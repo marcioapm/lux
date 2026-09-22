@@ -1,0 +1,6 @@
+FROM docker.io/library/alpine:3.24.2
+RUN apk add --no-cache git bash \
+ && adduser -D -u 1000 agent
+COPY lux-fake /usr/local/bin/lux-fake
+USER agent
+WORKDIR /home/agent

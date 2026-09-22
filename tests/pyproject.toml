@@ -1,0 +1,25 @@
+[project]
+name = "lux-e2e"
+version = "0.0.0"
+description = "Black-box end-to-end suite for lux"
+# The suite is a deliberate external client: it drives lux through its
+# binaries and its public API, never through the Go packages.
+requires-python = ">=3.14"
+dependencies = [
+    "pytest>=9.1.1",
+    "pytest-timeout>=2.4.0",
+    "requests>=2.34.2",
+    "psycopg[binary]>=3.3.6",
+    "boto3>=1.43.100",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["suites"]
+# A stuck Run is a failure, not a pause.
+timeout = 300
+addopts = "-ra --strict-markers"
+markers = [
+    "infra: checks the test environment itself, not lux",
+    "agents: drives a real coding agent; needs API keys in the environment",
+    "ec2: needs the EC2 provider (fake by default, real with --real-ec2)",
+]
