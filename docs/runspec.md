@@ -143,10 +143,13 @@ A nested Run is never `--privileged`. Beyond what every Run gets, it gets:
 
 - `CAP_SYS_CHROOT` in its bounding set;
 - no `no-new-privileges`, so that `newuidmap`/`newgidmap` can take
-  `CAP_SETUID`/`CAP_SETGID` from their file capabilities (for themselves
-  only). The workload holds no capabilities, so it can't become root in its
-  container, and nothing can gain a capability outside the bounding set
-  every Run has;
+  `CAP_SETUID`/`CAP_SETGID` from their file capabilities. The workload
+  itself starts with no capabilities. But without `no-new-privileges`, any
+  setuid-root program in the image (`sudo`, `su`) can make it root in its
+  container, exactly as a Run whose workload runs as root. That is within
+  the Run: container root is an unprivileged uid range on the host, with
+  the same bounding set as every Run. Leave setuid programs out of nested
+  images if the workload should stay unprivileged in its own container;
 - `/dev/fuse` and `/dev/net/tun`;
 - `unmask=ALL` and `label=disable`;
 - the host's seccomp profile, plus `sethostname`, `setdomainname` and

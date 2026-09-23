@@ -53,9 +53,13 @@ def test_artifacts_match_what_the_workload_wrote(lux, runners, hosts, tmp_path):
     run_id = artifacts_run(lux, script, ["/workspace/out/*.bin"])
     lux.wait_state(run_id, "succeeded")
     want = lux.logs(run_id).strip()
-    wait_available(lux, run_id, 1)
+    art = wait_available(lux, run_id, 1)[0]
+    # The listing describes the file, not how lux stores it.
+    assert art["sha256"] == want and art["size"] == 65536, art
     lux.run("artifacts", run_id, "--download", str(tmp_path))
-    assert hashlib.sha256((tmp_path / "1/workspace/out/r.bin").read_bytes()).hexdigest() == want
+    got = tmp_path / "1/workspace/out/r.bin"
+    assert hashlib.sha256(got.read_bytes()).hexdigest() == want
+    assert got.stat().st_mode & 0o044, "downloaded files are readable like any other"
 
 
 def test_every_exit_collects(lux, runners, hosts):
@@ -115,3 +119,36 @@ def test_collected_after_a_runner_restart(lux, runners, hosts):
     runners.start(hosts[0])
     lux.wait_state(run_id, "succeeded", timeout=60)
     assert [a["path"] for a in wait_available(lux, run_id, 1)] == ["/workspace/out/late.txt"]
+
+
+def test_a_symlinked_artifacts_dir_cannot_reach_the_host(lux, runners, hosts):
+    """A root workload replaces $LUX_ARTIFACTS with a link to a host path:
+    the runner neither collects from it nor removes anything there."""
+    host = runners.start(hosts[0])
+    host.exec("sh", "-c", "mkdir -p /srv/precious && echo keep > /srv/precious/file")
+    script = "rm -rf $LUX_ARTIFACTS && ln -s /srv/precious $LUX_ARTIFACTS && echo linked"
+    run_id = artifacts_run(lux, script, [])
+    lux.wait_state(run_id, "succeeded")
+    assert "linked" in lux.logs(run_id)
+    assert host.exec("cat", "/srv/precious/file").strip() == "keep"
+    assert lux.json("artifacts", run_id) == []
+
+
+def test_nested_volumes(lux, runners, hosts):
+    """A file is taken from the volume the container sees it on: not from
+    the outer volume's directory the inner one hides."""
+    host = runners.start(hosts[0])
+    vols = [{"name": "workspace", "path": "/workspace", "kind": "state"},
+            {"name": "repos", "path": "/workspace/repos", "kind": "state"}]
+    script = ("mkdir -p /workspace/repos/app && echo r > /workspace/repos/app/report.xml && "
+              "echo t > /workspace/top.xml && echo ready && sleep 300")
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", script, volumes=vols,
+                                artifacts={"paths": ["/workspace/**/*.xml"]}))
+    lux.wait_output(run_id, "ready")
+    # A stale file in the outer volume's own repos directory, which the
+    # inner volume hides from the container: it must not be collected.
+    outer = host.podman("volume", "inspect", "--format", "{{.Mountpoint}}", f"lux-{run_id}-workspace").strip()
+    host.exec("sh", "-c", f"mkdir -p {outer}/repos && echo stale > {outer}/repos/stale.xml")
+    lux.run("stop", run_id, "--wait")
+    paths = sorted(a["path"] for a in wait_available(lux, run_id, 2))
+    assert paths == ["/workspace/repos/app/report.xml", "/workspace/top.xml"], paths

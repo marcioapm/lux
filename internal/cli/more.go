@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -222,7 +225,23 @@ func (a *app) download(cmd *cobra.Command, id, dst string) error {
 		return err
 	}
 	defer os.Remove(f.Name())
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), resp.Body)
+	if err != nil {
+		f.Close()
+		return err
+	}
+	// Whole, and the file the Run wrote: or not written at all.
+	if resp.ContentLength >= 0 && n != resp.ContentLength {
+		f.Close()
+		return fmt.Errorf("download cut short: %d of %d bytes", n, resp.ContentLength)
+	}
+	if want := resp.Header.Get("X-Lux-SHA256"); want != "" && want != hex.EncodeToString(h.Sum(nil)) {
+		f.Close()
+		return errors.New("download does not match the artifact's sha256")
+	}
+	// Like os.Create would make it (CreateTemp's are private).
+	if err := f.Chmod(0o666 &^ umask()); err != nil {
 		f.Close()
 		return err
 	}
@@ -323,4 +342,11 @@ func (a *app) poolsCmd() *cobra.Command {
 	set.Flags().StringVar(&template, "template", "", "provider template (JSON)")
 	cmd.AddCommand(ls, set)
 	return cmd
+}
+
+// umask is the process's file-creation mask (read by setting it back).
+func umask() os.FileMode {
+	m := syscall.Umask(0)
+	syscall.Umask(m)
+	return os.FileMode(m)
 }

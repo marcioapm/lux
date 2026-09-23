@@ -236,10 +236,14 @@ type BlobInfo struct {
 	SHA256 string `json:"sha256"`
 }
 
+// Artifact is a collected file: BlobInfo is its stored blob (zstd), and
+// FileSize/FileSHA256 the file itself, as a download returns it.
 type Artifact struct {
 	BlobInfo
 	Path        string `json:"path"`
 	ContentType string `json:"contentType"`
+	FileSize    int64  `json:"fileSize"`
+	FileSHA256  string `json:"fileSha256"`
 }
 
 // RunEvent is a runner-side lifecycle note (image built, volumes restored,

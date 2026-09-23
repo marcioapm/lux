@@ -20,11 +20,23 @@ func TestGlobMatch(t *testing.T) {
 			t.Errorf("globMatch(%q, %q) = %v, want %v", c.pattern, c.name, got, c.want)
 		}
 	}
-	for pattern, want := range map[string]string{
-		"/workspace/out/**": "/workspace/out", "/workspace/*.log": "/workspace", "/w/report.xml": "/w/report.xml",
+}
+
+func TestGlobPrefix(t *testing.T) {
+	for _, c := range []struct {
+		pattern, dir string
+		want         bool
+	}{
+		{"/workspace/out/*.bin", "/workspace", true},
+		{"/workspace/out/*.bin", "/workspace/out", true},
+		{"/workspace/out/*.bin", "/workspace/node_modules", false},
+		{"/workspace/out/*.bin", "/workspace/out/deeper", false},
+		{"/workspace/**/*.xml", "/workspace/a/b/c", true},
+		{"/workspace/*/reports/*", "/workspace/app", true},
+		{"/workspace/*/reports/*", "/workspace/app/src", false},
 	} {
-		if got := globBase(pattern); got != want {
-			t.Errorf("globBase(%q) = %q, want %q", pattern, got, want)
+		if got := globPrefix(splitPath(c.pattern), splitPath(c.dir)); got != c.want {
+			t.Errorf("globPrefix(%q, %q) = %v, want %v", c.pattern, c.dir, got, c.want)
 		}
 	}
 }

@@ -19,10 +19,11 @@ import (
 //
 //   - CAP_SYS_CHROOT (Podman's storage setup chroots);
 //   - no no-new-privileges: newuidmap and newgidmap gain CAP_SETUID and
-//     CAP_SETGID from their file capabilities, only for themselves. The
-//     workload itself never holds them (so it cannot become root in its
-//     container), and nothing can gain a capability outside the bounding
-//     set every Run has;
+//     CAP_SETGID from their file capabilities. The workload starts with no
+//     capabilities, but a setuid-root program in its image can make it
+//     root in its container: as for a Run whose workload is root, that is
+//     within the Run (its user namespace), never beyond the bounding set
+//     every Run has;
 //   - /dev/fuse (fuse-overlayfs) and /dev/net/tun (pasta, its network);
 //   - unmask=ALL and label=disable (its /proc and /sys mounts);
 //   - the host's seccomp profile, plus sethostname, setdomainname and setns:

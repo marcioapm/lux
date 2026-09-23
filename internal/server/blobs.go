@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -167,11 +168,11 @@ func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) error {
 // out the compressed bytes; luxd decompresses on the way.)
 func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
-	var key, location, ctype, name string
-	var epoch int
+	var key, location, ctype, name, sum string
+	var size int64
 	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location, a.content_type, a.path, a.epoch
-			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.id = $1`, r.PathValue("aid")).Scan(&key, &location, &ctype, &name, &epoch)
+		return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location, a.content_type, a.path, a.size, a.sha256
+			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.id = $1`, r.PathValue("aid")).Scan(&key, &location, &ctype, &name, &size, &sum)
 	})
 	if err != nil {
 		return err
@@ -194,8 +195,15 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	defer zr.Close()
+	// The file's length and hash: a download cut short (an S3 or decode
+	// error once the body started) is detectable by the client.
 	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("X-Lux-SHA256", sum)
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(name)}))
-	_, err = io.Copy(w, zr)
-	return err
+	if _, err := io.Copy(w, zr); err != nil {
+		s.log.Warn("artifact download cut short", "artifact", r.PathValue("aid"), "err", err)
+		panic(http.ErrAbortHandler) // abort the response: never a clean end
+	}
+	return nil
 }

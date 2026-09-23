@@ -275,7 +275,7 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO artifacts (id, tenant_id, run_id, epoch, path, blob_id, content_type, size, sha256)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING`,
-			ids.New(ids.Artifact), tenantID, runID, epoch, a.Path, a.BlobID, a.ContentType, a.Size, a.SHA256); err != nil {
+			ids.New(ids.Artifact), tenantID, runID, epoch, a.Path, a.BlobID, a.ContentType, a.FileSize, a.FileSHA256); err != nil {
 			return err
 		}
 	}

@@ -367,6 +367,8 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		}
 		time.Sleep(time.Second)
 	}
+	// luxd has the artifacts: what the workload published can go.
+	p.clearPublished(ctx)
 	p.r.uploads.kick()
 
 	st := proto.Status{State: "exited", ExitCode: &exit.Code, Reason: exit.Reason, Message: exit.Message,

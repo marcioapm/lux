@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,11 +12,12 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
+
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -22,13 +25,17 @@ import (
 // Artifacts are files a Run produces, collected on every exit:
 //
 //   - files matching the spec's artifacts.paths (globs, ** for any depth),
-//     which must be on the Run's volumes;
+//     on the Run's volumes;
 //   - whatever the workload put in $LUX_ARTIFACTS (the runtime volume's
 //     artifacts directory), published under /.lux/artifacts/<name>.
 //
-// The runner reads them from the host side of the volumes, never following
-// a symlink (the workload controls those files, and a link could point
-// anywhere on the host). Each becomes a blob, uploaded like the snapshot.
+// The workload controls every one of those files and directories, so the
+// runner (root, on the host) reads them only through an os.Root per volume:
+// nothing it opens, renames or removes can resolve outside the volume,
+// whatever symlinks the workload made. Symlinks are never collected.
+//
+// Each artifact becomes a blob, uploaded like the snapshot. Its FileSize
+// and FileSHA256 are the file's (what a download returns), not the blob's.
 
 // Limits: an artifact set is for results, not a second snapshot.
 const (
@@ -36,71 +43,152 @@ const (
 	maxArtifactBytes = 1 << 30 // per file
 )
 
+var errTooMany = fmt.Errorf("more than %d artifacts: the rest were skipped", maxArtifacts)
+
+type collector struct {
+	p    *placement
+	out  []proto.Artifact
+	errs []error
+	full bool
+}
+
+func (c *collector) add(root *os.Root, rel, name string) {
+	if len(c.out) >= maxArtifacts {
+		if !c.full {
+			c.full = true
+			c.errs = append(c.errs, errTooMany)
+		}
+		return
+	}
+	a, err := c.p.artifactBlob(root, rel, name)
+	if err != nil {
+		c.errs = append(c.errs, fmt.Errorf("%s: %w", name, err))
+		return
+	}
+	c.out = append(c.out, a)
+}
+
 func (p *placement) collectArtifacts(ctx context.Context) ([]proto.Artifact, error) {
-	var out []proto.Artifact
-	var errs []error
-	add := func(hostFile, name string) {
-		if len(out) >= maxArtifacts {
-			errs = append(errs, fmt.Errorf("more than %d artifacts: %s and later ones skipped", maxArtifacts, name))
-			return
-		}
-		a, err := p.artifactBlob(hostFile, name)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", name, err))
-			return
-		}
-		out = append(out, a)
-	}
-	var paths []string
+	c := &collector{p: p}
+	var patterns [][]string
 	if p.assign != nil {
-		paths = p.assign.Spec.Artifacts.Paths
-	}
-	// One walk per volume, from its root (so no symlinked directory on the
-	// way can lead it out), trying each of that volume's patterns.
-	byVolume := map[string][][]string{}
-	for _, pattern := range paths {
-		root := p.volumeRoot(globBase(pattern))
-		if root == "" {
-			errs = append(errs, fmt.Errorf("%s is not on a volume", pattern))
-			continue
+		for _, pat := range p.assign.Spec.Artifacts.Paths {
+			patterns = append(patterns, splitPath(pat))
 		}
-		byVolume[root] = append(byVolume[root], splitPath(pattern))
 	}
-	for root, patterns := range byVolume {
-		hostRoot, err := p.hostPath(root)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		walkFiles(hostRoot, func(hostFile string) {
-			rel, _ := filepath.Rel(hostRoot, hostFile)
-			name := path.Join(root, filepath.ToSlash(rel))
-			ns := splitPath(name)
-			if slices.ContainsFunc(patterns, func(ps []string) bool { return globMatch(ps, ns) }) {
-				add(hostFile, name)
+	if len(patterns) > 0 {
+		// Each volume at its own mount path: a file is taken from the
+		// volume the container sees it on (volumes may nest).
+		vols := slices.Clone(p.state.Volumes)
+		sort.Slice(vols, func(i, j int) bool { return vols[i].Path < vols[j].Path })
+		for _, v := range vols {
+			mp, err := p.r.mountpoint(ctx, v.Volume)
+			if err != nil {
+				c.errs = append(c.errs, err)
+				continue
 			}
-		})
+			var inner []string // volumes mounted inside this one
+			for _, o := range vols {
+				if strings.HasPrefix(o.Path, v.Path+"/") {
+					inner = append(inner, o.Path)
+				}
+			}
+			c.walkVolume(mp, v.Path, inner, patterns)
+		}
 	}
-	// Published on demand, in $LUX_ARTIFACTS: collected once, then cleared
-	// (the runtime volume outlives the placement).
+	// Published on demand, in $LUX_ARTIFACTS.
 	if rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID)); err == nil {
-		dir := filepath.Join(rt, "artifacts")
-		walkFiles(dir, func(hostFile string) {
-			rel, _ := filepath.Rel(dir, hostFile)
-			add(hostFile, path.Join("/.lux/artifacts", filepath.ToSlash(rel)))
-		})
-		if entries, err := os.ReadDir(dir); err == nil {
-			for _, e := range entries {
-				_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+		c.collectPublished(rt)
+	}
+	return c.out, errors.Join(c.errs...)
+}
+
+// walkVolume collects a volume's files that match a pattern, skipping
+// directories no pattern can reach and paths another volume covers.
+func (c *collector) walkVolume(mountpoint, mountPath string, inner []string, patterns [][]string) {
+	root, err := os.OpenRoot(mountpoint)
+	if err != nil {
+		c.errs = append(c.errs, err)
+		return
+	}
+	defer root.Close()
+	_ = fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
+		switch {
+		case c.full:
+			return fs.SkipAll
+		case err != nil:
+			return nil // unreadable: skipped
+		}
+		name := path.Join(mountPath, rel)
+		if d.IsDir() {
+			if rel != "." && (slices.Contains(inner, name) || !anyReaches(patterns, splitPath(name))) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		ns := splitPath(name)
+		if d.Type().IsRegular() && slices.ContainsFunc(patterns, func(ps []string) bool { return globMatch(ps, ns) }) {
+			c.add(root, rel, name)
+		}
+		return nil
+	})
+}
+
+// publishedAside is where collected $LUX_ARTIFACTS wait, in the runtime
+// volume, until luxd has the report that lists them.
+const publishedAside = "artifacts.collected"
+
+// collectPublished takes what the workload put in $LUX_ARTIFACTS. The
+// runner first moves that directory aside (within the runtime volume,
+// through the Root), then collects from there. If the runner restarts
+// before luxd has the report, the moved-aside directory is collected
+// again; it is removed only once the report went through (clearPublished).
+func (c *collector) collectPublished(rt string) {
+	root, err := os.OpenRoot(rt)
+	if err != nil {
+		c.errs = append(c.errs, err)
+		return
+	}
+	defer root.Close()
+	if _, err := root.Lstat(publishedAside); errors.Is(err, fs.ErrNotExist) {
+		if fi, err := root.Lstat("artifacts"); err == nil && fi.IsDir() {
+			if err := root.Rename("artifacts", publishedAside); err != nil {
+				c.errs = append(c.errs, err)
+				return
 			}
 		}
 	}
-	return out, errors.Join(errs...)
+	aside, err := root.OpenRoot(publishedAside)
+	if err != nil {
+		return // nothing published
+	}
+	defer aside.Close()
+	_ = fs.WalkDir(aside.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
+		if c.full {
+			return fs.SkipAll
+		}
+		if err == nil && d.Type().IsRegular() {
+			c.add(aside, rel, path.Join("/.lux/artifacts", rel))
+		}
+		return nil
+	})
+}
+
+// clearPublished removes collected $LUX_ARTIFACTS, once reported.
+func (p *placement) clearPublished(ctx context.Context) {
+	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
+	if err != nil {
+		return
+	}
+	if root, err := os.OpenRoot(rt); err == nil {
+		_ = root.RemoveAll(publishedAside)
+		root.Close()
+	}
 }
 
 // artifactBlob stores one file as a blob (zstd, like every blob).
-func (p *placement) artifactBlob(hostFile, name string) (proto.Artifact, error) {
-	f, err := openNoFollow(hostFile)
+func (p *placement) artifactBlob(root *os.Root, rel, name string) (proto.Artifact, error) {
+	f, err := root.OpenFile(rel, os.O_RDONLY|oNoFollow, 0)
 	if err != nil {
 		return proto.Artifact{}, err
 	}
@@ -124,71 +212,70 @@ func (p *placement) artifactBlob(hostFile, name string) (proto.Artifact, error) 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return proto.Artifact{}, err
 	}
+	// The file's own size and hash, as a download returns it.
+	h := sha256.New()
+	var size int64
 	blobID := ids.New(ids.Blob)
-	size, sum, err := p.r.writeBlobLevel(blobID, compressionFor(ctype), func(w io.Writer) error {
-		_, err := io.Copy(w, io.LimitReader(f, maxArtifactBytes))
+	blobSize, blobSum, err := p.r.writeBlobLevel(blobID, compressionFor(ctype), func(w io.Writer) error {
+		var err error
+		size, err = io.Copy(io.MultiWriter(w, h), io.LimitReader(f, maxArtifactBytes))
 		return err
 	})
 	if err != nil {
 		return proto.Artifact{}, err
 	}
-	return proto.Artifact{BlobInfo: proto.BlobInfo{BlobID: blobID, Size: size, SHA256: sum}, Path: name, ContentType: ctype}, nil
-}
-
-// walkFiles calls fn for each regular file under root, never following
-// symlinks (links, to files or directories, are skipped). What it cannot
-// read, it skips.
-func walkFiles(root string, fn func(string)) {
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err == nil && d.Type().IsRegular() {
-			fn(p)
-		}
-		return nil
-	})
-}
-
-// openNoFollow opens a file, refusing a symlink in its last component
-// (swapped in after the walk).
-func openNoFollow(p string) (*os.File, error) {
-	return os.OpenFile(p, os.O_RDONLY|oNoFollow, 0)
-}
-
-// globBase is the directory part of a pattern before its first wildcard.
-func globBase(pattern string) string {
-	i := strings.IndexAny(pattern, "*?[")
-	if i < 0 {
-		return pattern
-	}
-	return path.Dir(pattern[:i] + "x")
+	return proto.Artifact{
+		BlobInfo: proto.BlobInfo{BlobID: blobID, Size: blobSize, SHA256: blobSum},
+		Path:     name, ContentType: ctype,
+		FileSize: size, FileSHA256: hex.EncodeToString(h.Sum(nil)),
+	}, nil
 }
 
 func splitPath(p string) []string { return strings.Split(strings.Trim(p, "/"), "/") }
 
+// anyReaches: whether some pattern could match something under dir.
+func anyReaches(patterns [][]string, dir []string) bool {
+	return slices.ContainsFunc(patterns, func(ps []string) bool { return globPrefix(ps, dir) })
+}
+
+// globPrefix: whether the pattern could match paths under dir: dir's
+// segments match the pattern's leading ones, or a ** is reached first.
+func globPrefix(ps, dir []string) bool {
+	for i, d := range dir {
+		if i >= len(ps) {
+			return false
+		}
+		if ps[i] == "**" {
+			return true
+		}
+		if ok, _ := path.Match(ps[i], d); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // globMatch matches a path's segments against a pattern's, where *
 // matches within a segment and ** any number of segments.
 func globMatch(ps, ns []string) bool {
-	var match func(ps, ns []string) bool
-	match = func(ps, ns []string) bool {
-		for len(ps) > 0 {
-			if ps[0] == "**" {
-				for i := 0; i <= len(ns); i++ {
-					if match(ps[1:], ns[i:]) {
-						return true
-					}
+	for len(ps) > 0 {
+		if ps[0] == "**" {
+			for i := 0; i <= len(ns); i++ {
+				if globMatch(ps[1:], ns[i:]) {
+					return true
 				}
-				return false
 			}
-			if len(ns) == 0 {
-				return false
-			}
-			if ok, _ := path.Match(ps[0], ns[0]); !ok {
-				return false
-			}
-			ps, ns = ps[1:], ns[1:]
+			return false
 		}
-		return len(ns) == 0
+		if len(ns) == 0 {
+			return false
+		}
+		if ok, _ := path.Match(ps[0], ns[0]); !ok {
+			return false
+		}
+		ps, ns = ps[1:], ns[1:]
 	}
-	return match(ps, ns)
+	return len(ns) == 0
 }
 
 // compressionFor: already-compressed content is stored at the fastest
