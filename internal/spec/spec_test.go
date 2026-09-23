@@ -85,3 +85,37 @@ func TestBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestGitPathsMustBeOnAStateVolume(t *testing.T) {
+	base := func(path string) RunSpec {
+		return RunSpec{
+			Image:    Image{Ref: "x"},
+			Workload: Workload{Command: []string{"true"}},
+			Volumes: []Volume{
+				{Name: "workspace", Path: "/workspace", Kind: "state"},
+				{Name: "cache", Path: "/workspace/cache", Kind: "ephemeral"},
+			},
+			Git: &Git{Repositories: []Repository{{Name: "api", URL: "https://x/a.git", Path: path}}},
+		}
+	}
+	for path, ok := range map[string]bool{
+		"/workspace/repos/api": true,
+		"/workspace/cache/api": false, // the more specific, ephemeral volume
+		"/opt/api":             false, // on no volume
+	} {
+		s := base(path)
+		err := s.Normalize()
+		if (err == nil) != ok {
+			t.Errorf("%s: %v", path, err)
+		}
+	}
+}
+
+func TestGitURLWithCredentialsIsRefused(t *testing.T) {
+	s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}},
+		Volumes: []Volume{{Name: "workspace", Path: "/workspace"}},
+		Git:     &Git{Repositories: []Repository{{Name: "a", URL: "https://user:tok@x/a.git"}}}}
+	if err := s.Normalize(); err == nil || !strings.Contains(err.Error(), "must not carry credentials") {
+		t.Fatalf("got %v", err)
+	}
+}

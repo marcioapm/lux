@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"path"
 	"regexp"
 	"sort"
@@ -358,7 +359,6 @@ func (s *RunSpec) Normalize() error {
 	}
 
 	if s.Git != nil {
-		ws := s.stateVolumeFor("/workspace")
 		names := map[string]bool{}
 		for i := range s.Git.Repositories {
 			r := &s.Git.Repositories[i]
@@ -368,6 +368,10 @@ func (s *RunSpec) Normalize() error {
 			names[r.Name] = true
 			if r.URL == "" {
 				fail("git.repositories[%d].url is required", i)
+			} else if u, err := url.Parse(r.URL); err == nil && u.User != nil {
+				// It would end up in the checkout's config, the snapshot and
+				// logs: credentials go through `credential`, never the URL.
+				fail("git.repositories[%d].url must not carry credentials: use credential: <secret name>", i)
 			}
 			if r.Ref == "" {
 				r.Ref = "HEAD"
@@ -376,7 +380,7 @@ func (s *RunSpec) Normalize() error {
 				r.Path = "/workspace/repos/" + r.Name
 			}
 			r.Path = path.Clean(r.Path)
-			if ws == nil && s.stateVolumeFor(r.Path) == nil {
+			if v := s.volumeFor(r.Path); v == nil || v.Kind != "state" {
 				fail("git.repositories[%d]: %s is not on a state volume, so the checkout would not survive a stop", i, r.Path)
 			}
 			if r.Credential != "" && !seen[r.Credential] {
@@ -456,12 +460,22 @@ func (s *RunSpec) Normalize() error {
 	return nil
 }
 
-func (s *RunSpec) stateVolumeFor(p string) *Volume {
+// volumeFor is the volume a path is on: the most specific one, as mounts
+// nest (a volume at /workspace/repos hides /workspace's files there).
+func (s *RunSpec) volumeFor(p string) *Volume {
+	var best *Volume
 	for i := range s.Volumes {
 		v := &s.Volumes[i]
-		if v.Kind == "state" && (p == v.Path || strings.HasPrefix(p, v.Path+"/")) {
-			return v
+		if (p == v.Path || strings.HasPrefix(p, v.Path+"/")) && (best == nil || len(v.Path) > len(best.Path)) {
+			best = v
 		}
+	}
+	return best
+}
+
+func (s *RunSpec) stateVolumeFor(p string) *Volume {
+	if v := s.volumeFor(p); v != nil && v.Kind == "state" {
+		return v
 	}
 	return nil
 }

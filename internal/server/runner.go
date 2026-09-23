@@ -237,6 +237,11 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 			if err := json.Unmarshal(f.Data, &ev); err != nil {
 				return err
 			}
+			if ev.Type == "git.push" {
+				if err := recordPushes(ctx, tx, f.RunID, ev.Data); err != nil {
+					return err
+				}
+			}
 			return addEvent(ctx, tx, tenantID, f.RunID, f.Epoch, ev.Type, ev.Data)
 		}
 		return fmt.Errorf("unknown report type %q", f.Type)
@@ -261,8 +266,9 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 	}
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `UPDATE hosts SET last_heartbeat = now(),
-			state = CASE WHEN state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE state END
-			WHERE id = $1`, hostID); err != nil {
+			state = CASE WHEN state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE state END,
+			caches = jsonb_set(caches, '{gitMirrors}', $2)
+			WHERE id = $1`, hostID, nonNil(hb.GitMirrors)); err != nil {
 			return err
 		}
 		if err := forgetMissingCopies(ctx, tx, hostID, hb.LocalSnapshots); err != nil {
@@ -287,6 +293,27 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 			hostID, interval(s.cfg.LeaseDuration), runs, epochs, mem, disk, pids, cpu, rx, tx_)
 		return err
 	})
+}
+
+// recordPushes keeps, per repository, the commit this Run pushed: the
+// lease for its next push.
+func recordPushes(ctx context.Context, tx pgx.Tx, runID string, data map[string]any) error {
+	b, _ := json.Marshal(data["results"])
+	var results []proto.PushResult
+	if err := json.Unmarshal(b, &results); err != nil {
+		return err
+	}
+	pushed := map[string]string{}
+	for _, r := range results {
+		if r.Status == "pushed" || r.Status == "up-to-date" {
+			pushed[r.Repo] = r.Commit
+		}
+	}
+	if len(pushed) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `UPDATE runs SET pushed = pushed || $2 WHERE id = $1`, runID, pushed)
+	return err
 }
 
 // forgetMissingCopies clears host_copy for snapshots the host said it no

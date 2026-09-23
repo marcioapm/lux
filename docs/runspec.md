@@ -101,7 +101,8 @@ starts:
 3. The checkout's `origin` is the plain `url`. The credential is used by
    the runner for the fetch, and later the push. It is **never in the
    container**: not in the environment, not in `.git/config`, and not on
-   the host's disk.
+   the host's disk. A `url` that carries credentials (`https://user:tok@…`)
+   is refused; use `credential:`.
 4. On a **resume**, the checkout is already on the restored volume and is
    left exactly as the workload left it.
 
@@ -111,7 +112,14 @@ starts:
 - The push is **leased**: it replaces the branch only if the branch still
   points where this Run last pushed it (or, the first time, only if the
   branch does not exist). If someone else pushed in between, the push is
-  `rejected` and their commit stays.
+  `rejected` and their commit stays. luxd keeps the lease, not the
+  checkout.
+- **The runner never runs git in the checkout.** The workload controls its
+  `.git`, including hooks and config such as URL rewrites. So the push works
+  from a bundle: the workload's user writes a bundle of `HEAD` inside the
+  container, and the runner pushes that bundle from a repository it owns.
+  The checkout's hooks and config never run as the runner and never see the
+  token.
 - Pushing with nothing new reports `up-to-date`.
 - Each repository's outcome is a `git.push` event. `--wait` prints the
   outcomes and exits non-zero unless every repository was pushed or already

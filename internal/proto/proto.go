@@ -121,6 +121,8 @@ type Heartbeat struct {
 	// forgets any other copy it thought the host had (removed by the host
 	// TTL, or by hand), so it never prefers a host for a copy that is gone.
 	LocalSnapshots []LocalSnapshot `json:"localSnapshots"`
+	// GitMirrors: the repositories this host has mirrors of now.
+	GitMirrors []string `json:"gitMirrors"`
 }
 
 // Assign starts (or resumes) a placement. Secrets travel only in this
@@ -279,6 +281,24 @@ type StreamData struct {
 	// Exit code when the stream's process ended (on close).
 	ExitCode *int `json:"exitCode,omitempty"`
 	EOF      bool `json:"eof,omitempty"`
+}
+
+// Push asks the runner to push each repository's current commit to the
+// spec's push branch. Leases holds, per repository, the commit this Run
+// last pushed there ("" if never): the branch is replaced only if it is
+// still there.
+type Push struct {
+	RequestID string            `json:"requestId"`
+	Leases    map[string]string `json:"leases"`
+}
+
+// PushResult is one repository's outcome, reported in a git.push event.
+type PushResult struct {
+	Repo   string `json:"repo"`
+	Branch string `json:"branch"`
+	Commit string `json:"commit,omitempty"`
+	Status string `json:"status"` // pushed | up-to-date | rejected | failed
+	Error  string `json:"error,omitempty"`
 }
 
 type Nack struct {

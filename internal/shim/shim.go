@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/marcioapm/lux/internal/adapter"
+	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/proto"
 )
 
@@ -641,45 +642,12 @@ type userInfo struct {
 	groups   []uint32
 }
 
-// lookupUser resolves "name", "uid" or "uid:gid" against the image's
-// /etc/passwd. Empty means root.
+// lookupUser resolves the workload user against the image's /etc/passwd.
 func lookupUser(spec string) (*userInfo, error) {
-	if spec == "" || spec == "root" || spec == "0" {
-		return &userInfo{name: "root", home: "/root"}, nil
+	b, _ := os.ReadFile("/etc/passwd")
+	u, err := passwd.Lookup(spec, b)
+	if err != nil {
+		return nil, err
 	}
-	name, group, _ := strings.Cut(spec, ":")
-	u := &userInfo{name: name, home: "/"}
-	found := false
-	if b, err := os.ReadFile("/etc/passwd"); err == nil {
-		for _, l := range strings.Split(string(b), "\n") {
-			f := strings.Split(l, ":")
-			if len(f) < 7 {
-				continue
-			}
-			if f[0] == name || f[2] == name {
-				u.name = f[0]
-				u.uid, _ = strconv.Atoi(f[2])
-				u.gid, _ = strconv.Atoi(f[3])
-				u.home = f[5]
-				found = true
-				break
-			}
-		}
-	}
-	if !found {
-		n, err := strconv.Atoi(name)
-		if err != nil {
-			return nil, fmt.Errorf("user %q is not in the image's /etc/passwd", name)
-		}
-		u.uid, u.gid = n, n
-	}
-	if group != "" {
-		g, err := strconv.Atoi(group)
-		if err != nil {
-			return nil, errors.New("group must be numeric")
-		}
-		u.gid = g
-	}
-	u.groups = []uint32{uint32(u.gid)}
-	return u, nil
+	return &userInfo{name: u.Name, uid: u.UID, gid: u.GID, home: u.Home, groups: []uint32{uint32(u.GID)}}, nil
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/marcioapm/lux/internal/ids"
+	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -48,7 +49,8 @@ type placement struct {
 	shimConn net.Conn
 	shimEnc  *json.Encoder
 	done     chan struct{}
-	session  string // latest session id the adapter reported
+	session  string      // latest session id the adapter reported
+	user     passwd.User // who the workload runs as
 	peakDisk int64
 	netRx    int64
 	netTx    int64
@@ -189,15 +191,19 @@ func (p *placement) run(ctx context.Context) {
 	p.state.Image = image
 	p.mark("imageReady")
 
+	if p.user, err = p.workloadUser(ctx, sp, image); err != nil {
+		fail("user", err)
+		return
+	}
 	if err := p.prepareVolumes(ctx, sp, a.Resume); err != nil {
 		fail("volumes", err)
 		return
 	}
-	if err := p.materializeRepos(ctx, sp, image); err != nil {
+	p.mark("volumesRestored")
+	if err := p.materializeRepos(ctx, sp, p.user); err != nil {
 		fail("git", err)
 		return
 	}
-	p.mark("volumesRestored")
 
 	if p.pendingStop() != "" {
 		p.finishWithoutContainer(ctx, "exited", "stopped before start")
@@ -592,8 +598,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image 
 	}
 	user := sp.Workload.User
 	if user == "" {
-		out, _ := p.r.pm.Run(ctx, "image", "inspect", "--format", "{{.Config.User}}", image)
-		user = strings.TrimSpace(string(out))
+		user = fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
 	}
 	a := p.assign
 	cfg := proto.ShimConfig{

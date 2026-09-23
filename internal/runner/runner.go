@@ -219,12 +219,11 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 		}
 	case proto.MsgPush:
 		if p := r.placement(f.RunID, f.Epoch); p != nil {
-			var req struct {
-				RequestID string `json:"requestId"`
-				Message   string `json:"message"`
-			}
+			var req proto.Push
 			_ = json.Unmarshal(f.Data, &req)
-			p.push(ctx, req.RequestID, req.Message)
+			// Not in the control queue: a push can take minutes, and a stop
+			// behind it must not wait.
+			go p.push(context.WithoutCancel(ctx), req)
 		}
 	case proto.MsgSnapshotDiscard:
 		var d struct {
@@ -323,7 +322,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 			return
 		case <-time.After(interval):
 		}
-		hb := proto.Heartbeat{LocalSnapshots: r.localSnapshots()}
+		hb := proto.Heartbeat{LocalSnapshots: r.localSnapshots(), GitMirrors: r.git.Mirrors()}
 		for _, p := range r.livePlacements() {
 			if st := p.liveState(); st != "" {
 				hb.Leases = append(hb.Leases, proto.LivePlacement{RunID: p.runID, Epoch: p.epoch, State: st, Usage: p.usage()})

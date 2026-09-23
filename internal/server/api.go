@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
@@ -635,29 +636,27 @@ func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) error {
 }
 
 // pushRun asks the Run's runner to push its repositories to the spec's
-// push branch, with the runner's credentials. The outcome arrives as
-// git.push events, one per repository, carrying the request id.
+// push branch, with the runner's credentials. The outcome arrives as one
+// git.push event carrying the request id and every repository's result.
 func (s *Server) pushRun(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
 	id := r.PathValue("id")
 	var req struct {
 		RequestID string `json:"requestId,omitempty"`
-		Message   string `json:"message,omitempty"`
 	}
 	if r.ContentLength != 0 {
 		if err := readJSON(r, &req); err != nil {
 			return err
 		}
 	}
-	if req.RequestID == "" {
-		req.RequestID = ids.New("push")
-	}
+	msg := proto.Push{RequestID: cmp.Or(req.RequestID, ids.New("push"))}
 	var hostID string
 	var epoch int
 	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		var state string
 		var sp spec.RunSpec
-		if err := tx.QueryRow(r.Context(), `SELECT state, current_epoch, spec FROM runs WHERE id = $1`, id).Scan(&state, &epoch, &sp); err != nil {
+		if err := tx.QueryRow(r.Context(), `SELECT state, current_epoch, spec, pushed FROM runs WHERE id = $1`, id).
+			Scan(&state, &epoch, &sp, &msg.Leases); err != nil {
 			return err
 		}
 		if sp.Git == nil || sp.Git.Push == nil {
@@ -669,16 +668,16 @@ func (s *Server) pushRun(w http.ResponseWriter, r *http.Request) error {
 		if err := tx.QueryRow(r.Context(), `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, id, epoch).Scan(&hostID); err != nil {
 			return err
 		}
-		return addEvent(r.Context(), tx, p.TenantID, id, epoch, "push.requested", map[string]any{"requestId": req.RequestID})
+		return addEvent(r.Context(), tx, p.TenantID, id, epoch, "push.requested", map[string]any{"requestId": msg.RequestID})
 	})
 	if err != nil {
 		return err
 	}
-	if err := s.systemEnqueue(r.Context(), hostID, id, epoch, proto.MsgPush, req); err != nil {
+	if err := s.systemEnqueue(r.Context(), hostID, id, epoch, proto.MsgPush, msg); err != nil {
 		return err
 	}
 	s.hub.Notify(hostID)
-	writeJSON(w, http.StatusAccepted, map[string]any{"requestId": req.RequestID})
+	writeJSON(w, http.StatusAccepted, map[string]any{"requestId": msg.RequestID})
 	return nil
 }
 

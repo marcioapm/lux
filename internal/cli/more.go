@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -44,37 +45,31 @@ and fails unless every one was pushed or already up to date.`,
 	return cmd
 }
 
-// waitPush waits for every repository's git.push event for a request.
+// waitPush waits for the push's git.push event (one per request, with
+// every repository's result), reading events from a cursor.
 func (a *app) waitPush(cmd *cobra.Command, runID, requestID string) error {
-	ctx := ctxOf(cmd)
-	run, err := a.getRun(ctx, runID)
-	if err != nil {
-		return err
-	}
-	want := 0
-	if run.Spec.Git != nil {
-		want = len(run.Spec.Git.Repositories)
-	}
-	deadline := time.Now().Add(10 * time.Minute)
+	ctx, cancel := context.WithTimeout(ctxOf(cmd), 15*time.Minute)
+	defer cancel()
+	var after int64
 	for {
 		var resp struct {
 			Events []server.Event `json:"events"`
 		}
-		if err := a.c.Do(ctx, "GET", "/v1/runs/"+runID+"/events", nil, &resp); err != nil {
+		if err := a.c.Do(ctx, "GET", fmt.Sprintf("/v1/runs/%s/events?after=%d", runID, after), nil, &resp); err != nil {
 			return err
 		}
-		var results []map[string]any
 		for _, e := range resp.Events {
-			if e.Type == "git.push" && e.Data["requestId"] == requestID {
-				results = append(results, e.Data)
+			after = e.ID
+			if e.Type != "git.push" || e.Data["requestId"] != requestID {
+				continue
 			}
-		}
-		if len(results) >= want {
+			results, _ := e.Data["results"].([]any)
 			if a.output == "json" {
 				_ = a.json(results)
 			}
 			failed := false
-			for _, r := range results {
+			for _, x := range results {
+				r, _ := x.(map[string]any)
 				if a.output != "json" {
 					fmt.Fprintf(a.stdout, "%s → %s: %s %s\n", r["repo"], r["branch"], r["status"], r["error"])
 				}
@@ -87,10 +82,11 @@ func (a *app) waitPush(cmd *cobra.Command, runID, requestID string) error {
 			}
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return errors.New("timed out waiting for the push")
+		select {
+		case <-ctx.Done():
+			return errors.New("timed out waiting for the push (is the Run still running?)")
+		case <-time.After(300 * time.Millisecond):
 		}
-		time.Sleep(300 * time.Millisecond)
 	}
 }
 
