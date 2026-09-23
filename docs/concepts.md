@@ -79,6 +79,30 @@ on every start, so it must be idempotent.
 - A resume must supply the Run's **secrets** again, because lux never stores
   secret values. This also means a resume can rotate credentials.
 
+## Secrets
+
+The caller passes secret values with each submit and resume. lux never
+stores them:
+
+- luxd keeps values **in memory** only until the Run is placed, and sends
+  them to the runner over its connection. The database holds each secret's
+  name and a fingerprint, never the value. If luxd restarts before a queued
+  Run is placed, the Run stops after a short grace period, with a reason
+  saying to resume it with its secrets.
+- `env` secrets are environment variables. `file` secrets are written on
+  a tmpfs (`/.lux/secrets`, readable only by the workload's user) and
+  linked at their `path`, so they are never in a snapshot.
+- **Output is redacted** before it is written anywhere. That covers the
+  exact value and its common encodings (base64, URL, hex, JSON-escaped).
+  Values shorter than 4 bytes are not redacted.
+- **A resume needs every secret again**, and is refused before scheduling
+  if one is missing. A resume can supply new values, which rotates them.
+- **Git credentials** are used by the runner only and never enter the
+  container (see [the RunSpec](runspec.md#git)).
+- **What lux does not do:** it does not scan state volumes. A secret that
+  the workload itself writes to a state volume is snapshotted as written.
+  This is accepted, and documented here on purpose.
+
 ## Output
 
 A placement's stdout, stderr and structured events are written by the shim

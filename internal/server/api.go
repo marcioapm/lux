@@ -578,7 +578,7 @@ func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) error {
 		}
 		var missing []string
 		for _, ref := range refs {
-			if _, ok := values[ref.Name]; !ok {
+			if values[ref.Name] == "" {
 				missing = append(missing, ref.Name)
 			}
 		}

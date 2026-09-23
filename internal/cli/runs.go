@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -522,6 +523,8 @@ from the environment (by name), a .env file (--secrets-from), or --secret NAME=V
 			if err := fillSecrets(secrets, secretsFrom); err != nil {
 				return err
 			}
+			// Only what was found: luxd names whatever is missing.
+			secrets = slices.DeleteFunc(secrets, func(s spec.Secret) bool { return s.Value == "" })
 			req := map[string]any{"secrets": secrets}
 			if input != "" {
 				req["input"] = map[string]string{"text": input}
