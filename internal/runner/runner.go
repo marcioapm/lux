@@ -71,7 +71,7 @@ type Runner struct {
 	// recordMu serializes read-modify-write of snapshot records (uploader,
 	// discard, report).
 	recordMu sync.Mutex
-	streams    streams
+	streams  streams
 	// nestedSeccomp is the seccomp profile for nested-containers Runs, or
 	// "" if this host does not offer them.
 	nestedSeccomp string
