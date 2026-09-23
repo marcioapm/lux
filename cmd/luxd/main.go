@@ -141,6 +141,12 @@ func serve(ctx context.Context) error {
 	if cfg.Tick, err = durationEnv("LUX_TICK", time.Second); err != nil {
 		return err
 	}
+	if cfg.ScaleDownAfter, err = durationEnv("LUX_SCALE_DOWN_AFTER", 10*time.Minute); err != nil {
+		return err
+	}
+	if cfg.LaunchTimeout, err = durationEnv("LUX_LAUNCH_TIMEOUT", 10*time.Minute); err != nil {
+		return err
+	}
 	cfg.Providers, err = providers(ctx, log)
 	if err != nil {
 		return err
@@ -280,7 +286,8 @@ func admin(ctx context.Context, args []string) error {
 			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared)
 				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9)
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
-					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared`,
+					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
+					retired = false`,
 				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared)
 			return err
 		})

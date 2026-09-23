@@ -133,7 +133,8 @@ class Host:
     def podman(self, *args: str, check: bool = True) -> str:
         return self.exec("podman", *args, check=check)
 
-    def start_runner(self, env: "TestEnvironment", token: str, *extra: str, name: str | None = None) -> subprocess.Popen:
+    def start_runner(self, env: "TestEnvironment", token: str, *extra: str, name: str | None = None,
+                     url: str | None = None) -> subprocess.Popen:
         """Start lux-runner inside this host, logging to <log dir>/<host>/runner.log."""
         binary = BIN_DIR / "lux-runner"
         if not binary.exists():
@@ -143,7 +144,7 @@ class Host:
         return subprocess.Popen(
             [
                 "docker", "exec", "-i",
-                "-e", f"LUX_URL={env.luxd_url}",
+                "-e", f"LUX_URL={url or env.luxd_url}",
                 "-e", f"LUX_HOST_TOKEN={token}",
                 self.container,
                 # The host image has no pkill: record the pid to stop it by.

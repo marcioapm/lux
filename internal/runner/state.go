@@ -106,6 +106,10 @@ type snapshotRecord struct {
 	// last uploads finish.
 	Discard bool  `json:"discard,omitempty"`
 	Created int64 `json:"created"`
+	// Reported: luxd has the snapshot.done that lists these blobs. Before
+	// that, luxd answers an upload with 404 (it does not know the blob
+	// yet), which must not count as done.
+	Reported bool `json:"reported,omitempty"`
 }
 
 type egressState struct {

@@ -38,6 +38,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/hosts/{id}/drain", s.withKey("admin", s.drainHost))
 	mux.Handle("GET /v1/pools", s.withKey("read", s.listPools))
 	mux.Handle("POST /v1/pools", s.withKey("admin", s.putPool))
+	mux.Handle("DELETE /v1/pools/{name}", s.withKey("admin", s.deletePool))
 }
 
 // Run is the API representation of a Run.
@@ -848,7 +849,7 @@ func (s *Server) listPools(w http.ResponseWriter, r *http.Request) error {
 	pools := []Pool{}
 	err := s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(), `SELECT name, provider, template, min_hosts, max_hosts, warm_hosts, shared, tenant_id IS NULL
-			FROM pools WHERE tenant_id = $1 OR tenant_id IS NULL ORDER BY name`, p.TenantID)
+			FROM pools WHERE (tenant_id = $1 OR tenant_id IS NULL) AND NOT retired ORDER BY name`, p.TenantID)
 		if err != nil {
 			return err
 		}
@@ -866,6 +867,52 @@ func (s *Server) listPools(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"pools": pools})
+	return nil
+}
+
+// deletePool removes one of the tenant's pools. Its provisioned hosts are
+// drained, and terminated by the provisioner once they are done (their
+// provider is known from the pool row, kept as `retired`); its Runs wait
+// for a pool of that name again.
+func (s *Server) deletePool(w http.ResponseWriter, r *http.Request) error {
+	p := principal(r)
+	name := r.PathValue("name")
+	var hosts []string
+	err := s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(r.Context(), `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
+			WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errNotFound
+		}
+		rows, err := tx.Query(r.Context(), `UPDATE hosts SET draining = true,
+				state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
+				state_reason = 'pool removed', drain_requested_at = coalesce(drain_requested_at, now())
+			WHERE tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL AND state <> 'terminated'
+			RETURNING id`, p.TenantID, name)
+		if err != nil {
+			return err
+		}
+		hosts, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		for _, h := range hosts {
+			if err := s.drainPlacements(r.Context(), tx, h); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, h := range hosts {
+		s.hub.Notify(h)
+	}
+	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 
@@ -889,7 +936,8 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) error {
 		_, err := tx.Exec(r.Context(), `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
-				min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts`,
+				min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
+				retired = false`,
 			ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts)
 		return err
 	})

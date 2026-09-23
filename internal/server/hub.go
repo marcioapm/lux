@@ -66,6 +66,14 @@ func (h *Hub) Reachable(hostID string) bool {
 // interactive streams need one; a polling host cannot relay them.
 func (h *Hub) Streaming(hostID string) bool { return h.conn(hostID) != nil }
 
+// Disconnect closes a host's WebSocket, if it has one here (the host was
+// terminated).
+func (h *Hub) Disconnect(hostID string) {
+	if c := h.conn(hostID); c != nil {
+		c.ws.Close(websocket.StatusPolicyViolation, "host terminated")
+	}
+}
+
 // Gone is closed when the host's current WebSocket ends (nil if it has
 // none): a stream relayed over it ends with it, since the runner forgets
 // its streams when its connection drops.

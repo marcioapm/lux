@@ -367,7 +367,11 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		}
 		time.Sleep(time.Second)
 	}
-	// luxd has the artifacts: what the workload published can go.
+	// luxd has the snapshot: its blobs can be uploaded, and what the
+	// workload published can go.
+	if sd.Manifest.SnapshotID != "" {
+		p.r.markReported(sd.Manifest.SnapshotID)
+	}
 	p.clearPublished(ctx)
 	p.r.uploads.kick()
 

@@ -115,3 +115,46 @@ LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a
 Host tokens come from `luxd admin create-host-token --tenant T [--pool P]
 [--label k=v]`. Restarting `lux-runner` does not touch running containers
 (Podman is daemonless). The new runner re-adopts them.
+
+## EC2 pools
+
+A pool with `provider: ec2` is sized by luxd:
+
+```bash
+lux pools set burst --provider ec2 --min 0 --max 10 --warm 1 \
+  --template '{"region":"eu-west-1","launchTemplate":"lux-runner","instanceType":"m7i.2xlarge","subnets":["subnet-a","subnet-b"]}'
+lux pools rm burst      # drains and terminates its hosts
+```
+
+- **Scale up:** when Runs for the pool wait in `provisioning`, luxd launches
+  enough hosts for them, plus `--warm` idle ones kept ready. It keeps at
+  least `--min` hosts and never more than `--max`. Launches alternate
+  across the template's subnets.
+- **Scale down:** a host idle longer than `LUX_SCALE_DOWN_AFTER` (default
+  10m), above the minimum and warm count, is drained. It is terminated once
+  it has no live placements and nothing left to upload. The same applies
+  to `lux pools rm`, and a Run on a drained host is stopped (snapshotted),
+  never cut short.
+- **Failures:** a launch that fails is retried on the next pass. A host
+  that never registers within `LUX_LAUNCH_TIMEOUT` (default 10m) is
+  terminated. An instance EC2 no longer has is written off and replaced.
+- One luxd instance does all this at a time (a Postgres advisory lock).
+
+What an instance needs:
+
+- An AMI with the host requirements above, `lux-runner` and `lux-shim`,
+  and a boot script that reads the instance's **user data** (`KEY=value`
+  lines: `LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`) and runs
+  `lux-runner --provider-id <instance id>` with them in its environment.
+  The token is single-use per host and revoked when the host is
+  terminated.
+- A launch template (id `lt-…` or name) with that AMI, a security group
+  that reaches luxd, and an instance profile if the runner needs one (it
+  doesn't hold S3 credentials).
+- luxd needs EC2 permissions for `RunInstances` (with the launch template
+  and `CreateTags`), `TerminateInstances` and `DescribeInstances`, from its
+  standard AWS configuration (environment or instance role).
+  `LUX_EC2_ENDPOINT` overrides the endpoint.
+
+Instances are tagged `Name=<host>`, `lux:pool=<pool>`, `lux:managed=true`,
+plus the template's `tags`.

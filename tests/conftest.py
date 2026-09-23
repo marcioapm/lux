@@ -376,3 +376,67 @@ def egress_hosts(hosts, net_targets):
     yield hosts
     for h in hosts:
         h.exec("sh", "-c", "[ -f /etc/resolv.conf.lux-orig ] && mv /etc/resolv.conf.lux-orig /etc/resolv.conf; true", check=False)
+
+
+# ---- EC2 -----------------------------------------------------------------------
+
+EC2_TEMPLATE = {"region": "us-east-1", "launchTemplate": "lt-0lux000000000test", "instanceType": "m7i.large",
+                "subnets": ["subnet-a", "subnet-b"]}
+
+
+class RealEC2:
+    """--real-ec2: what the tests ask of the fake, answered by AWS. Only
+    what real EC2 can do: no injected failures."""
+
+    real = True
+
+    def __init__(self, template: dict):
+        import boto3
+        self.template = template
+        self.client = boto3.client("ec2", region_name=template.get("region"))
+
+    def running(self) -> list[dict]:
+        out = self.client.describe_instances(Filters=[
+            {"Name": "tag:lux:managed", "Values": ["true"]},
+            {"Name": "instance-state-name", "Values": ["pending", "running"]}])
+        return [{"id": i["InstanceId"], "tags": {t["Key"]: t["Value"] for t in i.get("Tags", [])},
+                 "launchTemplate": self.template.get("launchTemplate"), "instanceType": i["InstanceType"]}
+                for r in out["Reservations"] for i in r["Instances"]]
+
+    def kill(self, instance_id: str):
+        self.client.terminate_instances(InstanceIds=[instance_id])
+
+
+@pytest.fixture
+def ec2(env: TestEnvironment, require):
+    """luxd with its EC2 provider pointed at a fake EC2, or, with
+    --real-ec2, at AWS (LUX_TEST_EC2_TEMPLATE: the pool template JSON for an
+    AMI with lux-runner; AWS credentials from the environment). Fast
+    scale-down for the tests."""
+    require("luxd", "lux-runner", "lux")
+    fast = dict(LUX_SCALE_DOWN_AFTER="4s", LUX_LAUNCH_TIMEOUT="60s")
+    if os.environ.get("LUX_TEST_REAL_EC2"):
+        raw = os.environ.get("LUX_TEST_EC2_TEMPLATE")
+        if not raw:
+            pytest.skip("--real-ec2 needs LUX_TEST_EC2_TEMPLATE (see docs/development.md)")
+        global EC2_TEMPLATE
+        EC2_TEMPLATE = json.loads(raw)
+        fake = RealEC2(EC2_TEMPLATE)
+        env.stop_luxd()
+        env.start_luxd(LUX_LAUNCH_TIMEOUT="600s", LUX_SCALE_DOWN_AFTER="30s")
+    else:
+        from fake_ec2 import FakeEC2
+        fake = FakeEC2(env)
+        env.stop_luxd()
+        env.start_luxd(LUX_EC2_ENDPOINT=fake.url, AWS_ACCESS_KEY_ID="fake", AWS_SECRET_ACCESS_KEY="fake",
+                       AWS_REGION="us-east-1", **fast)
+    yield fake
+    if hasattr(fake, "close"):
+        fake.close()
+    env.stop_luxd()
+    env.start_luxd()
+
+
+def fake_only(ec2):
+    if getattr(ec2, "real", False):
+        pytest.skip("needs the fake EC2 (it injects failures or inspects API calls)")

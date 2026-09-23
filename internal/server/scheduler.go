@@ -342,7 +342,7 @@ func (s *Server) noHost(ctx context.Context, tx pgx.Tx, r pendingRun, wait strin
 		return setRunState(ctx, tx, r.TenantID, r.ID, StateLost, "its snapshot is no longer available", r.Epoch)
 	}
 	var provider string
-	err := tx.QueryRow(ctx, `SELECT provider FROM pools WHERE name = $1 AND (tenant_id = $2 OR tenant_id IS NULL)
+	err := tx.QueryRow(ctx, `SELECT provider FROM pools WHERE name = $1 AND (tenant_id = $2 OR tenant_id IS NULL) AND NOT retired
 		ORDER BY tenant_id NULLS LAST LIMIT 1`, r.Spec.Placement.Pool, r.TenantID).Scan(&provider)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err

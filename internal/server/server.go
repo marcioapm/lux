@@ -23,6 +23,11 @@ type Config struct {
 	Tick time.Duration
 	// Provisioners by pool provider (ec2).
 	Providers map[string]Provider
+	// ScaleDownAfter is how long a provisioned host stays idle before it
+	// is drained and terminated (beyond the pool's minimum and warm hosts).
+	ScaleDownAfter time.Duration
+	// LaunchTimeout is how long a launched host may take to register.
+	LaunchTimeout time.Duration
 }
 
 type Server struct {
@@ -44,6 +49,12 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	}
 	if cfg.Tick == 0 {
 		cfg.Tick = time.Second
+	}
+	if cfg.ScaleDownAfter == 0 {
+		cfg.ScaleDownAfter = 10 * time.Minute
+	}
+	if cfg.LaunchTimeout == 0 {
+		cfg.LaunchTimeout = 10 * time.Minute
 	}
 	s := &Server{
 		cfg:     cfg,
@@ -78,8 +89,9 @@ func (s *Server) Handler() http.Handler {
 // Run starts the background loops and serves until ctx ends.
 func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	s.wg.Add(3)
+	s.wg.Add(4)
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.provisionerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.reaperLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.hub.deliveryLoop(ctx) }()
 	errc := make(chan error, 1)

@@ -119,6 +119,31 @@ stream-json (`-p --input-format stream-json …`), and Codex's app-server
 a state volume, and resumes from it. Its ACP replies stream in chunks
 without line breaks, as real agents' do.
 
+### EC2 pools: fake by default, real nightly
+
+`suites/test_ec2.py` runs luxd's real EC2 provider against a **fake EC2**
+(`tests/fake_ec2.py`). The fake is an HTTP server that speaks the three
+EC2 API calls lux makes (RunInstances, TerminateInstances,
+DescribeInstances). Each "instance" is a new simulated host that boots
+`lux-runner` from the instance's user data, as a real AMI would. Tests
+can make launches fail, or make instances never register.
+
+`--real-ec2` runs the same suite against AWS. The tests that need the
+fake's failure injection are skipped. It needs:
+
+- AWS credentials in the environment, for both luxd and the test
+  (boto3);
+- `LUX_TEST_EC2_TEMPLATE`: a pool template JSON
+  (`{"region", "launchTemplate", "instanceType", "subnets"}`). Its launch
+  template's AMI must have Podman and lux-runner (see
+  [operations](operations.md#ec2-pools)), and its instances must reach
+  luxd's `LUX_PUBLIC_URL`;
+- a luxd reachable from those instances, which in practice means running
+  the suite from inside the VPC.
+
+Run it nightly. It launches real instances and terminates every one it
+started.
+
 ### Real agents (opt-in)
 
 The `-real` variants make model calls, so each runs only when its

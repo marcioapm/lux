@@ -18,7 +18,7 @@ Each step ends with an end-to-end test through `tests/run_tests.py`.
 | 10 | Nested containers (opt-in) | ✅ done |
 | 11 | Attach, exec, port forwarding through the relay | ✅ done |
 | 12 | Artifacts | ✅ done |
-| 13 | EC2 pools (fake EC2 in tests, `--real-ec2` for nightly), autoscaling, draining, warm pools | ⏳ |
+| 13 | EC2 pools (fake EC2 in tests, `--real-ec2` for nightly), autoscaling, draining, warm pools | ✅ done |
 | 14 | Codex and OpenCode adapters | ✅ done (pulled forward) |
 
 Also: docs in `docs/` kept current with each step; external-tool findings

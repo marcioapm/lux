@@ -68,6 +68,9 @@ type Runner struct {
 	control    *serialQueues
 	egress     *egress.Firewall
 	images     *imageUse
+	// recordMu serializes read-modify-write of snapshot records (uploader,
+	// discard, report).
+	recordMu sync.Mutex
 	streams    streams
 	// nestedSeccomp is the seccomp profile for nested-containers Runs, or
 	// "" if this host does not offer them.

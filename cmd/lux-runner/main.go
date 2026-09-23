@@ -53,6 +53,10 @@ func main() {
 		return
 	}
 	cfg.Memory = *memory
+	// A provisioned host gets its name from luxd (user data).
+	if cfg.Name == "" {
+		cfg.Name = os.Getenv("LUX_HOST_NAME")
+	}
 	cfg.URL = os.Getenv("LUX_URL")
 	cfg.Token = os.Getenv("LUX_HOST_TOKEN")
 	if cfg.URL == "" || cfg.Token == "" {

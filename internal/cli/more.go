@@ -335,6 +335,15 @@ func (a *app) poolsCmd() *cobra.Command {
 			return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", p, nil)
 		},
 	}
+	rm := &cobra.Command{
+		Use:   "rm <name>",
+		Short: "Remove a pool (its provisioned hosts are drained and terminated)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.c.Do(ctxOf(cmd), "DELETE", "/v1/pools/"+args[0], nil, nil)
+		},
+	}
+	defer cmd.AddCommand(rm)
 	set.Flags().StringVar(&p.Provider, "provider", "static", "static | ec2")
 	set.Flags().IntVar(&p.MinHosts, "min", 0, "minimum hosts")
 	set.Flags().IntVar(&p.MaxHosts, "max", 0, "maximum hosts")

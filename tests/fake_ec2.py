@@ -1,0 +1,182 @@
+"""A fake EC2 for the test suite: an HTTP server speaking the three EC2
+Query API calls lux uses (RunInstances, TerminateInstances,
+DescribeInstances), where an instance is a simulated host container that
+boots lux-runner from its user data, as a real instance's AMI would.
+
+luxd's EC2 provider is pointed at it with LUX_EC2_ENDPOINT, so the real
+provider code runs; `run_tests.py --real-ec2` swaps in real AWS instead.
+"""
+
+from __future__ import annotations
+
+import base64
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
+from xml.sax.saxutils import escape
+
+NS = "http://ec2.amazonaws.com/doc/2016-11-15/"
+
+
+class FakeEC2:
+    def __init__(self, env):
+        self.env = env
+        self.lock = threading.Lock()
+        self.instances: dict[str, dict] = {}  # id → {state, host, tags, userdata}
+        self.calls: list[str] = []
+        self.fail_launches = False
+        self.no_boot = False  # launched instances never start a runner
+        self.server = ThreadingHTTPServer((env.gateway, 0), self._handler())
+        self.url = f"http://{env.gateway}:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        with self.lock:
+            ids = list(self.instances)
+        for i in ids:
+            self._terminate(i)
+
+    # -- what tests look at ----------------------------------------------
+
+    def running(self) -> list[dict]:
+        with self.lock:
+            return [dict(id=i, **v) for i, v in self.instances.items() if v["state"] == "running"]
+
+    def kill(self, instance_id: str):
+        """An instance vanishing behind lux's back."""
+        self._terminate(instance_id)
+
+    # -- the API -----------------------------------------------------------
+
+    def _handler(self):
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+                q = {k: v[0] for k, v in parse_qs(body).items()}
+                action = q.get("Action", "")
+                fake.calls.append(action)
+                try:
+                    xml = getattr(fake, "_" + action)(q)
+                    code = 200
+                except KeyError:
+                    code, xml = 400, _error("InvalidAction", action)
+                except FakeError as e:
+                    code, xml = 400, _error(e.code, str(e))
+                out = xml.encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "text/xml")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+        return H
+
+    def _RunInstances(self, q):
+        if self.fail_launches:
+            raise FakeError("InsufficientInstanceCapacity", "no capacity (fake)")
+        userdata = base64.b64decode(q.get("UserData", "")).decode()
+        env = dict(line.split("=", 1) for line in userdata.splitlines() if "=" in line)
+        tags = {}
+        i = 1
+        while f"TagSpecification.1.Tag.{i}.Key" in q:
+            tags[q[f"TagSpecification.1.Tag.{i}.Key"]] = q.get(f"TagSpecification.1.Tag.{i}.Value", "")
+            i += 1
+        iid = "i-" + uuid.uuid4().hex[:17]
+        with self.lock:
+            self.instances[iid] = {"state": "pending", "host": None, "tags": tags, "env": env,
+                                   "launchTemplate": q.get("LaunchTemplate.LaunchTemplateId") or q.get("LaunchTemplate.LaunchTemplateName"),
+                                   "instanceType": q.get("InstanceType"), "subnet": q.get("SubnetId")}
+        threading.Thread(target=self._boot, args=(iid,), daemon=True).start()
+        return (f'<RunInstancesResponse xmlns="{NS}"><reservationId>r-{uuid.uuid4().hex[:17]}</reservationId>'
+                f"<instancesSet><item><instanceId>{iid}</instanceId><instanceState><code>0</code><name>pending</name>"
+                f"</instanceState></item></instancesSet></RunInstancesResponse>")
+
+    def _boot(self, iid: str):
+        """Start the instance's host and, as its AMI's boot script would,
+        lux-runner with the user data's environment."""
+        with self.lock:
+            inst = self.instances.get(iid)
+            if not inst or inst["state"] != "pending":
+                return
+            name = inst["env"].get("LUX_HOST_NAME", iid)
+        host = self.env.add_host(f"ec2-{iid[2:10]}")
+        with self.lock:
+            inst = self.instances.get(iid)
+            if not inst or inst["state"] != "pending":
+                gone = True
+            else:
+                gone = False
+                inst["host"], inst["state"] = host, "running"
+        if gone:
+            _remove(host)
+            return
+        if self.no_boot:
+            return
+        e = inst["env"]
+        host.start_runner(self.env, e["LUX_HOST_TOKEN"], "--provider-id", iid, name=name, url=e.get("LUX_URL"))
+
+    def _TerminateInstances(self, q):
+        ids = _list(q, "InstanceId")
+        items = ""
+        for i in ids:
+            if i not in self.instances:
+                raise FakeError("InvalidInstanceID.NotFound", f"The instance ID '{i}' does not exist")
+            prev = self.instances[i]["state"]
+            self._terminate(i)
+            items += (f"<item><instanceId>{i}</instanceId><currentState><code>32</code><name>shutting-down</name>"
+                      f"</currentState><previousState><code>16</code><name>{prev}</name></previousState></item>")
+        return f'<TerminateInstancesResponse xmlns="{NS}"><instancesSet>{items}</instancesSet></TerminateInstancesResponse>'
+
+    def _terminate(self, iid: str):
+        with self.lock:
+            inst = self.instances.get(iid)
+            if not inst or inst["state"] == "terminated":
+                return
+            inst["state"] = "terminated"
+            host = inst["host"]
+        if host is not None:
+            _remove(host)
+
+    def _DescribeInstances(self, q):
+        ids = _list(q, "InstanceId")
+        with self.lock:
+            missing = [i for i in ids if i not in self.instances]
+            if missing:
+                raise FakeError("InvalidInstanceID.NotFound", f"The instance IDs '{', '.join(missing)}' do not exist")
+            chosen = ids or list(self.instances)
+            items = "".join(
+                f"<item><instanceId>{i}</instanceId><instanceState><code>16</code><name>{self.instances[i]['state']}</name>"
+                f"</instanceState></item>" for i in chosen)
+        return (f'<DescribeInstancesResponse xmlns="{NS}"><reservationSet><item><reservationId>r-0</reservationId>'
+                f"<instancesSet>{items}</instancesSet></item></reservationSet></DescribeInstancesResponse>")
+
+
+class FakeError(Exception):
+    def __init__(self, code: str, msg: str):
+        super().__init__(msg)
+        self.code = code
+
+
+def _error(code: str, msg: str) -> str:
+    return (f"<Response><Errors><Error><Code>{escape(code)}</Code><Message>{escape(msg)}</Message></Error></Errors>"
+            f"<RequestID>{uuid.uuid4()}</RequestID></Response>")
+
+
+def _list(q: dict, prefix: str) -> list[str]:
+    out, i = [], 1
+    while f"{prefix}.{i}" in q:
+        out.append(q[f"{prefix}.{i}"])
+        i += 1
+    return out
+
+
+def _remove(host):
+    from env import sh
+    sh("docker", "rm", "-f", "-v", host.container, check=False)

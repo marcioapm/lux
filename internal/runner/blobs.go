@@ -149,7 +149,10 @@ func (u *uploader) pass(ctx context.Context) {
 			if up.Done {
 				continue
 			}
-			if u.r.isStaleRun(rec.RunID, rec.Epoch) {
+			// Only once luxd has the report listing it (records from before
+			// this field existed: after a while, as luxd surely has it).
+			reported := rec.Reported || time.Since(time.UnixMilli(rec.Created)) > 10*time.Minute
+			if !reported || u.r.isStaleRun(rec.RunID, rec.Epoch) {
 				break
 			}
 			if err := u.upload(ctx, up); err != nil {
@@ -170,12 +173,41 @@ func (u *uploader) pass(ctx context.Context) {
 			changed = true
 		}
 		if changed {
-			_ = u.r.saveSnapshotRecord(snapID, rec)
+			u.r.updateRecord(snapID, func(cur *snapshotRecord) {
+				for i := range cur.Uploads {
+					for _, up := range rec.Uploads {
+						if up.BlobID == cur.Uploads[i].BlobID && up.Done {
+							cur.Uploads[i].Done = true
+						}
+					}
+				}
+			})
 		}
 		// A discarded Run's last uploads are done: nothing left to keep.
 		if rec.Discard && allDone(rec) {
 			removeSnapshotFiles(u.r, snapID, rec)
 		}
+	}
+}
+
+// markReported records that luxd has a snapshot's report.
+func (r *Runner) markReported(snapID string) {
+	r.updateRecord(snapID, func(rec *snapshotRecord) { rec.Reported = true })
+}
+
+// updateRecord changes a snapshot record on disk, from its current
+// contents: each writer changes only its own fields.
+func (r *Runner) updateRecord(snapID string, fn func(*snapshotRecord)) {
+	r.recordMu.Lock()
+	defer r.recordMu.Unlock()
+	b, err := os.ReadFile(r.recordPath(snapID))
+	if err != nil {
+		return
+	}
+	var rec snapshotRecord
+	if json.Unmarshal(b, &rec) == nil {
+		fn(&rec)
+		_ = r.saveSnapshotRecord(snapID, &rec)
 	}
 }
 
@@ -245,8 +277,7 @@ func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
 		}
 		if pending {
 			// Still owed to luxd: the uploader deletes it once uploaded.
-			rec.Discard = true
-			_ = r.saveSnapshotRecord(snapID, rec)
+			r.updateRecord(snapID, func(cur *snapshotRecord) { cur.Discard = true })
 			continue
 		}
 		removeSnapshotFiles(r, snapID, rec)
