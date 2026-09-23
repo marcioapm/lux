@@ -19,6 +19,8 @@
 //	sleep <seconds>        take a while (cancellable)
 //	print-secret <NAME>    reply with an environment variable
 //	cat-file <path>        reply with a file's contents (absolute path)
+//	commit <message>       git add -A and commit in the working directory;
+//	                       reply "committed <sha>"
 //	stderr <text>          write to stderr
 //	history                reply with every prompt so far in this session
 //	exit <code>            exit the process
@@ -33,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slices"
@@ -211,6 +214,30 @@ func (a *agent) path(p string) string {
 	return filepath.Join(a.cwd, p)
 }
 
+// commit commits everything in the working directory, as an agent would.
+func (a *agent) commit(message string) string {
+	git := func(args ...string) (string, error) {
+		c := exec.Command("git", append([]string{"-c", "user.name=lux-fake", "-c", "user.email=lux-fake@localhost"}, args...)...)
+		c.Dir = a.cwd
+		out, err := c.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("git %s: %v: %s", args[0], err, strings.TrimSpace(string(out)))
+		}
+		return strings.TrimSpace(string(out)), nil
+	}
+	if _, err := git("add", "-A"); err != nil {
+		return "error: " + err.Error()
+	}
+	if _, err := git("commit", "-q", "-m", message); err != nil {
+		return "error: " + err.Error()
+	}
+	sha, err := git("rev-parse", "HEAD")
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return "committed " + sha
+}
+
 // runScript runs one prompt; true if it was cancelled.
 func (a *agent) runScript(script string, cancel chan struct{}) bool {
 	for _, line := range strings.Split(script, "\n") {
@@ -251,6 +278,8 @@ func (a *agent) runScript(script string, cancel chan struct{}) bool {
 			}
 		case "print-secret":
 			a.say(os.Getenv(rest))
+		case "commit":
+			a.say(a.commit(rest))
 		case "stderr":
 			fmt.Fprintln(os.Stderr, rest)
 		case "history":

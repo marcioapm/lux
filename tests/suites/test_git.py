@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from env import wait_until
 from conftest import CLIError, fake_agent
 
 
@@ -145,10 +146,12 @@ def test_push_without_a_push_branch_is_refused(lux, runners, hosts, fake_image, 
 
 
 def commit(lux, run_id: str, host, repo: str, message: str):
-    """Commit in the Run's checkout, as its workload would (lux-fake does
-    not run git; the test does it inside the container)."""
-    host.exec("sh", "-c", f"podman exec --user agent -w /workspace/repos/{repo} lux-{run_id} "
-              f"sh -c 'git -c user.email=a@a -c user.name=a commit -qam \"{message}\"'")
+    """Have the Run's agent (lux-fake) commit in its checkout; returns the sha."""
+    before = lux.logs(run_id).count("committed ")
+    lux.run("steer", run_id, f"commit {message}")
+    out = wait_until(lambda: (o := lux.logs(run_id)).count("committed ") > before and o, 30, 0.3, "no commit")
+    lux.wait_activity(run_id, "idle")
+    return out.rsplit("committed ", 1)[1].split()[0]
 
 
 def test_a_hostile_checkout_cannot_hijack_the_push(lux, runners, hosts, fake_image, git_server):
