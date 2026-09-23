@@ -1,0 +1,83 @@
+// Command lux-runner runs on every host: it connects to luxd and runs the
+// placements it is given in Podman containers.
+//
+//	LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a
+//
+// See docs/operations.md for host requirements.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/marcioapm/lux/internal/runner"
+	"github.com/marcioapm/lux/internal/version"
+)
+
+type labels map[string]string
+
+func (l labels) String() string { return "" }
+func (l labels) Set(v string) error {
+	k, val, ok := strings.Cut(v, "=")
+	if !ok {
+		return fmt.Errorf("want key=value")
+	}
+	l[k] = val
+	return nil
+}
+
+func main() {
+	cfg := runner.Config{Labels: labels{}}
+	flag.StringVar(&cfg.Name, "name", "", "host name (default: hostname)")
+	flag.StringVar(&cfg.DataDir, "data-dir", "/var/lib/lux", "where the runner keeps its state and local snapshots")
+	flag.StringVar(&cfg.Shim, "shim", "/usr/local/lib/lux/lux-shim", "path to the lux-shim binary")
+	flag.Var(labels(cfg.Labels), "label", "host label key=value (repeatable)")
+	flag.IntVar(&cfg.MaxRuns, "max-runs", 0, "maximum concurrent Runs (default 16)")
+	flag.Float64Var(&cfg.CPUs, "cpus", 0, "CPUs to offer (default: all)")
+	memory := flag.Int64("memory", 0, "bytes of memory to offer (default: all)")
+	flag.StringVar(&cfg.ProviderID, "provider-id", os.Getenv("LUX_PROVIDER_ID"), "cloud instance id, for provisioned hosts")
+	flag.BoolVar(&cfg.ForcePoll, "poll", false, "use HTTP polling instead of a WebSocket")
+	flag.DurationVar(&cfg.HostTTL, "host-ttl", 24*time.Hour, "how long to keep local snapshot copies after upload")
+	showVersion := flag.Bool("version", false, "print the version")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(version.Version)
+		return
+	}
+	cfg.Memory = *memory
+	cfg.URL = os.Getenv("LUX_URL")
+	cfg.Token = os.Getenv("LUX_HOST_TOKEN")
+	if cfg.URL == "" || cfg.Token == "" {
+		fmt.Fprintln(os.Stderr, "lux-runner: LUX_URL and LUX_HOST_TOKEN are required")
+		os.Exit(2)
+	}
+	for _, kv := range strings.Split(os.Getenv("LUX_LABELS"), ",") {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			cfg.Labels[k] = v
+		}
+	}
+	level := slog.LevelInfo
+	if os.Getenv("LUX_DEBUG") != "" {
+		level = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	r, err := runner.New(cfg, log)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "lux-runner:", err)
+		os.Exit(1)
+	}
+	log.Info("lux-runner starting", "name", cfg.Name, "version", version.Version, "url", cfg.URL)
+	if err := r.Run(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "lux-runner:", err)
+		os.Exit(1)
+	}
+}

@@ -1,0 +1,342 @@
+// Command lux-fake is a scripted agent for tests. It speaks ACP (JSON-RPC
+// 2.0 over stdio) like a real agent, keeps its conversation in a
+// transcript under $HOME/.lux-fake/<session>.jsonl, and resumes from it
+// with session/load — so steering, stop and resume on another host can be
+// tested without a model.
+//
+// Each prompt is a script, one command per line:
+//
+//	echo <text>            reply with text
+//	write <file> <text>    write text to a file (relative to cwd)
+//	append <file> <text>   append a line
+//	read <file>            reply with the file's contents
+//	sleep <seconds>        take a while (cancellable)
+//	print-secret <NAME>    reply with an environment variable
+//	stderr <text>          write to stderr
+//	history                reply with every prompt so far in this session
+//	exit <code>            exit the process
+//	ask                    request a permission; reply with the outcome
+//
+// Anything else is echoed back as "you said: …".
+//
+// Run with no arguments for ACP. `lux-fake plain` is a line-oriented
+// generic workload: each stdin line is a script line.
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+type msg struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   json.RawMessage `json:"error,omitempty"`
+}
+
+type agent struct {
+	out     *json.Encoder
+	outMu   sync.Mutex
+	mu      sync.Mutex
+	session string
+	cwd     string
+	cancel  chan struct{}
+	pending map[string]chan json.RawMessage
+	nextID  int
+}
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "plain" {
+		plain()
+		return
+	}
+	a := &agent{out: json.NewEncoder(os.Stdout), pending: map[string]chan json.RawMessage{}}
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 64<<10), 16<<20)
+	for sc.Scan() {
+		var m msg
+		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+			continue
+		}
+		if m.Method == "" && len(m.ID) > 0 {
+			a.mu.Lock()
+			ch := a.pending[string(m.ID)]
+			delete(a.pending, string(m.ID))
+			a.mu.Unlock()
+			if ch != nil {
+				ch <- m.Result
+			}
+			continue
+		}
+		go a.handle(m)
+	}
+}
+
+func (a *agent) send(v any) {
+	a.outMu.Lock()
+	defer a.outMu.Unlock()
+	_ = a.out.Encode(v)
+}
+
+func (a *agent) reply(id json.RawMessage, result any) {
+	a.send(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+func (a *agent) replyErr(id json.RawMessage, code int, message string) {
+	a.send(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
+}
+
+func (a *agent) update(kind string, text string) {
+	a.send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{
+		"sessionId": a.session,
+		"update":    map[string]any{"sessionUpdate": kind, "content": map[string]string{"type": "text", "text": text}},
+	}})
+}
+
+func transcriptDir() string {
+	home, _ := os.UserHomeDir()
+	if h := os.Getenv("HOME"); h != "" {
+		home = h
+	}
+	return filepath.Join(home, ".lux-fake")
+}
+
+type entry struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}
+
+func (a *agent) record(role, text string) {
+	_ = os.MkdirAll(transcriptDir(), 0o755)
+	f, err := os.OpenFile(filepath.Join(transcriptDir(), a.session+".jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	b, _ := json.Marshal(entry{role, text})
+	f.Write(append(b, '\n'))
+}
+
+func (a *agent) history() []entry {
+	b, err := os.ReadFile(filepath.Join(transcriptDir(), a.session+".jsonl"))
+	if err != nil {
+		return nil
+	}
+	var out []entry
+	for _, l := range strings.Split(string(b), "\n") {
+		var e entry
+		if json.Unmarshal([]byte(l), &e) == nil && e.Role != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (a *agent) handle(m msg) {
+	switch m.Method {
+	case "initialize":
+		a.reply(m.ID, map[string]any{
+			"protocolVersion":   1,
+			"agentCapabilities": map[string]any{"loadSession": true},
+			"agentInfo":         map[string]string{"name": "lux-fake", "version": "1"},
+		})
+	case "session/new":
+		var p struct {
+			Cwd string `json:"cwd"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
+		a.mu.Lock()
+		a.session = fmt.Sprintf("fake-%d", time.Now().UnixNano())
+		a.cwd = p.Cwd
+		a.mu.Unlock()
+		a.record("system", "session started")
+		a.reply(m.ID, map[string]any{"sessionId": a.session})
+	case "session/load":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Cwd       string `json:"cwd"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
+		if _, err := os.Stat(filepath.Join(transcriptDir(), p.SessionID+".jsonl")); err != nil {
+			a.replyErr(m.ID, -32002, "session not found: "+p.SessionID)
+			return
+		}
+		a.mu.Lock()
+		a.session, a.cwd = p.SessionID, p.Cwd
+		a.mu.Unlock()
+		for _, e := range a.history() {
+			kind := "agent_message_chunk"
+			if e.Role == "user" {
+				kind = "user_message_chunk"
+			}
+			a.update(kind, e.Text)
+		}
+		a.record("system", "session loaded")
+		a.reply(m.ID, map[string]any{})
+	case "session/prompt":
+		var p struct {
+			Prompt []struct {
+				Text string `json:"text"`
+			} `json:"prompt"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
+		var text strings.Builder
+		for _, b := range p.Prompt {
+			text.WriteString(b.Text)
+		}
+		a.mu.Lock()
+		a.cancel = make(chan struct{})
+		cancel := a.cancel
+		a.mu.Unlock()
+		a.record("user", text.String())
+		stop := a.runScript(text.String(), cancel)
+		a.reply(m.ID, map[string]any{"stopReason": stop})
+	case "session/cancel":
+		a.mu.Lock()
+		if a.cancel != nil {
+			select {
+			case <-a.cancel:
+			default:
+				close(a.cancel)
+			}
+		}
+		a.mu.Unlock()
+	default:
+		if len(m.ID) > 0 {
+			a.replyErr(m.ID, -32601, "unknown method "+m.Method)
+		}
+	}
+}
+
+func (a *agent) say(s string) {
+	a.update("agent_message_chunk", s+"\n")
+	a.record("agent", s)
+}
+
+func (a *agent) path(p string) string {
+	if filepath.IsAbs(p) || a.cwd == "" {
+		return p
+	}
+	return filepath.Join(a.cwd, p)
+}
+
+func (a *agent) runScript(script string, cancel chan struct{}) string {
+	for _, line := range strings.Split(script, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		cmd, rest, _ := strings.Cut(line, " ")
+		switch cmd {
+		case "echo":
+			a.say(rest)
+		case "write", "append":
+			file, text, _ := strings.Cut(rest, " ")
+			flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+			if cmd == "append" {
+				flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+				text += "\n"
+			}
+			_ = os.MkdirAll(filepath.Dir(a.path(file)), 0o755)
+			f, err := os.OpenFile(a.path(file), flag, 0o644)
+			if err != nil {
+				a.say("error: " + err.Error())
+				continue
+			}
+			f.WriteString(text)
+			f.Close()
+			a.say("wrote " + file)
+		case "read":
+			b, err := os.ReadFile(a.path(rest))
+			if err != nil {
+				a.say("error: " + err.Error())
+				continue
+			}
+			a.say(strings.TrimRight(string(b), "\n"))
+		case "sleep":
+			secs, _ := strconv.ParseFloat(rest, 64)
+			select {
+			case <-time.After(time.Duration(secs * float64(time.Second))):
+			case <-cancel:
+				a.say("cancelled")
+				return "cancelled"
+			}
+		case "print-secret":
+			a.say(os.Getenv(rest))
+		case "stderr":
+			fmt.Fprintln(os.Stderr, rest)
+		case "history":
+			var parts []string
+			for _, e := range a.history() {
+				if e.Role == "user" {
+					parts = append(parts, e.Text)
+				}
+			}
+			a.say("history: " + strings.Join(parts, " | "))
+		case "exit":
+			code, _ := strconv.Atoi(rest)
+			os.Exit(code)
+		case "ask":
+			a.mu.Lock()
+			a.nextID++
+			id := fmt.Sprintf("%d", 1000+a.nextID)
+			ch := make(chan json.RawMessage, 1)
+			a.pending[id] = ch
+			a.mu.Unlock()
+			a.send(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "method": "session/request_permission", "params": map[string]any{
+				"sessionId": a.session,
+				"options": []map[string]string{
+					{"optionId": "no", "name": "Reject", "kind": "reject_once"},
+					{"optionId": "yes", "name": "Allow", "kind": "allow_once"},
+				},
+			}})
+			res := <-ch
+			a.say("permission: " + string(res))
+		default:
+			a.say("you said: " + line)
+		}
+		select {
+		case <-cancel:
+			a.say("cancelled")
+			return "cancelled"
+		default:
+		}
+	}
+	return "end_turn"
+}
+
+// plain is a line-oriented workload for the generic adapter.
+func plain() {
+	a := &agent{cwd: "."}
+	a.out = json.NewEncoder(os.Stdout)
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		cmd, rest, _ := strings.Cut(line, " ")
+		switch cmd {
+		case "echo":
+			fmt.Println(rest)
+		case "exit":
+			code, _ := strconv.Atoi(rest)
+			os.Exit(code)
+		case "print-secret":
+			fmt.Println(os.Getenv(rest))
+		case "write":
+			file, text, _ := strings.Cut(rest, " ")
+			os.WriteFile(file, []byte(text), 0o644)
+			fmt.Println("wrote", file)
+		default:
+			fmt.Println("you said:", line)
+		}
+	}
+}

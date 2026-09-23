@@ -1,0 +1,391 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/ids"
+	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
+	"github.com/marcioapm/lux/internal/store"
+)
+
+func (s *Server) schedulerLoop(ctx context.Context) {
+	t := time.NewTicker(s.cfg.Tick)
+	defer t.Stop()
+	for {
+		if err := s.scheduleOnce(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("schedule", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		case <-s.kick:
+		}
+	}
+}
+
+type candidateHost struct {
+	ID        string
+	TenantID  *string
+	Pool      string
+	Labels    map[string]string
+	Capacity  proto.Capacity
+	Images    []string
+	UsedCPUs  float64
+	UsedMem   int64
+	UsedRuns  int
+	Tenants   []string // tenants with live placements here
+	Shared    bool
+	Connected bool
+}
+
+type pendingRun struct {
+	ID            string
+	TenantID      string
+	State         string
+	Spec          spec.RunSpec
+	SnapshotID    *string
+	SessionID     string
+	Epoch         int
+	PendingInput  json.RawMessage
+	ImageResolved json.RawMessage
+	HasSecrets    bool
+}
+
+// scheduleOnce places every Run waiting for a host. One transaction per
+// Run, with SKIP LOCKED, so several luxd instances can schedule at once.
+func (s *Server) scheduleOnce(ctx context.Context) error {
+	for range 100 {
+		placed, err := s.scheduleNext(ctx)
+		if err != nil || !placed {
+			return err
+		}
+	}
+	return nil
+}
+
+var errNothingToDo = errors.New("nothing to schedule")
+
+func (s *Server) scheduleNext(ctx context.Context) (bool, error) {
+	var hostID string
+	var progressed bool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, session_id, current_epoch, pending_input, image_resolved,
+				jsonb_array_length(secrets) > 0
+			FROM runs WHERE state IN ('submitted', 'resuming', 'provisioning') AND NOT cancel_requested
+			ORDER BY updated_at FOR UPDATE SKIP LOCKED LIMIT 20`)
+		if err != nil {
+			return err
+		}
+		var runs []pendingRun
+		for rows.Next() {
+			var r pendingRun
+			if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.SessionID, &r.Epoch, &r.PendingInput, &r.ImageResolved, &r.HasSecrets); err != nil {
+				rows.Close()
+				return err
+			}
+			runs = append(runs, r)
+		}
+		rows.Close()
+		if len(runs) == 0 {
+			return errNothingToDo
+		}
+		hosts, err := s.candidateHosts(ctx, tx)
+		if err != nil {
+			return err
+		}
+		for _, r := range runs {
+			// Secret values live only in memory. If luxd restarted since they
+			// were supplied, the Run cannot start until someone supplies them
+			// again: it stops, resumable with its secrets.
+			if _, ok := s.secrets.get(r.ID); r.HasSecrets && !ok {
+				if err := setRunState(ctx, tx, r.TenantID, r.ID, StateStopped, "secrets must be supplied again: resume with them", r.Epoch); err != nil {
+					return err
+				}
+				progressed = true
+				return nil
+			}
+			h, wait, err := s.pickHost(ctx, tx, r, hosts)
+			if err != nil {
+				return err
+			}
+			if h == nil {
+				if err := s.noHost(ctx, tx, r, wait); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := s.assign(ctx, tx, r, h); err != nil {
+				return err
+			}
+			hostID = h.ID
+			progressed = true
+			return nil
+		}
+		return errNothingToDo
+	})
+	if errors.Is(err, errNothingToDo) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if hostID != "" {
+		s.hub.Notify(hostID)
+	}
+	return progressed, nil
+}
+
+func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx) ([]*candidateHost, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT h.id, h.tenant_id, h.pool, h.labels, h.capacity, coalesce(h.caches->'images', '[]'),
+			coalesce((SELECT bool_or(p.shared) FROM pools p WHERE p.tenant_id IS NULL AND p.name = h.pool), false)
+		FROM hosts h
+		WHERE h.state = 'ready' AND NOT h.draining AND h.last_heartbeat > now() - $1::interval`,
+		fmt.Sprintf("%f seconds", s.cfg.LeaseDuration.Seconds()))
+	if err != nil {
+		return nil, err
+	}
+	var hosts []*candidateHost
+	byID := map[string]*candidateHost{}
+	for rows.Next() {
+		h := &candidateHost{}
+		var images []string
+		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.Labels, &h.Capacity, &images, &h.Shared); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		h.Images = images
+		h.Connected = s.hub.Connected(h.ID)
+		hosts = append(hosts, h)
+		byID[h.ID] = h
+	}
+	rows.Close()
+	used, err := tx.Query(ctx, `SELECT host_id, tenant_id, resources FROM placements
+		WHERE state IN ('assigned', 'starting', 'running', 'stopping')`)
+	if err != nil {
+		return nil, err
+	}
+	defer used.Close()
+	for used.Next() {
+		var hostID, tenantID string
+		var res spec.Resources
+		if err := used.Scan(&hostID, &tenantID, &res); err != nil {
+			return nil, err
+		}
+		if h := byID[hostID]; h != nil {
+			h.UsedCPUs += res.CPUs
+			h.UsedMem += int64(res.Memory)
+			h.UsedRuns++
+			h.Tenants = append(h.Tenants, tenantID)
+		}
+	}
+	return hosts, used.Err()
+}
+
+// pickHost chooses where a Run goes. Hard constraints first (tenancy, pool,
+// labels, capacity), then affinity: the host holding the Run's snapshot
+// wins outright (a resume there moves nothing), then hosts with the image
+// cached, then soft label preferences.
+//
+// wait is a human-readable reason when no host is chosen.
+func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []*candidateHost) (*candidateHost, string, error) {
+	// Where is the snapshot we must resume from, and may another host use it?
+	var snapHost string
+	var snapUploaded, snapAvailable, snapHostCopy bool
+	if r.SnapshotID != nil {
+		err := tx.QueryRow(ctx, `SELECT coalesce(host_id, ''), uploaded, available, host_copy FROM snapshots WHERE id = $1`,
+			*r.SnapshotID).Scan(&snapHost, &snapUploaded, &snapAvailable, &snapHostCopy)
+		if err != nil {
+			return nil, "", err
+		}
+		if !snapAvailable {
+			return nil, "snapshot unavailable", nil
+		}
+		if !snapHostCopy {
+			snapHost = ""
+		}
+	}
+
+	type scored struct {
+		h     *candidateHost
+		score int
+	}
+	var ok []scored
+	reason := "no host matches"
+	for _, h := range hosts {
+		if !h.Connected {
+			continue
+		}
+		if h.Pool != r.Spec.Placement.Pool {
+			continue
+		}
+		// Tenancy: a tenant's own hosts; a shared platform pool; or a
+		// platform host no other tenant is using right now.
+		if h.TenantID != nil && *h.TenantID != r.TenantID {
+			continue
+		}
+		if h.TenantID == nil && !h.Shared {
+			other := false
+			for _, t := range h.Tenants {
+				if t != r.TenantID {
+					other = true
+				}
+			}
+			if other {
+				continue
+			}
+		}
+		if !labelsMatch(h.Labels, r.Spec.Placement.Requires) {
+			continue
+		}
+		if r.Spec.Sandbox.NestedContainers && h.Labels["nested"] != "true" {
+			continue
+		}
+		res := r.Spec.Resources
+		if h.Capacity.Runs > 0 && h.UsedRuns >= h.Capacity.Runs ||
+			h.Capacity.CPUs > 0 && h.UsedCPUs+res.CPUs > h.Capacity.CPUs ||
+			h.Capacity.Memory > 0 && h.UsedMem+int64(res.Memory) > h.Capacity.Memory {
+			reason = "waiting for capacity"
+			continue
+		}
+		// A snapshot only on another host, not yet uploaded: that host must
+		// finish the upload first (it just reported it; it is alive).
+		if snapHost != "" && h.ID != snapHost && !snapUploaded {
+			reason = "waiting for snapshot upload"
+			continue
+		}
+		sc := 0
+		if snapHost == h.ID {
+			sc += 1000
+		}
+		if r.Spec.Image.Ref != "" {
+			for _, img := range h.Images {
+				if img == r.Spec.Image.Ref {
+					sc += 100
+				}
+			}
+		}
+		for k, v := range r.Spec.Placement.Prefers {
+			if h.Labels[k] == v {
+				sc += 10
+			}
+		}
+		// Spread: fewer running Runs first.
+		sc -= h.UsedRuns
+		ok = append(ok, scored{h, sc})
+	}
+	if len(ok) == 0 {
+		return nil, reason, nil
+	}
+	sort.SliceStable(ok, func(i, j int) bool { return ok[i].score > ok[j].score })
+	return ok[0].h, "", nil
+}
+
+func labelsMatch(have, want map[string]string) bool {
+	for k, v := range want {
+		if have[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// noHost records why a Run is waiting, and asks a provider for a host if
+// its pool has one.
+func (s *Server) noHost(ctx context.Context, tx pgx.Tx, r pendingRun, wait string) error {
+	if wait == "snapshot unavailable" {
+		return setRunState(ctx, tx, r.TenantID, r.ID, StateLost, "its snapshot is no longer available", r.Epoch)
+	}
+	var provider string
+	err := tx.QueryRow(ctx, `SELECT provider FROM pools WHERE name = $1 AND (tenant_id = $2 OR tenant_id IS NULL)
+		ORDER BY tenant_id NULLS LAST LIMIT 1`, r.Spec.Placement.Pool, r.TenantID).Scan(&provider)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if provider != "" && provider != "static" && wait != "waiting for snapshot upload" {
+		if r.State != StateProvisioning {
+			return setRunState(ctx, tx, r.TenantID, r.ID, StateProvisioning, "waiting for a host", r.Epoch)
+		}
+		return nil
+	}
+	_, err = tx.Exec(ctx, `UPDATE runs SET state_reason = $2 WHERE id = $1 AND state_reason <> $2`, r.ID, wait)
+	return err
+}
+
+// assign creates the next placement: a new epoch, fenced. Everything the
+// previous placement reports from now on is stale.
+func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candidateHost) error {
+	epoch := r.Epoch + 1
+	placementID := ids.New(ids.Placement)
+	_, err := tx.Exec(ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, lease_expires_at)
+		VALUES ($1, $2, $3, $4, $5, 'assigned', $6, now() + $7::interval)`,
+		placementID, r.TenantID, r.ID, h.ID, epoch, r.Spec.Resources,
+		// Generous first lease: pulling or building the image can be slow,
+		// and heartbeats renew it once the runner has the placement.
+		fmt.Sprintf("%f seconds", (s.cfg.LeaseDuration*4).Seconds()))
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE runs SET current_epoch = $2, state = 'scheduled', state_reason = '', pending_input = NULL,
+			first_scheduled_at = coalesce(first_scheduled_at, now()), updated_at = now()
+		WHERE id = $1`, r.ID, epoch); err != nil {
+		return err
+	}
+	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID}); err != nil {
+		return err
+	}
+
+	a := proto.Assign{RunID: r.ID, TenantID: r.TenantID, Epoch: epoch, Spec: r.Spec, ImageResolved: r.ImageResolved}
+	if r.SnapshotID != nil || r.SessionID != "" {
+		a.Resume = &proto.ResumeInfo{SessionID: r.SessionID}
+		if r.SnapshotID != nil {
+			var m proto.Manifest
+			if err := tx.QueryRow(ctx, `SELECT manifest FROM snapshots WHERE id = $1`, *r.SnapshotID).Scan(&m); err != nil {
+				return err
+			}
+			a.Resume.Snapshot = &m
+		}
+	}
+	if len(r.PendingInput) > 0 {
+		var in proto.Input
+		if err := json.Unmarshal(r.PendingInput, &in); err == nil {
+			a.Input = &in
+		}
+	}
+	// Secrets are attached when the message is sent, from memory.
+	if err := enqueue(ctx, tx, h.ID, r.ID, epoch, proto.MsgAssign, a); err != nil {
+		return err
+	}
+	// The Run moved: the old host no longer needs its local copy once the
+	// new placement has restored from it. Told at snapshot time instead
+	// (see discardStaleCopies) so a failed start can fall back.
+	h.UsedRuns++
+	h.UsedCPUs += r.Spec.Resources.CPUs
+	h.UsedMem += int64(r.Spec.Resources.Memory)
+	h.Tenants = append(h.Tenants, r.TenantID)
+	return nil
+}
+
+// requestResume queues a stopped or lost Run for a new placement.
+func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID string, input *proto.Input, why string) error {
+	var in any
+	if input != nil {
+		in = input
+	}
+	_, err := tx.Exec(ctx, `UPDATE runs SET state = 'resuming', state_reason = $3, pending_input = $2, updated_at = now(),
+			exit_code = NULL
+		WHERE id = $1`, runID, in, why)
+	if err != nil {
+		return err
+	}
+	return addEvent(ctx, tx, tenantID, runID, 0, "state", map[string]any{"state": StateResuming, "reason": why})
+}

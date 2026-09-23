@@ -1,0 +1,422 @@
+package runner
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/klauspost/compress/zstd"
+
+	"github.com/marcioapm/lux/internal/proto"
+)
+
+// Blobs live under <data>/snapshots/<blob id>.zst until uploaded and no
+// longer needed locally.
+
+func (r *Runner) blobPath(blobID string) string {
+	return filepath.Join(r.cfg.DataDir, "snapshots", blobID+".zst")
+}
+
+func (r *Runner) recordPath(snapID string) string {
+	return filepath.Join(r.cfg.DataDir, "snapshots", snapID+".json")
+}
+
+// writeBlob compresses what produce writes into a new blob file. Returns
+// the compressed size and its sha256.
+func (r *Runner) writeBlob(blobID string, produce func(io.Writer) error) (int64, string, error) {
+	path := r.blobPath(blobID)
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return 0, "", err
+	}
+	h := sha256.New()
+	cw := &countWriter{w: io.MultiWriter(f, h)}
+	zw, err := zstd.NewWriter(cw, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
+		f.Close()
+		return 0, "", err
+	}
+	if err := produce(zw); err != nil {
+		zw.Close()
+		f.Close()
+		os.Remove(tmp)
+		return 0, "", err
+	}
+	if err := zw.Close(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return 0, "", err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return 0, "", err
+	}
+	f.Close()
+	if err := os.Rename(tmp, path); err != nil {
+		return 0, "", err
+	}
+	return cw.n, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+type countWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func (r *Runner) saveSnapshotRecord(snapID string, rec *snapshotRecord) error {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	tmp := r.recordPath(snapID) + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, r.recordPath(snapID))
+}
+
+func (r *Runner) snapshotRecords() map[string]*snapshotRecord {
+	out := map[string]*snapshotRecord{}
+	entries, _ := os.ReadDir(filepath.Join(r.cfg.DataDir, "snapshots"))
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(r.cfg.DataDir, "snapshots", name))
+		if err != nil {
+			continue
+		}
+		var rec snapshotRecord
+		if json.Unmarshal(b, &rec) == nil {
+			out[strings.TrimSuffix(name, ".json")] = &rec
+		}
+	}
+	return out
+}
+
+// uploader uploads blobs in the background, oldest first, retrying until
+// luxd has them. Runs across restarts: pending uploads are on disk.
+type uploader struct {
+	r    *Runner
+	kc   chan struct{}
+	mu   sync.Mutex
+	busy bool
+}
+
+func newUploader(r *Runner) *uploader { return &uploader{r: r, kc: make(chan struct{}, 1)} }
+
+func (u *uploader) kick() {
+	select {
+	case u.kc <- struct{}{}:
+	default:
+	}
+}
+
+func (u *uploader) loop(ctx context.Context) {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for {
+		u.pass(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		case <-u.kc:
+		}
+	}
+}
+
+func (u *uploader) pass(ctx context.Context) {
+	for snapID, rec := range u.r.snapshotRecords() {
+		changed := false
+		for i := range rec.Uploads {
+			up := &rec.Uploads[i]
+			if up.Done {
+				continue
+			}
+			if u.r.isStaleRun(rec.RunID, rec.Epoch) {
+				break
+			}
+			if err := u.upload(ctx, up); err != nil {
+				var he *httpError
+				if errors.As(err, &he) && (he.Status == http.StatusNotFound || he.Status == http.StatusGone) {
+					// luxd does not know it (never reported, or deleted):
+					// nothing to do.
+					up.Done = true
+					changed = true
+					continue
+				}
+				if ctx.Err() == nil {
+					u.r.log.Warn("upload failed; will retry", "blob", up.BlobID, "err", err)
+				}
+				break
+			}
+			up.Done = true
+			changed = true
+		}
+		if changed {
+			_ = u.r.saveSnapshotRecord(snapID, rec)
+		}
+	}
+}
+
+func (u *uploader) upload(ctx context.Context, up *pendingUpload) error {
+	f, err := os.Open(up.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			up.Done = true
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	return u.r.api.upload(ctx, up.BlobID, f, fi.Size())
+}
+
+func (r *Runner) isStaleRun(runID string, epoch int) bool {
+	st, err := readRunState(r.runDir(runID))
+	return err == nil && st.Stale && st.Epoch == epoch
+}
+
+// discard deletes the local copy of a Run's state: luxd says it resumed
+// elsewhere from an uploaded snapshot.
+func (r *Runner) discard(ctx context.Context, runID string, beforeEpoch int) {
+	r.mu.Lock()
+	p := r.placements[runID]
+	if p != nil && p.epoch >= beforeEpoch {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.placements, runID)
+	r.mu.Unlock()
+	r.removeRunLocal(ctx, runID)
+}
+
+func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
+	_ = r.pm.Remove(ctx, containerName(runID))
+	vols, _ := r.pm.VolumeList(ctx, LabelRun+"="+runID)
+	for _, v := range vols {
+		_ = r.pm.VolumeRemove(ctx, v)
+	}
+	_ = r.pm.NetworkRemove(ctx, networkName(runID))
+	for snapID, rec := range r.snapshotRecords() {
+		if rec.RunID != runID {
+			continue
+		}
+		pending := false
+		for _, up := range rec.Uploads {
+			if !up.Done {
+				pending = true
+			}
+		}
+		if pending {
+			continue // still owed to luxd
+		}
+		for _, up := range rec.Uploads {
+			os.Remove(up.Path)
+		}
+		os.Remove(r.recordPath(snapID))
+	}
+	os.RemoveAll(r.runDir(runID))
+	r.log.Info("discarded local copy", "run", runID)
+}
+
+// gcLoop removes local state for Runs that ended here longer ago than the
+// host TTL, once everything is uploaded.
+func (r *Runner) gcLoop(ctx context.Context) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		entries, _ := os.ReadDir(filepath.Join(r.cfg.DataDir, "runs"))
+		for _, e := range entries {
+			st, err := readRunState(r.runDir(e.Name()))
+			if err != nil || st.LastExitAt == 0 {
+				continue
+			}
+			if st.Phase != "reported" && !st.Stale {
+				continue
+			}
+			if time.Since(time.UnixMilli(st.LastExitAt)) < r.cfg.HostTTL {
+				continue
+			}
+			r.mu.Lock()
+			p := r.placements[e.Name()]
+			busy := p != nil && p.liveState() != ""
+			r.mu.Unlock()
+			if !busy {
+				r.discard(ctx, e.Name(), 1<<30)
+			}
+		}
+	}
+}
+
+// ---- restart: re-adopt containers ----------------------------------------
+
+// readopt finds this runner's containers after a restart. Running ones are
+// supervised again; ones that exited while the runner was down are
+// finished (snapshot and report) now.
+func (r *Runner) readopt(ctx context.Context) {
+	entries, _ := os.ReadDir(filepath.Join(r.cfg.DataDir, "runs"))
+	for _, e := range entries {
+		st, err := readRunState(r.runDir(e.Name()))
+		if err != nil || st.Stale {
+			continue
+		}
+		p := &placement{
+			r: r, runID: st.RunID, tenantID: st.TenantID, epoch: st.Epoch, dir: r.runDir(st.RunID),
+			state: st, done: make(chan struct{}), nudgeCh: make(chan struct{}, 1), stopWhy: st.StopReason,
+		}
+		switch st.Phase {
+		case "reported":
+			p.phase = "done"
+			close(p.done)
+		case "exited":
+			p.phase = "exited"
+			r.log.Info("re-adopting exited placement", "run", st.RunID, "epoch", st.Epoch)
+			go func() { defer close(p.done); p.finish(context.WithoutCancel(ctx), st.Exit) }()
+		case "started":
+			cs, _ := r.pm.Inspect(ctx, containerName(st.RunID))
+			if !cs.Exists {
+				p.phase = "done"
+				close(p.done)
+				break
+			}
+			p.cgroup = cs.CgroupPath
+			if cs.Running {
+				p.phase = "running"
+				if p.stopWhy != "" {
+					p.phase = "stopping"
+				}
+				r.log.Info("re-adopting running placement", "run", st.RunID, "epoch", st.Epoch)
+				go func() {
+					defer close(p.done)
+					if err := p.dialShim(ctx); err != nil {
+						r.log.Warn("re-adopt: shim", "run", st.RunID, "err", err)
+					}
+					p.supervise(context.WithoutCancel(ctx))
+				}()
+			} else {
+				p.phase = "exited"
+				go func() { defer close(p.done); p.supervise(context.WithoutCancel(ctx)) }()
+			}
+		default:
+			// Assigned but never started: luxd redelivers the assignment
+			// (unacked) or has given up on it.
+			continue
+		}
+		r.placements[st.RunID] = p
+	}
+}
+
+// ---- output streaming -------------------------------------------------------
+
+// streamOutput sends a placement's records to luxd for a subscriber.
+func (r *Runner) streamOutput(ctx context.Context, runID string, epoch int, s proto.OutputSubscribe) error {
+	done := func() bool {
+		r.mu.Lock()
+		p := r.placements[runID]
+		r.mu.Unlock()
+		if p == nil || p.epoch != epoch {
+			return true
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.phase == "exited" || p.phase == "done"
+	}
+	// The placement may not have created its runtime volume yet.
+	path, err := r.outputFile(ctx, runID, epoch)
+	for err != nil && s.Follow && !done() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+		path, err = r.outputFile(ctx, runID, epoch)
+	}
+	if err != nil {
+		if done() {
+			return nil // nothing was ever written
+		}
+		return err
+	}
+	var batch []proto.Record
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		err := r.conn.Send(ctx, proto.Frame{Type: proto.MsgOutputRecords, RunID: runID, Epoch: epoch,
+			Data: proto.Marshal(proto.OutputRecords{SubID: s.SubID, Records: batch})})
+		batch = batch[:0]
+		return err
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	recs := make(chan proto.Record, 256)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- tailRecords(ctx, path, s.Since, s.Follow, done, func(rec proto.Record) error {
+			select {
+			case recs <- rec:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+		close(recs)
+	}()
+	for {
+		select {
+		case rec, ok := <-recs:
+			if !ok {
+				if err := flush(); err != nil {
+					return err
+				}
+				return <-errc
+			}
+			batch = append(batch, rec)
+			if len(batch) >= 200 {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		case <-ticker.C:
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (r *Runner) outputFile(ctx context.Context, runID string, epoch int) (string, error) {
+	rt, err := r.pm.VolumeMountpoint(ctx, runtimeVolume(runID))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(rt, proto.OutputFile(epoch)), nil
+}

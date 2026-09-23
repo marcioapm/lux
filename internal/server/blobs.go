@@ -1,0 +1,255 @@
+package server
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/blob"
+	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/store"
+)
+
+// presignTTL bounds how long a download URL works: long enough to fetch a
+// large snapshot, short enough that a leaked URL is soon useless.
+const presignTTL = 15 * time.Minute
+
+// serveBlobUpload is PUT /runner/blobs/{id}: a runner uploading a blob it
+// reported in snapshot.done. luxd streams it to S3, verifying its sha256 on
+// the way; runners never hold S3 credentials.
+func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
+	tok, err := s.authHostToken(r)
+	if err != nil {
+		return err
+	}
+	id := r.PathValue("id")
+	hostName := r.URL.Query().Get("host")
+	var tenantID, runID, want, location, hostID string
+	var epoch int
+	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(r.Context(), `SELECT b.tenant_id, b.run_id, b.epoch, b.sha256, b.location, coalesce(b.host_id, '')
+			FROM blobs b JOIN hosts h ON h.id = b.host_id
+			WHERE b.id = $1 AND h.token_id = $2 AND h.name = $3`, id, tok.ID, hostName).
+			Scan(&tenantID, &runID, &epoch, &want, &location, &hostID)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errf(http.StatusNotFound, "not_found", "no blob %s from this host", id)
+	}
+	if err != nil {
+		return err
+	}
+	if location == "s3" {
+		writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
+		return nil
+	}
+	if location != "host" {
+		return errf(http.StatusGone, "gone", "blob %s was deleted", id)
+	}
+	key := blob.Key(tenantID, runID, id)
+	h := sha256.New()
+	body := io.TeeReader(r.Body, h)
+	if err := s.blobs.Put(r.Context(), key, body, r.ContentLength, want); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != want {
+		_ = s.blobs.Delete(context.WithoutCancel(r.Context()), key)
+		return errf(http.StatusBadRequest, "checksum_mismatch", "sha256 %s, expected %s", got, want)
+	}
+	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(r.Context(), `UPDATE blobs SET location = 's3', s3_key = $2, uploaded_at = now()
+			WHERE id = $1 AND location = 'host'`, id, key); err != nil {
+			return err
+		}
+		// A snapshot is uploaded once all its volumes are.
+		if _, err := tx.Exec(r.Context(), `UPDATE snapshots s SET uploaded = true
+			WHERE s.run_id = $1 AND s.epoch = $2 AND NOT s.uploaded AND NOT EXISTS (
+				SELECT 1 FROM jsonb_array_elements(coalesce(nullif(s.manifest->'volumes', 'null'), '[]')) v
+				JOIN blobs b ON b.id = v->>'blobId' WHERE b.location <> 's3')`, runID, epoch); err != nil {
+			return err
+		}
+		_, err := tx.Exec(r.Context(), `UPDATE placements p SET uploaded_at = now()
+			WHERE p.run_id = $1 AND p.epoch = $2 AND p.uploaded_at IS NULL AND NOT EXISTS (
+				SELECT 1 FROM blobs b WHERE b.run_id = $1 AND b.epoch = $2 AND b.location = 'host')`, runID, epoch)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	s.Kick() // a resume elsewhere may have been waiting for this upload
+	writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
+	return nil
+}
+
+// serveRunnerBlobDownload is GET /runner/blobs/{id}: a runner fetching a
+// snapshot volume for a Run assigned to it. Redirects to a presigned URL.
+func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request) error {
+	tok, err := s.authHostToken(r)
+	if err != nil {
+		return err
+	}
+	id := r.PathValue("id")
+	var key, location string
+	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
+		// Only for a Run whose current placement is on the asking host.
+		return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location FROM blobs b
+			JOIN runs rn ON rn.id = b.run_id
+			JOIN placements p ON p.run_id = rn.id AND p.epoch = rn.current_epoch
+			JOIN hosts h ON h.id = p.host_id
+			WHERE b.id = $1 AND h.token_id = $2 AND h.name = $3`, id, tok.ID, r.URL.Query().Get("host")).Scan(&key, &location)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errf(http.StatusNotFound, "not_found", "no blob %s for a run assigned to this host", id)
+	}
+	if err != nil {
+		return err
+	}
+	if location != "s3" {
+		return errf(http.StatusConflict, "not_uploaded", "blob %s is not uploaded yet", id)
+	}
+	url, err := s.blobs.PresignGet(r.Context(), key, presignTTL)
+	if err != nil {
+		return err
+	}
+	http.Redirect(w, r, url, http.StatusFound)
+	return nil
+}
+
+type Artifact struct {
+	ID          string    `json:"id"`
+	Epoch       int       `json:"epoch"`
+	Path        string    `json:"path"`
+	ContentType string    `json:"contentType"`
+	Size        int64     `json:"size"`
+	SHA256      string    `json:"sha256"`
+	Available   bool      `json:"available"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) error {
+	p := principal(r)
+	out := []Artifact{}
+	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		var exists bool
+		if err := tx.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 FROM runs WHERE id = $1)`, r.PathValue("id")).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return errNotFound
+		}
+		rows, err := tx.Query(r.Context(), `SELECT a.id, a.epoch, a.path, a.content_type, a.size, a.sha256, b.location = 's3', a.created_at
+			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.run_id = $1 ORDER BY a.epoch, a.path`, r.PathValue("id"))
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var a Artifact
+			if err := rows.Scan(&a.ID, &a.Epoch, &a.Path, &a.ContentType, &a.Size, &a.SHA256, &a.Available, &a.CreatedAt); err != nil {
+				return err
+			}
+			out = append(out, a)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"artifacts": out})
+	return nil
+}
+
+// downloadArtifact redirects to a presigned URL, or streams through luxd
+// with ?proxy=true (for clients that cannot reach S3).
+func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) error {
+	p := principal(r)
+	var key, location, ctype string
+	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location, a.content_type
+			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.id = $1`, r.PathValue("aid")).Scan(&key, &location, &ctype)
+	})
+	if err != nil {
+		return err
+	}
+	if location != "s3" {
+		w.Header().Set("Retry-After", "2")
+		return errf(http.StatusConflict, "not_uploaded", "artifact is still being uploaded from its host")
+	}
+	if r.URL.Query().Get("proxy") == "true" {
+		body, size, err := s.blobs.Get(r.Context(), key)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+		w.Header().Set("Content-Type", ctype)
+		if size > 0 {
+			w.Header().Set("Content-Length", itoa64(size))
+		}
+		_, err = io.Copy(w, body)
+		return err
+	}
+	url, err := s.blobs.PresignGet(r.Context(), key, presignTTL)
+	if err != nil {
+		return err
+	}
+	http.Redirect(w, r, url, http.StatusFound)
+	return nil
+}
+
+// discardStaleCopies tells hosts that still hold local copies of a Run's
+// older snapshots to delete them: the Run has started elsewhere from an
+// uploaded copy.
+func (s *Server) discardStaleCopies(ctx context.Context, tx pgx.Tx, runID string, epoch int, newHost string) ([]string, error) {
+	rows, err := tx.Query(ctx, `UPDATE snapshots SET host_copy = false
+		WHERE run_id = $1 AND epoch < $2 AND host_copy AND host_id IS NOT NULL AND host_id <> $3
+		RETURNING host_id, epoch`, runID, epoch, newHost)
+	if err != nil {
+		return nil, err
+	}
+	type he struct {
+		host  string
+		epoch int
+	}
+	var list []he
+	for rows.Next() {
+		var x he
+		if err := rows.Scan(&x.host, &x.epoch); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		list = append(list, x)
+	}
+	rows.Close()
+	seen := map[string]bool{}
+	var hosts []string
+	for _, x := range list {
+		if seen[x.host] {
+			continue
+		}
+		seen[x.host] = true
+		hosts = append(hosts, x.host)
+		if err := enqueue(ctx, tx, x.host, runID, 0, proto.MsgSnapshotDiscard, map[string]any{"runId": runID, "beforeEpoch": epoch}); err != nil {
+			return nil, err
+		}
+	}
+	return hosts, nil
+}
+
+func itoa64(n int64) string {
+	b := [20]byte{}
+	i := len(b)
+	if n == 0 {
+		return "0"
+	}
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
+}

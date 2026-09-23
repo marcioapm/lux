@@ -1,0 +1,295 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/ids"
+	"github.com/marcioapm/lux/internal/proto"
+)
+
+// Run states. See docs/lifecycle.md.
+const (
+	StateSubmitted    = "submitted"
+	StateScheduled    = "scheduled"
+	StateProvisioning = "provisioning"
+	StateStarting     = "starting"
+	StateRunning      = "running"
+	StateStopping     = "stopping"
+	StateStopped      = "stopped"
+	StateResuming     = "resuming"
+	StateSucceeded    = "succeeded"
+	StateFailed       = "failed"
+	StateCancelled    = "cancelled"
+	StateLost         = "lost"
+)
+
+func terminal(state string) bool {
+	return state == StateSucceeded || state == StateFailed || state == StateCancelled
+}
+
+// live: a placement exists and is (or is about to be) running.
+func live(state string) bool {
+	switch state {
+	case StateScheduled, StateStarting, StateRunning, StateStopping:
+		return true
+	}
+	return false
+}
+
+func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason string, epoch int) error {
+	_, err := tx.Exec(ctx, `UPDATE runs SET state = $2, state_reason = $3, updated_at = now(),
+			finished_at = CASE WHEN $2 IN ('succeeded', 'failed', 'cancelled') THEN now() ELSE finished_at END,
+			activity = CASE WHEN $2 IN ('running') THEN activity ELSE '' END
+		WHERE id = $1`, runID, state, reason)
+	if err != nil {
+		return err
+	}
+	data := map[string]any{"state": state}
+	if reason != "" {
+		data["reason"] = reason
+	}
+	return addEvent(ctx, tx, tenantID, runID, epoch, "state", data)
+}
+
+// applyStatus moves a Run forward from what its runner reports.
+func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status) error {
+	t := st.Times
+	_, err := tx.Exec(ctx, `UPDATE placements SET
+			image_ready_at       = coalesce(image_ready_at, $3),
+			volumes_restored_at  = coalesce(volumes_restored_at, $4),
+			container_started_at = coalesce(container_started_at, $5),
+			workload_started_at  = coalesce(workload_started_at, $6),
+			exited_at            = coalesce(exited_at, $7)
+		WHERE run_id = $1 AND epoch = $2`, runID, epoch,
+		msToTime(t["imageReady"]), msToTime(t["volumesRestored"]), msToTime(t["containerStarted"]),
+		msToTime(t["workloadStarted"]), msToTime(t["exited"]))
+	if err != nil {
+		return err
+	}
+	if st.Usage != nil {
+		if err := recordUsage(ctx, tx, runID, epoch, st.Usage); err != nil {
+			return err
+		}
+	}
+
+	var runState string
+	var cancel bool
+	if err := tx.QueryRow(ctx, `SELECT state, cancel_requested FROM runs WHERE id = $1`, runID).Scan(&runState, &cancel); err != nil {
+		return err
+	}
+	if terminal(runState) {
+		return nil
+	}
+
+	switch st.State {
+	case "starting":
+		if _, err := tx.Exec(ctx, `UPDATE placements SET state = 'starting' WHERE run_id = $1 AND epoch = $2 AND state = 'assigned'`, runID, epoch); err != nil {
+			return err
+		}
+		if runState == StateScheduled || runState == StateResuming || runState == StateProvisioning {
+			return setRunState(ctx, tx, tenantID, runID, StateStarting, "", epoch)
+		}
+	case "running":
+		if _, err := tx.Exec(ctx, `UPDATE placements SET state = 'running', started_at = coalesce(started_at, now())
+			WHERE run_id = $1 AND epoch = $2 AND state IN ('assigned', 'starting')`, runID, epoch); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()) WHERE id = $1`, runID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE hosts SET first_placement_at = coalesce(first_placement_at, now())
+			WHERE id = (SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2)`, runID, epoch); err != nil {
+			return err
+		}
+		if runState != StateRunning && runState != StateStopping {
+			return setRunState(ctx, tx, tenantID, runID, StateRunning, "", epoch)
+		}
+	case "stopping":
+		if _, err := tx.Exec(ctx, `UPDATE placements SET state = 'stopping' WHERE run_id = $1 AND epoch = $2 AND state IN ('starting', 'running')`, runID, epoch); err != nil {
+			return err
+		}
+	case "exited", "failed":
+		return s.placementExited(ctx, tx, tenantID, runID, epoch, st, runState, cancel)
+	}
+	return nil
+}
+
+// placementExited records a placement's end and decides what the Run
+// becomes. The snapshot arrives separately (snapshot.done); a stopped Run is
+// resumable once it has.
+func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status, runState string, cancel bool) error {
+	var stopReason, hostID string
+	err := tx.QueryRow(ctx, `UPDATE placements SET state = 'exited', ended_at = now(),
+			exited_at = coalesce(exited_at, now()), exit_code = $3, exit_reason = $4, output_seq = nullif($5, 0),
+			lease_expires_at = NULL
+		WHERE run_id = $1 AND epoch = $2 AND state <> 'exited'
+		RETURNING stop_reason, host_id`, runID, epoch, st.ExitCode, st.Reason, st.OutputSeq).Scan(&stopReason, &hostID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // already recorded: a redelivered report
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE hosts SET last_placement_ended_at = now() WHERE id = $1`, hostID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE runs SET exit_code = $2 WHERE id = $1`, runID, st.ExitCode); err != nil {
+		return err
+	}
+	addEvent(ctx, tx, tenantID, runID, epoch, "exited", map[string]any{"exitCode": st.ExitCode, "reason": st.Reason, "message": st.Message})
+
+	var next, reason string
+	switch {
+	case cancel || stopReason == "cancel":
+		next, reason = StateCancelled, "cancelled"
+	case stopReason == "timeout":
+		next, reason = StateFailed, "timeout"
+	case stopReason == "stop" || stopReason == "drain" || stopReason == "preempt":
+		// A requested stop: resumable. (A drained or preempted Run is put
+		// back in the queue by resumeAfterStop.)
+		next, reason = StateStopped, stopReason
+	case st.State == "failed":
+		next, reason = StateFailed, st.Message
+	case st.ExitCode != nil && *st.ExitCode == 0:
+		next, reason = StateSucceeded, ""
+	default:
+		code := -1
+		if st.ExitCode != nil {
+			code = *st.ExitCode
+		}
+		next, reason = StateFailed, fmt.Sprintf("exit code %d", code)
+	}
+	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
+		return err
+	}
+	if stopReason == "drain" || stopReason == "preempt" {
+		// Moved, not stopped by a person: resume elsewhere automatically.
+		return s.requestResume(ctx, tx, tenantID, runID, nil, "auto-resume after "+stopReason)
+	}
+	if terminal(next) {
+		s.secrets.drop(runID)
+	}
+	return nil
+}
+
+// placementLost gives up on a placement: its host stopped answering (or came
+// back without it). Its Run is lost and resumable only from the last
+// snapshot taken before it.
+func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epoch int, why string) error {
+	var tenantID, runState string
+	var current int
+	if err := tx.QueryRow(ctx, `SELECT tenant_id, state, current_epoch FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&tenantID, &runState, &current); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE placements SET state = 'lost', ended_at = now(), exit_reason = $3, lease_expires_at = NULL
+		WHERE run_id = $1 AND epoch = $2 AND state IN ('assigned', 'starting', 'running', 'stopping')`, runID, epoch, why)
+	if err != nil || tag.RowsAffected() == 0 {
+		return err
+	}
+	if epoch != current || terminal(runState) {
+		return nil
+	}
+	var cancel bool
+	_ = tx.QueryRow(ctx, `SELECT cancel_requested FROM runs WHERE id = $1`, runID).Scan(&cancel)
+	if cancel {
+		return setRunState(ctx, tx, tenantID, runID, StateCancelled, "cancelled; host lost", epoch)
+	}
+	return setRunState(ctx, tx, tenantID, runID, StateLost, why, epoch)
+}
+
+// applySnapshotDone records a placement's final state.
+func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch, current int, sd proto.SnapshotDone) error {
+	var placementID string
+	if err := tx.QueryRow(ctx, `UPDATE placements SET snapshot_done_at = coalesce(snapshot_done_at, now())
+		WHERE run_id = $1 AND epoch = $2 RETURNING id`, runID, epoch).Scan(&placementID); err != nil {
+		return err
+	}
+	if sd.Error != "" {
+		return addEvent(ctx, tx, tenantID, runID, epoch, "snapshot.failed", map[string]any{"error": sd.Error})
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM snapshots WHERE id = $1)`, sd.Manifest.SnapshotID).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil // redelivered
+	}
+	var total int64
+	for _, v := range sd.Manifest.Volumes {
+		total += v.Size
+		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, v.BlobID, "volume", v.Name, v.Size, v.SHA256); err != nil {
+			return err
+		}
+	}
+	if sd.Output != nil {
+		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, sd.Output.BlobID, "output", "output", sd.Output.Size, sd.Output.SHA256); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE placements SET output_blob_id = $3, output_seq = greatest(output_seq, nullif($4, 0))
+			WHERE run_id = $1 AND epoch = $2`, runID, epoch, sd.Output.BlobID, sd.OutputSeq); err != nil {
+			return err
+		}
+	}
+	for _, a := range sd.Artifacts {
+		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, a.BlobID, "artifact", a.Path, a.Size, a.SHA256); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO artifacts (id, tenant_id, run_id, epoch, path, blob_id, content_type, size, sha256)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING`,
+			ids.New(ids.Artifact), tenantID, runID, epoch, a.Path, a.BlobID, a.ContentType, a.Size, a.SHA256); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE placements SET snapshot_bytes = $3 WHERE run_id = $1 AND epoch = $2`, runID, epoch, total); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, host_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`, sd.Manifest.SnapshotID, tenantID, runID, placementID, epoch, sd.Manifest, hostID); err != nil {
+		return err
+	}
+	// Only the current placement's snapshot becomes the Run's: an old host
+	// reporting late must not roll the Run back.
+	if epoch == current {
+		if _, err := tx.Exec(ctx, `UPDATE runs SET snapshot_id = $2,
+				session_id = CASE WHEN $3 <> '' THEN $3 ELSE session_id END
+			WHERE id = $1`, runID, sd.Manifest.SnapshotID, sd.Manifest.SessionID); err != nil {
+			return err
+		}
+	}
+	return addEvent(ctx, tx, tenantID, runID, epoch, "snapshot", map[string]any{"snapshotId": sd.Manifest.SnapshotID, "bytes": total, "volumes": len(sd.Manifest.Volumes)})
+}
+
+func insertBlob(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, hostID, blobID, kind, name string, size int64, sha string) error {
+	_, err := tx.Exec(ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, sha256, location, host_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'host', $9) ON CONFLICT (id) DO NOTHING`,
+		blobID, tenantID, runID, epoch, kind, name, size, sha, hostID)
+	return err
+}
+
+func (s *Server) applyAdapterEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, ev proto.AdapterEvent) error {
+	if ev.SessionID != "" {
+		if _, err := tx.Exec(ctx, `UPDATE runs SET session_id = $2 WHERE id = $1`, runID, ev.SessionID); err != nil {
+			return err
+		}
+		addEvent(ctx, tx, tenantID, runID, epoch, "session", map[string]any{"sessionId": ev.SessionID})
+	}
+	if ev.Activity != "" {
+		if _, err := tx.Exec(ctx, `UPDATE runs SET activity = $2 WHERE id = $1 AND state = 'running'`, runID, ev.Activity); err != nil {
+			return err
+		}
+		addEvent(ctx, tx, tenantID, runID, epoch, "activity", map[string]any{"activity": ev.Activity})
+	}
+	if ev.InputAck != "" {
+		d := map[string]any{"requestId": ev.InputAck}
+		typ := "input.delivered"
+		if ev.InputError != "" {
+			typ, d["error"] = "input.failed", ev.InputError
+		}
+		addEvent(ctx, tx, tenantID, runID, epoch, typ, d)
+	}
+	return nil
+}
