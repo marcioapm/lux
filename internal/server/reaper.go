@@ -96,8 +96,36 @@ func (s *Server) reapHosts(ctx context.Context) error {
 			if _, err := tx.Exec(ctx, `UPDATE snapshots SET host_copy = false WHERE host_id = $1`, id); err != nil {
 				return err
 			}
-			// Its live placements go when their leases expire (reapLeases),
-			// which is at most the same interval.
+			// Its live placements are lost with it, whatever their leases say:
+			// a fresh assignment's lease is generous (image pulls are slow),
+			// but a host that stopped heartbeating is not pulling anything.
+			prow, err := tx.Query(ctx, `SELECT run_id, epoch FROM placements
+				WHERE host_id = $1 AND state IN ('assigned', 'starting', 'running', 'stopping')`, id)
+			if err != nil {
+				return err
+			}
+			type pe struct {
+				run   string
+				epoch int
+			}
+			var live []pe
+			for prow.Next() {
+				var x pe
+				if err := prow.Scan(&x.run, &x.epoch); err != nil {
+					prow.Close()
+					return err
+				}
+				live = append(live, x)
+			}
+			prow.Close()
+			for _, x := range live {
+				if err := s.placementLost(ctx, tx, x.run, x.epoch, "host lost: missed heartbeats"); err != nil {
+					return err
+				}
+			}
+		}
+		if len(lost) > 0 {
+			s.Kick()
 		}
 		return nil
 	})

@@ -107,6 +107,8 @@ class Host:
                 "-e", f"LUX_URL={env.luxd_url}",
                 "-e", f"LUX_HOST_TOKEN={token}",
                 self.container,
+                # The host image has no pkill: record the pid to stop it by.
+                "sh", "-c", 'echo $$ > /run/lux-runner.pid; exec "$@"', "lux-runner",
                 "/opt/lux/lux-runner",
                 "--name", self.name,
                 "--data-dir", "/var/lib/lux",
@@ -117,13 +119,23 @@ class Host:
             stderr=subprocess.STDOUT,
         )
 
+    def runner_pid(self) -> str:
+        pid = self.exec("cat", "/run/lux-runner.pid", check=False).strip()
+        if pid and self.exec("sh", "-c", f"kill -0 {pid} 2>/dev/null && echo alive", check=False).strip() == "alive":
+            return pid
+        return ""
+
     def stop_runner(self, signal: str = "TERM") -> None:
-        self.exec("pkill", f"-{signal}", "-x", "lux-runner", check=False)
+        pid = self.runner_pid()
+        if not pid:
+            return
+        self.exec("kill", f"-{signal}", pid, check=False)
         deadline = time.time() + 15
         while time.time() < deadline:
-            if self.exec("pgrep", "-x", "lux-runner", check=False).strip() == "":
+            if not self.runner_pid():
                 return
             time.sleep(0.2)
+        raise RuntimeError(f"lux-runner on {self.name} did not stop")
 
     def kill(self) -> None:
         """Simulate losing the machine: it stops, with everything on it."""

@@ -337,7 +337,7 @@ func (s *Server) servePoll(w http.ResponseWriter, r *http.Request) error {
 }
 
 func addEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, typ string, data any) error {
-	if data == nil {
+	if data == nil || isNilMap(data) {
 		data = map[string]any{}
 	}
 	var ep *int
@@ -347,6 +347,11 @@ func addEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int,
 	_, err := tx.Exec(ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES ($1, $2, $3, $4, $5)`,
 		tenantID, runID, ep, typ, data)
 	return err
+}
+
+func isNilMap(v any) bool {
+	m, ok := v.(map[string]any)
+	return ok && m == nil
 }
 
 func msToTime(ms int64) *time.Time {

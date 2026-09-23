@@ -37,6 +37,9 @@ type ACP struct {
 	started bool
 	ready   chan struct{}
 	stopped bool
+	// loading: session/load replays the conversation as updates; they are
+	// events, not new output.
+	loading bool
 }
 
 func NewACP() *ACP {
@@ -149,7 +152,14 @@ func (a *ACP) handshake(cfg proto.ShimConfig, sink Sink) error {
 		cwd = home()
 	}
 	if cfg.Resume && cfg.SessionID != "" && init.AgentCapabilities.LoadSession {
-		if _, err := a.call("session/load", map[string]any{"sessionId": cfg.SessionID, "cwd": cwd, "mcpServers": []any{}}); err == nil {
+		a.mu.Lock()
+		a.loading = true
+		a.mu.Unlock()
+		_, err := a.call("session/load", map[string]any{"sessionId": cfg.SessionID, "cwd": cwd, "mcpServers": []any{}})
+		a.mu.Lock()
+		a.loading = false
+		a.mu.Unlock()
+		if err == nil {
 			a.setSession(cfg.SessionID)
 			return nil
 		} else {
@@ -284,7 +294,10 @@ func (a *ACP) handleNotification(m rpcMsg, sink Sink) {
 	_ = json.Unmarshal(p.Update, &u)
 	// The agent's reply text is also written to stdout, so `lux logs`
 	// reads like a conversation without an event viewer.
-	if u.Kind == "agent_message_chunk" && u.Content.Type == "text" {
+	a.mu.Lock()
+	loading := a.loading
+	a.mu.Unlock()
+	if u.Kind == "agent_message_chunk" && u.Content.Type == "text" && !loading {
 		sink.Stdout([]byte(u.Content.Text))
 	}
 	sink.Event("acp."+u.Kind, json.RawMessage(p.Update))

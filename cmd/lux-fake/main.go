@@ -179,7 +179,7 @@ func (a *agent) handle(m msg) {
 			if e.Role == "user" {
 				kind = "user_message_chunk"
 			}
-			a.update(kind, e.Text)
+			a.update(kind, e.Text+"\n")
 		}
 		a.record("system", "session loaded")
 		a.reply(m.ID, map[string]any{})
@@ -245,8 +245,8 @@ func (a *agent) runScript(script string, cancel chan struct{}) string {
 			flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 			if cmd == "append" {
 				flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
-				text += "\n"
 			}
+			text += "\n"
 			_ = os.MkdirAll(filepath.Dir(a.path(file)), 0o755)
 			f, err := os.OpenFile(a.path(file), flag, 0o644)
 			if err != nil {
