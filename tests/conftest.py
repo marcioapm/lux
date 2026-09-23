@@ -202,15 +202,19 @@ def generic(image: str, *cmd: str, **extra) -> dict:
     return spec
 
 
-def fake_agent(image: str, prompt: str = "", **extra) -> dict:
-    """A spec running lux-fake over ACP, with its transcript on a state volume."""
+AGENT_VOLUMES = [
+    {"name": "workspace", "path": "/workspace", "kind": "state"},
+    {"name": "home", "path": "/home/agent", "kind": "state"},
+]
+
+
+def fake_agent(image: str, prompt: str = "", adapter: str = "acp", **extra) -> dict:
+    """A spec running lux-fake behind an adapter (acp, claude-code, codex:
+    lux-fake speaks each protocol), with its transcript on a state volume."""
     spec = {
         "image": {"ref": image},
-        "workload": {"adapter": "acp", "command": ["lux-fake"], "prompt": prompt, "workdir": "/workspace"},
-        "volumes": [
-            {"name": "workspace", "path": "/workspace", "kind": "state"},
-            {"name": "home", "path": "/home/agent", "kind": "state"},
-        ],
+        "workload": {"adapter": adapter, "command": ["lux-fake"], "prompt": prompt, "workdir": "/workspace"},
+        "volumes": [dict(v) for v in AGENT_VOLUMES],
     }
     for k, v in extra.items():
         if isinstance(v, dict) and isinstance(spec.get(k), dict):

@@ -54,69 +54,77 @@ def build_binaries() -> dict[str, Path | None]:
     return built
 
 
-def build_fake_image(fake_binary: Path | None) -> str | None:
-    """Build the fake agent's image from a context holding only the binary.
+def _build_image(tag: str, files: dict[str, Path], containerfile: Path, args: dict[str, str] | None = None) -> None:
+    """docker build from a context holding only the given files (not the
+    repository: a context that large makes every build slow)."""
+    with tempfile.TemporaryDirectory() as ctx:
+        for name, src in files.items():
+            dst = Path(ctx) / name
+            try:
+                os.link(src, dst)  # hard link: agent binaries are ~200MB
+            except OSError:
+                shutil.copy(src, dst)
+        shutil.copy(containerfile, Path(ctx) / "Containerfile")
+        cmd = ["docker", "build", "-q", "-t", tag, "-f", "Containerfile"]
+        for k, v in (args or {}).items():
+            cmd += ["--build-arg", f"{k}={v}"]
+        if subprocess.run([*cmd, "."], cwd=ctx, stdout=subprocess.DEVNULL).returncode != 0:
+            print(f"{tag} build failed", file=sys.stderr)
+            sys.exit(1)
+    print(f"  {tag} built")
 
-    Not the repository: a context that large makes every build slow, and the
-    image needs nothing else.
-    """
+
+def build_fake_image(fake_binary: Path | None) -> str | None:
     if fake_binary is None:
         return None
-    with tempfile.TemporaryDirectory() as ctx:
-        shutil.copy(fake_binary, Path(ctx) / "lux-fake")
-        shutil.copy(TESTS_DIR / "images" / "fake" / "Containerfile", Path(ctx) / "Containerfile")
-        result = subprocess.run(
-            ["docker", "build", "-q", "-t", FAKE_IMAGE, "-f", "Containerfile", "."],
-            cwd=ctx,
-            stdout=subprocess.DEVNULL,
-        )
-    if result.returncode != 0:
-        print("fake image build failed", file=sys.stderr)
-        sys.exit(1)
-    print(f"  {FAKE_IMAGE} built")
+    _build_image(FAKE_IMAGE, {"lux-fake": fake_binary}, TESTS_DIR / "images" / "fake" / "Containerfile")
     return FAKE_IMAGE
 
 
-AGENT_IMAGES = {
-    # name: (key env var, how to find the executable to copy in)
-    "claude": ("LUX_TEST_ANTHROPIC_API_KEY", lambda: shutil.which("claude")),
-    "codex": ("LUX_TEST_OPENAI_API_KEY", lambda: _codex_native()),
-    "opencode": ("LUX_TEST_OPENCODE_AUTH", lambda: shutil.which("opencode")),
+# The opt-in real-agent suites: the credentials each needs, and where its
+# self-contained executable is.
+AGENTS = {
+    "claude": (["LUX_TEST_ANTHROPIC_API_KEY"], lambda: shutil.which("claude")),
+    "codex": (["LUX_TEST_OPENAI_API_KEY"], lambda: _codex_native()),
+    "opencode": (["LUX_TEST_OPENCODE_AUTH", "LUX_TEST_OPENCODE_CONFIG", "LUX_TEST_OPENCODE_MODEL"],
+                 lambda: shutil.which("opencode")),
 }
 
 
 def _codex_native() -> str | None:
     """The codex npm package's launcher is a Node script; the native binary
-    it runs is what goes in the image."""
+    it runs, for this machine's architecture, is what goes in the image."""
     launcher = shutil.which("codex")
     if not launcher:
         return None
+    arch = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(os.uname().machine, os.uname().machine)
     pkg = Path(os.path.realpath(launcher)).parent.parent
-    found = sorted(pkg.glob("node_modules/@openai/codex-linux-*/vendor/*/bin/codex"))
+    found = sorted(pkg.glob(f"node_modules/@openai/codex-linux-{arch}/vendor/*/bin/codex"))
     return str(found[0]) if found else None
 
 
-def build_agent_images() -> dict[str, str | None]:
-    """Images for the opt-in real-agent suites: only for agents whose
-    credentials are set and which are installed here."""
-    return {name: _build_agent_image(name, env, find) for name, (env, find) in AGENT_IMAGES.items()}
+def _is_elf(path: str) -> bool:
+    with open(path, "rb") as f:
+        return f.read(4) == b"\x7fELF"
 
 
-def _build_agent_image(name: str, key_env: str, find) -> str | None:
-    if not os.environ.get(key_env):
-        return None
-    exe = find()
-    if not exe:
-        print(f"  {name} not installed; its real-agent suite will skip")
-        return None
-    tag = f"localhost/lux-{name}:test"
-    with tempfile.TemporaryDirectory() as ctx:
-        shutil.copy(os.path.realpath(exe), Path(ctx) / name)
-        shutil.copy(TESTS_DIR / "images" / name / "Containerfile", Path(ctx) / "Containerfile")
-        result = subprocess.run(["docker", "build", "-q", "-t", tag, "-f", "Containerfile", "."],
-                                cwd=ctx, stdout=subprocess.DEVNULL)
-    if result.returncode != 0:
-        print(f"{name} image build failed", file=sys.stderr)
-        sys.exit(1)
-    print(f"  {tag} built")
-    return tag
+def build_agent_images(selected: bool) -> dict[str, str | None]:
+    """Images for the real-agent suites: only when those suites are
+    selected, and only for agents whose credentials are all set and whose
+    CLI is installed here as a native binary (a Node launcher script cannot
+    run in the image)."""
+    images: dict[str, str | None] = {name: None for name in AGENTS}
+    if not selected:
+        return images
+    for name, (env_vars, find) in AGENTS.items():
+        if not all(os.environ.get(v) for v in env_vars):
+            continue
+        exe = find()
+        if not exe or not _is_elf(os.path.realpath(exe)):
+            print(f"  {name}: no native {name} binary installed; its real-agent suite will skip")
+            continue
+        tag = f"localhost/lux-{name}:test"
+        _build_image(tag, {name: Path(os.path.realpath(exe))}, TESTS_DIR / "images" / "agent" / "Containerfile",
+                     {"BIN": name})
+        images[name] = tag
+    return images

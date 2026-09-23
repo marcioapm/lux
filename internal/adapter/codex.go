@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"slices"
 	"sync"
 	"syscall"
@@ -28,6 +29,18 @@ type Codex struct {
 }
 
 func NewCodex() *Codex { return &Codex{} }
+
+// CredentialFiles: Codex reads its key from ~/.codex/auth.json (what
+// `codex login --with-api-key` writes), not from OPENAI_API_KEY in the
+// environment. An OPENAI_API_KEY secret becomes that file.
+func (c *Codex) CredentialFiles(secrets map[string]string, home string) map[string][]byte {
+	key, ok := secrets["OPENAI_API_KEY"]
+	if !ok {
+		return nil
+	}
+	b, _ := json.Marshal(map[string]string{"auth_mode": "apikey", "OPENAI_API_KEY": key})
+	return map[string][]byte{filepath.Join(home, ".codex", "auth.json"): b}
+}
 
 // Command runs the spec's command (default "codex") with app-server.
 func (c *Codex) Command(cfg proto.ShimConfig) ([]string, error) {
@@ -185,7 +198,8 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		if p.Item.Type == "agentMessage" && p.Item.Text != "" {
-			sink.Stdout([]byte(p.Item.Text + "\n"))
+			sink.Stdout([]byte(p.Item.Text))
+			sink.EndMessage()
 		}
 	}
 	sink.Event("codex."+m.Method, json.RawMessage(m.Params))

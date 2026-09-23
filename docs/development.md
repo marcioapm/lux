@@ -101,12 +101,11 @@ each runs only when its credentials are set:
 LUX_TEST_ANTHROPIC_API_KEY=sk-… uv run python run_tests.py suites/test_agents_real.py
 ```
 
-The harness copies each CLI installed on the developer machine into a
-test image (`tests/images/<agent>`). For Codex it copies the native binary,
-not the Node launcher. Credentials go in as secrets: Codex's key as the
-`~/.codex/auth.json` it expects (Codex ignores `OPENAI_API_KEY` in the
-environment), and OpenCode's `auth.json` and `opencode.json` as file
-secrets. Without credentials, a suite skips.
+The harness copies each CLI installed on the developer machine (the native
+binary, never a Node launcher) into a test image built from
+`tests/images/agent`, only when the suite is selected. Credentials go in as
+secrets: API keys as env secrets, OpenCode's `auth.json` and `opencode.json`
+as file secrets. Without credentials, a suite skips.
 
 ### Guards are mutation-checked
 

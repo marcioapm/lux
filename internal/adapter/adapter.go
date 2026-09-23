@@ -29,6 +29,9 @@ import (
 // which redacts, sequences and writes records.
 type Sink interface {
 	Stdout(p []byte)
+	// EndMessage ends a message the agent wrote to stdout (in one piece or
+	// streamed in several) on its own line.
+	EndMessage()
 	Stderr(p []byte)
 	// Event writes a structured event record (ch=event).
 	Event(typ string, data any)
@@ -68,6 +71,15 @@ type Adapter interface {
 	// Stop asks the workload to wind down gracefully. The shim SIGKILLs
 	// after the grace period.
 	Stop() error
+}
+
+// CredentialFiles is implemented by adapters whose agent reads its key
+// from a file rather than the environment. Given the Run's secret values
+// and the workload user's home, it returns the files to write (path →
+// contents). The shim writes them like file secrets: on the secrets tmpfs,
+// linked into place, never snapshotted.
+type CredentialFiles interface {
+	CredentialFiles(secrets map[string]string, home string) map[string][]byte
 }
 
 func New(name string) (Adapter, error) {

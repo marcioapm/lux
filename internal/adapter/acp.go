@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -33,8 +32,6 @@ type ACP struct {
 	// loading: session/load replays the conversation as updates; they are
 	// events, not new output.
 	loading bool
-	// midLine: agent text written to stdout without a trailing newline yet.
-	midLine bool
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -160,15 +157,9 @@ func (a *ACP) drain() {
 		if err != nil {
 			data["error"] = err.Error()
 		}
-		// Chunks are streamed without line breaks: end the turn's text on a
-		// line of its own, so `lux logs` reads one reply per line.
-		a.mu.Lock()
-		mid := a.midLine
-		a.midLine = false
-		a.mu.Unlock()
-		if mid {
-			a.sink.Stdout([]byte("\n"))
-		}
+		// Replies stream in chunks without line breaks: end the turn's text
+		// on a line of its own.
+		a.sink.EndMessage()
 		a.sink.Event("acp.turn_end", data)
 		a.mu.Lock()
 		a.busy = false
@@ -205,9 +196,6 @@ func (a *ACP) handleNotification(m rpcMsg) {
 	a.mu.Unlock()
 	if u.Kind == "agent_message_chunk" && u.Content.Type == "text" && !loading && u.Content.Text != "" {
 		a.sink.Stdout([]byte(u.Content.Text))
-		a.mu.Lock()
-		a.midLine = !strings.HasSuffix(u.Content.Text, "\n")
-		a.mu.Unlock()
 	}
 	a.sink.Event("acp."+u.Kind, json.RawMessage(p.Update))
 }

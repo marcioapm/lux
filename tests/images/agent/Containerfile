@@ -1,9 +1,11 @@
-# Codex for the opt-in real-agent suite. The native (musl, static) binary is
-# copied from the developer's install, so no test waits on npm.
+# A coding agent's CLI for the opt-in real-agent suites. The executable is
+# copied from the developer's install (a self-contained binary), so no test
+# waits on a package registry.
 FROM docker.io/library/debian:trixie-20260918-slim
+ARG BIN
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -m -u 1000 agent
-COPY codex /usr/local/bin/codex
+COPY ${BIN} /usr/local/bin/${BIN}
 USER agent
 WORKDIR /home/agent

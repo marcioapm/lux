@@ -95,7 +95,8 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 		case "assistant":
 			for _, b := range m.Message.Content {
 				if b.Type == "text" && b.Text != "" {
-					sink.Stdout([]byte(b.Text + "\n"))
+					sink.Stdout([]byte(b.Text))
+					sink.EndMessage()
 				}
 			}
 		case "result":

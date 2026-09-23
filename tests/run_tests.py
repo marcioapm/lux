@@ -39,7 +39,8 @@ def main() -> None:
     print("building:")
     built = build_binaries()
     fake_image = build_fake_image(built.get("lux-fake"))
-    agent_images = build_agent_images()
+    # Agent images are big: build (and ship to hosts) only when their suite runs.
+    agent_images = build_agent_images(any("agents" in a for a in pytest_args))
 
     env = TestEnvironment(n_hosts=args.hosts)
     env.binaries = {k: str(v) if v else None for k, v in built.items()}

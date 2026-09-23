@@ -92,3 +92,24 @@ func TestOutputFlushesAndContinues(t *testing.T) {
 		t.Fatalf("seq did not continue: %+v", recs)
 	}
 }
+
+// EndLine ends a message streamed in pieces on its own line, and adds
+// nothing after text that already ended one.
+func TestOutputEndLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	o, _ := OpenOutput(path, NewRedactor(nil))
+	o.Write("stdout", []byte("hel"))
+	o.Write("stdout", []byte("lo"))
+	o.EndLine("stdout")
+	o.Write("stdout", []byte("done\n"))
+	o.EndLine("stdout")
+	o.EndLine("stderr") // nothing written there: nothing to end
+	o.Close()
+	var text string
+	for _, r := range readRecords(t, path) {
+		text += r.Data
+	}
+	if text != "hello\ndone\n" {
+		t.Fatalf("got %q", text)
+	}
+}

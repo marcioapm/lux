@@ -32,9 +32,10 @@ on another host with its conversation intact.
 Agents authenticate however they normally do, through secrets:
 
 - **Claude Code:** `ANTHROPIC_API_KEY` as an env secret.
-- **Codex:** Codex reads its key from `~/.codex/auth.json`, not the
-  environment. Pass `{"auth_mode":"apikey","OPENAI_API_KEY":"…"}` as a file
-  secret at that path.
+- **Codex:** `OPENAI_API_KEY` as an env secret. Codex itself reads its key
+  from `~/.codex/auth.json`, not the environment, so the codex adapter
+  writes that file from the secret (on the secrets tmpfs, like any file
+  secret).
 - **OpenCode:** its `auth.json` (keys) and `opencode.json` (providers and
   model) as file secrets under `~/.local/share/opencode/` and
   `~/.config/opencode/`.

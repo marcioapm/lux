@@ -6,9 +6,10 @@ make model calls, so each runs only when its credentials are set:
   OpenCode     LUX_TEST_OPENCODE_AUTH     (its auth.json), LUX_TEST_OPENCODE_CONFIG (its opencode.json),
                LUX_TEST_OPENCODE_MODEL    (provider/model)
 
-Every test is the same story: do something, be steered, stop, resume on
-another host, and remember. Credentials go in as secrets, never as
-mounted config."""
+Select the suite (`suites/test_agents_real.py`, or `-m agents`) so the
+harness builds the agents' images. Every test tells the same story: do
+something, be steered, stop, resume on another host, and remember.
+Credentials go in as secrets, never as mounted config."""
 
 from __future__ import annotations
 
@@ -17,51 +18,44 @@ import os
 
 import pytest
 
+from conftest import AGENT_VOLUMES
 from env import wait_until
 
 pytestmark = pytest.mark.agents
 
-KEY = os.environ.get("LUX_TEST_ANTHROPIC_API_KEY", "")
-BASE_URL = os.environ.get("LUX_TEST_ANTHROPIC_BASE_URL", "")
+WRITE = ("Create the file /workspace/word.txt containing exactly the word PINEAPPLE, "
+         "then reply with just: done")
+ASK = "Without using any tools: what word did you write to word.txt earlier? Reply with just the word."
 
 
-def agent_image(env, name: str, why: str) -> str:
+def agent_image(env, name: str) -> str:
     img = env.extra.get("images", {}).get(name)
     if not img:
-        pytest.skip(why)
+        pytest.skip(f"no {name} image: set its credentials (see this module's docstring) and select this suite")
     return img
 
 
-@pytest.fixture
-def claude_image(env):
-    return agent_image(env, "claude", "set LUX_TEST_ANTHROPIC_API_KEY (and have claude installed)")
+def agent_spec(image: str, adapter: str, command: list[str], secrets: list[dict], env: dict | None = None) -> dict:
+    spec = {
+        "image": {"ref": image},
+        "workload": {"adapter": adapter, "prompt": WRITE, "workdir": "/workspace", "command": command},
+        "volumes": [dict(v) for v in AGENT_VOLUMES],
+        "secrets": secrets,
+        "network": {"unrestricted": True},
+    }
+    if env:
+        spec["env"] = env
+    return spec
 
 
-@pytest.fixture
-def codex_image(env):
-    return agent_image(env, "codex", "set LUX_TEST_OPENAI_API_KEY (and have codex installed)")
-
-
-@pytest.fixture
-def opencode_image(env):
-    return agent_image(env, "opencode", "set LUX_TEST_OPENCODE_AUTH/CONFIG/MODEL (and have opencode installed)")
-
-
-def agent_home_volumes() -> list[dict]:
-    return [
-        {"name": "workspace", "path": "/workspace", "kind": "state"},
-        {"name": "home", "path": "/home/agent", "kind": "state"},
-    ]
-
-
-def remember_across_hosts(lux, runners, hosts, spec: dict, resume_secrets: list[str], ask: str):
+def remember_across_hosts(lux, runners, hosts, spec: dict, key_values: list[str]):
     """The shared story: write a word, get steered, stop, resume on the
-    other host, and answer from the restored conversation."""
+    other host, and answer from the restored conversation. The key values
+    must never appear in the output."""
     a, b = hosts[0], hosts[1]
     runners.start(a)
     run_id = lux.submit(spec)
-    run = lux.wait_activity(run_id, "idle", timeout=240)
-    assert run["sessionId"], run
+    assert lux.wait_activity(run_id, "idle", timeout=240)["sessionId"]
     lux.run("steer", run_id, "Reply with just the word: steered")
     wait_until(lambda: "steered" in lux.logs(run_id).lower(), 240, 2, "steer never answered")
     lux.wait_activity(run_id, "idle", timeout=240)
@@ -70,119 +64,66 @@ def remember_across_hosts(lux, runners, hosts, spec: dict, resume_secrets: list[
     lux.wait_uploaded(run_id)
     runners.stop(a)
     runners.start(b)
-    before = lux.logs(run_id)
-    args = ["resume", run_id, "--wait", "--input", ask]
-    for s in resume_secrets:
-        args += ["--secret", s]
-    lux.run(*args)
-    wait_until(lambda: "PINEAPPLE" in lux.logs(run_id)[len(before):].upper(), 300, 2,
+    since = lux.records(run_id)[-1]["cursor"]
+    resume = ["resume", run_id, "--wait", "--input", ASK]
+    for sec in spec["secrets"]:
+        resume += ["--secret", f"{sec['name']}={sec['value']}"]
+    lux.run(*resume)
+    wait_until(lambda: "PINEAPPLE" in lux.logs(run_id, "--since", since).upper(), 300, 2,
                "resumed session did not remember")
     out = lux.logs(run_id)
     print("\n--- transcript ---\n" + out)
     run = lux.get(run_id)
     assert [p["hostName"] for p in run["placements"]] == [a.name, b.name]
-    assert run["sessionId"]
+    for v in key_values:
+        assert v not in out, "a credential leaked into output"
     lux.run("cancel", run_id)
-    return out
 
 
-WRITE = ("Create the file /workspace/word.txt containing exactly the word PINEAPPLE, "
-         "then reply with just: done")
-ASK = "Without using any tools: what word did you write to word.txt earlier? Reply with just the word."
+# ---- Claude Code --------------------------------------------------------------
 
 
-def claude_spec(image: str, prompt: str) -> dict:
-    spec = {
-        "image": {"ref": image},
-        "workload": {"adapter": "claude-code", "prompt": prompt, "workdir": "/workspace",
-                     "command": ["claude", "--model", "haiku", "--permission-mode", "bypassPermissions"]},
-        "volumes": agent_home_volumes(),
-        "secrets": [{"name": "ANTHROPIC_API_KEY", "value": KEY}],
-        "network": {"unrestricted": True},
-    }
-    if BASE_URL:
-        spec["env"] = {"ANTHROPIC_BASE_URL": BASE_URL}
-    return spec
+def test_claude_code_runs_steers_and_resumes_elsewhere(env, lux, runners, hosts):
+    image = agent_image(env, "claude")
+    key = os.environ["LUX_TEST_ANTHROPIC_API_KEY"]
+    base = os.environ.get("LUX_TEST_ANTHROPIC_BASE_URL")
+    spec = agent_spec(image, "claude-code",
+                      ["claude", "--model", "haiku", "--permission-mode", "bypassPermissions"],
+                      [{"name": "ANTHROPIC_API_KEY", "value": key}],
+                      {"ANTHROPIC_BASE_URL": base} if base else None)
+    remember_across_hosts(lux, runners, hosts, spec, [key])
 
 
-def test_claude_code_runs_steers_and_resumes_elsewhere(lux, runners, hosts, claude_image):
-    out = remember_across_hosts(lux, runners, hosts, claude_spec(claude_image, WRITE),
-                                [f"ANTHROPIC_API_KEY={KEY}"], ASK)
-    assert KEY not in out, "the API key leaked into output"
+# ---- Codex --------------------------------------------------------------------
 
 
-# ---- Codex ------------------------------------------------------------------
-
-OPENAI_KEY = os.environ.get("LUX_TEST_OPENAI_API_KEY", "")
-OPENAI_BASE_URL = os.environ.get("LUX_TEST_OPENAI_BASE_URL", "")
-CODEX_MODEL = os.environ.get("LUX_TEST_CODEX_MODEL", "")
-
-
-def codex_auth() -> str:
-    """Codex reads its key from ~/.codex/auth.json (what `codex login
-    --with-api-key` writes), not from the environment."""
-    return json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": OPENAI_KEY})
-
-
-def codex_spec(image: str, prompt: str) -> dict:
+def test_codex_runs_steers_and_resumes_elsewhere(env, lux, runners, hosts):
+    image = agent_image(env, "codex")
+    key = os.environ["LUX_TEST_OPENAI_API_KEY"]
     cmd = ["codex", "-c", "approval_policy=never", "-c", "sandbox_mode=danger-full-access"]
-    if OPENAI_BASE_URL:
-        cmd += ["-c", f'openai_base_url="{OPENAI_BASE_URL}"']
-    if CODEX_MODEL:
-        cmd += ["-c", f"model={CODEX_MODEL}"]
-    return {
-        "image": {"ref": image},
-        "workload": {"adapter": "codex", "prompt": prompt, "workdir": "/workspace", "command": cmd},
-        "volumes": agent_home_volumes(),
-        "secrets": [{"name": "codex_auth", "value": codex_auth(), "as": "file",
-                     "path": "/home/agent/.codex/auth.json"}],
-        "network": {"unrestricted": True},
-    }
+    if base := os.environ.get("LUX_TEST_OPENAI_BASE_URL"):
+        cmd += ["-c", f'openai_base_url="{base}"']
+    if model := os.environ.get("LUX_TEST_CODEX_MODEL"):
+        cmd += ["-c", f"model={model}"]
+    # An ordinary env secret: the codex adapter writes the auth.json Codex reads.
+    spec = agent_spec(image, "codex", cmd, [{"name": "OPENAI_API_KEY", "value": key}])
+    remember_across_hosts(lux, runners, hosts, spec, [key])
 
 
-def test_codex_runs_steers_and_resumes_elsewhere(lux, runners, hosts, codex_image):
-    out = remember_across_hosts(lux, runners, hosts, codex_spec(codex_image, WRITE),
-                                [f"codex_auth={codex_auth()}"], ASK)
-    assert OPENAI_KEY not in out
+# ---- OpenCode -----------------------------------------------------------------
 
 
-# ---- OpenCode ---------------------------------------------------------------
-
-OPENCODE_AUTH = os.environ.get("LUX_TEST_OPENCODE_AUTH", "")
-OPENCODE_CONFIG = os.environ.get("LUX_TEST_OPENCODE_CONFIG", "")
-OPENCODE_MODEL = os.environ.get("LUX_TEST_OPENCODE_MODEL", "")
-
-
-def opencode_config() -> str:
-    """The developer's opencode.json with the test model as the default."""
-    import json
-    cfg = json.loads(OPENCODE_CONFIG)
-    cfg["model"] = OPENCODE_MODEL
-    return json.dumps(cfg)
-
-
-def opencode_spec(image: str, prompt: str) -> dict:
-    # OpenCode reads its providers from opencode.json and its keys from
-    # auth.json; both go in as file secrets (tmpfs, never snapshotted).
-    return {
-        "image": {"ref": image},
-        "workload": {"adapter": "opencode", "prompt": prompt, "workdir": "/workspace",
-                     "command": ["opencode", "acp"]},
-        "volumes": agent_home_volumes(),
-        "secrets": [
-            {"name": "opencode_auth", "value": OPENCODE_AUTH, "as": "file",
-             "path": "/home/agent/.local/share/opencode/auth.json"},
-            {"name": "opencode_config", "value": opencode_config(), "as": "file",
-             "path": "/home/agent/.config/opencode/opencode.json"},
-        ],
-        "network": {"unrestricted": True},
-    }
-
-
-def test_opencode_runs_steers_and_resumes_elsewhere(lux, runners, hosts, opencode_image):
-    if not (OPENCODE_CONFIG and OPENCODE_MODEL):
-        pytest.skip("set LUX_TEST_OPENCODE_CONFIG and LUX_TEST_OPENCODE_MODEL too")
-    out = remember_across_hosts(lux, runners, hosts, opencode_spec(opencode_image, WRITE),
-                                [f"opencode_auth={OPENCODE_AUTH}", f"opencode_config={opencode_config()}"], ASK)
-    assert OPENCODE_AUTH not in out
-
+def test_opencode_runs_steers_and_resumes_elsewhere(env, lux, runners, hosts):
+    image = agent_image(env, "opencode")
+    auth = os.environ["LUX_TEST_OPENCODE_AUTH"]
+    config = json.loads(os.environ["LUX_TEST_OPENCODE_CONFIG"])
+    config["model"] = os.environ["LUX_TEST_OPENCODE_MODEL"]
+    # OpenCode reads providers from opencode.json and keys from auth.json:
+    # real user config, so both go in as file secrets (tmpfs, never snapshotted).
+    spec = agent_spec(image, "opencode", ["opencode", "acp"], [
+        {"name": "opencode_auth", "value": auth, "as": "file", "path": "/home/agent/.local/share/opencode/auth.json"},
+        {"name": "opencode_config", "value": json.dumps(config), "as": "file",
+         "path": "/home/agent/.config/opencode/opencode.json"},
+    ])
+    keys = [p["key"] for p in json.loads(auth).values() if isinstance(p, dict) and p.get("key")]
+    remember_across_hosts(lux, runners, hosts, spec, keys)

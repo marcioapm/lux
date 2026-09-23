@@ -20,13 +20,16 @@ import (
 // or 100 ms of quiet) so a secret split across two writes is still
 // redacted whole.
 type Output struct {
-	mu     sync.Mutex
-	f      *os.File
-	w      *bufio.Writer
-	seq    int64
-	red    *Redactor
-	bufs   map[string]*chanBuf
-	closed bool
+	mu sync.Mutex
+	// lastByte per stream channel: EndLine uses it to know whether the
+	// channel is mid-line.
+	lastByte map[string]byte
+	f        *os.File
+	w        *bufio.Writer
+	seq      int64
+	red      *Redactor
+	bufs     map[string]*chanBuf
+	closed   bool
 }
 
 type chanBuf struct {
@@ -59,7 +62,7 @@ func OpenOutput(path string, red *Redactor) (*Output, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Output{f: f, w: bufio.NewWriterSize(f, 64<<10), seq: seq, red: red, bufs: map[string]*chanBuf{}}, nil
+	return &Output{f: f, w: bufio.NewWriterSize(f, 64<<10), seq: seq, red: red, bufs: map[string]*chanBuf{}, lastByte: map[string]byte{}}, nil
 }
 
 func (o *Output) Seq() int64 {
@@ -81,6 +84,9 @@ func (o *Output) Write(ch string, p []byte) {
 		o.bufs[ch] = b
 	}
 	b.data = append(b.data, p...)
+	if len(p) > 0 {
+		o.lastByte[ch] = p[len(p)-1]
+	}
 	// Flush complete lines now, keeping a partial last line.
 	if i := lastNewline(b.data); i >= 0 {
 		o.record(ch, b.data[:i+1], nil)
@@ -115,6 +121,17 @@ func (o *Output) flushChan(ch string) {
 		b.data = nil
 	}
 	o.w.Flush()
+}
+
+// EndLine ends the channel's current line, if it is mid-line: a message
+// streamed in pieces then reads as one line, whoever wrote the pieces.
+func (o *Output) EndLine(ch string) {
+	o.mu.Lock()
+	mid := o.lastByte[ch] != 0 && o.lastByte[ch] != '\n'
+	o.mu.Unlock()
+	if mid {
+		o.Write(ch, []byte("\n"))
+	}
 }
 
 // Event writes a structured event record.

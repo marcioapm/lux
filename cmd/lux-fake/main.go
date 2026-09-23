@@ -1,31 +1,36 @@
-// Command lux-fake is a scripted agent for tests. It speaks ACP (JSON-RPC
-// 2.0 over stdio) like a real agent, keeps its conversation in a
-// transcript under $HOME/.lux-fake/<session>.jsonl, and resumes from it
-// with session/load — so steering, stop and resume on another host can be
-// tested without a model.
+// Command lux-fake is a scripted coding agent for tests. It speaks the
+// three agent protocols lux has adapters for, so steering, stop and resume
+// on another host are tested without a model:
+//
+//	lux-fake                                   ACP (JSON-RPC over stdio)
+//	lux-fake -p --input-format stream-json …   Claude Code's stream-json
+//	lux-fake app-server                        Codex's app-server
+//	lux-fake plain                             a line-oriented generic workload
+//
+// It keeps its conversation in a transcript under
+// $HOME/.lux-fake/<session>.jsonl and resumes from it.
 //
 // Each prompt is a script, one command per line:
 //
 //	echo <text>            reply with text
-//	write <file> <text>    write text to a file (relative to cwd)
+//	write <file> <text>    write a line to a file (relative to cwd)
 //	append <file> <text>   append a line
 //	read <file>            reply with the file's contents
 //	sleep <seconds>        take a while (cancellable)
 //	print-secret <NAME>    reply with an environment variable
+//	cat-file <path>        reply with a file's contents (absolute path)
 //	stderr <text>          write to stderr
 //	history                reply with every prompt so far in this session
 //	exit <code>            exit the process
-//	ask                    request a permission; reply with the outcome
+//	ask                    request a permission (ACP only); reply with the outcome
 //
 // Anything else is echoed back as "you said: …".
-//
-// Run with no arguments for ACP. `lux-fake plain` is a line-oriented
-// generic workload: each stdin line is a script line.
 package main
 
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -38,64 +43,48 @@ import (
 	"time"
 )
 
-type msg struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   json.RawMessage `json:"error,omitempty"`
-}
-
-type agent struct {
-	// streamJSON: speak Claude Code's stream-json instead of ACP.
-	streamJSON bool
-	// appServer: speak Codex's app-server protocol instead of ACP.
-	appServer bool
-	turnID    string
-	out       *json.Encoder
-	outMu     sync.Mutex
-	mu        sync.Mutex
-	session   string
-	cwd       string
-	cancel    chan struct{}
-	pending   map[string]chan json.RawMessage
-	nextID    int
-}
-
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "plain" {
+	switch {
+	case len(os.Args) > 1 && os.Args[1] == "plain":
 		plain()
-		return
-	}
-	if slices.Contains(os.Args, "stream-json") {
+	case slices.Contains(os.Args, "stream-json"):
 		streamJSON()
-		return
-	}
-	if slices.Contains(os.Args, "app-server") {
+	case slices.Contains(os.Args, "app-server"):
 		appServer()
-		return
+	default:
+		acp()
 	}
-	a := &agent{out: json.NewEncoder(os.Stdout), pending: map[string]chan json.RawMessage{}}
-	sc := bufio.NewScanner(os.Stdin)
-	sc.Buffer(make([]byte, 64<<10), 16<<20)
-	for sc.Scan() {
-		var m msg
-		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
-			continue
-		}
-		if m.Method == "" && len(m.ID) > 0 {
-			a.mu.Lock()
-			ch := a.pending[string(m.ID)]
-			delete(a.pending, string(m.ID))
-			a.mu.Unlock()
-			if ch != nil {
-				ch <- m.Result
-			}
-			continue
-		}
-		go a.handle(m)
+}
+
+// ---- the protocol-neutral core ---------------------------------------------
+
+type entry struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}
+
+// agent is the conversation and its turns. Each protocol front end sets
+// emit (how a reply goes out) and ask (how a permission request goes out)
+// and turns its messages into prompts and cancels.
+type agent struct {
+	mu      sync.Mutex
+	outMu   sync.Mutex
+	out     *json.Encoder
+	session string
+	cwd     string
+	cancel  chan struct{} // the running turn's; nil when idle
+	steer   []string      // extra prompts for the running turn
+	emit    func(text string)
+	ask     func() string
+}
+
+func newAgent() *agent {
+	a := &agent{out: json.NewEncoder(os.Stdout), cwd: "."}
+	if wd, err := os.Getwd(); err == nil {
+		a.cwd = wd
 	}
+	a.ask = func() string { return "not supported" }
+	return a
 }
 
 func (a *agent) send(v any) {
@@ -104,37 +93,28 @@ func (a *agent) send(v any) {
 	_ = a.out.Encode(v)
 }
 
-func (a *agent) reply(id json.RawMessage, result any) {
-	a.send(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+func transcriptDir() string { return filepath.Join(os.Getenv("HOME"), ".lux-fake") }
+
+func (a *agent) transcript() string { return filepath.Join(transcriptDir(), a.session+".jsonl") }
+
+func (a *agent) newSession() {
+	a.session = fmt.Sprintf("fake-%d", time.Now().UnixNano())
+	a.record("system", "session started")
 }
 
-func (a *agent) replyErr(id json.RawMessage, code int, message string) {
-	a.send(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": message}})
-}
-
-func (a *agent) update(kind string, text string) {
-	a.send(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{
-		"sessionId": a.session,
-		"update":    map[string]any{"sessionUpdate": kind, "content": map[string]string{"type": "text", "text": text}},
-	}})
-}
-
-func transcriptDir() string {
-	home, _ := os.UserHomeDir()
-	if h := os.Getenv("HOME"); h != "" {
-		home = h
+// loadSession continues a conversation from its transcript.
+func (a *agent) loadSession(id string) error {
+	if _, err := os.Stat(filepath.Join(transcriptDir(), id+".jsonl")); err != nil {
+		return fmt.Errorf("no conversation found with session id %s", id)
 	}
-	return filepath.Join(home, ".lux-fake")
-}
-
-type entry struct {
-	Role string `json:"role"`
-	Text string `json:"text"`
+	a.session = id
+	a.record("system", "session resumed")
+	return nil
 }
 
 func (a *agent) record(role, text string) {
 	_ = os.MkdirAll(transcriptDir(), 0o755)
-	f, err := os.OpenFile(filepath.Join(transcriptDir(), a.session+".jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(a.transcript(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}
@@ -144,7 +124,7 @@ func (a *agent) record(role, text string) {
 }
 
 func (a *agent) history() []entry {
-	b, err := os.ReadFile(filepath.Join(transcriptDir(), a.session+".jsonl"))
+	b, err := os.ReadFile(a.transcript())
 	if err != nil {
 		return nil
 	}
@@ -158,106 +138,81 @@ func (a *agent) history() []entry {
 	return out
 }
 
-func (a *agent) handle(m msg) {
-	switch m.Method {
-	case "initialize":
-		a.reply(m.ID, map[string]any{
-			"protocolVersion":   1,
-			"agentCapabilities": map[string]any{"loadSession": true},
-			"agentInfo":         map[string]string{"name": "lux-fake", "version": "1"},
-		})
-	case "session/new":
-		var p struct {
-			Cwd string `json:"cwd"`
-		}
-		_ = json.Unmarshal(m.Params, &p)
-		a.mu.Lock()
-		a.session = fmt.Sprintf("fake-%d", time.Now().UnixNano())
-		a.cwd = p.Cwd
-		a.mu.Unlock()
-		a.record("system", "session started")
-		a.reply(m.ID, map[string]any{"sessionId": a.session})
-	case "session/load":
-		var p struct {
-			SessionID string `json:"sessionId"`
-			Cwd       string `json:"cwd"`
-		}
-		_ = json.Unmarshal(m.Params, &p)
-		if _, err := os.Stat(filepath.Join(transcriptDir(), p.SessionID+".jsonl")); err != nil {
-			a.replyErr(m.ID, -32002, "session not found: "+p.SessionID)
-			return
-		}
-		a.mu.Lock()
-		a.session, a.cwd = p.SessionID, p.Cwd
-		a.mu.Unlock()
-		for _, e := range a.history() {
-			kind := "agent_message_chunk"
-			if e.Role == "user" {
-				kind = "user_message_chunk"
-			}
-			a.update(kind, e.Text+"\n")
-		}
-		a.record("system", "session loaded")
-		a.reply(m.ID, map[string]any{})
-	case "session/prompt":
-		var p struct {
-			Prompt []struct {
-				Text string `json:"text"`
-			} `json:"prompt"`
-		}
-		_ = json.Unmarshal(m.Params, &p)
-		var text strings.Builder
-		for _, b := range p.Prompt {
-			text.WriteString(b.Text)
-		}
-		a.mu.Lock()
-		a.cancel = make(chan struct{})
-		cancel := a.cancel
-		a.mu.Unlock()
-		a.record("user", text.String())
-		stop := a.runScript(text.String(), cancel)
-		a.reply(m.ID, map[string]any{"stopReason": stop})
-	case "session/cancel":
-		a.mu.Lock()
-		if a.cancel != nil {
-			select {
-			case <-a.cancel:
-			default:
-				close(a.cancel)
-			}
-		}
-		a.mu.Unlock()
-	default:
-		if len(m.ID) > 0 {
-			a.replyErr(m.ID, -32601, "unknown method "+m.Method)
-		}
-	}
-}
-
 func (a *agent) say(s string) {
-	if a.appServer {
-		a.send(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": a.session, "turnId": a.turnID,
-			"item": map[string]any{"type": "agentMessage", "id": fmt.Sprintf("msg-%d", time.Now().UnixNano()), "text": s}}})
-		a.record("agent", s)
-		return
-	}
-	if a.streamJSON {
-		a.send(map[string]any{"type": "assistant", "session_id": a.session,
-			"message": map[string]any{"role": "assistant", "content": []map[string]string{{"type": "text", "text": s}}}})
-	} else {
-		a.update("agent_message_chunk", s+"\n")
-	}
+	a.emit(s)
 	a.record("agent", s)
 }
 
+// startTurn marks a turn running and returns its cancel channel, or false
+// if one is already running.
+func (a *agent) startTurn() (chan struct{}, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancel != nil {
+		return nil, false
+	}
+	a.cancel = make(chan struct{})
+	return a.cancel, true
+}
+
+// cancelTurn cancels the running turn, if any.
+func (a *agent) cancelTurn() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancel != nil {
+		select {
+		case <-a.cancel:
+		default:
+			close(a.cancel)
+		}
+	}
+}
+
+// addSteer adds a prompt to the running turn; false if none is running.
+func (a *agent) addSteer(text string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancel == nil {
+		return false
+	}
+	a.steer = append(a.steer, text)
+	return true
+}
+
+// runTurn runs a prompt, then any prompts steered into the turn, and ends
+// the turn. Steers are taken and the turn ended under one lock, so a steer
+// is either run in this turn or refused (addSteer false): never lost.
+func (a *agent) runTurn(prompt string, c chan struct{}) (cancelled bool) {
+	for text := prompt; ; {
+		a.record("user", text)
+		if a.runScript(text, c) {
+			cancelled = true
+		}
+		a.mu.Lock()
+		if len(a.steer) == 0 || cancelled {
+			// Steers accepted into a cancelled turn are still part of the
+			// conversation; record them, not run them.
+			for _, t := range a.steer {
+				a.record("user", t)
+			}
+			a.steer, a.cancel = nil, nil
+			a.mu.Unlock()
+			return cancelled
+		}
+		text, a.steer = a.steer[0], a.steer[1:]
+		a.mu.Unlock()
+	}
+}
+
 func (a *agent) path(p string) string {
-	if filepath.IsAbs(p) || a.cwd == "" {
+	if filepath.IsAbs(p) {
 		return p
 	}
 	return filepath.Join(a.cwd, p)
 }
 
-func (a *agent) runScript(script string, cancel chan struct{}) string {
+// runScript runs one prompt; true if it was cancelled.
+func (a *agent) runScript(script string, cancel chan struct{}) bool {
 	for _, line := range strings.Split(script, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -273,17 +228,13 @@ func (a *agent) runScript(script string, cancel chan struct{}) string {
 			if cmd == "append" {
 				flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
 			}
-			text += "\n"
 			_ = os.MkdirAll(filepath.Dir(a.path(file)), 0o755)
-			f, err := os.OpenFile(a.path(file), flag, 0o644)
-			if err != nil {
+			if err := appendFile(a.path(file), flag, text+"\n"); err != nil {
 				a.say("error: " + err.Error())
 				continue
 			}
-			f.WriteString(text)
-			f.Close()
 			a.say("wrote " + file)
-		case "read":
+		case "read", "cat-file":
 			b, err := os.ReadFile(a.path(rest))
 			if err != nil {
 				a.say("error: " + err.Error())
@@ -296,7 +247,7 @@ func (a *agent) runScript(script string, cancel chan struct{}) string {
 			case <-time.After(time.Duration(secs * float64(time.Second))):
 			case <-cancel:
 				a.say("cancelled")
-				return "cancelled"
+				return true
 			}
 		case "print-secret":
 			a.say(os.Getenv(rest))
@@ -314,102 +265,216 @@ func (a *agent) runScript(script string, cancel chan struct{}) string {
 			code, _ := strconv.Atoi(rest)
 			os.Exit(code)
 		case "ask":
-			a.mu.Lock()
-			a.nextID++
-			id := fmt.Sprintf("%d", 1000+a.nextID)
-			ch := make(chan json.RawMessage, 1)
-			a.pending[id] = ch
-			a.mu.Unlock()
-			a.send(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "method": "session/request_permission", "params": map[string]any{
-				"sessionId": a.session,
-				"options": []map[string]string{
-					{"optionId": "no", "name": "Reject", "kind": "reject_once"},
-					{"optionId": "yes", "name": "Allow", "kind": "allow_once"},
-				},
-			}})
-			res := <-ch
-			a.say("permission: " + string(res))
+			a.say("permission: " + a.ask())
 		default:
 			a.say("you said: " + line)
 		}
 		select {
 		case <-cancel:
 			a.say("cancelled")
-			return "cancelled"
+			return true
 		default:
 		}
 	}
-	return "end_turn"
+	return false
 }
 
+func appendFile(path string, flag int, text string) error {
+	f, err := os.OpenFile(path, flag, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(text)
+	return err
+}
+
+func scanner() *bufio.Scanner {
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 64<<10), 16<<20)
+	return sc
+}
+
+// textBlocks is the [{"type":"text","text":…}] list all three protocols use.
+type textBlocks []struct {
+	Text string `json:"text"`
+}
+
+func (t textBlocks) String() string {
+	var b strings.Builder
+	for _, x := range t {
+		b.WriteString(x.Text)
+	}
+	return b.String()
+}
+
+// ---- ACP ----------------------------------------------------------------
+
+type rpcMsg struct {
+	ID     json.RawMessage `json:"id,omitempty"`
+	Method string          `json:"method,omitempty"`
+	Params json.RawMessage `json:"params,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+}
+
+// acp speaks the Agent Client Protocol. Replies stream as several chunks
+// without line breaks, as real agents' do.
+func acp() {
+	a := newAgent()
+	var pmu sync.Mutex
+	pending := map[string]chan json.RawMessage{}
+	nextID := 0
+	rpc := func(v map[string]any) { v["jsonrpc"] = "2.0"; a.send(v) }
+	update := func(kind, text string) {
+		rpc(map[string]any{"method": "session/update", "params": map[string]any{"sessionId": a.session,
+			"update": map[string]any{"sessionUpdate": kind, "content": map[string]string{"type": "text", "text": text}}}})
+	}
+	a.emit = func(s string) {
+		for len(s) > 4 {
+			update("agent_message_chunk", s[:4])
+			s = s[4:]
+		}
+		update("agent_message_chunk", s+" ")
+	}
+	a.ask = func() string {
+		pmu.Lock()
+		nextID++
+		id := strconv.Itoa(1000 + nextID)
+		ch := make(chan json.RawMessage, 1)
+		pending[id] = ch
+		pmu.Unlock()
+		rpc(map[string]any{"id": json.RawMessage(id), "method": "session/request_permission", "params": map[string]any{
+			"sessionId": a.session,
+			"options": []map[string]string{
+				{"optionId": "no", "name": "Reject", "kind": "reject_once"},
+				{"optionId": "yes", "name": "Allow", "kind": "allow_once"},
+			},
+		}})
+		return string(<-ch)
+	}
+	reply := func(id json.RawMessage, result any) { rpc(map[string]any{"id": id, "result": result}) }
+	fail := func(id json.RawMessage, code int, msg string) {
+		rpc(map[string]any{"id": id, "error": map[string]any{"code": code, "message": msg}})
+	}
+	for sc := scanner(); sc.Scan(); {
+		var m rpcMsg
+		if json.Unmarshal(sc.Bytes(), &m) != nil {
+			continue
+		}
+		if m.Method == "" && len(m.ID) > 0 {
+			pmu.Lock()
+			ch := pending[string(m.ID)]
+			delete(pending, string(m.ID))
+			pmu.Unlock()
+			if ch != nil {
+				ch <- m.Result
+			}
+			continue
+		}
+		var p struct {
+			SessionID string     `json:"sessionId"`
+			Cwd       string     `json:"cwd"`
+			Prompt    textBlocks `json:"prompt"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
+		switch m.Method {
+		case "initialize":
+			reply(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{"loadSession": true},
+				"agentInfo": map[string]string{"name": "lux-fake", "version": "1"}})
+		case "session/new":
+			a.cwd = p.Cwd
+			a.newSession()
+			reply(m.ID, map[string]any{"sessionId": a.session})
+		case "session/load":
+			if err := a.loadSession(p.SessionID); err != nil {
+				fail(m.ID, -32002, err.Error())
+				continue
+			}
+			a.cwd = p.Cwd
+			for _, e := range a.history() {
+				kind := "agent_message_chunk"
+				if e.Role == "user" {
+					kind = "user_message_chunk"
+				}
+				update(kind, e.Text+"\n")
+			}
+			reply(m.ID, map[string]any{})
+		case "session/prompt":
+			id, text := m.ID, p.Prompt.String()
+			go func() {
+				// ACP has no mid-turn message; a prompt during a turn waits.
+				c, ok := a.startTurn()
+				for !ok {
+					time.Sleep(50 * time.Millisecond)
+					c, ok = a.startTurn()
+				}
+				stop := "end_turn"
+				if a.runTurn(text, c) {
+					stop = "cancelled"
+				}
+				reply(id, map[string]any{"stopReason": stop})
+			}()
+		case "session/cancel":
+			a.cancelTurn()
+		default:
+			if len(m.ID) > 0 {
+				fail(m.ID, -32601, "unknown method "+m.Method)
+			}
+		}
+	}
+}
+
+// ---- Claude Code stream-json --------------------------------------------
+
 // streamJSON speaks Claude Code's stream-json protocol (the subset lux
-// uses; see docs/agent-protocols.md): run with
+// uses; see docs/agent-protocols.md):
 //
 //	lux-fake -p --input-format stream-json --output-format stream-json --verbose [--resume <id>]
 //
-// User messages are queued and run one turn at a time; each turn ends
-// with a "result" event. A control_request interrupt cancels the running
-// turn. SIGINT ends the turn cleanly and exits.
+// User messages queue and run one turn at a time, each ending with a
+// "result" event. A control_request interrupt cancels the running turn.
+// SIGINT ends the turn cleanly and exits. When stdin closes, queued turns
+// finish before it exits, as the real CLI does in -p mode.
 func streamJSON() {
-	a := &agent{out: json.NewEncoder(os.Stdout), streamJSON: true, cwd: "."}
-	if wd, err := os.Getwd(); err == nil {
-		a.cwd = wd
+	a := newAgent()
+	a.emit = func(s string) {
+		a.send(map[string]any{"type": "assistant", "session_id": a.session,
+			"message": map[string]any{"role": "assistant", "content": []map[string]string{{"type": "text", "text": s}}}})
 	}
-	for i, arg := range os.Args {
-		if arg == "--resume" && i+1 < len(os.Args) {
-			a.session = os.Args[i+1]
+	if i := slices.Index(os.Args, "--resume"); i >= 0 && i+1 < len(os.Args) {
+		if err := a.loadSession(os.Args[i+1]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
 		}
-	}
-	if a.session == "" {
-		a.session = fmt.Sprintf("fake-%d", time.Now().UnixNano())
-		a.record("system", "session started")
-	} else if _, err := os.Stat(filepath.Join(transcriptDir(), a.session+".jsonl")); err != nil {
-		fmt.Fprintf(os.Stderr, "No conversation found with session ID: %s\n", a.session)
-		os.Exit(1)
 	} else {
-		a.record("system", "session resumed")
+		a.newSession()
 	}
 	a.send(map[string]any{"type": "system", "subtype": "init", "session_id": a.session, "cwd": a.cwd,
 		"capabilities": []string{"interrupt_receipt_v1"}})
 
-	turns := make(chan string, 64)
-	var cancelMu sync.Mutex
-	var cancel chan struct{}
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT)
 	go func() {
 		<-sigs
-		cancelMu.Lock()
-		if cancel != nil {
-			close(cancel)
-			cancel = nil
-		}
-		cancelMu.Unlock()
+		a.cancelTurn()
 		time.Sleep(100 * time.Millisecond)
 		os.Exit(130)
 	}()
+	turns := make(chan string, 64)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for text := range turns {
-			c := make(chan struct{})
-			cancelMu.Lock()
-			cancel = c
-			cancelMu.Unlock()
-			a.record("user", text)
-			stop := a.runScript(text, c)
+			c, _ := a.startTurn()
 			reason := "completed"
-			if stop == "cancelled" {
+			if a.runTurn(text, c) {
 				reason = "aborted_streaming"
 			}
-			cancelMu.Lock()
-			cancel = nil
-			cancelMu.Unlock()
 			a.send(map[string]any{"type": "result", "subtype": "success", "session_id": a.session,
 				"terminal_reason": reason, "queued_turn_count": len(turns)})
 		}
 	}()
-	sc := bufio.NewScanner(os.Stdin)
-	sc.Buffer(make([]byte, 64<<10), 16<<20)
-	for sc.Scan() {
+	for sc := scanner(); sc.Scan(); {
 		var m struct {
 			Type      string `json:"type"`
 			RequestID string `json:"request_id"`
@@ -417,9 +482,7 @@ func streamJSON() {
 				Subtype string `json:"subtype"`
 			} `json:"request"`
 			Message struct {
-				Content []struct {
-					Text string `json:"text"`
-				} `json:"content"`
+				Content textBlocks `json:"content"`
 			} `json:"message"`
 		}
 		if json.Unmarshal(sc.Bytes(), &m) != nil {
@@ -427,169 +490,127 @@ func streamJSON() {
 		}
 		switch m.Type {
 		case "user":
-			var text strings.Builder
-			for _, c := range m.Message.Content {
-				text.WriteString(c.Text)
-			}
-			turns <- text.String()
+			turns <- m.Message.Content.String()
 		case "control_request":
 			if m.Request.Subtype == "interrupt" {
-				cancelMu.Lock()
-				if cancel != nil {
-					close(cancel)
-					cancel = nil
-				}
-				cancelMu.Unlock()
+				a.cancelTurn()
 			}
 			a.send(map[string]any{"type": "control_response", "response": map[string]any{
 				"subtype": "success", "request_id": m.RequestID, "response": map[string]any{"still_queued": []string{}}}})
 		}
 	}
 	close(turns)
-	// stdin closed: finish queued turns, like the real CLI in -p mode.
-	time.Sleep(200 * time.Millisecond)
+	<-done
 }
 
+// ---- Codex app-server -----------------------------------------------------
+
 // appServer speaks Codex's app-server protocol (the subset lux uses; see
-// docs/agent-protocols.md): JSON-RPC over stdio, responses without a
-// "jsonrpc" field, like the real server. A thread is the conversation,
-// persisted as a transcript; a turn runs one prompt script. turn/steer
-// appends to the running turn; turn/interrupt cancels it; thread/resume
-// continues a thread from its transcript in a new process.
+// docs/agent-protocols.md): JSON-RPC over stdio, with responses that carry
+// no "jsonrpc" field, like the real server. A thread is the conversation; a
+// turn runs a prompt. turn/steer adds to the running turn; turn/interrupt
+// cancels it; thread/resume continues a thread in a new process.
 func appServer() {
-	a := &agent{out: json.NewEncoder(os.Stdout), appServer: true, cwd: "."}
-	var mu sync.Mutex
-	var cancel chan struct{}
-	var steer []string
-	turnN := 0
+	a := newAgent()
+	var turnMu sync.Mutex
+	turnID, turnN := "", 0
+	a.emit = func(s string) {
+		turnMu.Lock()
+		id := turnID
+		turnMu.Unlock()
+		a.send(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": a.session, "turnId": id,
+			"item": map[string]any{"type": "agentMessage", "id": fmt.Sprintf("msg-%d", time.Now().UnixNano()), "text": s}}})
+	}
 	reply := func(id json.RawMessage, result any) { a.send(map[string]any{"id": id, "result": result}) }
-	fail := func(id json.RawMessage, msg string) {
-		a.send(map[string]any{"id": id, "error": map[string]any{"code": -32600, "message": msg}})
+	fail := func(id json.RawMessage, err error) {
+		a.send(map[string]any{"id": id, "error": map[string]any{"code": -32600, "message": err.Error()}})
 	}
 	thread := func() map[string]any {
-		return map[string]any{"id": a.session, "status": map[string]string{"type": "idle"}}
+		return map[string]any{"thread": map[string]any{"id": a.session, "status": map[string]string{"type": "idle"}}}
 	}
-	runTurn := func(text string, c chan struct{}) {
-		a.record("user", text)
-		stop := a.runScript(text, c)
-		for {
-			mu.Lock()
-			more := steer
-			steer = nil
-			mu.Unlock()
-			if len(more) == 0 || stop == "cancelled" {
-				break
-			}
-			for _, t := range more {
-				a.record("user", t)
-				if stop = a.runScript(t, c); stop == "cancelled" {
-					break
-				}
-			}
-		}
-		status := "completed"
-		if stop == "cancelled" {
-			status = "interrupted"
-		}
-		mu.Lock()
-		id := a.turnID
-		a.turnID, cancel = "", nil
-		mu.Unlock()
-		a.send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": a.session,
-			"turn": map[string]any{"id": id, "status": status}}})
-	}
-	sc := bufio.NewScanner(os.Stdin)
-	sc.Buffer(make([]byte, 64<<10), 16<<20)
-	for sc.Scan() {
-		var m msg
+	for sc := scanner(); sc.Scan(); {
+		var m rpcMsg
 		if json.Unmarshal(sc.Bytes(), &m) != nil || m.Method == "" {
 			continue
 		}
 		var p struct {
-			Cwd            string `json:"cwd"`
-			ThreadID       string `json:"threadId"`
-			TurnID         string `json:"turnId"`
-			ExpectedTurnID string `json:"expectedTurnId"`
-			Input          []struct {
-				Text string `json:"text"`
-			} `json:"input"`
+			Cwd            string     `json:"cwd"`
+			ThreadID       string     `json:"threadId"`
+			TurnID         string     `json:"turnId"`
+			ExpectedTurnID string     `json:"expectedTurnId"`
+			Input          textBlocks `json:"input"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
-		text := ""
-		for _, in := range p.Input {
-			text += in.Text
-		}
+		turnMu.Lock()
+		current := turnID
+		turnMu.Unlock()
 		switch m.Method {
 		case "initialize":
 			reply(m.ID, map[string]any{"userAgent": "lux-fake/1"})
 		case "thread/start":
-			a.session = fmt.Sprintf("fake-%d", time.Now().UnixNano())
 			if p.Cwd != "" {
 				a.cwd = p.Cwd
 			}
-			a.record("system", "thread started")
-			reply(m.ID, map[string]any{"thread": thread()})
+			a.newSession()
+			reply(m.ID, thread())
 		case "thread/resume":
-			if _, err := os.Stat(filepath.Join(transcriptDir(), p.ThreadID+".jsonl")); err != nil {
-				fail(m.ID, "no rollout found for thread id "+p.ThreadID)
+			if err := a.loadSession(p.ThreadID); err != nil {
+				fail(m.ID, fmt.Errorf("no rollout found for thread id %s", p.ThreadID))
 				continue
 			}
-			a.session = p.ThreadID
-			if wd, err := os.Getwd(); err == nil {
-				a.cwd = wd
-			}
-			a.record("system", "thread resumed")
-			reply(m.ID, map[string]any{"thread": thread()})
+			reply(m.ID, thread())
 		case "turn/start":
 			if p.ThreadID != a.session {
-				fail(m.ID, "thread not found: "+p.ThreadID)
+				fail(m.ID, fmt.Errorf("thread not found: %s", p.ThreadID))
 				continue
 			}
-			mu.Lock()
-			if a.turnID != "" {
-				mu.Unlock()
-				fail(m.ID, "a turn is already in progress")
+			c, ok := a.startTurn()
+			if !ok {
+				fail(m.ID, errors.New("a turn is already in progress"))
 				continue
 			}
+			turnMu.Lock()
 			turnN++
-			a.turnID = fmt.Sprintf("turn-%d", turnN)
-			cancel = make(chan struct{})
-			c, id := cancel, a.turnID
-			mu.Unlock()
+			turnID = fmt.Sprintf("turn-%d", turnN)
+			id := turnID
+			turnMu.Unlock()
 			turn := map[string]any{"id": id, "status": "inProgress"}
 			reply(m.ID, map[string]any{"turn": turn})
 			a.send(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": a.session, "turn": turn}})
-			go runTurn(text, c)
+			go func(text string) {
+				status := "completed"
+				if a.runTurn(text, c) {
+					status = "interrupted"
+				}
+				turnMu.Lock()
+				turnID = ""
+				turnMu.Unlock()
+				a.send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": a.session,
+					"turn": map[string]any{"id": id, "status": status}}})
+			}(p.Input.String())
 		case "turn/steer":
-			mu.Lock()
-			if a.turnID == "" || p.ExpectedTurnID != a.turnID {
-				mu.Unlock()
-				fail(m.ID, "expectedTurnId does not match the active turn")
+			if current == "" || p.ExpectedTurnID != current || !a.addSteer(p.Input.String()) {
+				fail(m.ID, errors.New("expectedTurnId does not match the active turn"))
 				continue
 			}
-			steer = append(steer, text)
-			mu.Unlock()
 			reply(m.ID, map[string]any{})
 		case "turn/interrupt":
-			mu.Lock()
-			if cancel != nil && p.TurnID == a.turnID {
-				close(cancel)
-				cancel = nil
+			if p.TurnID == current {
+				a.cancelTurn()
 			}
-			mu.Unlock()
 			reply(m.ID, map[string]any{})
 		default:
-			fail(m.ID, "unknown method "+m.Method)
+			fail(m.ID, fmt.Errorf("unknown method %s", m.Method))
 		}
 	}
 }
 
-// plain is a line-oriented workload for the generic adapter.
+// ---- plain ----------------------------------------------------------------
+
+// plain is a line-oriented workload for the generic adapter: each stdin
+// line is a script line.
 func plain() {
-	a := &agent{cwd: "."}
-	a.out = json.NewEncoder(os.Stdout)
-	sc := bufio.NewScanner(os.Stdin)
-	for sc.Scan() {
+	for sc := bufio.NewScanner(os.Stdin); sc.Scan(); {
 		line := strings.TrimSpace(sc.Text())
 		cmd, rest, _ := strings.Cut(line, " ")
 		switch cmd {

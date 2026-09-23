@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -115,10 +116,14 @@ func (s *Shim) run() int {
 		return s.fail("start-failed", err.Error())
 	}
 	env := s.environment(start.Secrets)
-	if err := s.writeSecretFiles(start.Secrets); err != nil {
+	s.prepareVolumes()
+	ad, err := adapter.New(s.cfg.Adapter)
+	if err != nil {
+		return s.fail("start-failed", err.Error())
+	}
+	if err := s.writeSecretFiles(start.Secrets, ad); err != nil {
 		return s.fail("start-failed", "secrets: "+err.Error())
 	}
-	s.prepareVolumes()
 
 	if strings.TrimSpace(s.cfg.Init) != "" {
 		code, err := s.runInit(env)
@@ -134,10 +139,6 @@ func (s *Shim) run() int {
 		return s.finish(proto.ExitInfo{ExitCode: 0, Reason: "stopped", Message: "stopped during init"})
 	}
 
-	ad, err := adapter.New(s.cfg.Adapter)
-	if err != nil {
-		return s.fail("start-failed", err.Error())
-	}
 	s.adapter = ad
 	argv, err := ad.Command(s.cfg)
 	if err != nil {
@@ -393,27 +394,24 @@ func (s *Shim) environment(secrets map[string]string) []string {
 	return out
 }
 
-// writeSecretFiles puts file secrets on the tmpfs at /.lux/secrets and
-// links them into place. The link can live on a state volume; the value
-// never does, so it is never in a snapshot.
-func (s *Shim) writeSecretFiles(values map[string]string) error {
+// writeSecretFiles places the Run's file secrets, and any credential files
+// its adapter's agent needs (see adapter.CredentialFiles).
+func (s *Shim) writeSecretFiles(values map[string]string, ad adapter.Adapter) error {
 	for _, sec := range s.cfg.Secrets {
 		if sec.As != "file" || sec.RunnerOnly {
 			continue
 		}
-		src := filepath.Join(proto.ShimSecretsDir, sec.Name)
-		if err := os.WriteFile(src, []byte(values[sec.Name]), 0o400); err != nil {
+		if err := s.placeSecret(sec.Name, sec.Path, []byte(values[sec.Name])); err != nil {
 			return err
 		}
-		_ = os.Chown(src, s.user.uid, s.user.gid)
-		if err := s.mkdirAllOwned(filepath.Dir(sec.Path)); err != nil {
-			return err
+	}
+	// Credentials the adapter's agent reads from files (Codex's auth.json).
+	if cf, ok := ad.(adapter.CredentialFiles); ok {
+		for path, content := range cf.CredentialFiles(values, s.user.home) {
+			if err := s.placeSecret("adapter-"+filepath.Base(filepath.Dir(path))+"-"+filepath.Base(path), path, content); err != nil {
+				return err
+			}
 		}
-		os.Remove(sec.Path)
-		if err := os.Symlink(src, sec.Path); err != nil {
-			return err
-		}
-		_ = os.Lchown(sec.Path, s.user.uid, s.user.gid)
 	}
 	if s.user.uid != 0 {
 		_ = os.Chown(proto.ShimSecretsDir, s.user.uid, s.user.gid)
@@ -421,24 +419,71 @@ func (s *Shim) writeSecretFiles(values map[string]string) error {
 	return nil
 }
 
-// mkdirAllOwned creates dir and any missing parents owned by the workload
-// user: a secret placed under the user's home (say ~/.config/tool/key)
-// must not leave directories the workload cannot write next to.
-func (s *Shim) mkdirAllOwned(dir string) error {
+// placeSecret writes a secret's value on the secrets tmpfs and links it
+// into place. The link can live on a state volume; the value never does,
+// so it is never in a snapshot.
+func (s *Shim) placeSecret(name, path string, value []byte) error {
+	src := filepath.Join(proto.ShimSecretsDir, name)
+	if err := os.WriteFile(src, value, 0o400); err != nil {
+		return err
+	}
+	_ = os.Chown(src, s.user.uid, s.user.gid)
+	if err := s.mkdirForWorkload(filepath.Dir(path)); err != nil {
+		return err
+	}
+	os.Remove(path)
+	if err := os.Symlink(src, path); err != nil {
+		return err
+	}
+	_ = os.Lchown(path, s.user.uid, s.user.gid)
+	return nil
+}
+
+// mkdirForWorkload creates dir and its missing parents, for a path the
+// shim (root) makes on the workload's behalf: a secret under the user's
+// home (say ~/.config/tool/key), the artifacts directory. Directories it
+// creates inside the workload's own space (its home, or a volume) are the
+// workload user's, so the workload can write next to them; anything else
+// it creates stays root's. Directories that already existed are never
+// touched.
+func (s *Shim) mkdirForWorkload(dir string) error {
 	var missing []string
 	for d := dir; d != "/" && d != "."; d = filepath.Dir(d) {
-		if _, err := os.Stat(d); err == nil {
+		_, err := os.Stat(d)
+		if err == nil {
 			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
 		}
 		missing = append(missing, d)
 	}
 	for i := len(missing) - 1; i >= 0; i-- {
-		if err := os.Mkdir(missing[i], 0o755); err != nil && !os.IsExist(err) {
+		d := missing[i]
+		if err := os.Mkdir(d, 0o755); err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				continue // created meanwhile by someone else: not ours
+			}
 			return err
 		}
-		_ = os.Chown(missing[i], s.user.uid, s.user.gid)
+		if s.workloadOwns(d) {
+			_ = os.Chown(d, s.user.uid, s.user.gid)
+		}
 	}
 	return nil
+}
+
+// workloadOwns: path is under the workload user's home or a volume.
+func (s *Shim) workloadOwns(path string) bool {
+	if s.user.uid == 0 {
+		return false
+	}
+	for _, root := range append([]string{s.user.home}, s.cfg.VolumePaths...) {
+		if root != "/" && (path == root || strings.HasPrefix(path, root+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 // prepareVolumes hands a fresh (root-owned) volume's root to the workload
@@ -457,7 +502,7 @@ func (s *Shim) prepareVolumes() {
 		}
 	}
 	if s.cfg.ArtifactsDir != "" {
-		_ = os.MkdirAll(s.cfg.ArtifactsDir, 0o755)
+		_ = s.mkdirForWorkload(s.cfg.ArtifactsDir)
 		_ = os.Chown(s.cfg.ArtifactsDir, s.user.uid, s.user.gid)
 	}
 }
@@ -565,6 +610,7 @@ func copyTo(r io.Reader, f func([]byte)) {
 type sink struct{ s *Shim }
 
 func (k *sink) Stdout(p []byte)            { k.s.out.Write("stdout", p) }
+func (k *sink) EndMessage()                { k.s.out.EndLine("stdout") }
 func (k *sink) Stderr(p []byte)            { k.s.out.Write("stderr", p) }
 func (k *sink) Event(typ string, data any) { k.s.out.Event(typ, data) }
 func (k *sink) Session(id string)          { k.s.out.Event(proto.EvSession, map[string]string{"sessionId": id}) }
