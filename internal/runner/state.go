@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // runState is what the runner keeps on disk per Run, so a restarted runner
@@ -104,13 +106,8 @@ type snapshotRecord struct {
 }
 
 type egressState struct {
-	Unrestricted bool         `json:"unrestricted,omitempty"`
-	Interface    string       `json:"interface"`
-	Gateway      string       `json:"gateway"`
-	Rules        []egressRule `json:"rules"`
-}
-
-type egressRule struct {
-	Host string `json:"host,omitempty"`
-	CIDR string `json:"cidr,omitempty"`
+	Unrestricted bool              `json:"unrestricted,omitempty"`
+	Interface    string            `json:"interface"`
+	Gateway      string            `json:"gateway"`
+	Rules        []spec.EgressRule `json:"rules"`
 }

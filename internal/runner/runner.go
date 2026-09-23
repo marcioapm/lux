@@ -122,7 +122,11 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	r.conn = newConn(r)
 	r.uploads = newUploader(r)
 	r.shimV = version.Version
-	fw, err := egress.New(blockedForRuns(cfg.URL))
+	blocked, err := blockedForRuns(context.Background(), cfg.URL)
+	if err != nil {
+		return nil, err
+	}
+	fw, err := egress.New(blocked)
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +142,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	go r.uploads.loop(ctx)
 	go r.heartbeatLoop(ctx)
 	go r.usageLoop(ctx)
+	go r.egress.Run(ctx)
 	go r.gcLoop(ctx)
 	r.conn.loop(ctx)
 	return nil

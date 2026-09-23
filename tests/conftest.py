@@ -327,16 +327,10 @@ def _q(s: str) -> str:
 
 @pytest.fixture(scope="session")
 def git_server(env: TestEnvironment):
-    from env import sh
-    import json as _json
-    from pathlib import Path
-    ctx = Path(__file__).parent / "images" / "gitserver"
-    sh("docker", "build", "-q", "-t", "localhost/lux-gitserver:test", "-f", str(ctx / "Containerfile"), str(ctx))
+    from env import build_test_image, sh, start_service
     name = f"lux-e2e-{env.run_id}-git"
     token = "ghp_" + uuid.uuid4().hex
-    sh("docker", "run", "-d", "--name", name, "--label", f"lux-e2e-run={env.run_id}",
-       "--network", env.network, "-e", f"GIT_TOKEN={token}", "localhost/lux-gitserver:test")
-    ip = _json.loads(sh("docker", "inspect", name))[0]["NetworkSettings"]["Networks"][env.network]["IPAddress"]
+    ip = start_service(env, name, build_test_image("gitserver"), GIT_TOKEN=token)
     yield GitServer(env, name, ip, token)
     sh("docker", "rm", "-f", name, check=False)
 
@@ -354,22 +348,13 @@ class NetTargets:
 
 @pytest.fixture(scope="session")
 def net_targets(env: TestEnvironment):
-    from env import sh
-    import json as _json
-    from pathlib import Path
-    ctx = Path(__file__).parent / "images" / "netsvc"
-    sh("docker", "build", "-q", "-t", "localhost/lux-netsvc:test", "-f", str(ctx / "Containerfile"), str(ctx))
+    from env import build_test_image, sh, start_service
+    image = build_test_image("netsvc")
     names = []
 
     def start(role: str, **envs) -> str:
-        name = f"lux-e2e-{env.run_id}-{role}-{len(names)}"
-        names.append(name)
-        args = ["docker", "run", "-d", "--name", name, "--label", f"lux-e2e-run={env.run_id}", "--network", env.network,
-                "-e", f"ROLE={role}"]
-        for k, v in envs.items():
-            args += ["-e", f"{k}={v}"]
-        sh(*args, "localhost/lux-netsvc:test")
-        return _json.loads(sh("docker", "inspect", name))[0]["NetworkSettings"]["Networks"][env.network]["IPAddress"]
+        names.append(f"lux-e2e-{env.run_id}-{role}-{len(names)}")
+        return start_service(env, names[-1], image, ROLE=role, **envs)
 
     allowed = start("web", NAME="allowed")
     denied = start("web", NAME="denied")

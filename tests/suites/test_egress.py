@@ -98,10 +98,26 @@ def test_hard_blocks_hold_against_allow_all(env, lux, runners, egress_hosts, net
 
 
 def test_unrestricted(lux, runners, egress_hosts, net_targets):
+    """Anything but the hard blocks, and names resolve through the host's
+    resolvers (not the stub: denied.lux.test is not in any rule)."""
     runners.start(egress_hosts[0])
     t = net_targets
-    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", fetch(t.denied_ip), network={"unrestricted": True}))
-    assert f"OK:{t.denied_ip}" in probe(lux, run_id)
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "; ".join([fetch(t.denied_ip), fetch(t.denied_name)]),
+                                network={"unrestricted": True}))
+    out = probe(lux, run_id)
+    assert f"OK:{t.denied_ip}" in out and f"OK:{t.denied_name}" in out, out
+
+
+def test_dns_events_are_distinct_lookups(lux, runners, egress_hosts, net_targets):
+    """Each (name, allowed) is one event however often it is looked up: the
+    workload chooses the names, and must not flood the control plane."""
+    runners.start(egress_hosts[0])
+    t = net_targets
+    lookups = "; ".join(f"nslookup {n} >/dev/null 2>&1" for n in [t.allowed_name, t.denied_name] * 5)
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", lookups, network={"egress": [{"host": t.allowed_name}]}))
+    probe(lux, run_id)
+    names = sorted(e["data"]["name"] for e in lux.json("events", run_id) if e["type"] == "dns")
+    assert names == sorted([t.allowed_name, t.denied_name]), names
 
 
 def test_rules_survive_a_runner_restart(lux, runners, egress_hosts, net_targets):

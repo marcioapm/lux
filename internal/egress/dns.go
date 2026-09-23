@@ -6,57 +6,89 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"syscall"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/sys/unix"
 )
 
 // stub is one Run's DNS server, on its gateway address. It answers A
-// queries for allowed names with the addresses the firewall allows (so an
-// answer is always reachable), and refuses everything else: DNS is not a
-// way out (no tunnelling through lookups of arbitrary names).
+// queries for allowed names with the addresses the firewall allows, and
+// refuses everything else: DNS is not a way out (no tunnelling through
+// lookups of arbitrary names).
 type stub struct {
 	udp *net.UDPConn
-	tcp *net.TCPListener
+	tcp net.Listener
 }
 
-func startStub(gw netip.Addr, r *run, f *Firewall) (*stub, error) {
-	addr := netip.AddrPortFrom(gw, StubPort)
-	udp, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(addr))
+// maxTCP caps a Run's concurrent TCP queries; tcpTimeout bounds each.
+const (
+	maxTCP     = 16
+	tcpTimeout = 10 * time.Second
+)
+
+// freebind lets the stub bind the gateway address before Podman gives it
+// to the bridge (at container start), so the Run's first lookup is served.
+var freebind = net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+	var serr error
+	err := c.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_FREEBIND, 1) })
+	if err != nil {
+		return err
+	}
+	return serr
+}}
+
+func startStub(gw netip.Addr, f *Firewall, iface string) (*stub, error) {
+	addr := netip.AddrPortFrom(gw, StubPort).String()
+	pc, err := freebind.ListenPacket(context.Background(), "udp", addr)
 	if err != nil {
 		return nil, err
 	}
-	tcp, err := net.ListenTCP("tcp", net.TCPAddrFromAddrPort(addr))
+	udp := pc.(*net.UDPConn)
+	tcp, err := freebind.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		udp.Close()
 		return nil, err
 	}
 	s := &stub{udp: udp, tcp: tcp}
 	go func() {
-		buf := make([]byte, 1500)
 		for {
+			buf := make([]byte, 1500)
 			n, from, err := udp.ReadFromUDPAddrPort(buf)
 			if err != nil {
 				return
 			}
-			if resp := answer(buf[:n], r, f); resp != nil {
-				udp.WriteToUDPAddrPort(resp, from)
-			}
+			// One goroutine per query: a slow first resolution of one name
+			// does not hold up the Run's other lookups.
+			go func() {
+				if resp := answer(buf[:n], f, iface); resp != nil {
+					udp.WriteToUDPAddrPort(resp, from)
+				}
+			}()
 		}
 	}()
 	go func() {
+		slots := make(chan struct{}, maxTCP)
 		for {
 			c, err := tcp.Accept()
 			if err != nil {
 				return
 			}
-			go serveTCP(c, r, f)
+			select {
+			case slots <- struct{}{}:
+				go func() { defer func() { <-slots }(); serveTCP(c, f, iface) }()
+			default:
+				c.Close()
+			}
 		}
 	}()
 	return s, nil
 }
 
-func serveTCP(c net.Conn, r *run, f *Firewall) {
+func serveTCP(c net.Conn, f *Firewall, iface string) {
 	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(tcpTimeout))
 	var l [2]byte
 	if _, err := io.ReadFull(c, l[:]); err != nil {
 		return
@@ -65,7 +97,7 @@ func serveTCP(c net.Conn, r *run, f *Firewall) {
 	if _, err := io.ReadFull(c, msg); err != nil {
 		return
 	}
-	if resp := answer(msg, r, f); resp != nil {
+	if resp := answer(msg, f, iface); resp != nil {
 		c.Write(append([]byte{byte(len(resp) >> 8), byte(len(resp))}, resp...))
 	}
 }
@@ -75,7 +107,7 @@ func (s *stub) close() {
 	s.tcp.Close()
 }
 
-func answer(query []byte, r *run, f *Firewall) []byte {
+func answer(query []byte, f *Firewall, iface string) []byte {
 	var p dnsmessage.Parser
 	h, err := p.Start(query)
 	if err != nil {
@@ -86,33 +118,32 @@ func answer(query []byte, r *run, f *Firewall) []byte {
 		return nil
 	}
 	name := strings.TrimSuffix(strings.ToLower(q.Name.String()), ".")
-	allowed := r.hosts[name]
 	resp := dnsmessage.Header{ID: h.ID, Response: true, RecursionAvailable: true, RecursionDesired: h.RecursionDesired}
-	var answers []netip.Addr
+	allowed, addrs := f.answerFor(iface, name)
+	if q.Type != dnsmessage.TypeA {
+		// AAAA and others: never an answer (egress is IPv4), but an allowed
+		// name exists, and is reported by its A lookup.
+		addrs = nil
+	}
 	switch {
 	case !allowed:
 		resp.RCode = dnsmessage.RCodeRefused
-	case q.Type == dnsmessage.TypeA:
-		answers = f.resolve(context.Background(), r, name)
-		if len(answers) == 0 {
-			resp.RCode = dnsmessage.RCodeNameError
-		}
-	default:
-		// AAAA and others: no answer (egress is IPv4), but the name exists.
+	case q.Type == dnsmessage.TypeA && len(addrs) == 0:
+		resp.RCode = dnsmessage.RCodeNameError
 	}
-	if r.onDNS != nil && (q.Type == dnsmessage.TypeA || !allowed) {
+	if q.Type == dnsmessage.TypeA || !allowed {
 		l := Lookup{Name: name, Allowed: allowed}
-		for _, a := range answers {
+		for _, a := range addrs {
 			l.Answers = append(l.Answers, a.String())
 		}
-		r.onDNS(l)
+		f.report(iface, l)
 	}
 	b := dnsmessage.NewBuilder(nil, resp)
 	b.EnableCompression()
 	_ = b.StartQuestions()
 	_ = b.Question(q)
 	_ = b.StartAnswers()
-	for _, a := range answers {
+	for _, a := range addrs {
 		_ = b.AResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 60}, dnsmessage.AResource{A: a.As4()})
 	}
 	out, err := b.Finish()

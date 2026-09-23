@@ -154,7 +154,6 @@ func (p *Podman) VolumeImport(ctx context.Context, name string, r io.Reader) err
 // Network is a created network's addressing.
 type Network struct {
 	Interface string
-	Subnet    netip.Prefix
 	Gateway   netip.Addr
 }
 
@@ -169,20 +168,19 @@ func (p *Podman) NetworkCreate(ctx context.Context, name, iface string, labels m
 		return Network{}, err
 	}
 	out, err := p.Run(ctx, "network", "inspect", "--format",
-		"{{.NetworkInterface}} {{(index .Subnets 0).Subnet}} {{(index .Subnets 0).Gateway}}", name)
+		"{{.NetworkInterface}} {{(index .Subnets 0).Gateway}}", name)
 	if err != nil {
 		return Network{}, err
 	}
 	f := strings.Fields(string(out))
-	if len(f) != 3 {
+	if len(f) != 2 {
 		return Network{}, fmt.Errorf("network inspect %s: %q", name, out)
 	}
-	sub, err1 := netip.ParsePrefix(f[1])
-	gw, err2 := netip.ParseAddr(f[2])
-	if err1 != nil || err2 != nil {
-		return Network{}, fmt.Errorf("network %s: bad addressing %q", name, out)
+	gw, err := netip.ParseAddr(f[1])
+	if err != nil {
+		return Network{}, fmt.Errorf("network %s: bad gateway %q", name, out)
 	}
-	return Network{Interface: f[0], Subnet: sub, Gateway: gw}, nil
+	return Network{Interface: f[0], Gateway: gw}, nil
 }
 
 func (p *Podman) NetworkRemove(ctx context.Context, name string) error {

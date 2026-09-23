@@ -49,8 +49,7 @@ type placement struct {
 	shimConn net.Conn
 	shimEnc  *json.Encoder
 	done     chan struct{}
-	session  string // latest session id the adapter reported
-	network  podman.Network
+	session  string      // latest session id the adapter reported
 	user     passwd.User // who the workload runs as
 	peakDisk int64
 	netRx    int64
@@ -220,10 +219,6 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	p.mark("containerStarted")
-	if err := p.serveDNS(sp, p.network); err != nil {
-		p.logf("dns stub", "err", err)
-		_ = p.r.pm.Kill(ctx, containerName(p.runID), "KILL")
-	}
 	p.state.Phase = "started"
 	_ = writeRunState(p.dir, p.state)
 	if st, err := p.r.pm.Inspect(ctx, containerName(p.runID)); err == nil {
@@ -258,6 +253,9 @@ func (p *placement) supervise(ctx context.Context) {
 		p.logf("podman wait failed", "err", err)
 	}
 	p.mark("exited")
+	// Nothing on the Run's network any more: its rules and stub go (its
+	// bridge, until removed, falls to the fail-closed drop).
+	p.r.egress.Remove(bridgeName(p.runID))
 	p.closeShim()
 	// Nothing writes the output file after the container exits: the tailer
 	// reads to its end and returns, so no final event is missed.
@@ -530,9 +528,6 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 	if err != nil {
 		return fmt.Errorf("network: %w", err)
 	}
-	p.mu.Lock()
-	p.network = network
-	p.mu.Unlock()
 	name := containerName(p.runID)
 	// A container from an earlier placement: its writable layer is only
 	// worth keeping for a same-host resume with the same image; the shim
@@ -566,9 +561,6 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 		"--label", LabelTenant+"="+p.tenantID,
 		"--label", "lux.spec="+specHash(sp),
 		"--network", networkName(p.runID),
-		// The Run's DNS is its egress stub on the gateway (Podman's DNS is
-		// off on this network); unrestricted Runs use the host's resolvers.
-		"--dns", dnsServer(sp, network),
 		"--user", "0:0",
 		"--entrypoint", proto.ShimBinary,
 		"-v", p.r.cfg.Shim+":"+proto.ShimBinary+":ro",
@@ -585,6 +577,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 	for _, v := range p.state.Volumes {
 		args = append(args, "-v", v.Volume+":"+v.Path+":idmap")
 	}
+	args = append(args, dnsArgs(sp, network)...)
 	args = append(args, p.extraArgs(sp)...)
 	args = append(args, image)
 	if _, err := p.r.pm.Create(ctx, args); err != nil {

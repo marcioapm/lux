@@ -7,6 +7,6 @@ web)
 	exec httpd -f -p 80 -h /www ;;
 dns)
 	args=""
-	for r in $(echo "$RECORDS" | tr , ' '); do args="$args --address=/${r%%=*}/${r#*=}"; done
-	exec dnsmasq -k --no-resolv --no-hosts --log-queries --log-facility=- $args ;;
+	for r in $(echo "$RECORDS" | tr , ' '); do args="$args --host-record=${r%%=*},${r#*=}"; done
+	exec dnsmasq -k --no-resolv --no-hosts --local=/lux.test/ --log-queries --log-facility=- $args ;;
 esac

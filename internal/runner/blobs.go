@@ -328,7 +328,7 @@ func (r *Runner) readopt(ctx context.Context) {
 			if cs.Running {
 				// Before anything else: a running container must not spend a
 				// moment without its egress rules.
-				if err := p.reapplyEgress(ctx); err != nil {
+				if err := p.applyEgress(ctx, p.state.Egress); err != nil {
 					r.log.Error("re-adopt: egress; killing the container", "run", st.RunID, "err", err)
 					_ = r.pm.Kill(ctx, containerName(st.RunID), "KILL")
 				}

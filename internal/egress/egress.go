@@ -1,27 +1,33 @@
 // Package egress enforces a Run's network egress on its host: default deny,
 // allowing only the CIDRs and hostnames in its spec.
 //
-// Each Run gets its own Podman network (a bridge, created with Podman's
-// DNS off). One nftables table, `inet lux`, owned by the runner and never
+// Each Run gets its own Podman network: a bridge with Podman's DNS off and a
+// fixed, lux-prefixed interface name, so its rules exist before the bridge
+// does. One nftables table, `inet lux`, owned by the runner and never
 // touched by netavark, holds:
 //
-//   - a forward chain, at a priority before netavark's, that drops traffic
-//     from one Run's bridge to another's (whatever either allows), sends
-//     each Run's traffic (by bridge interface) to that Run's chain, and drops
-//     traffic from any lux bridge that has none: a Run whose rules are not
-//     loaded (a runner restarting) fails closed, not open;
-//   - per Run, a chain accepting replies, then dropping what is always
-//     blocked (the metadata service, the control plane), then accepting the
-//     Run's allow set, then dropping everything else (other Runs' networks
-//     and private ranges included, unless the spec allows them);
-//   - input rules so a Run reaches the host only on the DNS stub's port;
-//   - a DNS redirect: port 53 from any Run goes to the stub.
+//   - a forward chain, ahead of netavark's, that drops traffic between
+//     Runs' bridges (whatever either allows), sends each Run's traffic to
+//     its chain, and drops traffic from any lux bridge with no chain: a Run
+//     whose rules are not loaded (a runner restarting) fails closed;
+//   - per Run, a chain: replies, then the hard blocks (sets blocked4 and
+//     blocked6: link-local and the metadata service, loopback, the control
+//     plane), then the Run's allow set, then drop. An unrestricted Run's
+//     chain accepts after the hard blocks instead;
+//   - input rules so a restricted Run reaches the host only on the DNS
+//     stub's port;
+//   - a DNS redirect: port 53 from any restricted Run goes to its stub.
+//     Unrestricted Runs use the host's resolvers.
 //
-// Hostnames are resolved by the runner (not the container), at start and
-// every minute after; addresses are added and never removed while the Run
-// lives, so a connection is not cut when a CDN rotates. The DNS stub
-// answers only for allowed names (from the same resolution, so an answer
-// is always reachable), refuses the rest, and records every lookup.
+// IPv6 from a restricted Run is dropped (allow sets are IPv4, and nothing
+// else accepts); the hard blocks cover IPv6 for unrestricted Runs too.
+//
+// Hostnames are resolved by the runner (not the container), once per host
+// name across all Runs, at start and every minute; addresses are only ever
+// added while a Run lives, so a connection is not cut when a CDN rotates.
+// The DNS stub answers only allowed names, from those resolved addresses
+// (so an answer is always reachable), refuses the rest, and reports each
+// distinct lookup once.
 package egress
 
 import (
@@ -31,19 +37,20 @@ import (
 	"net"
 	"net/netip"
 	"os/exec"
-	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // StubPort is where the DNS stub listens on each Run's gateway.
 const StubPort = 15353
 
-// Always blocked, whatever a spec allows: link-local (the cloud metadata
-// service) and loopback. Everything else, private ranges included, is
-// denied unless the spec allows it.
-var alwaysBlocked = []string{"169.254.0.0/16", "127.0.0.0/8"}
+// Always blocked, whatever a spec allows: link-local (including the cloud
+// metadata services) and loopback.
+var alwaysBlocked = []string{"169.254.0.0/16", "127.0.0.0/8", "fe80::/10", "fd00:ec2::254/128", "::1/128"}
 
 const setupRuleset = `
 table inet lux {
@@ -52,6 +59,14 @@ table inet lux {
 	}
 	set run_ifaces {
 		type ifname
+	}
+	set blocked4 {
+		type ipv4_addr
+		flags interval
+	}
+	set blocked6 {
+		type ipv6_addr
+		flags interval
 	}
 	chain egress {
 		type filter hook forward priority -10; policy accept;
@@ -72,13 +87,7 @@ table inet lux {
 }
 `
 
-// Rule is one egress rule from a spec.
-type Rule struct {
-	Host string
-	CIDR string
-}
-
-// Lookup is one DNS query a Run made, for its events.
+// Lookup is one distinct DNS query a Run made, for its events.
 type Lookup struct {
 	Name    string   `json:"name"`
 	Allowed bool     `json:"allowed"`
@@ -89,62 +98,79 @@ type Lookup struct {
 type Firewall struct {
 	mu       sync.Mutex
 	resolver *net.Resolver
-	runs     map[string]*run // by interface
-	blocked  []netip.Prefix  // extra always-blocked prefixes (the host, luxd)
+	runs     map[string]*run // by bridge interface
+	blocked  []netip.Prefix  // parsed once: always blocked, plus the control plane
+	resolved map[string]map[netip.Addr]bool
 }
 
 type run struct {
-	id     string
-	iface  string
-	hosts  map[string]bool // allowed hostnames, lowercased, no trailing dot
-	cidrs  []netip.Prefix
-	addrs  map[string]map[netip.Addr]bool // resolved, by host; only grows
-	stub   *stub
-	onDNS  func(Lookup)
-	cancel context.CancelFunc
+	unrestricted bool
+	hosts        map[string]bool // allowed hostnames, lowercased, no trailing dot
+	cidrs        []netip.Prefix
+	stub         *stub
+	onDNS        func(Lookup)
+	seen         map[string]bool // "<name>|<allowed>" already reported
 }
 
-// New sets up the nftables table (idempotent: an existing one is replaced,
-// so a restarted runner starts clean and re-applies its Runs; meanwhile
-// their traffic is dropped, never let through). blocked are
-// addresses no Run may reach, besides the always-blocked ranges: the host
-// itself, the control plane.
-func New(blocked []netip.Prefix) (*Firewall, error) {
-	_ = nft("delete table inet lux")
-	if err := nftScript(fmt.Sprintf(setupRuleset, StubPort, StubPort)); err != nil {
+// maxReported caps the distinct lookups reported per Run: the names are
+// the workload's to choose, and each is an event.
+const maxReported = 1000
+
+// New sets up the nftables table. An existing one is replaced, so a
+// restarted runner starts clean and re-applies its Runs; meanwhile their
+// traffic is dropped, never let through. extra are addresses no Run may
+// reach besides the always-blocked ranges: the control plane.
+func New(extra []netip.Prefix) (*Firewall, error) {
+	f := &Firewall{resolver: net.DefaultResolver, runs: map[string]*run{}, resolved: map[string]map[netip.Addr]bool{}}
+	for _, p := range alwaysBlocked {
+		f.blocked = append(f.blocked, netip.MustParsePrefix(p))
+	}
+	f.blocked = append(f.blocked, extra...)
+	// One transaction: create-if-missing, delete, recreate. There is never
+	// a moment without the table, so a Run is never open.
+	var b strings.Builder
+	b.WriteString("table inet lux {}\ndelete table inet lux\n")
+	fmt.Fprintf(&b, setupRuleset, StubPort, StubPort)
+	var v4, v6 []string
+	for _, p := range f.blocked {
+		if p.Addr().Is4() {
+			v4 = append(v4, p.String())
+		} else {
+			v6 = append(v6, p.String())
+		}
+	}
+	if len(v4) > 0 {
+		fmt.Fprintf(&b, "add element inet lux blocked4 { %s }\n", strings.Join(v4, ", "))
+	}
+	if len(v6) > 0 {
+		fmt.Fprintf(&b, "add element inet lux blocked6 { %s }\n", strings.Join(v6, ", "))
+	}
+	if err := nftScript(b.String()); err != nil {
 		return nil, fmt.Errorf("nftables: %w", err)
 	}
-	return &Firewall{resolver: net.DefaultResolver, runs: map[string]*run{}, blocked: blocked}, nil
+	return f, nil
 }
 
-var nameRe = regexp.MustCompile(`[^a-z0-9_]`)
+// Chain and set names derive from the bridge interface, which is already
+// a valid, unique nftables identifier.
+func chainName(iface string) string { return "run_" + iface }
+func setName(iface string) string   { return "allow_" + iface }
 
-func chainName(runID string) string {
-	return "run_" + nameRe.ReplaceAllString(strings.ToLower(runID), "_")
-}
-func setName(runID string) string {
-	return "allow_" + nameRe.ReplaceAllString(strings.ToLower(runID), "_")
-}
-
-// Apply loads a Run's egress rules for its network's bridge interface and
-// resolves its allowed hosts. Call it before the container starts: the
-// rules match the interface by name, so they hold from the first packet.
-// Idempotent. onDNS receives every lookup the Run makes.
-func (f *Firewall) Apply(ctx context.Context, runID, iface string, rules []Rule, onDNS func(Lookup)) error {
-	f.mu.Lock()
-	if old := f.runs[iface]; old != nil {
-		f.mu.Unlock()
-		f.Remove(iface)
-		f.mu.Lock()
-	}
-	r := &run{id: runID, iface: iface, hosts: map[string]bool{},
-		addrs: map[string]map[netip.Addr]bool{}, onDNS: onDNS}
+// Apply loads a Run's egress rules for its bridge interface and starts its
+// DNS stub on the bridge's gateway. Call it before the container starts:
+// the rules match the interface by name and the stub binds the gateway
+// address before the bridge has it, so both hold from the first packet.
+// Idempotent. onDNS receives each distinct lookup the Run makes. With
+// unrestricted, the Run may reach anything but the hard blocks, and
+// resolves through the host's resolvers.
+func (f *Firewall) Apply(ctx context.Context, iface string, gateway netip.Addr, unrestricted bool, rules []spec.EgressRule, onDNS func(Lookup)) error {
+	f.Remove(iface)
+	r := &run{unrestricted: unrestricted, hosts: map[string]bool{}, onDNS: onDNS, seen: map[string]bool{}}
 	for _, rule := range rules {
 		switch {
 		case rule.CIDR != "":
 			p, err := netip.ParsePrefix(rule.CIDR)
 			if err != nil {
-				f.mu.Unlock()
 				return fmt.Errorf("egress cidr %q: %w", rule.CIDR, err)
 			}
 			r.cidrs = append(r.cidrs, p.Masked())
@@ -152,89 +178,66 @@ func (f *Firewall) Apply(ctx context.Context, runID, iface string, rules []Rule,
 			r.hosts[strings.TrimSuffix(strings.ToLower(rule.Host), ".")] = true
 		}
 	}
+	c, s := chainName(iface), setName(iface)
+	var b strings.Builder
+	fmt.Fprintf(&b, "add chain inet lux %s\n", c)
+	fmt.Fprintf(&b, "add rule inet lux %s ct state established,related accept\n", c)
+	fmt.Fprintf(&b, "add rule inet lux %s ip daddr @blocked4 drop\n", c)
+	fmt.Fprintf(&b, "add rule inet lux %s ip6 daddr @blocked6 drop\n", c)
+	if unrestricted {
+		fmt.Fprintf(&b, "add rule inet lux %s accept\n", c)
+	} else {
+		fmt.Fprintf(&b, "add set inet lux %s { type ipv4_addr; flags interval; }\n", s)
+		fmt.Fprintf(&b, "add rule inet lux %s ip daddr @%s accept\n", c, s)
+		fmt.Fprintf(&b, "add rule inet lux %s counter drop\n", c)
+		if len(r.cidrs) > 0 {
+			fmt.Fprintf(&b, "add element inet lux %s { %s }\n", s, join(r.cidrs))
+		}
+	}
+	fmt.Fprintf(&b, "add element inet lux runs { %q : jump %s }\n", iface, c)
+	if !unrestricted {
+		fmt.Fprintf(&b, "add element inet lux run_ifaces { %q }\n", iface)
+		st, err := startStub(gateway, f, iface)
+		if err != nil {
+			return fmt.Errorf("dns stub on %s: %w", gateway, err)
+		}
+		r.stub = st
+	}
+	if err := nftScript(b.String()); err != nil {
+		if r.stub != nil {
+			r.stub.close()
+		}
+		return fmt.Errorf("nftables for %s: %w", iface, err)
+	}
+	f.mu.Lock()
 	f.runs[iface] = r
 	f.mu.Unlock()
-
-	// The Run's chain: replies; then always-blocked; then its own allow
-	// set; then drop. Private ranges are blocked unless allowed by CIDR.
-	var b strings.Builder
-	c, s := chainName(runID), setName(runID)
-	fmt.Fprintf(&b, "add set inet lux %s { type ipv4_addr; flags interval; }\n", s)
-	fmt.Fprintf(&b, "add chain inet lux %s\n", c)
-	fmt.Fprintf(&b, "flush chain inet lux %s\n", c)
-	fmt.Fprintf(&b, "add rule inet lux %s ct state established,related accept\n", c)
-	for _, p := range f.hardBlocked() {
-		fmt.Fprintf(&b, "add rule inet lux %s ip daddr %s drop\n", c, p)
+	// Resolve this Run's names now (adding known addresses to its set);
+	// the shared loop keeps them fresh.
+	for h := range r.hosts {
+		f.addKnown(iface, h)
+		f.resolve(ctx, h)
 	}
-	fmt.Fprintf(&b, "add rule inet lux %s ip daddr @%s accept\n", c, s)
-	fmt.Fprintf(&b, "add rule inet lux %s counter drop\n", c)
-	if len(r.cidrs) > 0 {
-		fmt.Fprintf(&b, "add element inet lux %s { %s }\n", s, join(r.cidrs))
-	}
-	fmt.Fprintf(&b, "add element inet lux runs { %q : jump %s }\n", iface, c)
-	fmt.Fprintf(&b, "add element inet lux run_ifaces { %q }\n", iface)
-	if err := nftScript(b.String()); err != nil {
-		return fmt.Errorf("nftables for %s: %w", runID, err)
-	}
-
-	rctx, cancel := context.WithCancel(context.Background())
-	r.cancel = cancel
-	f.resolveAll(ctx, r)
-	go f.reresolve(rctx, r)
 	return nil
 }
 
-// Open lets a Run's bridge out unfiltered (network.unrestricted): an
-// explicit accept, since a lux bridge with no entry is dropped. Other Runs'
-// bridges, the metadata service and the control plane stay unreachable.
-func (f *Firewall) Open(runID, iface string) error {
-	c := chainName(runID)
-	var b strings.Builder
-	fmt.Fprintf(&b, "add chain inet lux %s\n", c)
-	fmt.Fprintf(&b, "flush chain inet lux %s\n", c)
-	for _, p := range f.hardBlocked() {
-		fmt.Fprintf(&b, "add rule inet lux %s ip daddr %s drop\n", c, p)
-	}
-	fmt.Fprintf(&b, "add rule inet lux %s accept\n", c)
-	fmt.Fprintf(&b, "add element inet lux runs { %q : jump %s }\n", iface, c)
+// addKnown gives a Run the addresses already resolved for a host (by
+// another Run's rules): resolve only adds addresses that are new.
+func (f *Firewall) addKnown(iface, host string) {
 	f.mu.Lock()
-	f.runs[iface] = &run{id: runID, iface: iface}
+	var known []string
+	for ip := range f.resolved[host] {
+		known = append(known, ip.String())
+	}
 	f.mu.Unlock()
-	return nftScript(b.String())
+	if len(known) > 0 {
+		_ = nftScript(fmt.Sprintf("add element inet lux %s { %s }\n", setName(iface), strings.Join(known, ", ")))
+	}
 }
 
-// Serve starts a Run's DNS stub on its gateway. Call it once the container
-// is up: Podman creates the bridge, and its gateway address, only then.
-func (f *Firewall) Serve(iface string, gateway netip.Addr) error {
-	f.mu.Lock()
-	r := f.runs[iface]
-	f.mu.Unlock()
-	if r == nil {
-		return fmt.Errorf("egress: no rules applied for %s", iface)
-	}
-	if r.stub != nil {
-		r.stub.close()
-	}
-	st, err := startStub(gateway, r, f)
-	if err != nil {
-		return fmt.Errorf("dns stub on %s: %w", gateway, err)
-	}
-	f.mu.Lock()
-	r.stub = st
-	f.mu.Unlock()
-	return nil
-}
-
-// hardBlocked lists what no Run may reach, whatever it allows.
-func (f *Firewall) hardBlocked() []netip.Prefix {
-	out := append([]netip.Prefix{}, f.blocked...)
-	for _, p := range alwaysBlocked {
-		out = append(out, netip.MustParsePrefix(p))
-	}
-	return out
-}
-
-func (f *Firewall) reresolve(ctx context.Context, r *run) {
+// Run keeps allowed hostnames resolved, for every Run, until ctx ends:
+// each distinct name is resolved once a minute, however many Runs allow it.
+func (f *Firewall) Run(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	for {
@@ -242,55 +245,74 @@ func (f *Firewall) reresolve(ctx context.Context, r *run) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			f.resolveAll(ctx, r)
+		}
+		f.mu.Lock()
+		names := map[string]bool{}
+		for _, r := range f.runs {
+			for h := range r.hosts {
+				names[h] = true
+			}
+		}
+		f.mu.Unlock()
+		for h := range names {
+			f.resolve(ctx, h)
 		}
 	}
 }
 
-// resolveAll resolves every allowed host and adds new addresses to the
-// Run's set. Addresses are never removed while it runs.
-func (f *Firewall) resolveAll(ctx context.Context, r *run) {
-	for h := range r.hosts {
-		f.resolve(ctx, r, h)
-	}
-}
-
-func (f *Firewall) resolve(ctx context.Context, r *run, host string) []netip.Addr {
+// resolve looks a host up and adds its new addresses (never one in a
+// hard-blocked range) to every Run that allows it, in one nft script.
+// Returns every address known for it.
+func (f *Firewall) resolve(ctx context.Context, host string) []netip.Addr {
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	ips, err := f.resolver.LookupNetIP(rctx, "ip4", host)
-	if err != nil {
-		return f.known(r, host)
-	}
-	var fresh []netip.Addr
 	f.mu.Lock()
-	known := r.addrs[host]
+	defer f.mu.Unlock()
+	known := f.resolved[host]
 	if known == nil {
 		known = map[netip.Addr]bool{}
-		r.addrs[host] = known
+		f.resolved[host] = known
 	}
-	for _, ip := range ips {
-		ip = ip.Unmap()
-		if !known[ip] && !f.isBlocked(r, ip) {
-			known[ip] = true
-			fresh = append(fresh, ip)
+	var fresh []netip.Addr
+	if err == nil {
+		for _, ip := range ips {
+			ip = ip.Unmap()
+			if !known[ip] && !f.isBlocked(ip) && !slices.Contains(fresh, ip) {
+				fresh = append(fresh, ip)
+			}
 		}
 	}
-	f.mu.Unlock()
 	if len(fresh) > 0 {
-		var parts []string
-		for _, ip := range fresh {
-			parts = append(parts, ip.String())
+		list := make([]string, len(fresh))
+		for i, ip := range fresh {
+			list[i] = ip.String()
 		}
-		_ = nft(fmt.Sprintf("add element inet lux %s { %s }", setName(r.id), strings.Join(parts, ", ")))
+		var b strings.Builder
+		for iface, r := range f.runs {
+			if r.hosts[host] && !r.unrestricted {
+				fmt.Fprintf(&b, "add element inet lux %s { %s }\n", setName(iface), strings.Join(list, ", "))
+			}
+		}
+		// Known (so answered by the stub) only once the firewall allows
+		// them; a failed add is retried on the next resolution.
+		if b.Len() == 0 || nftScript(b.String()) == nil {
+			for _, ip := range fresh {
+				known[ip] = true
+			}
+		}
 	}
-	return f.known(r, host)
+	out := make([]netip.Addr, 0, len(known))
+	for ip := range known {
+		out = append(out, ip)
+	}
+	return out
 }
 
-// isBlocked: an allowed hostname that resolves into a blocked range (say
-// the metadata address) must not open it.
-func (f *Firewall) isBlocked(_ *run, ip netip.Addr) bool {
-	for _, p := range f.hardBlocked() {
+// isBlocked: an allowed hostname that resolves into a hard-blocked range
+// (say the metadata address) must not open it. Call with f.mu held.
+func (f *Firewall) isBlocked(ip netip.Addr) bool {
+	for _, p := range f.blocked {
 		if p.Contains(ip) {
 			return true
 		}
@@ -298,17 +320,47 @@ func (f *Firewall) isBlocked(_ *run, ip netip.Addr) bool {
 	return false
 }
 
-func (f *Firewall) known(r *run, host string) []netip.Addr {
+// answerFor is what the DNS stub answers a Run for name: nothing unless it
+// is allowed; then the addresses already known (the shared loop keeps them
+// fresh), resolving only on a first lookup.
+func (f *Firewall) answerFor(iface, name string) (allowed bool, addrs []netip.Addr) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []netip.Addr
-	for ip := range r.addrs[host] {
-		out = append(out, ip)
+	r := f.runs[iface]
+	if r == nil || !r.hosts[name] {
+		f.mu.Unlock()
+		return false, nil
 	}
-	return out
+	for ip := range f.resolved[name] {
+		addrs = append(addrs, ip)
+	}
+	f.mu.Unlock()
+	if len(addrs) == 0 {
+		addrs = f.resolve(context.Background(), name)
+	}
+	return true, addrs
 }
 
-// Remove tears a Run's egress down (its network is going away).
+// report sends a lookup to the Run's events, once per (name, allowed).
+func (f *Firewall) report(iface string, l Lookup) {
+	f.mu.Lock()
+	r := f.runs[iface]
+	if r == nil || r.onDNS == nil {
+		f.mu.Unlock()
+		return
+	}
+	key := fmt.Sprintf("%s|%t", l.Name, l.Allowed)
+	if r.seen[key] || len(r.seen) >= maxReported {
+		f.mu.Unlock()
+		return
+	}
+	r.seen[key] = true
+	cb := r.onDNS
+	f.mu.Unlock()
+	cb(l)
+}
+
+// Remove tears a Run's egress down (its network is going away), in one
+// script: map entries first, then the chain and set they point to.
 func (f *Firewall) Remove(iface string) {
 	f.mu.Lock()
 	r := f.runs[iface]
@@ -317,26 +369,24 @@ func (f *Firewall) Remove(iface string) {
 	if r == nil {
 		return
 	}
-	if r.cancel != nil {
-		r.cancel()
-	}
 	if r.stub != nil {
 		r.stub.close()
 	}
-	_ = nftScript(fmt.Sprintf("delete element inet lux runs { %q }\ndelete element inet lux run_ifaces { %q }\n", iface, iface))
-	_ = nftScript(fmt.Sprintf("delete chain inet lux %s\n", chainName(r.id)))
-	_ = nftScript(fmt.Sprintf("delete set inet lux %s\n", setName(r.id)))
+	script := fmt.Sprintf("delete element inet lux runs { %q }\ndelete chain inet lux %s\n", iface, chainName(iface))
+	if !r.unrestricted {
+		script = fmt.Sprintf("delete element inet lux run_ifaces { %q }\n", iface) + script +
+			fmt.Sprintf("delete set inet lux %s\n", setName(iface))
+	}
+	_ = nftScript(script)
 }
 
 func join(ps []netip.Prefix) string {
-	var parts []string
+	parts := make([]string, 0, len(ps))
 	for _, p := range ps {
 		parts = append(parts, p.String())
 	}
 	return strings.Join(parts, ", ")
 }
-
-func nft(cmd string) error { return nftScript(cmd + "\n") }
 
 func nftScript(script string) error {
 	c := exec.Command("nft", "-f", "-")

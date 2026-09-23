@@ -141,16 +141,19 @@ owned by the workload user.
   rotates. Wildcards can't be resolved, so list the concrete hostnames.
 - **DNS:** the Run's resolver is a stub on its network's gateway. It
   answers only allowed names, with exactly the addresses the firewall
-  allows. It refuses every other name and records every lookup as a `dns`
-  event, so "what did this Run try to reach" has an answer. Queries sent to
+  allows. It refuses every other name and records each distinct lookup
+  (name, allowed or not) as a `dns` event, so "what did this Run try to
+  reach" has an answer. Queries sent to
   any other DNS server are redirected to the stub, so DNS can't be used to
   get data out.
-- **Always blocked, whatever the spec says:** the cloud metadata range
-  (`169.254.0.0/16`), loopback, the control plane, and other Runs on the
-  same host. An allowed hostname that resolves into a blocked range does
+- **IPv4 only.** Allow rules are IPv4; a restricted Run's IPv6 traffic is
+  dropped, and the stub answers no AAAA queries.
+- **Always blocked, whatever the spec says:** link-local and the cloud
+  metadata services (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`),
+  loopback, the control plane, and other Runs on the same host. An allowed hostname that resolves into a blocked range does
   not open it.
-- `unrestricted: true` switches the filtering off. The hard blocks above
-  still apply.
+- `unrestricted: true` switches the filtering off, and the Run resolves
+  names through the host's resolvers. The hard blocks above still apply.
 - **A known limitation, by choice:** rules match IP addresses, so allowing
   a name hosted on a CDN allows everything else on those shared addresses.
   Filtering on hostnames (SNI) through a proxy is the upgrade path.
@@ -163,6 +166,12 @@ never touches:
   replies and the Run's allow set, drops the hard-blocked ranges, and drops
   everything else.
 - Traffic from a lux bridge with no rules loaded, for example while the
-  runner restarts, is dropped, so a Run fails closed, never open. A
-  restarted runner re-applies the rules for the Runs it re-adopts before
-  anything else.
+  runner restarts, is dropped, so a Run fails closed, never open. The
+  runner replaces the table in one transaction, so there is no moment
+  without it. A restarted runner re-applies the rules for the Runs it
+  re-adopts before anything else.
+- The rules and the DNS stub are in place before the container starts,
+  so its first packet and its first lookup are covered. They are removed
+  when the container exits.
+- The control plane is blocked by every address its URL's host resolves
+  to when the runner starts.

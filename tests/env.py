@@ -87,6 +87,24 @@ def wait_until(fn, timeout: float = 30, interval: float = 0.3, message: str = "c
     raise AssertionError(f"{message} (after {timeout}s; last: {last!r})")
 
 
+def build_test_image(name: str) -> str:
+    """Builds tests/images/<name> as localhost/lux-<name>:test."""
+    ctx = Path(__file__).parent / "images" / name
+    tag = f"localhost/lux-{name}:test"
+    sh("docker", "build", "-q", "-t", tag, "-f", str(ctx / "Containerfile"), str(ctx))
+    return tag
+
+
+def start_service(env, name: str, image: str, **envs: str) -> str:
+    """Runs a test service on the run network; returns its address. It is
+    labelled with the run, so teardown removes it with everything else."""
+    args = ["docker", "run", "-d", "--name", name, "--label", f"lux-e2e-run={env.run_id}", "--network", env.network]
+    for k, v in envs.items():
+        args += ["-e", f"{k}={v}"]
+    sh(*args, image)
+    return json.loads(sh("docker", "inspect", name))[0]["NetworkSettings"]["Networks"][env.network]["IPAddress"]
+
+
 def host_names(n: int) -> list[str]:
     return [f"host-{chr(ord('a') + i)}" for i in range(n)]
 
