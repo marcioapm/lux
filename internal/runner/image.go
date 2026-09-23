@@ -119,7 +119,7 @@ func (p *placement) build(ctx context.Context, sp spec.RunSpec, cf, tag string, 
 	// cancelled podman build can leave its RUN step running.
 	defer cg.remove()
 	mem := fmt.Sprintf("%d", int64(sp.Resources.Memory))
-	args := append(containment(), "--quiet", "--pull=never", "--isolation=oci",
+	args := append(containment(true), "--quiet", "--pull=never", "--isolation=oci",
 		"--layers=false", "--no-cache",
 		"--timestamp=0", // no build-time dates in the image: rebuilds match when the steps do
 		"--iidfile", iid,

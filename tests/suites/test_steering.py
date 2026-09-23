@@ -12,10 +12,6 @@ from conftest import CLIError, fake_agent, generic
 from env import ALPINE_IMAGE, wait_until
 
 
-
-
-
-
 def test_retried_input_is_delivered_once(lux, runners, hosts, fake_image):
     runners.start(hosts[0])
     run_id = lux.submit(fake_agent(fake_image, "echo hi"))
@@ -55,10 +51,6 @@ def test_input_before_start_is_rejected(lux, fake_image):
     with pytest.raises(CLIError) as e:
         lux.run("steer", run_id, "hello")
     assert "not started" in e.value.stderr
-
-
-
-
 
 
 def test_fake_conditionals(lux, runners, hosts, fake_image):

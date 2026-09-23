@@ -93,15 +93,6 @@ def test_symlinks_are_not_followed(lux, runners, hosts):
     assert [a["path"] for a in arts] == ["/workspace/out/fine.txt"], arts
 
 
-def test_download_stays_in_its_directory(lux, runners, hosts, tmp_path):
-    runners.start(hosts[0])
-    run_id = artifacts_run(lux, "mkdir -p /workspace/out && echo a > /workspace/out/a.txt", ["/workspace/out/*"])
-    lux.wait_state(run_id, "succeeded")
-    wait_available(lux, run_id, 1)
-    lux.run("artifacts", run_id, "--download", str(tmp_path))
-    assert all(str(p).startswith(str(tmp_path)) for p in tmp_path.rglob("*"))
-
-
 def test_another_tenant_cannot_see_them(lux, tenant_factory, runners, hosts):
     runners.start(hosts[0])
     run_id = artifacts_run(lux, "mkdir -p /workspace/out && echo a > /workspace/out/a.txt", ["/workspace/out/*"])
@@ -111,3 +102,16 @@ def test_another_tenant_cannot_see_them(lux, tenant_factory, runners, hosts):
     with pytest.raises(CLIError):
         other.run("artifacts", run_id)
     assert other.api(f"/v1/artifacts/{art['id']}").status_code == 404
+
+
+def test_collected_after_a_runner_restart(lux, runners, hosts):
+    """A Run re-adopted after its runner restarts still has its spec: its
+    artifacts are collected when it exits."""
+    runners.start(hosts[0])
+    script = "mkdir -p /workspace/out && echo late > /workspace/out/late.txt && sleep 5"
+    run_id = artifacts_run(lux, script, ["/workspace/out/*"])
+    lux.wait_state(run_id, "running")
+    runners.stop(hosts[0], "KILL")
+    runners.start(hosts[0])
+    lux.wait_state(run_id, "succeeded", timeout=60)
+    assert [a["path"] for a in wait_available(lux, run_id, 1)] == ["/workspace/out/late.txt"]

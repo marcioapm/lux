@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // Interactive streams (exec, attach, port-forward tunnels), relayed
@@ -26,26 +28,10 @@ import (
 // the stream rather than growing the runner's memory or holding up
 // other streams. A close is never queued behind input.
 type stream struct {
-	input  chan proto.StreamData
-	cancel context.CancelFunc
-	why    string // set with cancel when the runner ends the stream itself
-	mu     sync.Mutex
-}
-
-// end ends the stream from the runner's side, saying why.
-func (st *stream) end(why string) {
-	st.mu.Lock()
-	if st.why == "" {
-		st.why = why
-	}
-	st.mu.Unlock()
-	st.cancel()
-}
-
-func (st *stream) reason() string {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.why
+	input chan proto.StreamData
+	// cancel ends the stream: with a cause when the runner ends it (sent
+	// to luxd as the reason), with nil when luxd or the connection did.
+	cancel context.CancelCauseFunc
 }
 
 // streamInputBuffer is how many input frames a stream holds while its
@@ -73,7 +59,7 @@ func (ss *streams) endAll() {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	for _, st := range ss.m {
-		st.cancel()
+		st.cancel(nil)
 	}
 }
 
@@ -94,7 +80,7 @@ func (r *Runner) handleStreamFrame(ctx context.Context, f proto.Frame) {
 		}
 		// Registered before anything else arrives for it: the frames of a
 		// connection are read in order.
-		sctx, cancel := context.WithCancel(ctx)
+		sctx, cancel := context.WithCancelCause(ctx)
 		st := &stream{input: make(chan proto.StreamData, streamInputBuffer), cancel: cancel}
 		r.streams.put(f.Stream, st)
 		go r.runStream(sctx, f.RunID, f.Epoch, f.Stream, o, st)
@@ -110,37 +96,31 @@ func (r *Runner) handleStreamFrame(ctx context.Context, f proto.Frame) {
 		select {
 		case st.input <- d:
 		default:
-			st.end("the stream's input fell behind: its target is not reading")
+			st.cancel(errors.New("the stream's input fell behind: its target is not reading"))
 		}
 	case proto.MsgStreamClose:
 		// luxd ended it: no close back.
 		if st := r.streams.get(f.Stream); st != nil {
-			st.cancel()
+			st.cancel(nil)
 		}
 	}
 }
 
 func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id string, o proto.StreamOpen, st *stream) {
 	defer r.streams.remove(id)
-	defer st.cancel()
+	defer st.cancel(nil)
 	send := func(typ string, data []byte) {
 		_ = r.conn.Send(context.WithoutCancel(ctx), proto.Frame{Type: typ, RunID: runID, Epoch: epoch, Stream: id, Data: data})
 	}
 	closeWith := func(d proto.StreamData) { send(proto.MsgStreamClose, proto.Marshal(d)) }
-	// However the stream ends here, luxd hears of it (once): unless luxd
-	// itself ended it.
-	closed := false
+	// Ended by the runner (a cause other than plain cancellation): luxd
+	// hears why. Every other end below sends its own close.
 	defer func() {
-		if closed {
-			return
-		}
-		if why := st.reason(); why != "" {
-			closeWith(proto.StreamData{Error: why})
-		} else if ctx.Err() == nil {
-			closeWith(proto.StreamData{Error: "the stream ended"})
+		if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+			closeWith(proto.StreamData{Error: cause.Error()})
 		}
 	}()
-	final := func(d proto.StreamData) { closed = true; closeWith(d) }
+	final := closeWith
 
 	r.mu.Lock()
 	p := r.placements[runID]
@@ -190,7 +170,7 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 					_, err = conn.Write(d.Data)
 				}
 				if err != nil {
-					st.end("writing the stream's input: " + err.Error())
+					st.cancel(fmt.Errorf("writing the stream's input: %w", err))
 					return
 				}
 			}
@@ -234,7 +214,6 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 		}
 		_ = json.Unmarshal(line, &last)
 		if last.ExitCode != nil || last.Error != "" {
-			closed = true
 			send(proto.MsgStreamClose, line)
 			return
 		}
@@ -266,9 +245,7 @@ func (p *placement) shimStream(ctx context.Context, o proto.StreamOpen) (net.Con
 // dialPort connects to a port the Run's spec declares, on its container.
 // Only declared ports: a tunnel is not a way into anything else.
 func (p *placement) dialPort(ctx context.Context, port int) (net.Conn, error) {
-	p.mu.Lock()
-	declared := p.state != nil && slices.Contains(p.state.Ports, port)
-	p.mu.Unlock()
+	declared := p.assign != nil && slices.ContainsFunc(p.assign.Spec.Network.Ports, func(dp spec.Port) bool { return dp.Port == port })
 	if !declared {
 		return nil, fmt.Errorf("port %d is not declared in the Run's spec", port)
 	}

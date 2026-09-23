@@ -33,6 +33,10 @@ func (r *Runner) recordPath(snapID string) string {
 // writeBlob compresses what produce writes into a new blob file. Returns
 // the compressed size and its sha256.
 func (r *Runner) writeBlob(blobID string, produce func(io.Writer) error) (int64, string, error) {
+	return r.writeBlobLevel(blobID, zstd.SpeedDefault, produce)
+}
+
+func (r *Runner) writeBlobLevel(blobID string, level zstd.EncoderLevel, produce func(io.Writer) error) (int64, string, error) {
 	path := r.blobPath(blobID)
 	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
@@ -41,7 +45,7 @@ func (r *Runner) writeBlob(blobID string, produce func(io.Writer) error) (int64,
 	}
 	h := sha256.New()
 	cw := &countWriter{w: io.MultiWriter(f, h)}
-	zw, err := zstd.NewWriter(cw, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	zw, err := zstd.NewWriter(cw, zstd.WithEncoderLevel(level), zstd.WithEncoderConcurrency(1))
 	if err != nil {
 		f.Close()
 		return 0, "", err
@@ -309,6 +313,10 @@ func (r *Runner) readopt(ctx context.Context) {
 		p := &placement{
 			r: r, runID: st.RunID, tenantID: st.TenantID, epoch: st.Epoch, dir: r.runDir(st.RunID),
 			state: st, done: make(chan struct{}), stopWhy: st.StopReason,
+		}
+		// No assignment after a restart: the spec it had, without secrets.
+		if st.Spec != nil {
+			p.assign = &proto.Assign{RunID: st.RunID, TenantID: st.TenantID, Epoch: st.Epoch, Spec: *st.Spec}
 		}
 		switch st.Phase {
 		case "reported":

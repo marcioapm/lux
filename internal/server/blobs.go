@@ -189,7 +189,7 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	defer body.Close()
-	zr, err := zstd.NewReader(body)
+	zr, err := zstd.NewReader(body, zstd.WithDecoderConcurrency(1))
 	if err != nil {
 		return err
 	}

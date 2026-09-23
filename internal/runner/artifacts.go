@@ -11,8 +11,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -53,35 +55,37 @@ func (p *placement) collectArtifacts(ctx context.Context) ([]proto.Artifact, err
 	if p.assign != nil {
 		paths = p.assign.Spec.Artifacts.Paths
 	}
+	// One walk per volume, from its root (so no symlinked directory on the
+	// way can lead it out), trying each of that volume's patterns.
+	byVolume := map[string][][]string{}
 	for _, pattern := range paths {
-		root := p.volumeRoot(globBase(pattern)) // the volume's path
+		root := p.volumeRoot(globBase(pattern))
 		if root == "" {
 			errs = append(errs, fmt.Errorf("%s is not on a volume", pattern))
 			continue
 		}
-		// Walk from the volume's root: nothing in the path to the pattern
-		// (a symlinked directory the workload made) can lead the walk out.
+		byVolume[root] = append(byVolume[root], splitPath(pattern))
+	}
+	for root, patterns := range byVolume {
 		hostRoot, err := p.hostPath(root)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		err = walkFiles(hostRoot, func(hostFile string) {
+		walkFiles(hostRoot, func(hostFile string) {
 			rel, _ := filepath.Rel(hostRoot, hostFile)
 			name := path.Join(root, filepath.ToSlash(rel))
-			if globMatch(pattern, name) {
+			ns := splitPath(name)
+			if slices.ContainsFunc(patterns, func(ps []string) bool { return globMatch(ps, ns) }) {
 				add(hostFile, name)
 			}
 		})
-		if err != nil {
-			errs = append(errs, err)
-		}
 	}
 	// Published on demand, in $LUX_ARTIFACTS: collected once, then cleared
 	// (the runtime volume outlives the placement).
 	if rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID)); err == nil {
 		dir := filepath.Join(rt, "artifacts")
-		_ = walkFiles(dir, func(hostFile string) {
+		walkFiles(dir, func(hostFile string) {
 			rel, _ := filepath.Rel(dir, hostFile)
 			add(hostFile, path.Join("/.lux/artifacts", filepath.ToSlash(rel)))
 		})
@@ -121,7 +125,7 @@ func (p *placement) artifactBlob(hostFile, name string) (proto.Artifact, error) 
 		return proto.Artifact{}, err
 	}
 	blobID := ids.New(ids.Blob)
-	size, sum, err := p.r.writeBlob(blobID, func(w io.Writer) error {
+	size, sum, err := p.r.writeBlobLevel(blobID, compressionFor(ctype), func(w io.Writer) error {
 		_, err := io.Copy(w, io.LimitReader(f, maxArtifactBytes))
 		return err
 	})
@@ -132,21 +136,15 @@ func (p *placement) artifactBlob(hostFile, name string) (proto.Artifact, error) 
 }
 
 // walkFiles calls fn for each regular file under root, never following
-// symlinks (links, to files or directories, are skipped).
-func walkFiles(root string, fn func(string)) error {
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if p == root && errors.Is(err, fs.ErrNotExist) {
-				return filepath.SkipAll
-			}
-			return nil // an unreadable corner; the rest still counts
-		}
-		if d.Type().IsRegular() {
+// symlinks (links, to files or directories, are skipped). What it cannot
+// read, it skips.
+func walkFiles(root string, fn func(string)) {
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
 			fn(p)
 		}
 		return nil
 	})
-	return err
 }
 
 // openNoFollow opens a file, refusing a symlink in its last component
@@ -164,10 +162,11 @@ func globBase(pattern string) string {
 	return path.Dir(pattern[:i] + "x")
 }
 
-// globMatch matches a slash path against a pattern where * matches within
-// a path segment and ** any number of segments.
-func globMatch(pattern, name string) bool {
-	ps, ns := strings.Split(strings.Trim(pattern, "/"), "/"), strings.Split(strings.Trim(name, "/"), "/")
+func splitPath(p string) []string { return strings.Split(strings.Trim(p, "/"), "/") }
+
+// globMatch matches a path's segments against a pattern's, where *
+// matches within a segment and ** any number of segments.
+func globMatch(ps, ns []string) bool {
 	var match func(ps, ns []string) bool
 	match = func(ps, ns []string) bool {
 		for len(ps) > 0 {
@@ -190,4 +189,16 @@ func globMatch(pattern, name string) bool {
 		return len(ns) == 0
 	}
 	return match(ps, ns)
+}
+
+// compressionFor: already-compressed content is stored at the fastest
+// level (zstd framing is still needed: every blob is zstd).
+func compressionFor(ctype string) zstd.EncoderLevel {
+	for _, c := range []string{"image/", "video/", "audio/", "application/zip", "application/gzip",
+		"application/x-gzip", "application/zstd", "application/x-xz", "application/x-bzip2"} {
+		if strings.HasPrefix(ctype, c) && ctype != "image/svg+xml" {
+			return zstd.SpeedFastest
+		}
+	}
+	return zstd.SpeedDefault
 }

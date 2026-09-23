@@ -12,7 +12,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -193,9 +192,8 @@ func (p *placement) run(ctx context.Context) {
 
 	prev, _ := readRunState(p.dir)
 	p.state = &runState{RunID: p.runID, TenantID: p.tenantID, Epoch: p.epoch, Phase: "assigned", Times: map[string]int64{}}
-	for _, dp := range sp.Network.Ports {
-		p.state.Ports = append(p.state.Ports, dp.Port)
-	}
+	stored, _, _ := sp.SplitSecrets()
+	p.state.Spec = &stored
 	if prev != nil {
 		p.state.VolumesSnapshot, p.state.VolumesEpoch = prev.VolumesSnapshot, prev.VolumesEpoch
 	}
@@ -543,21 +541,21 @@ func (p *placement) restoreVolume(ctx context.Context, volume string, snap *prot
 // runs as non-root.
 // containment is what a workload and an image build (tenant code both)
 // run under: their own user namespace, few capabilities, no privilege gain.
-func containment() []string {
-	return []string{
+func containment(noNewPrivileges bool) []string {
+	args := []string{
 		"--userns=auto:size=65536",
 		"--cap-drop=ALL",
 		"--cap-add=CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,KILL",
-		"--security-opt=no-new-privileges",
 	}
+	if noNewPrivileges {
+		args = append(args, "--security-opt=no-new-privileges")
+	}
+	return args
 }
 
 func hardening(sp spec.RunSpec) []string {
-	args := containment()
-	if sp.Sandbox.NestedContainers {
-		args = slices.DeleteFunc(args, func(a string) bool { return a == "--security-opt=no-new-privileges" })
-	}
-	return append(args,
+	// Nested containers need newuidmap's file capabilities (see nested.go).
+	return append(containment(!sp.Sandbox.NestedContainers),
 		// Explicit, because a host's containers.conf may default them to
 		// the host's namespaces.
 		"--cgroups=enabled", "--cgroupns=private", "--ipc=private", "--uts=private", "--pid=private",

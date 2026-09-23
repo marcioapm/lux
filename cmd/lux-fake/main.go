@@ -267,8 +267,8 @@ func (a *agent) runLine(line string, cancel chan struct{}) bool {
 	case "if-exists", "unless-exists":
 		path, then, _ := strings.Cut(rest, " ")
 		_, err := os.Stat(a.path(path))
-		if (err == nil) == (cmd == "if-exists") && strings.TrimSpace(then) != "" {
-			return a.runLine(strings.TrimSpace(then), cancel)
+		if then = strings.TrimSpace(then); (err == nil) == (cmd == "if-exists") && then != "" {
+			return a.runLine(then, cancel)
 		}
 	case "echo":
 		a.say(rest)

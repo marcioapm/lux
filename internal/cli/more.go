@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/marcioapm/lux/internal/server"
 )
@@ -144,17 +146,29 @@ func (a *app) artifactsCmd() *cobra.Command {
 				return err
 			}
 			if dir != "" {
+				// A few at a time: each is a round trip through luxd.
+				var g errgroup.Group
+				g.SetLimit(4)
+				var mu sync.Mutex
 				for _, art := range resp.Artifacts {
 					dst, err := downloadPath(dir, art.Epoch, art.Path)
 					if err != nil {
 						return err
 					}
-					if err := a.download(cmd, art.ID, dst); err != nil {
-						return fmt.Errorf("%s: %w", art.Path, err)
-					}
-					if a.output != "json" {
-						fmt.Fprintln(a.stdout, dst)
-					}
+					g.Go(func() error {
+						if err := a.download(cmd, art.ID, dst); err != nil {
+							return fmt.Errorf("%s: %w", art.Path, err)
+						}
+						if a.output != "json" {
+							mu.Lock()
+							fmt.Fprintln(a.stdout, dst)
+							mu.Unlock()
+						}
+						return nil
+					})
+				}
+				if err := g.Wait(); err != nil {
+					return err
 				}
 			}
 			if a.output == "json" {
@@ -177,12 +191,11 @@ func (a *app) artifactsCmd() *cobra.Command {
 // downloadPath is where an artifact goes under dir: <epoch>/<its path>.
 // The path is the Run's to choose, so it must stay inside dir.
 func downloadPath(dir string, epoch int, artPath string) (string, error) {
-	base := filepath.Join(dir, fmt.Sprint(epoch))
-	dst := filepath.Join(base, filepath.FromSlash(strings.TrimPrefix(artPath, "/")))
-	if rel, err := filepath.Rel(base, dst); err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	rel := filepath.FromSlash(strings.TrimPrefix(artPath, "/"))
+	if !filepath.IsLocal(rel) {
 		return "", fmt.Errorf("%s: path outside the download directory", artPath)
 	}
-	return dst, nil
+	return filepath.Join(dir, fmt.Sprint(epoch), rel), nil
 }
 
 // download fetches an artifact (luxd streams it) into dst, atomically.

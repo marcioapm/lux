@@ -16,7 +16,7 @@ func TestGlobMatch(t *testing.T) {
 		{"/workspace/**/*.xml", "/workspace/report.xml", true},
 		{"/workspace/report.xml", "/workspace/report.xml", true},
 	} {
-		if got := globMatch(c.pattern, c.name); got != c.want {
+		if got := globMatch(splitPath(c.pattern), splitPath(c.name)); got != c.want {
 			t.Errorf("globMatch(%q, %q) = %v, want %v", c.pattern, c.name, got, c.want)
 		}
 	}

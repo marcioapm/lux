@@ -124,11 +124,10 @@ func (s *Shim) run() int {
 	if err != nil {
 		return s.fail("start-failed", err.Error())
 	}
-	s.mu.Lock()
-	s.user = user
-	s.mu.Unlock()
+	s.user = user // only this goroutine reads it before env is published
 	env := s.environment(start.Secrets)
-	// Exec needs both; it checks env, set last.
+	// Exec reads s.env, under the lock, as its sign that the workload's
+	// user and environment are ready.
 	s.mu.Lock()
 	s.env = env
 	s.mu.Unlock()

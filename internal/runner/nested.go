@@ -38,9 +38,6 @@ func (p *placement) extraArgs(sp spec.RunSpec) []string {
 	if !sp.Sandbox.NestedContainers {
 		return nil
 	}
-	if p.r.nestedSeccomp == "" {
-		return nil // refused before this, in admitNested
-	}
 	return []string{
 		"--cap-add=SYS_CHROOT",
 		"--device=/dev/fuse", "--device=/dev/net/tun",

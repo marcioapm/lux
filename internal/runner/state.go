@@ -35,9 +35,9 @@ type runState struct {
 	// running container (the nftables table starts empty). Unrestricted
 	// Runs have none.
 	Egress *egressState `json:"egress,omitempty"`
-	// Ports the spec declares: what port-forward may reach, also for a
-	// placement re-adopted after a restart (which has no assignment).
-	Ports []int `json:"ports,omitempty"`
+	// Spec is the Run's spec, without secret values: what a placement
+	// re-adopted after a runner restart (which has no assignment) goes by.
+	Spec *spec.RunSpec `json:"spec,omitempty"`
 	// LastExitAt, unix ms, for host-local TTL.
 	LastExitAt int64 `json:"lastExitAt,omitempty"`
 }

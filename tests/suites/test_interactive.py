@@ -98,20 +98,10 @@ def test_port_forward_reaches_a_declared_port_only(lux, runners, hosts):
     local = free_port()
     p = lux.popen("port-forward", run_id, "web", str(local))
     try:
-        def fetch():
-            try:
-                with socket.create_connection(("127.0.0.1", local), timeout=3) as s:
-                    s.sendall(b"GET / HTTP/1.0\r\n\r\n")
-                    data = b""
-                    while chunk := s.recv(4096):
-                        data += chunk
-                    return data.decode()
-            except OSError:
-                return ""
-        body = wait_until(lambda: "hello-from-run" in (b := fetch()) and b, 30, 0.5, "the tunnel never answered")
+        body = wait_until(lambda: "hello-from-run" in (b := http_get(local)) and b, 30, 0.5, "the tunnel never answered")
         assert "hello-from-run" in body
         # twice: every connection gets its own tunnel
-        assert "hello-from-run" in fetch()
+        assert "hello-from-run" in http_get(local)
     finally:
         p.terminate()
         p.wait(timeout=10)
@@ -130,7 +120,6 @@ def test_streams_need_the_runs_tenant(lux, tenant_factory, runners, hosts):
         other.run("exec", run_id, "--", "true")
     assert "not found" in e.value.stderr.lower(), e.value.stderr
     lux.run("cancel", run_id)
-
 
 
 def test_port_forward_after_a_runner_restart(lux, runners, hosts):
