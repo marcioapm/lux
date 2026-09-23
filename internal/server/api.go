@@ -65,12 +65,7 @@ type Run struct {
 	Usage       *RunUsage        `json:"usage,omitempty"`
 }
 
-// ImageResolution is a built image as its first build pinned it: every
-// FROM at a digest. Later placements build from this Containerfile.
-type ImageResolution struct {
-	Containerfile string `json:"containerfile"`
-	ImageID       string `json:"imageId"`
-}
+type ImageResolution = proto.ImageResolution
 
 type Placement struct {
 	Epoch              int        `json:"epoch"`
@@ -138,12 +133,10 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) error {
 		}
 		return err
 	}
-	for _, sec := range sp.Secrets {
-		if sec.Value == "" {
-			return errf(http.StatusUnprocessableEntity, "invalid_spec", "secret %q has no value", sec.Name)
-		}
-	}
 	stored, refs, values := sp.SplitSecrets()
+	if err := requireSecrets(refs, values); err != nil {
+		return err
+	}
 	idem := r.Header.Get("Idempotency-Key")
 
 	run := &Run{}
@@ -554,6 +547,23 @@ type resumeRequest struct {
 	FromSnapshot string `json:"fromSnapshot,omitempty"`
 }
 
+// requireSecrets refuses a submit or resume that lacks a value (or has an
+// empty one) for any of the Run's secrets, naming them all.
+func requireSecrets(refs []spec.SecretRef, values map[string]string) error {
+	var missing []string
+	for _, ref := range refs {
+		if values[ref.Name] == "" {
+			missing = append(missing, ref.Name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	he := errf(http.StatusUnprocessableEntity, "secrets_required", "secret values required: %s", strings.Join(missing, ", "))
+	he.Details = missing
+	return he
+}
+
 // resumeRun puts a stopped, lost or failed Run back in the queue. Its
 // secrets must be supplied again: luxd never kept them.
 func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) error {
@@ -585,16 +595,8 @@ func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) error {
 		default:
 			return errf(http.StatusConflict, "not_resumable", "run is %s: stop it first", state)
 		}
-		var missing []string
-		for _, ref := range refs {
-			if values[ref.Name] == "" {
-				missing = append(missing, ref.Name)
-			}
-		}
-		if len(missing) > 0 {
-			he := errf(http.StatusUnprocessableEntity, "secrets_required", "resume needs the run's secrets again: %s", strings.Join(missing, ", "))
-			he.Details = missing
-			return he
+		if err := requireSecrets(refs, values); err != nil {
+			return err
 		}
 		// Rotation is allowed: record the new fingerprints.
 		newRefs := make([]spec.SecretRef, 0, len(refs))

@@ -100,7 +100,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	if cfg.HostTTL == 0 {
 		cfg.HostTTL = 24 * time.Hour
 	}
-	for _, d := range []string{"runs", "snapshots"} {
+	for _, d := range []string{"runs", "snapshots", "tmp"} {
 		if err := os.MkdirAll(filepath.Join(cfg.DataDir, d), 0o700); err != nil {
 			return nil, err
 		}

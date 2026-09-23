@@ -81,6 +81,10 @@ class Lux:
         """lux run -f - with a spec; returns the run id."""
         return self.run("run", "-f", "-", *args, input=json.dumps(spec)).stdout.strip()
 
+    def events(self, run_id: str, typ: str) -> list[dict]:
+        """The Run's events of one type, whole (type, data, time...)."""
+        return [e for e in self.json("events", run_id) if e["type"] == typ]
+
     def get(self, run_id: str) -> dict:
         return self.json("get", run_id)
 

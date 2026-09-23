@@ -19,7 +19,7 @@ import signal
 import time
 from pathlib import Path
 
-from env import TestEnvironment, wait_until
+from env import TestEnvironment
 
 # Where the last detached environment is recorded, for --down without a path.
 LAST = Path(os.environ.get("LUX_TEST_LOG_ROOT", "/tmp")) / "lux-dev-env.json"
@@ -30,13 +30,14 @@ def serve(env: TestEnvironment, fake_image: str | None, detach: bool) -> None:
     t = env.luxd_admin("create-tenant", "--name", "dev")
     env.tenant_id, env.admin_key = t["tenantId"], t["apiKey"]
     env.api_key = env.luxd_admin("create-key", "--tenant", env.tenant_id, "--name", "dev", "--scopes", "run,read")["apiKey"]
-    token = env.luxd_admin("create-host-token", "--tenant", env.tenant_id)["token"]
+    # The suite's own runner handling: start on every host, wait until ready.
+    from conftest import Lux, Runners
+    runners = Runners(env, Lux(env, env.api_key, env.tenant_id))
+    token = runners.token()
     for h in env.hosts:
-        h.start_runner(env, token)
-    import requests
-    wait_until(lambda: sum(h["state"] == "ready" for h in requests.get(
-        f"{env.luxd_url}/v1/hosts", headers={"Authorization": f"Bearer {env.api_key}"}, timeout=5).json()["hosts"]) == len(env.hosts),
-        60, 0.5, "runners did not become ready")
+        runners.start(h, token=token, wait=False)
+    for h in env.hosts:
+        runners.wait_ready(h.name, timeout=60)
     env.save()
     LAST.write_text(str(env.env_file))
 

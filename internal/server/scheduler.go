@@ -57,7 +57,7 @@ type pendingRun struct {
 	SessionID     string
 	Epoch         int
 	PendingInput  json.RawMessage
-	ImageResolved json.RawMessage
+	ImageResolved *proto.ImageResolution
 	HasSecrets    bool
 }
 

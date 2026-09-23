@@ -321,20 +321,16 @@ func recordPushes(ctx context.Context, tx pgx.Tx, runID string, data map[string]
 	return err
 }
 
-// recordImageResolved keeps a Run's first image build resolution (every
-// FROM pinned, and the image id), so later placements build the same thing.
-// The first one reported wins; the event keeps the rest of it.
+// recordImageResolved keeps a Run's first image build (every FROM pinned,
+// and the image id), so later placements build the same thing. The first
+// one reported wins.
 func recordImageResolved(ctx context.Context, tx pgx.Tx, runID string, data map[string]any) error {
-	res, ok := data["resolved"]
-	if !ok {
-		return nil
-	}
-	delete(data, "resolved")
-	b, err := json.Marshal(res)
-	if err != nil {
+	b, _ := json.Marshal(data)
+	var res proto.ImageResolution
+	if err := json.Unmarshal(b, &res); err != nil || res.Containerfile == "" {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE runs SET image_resolved = $2 WHERE id = $1 AND image_resolved IS NULL`, runID, b)
+	_, err := tx.Exec(ctx, `UPDATE runs SET image_resolved = $2 WHERE id = $1 AND image_resolved IS NULL`, runID, res)
 	return err
 }
 

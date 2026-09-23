@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
@@ -249,8 +248,8 @@ func (a *app) getCmd() *cobra.Command {
 			} else if run.Image != nil {
 				fmt.Fprintf(w, "image:     built %s\n", run.Image.ImageID)
 				for _, l := range strings.Split(run.Image.Containerfile, "\n") {
-					if f := strings.Fields(l); len(f) > 1 && strings.EqualFold(f[0], "FROM") {
-						fmt.Fprintf(w, "           %s\n", strings.TrimSpace(l))
+					if f, ok := spec.ParseFrom(l); ok {
+						fmt.Fprintf(w, "           %s\n", f.With(f.Image))
 					}
 				}
 			} else {
@@ -535,8 +534,6 @@ from the environment (by name), a .env file (--secrets-from), or --secret NAME=V
 			if err := fillSecrets(secrets, secretsFrom); err != nil {
 				return err
 			}
-			// Only what was found: luxd names whatever is missing.
-			secrets = slices.DeleteFunc(secrets, func(s spec.Secret) bool { return s.Value == "" })
 			req := map[string]any{"secrets": secrets}
 			if input != "" {
 				req["input"] = map[string]string{"text": input}

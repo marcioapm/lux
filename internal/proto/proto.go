@@ -139,7 +139,15 @@ type Assign struct {
 	Input *Input `json:"input,omitempty"`
 	// Image build resolution from an earlier placement, so rebuilds use the
 	// same pinned FROMs.
-	ImageResolved json.RawMessage `json:"imageResolved,omitempty"`
+	ImageResolved *ImageResolution `json:"imageResolved,omitempty"`
+}
+
+// ImageResolution is a built image as its Run's first build made it: the
+// Containerfile with every FROM pinned to a digest, and the image id.
+// Later placements build from this Containerfile.
+type ImageResolution struct {
+	Containerfile string `json:"containerfile"`
+	ImageID       string `json:"imageId"`
 }
 
 type ResumeInfo struct {

@@ -519,3 +519,42 @@ func (s RunSpec) SplitSecrets() (RunSpec, []SecretRef, map[string]string) {
 	sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
 	return s, refs, values
 }
+
+// From is a Containerfile's `FROM [--flag=v ...] image [AS name]` line.
+type From struct {
+	Flags []string
+	Image string
+	Name  string
+}
+
+// ParseFrom reads a FROM line; ok is false for any other line.
+func ParseFrom(line string) (From, bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 2 || !strings.EqualFold(fields[0], "FROM") {
+		return From{}, false
+	}
+	var f From
+	rest := fields[1:]
+	for len(rest) > 0 && strings.HasPrefix(rest[0], "--") {
+		f.Flags = append(f.Flags, rest[0])
+		rest = rest[1:]
+	}
+	if len(rest) == 0 {
+		return From{}, false
+	}
+	f.Image = rest[0]
+	if len(rest) == 3 && strings.EqualFold(rest[1], "AS") {
+		f.Name = rest[2]
+	}
+	return f, true
+}
+
+// With is the line with another image.
+func (f From) With(image string) string {
+	parts := append([]string{"FROM"}, f.Flags...)
+	parts = append(parts, image)
+	if f.Name != "" {
+		parts = append(parts, "AS", f.Name)
+	}
+	return strings.Join(parts, " ")
+}

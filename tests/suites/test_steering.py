@@ -14,10 +14,6 @@ from env import ALPINE_IMAGE, wait_until
 
 
 
-def events_of(lux, run_id: str, typ: str) -> list[dict]:
-    return [e for e in lux.json("events", run_id) if e["type"] == typ]
-
-
 
 
 def test_retried_input_is_delivered_once(lux, runners, hosts, fake_image):
@@ -29,9 +25,9 @@ def test_retried_input_is_delivered_once(lux, runners, hosts, fake_image):
     lux.wait_output(run_id, "once")
     lux.wait_activity(run_id, "idle")
     # All three reached luxd; the shim delivered one.
-    assert len(events_of(lux, run_id, "input")) == 3
-    wait_until(lambda: events_of(lux, run_id, "input.delivered"), 20, 0.3, "no delivery ack")
-    assert len(events_of(lux, run_id, "input.delivered")) == 1
+    assert len(lux.events(run_id, "input")) == 3
+    wait_until(lambda: lux.events(run_id, "input.delivered"), 20, 0.3, "no delivery ack")
+    assert len(lux.events(run_id, "input.delivered")) == 1
     assert lux.logs(run_id).count("once") == 1
 
 

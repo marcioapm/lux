@@ -13,10 +13,6 @@ from conftest import harnesses
 from env import wait_until
 
 
-def events_of(lux, run_id: str, typ: str) -> list[dict]:
-    return [e for e in lux.json("events", run_id) if e["type"] == typ]
-
-
 def test_starts_reports_a_session_and_waits_for_input(lux, runners, hosts, harness):
     runners.start(hosts[0])
     run_id = lux.submit(harness.spec(harness.say("ready")))
@@ -33,7 +29,7 @@ def test_steering_is_delivered_and_acknowledged(lux, runners, hosts, harness):
     lux.wait_activity(run_id, "idle", timeout=harness.timeout)
     lux.run("steer", run_id, harness.say("second"), "--request-id", "req-1")
     wait_until(lambda: "second" in lux.logs(run_id).lower(), harness.timeout, 0.5, "steer never answered")
-    acks = wait_until(lambda: events_of(lux, run_id, "input.delivered"), 20, 0.3, "no delivery ack")
+    acks = wait_until(lambda: lux.events(run_id, "input.delivered"), 20, 0.3, "no delivery ack")
     assert acks[0]["data"]["requestId"] == "req-1"
 
 

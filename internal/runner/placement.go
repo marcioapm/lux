@@ -496,12 +496,19 @@ func (p *placement) restoreVolume(ctx context.Context, volume string, snap *prot
 // namespaces, and resource limits. The shim keeps just the capabilities it
 // needs to drop to the workload user; the workload gets none of them if it
 // runs as non-root.
-func hardening() []string {
+// containment is what a workload and an image build (tenant code both)
+// run under: their own user namespace, few capabilities, no privilege gain.
+func containment() []string {
 	return []string{
 		"--userns=auto:size=65536",
 		"--cap-drop=ALL",
 		"--cap-add=CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,KILL",
 		"--security-opt=no-new-privileges",
+	}
+}
+
+func hardening() []string {
+	return append(containment(),
 		// Explicit, because a host's containers.conf may default them to
 		// the host's namespaces.
 		"--cgroups=enabled", "--cgroupns=private", "--ipc=private", "--uts=private", "--pid=private",
@@ -509,7 +516,7 @@ func hardening() []string {
 		"--hostname=lux",
 		"--init=false",
 		"--log-driver=none",
-	}
+	)
 }
 
 func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image string, network podman.Network, a *proto.Assign) error {

@@ -5,10 +5,8 @@ what a Run runs on. Builds run contained, on the Run's network."""
 
 from __future__ import annotations
 
-import time
-
 from conftest import generic
-from env import ALPINE_IMAGE
+from env import ALPINE_IMAGE, wait_until
 
 
 def built(containerfile: str, *cmd: str, **extra) -> dict:
@@ -18,7 +16,7 @@ def built(containerfile: str, *cmd: str, **extra) -> dict:
 
 
 def events(lux, run_id: str, typ: str) -> list[dict]:
-    return [e["data"] for e in lux.json("events", run_id) if e["type"] == typ]
+    return [e["data"] for e in lux.events(run_id, typ)]
 
 
 def test_build_pins_from_and_runs(lux, runners, hosts):
@@ -61,10 +59,9 @@ def test_a_moved_run_rebuilds_from_the_pinned_base(lux, runners, hosts, fake_ima
     runners.start(b)
     lux.run("resume", run_id)
     lux.wait_state(run_id, "running")
-    time.sleep(1)
     run = lux.get(run_id)
     assert run["placements"][-1]["hostName"] == b.name
-    built_b = events(lux, run_id, "image.built")[-1]
+    built_b = wait_until(lambda: (e := events(lux, run_id, "image.built"))[1:] and e[-1], 10, 0.3, "no rebuild")
     assert built_b["imageId"] == first["imageId"], (built_b, first)
     assert not events(lux, run_id, "image.rebuild-differs")
     lux.run("cancel", run_id)
@@ -83,13 +80,7 @@ def test_a_rebuild_that_differs_is_a_warning(lux, runners, hosts):
     runners.start(b)
     lux.run("resume", run_id)
     lux.wait_state(run_id, "running")
-    differs = None
-    for _ in range(20):
-        differs = events(lux, run_id, "image.rebuild-differs")
-        if differs:
-            break
-        time.sleep(0.5)
-    assert differs, events(lux, run_id, "image.built")
+    wait_until(lambda: events(lux, run_id, "image.rebuild-differs"), 10, 0.3, "no image.rebuild-differs event")
     lux.run("cancel", run_id)
 
 

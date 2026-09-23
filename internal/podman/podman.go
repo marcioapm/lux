@@ -40,20 +40,20 @@ func (p *Podman) cmd(ctx context.Context, args ...string) *exec.Cmd {
 // (root-owned files are not root's) and its id changes from build to build.
 // Without them, buildah maps ownership back into the container's ids.
 func (p *Podman) Build(ctx context.Context, args ...string) ([]byte, error) {
-	var stdout, stderr bytes.Buffer
-	c := p.cmd(ctx, append([]string{"build"}, args...)...)
-	c.Env = append(os.Environ(), "_CONTAINERS_OVERLAY_DISABLE_IDMAP=yes")
-	c.Stdout, c.Stderr = &stdout, &stderr
-	if err := c.Run(); err != nil {
-		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return stdout.Bytes(), nil
+	return p.run(ctx, []string{"_CONTAINERS_OVERLAY_DISABLE_IDMAP=yes"}, append([]string{"build"}, args...)...)
 }
 
 // Run runs podman and returns stdout. Errors include stderr.
 func (p *Podman) Run(ctx context.Context, args ...string) ([]byte, error) {
+	return p.run(ctx, nil, args...)
+}
+
+func (p *Podman) run(ctx context.Context, env []string, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	c := p.cmd(ctx, args...)
+	if env != nil {
+		c.Env = append(os.Environ(), env...)
+	}
 	c.Stdout, c.Stderr = &stdout, &stderr
 	if err := c.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
@@ -91,19 +91,20 @@ func (p *Podman) ImageID(ctx context.Context, ref string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// ImageByDigest is a local image's id with the given manifest digest, under
-// any name, or "".
-func (p *Podman) ImageByDigest(ctx context.Context, digest string) string {
+// ImagesByDigest maps each local image's manifest digest to its id,
+// whatever it is named.
+func (p *Podman) ImagesByDigest(ctx context.Context) (map[string]string, error) {
 	out, err := p.Run(ctx, "images", "--digests", "--no-trunc", "--format", "{{.Digest}} {{.ID}}")
 	if err != nil {
-		return ""
+		return nil, err
 	}
-	for _, l := range strings.Split(string(out), "\n") {
-		if d, id, ok := strings.Cut(strings.TrimSpace(l), " "); ok && d == digest {
-			return id
+	m := map[string]string{}
+	for _, l := range fields(out) {
+		if d, id, ok := strings.Cut(l, " "); ok {
+			m[d] = id
 		}
 	}
-	return ""
+	return m, nil
 }
 
 // ImageDigest is the manifest digest an image was pulled (or loaded) by.
