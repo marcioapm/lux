@@ -19,10 +19,11 @@ type Config struct {
 	// LeaseDuration is how long a host may go without a heartbeat before it
 	// and its live Runs are lost.
 	LeaseDuration time.Duration
-	// HostTTL is how long a host keeps a local snapshot copy after upload.
-	HostTTL time.Duration
 	// Tick is the scheduler and reaper interval.
 	Tick time.Duration
+	// RetentionUnit is what one day of a tenant's retention_days means.
+	// 24h in production; tests shorten it to see retention happen.
+	RetentionUnit time.Duration
 	// Provisioners by pool provider (ec2).
 	Providers map[string]Provider
 }
@@ -47,8 +48,8 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	if cfg.Tick == 0 {
 		cfg.Tick = time.Second
 	}
-	if cfg.HostTTL == 0 {
-		cfg.HostTTL = 24 * time.Hour
+	if cfg.RetentionUnit == 0 {
+		cfg.RetentionUnit = 24 * time.Hour
 	}
 	s := &Server{
 		cfg:     cfg,

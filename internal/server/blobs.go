@@ -135,12 +135,8 @@ func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
 	out := []Artifact{}
 	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		var exists bool
-		if err := tx.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 FROM runs WHERE id = $1)`, r.PathValue("id")).Scan(&exists); err != nil {
+		if err := requireRun(r.Context(), tx, r.PathValue("id")); err != nil {
 			return err
-		}
-		if !exists {
-			return errNotFound
 		}
 		rows, err := tx.Query(r.Context(), `SELECT a.id, a.epoch, a.path, a.content_type, a.size, a.sha256, b.location = 's3', a.created_at
 			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.run_id = $1 ORDER BY a.epoch, a.path`, r.PathValue("id"))

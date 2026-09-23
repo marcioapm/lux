@@ -44,6 +44,8 @@ type Config struct {
 	ForcePoll bool
 	// HostTTL is how long local snapshot copies are kept after upload.
 	HostTTL time.Duration
+	// GCInterval is how often local copies past HostTTL are removed.
+	GCInterval time.Duration
 }
 
 type Runner struct {
@@ -95,6 +97,9 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	}
 	if cfg.HostTTL == 0 {
 		cfg.HostTTL = 24 * time.Hour
+	}
+	if cfg.GCInterval == 0 {
+		cfg.GCInterval = time.Minute
 	}
 	for _, d := range []string{"runs", "snapshots"} {
 		if err := os.MkdirAll(filepath.Join(cfg.DataDir, d), 0o700); err != nil {

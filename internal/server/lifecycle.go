@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -125,6 +126,11 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 		}
 		if _, err := tx.Exec(ctx, `UPDATE hosts SET first_placement_at = coalesce(first_placement_at, now())
 			WHERE id = (SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2)`, runID, epoch); err != nil {
+			return err
+		}
+		// The Run is running from its restored state: hosts still holding
+		// copies of its older snapshots no longer need them.
+		if err := s.discardOldCopies(ctx, tx, runID, epoch); err != nil {
 			return err
 		}
 		if runState != StateRunning && runState != StateStopping {
@@ -312,6 +318,33 @@ func (s *Server) applyAdapterEvent(ctx context.Context, tx pgx.Tx, tenantID, run
 			typ, d["error"] = "input.failed", ev.InputError
 		}
 		addEvent(ctx, tx, tenantID, runID, epoch, typ, d)
+	}
+	return nil
+}
+
+// discardOldCopies tells every other host holding a local copy of a Run's
+// older snapshots to delete it: the Run now runs elsewhere, from a copy in
+// S3 (or its own). Only copies already uploaded are discarded; a copy that
+// is the only one stays until its upload finishes (the runner will not drop
+// a pending upload).
+func (s *Server) discardOldCopies(ctx context.Context, tx pgx.Tx, runID string, epoch int) error {
+	rows, err := tx.Query(ctx, `UPDATE snapshots sn SET host_copy = false
+		WHERE sn.run_id = $1 AND sn.epoch < $2 AND sn.host_copy AND sn.uploaded
+		  AND sn.host_id IS DISTINCT FROM (SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2)
+		RETURNING sn.host_id`, runID, epoch)
+	if err != nil {
+		return err
+	}
+	hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	slices.Sort(hosts)
+	for _, h := range slices.Compact(hosts) {
+		// Not urgent: the hub's delivery sweep sends it after commit.
+		if err := enqueue(ctx, tx, h, runID, 0, proto.MsgSnapshotDiscard, map[string]any{"runId": runID, "beforeEpoch": epoch}); err != nil {
+			return err
+		}
 	}
 	return nil
 }

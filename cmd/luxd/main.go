@@ -138,10 +138,10 @@ func serve(ctx context.Context) error {
 	if cfg.LeaseDuration, err = durationEnv("LUX_LEASE", 30*time.Second); err != nil {
 		return err
 	}
-	if cfg.HostTTL, err = durationEnv("LUX_HOST_TTL", 24*time.Hour); err != nil {
+	if cfg.Tick, err = durationEnv("LUX_TICK", time.Second); err != nil {
 		return err
 	}
-	if cfg.Tick, err = durationEnv("LUX_TICK", time.Second); err != nil {
+	if cfg.RetentionUnit, err = durationEnv("LUX_RETENTION_UNIT", 24*time.Hour); err != nil {
 		return err
 	}
 	cfg.Providers, err = providers(ctx, log)

@@ -220,6 +220,8 @@ class TestEnvironment:
             "LUX_S3_ACCESS_KEY": MINIO_USER,
             "LUX_S3_SECRET_KEY": MINIO_PASSWORD,
             "LUX_S3_REGION": "us-east-1",
+            # A retention "day" is 10s here, so retention is testable.
+            "LUX_RETENTION_UNIT": "10s",
         }
 
     # -- setup --------------------------------------------------------------

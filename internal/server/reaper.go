@@ -180,9 +180,9 @@ func (s *Server) reapRetention(ctx context.Context) error {
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT bl.id, coalesce(bl.s3_key, '') FROM blobs bl
 			JOIN runs r ON r.id = bl.run_id JOIN tenants t ON t.id = r.tenant_id
-			WHERE r.finished_at IS NOT NULL AND r.finished_at < now() - make_interval(days => t.retention_days)
+			WHERE r.finished_at IS NOT NULL AND r.finished_at < now() - t.retention_days * $1::interval
 			  AND bl.location <> 'deleted'
-			LIMIT 100`)
+			LIMIT 100`, interval(s.cfg.RetentionUnit))
 		if err != nil {
 			return err
 		}

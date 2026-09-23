@@ -16,7 +16,8 @@ api_key = "lux_…"
 
 **Exit codes:** `0` success; the Run's own exit code for `run --follow`,
 `run --wait`, `resume --follow` and `wait`; `3` not found; `4` conflict or
-invalid spec (for example, steering a stopped Run); `1` anything else.
+invalid spec (for example, steering a stopped Run); `5` a tenant quota
+was reached; `1` anything else.
 
 ## Runs
 

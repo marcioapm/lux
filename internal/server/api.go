@@ -188,16 +188,37 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func checkRunQuota(ctx context.Context, tx pgx.Tx, tenantID string) error {
-	var max *int
-	var n int
-	if err := tx.QueryRow(ctx, `SELECT max_concurrent_runs, (SELECT count(*) FROM runs
-			WHERE tenant_id = $1 AND state NOT IN ('succeeded', 'failed', 'cancelled', 'stopped', 'lost'))
-		FROM tenants WHERE id = $1`, tenantID).Scan(&max, &n); err != nil {
+// checkRunQuota enforces a tenant's limits on concurrent Runs and on
+// stored bytes (snapshots, output and artifacts not yet deleted by
+// retention). Checked when a Run is submitted or resumed.
+// requireRun is 404 unless the Run exists in the transaction's tenant.
+func requireRun(ctx context.Context, tx pgx.Tx, runID string) error {
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE id = $1)`, runID).Scan(&exists); err != nil {
 		return err
 	}
-	if max != nil && n >= *max {
-		return errf(http.StatusTooManyRequests, "quota_exceeded", "tenant has %d active runs (limit %d)", n, *max)
+	if !exists {
+		return errNotFound
+	}
+	return nil
+}
+
+func checkRunQuota(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	var maxRuns *int
+	var maxBytes *int64
+	var n int
+	var stored int64
+	if err := tx.QueryRow(ctx, `SELECT max_concurrent_runs, max_storage_bytes,
+			(SELECT count(*) FROM runs WHERE tenant_id = $1 AND state NOT IN ('succeeded', 'failed', 'cancelled', 'stopped', 'lost')),
+			(SELECT coalesce(sum(size), 0) FROM blobs WHERE tenant_id = $1 AND location <> 'deleted')
+		FROM tenants WHERE id = $1`, tenantID).Scan(&maxRuns, &maxBytes, &n, &stored); err != nil {
+		return err
+	}
+	if maxRuns != nil && n >= *maxRuns {
+		return errf(http.StatusTooManyRequests, "quota_exceeded", "quota: tenant has %d active runs (limit %d)", n, *maxRuns)
+	}
+	if maxBytes != nil && stored >= *maxBytes {
+		return errf(http.StatusTooManyRequests, "quota_exceeded", "quota: tenant stores %d bytes (limit %d); cancel Runs or wait for retention", stored, *maxBytes)
 	}
 	return nil
 }
@@ -339,12 +360,8 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) error {
 func (s *Server) events(ctx context.Context, tenantID, runID string, after int64) ([]Event, error) {
 	events := []Event{}
 	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
-		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE id = $1)`, runID).Scan(&exists); err != nil {
+		if err := requireRun(ctx, tx, runID); err != nil {
 			return err
-		}
-		if !exists {
-			return errNotFound
 		}
 		rows, err := tx.Query(ctx, `SELECT id, epoch, type, data, created_at FROM run_events
 			WHERE run_id = $1 AND id > $2 ORDER BY id LIMIT 1000`, runID, after)
@@ -583,6 +600,9 @@ func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) error {
 		if req.Input != nil && req.Input.Text != "" {
 			in = &proto.Input{RequestID: ids.New("in"), Text: req.Input.Text}
 		}
+		if err := checkRunQuota(r.Context(), tx, p.TenantID); err != nil {
+			return err
+		}
 		resumed = true
 		// Cached before commit, so the scheduler never sees the Run
 		// resuming without its values.
@@ -665,6 +685,9 @@ func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
 	out := []Snapshot{}
 	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		if err := requireRun(r.Context(), tx, r.PathValue("id")); err != nil {
+			return err
+		}
 		rows, err := tx.Query(r.Context(), `SELECT s.id, s.epoch, s.manifest, s.available,
 				CASE WHEN s.host_copy THEN coalesce(h.name, '') ELSE '' END, s.uploaded, s.created_at
 			FROM snapshots s LEFT JOIN hosts h ON h.id = s.host_id WHERE s.run_id = $1 ORDER BY s.epoch`, r.PathValue("id"))

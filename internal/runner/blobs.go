@@ -239,7 +239,7 @@ func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
 // gcLoop removes local state for Runs that ended here longer ago than the
 // host TTL, once everything is uploaded.
 func (r *Runner) gcLoop(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(r.cfg.GCInterval)
 	defer t.Stop()
 	for {
 		select {
