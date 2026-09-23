@@ -74,6 +74,25 @@ The store unit tests create throwaway databases in the harness's Postgres:
 LUX_TEST_PG='postgres://lux:lux@127.0.0.1:55432/postgres?sslmode=disable' go test ./internal/store
 ```
 
+### A lux to develop against
+
+`--serve` brings the same environment up and leaves it running, with a
+runner on every host and a tenant ready to use:
+
+```sh
+cd tests
+uv run python run_tests.py --serve                       # up until Ctrl-C
+uv run python run_tests.py --serve --detach --hosts 3    # up in the background
+uv run python run_tests.py --serve --image ghcr.io/acme/agent:dev   # preload from local Docker
+uv run python run_tests.py --down                        # take the detached one down
+```
+
+It prints and writes `env.json` in its log directory. `luxd_url` and
+`api_key` (scopes `run` and `read`) are what a client needs. `admin_key`
+and `tenant_id` are there too. `--image` (repeatable) copies an image from
+the local Docker into every host, so Runs using it never pull. The
+`lux-fake` test agent is always preloaded as `localhost/lux-fake:test`.
+
 ### Agent harnesses: one set of tests for every agent
 
 Every coding agent lux drives is described once, in `tests/harnesses.py`:

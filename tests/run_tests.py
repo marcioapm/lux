@@ -7,6 +7,7 @@
     uv run python run_tests.py --keep            # keep containers and database to debug
     uv run python run_tests.py --hosts 3         # more simulated hosts
     uv run python run_tests.py --real-ec2        # EC2 suites against real AWS (nightly)
+    uv run python run_tests.py --serve           # a lux to develop against (see serve.py)
 
 Each invocation gets its own database, bucket, Docker network and hosts, so
 runs do not collide with each other or with a development instance.
@@ -34,7 +35,17 @@ def main() -> None:
     parser.add_argument("--keep", action="store_true", help="keep containers and database after the run")
     parser.add_argument("--hosts", type=int, default=2, help="number of simulated hosts")
     parser.add_argument("--real-ec2", action="store_true", help="run EC2 suites against real AWS")
+    parser.add_argument("--serve", action="store_true", help="bring lux up with runners and a tenant, and keep it up")
+    parser.add_argument("--detach", action="store_true", help="with --serve: return once it is up")
+    parser.add_argument("--down", nargs="?", const="", metavar="ENV_JSON", help="take a detached --serve down")
+    parser.add_argument("--image", action="append", default=[], metavar="REF",
+                        help="with --serve: preload an image from the local Docker into every host (repeatable)")
     args, pytest_args = parser.parse_known_args()
+
+    if args.down is not None:
+        from serve import down
+        down(args.down or None)
+        return
 
     print("building:")
     built = build_binaries()
@@ -44,9 +55,18 @@ def main() -> None:
 
     env = TestEnvironment(n_hosts=args.hosts)
     env.binaries = {k: str(v) if v else None for k, v in built.items()}
-    env.extra["images"] = agent_images
+    env.extra["images"] = {**agent_images, **{ref: ref for ref in args.image}}
     print(f"run id:   {env.run_id}")
     print(f"logs:     {env.log_dir}")
+
+    if args.serve:
+        from serve import serve
+        try:
+            serve(env, fake_image, args.detach)
+        except BaseException:
+            env.teardown()
+            raise
+        return
 
     exit_code = 1
     try:

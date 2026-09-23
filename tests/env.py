@@ -87,6 +87,15 @@ def wait_until(fn, timeout: float = 30, interval: float = 0.3, message: str = "c
     raise AssertionError(f"{message} (after {timeout}s; last: {last!r})")
 
 
+def docker_hub_ref(ref: str) -> str:
+    """The full reference of an image as Docker names it: alpine:3 is
+    docker.io/library/alpine:3, acme/tool is docker.io/acme/tool."""
+    first = ref.split("/", 1)[0]
+    if "/" in ref and ("." in first or ":" in first or first == "localhost"):
+        return ref
+    return ("docker.io/" if "/" in ref else "docker.io/library/") + ref
+
+
 def build_test_image(name: str) -> str:
     """Builds tests/images/<name> as localhost/lux-<name>:test."""
     ctx = Path(__file__).parent / "images" / name
@@ -147,6 +156,7 @@ class Host:
             ],
             stdout=log,
             stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
 
     def runner_pid(self) -> str:
@@ -196,6 +206,10 @@ class TestEnvironment:
     binaries: dict[str, str | None] = field(default_factory=dict)
     fake_image: str | None = None
     extra: dict = field(default_factory=dict)
+    # Set by the dev environment (serve.py): a tenant and its keys.
+    tenant_id: str = ""
+    api_key: str = ""
+    admin_key: str = ""
 
     def __post_init__(self) -> None:
         if not self.log_dir:
@@ -348,12 +362,16 @@ class TestEnvironment:
         with open(tar, "rb") as f:
             subprocess.run(["docker", "exec", "-i", container, "podman", "load", "-q"],
                            stdin=f, check=True, capture_output=True)
-        # docker save records short names (alpine:3.24.2), which podman
-        # loads as localhost/alpine; tag them with the full references specs
-        # use, so no test ever reaches a registry.
-        for ref in PRELOAD_IMAGES:
-            short = ref.removeprefix("docker.io/library/")
-            host.exec("sh", "-c", f"podman image exists {ref} || podman tag localhost/{short} {ref}")
+        # docker save records Docker Hub images by short name (alpine:3.24.2),
+        # which podman loads as localhost/alpine; tag them with the full
+        # references specs use, so nothing ever reaches a registry.
+        for ref in [*PRELOAD_IMAGES, *self.extra.get("images", {}).values()]:
+            if not ref:
+                continue
+            full = docker_hub_ref(ref)
+            short = full.removeprefix("docker.io/library/").removeprefix("docker.io/")
+            if short != full:
+                host.exec("sh", "-c", f"podman image exists {full} || podman tag localhost/{short} {full}")
         return host
 
     def _migrate(self) -> None:
@@ -368,10 +386,13 @@ class TestEnvironment:
     def start_luxd(self, **overrides: str) -> subprocess.Popen:
         Path(self.data_dir).mkdir(parents=True, exist_ok=True)
         log = open(Path(self.log_dir) / "luxd.log", "ab")
+        # Its own session: a terminal's Ctrl-C goes to the harness, which
+        # stops luxd in its teardown, and a detached dev environment's luxd
+        # outlives the harness.
         proc = subprocess.Popen(
             [str(BIN_DIR / "luxd"), "serve"],
             env={**os.environ, **self.luxd_env(), **self.extra.get("luxd_env", {}), **overrides},
-            stdout=log, stderr=subprocess.STDOUT,
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
         )
         (Path(self.log_dir) / "luxd.pid").write_text(str(proc.pid))
         if not self.wait_healthy(proc):
