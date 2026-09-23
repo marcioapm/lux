@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
-	"strconv"
+	"path"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/marcioapm/lux/internal/blob"
 	"github.com/marcioapm/lux/internal/store"
@@ -160,39 +162,40 @@ func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// downloadArtifact redirects to a presigned URL, or streams through luxd
-// with ?proxy=true (for clients that cannot reach S3).
+// downloadArtifact streams an artifact through luxd, as the file the Run
+// wrote. (Blobs are stored zstd-compressed, so a presigned URL would hand
+// out the compressed bytes; luxd decompresses on the way.)
 func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
-	var key, location, ctype string
+	var key, location, ctype, name string
+	var epoch int
 	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location, a.content_type
-			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.id = $1`, r.PathValue("aid")).Scan(&key, &location, &ctype)
+		return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location, a.content_type, a.path, a.epoch
+			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.id = $1`, r.PathValue("aid")).Scan(&key, &location, &ctype, &name, &epoch)
 	})
 	if err != nil {
 		return err
 	}
-	if location != "s3" {
+	switch location {
+	case "s3":
+	case "host":
 		w.Header().Set("Retry-After", "2")
 		return errf(http.StatusConflict, "not_uploaded", "artifact is still being uploaded from its host")
+	default:
+		return errf(http.StatusGone, "gone", "artifact was deleted (retention)")
 	}
-	if r.URL.Query().Get("proxy") == "true" {
-		body, size, err := s.blobs.Get(r.Context(), key)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-		w.Header().Set("Content-Type", ctype)
-		if size > 0 {
-			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-		}
-		_, err = io.Copy(w, body)
-		return err
-	}
-	url, err := s.blobs.PresignGet(r.Context(), key, presignTTL)
+	body, _, err := s.blobs.Get(r.Context(), key)
 	if err != nil {
 		return err
 	}
-	http.Redirect(w, r, url, http.StatusFound)
-	return nil
+	defer body.Close()
+	zr, err := zstd.NewReader(body)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(name)}))
+	_, err = io.Copy(w, zr)
+	return err
 }

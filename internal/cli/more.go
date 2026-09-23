@@ -145,7 +145,10 @@ func (a *app) artifactsCmd() *cobra.Command {
 			}
 			if dir != "" {
 				for _, art := range resp.Artifacts {
-					dst := filepath.Join(dir, fmt.Sprint(art.Epoch), filepath.FromSlash(strings.TrimPrefix(art.Path, "/")))
+					dst, err := downloadPath(dir, art.Epoch, art.Path)
+					if err != nil {
+						return err
+					}
 					if err := a.download(cmd, art.ID, dst); err != nil {
 						return fmt.Errorf("%s: %w", art.Path, err)
 					}
@@ -171,18 +174,25 @@ func (a *app) artifactsCmd() *cobra.Command {
 	return cmd
 }
 
+// downloadPath is where an artifact goes under dir: <epoch>/<its path>.
+// The path is the Run's to choose, so it must stay inside dir.
+func downloadPath(dir string, epoch int, artPath string) (string, error) {
+	base := filepath.Join(dir, fmt.Sprint(epoch))
+	dst := filepath.Join(base, filepath.FromSlash(strings.TrimPrefix(artPath, "/")))
+	if rel, err := filepath.Rel(base, dst); err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%s: path outside the download directory", artPath)
+	}
+	return dst, nil
+}
+
+// download fetches an artifact (luxd streams it) into dst, atomically.
 func (a *app) download(cmd *cobra.Command, id, dst string) error {
 	req, err := http.NewRequestWithContext(ctxOf(cmd), "GET", a.c.Base+"/v1/artifacts/"+id, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+a.c.Key)
-	// The redirect goes to a presigned URL; the API key must not follow it.
-	hc := &http.Client{CheckRedirect: func(r *http.Request, via []*http.Request) error {
-		r.Header.Del("Authorization")
-		return nil
-	}}
-	resp, err := hc.Do(req)
+	resp, err := a.c.HTTP.Do(req)
 	if err != nil {
 		return err
 	}
@@ -194,13 +204,19 @@ func (a *app) download(cmd *cobra.Command, id, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	f, err := os.Create(dst)
+	f, err := os.CreateTemp(filepath.Dir(dst), ".lux-download-*")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+	defer os.Remove(f.Name())
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), dst)
 }
 
 func (a *app) hostsCmd() *cobra.Command {

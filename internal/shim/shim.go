@@ -516,6 +516,11 @@ func (s *Shim) workloadOwns(path string) bool {
 // prepareVolumes hands a fresh (root-owned) volume's root to the workload
 // user, so a non-root workload can write to it.
 func (s *Shim) prepareVolumes() {
+	// $LUX_ARTIFACTS: the workload's to write, whoever it runs as.
+	if s.cfg.ArtifactsDir != "" {
+		_ = s.mkdirForWorkload(s.cfg.ArtifactsDir)
+		_ = os.Chown(s.cfg.ArtifactsDir, s.user.uid, s.user.gid)
+	}
 	if s.user.uid == 0 {
 		return
 	}
@@ -527,10 +532,6 @@ func (s *Shim) prepareVolumes() {
 		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid == 0 {
 			_ = os.Chown(p, s.user.uid, s.user.gid)
 		}
-	}
-	if s.cfg.ArtifactsDir != "" {
-		_ = s.mkdirForWorkload(s.cfg.ArtifactsDir)
-		_ = os.Chown(s.cfg.ArtifactsDir, s.user.uid, s.user.gid)
 	}
 }
 

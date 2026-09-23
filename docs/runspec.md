@@ -159,6 +159,26 @@ It is still in its own user namespace (an unprivileged uid range on the
 host). The containers it starts use the Run's network, so they have its
 egress rules and hard blocks, and nothing more.
 
+## Artifacts
+
+Artifacts are files a Run produces, kept after it ends and downloadable
+with `lux artifacts <run> --download DIR`. They are collected **on every
+exit** (a stop, a failure, a cancel, not only success), per placement:
+
+- files matching `artifacts.paths`: absolute globs on the Run's volumes,
+  where `*` matches within a directory and `**` any depth
+  (`/workspace/out/**`, `/workspace/**/*.xml`);
+- anything the workload writes into `$LUX_ARTIFACTS` while it runs,
+  listed as `/.lux/artifacts/<name>`. That directory is emptied once
+  collected, so each placement publishes its own.
+
+Each artifact is stored like a snapshot blob (uploaded through luxd to S3)
+with its size, sha256 and content type, and listed by placement epoch.
+Downloads stream through luxd as the file the Run wrote.
+
+Limits: 1000 artifacts per placement, 1 GiB per file. Symlinks are never
+collected: a workload's link could point anywhere on the host.
+
 ## Git
 
 lux clones repositories for you, on the host, before the container
