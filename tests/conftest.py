@@ -222,3 +222,45 @@ def fake_agent(image: str, prompt: str = "", adapter: str = "acp", **extra) -> d
         else:
             spec[k] = v
     return spec
+
+
+# ---- agent harnesses --------------------------------------------------------
+
+def pytest_generate_tests(metafunc):
+    """Parameterize every test that takes `harness` over all harnesses:
+    fake variants always, real ones as `agents`-marked cases."""
+    if "harness" not in metafunc.fixturenames:
+        return
+    from harnesses import HARNESSES
+    only = getattr(metafunc.function, "harness_filter", None)
+    params = []
+    for h in HARNESSES:
+        if only and not only(h):
+            continue
+        params.append(pytest.param((h, False), id=f"{h.name}-fake"))
+        if h.credentials:
+            params.append(pytest.param((h, True), id=f"{h.name}-real", marks=pytest.mark.agents))
+    metafunc.parametrize("harness", params, indirect=True)
+
+
+@pytest.fixture
+def harness(request, env: TestEnvironment):
+    """An agent harness, fake or real (see tests/harnesses.py)."""
+    from harnesses import Variant
+    h, real = request.param
+    if real:
+        img = env.extra.get("images", {}).get(h.name)
+        if not img:
+            pytest.skip(f"no real {h.name}: set {', '.join(h.credentials)} and select -m agents")
+        return Variant(h, True, img)
+    _require(env, "lux-fake")
+    return Variant(h, False, env.fake_image)
+
+
+def harnesses(pred):
+    """Decorator: run a harness-parameterized test only for harnesses
+    matching pred (a capability check, e.g. lambda h: h.caps.steer_joins_turn)."""
+    def mark(fn):
+        fn.harness_filter = pred
+        return fn
+    return mark

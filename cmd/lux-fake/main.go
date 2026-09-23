@@ -433,7 +433,8 @@ func acp() {
 //
 // User messages queue and run one turn at a time, each ending with a
 // "result" event. A control_request interrupt cancels the running turn.
-// SIGINT ends the turn cleanly and exits. When stdin closes, queued turns
+// SIGINT ends the turn cleanly and exits 0, as the real CLI does in -p
+// mode. When stdin closes, queued turns
 // finish before it exits, as the real CLI does in -p mode.
 func streamJSON() {
 	a := newAgent()
@@ -458,7 +459,7 @@ func streamJSON() {
 		<-sigs
 		a.cancelTurn()
 		time.Sleep(100 * time.Millisecond)
-		os.Exit(130)
+		os.Exit(0)
 	}()
 	turns := make(chan string, 64)
 	done := make(chan struct{})

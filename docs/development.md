@@ -74,22 +74,37 @@ The store unit tests create throwaway databases in the harness's Postgres:
 LUX_TEST_PG='postgres://lux:lux@127.0.0.1:55432/postgres?sslmode=disable' go test ./internal/store
 ```
 
-### The fake agent
+### Agent harnesses: one set of tests for every agent
 
-`lux-fake` speaks all three agent protocols like a real agent: ACP by
-default, Claude Code's stream-json (`-p --input-format stream-json …`), and
-Codex's app-server (`app-server`). It keeps a transcript on a state
-volume and resumes from it, and it follows a script taken from the prompt
-(`write f text`, `sleep 5`, `print-secret NAME`, `history`, `exit 3`, …).
-With it, steering, stop and resume on another host are all tested without
-a model. See `cmd/lux-fake/main.go`.
+Every coding agent lux drives is described once, in `tests/harnesses.py`:
+its adapter, how to build a spec for it, which credentials it needs, and
+what its protocol can do (`Caps`). `tests/suites/test_agents.py` takes a
+`harness` fixture, so each test runs once per agent, in two variants:
+
+| Variant | What runs | When |
+| --- | --- | --- |
+| `<agent>-fake` | `lux-fake` speaking that agent's protocol | always |
+| `<agent>-real` | the real CLI, with real model calls | with `-m agents` and its credentials |
+
+Tests assert from capabilities, never from an agent's name. For example,
+input sent mid-turn joins the running turn only where
+`caps.steer_joins_turn` (Codex). **Adding an agent is one `Harness` entry**
+(plus a `lux-fake` protocol mode if it speaks a new protocol). Every
+existing test then covers it. Use `@harnesses(pred)` to limit a test to
+the agents it concerns.
+
+`lux-fake` speaks all three protocols: ACP by default, Claude Code's
+stream-json (`-p --input-format stream-json …`), and Codex's app-server
+(`app-server`). It follows a script from the prompt (`write f text`,
+`sleep 5`, `history`, …; see `cmd/lux-fake/main.go`), keeps a transcript on
+a state volume, and resumes from it. Its ACP replies stream in chunks
+without line breaks, as real agents' do.
 
 ### Real agents (opt-in)
 
-`suites/test_agents_real.py` drives the real CLIs through lux. Each agent
-follows the same story: write a file, be steered, stop, resume on another
-host, and answer from the restored conversation. They make model calls, so
-each runs only when its credentials are set:
+The `-real` variants make model calls, so each runs only when its
+credentials are set and the suite is selected with `-m agents` (which also
+makes the harness build the agents' images):
 
 | Agent | Variables |
 | --- | --- |
@@ -98,14 +113,13 @@ each runs only when its credentials are set:
 | OpenCode | `LUX_TEST_OPENCODE_AUTH` (an `auth.json`), `LUX_TEST_OPENCODE_CONFIG` (an `opencode.json`), `LUX_TEST_OPENCODE_MODEL` (`provider/model`) |
 
 ```bash
-LUX_TEST_ANTHROPIC_API_KEY=sk-… uv run python run_tests.py suites/test_agents_real.py
+LUX_TEST_ANTHROPIC_API_KEY=sk-… uv run python run_tests.py suites/test_agents.py -m agents
 ```
 
 The harness copies each CLI installed on the developer machine (the native
 binary, never a Node launcher) into a test image built from
-`tests/images/agent`, only when the suite is selected. Credentials go in as
-secrets: API keys as env secrets, OpenCode's `auth.json` and `opencode.json`
-as file secrets. Without credentials, a suite skips.
+`tests/images/agent`. Credentials go in as secrets, never as mounted
+config.
 
 ### Guards are mutation-checked
 
