@@ -59,3 +59,23 @@ def test_input_before_start_is_rejected(lux, fake_image):
 
 
 
+
+
+def test_fake_conditionals(lux, runners, hosts, fake_image):
+    """lux-fake's if-exists / unless-exists run the rest of the line on a
+    path's presence (for scripted agents that react to the tree)."""
+    runners.start(hosts[0])
+    script = "\n".join([
+        "unless-exists FIXED.md echo finding: not fixed",
+        "if-exists FIXED.md echo WRONG-1",
+        "write FIXED.md done",
+        "unless-exists FIXED.md echo WRONG-2",
+        "if-exists FIXED.md echo fixed now",
+        "if-exists /etc/os-release unless-exists /nope echo nested-ok",
+    ])
+    run_id = lux.submit(fake_agent(fake_image, script))
+    lux.wait_activity(run_id, "idle")
+    out = lux.logs(run_id)
+    assert "finding: not fixed" in out and "fixed now" in out and "nested-ok" in out, out
+    assert "WRONG" not in out, out
+    lux.run("cancel", run_id)

@@ -21,6 +21,8 @@
 //	cat-file <path>        reply with a file's contents (absolute path)
 //	commit <message>       git add -A and commit in the working directory;
 //	                       reply "committed <sha>"
+//	if-exists <path> <cmd...>      run the rest of the line only if path
+//	unless-exists <path> <cmd...>  exists (does not exist); relative to cwd
 //	stderr <text>          write to stderr
 //	history                reply with every prompt so far in this session
 //	exit <code>            exit the process
@@ -245,58 +247,8 @@ func (a *agent) runScript(script string, cancel chan struct{}) bool {
 		if line == "" {
 			continue
 		}
-		cmd, rest, _ := strings.Cut(line, " ")
-		switch cmd {
-		case "echo":
-			a.say(rest)
-		case "write", "append":
-			file, text, _ := strings.Cut(rest, " ")
-			flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
-			if cmd == "append" {
-				flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
-			}
-			_ = os.MkdirAll(filepath.Dir(a.path(file)), 0o755)
-			if err := appendFile(a.path(file), flag, text+"\n"); err != nil {
-				a.say("error: " + err.Error())
-				continue
-			}
-			a.say("wrote " + file)
-		case "read", "cat-file":
-			b, err := os.ReadFile(a.path(rest))
-			if err != nil {
-				a.say("error: " + err.Error())
-				continue
-			}
-			a.say(strings.TrimRight(string(b), "\n"))
-		case "sleep":
-			secs, _ := strconv.ParseFloat(rest, 64)
-			select {
-			case <-time.After(time.Duration(secs * float64(time.Second))):
-			case <-cancel:
-				a.say("cancelled")
-				return true
-			}
-		case "print-secret":
-			a.say(os.Getenv(rest))
-		case "commit":
-			a.say(a.commit(rest))
-		case "stderr":
-			fmt.Fprintln(os.Stderr, rest)
-		case "history":
-			var parts []string
-			for _, e := range a.history() {
-				if e.Role == "user" {
-					parts = append(parts, e.Text)
-				}
-			}
-			a.say("history: " + strings.Join(parts, " | "))
-		case "exit":
-			code, _ := strconv.Atoi(rest)
-			os.Exit(code)
-		case "ask":
-			a.say("permission: " + a.ask())
-		default:
-			a.say("you said: " + line)
+		if a.runLine(line, cancel) {
+			return true
 		}
 		select {
 		case <-cancel:
@@ -304,6 +256,70 @@ func (a *agent) runScript(script string, cancel chan struct{}) bool {
 			return true
 		default:
 		}
+	}
+	return false
+}
+
+// runLine runs one script command; true if it was cancelled.
+func (a *agent) runLine(line string, cancel chan struct{}) bool {
+	cmd, rest, _ := strings.Cut(line, " ")
+	switch cmd {
+	case "if-exists", "unless-exists":
+		path, then, _ := strings.Cut(rest, " ")
+		_, err := os.Stat(a.path(path))
+		if (err == nil) == (cmd == "if-exists") && strings.TrimSpace(then) != "" {
+			return a.runLine(strings.TrimSpace(then), cancel)
+		}
+	case "echo":
+		a.say(rest)
+	case "write", "append":
+		file, text, _ := strings.Cut(rest, " ")
+		flag := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+		if cmd == "append" {
+			flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+		}
+		_ = os.MkdirAll(filepath.Dir(a.path(file)), 0o755)
+		if err := appendFile(a.path(file), flag, text+"\n"); err != nil {
+			a.say("error: " + err.Error())
+			return false
+		}
+		a.say("wrote " + file)
+	case "read", "cat-file":
+		b, err := os.ReadFile(a.path(rest))
+		if err != nil {
+			a.say("error: " + err.Error())
+			return false
+		}
+		a.say(strings.TrimRight(string(b), "\n"))
+	case "sleep":
+		secs, _ := strconv.ParseFloat(rest, 64)
+		select {
+		case <-time.After(time.Duration(secs * float64(time.Second))):
+		case <-cancel:
+			a.say("cancelled")
+			return true
+		}
+	case "print-secret":
+		a.say(os.Getenv(rest))
+	case "commit":
+		a.say(a.commit(rest))
+	case "stderr":
+		fmt.Fprintln(os.Stderr, rest)
+	case "history":
+		var parts []string
+		for _, e := range a.history() {
+			if e.Role == "user" {
+				parts = append(parts, e.Text)
+			}
+		}
+		a.say("history: " + strings.Join(parts, " | "))
+	case "exit":
+		code, _ := strconv.Atoi(rest)
+		os.Exit(code)
+	case "ask":
+		a.say("permission: " + a.ask())
+	default:
+		a.say("you said: " + line)
 	}
 	return false
 }
