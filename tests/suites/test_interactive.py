@@ -54,12 +54,10 @@ def test_exec_does_not_outlive_its_client(lux, runners, hosts):
     lux.wait_output(run_id, "up")
     marker = "7" + str(int(time.time() * 1000) % 10**7)
     p = lux.popen("exec", run_id, "-T", "--", "sleep", marker)
-    wait_until(lambda: f"sleep\x00{marker}" in host.exec("sh", "-c", "cat /proc/[0-9]*/cmdline 2>/dev/null; true"),
-               20, 0.3, "the exec never started")
+    wait_until(lambda: host.running("sleep", marker), 20, 0.3, "the exec never started")
     p.kill()
     p.wait()
-    wait_until(lambda: f"sleep\x00{marker}" not in host.exec("sh", "-c", "cat /proc/[0-9]*/cmdline 2>/dev/null; true"),
-               20, 0.3, "the exec'd command outlived its client")
+    wait_until(lambda: not host.running("sleep", marker), 20, 0.3, "the exec'd command outlived its client")
     lux.run("cancel", run_id)
 
 
@@ -71,10 +69,9 @@ def test_attach_to_a_terminal_workload(lux, runners, hosts):
     spec["workload"]["tty"] = True
     run_id = lux.submit(spec)
     lux.wait_output(run_id, "started")
-    p = subprocess.Popen([str(lux_bin()), "attach", run_id], env=lux._env(), stdin=subprocess.PIPE,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p = lux.popen("attach", run_id, stdin=subprocess.PIPE)
     time.sleep(1)
-    p.stdin.write(b"hello-attach\n")
+    p.stdin.write("hello-attach\n")
     p.stdin.flush()
     wait_until(lambda: "got:hello-attach" in lux.logs(run_id), 20, 0.3, "input never reached the terminal")
     p.stdin.close()
@@ -134,7 +131,3 @@ def test_streams_need_the_runs_tenant(lux, tenant_factory, runners, hosts):
     assert "not found" in e.value.stderr.lower(), e.value.stderr
     lux.run("cancel", run_id)
 
-
-def lux_bin():
-    from env import BIN_DIR
-    return BIN_DIR / "lux"

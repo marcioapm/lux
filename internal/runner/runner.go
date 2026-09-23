@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -156,7 +155,11 @@ func (r *Runner) Run(ctx context.Context) error {
 				return fmt.Errorf("--nested needs %s: %w", dev, err)
 			}
 		}
-		p, err := writeNestedSeccomp(ctx, r.cfg.DataDir, r.hostSeccompProfile(ctx))
+		host, err := r.hostSeccompProfile(ctx)
+		if err != nil {
+			return err
+		}
+		p, err := writeNestedSeccomp(r.cfg.DataDir, host)
 		if err != nil {
 			return err
 		}
@@ -172,21 +175,6 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-// labels are the configured labels, plus what this host offers.
-func (r *Runner) labels() map[string]string {
-	l := maps.Clone(r.cfg.Labels)
-	if l == nil {
-		l = map[string]string{}
-	}
-	// Set here, never trusted from --label: a Run asking for nested
-	// containers must land on a host that gives them.
-	delete(l, "nested")
-	if r.nestedSeccomp != "" {
-		l["nested"] = "true"
-	}
-	return l
-}
-
 func (r *Runner) hello(ctx context.Context) proto.Hello {
 	pv, _ := r.pm.Version(ctx)
 	imgs, _ := r.pm.Images(ctx)
@@ -198,7 +186,8 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 		ShimVersion:     r.shimV,
 		PodmanVersion:   pv,
 		Arch:            runtime.GOARCH,
-		Labels:          r.labels(),
+		Labels:          r.cfg.Labels,
+		Nested:          r.nestedSeccomp != "",
 		Capacity:        proto.Capacity{CPUs: r.cfg.CPUs, Memory: r.cfg.Memory, Runs: r.cfg.MaxRuns},
 		Images:          imgs,
 		GitMirrors:      r.git.Mirrors(),

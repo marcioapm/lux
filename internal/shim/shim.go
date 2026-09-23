@@ -31,7 +31,6 @@ import (
 	"github.com/marcioapm/lux/internal/adapter"
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/proto"
-	"golang.org/x/sys/unix"
 )
 
 type Shim struct {
@@ -190,10 +189,9 @@ func (s *Shim) run() int {
 	case <-adDone:
 	case <-time.After(5 * time.Second):
 	}
-	info := proto.ExitInfo{ExitCode: ws.ExitStatus(), Reason: "exited"}
+	info := proto.ExitInfo{ExitCode: exitCode(ws), Reason: "exited"}
 	if ws.Signaled() {
 		info.Signal = ws.Signal().String()
-		info.ExitCode = 128 + int(ws.Signal())
 	}
 	if s.isStopping() {
 		info.Reason = "stopped"
@@ -239,8 +237,6 @@ func (s *Shim) reap() {
 			}
 			s.mu.Lock()
 			work, init := s.workPid, s.initPid
-			s.mu.Unlock()
-			s.mu.Lock()
 			stream := s.streams[pid]
 			delete(s.streams, pid)
 			s.mu.Unlock()
@@ -548,9 +544,7 @@ func (s *Shim) command(argv []string, env []string) *exec.Cmd {
 	if s.user.uid != 0 || s.user.gid != 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(s.user.uid), Gid: uint32(s.user.gid), Groups: s.user.groups}
 	}
-	if s.cfg.Nested {
-		cmd.SysProcAttr.AmbientCaps = []uintptr{unix.CAP_SETUID, unix.CAP_SETGID}
-	}
+	cmd.SysProcAttr.AmbientCaps = s.cfg.AmbientCaps
 	// Resolve argv[0] with the workload's PATH, not the shim's.
 	if !strings.Contains(argv[0], "/") {
 		for _, kv := range env {
@@ -591,10 +585,7 @@ func (s *Shim) runInit(env []string) (int, error) {
 	s.mu.Lock()
 	s.initPid = 0
 	s.mu.Unlock()
-	code := ws.ExitStatus()
-	if ws.Signaled() {
-		code = 128 + int(ws.Signal())
-	}
+	code := exitCode(ws)
 	s.out.Event(proto.EvInit, map[string]any{"phase": "done", "exitCode": code})
 	return code, nil
 }

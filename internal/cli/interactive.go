@@ -2,23 +2,20 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
-	"sync"
 	"syscall"
 
 	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
-
-func jsonUnmarshalString(s string, v any) error { return json.Unmarshal([]byte(s), v) }
 
 func (a *app) execCmd() *cobra.Command {
 	var tty, noTTY bool
@@ -32,7 +29,7 @@ it off).`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
-			useTTY := (tty || term.IsTerminal(int(os.Stdin.Fd()))) && !noTTY
+			useTTY := (tty || a.stdinTerminal()) && !noTTY
 			ws, err := a.c.Dial(ctx, "/v1/runs/"+args[0]+"/exec")
 			if err != nil {
 				return err
@@ -42,7 +39,7 @@ it off).`,
 			if useTTY {
 				open.Cols, open.Rows, _ = term.GetSize(int(os.Stdout.Fd()))
 			}
-			if err := wsWrite(ctx, ws, open); err != nil {
+			if err := wsjson.Write(ctx, ws, open); err != nil {
 				return err
 			}
 			return a.interact(ctx, ws, useTTY)
@@ -68,19 +65,26 @@ workload keeps running).`,
 				return err
 			}
 			defer ws.CloseNow()
-			return a.interact(ctx, ws, term.IsTerminal(int(os.Stdin.Fd())))
+			return a.interact(ctx, ws, a.stdinTerminal())
 		},
 	}
 }
 
-// interact connects the terminal to a stream until it ends, and returns
-// the remote exit code as the command's.
+// stdinTerminal: whether the CLI's stdin is a terminal (raw mode, sizes).
+func (a *app) stdinTerminal() bool {
+	f, ok := a.stdin.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
+// interact connects stdin and stdout to a stream until it ends, and
+// returns the remote exit code as the command's.
 func (a *app) interact(ctx context.Context, ws *websocket.Conn, raw bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if raw {
-		if st, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
-			defer term.Restore(int(os.Stdin.Fd()), st)
+		fd := int(a.stdin.(*os.File).Fd())
+		if st, err := term.MakeRaw(fd); err == nil {
+			defer term.Restore(fd, st)
 		}
 		// Window size changes follow the local terminal.
 		winch := make(chan os.Signal, 1)
@@ -89,36 +93,27 @@ func (a *app) interact(ctx context.Context, ws *websocket.Conn, raw bool) error 
 		go func() {
 			for range winch {
 				if c, r, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
-					_ = wsWrite(ctx, ws, proto.StreamData{Rows: r, Cols: c})
+					_ = wsjson.Write(ctx, ws, proto.StreamData{Rows: r, Cols: c})
 				}
 			}
 		}()
 	}
 	go func() {
-		buf := make([]byte, 32<<10)
-		for {
-			n, err := a.stdin.Read(buf)
-			if n > 0 {
-				// Ctrl-] detaches from a terminal session.
-				if raw && n == 1 && buf[0] == 0x1d {
-					cancel()
-					return
-				}
-				if wsWrite(ctx, ws, proto.StreamData{Data: append([]byte{}, buf[:n]...)}) != nil {
-					return
-				}
+		pump(a.stdin, func(b []byte) bool {
+			// Ctrl-] detaches from a terminal session.
+			if raw && len(b) == 1 && b[0] == 0x1d {
+				cancel()
+				return false
 			}
-			if err != nil {
-				_ = wsWrite(ctx, ws, proto.StreamData{EOF: true})
-				return
-			}
-		}
+			return wsjson.Write(ctx, ws, proto.StreamData{Data: b}) == nil
+		})
+		_ = wsjson.Write(ctx, ws, proto.StreamData{EOF: true})
 	}()
 	for {
 		var d proto.StreamData
-		if err := wsRead(ctx, ws, &d); err != nil {
-			if ctx.Err() != nil {
-				return nil // detached
+		if err := wsjson.Read(ctx, ws, &d); err != nil {
+			if ctx.Err() != nil || websocket.CloseStatus(err) == websocket.StatusNormalClosure {
+				return nil // detached, or the stream just ended
 			}
 			return fmt.Errorf("stream ended: %w", err)
 		}
@@ -148,17 +143,13 @@ port the Run declares in network.ports. Runs until interrupted.`,
 		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
-			port, err := strconv.Atoi(args[2])
-			if err != nil {
-				return fmt.Errorf("local port: %w", err)
-			}
-			// Check before listening: a wrong name or a stopped Run fails now.
-			probe, err := a.c.Dial(ctx, "/v1/runs/"+args[0]+"/ports/"+args[1])
-			if err != nil {
+			path := "/v1/runs/" + args[0] + "/ports/" + args[1]
+			// Check before listening: a wrong name or a stopped Run fails
+			// now (the same URL, without the upgrade, only checks).
+			if err := a.c.Do(ctx, "GET", path, nil, nil); err != nil {
 				return err
 			}
-			probe.CloseNow()
-			ln, err := net.Listen("tcp", net.JoinHostPort(address, strconv.Itoa(port)))
+			ln, err := net.Listen("tcp", net.JoinHostPort(address, args[2]))
 			if err != nil {
 				return err
 			}
@@ -173,7 +164,7 @@ port the Run declares in network.ports. Runs until interrupted.`,
 					}
 					return err
 				}
-				go a.tunnel(ctx, c, "/v1/runs/"+args[0]+"/ports/"+args[1])
+				go a.tunnel(ctx, c, path)
 			}
 		},
 	}
@@ -192,34 +183,14 @@ func (a *app) tunnel(ctx context.Context, c net.Conn, path string) {
 	defer ws.CloseNow()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var once sync.Once
 	go func() {
-		defer once.Do(cancel)
-		buf := make([]byte, 32<<10)
-		for {
-			n, err := c.Read(buf)
-			if n > 0 {
-				if wsWrite(ctx, ws, proto.StreamData{Data: append([]byte{}, buf[:n]...)}) != nil {
-					return
-				}
-			}
-			if err != nil {
-				_ = wsWrite(ctx, ws, proto.StreamData{EOF: true})
-				// Keep reading the other way until the remote side ends.
-				<-ctx.Done()
-				return
-			}
-		}
+		pump(c, func(b []byte) bool { return wsjson.Write(ctx, ws, proto.StreamData{Data: b}) == nil })
+		// Half-closed: the other way keeps going until the remote ends.
+		_ = wsjson.Write(ctx, ws, proto.StreamData{EOF: true})
 	}()
 	for {
 		var d proto.StreamData
-		if err := wsRead(ctx, ws, &d); err != nil {
-			return
-		}
-		if d.ExitCode != nil || d.Error != "" {
-			if tc, ok := c.(*net.TCPConn); ok {
-				_ = tc.CloseWrite()
-			}
+		if wsjson.Read(ctx, ws, &d) != nil || d.ExitCode != nil || d.Error != "" {
 			return
 		}
 		if _, err := c.Write(d.Data); err != nil {
@@ -228,18 +199,17 @@ func (a *app) tunnel(ctx context.Context, c net.Conn, path string) {
 	}
 }
 
-func wsRead(ctx context.Context, ws *websocket.Conn, v any) error {
-	_, b, err := ws.Read(ctx)
-	if err != nil {
-		return err
+// pump reads r in chunks and hands each to fn (valid only until fn
+// returns) until r ends or fn returns false.
+func pump(r io.Reader, fn func([]byte) bool) {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 && !fn(buf[:n]) {
+			return
+		}
+		if err != nil {
+			return
+		}
 	}
-	return json.Unmarshal(b, v)
-}
-
-func wsWrite(ctx context.Context, ws *websocket.Conn, v any) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	return ws.Write(ctx, websocket.MessageText, b)
 }

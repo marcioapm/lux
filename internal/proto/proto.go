@@ -23,7 +23,10 @@ type Frame struct {
 	ID    int64           `json:"id,omitempty"`
 	RunID string          `json:"runId,omitempty"`
 	Epoch int             `json:"epoch,omitempty"`
-	Data  json.RawMessage `json:"data,omitempty"`
+	// Stream routes interactive-stream frames (stream.*) without parsing
+	// their data.
+	Stream string          `json:"stream,omitempty"`
+	Data   json.RawMessage `json:"data,omitempty"`
 }
 
 // luxd → runner
@@ -68,7 +71,10 @@ type Hello struct {
 	PodmanVersion   string            `json:"podmanVersion"`
 	Arch            string            `json:"arch"`
 	Labels          map[string]string `json:"labels"`
-	Capacity        Capacity          `json:"capacity"`
+	// Nested: the host offers nested containers (lux-runner --nested).
+	// luxd labels it nested=true; no configured label can.
+	Nested   bool     `json:"nested,omitempty"`
+	Capacity Capacity `json:"capacity"`
 	Images          []string          `json:"images"`
 	GitMirrors      []string          `json:"gitMirrors"`
 	// Runs whose state volumes are on this host, and as of which epoch.
@@ -280,9 +286,11 @@ type StreamOpen struct {
 	Cols     int      `json:"cols,omitempty"`
 }
 
+// StreamData is one message of an interactive stream, on every link:
+// client ↔ luxd, luxd ↔ runner (in a Frame, Frame.Stream naming the
+// stream) and runner ↔ shim (JSON lines after the ShimStream handshake).
 type StreamData struct {
-	StreamID string `json:"streamId"`
-	Data     []byte `json:"data,omitempty"`
+	Data []byte `json:"data,omitempty"`
 	// Resize, for PTYs.
 	Rows int `json:"rows,omitempty"`
 	Cols int `json:"cols,omitempty"`

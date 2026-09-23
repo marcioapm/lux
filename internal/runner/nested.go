@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/marcioapm/lux/internal/spec"
+	"golang.org/x/sys/unix"
 )
 
 // Nested containers: a Run with sandbox.nestedContainers can run rootless
@@ -43,12 +45,21 @@ func (p *placement) extraArgs(sp spec.RunSpec) []string {
 	}
 }
 
+// ambientCaps are the capabilities the workload keeps as ambient: for
+// nested containers, newuidmap and newgidmap's (CAP_SETUID, CAP_SETGID).
+func ambientCaps(sp spec.RunSpec) []uintptr {
+	if !sp.Sandbox.NestedContainers {
+		return nil
+	}
+	return []uintptr{unix.CAP_SETUID, unix.CAP_SETGID}
+}
+
 // nestedSyscalls are what the nested profile allows beyond the host's.
 var nestedSyscalls = []string{"sethostname", "setdomainname", "setns"}
 
 // writeNestedSeccomp derives the nested-containers seccomp profile from the
 // host's default one and writes it under the data directory.
-func writeNestedSeccomp(ctx context.Context, dataDir, hostProfile string) (string, error) {
+func writeNestedSeccomp(dataDir, hostProfile string) (string, error) {
 	b, err := os.ReadFile(hostProfile)
 	if err != nil {
 		return "", fmt.Errorf("seccomp profile: %w", err)
@@ -85,10 +96,13 @@ func writeNestedSeccomp(ctx context.Context, dataDir, hostProfile string) (strin
 }
 
 // hostSeccompProfile is the profile Podman uses by default on this host.
-func (r *Runner) hostSeccompProfile(ctx context.Context) string {
+func (r *Runner) hostSeccompProfile(ctx context.Context) (string, error) {
 	out, err := r.pm.Run(ctx, "info", "--format", "{{.Host.Security.SECCOMPProfilePath}}")
-	if p := strings.TrimSpace(string(out)); err == nil && p != "" {
-		return p
+	if err != nil {
+		return "", fmt.Errorf("podman's seccomp profile: %w", err)
 	}
-	return "/usr/share/containers/seccomp.json"
+	if p := strings.TrimSpace(string(out)); p != "" {
+		return p, nil
+	}
+	return "", errors.New("podman reports no default seccomp profile: nested containers need one to extend")
 }

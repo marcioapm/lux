@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -279,7 +280,7 @@ func (a *app) poolsCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p.Name = args[0]
 			if template != "" {
-				if err := jsonUnmarshalString(template, &p.Template); err != nil {
+				if err := json.Unmarshal([]byte(template), &p.Template); err != nil {
 					return fmt.Errorf("--template: %w", err)
 				}
 			}

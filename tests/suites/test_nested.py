@@ -5,10 +5,10 @@ namespace, and what it starts inside has the Run's egress and no more."""
 
 from __future__ import annotations
 
+from build import NESTED_IMAGE as NESTED
 from conftest import generic
 from env import ALPINE_IMAGE
 
-NESTED = "localhost/lux-nested:test"
 INNER = f"podman load -q -i /opt/alpine.tar >/dev/null && podman run --rm {ALPINE_IMAGE}"
 
 

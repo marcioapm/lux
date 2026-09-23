@@ -41,23 +41,24 @@ type placement struct {
 	assign   *proto.Assign // nil when re-adopted after a runner restart
 	dir      string
 
-	mu       sync.Mutex
-	state    *runState
-	phase    string // assigned | starting | running | stopping | exited | done
-	stale    bool
-	stopWhy  string
+	mu      sync.Mutex
+	state   *runState
+	phase   string // assigned | starting | running | stopping | exited | done
+	stale   bool
+	stopWhy string
 	// cancelStart ends the steps before the container starts (an image
 	// build, a pull, a clone) when the placement is stopped meanwhile.
 	cancelStart context.CancelFunc
 	shimConn    net.Conn
-	shimEnc  *json.Encoder
-	done     chan struct{}
-	session  string      // latest session id the adapter reported
-	user     passwd.User // who the workload runs as
-	peakDisk int64
-	netRx    int64
-	netTx    int64
-	cgroup   string
+	shimEnc     *json.Encoder
+	done        chan struct{}
+	session     string      // latest session id the adapter reported
+	user        passwd.User // who the workload runs as
+	peakDisk    int64
+	netRx       int64
+	netTx       int64
+	cgroup      string
+	ip          string // the container's address, once looked up
 }
 
 func newPlacement(r *Runner, a proto.Assign) *placement {
@@ -649,7 +650,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image 
 		GraceSec:     sp.Workload.Grace.Seconds(),
 		Secrets:      sp.Secrets,
 		ArtifactsDir: "/.lux/run/artifacts",
-		Nested:       sp.Sandbox.NestedContainers,
+		AmbientCaps:  ambientCaps(sp),
 	}
 	if sp.Init != nil {
 		cfg.Init = sp.Init.Script

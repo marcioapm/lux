@@ -159,6 +159,11 @@ class Host:
             start_new_session=True,
         )
 
+    def running(self, *argv: str) -> bool:
+        """Whether a process with exactly this command line runs here."""
+        want = "\x00".join(argv) + "\x00"
+        return want in self.exec("sh", "-c", "cat /proc/[0-9]*/cmdline 2>/dev/null; true")
+
     def runner_pid(self) -> str:
         pid = self.exec("cat", "/run/lux-runner.pid", check=False).strip()
         if pid and self.exec("sh", "-c", f"kill -0 {pid} 2>/dev/null && echo alive", check=False).strip() == "alive":

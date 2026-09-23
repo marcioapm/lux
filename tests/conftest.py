@@ -71,8 +71,8 @@ class Lux:
         out = self.run(*args, "-o", "json", **kw).stdout
         return json.loads(out)
 
-    def popen(self, *args: str) -> subprocess.Popen:
-        return subprocess.Popen([str(BIN_DIR / "lux"), *args], env=self._env(),
+    def popen(self, *args: str, stdin=None) -> subprocess.Popen:
+        return subprocess.Popen([str(BIN_DIR / "lux"), *args], env=self._env(), stdin=stdin,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     # -- conveniences ---------------------------------------------------

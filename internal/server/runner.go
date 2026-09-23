@@ -39,9 +39,10 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 	for k, v := range h.Labels {
 		labels[k] = v
 	}
-	// What the host offers is the runner's to say, never the token's.
+	// What the host is and offers, from the runner itself: never a
+	// configured label.
 	delete(labels, "nested")
-	if h.Labels["nested"] == "true" {
+	if h.Nested {
 		labels["nested"] = "true"
 	}
 	labels["arch"] = h.Arch

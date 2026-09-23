@@ -57,10 +57,11 @@ type ShimConfig struct {
 	Secrets []spec.Secret `json:"secrets,omitempty"`
 	// ArtifactsDir is watched for on-demand artifacts ($LUX_ARTIFACTS).
 	ArtifactsDir string `json:"artifactsDir,omitempty"`
-	// Nested: the workload keeps CAP_SETUID and CAP_SETGID as ambient
-	// capabilities, which rootless Podman inside it needs to map its
-	// containers' ids (newuidmap cannot gain them: no-new-privileges).
-	Nested bool `json:"nested,omitempty"`
+	// AmbientCaps are capabilities the workload's processes keep (ambient)
+	// when the shim switches to the workload user, e.g. CAP_SETUID for
+	// nested containers: under no-new-privileges they cannot be gained from
+	// file capabilities. Numbers, as in linux/capability.h.
+	AmbientCaps []uintptr `json:"ambientCaps,omitempty"`
 }
 
 // ShimMsg is one line on the shim socket, either direction.
@@ -71,14 +72,8 @@ type ShimMsg struct {
 	Input   *Input            `json:"input,omitempty"` // start (first input), input
 	// stop
 	Reason string `json:"reason,omitempty"`
-	// exec / attach: the stream's first message, then its data
-	Stream   *StreamOpen `json:"stream,omitempty"`
-	Data     []byte      `json:"data,omitempty"`
-	Channel  string      `json:"ch,omitempty"` // stdout | stderr, for output
-	EOF      bool        `json:"eof,omitempty"`
-	Rows     int         `json:"rows,omitempty"` // a resize
-	Cols     int         `json:"cols,omitempty"`
-	ExitCode *int        `json:"exitCode,omitempty"`
+	// A stream's handshake: the connection then carries StreamData lines.
+	Stream *StreamOpen `json:"stream,omitempty"`
 	// replies
 	Error string `json:"error,omitempty"`
 	OK    bool   `json:"ok,omitempty"`
@@ -91,10 +86,9 @@ const (
 	ShimStop      = "stop"
 	ShimPing      = "ping"
 	// A connection that starts with stream (exec, attach) carries only that
-	// stream: data both ways, then exit.
+	// stream from then on, as StreamData lines both ways; the shim's last
+	// one has ExitCode or Error.
 	ShimStream = "stream"
-	ShimData   = "data"
-	ShimExit   = "exit"
 )
 
 // Event types the shim writes as ch=event records. The runner forwards the

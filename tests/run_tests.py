@@ -55,7 +55,10 @@ def main() -> None:
 
     env = TestEnvironment(n_hosts=args.hosts)
     env.binaries = {k: str(v) if v else None for k, v in built.items()}
-    env.extra["images"] = {**agent_images, "nested": build_nested_image(), **{ref: ref for ref in args.image}}
+    # The nested image is only for its suite (a full run, or one naming it).
+    selected = [a for a in pytest_args if not a.startswith("-")]
+    nested = build_nested_image() if not selected or any("nested" in a for a in selected) else None
+    env.extra["images"] = {**agent_images, "nested": nested, **{ref: ref for ref in args.image}}
     print(f"run id:   {env.run_id}")
     print(f"logs:     {env.log_dir}")
 

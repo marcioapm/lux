@@ -147,13 +147,9 @@ func (c *conn) dispatch(ctx context.Context, f proto.Frame) {
 			ch <- f
 		}
 	case proto.MsgStreamOpen, proto.MsgStreamData, proto.MsgStreamClose:
-		// Live, not durable: no ack. A stream's frames are handled in
-		// order (its input must not be reordered), streams independently.
-		var ref struct {
-			StreamID string `json:"streamId"`
-		}
-		_ = json.Unmarshal(f.Data, &ref)
-		c.r.control.enqueue("stream/"+ref.StreamID, func() { c.r.handleStream(ctx, f) })
+		// Live, not durable: no ack. Handled here, in the order read, so
+		// a stream's input stays in order (see stream.go).
+		c.r.handleStreamFrame(ctx, f)
 	case proto.MsgOutputSubscribe, proto.MsgOutputCancel:
 		// Live, not durable: no ack.
 		go c.r.handleLive(ctx, f)

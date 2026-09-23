@@ -183,8 +183,7 @@ def test_cancel_ends_a_build(lux, runners, hosts):
     time.sleep(1)
     lux.run("cancel", run_id)
     lux.wait_state(run_id, "cancelled", timeout=30)
-    wait_until(lambda: f"sleep\x00{marker}" not in host.exec("sh", "-c", "cat /proc/[0-9]*/cmdline 2>/dev/null; true"),
-               20, 0.5, "the build is still running")
+    wait_until(lambda: not host.running("sleep", marker), 20, 0.5, "the build is still running")
     assert "chain run_" not in host.exec("nft", "list", "table", "inet", "lux")
 
 

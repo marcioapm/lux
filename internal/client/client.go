@@ -136,8 +136,7 @@ func (c *Client) Stream(ctx context.Context, path string, q url.Values, fn func(
 // carrying JSON messages (see the server's stream.go). An API error
 // before the upgrade (not running, no such port) is returned as such.
 func (c *Client) Dial(ctx context.Context, path string) (*websocket.Conn, error) {
-	u := c.Base + path
-	u = "ws" + strings.TrimPrefix(u, "http")
+	u := "ws" + strings.TrimPrefix(c.Base+path, "http")
 	ws, resp, err := websocket.Dial(ctx, u, &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + c.Key}},
 		HTTPClient: c.HTTP,

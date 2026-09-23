@@ -264,13 +264,14 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 			if err := s.ackMessage(ctx, c.hostID, f.ID); err != nil {
 				s.log.Warn("ack", "err", err)
 			}
-		case proto.MsgOutputRecords, proto.MsgOutputEnd, proto.MsgStreamData, proto.MsgStreamClose:
+		case proto.MsgStreamData, proto.MsgStreamClose:
+			s.hub.route(f.Stream, f)
+		case proto.MsgOutputRecords, proto.MsgOutputEnd:
 			var ref struct {
-				SubID    string `json:"subId"`
-				StreamID string `json:"streamId"`
+				SubID string `json:"subId"`
 			}
 			_ = json.Unmarshal(f.Data, &ref)
-			s.hub.route(ref.SubID+ref.StreamID, f)
+			s.hub.route(ref.SubID, f)
 		default:
 			reply := s.handleReport(ctx, c.hostID, f)
 			select {

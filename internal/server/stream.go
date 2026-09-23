@@ -7,159 +7,171 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
 // Interactive access: GET /v1/runs/{id}/exec, /attach and /ports/{name}
 // upgrade to a WebSocket, relayed to the Run's host.
 //
-// Client protocol (JSON text messages):
+// Client protocol (JSON text messages, proto.StreamData):
 //   - exec: the client sends one proto.StreamOpen first ({"command":[...],
 //     "tty":true,"rows":..,"cols":..}); attach and ports need none.
-//   - then proto.StreamData both ways: {"data":<base64>} for bytes,
-//     {"eof":true} to close input, {"rows","cols"} to resize;
-//   - luxd ends with one {"exitCode":N} or {"error":"..."} and closes.
+//   - then StreamData both ways: {"data":<base64>} for bytes, {"eof":true}
+//     to close input, {"rows","cols"} to resize;
+//   - the stream ends with one {"exitCode":N} (exec) or {"error":"..."}, or
+//     just the socket closing (a tunnel whose connection ended), and luxd
+//     closes.
 //
-// A stream ends with its WebSocket; nothing is replayed.
+// Without the WebSocket upgrade, the same URL answers 200 if the stream
+// could be opened and the error it would get otherwise, so a client can
+// check first (lux port-forward does, before listening).
 
-func (s *Server) streamHandler(kind string) handler {
-	return func(w http.ResponseWriter, r *http.Request) error { return s.streamRun(w, r, kind) }
+type streamTarget struct {
+	hostID string
+	epoch  int
+	port   int
 }
 
-func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, kind string) error {
+// resolveStream checks a stream can be opened and finds where it goes.
+func (s *Server) resolveStream(r *http.Request, kind string) (streamTarget, error) {
 	p := principal(r)
 	runID := r.PathValue("id")
-	var hostID string
-	var epoch, port int
+	var t streamTarget
 	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		run, err := s.loadRun(r.Context(), p.TenantID, runID, false)
+		var state string
+		var sp spec.RunSpec
+		err := tx.QueryRow(r.Context(), `SELECT r.state, r.spec, r.current_epoch, coalesce(p.host_id, '')
+			FROM runs r LEFT JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch
+			WHERE r.id = $1`, runID).Scan(&state, &sp, &t.epoch, &t.hostID)
 		if err != nil {
 			return err
 		}
-		if run.State != StateRunning {
-			return errf(http.StatusConflict, "not_running", "run is %s: interactive access needs it running", run.State)
+		if state != StateRunning {
+			return errf(http.StatusConflict, "not_running", "run is %s: interactive access needs it running", state)
 		}
 		switch kind {
 		case "attach":
-			if !run.Spec.Workload.TTY {
+			if !sp.Workload.TTY {
 				return errf(http.StatusConflict, "no_terminal", "attach needs a generic workload with workload.tty")
 			}
 		case "tunnel":
 			name := r.PathValue("name")
-			for _, dp := range run.Spec.Network.Ports {
+			for _, dp := range sp.Network.Ports {
 				if dp.Name == name {
-					port = dp.Port
+					t.port = dp.Port
 				}
 			}
-			if port == 0 {
+			if t.port == 0 {
 				return errf(http.StatusNotFound, "not_found", "the Run declares no port named %q", name)
 			}
 		}
-		epoch = run.Epoch
-		return tx.QueryRow(r.Context(), `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID)
+		return nil
 	})
 	if err != nil {
-		return err
+		return t, err
 	}
-	if !s.hub.Streaming(hostID) {
-		return errf(http.StatusServiceUnavailable, "host_unreachable", "the Run's host has no live connection to this luxd")
+	if !s.hub.Streaming(t.hostID) {
+		return t, errf(http.StatusServiceUnavailable, "host_unreachable", "the Run's host has no live connection to this luxd")
 	}
-	ws, err := websocket.Accept(w, r, nil)
-	if err != nil {
+	return t, nil
+}
+
+func (s *Server) streamHandler(kind string) handler {
+	return func(w http.ResponseWriter, r *http.Request) error {
+		t, err := s.resolveStream(r, kind)
+		if err != nil {
+			return err
+		}
+		if r.Header.Get("Upgrade") == "" {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return nil
+		}
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return nil
+		}
+		ws.SetReadLimit(4 << 20)
+		defer ws.CloseNow()
+		s.relayStream(r.Context(), ws, r.PathValue("id"), kind, t)
 		return nil
 	}
-	ws.SetReadLimit(4 << 20)
-	defer ws.CloseNow()
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+}
 
-	open := proto.StreamOpen{Kind: kind, Port: port}
+func (s *Server) relayStream(ctx context.Context, ws *websocket.Conn, runID, kind string, t streamTarget) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	open := proto.StreamOpen{Kind: kind, Port: t.port}
 	if kind == "exec" {
-		if err := wsRead(ctx, ws, &open); err != nil || len(open.Command) == 0 {
-			closeWith(ctx, ws, proto.StreamData{Error: "exec needs a command"})
-			return nil
+		if err := wsjson.Read(ctx, ws, &open); err != nil || len(open.Command) == 0 {
+			closeWith(ctx, ws, []byte(`{"error":"exec needs a command"}`))
+			return
 		}
 		open.Kind, open.Port = kind, 0
 	}
-	open.StreamID = ids.New("st")
-	ch, unsub := s.hub.Subscribe(open.StreamID)
+	id := ids.New("st")
+	ch, unsub := s.hub.Subscribe(id)
 	defer unsub()
-	send := func(typ string, d proto.StreamData) error {
-		d.StreamID = open.StreamID
-		return s.hub.SendLive(hostID, proto.Frame{Type: typ, RunID: runID, Epoch: epoch, Data: proto.Marshal(d)})
+	send := func(typ string, data []byte) error {
+		return s.hub.SendLive(t.hostID, proto.Frame{Type: typ, RunID: runID, Epoch: t.epoch, Stream: id, Data: data})
 	}
-	if err := s.hub.SendLive(hostID, proto.Frame{Type: proto.MsgStreamOpen, RunID: runID, Epoch: epoch, Data: proto.Marshal(open)}); err != nil {
-		closeWith(ctx, ws, proto.StreamData{Error: err.Error()})
-		return nil
+	if err := send(proto.MsgStreamOpen, proto.Marshal(open)); err != nil {
+		closeWith(ctx, ws, proto.Marshal(proto.StreamData{Error: err.Error()}))
+		return
 	}
-	defer send(proto.MsgStreamClose, proto.StreamData{})
+	defer send(proto.MsgStreamClose, nil)
 
-	// Client → host.
+	// Client → host: checked to be StreamData, forwarded as sent.
 	go func() {
 		defer cancel()
 		for {
-			var d proto.StreamData
-			if err := wsRead(ctx, ws, &d); err != nil {
+			_, b, err := ws.Read(ctx)
+			if err != nil {
 				return
 			}
-			d.ExitCode, d.Error = nil, ""
-			if err := send(proto.MsgStreamData, d); err != nil {
+			var d proto.StreamData
+			if json.Unmarshal(b, &d) != nil || d.ExitCode != nil || d.Error != "" {
+				return
+			}
+			if err := send(proto.MsgStreamData, b); err != nil {
 				return
 			}
 		}
 	}()
-	// Host → client.
+	// Host → client, forwarded as they come.
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return
 		case f, ok := <-ch:
 			if !ok {
-				closeWith(ctx, ws, proto.StreamData{Error: "the stream fell behind and was dropped"})
-				return nil
+				closeWith(ctx, ws, []byte(`{"error":"the stream fell behind and was dropped"}`))
+				return
 			}
-			var d proto.StreamData
-			_ = json.Unmarshal(f.Data, &d)
-			d.StreamID = ""
 			if f.Type == proto.MsgStreamClose {
-				closeWith(ctx, ws, d)
-				return nil
+				closeWith(ctx, ws, f.Data)
+				return
 			}
-			if err := wsWrite(ctx, ws, d); err != nil {
-				return nil
+			wctx, wcancel := context.WithTimeout(ctx, 30*time.Second)
+			err := ws.Write(wctx, websocket.MessageText, f.Data)
+			wcancel()
+			if err != nil {
+				return
 			}
 		}
 	}
 }
 
-func wsRead(ctx context.Context, ws *websocket.Conn, v any) error {
-	_, b, err := ws.Read(ctx)
-	if err != nil {
-		return err
+// closeWith sends the stream's last message, if it has one, and closes.
+func closeWith(ctx context.Context, ws *websocket.Conn, last []byte) {
+	var d proto.StreamData
+	if json.Unmarshal(last, &d) == nil && (d.ExitCode != nil || d.Error != "") {
+		_ = ws.Write(ctx, websocket.MessageText, last)
 	}
-	return json.Unmarshal(b, v)
-}
-
-func wsWrite(ctx context.Context, ws *websocket.Conn, v any) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	return ws.Write(wctx, websocket.MessageText, b)
-}
-
-// closeWith sends the stream's last message and closes the socket.
-func closeWith(ctx context.Context, ws *websocket.Conn, d proto.StreamData) {
-	if d.ExitCode == nil && d.Error == "" {
-		code := 0
-		d.ExitCode = &code
-	}
-	_ = wsWrite(ctx, ws, d)
 	_ = ws.Close(websocket.StatusNormalClosure, "")
 }
