@@ -74,20 +74,6 @@ func (p *Podman) ImageID(ctx context.Context, ref string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// ImageDigest returns a repo digest (name@sha256:…) for ref, if it has one.
-func (p *Podman) ImageDigest(ctx context.Context, ref string) (string, error) {
-	out, err := p.Run(ctx, "image", "inspect", "--format", "{{json .RepoDigests}}", ref)
-	if err != nil {
-		return "", err
-	}
-	var digests []string
-	_ = json.Unmarshal(out, &digests)
-	if len(digests) == 0 {
-		return "", nil
-	}
-	return digests[0], nil
-}
-
 func (p *Podman) Images(ctx context.Context) ([]string, error) {
 	out, err := p.Run(ctx, "images", "--format", "{{.Repository}}:{{.Tag}}")
 	if err != nil {
@@ -100,21 +86,6 @@ func (p *Podman) Images(ctx context.Context) ([]string, error) {
 		}
 	}
 	return imgs, nil
-}
-
-// Build builds an image from a context directory.
-func (p *Podman) Build(ctx context.Context, dir, containerfile, tag string, args map[string]string, log io.Writer) error {
-	a := []string{"build", "--pull=missing", "-f", containerfile, "-t", tag, "--layers"}
-	for k, v := range args {
-		a = append(a, "--build-arg", k+"="+v)
-	}
-	a = append(a, dir)
-	c := p.cmd(ctx, a...)
-	c.Stdout, c.Stderr = log, log
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("podman build: %w", err)
-	}
-	return nil
 }
 
 // ---- volumes ----------------------------------------------------------------
@@ -197,27 +168,6 @@ func (p *Podman) NetworkRemove(ctx context.Context, name string) error {
 		return nil
 	}
 	return err
-}
-
-type NetworkInfo struct {
-	Name             string `json:"name"`
-	NetworkInterface string `json:"network_interface"`
-	Subnets          []struct {
-		Subnet  string `json:"subnet"`
-		Gateway string `json:"gateway"`
-	} `json:"subnets"`
-}
-
-func (p *Podman) NetworkInspect(ctx context.Context, name string) (*NetworkInfo, error) {
-	out, err := p.Run(ctx, "network", "inspect", name)
-	if err != nil {
-		return nil, err
-	}
-	var infos []NetworkInfo
-	if err := json.Unmarshal(out, &infos); err != nil || len(infos) == 0 {
-		return nil, fmt.Errorf("network inspect %s: %v", name, err)
-	}
-	return &infos[0], nil
 }
 
 // ---- containers -------------------------------------------------------------
@@ -312,20 +262,6 @@ func (p *Podman) Wait(ctx context.Context, name string) (int, error) {
 		return -1, fmt.Errorf("podman wait: %q", out)
 	}
 	return code, nil
-}
-
-// List returns container names with a label.
-func (p *Podman) List(ctx context.Context, label string) ([]string, error) {
-	out, err := p.Run(ctx, "ps", "-a", "--filter", "label="+label, "--format", "{{.Names}}")
-	if err != nil {
-		return nil, err
-	}
-	return fields(out), nil
-}
-
-// Exec runs a command in a running container.
-func (p *Podman) Exec(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return p.Run(ctx, append([]string{"exec", name}, args...)...)
 }
 
 // Usage reads a running container's resource use from its cgroup (v2).

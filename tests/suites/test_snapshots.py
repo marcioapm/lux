@@ -7,13 +7,12 @@ epoch."""
 
 from __future__ import annotations
 
-import json
 import time
 
 import pytest
 
 from conftest import CLIError, fake_agent, generic
-from env import ALPINE_IMAGE
+from env import ALPINE_IMAGE, wait_until
 
 
 def placement_hosts(run: dict) -> list[str]:
@@ -39,13 +38,7 @@ def test_migration(env, lux, runners, hosts, fake_image):
     assert run["snapshotId"]
 
     # Host A goes away; the Run must resume on B from the uploaded snapshot.
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        snaps = lux.json("snapshots", run_id)
-        if snaps and snaps[-1]["uploaded"]:
-            break
-        time.sleep(0.5)
-    assert snaps[-1]["uploaded"], snaps
+    lux.wait_uploaded(run_id)
     runners.stop(a)
     runners.start(b)
 
@@ -107,12 +100,8 @@ def test_generic_state_volume_survives_stop(lux, runners, hosts):
     lux.wait_output(run_id, "1")
     lux.run("stop", run_id, "--wait")
     lux.run("resume", run_id, "--wait")
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        out = lux.logs(run_id).split()
-        if out[-1:] == ["2"]:
-            break
-        time.sleep(0.5)
+    out = wait_until(lambda: (lambda o: o if o[-1:] == ["2"] else None)(lux.logs(run_id).split()),
+                     30, 0.5, "second placement never counted 2")
     assert out == ["1", "2"], out
     lux.run("cancel", run_id, "--wait")
     assert lux.get(run_id)["state"] == "cancelled"
@@ -151,7 +140,7 @@ def test_lost_host_and_resume_from_the_previous_snapshot(env, lux, runners, host
     lux.wait_output(run_id, "one")
     lux.wait_activity(run_id, "idle")
     lux.run("stop", run_id, "--wait")
-    wait_uploaded(lux, run_id)
+    lux.wait_uploaded(run_id)
     lux.run("resume", run_id, "--wait", "--input", "write f.txt v2\necho two\nsleep 600")
     lux.wait_output(run_id, "two")
     # Pull the plug on the runner and freeze the host.
@@ -172,14 +161,6 @@ def test_lost_host_and_resume_from_the_previous_snapshot(env, lux, runners, host
         a.unpause()
 
 
-def wait_uploaded(lux, run_id: str, timeout: float = 30):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        snaps = lux.json("snapshots", run_id)
-        if snaps and snaps[-1]["uploaded"]:
-            return
-        time.sleep(0.5)
-    raise AssertionError(f"snapshot of {run_id} never uploaded")
 
 
 def test_resume_elsewhere_right_after_stop(lux, runners, hosts, fake_image):

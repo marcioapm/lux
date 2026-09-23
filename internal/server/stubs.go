@@ -20,14 +20,10 @@ type LaunchRequest struct {
 	Token string
 }
 
-func (s *Server) serveExec(w http.ResponseWriter, r *http.Request) error {
-	return errf(http.StatusNotImplemented, "not_implemented", "exec is not implemented yet")
-}
-
-func (s *Server) serveAttach(w http.ResponseWriter, r *http.Request) error {
-	return errf(http.StatusNotImplemented, "not_implemented", "attach is not implemented yet")
-}
-
-func (s *Server) servePort(w http.ResponseWriter, r *http.Request) error {
-	return errf(http.StatusNotImplemented, "not_implemented", "port forwarding is not implemented yet")
+// notYet answers for a feature that is not built yet, rather than
+// accepting work that would never happen.
+func (s *Server) notYet(what string) handler {
+	return func(w http.ResponseWriter, r *http.Request) error {
+		return errf(http.StatusNotImplemented, "not_implemented", "%s is not implemented yet", what)
+	}
 }

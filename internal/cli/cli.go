@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -93,10 +94,10 @@ func (a *app) root() *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := loadConfig()
 			if a.url == "" {
-				a.url = firstNonEmpty(os.Getenv("LUX_URL"), cfg.URL)
+				a.url = cmp.Or(os.Getenv("LUX_URL"), cfg.URL)
 			}
 			if a.key == "" {
-				a.key = firstNonEmpty(os.Getenv("LUX_API_KEY"), cfg.APIKey)
+				a.key = cmp.Or(os.Getenv("LUX_API_KEY"), cfg.APIKey)
 			}
 			if a.url == "" {
 				return errors.New("no lux URL: set LUX_URL, --url, or url in ~/.config/lux/config.toml")
@@ -120,15 +121,6 @@ func (a *app) root() *cobra.Command {
 		a.artifactsCmd(), a.execCmd(), a.attachCmd(), a.portForwardCmd(), a.hostsCmd(), a.poolsCmd(),
 	)
 	return root
-}
-
-func firstNonEmpty(v ...string) string {
-	for _, s := range v {
-		if s != "" {
-			return s
-		}
-	}
-	return ""
 }
 
 func (a *app) json(v any) error {

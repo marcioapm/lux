@@ -48,7 +48,7 @@ type placement struct {
 	shimConn net.Conn
 	shimEnc  *json.Encoder
 	done     chan struct{}
-	nudgeCh  chan struct{}
+	session  string // latest session id the adapter reported
 	peakDisk int64
 	netRx    int64
 	netTx    int64
@@ -59,7 +59,7 @@ func newPlacement(r *Runner, a proto.Assign) *placement {
 	return &placement{
 		r: r, runID: a.RunID, tenantID: a.TenantID, epoch: a.Epoch, assign: &a,
 		dir: r.runDir(a.RunID), phase: "assigned",
-		done: make(chan struct{}), nudgeCh: make(chan struct{}, 1),
+		done: make(chan struct{}),
 	}
 }
 
@@ -104,13 +104,6 @@ func (p *placement) setPhase(ph string) {
 	p.mu.Lock()
 	p.phase = ph
 	p.mu.Unlock()
-}
-
-func (p *placement) nudge() {
-	select {
-	case p.nudgeCh <- struct{}{}:
-	default:
-	}
 }
 
 func (p *placement) waitDone(d time.Duration) {
@@ -202,7 +195,7 @@ func (p *placement) run(ctx context.Context) {
 	}
 	p.mark("volumesRestored")
 
-	if p.stopRequested() {
+	if p.pendingStop() != "" {
 		p.finishWithoutContainer(ctx, "exited", "stopped before start")
 		return
 	}
@@ -241,9 +234,9 @@ func (p *placement) run(ctx context.Context) {
 // supervise follows a started container to its end: tails its output for
 // adapter events, waits for it to exit, then snapshots and reports.
 func (p *placement) supervise(ctx context.Context) {
-	tailCtx, stopTail := context.WithCancel(ctx)
+	exited := make(chan struct{})
 	tailDone := make(chan struct{})
-	go func() { defer close(tailDone); p.tailEvents(tailCtx) }()
+	go func() { defer close(tailDone); p.tailEvents(ctx, exited) }()
 
 	code, err := p.r.pm.Wait(ctx, containerName(p.runID))
 	if err != nil {
@@ -251,9 +244,9 @@ func (p *placement) supervise(ctx context.Context) {
 	}
 	p.mark("exited")
 	p.closeShim()
-	// Let the tailer catch the last events.
-	time.Sleep(200 * time.Millisecond)
-	stopTail()
+	// Nothing writes the output file after the container exits: the tailer
+	// reads to its end and returns, so no final event is missed.
+	close(exited)
 	<-tailDone
 
 	exit := p.readExit(code)
@@ -265,7 +258,7 @@ func (p *placement) supervise(ctx context.Context) {
 }
 
 func (p *placement) readExit(code int) *exitRecord {
-	rt, _ := p.r.pm.VolumeMountpoint(context.Background(), runtimeVolume(p.runID))
+	rt, _ := p.r.mountpoint(context.Background(), runtimeVolume(p.runID))
 	e := &exitRecord{Code: code, Reason: "exited"}
 	b, err := os.ReadFile(filepath.Join(rt, proto.ExitFile(p.epoch)))
 	if err != nil {
@@ -292,7 +285,8 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	p.state.LastExitAt = time.Now().UnixMilli()
 	p.mu.Unlock()
 	_ = writeRunState(p.dir, p.state)
-	usage := p.sampleUsage(ctx)
+	p.sampleSlow(ctx)
+	usage := p.usage()
 
 	if p.isStale() {
 		p.logf("placement ended (stale; not reported)")
@@ -417,6 +411,7 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume 
 		case v.Kind == "ephemeral":
 			// Ephemeral volumes start empty on every placement.
 			_ = p.r.pm.VolumeRemove(ctx, v.Volume)
+			p.r.forgetMountpoint(v.Volume)
 			if err := p.r.pm.VolumeCreate(ctx, v.Volume, labels); err != nil {
 				return err
 			}
@@ -424,6 +419,7 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume 
 			// Same host, same snapshot: nothing moves.
 		default:
 			_ = p.r.pm.VolumeRemove(ctx, v.Volume)
+			p.r.forgetMountpoint(v.Volume)
 			if err := p.r.pm.VolumeCreate(ctx, v.Volume, labels); err != nil {
 				return err
 			}
@@ -586,7 +582,7 @@ func specHash(sp spec.RunSpec) string {
 }
 
 func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image string) error {
-	rt, err := p.r.pm.VolumeMountpoint(ctx, runtimeVolume(p.runID))
+	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
 	if err != nil {
 		return err
 	}
@@ -638,7 +634,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image 
 // ---- shim socket ------------------------------------------------------------
 
 func (p *placement) socketPath(ctx context.Context) (string, error) {
-	rt, err := p.r.pm.VolumeMountpoint(ctx, runtimeVolume(p.runID))
+	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
 	if err != nil {
 		return "", err
 	}
@@ -731,8 +727,6 @@ func (p *placement) requestStop(ctx context.Context, reason string) {
 	}
 }
 
-func (p *placement) stopRequested() bool { return p.pendingStop() != "" }
-
 func (p *placement) pendingStop() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -770,12 +764,20 @@ func (p *placement) kill(ctx context.Context) {
 
 // tailEvents follows the placement's output file and forwards what the
 // adapter learned (session id, idle/busy, input acks) to luxd.
-func (p *placement) tailEvents(ctx context.Context) {
+func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 	path, err := p.outputPath(ctx, p.epoch)
 	if err != nil {
 		return
 	}
-	_ = tailRecords(ctx, path, 0, true, func() bool { return false }, func(rec proto.Record) error {
+	done := func() bool {
+		select {
+		case <-exited:
+			return true
+		default:
+			return false
+		}
+	}
+	_ = tailRecords(ctx, path, 0, true, done, func(rec proto.Record) error {
 		if rec.Ch != "event" {
 			return nil
 		}
@@ -797,6 +799,9 @@ func (p *placement) tailEvents(ctx context.Context) {
 		var ae *proto.AdapterEvent
 		switch ev.Type {
 		case proto.EvSession:
+			p.mu.Lock()
+			p.session = d.SessionID
+			p.mu.Unlock()
 			ae = &proto.AdapterEvent{SessionID: d.SessionID}
 		case proto.EvActivity:
 			ae = &proto.AdapterEvent{Activity: d.Activity}
@@ -818,7 +823,7 @@ func (p *placement) tailEvents(ctx context.Context) {
 }
 
 func (p *placement) outputPath(ctx context.Context, epoch int) (string, error) {
-	rt, err := p.r.pm.VolumeMountpoint(ctx, runtimeVolume(p.runID))
+	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
 	if err != nil {
 		return "", err
 	}
@@ -885,20 +890,31 @@ func tailRecords(ctx context.Context, path string, since int64, follow bool, don
 
 // ---- usage ------------------------------------------------------------------
 
-func (p *placement) sampleUsage(ctx context.Context) *proto.Usage {
+// usage is what a heartbeat reports: the cgroup's counters, which are
+// cheap file reads and kept by the kernel, plus the last disk and network
+// sample (see sampleSlow).
+func (p *placement) usage() *proto.Usage {
 	p.mu.Lock()
-	cg := p.cgroup
-	vols := append([]volumeRef{}, p.stateVolumes()...)
-	p.mu.Unlock()
-	u := &proto.Usage{}
-	if cg != "" {
-		if cu, err := podman.CgroupUsage(cg); err == nil {
+	defer p.mu.Unlock()
+	u := &proto.Usage{PeakDiskBytes: p.peakDisk, NetRxBytes: p.netRx, NetTxBytes: p.netTx}
+	if p.cgroup != "" {
+		if cu, err := podman.CgroupUsage(p.cgroup); err == nil {
 			u.PeakMemoryBytes, u.PeakPids, u.CPUSeconds = cu.PeakMemoryBytes, cu.PeakPids, cu.CPUSeconds
 		}
 	}
+	return u
+}
+
+// sampleSlow measures what costs real work: disk use (walking the state
+// volumes, and podman sizing the writable layer) and network counters.
+// Run off the heartbeat path, on its own schedule.
+func (p *placement) sampleSlow(ctx context.Context) {
+	p.mu.Lock()
+	vols := append([]volumeRef{}, p.stateVolumes()...)
+	p.mu.Unlock()
 	var disk int64
 	for _, v := range vols {
-		if mp, err := p.r.pm.VolumeMountpoint(ctx, v.Volume); err == nil {
+		if mp, err := p.r.mountpoint(ctx, v.Volume); err == nil {
 			disk += dirSize(mp)
 		}
 	}
@@ -907,16 +923,13 @@ func (p *placement) sampleUsage(ctx context.Context) *proto.Usage {
 		fmt.Sscan(strings.TrimSpace(string(out)), &n)
 		disk += n
 	}
-	if st, err := p.r.pm.Stats(ctx, containerName(p.runID)); err == nil {
-		p.mu.Lock()
-		p.netRx, p.netTx = max(p.netRx, st.NetInput), max(p.netTx, st.NetOutput)
-		p.mu.Unlock()
-	}
+	st, statsErr := p.r.pm.Stats(ctx, containerName(p.runID))
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.peakDisk = max(p.peakDisk, disk)
-	u.PeakDiskBytes, u.NetRxBytes, u.NetTxBytes = p.peakDisk, p.netRx, p.netTx
-	p.mu.Unlock()
-	return u
+	if statsErr == nil {
+		p.netRx, p.netTx = max(p.netRx, st.NetInput), max(p.netTx, st.NetOutput)
+	}
 }
 
 func (p *placement) stateVolumes() []volumeRef {
@@ -948,7 +961,7 @@ func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
 	snapID := ids.New(ids.Snapshot)
 	rec := &snapshotRecord{RunID: p.runID, Epoch: p.epoch, Created: time.Now().UnixMilli()}
 	sd := &proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: snapID, RunID: p.runID, Epoch: p.epoch, Volumes: []proto.VolumeSnapshot{}}}
-	sd.Manifest.SessionID = p.sessionID(ctx)
+	sd.Manifest.SessionID = p.sessionID()
 	for _, v := range p.state.Volumes {
 		if v.Kind != "state" {
 			continue
@@ -994,30 +1007,13 @@ func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
 	return sd, nil
 }
 
-// sessionID is the latest session id the adapter reported, from the
-// output file.
-func (p *placement) sessionID(ctx context.Context) string {
-	path, err := p.outputPath(ctx, p.epoch)
-	if err != nil {
-		return ""
+// sessionID is the latest session id the adapter reported (seen by
+// tailEvents), or the one this placement resumed.
+func (p *placement) sessionID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.session == "" && p.assign != nil && p.assign.Resume != nil {
+		return p.assign.Resume.SessionID
 	}
-	var id string
-	_ = tailRecords(ctx, path, 0, false, func() bool { return true }, func(rec proto.Record) error {
-		if rec.Ch == "event" {
-			var ev struct {
-				Type string `json:"type"`
-				Data struct {
-					SessionID string `json:"sessionId"`
-				} `json:"data"`
-			}
-			if json.Unmarshal(rec.Event, &ev) == nil && ev.Type == proto.EvSession {
-				id = ev.Data.SessionID
-			}
-		}
-		return nil
-	})
-	if id == "" && p.assign != nil && p.assign.Resume != nil {
-		id = p.assign.Resume.SessionID
-	}
-	return id
+	return p.session
 }

@@ -68,11 +68,17 @@ func writeRunState(dir string, s *runState) error {
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, "state.json.tmp")
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	return writeFileAtomic(filepath.Join(dir, "state.json"), b, 0o600)
+}
+
+// writeFileAtomic replaces path with b: readers see the old or the new
+// contents, never a partial file.
+func writeFileAtomic(path string, b []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, perm); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(dir, "state.json"))
+	return os.Rename(tmp, path)
 }
 
 // pendingUpload is a blob waiting to be uploaded, persisted beside it.

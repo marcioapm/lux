@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 	"syscall"
 
@@ -36,12 +37,11 @@ func (c *Claude) Command(cfg proto.ShimConfig) ([]string, error) {
 	if cfg.Resume && len(cfg.ResumeCommand) > 0 {
 		return cfg.ResumeCommand, nil
 	}
-	base := cfg.Command
-	if len(base) == 0 {
-		base = []string{"claude"}
+	base, err := command(cfg)
+	if err != nil {
+		return nil, err
 	}
-	argv := append([]string{}, base...)
-	argv = append(argv, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose")
+	argv := append(slices.Clone(base), "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose")
 	if cfg.Resume && cfg.SessionID != "" {
 		argv = append(argv, "--resume", cfg.SessionID)
 	}
@@ -49,9 +49,9 @@ func (c *Claude) Command(cfg proto.ShimConfig) ([]string, error) {
 }
 
 func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Sink) error {
+	c.lw.set(p.Stdin)
 	c.mu.Lock()
 	c.proc, c.sink = p, sink
-	c.lw.w = p.Stdin
 	queued := c.queue
 	c.queue = nil
 	c.mu.Unlock()
@@ -117,7 +117,7 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 func (c *Claude) send(in proto.Input) {
 	err := c.lw.send(map[string]any{
 		"type":    "user",
-		"message": map[string]any{"role": "user", "content": []map[string]string{{"type": "text", "text": in.Text}}},
+		"message": map[string]any{"role": "user", "content": textInput(in.Text)},
 	})
 	c.mu.Lock()
 	if err == nil {

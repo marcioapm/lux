@@ -75,6 +75,18 @@ def container_running(name: str) -> bool:
     return out.strip() == "true"
 
 
+def wait_until(fn, timeout: float = 30, interval: float = 0.3, message: str = "condition not met"):
+    """Poll fn until it returns something truthy; return that, or fail."""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = fn()
+        if last:
+            return last
+        time.sleep(interval)
+    raise AssertionError(f"{message} (after {timeout}s; last: {last!r})")
+
+
 def host_names(n: int) -> list[str]:
     return [f"host-{chr(ord('a') + i)}" for i in range(n)]
 

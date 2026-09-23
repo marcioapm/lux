@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/blob"
-	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -200,43 +199,4 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) error 
 	}
 	http.Redirect(w, r, url, http.StatusFound)
 	return nil
-}
-
-// discardStaleCopies tells hosts that still hold local copies of a Run's
-// older snapshots to delete them: the Run has started elsewhere from an
-// uploaded copy.
-func (s *Server) discardStaleCopies(ctx context.Context, tx pgx.Tx, runID string, epoch int, newHost string) ([]string, error) {
-	rows, err := tx.Query(ctx, `UPDATE snapshots SET host_copy = false
-		WHERE run_id = $1 AND epoch < $2 AND host_copy AND host_id IS NOT NULL AND host_id <> $3
-		RETURNING host_id, epoch`, runID, epoch, newHost)
-	if err != nil {
-		return nil, err
-	}
-	type he struct {
-		host  string
-		epoch int
-	}
-	var list []he
-	for rows.Next() {
-		var x he
-		if err := rows.Scan(&x.host, &x.epoch); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		list = append(list, x)
-	}
-	rows.Close()
-	seen := map[string]bool{}
-	var hosts []string
-	for _, x := range list {
-		if seen[x.host] {
-			continue
-		}
-		seen[x.host] = true
-		hosts = append(hosts, x.host)
-		if err := enqueue(ctx, tx, x.host, runID, 0, proto.MsgSnapshotDiscard, map[string]any{"runId": runID, "beforeEpoch": epoch}); err != nil {
-			return nil, err
-		}
-	}
-	return hosts, nil
 }

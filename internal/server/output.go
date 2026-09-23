@@ -150,10 +150,11 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request) error {
 				// Its host died before saving it: gone, by design.
 				_ = send("gap", map[string]any{"epoch": pl.epoch, "reason": "output lost with its host"})
 				done = true
-			case s.hub.Live(pl.hostID):
+			case s.hub.Streaming(pl.hostID):
 				done, err = s.relayOutput(ctx, pl, since, follow && liveNow, emit, flushEvents)
 			case liveNow && follow:
-				// Host not connected to this luxd right now; wait for it.
+				// No stream from the host: it is reconnecting, or it polls
+				// (no live relay; its output arrives with the upload). Wait.
 				done = false
 			default:
 				if pl.state == "exited" || pl.state == "lost" {
@@ -296,7 +297,7 @@ func (s *Server) relayOutput(ctx context.Context, pl placementOutput, since int6
 				return false, err
 			}
 			idle++
-			if !s.hub.Live(pl.hostID) {
+			if !s.hub.Streaming(pl.hostID) {
 				return false, fmt.Errorf("host disconnected")
 			}
 			if !follow && idle > 30 {

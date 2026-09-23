@@ -1,6 +1,10 @@
 package proto
 
-import "github.com/marcioapm/lux/internal/spec"
+import (
+	"strconv"
+
+	"github.com/marcioapm/lux/internal/spec"
+)
 
 // Runner ↔ shim.
 //
@@ -27,30 +31,8 @@ const (
 	ShimSecretsDir = "/.lux/secrets"
 )
 
-func OutputFile(epoch int) string { return "output-" + itoa(epoch) + ".jsonl" }
-func ExitFile(epoch int) string   { return "exit-" + itoa(epoch) + ".json" }
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
-}
+func OutputFile(epoch int) string { return "output-" + strconv.Itoa(epoch) + ".jsonl" }
+func ExitFile(epoch int) string   { return "exit-" + strconv.Itoa(epoch) + ".json" }
 
 type ShimConfig struct {
 	RunID    string            `json:"runId"`

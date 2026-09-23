@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -27,13 +26,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/runs/{id}/stop", s.withKey("run", s.stopRun))
 	mux.Handle("POST /v1/runs/{id}/resume", s.withKey("run", s.resumeRun))
 	mux.Handle("POST /v1/runs/{id}/cancel", s.withKey("run", s.cancelRun))
-	mux.Handle("POST /v1/runs/{id}/push", s.withKey("run", s.pushRun))
+	mux.Handle("POST /v1/runs/{id}/push", s.withKey("run", s.notYet("git push")))
 	mux.Handle("GET /v1/runs/{id}/snapshots", s.withKey("read", s.listSnapshots))
 	mux.Handle("GET /v1/runs/{id}/artifacts", s.withKey("read", s.listArtifacts))
 	mux.Handle("GET /v1/artifacts/{aid}", s.withKey("read", s.downloadArtifact))
-	mux.Handle("GET /v1/runs/{id}/exec", s.withKey("run", s.serveExec))
-	mux.Handle("GET /v1/runs/{id}/attach", s.withKey("run", s.serveAttach))
-	mux.Handle("GET /v1/runs/{id}/ports/{name}", s.withKey("run", s.servePort))
+	mux.Handle("GET /v1/runs/{id}/exec", s.withKey("run", s.notYet("exec")))
+	mux.Handle("GET /v1/runs/{id}/attach", s.withKey("run", s.notYet("attach")))
+	mux.Handle("GET /v1/runs/{id}/ports/{name}", s.withKey("run", s.notYet("port forwarding")))
 	mux.Handle("GET /v1/hosts", s.withKey("read", s.listHosts))
 	mux.Handle("POST /v1/hosts/{id}/drain", s.withKey("admin", s.drainHost))
 	mux.Handle("GET /v1/pools", s.withKey("read", s.listPools))
@@ -114,10 +113,6 @@ func scanRun(row pgx.Row) (*Run, error) {
 	return &r, err
 }
 
-type submitRequest struct {
-	spec.RunSpec
-}
-
 func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
 	var sp spec.RunSpec
@@ -143,6 +138,7 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) error {
 
 	run := &Run{}
 	created := false
+	id := ids.New(ids.Run)
 	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		if idem != "" {
 			existing, err := scanRun(tx.QueryRow(r.Context(), `SELECT `+runColumns+` FROM runs r WHERE idempotency_key = $1`, idem))
@@ -157,7 +153,6 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) error {
 		if err := checkRunQuota(r.Context(), tx, p.TenantID); err != nil {
 			return err
 		}
-		id := ids.New(ids.Run)
 		var idemArg *string
 		if idem != "" {
 			idemArg = &idem
@@ -172,16 +167,19 @@ func (s *Server) submitRun(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		created = true
+		// Cached before commit, so the scheduler never sees the Run
+		// without its values.
+		if len(values) > 0 {
+			s.secrets.put(id, values)
+		}
 		run, err = scanRun(tx.QueryRow(r.Context(), `SELECT `+runColumns+` FROM runs r WHERE id = $1`, id))
 		return err
 	})
 	if err != nil {
+		s.secrets.drop(id)
 		return err
 	}
 	if created {
-		if len(values) > 0 {
-			s.secrets.put(run.ID, values)
-		}
 		s.Kick()
 		writeJSON(w, http.StatusCreated, run)
 		return nil
@@ -476,10 +474,6 @@ func (s *Server) stopOrCancel(w http.ResponseWriter, r *http.Request, reason str
 				return nil
 			}
 			return setRunState(r.Context(), tx, p.TenantID, id, next, reason, 0)
-		case StateStopping:
-			if reason != "cancel" {
-				return nil
-			}
 		}
 		return nil
 	})
@@ -610,6 +604,8 @@ func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// pushRun is wired in with git workspaces (step 6); until then the route
+// answers notYet.
 func (s *Server) pushRun(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
 	id := r.PathValue("id")
@@ -715,7 +711,7 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) error {
 	// Tenants see their own hosts, and platform hosts in pools they can use.
 	err := s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(r.Context(), `SELECT h.id, h.name, h.pool, h.state, h.state_reason, h.draining, h.labels, h.capacity, h.versions,
-				h.tenant_id IS NULL, (SELECT count(*) FROM placements pl WHERE pl.host_id = h.id AND pl.state IN ('assigned', 'starting', 'running', 'stopping')),
+				h.tenant_id IS NULL, (SELECT count(*) FROM placements pl WHERE pl.host_id = h.id AND pl.state IN `+livePlacementStates+`),
 				h.provider_id, h.last_heartbeat,
 				h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
 				h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at
@@ -780,24 +776,12 @@ func (s *Server) drainHost(w http.ResponseWriter, r *http.Request) error {
 
 // drainPlacements asks every live placement on a host (by id) to stop.
 func (s *Server) drainPlacements(ctx context.Context, tx pgx.Tx, hostID string) error {
-	rows, err := tx.Query(ctx, `SELECT run_id, tenant_id FROM placements
-		WHERE host_id = $1 AND state IN ('assigned', 'starting', 'running', 'stopping')`, hostID)
+	live, err := livePlacements(ctx, tx, "p.host_id = $1", hostID)
 	if err != nil {
 		return err
 	}
-	type pr struct{ run, tenant string }
-	var live []pr
-	for rows.Next() {
-		var x pr
-		if err := rows.Scan(&x.run, &x.tenant); err != nil {
-			rows.Close()
-			return err
-		}
-		live = append(live, x)
-	}
-	rows.Close()
-	for _, x := range live {
-		if _, err := s.requestStop(ctx, tx, x.tenant, x.run, "drain"); err != nil {
+	for _, p := range live {
+		if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, "drain"); err != nil {
 			return err
 		}
 	}
@@ -871,9 +855,4 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) error {
 	s.Kick()
 	writeJSON(w, http.StatusOK, pl)
 	return nil
-}
-
-func jsonString(v any) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }

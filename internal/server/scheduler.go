@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sort"
 	"time"
 
@@ -81,10 +80,11 @@ type cursorPos struct {
 	id      string
 }
 
-// secretsGrace is how long a Run with secrets may wait for this luxd to
-// hold its values before they are declared lost. It covers the window
-// between a submit's commit and its secrets reaching the cache, and Runs
-// submitted through another luxd instance.
+// secretsGrace is how long a Run with secrets waits for this luxd to hold
+// its values before they are declared lost. Submit and resume cache them
+// before committing, so a Run this instance accepted always has them; the
+// grace is for Runs accepted by another instance (which schedules them
+// itself) and for this instance having restarted.
 const secretsGrace = 30 * time.Second
 
 // scheduleBatch looks at up to 20 waiting Runs after pos, placing what it
@@ -99,7 +99,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			FROM runs WHERE state IN ('submitted', 'resuming', 'provisioning') AND NOT cancel_requested
 			  AND (updated_at, id) > ($1, $2)
 			ORDER BY updated_at, id FOR UPDATE SKIP LOCKED LIMIT 20`,
-			pos.updated, pos.id, fmt.Sprintf("%f seconds", secretsGrace.Seconds()))
+			pos.updated, pos.id, interval(secretsGrace))
 		if err != nil {
 			return err
 		}
@@ -175,7 +175,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx) ([]*candidateHos
 			coalesce((SELECT bool_or(p.shared) FROM pools p WHERE p.tenant_id IS NULL AND p.name = h.pool), false)
 		FROM hosts h
 		WHERE h.state = 'ready' AND NOT h.draining AND h.last_heartbeat > now() - $1::interval`,
-		fmt.Sprintf("%f seconds", s.cfg.LeaseDuration.Seconds()))
+		interval(s.cfg.LeaseDuration))
 	if err != nil {
 		return nil, err
 	}
@@ -189,13 +189,13 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx) ([]*candidateHos
 			return nil, err
 		}
 		h.Images = images
-		h.Connected = s.hub.Connected(h.ID)
+		h.Connected = s.hub.Reachable(h.ID)
 		hosts = append(hosts, h)
 		byID[h.ID] = h
 	}
 	rows.Close()
 	used, err := tx.Query(ctx, `SELECT host_id, tenant_id, resources FROM placements
-		WHERE state IN ('assigned', 'starting', 'running', 'stopping')`)
+		WHERE state IN `+livePlacementStates+``)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +356,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		placementID, r.TenantID, r.ID, h.ID, epoch, r.Spec.Resources,
 		// Generous first lease: pulling or building the image can be slow,
 		// and heartbeats renew it once the runner has the placement.
-		fmt.Sprintf("%f seconds", (s.cfg.LeaseDuration*4).Seconds()))
+		interval(s.cfg.LeaseDuration*4))
 	if err != nil {
 		return err
 	}
@@ -390,9 +390,6 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if err := enqueue(ctx, tx, h.ID, r.ID, epoch, proto.MsgAssign, a); err != nil {
 		return err
 	}
-	// The Run moved: the old host no longer needs its local copy once the
-	// new placement has restored from it. Told at snapshot time instead
-	// (see discardStaleCopies) so a failed start can fall back.
 	h.UsedRuns++
 	h.UsedCPUs += r.Spec.Resources.CPUs
 	h.UsedMem += int64(r.Spec.Resources.Memory)

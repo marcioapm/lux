@@ -110,11 +110,19 @@ func (s *Server) withKey(scope string, h handler) http.HandlerFunc {
 			return errf(http.StatusUnauthorized, "unauthorized", "missing API key")
 		}
 		var p Principal
+		var stale bool
 		err := s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-			return tx.QueryRow(r.Context(), `
-				UPDATE api_keys SET last_used_at = now()
-				WHERE key_hash = $1 AND revoked_at IS NULL
-				RETURNING tenant_id, id, scopes`, ids.Hash(key)).Scan(&p.TenantID, &p.KeyID, &p.Scopes)
+			err := tx.QueryRow(r.Context(), `
+				SELECT tenant_id, id, scopes, coalesce(last_used_at < now() - interval '1 minute', true)
+				FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL`, ids.Hash(key)).
+				Scan(&p.TenantID, &p.KeyID, &p.Scopes, &stale)
+			if err != nil || !stale {
+				return err
+			}
+			// last_used_at is coarse on purpose: writing it on every request
+			// would put a row lock and a WAL write on every call.
+			_, err = tx.Exec(r.Context(), `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, p.KeyID)
+			return err
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errf(http.StatusUnauthorized, "unauthorized", "invalid API key")

@@ -27,6 +27,28 @@ const (
 	StateLost         = "lost"
 )
 
+// livePlacementStates, for SQL: a placement that is (or is about to be)
+// running on its host.
+const livePlacementStates = "('assigned', 'starting', 'running', 'stopping')"
+
+// placementRef names one placement.
+type placementRef struct {
+	RunID    string
+	TenantID string
+	Epoch    int
+}
+
+// livePlacements lists live placements matching a condition on the
+// placements table (aliased p).
+func livePlacements(ctx context.Context, tx pgx.Tx, where string, args ...any) ([]placementRef, error) {
+	rows, err := tx.Query(ctx, `SELECT p.run_id, p.tenant_id, p.epoch FROM placements p
+		WHERE p.state IN `+livePlacementStates+` AND (`+where+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[placementRef])
+}
+
 func terminal(state string) bool {
 	return state == StateSucceeded || state == StateFailed || state == StateCancelled
 }
@@ -186,7 +208,7 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 		return err
 	}
 	tag, err := tx.Exec(ctx, `UPDATE placements SET state = 'lost', ended_at = now(), exit_reason = $3, lease_expires_at = NULL
-		WHERE run_id = $1 AND epoch = $2 AND state IN ('assigned', 'starting', 'running', 'stopping')`, runID, epoch, why)
+		WHERE run_id = $1 AND epoch = $2 AND state IN `+livePlacementStates+``, runID, epoch, why)
 	if err != nil || tag.RowsAffected() == 0 {
 		return err
 	}

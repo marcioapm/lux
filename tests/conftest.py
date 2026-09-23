@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from env import BIN_DIR, Host, TestEnvironment
+from env import BIN_DIR, Host, TestEnvironment, wait_until
 
 
 def _require(env: TestEnvironment, *binaries: str) -> None:
@@ -95,24 +95,17 @@ class Lux:
         return [json.loads(l) for l in out.splitlines() if l.strip()]
 
     def wait_output(self, run_id: str, text: str, timeout: float = 60) -> str:
-        deadline = time.time() + timeout
-        out = ""
-        while time.time() < deadline:
-            out = self.logs(run_id)
-            if text in out:
-                return out
-            time.sleep(0.5)
-        raise AssertionError(f"{text!r} not in output of {run_id} after {timeout}s:\n{out}")
+        return wait_until(lambda: (lambda out: out if text in out else None)(self.logs(run_id)),
+                          timeout, 0.5, f"{text!r} not in output of {run_id}")
 
     def wait_activity(self, run_id: str, activity: str, timeout: float = 60) -> dict:
-        deadline = time.time() + timeout
-        run = {}
-        while time.time() < deadline:
-            run = self.get(run_id)
-            if run.get("activity") == activity:
-                return run
-            time.sleep(0.3)
-        raise AssertionError(f"run {run_id} never became {activity}: {run.get('state')} {run.get('activity')}")
+        return wait_until(lambda: (lambda r: r if r.get("activity") == activity else None)(self.get(run_id)),
+                          timeout, 0.3, f"run {run_id} never became {activity}")
+
+    def wait_uploaded(self, run_id: str, timeout: float = 30) -> dict:
+        """Wait until the Run's latest snapshot is in S3."""
+        return wait_until(lambda: (lambda sn: sn[-1] if sn and sn[-1]["uploaded"] else None)(self.json("snapshots", run_id)),
+                          timeout, 0.5, f"snapshot of {run_id} never uploaded")
 
 
 @pytest.fixture(scope="session")
@@ -155,16 +148,12 @@ class Runners:
         return host
 
     def wait_ready(self, name: str, timeout: float = 30):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            hosts = self.lux.json("hosts", "ls")
-            if any(h["name"] == name and h["state"] == "ready" for h in hosts):
-                return
-            proc = self.procs.get(name)
-            if proc and proc.poll() is not None:
-                raise AssertionError(f"runner on {name} exited {proc.returncode}; see its runner.log")
-            time.sleep(0.2)
-        raise AssertionError(f"host {name} did not become ready")
+        def ready():
+            for proc in self.procs.values():
+                if proc.poll() is not None:
+                    raise AssertionError(f"a runner exited {proc.returncode}; see its runner.log")
+            return any(h["name"] == name and h["state"] == "ready" for h in self.lux.json("hosts", "ls"))
+        wait_until(ready, timeout, 0.2, f"host {name} did not become ready")
 
     def stop(self, host: Host, signal: str = "TERM"):
         host.stop_runner(signal)
@@ -198,8 +187,7 @@ def runners(env: TestEnvironment, lux: Lux, require):
     yield r
     r.stop_all()
     for h in env.hosts:
-        if h.exec("sh", "-c", "docker inspect >/dev/null 2>&1; echo ok", check=False).strip() == "ok":
-            cleanup_host(h)
+        cleanup_host(h)
 
 
 @pytest.fixture

@@ -156,7 +156,7 @@ var Adapters = map[string]AdapterInfo{
 		StatePaths:     []string{"$HOME/.codex"},
 	},
 	"opencode": {
-		DefaultCommand: []string{"opencode"},
+		DefaultCommand: []string{"opencode", "acp"},
 		StatePaths:     []string{"$HOME/.local/share/opencode"},
 	},
 }

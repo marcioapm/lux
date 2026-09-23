@@ -21,7 +21,6 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -71,10 +70,6 @@ type Adapter interface {
 	Stop() error
 }
 
-// StatePaths are paths the agent keeps its session in, relative to the
-// workload user's home, that must be on a state volume. Mirrors
-// spec.Adapters.
-
 func New(name string) (Adapter, error) {
 	switch name {
 	case "generic", "":
@@ -100,14 +95,7 @@ type Generic struct {
 	sink  Sink
 }
 
-func (g *Generic) Command(cfg proto.ShimConfig) ([]string, error) {
-	if cfg.Resume {
-		if len(cfg.ResumeCommand) > 0 {
-			return cfg.ResumeCommand, nil
-		}
-	}
-	return cfg.Command, nil
-}
+func (g *Generic) Command(cfg proto.ShimConfig) ([]string, error) { return command(cfg) }
 
 func (g *Generic) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Sink) error {
 	g.mu.Lock()
@@ -180,12 +168,18 @@ func pump(r io.Reader, out func([]byte)) {
 	}
 }
 
-// ---- JSON lines helper ----------------------------------------------------
+// ---- helpers --------------------------------------------------------------
 
 // lineWriter serializes JSON lines to a process's stdin.
 type lineWriter struct {
 	mu sync.Mutex
 	w  io.Writer
+}
+
+func (l *lineWriter) set(w io.Writer) {
+	l.mu.Lock()
+	l.w = w
+	l.mu.Unlock()
 }
 
 func (l *lineWriter) send(v any) error {
@@ -196,18 +190,48 @@ func (l *lineWriter) send(v any) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.w == nil {
-		return fmt.Errorf("process not started")
+		return fmt.Errorf("process stdin is closed")
 	}
 	_, err = l.w.Write(append(b, '\n'))
 	return err
 }
 
-// home returns the workload user's home for resolving agent state paths.
-func home() string {
+// close closes stdin; later sends fail. Protocol agents exit when their
+// client goes away.
+func (l *lineWriter) close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if c, ok := l.w.(io.Closer); ok {
+		_ = c.Close()
+	}
+	l.w = nil
+}
+
+// workdir is where an agent session is rooted: the spec's workdir, or the
+// workload user's home.
+func workdir(cfg proto.ShimConfig) string {
+	if cfg.Workdir != "" {
+		return cfg.Workdir
+	}
 	if h := os.Getenv("HOME"); h != "" {
 		return h
 	}
 	return "/root"
 }
 
-var _ = time.Second
+// textInput is the one-text-block message both ACP and Codex take.
+func textInput(s string) []map[string]string {
+	return []map[string]string{{"type": "text", "text": s}}
+}
+
+// command picks the argv: the resume command on resume if the spec has one,
+// else the spec's command (spec.Normalize fills each adapter's default).
+func command(cfg proto.ShimConfig) ([]string, error) {
+	if cfg.Resume && len(cfg.ResumeCommand) > 0 {
+		return cfg.ResumeCommand, nil
+	}
+	if len(cfg.Command) == 0 {
+		return nil, fmt.Errorf("%s: no command", cfg.Adapter)
+	}
+	return cfg.Command, nil
+}

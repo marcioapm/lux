@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -34,32 +33,16 @@ func (s *Server) reaperLoop(ctx context.Context) {
 func (s *Server) reapLeases(ctx context.Context) error {
 	var n int
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT run_id, epoch FROM placements
-			WHERE state IN ('assigned', 'starting', 'running', 'stopping') AND lease_expires_at < now()
-			FOR UPDATE SKIP LOCKED LIMIT 100`)
+		expired, err := livePlacements(ctx, tx, "p.lease_expires_at < now()")
 		if err != nil {
 			return err
 		}
-		type pe struct {
-			run   string
-			epoch int
-		}
-		var expired []pe
-		for rows.Next() {
-			var p pe
-			if err := rows.Scan(&p.run, &p.epoch); err != nil {
-				rows.Close()
-				return err
-			}
-			expired = append(expired, p)
-		}
-		rows.Close()
 		for _, p := range expired {
-			if err := s.placementLost(ctx, tx, p.run, p.epoch, "lease expired: host stopped heartbeating"); err != nil {
+			if err := s.placementLost(ctx, tx, p.RunID, p.Epoch, "lease expired: host stopped heartbeating"); err != nil {
 				return err
 			}
-			n++
 		}
+		n = len(expired)
 		return nil
 	})
 	if n > 0 {
@@ -68,67 +51,45 @@ func (s *Server) reapLeases(ctx context.Context) error {
 	return err
 }
 
-// reapHosts: a host without heartbeats is lost; snapshots only it held are
-// unavailable.
+// reapHosts: a host without heartbeats is lost, and with it its live
+// placements and the snapshots only it held.
 func (s *Server) reapHosts(ctx context.Context) error {
-	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	var n int
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `UPDATE hosts SET state = 'lost', lost_at = now(), state_reason = 'missed heartbeats'
 			WHERE state IN ('ready', 'draining') AND last_heartbeat < now() - $1::interval
-			RETURNING id`, fmt.Sprintf("%f seconds", s.cfg.LeaseDuration.Seconds()))
+			RETURNING id`, interval(s.cfg.LeaseDuration))
 		if err != nil {
 			return err
 		}
-		var lost []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
-			}
-			lost = append(lost, id)
+		lost, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil || len(lost) == 0 {
+			return err
 		}
-		rows.Close()
-		for _, id := range lost {
-			s.log.Warn("host lost", "host", id)
-			if _, err := tx.Exec(ctx, `UPDATE snapshots SET available = false WHERE host_id = $1 AND NOT uploaded AND available`, id); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx, `UPDATE snapshots SET host_copy = false WHERE host_id = $1`, id); err != nil {
-				return err
-			}
-			// Its live placements are lost with it, whatever their leases say:
-			// a fresh assignment's lease is generous (image pulls are slow),
-			// but a host that stopped heartbeating is not pulling anything.
-			prow, err := tx.Query(ctx, `SELECT run_id, epoch FROM placements
-				WHERE host_id = $1 AND state IN ('assigned', 'starting', 'running', 'stopping')`, id)
-			if err != nil {
-				return err
-			}
-			type pe struct {
-				run   string
-				epoch int
-			}
-			var live []pe
-			for prow.Next() {
-				var x pe
-				if err := prow.Scan(&x.run, &x.epoch); err != nil {
-					prow.Close()
-					return err
-				}
-				live = append(live, x)
-			}
-			prow.Close()
-			for _, x := range live {
-				if err := s.placementLost(ctx, tx, x.run, x.epoch, "host lost: missed heartbeats"); err != nil {
-					return err
-				}
-			}
+		n = len(lost)
+		s.log.Warn("hosts lost", "hosts", lost)
+		if _, err := tx.Exec(ctx, `UPDATE snapshots SET available = available AND uploaded, host_copy = false
+			WHERE host_id = ANY($1)`, lost); err != nil {
+			return err
 		}
-		if len(lost) > 0 {
-			s.Kick()
+		// Their live placements go with them, whatever their leases say: a
+		// fresh assignment's lease is generous (image pulls are slow), but a
+		// host that stopped heartbeating is not pulling anything.
+		live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", lost)
+		if err != nil {
+			return err
+		}
+		for _, p := range live {
+			if err := s.placementLost(ctx, tx, p.RunID, p.Epoch, "host lost: missed heartbeats"); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
+	if n > 0 {
+		s.Kick()
+	}
+	return err
 }
 
 // reapTimeouts stops Runs that exceeded their wall-clock timeout, counted
@@ -184,7 +145,7 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 			stop_reason = CASE WHEN stop_reason = '' OR $2 = 'cancel' THEN $2 ELSE stop_reason END
 		FROM runs r
 		WHERE r.id = $1 AND p.run_id = r.id AND p.epoch = r.current_epoch
-		  AND p.state IN ('assigned', 'starting', 'running', 'stopping')
+		  AND p.state IN `+livePlacementStates+`
 		RETURNING p.host_id, p.epoch`, runID, reason).Scan(&hostID, &epoch)
 	if err == pgx.ErrNoRows {
 		return "", nil
@@ -238,18 +199,20 @@ func (s *Server) reapRetention(ctx context.Context) error {
 	if err != nil || len(due) == 0 {
 		return err
 	}
+	var deleted []string
 	for _, x := range due {
 		if x.key != "" {
 			if err := s.blobs.Delete(ctx, x.key); err != nil {
-				return err
+				break
 			}
 		}
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `UPDATE blobs SET location = 'deleted', deleted_at = now() WHERE id = $1`, x.id)
-			return err
-		}); err != nil {
-			return err
-		}
+		deleted = append(deleted, x.id)
 	}
-	return nil
+	if len(deleted) == 0 {
+		return nil
+	}
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE blobs SET location = 'deleted', deleted_at = now() WHERE id = ANY($1)`, deleted)
+		return err
+	})
 }

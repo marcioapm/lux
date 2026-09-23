@@ -1,13 +1,11 @@
 package adapter
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"slices"
 	"sync"
-	"sync/atomic"
 	"syscall"
 
 	"github.com/marcioapm/lux/internal/proto"
@@ -19,11 +17,8 @@ import (
 // native (turn/steer); interrupt is turn/interrupt; a resume on another
 // host is thread/resume with the stored thread id.
 type Codex struct {
-	lw      lineWriter
-	nextID  atomic.Int64
+	rpc     rpcConn
 	mu      sync.Mutex
-	pending map[int64]chan rpcResponse
-	proc    *Process
 	sink    Sink
 	thread  string
 	turn    string // in-progress turn id, "" when idle
@@ -32,43 +27,35 @@ type Codex struct {
 	stopped bool
 }
 
-func NewCodex() *Codex { return &Codex{pending: map[int64]chan rpcResponse{}} }
+func NewCodex() *Codex { return &Codex{} }
 
+// Command runs the spec's command (default "codex") with app-server.
 func (c *Codex) Command(cfg proto.ShimConfig) ([]string, error) {
 	if cfg.Resume && len(cfg.ResumeCommand) > 0 {
 		return cfg.ResumeCommand, nil
 	}
-	base := cfg.Command
-	if len(base) == 0 {
-		base = []string{"codex"}
+	argv, err := command(cfg)
+	if err != nil {
+		return nil, err
 	}
-	return append(append([]string{}, base...), "app-server"), nil
+	return append(slices.Clone(argv), "app-server"), nil
 }
 
 func (c *Codex) call(method string, params any) (json.RawMessage, error) {
-	id := c.nextID.Add(1)
-	ch := make(chan rpcResponse, 1)
-	c.mu.Lock()
-	c.pending[id] = ch
-	c.mu.Unlock()
-	if err := c.lw.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
-		return nil, err
-	}
-	r := <-ch
-	if r.Err != nil {
-		return nil, fmt.Errorf("%s: %s", method, r.Err.Message)
-	}
-	return r.Result, nil
+	return c.rpc.call(method, params)
 }
 
 func (c *Codex) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Sink) error {
 	c.mu.Lock()
-	c.proc, c.sink = p, sink
-	c.lw.w = p.Stdin
+	c.sink = sink
 	c.mu.Unlock()
+	c.rpc.attach(p.Stdin)
 	go pump(p.Stderr, sink.Stderr)
 	done := make(chan struct{})
-	go func() { defer close(done); c.readLoop(p, sink) }()
+	go func() {
+		defer close(done)
+		c.rpc.readLoop(p.Stdout, c.handleRequest, func(m rpcMsg) { c.handleNotification(m, sink) }, sink.Stdout)
+	}()
 
 	if err := c.handshake(cfg, sink); err != nil {
 		sink.Event(proto.EvWarning, map[string]any{"message": "codex: " + err.Error()})
@@ -80,12 +67,6 @@ func (c *Codex) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink 
 		c.drain()
 	}
 	<-done
-	c.mu.Lock()
-	for id, ch := range c.pending {
-		ch <- rpcResponse{Err: &rpcError{Message: "codex exited"}}
-		delete(c.pending, id)
-	}
-	c.mu.Unlock()
 	return nil
 }
 
@@ -93,10 +74,7 @@ func (c *Codex) handshake(cfg proto.ShimConfig, sink Sink) error {
 	if _, err := c.call("initialize", map[string]any{"clientInfo": map[string]string{"name": "lux", "version": "1"}}); err != nil {
 		return err
 	}
-	cwd := cfg.Workdir
-	if cwd == "" {
-		cwd = home()
-	}
+	cwd := workdir(cfg)
 	var res json.RawMessage
 	var err error
 	if cfg.Resume && cfg.SessionID != "" {
@@ -146,7 +124,7 @@ func (c *Codex) drain() {
 	c.mu.Unlock()
 	sink.Activity(false)
 	go func() {
-		res, err := c.call("turn/start", map[string]any{"threadId": thread, "input": []map[string]string{{"type": "text", "text": in.Text}}})
+		res, err := c.call("turn/start", map[string]any{"threadId": thread, "input": textInput(in.Text)})
 		var r struct {
 			Turn struct {
 				ID string `json:"id"`
@@ -170,36 +148,11 @@ func (c *Codex) drain() {
 	}()
 }
 
-func (c *Codex) readLoop(p *Process, sink Sink) {
-	sc := bufio.NewScanner(p.Stdout)
-	sc.Buffer(make([]byte, 64<<10), 64<<20)
-	for sc.Scan() {
-		line := sc.Bytes()
-		var m rpcMsg
-		if err := json.Unmarshal(line, &m); err != nil {
-			sink.Stdout(append(append([]byte{}, line...), '\n'))
-			continue
-		}
-		switch {
-		case m.Method != "" && len(m.ID) > 0:
-			// Server requests (approvals): unattended, so approve; the
-			// sandbox is the container.
-			_ = c.lw.send(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": map[string]string{"decision": "approved"}})
-			sink.Event("codex.request."+m.Method, json.RawMessage(m.Params))
-		case m.Method != "":
-			c.handleNotification(m, sink)
-		case len(m.ID) > 0:
-			var id int64
-			_ = json.Unmarshal(m.ID, &id)
-			c.mu.Lock()
-			ch := c.pending[id]
-			delete(c.pending, id)
-			c.mu.Unlock()
-			if ch != nil {
-				ch <- rpcResponse{Result: m.Result, Err: m.Error}
-			}
-		}
-	}
+// handleRequest answers server requests (approvals): unattended, so
+// approve; the sandbox is the container.
+func (c *Codex) handleRequest(m rpcMsg) {
+	_ = c.rpc.reply(m.ID, map[string]string{"decision": "approved"})
+	c.sink.Event("codex.request."+m.Method, json.RawMessage(m.Params))
 }
 
 func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
@@ -259,7 +212,7 @@ func (c *Codex) Deliver(in proto.Input) {
 	}
 	go func() {
 		_, err := c.call("turn/steer", map[string]any{"threadId": thread, "expectedTurnId": turn,
-			"input": []map[string]string{{"type": "text", "text": in.Text}}})
+			"input": textInput(in.Text)})
 		if err != nil {
 			// The turn ended meanwhile: send it as the next turn.
 			c.mu.Lock()
@@ -287,14 +240,8 @@ func (c *Codex) Interrupt() error {
 func (c *Codex) Stop() error {
 	c.mu.Lock()
 	c.stopped = true
-	p := c.proc
 	c.mu.Unlock()
 	_ = c.Interrupt()
-	if p != nil && p.Stdin != nil {
-		c.lw.mu.Lock()
-		_ = p.Stdin.Close()
-		c.lw.w = nil
-		c.lw.mu.Unlock()
-	}
+	c.rpc.lw.close()
 	return nil
 }

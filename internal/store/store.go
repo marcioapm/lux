@@ -16,7 +16,6 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -73,12 +72,6 @@ func (s *Store) Tx(ctx context.Context, sc Scope, fn func(pgx.Tx) error) error {
 		}
 		return fn(tx)
 	})
-}
-
-// IsUniqueViolation reports whether err is a unique-constraint violation.
-func IsUniqueViolation(err error) bool {
-	var pg *pgconn.PgError
-	return errors.As(err, &pg) && pg.Code == "23505"
 }
 
 // Migrate applies pending migrations as the database owner, then makes sure

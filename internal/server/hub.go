@@ -51,9 +51,9 @@ func (h *Hub) conn(hostID string) *runnerConn {
 	return h.conns[hostID]
 }
 
-// Connected reports whether a host's runner is connected to this luxd,
-// over a WebSocket or by polling recently.
-func (h *Hub) Connected(hostID string) bool {
+// Reachable reports whether a host's runner talks to this luxd, over a
+// WebSocket or by polling recently: it can be given work.
+func (h *Hub) Reachable(hostID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.conns[hostID] != nil {
@@ -62,8 +62,9 @@ func (h *Hub) Connected(hostID string) bool {
 	return time.Since(h.polls[hostID]) < 10*time.Second
 }
 
-// Live reports whether a host has a WebSocket here: live streams need one.
-func (h *Hub) Live(hostID string) bool { return h.conn(hostID) != nil }
+// Streaming reports whether a host has a WebSocket here: live output and
+// interactive streams need one; a polling host cannot relay them.
+func (h *Hub) Streaming(hostID string) bool { return h.conn(hostID) != nil }
 
 func (h *Hub) polled(hostID string) {
 	h.mu.Lock()
@@ -190,6 +191,14 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 		ws.Close(websocket.StatusPolicyViolation, truncate(err.Error(), 120))
 		return nil
 	}
+	// Everything unacked goes out again on this connection.
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE host_messages SET delivered_at = NULL WHERE host_id = $1 AND acked_at IS NULL`, welcome.HostID)
+		return err
+	}); err != nil {
+		ws.Close(websocket.StatusInternalError, "luxd error")
+		return nil
+	}
 	c := &runnerConn{
 		hostID: welcome.HostID,
 		ws:     ws,
@@ -221,10 +230,6 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 	// Writer: live frames and durable messages.
 	go func() {
 		defer cancel()
-		// Ids already sent on this connection. Not a high-water mark: ids are
-		// taken at insert and become visible at commit, so a lower id can
-		// appear after a higher one was sent.
-		sent := map[int64]bool{}
 		c.notify <- struct{}{}
 		for {
 			select {
@@ -235,19 +240,15 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 					return
 				}
 			case <-c.notify:
-				msgs, err := s.pendingMessages(ctx, c.hostID)
+				msgs, err := s.pendingMessages(ctx, c.hostID, true)
 				if err != nil {
 					s.log.Warn("pending messages", "err", err)
 					continue
 				}
 				for _, m := range msgs {
-					if sent[m.ID] {
-						continue
-					}
 					if err := writeFrame(ctx, ws, m); err != nil {
 						return
 					}
-					sent[m.ID] = true
 				}
 			}
 		}
@@ -299,15 +300,22 @@ func writeFrame(ctx context.Context, ws *websocket.Conn, f proto.Frame) error {
 	return ws.Write(wctx, websocket.MessageText, b)
 }
 
-// pendingMessages returns a host's unacked messages in id order, with
-// secrets attached to assignments at send time: they are never stored.
-func (s *Server) pendingMessages(ctx context.Context, hostID string) ([]proto.Frame, error) {
+// pendingMessages returns a host's unacked messages in id order, marking
+// them delivered, with secrets attached to assignments at send time (they
+// are never stored). With undelivered, only messages not yet sent on the
+// current connection: delivered_at is cleared whenever a runner connects,
+// so it means "sent on this connection" and the query itself skips what was
+// sent (whatever order ids committed in). The poll fallback has no
+// connection and asks for every unacked message.
+func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered bool) ([]proto.Frame, error) {
 	var out []proto.Frame
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			UPDATE host_messages SET delivered_at = coalesce(delivered_at, now())
-			WHERE id IN (SELECT id FROM host_messages WHERE host_id = $1 AND acked_at IS NULL ORDER BY id LIMIT 500)
-			RETURNING id, type, coalesce(run_id, ''), coalesce(epoch, 0), payload`, hostID)
+			UPDATE host_messages SET delivered_at = now()
+			WHERE id IN (SELECT id FROM host_messages
+				WHERE host_id = $1 AND acked_at IS NULL AND (NOT $2 OR delivered_at IS NULL)
+				ORDER BY id LIMIT 500)
+			RETURNING id, type, coalesce(run_id, ''), coalesce(epoch, 0), payload`, hostID, undelivered)
 		if err != nil {
 			return err
 		}

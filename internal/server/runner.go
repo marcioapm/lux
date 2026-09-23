@@ -99,18 +99,18 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		// What luxd thinks is live here. Anything the runner has beyond this
 		// is stale (its Run moved on) and it must stop it.
 		rows, err := tx.Query(ctx, `SELECT run_id, epoch, state FROM placements
-			WHERE host_id = $1 AND state IN ('assigned', 'starting', 'running', 'stopping')`, hostID)
+			WHERE host_id = $1 AND state IN `+livePlacementStates+``, hostID)
 		if err != nil {
 			return err
 		}
-		live := map[string]int{}
+		live := map[string]proto.LivePlacement{}
 		for rows.Next() {
 			var lp proto.LivePlacement
 			if err := rows.Scan(&lp.RunID, &lp.Epoch, &lp.State); err != nil {
 				return err
 			}
 			w.Live = append(w.Live, lp)
-			live[lp.RunID] = lp.Epoch
+			live[lp.RunID] = lp
 		}
 		rows.Close()
 
@@ -120,18 +120,16 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		for _, lp := range h.Live {
 			have[lp.RunID] = lp.Epoch
 		}
-		for runID, epoch := range live {
-			if e, ok := have[runID]; ok && e == epoch {
+		for runID, lp := range live {
+			if e, ok := have[runID]; ok && e == lp.Epoch {
 				continue
 			}
 			// Still assigned but not yet acked: the assign message is pending
 			// and will be (re)delivered; not lost.
-			var state string
-			_ = tx.QueryRow(ctx, `SELECT state FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&state)
-			if state == "assigned" {
+			if lp.State == "assigned" {
 				continue
 			}
-			if err := s.placementLost(ctx, tx, runID, epoch, "runner restarted without the container"); err != nil {
+			if err := s.placementLost(ctx, tx, runID, lp.Epoch, "runner restarted without the container"); err != nil {
 				return err
 			}
 		}
@@ -250,25 +248,41 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 }
 
 func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbeat) error {
+	n := len(hb.Leases)
+	runs, epochs := make([]string, n), make([]int, n)
+	mem, disk, cpu := make([]int64, n), make([]int64, n), make([]float64, n)
+	pids := make([]int, n)
+	rx, tx_ := make([]int64, n), make([]int64, n)
+	for i, l := range hb.Leases {
+		runs[i], epochs[i] = l.RunID, l.Epoch
+		if u := l.Usage; u != nil {
+			mem[i], disk[i], pids[i], cpu[i], rx[i], tx_[i] = u.PeakMemoryBytes, u.PeakDiskBytes, u.PeakPids, u.CPUSeconds, u.NetRxBytes, u.NetTxBytes
+		}
+	}
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `UPDATE hosts SET last_heartbeat = now(),
 			state = CASE WHEN state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE state END
 			WHERE id = $1`, hostID); err != nil {
 			return err
 		}
-		for _, l := range hb.Leases {
-			if _, err := tx.Exec(ctx, `UPDATE placements SET lease_expires_at = now() + $4::interval
-				WHERE run_id = $1 AND epoch = $2 AND host_id = $3 AND state IN ('assigned', 'starting', 'running', 'stopping')`,
-				l.RunID, l.Epoch, hostID, fmt.Sprintf("%f seconds", s.cfg.LeaseDuration.Seconds())); err != nil {
-				return err
-			}
-			if l.Usage != nil {
-				if err := recordUsage(ctx, tx, l.RunID, l.Epoch, l.Usage); err != nil {
-					return err
-				}
-			}
+		if n == 0 {
+			return nil
 		}
-		return nil
+		// Leases renewed and usage peaks raised for every placement at once.
+		_, err := tx.Exec(ctx, `UPDATE placements p SET
+				lease_expires_at  = now() + $2::interval,
+				peak_memory_bytes = greatest(p.peak_memory_bytes, nullif(u.mem, 0)),
+				peak_disk_bytes   = greatest(p.peak_disk_bytes, nullif(u.disk, 0)),
+				peak_pids         = greatest(p.peak_pids, nullif(u.pids, 0)),
+				cpu_seconds       = greatest(p.cpu_seconds, nullif(u.cpu, 0)),
+				net_rx_bytes      = greatest(p.net_rx_bytes, nullif(u.rx, 0)),
+				net_tx_bytes      = greatest(p.net_tx_bytes, nullif(u.tx, 0))
+			FROM unnest($3::text[], $4::int[], $5::bigint[], $6::bigint[], $7::int[], $8::float8[], $9::bigint[], $10::bigint[])
+				AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx)
+			WHERE p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1
+			  AND p.state IN `+livePlacementStates,
+			hostID, interval(s.cfg.LeaseDuration), runs, epochs, mem, disk, pids, cpu, rx, tx_)
+		return err
 	})
 }
 
@@ -327,7 +341,7 @@ func (s *Server) servePoll(w http.ResponseWriter, r *http.Request) error {
 	for _, f := range req.Reports {
 		resp.Replies = append(resp.Replies, s.handleReport(r.Context(), hostID, f))
 	}
-	msgs, err := s.pendingMessages(r.Context(), hostID)
+	msgs, err := s.pendingMessages(r.Context(), hostID, false)
 	if err != nil {
 		return err
 	}
@@ -336,8 +350,8 @@ func (s *Server) servePoll(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func addEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, typ string, data any) error {
-	if data == nil || isNilMap(data) {
+func addEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, typ string, data map[string]any) error {
+	if data == nil {
 		data = map[string]any{}
 	}
 	var ep *int
@@ -349,10 +363,8 @@ func addEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int,
 	return err
 }
 
-func isNilMap(v any) bool {
-	m, ok := v.(map[string]any)
-	return ok && m == nil
-}
+// interval formats a duration for a Postgres interval parameter.
+func interval(d time.Duration) string { return fmt.Sprintf("%f seconds", d.Seconds()) }
 
 func msToTime(ms int64) *time.Time {
 	if ms == 0 {

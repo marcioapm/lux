@@ -60,7 +60,24 @@ type Runner struct {
 	subs       map[string]context.CancelFunc
 	uploads    *uploader
 	control    *serialQueues
+	mounts     sync.Map // volume name → mountpoint
 }
+
+// mountpoint is where a volume's data is on this host. It never changes for
+// a volume's life, so it is looked up once (each lookup forks podman).
+func (r *Runner) mountpoint(ctx context.Context, volume string) (string, error) {
+	if mp, ok := r.mounts.Load(volume); ok {
+		return mp.(string), nil
+	}
+	mp, err := r.pm.VolumeMountpoint(ctx, volume)
+	if err != nil {
+		return "", err
+	}
+	r.mounts.Store(volume, mp)
+	return mp, nil
+}
+
+func (r *Runner) forgetMountpoint(volume string) { r.mounts.Delete(volume) }
 
 func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	if cfg.Name == "" {
@@ -110,6 +127,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.readopt(ctx)
 	go r.uploads.loop(ctx)
 	go r.heartbeatLoop(ctx)
+	go r.usageLoop(ctx)
 	go r.gcLoop(ctx)
 	r.conn.loop(ctx)
 	return nil
@@ -167,12 +185,6 @@ func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
 		p.markStale()
 		go p.kill(context.WithoutCancel(ctx))
 	}
-	// Placements that ended while disconnected re-send their reports.
-	r.mu.Lock()
-	for _, p := range r.placements {
-		p.nudge()
-	}
-	r.mu.Unlock()
 }
 
 // handleControl handles one durable message from luxd. Idempotent.
@@ -308,20 +320,45 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 		case <-time.After(interval):
 		}
 		var hb proto.Heartbeat
-		r.mu.Lock()
-		ps := make([]*placement, 0, len(r.placements))
-		for _, p := range r.placements {
-			ps = append(ps, p)
-		}
-		r.mu.Unlock()
-		for _, p := range ps {
+		for _, p := range r.livePlacements() {
 			if st := p.liveState(); st != "" {
-				hb.Leases = append(hb.Leases, proto.LivePlacement{RunID: p.runID, Epoch: p.epoch, State: st, Usage: p.sampleUsage(ctx)})
+				hb.Leases = append(hb.Leases, proto.LivePlacement{RunID: p.runID, Epoch: p.epoch, State: st, Usage: p.usage()})
 			}
 		}
 		hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		_ = r.conn.Report(hctx, proto.Frame{Type: proto.MsgHeartbeat, Data: proto.Marshal(hb)})
 		cancel()
+	}
+}
+
+func (r *Runner) livePlacements() []*placement {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ps := make([]*placement, 0, len(r.placements))
+	for _, p := range r.placements {
+		if p.liveState() != "" {
+			ps = append(ps, p)
+		}
+	}
+	return ps
+}
+
+// usageLoop samples disk and network use of live placements, in parallel,
+// on a slower schedule than heartbeats: it walks volumes and forks podman.
+func (r *Runner) usageLoop(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		var wg sync.WaitGroup
+		for _, p := range r.livePlacements() {
+			wg.Go(func() { p.sampleSlow(ctx) })
+		}
+		wg.Wait()
 	}
 }
 

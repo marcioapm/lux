@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -84,11 +83,7 @@ func (r *Runner) saveSnapshotRecord(snapID string, rec *snapshotRecord) error {
 	if err != nil {
 		return err
 	}
-	tmp := r.recordPath(snapID) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, r.recordPath(snapID))
+	return writeFileAtomic(r.recordPath(snapID), b, 0o600)
 }
 
 func (r *Runner) snapshotRecords() map[string]*snapshotRecord {
@@ -114,10 +109,8 @@ func (r *Runner) snapshotRecords() map[string]*snapshotRecord {
 // uploader uploads blobs in the background, oldest first, retrying until
 // luxd has them. Runs across restarts: pending uploads are on disk.
 type uploader struct {
-	r    *Runner
-	kc   chan struct{}
-	mu   sync.Mutex
-	busy bool
+	r  *Runner
+	kc chan struct{}
 }
 
 func newUploader(r *Runner) *uploader { return &uploader{r: r, kc: make(chan struct{}, 1)} }
@@ -218,6 +211,7 @@ func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
 	vols, _ := r.pm.VolumeList(ctx, LabelRun+"="+runID)
 	for _, v := range vols {
 		_ = r.pm.VolumeRemove(ctx, v)
+		r.forgetMountpoint(v)
 	}
 	_ = r.pm.NetworkRemove(ctx, networkName(runID))
 	for snapID, rec := range r.snapshotRecords() {
@@ -290,7 +284,7 @@ func (r *Runner) readopt(ctx context.Context) {
 		}
 		p := &placement{
 			r: r, runID: st.RunID, tenantID: st.TenantID, epoch: st.Epoch, dir: r.runDir(st.RunID),
-			state: st, done: make(chan struct{}), nudgeCh: make(chan struct{}, 1), stopWhy: st.StopReason,
+			state: st, done: make(chan struct{}), stopWhy: st.StopReason,
 		}
 		switch st.Phase {
 		case "reported":
@@ -414,7 +408,7 @@ func (r *Runner) streamOutput(ctx context.Context, runID string, epoch int, s pr
 }
 
 func (r *Runner) outputFile(ctx context.Context, runID string, epoch int) (string, error) {
-	rt, err := r.pm.VolumeMountpoint(ctx, runtimeVolume(runID))
+	rt, err := r.mountpoint(ctx, runtimeVolume(runID))
 	if err != nil {
 		return "", err
 	}

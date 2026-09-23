@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from conftest import generic
-from env import ALPINE_IMAGE
+from env import ALPINE_IMAGE, wait_until
 
 
 def test_unplaceable_runs_do_not_block_the_queue(lux, runners, hosts):
@@ -51,12 +51,8 @@ def test_drain_moves_runs_elsewhere(lux, runners, hosts, fake_image):
     runners.start(hosts[1])
     lux.run("hosts", "drain", hosts[0].name)
     # Stopped with reason drain, then automatically resumed on the other host.
-    deadline = time.time() + 90
-    while time.time() < deadline:
-        run = lux.get(run_id)
-        if len(run["placements"]) == 2 and run["state"] == "running":
-            break
-        time.sleep(0.5)
+    run = wait_until(lambda: (lambda r: r if len(r["placements"]) == 2 and r["state"] == "running" else None)(lux.get(run_id)),
+                     90, 0.5, "drained Run never resumed elsewhere")
     assert [p["hostName"] for p in run["placements"]] == [hosts[0].name, hosts[1].name], run["placements"]
     assert run["placements"][0]["stopReason"] == "drain"
     lux.run("steer", run_id, "read f.txt")

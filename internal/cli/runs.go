@@ -267,7 +267,7 @@ func (a *app) getCmd() *cobra.Command {
 }
 
 type logOpts struct {
-	stderr, events, all bool
+	stderr, events bool
 }
 
 func (a *app) logsCmd() *cobra.Command {
