@@ -269,8 +269,13 @@ func (s *RunSpec) Normalize() error {
 	if (s.Image.Ref == "") == (s.Image.Build == nil) {
 		fail("image: exactly one of ref or build is required")
 	}
-	if s.Image.Build != nil && strings.TrimSpace(s.Image.Build.Containerfile) == "" {
-		fail("image.build.containerfile is required")
+	if b := s.Image.Build; b != nil {
+		if strings.TrimSpace(b.Containerfile) == "" {
+			fail("image.build.containerfile is required")
+		}
+		if b.Context != "" {
+			fail("image.build.context is not supported yet: COPY and ADD have no build context")
+		}
 	}
 
 	w := &s.Workload

@@ -358,6 +358,12 @@ class TestEnvironment:
         host.exec("sh", "-c",
                   "echo containers:2147483647:2147483648 >> /etc/subuid && "
                   "echo containers:2147483647:2147483648 >> /etc/subgid")
+        # Native overlay, as on a real host. The image's default,
+        # fuse-overlayfs, cannot give a build's RUN steps (in their own user
+        # namespace) write access to the image's root directory.
+        host.exec("sh", "-c",
+                  "printf '[storage]\\ndriver = \"overlay\"\\nrunroot = \"/run/containers/storage\"\\n"
+                  "graphroot = \"/var/lib/containers/storage\"\\n' > /etc/containers/storage.conf")
         tar = image_tar or Path(self.log_dir) / "images.tar"
         with open(tar, "rb") as f:
             subprocess.run(["docker", "exec", "-i", container, "podman", "load", "-q"],

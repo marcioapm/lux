@@ -244,6 +244,18 @@ func (a *app) getCmd() *cobra.Command {
 				fmt.Fprintf(w, "exit code: %d\n", *run.ExitCode)
 			}
 			fmt.Fprintf(w, "adapter:   %s\n", run.Spec.Workload.Adapter)
+			if run.Spec.Image.Ref != "" {
+				fmt.Fprintf(w, "image:     %s\n", run.Spec.Image.Ref)
+			} else if run.Image != nil {
+				fmt.Fprintf(w, "image:     built %s\n", run.Image.ImageID)
+				for _, l := range strings.Split(run.Image.Containerfile, "\n") {
+					if f := strings.Fields(l); len(f) > 1 && strings.EqualFold(f[0], "FROM") {
+						fmt.Fprintf(w, "           %s\n", strings.TrimSpace(l))
+					}
+				}
+			} else {
+				fmt.Fprintln(w, "image:     built (not yet)")
+			}
 			if run.SessionID != "" {
 				fmt.Fprintf(w, "session:   %s\n", run.SessionID)
 			}

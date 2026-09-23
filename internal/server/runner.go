@@ -237,8 +237,13 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 			if err := json.Unmarshal(f.Data, &ev); err != nil {
 				return err
 			}
-			if ev.Type == "git.push" {
+			switch ev.Type {
+			case "git.push":
 				if err := recordPushes(ctx, tx, f.RunID, ev.Data); err != nil {
+					return err
+				}
+			case "image.built":
+				if err := recordImageResolved(ctx, tx, f.RunID, ev.Data); err != nil {
 					return err
 				}
 			}
@@ -313,6 +318,23 @@ func recordPushes(ctx context.Context, tx pgx.Tx, runID string, data map[string]
 		return nil
 	}
 	_, err := tx.Exec(ctx, `UPDATE runs SET pushed = pushed || $2 WHERE id = $1`, runID, pushed)
+	return err
+}
+
+// recordImageResolved keeps a Run's first image build resolution (every
+// FROM pinned, and the image id), so later placements build the same thing.
+// The first one reported wins; the event keeps the rest of it.
+func recordImageResolved(ctx context.Context, tx pgx.Tx, runID string, data map[string]any) error {
+	res, ok := data["resolved"]
+	if !ok {
+		return nil
+	}
+	delete(data, "resolved")
+	b, err := json.Marshal(res)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE runs SET image_resolved = $2 WHERE id = $1 AND image_resolved IS NULL`, runID, b)
 	return err
 }
 

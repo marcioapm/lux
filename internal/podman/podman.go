@@ -34,6 +34,22 @@ func (p *Podman) cmd(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, p.Bin, args...)
 }
 
+// Build runs podman build. Idmapped overlay mounts are off for it: with
+// them, a build in its own user namespace commits files owned by the host
+// ids of whichever range it was given, so the image depends on the host
+// (root-owned files are not root's) and its id changes from build to build.
+// Without them, buildah maps ownership back into the container's ids.
+func (p *Podman) Build(ctx context.Context, args ...string) ([]byte, error) {
+	var stdout, stderr bytes.Buffer
+	c := p.cmd(ctx, append([]string{"build"}, args...)...)
+	c.Env = append(os.Environ(), "_CONTAINERS_OVERLAY_DISABLE_IDMAP=yes")
+	c.Stdout, c.Stderr = &stdout, &stderr
+	if err := c.Run(); err != nil {
+		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
 // Run runs podman and returns stdout. Errors include stderr.
 func (p *Podman) Run(ctx context.Context, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
@@ -73,6 +89,31 @@ func (p *Podman) Pull(ctx context.Context, ref string) error {
 func (p *Podman) ImageID(ctx context.Context, ref string) (string, error) {
 	out, err := p.Run(ctx, "image", "inspect", "--format", "{{.Id}}", ref)
 	return strings.TrimSpace(string(out)), err
+}
+
+// ImageByDigest is a local image's id with the given manifest digest, under
+// any name, or "".
+func (p *Podman) ImageByDigest(ctx context.Context, digest string) string {
+	out, err := p.Run(ctx, "images", "--digests", "--no-trunc", "--format", "{{.Digest}} {{.ID}}")
+	if err != nil {
+		return ""
+	}
+	for _, l := range strings.Split(string(out), "\n") {
+		if d, id, ok := strings.Cut(strings.TrimSpace(l), " "); ok && d == digest {
+			return id
+		}
+	}
+	return ""
+}
+
+// ImageDigest is the manifest digest an image was pulled (or loaded) by.
+func (p *Podman) ImageDigest(ctx context.Context, ref string) (string, error) {
+	out, err := p.Run(ctx, "image", "inspect", "--format", "{{.Digest}}", ref)
+	d := strings.TrimSpace(string(out))
+	if err == nil && !strings.HasPrefix(d, "sha256:") {
+		err = fmt.Errorf("image %s has no digest", ref)
+	}
+	return d, err
 }
 
 func (p *Podman) Images(ctx context.Context) ([]string, error) {

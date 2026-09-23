@@ -78,6 +78,9 @@ Host requirements:
 - Podman ≥ 5 with netavark, run rootful.
 - A `containers` range in `/etc/subuid` and `/etc/subgid` (for
   `--userns=auto`), for example `containers:2147483647:2147483648`.
+- Podman storage on the native `overlay` driver, not fuse-overlayfs.
+  Image builds run in their own user namespace, and under fuse-overlayfs
+  their `RUN` steps can't write to the image's root directory.
 - nftables (the runner owns the `inet lux` table; see
   [egress](runspec.md#network-egress)).
 - `/dev/fuse` for nested containers.

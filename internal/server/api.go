@@ -54,13 +54,22 @@ type Run struct {
 	SnapshotID  *string           `json:"snapshotId,omitempty"`
 	Host        string            `json:"host,omitempty"`
 	Spec        spec.RunSpec      `json:"spec"`
-	Secrets     []spec.SecretRef  `json:"secrets"`
-	CreatedAt   time.Time         `json:"createdAt"`
-	ScheduledAt *time.Time        `json:"firstScheduledAt,omitempty"`
-	StartedAt   *time.Time        `json:"firstStartedAt,omitempty"`
-	FinishedAt  *time.Time        `json:"finishedAt,omitempty"`
-	Placements  []Placement       `json:"placements,omitempty"`
-	Usage       *RunUsage         `json:"usage,omitempty"`
+	// Image is how a built image was resolved on its first build.
+	Image       *ImageResolution `json:"image,omitempty"`
+	Secrets     []spec.SecretRef `json:"secrets"`
+	CreatedAt   time.Time        `json:"createdAt"`
+	ScheduledAt *time.Time       `json:"firstScheduledAt,omitempty"`
+	StartedAt   *time.Time       `json:"firstStartedAt,omitempty"`
+	FinishedAt  *time.Time       `json:"finishedAt,omitempty"`
+	Placements  []Placement      `json:"placements,omitempty"`
+	Usage       *RunUsage        `json:"usage,omitempty"`
+}
+
+// ImageResolution is a built image as its first build pinned it: every
+// FROM at a digest. Later placements build from this Containerfile.
+type ImageResolution struct {
+	Containerfile string `json:"containerfile"`
+	ImageID       string `json:"imageId"`
 }
 
 type Placement struct {
@@ -104,13 +113,13 @@ type RunUsage struct {
 }
 
 const runColumns = `r.id, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
-	r.session_id, r.snapshot_id, r.spec, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
+	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce((SELECT h.name FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = r.id AND p.epoch = r.current_epoch), '')`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
-		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host)
+		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host)
 	return &r, err
 }
 

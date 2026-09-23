@@ -86,6 +86,42 @@ artifacts:
 - Resources default to 2 CPUs, 4 GiB of memory, 1024 PIDs. Sizes accept
   `512Mi`, `8Gi`, `1G`, or bytes.
 
+## Images
+
+`image.ref` names an image. Pin it by digest (`name@sha256:…`) for a Run
+that is the same everywhere. It is pulled once per host and cached.
+
+`image.build` builds a Containerfile on the host that runs the Run. There
+is no registry:
+
+```yaml
+image:
+  build:
+    containerfile: |
+      FROM docker.io/library/node:24
+      RUN npm install -g pnpm
+    args: { NODE_ENV: test }      # --build-arg
+```
+
+- **The first build pins every `FROM` to a digest.** The pinned
+  Containerfile and the image id are recorded on the Run (`lux get` shows
+  them). Every later placement, on any host, builds from the pinned form,
+  so a tag that moves in between does not change the base.
+- A host builds each distinct pinned Containerfile and args only once, and
+  reuses the image after that.
+- If a rebuild on another host produces a different image, the Run
+  continues and records an `image.rebuild-differs` event. That happens when
+  a `RUN` step is not reproducible, for example one that downloads the
+  latest of something. State volumes do not depend on the image.
+- **Builds are contained like the workload:** their own user namespace, the
+  same dropped capabilities, the Run's resource limits, and the Run's
+  network, so a `RUN` step has the Run's egress (and needs its registries
+  and package mirrors allowed).
+- A `FROM` naming its image through a build argument can't be pinned and
+  is refused. `scratch` and earlier stages are left alone.
+- Not yet: a build context. `COPY` and `ADD` have nothing to copy from, so
+  a spec with `image.build.context` is refused.
+
 ## Git
 
 lux clones repositories for you, on the host, before the container

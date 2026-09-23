@@ -183,7 +183,14 @@ func (p *placement) run(ctx context.Context) {
 		p.finishWithoutContainer(ctx, "failed", fmt.Sprintf("%s: %v", stage, err))
 	}
 
-	image, err := p.ensureImage(ctx, sp)
+	// The network and its egress rules first: an image build runs on it,
+	// and a reused container rejoins it; both need its rules.
+	network, err := p.setupNetwork(ctx, sp)
+	if err != nil {
+		fail("network", err)
+		return
+	}
+	image, err := p.ensureImage(ctx, sp, network)
 	if err != nil {
 		fail("image", err)
 		return
@@ -210,7 +217,7 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 
-	if err := p.createContainer(ctx, sp, image, a); err != nil {
+	if err := p.createContainer(ctx, sp, image, network, a); err != nil {
 		fail("container", err)
 		return
 	}
@@ -368,22 +375,6 @@ func (p *placement) finishWithoutContainer(ctx context.Context, state, msg strin
 	p.setPhase("done")
 }
 
-// ---- image ----------------------------------------------------------------
-
-func (p *placement) ensureImage(ctx context.Context, sp spec.RunSpec) (string, error) {
-	if sp.Image.Build != nil {
-		return p.buildImage(ctx, sp)
-	}
-	ref := sp.Image.Ref
-	if !p.r.pm.ImageExists(ctx, ref) {
-		p.event(ctx, "image.pull", map[string]any{"ref": ref})
-		if err := p.r.pm.Pull(ctx, ref); err != nil {
-			return "", err
-		}
-	}
-	return ref, nil
-}
-
 // ---- volumes ----------------------------------------------------------------
 
 func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume *proto.ResumeInfo) error {
@@ -521,13 +512,7 @@ func hardening() []string {
 	}
 }
 
-func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image string, a *proto.Assign) error {
-	// The network and its egress rules first: a reused container rejoins
-	// the same network and needs its rules as much as a new one.
-	network, err := p.setupNetwork(ctx, sp)
-	if err != nil {
-		return fmt.Errorf("network: %w", err)
-	}
+func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image string, network podman.Network, a *proto.Assign) error {
 	name := containerName(p.runID)
 	// A container from an earlier placement: its writable layer is only
 	// worth keeping for a same-host resume with the same image; the shim
