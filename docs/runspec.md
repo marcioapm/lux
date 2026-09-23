@@ -141,14 +141,19 @@ minimal example.
 
 A nested Run is never `--privileged`. Beyond what every Run gets, it gets:
 
-- `CAP_SYS_CHROOT`, and `CAP_SETUID`/`CAP_SETGID` kept as ambient
-  capabilities for the workload user (`newuidmap` can't gain them from
-  file capabilities under `no-new-privileges`);
+- `CAP_SYS_CHROOT` in its bounding set;
+- no `no-new-privileges`, so that `newuidmap`/`newgidmap` can take
+  `CAP_SETUID`/`CAP_SETGID` from their file capabilities (for themselves
+  only). The workload holds no capabilities, so it can't become root in its
+  container, and nothing can gain a capability outside the bounding set
+  every Run has;
 - `/dev/fuse` and `/dev/net/tun`;
 - `unmask=ALL` and `label=disable`;
 - the host's seccomp profile, plus `sethostname`, `setdomainname` and
   `setns` (normally allowed only with `CAP_SYS_ADMIN`, which it does not
   get).
+
+A host started without `--nested` refuses nested Runs.
 
 It is still in its own user namespace (an unprivileged uid range on the
 host). The containers it starts use the Run's network, so they have its

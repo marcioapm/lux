@@ -131,3 +131,55 @@ def test_streams_need_the_runs_tenant(lux, tenant_factory, runners, hosts):
     assert "not found" in e.value.stderr.lower(), e.value.stderr
     lux.run("cancel", run_id)
 
+
+
+def test_port_forward_after_a_runner_restart(lux, runners, hosts):
+    """A Run re-adopted by a restarted runner (which has no assignment for
+    it any more) is still reachable on its declared ports, and only them."""
+    runners.start(hosts[0])
+    serve = "while :; do printf 'HTTP/1.0 200 OK\\r\\n\\r\\nstill-here\\n' | nc -l -p 8080 >/dev/null; done"
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", serve, network={"ports": [{"port": 8080, "name": "web"}]}))
+    lux.wait_state(run_id, "running")
+    runners.stop(hosts[0], "KILL")
+    runners.start(hosts[0])
+    # The restarted runner's connection is up once a check passes.
+    wait_until(lambda: lux.api(f"/v1/runs/{run_id}/ports/web").ok, 30, 0.5, "host never reconnected")
+    local = free_port()
+    p = lux.popen("port-forward", run_id, "web", str(local))
+    try:
+        body = wait_until(lambda: "still-here" in (b := http_get(local)) and b, 30, 0.5, "no answer after restart")
+        assert "still-here" in body
+    finally:
+        p.terminate()
+        p.wait(timeout=10)
+    lux.run("cancel", run_id)
+
+
+def test_a_stream_ends_when_the_runner_goes_away(lux, runners, hosts):
+    """The runner's connection drops mid-exec: the client gets an error
+    promptly instead of waiting forever."""
+    runners.start(hosts[0])
+    run_id = lux.submit(sleeper())
+    lux.wait_output(run_id, "up")
+    p = lux.popen("exec", run_id, "-T", "--", "sleep", "300", stdin=subprocess.PIPE)
+    time.sleep(2)
+    runners.stop(hosts[0], "KILL")
+    try:
+        p.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        raise AssertionError("exec hung after its runner went away")
+    assert p.returncode != 0
+    assert "disconnected" in p.stderr.read(), "no reason given"
+
+
+def http_get(port: int) -> str:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as s:
+            s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+            data = b""
+            while chunk := s.recv(4096):
+                data += chunk
+            return data.decode()
+    except OSError:
+        return ""

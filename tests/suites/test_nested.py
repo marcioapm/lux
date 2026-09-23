@@ -51,12 +51,16 @@ def test_without_the_opt_in_podman_inside_fails(lux, runners, hosts):
 
 def test_nested_is_not_privileged(lux, runners, hosts):
     """Still an unprivileged uid range on the host, without CAP_SYS_ADMIN,
-    and no host devices beyond fuse and tun."""
+    and no host devices beyond fuse and tun. The workload holds no
+    capabilities (so it cannot setuid to root in its container, and reach
+    the shim's socket or root's files)."""
     runners.start(hosts[0], "--nested")
     run_id = lux.submit(nested(
-        "awk '{print $2}' /proc/self/uid_map; grep CapBnd /proc/self/status; ls /dev | tr '\\n' ' '"))
+        "awk '{print $2}' /proc/self/uid_map; grep CapBnd /proc/self/status; ls /dev | tr '\\n' ' '; echo; "
+        "grep CapEff /proc/self/status"))
     lux.wait_state(run_id, "succeeded", timeout=60)
-    host_uid, cap, devs = lux.logs(run_id).split("\n")[:3]
+    host_uid, cap, devs, eff = lux.logs(run_id).split("\n")[:4]
+    assert int(eff.split()[1], 16) == 0, f"the workload holds capabilities: {eff}"
     assert host_uid.strip() != "0", "nested Run is host root"
     assert int(cap.split()[1], 16) & (1 << 21) == 0, f"CAP_SYS_ADMIN: {cap}"
     for d in ("sda", "nvme0n1", "kmsg", "mem"):

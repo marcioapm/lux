@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -192,6 +193,9 @@ func (p *placement) run(ctx context.Context) {
 
 	prev, _ := readRunState(p.dir)
 	p.state = &runState{RunID: p.runID, TenantID: p.tenantID, Epoch: p.epoch, Phase: "assigned", Times: map[string]int64{}}
+	for _, dp := range sp.Network.Ports {
+		p.state.Ports = append(p.state.Ports, dp.Port)
+	}
 	if prev != nil {
 		p.state.VolumesSnapshot, p.state.VolumesEpoch = prev.VolumesSnapshot, prev.VolumesEpoch
 	}
@@ -220,6 +224,10 @@ func (p *placement) run(ctx context.Context) {
 		p.finishWithoutContainer(ctx, "failed", fmt.Sprintf("%s: %v", stage, err))
 	}
 
+	if sp.Sandbox.NestedContainers && p.r.nestedSeccomp == "" {
+		fail("sandbox", errors.New("this host does not offer nested containers (lux-runner --nested)"))
+		return
+	}
 	// The network and its egress rules first: an image build runs on it,
 	// and a reused container rejoins it; both need its rules.
 	network, err := p.setupNetwork(startCtx, sp)
@@ -544,8 +552,12 @@ func containment() []string {
 	}
 }
 
-func hardening() []string {
-	return append(containment(),
+func hardening(sp spec.RunSpec) []string {
+	args := containment()
+	if sp.Sandbox.NestedContainers {
+		args = slices.DeleteFunc(args, func(a string) bool { return a == "--security-opt=no-new-privileges" })
+	}
+	return append(args,
 		// Explicit, because a host's containers.conf may default them to
 		// the host's namespaces.
 		"--cgroups=enabled", "--cgroupns=private", "--ipc=private", "--uts=private", "--pid=private",
@@ -582,7 +594,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 		return err
 	}
 
-	args := hardening()
+	args := hardening(sp)
 	args = append(args,
 		"--name", name,
 		"--label", LabelManaged+"=true",
@@ -650,7 +662,6 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image 
 		GraceSec:     sp.Workload.Grace.Seconds(),
 		Secrets:      sp.Secrets,
 		ArtifactsDir: "/.lux/run/artifacts",
-		AmbientCaps:  ambientCaps(sp),
 	}
 	if sp.Init != nil {
 		cfg.Init = sp.Init.Script

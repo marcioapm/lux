@@ -190,11 +190,24 @@ func (a *app) tunnel(ctx context.Context, c net.Conn, path string) {
 	}()
 	for {
 		var d proto.StreamData
-		if wsjson.Read(ctx, ws, &d) != nil || d.ExitCode != nil || d.Error != "" {
+		if err := wsjson.Read(ctx, ws, &d); err != nil {
 			return
 		}
-		if _, err := c.Write(d.Data); err != nil {
+		switch {
+		case d.Error != "":
+			fmt.Fprintln(a.stderr, "port-forward:", d.Error)
 			return
+		case d.ExitCode != nil:
+			return
+		case d.EOF:
+			// The service is done sending; the client may still be.
+			if tc, ok := c.(*net.TCPConn); ok {
+				_ = tc.CloseWrite()
+			}
+		default:
+			if _, err := c.Write(d.Data); err != nil {
+				return
+			}
 		}
 	}
 }

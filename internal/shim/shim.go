@@ -120,11 +120,15 @@ func (s *Shim) run() int {
 	}
 	s.red.Set(start.Secrets)
 
-	s.user, err = lookupUser(s.cfg.User)
+	user, err := lookupUser(s.cfg.User)
 	if err != nil {
 		return s.fail("start-failed", err.Error())
 	}
+	s.mu.Lock()
+	s.user = user
+	s.mu.Unlock()
 	env := s.environment(start.Secrets)
+	// Exec needs both; it checks env, set last.
 	s.mu.Lock()
 	s.env = env
 	s.mu.Unlock()
@@ -544,7 +548,6 @@ func (s *Shim) command(argv []string, env []string) *exec.Cmd {
 	if s.user.uid != 0 || s.user.gid != 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(s.user.uid), Gid: uint32(s.user.gid), Groups: s.user.groups}
 	}
-	cmd.SysProcAttr.AmbientCaps = s.cfg.AmbientCaps
 	// Resolve argv[0] with the workload's PATH, not the shim's.
 	if !strings.Contains(argv[0], "/") {
 		for _, kv := range env {

@@ -19,10 +19,10 @@ const Version = 1
 
 // Frame is the envelope for every message in either direction.
 type Frame struct {
-	Type  string          `json:"type"`
-	ID    int64           `json:"id,omitempty"`
-	RunID string          `json:"runId,omitempty"`
-	Epoch int             `json:"epoch,omitempty"`
+	Type  string `json:"type"`
+	ID    int64  `json:"id,omitempty"`
+	RunID string `json:"runId,omitempty"`
+	Epoch int    `json:"epoch,omitempty"`
 	// Stream routes interactive-stream frames (stream.*) without parsing
 	// their data.
 	Stream string          `json:"stream,omitempty"`
@@ -73,10 +73,10 @@ type Hello struct {
 	Labels          map[string]string `json:"labels"`
 	// Nested: the host offers nested containers (lux-runner --nested).
 	// luxd labels it nested=true; no configured label can.
-	Nested   bool     `json:"nested,omitempty"`
-	Capacity Capacity `json:"capacity"`
-	Images          []string          `json:"images"`
-	GitMirrors      []string          `json:"gitMirrors"`
+	Nested     bool     `json:"nested,omitempty"`
+	Capacity   Capacity `json:"capacity"`
+	Images     []string `json:"images"`
+	GitMirrors []string `json:"gitMirrors"`
 	// Runs whose state volumes are on this host, and as of which epoch.
 	LocalSnapshots []LocalSnapshot `json:"localSnapshots"`
 	// Placements the runner is still running (re-adopted after a restart).

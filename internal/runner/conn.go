@@ -123,6 +123,9 @@ func (c *conn) wsSession(ctx context.Context) error {
 			delete(c.waiters, id)
 		}
 		c.mu.Unlock()
+		// Streams live on this connection: luxd ends its side when it
+		// drops, and nothing could reach these again.
+		c.r.streams.endAll()
 	}()
 	c.log.Info("connected to luxd", "host", w.HostID, "live", len(w.Live))
 	c.r.onWelcome(ctx, w)

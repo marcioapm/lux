@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 
@@ -27,6 +28,24 @@ import (
 type stream struct {
 	input  chan proto.StreamData
 	cancel context.CancelFunc
+	why    string // set with cancel when the runner ends the stream itself
+	mu     sync.Mutex
+}
+
+// end ends the stream from the runner's side, saying why.
+func (st *stream) end(why string) {
+	st.mu.Lock()
+	if st.why == "" {
+		st.why = why
+	}
+	st.mu.Unlock()
+	st.cancel()
+}
+
+func (st *stream) reason() string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.why
 }
 
 // streamInputBuffer is how many input frames a stream holds while its
@@ -48,6 +67,14 @@ func (ss *streams) put(id string, st *stream) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.m[id] = st
+}
+
+func (ss *streams) endAll() {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	for _, st := range ss.m {
+		st.cancel()
+	}
 }
 
 func (ss *streams) remove(id string) {
@@ -83,9 +110,10 @@ func (r *Runner) handleStreamFrame(ctx context.Context, f proto.Frame) {
 		select {
 		case st.input <- d:
 		default:
-			st.cancel() // its target is not reading: end the stream
+			st.end("the stream's input fell behind: its target is not reading")
 		}
 	case proto.MsgStreamClose:
+		// luxd ended it: no close back.
 		if st := r.streams.get(f.Stream); st != nil {
 			st.cancel()
 		}
@@ -99,12 +127,26 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 		_ = r.conn.Send(context.WithoutCancel(ctx), proto.Frame{Type: typ, RunID: runID, Epoch: epoch, Stream: id, Data: data})
 	}
 	closeWith := func(d proto.StreamData) { send(proto.MsgStreamClose, proto.Marshal(d)) }
+	// However the stream ends here, luxd hears of it (once): unless luxd
+	// itself ended it.
+	closed := false
+	defer func() {
+		if closed {
+			return
+		}
+		if why := st.reason(); why != "" {
+			closeWith(proto.StreamData{Error: why})
+		} else if ctx.Err() == nil {
+			closeWith(proto.StreamData{Error: "the stream ended"})
+		}
+	}()
+	final := func(d proto.StreamData) { closed = true; closeWith(d) }
 
 	r.mu.Lock()
 	p := r.placements[runID]
 	r.mu.Unlock()
 	if p == nil || p.epoch != epoch || p.liveState() != "running" {
-		closeWith(proto.StreamData{Error: "the Run is not running here"})
+		final(proto.StreamData{Error: "the Run is not running here"})
 		return
 	}
 	var conn net.Conn
@@ -118,13 +160,17 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 		err = fmt.Errorf("unknown stream kind %q", o.Kind)
 	}
 	if err != nil {
-		closeWith(proto.StreamData{Error: err.Error()})
+		final(proto.StreamData{Error: err.Error()})
 		return
 	}
 	go func() { <-ctx.Done(); conn.Close() }()
+	// A tunnel ends when both directions have: its input goroutine and the
+	// output loop below each signal theirs.
+	inputDone := make(chan struct{})
 
 	// Input, in order.
 	go func() {
+		defer close(inputDone)
 		enc := json.NewEncoder(conn)
 		for {
 			select {
@@ -139,11 +185,12 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 					if tc, ok := conn.(*net.TCPConn); ok {
 						err = tc.CloseWrite()
 					}
+					return // no more input
 				default:
 					_, err = conn.Write(d.Data)
 				}
 				if err != nil {
-					st.cancel()
+					st.end("writing the stream's input: " + err.Error())
 					return
 				}
 			}
@@ -159,10 +206,22 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 				send(proto.MsgStreamData, proto.Marshal(proto.StreamData{Data: buf[:n]}))
 			}
 			if err != nil {
-				closeWith(proto.StreamData{})
-				return
+				break
 			}
 		}
+		if ctx.Err() != nil {
+			return
+		}
+		// The container is done sending: pass the half-close on, and keep
+		// relaying input until the client is done too.
+		send(proto.MsgStreamData, proto.Marshal(proto.StreamData{EOF: true}))
+		select {
+		case <-inputDone:
+		case <-ctx.Done():
+			return
+		}
+		final(proto.StreamData{})
+		return
 	}
 	// The shim's lines are StreamData already: forwarded as they are.
 	sc := bufio.NewScanner(conn)
@@ -175,13 +234,14 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 		}
 		_ = json.Unmarshal(line, &last)
 		if last.ExitCode != nil || last.Error != "" {
+			closed = true
 			send(proto.MsgStreamClose, line)
 			return
 		}
 		send(proto.MsgStreamData, line)
 	}
 	if ctx.Err() == nil {
-		closeWith(proto.StreamData{Error: "the container went away"})
+		final(proto.StreamData{Error: "the container went away"})
 	}
 }
 
@@ -206,10 +266,9 @@ func (p *placement) shimStream(ctx context.Context, o proto.StreamOpen) (net.Con
 // dialPort connects to a port the Run's spec declares, on its container.
 // Only declared ports: a tunnel is not a way into anything else.
 func (p *placement) dialPort(ctx context.Context, port int) (net.Conn, error) {
-	declared := false
-	for _, dp := range p.assign.Spec.Network.Ports {
-		declared = declared || dp.Port == port
-	}
+	p.mu.Lock()
+	declared := p.state != nil && slices.Contains(p.state.Ports, port)
+	p.mu.Unlock()
 	if !declared {
 		return nil, fmt.Errorf("port %d is not declared in the Run's spec", port)
 	}

@@ -11,17 +11,18 @@ import (
 	"strings"
 
 	"github.com/marcioapm/lux/internal/spec"
-	"golang.org/x/sys/unix"
 )
 
 // Nested containers: a Run with sandbox.nestedContainers can run rootless
 // Podman inside its container. It gets, beyond every other Run's
 // containment, only what that needs, and never --privileged:
 //
-//   - CAP_SYS_CHROOT (Podman's storage setup chroots), and CAP_SETUID and
-//     CAP_SETGID kept as ambient capabilities when the shim switches to the
-//     workload user (newuidmap needs them; no-new-privileges stops it from
-//     gaining them from its file capabilities);
+//   - CAP_SYS_CHROOT (Podman's storage setup chroots);
+//   - no no-new-privileges: newuidmap and newgidmap gain CAP_SETUID and
+//     CAP_SETGID from their file capabilities, only for themselves. The
+//     workload itself never holds them (so it cannot become root in its
+//     container), and nothing can gain a capability outside the bounding
+//     set every Run has;
 //   - /dev/fuse (fuse-overlayfs) and /dev/net/tun (pasta, its network);
 //   - unmask=ALL and label=disable (its /proc and /sys mounts);
 //   - the host's seccomp profile, plus sethostname, setdomainname and setns:
@@ -37,21 +38,15 @@ func (p *placement) extraArgs(sp spec.RunSpec) []string {
 	if !sp.Sandbox.NestedContainers {
 		return nil
 	}
+	if p.r.nestedSeccomp == "" {
+		return nil // refused before this, in admitNested
+	}
 	return []string{
 		"--cap-add=SYS_CHROOT",
 		"--device=/dev/fuse", "--device=/dev/net/tun",
 		"--security-opt=unmask=ALL", "--security-opt=label=disable",
 		"--security-opt=seccomp=" + p.r.nestedSeccomp,
 	}
-}
-
-// ambientCaps are the capabilities the workload keeps as ambient: for
-// nested containers, newuidmap and newgidmap's (CAP_SETUID, CAP_SETGID).
-func ambientCaps(sp spec.RunSpec) []uintptr {
-	if !sp.Sandbox.NestedContainers {
-		return nil
-	}
-	return []uintptr{unix.CAP_SETUID, unix.CAP_SETGID}
 }
 
 // nestedSyscalls are what the nested profile allows beyond the host's.

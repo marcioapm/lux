@@ -57,11 +57,6 @@ type ShimConfig struct {
 	Secrets []spec.Secret `json:"secrets,omitempty"`
 	// ArtifactsDir is watched for on-demand artifacts ($LUX_ARTIFACTS).
 	ArtifactsDir string `json:"artifactsDir,omitempty"`
-	// AmbientCaps are capabilities the workload's processes keep (ambient)
-	// when the shim switches to the workload user, e.g. CAP_SETUID for
-	// nested containers: under no-new-privileges they cannot be gained from
-	// file capabilities. Numbers, as in linux/capability.h.
-	AmbientCaps []uintptr `json:"ambientCaps,omitempty"`
 }
 
 // ShimMsg is one line on the shim socket, either direction.

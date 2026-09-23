@@ -115,6 +115,7 @@ func (s *Server) relayStream(ctx context.Context, ws *websocket.Conn, runID, kin
 		open.Kind, open.Port = kind, 0
 	}
 	id := ids.New("st")
+	gone := s.hub.Gone(t.hostID)
 	ch, unsub := s.hub.Subscribe(id)
 	defer unsub()
 	send := func(typ string, data []byte) error {
@@ -147,6 +148,9 @@ func (s *Server) relayStream(ctx context.Context, ws *websocket.Conn, runID, kin
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-gone:
+			closeWith(ctx, ws, []byte(`{"error":"the Run's host disconnected"}`))
 			return
 		case f, ok := <-ch:
 			if !ok {

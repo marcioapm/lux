@@ -66,6 +66,18 @@ func (h *Hub) Reachable(hostID string) bool {
 // interactive streams need one; a polling host cannot relay them.
 func (h *Hub) Streaming(hostID string) bool { return h.conn(hostID) != nil }
 
+// Gone is closed when the host's current WebSocket ends (nil if it has
+// none): a stream relayed over it ends with it, since the runner forgets
+// its streams when its connection drops.
+func (h *Hub) Gone(hostID string) <-chan struct{} {
+	if c := h.conn(hostID); c != nil {
+		return c.done
+	}
+	closed := make(chan struct{})
+	close(closed)
+	return closed
+}
+
 func (h *Hub) polled(hostID string) {
 	h.mu.Lock()
 	h.polls[hostID] = time.Now()

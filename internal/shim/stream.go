@@ -57,9 +57,9 @@ func (s *Shim) handleStream(sc *bufio.Scanner, enc *json.Encoder, open proto.Str
 // its environment, under a PTY if asked.
 func (s *Shim) execStream(sc *bufio.Scanner, out *streamConn, open proto.StreamOpen) {
 	s.mu.Lock()
-	env, user := s.env, s.user
+	env := s.env
 	s.mu.Unlock()
-	if user == nil {
+	if env == nil {
 		out.fail("the workload has not started yet")
 		return
 	}
@@ -137,6 +137,14 @@ func (s *Shim) execStream(sc *bufio.Scanner, out *streamConn, open proto.StreamO
 	}
 	if ptmx != nil {
 		_ = ptmx.Close()
+	}
+	// The reaper collected the process, so cmd.Wait (which would close
+	// the pipes' parent ends) is never called: close them here.
+	_ = stdin.Close()
+	for _, o := range outputs {
+		if c, ok := o.r.(io.Closer); ok {
+			_ = c.Close()
+		}
 	}
 	code := exitCode(ws)
 	_ = out.send(proto.StreamData{ExitCode: &code})
