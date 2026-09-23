@@ -174,45 +174,44 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 
 // reapRetention deletes the blobs of Runs that finished longer ago than
 // their tenant's retention.
+//
+// The database is the claim: blobs are marked deleted, and the snapshots
+// they belong to unavailable, in one transaction that locks each Run and
+// checks it is still finished, so a concurrent resume either sees the Run
+// finished (and is refused a snapshot that is going) or clears finished_at
+// first (and keeps everything). S3 objects are deleted after the claim; one
+// that fails to delete is an orphan in S3, never a Run pointing at nothing.
 func (s *Server) reapRetention(ctx context.Context) error {
-	type b struct{ id, key string }
-	var due []b
+	var keys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT bl.id, coalesce(bl.s3_key, '') FROM blobs bl
-			JOIN runs r ON r.id = bl.run_id JOIN tenants t ON t.id = r.tenant_id
-			WHERE r.finished_at IS NOT NULL AND r.finished_at < now() - t.retention_days * $1::interval
-			  AND bl.location <> 'deleted'
-			LIMIT 100`, interval(s.cfg.RetentionUnit))
+		rows, err := tx.Query(ctx, `
+			WITH due AS (
+				SELECT r.id FROM runs r JOIN tenants t ON t.id = r.tenant_id
+				WHERE r.finished_at IS NOT NULL AND r.finished_at < now() - make_interval(days => t.retention_days)
+				  AND EXISTS (SELECT 1 FROM blobs bl WHERE bl.run_id = r.id AND bl.location = 's3')
+				ORDER BY r.finished_at LIMIT 20
+				FOR UPDATE OF r SKIP LOCKED
+			), gone AS (
+				UPDATE snapshots SET available = false WHERE run_id IN (SELECT id FROM due)
+			)
+			-- Only blobs in S3: one still on its host is mid-upload; it is
+			-- claimed on a later pass, once it has arrived.
+			UPDATE blobs SET location = 'deleted', deleted_at = now()
+			WHERE run_id IN (SELECT id FROM due) AND location = 's3'
+			RETURNING s3_key`)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var x b
-			if err := rows.Scan(&x.id, &x.key); err != nil {
-				return err
-			}
-			due = append(due, x)
-		}
-		return rows.Err()
-	})
-	if err != nil || len(due) == 0 {
-		return err
-	}
-	var deleted []string
-	for _, x := range due {
-		if x.key != "" {
-			if err := s.blobs.Delete(ctx, x.key); err != nil {
-				break
-			}
-		}
-		deleted = append(deleted, x.id)
-	}
-	if len(deleted) == 0 {
-		return nil
-	}
-	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE blobs SET location = 'deleted', deleted_at = now() WHERE id = ANY($1)`, deleted)
+		keys, err = pgx.CollectRows(rows, pgx.RowTo[string])
 		return err
 	})
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if err := s.blobs.Delete(ctx, k); err != nil {
+			s.log.Warn("retention: S3 delete failed; object orphaned", "key", k, "err", err)
+		}
+	}
+	return nil
 }

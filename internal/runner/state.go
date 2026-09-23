@@ -90,9 +90,11 @@ type pendingUpload struct {
 }
 
 type snapshotRecord struct {
-	RunID    string          `json:"runId"`
-	Epoch    int             `json:"epoch"`
-	Uploads  []pendingUpload `json:"uploads"`
-	Reported bool            `json:"reported"`
-	Created  int64           `json:"created"`
+	RunID   string          `json:"runId"`
+	Epoch   int             `json:"epoch"`
+	Uploads []pendingUpload `json:"uploads"`
+	// Discard: its Run's local copy was removed; delete the files once the
+	// last uploads finish.
+	Discard bool  `json:"discard,omitempty"`
+	Created int64 `json:"created"`
 }

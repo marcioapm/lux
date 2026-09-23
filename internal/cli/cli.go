@@ -54,7 +54,7 @@ func Main(args []string) int {
 			return 3
 		case ae.Status == 409 || ae.Status == 422:
 			return 4
-		case ae.Status == 429:
+		case ae.Code == "quota_exceeded":
 			return 5
 		}
 	}

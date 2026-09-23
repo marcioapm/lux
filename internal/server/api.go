@@ -203,14 +203,24 @@ func requireRun(ctx context.Context, tx pgx.Tx, runID string) error {
 	return nil
 }
 
+// inactiveRunStates, for SQL: Runs that hold no host and count against no
+// concurrency quota.
+const inactiveRunStates = "('succeeded', 'failed', 'cancelled', 'stopped', 'lost')"
+
+// checkRunQuota enforces a tenant's limits on concurrent Runs and on
+// stored bytes (snapshots, output and artifacts not yet deleted by
+// retention). Checked when a Run is submitted or resumed. Each count runs
+// only when its limit is set.
 func checkRunQuota(ctx context.Context, tx pgx.Tx, tenantID string) error {
 	var maxRuns *int
 	var maxBytes *int64
 	var n int
 	var stored int64
 	if err := tx.QueryRow(ctx, `SELECT max_concurrent_runs, max_storage_bytes,
-			(SELECT count(*) FROM runs WHERE tenant_id = $1 AND state NOT IN ('succeeded', 'failed', 'cancelled', 'stopped', 'lost')),
-			(SELECT coalesce(sum(size), 0) FROM blobs WHERE tenant_id = $1 AND location <> 'deleted')
+			CASE WHEN max_concurrent_runs IS NULL THEN 0 ELSE
+				(SELECT count(*) FROM runs WHERE tenant_id = $1 AND state NOT IN `+inactiveRunStates+`) END,
+			CASE WHEN max_storage_bytes IS NULL THEN 0 ELSE
+				(SELECT coalesce(sum(size), 0) FROM blobs WHERE tenant_id = $1 AND location <> 'deleted') END
 		FROM tenants WHERE id = $1`, tenantID).Scan(&maxRuns, &maxBytes, &n, &stored); err != nil {
 		return err
 	}

@@ -265,6 +265,9 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 			WHERE id = $1`, hostID); err != nil {
 			return err
 		}
+		if err := forgetMissingCopies(ctx, tx, hostID, hb.LocalSnapshots); err != nil {
+			return err
+		}
 		if n == 0 {
 			return nil
 		}
@@ -284,6 +287,21 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 			hostID, interval(s.cfg.LeaseDuration), runs, epochs, mem, disk, pids, cpu, rx, tx_)
 		return err
 	})
+}
+
+// forgetMissingCopies clears host_copy for snapshots the host said it no
+// longer holds: a host holds a Run's copy as of one epoch (its latest
+// snapshot there), and nothing for Runs it does not list.
+func forgetMissingCopies(ctx context.Context, tx pgx.Tx, hostID string, held []proto.LocalSnapshot) error {
+	runs, epochs := make([]string, len(held)), make([]int, len(held))
+	for i, h := range held {
+		runs[i], epochs[i] = h.RunID, h.Epoch
+	}
+	_, err := tx.Exec(ctx, `UPDATE snapshots sn SET host_copy = false
+		WHERE sn.host_id = $1 AND sn.host_copy
+		  AND NOT EXISTS (SELECT 1 FROM unnest($2::text[], $3::int[]) AS h(run_id, epoch)
+		                  WHERE h.run_id = sn.run_id AND h.epoch = sn.epoch)`, hostID, runs, epochs)
+	return err
 }
 
 // recordUsage raises the placement's peaks; values only ever grow.

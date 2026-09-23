@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -167,7 +168,20 @@ func (u *uploader) pass(ctx context.Context) {
 		if changed {
 			_ = u.r.saveSnapshotRecord(snapID, rec)
 		}
+		// A discarded Run's last uploads are done: nothing left to keep.
+		if rec.Discard && allDone(rec) {
+			removeSnapshotFiles(u.r, snapID, rec)
+		}
 	}
+}
+
+func allDone(rec *snapshotRecord) bool {
+	for _, up := range rec.Uploads {
+		if !up.Done {
+			return false
+		}
+	}
+	return true
 }
 
 func (u *uploader) upload(ctx context.Context, up *pendingUpload) error {
@@ -225,21 +239,29 @@ func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
 			}
 		}
 		if pending {
-			continue // still owed to luxd
+			// Still owed to luxd: the uploader deletes it once uploaded.
+			rec.Discard = true
+			_ = r.saveSnapshotRecord(snapID, rec)
+			continue
 		}
-		for _, up := range rec.Uploads {
-			os.Remove(up.Path)
-		}
-		os.Remove(r.recordPath(snapID))
+		removeSnapshotFiles(r, snapID, rec)
 	}
 	os.RemoveAll(r.runDir(runID))
 	r.log.Info("discarded local copy", "run", runID)
 }
 
+func removeSnapshotFiles(r *Runner, snapID string, rec *snapshotRecord) {
+	for _, up := range rec.Uploads {
+		os.Remove(up.Path)
+	}
+	os.Remove(r.recordPath(snapID))
+}
+
 // gcLoop removes local state for Runs that ended here longer ago than the
 // host TTL, once everything is uploaded.
 func (r *Runner) gcLoop(ctx context.Context) {
-	t := time.NewTicker(r.cfg.GCInterval)
+	// Often enough that a copy outlives its TTL by at most half again.
+	t := time.NewTicker(min(r.cfg.HostTTL/2, time.Minute))
 	defer t.Stop()
 	for {
 		select {
@@ -264,7 +286,7 @@ func (r *Runner) gcLoop(ctx context.Context) {
 			busy := p != nil && p.liveState() != ""
 			r.mu.Unlock()
 			if !busy {
-				r.discard(ctx, e.Name(), 1<<30)
+				r.discard(ctx, e.Name(), math.MaxInt)
 			}
 		}
 	}

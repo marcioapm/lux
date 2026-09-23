@@ -117,21 +117,28 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 			return setRunState(ctx, tx, tenantID, runID, StateStarting, "", epoch)
 		}
 	case "running":
-		if _, err := tx.Exec(ctx, `UPDATE placements SET state = 'running', started_at = coalesce(started_at, now())
-			WHERE run_id = $1 AND epoch = $2 AND state IN ('assigned', 'starting')`, runID, epoch); err != nil {
+		// Only the transition matters: a placement reports running more than
+		// once (shim started, workload started), and reports are redelivered.
+		var hostID string
+		err := tx.QueryRow(ctx, `UPDATE placements SET state = 'running', started_at = coalesce(started_at, now())
+			WHERE run_id = $1 AND epoch = $2 AND state IN ('assigned', 'starting')
+			RETURNING host_id`, runID, epoch).Scan(&hostID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()) WHERE id = $1`, runID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE hosts SET first_placement_at = coalesce(first_placement_at, now())
-			WHERE id = (SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2)`, runID, epoch); err != nil {
-			return err
-		}
-		// The Run is running from its restored state: hosts still holding
-		// copies of its older snapshots no longer need them.
-		if err := s.discardOldCopies(ctx, tx, runID, epoch); err != nil {
-			return err
+		if hostID != "" {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()) WHERE id = $1`, runID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE hosts SET first_placement_at = coalesce(first_placement_at, now()) WHERE id = $1`, hostID); err != nil {
+				return err
+			}
+			// Running from its restored state: other hosts' copies of its
+			// older snapshots are no longer needed. (Not earlier: a start
+			// that fails can still fall back to them.)
+			if err := discardOldCopies(ctx, tx, runID, epoch, hostID); err != nil {
+				return err
+			}
 		}
 		if runState != StateRunning && runState != StateStopping {
 			return setRunState(ctx, tx, tenantID, runID, StateRunning, "", epoch)
@@ -327,11 +334,10 @@ func (s *Server) applyAdapterEvent(ctx context.Context, tx pgx.Tx, tenantID, run
 // S3 (or its own). Only copies already uploaded are discarded; a copy that
 // is the only one stays until its upload finishes (the runner will not drop
 // a pending upload).
-func (s *Server) discardOldCopies(ctx context.Context, tx pgx.Tx, runID string, epoch int) error {
-	rows, err := tx.Query(ctx, `UPDATE snapshots sn SET host_copy = false
-		WHERE sn.run_id = $1 AND sn.epoch < $2 AND sn.host_copy AND sn.uploaded
-		  AND sn.host_id IS DISTINCT FROM (SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2)
-		RETURNING sn.host_id`, runID, epoch)
+func discardOldCopies(ctx context.Context, tx pgx.Tx, runID string, epoch int, newHost string) error {
+	rows, err := tx.Query(ctx, `UPDATE snapshots SET host_copy = false
+		WHERE run_id = $1 AND epoch < $2 AND host_copy AND uploaded AND host_id IS NOT NULL AND host_id <> $3
+		RETURNING host_id`, runID, epoch, newHost)
 	if err != nil {
 		return err
 	}

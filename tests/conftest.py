@@ -102,6 +102,17 @@ class Lux:
         return wait_until(lambda: (lambda r: r if r.get("activity") == activity else None)(self.get(run_id)),
                           timeout, 0.3, f"run {run_id} never became {activity}")
 
+    def wait_placement_uploaded(self, run_id: str, timeout: float = 30) -> dict:
+        """Wait until the Run's first placement has all its blobs in S3."""
+        return wait_until(lambda: self.get(run_id)["placements"][0].get("uploadedAt"),
+                          timeout, 0.5, f"placement of {run_id} never uploaded")
+
+    def api(self, path: str, token: str | None = None, **kw):
+        """A raw GET to luxd, for what the CLI does not expose."""
+        import requests
+        return requests.get(f"{self.env.luxd_url}{path}", timeout=10,
+                            headers={"Authorization": f"Bearer {token or self.api_key}"}, **kw)
+
     def wait_uploaded(self, run_id: str, timeout: float = 30) -> dict:
         """Wait until the Run's latest snapshot is in S3."""
         return wait_until(lambda: (lambda sn: sn[-1] if sn and sn[-1]["uploaded"] else None)(self.json("snapshots", run_id)),

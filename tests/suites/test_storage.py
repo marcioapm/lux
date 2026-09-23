@@ -5,12 +5,10 @@ quotas are enforced."""
 
 from __future__ import annotations
 
-import requests
-
 import pytest
 
 from conftest import CLIError, fake_agent, generic
-from env import ALPINE_IMAGE, wait_until
+from env import ALPINE_IMAGE, MINIO_PASSWORD, wait_until
 
 
 def s3_keys(env, run_id: str) -> list[str]:
@@ -36,8 +34,7 @@ def test_blobs_land_in_s3_scoped_by_tenant(env, lux, runners, hosts, fake_image)
 
 def test_runners_hold_no_s3_credentials(env, runners, hosts, lux):
     runners.start(hosts[0])
-    from env import MINIO_PASSWORD
-    procenv = hosts[0].exec("sh", "-c", "cat /proc/$(cat /run/lux-runner.pid)/environ | tr '\\\\0' '\\\\n'")
+    procenv = hosts[0].exec("sh", "-c", "cat /proc/$(cat /run/lux-runner.pid)/environ | tr '\\0' '\\n'")
     assert MINIO_PASSWORD not in procenv
     assert "S3" not in procenv
 
@@ -46,11 +43,8 @@ def test_another_tenant_cannot_see_snapshots(env, tenant_factory, runners, hosts
     runners.start(hosts[0])
     run_id = lux.submit(generic(ALPINE_IMAGE, "true"))
     lux.wait_state(run_id, "succeeded")
-    wait_until(lambda: lux.get(run_id)["placements"][0].get("uploadedAt"), 30, 0.5, "never uploaded")
-    other = tenant_factory()
-    r = requests.get(f"{env.luxd_url}/v1/runs/{run_id}/snapshots",
-                     headers={"Authorization": f"Bearer {other.api_key}"}, timeout=10)
-    assert r.status_code == 404
+    lux.wait_placement_uploaded(run_id)
+    assert tenant_factory().api(f"/v1/runs/{run_id}/snapshots").status_code == 404
 
 
 def test_a_runner_cannot_download_a_run_it_does_not_hold(env, lux, runners, hosts, fake_image):
@@ -65,14 +59,12 @@ def test_a_runner_cannot_download_a_run_it_does_not_hold(env, lux, runners, host
     blob = snap["manifest"]["volumes"][0]["blobId"]
     runners.start(b)
     tok_b = runners.tokens[b.name]
-    r = requests.get(f"{env.luxd_url}/runner/blobs/{blob}?host={b.name}",
-                     headers={"Authorization": f"Bearer {tok_b}"}, allow_redirects=False, timeout=10)
+    r = lux.api(f"/runner/blobs/{blob}?host={b.name}", tok_b, allow_redirects=False)
     assert r.status_code == 404, r.text
     # Once the Run is placed on b, b may fetch it, through a presigned URL.
     runners.stop(a)
     lux.run("resume", run_id, "--wait")
-    r = requests.get(f"{env.luxd_url}/runner/blobs/{blob}?host={b.name}",
-                     headers={"Authorization": f"Bearer {tok_b}"}, allow_redirects=False, timeout=10)
+    r = lux.api(f"/runner/blobs/{blob}?host={b.name}", tok_b, allow_redirects=False)
     assert r.status_code == 302 and "X-Amz-Signature" in r.headers["Location"], r.status_code
 
 
@@ -97,26 +89,31 @@ def test_old_host_drops_its_copy_after_a_move(lux, runners, hosts, fake_image):
 
 
 def test_host_ttl_removes_local_copies(lux, runners, hosts):
-    runners.start(hosts[0], "--host-ttl", "2s", "--gc-interval", "1s")
+    runners.start(hosts[0], "--host-ttl", "2s")
     run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "x", volumes=[{"name": "d", "path": "/d"}]))
     lux.wait_state(run_id, "succeeded")
-    wait_until(lambda: lux.get(run_id)["placements"][0].get("uploadedAt"), 30, 0.5, "never uploaded")
+    lux.wait_placement_uploaded(run_id)
     wait_until(lambda: not host_blob_files(hosts[0]), 30, 0.5, "local copy outlived the TTL")
+    # luxd hears about it with the next heartbeat: no stale affinity.
+    wait_until(lambda: not lux.json("snapshots", run_id)[0].get("onHost"), 30, 0.5,
+               "luxd still thinks the host holds the copy")
     # Output still served, from S3.
     assert lux.logs(run_id).strip() == "x"
 
 
 def test_retention_deletes_finished_runs_blobs(env, lux, runners, hosts):
-    """Retention is per tenant, in days; this luxd counts a 'day' as
-    LUX_RETENTION_UNIT (set short for tests)."""
+    """Retention is per tenant, in days; 0 deletes a finished Run's blobs
+    as soon as they are uploaded."""
     env.luxd_admin("set-quota", "--tenant", lux.tenant_id, "--retention-days", "0")
     runners.start(hosts[0])
     run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "gone-soon"))
     lux.wait_state(run_id, "succeeded")
-    wait_until(lambda: s3_keys(env, run_id), 30, 0.5, "never uploaded")
-    wait_until(lambda: not s3_keys(env, run_id), 60, 1, "blobs outlived retention")
-    # The Run itself (and its events) stays; only its bytes are gone.
+    wait_until(lambda: not s3_keys(env, run_id) and lux.get(run_id)["placements"][0].get("uploadedAt"),
+               60, 1, "blobs were not uploaded and then deleted")
+    # The Run itself (and its events) stays; only its bytes are gone, and
+    # its snapshots say so: resuming it is refused, not broken.
     assert lux.get(run_id)["state"] == "succeeded"
+    assert not any(sn["available"] for sn in lux.json("snapshots", run_id))
 
 
 def test_storage_quota(env, lux, runners, hosts):
@@ -124,8 +121,23 @@ def test_storage_quota(env, lux, runners, hosts):
     run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "head -c 200000 /dev/urandom > /d/f",
                                 volumes=[{"name": "d", "path": "/d"}]))
     lux.wait_state(run_id, "succeeded")
-    wait_until(lambda: lux.get(run_id)["placements"][0].get("uploadedAt"), 30, 0.5, "never uploaded")
+    lux.wait_placement_uploaded(run_id)
     env.luxd_admin("set-quota", "--tenant", lux.tenant_id, "--max-storage", "100000")
     with pytest.raises(CLIError) as e:
         lux.submit(generic(ALPINE_IMAGE, "true"))
     assert e.value.code == 5 and "quota" in e.value.stderr
+
+
+def test_resuming_a_failed_run_after_retention_says_why(env, lux, runners, hosts):
+    """A failed Run is resumable; once retention has taken its snapshot,
+    resuming it ends as lost with the reason, rather than failing to
+    restore on a host."""
+    env.luxd_admin("set-quota", "--tenant", lux.tenant_id, "--retention-days", "0")
+    runners.start(hosts[0])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "exit 1", volumes=[{"name": "d", "path": "/d"}]))
+    lux.wait_state(run_id, "failed")
+    wait_until(lambda: not any(sn["available"] for sn in lux.json("snapshots", run_id)), 60, 1,
+               "retention never took the snapshot")
+    lux.run("resume", run_id)
+    run = lux.wait_state(run_id, "lost")
+    assert "snapshot" in run["stateReason"], run

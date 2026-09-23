@@ -117,6 +117,10 @@ type Welcome struct {
 
 type Heartbeat struct {
 	Leases []LivePlacement `json:"leases"`
+	// LocalSnapshots: the Runs this host still holds local copies of. luxd
+	// forgets any other copy it thought the host had (removed by the host
+	// TTL, or by hand), so it never prefers a host for a copy that is gone.
+	LocalSnapshots []LocalSnapshot `json:"localSnapshots"`
 }
 
 // Assign starts (or resumes) a placement. Secrets travel only in this

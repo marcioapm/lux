@@ -33,7 +33,7 @@ def test_output_after_exit_comes_from_s3(env, lux, runners, hosts):
     run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo from-the-container; echo to-stderr >&2"))
     assert lux.wait_state(run_id, "succeeded")["state"] == "succeeded"
     # Wait for the upload, then take the host away: output must still be there.
-    wait_until(lambda: lux.get(run_id)["placements"][0].get("uploadedAt"), 30, 0.5, "output never uploaded")
+    lux.wait_placement_uploaded(run_id)
     runners.stop(hosts[0])
     recs = lux.records(run_id)
     assert [r["data"] for r in recs if r["ch"] == "stdout"] == ["from-the-container\n"]

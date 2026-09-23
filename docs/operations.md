@@ -23,7 +23,6 @@ luxd serve        # as many as you like
 | `LUX_S3_ACCESS_KEY`, `LUX_S3_SECRET_KEY` | AWS chain | Only luxd holds S3 credentials. |
 | `LUX_LEASE` | `30s` | A host that misses heartbeats this long is lost, along with its live placements. |
 | `LUX_TICK` | `1s` | Scheduler and reaper interval. |
-| `LUX_RETENTION_UNIT` | `24h` | What one of a tenant's `retention_days` means. Only tests change this. |
 | `LUX_DEBUG` | — | Debug logging. |
 
 ### Tenants, keys and quotas
@@ -94,7 +93,6 @@ LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a
 | `--label k=v` | | Host labels, matched by `placement.requires` and `prefers`. Also `LUX_LABELS=k=v,…`. |
 | `--max-runs`, `--cpus`, `--memory` | 16, all, all | Capacity offered to the scheduler. |
 | `--host-ttl` | `24h` | How long uploaded local copies are kept. |
-| `--gc-interval` | `1m` | How often local copies past the TTL are removed. |
 | `--poll` | off | Use HTTP polling instead of a WebSocket. There is no live output in this mode: output arrives after exit. |
 
 Host tokens come from `luxd admin create-host-token --tenant T [--pool P]

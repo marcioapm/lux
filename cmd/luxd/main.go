@@ -141,9 +141,6 @@ func serve(ctx context.Context) error {
 	if cfg.Tick, err = durationEnv("LUX_TICK", time.Second); err != nil {
 		return err
 	}
-	if cfg.RetentionUnit, err = durationEnv("LUX_RETENTION_UNIT", 24*time.Hour); err != nil {
-		return err
-	}
 	cfg.Providers, err = providers(ctx, log)
 	if err != nil {
 		return err
