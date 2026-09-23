@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 
@@ -38,6 +39,7 @@ type candidateHost struct {
 	Labels    map[string]string
 	Capacity  proto.Capacity
 	Images    []string
+	Mirrors   []string
 	UsedCPUs  float64
 	UsedMem   int64
 	UsedRuns  int
@@ -172,6 +174,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx) ([]*candidateHost, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT h.id, h.tenant_id, h.pool, h.labels, h.capacity, coalesce(h.caches->'images', '[]'),
+			coalesce(h.caches->'gitMirrors', '[]'),
 			coalesce((SELECT bool_or(p.shared) FROM pools p WHERE p.tenant_id IS NULL AND p.name = h.pool), false)
 		FROM hosts h
 		WHERE h.state = 'ready' AND NOT h.draining AND h.last_heartbeat > now() - $1::interval`,
@@ -184,7 +187,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx) ([]*candidateHos
 	for rows.Next() {
 		h := &candidateHost{}
 		var images []string
-		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.Labels, &h.Capacity, &images, &h.Shared); err != nil {
+		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -296,6 +299,14 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 			for _, img := range h.Images {
 				if img == r.Spec.Image.Ref {
 					sc += 100
+				}
+			}
+		}
+		// Mirrors cached: a clone there is a local copy plus a fetch.
+		if r.Spec.Git != nil {
+			for _, repo := range r.Spec.Git.Repositories {
+				if slices.Contains(h.Mirrors, repo.URL) {
+					sc += 50
 				}
 			}
 		}

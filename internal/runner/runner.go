@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marcioapm/lux/internal/gitws"
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/version"
@@ -60,6 +61,7 @@ type Runner struct {
 	subs       map[string]context.CancelFunc
 	uploads    *uploader
 	control    *serialQueues
+	git        *gitws.Manager
 	mounts     sync.Map // volume name → mountpoint
 }
 
@@ -111,6 +113,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		placements: map[string]*placement{},
 		subs:       map[string]context.CancelFunc{},
 		control:    newSerialQueues(),
+		git:        gitws.New(cfg.DataDir),
 		leaseS:     30,
 	}
 	r.api = newAPI(cfg.URL, cfg.Token, cfg.Name)
@@ -147,6 +150,7 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 		Labels:          r.cfg.Labels,
 		Capacity:        proto.Capacity{CPUs: r.cfg.CPUs, Memory: r.cfg.Memory, Runs: r.cfg.MaxRuns},
 		Images:          imgs,
+		GitMirrors:      r.git.Mirrors(),
 		LocalSnapshots:  r.localSnapshots(),
 	}
 	r.mu.Lock()

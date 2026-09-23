@@ -193,6 +193,10 @@ func (p *placement) run(ctx context.Context) {
 		fail("volumes", err)
 		return
 	}
+	if err := p.materializeRepos(ctx, sp, image); err != nil {
+		fail("git", err)
+		return
+	}
 	p.mark("volumesRestored")
 
 	if p.pendingStop() != "" {

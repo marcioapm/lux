@@ -275,3 +275,67 @@ def harnesses(pred):
         fn.harness_filter = pred
         return fn
     return mark
+
+
+# ---- a git forge -------------------------------------------------------------
+
+class GitServer:
+    """A git server on the run network, reachable from hosts, with smart
+    HTTP behind basic auth (the password is `token`)."""
+
+    def __init__(self, env: TestEnvironment, container: str, ip: str, token: str):
+        self.env, self.container, self.ip, self.token = env, container, ip, token
+
+    def url(self, repo: str) -> str:
+        return f"http://{self.ip}:8080/{repo}.git"
+
+    def sh(self, script: str) -> str:
+        from env import sh
+        return sh("docker", "exec", self.container, "sh", "-c", script)
+
+    def create(self, repo: str, files: dict[str, str], branch: str = "main") -> str:
+        """A repository with one commit of files on branch; returns its sha."""
+        writes = " && ".join(f"printf %s {_q(content)} > {_q(path)}" for path, content in files.items())
+        return self.sh(
+            f"set -e; rm -rf /tmp/w && mkdir -p /tmp/w && cd /tmp/w && git init -q -b {branch} && "
+            f"git config user.email t@t && git config user.name t && {writes} && git add -A && "
+            f"git commit -qm init && rm -rf /repos/{repo}.git && "
+            f"git clone -q --bare /tmp/w /repos/{repo}.git && git -C /repos/{repo}.git config http.receivepack true && "
+            f"git -C /repos/{repo}.git rev-parse {branch}").strip()
+
+    def rev(self, repo: str, ref: str) -> str:
+        return self.sh(f"git -C /repos/{repo}.git rev-parse --verify -q {ref} || true").strip()
+
+    def show(self, repo: str, ref: str, path: str) -> str:
+        return self.sh(f"git -C /repos/{repo}.git show {ref}:{path}")
+
+    def commit_on(self, repo: str, branch: str, path: str, content: str) -> str:
+        """Someone else pushes to branch (for lease tests)."""
+        return self.sh(
+            f"set -e; rm -rf /tmp/o && git clone -q /repos/{repo}.git /tmp/o && cd /tmp/o && "
+            f"git config user.email o@o && git config user.name o && git checkout -q -B {branch} origin/{branch} 2>/dev/null || git checkout -q -b {branch}; "
+            f"printf %s {_q(content)} > {_q(path)} && git add -A && git commit -qm other && "
+            f"git push -q origin {branch} && git rev-parse HEAD").strip().splitlines()[-1]
+
+    def requests(self) -> list[str]:
+        return self.sh("cat /repos/requests.log 2>/dev/null; true").splitlines()
+
+
+def _q(s: str) -> str:
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+@pytest.fixture(scope="session")
+def git_server(env: TestEnvironment):
+    from env import sh
+    import json as _json
+    from pathlib import Path
+    ctx = Path(__file__).parent / "images" / "gitserver"
+    sh("docker", "build", "-q", "-t", "localhost/lux-gitserver:test", "-f", str(ctx / "Containerfile"), str(ctx))
+    name = f"lux-e2e-{env.run_id}-git"
+    token = "ghp_" + uuid.uuid4().hex
+    sh("docker", "run", "-d", "--name", name, "--label", f"lux-e2e-run={env.run_id}",
+       "--network", env.network, "-e", f"GIT_TOKEN={token}", "localhost/lux-gitserver:test")
+    ip = _json.loads(sh("docker", "inspect", name))[0]["NetworkSettings"]["Networks"][env.network]["IPAddress"]
+    yield GitServer(env, name, ip, token)
+    sh("docker", "rm", "-f", name, check=False)

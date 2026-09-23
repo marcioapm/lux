@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -14,21 +16,81 @@ import (
 )
 
 func (a *app) pushCmd() *cobra.Command {
-	return &cobra.Command{
+	var wait bool
+	cmd := &cobra.Command{
 		Use:   "push <run>",
-		Short: "Push the Run's git branch (with credentials the runner holds)",
-		Args:  cobra.ExactArgs(1),
+		Short: "Push the Run's repositories to its git.push branch",
+		Long: `Push each repository's current commit to the spec's git.push branch,
+with credentials only the runner holds. A branch that moved since this Run
+last pushed it is not overwritten. --wait prints each repository's outcome
+and fails unless every one was pushed or already up to date.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var resp map[string]string
 			if err := a.c.Do(ctxOf(cmd), "POST", "/v1/runs/"+args[0]+"/push", map[string]any{}, &resp); err != nil {
 				return err
 			}
-			if a.output == "json" {
-				return a.json(resp)
+			if !wait {
+				if a.output == "json" {
+					return a.json(resp)
+				}
+				fmt.Fprintln(a.stdout, resp["requestId"])
+				return nil
 			}
-			fmt.Fprintln(a.stdout, resp["requestId"])
-			return nil
+			return a.waitPush(cmd, args[0], resp["requestId"])
 		},
+	}
+	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the outcome")
+	return cmd
+}
+
+// waitPush waits for every repository's git.push event for a request.
+func (a *app) waitPush(cmd *cobra.Command, runID, requestID string) error {
+	ctx := ctxOf(cmd)
+	run, err := a.getRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	want := 0
+	if run.Spec.Git != nil {
+		want = len(run.Spec.Git.Repositories)
+	}
+	deadline := time.Now().Add(10 * time.Minute)
+	for {
+		var resp struct {
+			Events []server.Event `json:"events"`
+		}
+		if err := a.c.Do(ctx, "GET", "/v1/runs/"+runID+"/events", nil, &resp); err != nil {
+			return err
+		}
+		var results []map[string]any
+		for _, e := range resp.Events {
+			if e.Type == "git.push" && e.Data["requestId"] == requestID {
+				results = append(results, e.Data)
+			}
+		}
+		if len(results) >= want {
+			if a.output == "json" {
+				_ = a.json(results)
+			}
+			failed := false
+			for _, r := range results {
+				if a.output != "json" {
+					fmt.Fprintf(a.stdout, "%s → %s: %s %s\n", r["repo"], r["branch"], r["status"], r["error"])
+				}
+				if r["status"] != "pushed" && r["status"] != "up-to-date" {
+					failed = true
+				}
+			}
+			if failed {
+				return exitCode(1)
+			}
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("timed out waiting for the push")
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
 }
 

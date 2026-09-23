@@ -26,7 +26,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/runs/{id}/stop", s.withKey("run", s.stopRun))
 	mux.Handle("POST /v1/runs/{id}/resume", s.withKey("run", s.resumeRun))
 	mux.Handle("POST /v1/runs/{id}/cancel", s.withKey("run", s.cancelRun))
-	mux.Handle("POST /v1/runs/{id}/push", s.withKey("run", s.notYet("git push")))
+	mux.Handle("POST /v1/runs/{id}/push", s.withKey("run", s.pushRun))
 	mux.Handle("GET /v1/runs/{id}/snapshots", s.withKey("read", s.listSnapshots))
 	mux.Handle("GET /v1/runs/{id}/artifacts", s.withKey("read", s.listArtifacts))
 	mux.Handle("GET /v1/artifacts/{aid}", s.withKey("read", s.downloadArtifact))
@@ -634,8 +634,9 @@ func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// pushRun is wired in with git workspaces (step 6); until then the route
-// answers notYet.
+// pushRun asks the Run's runner to push its repositories to the spec's
+// push branch, with the runner's credentials. The outcome arrives as
+// git.push events, one per repository, carrying the request id.
 func (s *Server) pushRun(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
 	id := r.PathValue("id")

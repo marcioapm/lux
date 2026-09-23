@@ -18,6 +18,4 @@ func (p *placement) extraArgs(sp spec.RunSpec) []string { return nil }
 
 func (p *placement) collectArtifacts(ctx context.Context) ([]proto.Artifact, error) { return nil, nil }
 
-func (p *placement) push(ctx context.Context, requestID, message string) {}
-
 func (r *Runner) handleStream(ctx context.Context, f proto.Frame) {}

@@ -1,0 +1,154 @@
+"""Step 6: git workspaces. Repositories are cloned into a Run's workspace
+volume from host-local mirrors, at the ref asked for; pushes go to the
+spec's branch with credentials only the runner holds, never overwriting a
+branch that moved."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from conftest import CLIError, fake_agent, generic
+from env import ALPINE_IMAGE, wait_until
+
+
+def repo_spec(image: str, git_server, prompt: str, *, repo: str = "app", ref: str = "main",
+              push: str | None = "lux/work", credential: bool = True, **extra) -> dict:
+    spec = fake_agent(image, prompt, **extra)
+    spec["git"] = {"repositories": [{"name": repo, "url": git_server.url(repo), "ref": ref}]}
+    spec["workload"]["workdir"] = f"/workspace/repos/{repo}"
+    if credential:
+        spec["git"]["repositories"][0]["credential"] = "GIT_TOKEN"
+        spec["secrets"] = [{"name": "GIT_TOKEN", "value": git_server.token}]
+    if push:
+        spec["git"]["push"] = {"branch": push}
+    return spec
+
+
+def test_clone_at_a_branch(lux, runners, hosts, fake_image, git_server):
+    git_server.create("app", {"README.md": "hello from main\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(repo_spec(fake_image, git_server, "read README.md"))
+    lux.wait_output(run_id, "hello from main")
+    ev = [e for e in lux.json("events", run_id) if e["type"] == "git.checkout"][0]["data"]
+    assert ev["branch"] == "main" and len(ev["base"]) == 40
+
+
+def test_clone_at_a_sha_or_tag(lux, runners, hosts, fake_image, git_server):
+    first = git_server.create("pinned", {"v.txt": "one\n"})
+    git_server.commit_on("pinned", "main", "v.txt", "two\n")
+    git_server.sh(f"git -C /repos/pinned.git tag v1 {first}")
+    runners.start(hosts[0])
+    for ref in (first, "v1"):
+        run_id = lux.submit(repo_spec(fake_image, git_server, "read v.txt", repo="pinned", ref=ref))
+        out = lux.wait_output(run_id, "one")
+        assert "two" not in out
+        lux.run("cancel", run_id)
+
+
+def test_credentials_never_enter_the_container(lux, runners, hosts, fake_image, git_server):
+    """The token is used by the runner for fetch and push; the container has
+    no copy of it: not in its environment, not in the checkout's config."""
+    git_server.create("secret-repo", {"a.txt": "x\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(repo_spec(fake_image, git_server,
+                                  "print-secret GIT_TOKEN\nread .git/config", repo="secret-repo"))
+    out = lux.wait_output(run_id, "[remote")
+    assert git_server.token not in out
+    assert "REDACTED" not in out.split("[remote")[0], "the token was in the environment (redacted)"
+    assert f"url = {git_server.url('secret-repo')}" in out
+    # The clone went through the forge's auth: the runner held the token.
+    assert any("auth" in r and "secret-repo" in r for r in git_server.requests())
+
+
+def test_a_private_repo_needs_its_credential(lux, runners, hosts, fake_image, git_server):
+    git_server.create("private", {"a.txt": "x\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(repo_spec(fake_image, git_server, "echo never", repo="private", credential=False))
+    run = lux.wait_state(run_id, "failed")
+    assert "git" in run["stateReason"] and git_server.token not in run["stateReason"], run
+
+
+def test_push_with_the_runners_credentials(lux, runners, hosts, fake_image, git_server):
+    git_server.create("pushme", {"a.txt": "base\n"})
+    runners.start(hosts[0])
+    script = ("write a.txt changed\n"
+              "echo committing")
+    run_id = lux.submit(repo_spec(fake_image, git_server, script, repo="pushme"))
+    lux.wait_activity(run_id, "idle")
+    commit(lux, run_id, hosts[0], "pushme", "change a")
+    out = lux.run("push", run_id, "--wait").stdout
+    assert "pushed" in out, out
+    assert git_server.show("pushme", "lux/work", "a.txt") == "changed\n"
+    # Pushing again with nothing new is a no-op.
+    assert "up-to-date" in lux.run("push", run_id, "--wait").stdout
+
+
+def test_push_never_overwrites_a_branch_that_moved(lux, runners, hosts, fake_image, git_server):
+    git_server.create("lease", {"a.txt": "base\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(repo_spec(fake_image, git_server, "write a.txt mine", repo="lease"))
+    lux.wait_activity(run_id, "idle")
+    commit(lux, run_id, hosts[0], "lease", "mine")
+    lux.run("push", run_id, "--wait")
+    # Someone else pushes to the branch.
+    theirs = git_server.commit_on("lease", "lux/work", "a.txt", "theirs\n")
+    lux.run("steer", run_id, "write a.txt mine-again")
+    lux.wait_activity(run_id, "idle")
+    commit(lux, run_id, hosts[0], "lease", "mine again")
+    p = lux.run("push", run_id, "--wait", check=False)
+    assert p.returncode != 0 and "rejected" in p.stdout, p.stdout
+    assert git_server.rev("lease", "lux/work") == theirs
+
+
+def test_work_survives_a_move_and_pushes_from_the_new_host(lux, runners, hosts, fake_image, git_server):
+    """The checkout is on the workspace volume: it moves with the Run, and
+    the new host (which has no mirror) pushes it."""
+    git_server.create("moving", {"a.txt": "base\n"})
+    a, b = hosts[0], hosts[1]
+    runners.start(a)
+    run_id = lux.submit(repo_spec(fake_image, git_server, "write a.txt from-a", repo="moving"))
+    lux.wait_activity(run_id, "idle")
+    commit(lux, run_id, a, "moving", "from a")
+    lux.run("stop", run_id, "--wait")
+    lux.wait_uploaded(run_id)
+    runners.stop(a)
+    runners.start(b)
+    lux.run("resume", run_id, "--wait", "--secret", f"GIT_TOKEN={git_server.token}", "--input", "read a.txt")
+    lux.wait_output(run_id, "from-a")
+    out = lux.run("push", run_id, "--wait").stdout
+    assert "pushed" in out, out
+    assert git_server.show("moving", "lux/work", "a.txt") == "from-a\n"
+
+
+def test_mirror_is_reused(lux, runners, hosts, fake_image, git_server):
+    git_server.create("mirrored", {"a.txt": "x\n"})
+    runners.start(hosts[0])
+    for _ in range(2):
+        run_id = lux.submit(repo_spec(fake_image, git_server, "read a.txt", repo="mirrored", push=None))
+        lux.wait_output(run_id, "x")
+        lux.run("cancel", run_id)
+    clones = [r for r in git_server.requests() if "mirrored" in r and "git-upload-pack" in r and "POST" in r]
+    # First Run clones; the second only fetches (both upload-pack, but the
+    # host holds one mirror).
+    mirrors = hosts[0].exec("sh", "-c", "cat /var/lib/lux/mirrors/*/lux-url").split()
+    assert mirrors.count(git_server.url("mirrored")) == 1
+    assert clones
+
+
+def test_push_without_a_push_branch_is_refused(lux, runners, hosts, fake_image, git_server):
+    git_server.create("nopush", {"a.txt": "x\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(repo_spec(fake_image, git_server, "echo ok", repo="nopush", push=None))
+    lux.wait_activity(run_id, "idle")
+    with pytest.raises(CLIError) as e:
+        lux.run("push", run_id)
+    assert "git.push" in e.value.stderr
+
+
+def commit(lux, run_id: str, host, repo: str, message: str):
+    """Commit in the Run's checkout, as its workload would (lux-fake does
+    not run git; the test does it inside the container)."""
+    host.exec("sh", "-c", f"podman exec --user agent -w /workspace/repos/{repo} lux-{run_id} "
+              f"sh -c 'git -c user.email=a@a -c user.name=a commit -qam \"{message}\"'")

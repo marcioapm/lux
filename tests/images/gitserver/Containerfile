@@ -1,0 +1,7 @@
+# A git server for the tests: smart HTTP (git-http-backend) behind HTTP basic
+# auth, like a forge. Any username; the password must be the token.
+FROM docker.io/library/alpine:3.24.2
+RUN apk add --no-cache git git-daemon python3
+COPY server.py /server.py
+EXPOSE 8080
+ENTRYPOINT ["python3", "/server.py"]

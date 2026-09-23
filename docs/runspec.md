@@ -1,0 +1,121 @@
+# The RunSpec
+
+A RunSpec describes what a Run executes. You submit it as YAML or JSON
+(`lux run -f spec.yaml`). luxd validates it and fills in defaults,
+reporting every problem at once. It stores the result without secret
+values.
+
+```yaml
+name: fix-flaky-test            # optional, for humans
+labels: { team: payments }      # free-form; filter with `lux ls -l team=payments`
+
+image:
+  ref: ghcr.io/acme/agent@sha256:…        # exactly one of ref or build
+
+workload:
+  adapter: claude-code          # generic | acp | claude-code | codex | opencode
+  command: [claude, --model, sonnet]      # default: the adapter's
+  prompt: "Fix the flaky test in tests/api"
+  workdir: /workspace/repos/api
+  user: agent                   # default: the image's USER
+  grace: 30s                    # graceful stop before SIGKILL
+  resume: { command: [...] }    # generic only: what to run on resume
+
+init:
+  script: npm ci                # runs before the workload, on every start
+
+env: { NODE_ENV: test }
+
+secrets:                        # values supplied by the caller; never stored
+  - { name: ANTHROPIC_API_KEY, value: sk-…, as: env }
+  - { name: npmrc, value: "…", as: file, path: /home/agent/.npmrc }
+  - { name: GITHUB_TOKEN, value: ghp_… }   # used as a git credential below
+
+git:
+  repositories:
+    - name: api
+      url: https://github.com/acme/api.git
+      ref: main                 # branch, tag or sha; default: the remote's HEAD
+      credential: GITHUB_TOKEN  # a secret name; the runner uses it, the container never sees it
+      path: /workspace/repos/api  # default: /workspace/repos/<name>
+  push:
+    branch: lux/fix-flaky-test  # where `lux push` pushes
+
+volumes:
+  - { name: workspace, path: /workspace, kind: state }     # snapshotted on every exit
+  - { name: home, path: /home/agent, kind: state }
+  - { name: cache, path: /cache, kind: ephemeral }         # empty on every start
+
+resources: { cpus: 4, memory: 8Gi, pids: 2048 }
+timeout: 4h                     # wall-clock across all placements
+
+placement:
+  pool: default
+  requires: { arch: amd64 }     # host labels that must match
+  prefers: { region: eu-west-1 }
+
+network:
+  egress:
+    - host: api.anthropic.com
+    - cidr: 140.82.112.0/20
+  ports:
+    - { port: 3000, name: web }
+
+sandbox:
+  nestedContainers: false
+  readOnlyRoot: false
+
+artifacts:
+  paths: ["/workspace/out/**"]
+```
+
+## Rules
+
+- `image`: exactly one of `ref` or `build`.
+- `workload.adapter` decides how the workload is started, steered, stopped
+  and resumed (see [adapters](adapters.md)). Agent adapters need their
+  session paths on a state volume (for example `/home/agent` for Claude
+  Code's `~/.claude`). A spec that leaves them off is rejected, because it
+  would lose its conversation on the first resume.
+- `env` names must be valid variable names and must not start with `LUX_`.
+- Secrets are `env` (the default) or `file` (placed on a tmpfs and linked
+  at `path`). A file secret is never in a snapshot. Every resume must
+  supply every secret again.
+- Volume paths must be absolute. `/.lux` is reserved.
+- Resources default to 2 CPUs, 4 GiB of memory, 1024 PIDs. Sizes accept
+  `512Mi`, `8Gi`, `1G`, or bytes.
+
+## Git
+
+lux clones repositories for you, on the host, before the container
+starts:
+
+1. Each repository is fetched into a **mirror** on the host. The mirror is
+   shared by every Run there and updated on use, so a second Run on the
+   same host fetches only what is new. The scheduler prefers hosts that
+   already hold the mirrors a spec needs.
+2. It is cloned from the mirror into the Run's `path`, which must be on a
+   **state volume**, at `ref`: a branch checked out as a local branch, or a
+   tag or sha detached. The clone is self-contained, so it moves with the
+   Run to hosts that have no mirror.
+3. The checkout's `origin` is the plain `url`. The credential is used by
+   the runner for the fetch, and later the push. It is **never in the
+   container**: not in the environment, not in `.git/config`, and not on
+   the host's disk.
+4. On a **resume**, the checkout is already on the restored volume and is
+   left exactly as the workload left it.
+
+`lux push <run> [--wait]` pushes each repository's current commit to
+`git.push.branch`, again with the runner's credential:
+
+- The push is **leased**: it replaces the branch only if the branch still
+  points where this Run last pushed it (or, the first time, only if the
+  branch does not exist). If someone else pushed in between, the push is
+  `rejected` and their commit stays.
+- Pushing with nothing new reports `up-to-date`.
+- Each repository's outcome is a `git.push` event. `--wait` prints the
+  outcomes and exits non-zero unless every repository was pushed or already
+  up to date.
+
+The workload commits as it likes. The checkout is a normal git repository
+owned by the workload user.

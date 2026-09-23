@@ -63,6 +63,12 @@ A resume needs the Run's secrets again. lux looks for each one in
 `--secret`, then `--secrets-from`, then an environment variable of the same
 name.
 
+## Git
+
+```bash
+lux push <run> [--wait]         # push each repository to git.push.branch (leased)
+```
+
 ## Files
 
 ```bash
