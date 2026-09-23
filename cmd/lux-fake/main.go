@@ -50,14 +50,17 @@ type msg struct {
 type agent struct {
 	// streamJSON: speak Claude Code's stream-json instead of ACP.
 	streamJSON bool
-	out        *json.Encoder
-	outMu      sync.Mutex
-	mu         sync.Mutex
-	session    string
-	cwd        string
-	cancel     chan struct{}
-	pending    map[string]chan json.RawMessage
-	nextID     int
+	// appServer: speak Codex's app-server protocol instead of ACP.
+	appServer bool
+	turnID    string
+	out       *json.Encoder
+	outMu     sync.Mutex
+	mu        sync.Mutex
+	session   string
+	cwd       string
+	cancel    chan struct{}
+	pending   map[string]chan json.RawMessage
+	nextID    int
 }
 
 func main() {
@@ -67,6 +70,10 @@ func main() {
 	}
 	if slices.Contains(os.Args, "stream-json") {
 		streamJSON()
+		return
+	}
+	if slices.Contains(os.Args, "app-server") {
+		appServer()
 		return
 	}
 	a := &agent{out: json.NewEncoder(os.Stdout), pending: map[string]chan json.RawMessage{}}
@@ -228,6 +235,12 @@ func (a *agent) handle(m msg) {
 }
 
 func (a *agent) say(s string) {
+	if a.appServer {
+		a.send(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": a.session, "turnId": a.turnID,
+			"item": map[string]any{"type": "agentMessage", "id": fmt.Sprintf("msg-%d", time.Now().UnixNano()), "text": s}}})
+		a.record("agent", s)
+		return
+	}
 	if a.streamJSON {
 		a.send(map[string]any{"type": "assistant", "session_id": a.session,
 			"message": map[string]any{"role": "assistant", "content": []map[string]string{{"type": "text", "text": s}}}})
@@ -435,6 +448,140 @@ func streamJSON() {
 	close(turns)
 	// stdin closed: finish queued turns, like the real CLI in -p mode.
 	time.Sleep(200 * time.Millisecond)
+}
+
+// appServer speaks Codex's app-server protocol (the subset lux uses; see
+// docs/agent-protocols.md): JSON-RPC over stdio, responses without a
+// "jsonrpc" field, like the real server. A thread is the conversation,
+// persisted as a transcript; a turn runs one prompt script. turn/steer
+// appends to the running turn; turn/interrupt cancels it; thread/resume
+// continues a thread from its transcript in a new process.
+func appServer() {
+	a := &agent{out: json.NewEncoder(os.Stdout), appServer: true, cwd: "."}
+	var mu sync.Mutex
+	var cancel chan struct{}
+	var steer []string
+	turnN := 0
+	reply := func(id json.RawMessage, result any) { a.send(map[string]any{"id": id, "result": result}) }
+	fail := func(id json.RawMessage, msg string) {
+		a.send(map[string]any{"id": id, "error": map[string]any{"code": -32600, "message": msg}})
+	}
+	thread := func() map[string]any {
+		return map[string]any{"id": a.session, "status": map[string]string{"type": "idle"}}
+	}
+	runTurn := func(text string, c chan struct{}) {
+		a.record("user", text)
+		stop := a.runScript(text, c)
+		for {
+			mu.Lock()
+			more := steer
+			steer = nil
+			mu.Unlock()
+			if len(more) == 0 || stop == "cancelled" {
+				break
+			}
+			for _, t := range more {
+				a.record("user", t)
+				if stop = a.runScript(t, c); stop == "cancelled" {
+					break
+				}
+			}
+		}
+		status := "completed"
+		if stop == "cancelled" {
+			status = "interrupted"
+		}
+		mu.Lock()
+		id := a.turnID
+		a.turnID, cancel = "", nil
+		mu.Unlock()
+		a.send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": a.session,
+			"turn": map[string]any{"id": id, "status": status}}})
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 64<<10), 16<<20)
+	for sc.Scan() {
+		var m msg
+		if json.Unmarshal(sc.Bytes(), &m) != nil || m.Method == "" {
+			continue
+		}
+		var p struct {
+			Cwd            string `json:"cwd"`
+			ThreadID       string `json:"threadId"`
+			TurnID         string `json:"turnId"`
+			ExpectedTurnID string `json:"expectedTurnId"`
+			Input          []struct {
+				Text string `json:"text"`
+			} `json:"input"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
+		text := ""
+		for _, in := range p.Input {
+			text += in.Text
+		}
+		switch m.Method {
+		case "initialize":
+			reply(m.ID, map[string]any{"userAgent": "lux-fake/1"})
+		case "thread/start":
+			a.session = fmt.Sprintf("fake-%d", time.Now().UnixNano())
+			if p.Cwd != "" {
+				a.cwd = p.Cwd
+			}
+			a.record("system", "thread started")
+			reply(m.ID, map[string]any{"thread": thread()})
+		case "thread/resume":
+			if _, err := os.Stat(filepath.Join(transcriptDir(), p.ThreadID+".jsonl")); err != nil {
+				fail(m.ID, "no rollout found for thread id "+p.ThreadID)
+				continue
+			}
+			a.session = p.ThreadID
+			if wd, err := os.Getwd(); err == nil {
+				a.cwd = wd
+			}
+			a.record("system", "thread resumed")
+			reply(m.ID, map[string]any{"thread": thread()})
+		case "turn/start":
+			if p.ThreadID != a.session {
+				fail(m.ID, "thread not found: "+p.ThreadID)
+				continue
+			}
+			mu.Lock()
+			if a.turnID != "" {
+				mu.Unlock()
+				fail(m.ID, "a turn is already in progress")
+				continue
+			}
+			turnN++
+			a.turnID = fmt.Sprintf("turn-%d", turnN)
+			cancel = make(chan struct{})
+			c, id := cancel, a.turnID
+			mu.Unlock()
+			turn := map[string]any{"id": id, "status": "inProgress"}
+			reply(m.ID, map[string]any{"turn": turn})
+			a.send(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": a.session, "turn": turn}})
+			go runTurn(text, c)
+		case "turn/steer":
+			mu.Lock()
+			if a.turnID == "" || p.ExpectedTurnID != a.turnID {
+				mu.Unlock()
+				fail(m.ID, "expectedTurnId does not match the active turn")
+				continue
+			}
+			steer = append(steer, text)
+			mu.Unlock()
+			reply(m.ID, map[string]any{})
+		case "turn/interrupt":
+			mu.Lock()
+			if cancel != nil && p.TurnID == a.turnID {
+				close(cancel)
+				cancel = nil
+			}
+			mu.Unlock()
+			reply(m.ID, map[string]any{})
+		default:
+			fail(m.ID, "unknown method "+m.Method)
+		}
+	}
 }
 
 // plain is a line-oriented workload for the generic adapter.

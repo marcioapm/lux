@@ -22,7 +22,6 @@ TESTS_DIR = REPO_ROOT / "tests"
 BINARIES = ["luxd", "lux-runner", "lux-shim", "lux", "lux-fake"]
 
 FAKE_IMAGE = "localhost/lux-fake:test"
-CLAUDE_IMAGE = "localhost/lux-claude:test"
 
 
 def build_binaries() -> dict[str, Path | None]:
@@ -78,22 +77,46 @@ def build_fake_image(fake_binary: Path | None) -> str | None:
     return FAKE_IMAGE
 
 
-def build_claude_image() -> str | None:
-    """Claude Code for the opt-in real-agent suite: only when a key is set
-    and claude is installed here."""
-    import os
-    if not os.environ.get("LUX_TEST_ANTHROPIC_API_KEY"):
+AGENT_IMAGES = {
+    # name: (key env var, how to find the executable to copy in)
+    "claude": ("LUX_TEST_ANTHROPIC_API_KEY", lambda: shutil.which("claude")),
+    "codex": ("LUX_TEST_OPENAI_API_KEY", lambda: _codex_native()),
+    "opencode": ("LUX_TEST_OPENCODE_AUTH", lambda: shutil.which("opencode")),
+}
+
+
+def _codex_native() -> str | None:
+    """The codex npm package's launcher is a Node script; the native binary
+    it runs is what goes in the image."""
+    launcher = shutil.which("codex")
+    if not launcher:
         return None
-    claude = shutil.which("claude")
-    if not claude:
-        print("  claude not installed; real-agent suite will skip")
+    pkg = Path(os.path.realpath(launcher)).parent.parent
+    found = sorted(pkg.glob("node_modules/@openai/codex-linux-*/vendor/*/bin/codex"))
+    return str(found[0]) if found else None
+
+
+def build_agent_images() -> dict[str, str | None]:
+    """Images for the opt-in real-agent suites: only for agents whose
+    credentials are set and which are installed here."""
+    return {name: _build_agent_image(name, env, find) for name, (env, find) in AGENT_IMAGES.items()}
+
+
+def _build_agent_image(name: str, key_env: str, find) -> str | None:
+    if not os.environ.get(key_env):
         return None
+    exe = find()
+    if not exe:
+        print(f"  {name} not installed; its real-agent suite will skip")
+        return None
+    tag = f"localhost/lux-{name}:test"
     with tempfile.TemporaryDirectory() as ctx:
-        shutil.copy(os.path.realpath(claude), Path(ctx) / "claude")
-        shutil.copy(TESTS_DIR / "images" / "claude" / "Containerfile", Path(ctx) / "Containerfile")
-        result = subprocess.run(["docker", "build", "-q", "-t", CLAUDE_IMAGE, "-f", "Containerfile", "."], cwd=ctx, stdout=subprocess.DEVNULL)
+        shutil.copy(os.path.realpath(exe), Path(ctx) / name)
+        shutil.copy(TESTS_DIR / "images" / name / "Containerfile", Path(ctx) / "Containerfile")
+        result = subprocess.run(["docker", "build", "-q", "-t", tag, "-f", "Containerfile", "."],
+                                cwd=ctx, stdout=subprocess.DEVNULL)
     if result.returncode != 0:
-        print("claude image build failed", file=sys.stderr)
+        print(f"{name} image build failed", file=sys.stderr)
         sys.exit(1)
-    print(f"  {CLAUDE_IMAGE} built")
-    return CLAUDE_IMAGE
+    print(f"  {tag} built")
+    return tag

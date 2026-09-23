@@ -22,7 +22,25 @@ The adapter runs inside the container, in `lux-shim`. Pick one with
 | `opencode` | `opencode acp` | as `acp` | as `acp` | as `acp` | as `acp` | as `acp` |
 
 The exact messages, verified against the real CLIs, are in
-[agent-protocols.md](agent-protocols.md).
+[agent-protocols.md](agent-protocols.md). Each adapter is tested end to end
+against `lux-fake` speaking its protocol, and against the real CLI (Claude
+Code, Codex and OpenCode) in an opt-in suite: steered, stopped, and resumed
+on another host with its conversation intact.
+
+## Credentials
+
+Agents authenticate however they normally do, through secrets:
+
+- **Claude Code:** `ANTHROPIC_API_KEY` as an env secret.
+- **Codex:** Codex reads its key from `~/.codex/auth.json`, not the
+  environment. Pass `{"auth_mode":"apikey","OPENAI_API_KEY":"…"}` as a file
+  secret at that path.
+- **OpenCode:** its `auth.json` (keys) and `opencode.json` (providers and
+  model) as file secrets under `~/.local/share/opencode/` and
+  `~/.config/opencode/`.
+
+File secrets live on a tmpfs, so they are never snapshotted, and they are
+supplied again on every resume.
 
 ## What every adapter gives you
 

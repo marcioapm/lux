@@ -147,3 +147,59 @@ def test_claude_code_stop_is_sigint(lux, runners, hosts, fake_image):
     run = lux.get(run_id)
     assert run["state"] == "stopped"
     assert run["placements"][0]["exitCode"] == 130, run["placements"][0]
+
+
+def codex_fake(image: str, prompt: str) -> dict:
+    """The codex adapter driving lux-fake, which speaks app-server."""
+    return {
+        "image": {"ref": image},
+        "workload": {"adapter": "codex", "command": ["lux-fake"], "prompt": prompt, "workdir": "/workspace"},
+        "volumes": [
+            {"name": "workspace", "path": "/workspace", "kind": "state"},
+            {"name": "home", "path": "/home/agent", "kind": "state"},
+        ],
+    }
+
+
+def test_codex_adapter_with_app_server(lux, runners, hosts, fake_image):
+    """The codex adapter over app-server: thread and turn, native mid-turn
+    steering (turn/steer), interrupt (turn/interrupt), and thread/resume on
+    another host."""
+    a, b = hosts[0], hosts[1]
+    runners.start(a)
+    run_id = lux.submit(codex_fake(fake_image, "write a.txt from-a\necho turn-one\nsleep 2\necho turn-one-done"))
+    lux.wait_output(run_id, "turn-one")
+    # Mid-turn: steered into the running turn (turn/steer), not queued
+    # behind it as a second turn.
+    lux.run("steer", run_id, "echo steered-in")
+    out = lux.wait_output(run_id, "steered-in")
+    assert out.index("turn-one-done") < out.index("steered-in")
+    run = lux.wait_activity(run_id, "idle")
+    turns = [r["event"]["data"]["turn"]["id"] for r in lux.records(run_id, "--events")
+             if r.get("ch") == "event" and r["event"]["type"] == "codex.turn/completed"]
+    assert turns == ["turn-1"], f"the steer started its own turn: {turns}"
+    thread = run["sessionId"]
+    assert thread.startswith("fake-")
+    delivered = wait_until(lambda: events_of(lux, run_id, "input.delivered"), 20, 0.3, "steer not acknowledged")
+    assert delivered
+
+    # A new turn once idle.
+    lux.run("steer", run_id, "echo turn-two")
+    lux.wait_output(run_id, "turn-two")
+    lux.wait_activity(run_id, "idle")
+
+    lux.run("steer", run_id, "sleep 60\necho never")
+    lux.wait_activity(run_id, "busy")
+    lux.run("interrupt", run_id)
+    lux.wait_activity(run_id, "idle", timeout=20)
+    assert "never" not in lux.logs(run_id)
+
+    lux.run("stop", run_id, "--wait")
+    lux.wait_uploaded(run_id)
+    runners.stop(a)
+    runners.start(b)
+    lux.run("resume", run_id, "--wait", "--input", "read a.txt\nhistory")
+    out = lux.wait_output(run_id, "history:")
+    assert "from-a" in out
+    assert "write a.txt from-a" in out[out.index("history:"):]
+    assert lux.get(run_id)["sessionId"] == thread

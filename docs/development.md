@@ -76,7 +76,9 @@ LUX_TEST_PG='postgres://lux:lux@127.0.0.1:55432/postgres?sslmode=disable' go tes
 
 ### The fake agent
 
-`lux-fake` speaks ACP like a real agent. It keeps a transcript on a state
+`lux-fake` speaks all three agent protocols like a real agent: ACP by
+default, Claude Code's stream-json (`-p --input-format stream-json …`), and
+Codex's app-server (`app-server`). It keeps a transcript on a state
 volume and resumes from it, and it follows a script taken from the prompt
 (`write f text`, `sleep 5`, `print-secret NAME`, `history`, `exit 3`, …).
 With it, steering, stop and resume on another host are all tested without
@@ -84,19 +86,27 @@ a model. See `cmd/lux-fake/main.go`.
 
 ### Real agents (opt-in)
 
-`suites/test_agents_real.py` drives the real Claude Code CLI through lux:
-it writes a file, is steered, is stopped, and resumes on another host
-remembering the conversation. It makes model calls, so it runs only when
-a key is set:
+`suites/test_agents_real.py` drives the real CLIs through lux. Each agent
+follows the same story: write a file, be steered, stop, resume on another
+host, and answer from the restored conversation. They make model calls, so
+each runs only when its credentials are set:
+
+| Agent | Variables |
+| --- | --- |
+| Claude Code | `LUX_TEST_ANTHROPIC_API_KEY`, optional `LUX_TEST_ANTHROPIC_BASE_URL` |
+| Codex | `LUX_TEST_OPENAI_API_KEY`, optional `LUX_TEST_OPENAI_BASE_URL`, `LUX_TEST_CODEX_MODEL` |
+| OpenCode | `LUX_TEST_OPENCODE_AUTH` (an `auth.json`), `LUX_TEST_OPENCODE_CONFIG` (an `opencode.json`), `LUX_TEST_OPENCODE_MODEL` (`provider/model`) |
 
 ```bash
-LUX_TEST_ANTHROPIC_API_KEY=sk-… [LUX_TEST_ANTHROPIC_BASE_URL=https://proxy] \
-  uv run python run_tests.py suites/test_agents_real.py
+LUX_TEST_ANTHROPIC_API_KEY=sk-… uv run python run_tests.py suites/test_agents_real.py
 ```
 
-The harness copies the `claude` executable installed on the developer
-machine into a test image (`tests/images/claude`). Without a key, the suite
-skips.
+The harness copies each CLI installed on the developer machine into a
+test image (`tests/images/<agent>`). For Codex it copies the native binary,
+not the Node launcher. Credentials go in as secrets: Codex's key as the
+`~/.codex/auth.json` it expects (Codex ignores `OPENAI_API_KEY` in the
+environment), and OpenCode's `auth.json` and `opencode.json` as file
+secrets. Without credentials, a suite skips.
 
 ### Guards are mutation-checked
 

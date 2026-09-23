@@ -406,7 +406,7 @@ func (s *Shim) writeSecretFiles(values map[string]string) error {
 			return err
 		}
 		_ = os.Chown(src, s.user.uid, s.user.gid)
-		if err := os.MkdirAll(filepath.Dir(sec.Path), 0o755); err != nil {
+		if err := s.mkdirAllOwned(filepath.Dir(sec.Path)); err != nil {
 			return err
 		}
 		os.Remove(sec.Path)
@@ -417,6 +417,26 @@ func (s *Shim) writeSecretFiles(values map[string]string) error {
 	}
 	if s.user.uid != 0 {
 		_ = os.Chown(proto.ShimSecretsDir, s.user.uid, s.user.gid)
+	}
+	return nil
+}
+
+// mkdirAllOwned creates dir and any missing parents owned by the workload
+// user: a secret placed under the user's home (say ~/.config/tool/key)
+// must not leave directories the workload cannot write next to.
+func (s *Shim) mkdirAllOwned(dir string) error {
+	var missing []string
+	for d := dir; d != "/" && d != "."; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil {
+			break
+		}
+		missing = append(missing, d)
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := os.Mkdir(missing[i], 0o755); err != nil && !os.IsExist(err) {
+			return err
+		}
+		_ = os.Chown(missing[i], s.user.uid, s.user.gid)
 	}
 	return nil
 }
