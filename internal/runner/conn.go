@@ -152,10 +152,12 @@ func (c *conn) dispatch(ctx context.Context, f proto.Frame) {
 	default:
 		// Durable control message: handle, then ack. Handling must be
 		// idempotent: an unacked message is redelivered on reconnect.
-		go func() {
+		// Messages about one Run are handled in order (a stop must not
+		// overtake its assign); different Runs do not wait for each other.
+		c.r.control.enqueue(f.RunID, func() {
 			c.r.handleControl(ctx, f)
 			c.ack(ctx, f.ID)
-		}()
+		})
 	}
 }
 
@@ -327,4 +329,38 @@ func (c *conn) pollLoop(ctx context.Context) error {
 		}
 	}
 	return ctx.Err()
+}
+
+// serialQueues runs functions in order per key, concurrently across keys.
+type serialQueues struct {
+	mu     sync.Mutex
+	queues map[string][]func()
+}
+
+func newSerialQueues() *serialQueues { return &serialQueues{queues: map[string][]func(){}} }
+
+func (q *serialQueues) enqueue(key string, fn func()) {
+	q.mu.Lock()
+	pending, running := q.queues[key]
+	q.queues[key] = append(pending, fn)
+	q.mu.Unlock()
+	if !running {
+		go q.drain(key)
+	}
+}
+
+func (q *serialQueues) drain(key string) {
+	for {
+		q.mu.Lock()
+		fns := q.queues[key]
+		if len(fns) == 0 {
+			delete(q.queues, key)
+			q.mu.Unlock()
+			return
+		}
+		fn := fns[0]
+		q.queues[key] = fns[1:]
+		q.mu.Unlock()
+		fn()
+	}
 }

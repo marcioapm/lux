@@ -59,6 +59,7 @@ type Runner struct {
 	placements map[string]*placement // by run id
 	subs       map[string]context.CancelFunc
 	uploads    *uploader
+	control    *serialQueues
 }
 
 func New(cfg Config, log *slog.Logger) (*Runner, error) {
@@ -92,6 +93,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		pm:         podman.New(),
 		placements: map[string]*placement{},
 		subs:       map[string]context.CancelFunc{},
+		control:    newSerialQueues(),
 		leaseS:     30,
 	}
 	r.api = newAPI(cfg.URL, cfg.Token, cfg.Name)

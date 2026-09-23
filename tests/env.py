@@ -94,7 +94,7 @@ class Host:
     def podman(self, *args: str, check: bool = True) -> str:
         return self.exec("podman", *args, check=check)
 
-    def start_runner(self, env: "TestEnvironment", token: str, *extra: str) -> subprocess.Popen:
+    def start_runner(self, env: "TestEnvironment", token: str, *extra: str, name: str | None = None) -> subprocess.Popen:
         """Start lux-runner inside this host, logging to <log dir>/<host>/runner.log."""
         binary = BIN_DIR / "lux-runner"
         if not binary.exists():
@@ -110,7 +110,7 @@ class Host:
                 # The host image has no pkill: record the pid to stop it by.
                 "sh", "-c", 'echo $$ > /run/lux-runner.pid; exec "$@"', "lux-runner",
                 "/opt/lux/lux-runner",
-                "--name", self.name,
+                "--name", name or self.name,
                 "--data-dir", "/var/lib/lux",
                 "--shim", "/opt/lux/lux-shim",
                 *extra,

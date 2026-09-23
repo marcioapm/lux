@@ -2,3 +2,8 @@
 tests/.venv/
 __pycache__/
 *.egg-info/
+/luxd
+/lux
+/lux-runner
+/lux-shim
+/lux-fake

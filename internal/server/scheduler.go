@@ -60,58 +60,88 @@ type pendingRun struct {
 	HasSecrets    bool
 }
 
-// scheduleOnce places every Run waiting for a host. One transaction per
-// Run, with SKIP LOCKED, so several luxd instances can schedule at once.
+// scheduleOnce considers every Run waiting for a host, a batch at a time,
+// with SKIP LOCKED so several luxd instances can schedule at once. The
+// batches walk the queue by (updated_at, id), so Runs that cannot be
+// placed do not hide the ones behind them.
 func (s *Server) scheduleOnce(ctx context.Context) error {
-	for range 100 {
-		placed, err := s.scheduleNext(ctx)
-		if err != nil || !placed {
+	var after cursorPos
+	for range 50 {
+		next, more, err := s.scheduleBatch(ctx, after)
+		if err != nil || !more {
 			return err
 		}
+		after = next
 	}
 	return nil
 }
 
-var errNothingToDo = errors.New("nothing to schedule")
+type cursorPos struct {
+	updated time.Time
+	id      string
+}
 
-func (s *Server) scheduleNext(ctx context.Context) (bool, error) {
-	var hostID string
-	var progressed bool
+// secretsGrace is how long a Run with secrets may wait for this luxd to
+// hold its values before they are declared lost. It covers the window
+// between a submit's commit and its secrets reaching the cache, and Runs
+// submitted through another luxd instance.
+const secretsGrace = 30 * time.Second
+
+// scheduleBatch looks at up to 20 waiting Runs after pos, placing what it
+// can and recording why the rest wait. Everything it writes is committed.
+func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, bool, error) {
+	var notify []string
+	var last cursorPos
+	var n int
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, session_id, current_epoch, pending_input, image_resolved,
-				jsonb_array_length(secrets) > 0
+				jsonb_array_length(secrets) > 0, updated_at, updated_at < now() - $3::interval
 			FROM runs WHERE state IN ('submitted', 'resuming', 'provisioning') AND NOT cancel_requested
-			ORDER BY updated_at FOR UPDATE SKIP LOCKED LIMIT 20`)
+			  AND (updated_at, id) > ($1, $2)
+			ORDER BY updated_at, id FOR UPDATE SKIP LOCKED LIMIT 20`,
+			pos.updated, pos.id, fmt.Sprintf("%f seconds", secretsGrace.Seconds()))
 		if err != nil {
 			return err
 		}
-		var runs []pendingRun
+		type item struct {
+			r        pendingRun
+			updated  time.Time
+			graceful bool
+		}
+		var items []item
 		for rows.Next() {
-			var r pendingRun
-			if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.SessionID, &r.Epoch, &r.PendingInput, &r.ImageResolved, &r.HasSecrets); err != nil {
+			var it item
+			r := &it.r
+			if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.SessionID, &r.Epoch, &r.PendingInput,
+				&r.ImageResolved, &r.HasSecrets, &it.updated, &it.graceful); err != nil {
 				rows.Close()
 				return err
 			}
-			runs = append(runs, r)
+			items = append(items, it)
 		}
 		rows.Close()
-		if len(runs) == 0 {
-			return errNothingToDo
+		n = len(items)
+		if n == 0 {
+			return nil
 		}
+		last = cursorPos{items[n-1].updated, items[n-1].r.ID}
 		hosts, err := s.candidateHosts(ctx, tx)
 		if err != nil {
 			return err
 		}
-		for _, r := range runs {
-			// Secret values live only in memory. If luxd restarted since they
-			// were supplied, the Run cannot start until someone supplies them
-			// again: it stops, resumable with its secrets.
+		for _, it := range items {
+			r := it.r
+			// Secret values live only in memory. If this luxd does not hold
+			// them past the grace period (it restarted, or they went to an
+			// instance that is gone), the Run cannot start until someone
+			// supplies them again: it stops, resumable with its secrets.
 			if _, ok := s.secrets.get(r.ID); r.HasSecrets && !ok {
-				if err := setRunState(ctx, tx, r.TenantID, r.ID, StateStopped, "secrets must be supplied again: resume with them", r.Epoch); err != nil {
-					return err
+				if it.graceful {
+					if err := setRunState(ctx, tx, r.TenantID, r.ID, StateStopped, "secrets must be supplied again: resume with them", r.Epoch); err != nil {
+						return err
+					}
 				}
-				progressed = true
-				return nil
+				continue
 			}
 			h, wait, err := s.pickHost(ctx, tx, r, hosts)
 			if err != nil {
@@ -126,22 +156,17 @@ func (s *Server) scheduleNext(ctx context.Context) (bool, error) {
 			if err := s.assign(ctx, tx, r, h); err != nil {
 				return err
 			}
-			hostID = h.ID
-			progressed = true
-			return nil
+			notify = append(notify, h.ID)
 		}
-		return errNothingToDo
+		return nil
 	})
-	if errors.Is(err, errNothingToDo) {
-		return false, nil
-	}
 	if err != nil {
-		return false, err
+		return pos, false, err
 	}
-	if hostID != "" {
-		s.hub.Notify(hostID)
+	for _, h := range notify {
+		s.hub.Notify(h)
 	}
-	return progressed, nil
+	return last, n == 20, nil
 }
 
 func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx) ([]*candidateHost, error) {
@@ -381,8 +406,10 @@ func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID s
 	if input != nil {
 		in = input
 	}
+	// A resumed Run is not finished, whatever it was: retention must not
+	// treat its blobs as those of a terminal Run.
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = 'resuming', state_reason = $3, pending_input = $2, updated_at = now(),
-			exit_code = NULL
+			exit_code = NULL, finished_at = NULL
 		WHERE id = $1`, runID, in, why)
 	if err != nil {
 		return err

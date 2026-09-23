@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -119,9 +120,10 @@ func (h *Hub) route(id string, f proto.Frame) {
 	}
 	select {
 	case ch <- f:
-	case <-time.After(5 * time.Second):
-		// A client that cannot keep up loses its stream rather than stalling
-		// the runner's connection for everyone.
+	default:
+		// Never block: this runs on the runner's read loop, and a stall here
+		// delays every ack and report from that host. A client that cannot
+		// keep up loses its stream (it reconnects from its cursor).
 		h.mu.Lock()
 		if h.subs[id] == ch {
 			delete(h.subs, id)
@@ -219,7 +221,10 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 	// Writer: live frames and durable messages.
 	go func() {
 		defer cancel()
-		var lastSent int64
+		// Ids already sent on this connection. Not a high-water mark: ids are
+		// taken at insert and become visible at commit, so a lower id can
+		// appear after a higher one was sent.
+		sent := map[int64]bool{}
 		c.notify <- struct{}{}
 		for {
 			select {
@@ -230,16 +235,19 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 					return
 				}
 			case <-c.notify:
-				msgs, err := s.pendingMessages(ctx, c.hostID, lastSent)
+				msgs, err := s.pendingMessages(ctx, c.hostID)
 				if err != nil {
 					s.log.Warn("pending messages", "err", err)
 					continue
 				}
 				for _, m := range msgs {
+					if sent[m.ID] {
+						continue
+					}
 					if err := writeFrame(ctx, ws, m); err != nil {
 						return
 					}
-					lastSent = m.ID
+					sent[m.ID] = true
 				}
 			}
 		}
@@ -291,15 +299,15 @@ func writeFrame(ctx context.Context, ws *websocket.Conn, f proto.Frame) error {
 	return ws.Write(wctx, websocket.MessageText, b)
 }
 
-// pendingMessages returns unacked messages for a host after id, with
+// pendingMessages returns a host's unacked messages in id order, with
 // secrets attached to assignments at send time: they are never stored.
-func (s *Server) pendingMessages(ctx context.Context, hostID string, after int64) ([]proto.Frame, error) {
+func (s *Server) pendingMessages(ctx context.Context, hostID string) ([]proto.Frame, error) {
 	var out []proto.Frame
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			UPDATE host_messages SET delivered_at = coalesce(delivered_at, now())
-			WHERE id IN (SELECT id FROM host_messages WHERE host_id = $1 AND acked_at IS NULL AND id > $2 ORDER BY id LIMIT 100)
-			RETURNING id, type, coalesce(run_id, ''), coalesce(epoch, 0), payload`, hostID, after)
+			WHERE id IN (SELECT id FROM host_messages WHERE host_id = $1 AND acked_at IS NULL ORDER BY id LIMIT 500)
+			RETURNING id, type, coalesce(run_id, ''), coalesce(epoch, 0), payload`, hostID)
 		if err != nil {
 			return err
 		}
@@ -316,14 +324,8 @@ func (s *Server) pendingMessages(ctx context.Context, hostID string, after int64
 	if err != nil {
 		return nil, err
 	}
-	// Ids are assigned in commit order only loosely; sort to be safe.
-	for i := range out {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].ID < out[i].ID {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
+	// RETURNING does not preserve the subquery's order.
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	for i := range out {
 		if out[i].Type == proto.MsgAssign {
 			out[i].Data = s.attachSecrets(out[i].RunID, out[i].Data)

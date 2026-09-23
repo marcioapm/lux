@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -188,7 +189,7 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) error 
 		defer body.Close()
 		w.Header().Set("Content-Type", ctype)
 		if size > 0 {
-			w.Header().Set("Content-Length", itoa64(size))
+			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		}
 		_, err = io.Copy(w, body)
 		return err
@@ -238,18 +239,4 @@ func (s *Server) discardStaleCopies(ctx context.Context, tx pgx.Tx, runID string
 		}
 	}
 	return hosts, nil
-}
-
-func itoa64(n int64) string {
-	b := [20]byte{}
-	i := len(b)
-	if n == 0 {
-		return "0"
-	}
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
 }

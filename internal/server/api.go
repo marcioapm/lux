@@ -538,6 +538,7 @@ func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) error {
 	for _, sec := range req.Secrets {
 		values[sec.Name] = sec.Value
 	}
+	resumed := false
 	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		var state string
 		var refs []spec.SecretRef
@@ -547,7 +548,7 @@ func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) error {
 		switch state {
 		case StateStopped, StateLost, StateFailed:
 		case StateResuming:
-			return nil // idempotent
+			return nil // idempotent: the first resume's secrets stand
 		case StateCancelled, StateSucceeded:
 			return errf(http.StatusConflict, "not_resumable", "run is %s", state)
 		default:
@@ -588,14 +589,18 @@ func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) error {
 		if req.Input != nil && req.Input.Text != "" {
 			in = &proto.Input{RequestID: ids.New("in"), Text: req.Input.Text}
 		}
+		resumed = true
+		// Cached before commit, so the scheduler never sees the Run
+		// resuming without its values.
+		s.secrets.put(id, values)
 		return s.requestResume(r.Context(), tx, p.TenantID, id, in, "resume requested")
 	})
 	if err != nil {
+		if resumed {
+			s.secrets.drop(id)
+		}
 		return err
 	}
-	// Merge with any values still held, so names not in the spec (none) and
-	// the full set are present.
-	s.secrets.put(id, values)
 	s.Kick()
 	run, err := s.loadRun(r.Context(), p.TenantID, id, false)
 	if err != nil {
@@ -744,34 +749,39 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// drainHost stops new placements on a host and moves its live Runs
-// elsewhere (stop → auto-resume).
+// drainHost stops new placements on one of the tenant's hosts and moves its
+// live Runs elsewhere (stop → auto-resume). The host is named by id or name,
+// always within the caller's tenant.
 func (s *Server) drainHost(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
-	id := r.PathValue("id")
+	ref := r.PathValue("id")
+	var hostID string
 	err := s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-		tag, err := tx.Exec(r.Context(), `UPDATE hosts SET draining = true, state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
+		err := tx.QueryRow(r.Context(), `UPDATE hosts SET draining = true,
+				state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
 				drain_requested_at = coalesce(drain_requested_at, now())
-			WHERE (id = $1 OR name = $1) AND tenant_id = $2 AND state <> 'terminated'`, id, p.TenantID)
+			WHERE (id = $1 OR name = $1) AND tenant_id = $2 AND state <> 'terminated'
+			RETURNING id`, ref, p.TenantID).Scan(&hostID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errNotFound
+		}
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 {
-			return errNotFound
-		}
-		return s.drainPlacements(r.Context(), tx, id)
+		return s.drainPlacements(r.Context(), tx, hostID)
 	})
 	if err != nil {
 		return err
 	}
-	s.hub.Notify(id)
-	writeJSON(w, http.StatusAccepted, map[string]any{"draining": true})
+	s.hub.Notify(hostID)
+	writeJSON(w, http.StatusAccepted, map[string]any{"draining": true, "host": hostID})
 	return nil
 }
 
-func (s *Server) drainPlacements(ctx context.Context, tx pgx.Tx, host string) error {
-	rows, err := tx.Query(ctx, `SELECT p.run_id, p.tenant_id FROM placements p JOIN hosts h ON h.id = p.host_id
-		WHERE (h.id = $1 OR h.name = $1) AND p.state IN ('assigned', 'starting', 'running', 'stopping')`, host)
+// drainPlacements asks every live placement on a host (by id) to stop.
+func (s *Server) drainPlacements(ctx context.Context, tx pgx.Tx, hostID string) error {
+	rows, err := tx.Query(ctx, `SELECT run_id, tenant_id FROM placements
+		WHERE host_id = $1 AND state IN ('assigned', 'starting', 'running', 'stopping')`, hostID)
 	if err != nil {
 		return err
 	}

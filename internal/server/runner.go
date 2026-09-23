@@ -327,7 +327,7 @@ func (s *Server) servePoll(w http.ResponseWriter, r *http.Request) error {
 	for _, f := range req.Reports {
 		resp.Replies = append(resp.Replies, s.handleReport(r.Context(), hostID, f))
 	}
-	msgs, err := s.pendingMessages(r.Context(), hostID, 0)
+	msgs, err := s.pendingMessages(r.Context(), hostID)
 	if err != nil {
 		return err
 	}

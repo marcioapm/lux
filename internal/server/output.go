@@ -165,8 +165,14 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request) error {
 				if ctx.Err() != nil {
 					return nil
 				}
-				_ = send("gap", map[string]any{"epoch": pl.epoch, "reason": err.Error()})
-				done = true
+				if liveNow && follow {
+					// A hiccup on a live placement (runner reconnecting, a
+					// dropped relay): keep the cursor and try again.
+					done = false
+				} else {
+					_ = send("gap", map[string]any{"epoch": pl.epoch, "reason": err.Error()})
+					done = true
+				}
 			}
 			if !done {
 				break
