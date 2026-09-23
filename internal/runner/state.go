@@ -29,6 +29,10 @@ type runState struct {
 	StopReason string `json:"stopReason,omitempty"`
 	// Stale: luxd fenced this placement off; do not report or upload.
 	Stale bool `json:"stale,omitempty"`
+	// Egress, as applied: re-applied when a restarted runner re-adopts a
+	// running container (the nftables table starts empty). Unrestricted
+	// Runs have none.
+	Egress *egressState `json:"egress,omitempty"`
 	// LastExitAt, unix ms, for host-local TTL.
 	LastExitAt int64 `json:"lastExitAt,omitempty"`
 }
@@ -97,4 +101,16 @@ type snapshotRecord struct {
 	// last uploads finish.
 	Discard bool  `json:"discard,omitempty"`
 	Created int64 `json:"created"`
+}
+
+type egressState struct {
+	Unrestricted bool         `json:"unrestricted,omitempty"`
+	Interface    string       `json:"interface"`
+	Gateway      string       `json:"gateway"`
+	Rules        []egressRule `json:"rules"`
+}
+
+type egressRule struct {
+	Host string `json:"host,omitempty"`
+	CIDR string `json:"cidr,omitempty"`
 }

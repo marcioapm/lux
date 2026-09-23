@@ -78,7 +78,8 @@ Host requirements:
 - Podman ≥ 5 with netavark, run rootful.
 - A `containers` range in `/etc/subuid` and `/etc/subgid` (for
   `--userns=auto`), for example `containers:2147483647:2147483648`.
-- nftables.
+- nftables (the runner owns the `inet lux` table; see
+  [egress](runspec.md#network-egress)).
 - `/dev/fuse` for nested containers.
 
 ```bash

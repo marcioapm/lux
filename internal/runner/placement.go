@@ -49,7 +49,8 @@ type placement struct {
 	shimConn net.Conn
 	shimEnc  *json.Encoder
 	done     chan struct{}
-	session  string      // latest session id the adapter reported
+	session  string // latest session id the adapter reported
+	network  podman.Network
 	user     passwd.User // who the workload runs as
 	peakDisk int64
 	netRx    int64
@@ -219,6 +220,10 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	p.mark("containerStarted")
+	if err := p.serveDNS(sp, p.network); err != nil {
+		p.logf("dns stub", "err", err)
+		_ = p.r.pm.Kill(ctx, containerName(p.runID), "KILL")
+	}
 	p.state.Phase = "started"
 	_ = writeRunState(p.dir, p.state)
 	if st, err := p.r.pm.Inspect(ctx, containerName(p.runID)); err == nil {
@@ -519,6 +524,15 @@ func hardening() []string {
 }
 
 func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image string, a *proto.Assign) error {
+	// The network and its egress rules first: a reused container rejoins
+	// the same network and needs its rules as much as a new one.
+	network, err := p.setupNetwork(ctx, sp)
+	if err != nil {
+		return fmt.Errorf("network: %w", err)
+	}
+	p.mu.Lock()
+	p.network = network
+	p.mu.Unlock()
 	name := containerName(p.runID)
 	// A container from an earlier placement: its writable layer is only
 	// worth keeping for a same-host resume with the same image; the shim
@@ -543,9 +557,6 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 	if err := p.writeShimConfig(ctx, sp, image); err != nil {
 		return err
 	}
-	if err := p.r.pm.NetworkCreate(ctx, networkName(p.runID), map[string]string{LabelManaged: "true", LabelRun: p.runID}, false); err != nil {
-		return err
-	}
 
 	args := hardening()
 	args = append(args,
@@ -555,6 +566,9 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 		"--label", LabelTenant+"="+p.tenantID,
 		"--label", "lux.spec="+specHash(sp),
 		"--network", networkName(p.runID),
+		// The Run's DNS is its egress stub on the gateway (Podman's DNS is
+		// off on this network); unrestricted Runs use the host's resolvers.
+		"--dns", dnsServer(sp, network),
 		"--user", "0:0",
 		"--entrypoint", proto.ShimBinary,
 		"-v", p.r.cfg.Shim+":"+proto.ShimBinary+":ro",

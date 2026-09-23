@@ -55,9 +55,10 @@ placement:
   prefers: { region: eu-west-1 }
 
 network:
-  egress:
+  egress:                       # default deny: only these are reachable
     - host: api.anthropic.com
     - cidr: 140.82.112.0/20
+  # unrestricted: true          # no egress filtering (the hard blocks still apply)
   ports:
     - { port: 3000, name: web }
 
@@ -127,3 +128,41 @@ starts:
 
 The workload commits as it likes. The checkout is a normal git repository
 owned by the workload user.
+
+## Network egress
+
+**Default deny.** A Run can reach only the CIDRs and hostnames in
+`network.egress`. A spec with no rules reaches nothing.
+
+- **CIDRs** are allowed as written.
+- **Hostnames** are resolved by the runner (not the container) when the Run
+  starts, and every minute after that. New addresses are added and none are
+  removed while the Run lives, so a connection is not cut when a CDN
+  rotates. Wildcards can't be resolved, so list the concrete hostnames.
+- **DNS:** the Run's resolver is a stub on its network's gateway. It
+  answers only allowed names, with exactly the addresses the firewall
+  allows. It refuses every other name and records every lookup as a `dns`
+  event, so "what did this Run try to reach" has an answer. Queries sent to
+  any other DNS server are redirected to the stub, so DNS can't be used to
+  get data out.
+- **Always blocked, whatever the spec says:** the cloud metadata range
+  (`169.254.0.0/16`), loopback, the control plane, and other Runs on the
+  same host. An allowed hostname that resolves into a blocked range does
+  not open it.
+- `unrestricted: true` switches the filtering off. The hard blocks above
+  still apply.
+- **A known limitation, by choice:** rules match IP addresses, so allowing
+  a name hosted on a CDN allows everything else on those shared addresses.
+  Filtering on hostnames (SNI) through a proxy is the upgrade path.
+
+How it works: each Run gets its own bridge network, with Podman's own DNS
+turned off. The runner owns an nftables table, `inet lux`, which netavark
+never touches:
+
+- Traffic from each Run's bridge is sent to that Run's chain, which allows
+  replies and the Run's allow set, drops the hard-blocked ranges, and drops
+  everything else.
+- Traffic from a lux bridge with no rules loaded, for example while the
+  runner restarts, is dropped, so a Run fails closed, never open. A
+  restarted runner re-applies the rules for the Runs it re-adopts before
+  anything else.

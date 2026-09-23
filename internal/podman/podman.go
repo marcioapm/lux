@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strconv"
@@ -150,16 +151,38 @@ func (p *Podman) VolumeImport(ctx context.Context, name string, r io.Reader) err
 
 // ---- networks ---------------------------------------------------------------
 
-func (p *Podman) NetworkCreate(ctx context.Context, name string, labels map[string]string, internal bool) error {
-	a := []string{"network", "create", "--ignore"}
+// Network is a created network's addressing.
+type Network struct {
+	Interface string
+	Subnet    netip.Prefix
+	Gateway   netip.Addr
+}
+
+// NetworkCreate creates a bridge network (if missing) with a fixed bridge
+// interface name and Podman's own DNS off, and returns its addressing.
+func (p *Podman) NetworkCreate(ctx context.Context, name, iface string, labels map[string]string) (Network, error) {
+	a := []string{"network", "create", "--ignore", "--disable-dns", "--interface-name", iface}
 	for k, v := range labels {
 		a = append(a, "--label", k+"="+v)
 	}
-	if internal {
-		a = append(a, "--internal")
+	if _, err := p.Run(ctx, append(a, name)...); err != nil {
+		return Network{}, err
 	}
-	_, err := p.Run(ctx, append(a, name)...)
-	return err
+	out, err := p.Run(ctx, "network", "inspect", "--format",
+		"{{.NetworkInterface}} {{(index .Subnets 0).Subnet}} {{(index .Subnets 0).Gateway}}", name)
+	if err != nil {
+		return Network{}, err
+	}
+	f := strings.Fields(string(out))
+	if len(f) != 3 {
+		return Network{}, fmt.Errorf("network inspect %s: %q", name, out)
+	}
+	sub, err1 := netip.ParsePrefix(f[1])
+	gw, err2 := netip.ParseAddr(f[2])
+	if err1 != nil || err2 != nil {
+		return Network{}, fmt.Errorf("network %s: bad addressing %q", name, out)
+	}
+	return Network{Interface: f[0], Subnet: sub, Gateway: gw}, nil
 }
 
 func (p *Podman) NetworkRemove(ctx context.Context, name string) error {

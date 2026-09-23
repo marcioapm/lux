@@ -339,3 +339,51 @@ def git_server(env: TestEnvironment):
     ip = _json.loads(sh("docker", "inspect", name))[0]["NetworkSettings"]["Networks"][env.network]["IPAddress"]
     yield GitServer(env, name, ip, token)
     sh("docker", "rm", "-f", name, check=False)
+
+
+# ---- egress targets -----------------------------------------------------------
+
+class NetTargets:
+    """Two web servers on the run network and a DNS server that names them.
+    The hosts resolve through it, so the tests need no internet."""
+
+    def __init__(self, allowed_ip: str, denied_ip: str, dns_ip: str):
+        self.allowed_ip, self.denied_ip, self.dns_ip = allowed_ip, denied_ip, dns_ip
+        self.allowed_name, self.denied_name = "allowed.lux.test", "denied.lux.test"
+
+
+@pytest.fixture(scope="session")
+def net_targets(env: TestEnvironment):
+    from env import sh
+    import json as _json
+    from pathlib import Path
+    ctx = Path(__file__).parent / "images" / "netsvc"
+    sh("docker", "build", "-q", "-t", "localhost/lux-netsvc:test", "-f", str(ctx / "Containerfile"), str(ctx))
+    names = []
+
+    def start(role: str, **envs) -> str:
+        name = f"lux-e2e-{env.run_id}-{role}-{len(names)}"
+        names.append(name)
+        args = ["docker", "run", "-d", "--name", name, "--label", f"lux-e2e-run={env.run_id}", "--network", env.network,
+                "-e", f"ROLE={role}"]
+        for k, v in envs.items():
+            args += ["-e", f"{k}={v}"]
+        sh(*args, "localhost/lux-netsvc:test")
+        return _json.loads(sh("docker", "inspect", name))[0]["NetworkSettings"]["Networks"][env.network]["IPAddress"]
+
+    allowed = start("web", NAME="allowed")
+    denied = start("web", NAME="denied")
+    dns = start("dns", RECORDS=f"allowed.lux.test={allowed},denied.lux.test={denied},meta.lux.test=169.254.169.254")
+    yield NetTargets(allowed, denied, dns)
+    for n in names:
+        sh("docker", "rm", "-f", n, check=False)
+
+
+@pytest.fixture
+def egress_hosts(hosts, net_targets):
+    """Hosts whose runners resolve through the test DNS."""
+    for h in hosts:
+        h.exec("sh", "-c", f"cp /etc/resolv.conf /etc/resolv.conf.lux-orig 2>/dev/null; echo 'nameserver {net_targets.dns_ip}' > /etc/resolv.conf")
+    yield hosts
+    for h in hosts:
+        h.exec("sh", "-c", "[ -f /etc/resolv.conf.lux-orig ] && mv /etc/resolv.conf.lux-orig /etc/resolv.conf; true", check=False)

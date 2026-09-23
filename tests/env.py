@@ -330,6 +330,12 @@ class TestEnvironment:
         with open(tar, "rb") as f:
             subprocess.run(["docker", "exec", "-i", container, "podman", "load", "-q"],
                            stdin=f, check=True, capture_output=True)
+        # docker save records short names (alpine:3.24.2), which podman
+        # loads as localhost/alpine; tag them with the full references specs
+        # use, so no test ever reaches a registry.
+        for ref in PRELOAD_IMAGES:
+            short = ref.removeprefix("docker.io/library/")
+            host.exec("sh", "-c", f"podman image exists {ref} || podman tag localhost/{short} {ref}")
         return host
 
     def _migrate(self) -> None:

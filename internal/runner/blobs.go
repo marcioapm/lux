@@ -227,6 +227,7 @@ func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
 		_ = r.pm.VolumeRemove(ctx, v)
 		r.forgetMountpoint(v)
 	}
+	r.egress.Remove(bridgeName(runID))
 	_ = r.pm.NetworkRemove(ctx, networkName(runID))
 	for snapID, rec := range r.snapshotRecords() {
 		if rec.RunID != runID {
@@ -325,6 +326,12 @@ func (r *Runner) readopt(ctx context.Context) {
 			}
 			p.cgroup = cs.CgroupPath
 			if cs.Running {
+				// Before anything else: a running container must not spend a
+				// moment without its egress rules.
+				if err := p.reapplyEgress(ctx); err != nil {
+					r.log.Error("re-adopt: egress; killing the container", "run", st.RunID, "err", err)
+					_ = r.pm.Kill(ctx, containerName(st.RunID), "KILL")
+				}
 				p.phase = "running"
 				if p.stopWhy != "" {
 					p.phase = "stopping"

@@ -12,8 +12,8 @@ Each step ends with an end-to-end test through `tests/run_tests.py`.
 | 4 | Steering + adapters: `POST /input`, `lux-fake` over ACP, `acp` adapter, `claude-code` | ✅ done |
 | 5 | S3 (straight through luxd), presigned downloads, host-local GC, retention | ✅ done |
 | 6 | Git workspace: mirrors, clone at ref, push with runner-held credentials | ✅ done |
-| 7 | Egress: per-Run networks, nftables, DNS stub, re-resolution | 🚧 in progress |
-| 8 | Secrets: tmpfs, redaction, re-supply on resume | ⏳ |
+| 7 | Egress: per-Run networks, nftables, DNS stub, re-resolution | ✅ done |
+| 8 | Secrets: tmpfs, redaction, re-supply on resume | 🚧 in progress |
 | 9 | Images from Containerfiles: `podman build`, `FROM` pinning, rebuild warnings | ⏳ |
 | 10 | Nested containers (opt-in) | ⏳ |
 | 11 | Attach, exec, port forwarding through the relay | ⏳ |

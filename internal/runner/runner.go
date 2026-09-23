@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marcioapm/lux/internal/egress"
 	"github.com/marcioapm/lux/internal/gitws"
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
@@ -61,6 +62,7 @@ type Runner struct {
 	subs       map[string]context.CancelFunc
 	uploads    *uploader
 	control    *serialQueues
+	egress     *egress.Firewall
 	git        *gitws.Manager
 	mounts     sync.Map // volume name → mountpoint
 }
@@ -120,6 +122,11 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	r.conn = newConn(r)
 	r.uploads = newUploader(r)
 	r.shimV = version.Version
+	fw, err := egress.New(blockedForRuns(cfg.URL))
+	if err != nil {
+		return nil, err
+	}
+	r.egress = fw
 	return r, nil
 }
 

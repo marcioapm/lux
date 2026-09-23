@@ -1,0 +1,6 @@
+# Network targets for the egress tests: an HTTP server answering its own
+# name (busybox httpd), and dnsmasq for the names the tests use.
+FROM docker.io/library/alpine:3.24.2
+RUN apk add --no-cache dnsmasq busybox-extras
+COPY run.sh /run.sh
+ENTRYPOINT ["/bin/sh", "/run.sh"]
