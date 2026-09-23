@@ -457,7 +457,8 @@ func acp() {
 				if a.runTurn(text, c) {
 					stop = "cancelled"
 				}
-				reply(id, map[string]any{"stopReason": stop})
+				// Usage as OpenCode reports it (lux passes it through).
+				reply(id, map[string]any{"stopReason": stop, "usage": map[string]any{"inputTokens": 2, "outputTokens": 10, "totalTokens": 12}, "_meta": map[string]any{}})
 			}()
 		case "session/cancel":
 			a.cancelTurn()

@@ -129,9 +129,7 @@ func (c *Claude) send(in proto.Input) {
 	if err == nil {
 		sink.Activity(false)
 	}
-	if in.RequestID != "prompt" {
-		sink.InputAck(in.RequestID, err)
-	}
+	sink.InputAck(in, err)
 }
 
 // Deliver writes the message now: Claude Code queues mid-turn messages
@@ -151,7 +149,7 @@ func (c *Claude) Deliver(in proto.Input) {
 	if in.Text != "" {
 		c.send(in)
 	} else if in.RequestID != "" {
-		c.sink.InputAck(in.RequestID, nil)
+		c.sink.InputAck(in, nil)
 	}
 }
 

@@ -22,8 +22,9 @@ def test_retried_input_is_delivered_once(lux, runners, hosts, fake_image):
     lux.wait_activity(run_id, "idle")
     # All three reached luxd; the shim delivered one.
     assert len(lux.events(run_id, "input")) == 3
-    wait_until(lambda: lux.events(run_id, "input.delivered"), 20, 0.3, "no delivery ack")
-    assert len(lux.events(run_id, "input.delivered")) == 1
+    steered = lambda: [e for e in lux.events(run_id, "input.delivered") if e["data"]["requestId"] == "same"]
+    wait_until(steered, 20, 0.3, "no delivery ack")
+    assert len(steered()) == 1
     assert lux.logs(run_id).count("once") == 1
 
 
@@ -71,3 +72,14 @@ def test_fake_conditionals(lux, runners, hosts, fake_image):
     assert "finding: not fixed" in out and "fixed now" in out and "nested-ok" in out, out
     assert "WRONG" not in out, out
     lux.run("cancel", run_id)
+
+
+def test_acp_turn_end_carries_the_agents_usage(lux, runners, hosts, fake_image):
+    """The prompt response's usage (OpenCode reports it there) reaches the
+    turn's acp.turn_end event, as the agent sent it."""
+    runners.start(hosts[0])
+    run_id = lux.submit(fake_agent(fake_image, "echo hi", adapter="acp"))
+    lux.wait_activity(run_id, "idle")
+    ends = [r["event"] for r in lux.records(run_id, "--events") if r.get("ch") == "event"
+            and r["event"].get("type") == "acp.turn_end"]
+    assert ends and ends[0]["data"]["usage"] == {"inputTokens": 2, "outputTokens": 10, "totalTokens": 12}, ends

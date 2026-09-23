@@ -6,10 +6,10 @@ hosts EC2 lost. Against a fake EC2 (the real provider code, a fake API);
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
-import conftest
 from conftest import fake_only, generic
 from env import ALPINE_IMAGE, wait_until
 
@@ -24,8 +24,8 @@ def _clean(lux, ec2):
     wait_until(lambda: not ec2.running(), 90, 1, "the removed pool's instances were not terminated")
 
 
-def pool(lux, name="burst", **kw):
-    args = ["pools", "set", name, "--provider", "ec2", "--template", json.dumps(conftest.EC2_TEMPLATE)]
+def pool(lux, ec2, name="burst", **kw):
+    args = ["pools", "set", name, "--provider", "ec2", "--template", json.dumps(ec2.template)]
     for k, v in kw.items():
         args += [f"--{k}", str(v)]
     lux.run(*args)
@@ -36,14 +36,12 @@ def ec2_hosts(lux, pool_name="burst", states=("ready",)):
 
 
 def test_a_waiting_run_gets_a_host_launched(lux, ec2):
-    pool(lux, max=2)
+    pool(lux, ec2, max=2)
     run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "on-ec2", placement={"pool": "burst"}))
-    wait_until(lambda: lux.get(run_id)["state"] in ("provisioning", "scheduled", "running", "succeeded"),
-               30, 0.5, "the Run never waited for a host")
     lux.wait_state(run_id, "succeeded", timeout=120)
     assert "on-ec2" in lux.logs(run_id)
     [inst] = ec2.running()
-    assert inst["launchTemplate"] == conftest.EC2_TEMPLATE["launchTemplate"]
+    assert inst["launchTemplate"] == ec2.template["launchTemplate"]
     assert inst["tags"]["lux:pool"] == "burst"
     host = lux.get(run_id)["placements"][0]["hostName"]
     assert host == inst["tags"]["Name"], (host, inst["tags"])
@@ -54,7 +52,7 @@ def test_a_waiting_run_gets_a_host_launched(lux, ec2):
 
 def test_max_hosts_is_respected(lux, ec2):
     fake_only(ec2)
-    pool(lux, max=1)
+    pool(lux, ec2, max=1)
     runs = [lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "sleep 3", placement={"pool": "burst"},
                                resources={"cpus": 0.5})) for _ in range(3)]
     for r in runs:
@@ -66,22 +64,20 @@ def test_warm_and_minimum_hosts(lux, ec2):
     """A warm host is launched with nothing waiting, and a Run starts on it
     at once; the minimum is kept after scale-down."""
     fake_only(ec2)
-    pool(lux, min=1, warm=1, max=3)
+    pool(lux, ec2, min=1, warm=1, max=3)
     wait_until(lambda: len(ec2_hosts(lux)) >= 1, 90, 1, "no warm host")
-    before = ec2.calls.count("RunInstances")
     run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "warm", placement={"pool": "burst"}))
     lux.wait_state(run_id, "succeeded", timeout=60)
     run = lux.get(run_id)
     assert run["placements"][0]["hostName"] in {h["name"] for h in ec2_hosts(lux, states=("ready", "draining"))}
     # Scaling down never goes below the minimum (1) and warm (1).
-    wait_until(lambda: len(ec2.running()) == 1 and ec2.calls.count("RunInstances") >= before, 60, 1, "not back to one host")
-    import time
-    time.sleep(8)
+    wait_until(lambda: len(ec2.running()) == 1, 60, 1, "not back to one host")
+    time.sleep(8)  # past the scale-down delay (4s): still one
     assert len(ec2.running()) == 1
 
 
 def test_a_lost_instance_is_replaced(lux, ec2):
-    pool(lux, min=1, max=2)
+    pool(lux, ec2, min=1, max=2)
     wait_until(lambda: len(ec2_hosts(lux)) == 1, 90, 1, "no host")
     [inst] = ec2.running()
     ec2.kill(inst["id"])
@@ -92,7 +88,7 @@ def test_a_lost_instance_is_replaced(lux, ec2):
 def test_a_host_that_never_registers_is_terminated(lux, ec2):
     fake_only(ec2)
     ec2.no_boot = True
-    pool(lux, max=1)
+    pool(lux, ec2, max=1)
     run_id = lux.submit(generic(ALPINE_IMAGE, "true", placement={"pool": "burst"}))
     wait_until(lambda: ec2.calls.count("RunInstances") == 1, 30, 0.5, "never launched")
     # LUX_LAUNCH_TIMEOUT=60s in this fixture.
@@ -104,7 +100,7 @@ def test_a_host_that_never_registers_is_terminated(lux, ec2):
 def test_a_failed_launch_is_retried(lux, ec2):
     fake_only(ec2)
     ec2.fail_launches = True
-    pool(lux, max=1)
+    pool(lux, ec2, max=1)
     run_id = lux.submit(generic(ALPINE_IMAGE, "true", placement={"pool": "burst"}))
     wait_until(lambda: ec2.calls.count("RunInstances") >= 2, 30, 0.5, "not retried")
     ec2.fail_launches = False
@@ -115,7 +111,7 @@ def test_a_busy_host_is_drained_before_it_is_terminated(lux, ec2):
     """Removing the pool never cuts a Run short: its host is drained (the
     Run stops and snapshots), and terminated only once that snapshot is
     uploaded — never while the Run is still live on it."""
-    pool(lux, max=1)
+    pool(lux, ec2, max=1)
     # Slow to stop (a grace period it uses in full), so a terminate that
     # does not wait for the drain would catch it live.
     script = "trap 'sleep 6; exit 0' TERM; echo state > /w/f; echo up; while :; do sleep 1; done"
@@ -133,3 +129,18 @@ def test_a_busy_host_is_drained_before_it_is_terminated(lux, ec2):
     assert snaps and snaps[-1]["uploaded"], snaps
     run = lux.get(run_id)
     assert run["placements"][-1]["exitReason"] != "lost", run
+
+
+def test_a_purged_instance_does_not_write_off_the_others(lux, ec2):
+    """EC2 refuses a whole DescribeInstances when one id is unknown (it
+    purges terminated instances). The other hosts are still alive."""
+    fake_only(ec2)
+    pool(lux, ec2, min=2, max=2)
+    wait_until(lambda: len(ec2_hosts(lux)) == 2, 120, 1, "no hosts")
+    first, second = ec2.running()
+    ec2.purge(first["id"])
+    # A replacement comes for the purged one; the other is never replaced.
+    wait_until(lambda: len(ec2.running()) == 2 and second["id"] in {i["id"] for i in ec2.running()}
+               and first["id"] not in {i["id"] for i in ec2.running()}, 120, 1, "not replaced as expected")
+    assert second["id"] in {i["id"] for i in ec2.running()}
+    assert ec2.calls.count("RunInstances") == 3, ec2.calls.count("RunInstances")

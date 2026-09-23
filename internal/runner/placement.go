@@ -857,6 +857,8 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 			Activity  string `json:"activity"`
 			RequestID string `json:"requestId"`
 			Error     string `json:"error"`
+			Text      string `json:"text"`
+			Truncated bool   `json:"truncated"`
 			Phase     string `json:"phase"`
 		}
 		_ = json.Unmarshal(ev.Data, &d)
@@ -870,7 +872,7 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 		case proto.EvActivity:
 			ae = &proto.AdapterEvent{Activity: d.Activity}
 		case proto.EvInputAck:
-			ae = &proto.AdapterEvent{InputAck: d.RequestID, InputError: d.Error}
+			ae = &proto.AdapterEvent{InputAck: d.RequestID, InputError: d.Error, InputText: d.Text, InputTruncated: d.Truncated}
 		case proto.EvWorkload:
 			if d.Phase == "start" {
 				p.mark("workloadStarted")

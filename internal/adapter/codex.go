@@ -151,9 +151,7 @@ func (c *Codex) drain() {
 			c.turn = r.Turn.ID
 		}
 		c.mu.Unlock()
-		if in.RequestID != "prompt" {
-			sink.InputAck(in.RequestID, err)
-		}
+		sink.InputAck(in, err)
 		if err != nil {
 			sink.Activity(true)
 			c.drain()
@@ -235,7 +233,7 @@ func (c *Codex) Deliver(in proto.Input) {
 			c.drain()
 			return
 		}
-		c.sink.InputAck(in.RequestID, nil)
+		c.sink.InputAck(in, nil)
 	}()
 }
 

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -796,41 +797,56 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) error {
 func (s *Server) drainHost(w http.ResponseWriter, r *http.Request) error {
 	p := principal(r)
 	ref := r.PathValue("id")
-	var hostID string
+	var hosts []string
 	err := s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-		err := tx.QueryRow(r.Context(), `UPDATE hosts SET draining = true,
-				state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
-				drain_requested_at = coalesce(drain_requested_at, now())
-			WHERE (id = $1 OR name = $1) AND tenant_id = $2 AND state <> 'terminated'
-			RETURNING id`, ref, p.TenantID).Scan(&hostID)
-		if errors.Is(err, pgx.ErrNoRows) {
+		var err error
+		hosts, err = s.drainHosts(r.Context(), tx, "drain requested",
+			"(id = $1 OR name = $1) AND tenant_id = $2", ref, p.TenantID)
+		if err == nil && len(hosts) == 0 {
 			return errNotFound
 		}
-		if err != nil {
-			return err
-		}
-		return s.drainPlacements(r.Context(), tx, hostID)
+		return err
 	})
 	if err != nil {
 		return err
 	}
-	s.hub.Notify(hostID)
-	writeJSON(w, http.StatusAccepted, map[string]any{"draining": true, "host": hostID})
+	s.notifyAll(hosts)
+	writeJSON(w, http.StatusAccepted, map[string]any{"draining": true, "host": hosts[0]})
 	return nil
 }
 
-// drainPlacements asks every live placement on a host (by id) to stop.
-func (s *Server) drainPlacements(ctx context.Context, tx pgx.Tx, hostID string) error {
-	live, err := livePlacements(ctx, tx, "p.host_id = $1", hostID)
+// drainHosts takes hosts out of service (no new placements) and asks their
+// live placements to stop; where selects them (placeholders from $1).
+// Returns their ids, to notify once the transaction commits.
+func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, where string, args ...any) ([]string, error) {
+	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
+			state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
+			state_reason = $%d, drain_requested_at = coalesce(drain_requested_at, now())
+		WHERE state <> 'terminated' AND %s
+		RETURNING id`, len(args)+1, where), append(args, reason)...)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil || len(hosts) == 0 {
+		return hosts, err
+	}
+	live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", hosts)
+	if err != nil {
+		return nil, err
 	}
 	for _, p := range live {
 		if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, "drain"); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return hosts, nil
+}
+
+func (s *Server) notifyAll(hosts []string) {
+	for _, h := range hosts {
+		s.hub.Notify(h)
+	}
 }
 
 type Pool struct {
@@ -887,31 +903,14 @@ func (s *Server) deletePool(w http.ResponseWriter, r *http.Request) error {
 		if tag.RowsAffected() == 0 {
 			return errNotFound
 		}
-		rows, err := tx.Query(r.Context(), `UPDATE hosts SET draining = true,
-				state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
-				state_reason = 'pool removed', drain_requested_at = coalesce(drain_requested_at, now())
-			WHERE tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL AND state <> 'terminated'
-			RETURNING id`, p.TenantID, name)
-		if err != nil {
-			return err
-		}
-		hosts, err = pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil {
-			return err
-		}
-		for _, h := range hosts {
-			if err := s.drainPlacements(r.Context(), tx, h); err != nil {
-				return err
-			}
-		}
-		return nil
+		hosts, err = s.drainHosts(r.Context(), tx, "pool removed",
+			"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
+		return err
 	})
 	if err != nil {
 		return err
 	}
-	for _, h := range hosts {
-		s.hub.Notify(h)
-	}
+	s.notifyAll(hosts)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }

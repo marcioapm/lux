@@ -13,6 +13,12 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
+// Provisioning defaults (luxd's LUX_SCALE_DOWN_AFTER, LUX_LAUNCH_TIMEOUT).
+const (
+	DefaultScaleDownAfter = 10 * time.Minute
+	DefaultLaunchTimeout  = 10 * time.Minute
+)
+
 type Config struct {
 	Listen    string
 	PublicURL string
@@ -40,7 +46,10 @@ type Server struct {
 	// the placement that needs them has been assigned. Never persisted.
 	secrets *secretCache
 	kick    chan struct{}
-	wg      sync.WaitGroup
+	// lastAliveCheck: when the provisioner last asked providers which
+	// hosts still exist.
+	lastAliveCheck time.Time
+	wg             sync.WaitGroup
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {
@@ -51,10 +60,10 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		cfg.Tick = time.Second
 	}
 	if cfg.ScaleDownAfter == 0 {
-		cfg.ScaleDownAfter = 10 * time.Minute
+		cfg.ScaleDownAfter = DefaultScaleDownAfter
 	}
 	if cfg.LaunchTimeout == 0 {
-		cfg.LaunchTimeout = 10 * time.Minute
+		cfg.LaunchTimeout = DefaultLaunchTimeout
 	}
 	s := &Server{
 		cfg:     cfg,

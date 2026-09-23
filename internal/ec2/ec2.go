@@ -24,12 +24,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 )
 
 // Template is a pool's EC2 settings.
@@ -39,21 +41,6 @@ type Template struct {
 	InstanceType   string            `json:"instanceType"`
 	Subnets        []string          `json:"subnets"`
 	Tags           map[string]string `json:"tags"`
-}
-
-// Launch is one instance to start.
-type Launch struct {
-	Pool     string
-	HostName string
-	Template Template
-	// UserData: the runner's environment (KEY=value lines).
-	UserData map[string]string
-}
-
-// Instance is what DescribeInstances tells about one of ours.
-type Instance struct {
-	ID    string
-	State string // pending | running | shutting-down | terminated | stopping | stopped
 }
 
 type Provider struct {
@@ -67,8 +54,6 @@ type Provider struct {
 func New(endpoint string) *Provider {
 	return &Provider{endpoint: endpoint, clients: map[string]*awsec2.Client{}, next: map[string]int{}}
 }
-
-func (p *Provider) Name() string { return "ec2" }
 
 func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, error) {
 	if c := p.clients[region]; c != nil {
@@ -91,9 +76,13 @@ func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, e
 	return c, nil
 }
 
-// Launch starts one instance and returns its id.
-func (p *Provider) Launch(ctx context.Context, l Launch) (string, error) {
-	t := l.Template
+// Launch starts one instance for a pool and returns its id. env is the
+// runner's environment, passed as user data (KEY=value lines).
+func (p *Provider) Launch(ctx context.Context, pool, hostName string, template json.RawMessage, env map[string]string) (string, error) {
+	t, err := parse(template)
+	if err != nil {
+		return "", err
+	}
 	if t.LaunchTemplate == "" {
 		return "", errors.New("ec2: the pool template needs a launchTemplate")
 	}
@@ -102,7 +91,7 @@ func (p *Provider) Launch(ctx context.Context, l Launch) (string, error) {
 		return "", err
 	}
 	var ud strings.Builder
-	for k, v := range l.UserData {
+	for k, v := range env {
 		fmt.Fprintf(&ud, "%s=%s\n", k, v)
 	}
 	lt := &types.LaunchTemplateSpecification{Version: aws.String("$Default")}
@@ -112,8 +101,8 @@ func (p *Provider) Launch(ctx context.Context, l Launch) (string, error) {
 		lt.LaunchTemplateName = aws.String(t.LaunchTemplate)
 	}
 	tags := []types.Tag{
-		{Key: aws.String("Name"), Value: aws.String(l.HostName)},
-		{Key: aws.String("lux:pool"), Value: aws.String(l.Pool)},
+		{Key: aws.String("Name"), Value: aws.String(hostName)},
+		{Key: aws.String("lux:pool"), Value: aws.String(pool)},
 		{Key: aws.String("lux:managed"), Value: aws.String("true")},
 	}
 	for k, v := range t.Tags {
@@ -132,8 +121,8 @@ func (p *Provider) Launch(ctx context.Context, l Launch) (string, error) {
 		in.InstanceType = types.InstanceType(t.InstanceType)
 	}
 	if len(t.Subnets) > 0 {
-		i := p.next[l.Pool] % len(t.Subnets)
-		p.next[l.Pool]++
+		i := p.next[pool] % len(t.Subnets)
+		p.next[pool]++
 		in.SubnetId = aws.String(t.Subnets[i])
 	}
 	out, err := c.RunInstances(ctx, in)
@@ -146,57 +135,81 @@ func (p *Provider) Launch(ctx context.Context, l Launch) (string, error) {
 	return *out.Instances[0].InstanceId, nil
 }
 
-// Terminate ends an instance. An instance that no longer exists is done.
-func (p *Provider) Terminate(ctx context.Context, region, id string) error {
-	c, err := p.client(ctx, region)
+// Terminate ends an instance. One that no longer exists is done.
+func (p *Provider) Terminate(ctx context.Context, template json.RawMessage, id string) error {
+	t, err := parse(template)
+	if err != nil {
+		return err
+	}
+	c, err := p.client(ctx, t.Region)
 	if err != nil {
 		return err
 	}
 	_, err = c.TerminateInstances(ctx, &awsec2.TerminateInstancesInput{InstanceIds: []string{id}})
-	if err != nil && strings.Contains(err.Error(), "InvalidInstanceID.NotFound") {
+	if isNotFound(err) {
 		return nil
 	}
 	return err
 }
 
-// Describe reports the state of the given instances. Ones EC2 no longer
-// knows are absent from the result.
-func (p *Provider) Describe(ctx context.Context, region string, ids []string) (map[string]Instance, error) {
-	out := map[string]Instance{}
-	if len(ids) == 0 {
-		return out, nil
-	}
-	c, err := p.client(ctx, region)
+// Gone reports which of the given instances EC2 says are terminated (or
+// shutting down). An id EC2 does not know is not reported: it may be too
+// new to be visible yet (EC2 is eventually consistent), or long purged; a
+// host that never registers is terminated by the launch timeout instead.
+func (p *Provider) Gone(ctx context.Context, template json.RawMessage, ids []string) (map[string]bool, error) {
+	t, err := parse(template)
 	if err != nil {
 		return nil, err
 	}
+	c, err := p.client(ctx, t.Region)
+	if err != nil {
+		return nil, err
+	}
+	states, err := describe(ctx, c, ids)
+	if isNotFound(err) {
+		// One unknown id fails the whole call: ask about each alone.
+		states = map[string]types.InstanceStateName{}
+		for _, id := range ids {
+			one, err := describe(ctx, c, []string{id})
+			if err != nil && !isNotFound(err) {
+				return nil, err
+			}
+			maps.Copy(states, one)
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	gone := map[string]bool{}
+	for id, st := range states {
+		gone[id] = st == types.InstanceStateNameTerminated || st == types.InstanceStateNameShuttingDown
+	}
+	return gone, nil
+}
+
+func describe(ctx context.Context, c *awsec2.Client, ids []string) (map[string]types.InstanceStateName, error) {
+	out := map[string]types.InstanceStateName{}
 	pages := awsec2.NewDescribeInstancesPaginator(c, &awsec2.DescribeInstancesInput{InstanceIds: ids})
 	for pages.HasMorePages() {
 		page, err := pages.NextPage(ctx)
 		if err != nil {
-			if strings.Contains(err.Error(), "InvalidInstanceID.NotFound") {
-				return out, nil
-			}
 			return nil, err
 		}
 		for _, r := range page.Reservations {
 			for _, i := range r.Instances {
-				if i.InstanceId == nil {
+				if i.InstanceId == nil || i.State == nil {
 					continue
 				}
-				st := ""
-				if i.State != nil {
-					st = string(i.State.Name)
-				}
-				out[*i.InstanceId] = Instance{ID: *i.InstanceId, State: st}
+				out[*i.InstanceId] = i.State.Name
 			}
 		}
 	}
 	return out, nil
 }
 
-// Pool adapts the provider to a pool's JSON template, as luxd calls it.
-type Pool struct{ *Provider }
+func isNotFound(err error) bool {
+	var ae smithy.APIError
+	return errors.As(err, &ae) && ae.ErrorCode() == "InvalidInstanceID.NotFound"
+}
 
 func parse(raw json.RawMessage) (Template, error) {
 	var t Template
@@ -206,36 +219,4 @@ func parse(raw json.RawMessage) (Template, error) {
 		}
 	}
 	return t, nil
-}
-
-func (p Pool) Launch(ctx context.Context, pool, hostName string, template json.RawMessage, env map[string]string) (string, error) {
-	t, err := parse(template)
-	if err != nil {
-		return "", err
-	}
-	return p.Provider.Launch(ctx, Launch{Pool: pool, HostName: hostName, Template: t, UserData: env})
-}
-
-func (p Pool) Terminate(ctx context.Context, template json.RawMessage, id string) error {
-	t, err := parse(template)
-	if err != nil {
-		return err
-	}
-	return p.Provider.Terminate(ctx, t.Region, id)
-}
-
-func (p Pool) Alive(ctx context.Context, template json.RawMessage, ids []string) (map[string]bool, error) {
-	t, err := parse(template)
-	if err != nil {
-		return nil, err
-	}
-	insts, err := p.Provider.Describe(ctx, t.Region, ids)
-	if err != nil {
-		return nil, err
-	}
-	alive := map[string]bool{}
-	for id, i := range insts {
-		alive[id] = i.State != "terminated" && i.State != "shutting-down"
-	}
-	return alive, nil
 }

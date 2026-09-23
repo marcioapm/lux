@@ -215,6 +215,9 @@ type AdapterEvent struct {
 	// InputAck acknowledges delivery of an input by request id.
 	InputAck   string `json:"inputAck,omitempty"`
 	InputError string `json:"inputError,omitempty"`
+	// InputText is what was delivered (capped; InputTruncated if so).
+	InputText      string `json:"inputText,omitempty"`
+	InputTruncated bool   `json:"inputTruncated,omitempty"`
 }
 
 // SnapshotDone ends every placement, however it exited: its state volumes,

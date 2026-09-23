@@ -406,37 +406,36 @@ class RealEC2:
     def kill(self, instance_id: str):
         self.client.terminate_instances(InstanceIds=[instance_id])
 
+    def close(self):
+        pass
+
 
 @pytest.fixture
 def ec2(env: TestEnvironment, require):
     """luxd with its EC2 provider pointed at a fake EC2, or, with
     --real-ec2, at AWS (LUX_TEST_EC2_TEMPLATE: the pool template JSON for an
     AMI with lux-runner; AWS credentials from the environment). Fast
-    scale-down for the tests."""
+    scale-down for the tests. `ec2.template` is the pool template to use."""
     require("luxd", "lux-runner", "lux")
-    fast = dict(LUX_SCALE_DOWN_AFTER="4s", LUX_LAUNCH_TIMEOUT="60s")
+    env.stop_luxd()
     if os.environ.get("LUX_TEST_REAL_EC2"):
         raw = os.environ.get("LUX_TEST_EC2_TEMPLATE")
         if not raw:
+            env.start_luxd()
             pytest.skip("--real-ec2 needs LUX_TEST_EC2_TEMPLATE (see docs/development.md)")
-        global EC2_TEMPLATE
-        EC2_TEMPLATE = json.loads(raw)
-        fake = RealEC2(EC2_TEMPLATE)
-        env.stop_luxd()
+        cloud = RealEC2(json.loads(raw))
         env.start_luxd(LUX_LAUNCH_TIMEOUT="600s", LUX_SCALE_DOWN_AFTER="30s")
     else:
         from fake_ec2 import FakeEC2
-        fake = FakeEC2(env)
-        env.stop_luxd()
-        env.start_luxd(LUX_EC2_ENDPOINT=fake.url, AWS_ACCESS_KEY_ID="fake", AWS_SECRET_ACCESS_KEY="fake",
-                       AWS_REGION="us-east-1", **fast)
-    yield fake
-    if hasattr(fake, "close"):
-        fake.close()
+        cloud = FakeEC2(env, EC2_TEMPLATE)
+        env.start_luxd(LUX_EC2_ENDPOINT=cloud.url, AWS_ACCESS_KEY_ID="fake", AWS_SECRET_ACCESS_KEY="fake",
+                       AWS_REGION="us-east-1", LUX_SCALE_DOWN_AFTER="4s", LUX_LAUNCH_TIMEOUT="60s")
+    yield cloud
+    cloud.close()
     env.stop_luxd()
     env.start_luxd()
 
 
 def fake_only(ec2):
-    if getattr(ec2, "real", False):
+    if ec2.real:
         pytest.skip("needs the fake EC2 (it injects failures or inspects API calls)")

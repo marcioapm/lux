@@ -91,7 +91,7 @@ const (
 const (
 	EvSession  = "lux.session"  // {"sessionId"}
 	EvActivity = "lux.activity" // {"activity": "idle" | "busy"}
-	EvInputAck = "lux.input"    // {"requestId", "error"?}
+	EvInputAck = "lux.input"    // {"requestId", "text"?, "truncated"?, "error"?}; the first prompt's id is "prompt"
 	EvInit     = "lux.init"     // {"phase": "start" | "done", "exitCode"?}
 	EvWorkload = "lux.workload" // {"phase": "start", "pid"}
 	EvStop     = "lux.stop"     // {"reason"}

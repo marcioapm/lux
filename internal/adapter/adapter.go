@@ -37,7 +37,9 @@ type Sink interface {
 	Event(typ string, data any)
 	Session(id string)
 	Activity(idle bool)
-	InputAck(requestID string, err error)
+	// InputAck: an input was delivered to the agent (or failed to be).
+	// The workload's first prompt is acked too, with request id "prompt".
+	InputAck(in proto.Input, err error)
 }
 
 // Process is the workload process the shim started for an adapter.
@@ -144,7 +146,7 @@ func (g *Generic) Deliver(in proto.Input) {
 	if len(data) > 0 && g.proc.Stdin != nil {
 		_, err = g.proc.Stdin.Write(data)
 	}
-	g.sink.InputAck(in.RequestID, err)
+	g.sink.InputAck(in, err)
 }
 
 func (g *Generic) Interrupt() error {

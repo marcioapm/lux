@@ -141,10 +141,10 @@ func serve(ctx context.Context) error {
 	if cfg.Tick, err = durationEnv("LUX_TICK", time.Second); err != nil {
 		return err
 	}
-	if cfg.ScaleDownAfter, err = durationEnv("LUX_SCALE_DOWN_AFTER", 10*time.Minute); err != nil {
+	if cfg.ScaleDownAfter, err = durationEnv("LUX_SCALE_DOWN_AFTER", server.DefaultScaleDownAfter); err != nil {
 		return err
 	}
-	if cfg.LaunchTimeout, err = durationEnv("LUX_LAUNCH_TIMEOUT", 10*time.Minute); err != nil {
+	if cfg.LaunchTimeout, err = durationEnv("LUX_LAUNCH_TIMEOUT", server.DefaultLaunchTimeout); err != nil {
 		return err
 	}
 	cfg.Providers, err = providers(ctx, log)

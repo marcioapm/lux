@@ -143,56 +143,60 @@ func (u *uploader) loop(ctx context.Context) {
 
 func (u *uploader) pass(ctx context.Context) {
 	for snapID, rec := range u.r.snapshotRecords() {
-		changed := false
-		for i := range rec.Uploads {
-			up := &rec.Uploads[i]
+		// Only once luxd has the report that lists them: before, it does
+		// not know the blobs (and answers 404).
+		if !rec.Reported || u.r.isStaleRun(rec.RunID, rec.Epoch) {
+			continue
+		}
+		done := true
+		for _, up := range rec.Uploads {
 			if up.Done {
 				continue
 			}
-			// Only once luxd has the report listing it (records from before
-			// this field existed: after a while, as luxd surely has it).
-			reported := rec.Reported || time.Since(time.UnixMilli(rec.Created)) > 10*time.Minute
-			if !reported || u.r.isStaleRun(rec.RunID, rec.Epoch) {
-				break
+			err := u.upload(ctx, up)
+			var he *httpError
+			if err != nil && errors.As(err, &he) && (he.Status == http.StatusNotFound || he.Status == http.StatusGone) {
+				err = nil // luxd deleted it (retention): nothing to do
 			}
-			if err := u.upload(ctx, up); err != nil {
-				var he *httpError
-				if errors.As(err, &he) && (he.Status == http.StatusNotFound || he.Status == http.StatusGone) {
-					// luxd does not know it (never reported, or deleted):
-					// nothing to do.
-					up.Done = true
-					changed = true
-					continue
-				}
+			if err != nil {
 				if ctx.Err() == nil {
 					u.r.log.Warn("upload failed; will retry", "blob", up.BlobID, "err", err)
 				}
+				done = false
 				break
 			}
-			up.Done = true
-			changed = true
-		}
-		if changed {
+			// Durable per blob: a restart does not upload it again.
 			u.r.updateRecord(snapID, func(cur *snapshotRecord) {
 				for i := range cur.Uploads {
-					for _, up := range rec.Uploads {
-						if up.BlobID == cur.Uploads[i].BlobID && up.Done {
-							cur.Uploads[i].Done = true
-						}
+					if cur.Uploads[i].BlobID == up.BlobID {
+						cur.Uploads[i].Done = true
 					}
 				}
 			})
 		}
 		// A discarded Run's last uploads are done: nothing left to keep.
-		if rec.Discard && allDone(rec) {
+		if done && rec.Discard {
 			removeSnapshotFiles(u.r, snapID, rec)
 		}
 	}
 }
 
-// markReported records that luxd has a snapshot's report.
+// markReported records that luxd has a snapshot's report; and so every
+// earlier record of the same placement, whose report went through before
+// the runner could mark it (luxd answers a report only after the previous
+// one: they are sent in order, retried until answered).
 func (r *Runner) markReported(snapID string) {
-	r.updateRecord(snapID, func(rec *snapshotRecord) { rec.Reported = true })
+	var runID string
+	var epoch int
+	r.updateRecord(snapID, func(rec *snapshotRecord) {
+		rec.Reported = true
+		runID, epoch = rec.RunID, rec.Epoch
+	})
+	for id, rec := range r.snapshotRecords() {
+		if id != snapID && !rec.Reported && rec.RunID == runID && rec.Epoch <= epoch {
+			r.updateRecord(id, func(rec *snapshotRecord) { rec.Reported = true })
+		}
+	}
 }
 
 // updateRecord changes a snapshot record on disk, from its current
@@ -211,21 +215,11 @@ func (r *Runner) updateRecord(snapID string, fn func(*snapshotRecord)) {
 	}
 }
 
-func allDone(rec *snapshotRecord) bool {
-	for _, up := range rec.Uploads {
-		if !up.Done {
-			return false
-		}
-	}
-	return true
-}
-
-func (u *uploader) upload(ctx context.Context, up *pendingUpload) error {
+func (u *uploader) upload(ctx context.Context, up pendingUpload) error {
 	f, err := os.Open(up.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			up.Done = true
-			return nil
+			return nil // its file is gone: nothing to upload
 		}
 		return err
 	}

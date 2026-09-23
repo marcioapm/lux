@@ -144,16 +144,19 @@ func (a *ACP) drain() {
 	a.mu.Unlock()
 
 	a.sink.Activity(false)
-	if in.RequestID != "prompt" {
-		a.sink.InputAck(in.RequestID, nil)
-	}
+	a.sink.InputAck(in, nil)
 	go func() {
 		res, err := a.rpc.call("session/prompt", map[string]any{"sessionId": session, "prompt": textInput(in.Text)})
 		var pr struct {
-			StopReason string `json:"stopReason"`
+			StopReason string          `json:"stopReason"`
+			Usage      json.RawMessage `json:"usage"`
 		}
 		_ = json.Unmarshal(res, &pr)
 		data := map[string]any{"stopReason": pr.StopReason}
+		// The agent's own usage report, as it sent it.
+		if len(pr.Usage) > 0 && string(pr.Usage) != "null" {
+			data["usage"] = pr.Usage
+		}
 		if err != nil {
 			data["error"] = err.Error()
 		}

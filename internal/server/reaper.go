@@ -68,8 +68,7 @@ func (s *Server) reapHosts(ctx context.Context) error {
 		}
 		n = len(lost)
 		s.log.Warn("hosts lost", "hosts", lost)
-		if _, err := tx.Exec(ctx, `UPDATE snapshots SET available = available AND uploaded, host_copy = false
-			WHERE host_id = ANY($1)`, lost); err != nil {
+		if err := hostsGone(ctx, tx, lost); err != nil {
 			return err
 		}
 		// Their live placements go with them, whatever their leases say: a

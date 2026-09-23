@@ -20,8 +20,11 @@ NS = "http://ec2.amazonaws.com/doc/2016-11-15/"
 
 
 class FakeEC2:
-    def __init__(self, env):
+    real = False
+
+    def __init__(self, env, template: dict):
         self.env = env
+        self.template = template
         self.lock = threading.Lock()
         self.instances: dict[str, dict] = {}  # id → {state, host, tags, userdata}
         self.calls: list[str] = []
@@ -47,6 +50,12 @@ class FakeEC2:
     def kill(self, instance_id: str):
         """An instance vanishing behind lux's back."""
         self._terminate(instance_id)
+
+    def purge(self, instance_id: str):
+        """EC2 forgetting a terminated instance (it answers NotFound)."""
+        self._terminate(instance_id)
+        with self.lock:
+            self.instances.pop(instance_id, None)
 
     # -- the API -----------------------------------------------------------
 
@@ -109,12 +118,10 @@ class FakeEC2:
         host = self.env.add_host(f"ec2-{iid[2:10]}")
         with self.lock:
             inst = self.instances.get(iid)
-            if not inst or inst["state"] != "pending":
-                gone = True
-            else:
-                gone = False
+            booted = inst is not None and inst["state"] == "pending"
+            if booted:
                 inst["host"], inst["state"] = host, "running"
-        if gone:
+        if not booted:  # terminated while booting
             _remove(host)
             return
         if self.no_boot:

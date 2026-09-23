@@ -320,6 +320,12 @@ func (s *Server) applyAdapterEvent(ctx context.Context, tx pgx.Tx, tenantID, run
 	}
 	if ev.InputAck != "" {
 		d := map[string]any{"requestId": ev.InputAck}
+		if ev.InputText != "" {
+			d["text"] = ev.InputText
+		}
+		if ev.InputTruncated {
+			d["truncated"] = true
+		}
 		typ := "input.delivered"
 		if ev.InputError != "" {
 			typ, d["error"] = "input.failed", ev.InputError

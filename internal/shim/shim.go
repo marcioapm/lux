@@ -665,16 +665,31 @@ func (k *sink) Activity(idle bool) {
 	}
 	k.s.out.Event(proto.EvActivity, map[string]string{"activity": a})
 }
-func (k *sink) InputAck(requestID string, err error) {
-	if requestID == "" {
+func (k *sink) InputAck(in proto.Input, err error) {
+	if in.RequestID == "" {
 		return
 	}
-	d := map[string]string{"requestId": requestID}
+	// What was delivered, up to a limit (the record stream is not for
+	// whole files); secrets in it are redacted like all output.
+	d := map[string]any{"requestId": in.RequestID}
+	text := in.Text
+	if text == "" && len(in.Raw) > 0 {
+		text = string(in.Raw)
+	}
+	if text != "" {
+		if len(text) > maxAckedText {
+			text, d["truncated"] = text[:maxAckedText], true
+		}
+		d["text"] = text
+	}
 	if err != nil {
 		d["error"] = err.Error()
 	}
 	k.s.out.Event(proto.EvInputAck, d)
 }
+
+// maxAckedText caps the input text an ack repeats.
+const maxAckedText = 64 << 10
 
 // ---- users ------------------------------------------------------------------
 

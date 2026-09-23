@@ -42,12 +42,16 @@ func readRecords(t *testing.T, path string) []proto.Record {
 	defer f.Close()
 	var out []proto.Record
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64<<10), 16<<20) // as the runner reads them
 	for sc.Scan() {
 		var r proto.Record
 		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
 			t.Fatal(err)
 		}
 		out = append(out, r)
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
 	}
 	return out
 }
@@ -111,5 +115,50 @@ func TestOutputEndLine(t *testing.T) {
 	}
 	if text != "hello\ndone\n" {
 		t.Fatalf("got %q", text)
+	}
+}
+
+// An input ack repeats what was delivered, capped, and redacts secrets in
+// it like all output.
+func TestInputAck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	red := NewRedactor(map[string]string{"TOKEN": "s3cr3t-value"})
+	out, err := OpenOutput(path, red)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := &sink{s: &Shim{out: out}}
+	k.InputAck(proto.Input{RequestID: "prompt", Text: "use s3cr3t-value please"}, nil)
+	k.InputAck(proto.Input{RequestID: "big", Text: strings.Repeat("x", maxAckedText+10)}, nil)
+	k.InputAck(proto.Input{RequestID: "raw", Raw: []byte("raw bytes\n")}, nil)
+	k.InputAck(proto.Input{}, nil) // no request id: nothing to ack
+	out.Close()
+
+	type ack struct {
+		RequestID string `json:"requestId"`
+		Text      string `json:"text"`
+		Truncated bool   `json:"truncated"`
+	}
+	var acks []ack
+	for _, r := range readRecords(t, path) {
+		var ev struct {
+			Type string `json:"type"`
+			Data ack    `json:"data"`
+		}
+		if r.Ch == "event" && json.Unmarshal(r.Event, &ev) == nil && ev.Type == proto.EvInputAck {
+			acks = append(acks, ev.Data)
+		}
+	}
+	if len(acks) != 3 {
+		t.Fatalf("got %d acks: %+v", len(acks), acks)
+	}
+	if acks[0].RequestID != "prompt" || acks[0].Text != "use [REDACTED:TOKEN] please" || acks[0].Truncated {
+		t.Errorf("prompt ack: %+v", acks[0])
+	}
+	if len(acks[1].Text) != maxAckedText || !acks[1].Truncated {
+		t.Errorf("big ack: %d bytes, truncated=%v", len(acks[1].Text), acks[1].Truncated)
+	}
+	if acks[2].Text != "raw bytes\n" {
+		t.Errorf("raw ack: %+v", acks[2])
 	}
 }
