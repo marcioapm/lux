@@ -286,9 +286,13 @@ type StreamData struct {
 	// Resize, for PTYs.
 	Rows int `json:"rows,omitempty"`
 	Cols int `json:"cols,omitempty"`
+	// Channel of output data: stdout | stderr (exec without a TTY).
+	Channel string `json:"ch,omitempty"`
 	// Exit code when the stream's process ended (on close).
 	ExitCode *int `json:"exitCode,omitempty"`
 	EOF      bool `json:"eof,omitempty"`
+	// Error, on close: why the stream could not be opened, or ended.
+	Error string `json:"error,omitempty"`
 }
 
 // Push asks the runner to push each repository's current commit to the

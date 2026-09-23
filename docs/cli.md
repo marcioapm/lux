@@ -84,10 +84,27 @@ lux pools ls
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON]
 ```
 
-## Interactive (coming with step 11)
+## Interactive
+
+All three go through luxd, which relays to the Run's host. The client
+never talks to the host. They need the Run `running` on a host with a live
+connection.
 
 ```bash
-lux exec <run> -- bash
+lux exec <run> [-t | -T] -- command...
 lux attach <run>
-lux port-forward <run> <port-name> <local-port>
+lux port-forward <run> <port-name> <local-port> [--address 127.0.0.1]
 ```
+
+- **exec** runs a command in the container as the workload user, with the
+  workload's environment and working directory. Its stdin, stdout, stderr
+  and exit code are yours. A terminal is allocated when your stdin is one
+  (`-t` forces it, `-T` turns it off). If the client goes away, the
+  command is killed. Exec output is not part of the Run's output.
+- **attach** joins the terminal of a `generic` workload started with
+  `workload.tty: true`: its output from now on, and your typing. Ctrl-]
+  detaches; the workload keeps running. What the workload prints on its
+  terminal is also the Run's output, as always.
+- **port-forward** listens locally and tunnels each connection to a port
+  the Run declares in `network.ports`, by name. Undeclared ports cannot be
+  reached.

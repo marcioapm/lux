@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/coder/websocket"
 )
 
 type Client struct {
@@ -128,4 +130,27 @@ func (c *Client) Stream(ctx context.Context, path string, q url.Values, fn func(
 		}
 	}
 	return sc.Err()
+}
+
+// Dial opens an interactive stream (exec, attach, a port): a WebSocket
+// carrying JSON messages (see the server's stream.go). An API error
+// before the upgrade (not running, no such port) is returned as such.
+func (c *Client) Dial(ctx context.Context, path string) (*websocket.Conn, error) {
+	u := c.Base + path
+	u = "ws" + strings.TrimPrefix(u, "http")
+	ws, resp, err := websocket.Dial(ctx, u, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + c.Key}},
+		HTTPClient: c.HTTP,
+	})
+	if err != nil {
+		if resp != nil && resp.StatusCode/100 != 1 {
+			if resp.Body == nil {
+				resp.Body = io.NopCloser(strings.NewReader(""))
+			}
+			return nil, decodeError(resp)
+		}
+		return nil, err
+	}
+	ws.SetReadLimit(4 << 20)
+	return ws, nil
 }

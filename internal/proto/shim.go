@@ -71,9 +71,14 @@ type ShimMsg struct {
 	Input   *Input            `json:"input,omitempty"` // start (first input), input
 	// stop
 	Reason string `json:"reason,omitempty"`
-	// exec / stream
-	Stream *StreamOpen `json:"stream,omitempty"`
-	Data   []byte      `json:"data,omitempty"`
+	// exec / attach: the stream's first message, then its data
+	Stream   *StreamOpen `json:"stream,omitempty"`
+	Data     []byte      `json:"data,omitempty"`
+	Channel  string      `json:"ch,omitempty"` // stdout | stderr, for output
+	EOF      bool        `json:"eof,omitempty"`
+	Rows     int         `json:"rows,omitempty"` // a resize
+	Cols     int         `json:"cols,omitempty"`
+	ExitCode *int        `json:"exitCode,omitempty"`
 	// replies
 	Error string `json:"error,omitempty"`
 	OK    bool   `json:"ok,omitempty"`
@@ -85,6 +90,11 @@ const (
 	ShimInterrupt = "interrupt"
 	ShimStop      = "stop"
 	ShimPing      = "ping"
+	// A connection that starts with stream (exec, attach) carries only that
+	// stream: data both ways, then exit.
+	ShimStream = "stream"
+	ShimData   = "data"
+	ShimExit   = "exit"
 )
 
 // Event types the shim writes as ch=event records. The runner forwards the

@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/marcioapm/lux/internal/adapter"
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/proto"
@@ -52,6 +53,12 @@ type Shim struct {
 	initPid   int
 	initCh    chan syscall.WaitStatus
 	pending   []proto.Input
+	// env is the workload's environment, for exec.
+	env []string
+	// term is the workload's terminal, when it has one (workload.tty).
+	term *terminal
+	// streams: exec'd processes, by pid, whose exits the reaper reports.
+	streams map[int]chan syscall.WaitStatus
 }
 
 // Main is the shim's entry point. It returns the process exit code.
@@ -71,6 +78,7 @@ func Main() int {
 		red:       NewRedactor(nil),
 		startCh:   make(chan proto.ShimMsg, 1),
 		delivered: map[string]bool{},
+		streams:   map[int]chan syscall.WaitStatus{},
 		exitCh:    make(chan syscall.WaitStatus, 1),
 		initCh:    make(chan syscall.WaitStatus, 1),
 	}
@@ -118,6 +126,9 @@ func (s *Shim) run() int {
 		return s.fail("start-failed", err.Error())
 	}
 	env := s.environment(start.Secrets)
+	s.mu.Lock()
+	s.env = env
+	s.mu.Unlock()
 	s.prepareVolumes()
 	ad, err := adapter.New(s.cfg.Adapter)
 	if err != nil {
@@ -229,11 +240,19 @@ func (s *Shim) reap() {
 			s.mu.Lock()
 			work, init := s.workPid, s.initPid
 			s.mu.Unlock()
+			s.mu.Lock()
+			stream := s.streams[pid]
+			delete(s.streams, pid)
+			s.mu.Unlock()
 			switch pid {
 			case work:
 				s.exitCh <- ws
 			case init:
 				s.initCh <- ws
+			default:
+				if stream != nil {
+					stream <- ws
+				}
 			}
 		}
 	}
@@ -300,6 +319,12 @@ func (s *Shim) handleConn(c net.Conn) {
 			}
 		case proto.ShimStop:
 			s.stop(m.Reason)
+		case proto.ShimStream:
+			// The connection is the stream's from now on.
+			if m.Stream != nil {
+				s.handleStream(sc, enc, *m.Stream)
+			}
+			return
 		default:
 			reply.OK, reply.Error = false, "unknown message "+m.Type
 		}
@@ -576,6 +601,9 @@ func (s *Shim) runInit(env []string) (int, error) {
 
 func (s *Shim) startWorkload(argv []string, env []string) (*adapter.Process, error) {
 	cmd := s.command(argv, env)
+	if s.cfg.TTY {
+		return s.startWorkloadTTY(cmd, argv)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -595,6 +623,23 @@ func (s *Shim) startWorkload(argv []string, env []string) (*adapter.Process, err
 	}
 	s.workPid = cmd.Process.Pid
 	s.proc = &adapter.Process{Cmd: cmd, Stdin: stdin, Stdout: stdout, Stderr: stderr}
+	return s.proc, nil
+}
+
+// startWorkloadTTY starts a generic workload on a PTY (workload.tty): its
+// terminal output goes to the output file as stdout, and to whoever is
+// attached; input goes to the terminal.
+func (s *Shim) startWorkloadTTY(cmd *exec.Cmd, argv []string) (*adapter.Process, error) {
+	cmd.SysProcAttr.Setpgid = false // a session leader, as a PTY makes it
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ptmx, err := pty.StartWithSize(cmd, winsize(0, 0))
+	if err != nil {
+		return nil, fmt.Errorf("start %s: %w", argv[0], err)
+	}
+	s.workPid = cmd.Process.Pid
+	s.term = newTerminal(ptmx)
+	s.proc = &adapter.Process{Cmd: cmd, Stdin: ptmx, Stdout: io.NopCloser(s.term), Stderr: io.NopCloser(strings.NewReader(""))}
 	return s.proc, nil
 }
 

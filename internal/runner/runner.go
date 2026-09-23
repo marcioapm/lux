@@ -69,6 +69,7 @@ type Runner struct {
 	control    *serialQueues
 	egress     *egress.Firewall
 	images     *imageUse
+	streams    streams
 	// nestedSeccomp is the seccomp profile for nested-containers Runs, or
 	// "" if this host does not offer them.
 	nestedSeccomp string
@@ -124,6 +125,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		placements: map[string]*placement{},
 		subs:       map[string]context.CancelFunc{},
 		control:    newSerialQueues(),
+		streams:    streams{m: map[string]*stream{}},
 		git:        gitws.New(cfg.DataDir),
 		leaseS:     30,
 	}
@@ -355,8 +357,6 @@ func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 			c()
 		}
 		r.mu.Unlock()
-	case proto.MsgStreamOpen, proto.MsgStreamData, proto.MsgStreamClose:
-		r.handleStream(ctx, f)
 	}
 }
 

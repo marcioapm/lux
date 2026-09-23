@@ -16,7 +16,7 @@ Each step ends with an end-to-end test through `tests/run_tests.py`.
 | 8 | Secrets: tmpfs, redaction, re-supply on resume | ✅ done |
 | 9 | Images from Containerfiles: `podman build`, `FROM` pinning, rebuild warnings | ✅ done |
 | 10 | Nested containers (opt-in) | ✅ done |
-| 11 | Attach, exec, port forwarding through the relay | ⏳ |
+| 11 | Attach, exec, port forwarding through the relay | ✅ done |
 | 12 | Artifacts | ⏳ |
 | 13 | EC2 pools (fake EC2 in tests, `--real-ec2` for nightly), autoscaling, draining, warm pools | ⏳ |
 | 14 | Codex and OpenCode adapters | ✅ done (pulled forward) |

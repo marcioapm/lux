@@ -273,6 +273,17 @@ func (p *Podman) Remove(ctx context.Context, name string) error {
 	return err
 }
 
+// ContainerIP is a container's address on a network.
+func (p *Podman) ContainerIP(ctx context.Context, name, network string) (string, error) {
+	out, err := p.Run(ctx, "container", "inspect", "--format",
+		fmt.Sprintf("{{(index .NetworkSettings.Networks %q).IPAddress}}", network), name)
+	ip := strings.TrimSpace(string(out))
+	if err == nil && ip == "" {
+		err = fmt.Errorf("%s has no address on %s", name, network)
+	}
+	return ip, err
+}
+
 type ContainerState struct {
 	Exists     bool
 	Status     string // created | running | exited | ...
