@@ -298,6 +298,7 @@ class TestEnvironment:
         images = list(PRELOAD_IMAGES)
         if self.fake_image:
             images.append(self.fake_image)
+        images += [i for i in self.extra.get("images", {}).values() if i]
         sh("docker", "save", "-o", str(tar), *images)
         return tar
 

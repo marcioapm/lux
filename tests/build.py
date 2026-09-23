@@ -22,6 +22,7 @@ TESTS_DIR = REPO_ROOT / "tests"
 BINARIES = ["luxd", "lux-runner", "lux-shim", "lux", "lux-fake"]
 
 FAKE_IMAGE = "localhost/lux-fake:test"
+CLAUDE_IMAGE = "localhost/lux-claude:test"
 
 
 def build_binaries() -> dict[str, Path | None]:
@@ -75,3 +76,24 @@ def build_fake_image(fake_binary: Path | None) -> str | None:
         sys.exit(1)
     print(f"  {FAKE_IMAGE} built")
     return FAKE_IMAGE
+
+
+def build_claude_image() -> str | None:
+    """Claude Code for the opt-in real-agent suite: only when a key is set
+    and claude is installed here."""
+    import os
+    if not os.environ.get("LUX_TEST_ANTHROPIC_API_KEY"):
+        return None
+    claude = shutil.which("claude")
+    if not claude:
+        print("  claude not installed; real-agent suite will skip")
+        return None
+    with tempfile.TemporaryDirectory() as ctx:
+        shutil.copy(os.path.realpath(claude), Path(ctx) / "claude")
+        shutil.copy(TESTS_DIR / "images" / "claude" / "Containerfile", Path(ctx) / "Containerfile")
+        result = subprocess.run(["docker", "build", "-q", "-t", CLAUDE_IMAGE, "-f", "Containerfile", "."], cwd=ctx, stdout=subprocess.DEVNULL)
+    if result.returncode != 0:
+        print("claude image build failed", file=sys.stderr)
+        sys.exit(1)
+    print(f"  {CLAUDE_IMAGE} built")
+    return CLAUDE_IMAGE

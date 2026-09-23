@@ -28,10 +28,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -45,19 +48,25 @@ type msg struct {
 }
 
 type agent struct {
-	out     *json.Encoder
-	outMu   sync.Mutex
-	mu      sync.Mutex
-	session string
-	cwd     string
-	cancel  chan struct{}
-	pending map[string]chan json.RawMessage
-	nextID  int
+	// streamJSON: speak Claude Code's stream-json instead of ACP.
+	streamJSON bool
+	out        *json.Encoder
+	outMu      sync.Mutex
+	mu         sync.Mutex
+	session    string
+	cwd        string
+	cancel     chan struct{}
+	pending    map[string]chan json.RawMessage
+	nextID     int
 }
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "plain" {
 		plain()
+		return
+	}
+	if slices.Contains(os.Args, "stream-json") {
+		streamJSON()
 		return
 	}
 	a := &agent{out: json.NewEncoder(os.Stdout), pending: map[string]chan json.RawMessage{}}
@@ -219,7 +228,12 @@ func (a *agent) handle(m msg) {
 }
 
 func (a *agent) say(s string) {
-	a.update("agent_message_chunk", s+"\n")
+	if a.streamJSON {
+		a.send(map[string]any{"type": "assistant", "session_id": a.session,
+			"message": map[string]any{"role": "assistant", "content": []map[string]string{{"type": "text", "text": s}}}})
+	} else {
+		a.update("agent_message_chunk", s+"\n")
+	}
 	a.record("agent", s)
 }
 
@@ -313,6 +327,114 @@ func (a *agent) runScript(script string, cancel chan struct{}) string {
 		}
 	}
 	return "end_turn"
+}
+
+// streamJSON speaks Claude Code's stream-json protocol (the subset lux
+// uses; see docs/agent-protocols.md): run with
+//
+//	lux-fake -p --input-format stream-json --output-format stream-json --verbose [--resume <id>]
+//
+// User messages are queued and run one turn at a time; each turn ends
+// with a "result" event. A control_request interrupt cancels the running
+// turn. SIGINT ends the turn cleanly and exits.
+func streamJSON() {
+	a := &agent{out: json.NewEncoder(os.Stdout), streamJSON: true, cwd: "."}
+	if wd, err := os.Getwd(); err == nil {
+		a.cwd = wd
+	}
+	for i, arg := range os.Args {
+		if arg == "--resume" && i+1 < len(os.Args) {
+			a.session = os.Args[i+1]
+		}
+	}
+	if a.session == "" {
+		a.session = fmt.Sprintf("fake-%d", time.Now().UnixNano())
+		a.record("system", "session started")
+	} else if _, err := os.Stat(filepath.Join(transcriptDir(), a.session+".jsonl")); err != nil {
+		fmt.Fprintf(os.Stderr, "No conversation found with session ID: %s\n", a.session)
+		os.Exit(1)
+	} else {
+		a.record("system", "session resumed")
+	}
+	a.send(map[string]any{"type": "system", "subtype": "init", "session_id": a.session, "cwd": a.cwd,
+		"capabilities": []string{"interrupt_receipt_v1"}})
+
+	turns := make(chan string, 64)
+	var cancelMu sync.Mutex
+	var cancel chan struct{}
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT)
+	go func() {
+		<-sigs
+		cancelMu.Lock()
+		if cancel != nil {
+			close(cancel)
+			cancel = nil
+		}
+		cancelMu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+		os.Exit(130)
+	}()
+	go func() {
+		for text := range turns {
+			c := make(chan struct{})
+			cancelMu.Lock()
+			cancel = c
+			cancelMu.Unlock()
+			a.record("user", text)
+			stop := a.runScript(text, c)
+			reason := "completed"
+			if stop == "cancelled" {
+				reason = "aborted_streaming"
+			}
+			cancelMu.Lock()
+			cancel = nil
+			cancelMu.Unlock()
+			a.send(map[string]any{"type": "result", "subtype": "success", "session_id": a.session,
+				"terminal_reason": reason, "queued_turn_count": len(turns)})
+		}
+	}()
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 64<<10), 16<<20)
+	for sc.Scan() {
+		var m struct {
+			Type      string `json:"type"`
+			RequestID string `json:"request_id"`
+			Request   struct {
+				Subtype string `json:"subtype"`
+			} `json:"request"`
+			Message struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(sc.Bytes(), &m) != nil {
+			continue
+		}
+		switch m.Type {
+		case "user":
+			var text strings.Builder
+			for _, c := range m.Message.Content {
+				text.WriteString(c.Text)
+			}
+			turns <- text.String()
+		case "control_request":
+			if m.Request.Subtype == "interrupt" {
+				cancelMu.Lock()
+				if cancel != nil {
+					close(cancel)
+					cancel = nil
+				}
+				cancelMu.Unlock()
+			}
+			a.send(map[string]any{"type": "control_response", "response": map[string]any{
+				"subtype": "success", "request_id": m.RequestID, "response": map[string]any{"still_queued": []string{}}}})
+		}
+	}
+	close(turns)
+	// stdin closed: finish queued turns, like the real CLI in -p mode.
+	time.Sleep(200 * time.Millisecond)
 }
 
 // plain is a line-oriented workload for the generic adapter.

@@ -82,6 +82,22 @@ volume and resumes from it, and it follows a script taken from the prompt
 With it, steering, stop and resume on another host are all tested without
 a model. See `cmd/lux-fake/main.go`.
 
+### Real agents (opt-in)
+
+`suites/test_agents_real.py` drives the real Claude Code CLI through lux:
+it writes a file, is steered, is stopped, and resumes on another host
+remembering the conversation. It makes model calls, so it runs only when
+a key is set:
+
+```bash
+LUX_TEST_ANTHROPIC_API_KEY=sk-… [LUX_TEST_ANTHROPIC_BASE_URL=https://proxy] \
+  uv run python run_tests.py suites/test_agents_real.py
+```
+
+The harness copies the `claude` executable installed on the developer
+machine into a test image (`tests/images/claude`). Without a key, the suite
+skips.
+
 ### Guards are mutation-checked
 
 When you add a guard (fencing, RLS, redaction), break it on purpose and
