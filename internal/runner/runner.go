@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -46,6 +47,10 @@ type Config struct {
 	ForcePoll bool
 	// HostTTL is how long local snapshot copies are kept after upload.
 	HostTTL time.Duration
+	// Nested offers nested containers (sandbox.nestedContainers): the host
+	// is labelled nested=true, and such Runs get what rootless Podman
+	// inside them needs (see nested.go).
+	Nested bool
 }
 
 type Runner struct {
@@ -64,8 +69,11 @@ type Runner struct {
 	control    *serialQueues
 	egress     *egress.Firewall
 	images     *imageUse
-	git        *gitws.Manager
-	mounts     sync.Map // volume name → mountpoint
+	// nestedSeccomp is the seccomp profile for nested-containers Runs, or
+	// "" if this host does not offer them.
+	nestedSeccomp string
+	git           *gitws.Manager
+	mounts        sync.Map // volume name → mountpoint
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -140,6 +148,18 @@ func (r *Runner) Run(ctx context.Context) error {
 	if _, err := r.pm.Version(ctx); err != nil {
 		return fmt.Errorf("podman is not usable: %w", err)
 	}
+	if r.cfg.Nested {
+		for _, dev := range []string{"/dev/fuse", "/dev/net/tun"} {
+			if _, err := os.Stat(dev); err != nil {
+				return fmt.Errorf("--nested needs %s: %w", dev, err)
+			}
+		}
+		p, err := writeNestedSeccomp(ctx, r.cfg.DataDir, r.hostSeccompProfile(ctx))
+		if err != nil {
+			return err
+		}
+		r.nestedSeccomp = p
+	}
 	r.readopt(ctx)
 	go r.uploads.loop(ctx)
 	go r.heartbeatLoop(ctx)
@@ -148,6 +168,21 @@ func (r *Runner) Run(ctx context.Context) error {
 	go r.gcLoop(ctx)
 	r.conn.loop(ctx)
 	return nil
+}
+
+// labels are the configured labels, plus what this host offers.
+func (r *Runner) labels() map[string]string {
+	l := maps.Clone(r.cfg.Labels)
+	if l == nil {
+		l = map[string]string{}
+	}
+	// Set here, never trusted from --label: a Run asking for nested
+	// containers must land on a host that gives them.
+	delete(l, "nested")
+	if r.nestedSeccomp != "" {
+		l["nested"] = "true"
+	}
+	return l
 }
 
 func (r *Runner) hello(ctx context.Context) proto.Hello {
@@ -161,7 +196,7 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 		ShimVersion:     r.shimV,
 		PodmanVersion:   pv,
 		Arch:            runtime.GOARCH,
-		Labels:          r.cfg.Labels,
+		Labels:          r.labels(),
 		Capacity:        proto.Capacity{CPUs: r.cfg.CPUs, Memory: r.cfg.Memory, Runs: r.cfg.MaxRuns},
 		Images:          imgs,
 		GitMirrors:      r.git.Mirrors(),

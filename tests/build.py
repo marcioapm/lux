@@ -81,6 +81,20 @@ def build_fake_image(fake_binary: Path | None) -> str | None:
     return FAKE_IMAGE
 
 
+NESTED_IMAGE = "localhost/lux-nested:test"
+
+
+def build_nested_image() -> str:
+    """A workload image with Podman in it, and an alpine archive to run
+    inside (see tests/images/nested)."""
+    from env import ALPINE_IMAGE
+    with tempfile.TemporaryDirectory() as d:
+        tar = Path(d) / "alpine.tar"
+        subprocess.run(["docker", "save", "-o", str(tar), ALPINE_IMAGE], check=True)
+        _build_image(NESTED_IMAGE, {"alpine.tar": tar}, TESTS_DIR / "images" / "nested" / "Containerfile")
+    return NESTED_IMAGE
+
+
 # The opt-in real-agent suites: the credentials each needs, and where its
 # self-contained executable is.
 AGENTS = {

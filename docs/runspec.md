@@ -130,6 +130,30 @@ image:
 - Not yet: a build context. `COPY` and `ADD` have nothing to copy from, so
   a spec with `image.build.context` is refused.
 
+## Nested containers
+
+`sandbox.nestedContainers: true` lets the workload run containers itself,
+with rootless Podman inside its container. The Run is placed only on hosts
+started with `lux-runner --nested`. Its image must have Podman (and
+`fuse-overlayfs`, and `newuidmap`/`newgidmap`), and the workload user
+needs `/etc/subuid` and `/etc/subgid` entries. `tests/images/nested` is a
+minimal example.
+
+A nested Run is never `--privileged`. Beyond what every Run gets, it gets:
+
+- `CAP_SYS_CHROOT`, and `CAP_SETUID`/`CAP_SETGID` kept as ambient
+  capabilities for the workload user (`newuidmap` can't gain them from
+  file capabilities under `no-new-privileges`);
+- `/dev/fuse` and `/dev/net/tun`;
+- `unmask=ALL` and `label=disable`;
+- the host's seccomp profile, plus `sethostname`, `setdomainname` and
+  `setns` (normally allowed only with `CAP_SYS_ADMIN`, which it does not
+  get).
+
+It is still in its own user namespace (an unprivileged uid range on the
+host). The containers it starts use the Run's network, so they have its
+egress rules and hard blocks, and nothing more.
+
 ## Git
 
 lux clones repositories for you, on the host, before the container

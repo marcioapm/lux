@@ -57,6 +57,10 @@ type ShimConfig struct {
 	Secrets []spec.Secret `json:"secrets,omitempty"`
 	// ArtifactsDir is watched for on-demand artifacts ($LUX_ARTIFACTS).
 	ArtifactsDir string `json:"artifactsDir,omitempty"`
+	// Nested: the workload keeps CAP_SETUID and CAP_SETGID as ambient
+	// capabilities, which rootless Podman inside it needs to map its
+	// containers' ids (newuidmap cannot gain them: no-new-privileges).
+	Nested bool `json:"nested,omitempty"`
 }
 
 // ShimMsg is one line on the shim socket, either direction.

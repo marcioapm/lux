@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from build import build_agent_images, build_binaries, build_fake_image  # noqa: E402
+from build import build_agent_images, build_binaries, build_fake_image, build_nested_image  # noqa: E402
 from env import TestEnvironment  # noqa: E402
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -55,7 +55,7 @@ def main() -> None:
 
     env = TestEnvironment(n_hosts=args.hosts)
     env.binaries = {k: str(v) if v else None for k, v in built.items()}
-    env.extra["images"] = {**agent_images, **{ref: ref for ref in args.image}}
+    env.extra["images"] = {**agent_images, "nested": build_nested_image(), **{ref: ref for ref in args.image}}
     print(f"run id:   {env.run_id}")
     print(f"logs:     {env.log_dir}")
 

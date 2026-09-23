@@ -92,7 +92,9 @@ Host requirements:
   upgrade that drops the switch: run it before upgrading hosts.
 - nftables (the runner owns the `inet lux` table; see
   [egress](runspec.md#network-egress)).
-- `/dev/fuse` for nested containers.
+- For nested containers, `lux-runner --nested`: the host needs `/dev/fuse`
+  and `/dev/net/tun`. The runner then labels the host `nested=true`; that
+  label cannot be set with `--label` or a host token.
 
 ```bash
 LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a

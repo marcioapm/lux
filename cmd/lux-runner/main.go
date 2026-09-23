@@ -44,6 +44,7 @@ func main() {
 	memory := flag.Int64("memory", 0, "bytes of memory to offer (default: all)")
 	flag.StringVar(&cfg.ProviderID, "provider-id", os.Getenv("LUX_PROVIDER_ID"), "cloud instance id, for provisioned hosts")
 	flag.BoolVar(&cfg.ForcePoll, "poll", false, "use HTTP polling instead of a WebSocket")
+	flag.BoolVar(&cfg.Nested, "nested", false, "offer nested containers (needs /dev/fuse and /dev/net/tun)")
 	flag.DurationVar(&cfg.HostTTL, "host-ttl", 24*time.Hour, "how long to keep local snapshot copies after upload")
 	showVersion := flag.Bool("version", false, "print the version")
 	flag.Parse()

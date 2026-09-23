@@ -30,6 +30,7 @@ import (
 	"github.com/marcioapm/lux/internal/adapter"
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/proto"
+	"golang.org/x/sys/unix"
 )
 
 type Shim struct {
@@ -521,6 +522,9 @@ func (s *Shim) command(argv []string, env []string) *exec.Cmd {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if s.user.uid != 0 || s.user.gid != 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(s.user.uid), Gid: uint32(s.user.gid), Groups: s.user.groups}
+	}
+	if s.cfg.Nested {
+		cmd.SysProcAttr.AmbientCaps = []uintptr{unix.CAP_SETUID, unix.CAP_SETGID}
 	}
 	// Resolve argv[0] with the workload's PATH, not the shim's.
 	if !strings.Contains(argv[0], "/") {
