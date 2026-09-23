@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -39,6 +40,9 @@ func (p *Podman) cmd(ctx context.Context, args ...string) *exec.Cmd {
 // ids of whichever range it was given, so the image depends on the host
 // (root-owned files are not root's) and its id changes from build to build.
 // Without them, buildah maps ownership back into the container's ids.
+//
+// Cancelling ctx sends SIGTERM, which podman build handles by stopping the
+// step under way; SIGKILL (exec's default) would leave that step running.
 func (p *Podman) Build(ctx context.Context, args ...string) ([]byte, error) {
 	return p.run(ctx, []string{"_CONTAINERS_OVERLAY_DISABLE_IDMAP=yes"}, append([]string{"build"}, args...)...)
 }
@@ -54,6 +58,10 @@ func (p *Podman) run(ctx context.Context, env []string, args ...string) ([]byte,
 	if env != nil {
 		c.Env = append(os.Environ(), env...)
 	}
+	// Cancelled: ask podman to stop (it cleans up what it started), and
+	// kill it only if it has not after a while.
+	c.Cancel = func() error { return c.Process.Signal(syscall.SIGTERM) }
+	c.WaitDelay = 30 * time.Second
 	c.Stdout, c.Stderr = &stdout, &stderr
 	if err := c.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())

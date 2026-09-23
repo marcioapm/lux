@@ -46,7 +46,10 @@ type placement struct {
 	phase    string // assigned | starting | running | stopping | exited | done
 	stale    bool
 	stopWhy  string
-	shimConn net.Conn
+	// cancelStart ends the steps before the container starts (an image
+	// build, a pull, a clone) when the placement is stopped meanwhile.
+	cancelStart context.CancelFunc
+	shimConn    net.Conn
 	shimEnc  *json.Encoder
 	done     chan struct{}
 	session  string      // latest session id the adapter reported
@@ -155,6 +158,23 @@ func (p *placement) report(ctx context.Context, typ string, data any) error {
 	return err
 }
 
+// reportRetrying reports an event that must reach luxd (it records state
+// the Run depends on), retrying until it does, the placement is fenced off,
+// or ctx ends.
+func (p *placement) reportRetrying(ctx context.Context, ev proto.RunEvent) error {
+	for {
+		err := p.report(ctx, proto.MsgRunEvent, ev)
+		if err == nil || errors.Is(err, errStale) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
 func (p *placement) event(ctx context.Context, typ string, data map[string]any) {
 	go func() {
 		c, cancel := context.WithTimeout(ctx, time.Minute)
@@ -178,19 +198,35 @@ func (p *placement) run(ctx context.Context) {
 	p.setPhase("starting")
 	go p.report(ctx, proto.MsgStatus, proto.Status{State: "starting"})
 
+	// Until the container starts, a stop cancels whatever is under way.
+	startCtx, cancelStart := context.WithCancel(ctx)
+	defer cancelStart()
+	p.mu.Lock()
+	p.cancelStart = cancelStart
+	stopped := p.stopWhy != ""
+	p.mu.Unlock()
+	if stopped {
+		cancelStart()
+	}
 	fail := func(stage string, err error) {
+		// Nothing runs on the Run's network without a container.
+		p.r.egress.Remove(bridgeName(p.runID))
+		if p.pendingStop() != "" {
+			p.finishWithoutContainer(ctx, "exited", "stopped before start")
+			return
+		}
 		p.logf("placement failed", "stage", stage, "err", err)
 		p.finishWithoutContainer(ctx, "failed", fmt.Sprintf("%s: %v", stage, err))
 	}
 
 	// The network and its egress rules first: an image build runs on it,
 	// and a reused container rejoins it; both need its rules.
-	network, err := p.setupNetwork(ctx, sp)
+	network, err := p.setupNetwork(startCtx, sp)
 	if err != nil {
 		fail("network", err)
 		return
 	}
-	image, err := p.ensureImage(ctx, sp, network)
+	image, err := p.ensureImage(startCtx, sp, network)
 	if err != nil {
 		fail("image", err)
 		return
@@ -198,22 +234,22 @@ func (p *placement) run(ctx context.Context) {
 	p.state.Image = image
 	p.mark("imageReady")
 
-	if p.user, err = p.workloadUser(ctx, sp, image); err != nil {
+	if p.user, err = p.workloadUser(startCtx, sp, image); err != nil {
 		fail("user", err)
 		return
 	}
-	if err := p.prepareVolumes(ctx, sp, a.Resume); err != nil {
+	if err := p.prepareVolumes(startCtx, sp, a.Resume); err != nil {
 		fail("volumes", err)
 		return
 	}
 	p.mark("volumesRestored")
-	if err := p.materializeRepos(ctx, sp, p.user); err != nil {
+	if err := p.materializeRepos(startCtx, sp, p.user); err != nil {
 		fail("git", err)
 		return
 	}
 
 	if p.pendingStop() != "" {
-		p.finishWithoutContainer(ctx, "exited", "stopped before start")
+		fail("stop", nil)
 		return
 	}
 
@@ -726,6 +762,9 @@ func (p *placement) requestStop(ctx context.Context, reason string) {
 	if p.state != nil {
 		p.state.StopReason = p.stopWhy
 		_ = writeRunState(p.dir, p.state)
+	}
+	if phase == "starting" && p.cancelStart != nil {
+		p.cancelStart()
 	}
 	p.mu.Unlock()
 	if phase == "running" {

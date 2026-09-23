@@ -270,6 +270,7 @@ func (r *Runner) gcLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		r.gcImages(ctx, r.cfg.HostTTL)
 		entries, _ := os.ReadDir(filepath.Join(r.cfg.DataDir, "runs"))
 		for _, e := range entries {
 			st, err := readRunState(r.runDir(e.Name()))

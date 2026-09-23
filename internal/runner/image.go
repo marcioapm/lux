@@ -3,13 +3,17 @@ package runner
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
@@ -38,8 +42,11 @@ func (p *placement) pullIfMissing(ctx context.Context, ref string) error {
 // a hash of what they are built from, so a host builds each once.
 //
 // The build runs tenant code, so it is contained like the workload: its own
-// user namespace, the workload's capabilities, and the Run's network, with
-// its egress rules and DNS stub.
+// user namespace, the workload's capabilities and limits, and the Run's
+// network, with its egress rules and DNS stub. What a build produces depends
+// on what it could reach, so a built image is reused only by the same tenant
+// with the same network rules, and there is no layer cache (it would share
+// RUN results across tenants and rules).
 func (p *placement) buildImage(ctx context.Context, sp spec.RunSpec, net podman.Network) (string, error) {
 	b := sp.Image.Build
 	var prev proto.ImageResolution
@@ -53,7 +60,7 @@ func (p *placement) buildImage(ctx context.Context, sp spec.RunSpec, net podman.
 			return "", err
 		}
 	}
-	tag := "localhost/lux-build:" + buildKey(cf, b.Args)
+	tag := "localhost/lux-build:" + buildKey(p.tenantID, sp.Network, cf, b.Args)
 	id, err := p.r.pm.ImageID(ctx, tag)
 	cached := err == nil
 	if !cached {
@@ -66,8 +73,18 @@ func (p *placement) buildImage(ctx context.Context, sp spec.RunSpec, net podman.
 			return "", err
 		}
 	}
+	p.r.images.used(tag)
 	// luxd keeps the first of these it sees as the Run's image resolution.
-	p.event(ctx, "image.built", map[string]any{"tag": tag, "imageId": id, "cached": cached, "containerfile": cf})
+	built := map[string]any{"tag": tag, "imageId": id, "cached": cached, "containerfile": cf}
+	if prev.Containerfile == "" {
+		// The resolution is what later placements build from: it must reach
+		// luxd before the Run goes on.
+		if err := p.reportRetrying(ctx, proto.RunEvent{Type: "image.built", Data: built}); err != nil {
+			return "", err
+		}
+	} else {
+		p.event(ctx, "image.built", built)
+	}
 	if prev.ImageID != "" && prev.ImageID != id {
 		// Not a failure: state volumes do not depend on the image, only the
 		// writable layer would, and that does not travel.
@@ -93,10 +110,24 @@ func (p *placement) build(ctx context.Context, sp spec.RunSpec, cf, tag string, 
 	if err := os.Mkdir(ctxDir, 0o755); err != nil {
 		return "", err
 	}
-	args := append(containment(), "--quiet", "--pull=never", "--isolation=oci", "--layers",
+	iid := filepath.Join(dir, "iid")
+	cg, err := newBuildCgroup(p.runID, sp.Resources)
+	if err != nil {
+		return "", err
+	}
+	// Whatever the build started goes with it, however it ended: a
+	// cancelled podman build can leave its RUN step running.
+	defer cg.remove()
+	mem := fmt.Sprintf("%d", int64(sp.Resources.Memory))
+	args := append(containment(), "--quiet", "--pull=never", "--isolation=oci",
+		"--layers=false", "--no-cache",
 		"--timestamp=0", // no build-time dates in the image: rebuilds match when the steps do
-		"--memory", fmt.Sprintf("%d", int64(sp.Resources.Memory)),
+		"--iidfile", iid,
+		"--memory", mem, "--memory-swap", mem,
 		"--cpu-period=100000", fmt.Sprintf("--cpu-quota=%d", int64(sp.Resources.CPUs*100000)),
+		// The spec's process limit (podman build has no --pids-limit) is
+		// on this cgroup, which the build's steps run under.
+		"--cgroup-parent", cg.path,
 		"--network", networkName(p.runID),
 		"--label", LabelManaged+"=true",
 		"-t", tag, "-f", file,
@@ -105,11 +136,14 @@ func (p *placement) build(ctx context.Context, sp spec.RunSpec, cf, tag string, 
 	for _, k := range slices.Sorted(maps.Keys(sp.Image.Build.Args)) {
 		args = append(args, "--build-arg", k+"="+sp.Image.Build.Args[k])
 	}
-	out, err := p.r.pm.Build(ctx, append(args, ctxDir)...)
-	if err != nil {
+	if _, err := p.r.pm.Build(ctx, append(args, ctxDir)...); err != nil {
 		return "", fmt.Errorf("build: %s", tail(err.Error(), 2000))
 	}
-	return strings.TrimSpace(string(out)), nil
+	b, err := os.ReadFile(iid)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(strings.TrimSpace(string(b)), "sha256:"), nil
 }
 
 // pinFroms rewrites every FROM that names an image to that image at the
@@ -117,12 +151,22 @@ func (p *placement) build(ctx context.Context, sp spec.RunSpec, cf, tag string, 
 func (p *placement) pinFroms(ctx context.Context, cf string) (string, error) {
 	var out []string
 	stages := map[string]bool{}
+	n := 0
 	for _, line := range strings.Split(cf, "\n") {
 		f, ok := spec.ParseFrom(line)
 		if !ok {
+			// COPY --from and RUN --mount=from=... may only name earlier
+			// stages: an image named there would be neither pinned nor pulled.
+			for _, from := range fromRefs(line) {
+				if !stages[strings.ToLower(from)] {
+					return "", fmt.Errorf("%q names an image; only earlier stages can be used there. Add `FROM %s AS <name>` and use the name", strings.TrimSpace(line), from)
+				}
+			}
 			out = append(out, line)
 			continue
 		}
+		stages[fmt.Sprint(n)] = true
+		n++
 		pinned, err := p.pinFrom(ctx, f, stages)
 		if err != nil {
 			return "", err
@@ -171,30 +215,59 @@ func (p *placement) localBases(ctx context.Context, cf string) (string, error) {
 			continue
 		}
 		_, digest, _ := strings.Cut(f.Image, "@")
-		if byDigest[digest] == "" {
+		// Under any name; or by this reference (a digest of a multi-arch
+		// index resolves to the platform image it was pulled as).
+		id := byDigest[digest]
+		if id == "" {
+			id, _ = p.r.pm.ImageID(ctx, f.Image)
+		}
+		if id == "" {
 			p.event(ctx, "image.pull", map[string]any{"ref": f.Image})
 			if err := p.r.pm.Pull(ctx, f.Image); err != nil {
 				return "", err
 			}
-			if byDigest, err = p.r.pm.ImagesByDigest(ctx); err != nil {
+			if id, err = p.r.pm.ImageID(ctx, f.Image); err != nil {
 				return "", err
-			}
-			if byDigest[digest] == "" {
-				return "", fmt.Errorf("pulled %s but found no image with that digest", f.Image)
 			}
 		}
 		local := "localhost/lux-base:" + strings.TrimPrefix(digest, "sha256:")
-		if _, err := p.r.pm.Run(ctx, "tag", byDigest[digest], local); err != nil {
+		if _, err := p.r.pm.Run(ctx, "tag", id, local); err != nil {
 			return "", err
 		}
+		p.r.images.used(local)
 		lines[i] = f.With(local)
 	}
 	return strings.Join(lines, "\n"), nil
 }
 
-// buildKey names a build by what it is built from.
-func buildKey(cf string, args map[string]string) string {
+// fromRefs are the images or stages a non-FROM line reads from:
+// COPY --from=x and RUN --mount=...,from=x.
+func fromRefs(line string) []string {
+	var refs []string
+	for _, f := range strings.Fields(line) {
+		if v, ok := strings.CutPrefix(f, "--from="); ok {
+			refs = append(refs, v)
+		}
+		if v, ok := strings.CutPrefix(f, "--mount="); ok {
+			for _, kv := range strings.Split(v, ",") {
+				if from, ok := strings.CutPrefix(kv, "from="); ok {
+					refs = append(refs, from)
+				}
+			}
+		}
+	}
+	return refs
+}
+
+// buildKey names a build by what it is built from, and by whom under what
+// network rules: a build's result depends on what it could reach.
+func buildKey(tenant string, network spec.Network, cf string, args map[string]string) string {
 	h := sha256.New()
+	nb, _ := json.Marshal(struct {
+		Egress       []spec.EgressRule
+		Unrestricted bool
+	}{network.Egress, network.Unrestricted})
+	fmt.Fprintf(h, "%s\x00%s\x00", tenant, nb)
 	h.Write([]byte(cf))
 	for _, k := range slices.Sorted(maps.Keys(args)) {
 		fmt.Fprintf(h, "\x00%s=%s", k, args[k])
@@ -212,4 +285,57 @@ func tail(s string, n int) string {
 		s = s[i+1:]
 	}
 	return "…" + s
+}
+
+// imageUse remembers when this host last used each image it built or
+// tagged (lux-build and lux-base), in a file, so the GC can remove the ones
+// unused for longer than the host TTL, across runner restarts.
+type imageUse struct {
+	mu   sync.Mutex
+	path string
+	last map[string]int64 // ref → unix ms
+}
+
+func newImageUse(dataDir string) *imageUse {
+	u := &imageUse{path: filepath.Join(dataDir, "images.json"), last: map[string]int64{}}
+	if b, err := os.ReadFile(u.path); err == nil {
+		_ = json.Unmarshal(b, &u.last)
+	}
+	return u
+}
+
+func (u *imageUse) used(ref string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.last[ref] = time.Now().UnixMilli()
+	u.saveLocked()
+}
+
+func (u *imageUse) saveLocked() {
+	b, _ := json.Marshal(u.last)
+	_ = writeFileAtomic(u.path, b, 0o600)
+}
+
+// gcImages removes lux-built images and base tags unused for longer than
+// ttl. An image a container still uses is left (podman refuses, and the
+// next pass tries again once it is gone).
+func (r *Runner) gcImages(ctx context.Context, ttl time.Duration) {
+	u := r.images
+	u.mu.Lock()
+	var old []string
+	for ref, at := range u.last {
+		if time.Since(time.UnixMilli(at)) > ttl {
+			old = append(old, ref)
+		}
+	}
+	u.mu.Unlock()
+	for _, ref := range old {
+		if _, err := r.pm.Run(ctx, "rmi", ref); err != nil && !errors.Is(err, podman.ErrNotFound) {
+			continue
+		}
+		u.mu.Lock()
+		delete(u.last, ref)
+		u.saveLocked()
+		u.mu.Unlock()
+	}
 }

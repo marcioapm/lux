@@ -107,8 +107,16 @@ image:
   Containerfile and the image id are recorded on the Run (`lux get` shows
   them). Every later placement, on any host, builds from the pinned form,
   so a tag that moves in between does not change the base.
-- A host builds each distinct pinned Containerfile and args only once, and
-  reuses the image after that.
+- A host builds each distinct pinned Containerfile, args, tenant and
+  network rules once, and reuses the image after that. A build's result
+  depends on what it could reach, so no image, and no layer cache, is
+  shared between tenants or between different egress rules. Built images a
+  host has not used for its host TTL are removed.
+- `COPY --from` and `RUN --mount=from=` may name earlier stages only. An
+  image named there would not be pinned, so it is refused. Add
+  `FROM image AS name` and use the name instead.
+- A build has the Run's limits: CPUs, memory (no swap), and processes.
+- A stop or cancel during a build ends the build.
 - If a rebuild on another host produces a different image, the Run
   continues and records an `image.rebuild-differs` event. That happens when
   a `RUN` step is not reproducible, for example one that downloads the

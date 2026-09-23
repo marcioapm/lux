@@ -63,6 +63,7 @@ type Runner struct {
 	uploads    *uploader
 	control    *serialQueues
 	egress     *egress.Firewall
+	images     *imageUse
 	git        *gitws.Manager
 	mounts     sync.Map // volume name → mountpoint
 }
@@ -131,6 +132,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		return nil, err
 	}
 	r.egress = fw
+	r.images = newImageUse(cfg.DataDir)
 	return r, nil
 }
 

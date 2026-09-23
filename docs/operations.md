@@ -74,13 +74,22 @@ Keys are `tenants/<tenant>/runs/<run>/<blob>`. Encrypt the bucket at rest
 
 Host requirements:
 
-- Linux with cgroup v2.
+- Linux with cgroup v2. The runner makes cgroups of its own under
+  `/sys/fs/cgroup/lux.slice` for image builds (their process limit, and
+  ending everything a cancelled build started), and enables the `pids`
+  controller for them.
 - Podman ≥ 5 with netavark, run rootful.
 - A `containers` range in `/etc/subuid` and `/etc/subgid` (for
   `--userns=auto`), for example `containers:2147483647:2147483648`.
 - Podman storage on the native `overlay` driver, not fuse-overlayfs.
   Image builds run in their own user namespace, and under fuse-overlayfs
   their `RUN` steps can't write to the image's root directory.
+- Tested with Podman 5.8. The runner turns idmapped overlay mounts off for
+  builds (`_CONTAINERS_OVERLAY_DISABLE_IDMAP`, containers/storage's only
+  switch for it). Without that, a build's files are owned by host ids, and
+  its image id depends on the uid range it happened to get. The e2e test
+  `test_rebuilds_match_whatever_uid_range_they_get` catches a Podman
+  upgrade that drops the switch: run it before upgrading hosts.
 - nftables (the runner owns the `inet lux` table; see
   [egress](runspec.md#network-egress)).
 - `/dev/fuse` for nested containers.

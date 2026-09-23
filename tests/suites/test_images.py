@@ -6,6 +6,9 @@ what a Run runs on. Builds run contained, on the Run's network."""
 from __future__ import annotations
 
 from conftest import generic
+import time
+import uuid
+
 from env import ALPINE_IMAGE, wait_until
 
 
@@ -136,3 +139,59 @@ def test_rebuilds_match_whatever_uid_range_they_get(lux, runners, hosts):
     hosts[0].podman("rm", "-f", "-t", "0", "range-hog")
     assert events(lux, again, "image.built")[0]["cached"] is False
     assert lux.get(again)["image"]["imageId"] == first_id
+
+
+def test_builds_are_not_shared_across_tenants_or_egress(lux, tenant_factory, runners, hosts):
+    """A build's result depends on what it could reach. Another tenant, or
+    the same tenant with other egress, builds its own image; RUN output does
+    not leak into the recorded image id."""
+    runners.start(hosts[0])
+    cf = f"FROM {ALPINE_IMAGE}\nRUN echo noisy-output; echo x > /x\n"
+    first = lux.submit(built(cf, "true"))
+    lux.wait_state(first, "succeeded")
+    image_id = lux.get(first)["image"]["imageId"]
+    assert len(image_id) == 64 and "noisy" not in image_id, image_id
+    other_rules = lux.submit(built(cf, "true", network={"egress": [{"cidr": "10.9.9.9/32"}]}))
+    lux.wait_state(other_rules, "succeeded")
+    assert events(lux, other_rules, "image.built")[0]["cached"] is False
+
+    other = tenant_factory()
+    other_runners = runners.__class__(runners.env, other)
+    other_runners.start(hosts[1])
+    theirs = other.submit(built(cf, "true"))
+    other.wait_state(theirs, "succeeded")
+    assert [e["data"] for e in other.events(theirs, "image.built")][0]["cached"] is False
+    other_runners.stop_all()
+
+
+def test_copy_from_an_image_is_refused(lux, runners, hosts):
+    runners.start(hosts[0])
+    run_id = lux.submit(built(f"FROM {ALPINE_IMAGE}\nCOPY --from={ALPINE_IMAGE} /etc/os-release /x\n", "true"))
+    run = lux.wait_state(run_id, "failed")
+    assert "earlier stages" in run["stateReason"], run
+    ok = lux.submit(built(f"FROM {ALPINE_IMAGE} AS base\nFROM {ALPINE_IMAGE}\nCOPY --from=base /etc/os-release /x\n",
+                          "cat", "/x"))
+    lux.wait_state(ok, "succeeded")
+
+
+def test_cancel_ends_a_build(lux, runners, hosts):
+    """A cancel during a long build ends it, and leaves no egress behind."""
+    host = runners.start(hosts[0])
+    marker = f"6{uuid.uuid4().int % 10**6:06d}"  # a sleep no other process runs
+    run_id = lux.submit(built(f"FROM {ALPINE_IMAGE}\nRUN sleep {marker}\n", "true"))
+    wait_until(lambda: events(lux, run_id, "image.build"), 30, 0.3, "the build never started")
+    time.sleep(1)
+    lux.run("cancel", run_id)
+    lux.wait_state(run_id, "cancelled", timeout=30)
+    wait_until(lambda: f"sleep\x00{marker}" not in host.exec("sh", "-c", "cat /proc/[0-9]*/cmdline 2>/dev/null; true"),
+               20, 0.5, "the build is still running")
+    assert "chain run_" not in host.exec("nft", "list", "table", "inet", "lux")
+
+
+def test_a_build_has_the_runs_process_limit(lux, runners, hosts):
+    runners.start(hosts[0])
+    cf = f"FROM {ALPINE_IMAGE}\nRUN for i in $(seq 200); do sleep 3 & done; wait\n"
+    spec = built(cf, "true")
+    spec["resources"] = {"pids": 64}
+    run = lux.wait_state(lux.submit(spec), "failed")
+    assert "fork" in run["stateReason"], run
