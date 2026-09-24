@@ -1,0 +1,136 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/coreos/go-oidc/v3/oidc"
+)
+
+// ConsoleAuth is how requests without an API key may authenticate: "key"
+// (they may not: the console asks for a key), or "cloudflare-access":
+// luxd sits behind a Cloudflare Access application, and a request carrying
+// a valid Access token (the Cf-Access-Jwt-Assertion header, or the
+// CF_Authorization cookie) is an operator's, as the user Access let in.
+type ConsoleAuth struct {
+	Mode string
+	// CFTeam is the Access team domain (acme, or acme.cloudflareaccess.com);
+	// CFAud the application's AUD tag.
+	CFTeam, CFAud string
+}
+
+// cfAccess verifies Cloudflare Access tokens: signed by the team's keys
+// (fetched and cached by go-oidc), issued by the team, for this
+// application, not expired. The user's name comes from Access's identity
+// endpoint, cached by email.
+type cfAccess struct {
+	team     string // https://<team>.cloudflareaccess.com
+	verifier *oidc.IDTokenVerifier
+	client   *http.Client
+
+	mu    sync.Mutex
+	names map[string]cachedName
+}
+
+type cachedName struct {
+	name string
+	at   time.Time
+}
+
+func newCFAccess(team, aud string) *cfAccess {
+	if !strings.Contains(team, ".") {
+		team += ".cloudflareaccess.com"
+	}
+	if !strings.Contains(team, "://") {
+		team = "https://" + team
+	}
+	team = strings.TrimRight(team, "/")
+	keys := oidc.NewRemoteKeySet(context.Background(), team+"/cdn-cgi/access/certs")
+	return &cfAccess{
+		team:     team,
+		verifier: oidc.NewVerifier(team, keys, &oidc.Config{ClientID: aud}),
+		client:   &http.Client{Timeout: 5 * time.Second},
+		names:    map[string]cachedName{},
+	}
+}
+
+// accessToken is the request's Access token, if any.
+func accessToken(r *http.Request) string {
+	if t := r.Header.Get("Cf-Access-Jwt-Assertion"); t != "" {
+		return t
+	}
+	if c, err := r.Cookie("CF_Authorization"); err == nil {
+		return c.Value
+	}
+	return ""
+}
+
+// user verifies a token and says who it is. A service token (no email) is
+// refused: the console is for people.
+func (a *cfAccess) user(ctx context.Context, token string) (email, name string, err error) {
+	t, err := a.verifier.Verify(ctx, token)
+	if err != nil {
+		return "", "", errf(http.StatusUnauthorized, "unauthorized", "invalid Cloudflare Access token: %v", err)
+	}
+	var claims struct {
+		Email string `json:"email"`
+	}
+	if err := t.Claims(&claims); err != nil || claims.Email == "" {
+		return "", "", errf(http.StatusUnauthorized, "unauthorized", "the Cloudflare Access token names no user")
+	}
+	return claims.Email, a.name(ctx, claims.Email, token), nil
+}
+
+// name is the user's name from Access's identity endpoint (the token's
+// claims carry only the email), cached for an hour; the email if unknown.
+func (a *cfAccess) name(ctx context.Context, email, token string) string {
+	a.mu.Lock()
+	c, ok := a.names[email]
+	a.mu.Unlock()
+	if ok && time.Since(c.at) < time.Hour {
+		return c.name
+	}
+	name := email
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.team+"/cdn-cgi/access/get-identity", nil)
+	if err == nil {
+		req.AddCookie(&http.Cookie{Name: "CF_Authorization", Value: token})
+		if resp, err := a.client.Do(req); err == nil {
+			var id struct {
+				Name string `json:"name"`
+			}
+			if resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&id) == nil && id.Name != "" {
+				name = id.Name
+			}
+			resp.Body.Close()
+		}
+	}
+	a.mu.Lock()
+	a.names[email] = cachedName{name, time.Now()}
+	a.mu.Unlock()
+	return name
+}
+
+// consoleUser authenticates a request with no API key by the configured
+// console auth: an operator, as the user Cloudflare Access let in.
+func (s *Server) consoleUser(r *http.Request, scope string) (Principal, error) {
+	if s.cfAccess == nil {
+		return Principal{}, errf(http.StatusUnauthorized, "unauthorized", "missing API key")
+	}
+	token := accessToken(r)
+	if token == "" {
+		return Principal{}, errf(http.StatusUnauthorized, "unauthorized", "missing API key or Cloudflare Access token")
+	}
+	email, name, err := s.cfAccess.user(r.Context(), token)
+	if err != nil {
+		return Principal{}, err
+	}
+	p := Principal{Operator: true, Scopes: []string{"operator"}, Email: email, Name: name}
+	if !p.Can(scope) {
+		return p, errf(http.StatusForbidden, "forbidden", "scope %q", scope)
+	}
+	return p, nil
+}

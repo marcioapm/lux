@@ -236,7 +236,14 @@ func asBefore(ctx huma.Context, next func(huma.Context)) {
 // Principal goes in the request's context.
 func (s *Server) requireKey(scope string) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
-		p, err := s.authKey(ctx.Context(), bearerToken(ctx.Header("Authorization")), scope)
+		var p Principal
+		var err error
+		if key := bearerToken(ctx.Header("Authorization")); key != "" || s.cfAccess == nil {
+			p, err = s.authKey(ctx.Context(), key, scope)
+		} else {
+			r, _ := humago.Unwrap(ctx)
+			p, err = s.consoleUser(r, scope)
+		}
 		if err == nil {
 			p, err = s.operatorScope(ctx, p)
 		}

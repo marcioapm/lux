@@ -10,7 +10,8 @@
 //	luxd serve                                    run the API, scheduler and reapers
 //	luxd openapi                                  print the tenant API's OpenAPI spec (YAML)
 //
-// Configuration is environment variables; see docs/operations.md.
+// Configuration is a TOML file (--config, LUX_CONFIG, or /etc/lux/luxd.toml),
+// overridden by environment variables; see docs/operations.md.
 package main
 
 import (
@@ -20,13 +21,10 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -44,14 +42,29 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	cmd, args := os.Args[1], os.Args[2:]
+	// --config FILE, before or after the command.
+	var path string
+	if cmd == "--config" && len(args) >= 2 {
+		path, cmd, args = args[0], args[1], args[2:]
+	} else if len(args) >= 2 && args[0] == "--config" {
+		path, args = args[1], args[2:]
+	}
 	var err error
-	switch os.Args[1] {
-	case "migrate":
-		err = migrate(ctx)
-	case "admin":
-		err = admin(ctx, os.Args[2:])
-	case "serve":
-		err = serve(ctx)
+	var cfg config
+	switch cmd {
+	case "migrate", "admin", "serve":
+		if cfg, err = loadConfig(path); err != nil {
+			break
+		}
+		switch cmd {
+		case "migrate":
+			err = migrate(ctx, cfg)
+		case "admin":
+			err = admin(ctx, cfg, args)
+		case "serve":
+			err = serve(ctx, cfg)
+		}
 	case "openapi":
 		var doc []byte
 		if doc, err = server.OpenAPI(); err == nil {
@@ -69,7 +82,10 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: luxd migrate | admin <command> | serve | openapi | version
+	fmt.Fprintln(os.Stderr, `usage: luxd [--config FILE] migrate | admin <command> | serve | openapi | version
+
+Configuration: FILE (TOML), else LUX_CONFIG, else /etc/lux/luxd.toml if it
+exists; environment variables override it (docs/operations.md).
 
 admin commands:
   create-tenant --name N [--max-runs N] [--max-hosts N] [--retention-days N]
@@ -82,40 +98,29 @@ admin commands:
 	os.Exit(2)
 }
 
-func env(name, def string) string {
-	if v := os.Getenv(name); v != "" {
-		return v
-	}
-	return def
-}
-
-func mustEnv(name string) (string, error) {
-	v := os.Getenv(name)
-	if v == "" {
-		return "", fmt.Errorf("%s is required", name)
-	}
-	return v, nil
-}
-
-func migrate(ctx context.Context) error {
-	dsn, err := mustEnv("LUX_DATABASE_URL")
+func migrate(ctx context.Context, cfg config) error {
+	dsn, err := require(cfg.Database.URL, "database.url", "LUX_DATABASE_URL")
 	if err != nil {
 		return err
 	}
-	applied, err := store.Migrate(ctx, dsn, env("LUX_APP_PASSWORD", "lux_app"))
+	applied, err := store.Migrate(ctx, dsn, cfg.Database.AppPassword)
 	for _, v := range applied {
 		fmt.Fprintln(os.Stderr, "applied", v)
 	}
 	return err
 }
 
-func serve(ctx context.Context) error {
+func serve(ctx context.Context, c config) error {
 	level := slog.LevelInfo
-	if os.Getenv("LUX_DEBUG") != "" {
+	if c.Debug {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	dsn, err := mustEnv("LUX_DATABASE_URL")
+	dsn, err := require(c.Database.URL, "database.url", "LUX_DATABASE_URL")
+	if err != nil {
+		return err
+	}
+	bucket, err := require(c.S3.Bucket, "s3.bucket", "LUX_S3_BUCKET")
 	if err != nil {
 		return err
 	}
@@ -124,17 +129,13 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	defer db.Close()
-	bucket, err := mustEnv("LUX_S3_BUCKET")
-	if err != nil {
-		return err
-	}
 	blobs, err := blob.New(blob.Config{
-		Endpoint:       os.Getenv("LUX_S3_ENDPOINT"),
-		PublicEndpoint: os.Getenv("LUX_S3_PUBLIC_ENDPOINT"),
-		Region:         env("LUX_S3_REGION", "us-east-1"),
+		Endpoint:       c.S3.Endpoint,
+		PublicEndpoint: c.S3.PublicEndpoint,
+		Region:         c.S3.Region,
 		Bucket:         bucket,
-		AccessKey:      os.Getenv("LUX_S3_ACCESS_KEY"),
-		SecretKey:      os.Getenv("LUX_S3_SECRET_KEY"),
+		AccessKey:      c.S3.AccessKey,
+		SecretKey:      c.S3.SecretKey,
 	})
 	if err != nil {
 		return err
@@ -142,88 +143,26 @@ func serve(ctx context.Context) error {
 	if err := blobs.Check(ctx); err != nil {
 		return fmt.Errorf("blob store: %w", err)
 	}
-	cfg := server.Config{
-		Listen:    env("LUX_LISTEN", "127.0.0.1:7070"),
-		PublicURL: os.Getenv("LUX_PUBLIC_URL"),
-	}
-	if cfg.LeaseDuration, err = durationEnv("LUX_LEASE", 30*time.Second); err != nil {
-		return err
-	}
-	if cfg.Tick, err = durationEnv("LUX_TICK", time.Second); err != nil {
-		return err
-	}
-	if cfg.ScaleDownAfter, err = durationEnv("LUX_SCALE_DOWN_AFTER", server.DefaultScaleDownAfter); err != nil {
-		return err
-	}
-	if cfg.LaunchTimeout, err = durationEnv("LUX_LAUNCH_TIMEOUT", server.DefaultLaunchTimeout); err != nil {
-		return err
-	}
-	if cfg.Defaults, err = resourceDefaults(); err != nil {
-		return err
-	}
-	if cfg.SampleEvery, err = durationEnv("LUX_SAMPLE_EVERY", 10*time.Second); err != nil {
-		return err
-	}
-	if cfg.HistoryRaw, err = durationEnv("LUX_HISTORY_RAW", server.DefaultHistoryRaw); err != nil {
-		return err
-	}
-	if cfg.HistoryMinutes, err = durationEnv("LUX_HISTORY_MINUTES", server.DefaultHistoryMinutes); err != nil {
-		return err
-	}
-	if cfg.HistoryHours, err = durationEnv("LUX_HISTORY_HOURS", server.DefaultHistoryHours); err != nil {
-		return err
-	}
-	cfg.Providers, err = providers(ctx, log)
-	if err != nil {
-		return err
-	}
-	srv := server.New(cfg, db, blobs, log)
+	srv := server.New(server.Config{
+		Listen:         c.Listen,
+		PublicURL:      c.PublicURL,
+		LeaseDuration:  c.Lease.Duration,
+		Tick:           c.Tick.Duration,
+		ScaleDownAfter: c.ScaleDownAfter.Duration,
+		LaunchTimeout:  c.LaunchTimeout.Duration,
+		Defaults:       spec.Defaults{CPUs: c.Defaults.CPUs, Memory: c.Defaults.Memory.Bytes, Disk: c.Defaults.Disk.Bytes, Pids: c.Defaults.Pids},
+		SampleEvery:    c.History.SampleEvery.Duration,
+		HistoryRaw:     c.History.Raw.Duration,
+		HistoryMinutes: c.History.Minutes.Duration,
+		HistoryHours:   c.History.Hours.Duration,
+		Providers:      providers(c),
+		ConsoleAuth: server.ConsoleAuth{
+			Mode:   c.Console.Auth,
+			CFTeam: c.Console.CloudflareAccess.Team,
+			CFAud:  c.Console.CloudflareAccess.AUD,
+		},
+	}, db, blobs, log)
 	return srv.Run(ctx)
-}
-
-func durationEnv(name string, def time.Duration) (time.Duration, error) {
-	v := os.Getenv(name)
-	if v == "" {
-		return def, nil
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %w", name, err)
-	}
-	return d, nil
-}
-
-// resourceDefaults are a Run's resources where its spec leaves them unset:
-// LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY ("8Gi"), LUX_DEFAULT_DISK ("20Gi"),
-// LUX_DEFAULT_PIDS.
-func resourceDefaults() (spec.Defaults, error) {
-	d := spec.BuiltinDefaults
-	if v := os.Getenv("LUX_DEFAULT_CPUS"); v != "" {
-		n, err := strconv.ParseFloat(v, 64)
-		// NaN fails every comparison, so n <= 0 alone lets it through.
-		if err != nil || !(n > 0) || math.IsInf(n, 0) {
-			return d, fmt.Errorf("LUX_DEFAULT_CPUS: %q is not a positive number", v)
-		}
-		d.CPUs = n
-	}
-	if v := os.Getenv("LUX_DEFAULT_MEMORY"); v != "" {
-		if err := json.Unmarshal(fmt.Appendf(nil, "%q", v), &d.Memory); err != nil || d.Memory <= 0 {
-			return d, fmt.Errorf("LUX_DEFAULT_MEMORY: %q is not a size", v)
-		}
-	}
-	if v := os.Getenv("LUX_DEFAULT_DISK"); v != "" {
-		if err := json.Unmarshal(fmt.Appendf(nil, "%q", v), &d.Disk); err != nil || d.Disk <= 0 {
-			return d, fmt.Errorf("LUX_DEFAULT_DISK: %q is not a size", v)
-		}
-	}
-	if v := os.Getenv("LUX_DEFAULT_PIDS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n <= 0 {
-			return d, fmt.Errorf("LUX_DEFAULT_PIDS: %q is not a positive number", v)
-		}
-		d.Pids = n
-	}
-	return d, nil
 }
 
 type labelsFlag map[string]string
@@ -238,11 +177,11 @@ func (l labelsFlag) Set(v string) error {
 	return nil
 }
 
-func admin(ctx context.Context, args []string) error {
+func admin(ctx context.Context, cfg config, args []string) error {
 	if len(args) == 0 {
 		usage()
 	}
-	dsn, err := mustEnv("LUX_DATABASE_URL")
+	dsn, err := require(cfg.Database.URL, "database.url", "LUX_DATABASE_URL")
 	if err != nil {
 		return err
 	}

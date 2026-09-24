@@ -25,6 +25,17 @@ type Principal struct {
 	KeyID    string
 	Scopes   []string
 	Operator bool
+	// Email and Name: a person's, when authenticated as one (console
+	// auth) rather than by an API key.
+	Email, Name string
+}
+
+// Actor names who a request is from in events: the person, or the key.
+func (p Principal) Actor() string {
+	if p.Email != "" {
+		return p.Email
+	}
+	return p.KeyID
 }
 
 func (p Principal) Can(scope string) bool {

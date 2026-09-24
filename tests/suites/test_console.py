@@ -5,28 +5,12 @@ system's Chrome, or Playwright's own Chromium if installed
 
 from __future__ import annotations
 
-import os
-import shutil
-
 import pytest
 
 from conftest import generic
 from env import ALPINE_IMAGE, wait_until
 
 pytestmark = pytest.mark.console
-
-
-@pytest.fixture(scope="module")
-def browser():
-    sync_api = pytest.importorskip("playwright.sync_api")
-    chrome = os.environ.get("LUX_TEST_CHROME") or shutil.which("google-chrome") or shutil.which("chromium")
-    with sync_api.sync_playwright() as p:
-        try:
-            b = p.chromium.launch(executable_path=chrome) if chrome else p.chromium.launch()
-        except Exception as e:  # no browser at all
-            pytest.skip(f"no headless browser: {e}")
-        yield b
-        b.close()
 
 
 @pytest.fixture
@@ -36,7 +20,9 @@ def page(browser, env):
     pg = ctx.new_page()
     pg.errors = []
     pg.on("pageerror", lambda e: pg.errors.append(str(e)))
-    pg.on("console", lambda m: m.type == "error" and pg.errors.append(m.text))
+    # The console first asks whoami without a key (is luxd behind Cloudflare
+    # Access?): its 401 is expected, and browsers log it.
+    pg.on("console", lambda m: m.type == "error" and "401" not in m.text and pg.errors.append(m.text))
 
     def sign_in(key: str, path: str = "/console/"):
         ctx.add_init_script(f"sessionStorage.setItem('lux.key', {key!r})")

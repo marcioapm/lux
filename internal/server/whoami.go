@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"slices"
 
@@ -11,11 +12,16 @@ import (
 
 // Whoami is what a key is: an operator's (every tenant) or a tenant's.
 type Whoami struct {
-	Operator bool     `json:"operator"`
-	Tenant   string   `json:"tenant" doc:"The key's tenant's name; empty for an operator key."`
-	TenantID string   `json:"tenantId"`
-	KeyID    string   `json:"keyId"`
-	Scopes   []string `json:"scopes"`
+	Operator bool   `json:"operator"`
+	Tenant   string `json:"tenant" doc:"The key's tenant's name; empty for an operator key."`
+	TenantID string `json:"tenantId"`
+	KeyID    string `json:"keyId,omitempty"`
+	// Email and Name: a person's, signed in through console auth (no key).
+	Email string `json:"email,omitempty"`
+	Name  string `json:"name,omitempty"`
+	// ConsoleAuth is luxd's console auth: key or cloudflare-access.
+	ConsoleAuth string   `json:"consoleAuth"`
+	Scopes      []string `json:"scopes"`
 }
 
 type whoamiOutput struct {
@@ -26,7 +32,8 @@ type whoamiOutput struct {
 // knows what to offer without probing.
 func (s *Server) whoami(ctx context.Context, _ *struct{}) (*whoamiOutput, error) {
 	p := principal(ctx)
-	w := Whoami{Operator: p.Operator, KeyID: p.KeyID, Scopes: slices.Clone(p.Scopes)}
+	w := Whoami{Operator: p.Operator, KeyID: p.KeyID, Email: p.Email, Name: p.Name, Scopes: slices.Clone(p.Scopes),
+		ConsoleAuth: cmp.Or(s.cfg.ConsoleAuth.Mode, "key")}
 	if !p.Operator {
 		w.TenantID = p.TenantID
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {

@@ -1,6 +1,8 @@
-// API key session. Kept in sessionStorage so a reload keeps you signed in but
-// closing the tab does not. Whether the key is an operator's is learned from
-// GET /v1/whoami right after sign-in.
+// The session: an API key, kept in sessionStorage so a reload keeps you
+// signed in but closing the tab does not; or, when luxd is behind Cloudflare
+// Access, the person Access signed in (no key: the browser's Access cookie
+// authenticates every call). Whether it is an operator's, and who, is
+// learned from GET /v1/whoami.
 import { useSyncExternalStore } from "react";
 
 const KEY = "lux.key";
@@ -11,9 +13,11 @@ export type Role = "unknown" | "operator" | "tenant";
 interface Session {
   key: string | null;
   role: Role;
+  /** Signed in by Cloudflare Access, as this person (no key). */
+  user: { email: string; name: string } | null;
 }
 
-let session: Session = { key: readKey(), role: "unknown" };
+let session: Session = { key: readKey(), role: "unknown", user: null };
 
 function readKey(): string | null {
   try {
@@ -35,7 +39,13 @@ export function signIn(key: string) {
   try {
     sessionStorage.setItem(KEY, key);
   } catch {}
-  session = { key, role: "unknown" };
+  session = { key, role: "unknown", user: null };
+  emit();
+}
+
+/** Signed in by the console auth luxd sits behind (Cloudflare Access). */
+export function signInAs(user: { email: string; name: string }, role: Role) {
+  session = { key: null, role, user };
   emit();
 }
 
@@ -43,7 +53,7 @@ export function signOut() {
   try {
     sessionStorage.removeItem(KEY);
   } catch {}
-  session = { key: null, role: "unknown" };
+  session = { key: null, role: "unknown", user: null };
   emit();
 }
 

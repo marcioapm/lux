@@ -29,6 +29,8 @@ Each step ends with an end-to-end test through `tests/run_tests.py`.
 | C2 | History: host, placement and system samples, rollups, retention, `lux history` | ✅ done |
 | C3 | Actions: `migrate`, `resume --to`, force resume with held secrets, resumability, `events --all` | ✅ done |
 | C4 | Web console (React, Bun), embedded in luxd at `/console/`; review, simplify, browser tests | ✅ done |
+| C5 | Live console: events pushed (LISTEN/NOTIFY), one event stream per tab; route owners declared | ✅ done |
+| C6 | luxd TOML config (env overrides); console sign-in through Cloudflare Access | ✅ done |
 
 Also: docs in `docs/` kept current with each step; external-tool findings
 recorded in `docs/agent-protocols.md` and `docs/podman.md`.

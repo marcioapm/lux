@@ -1,0 +1,51 @@
+# luxd configuration. luxd reads this file from --config, else LUX_CONFIG,
+# else /etc/lux/luxd.toml if it exists. Every setting also has an
+# environment variable (given beside it), which overrides the file.
+# Everything but database.url and s3.bucket has a default: shown here.
+
+listen = "127.0.0.1:7070"          # LUX_LISTEN
+public_url = ""                    # LUX_PUBLIC_URL: the URL runners and clients use
+debug = false                      # LUX_DEBUG
+
+lease = "30s"                      # LUX_LEASE: a host silent this long is lost
+tick = "1s"                        # LUX_TICK: scheduler and reaper interval
+scale_down_after = "10m"           # LUX_SCALE_DOWN_AFTER
+launch_timeout = "10m"             # LUX_LAUNCH_TIMEOUT
+
+[database]
+url = "postgres://lux_app:…@db:5432/lux"  # LUX_DATABASE_URL (migrate: the owner's)
+app_password = "lux_app"           # LUX_APP_PASSWORD (migrate: sets lux_app's)
+
+[s3]
+bucket = "lux"                     # LUX_S3_BUCKET
+endpoint = ""                      # LUX_S3_ENDPOINT: MinIO and the like; empty: AWS
+public_endpoint = ""               # LUX_S3_PUBLIC_ENDPOINT
+region = "us-east-1"               # LUX_S3_REGION
+access_key = ""                    # LUX_S3_ACCESS_KEY (empty: the AWS chain)
+secret_key = ""                    # LUX_S3_SECRET_KEY
+
+[defaults]                         # a Run's resources where its spec sets none
+cpus = 2                           # LUX_DEFAULT_CPUS
+memory = "8Gi"                     # LUX_DEFAULT_MEMORY
+disk = "20Gi"                      # LUX_DEFAULT_DISK: writable layer plus state volumes
+pids = 1024                        # LUX_DEFAULT_PIDS
+
+[history]
+sample_every = "10s"               # LUX_SAMPLE_EVERY
+raw = "48h"                        # LUX_HISTORY_RAW
+minutes = "720h"                   # LUX_HISTORY_MINUTES
+hours = "9600h"                    # LUX_HISTORY_HOURS
+
+[ec2]
+endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
+
+[console]
+# How the web console signs people in (docs/operators.md#signing-in):
+#   key                a pasted API key (the default)
+#   cloudflare-access  luxd is behind a Cloudflare Access application; whoever
+#                      Access lets in is an operator. API keys still work.
+auth = "key"                       # LUX_CONSOLE_AUTH
+
+[console.cloudflare_access]
+team = ""                          # LUX_CF_ACCESS_TEAM: acme, or acme.cloudflareaccess.com
+aud = ""                           # LUX_CF_ACCESS_AUD: the application's AUD tag

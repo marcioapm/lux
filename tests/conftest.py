@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -448,3 +449,18 @@ def ec2(env: TestEnvironment, require):
 def fake_only(ec2):
     if ec2.real:
         pytest.skip("needs the fake EC2 (it injects failures or inspects API calls)")
+
+
+@pytest.fixture(scope="session")
+def browser():
+    """A headless Chromium for the console suites: the system's Chrome, or
+    Playwright's own if installed; skipped when neither is there."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    chrome = os.environ.get("LUX_TEST_CHROME") or shutil.which("google-chrome") or shutil.which("chromium")
+    with sync_api.sync_playwright() as p:
+        try:
+            b = p.chromium.launch(executable_path=chrome) if chrome else p.chromium.launch()
+        except Exception as e:  # no browser at all
+            pytest.skip(f"no headless browser: {e}")
+        yield b
+        b.close()

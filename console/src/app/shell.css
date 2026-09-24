@@ -487,3 +487,15 @@
   gap: var(--sp-4);
   align-items: center;
 }
+
+/* The person Cloudflare Access signed in: their name; a link to sign out of Access. */
+.topbar-user {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+  text-decoration: none;
+  padding: 0 var(--sp-2);
+  white-space: nowrap;
+}
+.topbar-user:hover {
+  color: var(--fg);
+}

@@ -210,8 +210,13 @@ export interface WhoAmI {
   tenant: string;
   /** "" for operators. */
   tenantId: string;
-  keyId: string;
+  keyId?: string;
+  /** A person signed in through luxd's console auth (no key). */
+  email?: string;
+  name?: string;
   scopes: string[];
+  /** key: the console needs an API key; cloudflare-access: Access signs people in. */
+  consoleAuth: "key" | "cloudflare-access";
 }
 
 export interface Tenant {

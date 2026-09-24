@@ -125,3 +125,18 @@ def test_tenants_do_not_see_each_others_use_of_platform_hosts(operator, tenant_f
     finally:
         hosts[0].stop_runner()
         proc.wait(timeout=10)
+
+
+def test_key_mode_does_not_trust_access_tokens(env, lux):
+    """Without console.auth = cloudflare-access, an Access token means
+    nothing: only keys authenticate."""
+    import requests
+    from fake_access import FakeAccess
+    fake = FakeAccess(env.gateway)
+    try:
+        r = requests.get(env.luxd_url + "/v1/whoami", headers={"Cf-Access-Jwt-Assertion": fake.token("x@example.com")}, timeout=10)
+        assert r.status_code == 401, r.text
+        me = requests.get(env.luxd_url + "/v1/whoami", headers={"Authorization": f"Bearer {lux.api_key}"}, timeout=10).json()
+        assert me["consoleAuth"] == "key" and not me["operator"], me
+    finally:
+        fake.close()

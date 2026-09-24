@@ -1177,7 +1177,13 @@ components:
     Whoami:
       additionalProperties: false
       properties:
+        consoleAuth:
+          type: string
+        email:
+          type: string
         keyId:
+          type: string
+        name:
           type: string
         operator:
           type: boolean
@@ -3406,7 +3412,7 @@ paths:
   /v1/whoami:
     get:
       description: |-
-        Whether it is an operator's, its tenant and its scopes.
+        An API key (whether an operator's, its tenant, its scopes), or a person signed in through the console auth (their email and name); and luxd's console auth.
 
         Needs the `read` scope.
       operationId: whoami
@@ -3437,7 +3443,7 @@ paths:
           description: Internal Server Error
       security:
         - apiKey: []
-      summary: The caller's key
+      summary: Who the caller is
       tags:
         - operators
 tags:

@@ -191,7 +191,7 @@ func (s *Server) routes(api huma.API) {
 	// Operators and the system.
 	register(s, api, huma.Operation{
 		OperationID: "whoami", Method: http.MethodGet, Path: "/v1/whoami", Tags: []string{"operators"},
-		Summary: "The caller's key", Description: "Whether it is an operator's, its tenant and its scopes.",
+		Summary: "Who the caller is", Description: "An API key (whether an operator's, its tenant, its scopes), or a person signed in through the console auth (their email and name); and luxd's console auth.",
 	}, "read", s.whoami)
 	register(s, api, huma.Operation{
 		OperationID: "listTenants", Method: http.MethodGet, Path: "/v1/tenants", Tags: []string{"operators"},
@@ -426,7 +426,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		if err != nil {
 			return err
 		}
-		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", map[string]any{"by": p.KeyID}); err != nil {
+		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", map[string]any{"by": p.Actor()}); err != nil {
 			return err
 		}
 		created = true
@@ -876,7 +876,7 @@ func (s *Server) stopOrCancel(ctx context.Context, id, reason string) (*accepted
 				return err
 			}
 		}
-		if err := addEvent(ctx, tx, p.TenantID, id, 0, reason+".requested", map[string]any{"by": p.KeyID}); err != nil {
+		if err := addEvent(ctx, tx, p.TenantID, id, 0, reason+".requested", map[string]any{"by": p.Actor()}); err != nil {
 			return err
 		}
 		switch state {

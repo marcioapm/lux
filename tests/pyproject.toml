@@ -12,6 +12,7 @@ dependencies = [
     "psycopg[binary]>=3.3.6",
     "boto3>=1.43.100",
     "playwright>=1.63.0",
+    "cryptography>=50.0.1",
 ]
 
 [tool.pytest.ini_options]

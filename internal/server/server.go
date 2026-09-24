@@ -40,6 +40,8 @@ type Config struct {
 	// Defaults are a Run's resources where its spec leaves them unset
 	// (zero: spec.BuiltinDefaults).
 	Defaults spec.Defaults
+	// ConsoleAuth: how requests without an API key authenticate (access.go).
+	ConsoleAuth ConsoleAuth
 	// SampleEvery is how often the system is sampled for history.
 	SampleEvery time.Duration
 	// How long history is kept: raw samples, minute and hour rollups.
@@ -55,6 +57,9 @@ type Server struct {
 	// secrets holds submitted secret values in memory, by run id, until
 	// the placement that needs them has been assigned. Never persisted.
 	secrets *secretCache
+	// cfAccess verifies Cloudflare Access tokens, when that is the console
+	// auth (access.go).
+	cfAccess *cfAccess
 	// wakeups wake followers of Run events (wakeups.go).
 	wakeups *wakeups
 	kick    chan struct{}
@@ -96,6 +101,9 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		secrets: newSecretCache(),
 		wakeups: newWakeups(),
 		kick:    make(chan struct{}, 1),
+	}
+	if cfg.ConsoleAuth.Mode == "cloudflare-access" {
+		s.cfAccess = newCFAccess(cfg.ConsoleAuth.CFTeam, cfg.ConsoleAuth.CFAud)
 	}
 	s.hub = newHub(s)
 	return s

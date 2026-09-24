@@ -107,7 +107,7 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 			return err
 		}
 		if err := addEvent(ctx, tx, p.TenantID, in.ID, 0, "migrate.requested",
-			map[string]any{"by": p.KeyID, "from": current, "to": placeOn}); err != nil {
+			map[string]any{"by": p.Actor(), "from": current, "to": placeOn}); err != nil {
 			return err
 		}
 		hostID, err = s.requestStop(ctx, tx, p.TenantID, in.ID, "migrate")

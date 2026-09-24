@@ -11,6 +11,16 @@ luxd migrate      # once per upgrade, as the database owner
 luxd serve        # as many as you like
 ```
 
+### Configuration
+
+luxd reads a TOML file: `--config FILE` (before or after the command),
+else `LUX_CONFIG`, else `/etc/lux/luxd.toml` if it exists. Every setting
+also has an environment variable, which overrides the file, so a secret can
+stay out of it (`LUX_DATABASE_URL`, `LUX_S3_SECRET_KEY`). An unknown key or
+a bad value stops luxd, naming it.
+[luxd.example.toml](luxd.example.toml) has every key with its default and
+its variable; the table below lists them by variable.
+
 | Variable | Default | |
 | --- | --- | --- |
 | `LUX_DATABASE_URL` | — | For `serve`, a DSN for the `lux_app` role (created by `migrate`, which needs the owner's DSN and takes `LUX_APP_PASSWORD`). |
@@ -32,6 +42,9 @@ luxd serve        # as many as you like
 | `LUX_HISTORY_MINUTES` | `720h` | How long minute rollups are kept. |
 | `LUX_HISTORY_HOURS` | `9600h` | How long hour rollups are kept. |
 | `LUX_DEBUG` | — | Debug logging. |
+| `LUX_CONSOLE_AUTH` | `key` | How the console signs people in: `key` or `cloudflare-access` ([Operators](operators.md#signing-in)). |
+| `LUX_CF_ACCESS_TEAM`, `LUX_CF_ACCESS_AUD` | — | For `cloudflare-access`: the Access team (`acme` or `acme.cloudflareaccess.com`) and the application's AUD tag. |
+| `LUX_CONFIG` | `/etc/lux/luxd.toml` | The configuration file. |
 
 luxd also serves the operator console at `/console/` ([Operators](operators.md#the-console)).
 

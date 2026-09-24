@@ -104,9 +104,8 @@ network bytes) are served as rates.
 ## The console
 
 luxd serves a web console at `/console/`, the same origin as the API. It
-asks for an API key (kept for the browser session only) and shows what that
-key can see: with an operator key, the whole system, with a tenant filter
-at the top; with a tenant key, that tenant.
+shows what its user can see: an operator the whole system, with a tenant
+filter at the top; a tenant key, that tenant.
 
 - **Overview**: status now, history charts over the chosen range, and a live
   feed of every Run's events.
@@ -120,3 +119,25 @@ at the top; with a tenant key, that tenant.
 The console is static files built with Bun and embedded in luxd (see
 [Development](development.md)). Reach it like the API: through the tunnel
 or load balancer you already use for luxd.
+
+### Signing in
+
+`console.auth` (`LUX_CONSOLE_AUTH`) says how:
+
+- **`key`** (the default): the console asks for an API key, kept for the
+  browser tab's session only.
+- **`cloudflare-access`**: luxd sits behind a Cloudflare Access
+  application, and whoever Access lets in is an operator; the console
+  shows their name, and their actions are recorded as their email. Set
+  `console.cloudflare_access.team` and `.aud` (the application's AUD tag,
+  on its Overview page). luxd verifies every Access token itself (the
+  `Cf-Access-Jwt-Assertion` header or `CF_Authorization` cookie: signed by
+  the team's keys, for this application, not expired), so a request that
+  reaches luxd around Access gets nothing without a key. Access policies
+  decide who is an operator: keep the application's policy to the people
+  who should be. API keys still work alongside (the CLI, runners).
+
+  With a tunnel (`cloudflared`), `originRequest.access.required` can also
+  refuse unauthenticated requests before they reach luxd.
+
+Other ways to sign in can be added as further `console.auth` values.

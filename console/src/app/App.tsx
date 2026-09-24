@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ToastProvider, type Tenant as PickerTenant } from "../ds/index.ts";
-import { api, errorText, isApiError, setRole, useQuery, useSession } from "../api/index.ts";
+import { api, errorText, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
 import { matchPath, usePath } from "./router.tsx";
 import { ScopeProvider, useScope } from "./scope.tsx";
 import { useLiveUpdates } from "./live.ts";
@@ -112,9 +112,34 @@ function Router() {
 
 export function App() {
   const session = useSession();
+  const probe = useConsoleAuth(session.key == null && session.user == null);
+  const signedIn = session.key ?? session.user?.email;
   return (
     <ScopeProvider>
-      <ToastProvider>{session.key ? <Router key={session.key} /> : <SignIn />}</ToastProvider>
+      <ToastProvider>{signedIn ? <Router key={signedIn} /> : probe === "checking" ? null : <SignIn />}</ToastProvider>
     </ScopeProvider>
   );
+}
+
+/**
+ * With no key: is luxd behind Cloudflare Access, with this browser signed
+ * in? GET /v1/whoami without a key answers as the person if so; then no key
+ * is needed. Otherwise (401), the key sign-in.
+ */
+function useConsoleAuth(enabled: boolean): "checking" | "done" {
+  const [state, setState] = useState<"checking" | "done">(enabled ? "checking" : "done");
+  useEffect(() => {
+    if (!enabled) return;
+    const ctrl = new AbortController();
+    setState("checking");
+    api
+      .whoami(ctrl.signal)
+      .then((me) => {
+        if (me.email) signInAs({ email: me.email, name: me.name || me.email }, me.operator ? "operator" : "tenant");
+      })
+      .catch(() => {})
+      .finally(() => !ctrl.signal.aborted && setState("done"));
+    return () => ctrl.abort();
+  }, [enabled]);
+  return state;
 }

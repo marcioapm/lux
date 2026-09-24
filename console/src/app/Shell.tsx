@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { IconButton, LiveDot, TenantPicker, TimeRangePicker, useTheme, type Tenant } from "../ds/index.ts";
 import { IconGrid, IconLayers, IconLogout, IconMoon, IconPalette, IconPlay, IconServer, IconSun, IconUsers } from "../ds/icons.tsx";
-import { liveLabel, signOut, useLiveState } from "../api/index.ts";
+import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
 import { Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
 
@@ -31,6 +31,7 @@ export interface ShellProps {
 }
 
 export function Shell({ tenants, operator, title, children }: ShellProps) {
+  const session = useSession();
   const path = usePath();
   const scope = useScope();
   const { resolved, toggle } = useTheme();
@@ -69,9 +70,16 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
             <IconButton size="sm" label={resolved === "dark" ? "Switch to light theme" : "Switch to dark theme"} onClick={toggle}>
               {resolved === "dark" ? <IconSun size={15} /> : <IconMoon size={15} />}
             </IconButton>
-            <IconButton size="sm" label="Sign out" onClick={signOut}>
-              <IconLogout size={15} />
-            </IconButton>
+            {session.user ? (
+              // Signed in by Cloudflare Access: signing out is Access's.
+              <a className="topbar-user" href="/cdn-cgi/access/logout" title={`${session.user.email} · sign out of Cloudflare Access`}>
+                {session.user.name}
+              </a>
+            ) : (
+              <IconButton size="sm" label="Sign out" onClick={signOut}>
+                <IconLogout size={15} />
+              </IconButton>
+            )}
           </div>
         </header>
         <main className="content">{children}</main>
