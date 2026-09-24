@@ -42,6 +42,8 @@ func main() {
 	flag.IntVar(&cfg.MaxRuns, "max-runs", 0, "maximum concurrent Runs (default 16)")
 	flag.Float64Var(&cfg.CPUs, "cpus", 0, "CPUs to offer (default: all)")
 	memory := flag.Int64("memory", 0, "bytes of memory to offer (default: all)")
+	flag.DurationVar(&cfg.UsageEvery, "usage-every", 0, "how often disk use is sampled and the disk limit checked (default 15s)")
+	flag.Int64Var(&cfg.Disk, "disk", 0, "bytes of disk to reserve for Runs, from their resources.disk (default: not reserved)")
 	flag.StringVar(&cfg.ProviderID, "provider-id", os.Getenv("LUX_PROVIDER_ID"), "cloud instance id, for provisioned hosts")
 	flag.BoolVar(&cfg.ForcePoll, "poll", false, "use HTTP polling instead of a WebSocket")
 	flag.StringVar(&cfg.EC2IMDS, "ec2-imds", os.Getenv("LUX_EC2_IMDS"), "EC2 instance metadata URL to watch for spot interruptions (http://169.254.169.254 on EC2; empty: off)")
@@ -54,6 +56,10 @@ func main() {
 		return
 	}
 	cfg.Memory = *memory
+	if cfg.UsageEvery < 0 || cfg.Disk < 0 || cfg.Memory < 0 || cfg.CPUs < 0 {
+		fmt.Fprintln(os.Stderr, "lux-runner: --usage-every, --disk, --memory and --cpus must not be negative")
+		os.Exit(2)
+	}
 	// A provisioned host gets its name from luxd (user data).
 	if cfg.Name == "" {
 		cfg.Name = os.Getenv("LUX_HOST_NAME")

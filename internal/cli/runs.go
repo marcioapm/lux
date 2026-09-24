@@ -661,7 +661,7 @@ func (a *app) cancelCmd() *cobra.Command {
 }
 
 func (a *app) resumeCmd() *cobra.Command {
-	var input, secretsFrom, fromSnapshot, to string
+	var input, secretsFrom, fromSnapshot, to, disk string
 	var secretArgs []string
 	var follow, wait bool
 	cmd := &cobra.Command{
@@ -707,6 +707,9 @@ With an operator key, secrets may be left out while luxd still holds them
 			if to != "" {
 				req["to"] = to
 			}
+			if disk != "" {
+				req["resources"] = map[string]string{"disk": disk}
+			}
 			var out Run
 			if err := a.c.Do(ctx, "POST", "/v1/runs/"+args[0]+"/resume", req, &out); err != nil {
 				return err
@@ -736,6 +739,7 @@ With an operator key, secrets may be left out while luxd still holds them
 	cmd.Flags().StringArrayVar(&secretArgs, "secret", nil, "NAME=VALUE (repeatable)")
 	cmd.Flags().StringVar(&fromSnapshot, "from-snapshot", "", "resume from an older snapshot")
 	cmd.Flags().StringVar(&to, "to", "", "operators: resume on this host (id or name)")
+	cmd.Flags().StringVar(&disk, "disk", "", "a new disk limit from now on (e.g. 40Gi), for a Run that went over")
 	cmd.Flags().BoolVar(&follow, "follow", false, "stream output until it ends")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait until it is running (or has ended)")
 	return cmd

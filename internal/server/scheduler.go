@@ -42,6 +42,7 @@ type candidateHost struct {
 	Mirrors   []string
 	UsedCPUs  float64
 	UsedMem   int64
+	UsedDisk  int64
 	UsedRuns  int
 	Tenants   []string // tenants with live placements here
 	Shared    bool
@@ -215,6 +216,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx) ([]*candidateHos
 		if h := byID[hostID]; h != nil {
 			h.UsedCPUs += res.CPUs
 			h.UsedMem += int64(res.Memory)
+			h.UsedDisk += int64(res.Disk)
 			h.UsedRuns++
 			h.Tenants = append(h.Tenants, tenantID)
 		}
@@ -305,7 +307,8 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 		res := r.Spec.Resources
 		if h.Capacity.Runs > 0 && h.UsedRuns >= h.Capacity.Runs ||
 			h.Capacity.CPUs > 0 && h.UsedCPUs+res.CPUs > h.Capacity.CPUs ||
-			h.Capacity.Memory > 0 && h.UsedMem+int64(res.Memory) > h.Capacity.Memory {
+			h.Capacity.Memory > 0 && h.UsedMem+int64(res.Memory) > h.Capacity.Memory ||
+			h.Capacity.Disk > 0 && h.UsedDisk+int64(res.Disk) > h.Capacity.Disk {
 			reason = "waiting for capacity"
 			continue
 		}
@@ -438,6 +441,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	h.UsedRuns++
 	h.UsedCPUs += r.Spec.Resources.CPUs
 	h.UsedMem += int64(r.Spec.Resources.Memory)
+	h.UsedDisk += int64(r.Spec.Resources.Disk)
 	h.Tenants = append(h.Tenants, r.TenantID)
 	return nil
 }

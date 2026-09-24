@@ -613,6 +613,9 @@ components:
         input:
           $ref: "#/components/schemas/ResumeInput"
           description: A message for the workload once it is back.
+        resources:
+          $ref: "#/components/schemas/ResumeResources"
+          description: Change what the Run gets from now on (e.g. more disk after it went over).
         secrets:
           description: "A value for every one of the Run's secrets: luxd never keeps them."
           items:
@@ -623,6 +626,18 @@ components:
         to:
           description: "Operators: place it on this host (id or name), and nowhere else."
           type: string
+      type: object
+    ResumeResources:
+      additionalProperties: false
+      properties:
+        disk:
+          description: "A new disk limit: its writable layer plus state volumes."
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
       type: object
     Run:
       additionalProperties: false
@@ -791,7 +806,7 @@ components:
           $ref: "#/components/schemas/Placement"
         resources:
           $ref: "#/components/schemas/Resources"
-          description: "What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_PIDS)."
+          description: "What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS). disk bounds the writable layer plus state volumes: a Run over it is stopped and fails."
         sandbox:
           $ref: "#/components/schemas/Sandbox"
         secrets:

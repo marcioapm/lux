@@ -212,7 +212,7 @@ type Evicting struct {
 }
 
 type StopRequest struct {
-	Reason string `json:"reason"` // stop | cancel | preempt | drain | timeout
+	Reason string `json:"reason"` // stop | cancel | preempt | drain | timeout | disk
 }
 
 // Status is a placement's state as the runner sees it.
@@ -270,6 +270,10 @@ type Artifact struct {
 	FileSize    int64  `json:"fileSize"`
 	FileSHA256  string `json:"fileSha256"`
 }
+
+// EvDiskExceeded: a placement wrote more than its resources.disk (its
+// writable layer and state volumes). luxd stops it.
+const EvDiskExceeded = "disk.exceeded"
 
 // RunEvent is a runner-side lifecycle note (image built, volumes restored,
 // rebuild differed, DNS lookup…) stored with the Run's events.

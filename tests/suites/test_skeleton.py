@@ -158,3 +158,41 @@ def test_resource_defaults_and_requests_reach_the_container(lux, runners, hosts)
     lux.wait_state(asked, "succeeded")
     out = lux.logs(asked).split()
     assert out[:2] == ["50000", "100000"] and int(out[2]) == 512 << 20 and int(out[3]) == 64, out
+
+
+def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
+    """resources.disk bounds what a Run writes (its writable layer and state
+    volumes): past it, the Run is stopped and fails, its state kept."""
+    runners.start(hosts[0], "--usage-every", "1s")
+    script = "echo start; dd if=/dev/zero of=/w/big bs=1M count=64 2>/dev/null; echo wrote; sleep 600"
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", script, resources={"disk": "32Mi"},
+                                volumes=[{"name": "w", "path": "/w", "kind": "state"}]))
+    run = lux.wait_state(run_id, "failed", timeout=60)
+    assert run["stateReason"] == "disk limit exceeded", run
+    assert run["placements"][-1]["stopReason"] == "disk", run["placements"]
+    exceeded = lux.events(run_id, "disk.exceeded")
+    assert exceeded and exceeded[0]["data"]["limitBytes"] == 32 << 20, exceeded
+    assert lux.json("snapshots", run_id), "its state was not kept"
+    # Resumed with room to spare: it runs on, its 64 MiB still there.
+    lux.run("resume", run_id, "--disk", "256Mi")
+    lux.wait_output(run_id, "start\nwrote\nstart", timeout=60)
+    run = lux.get(run_id)
+    assert run["state"] == "running" and run["spec"]["resources"]["disk"] == 256 << 20, run
+    lux.run("cancel", run_id, "--wait")
+
+    # Under the limit: untouched. The default is 20 GiB.
+    ok = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "dd if=/dev/zero of=/tmp/f bs=1M count=8 2>/dev/null; sleep 3"))
+    run = lux.wait_state(ok, "succeeded", timeout=60)
+    assert run["spec"]["resources"]["disk"] == 20 << 30, run["spec"]["resources"]
+
+
+def test_disk_is_reserved_on_the_host(lux, runners, hosts):
+    """The scheduler reserves resources.disk against what the host offers."""
+    runners.start(hosts[0], "--disk", str(1 << 30))
+    big = lux.submit(generic(ALPINE_IMAGE, "sleep", "600", resources={"disk": "768Mi"}))
+    lux.wait_state(big, "running", timeout=60)
+    second = lux.submit(generic(ALPINE_IMAGE, "true", resources={"disk": "512Mi"}))
+    from env import wait_until
+    wait_until(lambda: lux.get(second).get("stateReason") == "waiting for capacity", 20, 0.5, "not held for disk")
+    lux.run("cancel", big, "--wait")
+    lux.wait_state(second, "succeeded", timeout=60)

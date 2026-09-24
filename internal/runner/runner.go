@@ -41,6 +41,10 @@ type Config struct {
 	MaxRuns int
 	CPUs    float64
 	Memory  int64
+	// Disk offered for Runs' writable layers and volumes, reserved by the
+	// scheduler from their resources.disk (0: not reserved; each Run's
+	// limit still applies).
+	Disk int64
 	// ProviderID is the cloud instance id, for provisioned hosts.
 	ProviderID string
 	// ForcePoll uses the HTTP polling transport even if WebSocket works.
@@ -50,6 +54,9 @@ type Config struct {
 	// EC2IMDS is the EC2 instance metadata endpoint to watch for a spot
 	// interruption notice ("" does not watch).
 	EC2IMDS string
+	// UsageEvery is how often disk and network use are sampled, which
+	// bounds how far past its disk limit a Run can write (default 15s).
+	UsageEvery time.Duration
 	// Nested offers nested containers (sandbox.nestedContainers): the host
 	// is labelled nested=true, and such Runs get what rootless Podman
 	// inside them needs (see nested.go).
@@ -116,6 +123,9 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	}
 	if cfg.Memory == 0 {
 		cfg.Memory = memTotal()
+	}
+	if cfg.UsageEvery == 0 {
+		cfg.UsageEvery = 15 * time.Second
 	}
 	if cfg.HostTTL == 0 {
 		cfg.HostTTL = 24 * time.Hour
@@ -202,7 +212,7 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 		Arch:            runtime.GOARCH,
 		Labels:          r.cfg.Labels,
 		Nested:          r.nestedSeccomp != "",
-		Capacity:        proto.Capacity{CPUs: r.cfg.CPUs, Memory: r.cfg.Memory, Runs: r.cfg.MaxRuns},
+		Capacity:        proto.Capacity{CPUs: r.cfg.CPUs, Memory: r.cfg.Memory, Disk: r.cfg.Disk, Runs: r.cfg.MaxRuns},
 		Images:          imgs,
 		GitMirrors:      r.git.Mirrors(),
 		LocalSnapshots:  r.localSnapshots(),
@@ -407,8 +417,10 @@ func (r *Runner) livePlacements() []*placement {
 
 // usageLoop samples disk and network use of live placements, in parallel,
 // on a slower schedule than heartbeats: it walks volumes and forks podman.
+// It is also how the disk limit is enforced, so a Run can write about one
+// interval's worth past its limit before it is stopped.
 func (r *Runner) usageLoop(ctx context.Context) {
-	t := time.NewTicker(30 * time.Second)
+	t := time.NewTicker(r.cfg.UsageEvery)
 	defer t.Stop()
 	for {
 		select {

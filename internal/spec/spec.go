@@ -27,7 +27,7 @@ type RunSpec struct {
 	Secrets   []Secret          `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 	Git       *Git              `json:"git,omitempty" yaml:"git,omitempty"`
 	Volumes   []Volume          `json:"volumes,omitempty" yaml:"volumes,omitempty"`
-	Resources Resources         `json:"resources" yaml:"resources" doc:"What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_PIDS)."`
+	Resources Resources         `json:"resources" yaml:"resources" doc:"What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS). disk bounds the writable layer plus state volumes: a Run over it is stopped and fails."`
 	Timeout   Duration          `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	Placement Placement         `json:"placement" yaml:"placement"`
 	Network   Network           `json:"network" yaml:"network"`
@@ -262,10 +262,11 @@ const (
 type Defaults struct {
 	CPUs   float64
 	Memory Bytes
+	Disk   Bytes
 	Pids   int
 }
 
-var BuiltinDefaults = Defaults{CPUs: 2, Memory: 8 << 30, Pids: 1024}
+var BuiltinDefaults = Defaults{CPUs: 2, Memory: 8 << 30, Disk: 20 << 30, Pids: 1024}
 
 // Normalize validates the spec and fills defaults. It returns every problem
 // at once so a caller can fix a spec in one round trip.
@@ -435,7 +436,10 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	if r.Pids == 0 {
 		r.Pids = int64(d.Pids)
 	}
-	if r.CPUs < 0 || r.Memory < 0 || r.Pids < 0 {
+	if r.Disk == 0 {
+		r.Disk = d.Disk
+	}
+	if r.CPUs < 0 || r.Memory < 0 || r.Disk < 0 || r.Pids < 0 {
 		fail("resources must not be negative")
 	}
 	if s.Timeout.Duration == 0 {

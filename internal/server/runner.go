@@ -193,7 +193,9 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 	}
 
 	var kicked bool
+	var notifyHost string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		notifyHost = ""
 		// Fencing: every report about a Run must carry the epoch of its
 		// current placement, on this host.
 		var tenantID, placementHost, placementState string
@@ -253,6 +255,11 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 				if err := recordImageResolved(ctx, tx, f.RunID, ev.Data); err != nil {
 					return err
 				}
+			case proto.EvDiskExceeded:
+				if _, err := s.requestStop(ctx, tx, tenantID, f.RunID, "disk"); err != nil {
+					return err
+				}
+				notifyHost = hostID
 			}
 			return addEvent(ctx, tx, tenantID, f.RunID, f.Epoch, ev.Type, ev.Data)
 		}
@@ -260,6 +267,9 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 	})
 	if err == nil && kicked {
 		s.Kick()
+	}
+	if err == nil && notifyHost != "" {
+		s.hub.Notify(notifyHost)
 	}
 	return err
 }

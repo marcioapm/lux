@@ -46,7 +46,7 @@ volumes:
   - { name: home, path: /home/agent, kind: state }
   - { name: cache, path: /cache, kind: ephemeral }         # empty on every start
 
-resources: { cpus: 4, memory: 8Gi, pids: 2048 }
+resources: { cpus: 4, memory: 8Gi, disk: 50Gi, pids: 2048 }
 timeout: 4h                     # wall-clock across all placements
 
 placement:
@@ -85,11 +85,26 @@ artifacts:
 - Volume paths must be absolute. `/.lux` is reserved.
 - **Resources** are what a Run gets and what the scheduler reserves on its
   host: `cpus` (a CPU quota; `0.5` is half a CPU), `memory` (the limit,
-  with no swap beyond it), `pids` (processes). They default to **2 CPUs,
-  8 GiB and 1024 processes**, and an operator can change the defaults
-  (`LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_PIDS` on luxd).
+  with no swap beyond it), `disk` (what it may write: its container's
+  writable layer plus its state volumes), `pids` (processes). They default
+  to **2 CPUs, 8 GiB of memory, 20 GiB of disk and 1024 processes**, and an
+  operator can change the defaults (`LUX_DEFAULT_CPUS`,
+  `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_DISK`, `LUX_DEFAULT_PIDS` on luxd).
   Sizes accept `512Mi`, `8Gi`, `1G`, or bytes. A Run waits until a host in
-  its pool has that much free; an image build is held to the same limits.
+  its pool has that much free; an image build is held to the same CPU,
+  memory and process limits.
+- **Disk is measured, not capped by the filesystem**, so lux needs no
+  special storage on hosts. The runner samples each Run's use (every 15s
+  by default, `lux-runner --usage-every`); a Run over its limit gets a
+  `disk.exceeded` event, is stopped and snapshotted as usual, and ends
+  `failed` with reason `disk limit exceeded`. It can write about one
+  sampling interval's worth past the limit before that. Its state is
+  kept: resume it with a larger limit (`lux resume <run> --disk 40Gi`, or
+  `resources.disk` in the resume request), or it is stopped again. tmpfs
+  mounts (with `readOnlyRoot`) count against memory, not disk.
+- **Disk is reserved only where the host says how much it has**
+  (`lux-runner --disk`); otherwise each Run's limit still applies, but
+  the scheduler does not add them up.
 
 ## Images
 

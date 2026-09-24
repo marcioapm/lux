@@ -931,8 +931,13 @@ type resumeRequest struct {
 	Secrets []spec.Secret `json:"secrets,omitempty" doc:"A value for every one of the Run's secrets: luxd never keeps them."`
 	Input   *resumeInput  `json:"input,omitempty" doc:"A message for the workload once it is back."`
 	// FromSnapshot resumes from an older snapshot (e.g. after lost).
-	FromSnapshot string `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost)."`
-	To           string `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
+	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost)."`
+	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
+	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over)."`
+}
+
+type resumeResources struct {
+	Disk spec.Bytes `json:"disk,omitempty" doc:"A new disk limit: its writable layer plus state volumes."`
 }
 
 type resumeInput struct {
@@ -1019,6 +1024,15 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 		if _, err := tx.Exec(ctx, `UPDATE runs SET secrets = $2, cancel_requested = false, place_on = $3, avoid_host = NULL, pending_input = NULL WHERE id = $1`,
 			id, newRefs, placeOn); err != nil {
 			return err
+		}
+		if r := req.Resources; r != nil && r.Disk != 0 {
+			if r.Disk < 0 {
+				return errf(http.StatusUnprocessableEntity, "invalid_request", "resources.disk must not be negative")
+			}
+			if _, err := tx.Exec(ctx, `UPDATE runs SET spec = jsonb_set(spec, '{resources,disk}', to_jsonb($2::bigint)) WHERE id = $1`,
+				id, int64(r.Disk)); err != nil {
+				return err
+			}
 		}
 		if req.FromSnapshot != "" {
 			var ok bool

@@ -196,6 +196,8 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		next, reason = StateCancelled, "cancelled"
 	case stopReason == "timeout":
 		next, reason = StateFailed, "timeout"
+	case stopReason == "disk":
+		next, reason = StateFailed, "disk limit exceeded"
 	case stopReason == "stop" || slices.Contains(movedStops, stopReason):
 		// A requested stop: resumable (and a move resumed below).
 		next, reason = StateStopped, stopReason

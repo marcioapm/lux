@@ -23,7 +23,7 @@ luxd serve        # as many as you like
 | `LUX_S3_ACCESS_KEY`, `LUX_S3_SECRET_KEY` | AWS chain | Only luxd holds S3 credentials. |
 | `LUX_LEASE` | `30s` | A host that misses heartbeats this long is lost, along with its live placements. |
 | `LUX_TICK` | `1s` | Scheduler and reaper interval. |
-| `LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_PIDS` | `2`, `8Gi`, `1024` | Resources a Run gets when its spec sets none. |
+| `LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_DISK`, `LUX_DEFAULT_PIDS` | `2`, `8Gi`, `20Gi`, `1024` | Resources a Run gets when its spec sets none. |
 | `LUX_SCALE_DOWN_AFTER` | `10m` | How long a provisioned host stays idle before it is drained and terminated. |
 | `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
 | `LUX_EC2_ENDPOINT` | AWS | Overrides the EC2 endpoint (tests). |
@@ -120,6 +120,8 @@ LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a
 | `--shim` | `/usr/local/lib/lux/lux-shim` | The shim binary to mount into containers. |
 | `--label k=v` | | Host labels, matched by `placement.requires` and `prefers`. Also `LUX_LABELS=k=v,…`. |
 | `--max-runs`, `--cpus`, `--memory` | 16, all, all | Capacity offered to the scheduler. |
+| `--disk` | not reserved | Bytes of disk the scheduler reserves Runs' `resources.disk` from. Without it, disk is not reserved (Runs still stop at their own limit). Set it to the space under `/var/lib/containers`, more to overcommit. |
+| `--usage-every` | `15s` | How often each Run's disk use is sampled, and its disk limit checked. |
 | `--host-ttl` | `24h` | How long uploaded local copies are kept. |
 | `--provider-id` | | The cloud instance id, for provisioned hosts. Also `LUX_PROVIDER_ID`. |
 | `--ec2-imds` | off | EC2 instance metadata URL (`http://169.254.169.254`) to watch for spot interruptions. Also `LUX_EC2_IMDS`. |

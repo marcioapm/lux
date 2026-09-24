@@ -194,7 +194,8 @@ func durationEnv(name string, def time.Duration) (time.Duration, error) {
 }
 
 // resourceDefaults are a Run's resources where its spec leaves them unset:
-// LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY ("8Gi"), LUX_DEFAULT_PIDS.
+// LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY ("8Gi"), LUX_DEFAULT_DISK ("20Gi"),
+// LUX_DEFAULT_PIDS.
 func resourceDefaults() (spec.Defaults, error) {
 	d := spec.BuiltinDefaults
 	if v := os.Getenv("LUX_DEFAULT_CPUS"); v != "" {
@@ -208,6 +209,11 @@ func resourceDefaults() (spec.Defaults, error) {
 	if v := os.Getenv("LUX_DEFAULT_MEMORY"); v != "" {
 		if err := json.Unmarshal(fmt.Appendf(nil, "%q", v), &d.Memory); err != nil || d.Memory <= 0 {
 			return d, fmt.Errorf("LUX_DEFAULT_MEMORY: %q is not a size", v)
+		}
+	}
+	if v := os.Getenv("LUX_DEFAULT_DISK"); v != "" {
+		if err := json.Unmarshal(fmt.Appendf(nil, "%q", v), &d.Disk); err != nil || d.Disk <= 0 {
+			return d, fmt.Errorf("LUX_DEFAULT_DISK: %q is not a size", v)
 		}
 	}
 	if v := os.Getenv("LUX_DEFAULT_PIDS"); v != "" {

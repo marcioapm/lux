@@ -55,10 +55,12 @@ type placement struct {
 	session     string      // latest session id the adapter reported
 	user        passwd.User // who the workload runs as
 	peakDisk    int64
-	netRx       int64
-	netTx       int64
-	cgroup      string
-	ip          string // the container's address, once looked up
+	// diskReported: this placement was reported over its disk limit.
+	diskReported bool
+	netRx        int64
+	netTx        int64
+	cgroup       string
+	ip           string // the container's address, once looked up
 }
 
 func newPlacement(r *Runner, a proto.Assign) *placement {
@@ -997,11 +999,32 @@ func (p *placement) sampleSlow(ctx context.Context) {
 		disk += n
 	}
 	st, statsErr := p.r.pm.Stats(ctx, containerName(p.runID))
+	p.checkDisk(ctx, disk)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.peakDisk = max(p.peakDisk, disk)
 	if statsErr == nil {
 		p.netRx, p.netTx = max(p.netRx, st.NetInput), max(p.netTx, st.NetOutput)
+	}
+}
+
+// checkDisk reports a Run over its disk limit (its writable layer and state
+// volumes), once: luxd stops it, and it ends failed, snapshotted as usual.
+func (p *placement) checkDisk(ctx context.Context, used int64) {
+	if p.assign == nil || p.assign.Spec.Resources.Disk <= 0 {
+		return
+	}
+	limit := int64(p.assign.Spec.Resources.Disk)
+	p.mu.Lock()
+	over := used > limit && !p.diskReported && p.phase == "running"
+	if over {
+		p.diskReported = true
+	}
+	p.mu.Unlock()
+	if over {
+		p.logf("over its disk limit", "used", used, "limit", limit)
+		go p.reportRetrying(context.WithoutCancel(ctx), proto.RunEvent{Type: proto.EvDiskExceeded,
+			Data: map[string]any{"usedBytes": used, "limitBytes": limit}})
 	}
 }
 
