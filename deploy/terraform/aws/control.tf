@@ -195,6 +195,16 @@ resource "aws_instance" "control" {
 
   user_data = local.cloud_init
 
+  # t4g's default (unlimited) bills sustained load above the 20%
+  # baseline as surplus credits at the instance's hourly rate — cheap
+  # per burst, but unbounded if luxd or Postgres runs hot for a while.
+  # standard caps CPU at the baseline instead: predictable cost, at the
+  # price of throttling under sustained load (see the README's cost
+  # table).
+  credit_specification {
+    cpu_credits = "standard"
+  }
+
   root_block_device {
     volume_size           = var.control_root_volume_size
     volume_type           = "gp3"

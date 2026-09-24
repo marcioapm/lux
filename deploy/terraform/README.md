@@ -18,10 +18,18 @@ separate private repo should hold the real values and state.
   (trixie) arm64, with `luxd` and Postgres 18 (via PGDG) both on it. Root
   and Postgres-data volumes are separate encrypted gp3 EBS volumes; the
   data volume has `prevent_destroy` so replacing the instance does not
-  touch it. A systemd timer (`lux-deploy.timer`, every 5 minutes) polls an
-  SSM parameter for the desired lux version and deploys it — see
-  "Upgrading" below. Another timer runs `pg_dump -Fc` daily at 00:00 UTC.
-  Shell access is SSM Session Manager only: no SSH, no key pairs.
+  touch it. `lifecycle { ignore_changes = [ami, user_data] }` keeps a
+  newer Debian AMI or an edited cloud-init template from triggering an
+  unplanned replacement; values that change after first boot (public
+  URL, the Access team/AUD, the blob bucket) go through SSM instead and
+  are re-read on every deploy run. A systemd timer (`lux-deploy.timer`,
+  every 5 minutes) polls an SSM parameter for the desired lux version
+  and deploys it — see "Upgrading" below. Another timer runs `pg_dump
+  -Fc` daily at 00:00 UTC, streamed to S3. Shell access is SSM Session
+  Manager only: no SSH, no key pairs — cloud-init installs the regional
+  `amazon-ssm-agent` `.deb`, which the Debian Cloud Image doesn't ship
+  (UNVERIFIED: no AWS credentials available to confirm this against a
+  live account — see `.fix-report.md`).
 - **Runners** (`aws/runners.tf`): one launch template per pool (an
   `arm64`/`m8g.2xlarge` spot pool by default; an `amd64`/`m7i.2xlarge` one
   behind a variable). Runners boot **Fedora CoreOS, stable stream**
@@ -32,7 +40,12 @@ separate private repo should hold the real values and state.
   `RunInstances` (the launch templates set none), and a runner is usually
   registered with luxd in under a minute — the only network activity is
   luxd's ~20 MB runner binaries coming from the control host over the
-  private network. Launching a stock Fedora/Ubuntu/AL2023 AMI instead
+  private network (see "Cost" below: this makes the control host the
+  upload bottleneck for the whole deployment). `update_default_version =
+  true` on the launch template, so a new FCOS AMI, volume size or IOPS
+  change (luxd always launches `$Default`) takes effect on the very next
+  runner it starts, not only on templates created after the change.
+  Launching a stock Fedora/Ubuntu/AL2023 AMI instead
   (`image = "custom"`, `userData = "script"`, which installs Podman if
   missing) or a prebuilt image (`userData = "env"`) both stay available
   per pool if FCOS does not fit; pick `"script"` for a distro you already
@@ -46,18 +59,28 @@ separate private repo should hold the real values and state.
   (`lux exec`/`lux attach`), and debug a boot failure with
   `aws ec2 get-console-output`.
 - **IAM** (`aws/iam.tf`): the control host's instance role only —
-  `ec2:RunInstances` scoped to the runner launch templates/subnets/SG,
+  `ec2:RunInstances` scoped to the runner launch templates/subnets/SG
+  (including spot-instances-request, for spot pools),
   `ec2:CreateTags` on create, `ec2:TerminateInstances` conditioned on
-  `lux:managed=true`, `ec2:DescribeInstances`, S3 on its own buckets,
-  `ssm:GetParameter(s)`/`PutParameter` under its own prefix, KMS
-  decrypt/encrypt for the default SSM key. No runner instance profile, so
-  no `iam:PassRole` either (see "Runners" above).
+  `lux:managed=true`, `ec2:DescribeInstances`, S3 on its own buckets, and
+  `ssm:GetParameter(s)` under its own prefix (the desired lux version and
+  the values `lux-render-config.sh` re-reads on every deploy run — see
+  "Control host" above). Also creates the `AWSServiceRoleForEC2Spot`
+  service-linked role, needed before a fresh account's first spot
+  launch, behind `create_spot_service_linked_role` (default true — set
+  to false, and `terraform import` it, on an account that already has
+  it). Postgres passwords are generated and kept on the control host
+  itself (`/root/.lux-*`), never written to SSM or Terraform state. No
+  runner instance profile, so no `iam:PassRole` either (see "Runners"
+  above).
 - **S3** (`aws/s3.tf`): a blob bucket (snapshots/output/artifacts) and a
   Postgres backup bucket. Both block public access and use SSE-KMS; the
   backup bucket is versioned with a lifecycle expiry (default 30 days).
 - **SSM** (`aws/ssm.tf`): the desired lux version, written by Terraform;
-  the Cloudflare Tunnel token, written by Terraform only if a value is
-  given (otherwise expected to already exist).
+  the Cloudflare Tunnel token, written by Terraform only when
+  `manage_cloudflare_tunnel_token = true` (otherwise expected to already
+  exist); and, per "Control host" above, the values `lux-render-config.sh`
+  re-reads on every deploy run.
 - **Cloudflare** (`cloudflare/`, optional): a Tunnel to the control host
   (`http://localhost:7070`), its DNS record, and two Access applications:
   one gating the console (bare hostname) to the given emails/domains,
@@ -80,13 +103,31 @@ separate private repo should hold the real values and state.
 | S3 (blobs + backups) | ~$0.023/GB-mo + requests | usage-dependent, typically a few $ |
 | S3 gateway endpoint | free | $0 |
 | Data transfer out (runners, tunnel) | $0.09/GB after 1 GB free | usage-dependent |
+| Public IPv4, control host + each running runner | $0.005/h each | ~$3.65/mo per address |
+| Cross-AZ transfer (runners in a 2nd+ AZ, to the control host) | $0.01/GB each direction | usage-dependent; only with `az_count` > 1 and runners actually placed there |
 
 A single-control-host, one-warm-runner deployment runs roughly **$100-130/month**
-on spot, dominated by the control host and the one warm runner; it drops
-toward $30/month with `--warm 0` and pools scaled to zero when idle
-(`lux pools set ... --min 0 --warm 0`). No NAT gateway (~$33/mo saved), no
-DynamoDB (S3 native locking), no idle EC2 beyond the control host and
-whatever `--warm` keeps ready.
+on spot, dominated by the control host and the one warm runner, plus
+~$7/mo for the two public IPv4 addresses; it drops toward $30/month with
+`--warm 0` and pools scaled to zero when idle (`lux pools set ... --min 0
+--warm 0`). No NAT gateway (~$33/mo saved), no DynamoDB (S3 native
+locking), no idle EC2 beyond the control host and whatever `--warm`
+keeps ready.
+
+`credit_specification { cpu_credits = "standard" }` is set on the
+control host (`control.tf`) rather than t4g's `unlimited` default:
+`unlimited` bills sustained load above the 20% baseline as surplus
+credits with no cap, while `standard` throttles CPU at the baseline
+instead — cheap and predictable, but the tradeoff is that a control
+host under sustained heavy load (many concurrent runs, a busy Postgres)
+throttles rather than bursts. Switch back to `unlimited` if that
+throttling shows up.
+
+luxd is the upload bottleneck for the whole deployment: every snapshot
+and artifact goes runner → luxd → S3, through a single `t4g.medium`
+whose baseline network bandwidth is ~0.25 Gbps (it bursts higher, but
+not indefinitely). Adding more runner capacity does not add more upload
+throughput; only a bigger control host instance type does.
 
 ## Bootstrap the state bucket
 
@@ -142,9 +183,12 @@ DynamoDB table needed.
 Bump `lux_version` in your tfvars (a GitHub release tag) and `terraform
 apply`. Terraform only writes the new value to the SSM parameter; the
 control host's `lux-deploy.timer` picks it up within 5 minutes, downloads
-the release, verifies its checksum, runs `luxd migrate`, and restarts
-`luxd` — leaving the previous version running if anything fails. No
-manual SSH, no rebuild.
+the release, verifies its checksum, and runs `luxd migrate` with the new
+binary before touching anything running. Only once that succeeds does it
+switch to the new version and restart luxd, then poll `systemctl
+is-active` and `/health` for about 30s; on any failure it restores the
+previous version's symlinks, restarts luxd again, and exits non-zero,
+leaving the previous version running. No manual SSH, no rebuild.
 
 ## Restore from a backup
 
