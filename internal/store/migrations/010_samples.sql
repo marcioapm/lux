@@ -1,4 +1,4 @@
--- 009_samples.sql — history: resource use and system state over time.
+-- 010_samples.sql — history: resource use and system state over time.
 --
 -- Rows at three resolutions: 0 is raw (one per heartbeat, or per system
 -- tick), 60 and 3600 are rollups of the resolution below (averages of

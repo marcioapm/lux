@@ -74,12 +74,18 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 	var hostID string
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var state, current, stopping string
-		if err := tx.QueryRow(ctx, `SELECT r.state, coalesce(p.host_id, ''), coalesce(p.stop_reason, '') FROM runs r
+		var hostDraining bool
+		if err := tx.QueryRow(ctx, `SELECT r.state, coalesce(p.host_id, ''), coalesce(p.stop_reason, ''), coalesce(h.draining, false) FROM runs r
 				LEFT JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch
-				WHERE r.id = $1 AND r.tenant_id = $2 FOR UPDATE OF r`, in.ID, p.TenantID).Scan(&state, &current, &stopping); err != nil {
+				LEFT JOIN hosts h ON h.id = p.host_id
+				WHERE r.id = $1 AND r.tenant_id = $2 FOR UPDATE OF r`, in.ID, p.TenantID).Scan(&state, &current, &stopping, &hostDraining); err != nil {
 			return err
 		}
 		switch {
+		case hostDraining && placeOn == nil:
+			// Its host's drain (or eviction) is already moving it: a
+			// migration would only race it.
+			return errf(http.StatusConflict, "host_draining", "the Run's host is draining: the Run is being moved already")
 		case state != StateRunning && state != StateStopping:
 			return errf(http.StatusConflict, "not_running", "run is %s: only a running Run can be migrated (a stopped one: resume --to)", state)
 		case stopping != "":

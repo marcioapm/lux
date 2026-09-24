@@ -159,3 +159,16 @@ def test_migrate_refuses_a_run_already_stopping(operator, lux, runners, hosts):
     time.sleep(3)
     assert lux.get(run_id)["state"] == "stopped", "the tenant's stop was overridden"
     lux.run("cancel", run_id)
+
+
+def test_migrate_leaves_a_draining_hosts_runs_to_the_drain(operator, lux, runners, hosts):
+    """A draining (or evicting) host's Runs are already being moved: a
+    migration without a target would only race the drain."""
+    runners.start(hosts[0])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "trap 'sleep 5; exit 0' TERM; sleep 300 & wait"))
+    host = lux.wait_state(run_id, "running")["host"]
+    lux.run("hosts", "drain", host)
+    with pytest.raises(CLIError) as e:
+        operator.run("migrate", run_id)
+    assert "draining" in e.value.stderr
+    lux.run("cancel", run_id)

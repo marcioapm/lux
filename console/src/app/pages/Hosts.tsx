@@ -36,7 +36,7 @@ export function Hosts() {
         header: "State",
         cell: (h) => (
           <StateCell kind="host" state={h.state} reason={h.stateReason}>
-            {h.draining && h.state !== "draining" && <Badge tone="warn">draining</Badge>}
+            {h.stateReason?.startsWith("evicting") ? <Badge tone="danger">evicting</Badge> : h.draining && h.state !== "draining" && <Badge tone="warn">draining</Badge>}
           </StateCell>
         ),
         sortValue: (h) => h.state,

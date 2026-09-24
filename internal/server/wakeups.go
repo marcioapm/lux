@@ -8,7 +8,7 @@ import (
 
 // wakeups wake followers of Run events (the feed, output streams) when any
 // is written, by any luxd: Postgres notifies lux_events after each insert
-// into run_events (migration 011), and one connection per luxd listens.
+// into run_events (migration 012), and one connection per luxd listens.
 // Followers re-read under their own scope; a wake-up says only "look".
 type wakeups struct {
 	mu   sync.Mutex

@@ -1,4 +1,4 @@
--- 011_event_notify.sql — every Run event wakes whoever is following
+-- 012_event_notify.sql — every Run event wakes whoever is following
 -- events (the feed, output streams) in every luxd, instead of each polling.
 -- The payload carries nothing: listeners re-read under their own scope.
 CREATE FUNCTION lux_event_notify() RETURNS trigger LANGUAGE plpgsql AS $$
