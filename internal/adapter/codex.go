@@ -18,11 +18,14 @@ import (
 // native (turn/steer); interrupt is turn/interrupt; a resume on another
 // host is thread/resume with the stored thread id.
 type Codex struct {
-	rpc     rpcConn
-	mu      sync.Mutex
-	sink    Sink
-	thread  string
-	turn    string // in-progress turn id, "" when idle
+	rpc    rpcConn
+	mu     sync.Mutex
+	sink   Sink
+	thread string
+	turn   string // in-progress turn id, "" when idle
+	// usage is the last thread/tokenUsage/updated of the turn in progress,
+	// as Codex sent it: codex.turn_end carries it.
+	usage   json.RawMessage
 	queue   []proto.Input
 	ready   bool
 	stopped bool
@@ -178,11 +181,34 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 		c.mu.Lock()
 		c.turn = p.Turn.ID
 		c.mu.Unlock()
+	case "thread/tokenUsage/updated":
+		var p struct {
+			TokenUsage json.RawMessage `json:"tokenUsage"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
+		c.mu.Lock()
+		c.usage = p.TokenUsage
+		c.mu.Unlock()
 	case "turn/completed":
+		var p struct {
+			Turn struct {
+				Status string `json:"status"`
+			} `json:"turn"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
 		c.mu.Lock()
 		c.turn = ""
+		usage := c.usage
+		c.usage = nil
 		idle := len(c.queue) == 0
 		c.mu.Unlock()
+		// The turn's end, with the agent's usage as it reported it (the
+		// counterpart of acp.turn_end; claude.result carries its own).
+		end := map[string]any{"status": p.Turn.Status}
+		if len(usage) > 0 && string(usage) != "null" {
+			end["usage"] = usage
+		}
+		defer sink.Event("codex.turn_end", end)
 		if idle {
 			sink.Activity(true)
 		}

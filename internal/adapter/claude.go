@@ -81,7 +81,8 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 					Text string `json:"text"`
 				} `json:"content"`
 			} `json:"message"`
-			Result string `json:"result"`
+			Result string          `json:"result"`
+			Usage  json.RawMessage `json:"usage"`
 		}
 		if err := json.Unmarshal(line, &m); err != nil || m.Type == "" {
 			sink.Stdout(append(append([]byte{}, line...), '\n'))
@@ -106,6 +107,13 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 			}
 			idle := c.inTurn == 0
 			c.mu.Unlock()
+			// The turn's end, with the agent's usage as it reported it (the
+			// whole result line is claude.result, below).
+			end := map[string]any{}
+			if len(m.Usage) > 0 && string(m.Usage) != "null" {
+				end["usage"] = m.Usage
+			}
+			sink.Event("claude.turn_end", end)
 			if idle {
 				sink.Activity(true)
 			}

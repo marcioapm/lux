@@ -127,10 +127,12 @@ func TestInputAck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k := &sink{s: &Shim{out: out}}
+	k := &sink{s: &Shim{out: out, red: red}}
 	k.InputAck(proto.Input{RequestID: "prompt", Text: "use s3cr3t-value please"}, nil)
 	k.InputAck(proto.Input{RequestID: "big", Text: strings.Repeat("x", maxAckedText+10)}, nil)
 	k.InputAck(proto.Input{RequestID: "raw", Raw: []byte("raw bytes\n")}, nil)
+	// A secret straddling the cut: redacted whole before cutting.
+	k.InputAck(proto.Input{RequestID: "edge", Text: strings.Repeat("y", maxAckedText-5) + "s3cr3t-value"}, nil)
 	k.InputAck(proto.Input{}, nil) // no request id: nothing to ack
 	out.Close()
 
@@ -149,7 +151,7 @@ func TestInputAck(t *testing.T) {
 			acks = append(acks, ev.Data)
 		}
 	}
-	if len(acks) != 3 {
+	if len(acks) != 4 {
 		t.Fatalf("got %d acks: %+v", len(acks), acks)
 	}
 	if acks[0].RequestID != "prompt" || acks[0].Text != "use [REDACTED:TOKEN] please" || acks[0].Truncated {
@@ -160,5 +162,8 @@ func TestInputAck(t *testing.T) {
 	}
 	if acks[2].Text != "raw bytes\n" {
 		t.Errorf("raw ack: %+v", acks[2])
+	}
+	if strings.Contains(acks[3].Text, "s3cr") || strings.Contains(acks[3].Text, "[REDA") || !acks[3].Truncated {
+		t.Errorf("edge ack keeps part of a secret: …%q", acks[3].Text[len(acks[3].Text)-30:])
 	}
 }

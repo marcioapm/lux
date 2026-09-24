@@ -29,9 +29,9 @@ def test_steering_is_delivered_and_acknowledged(lux, runners, hosts, harness):
     lux.wait_activity(run_id, "idle", timeout=harness.timeout)
     lux.run("steer", run_id, harness.say("second"), "--request-id", "req-1")
     wait_until(lambda: "second" in lux.logs(run_id).lower(), harness.timeout, 0.5, "steer never answered")
-    acks = wait_until(lambda: {e["data"]["requestId"]: e["data"] for e in lux.events(run_id, "input.delivered")}
-                      .get("req-1") and lux.events(run_id, "input.delivered"), 20, 0.3, "no delivery ack")
-    by_id = {e["data"]["requestId"]: e["data"] for e in acks}
+    def delivered():
+        return {e["data"]["requestId"]: e["data"] for e in lux.events(run_id, "input.delivered")}
+    by_id = wait_until(lambda: (d := delivered()) and "req-1" in d and d, 20, 0.3, "no delivery ack")
     # The first prompt is acknowledged too, and each ack carries what was
     # delivered.
     assert by_id["prompt"]["text"] == harness.say("first"), by_id

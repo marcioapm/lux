@@ -26,6 +26,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/creack/pty"
 	"github.com/marcioapm/lux/internal/adapter"
@@ -677,8 +678,21 @@ func (k *sink) InputAck(in proto.Input, err error) {
 		text = string(in.Raw)
 	}
 	if text != "" {
+		// Redacted before it is cut, so a secret straddling the cut is not
+		// half kept; cut on a rune boundary.
+		text = k.s.red.Redact(text)
 		if len(text) > maxAckedText {
-			text, d["truncated"] = text[:maxAckedText], true
+			cut := maxAckedText
+			for cut > 0 && !utf8.RuneStart(text[cut]) {
+				cut--
+			}
+			// Not inside a redaction marker, either: the last one starting
+			// before the cut must also end before it.
+			if open := strings.LastIndex(text[:cut], "["); open >= 0 && strings.HasPrefix(text[open:], "[REDACTED:") &&
+				!strings.Contains(text[open:cut], "]") {
+				cut = open
+			}
+			text, d["truncated"] = text[:cut], true
 		}
 		d["text"] = text
 	}

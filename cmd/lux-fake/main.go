@@ -518,7 +518,9 @@ func streamJSON() {
 				reason = "aborted_streaming"
 			}
 			a.send(map[string]any{"type": "result", "subtype": "success", "session_id": a.session,
-				"terminal_reason": reason, "queued_turn_count": len(turns)})
+				"terminal_reason": reason, "queued_turn_count": len(turns),
+				// Usage as Claude Code reports it on its result line.
+				"usage": map[string]any{"input_tokens": 3, "output_tokens": 9}, "total_cost_usd": 0.0001})
 		}
 	}()
 	for sc := scanner(); sc.Scan(); {
@@ -632,6 +634,12 @@ func appServer() {
 				turnMu.Lock()
 				turnID = ""
 				turnMu.Unlock()
+				// Usage as Codex reports it: a notification before the turn ends.
+				a.send(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{"threadId": a.session,
+					"turnId": id, "tokenUsage": map[string]any{
+						"last":               map[string]any{"inputTokens": 5, "outputTokens": 7, "cachedInputTokens": 0, "reasoningOutputTokens": 0, "totalTokens": 12},
+						"total":              map[string]any{"inputTokens": 5, "outputTokens": 7, "cachedInputTokens": 0, "reasoningOutputTokens": 0, "totalTokens": 12},
+						"modelContextWindow": 200000}}})
 				a.send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": a.session,
 					"turn": map[string]any{"id": id, "status": status}}})
 			}(p.Input.String())

@@ -83,3 +83,23 @@ def test_acp_turn_end_carries_the_agents_usage(lux, runners, hosts, fake_image):
     ends = [r["event"] for r in lux.records(run_id, "--events") if r.get("ch") == "event"
             and r["event"].get("type") == "acp.turn_end"]
     assert ends and ends[0]["data"]["usage"] == {"inputTokens": 2, "outputTokens": 10, "totalTokens": 12}, ends
+
+
+@pytest.mark.parametrize("adapter,event,usage", [
+    ("claude-code", "claude.turn_end", {"input_tokens": 3, "output_tokens": 9}),
+    ("codex", "codex.turn_end", {"last": {"inputTokens": 5, "outputTokens": 7, "cachedInputTokens": 0,
+                                          "reasoningOutputTokens": 0, "totalTokens": 12},
+                                 "total": {"inputTokens": 5, "outputTokens": 7, "cachedInputTokens": 0,
+                                           "reasoningOutputTokens": 0, "totalTokens": 12},
+                                 "modelContextWindow": 200000}),
+])
+def test_turn_end_carries_the_agents_usage(lux, runners, hosts, fake_image, adapter, event, usage):
+    """Each agent adapter ends a turn with <adapter>.turn_end carrying the
+    agent's own usage report, untranslated (lux-fake reports it as the
+    real agent does)."""
+    runners.start(hosts[0])
+    run_id = lux.submit(fake_agent(fake_image, "echo hi", adapter=adapter))
+    lux.wait_activity(run_id, "idle")
+    ends = [r["event"] for r in lux.records(run_id, "--events") if r.get("ch") == "event"
+            and r["event"].get("type") == event]
+    assert ends and ends[0]["data"]["usage"] == usage, ends
