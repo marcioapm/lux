@@ -153,9 +153,9 @@ type hostRef struct {
 	ID, ProviderID, Reason string
 	Template               json.RawMessage
 	Draining               bool // not counted in the pool's total
-	// Settled: launched long enough ago that the provider lists it (its
-	// listings are eventually consistent), and its runner is not
-	// heartbeating; one missing from the listings is gone.
+	// Settled: launched with the tags we list by, long enough ago that the
+	// provider lists it (its listings are eventually consistent), and its
+	// runner is not heartbeating; one missing from the listings is gone.
 	Settled bool
 }
 
@@ -264,8 +264,8 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 	}
 	// Terminated instances drop out of the provider's listings after a while
 	// (EC2 purges them): a settled host that is not listed is gone too. It
-	// is terminated first, in case it runs without the tags we list by
-	// (launched by an older luxd): written off, it must not run on.
+	// is terminated first all the same: if a listing was merely incomplete,
+	// a host written off must not run on.
 	for pid, h := range rows {
 		if listed[pid] || !h.Settled {
 			continue
@@ -323,7 +323,7 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			coalesce(h.last_placement_ended_at, h.registered_at, h.created_at) < now() - $3::interval,
 			h.provision_requested_at < now() - $4::interval,
 			coalesce(h.lost_at < now() - $6::interval, false),
-			h.provision_requested_at < now() - interval '1 minute'
+			h.tagged AND h.provision_requested_at < now() - interval '1 minute'
 			  AND coalesce(h.last_heartbeat < now() - $7::interval, true)
 		FROM hosts h
 		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provision_requested_at IS NOT NULL
@@ -412,8 +412,8 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 			tokenID, pl.TenantID, pl.Name, ids.Hash(token)); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state, provision_requested_at, launch_template)
-			VALUES ($1, $2, $3, $4, $5, 'provisioning', now(), $6)`,
+		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state, provision_requested_at, launch_template, tagged)
+			VALUES ($1, $2, $3, $4, $5, 'provisioning', now(), $6, true)`,
 			hostID, pl.TenantID, pl.Name, tokenID, name, pl.Template)
 		return err
 	})
