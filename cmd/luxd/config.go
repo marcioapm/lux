@@ -29,7 +29,7 @@ type config struct {
 	} `toml:"database"`
 	Listen    string `toml:"listen" env:"LUX_LISTEN"`
 	PublicURL string `toml:"public_url" env:"LUX_PUBLIC_URL"`
-	Debug     bool   `toml:"debug" env:"LUX_DEBUG"`
+	Debug     onFlag `toml:"debug" env:"LUX_DEBUG"`
 	S3        struct {
 		Bucket         string `toml:"bucket" env:"LUX_S3_BUCKET"`
 		Endpoint       string `toml:"endpoint" env:"LUX_S3_ENDPOINT"`
@@ -67,6 +67,15 @@ type config struct {
 	} `toml:"console"`
 }
 
+// onFlag is a bool the environment sets with any non-empty value
+// (LUX_DEBUG=1, =yes), as it always has; in the file, true or false.
+type onFlag bool
+
+func (f *onFlag) UnmarshalText(b []byte) error {
+	*f = onFlag(len(b) > 0 && string(b) != "false" && string(b) != "0")
+	return nil
+}
+
 // duration is a time.Duration written as a Go duration string ("30s").
 type duration struct{ time.Duration }
 
@@ -84,6 +93,31 @@ type size struct{ spec.Bytes }
 
 func (s *size) UnmarshalText(b []byte) error {
 	return s.UnmarshalJSON(strconv.AppendQuote(nil, string(b)))
+}
+
+// configFlag takes --config FILE (or --config=FILE) out of luxd's
+// arguments, wherever it is.
+func configFlag(args []string) (path string, rest []string, err error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--config":
+			if i+1 == len(args) || strings.HasPrefix(args[i+1], "-") {
+				return "", nil, errors.New("--config needs a file")
+			}
+			path = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--config="):
+			path = strings.TrimPrefix(a, "--config=")
+		default:
+			rest = append(rest, a)
+			continue
+		}
+		if path == "" {
+			return "", nil, errors.New("--config needs a file")
+		}
+	}
+	return path, rest, nil
 }
 
 // defaultConfigPath is read when it exists and no other file is named.
@@ -122,6 +156,7 @@ func loadConfig(path string) (config, error) {
 	b, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		warnReadable(path)
 		dec := toml.NewDecoder(bytes.NewReader(b))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&c); err != nil {
@@ -237,6 +272,14 @@ func tomlError(err error) string {
 		return fmt.Sprintf("line %d column %d: %s: %v", row, col, strings.Join(de.Key(), "."), de)
 	}
 	return err.Error()
+}
+
+// warnReadable warns when others may read the file: it may hold the
+// database password or S3 secret (both better in the environment).
+func warnReadable(path string) {
+	if st, err := os.Stat(path); err == nil && st.Mode().Perm()&0o077 != 0 {
+		fmt.Fprintf(os.Stderr, "luxd: warning: others can read %s (mode %v); if it holds secrets, chmod 600 it or set them in the environment\n", path, st.Mode().Perm())
+	}
 }
 
 // require is the value, or an error naming its key and variable.

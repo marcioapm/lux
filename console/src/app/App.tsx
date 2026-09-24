@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ToastProvider, type Tenant as PickerTenant } from "../ds/index.ts";
-import { api, errorText, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
+import { api, errorText, getSession, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
 import { matchPath, usePath } from "./router.tsx";
 import { ScopeProvider, useScope } from "./scope.tsx";
 import { useLiveUpdates } from "./live.ts";
@@ -53,6 +53,13 @@ function useRole(): { error: string | null; retrying: boolean; retry: () => void
         setFailure(null);
       } catch (e) {
         if (ctrl.signal.aborted) return;
+        // Signed in by Cloudflare Access and now a network error: most
+        // likely the Access session expired, and Access answered with a
+        // redirect to its login, which fetch cannot follow. A reload can.
+        if (!isApiError(e) && getSession().user) {
+          window.location.reload();
+          return;
+        }
         const retrying = !isApiError(e) || e.status >= 500;
         setFailure({ error: errorText(e), retrying });
         if (!retrying) return;
@@ -127,19 +134,21 @@ export function App() {
  * is needed. Otherwise (401), the key sign-in.
  */
 function useConsoleAuth(enabled: boolean): "checking" | "done" {
-  const [state, setState] = useState<"checking" | "done">(enabled ? "checking" : "done");
+  // Keyed by `enabled`, so the render that turns it on is already "checking"
+  // (no flash of the key sign-in before the effect runs).
+  const [state, setState] = useState<{ for: boolean; value: "checking" | "done" }>({ for: enabled, value: enabled ? "checking" : "done" });
+  if (state.for !== enabled) setState({ for: enabled, value: enabled ? "checking" : "done" });
   useEffect(() => {
     if (!enabled) return;
     const ctrl = new AbortController();
-    setState("checking");
     api
       .whoami(ctrl.signal)
       .then((me) => {
         if (me.email) signInAs({ email: me.email, name: me.name || me.email }, me.operator ? "operator" : "tenant");
       })
       .catch(() => {})
-      .finally(() => !ctrl.signal.aborted && setState("done"));
+      .finally(() => !ctrl.signal.aborted && setState({ for: true, value: "done" }));
     return () => ctrl.abort();
   }, [enabled]);
-  return state;
+  return state.for === enabled ? state.value : enabled ? "checking" : "done";
 }

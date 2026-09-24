@@ -31,6 +31,10 @@ function emit() {
   for (const l of listeners) l();
 }
 
+export function getSession(): Session {
+  return session;
+}
+
 export function getKey(): string | null {
   return session.key;
 }

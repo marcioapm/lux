@@ -58,15 +58,25 @@ func newCFAccess(team, aud string) *cfAccess {
 	}
 }
 
-// accessToken is the request's Access token, if any.
+// accessToken is the request's Access token, if any: the header Access
+// adds in front of luxd, or the browser's cookie. A cookie is sent with
+// any request the browser makes, a cross-site one included, so it
+// authenticates only reads, or requests that show they come from this
+// origin (fetch sets Sec-Fetch-Site; a form post from elsewhere cannot
+// fake it).
 func accessToken(r *http.Request) string {
 	if t := r.Header.Get("Cf-Access-Jwt-Assertion"); t != "" {
 		return t
 	}
-	if c, err := r.Cookie("CF_Authorization"); err == nil {
-		return c.Value
+	c, err := r.Cookie("CF_Authorization")
+	if err != nil {
+		return ""
 	}
-	return ""
+	safe := r.Method == http.MethodGet || r.Method == http.MethodHead
+	if !safe && r.Header.Get("Sec-Fetch-Site") != "same-origin" {
+		return ""
+	}
+	return c.Value
 }
 
 // user verifies a token and says who it is. A service token (no email) is

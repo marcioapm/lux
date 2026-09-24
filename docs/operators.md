@@ -135,7 +135,10 @@ or load balancer you already use for luxd.
   the team's keys, for this application, not expired), so a request that
   reaches luxd around Access gets nothing without a key. Access policies
   decide who is an operator: keep the application's policy to the people
-  who should be. API keys still work alongside (the CLI, runners).
+  who should be (a policy letting in anyone with an email makes everyone an
+  operator). API keys still work alongside (the CLI, runners). The Access
+  cookie authenticates reads and requests from the console itself; a form
+  or script on another site cannot act with it.
 
   With a tunnel (`cloudflared`), `originRequest.access.required` can also
   refuse unauthenticated requests before they reach luxd.

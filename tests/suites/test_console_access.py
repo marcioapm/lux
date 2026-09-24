@@ -61,6 +61,23 @@ def test_invalid_access_tokens_are_refused(env, access, bad):
     assert _get(env, "/v1/whoami").status_code == 401  # and none at all
 
 
+def test_the_cookie_does_not_authorize_cross_site_actions(env, access, tenant_factory):
+    """A browser sends the Access cookie with any request, a cross-site form
+    post included: the cookie alone reads, but acts only from this origin."""
+    t = tenant_factory()
+    run_id = t.submit(generic(ALPINE_IMAGE, "true", placement={"requires": {"nowhere": "yes"}}))
+    cookie = {"CF_Authorization": access.token("mallory-victim@example.com")}
+    url = f"{env.luxd_url}/v1/runs/{run_id}/cancel"
+    assert _get(env, "/v1/whoami", cookies=cookie).status_code == 200
+    for site in (None, "cross-site", "same-site"):
+        hdr = {"Sec-Fetch-Site": site} if site else {}
+        r = requests.post(url, cookies=cookie, headers=hdr, timeout=10)
+        assert r.status_code == 401, (site, r.status_code, r.text)
+    assert t.get(run_id)["state"] != "cancelled"
+    r = requests.post(url, cookies=cookie, headers={"Sec-Fetch-Site": "same-origin"}, timeout=10)
+    assert r.status_code == 202, r.text
+
+
 def test_keys_still_work_behind_access(env, access, lux):
     """The CLI and runners keep their keys: a key wins over a token."""
     me = lux.json("ls")

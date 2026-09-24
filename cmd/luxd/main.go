@@ -42,19 +42,22 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	cmd, args := os.Args[1], os.Args[2:]
-	// --config FILE, before or after the command.
-	var path string
-	if cmd == "--config" && len(args) >= 2 {
-		path, cmd, args = args[0], args[1], args[2:]
-	} else if len(args) >= 2 && args[0] == "--config" {
-		path, args = args[1], args[2:]
+	path, rest, err := configFlag(os.Args[1:])
+	if err != nil || len(rest) == 0 {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "luxd:", err)
+		}
+		usage()
 	}
-	var err error
+	cmd, args := rest[0], rest[1:]
 	var cfg config
 	switch cmd {
 	case "migrate", "admin", "serve":
 		if cfg, err = loadConfig(path); err != nil {
+			break
+		}
+		if cmd != "admin" && len(args) > 0 {
+			err = fmt.Errorf("%s takes no arguments: %s", cmd, strings.Join(args, " "))
 			break
 		}
 		switch cmd {
@@ -112,7 +115,7 @@ func migrate(ctx context.Context, cfg config) error {
 
 func serve(ctx context.Context, c config) error {
 	level := slog.LevelInfo
-	if c.Debug {
+	if bool(c.Debug) {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))

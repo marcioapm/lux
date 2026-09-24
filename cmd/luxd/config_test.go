@@ -83,3 +83,43 @@ aud = "aud-from-file"
 		t.Error("a missing named file was not an error")
 	}
 }
+
+func TestConfigFlag(t *testing.T) {
+	for _, c := range []struct {
+		args       []string
+		path, rest string
+		err        bool
+	}{
+		{[]string{"serve"}, "", "serve", false},
+		{[]string{"--config", "a.toml", "serve"}, "a.toml", "serve", false},
+		{[]string{"serve", "--config", "a.toml"}, "a.toml", "serve", false},
+		{[]string{"--config=a.toml", "admin", "create-tenant", "--name", "x"}, "a.toml", "admin create-tenant --name x", false},
+		{[]string{"admin", "create-tenant", "--config", "a.toml", "--name", "x"}, "a.toml", "admin create-tenant --name x", false},
+		{[]string{"serve", "--config"}, "", "", true},
+		{[]string{"--config", "--debug", "serve"}, "", "", true},
+		{[]string{"--config=", "serve"}, "", "", true},
+	} {
+		path, rest, err := configFlag(c.args)
+		if (err != nil) != c.err || path != c.path || strings.Join(rest, " ") != c.rest {
+			t.Errorf("%q: %q %q %v", c.args, path, rest, err)
+		}
+	}
+}
+
+// LUX_DEBUG turns debug on with any value but false and 0, as it always has.
+func TestDebugFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.toml")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for v, want := range map[string]bool{"1": true, "yes": true, "true": true, "false": false, "0": false} {
+		t.Setenv("LUX_DEBUG", v)
+		c, err := loadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bool(c.Debug) != want {
+			t.Errorf("LUX_DEBUG=%s: debug %v", v, c.Debug)
+		}
+	}
+}
