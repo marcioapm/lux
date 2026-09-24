@@ -177,6 +177,8 @@ write_files:
       Environment=LUX_VERSION_PARAMETER=${version_parameter}
       Environment=LUX_REGION=${region}
       Environment=LUX_MIGRATE_DSN_FILE=/root/.lux-migrate-dsn
+      Environment=LUX_HEALTH_URL=http://127.0.0.1:${luxd_port}/health
+      Environment=LUX_RUNNER_BIN_DIR=${runner_bin_dir}
       ExecStart=/usr/bin/python3 /usr/local/lib/lux/deploy-lux.py
 
   - path: /etc/systemd/system/lux-pg-backup.timer
