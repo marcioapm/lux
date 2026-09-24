@@ -42,6 +42,10 @@ lux history --host <host>
 lux events --all [--after ID] [--follow=false]   # every Run's events, as they happen
 ```
 
+On a platform host (shared by tenants), a tenant sees its own placements and
+what they hold, never another tenant's; the host's history is the
+operators'.
+
 A host is named by id or name. Two tenants may each have a host of the
 same name; an operator then names it by id, or with `--tenant`.
 
@@ -55,13 +59,19 @@ lux resume <run> [--to HOST] [--from-snapshot S] [--input TEXT]
 ```
 
 **Migrate** moves a running Run: it is stopped (its state volumes
-snapshotted, as on any stop), then resumed at once on `--to`, or on any host
-but the one it was on. It is the path a drain takes, for one Run. An agent
+snapshotted, as on any stop), then resumed at once on `--to`, or anywhere
+but the host it was on (if no other host can take it, it goes back there
+rather than wait). It is the path a drain takes, for one Run. An agent
 resumes its session, so it has its whole conversation; if it was in the
 middle of a turn, that turn was interrupted. Nothing is said to it unless
 `--input` is given: that text is delivered once it runs again ("go on where
 you left off", say). A generic workload restarts its command with its state
 volumes restored.
+
+A Run already being stopped (by its tenant, a drain, a cancel) cannot also
+be migrated. A tenant's `stop` during a migration wins: the Run stays
+stopped. A chosen host that stops taking Runs (drained, lost) before the Run
+gets there no longer holds it: it goes wherever it may.
 
 **Resume** by an operator can choose the host (`--to`). A Run's secrets are
 never stored: luxd holds their values in memory from the submit or resume

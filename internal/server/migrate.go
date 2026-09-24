@@ -80,11 +80,13 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 			return err
 		}
 		switch {
+		case state != StateRunning && state != StateStopping:
+			return errf(http.StatusConflict, "not_running", "run is %s: only a running Run can be migrated (a stopped one: resume --to)", state)
 		case stopping != "":
 			// Its stop decides what becomes of it: one reason per stop.
 			return errf(http.StatusConflict, "stopping", "the Run is already being stopped (%s)", stopping)
 		case state != StateRunning:
-			return errf(http.StatusConflict, "not_running", "run is %s: only a running Run can be migrated (a stopped one: resume --to)", state)
+			return errf(http.StatusConflict, "not_running", "run is %s", state)
 		case placeOn != nil && *placeOn == current:
 			return errf(http.StatusConflict, "same_host", "the Run is already on that host")
 		}

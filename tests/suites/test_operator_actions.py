@@ -126,3 +126,33 @@ def test_events_feed(operator, tenant_factory):
     finally:
         p.kill()
     b.run("cancel", rb)
+
+
+def test_migrate_with_nowhere_else_to_go_comes_back(operator, lux, runners, hosts):
+    """Avoiding the host it left is a preference: with no other host, the
+    migrated Run runs there again rather than waiting forever."""
+    runners.start(hosts[0])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sleep", "300"))
+    host = lux.wait_state(run_id, "running")["host"]
+    run = operator.json("migrate", run_id, "--wait", timeout=200)
+    assert run["host"] == host and run["epoch"] == 2, run
+    lux.run("cancel", run_id)
+
+
+def test_migrate_refuses_a_run_already_stopping(operator, lux, runners, hosts):
+    """One reason per stop: a Run being stopped is not also migrated, and
+    a tenant's stop wins over a migration in flight."""
+    runners.start(hosts[0])
+    runners.start(hosts[1])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "trap 'sleep 3; exit 0' TERM; sleep 300 & wait"))
+    lux.wait_state(run_id, "running")
+    operator.run("migrate", run_id)
+    with pytest.raises(CLIError) as e:
+        operator.run("migrate", run_id)
+    assert "already being stopped" in e.value.stderr
+    lux.run("stop", run_id)
+    run = lux.wait_state(run_id, "stopped", timeout=60)
+    assert run["placements"][-1]["stopReason"] == "stop", run
+    time.sleep(3)
+    assert lux.get(run_id)["state"] == "stopped", "the tenant's stop was overridden"
+    lux.run("cancel", run_id)

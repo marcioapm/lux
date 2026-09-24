@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import CLIError, Runners, generic
-from env import ALPINE_IMAGE
+from env import ALPINE_IMAGE, wait_until
 
 
 def test_operator_sees_every_tenant_and_can_narrow(operator, tenant_factory, env):
@@ -92,3 +92,36 @@ def test_operator_hosts_status_and_drain(operator, tenant_factory, env, hosts):
     finally:
         ra.stop_all()
         rb.stop_all()
+
+
+def test_tenants_do_not_see_each_others_use_of_platform_hosts(operator, tenant_factory, env, hosts):
+    """On a shared platform host, a tenant sees its own placements and
+    allocation only, and not the host's history."""
+    a, b = tenant_factory(), tenant_factory()
+    tag = a.tenant_id[-6:]
+    pool, name = f"shared-{tag}", f"plat-{tag}"
+    env.luxd_admin("create-pool", "--name", pool, "--provider", "static", "--shared")
+    token = env.luxd_admin("create-host-token", "--pool", pool)["token"]
+    proc = hosts[0].start_runner(env, token, name=name)
+    try:
+        wait_until(lambda: any(h["name"] == name and h["state"] == "ready" for h in operator.json("hosts", "ls")),
+                   30, 0.3, "the platform host never became ready")
+        spec = generic(ALPINE_IMAGE, "sleep", "300", resources={"cpus": 0.5}, placement={"pool": pool})
+        ra, rb = a.submit(spec), b.submit(spec)
+        a.wait_state(ra, "running")
+        b.wait_state(rb, "running")
+        ha = a.json("hosts", "get", name)
+        assert [p["runId"] for p in ha["placements"]] == [ra]
+        assert ha["allocated"]["cpus"] == 0.5 and ha["liveRuns"] == 1, ha
+        assert operator.json("hosts", "get", name)["allocated"]["cpus"] == 1.0
+        assert a.json("status")["allocated"]["cpus"] == 0.5
+        with pytest.raises(CLIError) as e:
+            a.run("history", "--host", name)
+        assert "operators" in e.value.stderr
+        # A tenant filters its Runs by a platform host too.
+        assert [r["id"] for r in a.json("ls", "--host", name)] == [ra]
+        a.run("cancel", ra)
+        b.run("cancel", rb)
+    finally:
+        hosts[0].stop_runner()
+        proc.wait(timeout=10)

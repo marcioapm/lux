@@ -320,6 +320,12 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 			reason = "waiting for snapshot upload"
 			continue
 		}
+		// Moving away (a migration): its snapshot's host is the one it
+		// left, so wait for the upload rather than go straight back.
+		if h.ID == r.AvoidHost && snapHost == h.ID && !snapUploaded {
+			reason = "waiting for snapshot upload"
+			continue
+		}
 		sc := 0
 		if snapHost == h.ID {
 			sc += 1000
