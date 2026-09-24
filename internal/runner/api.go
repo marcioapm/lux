@@ -67,6 +67,25 @@ func (a *api) postJSON(ctx context.Context, path string, in, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+func (a *api) getJSON(ctx context.Context, path string, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	r, err := a.req(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := a.http.Do(r)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("%s %s: %s: %s", http.MethodGet, path, resp.Status, bytes.TrimSpace(msg))
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 // upload PUTs a blob; luxd streams it into S3.
 func (a *api) upload(ctx context.Context, blobID string, body io.Reader, size int64) error {
 	r, err := a.req(ctx, http.MethodPut, "/runner/blobs/"+blobID+"?host="+a.host, body)

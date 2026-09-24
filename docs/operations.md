@@ -74,6 +74,7 @@ its variable; the table below lists them by variable.
 | `LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_DISK`, `LUX_DEFAULT_PIDS` | `2`, `8Gi`, `20Gi`, `1024` | Resources a Run gets when its spec sets none. |
 | `LUX_SCALE_DOWN_AFTER` | `10m` | How long a provisioned host stays idle before it is drained and terminated. |
 | `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
+| `LUX_OUTDATED_DRAIN_PERCENT` | `10` | Caps concurrent outdated-binaries drains per pool, as a percentage of its live hosts (at least 1 regardless). |
 | `LUX_EC2_ENDPOINT` | AWS | Overrides the EC2 endpoint (tests). |
 | `LUX_SAMPLE_EVERY` | `10s` | How often the system is sampled for history ([Operators](operators.md#history)). |
 | `LUX_HISTORY_RAW` | `48h` | How long raw samples (hosts and placements: one per heartbeat) are kept. |
@@ -212,28 +213,39 @@ config-management run has to carry them:
 
 - `GET /runner/bin/manifest` (host-token auth): `{"linux-arm64":
   {"lux-runner": "<sha256>", "lux-shim": "<sha256>"}, "linux-amd64": {...}}`
-  for whatever `LUX_RUNNER_BIN_DIR` holds.
+  for each arch `LUX_RUNNER_BIN_DIR` holds **both** binaries for; an arch
+  missing either file is never listed, and never grounds for a drain (luxd
+  never asks a host to update to something it cannot itself serve).
 - `GET /runner/bin/linux-{arch}/{lux-runner|lux-shim}` streams the binary,
   with `Content-Length` and its sha256 in `X-Lux-Sha256`.
 
-luxd hashes what it finds under `LUX_RUNNER_BIN_DIR` once at startup; a
-missing arch or file is simply not offered. A host downloads its arch's
-binaries before starting `lux-runner` (its systemd unit's
-`ExecStartPre`), so an upgrade is: replace luxd's `runner_bin_dir`,
-restart luxd, then restart or replace each host — never patch a running
-binary in place.
+luxd hashes what it finds under `LUX_RUNNER_BIN_DIR` once at startup. A
+host downloads its arch's binaries before starting `lux-runner` (its
+systemd unit's `ExecStartPre`), so an upgrade is: replace luxd's
+`runner_bin_dir`, restart luxd, then restart or replace each host — never
+patch a running binary in place. **Every luxd instance behind the same
+`runner_url` must serve identical runner binaries before a rolling
+deploy**: otherwise which luxd a host's next heartbeat happens to reach
+decides whether it is "outdated", and `/runner/bin` can serve a different
+build to a host mid-update.
 
 Every `Hello` and `Heartbeat` a runner sends carries the sha256 of its own
 binary (`os.Executable()`) and of its `--shim`; older runners simply omit
-them. When luxd holds binaries for that host's arch and either sha
-differs, it drains the host once (reason `outdated binaries`; a host
-already draining for another reason is left alone, and this never
-re-drains a host on a later heartbeat). A drained **provisioned** host is
-terminated once idle, same as any other drain, and the pool launches a
-fresh one with the running luxd's binaries. A drained **static** host is
-told to exit, once it is idle and has nothing left to upload: its systemd
-unit's `Restart=always` brings it back, and its `ExecStartPre`
-re-downloads the binaries first.
+them. When luxd holds both binaries for that host's arch and either sha
+differs, it cordons the host once (reason `outdated binaries`; no Run is
+stopped — a host already draining for another reason is left alone, this
+never re-drains a host on a later heartbeat, and at most
+`LUX_OUTDATED_DRAIN_PERCENT`% of a pool's live hosts, at least one, cordon
+at a time). A cordoned **provisioned** host stops taking new Runs; once its
+existing ones finish and it goes idle it is terminated same as any other
+drain, and the pool launches a fresh one with the running luxd's binaries.
+A cordoned **static** host keeps its Runs; once none are left and it has
+nothing left to upload, luxd asks it to exit: its systemd unit's
+`Restart=always` brings it back, and its `ExecStartPre` re-downloads the
+binaries first. A `Hello` reporting matching binaries un-drains the host
+in the same transaction that acks any exit still queued for it, and a
+runner ignores a redelivered `exit` if its binaries already match what
+luxd's manifest last showed, or if it holds live placements.
 
 ## EC2 pools
 

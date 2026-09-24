@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // runnerArches are the architectures luxd may hold runner binaries for.
@@ -65,30 +68,71 @@ func sha256File(path string) (string, error) {
 // re-drains it, and a matching restart can be un-drained).
 const outdatedBinariesReason = "outdated binaries"
 
-// binariesOutdated reports whether luxd holds a binary for arch that
-// differs from what the runner reports having. Only checked for shas the
-// runner sends and luxd holds: an older runner (no shas) or an arch luxd
-// serves nothing for are never grounds to drain.
-func (s *Server) binariesOutdated(arch, runnerSHA, shimSHA string) bool {
+// hasBothBinaries reports whether luxd holds every binary in
+// runnerBinNames for arch: the precondition for drain and undrain
+// decisions, so luxd is never asking a host for what it cannot itself
+// serve (a partial upload, or a build that only produced one file).
+func (s *Server) hasBothBinaries(arch string) bool {
 	have := s.bins[arch]
-	if len(have) == 0 {
+	for _, name := range runnerBinNames {
+		if have[name] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// binariesOutdated reports whether luxd holds a binary for arch that
+// differs from what the runner reports having. Only when luxd holds both
+// binaries for the arch (hasBothBinaries): an older runner (no shas), an
+// arch luxd serves nothing for, or one where only one of the pair is
+// present are never grounds to drain — luxd never drains a host for an
+// arch it cannot itself serve.
+func (s *Server) binariesOutdated(arch, runnerSHA, shimSHA string) bool {
+	if !s.hasBothBinaries(arch) {
 		return false
 	}
-	if runnerSHA != "" && have["lux-runner"] != "" && have["lux-runner"] != runnerSHA {
+	have := s.bins[arch]
+	if runnerSHA != "" && have["lux-runner"] != runnerSHA {
 		return true
 	}
-	if shimSHA != "" && have["lux-shim"] != "" && have["lux-shim"] != shimSHA {
+	if shimSHA != "" && have["lux-shim"] != shimSHA {
 		return true
 	}
 	return false
 }
 
 // binariesMatch is the converse, used to un-drain a host once a restart
-// downloaded binaries that now match: both shas must be present and
-// neither outdated (a runner still reporting nothing never un-drains
-// itself this way; it stays drained until it does).
+// downloaded binaries that now match: luxd must hold both binaries for the
+// arch, both shas must be present and neither outdated (a runner still
+// reporting nothing never un-drains itself this way; it stays drained
+// until it does).
 func (s *Server) binariesMatch(arch, runnerSHA, shimSHA string) bool {
-	return runnerSHA != "" && shimSHA != "" && !s.binariesOutdated(arch, runnerSHA, shimSHA)
+	return s.hasBothBinaries(arch) && runnerSHA != "" && shimSHA != "" && !s.binariesOutdated(arch, runnerSHA, shimSHA)
+}
+
+// outdatedDrainRoom reports whether hostID's pool has room for one more
+// concurrent outdated-binaries drain, capped at
+// max(1, OutdatedDrainPercent% of the pool's live hosts): a release must
+// not cordon a whole pool's worth of capacity in one instant. A pool's
+// live hosts and its currently-draining-for-this-reason hosts are counted
+// together (coalesce(tenant_id,”), pool): the same grouping a pool's
+// hosts share.
+func (s *Server) outdatedDrainRoom(ctx context.Context, tx pgx.Tx, hostID string) (bool, error) {
+	var live, draining int
+	err := tx.QueryRow(ctx, `
+		WITH h AS (SELECT coalesce(tenant_id, '') AS tenant, pool FROM hosts WHERE id = $1)
+		SELECT
+			count(*) FILTER (WHERE state IN ('ready', 'draining')),
+			count(*) FILTER (WHERE draining AND state_reason = $2)
+		FROM hosts, h
+		WHERE coalesce(hosts.tenant_id, '') = h.tenant AND hosts.pool = h.pool`,
+		hostID, outdatedBinariesReason).Scan(&live, &draining)
+	if err != nil {
+		return false, err
+	}
+	room := max(1, live*s.cfg.OutdatedDrainPercent/100)
+	return draining < room, nil
 }
 
 func (s *Server) runnerBinSHA256(arch, name string) (string, bool) {
@@ -97,12 +141,14 @@ func (s *Server) runnerBinSHA256(arch, name string) (string, bool) {
 }
 
 // runnerBinManifest is the contract's {"linux-arm64": {"lux-runner": sha,
-// "lux-shim": sha}, ...}, for arches luxd holds anything for.
+// "lux-shim": sha}, ...}, for arches luxd holds both binaries for: a host
+// downloading by this manifest, or a drain decision made from it, never
+// meets an arch luxd can only half serve.
 func (s *Server) runnerBinManifest() map[string]map[string]string {
 	out := map[string]map[string]string{}
-	for arch, m := range s.bins {
-		if len(m) > 0 {
-			out["linux-"+arch] = m
+	for arch := range s.bins {
+		if s.hasBothBinaries(arch) {
+			out["linux-"+arch] = s.bins[arch]
 		}
 	}
 	return out

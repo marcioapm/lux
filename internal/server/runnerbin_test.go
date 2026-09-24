@@ -27,8 +27,9 @@ func TestLoadRunnerBinaries(t *testing.T) {
 	write("arm64", "lux-runner", "runner-arm64")
 	write("arm64", "lux-shim", "shim-arm64")
 	write("amd64", "lux-runner", "runner-amd64")
-	// amd64's lux-shim is missing: that arch is still offered, just
-	// without it (the manifest only lists what is there).
+	// amd64's lux-shim is missing: the pair is incomplete, so amd64 is
+	// hashed (a lookup for lux-runner alone still finds it) but never
+	// offered in the manifest and never grounds for a drain decision.
 
 	s := &Server{cfg: Config{RunnerBinDir: dir}}
 	s.loadRunnerBinaries()
@@ -48,11 +49,8 @@ func TestLoadRunnerBinaries(t *testing.T) {
 	if m["linux-arm64"]["lux-runner"] != sum("runner-arm64") || m["linux-arm64"]["lux-shim"] != sum("shim-arm64") {
 		t.Errorf("manifest linux-arm64: %+v", m["linux-arm64"])
 	}
-	if m["linux-amd64"]["lux-runner"] != sum("runner-amd64") {
-		t.Errorf("manifest linux-amd64: %+v", m["linux-amd64"])
-	}
-	if _, has := m["linux-amd64"]["lux-shim"]; has {
-		t.Error("manifest listed an amd64 lux-shim that does not exist")
+	if _, has := m["linux-amd64"]; has {
+		t.Error("manifest offered amd64, which is missing lux-shim")
 	}
 }
 
@@ -75,6 +73,7 @@ func TestLoadRunnerBinariesEmptyDir(t *testing.T) {
 func TestBinariesOutdated(t *testing.T) {
 	s := &Server{bins: map[string]map[string]string{
 		"arm64": {"lux-runner": "r1", "lux-shim": "s1"},
+		"riscv": {"lux-runner": "r1"}, // only one of the pair
 	}}
 	cases := []struct {
 		name               string
@@ -86,6 +85,7 @@ func TestBinariesOutdated(t *testing.T) {
 		{"shim differs", "arm64", "r1", "s2", true},
 		{"older runner: no shas", "arm64", "", "", false},
 		{"unknown arch: luxd holds nothing", "amd64", "whatever", "whatever", false},
+		{"only one of the pair: never grounds to drain", "riscv", "r2", "whatever", false},
 	}
 	for _, c := range cases {
 		if got := s.binariesOutdated(c.arch, c.runner, c.shim); got != c.want {
@@ -97,6 +97,7 @@ func TestBinariesOutdated(t *testing.T) {
 func TestBinariesMatch(t *testing.T) {
 	s := &Server{bins: map[string]map[string]string{
 		"arm64": {"lux-runner": "r1", "lux-shim": "s1"},
+		"riscv": {"lux-runner": "r1"}, // only one of the pair
 	}}
 	if !s.binariesMatch("arm64", "r1", "s1") {
 		t.Error("matching shas did not match")
@@ -106,5 +107,8 @@ func TestBinariesMatch(t *testing.T) {
 	}
 	if s.binariesMatch("arm64", "", "") {
 		t.Error("empty shas (no report yet) matched")
+	}
+	if s.binariesMatch("riscv", "r1", "s1") {
+		t.Error("matched an arch luxd only half serves")
 	}
 }

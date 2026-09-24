@@ -104,7 +104,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		}
 		// Un-drain a host drained for exactly this reason once its
 		// binaries match again (its restart's ExecStartPre re-downloaded
-		// them); read before this Hello's own UPDATE clears state_reason.
+		// them); read before this Hello's own UPDATE.
 		var wasDraining bool
 		var reason string
 		if err := tx.QueryRow(ctx, `SELECT draining, state_reason FROM hosts WHERE id = $1`, hostID).Scan(&wasDraining, &reason); err != nil {
@@ -112,10 +112,20 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		}
 		undrain := wasDraining && reason == outdatedBinariesReason && s.binariesMatch(h.Arch, h.RunnerSHA256, h.ShimSHA256)
 		draining := wasDraining && !undrain
+		// state_reason survives while still draining: a Hello (a reconnect,
+		// or luxd itself restarting) must not wipe the marker the reaper
+		// and this same undrain check depend on. Only an actual undrain
+		// clears it, along with the timestamps a later drain cycle needs
+		// to start clean, and any exit message still queued from the drain
+		// this Hello just ended (redelivered otherwise, to a host that is
+		// current again).
 		_, err = tx.Exec(ctx, `UPDATE hosts SET
 				draining = $9,
 				state = CASE WHEN $9 THEN 'draining' ELSE 'ready' END,
-				state_reason = '', labels = $2, arch = $3, capacity = $4, versions = $5, caches = $6,
+				state_reason = CASE WHEN $9 THEN state_reason ELSE '' END,
+				drain_requested_at = CASE WHEN $9 THEN drain_requested_at ELSE NULL END,
+				exit_requested_at = CASE WHEN $9 THEN exit_requested_at ELSE NULL END,
+				labels = $2, arch = $3, capacity = $4, versions = $5, caches = $6,
 				local_snapshots = $7, provider_id = coalesce(nullif($8, ''), provider_id),
 				registered_at = coalesce(registered_at, now()),
 				provisioned_at = coalesce(provisioned_at, now()),
@@ -125,12 +135,26 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		if err != nil {
 			return err
 		}
-		if !draining && s.binariesOutdated(h.Arch, h.RunnerSHA256, h.ShimSHA256) {
-			drained, err := s.drainHosts(ctx, tx, outdatedBinariesReason, "drain", "id = $1", hostID)
-			if err != nil {
+		if undrain {
+			if _, err := tx.Exec(ctx, `UPDATE host_messages SET acked_at = now()
+				WHERE host_id = $1 AND type = $2 AND acked_at IS NULL`, hostID, proto.MsgExit); err != nil {
 				return err
 			}
-			outdatedDrained = drained
+		}
+		if !draining && s.binariesOutdated(h.Arch, h.RunnerSHA256, h.ShimSHA256) {
+			if room, err := s.outdatedDrainRoom(ctx, tx, hostID); err != nil {
+				return err
+			} else if room {
+				// Cordon only: no requestStop. A static host's Runs finish
+				// undisturbed and the reaper sends MsgExit once none are
+				// left; a provisioned host stops taking new Runs and the
+				// pool's existing replace path takes over once it is idle.
+				drained, err := s.drainHosts(ctx, tx, outdatedBinariesReason, "", "id = $1", hostID)
+				if err != nil {
+					return err
+				}
+				outdatedDrained = drained
+			}
 		}
 		w.HostID = hostID
 
@@ -343,17 +367,24 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		}
 		// A host already draining (for any reason) is left alone: never
 		// re-drained here, and its reason is not this heartbeat's to change.
+		// draining alone is enough: the UPDATE above already reconciled
+		// state with it for a host coming back from lost (same predicate
+		// registerHost's Hello uses).
 		var arch string
 		var draining bool
-		if err := tx.QueryRow(ctx, `SELECT arch, draining OR state = 'draining' FROM hosts WHERE id = $1`, hostID).Scan(&arch, &draining); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT arch, draining FROM hosts WHERE id = $1`, hostID).Scan(&arch, &draining); err != nil {
 			return err
 		}
 		if !draining && s.binariesOutdated(arch, hb.RunnerSHA256, hb.ShimSHA256) {
-			drained, err := s.drainHosts(ctx, tx, outdatedBinariesReason, "drain", "id = $1", hostID)
-			if err != nil {
+			if room, err := s.outdatedDrainRoom(ctx, tx, hostID); err != nil {
 				return err
+			} else if room {
+				drained, err := s.drainHosts(ctx, tx, outdatedBinariesReason, "", "id = $1", hostID)
+				if err != nil {
+					return err
+				}
+				outdatedDrained = drained
 			}
-			outdatedDrained = drained
 		}
 		if n > 0 {
 			// Leases renewed and usage peaks raised for every placement at once.

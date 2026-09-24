@@ -339,6 +339,19 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 	case proto.MsgExit:
 		var e proto.ExitHost
 		_ = json.Unmarshal(f.Data, &e)
+		// A redelivered exit can arrive after this host already undrained
+		// (a race between the ack and a reconnect) or while it is placing
+		// new work: neither is safe to act on. Log it either way, since
+		// both cases mean luxd's and the runner's view of this host
+		// briefly diverged.
+		if live := r.livePlacements(); len(live) > 0 {
+			r.log.Warn("ignoring exit: this host holds live placements", "reason", e.Reason, "code", e.Code, "placements", len(live))
+			return
+		}
+		if r.binariesMatchManifest(ctx) {
+			r.log.Warn("ignoring exit: this host's binaries already match luxd's manifest", "reason", e.Reason, "code", e.Code)
+			return
+		}
 		r.log.Warn("luxd asked this host to exit", "reason", e.Reason, "code", e.Code)
 		// Exit after the ack for this message has gone out (handleControl
 		// returns to its caller, which sends it next), not from here: never
@@ -464,6 +477,25 @@ func (r *Runner) livePlacements() []*placement {
 		}
 	}
 	return ps
+}
+
+// binariesMatchManifest fetches luxd's current manifest and reports
+// whether it lists this host's arch with the shas this runner already
+// has: the binaries an exit would have downloaded are already in place
+// (a race between the exit and this host's own restart), so the exit is
+// stale and safe to ignore. A manifest luxd cannot be reached for, or
+// that does not offer this arch, never matches: only a positive match
+// silences the exit.
+func (r *Runner) binariesMatchManifest(ctx context.Context) bool {
+	var manifest map[string]map[string]string
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := r.api.getJSON(ctx, "/runner/bin/manifest", &manifest); err != nil {
+		return false
+	}
+	have := manifest["linux-"+runtime.GOARCH]
+	return have["lux-runner"] != "" && have["lux-runner"] == r.runnerSHA256 &&
+		have["lux-shim"] != "" && have["lux-shim"] == r.shimSHA256
 }
 
 // usageLoop samples disk and network use of live placements, in parallel,

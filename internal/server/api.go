@@ -1520,9 +1520,14 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 	return out, nil
 }
 
-// drainHosts takes hosts out of service (no new placements) and asks their
-// live placements to stop with stopReason (drain or preempt: both resume
-// elsewhere); where selects them (placeholders from $1).
+// drainHosts takes hosts out of service (no new placements) and, unless
+// stopReason is "" (cordon only), asks their live placements to stop with
+// it (drain or preempt: both resume elsewhere); where selects them
+// (placeholders from $1). Cordon-only is for a reason that must not
+// preempt anything running (outdated binaries): the host simply stops
+// taking new work, and whatever runs on it finishes on its own — the
+// reaper (static hosts) or the pool's replace path (provisioned) picks it
+// up once it is idle.
 // Returns their ids, to notify once the transaction commits.
 func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, stopReason, where string, args ...any) ([]string, error) {
 	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
@@ -1534,7 +1539,7 @@ func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, stopReason, 
 		return nil, err
 	}
 	hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil || len(hosts) == 0 {
+	if err != nil || len(hosts) == 0 || stopReason == "" {
 		return hosts, err
 	}
 	live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", hosts)

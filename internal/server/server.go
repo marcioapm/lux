@@ -20,6 +20,9 @@ import (
 const (
 	DefaultScaleDownAfter = 10 * time.Minute
 	DefaultLaunchTimeout  = 10 * time.Minute
+	// DefaultOutdatedDrainPercent: 10% of a pool's hosts (at least 1) may
+	// drain for outdated binaries at once.
+	DefaultOutdatedDrainPercent = 10
 )
 
 type Config struct {
@@ -45,6 +48,13 @@ type Config struct {
 	ScaleDownAfter time.Duration
 	// LaunchTimeout is how long a launched host may take to register.
 	LaunchTimeout time.Duration
+	// OutdatedDrainPercent caps how many of a pool's hosts may be
+	// draining for outdated binaries at once, as a percentage of its live
+	// hosts (at least 1 regardless). 0: DefaultOutdatedDrainPercent.
+	// Every luxd instance must serve identical runner binaries before a
+	// rolling deploy: otherwise which one a host's next heartbeat reaches
+	// decides whether it is "outdated" (docs/operations.md).
+	OutdatedDrainPercent int
 	// Defaults are a Run's resources where its spec leaves them unset
 	// (zero: spec.BuiltinDefaults).
 	Defaults spec.Defaults
@@ -96,6 +106,9 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	}
 	if cfg.LaunchTimeout == 0 {
 		cfg.LaunchTimeout = DefaultLaunchTimeout
+	}
+	if cfg.OutdatedDrainPercent == 0 {
+		cfg.OutdatedDrainPercent = DefaultOutdatedDrainPercent
 	}
 	if cfg.Defaults == (spec.Defaults{}) {
 		cfg.Defaults = spec.BuiltinDefaults

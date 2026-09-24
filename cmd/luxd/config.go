@@ -49,7 +49,10 @@ type config struct {
 	Tick           duration `toml:"tick" env:"LUX_TICK"`
 	ScaleDownAfter duration `toml:"scale_down_after" env:"LUX_SCALE_DOWN_AFTER"`
 	LaunchTimeout  duration `toml:"launch_timeout" env:"LUX_LAUNCH_TIMEOUT"`
-	Defaults       struct {
+	// OutdatedDrainPercent caps concurrent outdated-binaries drains per
+	// pool, as a percentage of its live hosts (at least 1). Default 10.
+	OutdatedDrainPercent int `toml:"outdated_drain_percent" env:"LUX_OUTDATED_DRAIN_PERCENT"`
+	Defaults             struct {
 		CPUs   float64 `toml:"cpus" env:"LUX_DEFAULT_CPUS"`
 		Memory size    `toml:"memory" env:"LUX_DEFAULT_MEMORY"`
 		Disk   size    `toml:"disk" env:"LUX_DEFAULT_DISK"`
@@ -140,6 +143,7 @@ func defaultConfig() config {
 	c.Tick.Duration = time.Second
 	c.ScaleDownAfter.Duration = server.DefaultScaleDownAfter
 	c.LaunchTimeout.Duration = server.DefaultLaunchTimeout
+	c.OutdatedDrainPercent = server.DefaultOutdatedDrainPercent
 	d := spec.BuiltinDefaults
 	c.Defaults.CPUs, c.Defaults.Memory.Bytes, c.Defaults.Disk.Bytes, c.Defaults.Pids = d.CPUs, d.Memory, d.Disk, d.Pids
 	c.History.SampleEvery.Duration = 10 * time.Second

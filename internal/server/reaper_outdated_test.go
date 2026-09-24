@@ -90,3 +90,62 @@ func TestReapOutdatedStaticHosts(t *testing.T) {
 		t.Fatalf("host_messages for h1 after a second pass: %d, want still 1", msgs)
 	}
 }
+
+// reapOutdatedStaticHosts must not exit a host that still has a live
+// placement, an unshipped blob, or that is provisioned (the pool's own
+// replace path handles those instead).
+func TestReapOutdatedStaticHostsExclusions(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q, args...); return err }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	exec(`INSERT INTO hosts (id, name, state, draining, state_reason) VALUES
+		('h-busy', 'h-busy', 'draining', true, $1),
+		('h-blob', 'h-blob', 'draining', true, $1)`, outdatedBinariesReason)
+	exec(`INSERT INTO hosts (id, name, state, draining, state_reason, provision_requested_at) VALUES
+		('h-prov', 'h-prov', 'draining', true, $1, now())`, outdatedBinariesReason)
+	exec(`INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{}', 'running')`)
+	exec(`INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES
+		('p1', 't1', 'r1', 'h-busy', 1, 'running')`)
+	exec(`INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, host_id) VALUES
+		('b1', 't1', 'r1', 1, 'output', 'out', 'host', 'h-blob')`)
+
+	if err := s.reapOutdatedStaticHosts(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	requested := map[string]bool{}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id, exit_requested_at IS NOT NULL FROM hosts ORDER BY id`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			var r bool
+			if err := rows.Scan(&id, &r); err != nil {
+				return err
+			}
+			requested[id] = r
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requested["h-busy"] {
+		t.Error("h-busy (live placement): exit was requested, want held back")
+	}
+	if requested["h-blob"] {
+		t.Error("h-blob (unshipped blob): exit was requested, want held back")
+	}
+	if requested["h-prov"] {
+		t.Error("h-prov (provisioned): exit was requested, want left to the pool's replace path")
+	}
+}

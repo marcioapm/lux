@@ -81,6 +81,27 @@ def test_a_missing_arch_or_binary_is_not_offered(env, runner_bin_dir):
     assert resp.status_code == 404
 
 
+def test_an_arch_missing_one_of_the_pair_is_not_offered(env, tmp_path_factory):
+    """luxd never advertises, or drains for, an arch it can only half
+    serve: the manifest only lists an arch when it holds both binaries."""
+    d = tmp_path_factory.mktemp("runner-bin-partial")
+    (d / "linux-arm64").mkdir()
+    (d / "linux-arm64" / "lux-runner").write_bytes(b"only the runner, no shim\n")
+    env.stop_luxd()
+    env.start_luxd(LUX_RUNNER_BIN_DIR=str(d))
+    try:
+        token = env.luxd_admin("create-host-token")["token"]
+        manifest = _get(env, "/runner/bin/manifest", token).json()
+        assert "linux-arm64" not in manifest, manifest
+        # The binary itself is still servable by name (a partial mirror is
+        # not a 404), just never offered or drained for.
+        resp = _get(env, "/runner/bin/linux-arm64/lux-runner", token)
+        assert resp.status_code == 200, resp.text
+    finally:
+        env.stop_luxd()
+        env.start_luxd()
+
+
 # ---- bootstrap.sh (static hosts) --------------------------------------------
 
 def test_bootstrap_script_is_served_without_auth(env):
@@ -207,18 +228,27 @@ def test_an_outdated_static_host_is_told_to_exit_once_drained(env, lux, runners,
 
 def test_a_host_already_draining_for_another_reason_is_left_alone(env, lux, runners, hosts):
     """Outdated binaries are never a second drain reason for a host already
-    draining for something else (e.g. a person asked for it)."""
+    draining for something else (e.g. a person asked for it), including
+    across a reconnect: the Hello that follows luxd's restart must not wipe
+    the reason (`state_reason` survives while still draining)."""
     host = runners.start(hosts[0])
     arch = _host_arch(lux, host.name)
     lux.run("hosts", "drain", host.name)
     wait_until(lambda: lux.json("hosts", "get", host.name)["draining"], 15, 0.3, "manual drain never took")
+    before_heartbeat = lux.json("hosts", "get", host.name)["lastHeartbeat"]
     bin_dir = _mismatched_bin_dir(env.log_dir + "/other-bin3", arch)
 
     env.stop_luxd()
     env.start_luxd(LUX_RUNNER_BIN_DIR=bin_dir)
     try:
-        time.sleep(3)
+        # Wait for an actual reconnect (a fresh Hello answered by the
+        # restarted luxd), not a fixed sleep: a newer lastHeartbeat than
+        # before luxd restarted proves the Hello that could have wiped the
+        # reason has already been processed.
+        wait_until(lambda: (lambda h: h if h["lastHeartbeat"] != before_heartbeat else None)(lux.json("hosts", "get", host.name)),
+                   30, 0.3, "the runner never reconnected after luxd restarted")
         h = lux.json("hosts", "get", host.name)
+        assert h["draining"], h
         assert h["stateReason"] == "drain requested", h  # not overwritten with "outdated binaries"
     finally:
         env.stop_luxd()
