@@ -144,8 +144,17 @@ func (u *uploader) loop(ctx context.Context) {
 func (u *uploader) pass(ctx context.Context) {
 	for snapID, rec := range u.r.snapshotRecords() {
 		// Only once luxd has the report that lists them: before, it does
-		// not know the blobs (and answers 404).
-		if !rec.Reported || u.r.isStaleRun(rec.RunID, rec.Epoch) {
+		// not know the blobs (and answers 404). A record that will never be
+		// reported (its placement was fenced off, or a later placement of
+		// the Run on this host replaced it) has nothing to upload: its
+		// files go once its Run's local copy is discarded.
+		if !rec.Reported {
+			if rec.Discard && u.r.unreportable(rec) {
+				removeSnapshotFiles(u.r, snapID, rec)
+			}
+			continue
+		}
+		if u.r.isStaleRun(rec.RunID, rec.Epoch) {
 			continue
 		}
 		done := true
@@ -181,10 +190,10 @@ func (u *uploader) pass(ctx context.Context) {
 	}
 }
 
-// markReported records that luxd has a snapshot's report; and so every
-// earlier record of the same placement, whose report went through before
-// the runner could mark it (luxd answers a report only after the previous
-// one: they are sent in order, retried until answered).
+// markReported records that luxd has a snapshot's report; and so an
+// earlier record of the same placement (same epoch: a restarted runner
+// finished it again), whose report went through before the runner could
+// mark it. Other placements' records are theirs alone.
 func (r *Runner) markReported(snapID string) {
 	var runID string
 	var epoch int
@@ -193,10 +202,20 @@ func (r *Runner) markReported(snapID string) {
 		runID, epoch = rec.RunID, rec.Epoch
 	})
 	for id, rec := range r.snapshotRecords() {
-		if id != snapID && !rec.Reported && rec.RunID == runID && rec.Epoch <= epoch {
+		if id != snapID && !rec.Reported && rec.RunID == runID && rec.Epoch == epoch {
 			r.updateRecord(id, func(rec *snapshotRecord) { rec.Reported = true })
 		}
 	}
+}
+
+// unreportable: a record whose report will never be sent: its placement
+// was fenced off, or the Run has a later placement on this host.
+func (r *Runner) unreportable(rec *snapshotRecord) bool {
+	st, err := readRunState(r.runDir(rec.RunID))
+	if err != nil {
+		return true // the Run's local state is gone
+	}
+	return st.Epoch > rec.Epoch || (st.Stale && st.Epoch == rec.Epoch)
 }
 
 // updateRecord changes a snapshot record on disk, from its current

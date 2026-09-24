@@ -258,6 +258,12 @@ class TestEnvironment:
             "LUX_S3_ACCESS_KEY": MINIO_USER,
             "LUX_S3_SECRET_KEY": MINIO_PASSWORD,
             "LUX_S3_REGION": "us-east-1",
+            # Never the developer's AWS account: the EC2 provider gets only
+            # what a test passes it (the fake's endpoint, or --real-ec2).
+            **({} if os.environ.get("LUX_TEST_REAL_EC2") else {
+                "AWS_CONFIG_FILE": "/dev/null", "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
+                "AWS_EC2_METADATA_DISABLED": "true", "LUX_EC2_ENDPOINT": "http://127.0.0.1:9",
+                "AWS_ACCESS_KEY_ID": "", "AWS_SECRET_ACCESS_KEY": "", "AWS_SESSION_TOKEN": "", "AWS_PROFILE": ""}),
         }
 
     # -- setup --------------------------------------------------------------

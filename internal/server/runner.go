@@ -71,13 +71,8 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			if hostID == "" {
 				hostID = ids.New(ids.Host)
 				if tok.TenantID != nil {
-					var n, max int
-					if err := tx.QueryRow(ctx, `SELECT count(*), coalesce((SELECT max_hosts FROM tenants WHERE id = $1), 0)
-						FROM hosts WHERE tenant_id = $1 AND state IN ('provisioning', 'ready', 'draining')`, *tok.TenantID).Scan(&n, &max); err != nil {
+					if err := checkHostQuota(ctx, tx, *tok.TenantID); err != nil {
 						return err
-					}
-					if max > 0 && n >= max {
-						return fmt.Errorf("tenant host quota reached (%d)", max)
 					}
 				}
 				if _, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state)

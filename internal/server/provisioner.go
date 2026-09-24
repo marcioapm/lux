@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,15 +16,29 @@ import (
 
 // Provider provisions hosts for pools whose provider it is (ec2).
 type Provider interface {
-	// Launch starts one host and returns its provider id. template is the
-	// pool's; env is what its runner starts with (URL, host token, name).
-	Launch(ctx context.Context, pool, hostName string, template json.RawMessage, env map[string]string) (string, error)
+	// Launch starts one host, tagged with tags, and returns its provider
+	// id. env is what its runner starts with (URL, host token, name).
+	Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (string, error)
 	// Terminate ends a host. One that no longer exists is done.
 	Terminate(ctx context.Context, template json.RawMessage, providerID string) error
-	// Gone reports which of the given hosts the provider knows are
-	// terminated. A host it does not know yet (just launched) is not gone.
-	Gone(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string]bool, error)
+	// Instances lists the provider's hosts carrying all the given tags,
+	// by provider id, with their state (terminated and shutting-down are
+	// gone; anything else may still run).
+	Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]string, error)
 }
+
+// Tags lux puts on what it launches: how the provisioner finds a pool's
+// instances whatever its database knows (a launch whose reply was lost,
+// a row written off too early).
+const (
+	tagManaged = "lux:managed"
+	tagPool    = "lux:pool"
+	tagHost    = "lux:host" // the host row's id
+)
+
+// lostGrace: a lost provisioned host is terminated only after this long
+// without its runner (a restart or a network blip is not a loss).
+const lostGrace = 5 * time.Minute
 
 // provisionerLoop keeps provisioned pools the size their demand, minimum
 // and warm settings say. One luxd at a time does it (an advisory lock).
@@ -57,21 +72,14 @@ type poolRow struct {
 const provisionLock = 0x6c75782f70726f76
 
 func (s *Server) provision(ctx context.Context) error {
-	// A session lock, held on one connection for the whole pass: another
-	// luxd must not reconcile (and launch) at the same time.
-	conn, err := s.db.Pool.Acquire(ctx)
-	if err != nil {
+	// Leadership: a lease in the database, not a lock held on a connection
+	// across provider calls. One luxd reconciles at a time; another takes
+	// over when the lease lapses.
+	if ok, err := s.provisionLease(ctx); err != nil || !ok {
 		return err
 	}
-	defer conn.Release()
-	var locked bool
-	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, int64(provisionLock)).Scan(&locked); err != nil || !locked {
-		return err
-	}
-	defer conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, int64(provisionLock))
-
 	var pools []poolRow
-	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired
 			FROM pools WHERE provider <> 'static'
 			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool = pools.name
@@ -119,6 +127,10 @@ type poolState struct {
 type hostRef struct {
 	ID, ProviderID, Reason string
 	Template               json.RawMessage
+	Draining               bool // not counted in the pool's total
+	// Settled: launched long enough ago that the provider lists it (its
+	// listings are eventually consistent); one missing from them is gone.
+	Settled bool
 }
 
 func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, checkAlive bool) error {
@@ -130,27 +142,12 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		return err
 	}
 
-	// Hosts the provider says are terminated (behind our back): their rows
-	// go, and their Runs are lost by the usual heartbeat path. Checked once
-	// a minute (provider API limits).
-	if checkAlive && len(st.existing) > 0 {
-		for tmpl, hosts := range byTemplate(st.existing) {
-			pids := make([]string, len(hosts))
-			for i, h := range hosts {
-				pids[i] = h.ProviderID
-			}
-			gone, err := prov.Gone(ctx, json.RawMessage(tmpl), pids)
-			if err != nil {
-				s.log.Warn("provider check", "pool", pl.Name, "err", err)
-				continue
-			}
-			for _, h := range hosts {
-				if gone[h.ProviderID] {
-					s.markTerminated(ctx, h.ID, "the provider terminated this host")
-					st.total--
-				}
-			}
-		}
+	// Once a minute (provider API limits), the provider's view of the
+	// pool, by tag: hosts it terminated behind our back go (their Runs are
+	// lost by the usual heartbeat path); instances of this pool that no
+	// live row claims (a launch whose reply was lost) are terminated.
+	if checkAlive {
+		s.reconcileWithProvider(ctx, prov, pl, &st)
 	}
 
 	// Scale down: drain idle hosts beyond what warm and waiting Runs need
@@ -193,12 +190,63 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	return nil
 }
 
-func byTemplate(hosts []hostRef) map[string][]hostRef {
-	out := map[string][]hostRef{}
-	for _, h := range hosts {
-		out[string(h.Template)] = append(out[string(h.Template)], h)
+func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl poolRow, st *poolState) {
+	// Instances are listed with the template each was launched with (its
+	// region): the pool's current one, and any older ones its hosts carry.
+	templates := map[string]json.RawMessage{string(pl.Template): pl.Template}
+	for _, h := range st.existing {
+		templates[string(h.Template)] = h.Template
 	}
-	return out
+	rows := map[string]hostRef{} // provider id → live row
+	for _, h := range st.existing {
+		rows[h.ProviderID] = h
+	}
+	listed := map[string]bool{}
+	for _, tmpl := range templates {
+		insts, err := prov.Instances(ctx, tmpl, map[string]string{tagManaged: "true", tagPool: s.poolTag(pl)})
+		if err != nil {
+			s.log.Warn("provider check", "pool", pl.Name, "err", err)
+			return
+		}
+		for pid, state := range insts {
+			listed[pid] = true
+			gone := state == "terminated" || state == "shutting-down"
+			h, known := rows[pid]
+			switch {
+			case known && gone:
+				s.providerGone(ctx, h, st)
+			case !known && !gone:
+				// No live row claims it: an orphan (a launch luxd never
+				// recorded, or a host written off). Terminate it.
+				s.log.Warn("terminating an orphaned instance", "pool", pl.Name, "providerId", pid)
+				if err := prov.Terminate(ctx, tmpl, pid); err != nil {
+					s.log.Warn("terminate orphan", "providerId", pid, "err", err)
+				}
+			}
+		}
+	}
+	// Terminated instances drop out of the provider's listings after a while
+	// (EC2 purges them): a settled host that is not listed is gone too.
+	for pid, h := range rows {
+		if !listed[pid] && h.Settled {
+			s.providerGone(ctx, h, st)
+		}
+	}
+}
+
+func (s *Server) providerGone(ctx context.Context, h hostRef, st *poolState) {
+	s.markTerminated(ctx, h.ID, "the provider terminated this host")
+	if !h.Draining {
+		st.total--
+	}
+}
+
+// poolTag names a pool in provider tags: tenant pools by tenant and name.
+func (s *Server) poolTag(pl poolRow) string {
+	if pl.TenantID != nil {
+		return *pl.TenantID + "/" + pl.Name
+	}
+	return pl.Name
 }
 
 func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolState) error {
@@ -213,16 +261,18 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 		           ELSE r.tenant_id = $2 END`, pl.Name, pl.TenantID).Scan(&st.demand); err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT h.id, h.provider_id, coalesce(h.launch_template, $5), h.state, h.draining,
+	rows, err := tx.Query(ctx, `SELECT h.id, coalesce(h.provider_id, ''), coalesce(h.launch_template, $5), h.state, h.draining,
 			EXISTS (SELECT 1 FROM placements p WHERE p.host_id = h.id AND p.state IN `+livePlacementStates+`),
 			EXISTS (SELECT 1 FROM blobs b WHERE b.host_id = h.id AND b.location = 'host'),
 			coalesce(h.last_placement_ended_at, h.registered_at, h.created_at) < now() - $3::interval,
-			h.provision_requested_at < now() - $4::interval
+			h.provision_requested_at < now() - $4::interval,
+			coalesce(h.lost_at < now() - $6::interval, false),
+			h.provision_requested_at < now() - interval '1 minute'
 		FROM hosts h
-		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provider_id IS NOT NULL
+		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provision_requested_at IS NOT NULL
 		  AND h.state <> 'terminated'
 		ORDER BY coalesce(h.last_placement_ended_at, h.registered_at, h.created_at)`,
-		pl.Name, pl.TenantID, interval(s.cfg.ScaleDownAfter), interval(s.cfg.LaunchTimeout), pl.Template)
+		pl.Name, pl.TenantID, interval(s.cfg.ScaleDownAfter), interval(s.cfg.LaunchTimeout), pl.Template, interval(lostGrace))
 	if err != nil {
 		return err
 	}
@@ -230,19 +280,27 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 	for rows.Next() {
 		var h hostRef
 		var state string
-		var draining, busy, pending, idleLong, launchLong bool
-		if err := rows.Scan(&h.ID, &h.ProviderID, &h.Template, &state, &draining, &busy, &pending, &idleLong, &launchLong); err != nil {
+		var draining, busy, pending, idleLong, launchLong, lostLong bool
+		if err := rows.Scan(&h.ID, &h.ProviderID, &h.Template, &state, &draining, &busy, &pending, &idleLong, &launchLong, &lostLong, &h.Settled); err != nil {
 			return err
 		}
 		switch {
+		case h.ProviderID == "":
+			// Launched, but its instance id was never recorded (luxd
+			// stopped mid-launch): the tag check finds and ends the
+			// instance; the row goes once the launch timeout has passed.
+			if launchLong {
+				s.markTerminatedTx(ctx, tx, h.ID, "launch never completed")
+			}
+			continue
 		case state == "provisioning" && launchLong:
 			h.Reason = "never registered"
 			st.terminate = append(st.terminate, h)
 			continue
-		case state == "lost":
-			// Its runner is gone; its Runs were written off. The instance
-			// may still run (and bill): terminate it; a replacement comes
-			// from the usual scale-up.
+		case state == "lost" && lostLong:
+			// Its runner has been gone past the grace period; its Runs were
+			// written off. The instance may still run (and bill): terminate
+			// it; a replacement comes from the usual scale-up.
 			h.Reason = "lost: terminated"
 			st.terminate = append(st.terminate, h)
 			continue
@@ -251,6 +309,7 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 				h.Reason = "drained: terminated"
 				st.terminate = append(st.terminate, h)
 			}
+			h.Draining = true
 			st.existing = append(st.existing, h)
 			continue // not counted: on its way out
 		case state == "provisioning":
@@ -268,9 +327,9 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 }
 
 // launch asks the provider for one host. Its row exists first (state
-// provisioning, with a one-use host token, and a provider id reserved
-// before the call: a luxd that stops right after the launch still knows
-// the host, and terminates it if it never registers).
+// provisioning, with a one-use host token), and the instance is tagged with
+// the row's id: a luxd that stops before recording the instance id still
+// finds the instance by tag (reconcileWithProvider) and ends it.
 func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 	hostID := ids.New(ids.Host)
 	name := fmt.Sprintf("%s-%s", pl.Name, hostID[len(hostID)-8:])
@@ -278,33 +337,29 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 	tokenID := ids.New(ids.HostToken)
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		if pl.TenantID != nil {
-			var n, quota int
-			if err := tx.QueryRow(ctx, `SELECT count(*), coalesce((SELECT max_hosts FROM tenants WHERE id = $1), 0)
-				FROM hosts WHERE tenant_id = $1 AND state IN ('provisioning', 'ready', 'draining', 'lost')`, *pl.TenantID).Scan(&n, &quota); err != nil {
+			if err := checkHostQuota(ctx, tx, *pl.TenantID); err != nil {
 				return err
-			}
-			if quota > 0 && n >= quota {
-				return errQuotaFull
 			}
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES ($1, $2, $3, $4)`,
 			tokenID, pl.TenantID, pl.Name, ids.Hash(token)); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state, provision_requested_at,
-				provider_id, launch_template)
-			VALUES ($1, $2, $3, $4, $5, 'provisioning', now(), $6, $7)`,
-			hostID, pl.TenantID, pl.Name, tokenID, name, "pending:"+hostID, pl.Template)
+		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state, provision_requested_at, launch_template)
+			VALUES ($1, $2, $3, $4, $5, 'provisioning', now(), $6)`,
+			hostID, pl.TenantID, pl.Name, tokenID, name, pl.Template)
 		return err
 	})
-	if errors.Is(err, errQuotaFull) {
+	var he *HTTPError
+	if errors.As(err, &he) && he.Code == "quota_exceeded" {
 		return nil // at the tenant's host quota: Runs wait
 	}
 	if err != nil {
 		return err
 	}
 	env := map[string]string{"LUX_URL": s.cfg.PublicURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
-	pid, err := prov.Launch(ctx, pl.Name, name, pl.Template, env)
+	tags := map[string]string{"Name": name, tagManaged: "true", tagPool: s.poolTag(pl), tagHost: hostID}
+	pid, err := prov.Launch(ctx, pl.Template, tags, env)
 	if err != nil {
 		s.markTerminated(ctx, hostID, "launch failed: "+truncate(err.Error(), 200))
 		return fmt.Errorf("launch in %s: %w", pl.Name, err)
@@ -316,7 +371,38 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 	})
 }
 
-var errQuotaFull = errors.New("host quota reached")
+// checkHostQuota: one rule for a tenant's hosts, whether a runner
+// registers or luxd launches: hosts that are, or may come, up count.
+func checkHostQuota(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	var n, quota int
+	if err := tx.QueryRow(ctx, `SELECT count(*), coalesce((SELECT max_hosts FROM tenants WHERE id = $1), 0)
+		FROM hosts WHERE tenant_id = $1 AND state IN ('provisioning', 'ready', 'draining')`, tenantID).Scan(&n, &quota); err != nil {
+		return err
+	}
+	if quota > 0 && n >= quota {
+		return errf(http.StatusTooManyRequests, "quota_exceeded", "tenant host quota reached (%d)", quota)
+	}
+	return nil
+}
+
+// instanceID names this luxd process in leases.
+var instanceID = ids.New("luxd")
+
+// provisionLease makes this luxd the provisioner for the next while, if
+// no other one is (a row with a holder and an expiry).
+func (s *Server) provisionLease(ctx context.Context) (bool, error) {
+	var ok bool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `INSERT INTO leases (name, holder, expires_at) VALUES ('provisioner', $1, now() + $2::interval)
+			ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at
+				WHERE leases.holder = EXCLUDED.holder OR leases.expires_at < now()
+			RETURNING true`, instanceID, interval(max(10*s.cfg.Tick, 30*time.Second))).Scan(&ok)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return ok, err
+}
 
 // drainForScaleDown takes an idle host out of service; the next pass
 // terminates it once it has nothing left to upload.
@@ -336,25 +422,29 @@ func (s *Server) drainForScaleDown(ctx context.Context, hostID string) (bool, er
 
 func (s *Server) markTerminated(ctx context.Context, hostID, reason string) {
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE hosts SET state = 'terminated', state_reason = $2,
-				terminate_requested_at = coalesce(terminate_requested_at, now()), terminated_at = now()
-			WHERE id = $1`, hostID, reason)
-		if err != nil {
-			return err
-		}
-		if err := hostsGone(ctx, tx, []string{hostID}); err != nil {
-			return err
-		}
-		// Its host token was made for it alone (launch): spent.
-		_, err = tx.Exec(ctx, `UPDATE host_tokens SET revoked_at = now()
-			WHERE id = (SELECT token_id FROM hosts WHERE id = $1 AND provision_requested_at IS NOT NULL)`, hostID)
-		return err
+		return s.markTerminatedTx(ctx, tx, hostID, reason)
 	})
 	if err != nil {
 		s.log.Warn("mark terminated", "host", hostID, "err", err)
 		return
 	}
 	s.hub.Disconnect(hostID)
+}
+
+func (s *Server) markTerminatedTx(ctx context.Context, tx pgx.Tx, hostID, reason string) error {
+	_, err := tx.Exec(ctx, `UPDATE hosts SET state = 'terminated', state_reason = $2,
+			terminate_requested_at = coalesce(terminate_requested_at, now()), terminated_at = now()
+		WHERE id = $1`, hostID, reason)
+	if err != nil {
+		return err
+	}
+	if err := hostsGone(ctx, tx, []string{hostID}); err != nil {
+		return err
+	}
+	// Its host token was made for it alone (launch): spent.
+	_, err = tx.Exec(ctx, `UPDATE host_tokens SET revoked_at = now()
+		WHERE id = (SELECT token_id FROM hosts WHERE id = $1 AND provision_requested_at IS NOT NULL)`, hostID)
+	return err
 }
 
 // hostsGone: the hosts' copies of snapshots are gone with them; uploaded

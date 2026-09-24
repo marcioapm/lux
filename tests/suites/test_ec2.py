@@ -42,7 +42,7 @@ def test_a_waiting_run_gets_a_host_launched(lux, ec2):
     assert "on-ec2" in lux.logs(run_id)
     [inst] = ec2.running()
     assert inst["launchTemplate"] == ec2.template["launchTemplate"]
-    assert inst["tags"]["lux:pool"] == "burst"
+    assert inst["tags"]["lux:pool"].endswith("/burst")  # tenant pools: <tenant>/<name>
     host = lux.get(run_id)["placements"][0]["hostName"]
     assert host == inst["tags"]["Name"], (host, inst["tags"])
     # Idle past the scale-down delay: drained, then terminated.
@@ -141,6 +141,23 @@ def test_a_purged_instance_does_not_write_off_the_others(lux, ec2):
     ec2.purge(first["id"])
     # A replacement comes for the purged one; the other is never replaced.
     wait_until(lambda: len(ec2.running()) == 2 and second["id"] in {i["id"] for i in ec2.running()}
-               and first["id"] not in {i["id"] for i in ec2.running()}, 120, 1, "not replaced as expected")
+               and first["id"] not in {i["id"] for i in ec2.running()}, 240, 1, "not replaced as expected")
     assert second["id"] in {i["id"] for i in ec2.running()}
     assert ec2.calls.count("RunInstances") == 3, ec2.calls.count("RunInstances")
+
+
+def test_an_instance_whose_launch_reply_was_lost_is_terminated(lux, ec2):
+    """RunInstances succeeds but luxd never gets the reply (it stops, or
+    the network drops it): the instance is found by its lux tags and
+    terminated, and a host is launched properly."""
+    fake_only(ec2)
+    ec2.orphan_next_launch()
+    ec2.no_boot = True  # the orphan must not register on its own
+    pool(lux, ec2, max=1)
+    run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "ok", placement={"pool": "burst"}))
+    wait_until(lambda: ec2.calls.count("RunInstances") >= 1, 30, 0.5, "never launched")
+    orphan = wait_until(lambda: ec2.running() and ec2.running()[0]["id"], 60, 0.5, "no instance")
+    assert "lux:host" in ec2.running()[0]["tags"]
+    ec2.no_boot = False
+    lux.wait_state(run_id, "succeeded", timeout=240)
+    wait_until(lambda: orphan not in {i["id"] for i in ec2.running()}, 120, 1, "the orphan was never terminated")

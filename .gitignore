@@ -7,3 +7,4 @@ __pycache__/
 /lux-runner
 /lux-shim
 /lux-fake
+.claude/

@@ -30,6 +30,7 @@ class FakeEC2:
         self.calls: list[str] = []
         self.fail_launches = False
         self.no_boot = False  # launched instances never start a runner
+        self.lose_reply = False
         self.server = ThreadingHTTPServer((env.gateway, 0), self._handler())
         self.url = f"http://{env.gateway}:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -46,6 +47,11 @@ class FakeEC2:
     def running(self) -> list[dict]:
         with self.lock:
             return [dict(id=i, **v) for i, v in self.instances.items() if v["state"] == "running"]
+
+    def orphan_next_launch(self):
+        """The next RunInstances succeeds but its reply is lost (as when luxd
+        stops right after the call)."""
+        self.lose_reply = True
 
     def kill(self, instance_id: str):
         """An instance vanishing behind lux's back."""
@@ -103,6 +109,9 @@ class FakeEC2:
                                    "launchTemplate": q.get("LaunchTemplate.LaunchTemplateId") or q.get("LaunchTemplate.LaunchTemplateName"),
                                    "instanceType": q.get("InstanceType"), "subnet": q.get("SubnetId")}
         threading.Thread(target=self._boot, args=(iid,), daemon=True).start()
+        if self.lose_reply:
+            self.lose_reply = False
+            raise FakeError("RequestLimitExceeded", "the reply was lost (fake)")
         return (f'<RunInstancesResponse xmlns="{NS}"><reservationId>r-{uuid.uuid4().hex[:17]}</reservationId>'
                 f"<instancesSet><item><instanceId>{iid}</instanceId><instanceState><code>0</code><name>pending</name>"
                 f"</instanceState></item></instancesSet></RunInstancesResponse>")
@@ -153,11 +162,21 @@ class FakeEC2:
 
     def _DescribeInstances(self, q):
         ids = _list(q, "InstanceId")
+        filters = {}
+        i = 1
+        while f"Filter.{i}.Name" in q:
+            filters[q[f"Filter.{i}.Name"]] = set(_list(q, f"Filter.{i}.Value"))
+            i += 1
         with self.lock:
             missing = [i for i in ids if i not in self.instances]
-            if missing:
+            if missing:  # as EC2: unknown InstanceIds fail the call; filters do not
                 raise FakeError("InvalidInstanceID.NotFound", f"The instance IDs '{', '.join(missing)}' do not exist")
             chosen = ids or list(self.instances)
+            for name, values in filters.items():
+                if name == "instance-id":
+                    chosen = [c for c in chosen if c in values]
+                elif name.startswith("tag:"):
+                    chosen = [c for c in chosen if self.instances[c]["tags"].get(name[4:]) in values]
             items = "".join(
                 f"<item><instanceId>{i}</instanceId><instanceState><code>16</code><name>{self.instances[i]['state']}</name>"
                 f"</instanceState></item>" for i in chosen)
