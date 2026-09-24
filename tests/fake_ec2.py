@@ -92,6 +92,13 @@ class FakeEC2:
         with self.lock:
             return [dict(id=i, **v) for i, v in self.instances.items() if v["state"] == "running"]
 
+    def userdata(self, instance_id: str) -> str:
+        """The raw user data RunInstances sent for one instance, decoded:
+        for a test that runs it for real on a simulated host, rather than
+        only checking the env it decodes to."""
+        with self.lock:
+            return self.instances[instance_id]["userdata"]
+
     def orphan_next_launch(self):
         """The next RunInstances succeeds but its reply is lost (as when luxd
         stops right after the call)."""
@@ -178,6 +185,7 @@ class FakeEC2:
         iid = "i-" + uuid.uuid4().hex[:17]
         with self.lock:
             self.instances[iid] = {"state": "pending", "host": None, "tags": tags, "env": env,
+                                   "userdata": userdata,
                                    "launchTemplate": q.get("LaunchTemplate.LaunchTemplateId") or q.get("LaunchTemplate.LaunchTemplateName"),
                                    "instanceType": q.get("InstanceType"), "subnet": q.get("SubnetId"),
                                    "market": q.get("InstanceMarketOptions.MarketType")}

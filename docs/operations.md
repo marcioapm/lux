@@ -168,11 +168,15 @@ LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a
 A static host set up from a stock distro image can instead run luxd's
 bootstrap script, which checks the host requirements above, installs
 whatever is missing, and installs `lux-runner` as a systemd service
-(`GET /runner/bootstrap.sh`, no auth: it carries no secret):
+(`GET /runner/bootstrap.sh`, no auth: it carries no secret). It is a bash
+script (`missing=()` arrays, `set -o pipefail`), so it must run under
+`bash`, not piped into a bare `sh`, which is `dash` on Debian and Ubuntu
+and silently fails on it; `sudo env` is required to pass the environment
+through:
 
 ```bash
-curl -fsS https://luxd.example/runner/bootstrap.sh | sudo \
-  LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… LUX_HOST_NAME=host-a sh
+curl -fsS https://luxd.example/runner/bootstrap.sh | sudo env \
+  LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… LUX_HOST_NAME=host-a bash
 ```
 
 | Flag | Default | |
@@ -338,8 +342,8 @@ with an unrecognized value is refused, not left to fail at boot:
 
 Every format's token is single-use per host and revoked when the host is
 terminated. A static host (outside any pool) uses the same script as
-`userData: script`, unfilled: `curl <luxd>/runner/bootstrap.sh | sudo
-LUX_HOST_TOKEN=luxh_… LUX_URL=https://luxd.example sh` (no auth on that
+`userData: script`, unfilled: `curl <luxd>/runner/bootstrap.sh | sudo env
+LUX_HOST_TOKEN=luxh_… LUX_URL=https://luxd.example bash` (no auth on that
 endpoint: it carries no secret, only how to reach luxd).
 
 Instances are tagged `Name=<host>`, `lux:pool=<pool>` (`<tenant>/<pool>`

@@ -12,6 +12,7 @@ import json
 import os
 import time
 
+import psycopg
 import pytest
 import requests
 
@@ -115,24 +116,26 @@ def test_bootstrap_script_is_served_without_auth(env):
 
 
 def test_bootstrap_script_fetches_and_verifies_binaries_on_a_host(env, hosts, runner_bin_dir):
-    """Runs the actual downloaded script (not internal/hostboot's Go
-    source) on a simulated host, with LUX_URL/LUX_HOST_TOKEN set as
-    `curl ... | sh` would. The simulated host has no systemd PID 1, so
-    `systemctl` is stubbed out: what is checked is bootstrap.sh's own
-    idempotent writes (env file, unit file, fetch script) and, run
-    separately exactly as the unit's ExecStartPre would, that the fetch
-    script downloads and verifies both binaries against runner_bin_dir."""
+    """Runs the documented pipeline shape exactly as docs/operations.md
+    gives it: `curl ... | sudo env LUX_URL=... LUX_HOST_TOKEN=... bash`,
+    piped from luxd's own endpoint on a simulated host, not a copy of the
+    Go source and not run through a bare `sh` (which the docs no longer
+    say, and which would silently fail on Debian/Ubuntu's dash). The
+    simulated host has no systemd PID 1, so `systemctl` is stubbed out:
+    what is checked is bootstrap.sh's own idempotent writes (env file,
+    unit file, fetch script) and, run separately exactly as the unit's
+    ExecStartPre would, that the fetch script downloads and verifies both
+    binaries against runner_bin_dir."""
     _, token, content = runner_bin_dir
     host = hosts[0]
     arch = host.exec("uname", "-m").strip()
     larch = {"aarch64": "arm64", "x86_64": "amd64"}.get(arch, arch)
-    script = requests.get(f"{env.luxd_url}/runner/bootstrap.sh", timeout=10).text
-    host.exec("sh", "-c", "cat > /tmp/bootstrap.sh", input=script.encode())
     host.exec("sh", "-c", "printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/systemctl && chmod +x /usr/local/bin/systemctl")
-    run = lambda: host.exec(  # noqa: E731
-        "env", f"LUX_URL={env.luxd_url}", f"LUX_HOST_TOKEN={token}", "LUX_HOST_NAME=bootstrap-test",
-        "bash", "/tmp/bootstrap.sh",
+    pipeline = (
+        f"curl -fsS {env.luxd_url}/runner/bootstrap.sh | "
+        f"sudo env LUX_URL={env.luxd_url} LUX_HOST_TOKEN={token} LUX_HOST_NAME=bootstrap-test bash"
     )
+    run = lambda: host.exec("sh", "-c", pipeline)  # noqa: E731
     run()
     env_mode = host.exec("stat", "-c", "%a", "/etc/lux/runner.env").strip()
     assert env_mode == "600", env_mode
@@ -168,6 +171,20 @@ def _host_arch(lux, name: str) -> str:
     return lux.json("hosts", "get", name)["labels"]["arch"]
 
 
+def _host_message_count(env, host_id: str, msg_type: str) -> int:
+    with psycopg.connect(env.owner_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM host_messages WHERE host_id = %s AND type = %s", (host_id, msg_type))
+            return cur.fetchone()[0]
+
+
+def _stop_request_count(env, host_id: str) -> int:
+    with psycopg.connect(env.owner_dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM placements WHERE host_id = %s AND stop_requested_at IS NOT NULL", (host_id,))
+            return cur.fetchone()[0]
+
+
 def _mismatched_bin_dir(base: str, arch: str) -> str:
     """A runner_bin_dir whose binaries for arch are real files but not what
     any built lux-runner/lux-shim hashes to."""
@@ -181,9 +198,13 @@ def _mismatched_bin_dir(base: str, arch: str) -> str:
 
 def test_an_outdated_static_host_is_drained_once(env, lux, runners, hosts):
     """luxd holds a binary for this host's arch that differs from what its
-    runner reports: it is drained, with a clear reason, and not re-drained
-    on later heartbeats (its host row's drain_requested_at does not move)."""
+    runner reports: it is drained, with a clear reason, cordoned (no Run
+    stopped: outdated-binaries drains never call requestStop), and the
+    reaper's `exit` message is queued exactly once even across several
+    heartbeats — not merely "the timestamp doesn't move" (coalesce makes
+    that true regardless of how many times the host is drained)."""
     host = runners.start(hosts[0])
+    host_id = lux.json("hosts", "get", host.name)["id"]
     arch = _host_arch(lux, host.name)
     bin_dir = _mismatched_bin_dir(env.log_dir + "/other-bin", arch)
 
@@ -193,12 +214,18 @@ def test_an_outdated_static_host_is_drained_once(env, lux, runners, hosts):
         h = wait_until(lambda: (lambda x: x if x["draining"] else None)(lux.json("hosts", "get", host.name)),
                        30, 0.5, "the outdated host was never drained")
         assert h["stateReason"] == "outdated binaries", h
-        drained_at = h["times"]["drainRequested"]
 
-        # A later heartbeat must not re-drain it (the timestamp is stable).
+        # Idle and drained: the reaper queues exactly one exit message.
+        wait_until(lambda: _host_message_count(env, host_id, "exit") == 1, 30, 0.5,
+                   "the reaper never queued an exit message")
+        # Several more heartbeats (and reaper ticks) must not queue a
+        # second one: a real count, not a timestamp coalesce can't move.
         time.sleep(3)
-        h2 = lux.json("hosts", "get", host.name)
-        assert h2["times"]["drainRequested"] == drained_at, "re-drained on a later heartbeat"
+        assert _host_message_count(env, host_id, "exit") == 1, "a second exit message was queued"
+        # Cordon-only: no live placement ever exists here (idle from the
+        # start), so no stop request either — proving the outdated-binaries
+        # drain does not touch requestStop at all.
+        assert _stop_request_count(env, host_id) == 0
     finally:
         env.stop_luxd()
         env.start_luxd()
@@ -206,9 +233,10 @@ def test_an_outdated_static_host_is_drained_once(env, lux, runners, hosts):
 
 def test_an_outdated_static_host_is_told_to_exit_once_drained(env, lux, runners, hosts):
     """Once an outdated, drained static host has nothing left running or to
-    upload, luxd asks it to exit (a durable `exit` control message); its
-    systemd unit would restart it with fresh binaries — here, the bare
-    runner process (standing in for the unit's restart) simply exits."""
+    upload, luxd asks it to exit (a durable `exit` control message, code
+    42); its systemd unit would restart it with fresh binaries — here, the
+    bare runner process (standing in for the unit's restart) simply exits
+    with that code."""
     host = runners.start(hosts[0])
     arch = _host_arch(lux, host.name)
     bin_dir = _mismatched_bin_dir(env.log_dir + "/other-bin2", arch)
@@ -219,8 +247,9 @@ def test_an_outdated_static_host_is_told_to_exit_once_drained(env, lux, runners,
         wait_until(lambda: (lambda x: x if x["draining"] else None)(lux.json("hosts", "get", host.name)),
                   30, 0.5, "the outdated host was never drained")
         # Idle and nothing to upload (no Runs were placed): luxd asks it to
-        # exit.
-        runners.procs[host.name].wait(timeout=60)
+        # exit with the outdated-binaries code.
+        code = runners.procs[host.name].wait(timeout=60)
+        assert code == 42, f"exit code {code}, want 42 (ExitCodeOutdatedBinaries)"
     finally:
         env.stop_luxd()
         env.start_luxd()

@@ -24,11 +24,17 @@ def _clean(lux, ec2):
 
 
 @pytest.mark.parametrize("user_data", ["ignition", "script", "env", None])
-def test_a_host_boots_and_registers_in_every_user_data_format(lux, ec2, user_data):
-    """Whichever format the pool's template names, the fake EC2's `_boot`
-    reads the same env out of it (fake_ec2._parse_user_data) and the
-    runner registers normally. None: the default (unset), which must
-    behave as "ignition"."""
+def test_the_env_round_trips_through_every_user_data_format(lux, ec2, user_data):
+    """This proves the env luxd puts into each userData format survives
+    being rendered and decoded, and that a runner started directly with
+    that env registers under the name luxd gave it. It does **not** prove
+    that Ignition, cloud-init or a custom AMI's boot script would actually
+    run any of this on a real instance: the fake's `_boot` decodes the
+    user data and starts the harness's lux-runner itself
+    (fake_ec2._parse_user_data), never Ignition or a shell. See
+    `test_the_script_format_actually_boots_a_runner` for that, for the
+    one format the harness can run for real. None: the default (unset),
+    which must behave as "ignition"."""
     fake_only(ec2)
     template = dict(ec2.template)
     if user_data is not None:
@@ -41,6 +47,33 @@ def test_a_host_boots_and_registers_in_every_user_data_format(lux, ec2, user_dat
     # The env the fake parsed out of the rendered user data reached the
     # runner: it registered with the name luxd gave it.
     assert lux.get(run_id)["placements"][0]["hostName"] == inst["tags"]["Name"]
+
+
+def test_the_script_format_actually_boots_a_runner(env, lux, ec2, hosts):
+    """Unlike the parametrized round-trip test above, this fetches the
+    real rendered `userData: script` cloud-init script the fake EC2 was
+    given for a launch, and executes it (as `bash`, as cloud-init would)
+    on a fresh simulated host — the same thing
+    test_bootstrap_script_fetches_and_verifies_binaries_on_a_host does for
+    the static-host bootstrap script, so this format gets the same
+    real-execution coverage."""
+    fake_only(ec2)
+    template = {**ec2.template, "userData": "script"}
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(template), "--min", "1", "--max", "1")
+    wait_until(lambda: ec2.running(), 60, 1, "no host launched")
+    [inst] = ec2.running()
+    script = ec2.userdata(inst["id"])
+    assert script.startswith("#!/bin/bash\nexport LUX_URL="), script[:200]
+
+    host = env.add_host("script-userdata-test")
+    host.exec("sh", "-c", "cat > /tmp/userdata.sh", input=script.encode())
+    host.exec("sh", "-c", "printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/systemctl && chmod +x /usr/local/bin/systemctl")
+    host.exec("bash", "/tmp/userdata.sh")
+
+    unit = host.exec("cat", "/etc/systemd/system/lux-runner.service")
+    assert "ExecStartPre=/usr/local/lib/lux/fetch-binaries.sh" in unit
+    runner_env = host.exec("cat", "/etc/lux/runner.env")
+    assert f"LUX_URL={env.luxd_url}" in runner_env
 
 
 def test_an_unknown_user_data_format_is_refused_when_the_pool_is_set(lux, ec2):

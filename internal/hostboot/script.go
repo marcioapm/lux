@@ -17,6 +17,7 @@ import "strings"
 // disturbs a live lux-runner. Output goes to stdout/stderr, which cloud-init
 // and a manual `sh` both send to the console and the journal.
 const scriptBody = `#!/bin/bash
+[ -n "${BASH_VERSION:-}" ] || { echo "lux: run this script with bash, not sh (curl ... | sudo env ... bash)" >&2; exit 1; }
 set -euo pipefail
 
 : "${LUX_URL:?LUX_URL is required}"
@@ -100,9 +101,12 @@ func Script(env Env) string {
 
 // Bootstrap renders GET /runner/bootstrap.sh: the same script, unfilled —
 // it takes LUX_URL, LUX_HOST_TOKEN, LUX_HOST_NAME and LUX_EC2_IMDS from
-// whatever environment it is run with (curl ... | sudo LUX_HOST_TOKEN=...
-// LUX_URL=... sh), and defaults the host name to `hostname`. No auth: it
-// carries no secret.
+// whatever environment it is run with (curl ... | sudo env LUX_HOST_TOKEN=...
+// LUX_URL=... bash), and defaults the host name to `hostname`. No auth: it
+// carries no secret. The script uses bash arrays and set -o pipefail, so
+// its first line (after the guard, before either) refuses to run under a
+// bare `sh`: on Debian and Ubuntu that is dash, which a piped `| sh`
+// silently ignores the #!/bin/bash shebang for.
 func Bootstrap() string { return scriptBody }
 
 func shellQuote(s string) string {
