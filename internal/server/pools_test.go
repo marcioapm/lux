@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -43,5 +45,34 @@ func TestPutPoolRejectsUnknownUserData(t *testing.T) {
 	static := &poolBody{Body: Pool{Name: "burst3", Provider: "static", Template: map[string]any{"userData": "nonsense"}}}
 	if _, err := s.putPool(ctx, static); err != nil {
 		t.Fatalf("a static pool's template.userData was checked: %v", err)
+	}
+}
+
+// A template.userData that isn't a string (a number or a bool, both valid
+// JSON that unmarshal into map[string]any) is refused with 422, not
+// stored: JSON later fails to decode it into hostboot's string field on
+// every launch attempt, retried forever with no useful error at the point
+// that matters.
+func TestPutPoolRejectsNonStringUserData(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+
+	for _, v := range []any{123, true} {
+		pool := &poolBody{Body: Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"userData": v}}}
+		_, err := s.putPool(ctx, pool)
+		if err == nil {
+			t.Fatalf("userData %#v (type %T) was accepted", v, v)
+		}
+		var he *HTTPError
+		if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity {
+			t.Fatalf("userData %#v: err = %v, want a 422 HTTPError", v, err)
+		}
 	}
 }

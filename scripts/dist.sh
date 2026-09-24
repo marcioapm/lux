@@ -15,6 +15,11 @@ VERSION="${VERSION:?set VERSION=vX.Y.Z}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 LDFLAGS="-s -w -X github.com/marcioapm/lux/internal/version.Version=$VERSION"
+# Reproducible tarballs: root-owned regardless of the CI runner's uid,
+# and a fixed mtime (the tagged commit's own date, so a rebuild of the
+# same tag is byte-identical) rather than each build's wall clock.
+MTIME="$(git -C "$ROOT" log -1 --format=%cI 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+TAR_REPRO_FLAGS=(--owner=0 --group=0 --numeric-owner --sort=name --mtime="$MTIME")
 
 rm -rf "$DIST"
 mkdir -p "$DIST"
@@ -48,7 +53,7 @@ rm -f "$DIST"/lux-runner-linux-* "$DIST"/lux-shim-linux-*
 
 for arch in arm64 amd64; do
   chmod +x "$DIST/work-linux-$arch/bin/"* "$DIST/work-linux-$arch/lib/lux/runner"/*/*
-  tar -C "$DIST/work-linux-$arch" -czf "$DIST/lux_${VERSION}_linux_${arch}.tar.gz" bin lib
+  tar "${TAR_REPRO_FLAGS[@]}" -C "$DIST/work-linux-$arch" -czf "$DIST/lux_${VERSION}_linux_${arch}.tar.gz" bin lib
   rm -rf "$DIST/work-linux-$arch"
 done
 
@@ -58,7 +63,7 @@ for arch in arm64 amd64; do
   mkdir -p "$work/bin"
   build darwin "$arch" lux "$work/bin/lux"
   chmod +x "$work/bin/lux"
-  tar -C "$work" -czf "$DIST/lux_${VERSION}_darwin_${arch}.tar.gz" bin
+  tar "${TAR_REPRO_FLAGS[@]}" -C "$work" -czf "$DIST/lux_${VERSION}_darwin_${arch}.tar.gz" bin
   rm -rf "$work"
 done
 

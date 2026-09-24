@@ -1656,8 +1656,14 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "only platform pools can be shared (luxd admin create-pool --shared)")
 	}
 	if pl.Provider == "ec2" {
-		if ud, ok := pl.Template["userData"].(string); ok && !hostboot.ValidUserData(ud) {
-			return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "template.userData %q: want ignition, script or env", ud)
+		if raw, present := pl.Template["userData"]; present {
+			ud, isString := raw.(string)
+			if !isString {
+				return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "template.userData must be a string, got %T", raw)
+			}
+			if !hostboot.ValidUserData(ud) {
+				return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "template.userData %q: want ignition, script or env", ud)
+			}
 		}
 	}
 	if pl.Template == nil {
