@@ -267,10 +267,8 @@ func (m *Manager) Push(ctx context.Context, r Repo, bundle, branch, lease string
 		return res
 	}
 	res.Commit = head
-	if head == lease {
-		res.Status = "up-to-date"
-		return res
-	}
+	// Always asked of the remote, even when head is the lease: the lease
+	// may be a caller's expectation, not where the branch is.
 	ref := "refs/heads/" + branch
 	out, err := git(ctx, work, r.Token, "push", "--porcelain", "--force-with-lease="+ref+":"+lease, r.URL, "refs/lux/push:"+ref)
 	if err != nil {
@@ -284,7 +282,21 @@ func (m *Manager) Push(ctx context.Context, r Repo, bundle, branch, lease string
 		return res
 	}
 	res.Status = "pushed"
+	if pushUpToDate(out) {
+		res.Status = "up-to-date"
+	}
 	return res
+}
+
+// pushUpToDate: the --porcelain output of a push that changed nothing (the
+// remote already had the commit) flags its ref line "=".
+func pushUpToDate(out string) bool {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "=\t") || strings.Contains(l, "[up to date]") {
+			return true
+		}
+	}
+	return false
 }
 
 // Scrub removes anything credential-like a URL might carry, for display.

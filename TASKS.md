@@ -23,3 +23,14 @@ Each step ends with an end-to-end test through `tests/run_tests.py`.
 
 Also: docs in `docs/` kept current with each step; external-tool findings
 recorded in `docs/agent-protocols.md` and `docs/podman.md`.
+
+After v1:
+
+| Item | Status |
+| --- | --- |
+| API on huma v2; `docs/openapi.yaml` generated (`luxd openapi`) | ✅ done |
+| Turn-end usage for Claude Code and Codex | ✅ done |
+| `lux push --expect repo=sha` | ✅ done |
+| Resource defaults per Run (2 CPUs, 8 GiB, 1024 pids; `LUX_DEFAULT_*`) | ✅ done |
+| Spot instances: interruption notice → preempt → resume elsewhere | ✅ done |
+| Review + simplify of the above | in progress |

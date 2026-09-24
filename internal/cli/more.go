@@ -41,8 +41,12 @@ pushed or already up to date.`,
 				ex := map[string]string{}
 				for _, kv := range expect {
 					repo, sha, ok := strings.Cut(kv, "=")
-					if !ok {
+					repo, sha = strings.TrimSpace(repo), strings.ToLower(strings.TrimSpace(sha))
+					if !ok || repo == "" || sha == "" {
 						return fmt.Errorf("--expect %q: want repo=sha", kv)
+					}
+					if _, dup := ex[repo]; dup {
+						return fmt.Errorf("--expect: %s given twice", repo)
 					}
 					ex[repo] = sha
 				}
@@ -165,17 +169,25 @@ func (a *app) artifactsCmd() *cobra.Command {
 				return err
 			}
 			if dir != "" {
-				// A few at a time: each is a round trip through luxd.
-				var g errgroup.Group
-				g.SetLimit(4)
-				var mu sync.Mutex
-				for _, art := range resp.Artifacts {
+				// Every path checked before any download starts, so a
+				// rejected one leaves nothing behind.
+				dsts := make([]string, len(resp.Artifacts))
+				for i, art := range resp.Artifacts {
 					dst, err := downloadPath(dir, art.Epoch, art.Path)
 					if err != nil {
 						return err
 					}
+					dsts[i] = dst
+				}
+				// A few at a time: each is a round trip through luxd. One
+				// failing cancels the rest (their temp files are removed).
+				g, ctx := errgroup.WithContext(ctxOf(cmd))
+				g.SetLimit(4)
+				var mu sync.Mutex
+				for i, art := range resp.Artifacts {
+					dst := dsts[i]
 					g.Go(func() error {
-						if err := a.download(cmd, art.ID, dst); err != nil {
+						if err := a.download(ctx, art.ID, dst); err != nil {
 							return fmt.Errorf("%s: %w", art.Path, err)
 						}
 						if a.output != "json" {
@@ -218,8 +230,8 @@ func downloadPath(dir string, epoch int, artPath string) (string, error) {
 }
 
 // download fetches an artifact (luxd streams it) into dst, atomically.
-func (a *app) download(cmd *cobra.Command, id, dst string) error {
-	req, err := http.NewRequestWithContext(ctxOf(cmd), "GET", a.c.Base+"/v1/artifacts/"+id, nil)
+func (a *app) download(ctx context.Context, id, dst string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", a.c.Base+"/v1/artifacts/"+id, nil)
 	if err != nil {
 		return err
 	}

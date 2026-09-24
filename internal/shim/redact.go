@@ -11,13 +11,16 @@ import (
 
 // Redactor replaces secret values in output before it is written anywhere.
 // It matches each value exactly and in its common encodings (base64, URL
-// encoding, hex), longest first so a value containing another is replaced
-// whole.
+// encoding, hex). Every occurrence of every form is found and overlapping
+// or adjacent matches are merged into one marker, so no part of a value
+// survives because another match started first.
 type Redactor struct {
-	mu       sync.RWMutex
-	replacer *strings.Replacer
-	longest  int
+	mu      sync.RWMutex
+	pats    []pattern // longest first
+	longest int
 }
+
+type pattern struct{ from, to string }
 
 // minSecretLen: shorter values would redact ordinary text; they are not
 // redacted (and documented as such).
@@ -30,15 +33,14 @@ func NewRedactor(values map[string]string) *Redactor {
 }
 
 func (r *Redactor) Set(values map[string]string) {
-	type pair struct{ from, to string }
 	seen := map[string]bool{}
-	var pairs []pair
+	var pairs []pattern
 	add := func(v, name string) {
 		if len(v) < minSecretLen || seen[v] {
 			return
 		}
 		seen[v] = true
-		pairs = append(pairs, pair{v, "[REDACTED:" + name + "]"})
+		pairs = append(pairs, pattern{v, "[REDACTED:" + name + "]"})
 	}
 	for name, v := range values {
 		add(v, name)
@@ -54,28 +56,56 @@ func (r *Redactor) Set(values map[string]string) {
 		add(esc, name)
 	}
 	sort.Slice(pairs, func(i, j int) bool { return len(pairs[i].from) > len(pairs[j].from) })
-	args := make([]string, 0, 2*len(pairs))
 	longest := 0
-	for _, p := range pairs {
-		args = append(args, p.from, p.to)
-		longest = max(longest, len(p.from))
+	if len(pairs) > 0 {
+		longest = len(pairs[0].from) // sorted longest first
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(args) == 0 {
-		r.replacer, r.longest = nil, 0
-		return
-	}
-	r.replacer, r.longest = strings.NewReplacer(args...), longest
+	r.pats, r.longest = pairs, longest
 }
 
 func (r *Redactor) Redact(s string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.replacer == nil {
+	type match struct{ start, end, pat int }
+	var ms []match
+	for i, p := range r.pats {
+		// Step one byte past each match start: a value may overlap itself.
+		for off := 0; off < len(s); {
+			j := strings.Index(s[off:], p.from)
+			if j < 0 {
+				break
+			}
+			ms = append(ms, match{off + j, off + j + len(p.from), i})
+			off += j + 1
+		}
+	}
+	if len(ms) == 0 {
 		return s
 	}
-	return r.replacer.Replace(s)
+	// By start, then longest (pats is longest first): the first match of a
+	// merged range names its marker.
+	sort.Slice(ms, func(a, b int) bool {
+		if ms[a].start != ms[b].start {
+			return ms[a].start < ms[b].start
+		}
+		return ms[a].pat < ms[b].pat
+	})
+	var b strings.Builder
+	b.Grow(len(s))
+	last := 0
+	for k := 0; k < len(ms); {
+		start, end, pat := ms[k].start, ms[k].end, ms[k].pat
+		for k++; k < len(ms) && ms[k].start <= end; k++ {
+			end = max(end, ms[k].end)
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(r.pats[pat].to)
+		last = end
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 // Longest is the longest matched form, so a streaming writer can hold back

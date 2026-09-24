@@ -84,7 +84,7 @@ type Runner struct {
 	// evictBy is when the provider takes this host away (zero: not
 	// evicting). Stops before it get a grace that leaves time to snapshot
 	// and upload.
-	evictBy atomic.Pointer[time.Time]
+	evictBy atomic.Pointer[evicting]
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -326,6 +326,10 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 		old.waitDone(30 * time.Second)
 	}
 	go p.run(context.WithoutCancel(ctx))
+	if r.evictBy.Load() != nil {
+		// Placed here while the drain was being decided: luxd preempts it.
+		go r.reportEvicting(context.WithoutCancel(ctx))
+	}
 }
 
 // handleLive handles non-durable frames: output subscriptions, streams.

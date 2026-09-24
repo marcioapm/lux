@@ -111,9 +111,33 @@ func TestPushIgnoresTheCheckoutsGitConfig(t *testing.T) {
 	if res := m.Push(context.Background(), Repo{Name: "r", URL: bare}, bundle2, "lux/x", ""); res.Status != "rejected" {
 		t.Fatalf("stale lease: %+v", res)
 	}
-	if res := m.Push(context.Background(), Repo{Name: "r", URL: bare}, bundle2, "lux/x", res.Commit); res.Status != "pushed" {
-		t.Fatalf("correct lease: %+v", res)
+	res2 := m.Push(context.Background(), Repo{Name: "r", URL: bare}, bundle2, "lux/x", res.Commit)
+	if res2.Status != "pushed" {
+		t.Fatalf("correct lease: %+v", res2)
 	}
+	// Again, nothing new: the remote says so.
+	if res := m.Push(context.Background(), Repo{Name: "r", URL: bare}, bundle2, "lux/x", res2.Commit); res.Status != "up-to-date" {
+		t.Fatalf("nothing new: %+v", res)
+	}
+	// The lease is the commit being pushed but the branch is elsewhere (a
+	// caller's wrong expectation): the remote is asked, and refuses.
+	if res := m.Push(context.Background(), Repo{Name: "r", URL: bare}, bundle, "lux/x", res.Commit); res.Status != "rejected" {
+		t.Fatalf("lease equal to head, branch elsewhere: %+v", res)
+	}
+	if got := gitOut(t, bare, "rev-parse", "refs/heads/lux/x"); got != res2.Commit {
+		t.Fatalf("branch moved to %s", got)
+	}
+}
+
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func gitIn(t *testing.T, dir string, args ...string) {

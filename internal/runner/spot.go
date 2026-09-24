@@ -27,39 +27,59 @@ const spotPoll = 5 * time.Second
 func (r *Runner) watchSpot(ctx context.Context, base string) {
 	m := &imds{base: strings.TrimRight(base, "/"), http: &http.Client{Timeout: 5 * time.Second}}
 	for {
+		action, at, err := m.instanceAction(ctx)
+		switch {
+		case err != nil:
+			r.log.Debug("spot notice check", "err", err)
+		case action != "":
+			r.log.Warn("spot interruption notice: moving Runs away", "action", action, "at", at)
+			r.evictBy.Store(&evicting{at: at, reason: "spot interruption (" + action + ")"})
+			r.reportEvicting(ctx)
+			return // one notice per instance
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(spotPoll):
 		}
-		action, at, err := m.instanceAction(ctx)
-		if err != nil {
-			r.log.Debug("spot notice check", "err", err)
-			continue
+	}
+}
+
+type evicting struct {
+	at     time.Time
+	reason string
+}
+
+// reportEvicting tells luxd this host is going, until luxd has it: the
+// Runs must be moved while there is time. Sent again for any assign that
+// raced the drain, so luxd preempts that placement too.
+func (r *Runner) reportEvicting(ctx context.Context) {
+	ev := r.evictBy.Load()
+	if ev == nil {
+		return
+	}
+	for ctx.Err() == nil && time.Now().Before(ev.at) {
+		err := r.conn.Report(ctx, proto.Frame{Type: proto.MsgHostEvicting,
+			Data: proto.Marshal(proto.Evicting{Deadline: ev.at, Reason: ev.reason})})
+		if err == nil {
+			return
 		}
-		if action == "" {
-			continue
+		r.log.Warn("reporting the eviction", "err", err)
+		select {
+		case <-ctx.Done():
+		case <-time.After(2 * time.Second):
 		}
-		r.log.Warn("spot interruption notice: moving Runs away", "action", action, "at", at)
-		r.evictBy.Store(&at)
-		// Until luxd has it: the Runs must be moved while there is time.
-		err = r.conn.Report(ctx, proto.Frame{Type: proto.MsgHostEvicting,
-			Data: proto.Marshal(proto.Evicting{Deadline: at, Reason: "spot interruption (" + action + ")"})})
-		if err != nil {
-			r.log.Warn("reporting the spot interruption", "err", err)
-		}
-		return // one notice per instance
 	}
 }
 
 // evictionGrace is the grace a stop may use: the workload's own, or half the
 // time left before the host goes if it is being evicted.
 func (r *Runner) evictionGrace(grace time.Duration) time.Duration {
-	at := r.evictBy.Load()
-	if at == nil {
+	ev := r.evictBy.Load()
+	if ev == nil {
 		return grace
 	}
-	return max(min(grace, time.Until(*at)/2), time.Second)
+	return max(min(grace, time.Until(ev.at)/2), time.Second)
 }
 
 // imds is an EC2 instance metadata client (IMDSv2: a session token first).

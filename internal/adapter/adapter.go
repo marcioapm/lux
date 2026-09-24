@@ -238,6 +238,15 @@ func textInput(s string) []map[string]string {
 	return []map[string]string{{"type": "text", "text": s}}
 }
 
+// withUsage adds an agent's usage report, as it sent it, to a turn_end
+// event's data, if it sent one.
+func withUsage(data map[string]any, usage json.RawMessage) map[string]any {
+	if len(usage) > 0 && string(usage) != "null" {
+		data["usage"] = usage
+	}
+	return data
+}
+
 // command picks the argv: the resume command on resume if the spec has one,
 // else the spec's command (spec.Normalize fills each adapter's default).
 func command(cfg proto.ShimConfig) ([]string, error) {

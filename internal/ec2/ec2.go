@@ -37,6 +37,8 @@ import (
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
+
+	"github.com/marcioapm/lux/internal/server"
 )
 
 // Template is a pool's EC2 settings.
@@ -114,11 +116,10 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		lt.LaunchTemplateName = aws.String(t.LaunchTemplate)
 	}
 	var instTags []types.Tag
-	for k, v := range t.Tags {
-		instTags = append(instTags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
-	}
-	for k, v := range tags {
-		instTags = append(instTags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+	for _, m := range []map[string]string{t.Tags, tags} {
+		for k, v := range m {
+			instTags = append(instTags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
+		}
 	}
 	in := &awsec2.RunInstancesInput{
 		MinCount:       aws.Int32(1),
@@ -174,9 +175,9 @@ func (p *Provider) Terminate(ctx context.Context, template json.RawMessage, id s
 }
 
 // Instances lists the instances carrying all the given tags, with their
-// state (pending, running, shutting-down, terminated, …). A filtered call:
-// ids EC2 does not know do not fail it.
-func (p *Provider) Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]string, error) {
+// state (pending, running, shutting-down, terminated, …) and tags. A
+// filtered call: ids EC2 does not know do not fail it.
+func (p *Provider) Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]server.Instance, error) {
 	t, err := parse(template)
 	if err != nil {
 		return nil, err
@@ -189,19 +190,7 @@ func (p *Provider) Instances(ctx context.Context, template json.RawMessage, tags
 	for k, v := range tags {
 		filters = append(filters, types.Filter{Name: aws.String("tag:" + k), Values: []string{v}})
 	}
-	states, err := describe(ctx, c, filters)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]string, len(states))
-	for id, st := range states {
-		out[id] = string(st)
-	}
-	return out, nil
-}
-
-func describe(ctx context.Context, c *awsec2.Client, filters []types.Filter) (map[string]types.InstanceStateName, error) {
-	out := map[string]types.InstanceStateName{}
+	out := map[string]server.Instance{}
 	pages := awsec2.NewDescribeInstancesPaginator(c, &awsec2.DescribeInstancesInput{Filters: filters})
 	for pages.HasMorePages() {
 		page, err := pages.NextPage(ctx)
@@ -213,7 +202,11 @@ func describe(ctx context.Context, c *awsec2.Client, filters []types.Filter) (ma
 				if i.InstanceId == nil || i.State == nil {
 					continue
 				}
-				out[*i.InstanceId] = i.State.Name
+				inst := server.Instance{State: string(i.State.Name), Tags: map[string]string{}}
+				for _, tag := range i.Tags {
+					inst.Tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+				}
+				out[*i.InstanceId] = inst
 			}
 		}
 	}

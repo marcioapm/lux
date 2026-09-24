@@ -53,7 +53,11 @@ type Server struct {
 	// lastAliveCheck: when the provisioner last asked providers which
 	// hosts still exist.
 	lastAliveCheck time.Time
-	wg             sync.WaitGroup
+	// deployment identifies this lux database in provider tags, so two
+	// deployments sharing a cloud account never take each other's
+	// instances for orphans (read by the provisioner).
+	deployment string
+	wg         sync.WaitGroup
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {

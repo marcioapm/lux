@@ -56,6 +56,8 @@ func TestHumaErrorsInLuxShape(t *testing.T) {
 			`{"error":{"code":"bad_request","message":"invalid JSON body: unexpected EOF"}}`},
 		{huma.NewError(http.StatusBadRequest, "request body is required"),
 			`{"error":{"code":"bad_request","message":"invalid JSON body: EOF"}}`},
+		{huma.NewError(http.StatusInternalServerError, "cannot read request body", errors.New("unexpected EOF")),
+			`{"error":{"code":"bad_request","message":"invalid JSON body: unexpected EOF"}}`},
 		{huma.NewError(http.StatusUnprocessableEntity, "validation failed", errors.New("a"), errors.New("b")),
 			`{"error":{"code":"invalid_request","details":["a","b"],"message":"validation failed"}}`},
 	} {

@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -184,7 +185,8 @@ func resourceDefaults() (spec.Defaults, error) {
 	d := spec.BuiltinDefaults
 	if v := os.Getenv("LUX_DEFAULT_CPUS"); v != "" {
 		n, err := strconv.ParseFloat(v, 64)
-		if err != nil || n <= 0 {
+		// NaN fails every comparison, so n <= 0 alone lets it through.
+		if err != nil || !(n > 0) || math.IsInf(n, 0) {
 			return d, fmt.Errorf("LUX_DEFAULT_CPUS: %q is not a positive number", v)
 		}
 		d.CPUs = n

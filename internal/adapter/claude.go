@@ -109,11 +109,7 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 			c.mu.Unlock()
 			// The turn's end, with the agent's usage as it reported it (the
 			// whole result line is claude.result, below).
-			end := map[string]any{}
-			if len(m.Usage) > 0 && string(m.Usage) != "null" {
-				end["usage"] = m.Usage
-			}
-			sink.Event("claude.turn_end", end)
+			sink.Event("claude.turn_end", withUsage(map[string]any{}, m.Usage))
 			if idle {
 				sink.Activity(true)
 			}

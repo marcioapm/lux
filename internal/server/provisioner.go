@@ -22,18 +22,27 @@ type Provider interface {
 	// Terminate ends a host. One that no longer exists is done.
 	Terminate(ctx context.Context, template json.RawMessage, providerID string) error
 	// Instances lists the provider's hosts carrying all the given tags,
-	// by provider id, with their state (terminated and shutting-down are
-	// gone; anything else may still run).
-	Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]string, error)
+	// by provider id.
+	Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]Instance, error)
+}
+
+// Instance is a provider's view of one host.
+type Instance struct {
+	// State: terminated and shutting-down are gone; anything else may
+	// still run.
+	State string
+	// Tags it carries (lux:host names its host row).
+	Tags map[string]string
 }
 
 // Tags lux puts on what it launches: how the provisioner finds a pool's
 // instances whatever its database knows (a launch whose reply was lost,
 // a row written off too early).
 const (
-	tagManaged = "lux:managed"
-	tagPool    = "lux:pool"
-	tagHost    = "lux:host" // the host row's id
+	tagManaged    = "lux:managed"
+	tagDeployment = "lux:deployment" // which lux database launched it
+	tagPool       = "lux:pool"
+	tagHost       = "lux:host" // the host row's id
 )
 
 // lostGrace: a lost provisioned host is terminated only after this long
@@ -41,10 +50,23 @@ const (
 const lostGrace = 5 * time.Minute
 
 // provisionerLoop keeps provisioned pools the size their demand, minimum
-// and warm settings say. One luxd at a time does it (an advisory lock).
+// and warm settings say. One luxd at a time does it (provisionLease).
 func (s *Server) provisionerLoop(ctx context.Context) {
 	if len(s.cfg.Providers) == 0 {
 		return
+	}
+	for s.deployment == "" {
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT value FROM settings WHERE name = 'deployment'`).Scan(&s.deployment)
+		})
+		if err != nil {
+			s.log.Warn("provisioner: reading the deployment id", "err", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
 	}
 	t := time.NewTicker(s.cfg.Tick)
 	defer t.Stop()
@@ -67,9 +89,6 @@ type poolRow struct {
 	Min, Max, Warm     int
 	Retired            bool
 }
-
-// provisionLock: the provisioner's advisory lock key ("lux/prov").
-const provisionLock = 0x6c75782f70726f76
 
 func (s *Server) provision(ctx context.Context) error {
 	// Leadership: a lease in the database, not a lock held on a connection
@@ -102,6 +121,10 @@ func (s *Server) provision(ctx context.Context) error {
 		if prov == nil {
 			continue
 		}
+		// Provider calls can be slow: still the provisioner?
+		if ok, err := s.provisionLease(ctx); err != nil || !ok {
+			return err
+		}
 		if err := s.reconcilePool(ctx, prov, pl, checkAlive); err != nil {
 			s.log.Warn("pool", "pool", pl.Name, "err", err)
 		}
@@ -120,6 +143,8 @@ type poolState struct {
 	terminate []hostRef
 	// Hosts the provider should still have (checked once a minute).
 	existing []hostRef
+	// Hosts launched whose instance id is not recorded yet, by id.
+	launching map[string]bool
 }
 
 // hostRef is a provisioned host, with the template it was launched with
@@ -129,7 +154,8 @@ type hostRef struct {
 	Template               json.RawMessage
 	Draining               bool // not counted in the pool's total
 	// Settled: launched long enough ago that the provider lists it (its
-	// listings are eventually consistent); one missing from them is gone.
+	// listings are eventually consistent), and its runner is not
+	// heartbeating; one missing from the listings is gone.
 	Settled bool
 }
 
@@ -182,7 +208,12 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	if pl.Max > 0 {
 		want = min(want, pl.Max-st.total)
 	}
-	for range max(want, 0) {
+	for i := range max(want, 0) {
+		if i > 0 {
+			if ok, err := s.provisionLease(ctx); err != nil || !ok {
+				return err
+			}
+		}
 		if err := s.launch(ctx, prov, pl); err != nil {
 			return err
 		}
@@ -194,30 +225,36 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 	// Instances are listed with the template each was launched with (its
 	// region): the pool's current one, and any older ones its hosts carry.
 	templates := map[string]json.RawMessage{string(pl.Template): pl.Template}
-	for _, h := range st.existing {
-		templates[string(h.Template)] = h.Template
-	}
 	rows := map[string]hostRef{} // provider id → live row
 	for _, h := range st.existing {
+		templates[string(h.Template)] = h.Template
 		rows[h.ProviderID] = h
 	}
+	tags := s.poolTags(pl)
 	listed := map[string]bool{}
 	for _, tmpl := range templates {
-		insts, err := prov.Instances(ctx, tmpl, map[string]string{tagManaged: "true", tagPool: s.poolTag(pl)})
+		insts, err := prov.Instances(ctx, tmpl, tags)
 		if err != nil {
 			s.log.Warn("provider check", "pool", pl.Name, "err", err)
 			return
 		}
-		for pid, state := range insts {
+		for pid, inst := range insts {
+			if listed[pid] {
+				continue // two templates in one region list the same instances
+			}
 			listed[pid] = true
-			gone := state == "terminated" || state == "shutting-down"
+			gone := inst.State == "terminated" || inst.State == "shutting-down"
 			h, known := rows[pid]
 			switch {
 			case known && gone:
 				s.providerGone(ctx, h, st)
+			case !known && !gone && st.launching[inst.Tags[tagHost]]:
+				// A launch whose instance id is not recorded yet (in flight,
+				// or luxd stopped mid-launch): its row claims it.
+				s.recordProviderID(ctx, inst.Tags[tagHost], pid)
 			case !known && !gone:
-				// No live row claims it: an orphan (a launch luxd never
-				// recorded, or a host written off). Terminate it.
+				// No live row claims it: an orphan (a launch whose reply was
+				// lost, or a host written off). Terminate it.
 				s.log.Warn("terminating an orphaned instance", "pool", pl.Name, "providerId", pid)
 				if err := prov.Terminate(ctx, tmpl, pid); err != nil {
 					s.log.Warn("terminate orphan", "providerId", pid, "err", err)
@@ -226,11 +263,28 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 		}
 	}
 	// Terminated instances drop out of the provider's listings after a while
-	// (EC2 purges them): a settled host that is not listed is gone too.
+	// (EC2 purges them): a settled host that is not listed is gone too. It
+	// is terminated first, in case it runs without the tags we list by
+	// (launched by an older luxd): written off, it must not run on.
 	for pid, h := range rows {
-		if !listed[pid] && h.Settled {
-			s.providerGone(ctx, h, st)
+		if listed[pid] || !h.Settled {
+			continue
 		}
+		if err := prov.Terminate(ctx, h.Template, pid); err != nil {
+			s.log.Warn("terminate unlisted", "host", h.ID, "err", err)
+			continue
+		}
+		s.providerGone(ctx, h, st)
+	}
+}
+
+func (s *Server) recordProviderID(ctx context.Context, hostID, pid string) {
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE hosts SET provider_id = $2 WHERE id = $1 AND provider_id IS NULL AND state <> 'terminated'`, hostID, pid)
+		return err
+	})
+	if err != nil {
+		s.log.Warn("record provider id", "host", hostID, "err", err)
 	}
 }
 
@@ -241,12 +295,14 @@ func (s *Server) providerGone(ctx context.Context, h hostRef, st *poolState) {
 	}
 }
 
-// poolTag names a pool in provider tags: tenant pools by tenant and name.
-func (s *Server) poolTag(pl poolRow) string {
+// poolTags are the tags every instance of a pool carries, and what its
+// instances are listed by. Tenant pools are named by tenant and name.
+func (s *Server) poolTags(pl poolRow) map[string]string {
+	pool := pl.Name
 	if pl.TenantID != nil {
-		return *pl.TenantID + "/" + pl.Name
+		pool = *pl.TenantID + "/" + pl.Name
 	}
-	return pl.Name
+	return map[string]string{tagManaged: "true", tagDeployment: s.deployment, tagPool: pool}
 }
 
 func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolState) error {
@@ -268,11 +324,12 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			h.provision_requested_at < now() - $4::interval,
 			coalesce(h.lost_at < now() - $6::interval, false),
 			h.provision_requested_at < now() - interval '1 minute'
+			  AND coalesce(h.last_heartbeat < now() - $7::interval, true)
 		FROM hosts h
 		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provision_requested_at IS NOT NULL
 		  AND h.state <> 'terminated'
 		ORDER BY coalesce(h.last_placement_ended_at, h.registered_at, h.created_at)`,
-		pl.Name, pl.TenantID, interval(s.cfg.ScaleDownAfter), interval(s.cfg.LaunchTimeout), pl.Template, interval(lostGrace))
+		pl.Name, pl.TenantID, interval(s.cfg.ScaleDownAfter), interval(s.cfg.LaunchTimeout), pl.Template, interval(lostGrace), interval(s.cfg.LeaseDuration))
 	if err != nil {
 		return err
 	}
@@ -285,13 +342,23 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			return err
 		}
 		switch {
-		case h.ProviderID == "":
+		case h.ProviderID == "" && launchLong:
 			// Launched, but its instance id was never recorded (luxd
-			// stopped mid-launch): the tag check finds and ends the
-			// instance; the row goes once the launch timeout has passed.
-			if launchLong {
-				s.markTerminatedTx(ctx, tx, h.ID, "launch never completed")
+			// stopped mid-launch, and no instance carries its tag): the
+			// row goes; an instance found later is an orphan.
+			if err := s.markTerminatedTx(ctx, tx, h.ID, "launch never completed"); err != nil {
+				return err
 			}
+			continue
+		case h.ProviderID == "":
+			// Being launched (perhaps by another luxd, or this one before
+			// it restarted): counted, so no one launches it twice.
+			if st.launching == nil {
+				st.launching = map[string]bool{}
+			}
+			st.launching[h.ID] = true
+			st.provisioning++
+			st.total++
 			continue
 		case state == "provisioning" && launchLong:
 			h.Reason = "never registered"
@@ -358,7 +425,8 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 		return err
 	}
 	env := map[string]string{"LUX_URL": s.cfg.PublicURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
-	tags := map[string]string{"Name": name, tagManaged: "true", tagPool: s.poolTag(pl), tagHost: hostID}
+	tags := s.poolTags(pl)
+	tags["Name"], tags[tagHost] = name, hostID
 	pid, err := prov.Launch(ctx, pl.Template, tags, env)
 	if err != nil {
 		s.markTerminated(ctx, hostID, "launch failed: "+truncate(err.Error(), 200))

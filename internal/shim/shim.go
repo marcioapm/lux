@@ -360,13 +360,18 @@ func (s *Shim) deliver(in proto.Input) {
 // set (the host is being taken away).
 func (s *Shim) stop(reason string, shorter time.Duration) {
 	s.mu.Lock()
+	ad, proc, initPid := s.adapter, s.proc, s.initPid
 	if s.stopping {
 		s.mu.Unlock()
+		// Stopping already: a shorter grace (the host is going) still
+		// applies. The earlier timer firing later is harmless.
+		if shorter > 0 && proc != nil {
+			time.AfterFunc(shorter, func() { _ = syscall.Kill(-proc.Cmd.Process.Pid, syscall.SIGKILL) })
+		}
 		return
 	}
 	s.stopping = true
 	s.stopWhy = reason
-	ad, proc, initPid := s.adapter, s.proc, s.initPid
 	s.mu.Unlock()
 	s.out.Event(proto.EvStop, map[string]any{"reason": reason})
 	if initPid > 0 {

@@ -784,9 +784,14 @@ func (p *placement) requestStop(ctx context.Context, reason string) {
 		p.cancelStart()
 	}
 	p.mu.Unlock()
-	if phase == "running" {
+	switch {
+	case phase == "running":
 		p.setPhase("stopping")
 		go p.report(ctx, proto.MsgStatus, proto.Status{State: "stopping"})
+		p.sendStop(ctx, reason)
+	case phase == "stopping" && reason == "preempt":
+		// Already stopping, perhaps with a long grace: the host is going,
+		// so the shim shortens it.
 		p.sendStop(ctx, reason)
 	}
 }

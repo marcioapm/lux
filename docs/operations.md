@@ -146,7 +146,8 @@ lux pools rm burst      # drains and terminates its hosts
   terminated. An instance EC2 no longer has is written off and replaced.
 - **Orphans:** once a minute luxd lists the pool's instances by tag. One
   no host row claims (a launch whose reply was lost) is terminated; a host
-  EC2 no longer lists is written off. A host lost for over 5 minutes is
+  EC2 no longer lists (and whose runner is silent) is terminated and
+  written off. A host lost for over 5 minutes is
   terminated.
 - One luxd instance does all this at a time (a lease in Postgres).
 
@@ -193,5 +194,7 @@ What an instance needs:
   `LUX_EC2_ENDPOINT` overrides the endpoint.
 
 Instances are tagged `Name=<host>`, `lux:pool=<pool>` (`<tenant>/<pool>`
-for a tenant's pool), `lux:managed=true` and `lux:host=<host id>`, plus the
+for a tenant's pool), `lux:managed=true`, `lux:deployment=<id>` (which lux
+database launched it: deployments sharing an account never touch each
+other's instances) and `lux:host=<host id>`, plus the
 template's `tags`. luxd also needs `DescribeInstances` filtered by tag.

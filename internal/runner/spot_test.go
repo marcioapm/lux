@@ -50,13 +50,11 @@ func TestEvictionGrace(t *testing.T) {
 	if g := r.evictionGrace(30 * time.Second); g != 30*time.Second {
 		t.Errorf("not evicting: %v", g)
 	}
-	at := time.Now().Add(20 * time.Second)
-	r.evictBy.Store(&at)
+	r.evictBy.Store(&evicting{at: time.Now().Add(20 * time.Second)})
 	if g := r.evictionGrace(30 * time.Second); g > 10*time.Second || g < 9*time.Second {
 		t.Errorf("evicting in 20s: grace %v, want about half", g)
 	}
-	past := time.Now().Add(-time.Second)
-	r.evictBy.Store(&past)
+	r.evictBy.Store(&evicting{at: time.Now().Add(-time.Second)})
 	if g := r.evictionGrace(30 * time.Second); g != time.Second {
 		t.Errorf("past the deadline: %v", g)
 	}

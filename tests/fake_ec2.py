@@ -213,7 +213,7 @@ class FakeEC2:
                     chosen = [c for c in chosen if self.instances[c]["tags"].get(name[4:]) in values]
             items = "".join(
                 f"<item><instanceId>{i}</instanceId><instanceState><code>16</code><name>{self.instances[i]['state']}</name>"
-                f"</instanceState></item>" for i in chosen)
+                f"</instanceState><tagSet>{_tags(self.instances[i]['tags'])}</tagSet></item>" for i in chosen)
         return (f'<DescribeInstancesResponse xmlns="{NS}"><reservationSet><item><reservationId>r-0</reservationId>'
                 f"<instancesSet>{items}</instancesSet></item></reservationSet></DescribeInstancesResponse>")
 
@@ -227,6 +227,10 @@ class FakeError(Exception):
 def _error(code: str, msg: str) -> str:
     return (f"<Response><Errors><Error><Code>{escape(code)}</Code><Message>{escape(msg)}</Message></Error></Errors>"
             f"<RequestID>{uuid.uuid4()}</RequestID></Response>")
+
+
+def _tags(tags: dict) -> str:
+    return "".join(f"<item><key>{escape(k)}</key><value>{escape(v)}</value></item>" for k, v in tags.items())
 
 
 def _list(q: dict, prefix: str) -> list[str]:

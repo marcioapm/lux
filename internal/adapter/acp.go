@@ -152,11 +152,7 @@ func (a *ACP) drain() {
 			Usage      json.RawMessage `json:"usage"`
 		}
 		_ = json.Unmarshal(res, &pr)
-		data := map[string]any{"stopReason": pr.StopReason}
-		// The agent's own usage report, as it sent it.
-		if len(pr.Usage) > 0 && string(pr.Usage) != "null" {
-			data["usage"] = pr.Usage
-		}
+		data := withUsage(map[string]any{"stopReason": pr.StopReason}, pr.Usage)
 		if err != nil {
 			data["error"] = err.Error()
 		}

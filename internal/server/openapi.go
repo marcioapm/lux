@@ -31,6 +31,14 @@ func init() {
 			return errf(http.StatusBadRequest, "bad_request", "invalid JSON body: http: request body too large")
 		case msg == "request body is required":
 			return errf(http.StatusBadRequest, "bad_request", "invalid JSON body: EOF")
+		case msg == "cannot read request body":
+			// The client's body broke off (not a server fault): a 400, as
+			// the decoder reported it before huma.
+			reason := "unexpected EOF"
+			if len(errs) > 0 && errs[0] != nil {
+				reason = errs[0].Error()
+			}
+			return errf(http.StatusBadRequest, "bad_request", "invalid JSON body: %s", reason)
 		}
 		var details []string
 		decoding := msg == "validation failed" && len(errs) > 0
@@ -217,8 +225,8 @@ func asBefore(ctx huma.Context, next func(huma.Context)) {
 	next(huma.WithValue(ctx, requestKey, r))
 }
 
-// requireKey is withKey as huma middleware: the Principal goes in the
-// request's context.
+// requireKey authenticates the API key (authKey) as huma middleware: the
+// Principal goes in the request's context.
 func (s *Server) requireKey(scope string) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		p, err := s.authKey(ctx.Context(), bearerToken(ctx.Header("Authorization")), scope)

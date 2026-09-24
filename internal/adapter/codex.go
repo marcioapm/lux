@@ -24,11 +24,13 @@ type Codex struct {
 	thread string
 	turn   string // in-progress turn id, "" when idle
 	// usage is the last thread/tokenUsage/updated of the turn in progress,
-	// as Codex sent it: codex.turn_end carries it.
-	usage   json.RawMessage
-	queue   []proto.Input
-	ready   bool
-	stopped bool
+	// as Codex sent it, and usageTurn the turnId it named: codex.turn_end
+	// carries it. Cleared when a turn starts, so it never leaks into the next.
+	usage     json.RawMessage
+	usageTurn string
+	queue     []proto.Input
+	ready     bool
+	stopped   bool
 }
 
 func NewCodex() *Codex { return &Codex{} }
@@ -135,6 +137,7 @@ func (c *Codex) drain() {
 	in := c.queue[0]
 	c.queue = c.queue[1:]
 	c.turn = "starting"
+	c.usage, c.usageTurn = nil, ""
 	thread := c.thread
 	sink := c.sink
 	c.mu.Unlock()
@@ -179,19 +182,30 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		c.mu.Lock()
+		// A turn we did not know of (not the one turn/start just named):
+		// usage so far belongs to an earlier one.
+		if p.Turn.ID != c.turn {
+			c.usage, c.usageTurn = nil, ""
+		}
 		c.turn = p.Turn.ID
 		c.mu.Unlock()
 	case "thread/tokenUsage/updated":
 		var p struct {
+			TurnID     string          `json:"turnId"`
 			TokenUsage json.RawMessage `json:"tokenUsage"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		c.mu.Lock()
-		c.usage = p.TokenUsage
+		// Only the turn in progress's; while it is "starting" its id is
+		// not known yet, so take it.
+		if c.turn != "" && (p.TurnID == "" || c.turn == "starting" || p.TurnID == c.turn) {
+			c.usage, c.usageTurn = p.TokenUsage, p.TurnID
+		}
 		c.mu.Unlock()
 	case "turn/completed":
 		var p struct {
 			Turn struct {
+				ID     string `json:"id"`
 				Status string `json:"status"`
 			} `json:"turn"`
 		}
@@ -199,20 +213,20 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 		c.mu.Lock()
 		c.turn = ""
 		usage := c.usage
-		c.usage = nil
+		if c.usageTurn != "" && p.Turn.ID != "" && c.usageTurn != p.Turn.ID {
+			usage = nil
+		}
+		c.usage, c.usageTurn = nil, ""
 		idle := len(c.queue) == 0
 		c.mu.Unlock()
 		// The turn's end, with the agent's usage as it reported it (the
-		// counterpart of acp.turn_end; claude.result carries its own).
-		end := map[string]any{"status": p.Turn.Status}
-		if len(usage) > 0 && string(usage) != "null" {
-			end["usage"] = usage
-		}
-		defer sink.Event("codex.turn_end", end)
+		// counterpart of acp.turn_end and claude.turn_end).
+		// Sent before idle and before the next turn starts.
+		sink.Event("codex.turn_end", withUsage(map[string]any{"status": p.Turn.Status}, usage))
 		if idle {
 			sink.Activity(true)
 		}
-		defer c.drain()
+		defer c.drain() // after the turn/completed event below
 	case "item/completed":
 		var p struct {
 			Item struct {
