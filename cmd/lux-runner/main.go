@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/marcioapm/lux/internal/hostboot"
 	"github.com/marcioapm/lux/internal/runner"
 	"github.com/marcioapm/lux/internal/version"
 )
@@ -37,7 +38,7 @@ func main() {
 	cfg := runner.Config{Labels: labels{}}
 	flag.StringVar(&cfg.Name, "name", "", "host name (default: hostname)")
 	flag.StringVar(&cfg.DataDir, "data-dir", "/var/lib/lux", "where the runner keeps its state and local snapshots")
-	flag.StringVar(&cfg.Shim, "shim", "/usr/local/lib/lux/lux-shim", "path to the lux-shim binary")
+	flag.StringVar(&cfg.Shim, "shim", hostboot.InstallDir+"/lux-shim", "path to the lux-shim binary")
 	flag.Var(labels(cfg.Labels), "label", "host label key=value (repeatable)")
 	flag.IntVar(&cfg.MaxRuns, "max-runs", 0, "maximum concurrent Runs (default 16)")
 	flag.Float64Var(&cfg.CPUs, "cpus", 0, "CPUs to offer (default: all)")

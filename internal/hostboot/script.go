@@ -53,9 +53,6 @@ if [ "${#missing[@]}" -gt 0 ]; then
   fi
 fi
 
-grep -q '^containers:' /etc/subuid 2>/dev/null || echo '` + SubuidRange + `' >> /etc/subuid
-grep -q '^containers:' /etc/subgid 2>/dev/null || echo '` + SubuidRange + `' >> /etc/subgid
-
 mkdir -p /etc/lux
 umask 077
 {
@@ -66,7 +63,6 @@ umask 077
 } > /etc/lux/runner.env
 chmod 0600 /etc/lux/runner.env
 
-mkdir -p /usr/local/lib/lux
 cat > ` + FetchBinariesPath + ` <<'LUX_FETCH_SCRIPT'
 ` + FetchBinariesScript + `LUX_FETCH_SCRIPT
 chmod 0755 ` + FetchBinariesPath + `

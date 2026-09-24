@@ -58,17 +58,20 @@ func boolPtr(b bool) *bool { return &b }
 
 // Ignition renders the Ignition v3.4.0 config Fedora CoreOS reads from EC2
 // user data (spec 3.4.0: see ignitionSpec). It writes /etc/lux/runner.env,
-// appends the runner's subuid/subgid range, installs the fetch-binaries
-// script and the lux-runner unit (enabled), and masks zincati.service:
-// runners are disposable and must never auto-update and reboot mid-Run.
+// installs the fetch-binaries script and the lux-runner unit (enabled),
+// and masks zincati.service: runners are disposable and must never
+// auto-update and reboot mid-Run. The runner's subuid/subgid range is
+// appended by the fetch script itself (FetchBinariesScript), not here:
+// Ignition's `append` always appends, with no "only if absent" the script
+// format also needs, so both formats share the one idempotent append
+// instead of each risking a different answer to "what if it's already
+// there".
 func Ignition(env Env) ([]byte, error) {
 	cfg := ignitionConfig{
 		Ignition: ignitionMeta{Version: ignitionSpec},
 		Storage: ignitionStorage{
 			Files: []ignitionFile{
 				{Path: "/etc/lux/runner.env", Mode: 0o600, Contents: &ignitionFileContents{Source: dataURL(env.Lines())}},
-				{Path: "/etc/subuid", Append: []ignitionFileContents{{Source: dataURL(SubuidRange + "\n")}}},
-				{Path: "/etc/subgid", Append: []ignitionFileContents{{Source: dataURL(SubuidRange + "\n")}}},
 				{Path: FetchBinariesPath, Mode: 0o755, Contents: &ignitionFileContents{Source: dataURL(FetchBinariesScript)}},
 			},
 		},

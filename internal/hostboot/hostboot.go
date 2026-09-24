@@ -53,6 +53,17 @@ func (e Env) Lines() string {
 	return b.String()
 }
 
+// InstallDir is where every format installs the runner binaries and the
+// fetch script: /usr/local/bin, not /usr/local/lib/lux. Fedora CoreOS
+// enforces SELinux, and its policy labels /usr/local/bin bin_t (systemd
+// can ExecStart it); /usr/local/lib gets no such label by default, and a
+// binary systemd tries to exec from an unlabeled path fails with EACCES
+// (203/EXEC). runner_bin_dir, the directory *luxd* serves these binaries
+// from on its own host, is unrelated and unchanged (LUX_RUNNER_BIN_DIR,
+// still /usr/local/lib/lux/runner by default): this is only where a
+// runner host installs what it downloads.
+const InstallDir = "/usr/local/bin"
+
 // UnitName is the systemd unit every format installs.
 const UnitName = "lux-runner.service"
 
@@ -78,7 +89,7 @@ StartLimitIntervalSec=0
 [Service]
 EnvironmentFile=/etc/lux/runner.env
 ExecStartPre=` + FetchBinariesPath + `
-ExecStart=/usr/local/lib/lux/lux-runner --data-dir /var/lib/lux --shim /usr/local/lib/lux/lux-shim
+ExecStart=` + InstallDir + `/lux-runner --data-dir /var/lib/lux --shim ` + InstallDir + `/lux-shim
 Restart=always
 RestartSec=10s
 
@@ -87,29 +98,39 @@ WantedBy=multi-user.target
 `
 
 // FetchBinariesPath is where every format installs FetchBinariesScript.
-const FetchBinariesPath = "/usr/local/lib/lux/fetch-binaries.sh"
+const FetchBinariesPath = InstallDir + "/lux-fetch-binaries.sh"
 
-// FetchBinariesScript is lux-runner.service's ExecStartPre. It fetches
-// LUX_URL/runner/bin/manifest first, and downloads only lux-runner and/or
-// lux-shim whose sha256 there differs from (or is missing from) what is
-// already installed, verifying each against the manifest and its
-// X-Lux-Sha256 header before installing; the pair is installed
-// atomically (both staged, then both renamed into place), so a fetch that
-// fails partway through never leaves a new runner next to an old shim or
-// vice versa. curl retries transient failures (connection refused: luxd
-// mid-restart) before giving up. If the fetch fails for any reason and
-// both binaries are already installed and were previously verified (a
-// sha256 recorded alongside them), it warns and exits 0: the old version
-// keeps running rather than the unit spinning or going dead. Idempotent:
-// a rerun with nothing changed downloads nothing.
+// FetchBinariesScript is lux-runner.service's ExecStartPre. It first
+// appends the runner's subuid/subgid range (SubuidRange) if no
+// `containers:` entry exists yet — the one place this happens, so
+// Ignition (which has no native "append if absent") and the script
+// format share this instead of each implementing it separately and
+// risking drift. Idempotent: a second run finds the entry already there
+// and skips it. It then fetches LUX_URL/runner/bin/manifest, and
+// downloads only lux-runner and/or lux-shim whose sha256 there differs
+// from (or is missing from) what is already installed, verifying each
+// against the manifest and its X-Lux-Sha256 header before installing; the
+// pair is installed atomically (both staged, then both renamed into
+// place), so a fetch that fails partway through never leaves a new
+// runner next to an old shim or vice versa. curl retries transient
+// failures (connection refused: luxd mid-restart) before giving up. If
+// the fetch fails for any reason and both binaries are already installed
+// and were previously verified (a sha256 recorded alongside them), it
+// warns and exits 0: the old version keeps running rather than the unit
+// spinning or going dead.
 const FetchBinariesScript = `#!/bin/bash
 [ -n "${BASH_VERSION:-}" ] || { echo "lux: fetch-binaries.sh needs bash, not sh" >&2; exit 1; }
 set -uo pipefail
 
+install_dir="` + InstallDir + `"
+
+grep -q '^containers:' /etc/subuid 2>/dev/null || echo '` + SubuidRange + `' >> /etc/subuid
+grep -q '^containers:' /etc/subgid 2>/dev/null || echo '` + SubuidRange + `' >> /etc/subgid
+
 warn_and_keep_running() {
   echo "lux: $1" >&2
-  if [ -x /usr/local/lib/lux/lux-runner ] && [ -x /usr/local/lib/lux/lux-shim ] \
-     && [ -f /usr/local/lib/lux/.installed-sha256 ]; then
+  if [ -x "$install_dir/lux-runner" ] && [ -x "$install_dir/lux-shim" ] \
+     && [ -f "$install_dir/.lux-installed-sha256" ]; then
     echo "lux: keeping the already-installed, previously verified binaries" >&2
     exit 0
   fi
@@ -124,7 +145,7 @@ case "$arch" in
   *) echo "lux: unsupported architecture $arch" >&2; exit 1 ;;
 esac
 
-mkdir -p /usr/local/lib/lux
+mkdir -p "$install_dir"
 curl_retry() { curl -fsS --retry 5 --retry-connrefused --retry-delay 2 "$@"; }
 
 manifest=$(curl_retry -H "Authorization: Bearer $LUX_HOST_TOKEN" "$LUX_URL/runner/bin/manifest") \
@@ -147,11 +168,11 @@ for bin in lux-runner lux-shim; do
     warn_and_keep_running "luxd's manifest has no $bin for linux-$larch"
   fi
   have=""
-  [ -x "/usr/local/lib/lux/$bin" ] && have=$(sha256sum "/usr/local/lib/lux/$bin" | awk '{print $1}')
+  [ -x "$install_dir/$bin" ] && have=$(sha256sum "$install_dir/$bin" | awk '{print $1}')
   if [ "$have" = "$want" ]; then
     continue  # already current: nothing to download
   fi
-  tmp=$(mktemp "/usr/local/lib/lux/.$bin.XXXXXX")
+  tmp=$(mktemp "$install_dir/.$bin.XXXXXX")
   staged+=("$tmp")
   url="$LUX_URL/runner/bin/linux-$larch/$bin"
   headers=$(mktemp)
@@ -172,10 +193,10 @@ done
 for tmp in "${staged[@]:-}"; do
   [ -z "$tmp" ] && continue
   bin=$(basename "$tmp" | sed 's/^\.//; s/\.[^.]*$//')
-  mv -f "$tmp" "/usr/local/lib/lux/$bin"
+  mv -f "$tmp" "$install_dir/$bin"
 done
 staged=()
-sha256sum /usr/local/lib/lux/lux-runner /usr/local/lib/lux/lux-shim > /usr/local/lib/lux/.installed-sha256
+sha256sum "$install_dir/lux-runner" "$install_dir/lux-shim" > "$install_dir/.lux-installed-sha256"
 
 if [ -n "${LUX_EC2_IMDS:-}" ] && ! grep -q '^LUX_PROVIDER_ID=' /etc/lux/runner.env 2>/dev/null; then
   token=$(curl_retry -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' "$LUX_EC2_IMDS/latest/api/token")

@@ -1,6 +1,7 @@
 package hostboot
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -70,6 +71,51 @@ func TestIgnitionShape(t *testing.T) {
 	}
 	if len(b) > 16<<10 {
 		t.Errorf("rendered Ignition config is %d bytes, over the EC2 user-data limit", len(b))
+	}
+}
+
+// Both Ignition and the script format append the subuid/subgid range only
+// through FetchBinariesScript's own idempotent grep-then-append, not
+// separately: Ignition installs no /etc/subuid or /etc/subgid file entry
+// of its own (its `append` has no "only if absent", which would duplicate
+// the entry on a second boot if it ever ran twice), and the fetch script
+// embedded in the Ignition config is the identical constant the script
+// format also embeds. One append behaviour, shared, rather than two that
+// could drift.
+func TestIgnitionAndScriptShareOneSubuidAppend(t *testing.T) {
+	b, err := Ignition(Env{URL: "http://10.0.1.10:7070", HostToken: "luxh_x", HostName: "h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	files := cfg["storage"].(map[string]any)["files"].([]any)
+	var fetchScript map[string]any
+	for _, f := range files {
+		fm := f.(map[string]any)
+		switch fm["path"] {
+		case "/etc/subuid", "/etc/subgid":
+			t.Errorf("Ignition still writes %v directly; subuid/subgid must come from FetchBinariesScript alone", fm["path"])
+		case FetchBinariesPath:
+			fetchScript = fm
+		}
+	}
+	if fetchScript == nil {
+		t.Fatal("no fetch-binaries.sh file entry")
+	}
+	source := fetchScript["contents"].(map[string]any)["source"].(string)
+	_, b64, _ := strings.Cut(source, ",")
+	decoded, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != FetchBinariesScript {
+		t.Error("the fetch script Ignition embeds diverged from FetchBinariesScript")
+	}
+	if !strings.Contains(FetchBinariesScript, "grep -q '^containers:' /etc/subuid") {
+		t.Error("FetchBinariesScript no longer appends the subuid range idempotently")
 	}
 }
 

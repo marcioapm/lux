@@ -124,8 +124,10 @@ def test_bootstrap_script_fetches_and_verifies_binaries_on_a_host(env, hosts, ru
     simulated host has no systemd PID 1, so `systemctl` is stubbed out:
     what is checked is bootstrap.sh's own idempotent writes (env file,
     unit file, fetch script) and, run separately exactly as the unit's
-    ExecStartPre would, that the fetch script downloads and verifies both
-    binaries against runner_bin_dir."""
+    ExecStartPre would (subuid/subgid setup lives there now, shared with
+    the Ignition rendering: see internal/hostboot/hostboot.go), that the
+    fetch script downloads and verifies both binaries against
+    runner_bin_dir and sets up the subuid/subgid range idempotently."""
     _, token, content = runner_bin_dir
     host = hosts[0]
     arch = host.exec("uname", "-m").strip()
@@ -143,26 +145,31 @@ def test_bootstrap_script_fetches_and_verifies_binaries_on_a_host(env, hosts, ru
     assert f"LUX_URL={env.luxd_url}" in runner_env
     assert "LUX_HOST_NAME=bootstrap-test" in runner_env
     unit = host.exec("cat", "/etc/systemd/system/lux-runner.service")
-    assert "ExecStartPre=/usr/local/lib/lux/fetch-binaries.sh" in unit
+    assert "ExecStartPre=/usr/local/bin/lux-fetch-binaries.sh" in unit
     assert "Restart=always" in unit
-    fetch_mode = host.exec("stat", "-c", "%a", "/usr/local/lib/lux/fetch-binaries.sh").strip()
+    fetch_mode = host.exec("stat", "-c", "%a", "/usr/local/bin/lux-fetch-binaries.sh").strip()
     assert fetch_mode == "755", fetch_mode
-    subuid = host.exec("cat", "/etc/subuid")
-    assert "containers:2147483647:2147483648" in subuid
-    # Idempotent: a second run (a reboot) does not fail, and does not
-    # duplicate the subuid/subgid line.
+    # A second run (a reboot) does not fail: bootstrap.sh's own writes are
+    # idempotent (systemd itself is stubbed, so ExecStartPre never runs
+    # here; the fetch script's own idempotency, including subuid, is
+    # exercised below by running it directly, as the unit would).
     run()
-    assert host.exec("grep", "-c", "^containers:", "/etc/subuid").strip() == "1"
 
     # The fetch script it installed is exactly what lux-runner.service's
     # ExecStartPre would run, with the same EnvironmentFile= it declares:
-    # exercise it the same way, as systemd would.
-    host.exec("sh", "-c", "set -a; . /etc/lux/runner.env; set +a; exec bash /usr/local/lib/lux/fetch-binaries.sh")
+    # exercise it the same way, as systemd would, twice (a reboot).
+    fetch = "set -a; . /etc/lux/runner.env; set +a; exec bash /usr/local/bin/lux-fetch-binaries.sh"
+    host.exec("sh", "-c", fetch)
+    subuid = host.exec("cat", "/etc/subuid")
+    assert "containers:2147483647:2147483648" in subuid
     for name in ("lux-runner", "lux-shim"):
-        got = host.exec("sha256sum", f"/usr/local/lib/lux/{name}").split()[0]
+        got = host.exec("sha256sum", f"/usr/local/bin/{name}").split()[0]
         assert got == content[larch][name], (name, got, content[larch][name])
-        mode = host.exec("stat", "-c", "%a", f"/usr/local/lib/lux/{name}").strip()
+        mode = host.exec("stat", "-c", "%a", f"/usr/local/bin/{name}").strip()
         assert mode == "755", (name, mode)
+
+    host.exec("sh", "-c", fetch)
+    assert host.exec("grep", "-c", "^containers:", "/etc/subuid").strip() == "1"
 
 
 # ---- draining outdated hosts ------------------------------------------------

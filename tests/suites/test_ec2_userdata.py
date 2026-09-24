@@ -71,7 +71,7 @@ def test_the_script_format_actually_boots_a_runner(env, lux, ec2, hosts):
     host.exec("bash", "/tmp/userdata.sh")
 
     unit = host.exec("cat", "/etc/systemd/system/lux-runner.service")
-    assert "ExecStartPre=/usr/local/lib/lux/fetch-binaries.sh" in unit
+    assert "ExecStartPre=/usr/local/bin/lux-fetch-binaries.sh" in unit
     runner_env = host.exec("cat", "/etc/lux/runner.env")
     assert f"LUX_URL={env.luxd_url}" in runner_env
 

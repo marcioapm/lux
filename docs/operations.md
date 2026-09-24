@@ -183,7 +183,7 @@ curl -fsS https://luxd.example/runner/bootstrap.sh | sudo env \
 | --- | --- | --- |
 | `--name` | hostname | Unique within the tenant. |
 | `--data-dir` | `/var/lib/lux` | Run state and local snapshot copies. |
-| `--shim` | `/usr/local/lib/lux/lux-shim` | The shim binary to mount into containers. |
+| `--shim` | `/usr/local/bin/lux-shim` | The shim binary to mount into containers. |
 | `--label k=v` | | Host labels, matched by `placement.requires` and `prefers`. Also `LUX_LABELS=k=v,…`. |
 | `--max-runs`, `--cpus`, `--memory` | 16, all, all | Capacity offered to the scheduler. |
 | `--disk` | not reserved | Bytes of disk the scheduler reserves Runs' `resources.disk` from. Without it, disk is not reserved (Runs still stop at their own limit). Set it to the space under `/var/lib/containers`, more to overcommit. |
@@ -250,6 +250,13 @@ binaries first. A `Hello` reporting matching binaries un-drains the host
 in the same transaction that acks any exit still queued for it, and a
 runner ignores a redelivered `exit` if its binaries already match what
 luxd's manifest last showed, or if it holds live placements.
+
+A host installs the downloaded `lux-runner`, `lux-shim` and the fetch
+script itself under `/usr/local/bin`, not under `/usr/local/lib` — Fedora
+CoreOS enforces SELinux, and its default policy labels `/usr/local/bin`
+`bin_t` (systemd's `ExecStart` can run it) but leaves `/usr/local/lib`
+unlabeled, which fails with `203/EXEC`. This is unrelated to
+`runner_bin_dir` on luxd's own host, which is unchanged.
 
 ## EC2 pools
 
