@@ -21,7 +21,7 @@ func (s *Server) reaperLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		for _, f := range []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapRetention} {
+		for _, f := range []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapRetention, s.reapOutdatedStaticHosts} {
 			if err := f(ctx); err != nil && ctx.Err() == nil {
 				s.log.Warn("reaper", "err", err)
 			}
@@ -132,6 +132,39 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 	for _, h := range hosts {
 		s.hub.Notify(h)
 	}
+	return err
+}
+
+// reapOutdatedStaticHosts tells a static host drained for outdated
+// binaries to exit, once it is idle and has nothing left to upload: its
+// systemd unit restarts it, whose ExecStartPre re-downloads first. A
+// provisioned host takes the existing drain→terminate→relaunch path
+// instead (reconcilePool); this is only for hosts nothing else replaces.
+func (s *Server) reapOutdatedStaticHosts(ctx context.Context) error {
+	var hosts []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `UPDATE hosts SET exit_requested_at = now()
+			WHERE draining AND state_reason = $1 AND provision_requested_at IS NULL
+			  AND exit_requested_at IS NULL
+			  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.host_id = hosts.id AND p.state IN `+livePlacementStates+`)
+			  AND NOT EXISTS (SELECT 1 FROM blobs b WHERE b.host_id = hosts.id AND b.location = 'host')
+			RETURNING id`, outdatedBinariesReason)
+		if err != nil {
+			return err
+		}
+		hosts, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		for _, h := range hosts {
+			if err := enqueue(ctx, tx, h, "", 0, proto.MsgExit,
+				proto.ExitHost{Reason: outdatedBinariesReason, Code: proto.ExitCodeOutdatedBinaries}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	s.notifyAll(hosts)
 	return err
 }
 

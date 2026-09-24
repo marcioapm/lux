@@ -59,8 +59,38 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// runnerBinSHA256 is the sha256 luxd has for arch/name, and whether it has
-// one at all (an unknown arch, or one it holds no binaries for).
+// outdatedBinariesReason is the drain reason luxd uses when a host's
+// runner or shim no longer match runner_bin_dir; also read back to
+// recognize a host drained for exactly this (so a heartbeat never
+// re-drains it, and a matching restart can be un-drained).
+const outdatedBinariesReason = "outdated binaries"
+
+// binariesOutdated reports whether luxd holds a binary for arch that
+// differs from what the runner reports having. Only checked for shas the
+// runner sends and luxd holds: an older runner (no shas) or an arch luxd
+// serves nothing for are never grounds to drain.
+func (s *Server) binariesOutdated(arch, runnerSHA, shimSHA string) bool {
+	have := s.bins[arch]
+	if len(have) == 0 {
+		return false
+	}
+	if runnerSHA != "" && have["lux-runner"] != "" && have["lux-runner"] != runnerSHA {
+		return true
+	}
+	if shimSHA != "" && have["lux-shim"] != "" && have["lux-shim"] != shimSHA {
+		return true
+	}
+	return false
+}
+
+// binariesMatch is the converse, used to un-drain a host once a restart
+// downloaded binaries that now match: both shas must be present and
+// neither outdated (a runner still reporting nothing never un-drains
+// itself this way; it stays drained until it does).
+func (s *Server) binariesMatch(arch, runnerSHA, shimSHA string) bool {
+	return runnerSHA != "" && shimSHA != "" && !s.binariesOutdated(arch, runnerSHA, shimSHA)
+}
+
 func (s *Server) runnerBinSHA256(arch, name string) (string, bool) {
 	sum, ok := s.bins[arch][name]
 	return sum, ok

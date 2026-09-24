@@ -53,6 +53,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 
 	var w proto.Welcome
 	w.LeaseSeconds = s.cfg.LeaseDuration.Seconds()
+	var outdatedDrained []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var hostID string
 		err := tx.QueryRow(ctx, `SELECT id FROM hosts
@@ -86,17 +87,35 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		case err != nil:
 			return err
 		}
+		// Un-drain a host drained for exactly this reason once its
+		// binaries match again (its restart's ExecStartPre re-downloaded
+		// them); read before this Hello's own UPDATE clears state_reason.
+		var wasDraining bool
+		var reason string
+		if err := tx.QueryRow(ctx, `SELECT draining, state_reason FROM hosts WHERE id = $1`, hostID).Scan(&wasDraining, &reason); err != nil {
+			return err
+		}
+		undrain := wasDraining && reason == outdatedBinariesReason && s.binariesMatch(h.Arch, h.RunnerSHA256, h.ShimSHA256)
+		draining := wasDraining && !undrain
 		_, err = tx.Exec(ctx, `UPDATE hosts SET
-				state = CASE WHEN draining THEN 'draining' ELSE 'ready' END,
+				draining = $9,
+				state = CASE WHEN $9 THEN 'draining' ELSE 'ready' END,
 				state_reason = '', labels = $2, arch = $3, capacity = $4, versions = $5, caches = $6,
 				local_snapshots = $7, provider_id = coalesce(nullif($8, ''), provider_id),
 				registered_at = coalesce(registered_at, now()),
 				provisioned_at = coalesce(provisioned_at, now()),
 				last_heartbeat = now(), lost_at = NULL
 			WHERE id = $1`,
-			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID)
+			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, draining)
 		if err != nil {
 			return err
+		}
+		if !draining && s.binariesOutdated(h.Arch, h.RunnerSHA256, h.ShimSHA256) {
+			drained, err := s.drainHosts(ctx, tx, outdatedBinariesReason, "drain", "id = $1", hostID)
+			if err != nil {
+				return err
+			}
+			outdatedDrained = drained
 		}
 		w.HostID = hostID
 
@@ -141,6 +160,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 	})
 	if err == nil {
 		s.Kick()
+		s.notifyAll(outdatedDrained)
 	}
 	return w, err
 }
@@ -295,7 +315,8 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 			curMem[i], curPids[i] = u.MemoryBytes, u.Pids
 		}
 	}
-	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	var outdatedDrained []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `UPDATE hosts SET last_heartbeat = now(),
 			state = CASE WHEN state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE state END,
 			caches = jsonb_set(caches, '{gitMirrors}', $2)
@@ -304,6 +325,20 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		}
 		if err := forgetMissingCopies(ctx, tx, hostID, hb.LocalSnapshots); err != nil {
 			return err
+		}
+		// A host already draining (for any reason) is left alone: never
+		// re-drained here, and its reason is not this heartbeat's to change.
+		var arch string
+		var draining bool
+		if err := tx.QueryRow(ctx, `SELECT arch, draining OR state = 'draining' FROM hosts WHERE id = $1`, hostID).Scan(&arch, &draining); err != nil {
+			return err
+		}
+		if !draining && s.binariesOutdated(arch, hb.RunnerSHA256, hb.ShimSHA256) {
+			drained, err := s.drainHosts(ctx, tx, outdatedBinariesReason, "drain", "id = $1", hostID)
+			if err != nil {
+				return err
+			}
+			outdatedDrained = drained
 		}
 		if n > 0 {
 			// Leases renewed and usage peaks raised for every placement at once.
@@ -342,6 +377,10 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		})
 		return nil
 	})
+	if err == nil {
+		s.notifyAll(outdatedDrained)
+	}
+	return err
 }
 
 // sample writes history in a savepoint of a heartbeat's transaction: a

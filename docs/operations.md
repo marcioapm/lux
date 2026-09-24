@@ -213,6 +213,18 @@ binaries before starting `lux-runner` (its systemd unit's
 restart luxd, then restart or replace each host — never patch a running
 binary in place.
 
+Every `Hello` and `Heartbeat` a runner sends carries the sha256 of its own
+binary (`os.Executable()`) and of its `--shim`; older runners simply omit
+them. When luxd holds binaries for that host's arch and either sha
+differs, it drains the host once (reason `outdated binaries`; a host
+already draining for another reason is left alone, and this never
+re-drains a host on a later heartbeat). A drained **provisioned** host is
+terminated once idle, same as any other drain, and the pool launches a
+fresh one with the running luxd's binaries. A drained **static** host is
+told to exit, once it is idle and has nothing left to upload: its systemd
+unit's `Restart=always` brings it back, and its `ExecStartPre`
+re-downloads the binaries first.
+
 ## EC2 pools
 
 A pool with `provider: ec2` is sized by luxd:

@@ -11,8 +11,11 @@ package runner
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -98,6 +101,10 @@ type Runner struct {
 	// evicting). Stops before it get a grace that leaves time to snapshot
 	// and upload.
 	evictBy atomic.Pointer[evicting]
+	// runnerSHA256, shimSHA256: this runner's own binary and its --shim,
+	// hashed once at startup (a self-update replaces the file, not this
+	// process, so the hash is stable for the process's life).
+	runnerSHA256, shimSHA256 string
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -172,7 +179,27 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	}
 	r.egress = fw
 	r.images = newImageUse(cfg.DataDir)
+	// Best effort: an unreadable binary (permissions, a stripped
+	// /proc/self/exe on some minimal containers) just means luxd never
+	// drains this runner for being outdated.
+	if exe, err := os.Executable(); err == nil {
+		r.runnerSHA256, _ = sha256File(exe)
+	}
+	r.shimSHA256, _ = sha256File(cfg.Shim)
 	return r, nil
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -225,6 +252,8 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 		Images:          imgs,
 		GitMirrors:      r.git.Mirrors(),
 		LocalSnapshots:  r.localSnapshots(),
+		RunnerSHA256:    r.runnerSHA256,
+		ShimSHA256:      r.shimSHA256,
 	}
 	r.mu.Lock()
 	for _, p := range r.placements {
@@ -307,6 +336,18 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 		r.discard(ctx, d.RunID, d.BeforeEpoch)
 	case proto.MsgDrain:
 		// luxd stops this host's Runs itself; nothing to do locally.
+	case proto.MsgExit:
+		var e proto.ExitHost
+		_ = json.Unmarshal(f.Data, &e)
+		r.log.Warn("luxd asked this host to exit", "reason", e.Reason, "code", e.Code)
+		// Exit after the ack for this message has gone out (handleControl
+		// returns to its caller, which sends it next), not from here: never
+		// in place of the running binary. The unit's Restart=always starts
+		// a fresh process, whose ExecStartPre re-downloads first.
+		go func() {
+			time.Sleep(2 * time.Second)
+			os.Exit(e.Code)
+		}()
 	default:
 		r.log.Warn("unknown control message", "type", f.Type)
 	}
@@ -397,7 +438,8 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 			return
 		case <-time.After(interval):
 		}
-		hb := proto.Heartbeat{LocalSnapshots: r.localSnapshots(), GitMirrors: r.git.Mirrors()}
+		hb := proto.Heartbeat{LocalSnapshots: r.localSnapshots(), GitMirrors: r.git.Mirrors(),
+			RunnerSHA256: r.runnerSHA256, ShimSHA256: r.shimSHA256}
 		if hu, err := podman.ReadHostUsage(r.cfg.DataDir); err == nil {
 			hb.Usage = &proto.HostUsage{CPUSeconds: hu.CPUSeconds, MemoryBytes: hu.MemoryBytes, DiskBytes: hu.DiskBytes}
 		}

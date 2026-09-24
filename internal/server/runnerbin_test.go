@@ -68,3 +68,43 @@ func TestLoadRunnerBinariesEmptyDir(t *testing.T) {
 		t.Error("found a binary with no configured directory")
 	}
 }
+
+// binariesOutdated only fires when luxd holds a binary for the arch that
+// differs from what the runner reports; an older runner (no shas) or an
+// arch luxd serves nothing for are never grounds to drain.
+func TestBinariesOutdated(t *testing.T) {
+	s := &Server{bins: map[string]map[string]string{
+		"arm64": {"lux-runner": "r1", "lux-shim": "s1"},
+	}}
+	cases := []struct {
+		name               string
+		arch, runner, shim string
+		want               bool
+	}{
+		{"matches", "arm64", "r1", "s1", false},
+		{"runner differs", "arm64", "r2", "s1", true},
+		{"shim differs", "arm64", "r1", "s2", true},
+		{"older runner: no shas", "arm64", "", "", false},
+		{"unknown arch: luxd holds nothing", "amd64", "whatever", "whatever", false},
+	}
+	for _, c := range cases {
+		if got := s.binariesOutdated(c.arch, c.runner, c.shim); got != c.want {
+			t.Errorf("%s: binariesOutdated = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestBinariesMatch(t *testing.T) {
+	s := &Server{bins: map[string]map[string]string{
+		"arm64": {"lux-runner": "r1", "lux-shim": "s1"},
+	}}
+	if !s.binariesMatch("arm64", "r1", "s1") {
+		t.Error("matching shas did not match")
+	}
+	if s.binariesMatch("arm64", "r2", "s1") {
+		t.Error("a differing runner sha matched")
+	}
+	if s.binariesMatch("arm64", "", "") {
+		t.Error("empty shas (no report yet) matched")
+	}
+}

@@ -48,6 +48,11 @@ const (
 	MsgAck             = "ack" // luxd acking a runner report (reply)
 	MsgNack            = "nack"
 	MsgWelcome         = "welcome"
+	// MsgExit asks the runner to exit with Exit.Code: sent only once luxd
+	// has drained the host and it has nothing left to lose, so the
+	// runner's systemd unit restarts it and its ExecStartPre re-downloads
+	// the binaries first. Never a signal to replace itself in place.
+	MsgExit = "exit"
 )
 
 // runner → luxd
@@ -83,6 +88,11 @@ type Hello struct {
 	LocalSnapshots []LocalSnapshot `json:"localSnapshots"`
 	// Placements the runner is still running (re-adopted after a restart).
 	Live []LivePlacement `json:"live"`
+	// RunnerSHA256, ShimSHA256: sha256 of this runner's own binary
+	// (os.Executable()) and of the shim it mounts (--shim). Absent from
+	// runners that predate self-update: luxd never drains those for it.
+	RunnerSHA256 string `json:"runnerSha256,omitempty"`
+	ShimSHA256   string `json:"shimSha256,omitempty"`
 }
 
 type Capacity struct {
@@ -144,6 +154,11 @@ type Heartbeat struct {
 	GitMirrors []string `json:"gitMirrors"`
 	// Usage: the host's, for history (absent from older runners).
 	Usage *HostUsage `json:"usage,omitempty"`
+	// RunnerSHA256, ShimSHA256: as in Hello, on every heartbeat, so a
+	// binary replaced after the runner started (a bad manual copy) is
+	// still noticed. Absent from runners that predate self-update.
+	RunnerSHA256 string `json:"runnerSha256,omitempty"`
+	ShimSHA256   string `json:"shimSha256,omitempty"`
 }
 
 // Assign starts (or resumes) a placement. Secrets travel only in this
@@ -214,6 +229,19 @@ type Evicting struct {
 type StopRequest struct {
 	Reason string `json:"reason"` // stop | cancel | preempt | drain | timeout | disk
 }
+
+// ExitHost tells a static runner to exit once it has drained: its
+// binaries are outdated, and its systemd unit's Restart=always brings it
+// back after ExecStartPre re-downloads them. Code distinguishes this exit
+// from a crash in the unit's condition, and in logs.
+type ExitHost struct {
+	Reason string `json:"reason"`
+	Code   int    `json:"code"`
+}
+
+// ExitCodeOutdatedBinaries: the code luxd sends an ExitHost with when a
+// static host's runner or shim no longer matches what luxd holds.
+const ExitCodeOutdatedBinaries = 42
 
 // Status is a placement's state as the runner sees it.
 type Status struct {
