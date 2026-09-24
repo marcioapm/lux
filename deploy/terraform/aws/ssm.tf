@@ -1,11 +1,11 @@
 # SSM Parameter Store: the desired lux version (set by Terraform) and the
-# Cloudflare Tunnel token (a SecureString, created only if a value is
-# given — otherwise Terraform expects it to already exist, e.g. created
-# out of band or by deploy/terraform/cloudflare). Postgres passwords are
-# generated on the control host itself and never touch Terraform state
-# (see control.tf); they may end up under this same prefix as
-# SecureStrings the box writes, which is why iam.tf grants PutParameter
-# there too.
+# Cloudflare Tunnel token (a SecureString, created only if
+# manage_cloudflare_tunnel_token is true — otherwise Terraform expects it
+# to already exist, e.g. created out of band or by
+# deploy/terraform/cloudflare). Postgres passwords are generated on the
+# control host itself and never touch Terraform state (see control.tf);
+# they may end up under this same prefix as SecureStrings the box writes,
+# which is why iam.tf grants PutParameter there too.
 
 variable "ssm_prefix" {
   description = "SSM Parameter Store path prefix for this deployment's parameters."
@@ -24,8 +24,14 @@ variable "cloudflare_tunnel_token_parameter" {
   default     = ""
 }
 
+variable "manage_cloudflare_tunnel_token" {
+  description = "Whether Terraform creates the SecureString parameter for the Cloudflare Tunnel token. Must be a plain bool, known at plan time — unlike checking cloudflare_tunnel_token != \"\", which is unknown until apply when the token comes from the cloudflare module's output (an \"Invalid count argument\" error at plan time)."
+  type        = bool
+  default     = false
+}
+
 variable "cloudflare_tunnel_token" {
-  description = "Cloudflare Tunnel token. If set, Terraform creates the SecureString parameter; if empty, the parameter is expected to already exist (e.g. created by deploy/terraform/cloudflare or by hand) and Terraform does not manage it."
+  description = "Cloudflare Tunnel token. Used only if manage_cloudflare_tunnel_token is true; otherwise the parameter is expected to already exist (e.g. created by deploy/terraform/cloudflare or by hand) and Terraform does not manage it."
   type        = string
   default     = ""
   sensitive   = true
@@ -45,7 +51,7 @@ resource "aws_ssm_parameter" "lux_version" {
 }
 
 resource "aws_ssm_parameter" "cloudflare_tunnel_token" {
-  count = var.cloudflare_tunnel_token != "" ? 1 : 0
+  count = var.manage_cloudflare_tunnel_token ? 1 : 0
 
   name  = local.cloudflare_tunnel_token_parameter
   type  = "SecureString"

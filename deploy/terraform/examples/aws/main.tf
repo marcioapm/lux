@@ -16,7 +16,8 @@ module "aws" {
   cf_access_aud  = module.cloudflare.access_application_aud
 
   # The token Terraform writes to SSM for cloudflared to read at boot.
-  cloudflare_tunnel_token = module.cloudflare.tunnel_token
+  manage_cloudflare_tunnel_token = true
+  cloudflare_tunnel_token        = module.cloudflare.tunnel_token
 
   runner_pools = merge(
     {
@@ -48,7 +49,7 @@ module "cloudflare" {
   name       = var.name
   hostname   = local.public_hostname
 
-  origin_port           = 7070
+  origin_port           = module.aws.luxd_port
   allowed_emails        = var.cf_allowed_emails
   allowed_email_domains = var.cf_allowed_email_domains
 }

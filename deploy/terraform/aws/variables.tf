@@ -37,3 +37,7 @@ variable "luxd_port" {
   type        = number
   default     = 7070
 }
+
+output "luxd_port" {
+  value = var.luxd_port
+}
