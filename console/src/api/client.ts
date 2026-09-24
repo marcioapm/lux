@@ -4,7 +4,7 @@
 import { getKey, signOut } from "./auth.ts";
 import type { ApiErrorBody } from "./types.ts";
 
-export const API_BASE = "/v1";
+const API_BASE = "/v1";
 
 export class ApiError extends Error {
   status: number;
@@ -36,7 +36,7 @@ export interface RequestOptions {
   headers?: Record<string, string>;
 }
 
-export function buildUrl(path: string, query: Query = {}, tenant?: string): string {
+function buildUrl(path: string, query: Query = {}, tenant?: string): string {
   const u = new URL(API_BASE + path, window.location.origin);
   for (const [k, v] of Object.entries(query)) {
     if (v == null || v === "" || v === false) continue;
@@ -48,7 +48,7 @@ export function buildUrl(path: string, query: Query = {}, tenant?: string): stri
   return u.pathname + u.search;
 }
 
-export function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const key = getKey();
   return key ? { Authorization: `Bearer ${key}`, ...extra } : extra;
 }

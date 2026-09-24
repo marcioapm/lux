@@ -1,8 +1,8 @@
 import { useMemo } from "react";
 import { Badge, Card, Table, type Column } from "../../ds/index.ts";
-import { api, useQuery, useSession, type Pool } from "../../api/index.ts";
-import { useScope } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip } from "./common.tsx";
+import { api, type Pool } from "../../api/index.ts";
+import { useScope, useScopedQuery } from "../scope.tsx";
+import { DASH, ErrorBlock, ErrorStrip, labelsText } from "./common.tsx";
 
 interface PoolRow extends Pool {
   key: string;
@@ -11,10 +11,9 @@ interface PoolRow extends Pool {
 }
 
 export function Pools() {
-  const scope = useScope();
-  const session = useSession();
-  const pools = useQuery(`pools:${scope.tenant}`, (s) => api.pools(scope.apiTenant, s), { interval: 15_000 });
-  const hosts = useQuery(`hosts:${scope.tenant}:all`, (s) => api.hosts(scope.apiTenant, {}, s), { interval: 15_000 });
+  const { showTenant } = useScope();
+  const pools = useScopedQuery("pools", api.pools, { interval: 15_000 });
+  const hosts = useScopedQuery("hosts", (t, s) => api.hosts(t, {}, s), { interval: 15_000 });
 
   const rows = useMemo<PoolRow[]>(() => {
     const counts = new Map<string, { n: number; ready: number }>();
@@ -33,7 +32,6 @@ export function Pools() {
     });
   }, [pools.data, hosts.data]);
 
-  const showTenant = session.role === "operator";
   const cols = useMemo<Column<PoolRow>[]>(() => {
     const c: Column<PoolRow>[] = [{ key: "name", header: "Pool", cell: (p) => <span className="mono">{p.name}</span>, sortValue: (p) => p.name, width: 180 }];
     if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => (p.platform ? <Badge outline>platform</Badge> : p.tenant || DASH), sortValue: (p) => (p.platform ? "" : p.tenant), width: 120 });
@@ -44,7 +42,7 @@ export function Pools() {
       { key: "warm", header: "Warm", cell: (p) => p.warmHosts, sortValue: (p) => p.warmHosts, align: "right", mono: true, width: 60 },
       { key: "max", header: "Max", cell: (p) => p.maxHosts, sortValue: (p) => p.maxHosts, align: "right", mono: true, width: 60 },
       { key: "shared", header: "Shared", cell: (p) => (p.shared ? <Badge tone="info">shared</Badge> : DASH), sortValue: (p) => (p.shared ? 1 : 0), width: 90 },
-      { key: "template", header: "Template", cell: (p) => (p.template && Object.keys(p.template).length > 0 ? <span className="mono muted ellipsis">{templateText(p.template)}</span> : DASH), nowrap: true },
+      { key: "template", header: "Template", cell: (p) => (p.template && Object.keys(p.template).length > 0 ? <span className="mono muted ellipsis">{labelsText(p.template)}</span> : DASH), nowrap: true },
     );
     return c;
   }, [showTenant]);
@@ -61,10 +59,4 @@ export function Pools() {
       </Card>
     </div>
   );
-}
-
-function templateText(t: Record<string, unknown>): string {
-  return Object.entries(t)
-    .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
-    .join(" ");
 }

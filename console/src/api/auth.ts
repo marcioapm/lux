@@ -1,6 +1,6 @@
 // API key session. Kept in sessionStorage so a reload keeps you signed in but
 // closing the tab does not. Whether the key is an operator's is learned from
-// the first GET /v1/tenants (403 for tenant keys).
+// GET /v1/whoami right after sign-in.
 import { useSyncExternalStore } from "react";
 
 const KEY = "lux.key";

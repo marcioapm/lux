@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Card, TimeSeriesChart, type ChartMark } from "../../ds/index.ts";
 import { api, useQuery, type Run } from "../../api/index.ts";
-import { ErrorBlock, seriesFrom } from "./common.tsx";
+import { ErrorBlock, useSeries } from "./common.tsx";
 
 export function RunResources({ run }: { run: Run }) {
   // Cover the Run's whole life (plus slack), so a young Run gets raw samples
@@ -13,11 +13,12 @@ export function RunResources({ run }: { run: Run }) {
   const q = useQuery(`run-history:${run.id}:${since}`, (s) => api.runHistory(run.id, since, s), { interval: 15_000 });
   const samples = q.data?.samples;
 
-  const cpu = useMemo(() => seriesFrom(samples, [(s) => s.cpuCores, () => run.spec.resources.cpus ?? null]), [samples, run.spec.resources.cpus]);
-  const mem = useMemo(() => seriesFrom(samples, [(s) => s.memoryBytes, () => run.spec.resources.memory ?? null]), [samples, run.spec.resources.memory]);
-  const disk = useMemo(() => seriesFrom(samples, [(s) => s.diskBytes, () => run.spec.resources.disk ?? null]), [samples, run.spec.resources.disk]);
-  const pids = useMemo(() => seriesFrom(samples, [(s) => s.pids]), [samples]);
-  const net = useMemo(() => seriesFrom(samples, [(s) => s.netRxRate, (s) => s.netTxRate]), [samples]);
+  const req = run.spec.resources;
+  const cpu = useSeries(samples, [(s) => s.cpuCores, req.cpus]);
+  const mem = useSeries(samples, [(s) => s.memoryBytes, req.memory]);
+  const disk = useSeries(samples, [(s) => s.diskBytes, req.disk]);
+  const pids = useSeries(samples, [(s) => s.pids]);
+  const net = useSeries(samples, [(s) => s.netRxRate, (s) => s.netTxRate]);
 
   const marks = useMemo<ChartMark[]>(() => {
     const out: ChartMark[] = [];

@@ -29,7 +29,7 @@ export interface StateStyle {
   live?: boolean;
 }
 
-export const RUN_STATES: Record<RunState, StateStyle> = {
+const RUN_STATES: Record<RunState, StateStyle> = {
   submitted: { hue: "neutral", label: "Submitted" },
   scheduled: { hue: "blue", label: "Scheduled" },
   provisioning: { hue: "neutral", label: "Provisioning", live: true },
@@ -44,7 +44,7 @@ export const RUN_STATES: Record<RunState, StateStyle> = {
   lost: { hue: "red", label: "Lost" },
 };
 
-export const HOST_STATES: Record<HostState, StateStyle> = {
+const HOST_STATES: Record<HostState, StateStyle> = {
   provisioning: { hue: "neutral", label: "Provisioning", live: true },
   ready: { hue: "green", label: "Ready" },
   draining: { hue: "amber", label: "Draining", live: true },

@@ -30,6 +30,16 @@ export interface StatePillProps {
   className?: string;
 }
 
+/** A lone pulsing dot (e.g. "this feed is live"); the label goes to the title and screen readers. */
+export function LiveDot({ hue = "teal", label = "live" }: { hue?: StateHue; label?: string }) {
+  return (
+    <span className={`pill pill-${hue} pill-live pill-compact`} title={label}>
+      <span className="pill-dot" aria-hidden="true" />
+      <span className="sr-only">{label}</span>
+    </span>
+  );
+}
+
 /** Colored dot + label for a run or host state. Never color-only. */
 export function StatePill({ kind, state, activity, compact, className }: StatePillProps) {
   const style = kind === "run" ? runStateStyle(state) : hostStateStyle(state);

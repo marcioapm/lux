@@ -127,7 +127,7 @@ func (s *Server) status(ctx context.Context, _ *TenantQuery) (*statusNowOutput, 
 			return err
 		}
 		if err := tx.QueryRow(ctx, `SELECT count(*), min(updated_at) FROM runs
-			WHERE state IN ('submitted', 'resuming', 'provisioning')`).Scan(&st.Queued, &st.OldestQueuedAt); err != nil {
+			WHERE state IN `+queuedRunStates).Scan(&st.Queued, &st.OldestQueuedAt); err != nil {
 			return err
 		}
 		l := &st.StartLatency

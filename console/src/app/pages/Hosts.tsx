@@ -1,14 +1,12 @@
 import { useMemo } from "react";
-import { Badge, Button, Card, formatBytes, formatCores, formatRelative, formatTimestamp, HOST_STATE_LIST, Select, Table, Tooltip, type Column } from "../../ds/index.ts";
-import { api, useNow, useQuery, useSession, type Host } from "../../api/index.ts";
+import { Badge, Button, Card, formatBytes, formatCores, HOST_STATE_LIST, Select, Table, type Column } from "../../ds/index.ts";
+import { api, type Host } from "../../api/index.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
-import { useScope } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, hostPath, hostRunsPath, IdLink, StateCell, UsageBar } from "./common.tsx";
+import { useScope, useScopedQuery } from "../scope.tsx";
+import { DASH, ErrorBlock, ErrorStrip, hostPath, hostRunsPath, IdLink, RelativeTime, StateCell, UsageBar } from "./common.tsx";
 
 export function Hosts() {
-  const scope = useScope();
-  const session = useSession();
-  const now = useNow();
+  const { showTenant } = useScope();
   // Filters live in the URL, so a filtered list is a link.
   const params = useSearchParams();
   const pool = params.get("pool") ?? "";
@@ -17,8 +15,8 @@ export function Hosts() {
   const setPool = (v: string) => setSearchParams({ pool: v || null });
   const setState = (v: string) => setSearchParams({ state: v || null });
   const setAll = (v: boolean) => setSearchParams({ all: v ? "true" : null });
-  const q = useQuery(`hosts:${scope.tenant}:${pool}:${state}:${all}`, (s) => api.hosts(scope.apiTenant, { pool: pool || undefined, state: state || undefined, all }, s), { interval: 5000 });
-  const pools = useQuery(`pools:${scope.tenant}`, (s) => api.pools(scope.apiTenant, s), { interval: 60_000 });
+  const q = useScopedQuery(`hosts:${pool}:${state}:${all}`, (t, s) => api.hosts(t, { pool: pool || undefined, state: state || undefined, all }, s), { interval: 5000 });
+  const pools = useScopedQuery("pools", api.pools, { interval: 60_000 });
 
   const poolOptions = useMemo(() => {
     const names = new Set<string>((pools.data ?? []).map((p) => p.name));
@@ -26,7 +24,6 @@ export function Hosts() {
     return [{ value: "", label: "Any pool", text: "Any pool" }, ...[...names].sort().map((n) => ({ value: n, label: n, text: n }))];
   }, [pools.data, q.data]);
 
-  const showTenant = session.role === "operator";
   const cols = useMemo<Column<Host>[]>(() => {
     const c: Column<Host>[] = [
       { key: "name", header: "Host", cell: (h) => <IdLink value={h.name} to={hostPath(h.id)} />, sortValue: (h) => h.name, mono: true, width: 220 },
@@ -48,10 +45,10 @@ export function Hosts() {
       { key: "runs", header: "Live runs", cell: (h) => <Link to={hostRunsPath(h.id)} title="Runs placed on this host">{`${h.liveRuns} / ${h.capacity.runs}`}</Link>, sortValue: (h) => h.liveRuns, align: "right", mono: true, width: 90 },
       { key: "cpu", header: "CPU", cell: (h) => <UsageBar used={h.allocated.cpus ?? 0} total={h.capacity.cpus} unit="cores" />, sortValue: (h) => (h.capacity.cpus ? (h.allocated.cpus ?? 0) / h.capacity.cpus : 0), width: 160 },
       { key: "mem", header: "Memory", cell: (h) => <UsageBar used={h.allocated.memory ?? 0} total={h.capacity.memory} unit="bytes" width={170} />, sortValue: (h) => (h.capacity.memory ? (h.allocated.memory ?? 0) / h.capacity.memory : 0), width: 190 },
-      { key: "hb", header: "Heartbeat", cell: (h) => (h.lastHeartbeat ? <Tooltip content={formatTimestamp(h.lastHeartbeat)}><span>{formatRelative(h.lastHeartbeat, now)}</span></Tooltip> : DASH), sortValue: (h) => (h.lastHeartbeat ? Date.parse(h.lastHeartbeat) : null), align: "right", width: 96 },
+      { key: "hb", header: "Heartbeat", cell: (h) => <RelativeTime at={h.lastHeartbeat} />, sortValue: (h) => (h.lastHeartbeat ? Date.parse(h.lastHeartbeat) : null), align: "right", width: 96 },
     );
     return c;
-  }, [showTenant, now]);
+  }, [showTenant]);
 
   const hosts = q.data ?? [];
   const totals = useMemo(() => {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -147,7 +148,9 @@ func ensureAppRole(ctx context.Context, conn *pgx.Conn, password string) error {
 	// packages) can collide on the role. It is idempotent: try again.
 	var err error
 	for range 5 {
-		if err = ensureAppRoleOnce(ctx, conn, password); err == nil || !strings.Contains(err.Error(), "concurrently") {
+		var pe *pgconn.PgError
+		// XX000 "tuple concurrently updated", 23505 a role created at once.
+		if err = ensureAppRoleOnce(ctx, conn, password); err == nil || !errors.As(err, &pe) || (pe.Code != "XX000" && pe.Code != "23505") {
 			return err
 		}
 		time.Sleep(100 * time.Millisecond)

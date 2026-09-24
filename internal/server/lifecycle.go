@@ -32,6 +32,16 @@ const (
 // running on its host.
 const livePlacementStates = "('assigned', 'starting', 'running', 'stopping')"
 
+// queuedRunStates, for SQL: Runs waiting for a host.
+const queuedRunStates = "('submitted', 'resuming', 'provisioning')"
+
+// resumableRunStates, for SQL: Runs resume accepts.
+const resumableRunStates = "('stopped', 'lost', 'failed')"
+
+// movedStops: stop reasons that move a Run rather than stop it; it is
+// resumed elsewhere as soon as it has stopped.
+var movedStops = []string{"drain", "preempt", "migrate"}
+
 // placementRef names one placement.
 type placementRef struct {
 	RunID    string
@@ -49,6 +59,9 @@ func livePlacements(ctx context.Context, tx pgx.Tx, where string, args ...any) (
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[placementRef])
 }
+
+// Terminal: a Run in this state has ended for good.
+func Terminal(state string) bool { return terminal(state) }
 
 func terminal(state string) bool {
 	return state == StateSucceeded || state == StateFailed || state == StateCancelled
@@ -183,9 +196,8 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		next, reason = StateCancelled, "cancelled"
 	case stopReason == "timeout":
 		next, reason = StateFailed, "timeout"
-	case stopReason == "stop" || stopReason == "drain" || stopReason == "preempt" || stopReason == "migrate":
-		// A requested stop: resumable. (A drained, preempted or migrated
-		// Run is put back in the queue by resumeAfterStop.)
+	case stopReason == "stop" || slices.Contains(movedStops, stopReason):
+		// A requested stop: resumable (and a move resumed below).
 		next, reason = StateStopped, stopReason
 	case st.State == "failed":
 		next, reason = StateFailed, st.Message
@@ -201,16 +213,10 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
 		return err
 	}
-	if stopReason == "drain" || stopReason == "preempt" || stopReason == "migrate" {
+	if slices.Contains(movedStops, stopReason) {
 		// Moved, not stopped by a person: resume elsewhere automatically
-		// (with the input a migration carries, if any).
-		var in *proto.Input
-		if stopReason == "migrate" {
-			if err := tx.QueryRow(ctx, `SELECT pending_input FROM runs WHERE id = $1`, runID).Scan(&in); err != nil {
-				return err
-			}
-		}
-		return s.requestResume(ctx, tx, tenantID, runID, in, "auto-resume after "+stopReason)
+		// (with the input a migration left, if any).
+		return s.requestResume(ctx, tx, tenantID, runID, nil, "auto-resume after "+stopReason)
 	}
 	if terminal(next) {
 		s.secrets.drop(runID)

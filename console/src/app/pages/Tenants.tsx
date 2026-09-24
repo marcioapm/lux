@@ -1,13 +1,12 @@
 import { useMemo } from "react";
-import { Card, formatBytes, formatCount, formatRelative, formatTimestamp, IdChip, Table, Tooltip, type Column } from "../../ds/index.ts";
-import { api, useNow, useQuery, type Tenant } from "../../api/index.ts";
+import { Card, formatBytes, formatCount, IdChip, Table, type Column } from "../../ds/index.ts";
+import { api, useQuery, type Tenant } from "../../api/index.ts";
 import { go } from "../router.tsx";
 import { useScope } from "../scope.tsx";
-import { ErrorBlock, ErrorStrip, UsageBar } from "./common.tsx";
+import { ErrorBlock, ErrorStrip, RelativeTime, UsageBar } from "./common.tsx";
 
 export function Tenants() {
   const scope = useScope();
-  const now = useNow();
   const q = useQuery("tenants:page", (s) => api.tenants(s), { interval: 15_000 });
 
   const cols = useMemo<Column<Tenant>[]>(
@@ -19,9 +18,9 @@ export function Tenants() {
       { key: "hosts", header: "Hosts", cell: (t) => (t.maxHosts != null ? `${t.hosts} / ${t.maxHosts}` : String(t.hosts)), sortValue: (t) => t.hosts, align: "right", mono: true, width: 90 },
       { key: "stored", header: "Stored", cell: (t) => (t.maxStorageBytes != null ? <UsageBar used={t.storedBytes} total={t.maxStorageBytes} unit="bytes" width={200} /> : <span className="mono">{formatBytes(t.storedBytes)}</span>), sortValue: (t) => t.storedBytes, width: 220 },
       { key: "retention", header: "Retention", cell: (t) => `${t.retentionDays}d`, sortValue: (t) => t.retentionDays, align: "right", mono: true, width: 90 },
-      { key: "created", header: "Created", cell: (t) => <Tooltip content={formatTimestamp(t.createdAt)}><span>{formatRelative(t.createdAt, now)}</span></Tooltip>, sortValue: (t) => Date.parse(t.createdAt), align: "right", width: 96 },
+      { key: "created", header: "Created", cell: (t) => <RelativeTime at={t.createdAt} />, sortValue: (t) => Date.parse(t.createdAt), align: "right", width: 96 },
     ],
-    [now],
+    [],
   );
 
   const open = (t: Tenant) => {

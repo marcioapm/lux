@@ -3,10 +3,10 @@
 // the path, the query (page filters) and the global scope (scope.tsx).
 import { useMemo, useSyncExternalStore } from "react";
 
-export const BASE = "/console";
+const BASE = "/console";
 
 /** Query keys that make up the global scope; links keep them across pages. */
-export const SCOPE_KEYS = ["tenant", "range"] as const;
+const SCOPE_KEYS = ["tenant", "range"] as const;
 
 const listeners = new Set<() => void>();
 function notify() {
@@ -20,7 +20,7 @@ function subscribe(cb: () => void) {
 }
 
 /** Current path relative to BASE, always starting with "/". */
-export function currentPath(): string {
+function currentPath(): string {
   let p = window.location.pathname;
   if (p.startsWith(BASE)) p = p.slice(BASE.length);
   if (p === "") p = "/";
@@ -32,7 +32,7 @@ function currentSearch(): string {
 }
 
 /** Go to a path (with an optional query) under BASE. */
-export function navigate(to: string, opts: { replace?: boolean } = {}) {
+function navigate(to: string, opts: { replace?: boolean } = {}) {
   const url = href(to);
   if (opts.replace) history.replaceState(null, "", url);
   else history.pushState(null, "", url);
@@ -70,7 +70,7 @@ export function scoped(to: string, search: string = currentSearch()): string {
   return q ? `${path}?${q}` : path;
 }
 
-export interface Match {
+interface Match {
   params: Record<string, string>;
 }
 

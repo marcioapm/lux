@@ -203,6 +203,17 @@ export interface Pool {
   platform: boolean;
 }
 
+/** GET /v1/whoami: who the key belongs to. */
+export interface WhoAmI {
+  operator: boolean;
+  /** Tenant name; "" for operators. */
+  tenant: string;
+  /** "" for operators. */
+  tenantId: string;
+  keyId: string;
+  scopes: string[];
+}
+
 export interface Tenant {
   id: string;
   name: string;

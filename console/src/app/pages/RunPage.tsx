@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Badge, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, KeyValue, StatePill, Tabs } from "../../ds/index.ts";
-import { api, isRunActive, useNow, useQuery, useSession, type Run } from "../../api/index.ts";
+import { api, isRunActive, useNow, useQuery, type Run } from "../../api/index.ts";
+import { useScope } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, HostLink, labelsText, PageSkeleton } from "./common.tsx";
 import { RunActions } from "./RunActions.tsx";
 import { RunOutput } from "./RunOutput.tsx";
@@ -11,7 +12,7 @@ import { RunTimeline } from "./RunTimeline.tsx";
 type Tab = "output" | "timeline" | "resources" | "events" | "snapshots" | "spec";
 
 export function RunPage({ id }: { id: string }) {
-  const session = useSession();
+  const { operator } = useScope();
   const now = useNow(5000);
   const [tab, setTab] = useState<Tab>("output");
   const [active, setActive] = useState(true);
@@ -41,7 +42,6 @@ export function RunPage({ id }: { id: string }) {
     setActive(true);
     void q.refetch();
   };
-  const showTenant = session.role === "operator";
   const live = isRunActive(run.state);
 
   return (
@@ -60,7 +60,7 @@ export function RunPage({ id }: { id: string }) {
           </div>
           <div className="row page-desc">
             <IdChip value={run.id} prefix="run" />
-            {showTenant && <span>tenant {run.tenant}</span>}
+            {operator && <span>tenant {run.tenant}</span>}
             {run.hostId ? (
               <span>
                 on <HostLink id={run.hostId} name={run.host} />
@@ -70,7 +70,7 @@ export function RunPage({ id }: { id: string }) {
           </div>
           {run.stateReason && <div className="state-reason-lg">{run.stateReason}</div>}
         </div>
-        <RunActions run={run} operator={session.role === "operator"} onChanged={onChanged} />
+        <RunActions run={run} operator={operator} onChanged={onChanged} />
       </div>
       <ErrorStrip error={q.error} />
 

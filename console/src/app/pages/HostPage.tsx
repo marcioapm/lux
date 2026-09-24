@@ -1,28 +1,28 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, ConfirmDialog, formatBytes, formatCores, formatRelative, formatTimestamp, IdChip, KeyValue, StatePill, Table, TimeSeriesChart, Timeline, Tooltip, useToast, type Column, type TimelineStage } from "../../ds/index.ts";
-import { api, errorText, useNow, useQuery, useSession, type Host, type HostPlacement, type HostTimeKey, type Run } from "../../api/index.ts";
+import { Badge, Button, Card, ConfirmDialog, formatBytes, formatCores, formatRelative, formatTimestamp, IdChip, KeyValue, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage } from "../../ds/index.ts";
+import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type HostTimeKey, type Run } from "../../api/index.ts";
 import { go, Link } from "../router.tsx";
-import { useScope } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, RunLink, runColumns, runPath, seriesFrom } from "./common.tsx";
+import { useScope, useScopedQuery } from "../scope.tsx";
+import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, RelativeTime, RunLink, runColumns, runPath, useSeries } from "./common.tsx";
 
 export function HostPage({ id }: { id: string }) {
   const scope = useScope();
-  const session = useSession();
   const now = useNow();
   const toast = useToast();
   const host = useQuery(`host:${id}`, (s) => api.host(id, s), { interval: 5000 });
   const history = useQuery(`host-history:${id}:${scope.range}`, (s) => api.hostHistory(id, scope.range, s), { interval: 30_000 });
   // By host id: tenant-independent, and an operator sees every tenant's runs there.
-  const recent = useQuery(`host-runs:${id}:${scope.tenant}`, (s) => api.runs(scope.apiTenant, { host: id, limit: 50 }, s), { interval: 15_000 });
+  const recent = useScopedQuery(`host-runs:${id}`, (t, s) => api.runs(t, { host: id, limit: 50 }, s), { interval: 15_000 });
   const [drainOpen, setDrainOpen] = useState(false);
   const [draining, setDraining] = useState(false);
 
   const h = host.data;
   const samples = history.data?.samples;
-  const cpu = useMemo(() => seriesFrom(samples, [(s) => s.cpuCores, () => h?.capacity.cpus ?? null, (s) => s.allocCpus]), [samples, h?.capacity.cpus]);
-  const mem = useMemo(() => seriesFrom(samples, [(s) => s.memoryBytes, () => h?.capacity.memory ?? null, (s) => s.allocMemory]), [samples, h?.capacity.memory]);
-  const disk = useMemo(() => seriesFrom(samples, [(s) => s.diskBytes, () => h?.capacity.disk ?? null]), [samples, h?.capacity.disk]);
-  const placements = useMemo(() => seriesFrom(samples, [(s) => s.placements, () => h?.capacity.runs ?? null]), [samples, h?.capacity.runs]);
+  const cap = h?.capacity;
+  const cpu = useSeries(samples, [(s) => s.cpuCores, cap?.cpus, (s) => s.allocCpus]);
+  const mem = useSeries(samples, [(s) => s.memoryBytes, cap?.memory, (s) => s.allocMemory]);
+  const disk = useSeries(samples, [(s) => s.diskBytes, cap?.disk]);
+  const placements = useSeries(samples, [(s) => s.placements, cap?.runs]);
 
   const drain = async () => {
     setDraining(true);
@@ -87,7 +87,7 @@ export function HostPage({ id }: { id: string }) {
               { key: "Capacity", value: `${formatCores(h.capacity.cpus)} · ${formatBytes(h.capacity.memory)} · ${formatBytes(h.capacity.disk)} disk · ${h.capacity.runs} runs`, mono: true },
               { key: "Allocated", value: `${formatCores(h.allocated.cpus ?? 0)} · ${formatBytes(h.allocated.memory ?? 0)} · ${formatBytes(h.allocated.disk ?? 0)} disk · ${h.liveRuns} live`, mono: true },
               { key: "Labels", value: Object.keys(h.labels).length ? <span className="mono">{labelsText(h.labels)}</span> : DASH },
-              { key: "Versions", value: Object.keys(h.versions).length ? <span className="mono">{labelsText(stringMap(h.versions))}</span> : DASH },
+              { key: "Versions", value: Object.keys(h.versions).length ? <span className="mono">{labelsText(h.versions)}</span> : DASH },
             ]}
           />
         </Card>
@@ -97,7 +97,7 @@ export function HostPage({ id }: { id: string }) {
       </div>
 
       <Card flush title="Live placements" subtitle={`${h.placements?.length ?? 0} on this host`}>
-        <PlacementsTable placements={h.placements ?? []} loading={host.loading} operator={session.role === "operator"} now={now} />
+        <PlacementsTable placements={h.placements ?? []} loading={host.loading} tenant={scope.operator} />
       </Card>
 
       <ErrorStrip error={history.error} />
@@ -118,7 +118,7 @@ export function HostPage({ id }: { id: string }) {
 
       <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
         <ErrorStrip error={recent.error} />
-        <RecentRuns runs={recent.data ?? []} loading={recent.loading} now={now} tenant={session.role === "operator" && scope.apiTenant === undefined} />
+        <RecentRuns runs={recent.data ?? []} loading={recent.loading} tenant={scope.showTenant} />
       </Card>
 
       <ConfirmDialog
@@ -160,29 +160,23 @@ function hostStages(h: Host): TimelineStage[] {
   });
 }
 
-function stringMap(m: Record<string, unknown>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(m)) out[k] = typeof v === "string" ? v : JSON.stringify(v);
-  return out;
-}
-
-function PlacementsTable({ placements, loading, operator, now }: { placements: HostPlacement[]; loading: boolean; operator: boolean; now: number }) {
+function PlacementsTable({ placements, loading, tenant }: { placements: HostPlacement[]; loading: boolean; tenant: boolean }) {
   const cols = useMemo<Column<HostPlacement>[]>(() => {
     const c: Column<HostPlacement>[] = [{ key: "run", header: "Run", cell: (p) => <RunLink id={p.runId} />, mono: true, width: 200 }];
     c.push({ key: "name", header: "Name", cell: (p) => p.runName || DASH, nowrap: true });
-    if (operator) c.push({ key: "tenant", header: "Tenant", cell: (p) => p.tenant, width: 110 });
+    if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => p.tenant, width: 110 });
     c.push(
       { key: "epoch", header: "Epoch", cell: (p) => p.epoch, align: "right", mono: true, width: 64 },
       { key: "state", header: "Placement", cell: (p) => <Badge mono outline>{p.state}</Badge>, width: 110 },
       { key: "res", header: "Resources", cell: (p) => `${formatCores(p.resources.cpus ?? 0)} · ${formatBytes(p.resources.memory ?? 0)}`, mono: true, width: 200 },
-      { key: "since", header: "Since", cell: (p) => <Tooltip content={formatTimestamp(p.since)}><span>{formatRelative(p.since, now)}</span></Tooltip>, align: "right", width: 110 },
+      { key: "since", header: "Since", cell: (p) => <RelativeTime at={p.since} />, align: "right", width: 110 },
     );
     return c;
-  }, [operator, now]);
+  }, [tenant]);
   return <Table columns={cols} rows={placements} rowKey={(p) => `${p.runId}:${p.epoch}`} loading={loading} onRowClick={(p) => go(runPath(p.runId))} empty="No live placements." dense />;
 }
 
-function RecentRuns({ runs, loading, now, tenant }: { runs: Run[]; loading: boolean; now: number; tenant: boolean }) {
-  const cols = useMemo<Column<Run>[]>(() => runColumns({ now, tenant, host: false, adapter: false }), [now, tenant]);
+function RecentRuns({ runs, loading, tenant }: { runs: Run[]; loading: boolean; tenant: boolean }) {
+  const cols = useMemo<Column<Run>[]>(() => runColumns({ tenant, host: false, adapter: false }), [tenant]);
   return <Table columns={cols} rows={runs} rowKey={(r) => r.id} loading={loading} onRowClick={(r) => go(runPath(r.id))} empty="No runs have been placed here." dense />;
 }

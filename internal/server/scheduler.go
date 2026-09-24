@@ -101,7 +101,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, session_id, current_epoch, pending_input, image_resolved,
 				jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), updated_at, updated_at < now() - $3::interval
-			FROM runs WHERE state IN ('submitted', 'resuming', 'provisioning') AND NOT cancel_requested
+			FROM runs WHERE state IN `+queuedRunStates+` AND NOT cancel_requested
 			  AND (updated_at, id) > ($1, $2)
 			ORDER BY updated_at, id FOR UPDATE SKIP LOCKED LIMIT 20`,
 			pos.updated, pos.id, interval(secretsGrace))
@@ -253,15 +253,10 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 	var ok []scored
 	reason := "no host matches"
 	if r.PlaceOn != "" {
-		// A chosen host that can no longer take Runs (drained, lost, gone)
-		// must not hold the Run forever: the choice lapses, and the Run
-		// goes wherever it may.
-		var usable bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hosts WHERE id = $1 AND state = 'ready' AND NOT draining)`,
-			r.PlaceOn).Scan(&usable); err != nil {
-			return nil, "", err
-		}
-		if usable {
+		// A chosen host that can no longer take Runs (drained, lost, gone:
+		// not a candidate) must not hold the Run forever: the choice
+		// lapses, and the Run goes wherever it may.
+		if slices.ContainsFunc(hosts, func(h *candidateHost) bool { return h.ID == r.PlaceOn }) {
 			reason = "waiting for its chosen host"
 		} else {
 			if _, err := tx.Exec(ctx, `UPDATE runs SET place_on = NULL WHERE id = $1`, r.ID); err != nil {
@@ -454,8 +449,9 @@ func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID s
 		in = input
 	}
 	// A resumed Run is not finished, whatever it was: retention must not
-	// treat its blobs as those of a terminal Run.
-	_, err := tx.Exec(ctx, `UPDATE runs SET state = 'resuming', state_reason = $3, pending_input = $2, updated_at = now(),
+	// treat its blobs as those of a terminal Run. Without input, it keeps
+	// what was pending (a migration's).
+	_, err := tx.Exec(ctx, `UPDATE runs SET state = 'resuming', state_reason = $3, pending_input = coalesce($2, pending_input), updated_at = now(),
 			exit_code = NULL, finished_at = NULL
 		WHERE id = $1`, runID, in, why)
 	if err != nil {

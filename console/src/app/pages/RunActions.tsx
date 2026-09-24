@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Badge, Button, ConfirmDialog, Dialog, IdChip, Select, useToast } from "../../ds/index.ts";
-import { api, errorText, isApiError, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, useQuery, type Run, type Snapshot } from "../../api/index.ts";
+import { api, errorText, isApiError, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, useQuery, type MigrateRequest, type ResumeRequest, type Run, type Snapshot } from "../../api/index.ts";
 
 export interface RunActionsProps {
   run: Run;
@@ -94,10 +94,7 @@ function useReadyHosts(run: Run, enabled: boolean, exclude?: string) {
   return { options, error: q.error };
 }
 
-type ResumeBody = Parameters<typeof api.resumeRun>[1];
-type MigrateBody = Parameters<typeof api.migrateRun>[1];
-
-function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; operator: boolean; busy: boolean; onConfirm: (body: ResumeBody) => Promise<unknown>; onCancel: () => void }) {
+function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; operator: boolean; busy: boolean; onConfirm: (body: ResumeRequest) => Promise<unknown>; onCancel: () => void }) {
   const rs = run.resume;
   const [input, setInput] = useState("");
   const [to, setTo] = useState(ANY);
@@ -118,7 +115,7 @@ function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; 
   // "latest snapshot unavailable" blocker moot.
   const blockers = (rs?.blockers ?? []).filter((b) => !(from && b.startsWith("its snapshot")));
   const submit = async () => {
-    const body: ResumeBody = {};
+    const body: ResumeRequest = {};
     if (input.trim()) body.input = { text: input.trim() };
     if (to) body.to = to;
     if (from) body.fromSnapshot = from;
@@ -199,12 +196,12 @@ function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; 
   );
 }
 
-function MigrateDialog({ run, busy, onConfirm, onCancel }: { run: Run; busy: boolean; onConfirm: (body: MigrateBody) => Promise<unknown>; onCancel: () => void }) {
+function MigrateDialog({ run, busy, onConfirm, onCancel }: { run: Run; busy: boolean; onConfirm: (body: MigrateRequest) => Promise<unknown>; onCancel: () => void }) {
   const [to, setTo] = useState(ANY);
   const [input, setInput] = useState("");
   const hosts = useReadyHosts(run, true, run.hostId);
   const submit = () => {
-    const body: MigrateBody = {};
+    const body: MigrateRequest = {};
     if (to) body.to = to;
     if (input.trim()) body.input = { text: input.trim() };
     void onConfirm(body);

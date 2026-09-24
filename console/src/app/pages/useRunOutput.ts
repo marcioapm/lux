@@ -15,11 +15,12 @@ export interface OutputState {
 
 const MAX_LINES = 200_000;
 
+/** An "event" record: a {type, data} object summarized like lux events, else its JSON. */
 function eventLine(ev: unknown): string {
-  if (ev && typeof ev === "object" && "type" in ev) {
-    const e = ev as { type?: unknown; data?: unknown };
-    const data = e.data === undefined ? "" : typeof e.data === "string" ? e.data : JSON.stringify(e.data);
-    return `[${String(e.type)}] ${data}`.trimEnd();
+  if (ev && typeof ev === "object" && typeof (ev as { type?: unknown }).type === "string") {
+    const e = ev as { type: string; data?: unknown };
+    const data = e.data && typeof e.data === "object" && !Array.isArray(e.data) ? (e.data as Record<string, unknown>) : e.data === undefined ? {} : { data: e.data };
+    return `[${e.type}] ${eventSummary({ id: 0, type: e.type, data, time: "" })}`.trimEnd();
   }
   return typeof ev === "string" ? ev : JSON.stringify(ev);
 }

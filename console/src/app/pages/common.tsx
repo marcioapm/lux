@@ -1,8 +1,8 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
-import type { ReactNode } from "react";
-import { Badge, Button, EmptyState, formatCores, formatBytes, formatRelative, formatTimestamp, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type Column, type Unit } from "../../ds/index.ts";
-import type { Run, Sample } from "../../api/index.ts";
+import { useMemo, type ReactNode } from "react";
+import { Badge, Button, EmptyState, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type Column, type Unit } from "../../ds/index.ts";
+import { useNow, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
 
 export function ErrorBlock({ error, onRetry, compact }: { error: string; onRetry?: () => void; compact?: boolean }) {
@@ -81,8 +81,19 @@ export function StateCell({ kind, state, activity, reason, children }: { kind: "
   );
 }
 
+/** "3m ago" with the timestamp in a tooltip; re-renders itself as time passes. */
+export function RelativeTime({ at }: { at: string | null | undefined }) {
+  const now = useNow();
+  if (!at) return DASH;
+  return (
+    <Tooltip content={formatTimestamp(at)}>
+      <span>{formatRelative(at, now)}</span>
+    </Tooltip>
+  );
+}
+
 /** Shared columns of a runs table. */
-export function runColumns({ now, tenant, host = true, adapter = true }: { now: number; tenant: boolean; host?: boolean; adapter?: boolean }): Column<Run>[] {
+export function runColumns({ tenant, host = true, adapter = true }: { tenant: boolean; host?: boolean; adapter?: boolean }): Column<Run>[] {
   const c: Column<Run>[] = [];
   if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, width: 110, nowrap: true });
   c.push(
@@ -94,33 +105,42 @@ export function runColumns({ now, tenant, host = true, adapter = true }: { now: 
   if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <Badge mono outline>{r.spec.workload.adapter}</Badge>, sortValue: (r) => r.spec.workload.adapter, width: 100 });
   c.push(
     { key: "epoch", header: "Epoch", cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 64 },
-    { key: "created", header: "Created", cell: (r) => <Tooltip content={formatTimestamp(r.createdAt)}><span>{formatRelative(r.createdAt, now)}</span></Tooltip>, sortValue: (r) => Date.parse(r.createdAt), align: "right", width: 96 },
+    { key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} />, sortValue: (r) => Date.parse(r.createdAt), align: "right", width: 96 },
   );
   return c;
 }
 
-export interface SeriesData {
+interface SeriesData {
   x: number[];
   ys: (number | null)[][];
 }
 
+/** One series of seriesFrom: a field of each sample, or a number for a constant line (e.g. a capacity). */
+export type SeriesPick = ((s: Sample) => number | null | undefined) | number | null | undefined;
+
 /** Pull aligned series out of history samples. Missing values stay null. */
-export function seriesFrom(samples: Sample[] | undefined, pick: ((s: Sample) => number | null | undefined)[]): SeriesData {
+export function seriesFrom(samples: Sample[] | undefined, pick: SeriesPick[]): SeriesData {
   const x: number[] = [];
   const ys: (number | null)[][] = pick.map(() => []);
   for (const s of samples ?? []) {
     const t = Date.parse(s.at);
     if (!Number.isFinite(t)) continue;
     x.push(Math.floor(t / 1000));
-    pick.forEach((p, i) => ys[i]!.push(p(s) ?? null));
+    pick.forEach((p, i) => ys[i]!.push((typeof p === "function" ? p(s) : p) ?? null));
   }
   return { x, ys };
 }
 
+/** Memoized seriesFrom: recomputed when the samples or a constant line change. Pick functions must read only the sample. */
+export function useSeries(samples: Sample[] | undefined, pick: SeriesPick[]): SeriesData {
+  const consts = pick.map((p) => (typeof p === "function" ? "f" : String(p))).join("|");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return useMemo(() => seriesFrom(samples, pick), [samples, consts]);
+}
+
 /** "3.5 / 8 cores" style ratio text. */
-export function ratioText(used: number | null | undefined, total: number | null | undefined, unit: Unit): string {
-  const f = unit === "bytes" ? formatBytes : unit === "cores" ? formatCores : (n: number | null | undefined) => (n == null ? "–" : String(n));
-  return `${f(used)} / ${f(total)}`;
+function ratioText(used: number | null | undefined, total: number | null | undefined, unit: Unit): string {
+  return `${formatUnit(used, unit)} / ${formatUnit(total, unit)}`;
 }
 
 /** Thin allocation bar: used over total, with the ratio as its label. */
@@ -130,7 +150,7 @@ export function UsageBar({ used, total, unit, width = 140 }: { used: number | nu
   return (
     <span className="usage" style={{ width }} title={ratioText(used, total, unit)}>
       <span className={["usage-track", tone].join(" ").trim()}>
-        <span className="usage-fill" style={{ width: `${(ratio * 100).toFixed(1)}%` }} />
+        <span className="usage-fill" style={{ width: formatPercent(ratio) }} />
       </span>
       <span className="usage-text mono">{ratioText(used, total, unit)}</span>
     </span>
@@ -139,9 +159,10 @@ export function UsageBar({ used, total, unit, width = 140 }: { used: number | nu
 
 export const DASH = <span className="muted">–</span>;
 
-export function labelsText(labels: Record<string, string> | undefined): string {
+/** "k=v k2=v2"; non-string values are JSON-encoded. */
+export function labelsText(labels: Record<string, unknown> | undefined): string {
   return Object.entries(labels ?? {})
-    .map(([k, v]) => `${k}=${v}`)
+    .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join(" ");
 }
 

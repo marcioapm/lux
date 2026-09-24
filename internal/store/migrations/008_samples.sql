@@ -35,8 +35,8 @@ CREATE TABLE placement_samples (
   PRIMARY KEY (run_id, epoch, res, at)
 );
 
--- Per tenant, so the system view can be narrowed; the platform's hosts
--- (and every host, for the whole system) are rows with tenant_id ''.
+-- Per tenant, so the system view can be narrowed; the whole system is the
+-- row with tenant_id ''.
 CREATE TABLE system_samples (
   tenant_id     text NOT NULL,
   res           int  NOT NULL,
@@ -47,7 +47,7 @@ CREATE TABLE system_samples (
   busy          int NOT NULL DEFAULT 0,
   idle          int NOT NULL DEFAULT 0,
   queued        int NOT NULL DEFAULT 0,
-  started       int NOT NULL DEFAULT 0, -- first starts since the last sample
+  started       int NOT NULL DEFAULT 0, -- first starts in the window
   finished      int NOT NULL DEFAULT 0,
   start_p50     float8,
   start_p95     float8,
@@ -58,7 +58,16 @@ CREATE TABLE system_samples (
   alloc_mem     bigint NOT NULL DEFAULT 0,
   PRIMARY KEY (tenant_id, res, at)
 );
-CREATE INDEX placement_samples_tenant ON placement_samples (tenant_id, res, at);
+
+-- Rollups and retention walk each table by resolution and time.
+CREATE INDEX host_samples_res_at ON host_samples (res, at);
+CREATE INDEX placement_samples_res_at ON placement_samples (res, at);
+CREATE INDEX system_samples_res_at ON system_samples (res, at);
+-- The system sampler counts starts and finishes in a time window.
+CREATE INDEX runs_first_started ON runs (first_started_at) WHERE first_started_at IS NOT NULL;
+CREATE INDEX runs_finished ON runs (finished_at) WHERE finished_at IS NOT NULL;
+-- Runs by host (lux ls --host): every placement, not only live ones.
+CREATE INDEX placements_host_run ON placements (host_id, run_id);
 
 -- Placement samples are a tenant's rows; host and system samples are the
 -- platform's and read only through luxd, which scopes them.

@@ -3,23 +3,13 @@ import { Select } from "./Select.tsx";
 
 export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
 
-export const TIME_RANGES: { value: TimeRange; label: string; seconds: number }[] = [
-  { value: "1h", label: "Last hour", seconds: 3600 },
-  { value: "6h", label: "Last 6 hours", seconds: 6 * 3600 },
-  { value: "24h", label: "Last 24 hours", seconds: 24 * 3600 },
-  { value: "7d", label: "Last 7 days", seconds: 7 * 86400 },
-  { value: "30d", label: "Last 30 days", seconds: 30 * 86400 },
+export const TIME_RANGES: { value: TimeRange; label: string }[] = [
+  { value: "1h", label: "Last hour" },
+  { value: "6h", label: "Last 6 hours" },
+  { value: "24h", label: "Last 24 hours" },
+  { value: "7d", label: "Last 7 days" },
+  { value: "30d", label: "Last 30 days" },
 ];
-
-export function timeRangeSeconds(r: TimeRange): number {
-  return TIME_RANGES.find((t) => t.value === r)?.seconds ?? 3600;
-}
-
-/** [from, to] in epoch seconds for a range ending now. */
-export function timeRangeBounds(r: TimeRange, now = Date.now()): [number, number] {
-  const to = Math.floor(now / 1000);
-  return [to - timeRangeSeconds(r), to];
-}
 
 export interface TimeRangePickerProps {
   value: TimeRange;

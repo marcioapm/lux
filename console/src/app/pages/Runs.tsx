@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Button, Card, RUN_STATE_LIST, runStateStyle, Table } from "../../ds/index.ts";
-import { api, useNow, useQuery, useSession } from "../../api/index.ts";
+import { api, errorText, useQuery, type Run, type RunListParams } from "../../api/index.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
-import { useScope } from "../scope.tsx";
+import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, hostPath, runColumns, runPath } from "./common.tsx";
 
 const PAGE = 100;
-/** The API's largest page: past it, narrow the filters. */
+/** The most rows loaded at once: past it, narrow the filters. */
 const MAX = 1000;
 
 /**
@@ -16,8 +16,6 @@ const MAX = 1000;
  */
 export function Runs() {
   const scope = useScope();
-  const session = useSession();
-  const now = useNow();
   const params = useSearchParams();
   const states = useMemo(() => (params.get("state") ?? "").split(",").filter(Boolean), [params]);
   const resumable = params.get("resumable") === "true";
@@ -29,22 +27,46 @@ export function Runs() {
   useEffect(() => setHostDraft(host), [host]);
   useEffect(() => setLabelDraft(label), [label]);
 
-  // Pages loaded so far, for this filter only: a filter change starts over.
-  const filterKey = `${scope.tenant}|${states.join(",")}|${resumable}|${host}|${label}`;
-  const [paging, setPaging] = useState({ key: filterKey, pages: 1 });
-  const pages = paging.key === filterKey ? paging.pages : 1;
-  const limit = Math.min(MAX, PAGE * pages);
-
-  // One list, refreshed as a whole: every page loaded so far.
-  const q = useQuery(
-    `runs:${filterKey}:${limit}`,
-    async (s) => ({ limit, runs: await api.runs(scope.apiTenant, { state: states.length ? states : undefined, resumable: resumable || undefined, host: host || undefined, label: label || undefined, limit }, s) }),
-    { interval: 5000, keep: pages > 1 },
+  const filter = useMemo<RunListParams>(
+    () => ({ state: states.length ? states : undefined, resumable: resumable || undefined, host: host || undefined, label: label || undefined }),
+    [states, resumable, host, label],
   );
-  const runs = q.data?.runs ?? [];
-  const full = q.data != null && q.data.runs.length >= q.data.limit;
-  const more = full && limit < MAX;
-  const loadingMore = q.fetching && (q.data?.limit ?? 0) < limit;
+  const filterKey = `${states.join(",")}|${resumable}|${host}|${label}`;
+
+  // Only the newest page is polled. "Load more" pages further back (by
+  // creation time) and keeps what it loaded, merged under the fresh first
+  // page (which wins). A filter or tenant change starts over.
+  const q = useScopedQuery(`runs:${filterKey}`, (t, s) => api.runs(t, { ...filter, limit: PAGE }, s), { interval: 5000 });
+  const olderKey = `${scope.tenant}|${filterKey}`;
+  const [older, setOlder] = useState<{ key: string; runs: Run[]; full: boolean; loading: boolean; error: string | null }>({ key: olderKey, runs: [], full: false, loading: false, error: null });
+  const olderHere = older.key === olderKey ? older : null;
+
+  const runs = useMemo(() => {
+    const first = q.data ?? [];
+    if (!olderHere || olderHere.runs.length === 0) return first;
+    // The fresh first page wins. A loaded row within its time span that it
+    // no longer has left the filter (e.g. changed state): drop it.
+    const seen = new Set(first.map((r) => r.id));
+    const cutoff = first.length >= PAGE ? Date.parse(first[first.length - 1]!.createdAt) : -Infinity;
+    return [...first, ...olderHere.runs.filter((r) => !seen.has(r.id) && Date.parse(r.createdAt) < cutoff)];
+  }, [q.data, olderHere]);
+  // A short first page is the whole list.
+  const full = (q.data?.length ?? 0) >= PAGE && (olderHere && olderHere.runs.length > 0 ? olderHere.full : true);
+  const more = full && runs.length < MAX;
+
+  const loadMore = async () => {
+    const last = runs[runs.length - 1];
+    if (!last) return;
+    const key = olderKey;
+    const loaded = runs;
+    setOlder((o) => ({ ...(o.key === key ? o : { runs: [], full: false }), key, loading: true, error: null }));
+    try {
+      const page = await api.runs(scope.apiTenant, { ...filter, before: last.createdAt, limit: PAGE });
+      setOlder((o) => (o.key !== key ? o : { key, runs: [...loaded, ...page], full: page.length >= PAGE, loading: false, error: null }));
+    } catch (e) {
+      setOlder((o) => (o.key !== key ? o : { ...o, loading: false, error: errorText(e) }));
+    }
+  };
 
   // Show a host id filter by name (a name filter is shown as typed).
   const hostInfo = useQuery(`host-name:${host}`, (s) => api.host(host, s), { enabled: host.startsWith("host_") });
@@ -60,8 +82,7 @@ export function Runs() {
   const clear = () => setSearchParams({ state: null, resumable: null, host: null, label: null });
   const filtered = states.length > 0 || resumable || host !== "" || label !== "";
 
-  const showTenant = session.role === "operator" && scope.apiTenant === undefined;
-  const cols = useMemo(() => runColumns({ now, tenant: showTenant }), [showTenant, now]);
+  const cols = useMemo(() => runColumns({ tenant: scope.showTenant }), [scope.showTenant]);
 
   return (
     <div className="page">
@@ -122,20 +143,20 @@ export function Runs() {
         </span>
       </form>
       <Card flush title="Runs" subtitle={`${runs.length}${full ? "+" : ""} · newest first · refreshes every 5s`}>
-        <ErrorStrip error={runs.length > 0 ? q.error : null} />
+        <ErrorStrip error={runs.length > 0 ? q.error ?? olderHere?.error ?? null : null} />
         {q.error && runs.length === 0 && !q.loading ? (
           <ErrorBlock error={q.error} onRetry={q.refetch} />
         ) : (
           <Table columns={cols} rows={runs} rowKey={(r) => r.id} loading={q.loading} onRowClick={(r) => go(runPath(r.id))} empty="No runs match these filters." />
         )}
-        {(more || (full && limit >= MAX)) && (
+        {full && (
           <div className="table-foot">
             {more ? (
-              <Button size="sm" onClick={() => setPaging({ key: filterKey, pages: pages + 1 })} loading={loadingMore}>
+              <Button size="sm" onClick={() => void loadMore()} loading={olderHere?.loading ?? false}>
                 Load more
               </Button>
             ) : (
-              <span className="muted">Showing the newest {MAX}. Narrow the filters to see older runs.</span>
+              <span className="muted">Showing the newest {runs.length}. Narrow the filters to see older runs.</span>
             )}
           </div>
         )}

@@ -3,7 +3,7 @@
 // id with backoff until aborted or the server says it is done.
 import { ApiError, apiFetch, type Query } from "./client.ts";
 
-export interface SSEMessage {
+interface SSEMessage {
   event: string;
   data: string;
   id?: string;
@@ -24,7 +24,7 @@ export interface SSEOptions {
 }
 
 /** Parse one complete event block (lines without the trailing blank line). */
-export function parseBlock(lines: string[]): SSEMessage | null {
+function parseBlock(lines: string[]): SSEMessage | null {
   let event = "message";
   let id: string | undefined;
   const data: string[] = [];
@@ -43,7 +43,7 @@ export function parseBlock(lines: string[]): SSEMessage | null {
 }
 
 /** The server sent `event: error` and closed: a failed connection. */
-export class StreamError extends Error {
+class StreamError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "StreamError";

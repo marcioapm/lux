@@ -19,7 +19,7 @@ const STAGES: { key: string; label: string; from: Stamp; to: Stamp | Stamp[]; to
 
 const PLACEMENT_DONE = new Set(["exited", "lost", "failed", "rejected"]);
 
-export function placementStages(p: Placement): TimelineStage[] {
+function placementStages(p: Placement): TimelineStage[] {
   const at = (k: Stamp): number | null => {
     const v = p[k];
     if (typeof v !== "string") return null;

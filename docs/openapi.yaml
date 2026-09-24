@@ -1157,6 +1157,25 @@ components:
           format: int64
           type: integer
       type: object
+    Whoami:
+      additionalProperties: false
+      properties:
+        keyId:
+          type: string
+        operator:
+          type: boolean
+        scopes:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        tenant:
+          description: The key's tenant's name; empty for an operator key.
+          type: string
+        tenantId:
+          type: string
+      type: object
     Workload:
       additionalProperties: false
       properties:
@@ -3365,6 +3384,43 @@ paths:
       security:
         - apiKey: []
       summary: List tenants
+      tags:
+        - operators
+  /v1/whoami:
+    get:
+      description: |-
+        Whether it is an operator's, its tenant and its scopes.
+
+        Needs the `read` scope.
+      operationId: whoami
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Whoami"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: The caller's key
       tags:
         - operators
 tags:

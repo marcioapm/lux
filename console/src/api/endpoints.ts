@@ -1,12 +1,13 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { Artifact, Event, History, Host, HostListParams, MigrateRequest, Pool, ResumeRequest, Run, RunListParams, Snapshot, Status, Tenant } from "./types.ts";
+import type { Artifact, Event, History, Host, HostListParams, MigrateRequest, Pool, ResumeRequest, Run, RunListParams, Snapshot, Status, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
 type Scope = string | undefined;
 
 export const api = {
+  whoami: (signal?: Sig) => request<WhoAmI>("/whoami", { signal }),
   status: (tenant: Scope, signal?: Sig) => request<Status>("/status", { tenant, signal }),
   history: (tenant: Scope, since: string, signal?: Sig) => request<History>("/history", { tenant, query: { since }, signal }),
 

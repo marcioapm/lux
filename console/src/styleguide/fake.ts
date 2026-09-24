@@ -19,7 +19,7 @@ const id = (prefix: string, n = 16) => {
 
 export const NOW = Date.UTC(2026, 8, 24, 14, 3, 11);
 
-export const fakeTenants: Tenant[] = [
+const fakeTenants: Tenant[] = [
   { id: "acme", name: "Acme Corp", hint: "37 active" },
   { id: "globex", name: "Globex", hint: "12 active" },
   { id: "initech", name: "Initech", hint: "4 active" },

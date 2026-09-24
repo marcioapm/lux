@@ -28,16 +28,15 @@ const (
 	DefaultHistoryHours   = 400 * 24 * time.Hour
 )
 
-// resolutions, finest first: seconds per sample (0: raw) and how long each
-// is kept.
-func (s *Server) resolutions() []struct {
+// resolution: seconds per sample (0: raw), and how long they are kept.
+type resolution struct {
 	res  int
 	keep time.Duration
-} {
-	return []struct {
-		res  int
-		keep time.Duration
-	}{{0, s.cfg.HistoryRaw}, {60, s.cfg.HistoryMinutes}, {3600, s.cfg.HistoryHours}}
+}
+
+// resolutions, finest first.
+func (s *Server) resolutions() []resolution {
+	return []resolution{{0, s.cfg.HistoryRaw}, {60, s.cfg.HistoryMinutes}, {3600, s.cfg.HistoryHours}}
 }
 
 // sampleHost records a host's heartbeat: its usage and what its live
@@ -49,8 +48,8 @@ func sampleHost(ctx context.Context, tx pgx.Tx, hostID string, u *proto.HostUsag
 		cpu, mem, disk = &u.CPUSeconds, &u.MemoryBytes, &u.DiskBytes
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem)
-		SELECT $1, 0, now(), $2, $3, $4, count(*), coalesce(sum((resources->>'cpus')::float8), 0), coalesce(sum((resources->>'memory')::int8), 0)
-		FROM placements WHERE host_id = $1 AND state IN `+livePlacementStates+`
+		SELECT $1, 0, now(), $2, $3, $4, count(*), coalesce(sum((pl.resources->>'cpus')::float8), 0), coalesce(sum((pl.resources->>'memory')::int8), 0)
+		FROM placements pl WHERE pl.host_id = $1 AND pl.state IN `+livePlacementStates+`
 		ON CONFLICT DO NOTHING`, hostID, cpu, mem, disk)
 	return err
 }
@@ -94,34 +93,44 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 			FROM system_samples WHERE res = 0 AND tenant_id = ''`, interval(s.cfg.SampleEvery)).Scan(&from); err != nil {
 			return err
 		}
+		// Each table is read once: GROUPING SETS give each tenant's rows
+		// and, with the empty set (tenant ''), the whole system's.
 		_, err := tx.Exec(ctx, `
-			WITH last AS (SELECT $1::timestamptz AS at, now() - interval '1 minute' AS until),
-			tenants AS (
-				SELECT '' AS id UNION ALL
-				SELECT t.id FROM tenants t WHERE EXISTS (SELECT 1 FROM runs r WHERE r.tenant_id = t.id AND (r.state NOT IN `+inactiveRunStates+`
-					OR r.finished_at > (SELECT at FROM last)))
-				   OR EXISTS (SELECT 1 FROM hosts h WHERE h.tenant_id = t.id AND h.state <> 'terminated')
+			WITH w AS (SELECT $1::timestamptz AS since, now() - interval '1 minute' AS until),
+			by_state AS (
+				SELECT coalesce(tenant_id, '') AS id, state, count(*) AS n,
+					count(*) FILTER (WHERE state = 'running' AND activity = 'busy') AS busy,
+					count(*) FILTER (WHERE state = 'running' AND activity = 'idle') AS idle
+				FROM runs WHERE state NOT IN ('succeeded', 'failed', 'cancelled')
+				GROUP BY GROUPING SETS ((tenant_id, state), (state))
 			),
 			runs_by AS (
-				SELECT t.id, jsonb_object_agg(x.state, x.n) AS runs, sum(x.busy)::int AS busy, sum(x.idle)::int AS idle, sum(x.queued)::int AS queued
-				FROM tenants t CROSS JOIN LATERAL (
-					SELECT state, count(*) AS n, count(*) FILTER (WHERE state = 'running' AND activity = 'busy') AS busy,
-						count(*) FILTER (WHERE state = 'running' AND activity = 'idle') AS idle,
-						count(*) FILTER (WHERE state IN ('submitted', 'resuming', 'provisioning')) AS queued
-					FROM runs r WHERE (t.id = '' OR r.tenant_id = t.id) AND r.state NOT IN ('succeeded', 'failed', 'cancelled')
-					GROUP BY state) x
-				GROUP BY t.id
+				SELECT id, jsonb_object_agg(state, n) AS runs, sum(busy)::int AS busy, sum(idle)::int AS idle,
+					coalesce(sum(n) FILTER (WHERE state IN `+queuedRunStates+`), 0)::int AS queued
+				FROM by_state GROUP BY id
 			),
 			flow AS (
-				SELECT t.id,
-					(SELECT count(*) FROM runs r WHERE (t.id = '' OR r.tenant_id = t.id) AND r.first_started_at > l.at AND r.first_started_at <= l.until) AS started,
-					(SELECT count(*) FROM runs r WHERE (t.id = '' OR r.tenant_id = t.id) AND r.finished_at > l.at AND r.finished_at <= l.until) AS finished,
-					(SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY d) FROM (SELECT extract(epoch FROM first_started_at - created_at) AS d FROM runs r
-						WHERE (t.id = '' OR r.tenant_id = t.id) AND r.first_started_at > l.at AND r.first_started_at <= l.until) q) AS p50,
-					(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY d) FROM (SELECT extract(epoch FROM first_started_at - created_at) AS d FROM runs r
-						WHERE (t.id = '' OR r.tenant_id = t.id) AND r.first_started_at > l.at AND r.first_started_at <= l.until) q) AS p95
-				FROM tenants t, last l
+				SELECT coalesce(r.tenant_id, '') AS id,
+					count(*) FILTER (WHERE r.first_started_at > w.since AND r.first_started_at <= w.until) AS started,
+					count(*) FILTER (WHERE r.finished_at > w.since AND r.finished_at <= w.until) AS finished,
+					percentile_cont(ARRAY[0.5, 0.95]) WITHIN GROUP (ORDER BY extract(epoch FROM r.first_started_at - r.created_at))
+						FILTER (WHERE r.first_started_at > w.since AND r.first_started_at <= w.until) AS pct
+				FROM runs r, w
+				WHERE r.first_started_at > w.since AND r.first_started_at <= w.until OR r.finished_at > w.since AND r.finished_at <= w.until
+				GROUP BY GROUPING SETS ((r.tenant_id), ())
 			),
+			alloc AS (
+				SELECT coalesce(pl.tenant_id, '') AS id, coalesce(sum((pl.resources->>'cpus')::float8), 0) AS cpus,
+					coalesce(sum((pl.resources->>'memory')::int8), 0)::bigint AS mem
+				FROM placements pl WHERE pl.state IN `+livePlacementStates+`
+				GROUP BY GROUPING SETS ((pl.tenant_id), ())
+			),
+			tenants AS (
+				SELECT '' AS id
+				UNION SELECT id FROM runs_by UNION SELECT id FROM flow
+				UNION SELECT tenant_id FROM hosts WHERE tenant_id IS NOT NULL AND state <> 'terminated'
+			),
+			-- Hosts a tenant may use: its own and the platform's; all for ''.
 			hosts_by AS (
 				SELECT t.id, jsonb_object_agg(x.state, x.n) AS hosts, sum(x.cpus) AS cpus, sum(x.mem)::bigint AS mem
 				FROM tenants t CROSS JOIN LATERAL (
@@ -131,18 +140,13 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 					FROM hosts h WHERE h.state <> 'terminated' AND (t.id = '' OR h.tenant_id = t.id OR h.tenant_id IS NULL)
 					GROUP BY h.state) x
 				GROUP BY t.id
-			),
-			alloc AS (
-				SELECT t.id, coalesce(sum((p.resources->>'cpus')::float8), 0) AS cpus, coalesce(sum((p.resources->>'memory')::int8), 0)::bigint AS mem
-				FROM tenants t LEFT JOIN placements p ON p.state IN `+livePlacementStates+` AND (t.id = '' OR p.tenant_id = t.id)
-				GROUP BY t.id
 			)
 			INSERT INTO system_samples (tenant_id, res, at, window_end, runs, busy, idle, queued, started, finished, start_p50, start_p95,
 				hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem)
-			SELECT t.id, 0, now(), (SELECT until FROM last), coalesce(r.runs, '{}'), coalesce(r.busy, 0), coalesce(r.idle, 0), coalesce(r.queued, 0),
-				f.started, f.finished, f.p50, f.p95, coalesce(h.hosts, '{}'), coalesce(h.cpus, 0), coalesce(h.mem, 0), a.cpus, a.mem
-			FROM tenants t JOIN flow f USING (id) JOIN alloc a USING (id)
-				LEFT JOIN runs_by r USING (id) LEFT JOIN hosts_by h USING (id)
+			SELECT t.id, 0, now(), (SELECT until FROM w), coalesce(r.runs, '{}'), coalesce(r.busy, 0), coalesce(r.idle, 0), coalesce(r.queued, 0),
+				coalesce(f.started, 0), coalesce(f.finished, 0), f.pct[1], f.pct[2], coalesce(h.hosts, '{}'), coalesce(h.cpus, 0), coalesce(h.mem, 0),
+				coalesce(a.cpus, 0), coalesce(a.mem, 0)
+			FROM tenants t LEFT JOIN runs_by r USING (id) LEFT JOIN flow f USING (id) LEFT JOIN alloc a USING (id) LEFT JOIN hosts_by h USING (id)
 			ON CONFLICT DO NOTHING`, from)
 		return err
 	})
@@ -335,7 +339,8 @@ func (p *rate) next(at time.Time, v *float64) *float64 {
 	return &r
 }
 
-func i64f(v *int64) *float64 {
+// Float is a number as a *float64, for chart series; nil stays nil.
+func Float[T ~int | ~int64](v *T) *float64 {
 	if v == nil {
 		return nil
 	}
@@ -435,7 +440,7 @@ func (s *Server) runHistory(ctx context.Context, in *runHistoryInput) (*historyO
 			}
 			ep := epoch
 			h.Samples = append(h.Samples, Sample{At: at, Epoch: &ep, CPUCores: cpu.next(at, cpuS), MemoryBytes: mem, DiskBytes: disk,
-				Pids: pids, NetRxRate: rx.next(at, i64f(nrx)), NetTxRate: tx_.next(at, i64f(ntx))})
+				Pids: pids, NetRxRate: rx.next(at, Float(nrx)), NetTxRate: tx_.next(at, Float(ntx))})
 			return nil
 		})
 		return err

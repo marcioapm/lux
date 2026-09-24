@@ -17,6 +17,7 @@ import {
   IconButton,
   IdChip,
   KeyValue,
+  LiveDot,
   LogView,
   RUN_STATE_LIST,
   Select,
@@ -276,6 +277,7 @@ function States() {
         <StatePill kind="run" state="running" compact />
         <StatePill kind="run" state="failed" compact />
         <StatePill kind="run" state="weird" />
+        <LiveDot />
       </div>
       <h3 className="sg-h3">Host states</h3>
       <div className="sg-row">

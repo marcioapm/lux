@@ -129,3 +129,68 @@ func TestRollupHistory(t *testing.T) {
 		t.Fatalf("hour rollup: %+v", hours)
 	}
 }
+
+// sampleSystem counts each tenant's Runs and the whole system's; a tenant's
+// hosts are its own and the platform's; a start is counted once its window
+// reaches it.
+func TestSampleSystem(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	exec := func(q string) {
+		t.Helper()
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q); return err }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO tenants (id, name) VALUES ('ta', 'a'), ('tb', 'b')`)
+	exec(`INSERT INTO hosts (id, name, state, tenant_id, capacity) VALUES
+		('ha', 'ha', 'ready', 'ta', '{"cpus": 4}'), ('hp', 'hp', 'ready', NULL, '{"cpus": 8}')`)
+	exec(`INSERT INTO runs (id, tenant_id, spec, state, activity, created_at, first_started_at) VALUES
+		('r1', 'ta', '{}', 'running', 'busy', now() - interval '3 minutes', now() - interval '2 minutes'),
+		('r2', 'ta', '{}', 'submitted', '', now(), NULL),
+		('r3', 'tb', '{}', 'running', 'idle', now() - interval '10 minutes', now() - interval '9 minutes')`)
+	if err := s.sampleSystem(ctx); err != nil {
+		t.Fatal(err)
+	}
+	type row struct {
+		Runs                     map[string]int
+		Busy, Idle, Queued, Strt int
+		CapCPUs                  float64
+	}
+	read := func() map[string]row {
+		t.Helper()
+		got := map[string]row{}
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			rows, _ := tx.Query(ctx, `SELECT DISTINCT ON (tenant_id) tenant_id, runs, busy, idle, queued, started, cap_cpus
+				FROM system_samples ORDER BY tenant_id, at DESC`)
+			var id string
+			var r row
+			_, err := pgx.ForEachRow(rows, []any{&id, &r.Runs, &r.Busy, &r.Idle, &r.Queued, &r.Strt, &r.CapCPUs}, func() error {
+				got[id] = r
+				return nil
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	// The first window is SampleEvery long, ending a minute ago: no starts.
+	want := map[string]row{
+		"":   {map[string]int{"running": 2, "submitted": 1}, 1, 1, 1, 0, 12},
+		"ta": {map[string]int{"running": 1, "submitted": 1}, 1, 0, 1, 0, 12},
+		"tb": {map[string]int{"running": 1}, 0, 1, 0, 0, 8},
+	}
+	if got := read(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("first sample:\n got %v\nwant %v", got, want)
+	}
+	// A window from 5 minutes ago takes in r1's start, once.
+	exec(`UPDATE system_samples SET window_end = now() - interval '5 minutes', at = now() - interval '5 minutes'`)
+	if err := s.sampleSystem(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got["ta"].Strt != 1 || got[""].Strt != 1 || got["tb"].Strt != 0 {
+		t.Fatalf("second sample: %v", got)
+	}
+}

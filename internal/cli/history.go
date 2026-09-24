@@ -49,10 +49,9 @@ finest kept for that range (raw, 60 or 3600 seconds), or --res.`,
 				fmt.Fprintln(a.stdout, "no samples in this range")
 				return nil
 			}
-			switch {
-			case path == "/v1/history":
+			if len(args) == 0 {
 				a.systemHistory(h)
-			default:
+			} else {
 				a.usageHistory(h, !host)
 			}
 			return nil
@@ -77,17 +76,17 @@ type series struct {
 func (a *app) usageHistory(h server.History, run bool) {
 	all := []series{
 		{"cpu", func(s server.Sample) *float64 { return s.CPUCores }, cores},
-		{"memory", func(s server.Sample) *float64 { return f64(s.MemoryBytes) }, bytesF},
-		{"disk", func(s server.Sample) *float64 { return f64(s.DiskBytes) }, bytesF},
+		{"memory", func(s server.Sample) *float64 { return server.Float(s.MemoryBytes) }, bytesF},
+		{"disk", func(s server.Sample) *float64 { return server.Float(s.DiskBytes) }, bytesF},
 	}
 	if run {
 		all = append(all,
-			series{"pids", func(s server.Sample) *float64 { return fInt(s.Pids) }, plain},
+			series{"pids", func(s server.Sample) *float64 { return server.Float(s.Pids) }, plain},
 			series{"net rx", func(s server.Sample) *float64 { return s.NetRxRate }, rateF},
 			series{"net tx", func(s server.Sample) *float64 { return s.NetTxRate }, rateF})
 	} else {
 		all = append(all,
-			series{"placements", func(s server.Sample) *float64 { return fInt(s.Placements) }, plain},
+			series{"placements", func(s server.Sample) *float64 { return server.Float(s.Placements) }, plain},
 			series{"alloc cpu", func(s server.Sample) *float64 { return s.AllocCPUs }, cores})
 	}
 	a.header(h)
@@ -97,18 +96,15 @@ func (a *app) usageHistory(h server.History, run bool) {
 }
 
 func (a *app) systemHistory(h server.History) {
-	count := func(get func(server.Sample) *int) func(server.Sample) *float64 {
-		return func(s server.Sample) *float64 { return fInt(get(s)) }
-	}
 	a.header(h)
 	for _, s := range []series{
-		{"running", func(s server.Sample) *float64 { return fInt(ptr(s.Runs["running"])) }, plain},
-		{"busy", count(func(s server.Sample) *int { return s.Busy }), plain},
-		{"queued", count(func(s server.Sample) *int { return s.Queued }), plain},
-		{"started", count(func(s server.Sample) *int { return s.Started }), plain},
-		{"finished", count(func(s server.Sample) *int { return s.Finished }), plain},
+		{"running", func(s server.Sample) *float64 { return server.Float(ptr(s.Runs["running"])) }, plain},
+		{"busy", func(s server.Sample) *float64 { return server.Float(s.Busy) }, plain},
+		{"queued", func(s server.Sample) *float64 { return server.Float(s.Queued) }, plain},
+		{"started", func(s server.Sample) *float64 { return server.Float(s.Started) }, plain},
+		{"finished", func(s server.Sample) *float64 { return server.Float(s.Finished) }, plain},
 		{"start p95", func(s server.Sample) *float64 { return s.StartP95 }, secs},
-		{"hosts ready", func(s server.Sample) *float64 { return fInt(ptr(s.Hosts["ready"])) }, plain},
+		{"hosts ready", func(s server.Sample) *float64 { return server.Float(ptr(s.Hosts["ready"])) }, plain},
 		{"alloc cpu", func(s server.Sample) *float64 { return s.SysAllocC }, cores},
 		{"capacity cpu", func(s server.Sample) *float64 { return s.CapCPUs }, cores},
 	} {
@@ -160,22 +156,6 @@ func (a *app) spark(sr series, samples []server.Sample) {
 		b.WriteRune(sparks[i])
 	}
 	fmt.Fprintf(a.stdout, "%-13s %-60s  %s  (%s–%s)\n", sr.name, b.String(), sr.format(vs[len(vs)-1]), sr.format(lo), sr.format(hi))
-}
-
-func f64(v *int64) *float64 {
-	if v == nil {
-		return nil
-	}
-	f := float64(*v)
-	return &f
-}
-
-func fInt(v *int) *float64 {
-	if v == nil {
-		return nil
-	}
-	f := float64(*v)
-	return &f
 }
 
 func ptr(v int) *int { return &v }

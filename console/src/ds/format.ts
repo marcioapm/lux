@@ -52,11 +52,6 @@ export function formatDuration(seconds: number | null | undefined): string {
   return neg ? `-${out}` : out;
 }
 
-/** Milliseconds → same as formatDuration. */
-export function formatMillis(ms: number | null | undefined): string {
-  return ms == null ? MISSING : formatDuration(ms / 1000);
-}
-
 /** Time between two dates/timestamps. */
 export function formatElapsed(from: Date | number | string | null | undefined, to: Date | number | string = Date.now()): string {
   const a = toMillis(from);

@@ -190,6 +190,10 @@ func (s *Server) routes(api huma.API) {
 
 	// Operators and the system.
 	register(s, api, huma.Operation{
+		OperationID: "whoami", Method: http.MethodGet, Path: "/v1/whoami", Tags: []string{"operators"},
+		Summary: "The caller's key", Description: "Whether it is an operator's, its tenant and its scopes.",
+	}, "read", s.whoami)
+	register(s, api, huma.Operation{
 		OperationID: "listTenants", Method: http.MethodGet, Path: "/v1/tenants", Tags: []string{"operators"},
 		Summary: "List tenants", Description: "Their quotas and what they use.",
 	}, "operator", s.listTenants)
@@ -350,10 +354,15 @@ type RunUsage struct {
 
 // runColumns: Tenant is the owning tenant's name; Host and HostID are the
 // current placement's host.
-const runColumns = `r.id, (SELECT t.name FROM tenants t WHERE t.id = r.tenant_id), r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
+// Select runColumns FROM runsFrom.
+const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
-	coalesce((SELECT h.name FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = r.id AND p.epoch = r.current_epoch), ''),
-	coalesce((SELECT p.host_id FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch), '')`
+	coalesce(rh.name, ''), coalesce(rp.host_id, '')`
+
+// runsFrom: a Run with its tenant and its current placement's host.
+const runsFrom = `runs r JOIN tenants rt ON rt.id = r.tenant_id
+	LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
+	LEFT JOIN hosts rh ON rh.id = rp.host_id`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
@@ -395,7 +404,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	id := ids.New(ids.Run)
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		if idem != "" {
-			existing, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs r WHERE idempotency_key = $1`, idem))
+			existing, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.idempotency_key = $1`, idem))
 			if err == nil {
 				run = existing
 				return nil
@@ -426,7 +435,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		if len(values) > 0 {
 			s.secrets.put(id, values)
 		}
-		run, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs r WHERE id = $1`, id))
+		run, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id = $1`, id))
 		return err
 	})
 	if err != nil {
@@ -532,24 +541,13 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		where = append(where, "r.state = ANY("+arg(strings.Split(st, ","))+")")
 	}
 	if in.Resumable {
-		where = append(where, "r.state IN ('stopped', 'lost', 'failed')")
+		where = append(where, "r.state IN "+resumableRunStates)
 	}
 	if in.Host != "" {
-		// Resolved where every visible host is, platform ones included (a
-		// tenant scope does not see those rows).
-		var hostID string
-		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			var err error
-			hostID, err = s.resolveHost(ctx, tx, p, in.Host, true)
-			return err
-		})
-		if errors.Is(err, errNotFound) {
-			return &listRunsOutput{Body: listRunsBody{Runs: []*Run{}}}, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		where = append(where, "EXISTS (SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.host_id = "+arg(hostID)+")")
+		// By id, or by the name of a host not terminated (names are reused).
+		n := arg(in.Host)
+		where = append(where, `r.id IN (SELECT p.run_id FROM placements p JOIN hosts h ON h.id = p.host_id
+			WHERE h.id = `+n+` OR (h.name = `+n+` AND h.state <> 'terminated'))`)
 	}
 	for _, l := range in.Label {
 		k, v, _ := strings.Cut(l, "=")
@@ -568,7 +566,7 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 	}
 	runs := []*Run{}
 	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM runs r WHERE `+strings.Join(where, " AND ")+
+		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE `+strings.Join(where, " AND ")+
 			` ORDER BY r.created_at DESC LIMIT `+strconv.Itoa(limit), args...)
 		if err != nil {
 			return err
@@ -595,7 +593,7 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 	var run *Run
 	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
 		var err error
-		run, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs r WHERE r.id = $1`, id))
+		run, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id = $1`, id))
 		if err != nil || !detail {
 			return err
 		}
@@ -683,11 +681,9 @@ func (s *Server) resumability(ctx context.Context, tenantID string, run *Run) (*
 		_, rs.SecretsHeld = s.secrets.get(run.ID)
 	}
 	if run.SnapshotID != nil {
-		// The host holding a copy may be a platform host, which a tenant
-		// scope does not see: read it in the system's, for this Run only.
 		var available bool
 		var host *string
-		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT s.available, s.uploaded, CASE WHEN s.host_copy THEN h.name END
 				FROM snapshots s LEFT JOIN hosts h ON h.id = s.host_id WHERE s.id = $1 AND s.run_id = $2`, *run.SnapshotID, run.ID).
 				Scan(&available, &rs.Uploaded, &host)
@@ -1007,8 +1003,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 			return errf(http.StatusConflict, "not_resumable", "run is %s: stop it first", state)
 		}
 		if err := requireSecrets(refs, values); err != nil {
-			if p.Operator {
-				err.(*HTTPError).Message += " (luxd no longer holds them: only the tenant can resume it)"
+			if p.Operator && len(req.Secrets) == 0 {
+				return errf(http.StatusUnprocessableEntity, "secrets_required",
+					"luxd no longer holds this Run's secrets: only the tenant can resume it, supplying them")
 			}
 			return err
 		}
@@ -1019,7 +1016,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 		}
 		// place_on is this resume's alone: a migration's that never took
 		// effect (its host died first) does not steer it.
-		if _, err := tx.Exec(ctx, `UPDATE runs SET secrets = $2, cancel_requested = false, place_on = $3, avoid_host = NULL WHERE id = $1`,
+		if _, err := tx.Exec(ctx, `UPDATE runs SET secrets = $2, cancel_requested = false, place_on = $3, avoid_host = NULL, pending_input = NULL WHERE id = $1`,
 			id, newRefs, placeOn); err != nil {
 			return err
 		}
@@ -1246,15 +1243,19 @@ const visibleHosts = "($1 = '' OR h.tenant_id = $1 OR h.tenant_id IS NULL)"
 // own, or every tenant's for an operator.
 const visiblePlacements = "($1 = '' OR pl.tenant_id = $1)"
 
-const hostColumns = `h.id, h.name, coalesce((SELECT t.name FROM tenants t WHERE t.id = h.tenant_id), ''), h.pool, h.state, h.state_reason,
+// Select hostColumns FROM hostsFrom ($1: the principal's tenant id, for
+// which of its placements count).
+const hostColumns = `h.id, h.name, coalesce(ht.name, ''), h.pool, h.state, h.state_reason,
 	h.draining, h.labels, h.capacity, h.versions, h.tenant_id IS NULL,
-	(SELECT count(*) FROM placements pl WHERE pl.host_id = h.id AND pl.state IN ` + livePlacementStates + ` AND ` + visiblePlacements + `),
-	(SELECT jsonb_build_object('cpus', coalesce(sum((pl.resources->>'cpus')::float8), 0), 'memory', coalesce(sum((pl.resources->>'memory')::int8), 0),
-		'disk', coalesce(sum((pl.resources->>'disk')::int8), 0))
-		FROM placements pl WHERE pl.host_id = h.id AND pl.state IN ` + livePlacementStates + ` AND ` + visiblePlacements + `),
+	hl.n, jsonb_build_object('cpus', hl.cpus, 'memory', hl.mem, 'disk', hl.disk),
 	h.provider_id, h.last_heartbeat,
 	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at`
+
+const hostsFrom = `hosts h LEFT JOIN tenants ht ON ht.id = h.tenant_id
+	CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(sum((pl.resources->>'cpus')::float8), 0) AS cpus,
+		coalesce(sum((pl.resources->>'memory')::int8), 0) AS mem, coalesce(sum((pl.resources->>'disk')::int8), 0) AS disk
+		FROM placements pl WHERE pl.host_id = h.id AND pl.state IN ` + livePlacementStates + ` AND ` + visiblePlacements + `) hl`
 
 func scanHost(row pgx.Row) (Host, error) {
 	var h Host
@@ -1291,7 +1292,7 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 	p := principal(ctx)
 	hosts := []Host{}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT `+hostColumns+` FROM hosts h
+		rows, err := tx.Query(ctx, `SELECT `+hostColumns+` FROM `+hostsFrom+`
 			WHERE `+visibleHosts+` AND ($2 OR h.state <> 'terminated') AND ($3 = '' OR h.pool = $3) AND ($4 = '' OR h.state = $4)
 			ORDER BY h.name, h.id`, p.TenantID, in.All == "true" || in.State == "terminated", in.Pool, in.State)
 		if err != nil {
@@ -1331,7 +1332,7 @@ func (s *Server) getHost(ctx context.Context, in *getHostInput) (*hostOutput, er
 		if err != nil {
 			return err
 		}
-		if h, err = scanHost(tx.QueryRow(ctx, `SELECT `+hostColumns+` FROM hosts h WHERE h.id = $2`, p.TenantID, id)); err != nil {
+		if h, err = scanHost(tx.QueryRow(ctx, `SELECT `+hostColumns+` FROM `+hostsFrom+` WHERE h.id = $2`, p.TenantID, id)); err != nil {
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT r.id, r.name, t.name, pl.epoch, pl.state, pl.resources, pl.created_at

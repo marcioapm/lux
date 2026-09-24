@@ -1,8 +1,8 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ToastProvider, type Tenant as PickerTenant } from "../ds/index.ts";
-import { api, isApiError, setRole, useQuery, useSession } from "../api/index.ts";
+import { api, errorText, isApiError, setRole, useQuery, useSession } from "../api/index.ts";
 import { matchPath, usePath } from "./router.tsx";
-import { ScopeProvider } from "./scope.tsx";
+import { ScopeProvider, useScope } from "./scope.tsx";
 import { Shell } from "./Shell.tsx";
 import { SignIn } from "./SignIn.tsx";
 import { StyleGuide } from "../styleguide/StyleGuide.tsx";
@@ -33,31 +33,59 @@ const ROUTES: Route[] = [
   { pattern: "/styleguide", title: "Style guide", render: () => <StyleGuide /> },
 ];
 
+/**
+ * Learns the key's role from GET /v1/whoami once per sign-in, retrying
+ * network and server errors with backoff. A 401 signs out (apiFetch), which
+ * brings back the sign-in screen.
+ */
+function useRole(): { error: string | null; retrying: boolean; retry: () => void } {
+  const [failure, setFailure] = useState<{ error: string; retrying: boolean } | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const ctrl = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let backoff = 1000;
+    const probe = async () => {
+      try {
+        const me = await api.whoami(ctrl.signal);
+        setRole(me.operator ? "operator" : "tenant");
+        setFailure(null);
+      } catch (e) {
+        if (ctrl.signal.aborted) return;
+        const retrying = !isApiError(e) || e.status >= 500;
+        setFailure({ error: errorText(e), retrying });
+        if (!retrying) return;
+        timer = setTimeout(() => void probe(), backoff);
+        backoff = Math.min(backoff * 2, 30_000);
+      }
+    };
+    void probe();
+    return () => {
+      ctrl.abort();
+      clearTimeout(timer);
+    };
+  }, [attempt]);
+  return { error: failure?.error ?? null, retrying: failure?.retrying ?? false, retry: () => setAttempt((n) => n + 1) };
+}
+
 function Router() {
   const path = usePath();
   const session = useSession();
-  // The tenant list doubles as the role probe: 403 means a tenant key.
-  const tenants = useQuery("tenants", (signal) => api.tenants(signal).catch((e: unknown) => {
-    if (isApiError(e) && e.status === 403) return null;
-    throw e;
-  }), { interval: session.role === "unknown" ? 5000 : 60_000 });
-  useEffect(() => {
-    if (tenants.data === undefined) return;
-    setRole(tenants.data === null ? "tenant" : "operator");
-  }, [tenants.data]);
-
+  const role = useRole();
+  const { operator } = useScope();
+  // The tenant picker's list: operators only.
+  const tenants = useQuery("tenants", (signal) => api.tenants(signal), { interval: 60_000, enabled: operator });
   const picker = useMemo<PickerTenant[]>(
     () => (tenants.data ?? []).map((t) => ({ id: t.id, name: t.name, hint: t.activeRuns > 0 ? `${t.activeRuns} active` : undefined })),
     [tenants.data],
   );
-  const operator = session.role === "operator";
 
-  // Until the probe answers, the role is unknown: do not guess "tenant".
-  if (session.role === "unknown" && tenants.error && path !== "/styleguide") {
+  // Until whoami answers, the role is unknown: do not guess "tenant".
+  if (session.role === "unknown" && role.error && path !== "/styleguide") {
     return (
       <Shell tenants={[]} operator={false} title="Cannot reach luxd">
         <div className="page">
-          <ErrorBlock error={`Could not check this key's access: ${tenants.error}. Retrying every few seconds.`} onRetry={tenants.refetch} />
+          <ErrorBlock error={`Could not check this key's access: ${role.error}.${role.retrying ? " Retrying." : ""}`} onRetry={role.retry} />
         </div>
       </Shell>
     );

@@ -288,36 +288,38 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		if err := forgetMissingCopies(ctx, tx, hostID, hb.LocalSnapshots); err != nil {
 			return err
 		}
-		s.sample(ctx, tx, func(tx pgx.Tx) error { return sampleHost(ctx, tx, hostID, hb.Usage) })
-		if n == 0 {
-			return nil
+		if n > 0 {
+			// Leases renewed and usage peaks raised for every placement at once.
+			_, err := tx.Exec(ctx, `UPDATE placements p SET
+					lease_expires_at  = now() + $2::interval,
+					peak_memory_bytes = greatest(p.peak_memory_bytes, nullif(u.mem, 0)),
+					peak_disk_bytes   = greatest(p.peak_disk_bytes, nullif(u.disk, 0)),
+					peak_pids         = greatest(p.peak_pids, nullif(u.pids, 0)),
+					cpu_seconds       = greatest(p.cpu_seconds, nullif(u.cpu, 0)),
+					net_rx_bytes      = greatest(p.net_rx_bytes, nullif(u.rx, 0)),
+					net_tx_bytes      = greatest(p.net_tx_bytes, nullif(u.tx, 0))
+				FROM unnest($3::text[], $4::int[], $5::bigint[], $6::bigint[], $7::int[], $8::float8[], $9::bigint[], $10::bigint[])
+					AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx)
+				WHERE p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1
+				  AND p.state IN `+livePlacementStates,
+				hostID, interval(s.cfg.LeaseDuration), runs, epochs, mem, disk, pids, cpu, rx, tx_)
+			if err != nil {
+				return err
+			}
 		}
-		// Leases renewed and usage peaks raised for every placement at once.
-		_, err := tx.Exec(ctx, `UPDATE placements p SET
-				lease_expires_at  = now() + $2::interval,
-				peak_memory_bytes = greatest(p.peak_memory_bytes, nullif(u.mem, 0)),
-				peak_disk_bytes   = greatest(p.peak_disk_bytes, nullif(u.disk, 0)),
-				peak_pids         = greatest(p.peak_pids, nullif(u.pids, 0)),
-				cpu_seconds       = greatest(p.cpu_seconds, nullif(u.cpu, 0)),
-				net_rx_bytes      = greatest(p.net_rx_bytes, nullif(u.rx, 0)),
-				net_tx_bytes      = greatest(p.net_tx_bytes, nullif(u.tx, 0))
-			FROM unnest($3::text[], $4::int[], $5::bigint[], $6::bigint[], $7::int[], $8::float8[], $9::bigint[], $10::bigint[])
-				AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx)
-			WHERE p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1
-			  AND p.state IN `+livePlacementStates,
-			hostID, interval(s.cfg.LeaseDuration), runs, epochs, mem, disk, pids, cpu, rx, tx_)
-		if err != nil {
-			return err
-		}
-		// One sample per live placement: current levels, cumulative counters.
+		// History: the host's sample, and one per live placement (current
+		// levels, cumulative counters).
 		s.sample(ctx, tx, func(tx pgx.Tx) error {
+			if err := sampleHost(ctx, tx, hostID, hb.Usage); err != nil || n == 0 {
+				return err
+			}
 			_, err := tx.Exec(ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx)
-			SELECT p.run_id, p.epoch, p.tenant_id, 0, now(), nullif(u.cpu, 0), nullif(u.mem, 0), nullif(u.disk, 0), nullif(u.pids, 0),
-				nullif(u.rx, 0), nullif(u.tx, 0)
-			FROM unnest($2::text[], $3::int[], $4::bigint[], $5::bigint[], $6::int[], $7::float8[], $8::bigint[], $9::bigint[])
-				AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx)
-			JOIN placements p ON p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1 AND p.state IN `+livePlacementStates+`
-			ON CONFLICT DO NOTHING`,
+				SELECT p.run_id, p.epoch, p.tenant_id, 0, now(), nullif(u.cpu, 0), nullif(u.mem, 0), nullif(u.disk, 0), nullif(u.pids, 0),
+					nullif(u.rx, 0), nullif(u.tx, 0)
+				FROM unnest($2::text[], $3::int[], $4::bigint[], $5::bigint[], $6::int[], $7::float8[], $8::bigint[], $9::bigint[])
+					AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx)
+				JOIN placements p ON p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1 AND p.state IN `+livePlacementStates+`
+				ON CONFLICT DO NOTHING`,
 				hostID, runs, epochs, curMem, disk, curPids, cpu, rx, tx_)
 			return err
 		})

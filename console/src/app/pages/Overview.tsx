@@ -1,9 +1,8 @@
-import { useMemo } from "react";
 import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, StatTile, TimeSeriesChart } from "../../ds/index.ts";
-import { api, useNow, useQuery } from "../../api/index.ts";
+import { api, useNow } from "../../api/index.ts";
 import { go } from "../router.tsx";
-import { useScope } from "../scope.tsx";
-import { ErrorBlock, ErrorStrip, seriesFrom } from "./common.tsx";
+import { useScope, useScopedQuery } from "../scope.tsx";
+import { ErrorBlock, ErrorStrip, useSeries } from "./common.tsx";
 import { ActivityFeed } from "./ActivityFeed.tsx";
 
 /** What the Queued tile counts. */
@@ -12,19 +11,19 @@ const QUEUED = ["submitted", "resuming", "provisioning"];
 export function Overview() {
   const scope = useScope();
   const now = useNow();
-  const status = useQuery(`status:${scope.tenant}`, (s) => api.status(scope.apiTenant, s), { interval: 5000 });
-  const history = useQuery(`history:${scope.tenant}:${scope.range}`, (s) => api.history(scope.apiTenant, scope.range, s), { interval: 30_000 });
+  const status = useScopedQuery("status", api.status, { interval: 5000 });
+  const history = useScopedQuery(`history:${scope.range}`, (t, s) => api.history(t, scope.range, s), { interval: 30_000 });
   const st = status.data;
   const runs = st?.runs ?? {};
   const hosts = st?.hosts ?? {};
 
   const h = history.data?.samples;
-  const runSeries = useMemo(() => seriesFrom(h, [(s) => s.runs?.running, (s) => s.queued]), [h]);
-  const flow = useMemo(() => seriesFrom(h, [(s) => s.started, (s) => s.finished]), [h]);
-  const latency = useMemo(() => seriesFrom(h, [(s) => s.startP50, (s) => s.startP95]), [h]);
-  const cpu = useMemo(() => seriesFrom(h, [(s) => s.allocatedCpus, (s) => s.capacityCpus]), [h]);
-  const mem = useMemo(() => seriesFrom(h, [(s) => s.allocatedMemory, (s) => s.capacityMemory]), [h]);
-  const hostSeries = useMemo(() => seriesFrom(h, [(s) => s.hosts?.ready, (s) => s.hosts?.draining, (s) => s.hosts?.lost]), [h]);
+  const runSeries = useSeries(h, [(s) => s.runs?.running, (s) => s.queued]);
+  const flow = useSeries(h, [(s) => s.started, (s) => s.finished]);
+  const latency = useSeries(h, [(s) => s.startP50, (s) => s.startP95]);
+  const cpu = useSeries(h, [(s) => s.allocatedCpus, (s) => s.capacityCpus]);
+  const mem = useSeries(h, [(s) => s.allocatedMemory, (s) => s.capacityMemory]);
+  const hostSeries = useSeries(h, [(s) => s.hosts?.ready, (s) => s.hosts?.draining, (s) => s.hosts?.lost]);
 
   const loading = status.loading;
   const lostHosts = hosts.lost ?? 0;

@@ -572,26 +572,16 @@ again (if it was mid-turn, that turn was interrupted: tell it to go on).`,
 func (a *app) waitMoved(ctx context.Context, id string, epoch int) (*Run, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	for {
-		run, err := a.getRun(ctx, id)
-		if err != nil {
-			return nil, err
-		}
+	return a.waitFor(ctx, id, func(run *Run) (bool, error) {
 		switch {
-		case run.State == "running" && run.Epoch > epoch:
-			return run, nil
-		case run.State == "stopped" && run.Epoch > epoch, run.State == "lost", terminalState(run.State):
-			return run, fmt.Errorf("run is %s: %s", run.State, run.StateReason)
+		case run.State == server.StateRunning && run.Epoch > epoch:
+			return true, nil
+		case run.State == server.StateStopped && run.Epoch > epoch, run.State == server.StateLost, server.Terminal(run.State):
+			return true, fmt.Errorf("run is %s: %s", run.State, run.StateReason)
 		}
-		select {
-		case <-ctx.Done():
-			return nil, errors.New("timed out waiting for the Run to move")
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
+		return false, nil
+	})
 }
-
-func terminalState(s string) bool { return s == "succeeded" || s == "failed" || s == "cancelled" }
 
 func (a *app) steerCmd() *cobra.Command {
 	var interrupt bool
@@ -785,17 +775,18 @@ func (a *app) waitCmd() *cobra.Command {
 }
 
 func (a *app) waitState(ctx context.Context, id string, states ...string) (*Run, error) {
-	want := map[string]bool{}
-	for _, s := range states {
-		want[s] = true
-	}
+	return a.waitFor(ctx, id, func(run *Run) (bool, error) { return slices.Contains(states, run.State), nil })
+}
+
+// waitFor polls a Run until done says so (or fails), or ctx ends.
+func (a *app) waitFor(ctx context.Context, id string, done func(*Run) (bool, error)) (*Run, error) {
 	for {
 		run, err := a.getRun(ctx, id)
 		if err != nil {
 			return nil, err
 		}
-		if want[run.State] {
-			return run, nil
+		if ok, err := done(run); ok || err != nil {
+			return run, err
 		}
 		select {
 		case <-ctx.Done():
