@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { IconButton, LiveDot, TenantPicker, TimeRangePicker, useTheme, type Tenant } from "../ds/index.ts";
 import { IconGrid, IconLayers, IconLogout, IconMoon, IconPalette, IconPlay, IconServer, IconSun, IconUsers } from "../ds/icons.tsx";
-import { signOut, useLiveState } from "../api/index.ts";
+import { liveLabel, signOut, useLiveState } from "../api/index.ts";
 import { Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
 
@@ -90,7 +90,7 @@ function LiveIndicator() {
       </span>
     );
   }
-  const label = status === "reconnecting" ? "reconnecting…" : status === "off" ? "offline" : "connecting…";
+  const label = liveLabel(status);
   return (
     <span className="live-indicator" title={`Event stream ${label} Polling meanwhile.${error ? ` ${error}` : ""}`}>
       <LiveDot hue={status === "off" ? "red" : "amber"} label={label} /> {label}

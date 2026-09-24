@@ -143,6 +143,7 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 	}
 
 	for {
+		woken := s.wakeups.next(runID) // before the reads: see wakeups
 		placements, runState, err := s.placementsFrom(ctx, p.TenantID, runID, cur.Epoch)
 		if err != nil {
 			return send("error", outputError{err.Error()})
@@ -213,7 +214,7 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 		if !progressed {
 			// An event (a state change, a new placement) wakes it at once;
 			// output uploads and the like are checked every half second.
-			s.wakeups.wait(ctx, 500*time.Millisecond)
+			wait(ctx, woken, 500*time.Millisecond)
 			if ctx.Err() != nil {
 				return nil
 			}

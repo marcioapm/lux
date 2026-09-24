@@ -1,5 +1,5 @@
 import { Badge, Card, formatClock, LiveDot, Spinner } from "../../ds/index.ts";
-import { useLiveState } from "../../api/index.ts";
+import { liveLabel, useLiveState } from "../../api/index.ts";
 import { useScope } from "../scope.tsx";
 import { ErrorStrip, RunLink } from "./common.tsx";
 import { eventSummary } from "./events.ts";
@@ -12,7 +12,7 @@ export function ActivityFeed() {
   return (
     <Card
       title="Activity"
-      subtitle={status === "live" ? "live" : status === "reconnecting" ? "reconnecting…" : status === "off" ? "offline" : "connecting…"}
+      subtitle={liveLabel(status)}
       actions={status === "live" ? <LiveDot /> : <Spinner size={12} />}
       flush
       className="feed-card"

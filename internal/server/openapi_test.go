@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -70,14 +69,14 @@ func TestHumaErrorsInLuxShape(t *testing.T) {
 	}
 }
 
-// Every operation on a tenant's object declares its owner, so an operator's
-// request on it runs in that tenant's scope; forgetting is caught at
-// registration.
-func TestOwnedOperationsDeclareTheirOwner(t *testing.T) {
+// Every operation on a tenant's object carries its owner, so an operator's
+// request on it runs in that tenant's scope.
+func TestOwnedOperationsHaveTheirOwner(t *testing.T) {
 	api := (&Server{}).newAPI(http.NewServeMux())
+	n := 0
 	for path, item := range api.OpenAPI().Paths {
 		for _, op := range []*huma.Operation{item.Get, item.Post, item.Put, item.Delete} {
-			if op == nil || len(op.Security) == 0 {
+			if op == nil {
 				continue
 			}
 			_, owned := op.Metadata[ownerKey]
@@ -85,13 +84,12 @@ func TestOwnedOperationsDeclareTheirOwner(t *testing.T) {
 			if owned != want {
 				t.Errorf("%s %s: owned %v, want %v", op.Method, path, owned, want)
 			}
+			if owned {
+				n++
+			}
 		}
 	}
-	defer func() {
-		if recover() == nil {
-			t.Error("registering an owned path without its owner did not panic")
-		}
-	}()
-	register(&Server{}, huma.NewAPI(huma.DefaultConfig("t", "1"), nil), huma.Operation{OperationID: "x", Method: http.MethodGet, Path: "/v1/runs/{id}/x"},
-		"read", func(context.Context, *struct{}) (*struct{}, error) { return nil, nil })
+	if n < 15 {
+		t.Errorf("only %d owned operations", n)
+	}
 }

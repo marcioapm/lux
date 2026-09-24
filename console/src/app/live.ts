@@ -8,10 +8,11 @@ import { useScope } from "./scope.tsx";
 /** Query key prefixes that list runs or count them: any event may change them. */
 const RUN_LISTS = ["runs:", "host-runs:", "status@"];
 
+/** Query key prefixes of one Run's data. */
+const RUN_DATA = ["run:", "run-events:", "run-snapshots:", "run-artifacts:"];
+
 function refetchFor(e: FeedEvent) {
-  invalidate((k) => RUN_LISTS.some((p) => k.startsWith(p)));
-  const run = new Set([`run:${e.runId}`, `run-events:${e.runId}`, `run-snapshots:${e.runId}`, `run-artifacts:${e.runId}`]);
-  invalidate((k) => run.has(k));
+  invalidate((k) => RUN_LISTS.some((p) => k.startsWith(p)) || RUN_DATA.some((p) => k === p + e.runId));
 }
 
 /** Open the event stream for the current scope and refetch on its events. Mount once. */

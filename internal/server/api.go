@@ -43,15 +43,17 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "listRuns", Method: http.MethodGet, Path: "/v1/runs", Tags: []string{"runs"},
 		Summary: "List Runs", Description: "Newest first.",
 	}, "read", s.listRuns)
-	register(s, api, ownedBy(runOwner, huma.Operation{
+	register(s, api, huma.Operation{
 		OperationID: "getRun", Method: http.MethodGet, Path: "/v1/runs/{id}", Tags: []string{"runs"},
 		Summary: "Get a Run", Description: "With its placements and resource usage.",
-		Errors: []int{http.StatusNotFound}}), "read", s.getRun)
-	register(s, api, ownedBy(runOwner, huma.Operation{
+		Errors: []int{http.StatusNotFound},
+	}, "read", s.getRun)
+	register(s, api, huma.Operation{
 		OperationID: "listEvents", Method: http.MethodGet, Path: "/v1/runs/{id}/events", Tags: []string{"runs"},
 		Summary: "List a Run's lifecycle events",
-		Errors:  []int{http.StatusNotFound}}), "read", s.listEvents)
-	register(s, api, ownedBy(runOwner, huma.Operation{
+		Errors:  []int{http.StatusNotFound},
+	}, "read", s.listEvents)
+	register(s, api, huma.Operation{
 		OperationID: "streamOutput", Method: http.MethodGet, Path: "/v1/runs/{id}/output", Tags: []string{"runs"},
 		Summary: "Stream a Run's output",
 		Description: "The Run's output as server-sent events, from wherever it is: relayed from its host while it runs, from S3 once uploaded. " +
@@ -66,53 +68,62 @@ func (s *Server) routes(api huma.API) {
 			sseEvent("error", "The stream failed.", schemaRef[outputError](api)),
 			sseEvent("end", "The last event.", schemaRef[outputEnd](api)),
 		)}}}},
-		Errors: []int{http.StatusBadRequest, http.StatusNotFound}}), "read", streamed(s, s.serveOutput))
-	register(s, api, ownedBy(runOwner, huma.Operation{
+		Errors: []int{http.StatusBadRequest, http.StatusNotFound},
+	}, "read", streamed(s, s.serveOutput))
+	register(s, api, huma.Operation{
 		OperationID: "stopRun", Method: http.MethodPost, Path: "/v1/runs/{id}/stop", Tags: []string{"runs"},
 		Summary:       "Stop a Run",
 		Description:   "Gracefully: its state volumes are snapshotted and it can be resumed. Idempotent.",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusNotFound}}), "run", s.stopRun)
-	register(s, api, ownedBy(runOwner, huma.Operation{
+		Errors:        []int{http.StatusNotFound},
+	}, "run", s.stopRun)
+	register(s, api, huma.Operation{
 		OperationID: "resumeRun", Method: http.MethodPost, Path: "/v1/runs/{id}/resume", Tags: []string{"runs"},
 		Summary:       "Resume a stopped, lost or failed Run",
 		Description:   "From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming.",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests}}), "run", s.resumeRun)
-	register(s, api, ownedBy(runOwner, huma.Operation{
+		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests},
+	}, "run", s.resumeRun)
+	register(s, api, huma.Operation{
 		OperationID: "cancelRun", Method: http.MethodPost, Path: "/v1/runs/{id}/cancel", Tags: []string{"runs"},
 		Summary:       "Cancel a Run",
 		Description:   "It ends as cancelled and cannot be resumed. Idempotent.",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusNotFound}}), "run", s.cancelRun)
-	register(s, api, ownedBy(runOwner, huma.Operation{
+		Errors:        []int{http.StatusNotFound},
+	}, "run", s.cancelRun)
+	register(s, api, huma.Operation{
 		OperationID: "migrateRun", Method: http.MethodPost, Path: "/v1/runs/{id}/migrate", Tags: []string{"runs", "operators"},
 		Summary: "Move a running Run to another host",
 		Description: "It is stopped (its state snapshotted), then resumed at once on `to`, or on any host but the one it was on. " +
 			"An agent resumes its session; `input`, if given, is delivered once it runs again.",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusNotFound, http.StatusConflict}}), "operator", s.migrateRun)
-	register(s, api, ownedBy(runOwner, huma.Operation{
+		Errors:        []int{http.StatusNotFound, http.StatusConflict},
+	}, "operator", s.migrateRun)
+	register(s, api, huma.Operation{
 		OperationID: "runHistory", Method: http.MethodGet, Path: "/v1/runs/{id}/history", Tags: []string{"runs", "history"},
 		Summary: "A Run's resource use over time", Description: "Across its placements: each sample carries its epoch.",
-		Errors: []int{http.StatusNotFound}}), "read", s.runHistory)
-	register(s, api, ownedBy(runOwner, huma.Operation{
+		Errors: []int{http.StatusNotFound},
+	}, "read", s.runHistory)
+	register(s, api, huma.Operation{
 		OperationID: "pushRun", Method: http.MethodPost, Path: "/v1/runs/{id}/push", Tags: []string{"runs"},
 		Summary: "Push a running Run's repositories",
 		Description: "To the spec's git.push branch, with the runner's credentials. The outcome arrives as a git.push event carrying the request id.\n\n" +
 			"expect: per repository, the commit the push branch must be at for the push to go ahead (a compare-and-swap). " +
 			"Without it, the lease is what this Run last pushed, or, the first time, that the branch does not exist.",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity}}), "run", s.pushRun)
-	register(s, api, ownedBy(runOwner, huma.Operation{
+		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "run", s.pushRun)
+	register(s, api, huma.Operation{
 		OperationID: "listSnapshots", Method: http.MethodGet, Path: "/v1/runs/{id}/snapshots", Tags: []string{"runs"},
 		Summary: "List a Run's snapshots",
-		Errors:  []int{http.StatusNotFound}}), "read", s.listSnapshots)
-	register(s, api, ownedBy(runOwner, huma.Operation{
+		Errors:  []int{http.StatusNotFound},
+	}, "read", s.listSnapshots)
+	register(s, api, huma.Operation{
 		OperationID: "listArtifacts", Method: http.MethodGet, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
 		Summary: "List a Run's artifacts",
-		Errors:  []int{http.StatusNotFound}}), "read", s.listArtifacts)
-	register(s, api, ownedBy(artifactOwner, huma.Operation{
+		Errors:  []int{http.StatusNotFound},
+	}, "read", s.listArtifacts)
+	register(s, api, huma.Operation{
 		OperationID: "downloadArtifact", Method: http.MethodGet, Path: "/v1/artifacts/{aid}", Tags: []string{"runs"},
 		Summary: "Download an artifact",
 		Description: "The file the Run wrote, streamed through luxd. Content-Length and X-Lux-SHA256 let a client tell a whole download " +
@@ -127,23 +138,25 @@ func (s *Server) routes(api huma.API) {
 				"Content-Disposition": {Description: "attachment, with the file's name.", Schema: &huma.Schema{Type: huma.TypeString}},
 			},
 		}},
-		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusGone}}), "read", streamed(s, s.downloadArtifact))
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusGone},
+	}, "read", streamed(s, s.downloadArtifact))
 
 	// Interactive.
-	register(s, api, ownedBy(runOwner, huma.Operation{
+	register(s, api, huma.Operation{
 		OperationID: "postInput", Method: http.MethodPost, Path: "/v1/runs/{id}/input", Tags: []string{"interactive"},
 		Summary:       "Steer a running Run",
 		Description:   "Agents get text as a message (queued until the current turn ends if the agent cannot take it mid-turn); generic workloads get it on stdin. A stopped Run takes its input through resume instead.",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict}}), "run", s.postInput)
-	register(s, api, ownedBy(runOwner, streamOp(api, "execRun", "/v1/runs/{id}/exec", "exec", "Run a command in a running Run",
-		"The client's first message is a StreamOpen: `{\"command\": [...], \"tty\": true, \"rows\": 24, \"cols\": 80}`. ")),
+		Errors:        []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict},
+	}, "run", s.postInput)
+	register(s, api, streamOp(api, "execRun", "/v1/runs/{id}/exec", "exec", "Run a command in a running Run",
+		"The client's first message is a StreamOpen: `{\"command\": [...], \"tty\": true, \"rows\": 24, \"cols\": 80}`. "),
 		"run", streamed(s, s.runStream("exec")))
-	register(s, api, ownedBy(runOwner, streamOp(api, "attachRun", "/v1/runs/{id}/attach", "attach", "Attach to a running Run's terminal",
-		"Needs a generic workload with workload.tty. ")),
+	register(s, api, streamOp(api, "attachRun", "/v1/runs/{id}/attach", "attach", "Attach to a running Run's terminal",
+		"Needs a generic workload with workload.tty. "),
 		"run", streamed(s, s.runStream("attach")))
-	register(s, api, ownedBy(runOwner, streamOp(api, "portForward", "/v1/runs/{id}/ports/{name}", "tunnel", "Reach one of a running Run's ports",
-		"A TCP connection to a port the spec declares in network.ports, carried as StreamData. ")),
+	register(s, api, streamOp(api, "portForward", "/v1/runs/{id}/ports/{name}", "tunnel", "Reach one of a running Run's ports",
+		"A TCP connection to a port the spec declares in network.ports, carried as StreamData. "),
 		"run", streamed(s, s.streamHandler("tunnel")))
 
 	// Hosts and pools.

@@ -41,7 +41,7 @@ const feedPage = 500
 
 // serveFeed is GET /v1/events: every event of every Run the caller sees
 // (an operator's: all tenants, or ?tenant=), as SSE, in id order. It reads
-// when an event is written (events.go), not on a timer.
+// when an event is written (wakeups.go), not on a timer.
 func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput) error {
 	ctx := r.Context()
 	p := principal(ctx)
@@ -76,6 +76,7 @@ func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput
 	sent := map[int64]bool{}
 	keepalive := time.Now()
 	for {
+		woken := s.wakeups.next("") // before the read: see wakeups
 		evs, err := s.feedAfter(ctx, p, low)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -121,11 +122,11 @@ func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput
 		}
 		// Young events still settling are re-read soon; otherwise at the
 		// next event (or the fallback).
-		wait := feedFallback
+		fallback := feedFallback
 		if len(sent) > 0 {
-			wait = time.Second
+			fallback = time.Second
 		}
-		s.wakeups.wait(ctx, wait)
+		wait(ctx, woken, fallback)
 		if ctx.Err() != nil {
 			return nil
 		}

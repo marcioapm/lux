@@ -11,7 +11,8 @@ const QUEUED = ["submitted", "resuming", "provisioning"];
 export function Overview() {
   const scope = useScope();
   const now = useNow();
-  const status = useScopedQuery("status", api.status, { interval: 5000, live: 15_000 });
+  // Status counts hosts too, which have no events: it keeps polling.
+  const status = useScopedQuery("status", api.status, { interval: 5000 });
   const history = useScopedQuery(`history:${scope.range}`, (t, s) => api.history(t, scope.range, s), { interval: 30_000 });
   const st = status.data;
   const runs = st?.runs ?? {};

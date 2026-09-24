@@ -55,7 +55,7 @@ type Server struct {
 	// secrets holds submitted secret values in memory, by run id, until
 	// the placement that needs them has been assigned. Never persisted.
 	secrets *secretCache
-	// wakeups wake followers of Run events (events.go).
+	// wakeups wake followers of Run events (wakeups.go).
 	wakeups *wakeups
 	kick    chan struct{}
 	// lastAliveCheck: when the provisioner last asked providers which

@@ -39,11 +39,18 @@ export function useLiveStream(tenant: string | undefined): void {
   useEffect(() => {
     const ctrl = new AbortController();
     set({ status: "connecting", error: null, recent: [] });
+    // The backfill (last: RECENT) fills Activity only: pages fetched on
+    // mount. Events written after the stream opened (and all of a
+    // reconnect's, which resumes by Last-Event-ID) refetch what they change.
+    let since = Infinity;
     void streamSSE("/events", {
       query: { follow: true, last: RECENT },
       tenant,
       signal: ctrl.signal,
-      onOpen: () => set({ status: "live", error: null }),
+      onOpen: () => {
+        since = Math.min(since, Date.now() - 1000); // a little slack for clock skew
+        set({ status: "live", error: null });
+      },
       onMessage: (m) => {
         if (ctrl.signal.aborted || m.event !== "lux") return;
         let e: FeedEvent;
@@ -54,7 +61,7 @@ export function useLiveStream(tenant: string | undefined): void {
         }
         if (state.recent.some((x) => x.id === e.id)) return;
         set({ recent: [e, ...state.recent].slice(0, RECENT) });
-        handlers.forEach((h) => h(e));
+        if (Date.parse(e.time) >= since) handlers.forEach((h) => h(e));
       },
       onClose: (_reason, err) => {
         if (ctrl.signal.aborted) return;
@@ -63,10 +70,7 @@ export function useLiveStream(tenant: string | undefined): void {
         set({ status: final ? "off" : "reconnecting", ...(err ? { error: errorText(err) } : {}) });
       },
     });
-    return () => {
-      ctrl.abort();
-      set({ status: "connecting" });
-    };
+    return () => ctrl.abort();
   }, [tenant]);
 }
 
@@ -82,4 +86,9 @@ export function useLiveStatus(): LiveStatus {
 
 export function useLiveState(): LiveState {
   return useSyncExternalStore(watch, () => state);
+}
+
+/** Words for a stream status. */
+export function liveLabel(status: LiveStatus): string {
+  return status === "live" ? "live" : status === "reconnecting" ? "reconnecting…" : status === "off" ? "offline" : "connecting…";
 }
