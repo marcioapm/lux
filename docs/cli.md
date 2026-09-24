@@ -25,7 +25,7 @@ was reached; `1` anything else.
 ```bash
 lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
-lux ls [--state running,stopped] [-l team=x]
+lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]
 lux get <run>                                  # state, placements, usage
 lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false]
 lux events <run>                               # lifecycle events
@@ -55,7 +55,7 @@ Agents get the text as a message. Generic workloads get it on stdin. See
 
 ```bash
 lux stop <run> [--wait]         # graceful; snapshot; resumable
-lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--from-snapshot ID]
+lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--from-snapshot ID] [--disk SIZE] [--to HOST]
 lux cancel <run> [--wait]       # final (a snapshot is still taken)
 lux snapshots <run>             # where each snapshot lives
 ```

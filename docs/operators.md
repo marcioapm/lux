@@ -138,9 +138,19 @@ or load balancer you already use for luxd.
   who should be (a policy letting in anyone with an email makes everyone an
   operator). API keys still work alongside (the CLI, runners). The Access
   cookie authenticates reads and requests from the console itself; a form
-  or script on another site cannot act with it.
+  or script on another site cannot act with it (writes need the browser to
+  mark them same-origin, `Sec-Fetch-Site`; every current browser does).
+  Service tokens carry no email and are refused. The top bar shows who is
+  signed in; clicking the name signs out of Access
+  (`/cdn-cgi/access/logout`). In key mode, "Sign out" forgets the key.
 
   With a tunnel (`cloudflared`), `originRequest.access.required` can also
   refuse unauthenticated requests before they reach luxd.
 
 Other ways to sign in can be added as further `console.auth` values.
+
+### What only operators can do
+
+`lux tenants ls`, `lux migrate`, choosing a host (`resume --to`), and
+resuming without supplying secrets. Tenants and keys are made with `luxd
+admin` only, never through the API, by operators or anyone.

@@ -13,8 +13,10 @@ scale_down_after = "10m"           # LUX_SCALE_DOWN_AFTER
 launch_timeout = "10m"             # LUX_LAUNCH_TIMEOUT
 
 [database]
-url = "postgres://lux_app:…@db:5432/lux"  # LUX_DATABASE_URL (migrate: the owner's)
-app_password = "lux_app"           # LUX_APP_PASSWORD (migrate: sets lux_app's)
+# LUX_DATABASE_URL. serve connects as lux_app; migrate needs the database
+# owner: keep serve's here and set LUX_DATABASE_URL for migrate.
+url = "postgres://lux_app:…@db:5432/lux"
+app_password = "lux_app"           # LUX_APP_PASSWORD: migrate sets lux_app's password to it. Set your own.
 
 [s3]
 bucket = "lux"                     # LUX_S3_BUCKET

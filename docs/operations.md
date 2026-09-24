@@ -11,19 +11,55 @@ luxd migrate      # once per upgrade, as the database owner
 luxd serve        # as many as you like
 ```
 
+### Building
+
+`make build` builds the operator console (`console/`, with
+[Bun](https://bun.sh)) and then the binaries in `bin/`; luxd embeds the
+console. A luxd built with plain `go build` and no console build serves, at
+`/console/`, a page saying how to build it.
+
+### Postgres
+
+Postgres 13 or later (tested on 18); no extensions. `luxd migrate` runs as
+the database owner, who must be able to create roles: it creates `lux_app`
+(no SUPERUSER, no BYPASSRLS: row-level security is the tenant boundary),
+sets its password to `LUX_APP_PASSWORD` (default `lux_app`: set your own),
+and grants it every table, new ones included, on each run. `luxd serve`
+connects as `lux_app`; `luxd admin` works with either DSN.
+
+Each luxd also holds one long-lived connection, outside its pool and made
+with the same DSN, listening for Run events (`LISTEN lux_events`), which
+is what makes the console and `lux logs -f` live. LISTEN does not work
+through PgBouncer in transaction or statement mode: point luxd at Postgres
+directly, or at a session-mode pool. If it cannot listen, updates still
+arrive, a few seconds late.
+
+### Upgrading
+
+1. Run `luxd migrate` with the owner's DSN. It applies what is new and is
+   safe to run again; running luxds keep working meanwhile.
+2. Restart (or roll) every `luxd serve` onto the new binary.
+
+Migrate first: a luxd newer than its schema does not check it, and fails
+requests that touch what is missing (luxds older than the schema keep
+working). Configuration through the environment alone keeps working: a
+configuration file is optional.
+
 ### Configuration
 
 luxd reads a TOML file: `--config FILE` (before or after the command),
 else `LUX_CONFIG`, else `/etc/lux/luxd.toml` if it exists. Every setting
 also has an environment variable, which overrides the file, so a secret can
 stay out of it (`LUX_DATABASE_URL`, `LUX_S3_SECRET_KEY`). An unknown key or
-a bad value stops luxd, naming it.
+a bad value stops luxd, naming it. luxd warns when others can read the
+file: keep it `chmod 600`, or keep secrets in the environment.
 [luxd.example.toml](luxd.example.toml) has every key with its default and
 its variable; the table below lists them by variable.
 
 | Variable | Default | |
 | --- | --- | --- |
-| `LUX_DATABASE_URL` | — | For `serve`, a DSN for the `lux_app` role (created by `migrate`, which needs the owner's DSN and takes `LUX_APP_PASSWORD`). |
+| `LUX_DATABASE_URL` | — | For `serve`, a DSN for the `lux_app` role; for `migrate`, the owner's. One file can serve both: set this variable per command. |
+| `LUX_APP_PASSWORD` | `lux_app` | `migrate` sets `lux_app`'s password to it, each run. Set your own. |
 | `LUX_LISTEN` | `127.0.0.1:7070` | Address to serve on. |
 | `LUX_PUBLIC_URL` | — | The URL runners and clients use. |
 | `LUX_S3_BUCKET` | — | Where snapshots, output and artifacts go. |
