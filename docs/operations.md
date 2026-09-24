@@ -27,13 +27,20 @@ luxd serve        # as many as you like
 | `LUX_SCALE_DOWN_AFTER` | `10m` | How long a provisioned host stays idle before it is drained and terminated. |
 | `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
 | `LUX_EC2_ENDPOINT` | AWS | Overrides the EC2 endpoint (tests). |
+| `LUX_SAMPLE_EVERY` | `10s` | How often the system is sampled for history ([Operators](operators.md#history)). |
+| `LUX_HISTORY_RAW` | `48h` | How long raw samples (hosts and placements: one per heartbeat) are kept. |
+| `LUX_HISTORY_MINUTES` | `720h` | How long minute rollups are kept. |
+| `LUX_HISTORY_HOURS` | `9600h` | How long hour rollups are kept. |
 | `LUX_DEBUG` | — | Debug logging. |
+
+luxd also serves the operator console at `/console/` ([Operators](operators.md#the-console)).
 
 ### Tenants, keys and quotas
 
 ```bash
 luxd admin create-tenant --name acme [--max-runs N] [--max-hosts N] [--retention-days 30]
 luxd admin create-key --tenant T --scopes read,run
+luxd admin create-operator-key [--name N]       # every tenant: see docs/operators.md
 luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N]
 ```
 

@@ -1,0 +1,188 @@
+import { useMemo, useState } from "react";
+import { Badge, Button, Card, ConfirmDialog, formatBytes, formatCores, formatRelative, formatTimestamp, IdChip, KeyValue, StatePill, Table, TimeSeriesChart, Timeline, Tooltip, useToast, type Column, type TimelineStage } from "../../ds/index.ts";
+import { api, errorText, useNow, useQuery, useSession, type Host, type HostPlacement, type HostTimeKey, type Run } from "../../api/index.ts";
+import { go, Link } from "../router.tsx";
+import { useScope } from "../scope.tsx";
+import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, RunLink, runColumns, runPath, seriesFrom } from "./common.tsx";
+
+export function HostPage({ id }: { id: string }) {
+  const scope = useScope();
+  const session = useSession();
+  const now = useNow();
+  const toast = useToast();
+  const host = useQuery(`host:${id}`, (s) => api.host(id, s), { interval: 5000 });
+  const history = useQuery(`host-history:${id}:${scope.range}`, (s) => api.hostHistory(id, scope.range, s), { interval: 30_000 });
+  // By host id: tenant-independent, and an operator sees every tenant's runs there.
+  const recent = useQuery(`host-runs:${id}:${scope.tenant}`, (s) => api.runs(scope.apiTenant, { host: id, limit: 50 }, s), { interval: 15_000 });
+  const [drainOpen, setDrainOpen] = useState(false);
+  const [draining, setDraining] = useState(false);
+
+  const h = host.data;
+  const samples = history.data?.samples;
+  const cpu = useMemo(() => seriesFrom(samples, [(s) => s.cpuCores, () => h?.capacity.cpus ?? null, (s) => s.allocCpus]), [samples, h?.capacity.cpus]);
+  const mem = useMemo(() => seriesFrom(samples, [(s) => s.memoryBytes, () => h?.capacity.memory ?? null, (s) => s.allocMemory]), [samples, h?.capacity.memory]);
+  const disk = useMemo(() => seriesFrom(samples, [(s) => s.diskBytes, () => h?.capacity.disk ?? null]), [samples, h?.capacity.disk]);
+  const placements = useMemo(() => seriesFrom(samples, [(s) => s.placements, () => h?.capacity.runs ?? null]), [samples, h?.capacity.runs]);
+
+  const drain = async () => {
+    setDraining(true);
+    try {
+      await api.drainHost(id);
+      toast({ title: `Draining ${h?.name ?? id}`, description: h?.liveRuns ? `${h.liveRuns} live runs will be moved` : undefined, tone: "warn" });
+      setDrainOpen(false);
+      await host.refetch();
+    } catch (e) {
+      toast({ title: "Drain failed", description: errorText(e), tone: "danger" });
+    } finally {
+      setDraining(false);
+    }
+  };
+
+  if (host.error && !h) {
+    return (
+      <div className="page">
+        <ErrorBlock error={host.error} onRetry={host.refetch} />
+      </div>
+    );
+  }
+
+  if (!h) return <PageSkeleton />;
+
+  const canDrain = h.state !== "terminated" && !h.draining;
+  return (
+    <div className="page">
+      <div className="page-head">
+        <div className="stack" style={{ gap: 4 }}>
+          <div className="row">
+            <h1 className="page-title mono">{h.name}</h1>
+            <StatePill kind="host" state={h.state} />
+            {h.draining && h.state !== "draining" && <Badge tone="warn">draining</Badge>}
+            {h.platform && <Badge outline>platform</Badge>}
+          </div>
+          <div className="row page-desc">
+            <IdChip value={h.id} prefix="host" />
+            {h.tenant && <span>tenant {h.tenant}</span>}
+            <span>pool {h.pool}</span>
+            <Link to={hostRunsPath(h.id)}>
+              {h.liveRuns} live run{h.liveRuns === 1 ? "" : "s"} · all runs on this host
+            </Link>
+          </div>
+          {h.stateReason && <div className="state-reason-lg">{h.stateReason}</div>}
+        </div>
+        <div className="row">
+          <Button variant="danger" disabled={!canDrain} onClick={() => setDrainOpen(true)}>
+            Drain
+          </Button>
+        </div>
+      </div>
+      <ErrorStrip error={host.error} />
+
+      <div className="grid grid-2">
+        <Card title="Details">
+          <KeyValue
+            columns={2}
+            items={[
+              { key: "Provider id", value: h.providerId ? <IdChip value={h.providerId} /> : DASH },
+              { key: "Heartbeat", value: h.lastHeartbeat ? `${formatRelative(h.lastHeartbeat, now)} (${formatTimestamp(h.lastHeartbeat)})` : DASH },
+              { key: "Capacity", value: `${formatCores(h.capacity.cpus)} · ${formatBytes(h.capacity.memory)} · ${formatBytes(h.capacity.disk)} disk · ${h.capacity.runs} runs`, mono: true },
+              { key: "Allocated", value: `${formatCores(h.allocated.cpus ?? 0)} · ${formatBytes(h.allocated.memory ?? 0)} · ${formatBytes(h.allocated.disk ?? 0)} disk · ${h.liveRuns} live`, mono: true },
+              { key: "Labels", value: Object.keys(h.labels).length ? <span className="mono">{labelsText(h.labels)}</span> : DASH },
+              { key: "Versions", value: Object.keys(h.versions).length ? <span className="mono">{labelsText(stringMap(h.versions))}</span> : DASH },
+            ]}
+          />
+        </Card>
+        <Card title="Lifecycle">
+          <Timeline stages={hostStages(h)} now={now} />
+        </Card>
+      </div>
+
+      <Card flush title="Live placements" subtitle={`${h.placements?.length ?? 0} on this host`}>
+        <PlacementsTable placements={h.placements ?? []} loading={host.loading} operator={session.role === "operator"} now={now} />
+      </Card>
+
+      <ErrorStrip error={history.error} />
+      <div className="grid grid-2">
+        <Card title="CPU" subtitle="used cores vs capacity, and allocated">
+          <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Used", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="cores" height={180} />
+        </Card>
+        <Card title="Memory" subtitle="used vs capacity, and allocated">
+          <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Used", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="bytes" height={180} />
+        </Card>
+        <Card title="Disk" subtitle="used vs capacity">
+          <TimeSeriesChart x={disk.x} ys={disk.ys} series={[{ label: "Used", color: 4, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" height={180} />
+        </Card>
+        <Card title="Placements" subtitle="live placements vs run capacity">
+          <TimeSeriesChart x={placements.x} ys={placements.ys} series={[{ label: "Placements", color: 3, step: true, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="count" height={180} />
+        </Card>
+      </div>
+
+      <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
+        <ErrorStrip error={recent.error} />
+        <RecentRuns runs={recent.data ?? []} loading={recent.loading} now={now} tenant={session.role === "operator" && scope.apiTenant === undefined} />
+      </Card>
+
+      <ConfirmDialog
+        open={drainOpen}
+        title={`Drain ${h.name}?`}
+        description={`No new placements will be assigned. ${h.liveRuns ? `Its ${h.liveRuns} live run${h.liveRuns === 1 ? "" : "s"} are stopped, snapshotted and resumed elsewhere.` : "It has no live runs."} A provisioned host is terminated once empty.`}
+        confirmLabel="Drain host"
+        tone="danger"
+        confirmText={h.name}
+        loading={draining}
+        onConfirm={() => void drain()}
+        onCancel={() => setDrainOpen(false)}
+      />
+    </div>
+  );
+}
+
+const HOST_TIMES: { key: HostTimeKey; label: string; tone: TimelineStage["tone"] }[] = [
+  { key: "created", label: "Created", tone: "neutral" },
+  { key: "provisionRequested", label: "Provision requested", tone: "neutral" },
+  { key: "provisioned", label: "Provisioned", tone: "accent" },
+  { key: "registered", label: "Registered", tone: "accent" },
+  { key: "firstPlacement", label: "First placement", tone: "teal" },
+  { key: "lastPlacementEnded", label: "Last placement ended", tone: "teal" },
+  { key: "drainRequested", label: "Drain requested", tone: "amber" },
+  { key: "terminateRequested", label: "Terminate requested", tone: "amber" },
+  { key: "lost", label: "Lost", tone: "red" },
+  { key: "terminated", label: "Terminated", tone: "neutral" },
+];
+
+/** Host times are instants; each stage runs from its stamp to the next one that happened. */
+function hostStages(h: Host): TimelineStage[] {
+  const stamped = HOST_TIMES.map((t) => ({ ...t, at: h.times[t.key] ? Date.parse(h.times[t.key]!) : null })).filter((t) => t.at != null && Number.isFinite(t.at));
+  stamped.sort((a, b) => a.at! - b.at!);
+  const ended = h.state === "terminated" || h.state === "lost";
+  return stamped.map((t, i) => {
+    const next = stamped[i + 1];
+    return { key: t.key, label: t.label, start: t.at, end: next ? next.at : ended ? t.at! + 1000 : null, tone: t.tone };
+  });
+}
+
+function stringMap(m: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(m)) out[k] = typeof v === "string" ? v : JSON.stringify(v);
+  return out;
+}
+
+function PlacementsTable({ placements, loading, operator, now }: { placements: HostPlacement[]; loading: boolean; operator: boolean; now: number }) {
+  const cols = useMemo<Column<HostPlacement>[]>(() => {
+    const c: Column<HostPlacement>[] = [{ key: "run", header: "Run", cell: (p) => <RunLink id={p.runId} />, mono: true, width: 200 }];
+    c.push({ key: "name", header: "Name", cell: (p) => p.runName || DASH, nowrap: true });
+    if (operator) c.push({ key: "tenant", header: "Tenant", cell: (p) => p.tenant, width: 110 });
+    c.push(
+      { key: "epoch", header: "Epoch", cell: (p) => p.epoch, align: "right", mono: true, width: 64 },
+      { key: "state", header: "Placement", cell: (p) => <Badge mono outline>{p.state}</Badge>, width: 110 },
+      { key: "res", header: "Resources", cell: (p) => `${formatCores(p.resources.cpus ?? 0)} · ${formatBytes(p.resources.memory ?? 0)}`, mono: true, width: 200 },
+      { key: "since", header: "Since", cell: (p) => <Tooltip content={formatTimestamp(p.since)}><span>{formatRelative(p.since, now)}</span></Tooltip>, align: "right", width: 110 },
+    );
+    return c;
+  }, [operator, now]);
+  return <Table columns={cols} rows={placements} rowKey={(p) => `${p.runId}:${p.epoch}`} loading={loading} onRowClick={(p) => go(runPath(p.runId))} empty="No live placements." dense />;
+}
+
+function RecentRuns({ runs, loading, now, tenant }: { runs: Run[]; loading: boolean; now: number; tenant: boolean }) {
+  const cols = useMemo<Column<Run>[]>(() => runColumns({ now, tenant, host: false, adapter: false }), [now, tenant]);
+  return <Table columns={cols} rows={runs} rowKey={(r) => r.id} loading={loading} onRowClick={(r) => go(runPath(r.id))} empty="No runs have been placed here." dense />;
+}

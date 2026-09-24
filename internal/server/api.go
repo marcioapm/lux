@@ -38,7 +38,7 @@ func (s *Server) routes(api huma.API) {
 		DefaultStatus: http.StatusCreated,
 		Responses:     map[string]*huma.Response{"200": {Description: "An earlier submission with the same Idempotency-Key.", Content: jsonContent(schemaRef[Run](api))}},
 		Errors:        []int{http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusTooManyRequests},
-	}, "run", s.submitRun)
+	}, "run", forTenant(s.submitRun))
 	register(s, api, huma.Operation{
 		OperationID: "listRuns", Method: http.MethodGet, Path: "/v1/runs", Tags: []string{"runs"},
 		Summary: "List Runs", Description: "Newest first.",
@@ -91,6 +91,19 @@ func (s *Server) routes(api huma.API) {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound},
 	}, "run", s.cancelRun)
+	register(s, api, huma.Operation{
+		OperationID: "migrateRun", Method: http.MethodPost, Path: "/v1/runs/{id}/migrate", Tags: []string{"runs", "operators"},
+		Summary: "Move a running Run to another host",
+		Description: "It is stopped (its state snapshotted), then resumed at once on `to`, or on any host but the one it was on. " +
+			"An agent resumes its session; `input`, if given, is delivered once it runs again.",
+		DefaultStatus: http.StatusAccepted,
+		Errors:        []int{http.StatusNotFound, http.StatusConflict},
+	}, "operator", s.migrateRun)
+	register(s, api, huma.Operation{
+		OperationID: "runHistory", Method: http.MethodGet, Path: "/v1/runs/{id}/history", Tags: []string{"runs", "history"},
+		Summary: "A Run's resource use over time", Description: "Across its placements: each sample carries its epoch.",
+		Errors: []int{http.StatusNotFound},
+	}, "read", s.runHistory)
 	register(s, api, huma.Operation{
 		OperationID: "pushRun", Method: http.MethodPost, Path: "/v1/runs/{id}/push", Tags: []string{"runs"},
 		Summary: "Push a running Run's repositories",
@@ -149,30 +162,68 @@ func (s *Server) routes(api huma.API) {
 	// Hosts and pools.
 	register(s, api, huma.Operation{
 		OperationID: "listHosts", Method: http.MethodGet, Path: "/v1/hosts", Tags: []string{"hosts"},
-		Summary: "List hosts", Description: "The tenant's own hosts, and platform hosts in pools it can use.",
+		Summary: "List hosts", Description: "The tenant's own hosts, and platform hosts in pools it can use. Operators: every host.",
 	}, "read", s.listHosts)
+	register(s, api, huma.Operation{
+		OperationID: "getHost", Method: http.MethodGet, Path: "/v1/hosts/{id}", Tags: []string{"hosts"},
+		Summary: "Get a host", Description: "With its live placements.",
+		Errors: []int{http.StatusNotFound, http.StatusConflict},
+	}, "read", s.getHost)
+	register(s, api, huma.Operation{
+		OperationID: "hostHistory", Method: http.MethodGet, Path: "/v1/hosts/{id}/history", Tags: []string{"history"},
+		Summary: "A host's resource use over time",
+		Description: "CPU cores and memory in use, disk used, and its live placements and what they asked for. " +
+			"A tenant sees its own hosts' history only.",
+		Errors: []int{http.StatusNotFound, http.StatusConflict},
+	}, "read", s.hostHistory)
 	register(s, api, huma.Operation{
 		OperationID: "drainHost", Method: http.MethodPost, Path: "/v1/hosts/{id}/drain", Tags: []string{"hosts"},
 		Summary:       "Drain a host",
-		Description:   "No new placements; its live Runs are stopped and resumed elsewhere. Only the tenant's own hosts.",
+		Description:   "No new placements; its live Runs are stopped and resumed elsewhere. Only the tenant's own hosts; operators, any host.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound},
 	}, "admin", s.drainHost)
 	register(s, api, huma.Operation{
 		OperationID: "listPools", Method: http.MethodGet, Path: "/v1/pools", Tags: []string{"pools"},
-		Summary: "List pools", Description: "The tenant's pools and the platform pools it can use.",
+		Summary: "List pools", Description: "The tenant's pools and the platform pools it can use. Operators: every pool.",
 	}, "read", s.listPools)
+
+	// Operators and the system.
+	register(s, api, huma.Operation{
+		OperationID: "listTenants", Method: http.MethodGet, Path: "/v1/tenants", Tags: []string{"operators"},
+		Summary: "List tenants", Description: "Their quotas and what they use.",
+	}, "operator", s.listTenants)
+	register(s, api, huma.Operation{
+		OperationID: "status", Method: http.MethodGet, Path: "/v1/status", Tags: []string{"history"},
+		Summary: "The state of the system now",
+		Description: "Runs by state, the queue, time to start, hosts by state, and capacity against what live placements hold: " +
+			"the caller's (a tenant's Runs and the hosts it may use), or the whole system's for an operator.",
+	}, "read", s.status)
+	register(s, api, huma.Operation{
+		OperationID: "history", Method: http.MethodGet, Path: "/v1/history", Tags: []string{"history"},
+		Summary: "The state of the system over time", Description: "Samples of what GET /v1/status reports.",
+	}, "read", s.systemHistory)
+	register(s, api, huma.Operation{
+		OperationID: "eventFeed", Method: http.MethodGet, Path: "/v1/events", Tags: []string{"runs"},
+		Summary: "Every Run's events, as they happen",
+		Description: "Server-sent events: one `lux` event per Run event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). " +
+			"From now, from `after`, or the `last` N; with `follow=false` the stream ends after what is there now.",
+		Responses: map[string]*huma.Response{"200": {Description: "OK", Content: map[string]*huma.MediaType{"text/event-stream": {Schema: sseEvents(
+			sseEvent("lux", "A Run's event.", schemaRef[FeedEvent](api)),
+			sseEvent("error", "The stream failed.", schemaRef[outputError](api)),
+		)}}}},
+	}, "read", streamed(s, s.serveFeed))
 	register(s, api, huma.Operation{
 		OperationID: "putPool", Method: http.MethodPost, Path: "/v1/pools", Tags: []string{"pools"},
 		Summary: "Create or update a pool",
 		Errors:  []int{http.StatusUnprocessableEntity},
-	}, "admin", s.putPool)
+	}, "admin", forTenant(s.putPool))
 	register(s, api, huma.Operation{
 		OperationID: "deletePool", Method: http.MethodDelete, Path: "/v1/pools/{name}", Tags: []string{"pools"},
 		Summary:     "Remove a pool",
 		Description: "Its provisioned hosts are drained, then terminated; its Runs wait for a pool of that name again.",
 		Errors:      []int{http.StatusNotFound},
-	}, "admin", s.deletePool)
+	}, "admin", forTenant(s.deletePool))
 }
 
 type statusBody struct {
@@ -213,6 +264,7 @@ func jsonContent(schema *huma.Schema) map[string]*huma.MediaType {
 // Run is the API representation of a Run.
 type Run struct {
 	ID          string            `json:"id"`
+	Tenant      string            `json:"tenant" doc:"The owning tenant's name."`
 	Name        string            `json:"name,omitempty"`
 	Labels      map[string]string `json:"labels"`
 	State       string            `json:"state"`
@@ -222,7 +274,8 @@ type Run struct {
 	Epoch       int               `json:"epoch"`
 	SessionID   string            `json:"sessionId,omitempty"`
 	SnapshotID  *string           `json:"snapshotId,omitempty"`
-	Host        string            `json:"host,omitempty"`
+	Host        string            `json:"host,omitempty" doc:"The name of the host of its current placement."`
+	HostID      string            `json:"hostId,omitempty" doc:"That host's id."`
 	Spec        spec.RunSpec      `json:"spec"`
 	// Image is how a built image was resolved on its first build.
 	Image       *ImageResolution `json:"image,omitempty"`
@@ -233,6 +286,24 @@ type Run struct {
 	FinishedAt  *time.Time       `json:"finishedAt,omitempty"`
 	Placements  []Placement      `json:"placements,omitempty"`
 	Usage       *RunUsage        `json:"usage,omitempty"`
+	// Resume: on GET /v1/runs/{id} of a stopped, lost or failed Run, what
+	// a resume would take.
+	Resume *Resumability `json:"resume,omitempty"`
+}
+
+// Resumability says whether a Run can be resumed now, and from what.
+type Resumability struct {
+	// Snapshot is what it resumes from (none: from scratch), and
+	// OnHosts the hosts holding a local copy (a resume there moves nothing).
+	Snapshot *string  `json:"snapshot,omitempty"`
+	Uploaded bool     `json:"uploaded"`
+	OnHosts  []string `json:"onHosts,omitempty"`
+	// SecretsHeld: luxd still holds the values of its secrets, so an
+	// operator can resume it without them. False when it has none to hold.
+	Secrets     []string `json:"secrets,omitempty"`
+	SecretsHeld bool     `json:"secretsHeld"`
+	// Blockers: why a resume would be refused or wait, in words.
+	Blockers []string `json:"blockers,omitempty"`
 }
 
 type ImageResolution = proto.ImageResolution
@@ -277,14 +348,17 @@ type RunUsage struct {
 	QueueSeconds *float64 `json:"queueSeconds,omitempty"`
 }
 
-const runColumns = `r.id, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
+// runColumns: Tenant is the owning tenant's name; Host and HostID are the
+// current placement's host.
+const runColumns = `r.id, (SELECT t.name FROM tenants t WHERE t.id = r.tenant_id), r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
-	coalesce((SELECT h.name FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = r.id AND p.epoch = r.current_epoch), '')`
+	coalesce((SELECT h.name FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = r.id AND p.epoch = r.current_epoch), ''),
+	coalesce((SELECT p.host_id FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch), '')`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
-	err := row.Scan(&r.ID, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
-		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host)
+	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
+		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID)
 	return &r, err
 }
 
@@ -419,9 +493,13 @@ func nonNilMap(m map[string]string) map[string]string {
 }
 
 type listRunsInput struct {
-	State string   `query:"state" doc:"Only Runs in these states (comma-separated)." example:"running,stopped"`
-	Label []string `query:"label,explode" doc:"Only Runs with this label (key=value); repeat to require several."`
-	Limit string   `query:"limit" doc:"At most this many Runs, newest first: 1 to 1000, default 100." example:"100"`
+	TenantQuery
+	State     string   `query:"state" doc:"Only Runs in these states (comma-separated)." example:"running,stopped"`
+	Resumable bool     `query:"resumable" doc:"Only Runs resume accepts: stopped, lost or failed."`
+	Host      string   `query:"host" doc:"Only Runs with a placement (any epoch) on this host, by id or name."`
+	Label     []string `query:"label,explode" doc:"Only Runs with this label (key=value); repeat to require several."`
+	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run."`
+	Limit     string   `query:"limit" doc:"At most this many Runs, newest first: 1 to 1000, default 100." example:"100"`
 }
 
 // Resolve reads every label as given: huma drops them all when the first
@@ -433,30 +511,63 @@ func (in *listRunsInput) Resolve(ctx huma.Context) []error {
 }
 
 type listRunsOutput struct {
-	Body struct {
-		Runs []*Run `json:"runs"`
-	} `nameHint:"RunList"`
+	Body listRunsBody `nameHint:"RunList"`
 }
 
+type listRunsBody struct {
+	Runs []*Run `json:"runs"`
+}
+
+// listRuns lists the Runs the caller sees (an operator: every tenant's,
+// unless narrowed with ?tenant=), newest first.
 func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutput, error) {
 	p := principal(ctx)
 	where := []string{"true"}
 	args := []any{}
+	arg := func(v any) string {
+		args = append(args, v)
+		return "$" + strconv.Itoa(len(args))
+	}
 	if st := in.State; st != "" {
-		args = append(args, strings.Split(st, ","))
-		where = append(where, "r.state = ANY($"+strconv.Itoa(len(args))+")")
+		where = append(where, "r.state = ANY("+arg(strings.Split(st, ","))+")")
+	}
+	if in.Resumable {
+		where = append(where, "r.state IN ('stopped', 'lost', 'failed')")
+	}
+	if in.Host != "" {
+		// Resolved where every visible host is, platform ones included (a
+		// tenant scope does not see those rows).
+		var hostID string
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			var err error
+			hostID, err = s.resolveHost(ctx, tx, p, in.Host, true)
+			return err
+		})
+		if errors.Is(err, errNotFound) {
+			return &listRunsOutput{Body: listRunsBody{Runs: []*Run{}}}, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, "EXISTS (SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.host_id = "+arg(hostID)+")")
 	}
 	for _, l := range in.Label {
 		k, v, _ := strings.Cut(l, "=")
-		args = append(args, map[string]string{k: v})
-		where = append(where, "r.labels @> $"+strconv.Itoa(len(args)))
+		where = append(where, "r.labels @> "+arg(map[string]string{k: v}))
+	}
+	if in.Before != "" {
+		t, err := time.Parse(time.RFC3339Nano, in.Before)
+		if err != nil {
+			return nil, errf(http.StatusBadRequest, "bad_request", "before: %v", err)
+		}
+		where = append(where, "r.created_at < "+arg(t))
 	}
 	limit := 100
 	if n, err := strconv.Atoi(in.Limit); err == nil && n > 0 && n <= 1000 {
 		limit = n
 	}
 	runs := []*Run{}
-	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM runs r WHERE `+strings.Join(where, " AND ")+
 			` ORDER BY r.created_at DESC LIMIT `+strconv.Itoa(limit), args...)
 		if err != nil {
@@ -552,7 +663,54 @@ func (s *Server) getRun(ctx context.Context, in *RunPath) (*runOutput, error) {
 	if err != nil {
 		return nil, err
 	}
+	if run.State == StateStopped || run.State == StateLost || run.State == StateFailed {
+		if run.Resume, err = s.resumability(ctx, principal(ctx).TenantID, run); err != nil {
+			return nil, err
+		}
+	}
 	return &runOutput{run}, nil
+}
+
+// resumability is what resuming a Run would take, as far as luxd can tell
+// without trying: its snapshot, secrets and quota. (Whether a host fits is
+// the scheduler's to find out; a resumed Run says why it waits.)
+func (s *Server) resumability(ctx context.Context, tenantID string, run *Run) (*Resumability, error) {
+	rs := &Resumability{Snapshot: run.SnapshotID}
+	for _, ref := range run.Secrets {
+		rs.Secrets = append(rs.Secrets, ref.Name)
+	}
+	if len(rs.Secrets) > 0 {
+		_, rs.SecretsHeld = s.secrets.get(run.ID)
+	}
+	if run.SnapshotID != nil {
+		// The host holding a copy may be a platform host, which a tenant
+		// scope does not see: read it in the system's, for this Run only.
+		var available bool
+		var host *string
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT s.available, s.uploaded, CASE WHEN s.host_copy THEN h.name END
+				FROM snapshots s LEFT JOIN hosts h ON h.id = s.host_id WHERE s.id = $1 AND s.run_id = $2`, *run.SnapshotID, run.ID).
+				Scan(&available, &rs.Uploaded, &host)
+		})
+		if err != nil {
+			return nil, err
+		}
+		if host != nil {
+			rs.OnHosts = append(rs.OnHosts, *host)
+		}
+		if !available {
+			rs.Blockers = append(rs.Blockers, "its snapshot is no longer available: resume --from-snapshot an older one")
+		} else if !rs.Uploaded && host == nil {
+			rs.Blockers = append(rs.Blockers, "its snapshot was never uploaded and no host holds it")
+		}
+	}
+	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
+		if err := checkRunQuota(ctx, tx, tenantID); err != nil {
+			rs.Blockers = append(rs.Blockers, err.Error())
+		}
+		return nil
+	})
+	return rs, err
 }
 
 type Event struct {
@@ -778,6 +936,7 @@ type resumeRequest struct {
 	Input   *resumeInput  `json:"input,omitempty" doc:"A message for the workload once it is back."`
 	// FromSnapshot resumes from an older snapshot (e.g. after lost).
 	FromSnapshot string `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost)."`
+	To           string `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
 }
 
 type resumeInput struct {
@@ -807,7 +966,9 @@ func requireSecrets(refs []spec.SecretRef, values map[string]string) error {
 }
 
 // resumeRun puts a stopped, lost or failed Run back in the queue. Its
-// secrets must be supplied again: luxd never kept them.
+// secrets must be supplied again: luxd never kept them. An operator may
+// resume without them while this luxd still holds them in memory (it has
+// not restarted since they were last supplied), and may choose the host.
 func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRun, error) {
 	p := principal(ctx)
 	id := in.ID
@@ -819,8 +980,18 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 	for _, sec := range req.Secrets {
 		values[sec.Name] = sec.Value
 	}
+	cached := false
+	if p.Operator && len(req.Secrets) == 0 {
+		if v, ok := s.secrets.get(id); ok {
+			values, cached = v, true
+		}
+	}
+	placeOn, err := s.chooseHost(ctx, p, req.To)
+	if err != nil {
+		return nil, err
+	}
 	resumed := false
-	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		var state string
 		var refs []spec.SecretRef
 		if err := tx.QueryRow(ctx, `SELECT state, secrets FROM runs WHERE id = $1 FOR UPDATE`, id).Scan(&state, &refs); err != nil {
@@ -836,6 +1007,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 			return errf(http.StatusConflict, "not_resumable", "run is %s: stop it first", state)
 		}
 		if err := requireSecrets(refs, values); err != nil {
+			if p.Operator {
+				err.(*HTTPError).Message += " (luxd no longer holds them: only the tenant can resume it)"
+			}
 			return err
 		}
 		// Rotation is allowed: record the new fingerprints.
@@ -843,7 +1017,10 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 		for _, ref := range refs {
 			newRefs = append(newRefs, spec.SecretRef{Name: ref.Name, Fingerprint: spec.Fingerprint(ref.Name, values[ref.Name])})
 		}
-		if _, err := tx.Exec(ctx, `UPDATE runs SET secrets = $2, cancel_requested = false WHERE id = $1`, id, newRefs); err != nil {
+		// place_on is this resume's alone: a migration's that never took
+		// effect (its host died first) does not steer it.
+		if _, err := tx.Exec(ctx, `UPDATE runs SET secrets = $2, cancel_requested = false, place_on = $3, avoid_host = NULL WHERE id = $1`,
+			id, newRefs, placeOn); err != nil {
 			return err
 		}
 		if req.FromSnapshot != "" {
@@ -869,10 +1046,14 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 		// Cached before commit, so the scheduler never sees the Run
 		// resuming without its values.
 		s.secrets.put(id, values)
-		return s.requestResume(ctx, tx, p.TenantID, id, in, "resume requested")
+		why := "resume requested"
+		if p.Operator {
+			why = "resumed by an operator"
+		}
+		return s.requestResume(ctx, tx, p.TenantID, id, in, why)
 	})
 	if err != nil {
-		if resumed {
+		if resumed && !cached {
 			s.secrets.drop(id)
 		}
 		return nil, err
@@ -1016,24 +1197,86 @@ func (s *Server) listSnapshots(ctx context.Context, in *RunPath) (*listSnapshots
 }
 
 type Host struct {
-	ID            string                `json:"id"`
-	Name          string                `json:"name"`
-	Pool          string                `json:"pool"`
-	State         string                `json:"state"`
-	StateReason   string                `json:"stateReason,omitempty"`
-	Draining      bool                  `json:"draining"`
-	Labels        map[string]string     `json:"labels"`
-	Capacity      proto.Capacity        `json:"capacity"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Tenant      string            `json:"tenant,omitempty" doc:"The owning tenant's name; empty for a platform host."`
+	Pool        string            `json:"pool"`
+	State       string            `json:"state"`
+	StateReason string            `json:"stateReason,omitempty"`
+	Draining    bool              `json:"draining"`
+	Labels      map[string]string `json:"labels"`
+	Capacity    proto.Capacity    `json:"capacity"`
+	// Allocated and LiveRuns: what its live placements asked for. A tenant
+	// sees only its own placements' share of a platform host.
+	Allocated     spec.Resources        `json:"allocated"`
 	Versions      map[string]any        `json:"versions"`
 	Platform      bool                  `json:"platform"`
 	LiveRuns      int                   `json:"liveRuns"`
 	ProviderID    *string               `json:"providerId,omitempty"`
 	LastHeartbeat *time.Time            `json:"lastHeartbeat,omitempty"`
 	Times         map[string]*time.Time `json:"times"`
+	// Placements: on GET /v1/hosts/{id} only, its live placements (the
+	// caller's; every tenant's for an operator).
+	Placements []HostPlacement `json:"placements,omitempty"`
+}
+
+// HostPlacement is a live placement, seen from its host.
+type HostPlacement struct {
+	RunID     string         `json:"runId"`
+	RunName   string         `json:"runName,omitempty"`
+	Tenant    string         `json:"tenant"`
+	Epoch     int            `json:"epoch"`
+	State     string         `json:"state"`
+	Resources spec.Resources `json:"resources"`
+	Since     time.Time      `json:"since"`
+}
+
+// TenantQuery narrows an operator's request to one tenant (requireKey
+// reads it; it is here to be documented). Tenant keys ignore it.
+type TenantQuery struct {
+	Tenant string `query:"tenant" doc:"Operator keys: only this tenant (id or name). Tenant keys ignore it."`
+}
+
+// visibleHosts, for SQL on hosts h with the principal's tenant id as $1:
+// tenants see their own hosts and platform hosts; an operator sees every
+// host, or, narrowed to a tenant, what that tenant sees.
+const visibleHosts = "($1 = '' OR h.tenant_id = $1 OR h.tenant_id IS NULL)"
+
+// visiblePlacements, for SQL on placements pl with $1 as above: a tenant's
+// own, or every tenant's for an operator.
+const visiblePlacements = "($1 = '' OR pl.tenant_id = $1)"
+
+const hostColumns = `h.id, h.name, coalesce((SELECT t.name FROM tenants t WHERE t.id = h.tenant_id), ''), h.pool, h.state, h.state_reason,
+	h.draining, h.labels, h.capacity, h.versions, h.tenant_id IS NULL,
+	(SELECT count(*) FROM placements pl WHERE pl.host_id = h.id AND pl.state IN ` + livePlacementStates + ` AND ` + visiblePlacements + `),
+	(SELECT jsonb_build_object('cpus', coalesce(sum((pl.resources->>'cpus')::float8), 0), 'memory', coalesce(sum((pl.resources->>'memory')::int8), 0),
+		'disk', coalesce(sum((pl.resources->>'disk')::int8), 0))
+		FROM placements pl WHERE pl.host_id = h.id AND pl.state IN ` + livePlacementStates + ` AND ` + visiblePlacements + `),
+	h.provider_id, h.last_heartbeat,
+	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
+	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at`
+
+func scanHost(row pgx.Row) (Host, error) {
+	var h Host
+	var t [10]*time.Time
+	if err := row.Scan(&h.ID, &h.Name, &h.Tenant, &h.Pool, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
+		&h.Platform, &h.LiveRuns, &h.Allocated, &h.ProviderID, &h.LastHeartbeat,
+		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9]); err != nil {
+		return h, err
+	}
+	h.Times = map[string]*time.Time{
+		"provisionRequested": t[0], "provisioned": t[1], "registered": t[2], "firstPlacement": t[3],
+		"lastPlacementEnded": t[4], "drainRequested": t[5], "terminateRequested": t[6], "terminated": t[7],
+		"lost": t[8], "created": t[9],
+	}
+	return h, nil
 }
 
 type listHostsInput struct {
-	All string `query:"all" doc:"true to include terminated hosts." example:"true"`
+	TenantQuery
+	All   string `query:"all" doc:"true to include terminated hosts." example:"true"`
+	Pool  string `query:"pool" doc:"Only this pool's hosts."`
+	State string `query:"state" doc:"Only hosts in this state: provisioning, ready, draining, lost or terminated."`
 }
 
 type listHostsOutput struct {
@@ -1042,38 +1285,20 @@ type listHostsOutput struct {
 	} `nameHint:"HostList"`
 }
 
+// listHosts lists hosts by name: a tenant's own and the platform's, or
+// every host for an operator.
 func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsOutput, error) {
 	p := principal(ctx)
 	hosts := []Host{}
-	// Tenants see their own hosts, and platform hosts in pools they can use.
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT h.id, h.name, h.pool, h.state, h.state_reason, h.draining, h.labels, h.capacity, h.versions,
-				h.tenant_id IS NULL, (SELECT count(*) FROM placements pl WHERE pl.host_id = h.id AND pl.state IN `+livePlacementStates+`),
-				h.provider_id, h.last_heartbeat,
-				h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
-				h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at
-			FROM hosts h WHERE (h.tenant_id = $1 OR h.tenant_id IS NULL) AND ($2 OR h.state <> 'terminated')
-			ORDER BY h.name`, p.TenantID, in.All == "true")
+		rows, err := tx.Query(ctx, `SELECT `+hostColumns+` FROM hosts h
+			WHERE `+visibleHosts+` AND ($2 OR h.state <> 'terminated') AND ($3 = '' OR h.pool = $3) AND ($4 = '' OR h.state = $4)
+			ORDER BY h.name, h.id`, p.TenantID, in.All == "true" || in.State == "terminated", in.Pool, in.State)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var h Host
-			var t [10]*time.Time
-			if err := rows.Scan(&h.ID, &h.Name, &h.Pool, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
-				&h.Platform, &h.LiveRuns, &h.ProviderID, &h.LastHeartbeat,
-				&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9]); err != nil {
-				return err
-			}
-			h.Times = map[string]*time.Time{
-				"provisionRequested": t[0], "provisioned": t[1], "registered": t[2], "firstPlacement": t[3],
-				"lastPlacementEnded": t[4], "drainRequested": t[5], "terminateRequested": t[6], "terminated": t[7],
-				"lost": t[8], "created": t[9],
-			}
-			hosts = append(hosts, h)
-		}
-		return rows.Err()
+		hosts, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Host, error) { return scanHost(row) })
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -1083,11 +1308,77 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 	return out, nil
 }
 
-// drainHost stops new placements on one of the tenant's hosts and moves its
-// live Runs elsewhere (stop → auto-resume). The host is named by id or name,
-// always within the caller's tenant.
+// HostPath names a host, by id or name.
+type HostPath struct {
+	ID string `path:"id" doc:"The host's id or name (a name of a host that is not terminated)."`
+}
+
+type getHostInput struct {
+	HostPath
+	TenantQuery
+}
+
+type hostOutput struct {
+	Body Host
+}
+
+// getHost is one host with its live placements.
+func (s *Server) getHost(ctx context.Context, in *getHostInput) (*hostOutput, error) {
+	p := principal(ctx)
+	var h Host
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		id, err := s.resolveHost(ctx, tx, p, in.ID, true)
+		if err != nil {
+			return err
+		}
+		if h, err = scanHost(tx.QueryRow(ctx, `SELECT `+hostColumns+` FROM hosts h WHERE h.id = $2`, p.TenantID, id)); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT r.id, r.name, t.name, pl.epoch, pl.state, pl.resources, pl.created_at
+			FROM placements pl JOIN runs r ON r.id = pl.run_id JOIN tenants t ON t.id = pl.tenant_id
+			WHERE pl.host_id = $2 AND pl.state IN `+livePlacementStates+` AND `+visiblePlacements+`
+			ORDER BY pl.created_at`, p.TenantID, id)
+		if err != nil {
+			return err
+		}
+		h.Placements, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (HostPlacement, error) {
+			var hp HostPlacement
+			err := row.Scan(&hp.RunID, &hp.RunName, &hp.Tenant, &hp.Epoch, &hp.State, &hp.Resources, &hp.Since)
+			return hp, err
+		})
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &hostOutput{h}, nil
+}
+
+// resolveHost finds a host the principal sees, by id or by name. A name
+// names a host that is not terminated (names are reused); with
+// terminated, a terminated host is found by id. A name that two visible
+// hosts share (an operator's view spans tenants) is ambiguous.
+func (s *Server) resolveHost(ctx context.Context, tx pgx.Tx, p Principal, ref string, terminated bool) (string, error) {
+	rows, err := tx.Query(ctx, `SELECT h.id FROM hosts h WHERE `+visibleHosts+`
+		AND ((h.id = $2 AND ($3 OR h.state <> 'terminated')) OR (h.name = $2 AND h.state <> 'terminated')) LIMIT 2`, p.TenantID, ref, terminated)
+	if err != nil {
+		return "", err
+	}
+	found, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	switch {
+	case err != nil:
+		return "", err
+	case len(found) == 0:
+		return "", errNotFound
+	case len(found) > 1:
+		return "", errf(http.StatusConflict, "ambiguous", "more than one host is named %s: use its id, or ?tenant=", ref)
+	}
+	return found[0], nil
+}
+
 type drainHostInput struct {
-	ID string `path:"id" doc:"The host's id or name."`
+	HostPath
+	TenantQuery
 }
 
 type drainHostOutput struct {
@@ -1098,14 +1389,18 @@ type drainHostOutput struct {
 	} `nameHint:"HostDrain"`
 }
 
+// drainHost stops new placements on a host and moves its live Runs
+// elsewhere (stop → auto-resume). A tenant drains only its own hosts; an
+// operator, any host.
 func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostOutput, error) {
 	p := principal(ctx)
-	ref := in.ID
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		var err error
-		hosts, err = s.drainHosts(ctx, tx, "drain requested", "drain",
-			"(id = $1 OR name = $1) AND tenant_id = $2", ref, p.TenantID)
+		id, err := s.resolveHost(ctx, tx, p, in.ID, false)
+		if err != nil {
+			return err
+		}
+		hosts, err = s.drainHosts(ctx, tx, "drain requested", "drain", "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
 		if err == nil && len(hosts) == 0 {
 			return errNotFound
 		}
@@ -1157,6 +1452,7 @@ func (s *Server) notifyAll(hosts []string) {
 
 type Pool struct {
 	Name      string         `json:"name"`
+	Tenant    string         `json:"tenant,omitempty" readOnly:"true" doc:"The owning tenant's name; empty for a platform pool."`
 	Provider  string         `json:"provider"`
 	Template  map[string]any `json:"template,omitempty"`
 	MinHosts  int            `json:"minHosts"`
@@ -1172,19 +1468,21 @@ type listPoolsOutput struct {
 	} `nameHint:"PoolList"`
 }
 
-func (s *Server) listPools(ctx context.Context, _ *struct{}) (*listPoolsOutput, error) {
+func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutput, error) {
 	p := principal(ctx)
 	pools := []Pool{}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT name, provider, template, min_hosts, max_hosts, warm_hosts, shared, tenant_id IS NULL
-			FROM pools WHERE (tenant_id = $1 OR tenant_id IS NULL) AND NOT retired ORDER BY name`, p.TenantID)
+		rows, err := tx.Query(ctx, `SELECT p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
+				p.shared, p.tenant_id IS NULL
+			FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id
+			WHERE ($1 = '' OR p.tenant_id = $1 OR p.tenant_id IS NULL) AND NOT p.retired ORDER BY p.name, t.name NULLS FIRST`, p.TenantID)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var pl Pool
-			if err := rows.Scan(&pl.Name, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts, &pl.Shared, &pl.Platform); err != nil {
+			if err := rows.Scan(&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts, &pl.Shared, &pl.Platform); err != nil {
 				return err
 			}
 			pools = append(pools, pl)
@@ -1204,6 +1502,7 @@ func (s *Server) listPools(ctx context.Context, _ *struct{}) (*listPoolsOutput, 
 // provider is known from the pool row, kept as `retired`); its Runs wait
 // for a pool of that name again.
 type deletePoolInput struct {
+	TenantQuery
 	Name string `path:"name" doc:"The pool's name."`
 }
 
@@ -1233,6 +1532,7 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 
 // putPool creates or updates one of the tenant's pools.
 type poolBody struct {
+	TenantQuery
 	Body Pool
 }
 
@@ -1261,5 +1561,5 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		return nil, err
 	}
 	s.Kick()
-	return &poolBody{pl}, nil
+	return &poolBody{Body: pl}, nil
 }

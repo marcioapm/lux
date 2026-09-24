@@ -379,6 +379,9 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 		case <-time.After(interval):
 		}
 		hb := proto.Heartbeat{LocalSnapshots: r.localSnapshots(), GitMirrors: r.git.Mirrors()}
+		if hu, err := podman.ReadHostUsage(r.cfg.DataDir); err == nil {
+			hb.Usage = &proto.HostUsage{CPUSeconds: hu.CPUSeconds, MemoryBytes: hu.MemoryBytes, DiskBytes: hu.DiskBytes}
+		}
 		for _, p := range r.livePlacements() {
 			if st := p.liveState(); st != "" {
 				hb.Leases = append(hb.Leases, proto.LivePlacement{RunID: p.runID, Epoch: p.epoch, State: st, Usage: p.usage()})

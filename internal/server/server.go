@@ -3,12 +3,14 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/marcioapm/lux/console"
 	"github.com/marcioapm/lux/internal/blob"
 	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
@@ -38,6 +40,10 @@ type Config struct {
 	// Defaults are a Run's resources where its spec leaves them unset
 	// (zero: spec.BuiltinDefaults).
 	Defaults spec.Defaults
+	// SampleEvery is how often the system is sampled for history.
+	SampleEvery time.Duration
+	// How long history is kept: raw samples, minute and hour rollups.
+	HistoryRaw, HistoryMinutes, HistoryHours time.Duration
 }
 
 type Server struct {
@@ -76,6 +82,10 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	if cfg.Defaults == (spec.Defaults{}) {
 		cfg.Defaults = spec.BuiltinDefaults
 	}
+	cfg.SampleEvery = cmp.Or(cfg.SampleEvery, 10*time.Second)
+	cfg.HistoryRaw = cmp.Or(cfg.HistoryRaw, DefaultHistoryRaw)
+	cfg.HistoryMinutes = cmp.Or(cfg.HistoryMinutes, DefaultHistoryMinutes)
+	cfg.HistoryHours = cmp.Or(cfg.HistoryHours, DefaultHistoryHours)
 	s := &Server{
 		cfg:     cfg,
 		db:      db,
@@ -100,17 +110,22 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.newAPI(mux)
 	s.runnerRoutes(mux)
+	// The operator console: static files; it calls the API with the key
+	// its user gives it.
+	mux.Handle("GET /console/", console.Handler())
+	mux.Handle("GET /console", http.RedirectHandler("/console/", http.StatusMovedPermanently))
 	return logMiddleware(s.log, mux)
 }
 
 // Run starts the background loops and serves until ctx ends.
 func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	s.wg.Add(4)
+	s.wg.Add(5)
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.provisionerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.reaperLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.hub.deliveryLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.historyLoop(ctx) }()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	s.log.Info("luxd listening", "addr", s.cfg.Listen)

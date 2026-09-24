@@ -3,6 +3,7 @@
 //	luxd migrate                                  apply migrations (as the database owner)
 //	luxd admin create-tenant --name N             → {"tenantId", "apiKey"}
 //	luxd admin create-key --tenant T [--scopes run,read]
+//	luxd admin create-operator-key [--name N]    → {"apiKey"}: every tenant
 //	luxd admin create-host-token [--tenant T] [--pool P] [--label k=v]  → {"token"}
 //	luxd admin create-pool --name N --provider static|ec2 [--tenant T] [--shared] ...
 //	luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--retention-days N]
@@ -73,6 +74,7 @@ func usage() {
 admin commands:
   create-tenant --name N [--max-runs N] [--max-hosts N] [--retention-days N]
   create-key --tenant T [--name N] [--scopes read,run,admin]
+  create-operator-key [--name N]
   create-host-token [--tenant T] [--pool P] [--label k=v ...]
   create-pool --name N --provider static|ec2 [--tenant T] [--shared]
               [--min N] [--max N] [--warm N] [--template JSON]
@@ -157,6 +159,18 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	if cfg.Defaults, err = resourceDefaults(); err != nil {
+		return err
+	}
+	if cfg.SampleEvery, err = durationEnv("LUX_SAMPLE_EVERY", 10*time.Second); err != nil {
+		return err
+	}
+	if cfg.HistoryRaw, err = durationEnv("LUX_HISTORY_RAW", server.DefaultHistoryRaw); err != nil {
+		return err
+	}
+	if cfg.HistoryMinutes, err = durationEnv("LUX_HISTORY_MINUTES", server.DefaultHistoryMinutes); err != nil {
+		return err
+	}
+	if cfg.HistoryHours, err = durationEnv("LUX_HISTORY_HOURS", server.DefaultHistoryHours); err != nil {
 		return err
 	}
 	cfg.Providers, err = providers(ctx, log)
@@ -279,6 +293,22 @@ func admin(ctx context.Context, args []string) error {
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ($1, $2, $3, $4, $5)`,
 				ids.New(ids.APIKey), *tenant, *name, ids.Hash(key), sc)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		return out.Encode(map[string]string{"apiKey": key})
+
+	case "create-operator-key":
+		// An operator key belongs to no tenant: it reads and acts on every
+		// tenant's Runs and hosts. Only ever made here, never over the API.
+		name := fs.String("name", "operator", "key name")
+		fs.Parse(args[1:])
+		key := ids.Secret("lux")
+		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ($1, NULL, $2, $3, $4)`,
+				ids.New(ids.APIKey), *name, ids.Hash(key), []string{"operator"})
 			return err
 		})
 		if err != nil {

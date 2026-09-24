@@ -1,0 +1,40 @@
+// Typed calls, one per endpoint. Lists are unwrapped from their envelope.
+import { download, request } from "./client.ts";
+import type { Artifact, Event, History, Host, HostListParams, MigrateRequest, Pool, ResumeRequest, Run, RunListParams, Snapshot, Status, Tenant } from "./types.ts";
+
+type Sig = AbortSignal | undefined;
+/** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
+type Scope = string | undefined;
+
+export const api = {
+  status: (tenant: Scope, signal?: Sig) => request<Status>("/status", { tenant, signal }),
+  history: (tenant: Scope, since: string, signal?: Sig) => request<History>("/history", { tenant, query: { since }, signal }),
+
+  runs: (tenant: Scope, p: RunListParams, signal?: Sig) =>
+    request<{ runs: Run[] }>("/runs", { tenant, query: { state: p.state?.join(","), resumable: p.resumable, host: p.host, label: p.label, before: p.before, limit: p.limit }, signal }).then((r) => r.runs),
+  run: (id: string, signal?: Sig) => request<Run>(`/runs/${enc(id)}`, { signal }),
+  runHistory: (id: string, since: string, signal?: Sig) => request<History>(`/runs/${enc(id)}/history`, { query: { since }, signal }),
+  runEvents: (id: string, after = 0, signal?: Sig) => request<{ events: Event[] }>(`/runs/${enc(id)}/events`, { query: { after }, signal }).then((r) => r.events),
+  snapshots: (id: string, signal?: Sig) => request<{ snapshots: Snapshot[] }>(`/runs/${enc(id)}/snapshots`, { signal }).then((r) => r.snapshots),
+  artifacts: (id: string, signal?: Sig) => request<{ artifacts: Artifact[] }>(`/runs/${enc(id)}/artifacts`, { signal }).then((r) => r.artifacts),
+  downloadArtifact: (a: Artifact) => download(`/artifacts/${enc(a.id)}`, a.path.split("/").pop() || a.id),
+
+  stopRun: (id: string) => request<Run>(`/runs/${enc(id)}/stop`, { method: "POST" }),
+  cancelRun: (id: string) => request<Run>(`/runs/${enc(id)}/cancel`, { method: "POST" }),
+  resumeRun: (id: string, body: ResumeRequest) => request<Run>(`/runs/${enc(id)}/resume`, { method: "POST", body }),
+  migrateRun: (id: string, body: MigrateRequest) => request<Run>(`/runs/${enc(id)}/migrate`, { method: "POST", body }),
+  inputRun: (id: string, text: string) => request<{ requestId: string }>(`/runs/${enc(id)}/input`, { method: "POST", body: { text } }),
+  interruptRun: (id: string) => request<{ requestId: string }>(`/runs/${enc(id)}/input`, { method: "POST", body: { interrupt: true } }),
+
+  hosts: (tenant: Scope, p: HostListParams = {}, signal?: Sig) => request<{ hosts: Host[] }>("/hosts", { tenant, query: { all: p.all, pool: p.pool, state: p.state }, signal }).then((r) => r.hosts),
+  host: (id: string, signal?: Sig) => request<Host>(`/hosts/${enc(id)}`, { signal }),
+  hostHistory: (id: string, since: string, signal?: Sig) => request<History>(`/hosts/${enc(id)}/history`, { query: { since }, signal }),
+  drainHost: (id: string) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST" }),
+
+  pools: (tenant: Scope, signal?: Sig) => request<{ pools: Pool[] }>("/pools", { tenant, signal }).then((r) => r.pools),
+  tenants: (signal?: Sig) => request<{ tenants: Tenant[] }>("/tenants", { signal }).then((r) => r.tenants),
+};
+
+function enc(s: string): string {
+  return encodeURIComponent(s);
+}

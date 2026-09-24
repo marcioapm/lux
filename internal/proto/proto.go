@@ -105,7 +105,8 @@ type LivePlacement struct {
 }
 
 // Usage is a placement's resource use so far, from its cgroup. Peaks, so a
-// report can only raise them.
+// report can only raise them; the current values (memory, pids) are only
+// sampled for history.
 type Usage struct {
 	PeakMemoryBytes int64   `json:"peakMemoryBytes,omitempty"`
 	PeakDiskBytes   int64   `json:"peakDiskBytes,omitempty"`
@@ -113,6 +114,16 @@ type Usage struct {
 	CPUSeconds      float64 `json:"cpuSeconds,omitempty"`
 	NetRxBytes      int64   `json:"netRxBytes,omitempty"`
 	NetTxBytes      int64   `json:"netTxBytes,omitempty"`
+	MemoryBytes     int64   `json:"memoryBytes,omitempty"`
+	Pids            int     `json:"pids,omitempty"`
+}
+
+// HostUsage is the whole host's, on each heartbeat: counters (CPU seconds
+// since boot) and levels now.
+type HostUsage struct {
+	CPUSeconds  float64 `json:"cpuSeconds"`
+	MemoryBytes int64   `json:"memoryBytes"`
+	DiskBytes   int64   `json:"diskBytes"`
 }
 
 type Welcome struct {
@@ -131,6 +142,8 @@ type Heartbeat struct {
 	LocalSnapshots []LocalSnapshot `json:"localSnapshots"`
 	// GitMirrors: the repositories this host has mirrors of now.
 	GitMirrors []string `json:"gitMirrors"`
+	// Usage: the host's, for history (absent from older runners).
+	Usage *HostUsage `json:"usage,omitempty"`
 }
 
 // Assign starts (or resumes) a placement. Secrets travel only in this

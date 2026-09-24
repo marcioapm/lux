@@ -18,17 +18,19 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// Principal is who a request is from.
+// Principal is who a request is from: a tenant's key, or an operator's.
+// An operator key belongs to no tenant; it sees and acts on every tenant.
 type Principal struct {
 	TenantID string
 	KeyID    string
 	Scopes   []string
+	Operator bool
 }
 
 func (p Principal) Can(scope string) bool {
 	for _, s := range p.Scopes {
-		// admin implies run implies read.
-		if s == scope || s == "admin" || (s == "run" && scope == "read") {
+		// operator implies admin implies run implies read.
+		if s == scope || s == "operator" || (s == "admin" && scope != "operator") || (s == "run" && scope == "read") {
 			return true
 		}
 	}
@@ -136,18 +138,24 @@ func readJSON(r *http.Request, v any) error {
 // maxBody bounds a JSON request body.
 const maxBody = 8 << 20
 
-// authKey authenticates a tenant API key and requires a scope.
+// authKey authenticates an API key (a tenant's, or an operator's: no
+// tenant) and requires a scope.
 func (s *Server) authKey(ctx context.Context, key, scope string) (Principal, error) {
 	var p Principal
 	if key == "" {
 		return p, errf(http.StatusUnauthorized, "unauthorized", "missing API key")
 	}
+	var tenant *string
 	var stale bool
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
 			SELECT tenant_id, id, scopes, coalesce(last_used_at < now() - interval '1 minute', true)
 			FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL`, ids.Hash(key)).
-			Scan(&p.TenantID, &p.KeyID, &p.Scopes, &stale)
+			Scan(&tenant, &p.KeyID, &p.Scopes, &stale)
+		p.Operator = tenant == nil
+		if tenant != nil {
+			p.TenantID = *tenant
+		}
 		if err != nil || !stale {
 			return err
 		}
@@ -166,6 +174,30 @@ func (s *Server) authKey(ctx context.Context, key, scope string) (Principal, err
 		return p, errf(http.StatusForbidden, "forbidden", "this key lacks the %q scope", scope)
 	}
 	return p, nil
+}
+
+// narrow applies an operator's ?tenant= (an id or, failing that, a
+// name): its request becomes one of that tenant. Tenant keys ignore it.
+func (s *Server) narrow(ctx context.Context, p Principal, ref string) (Principal, error) {
+	if !p.Operator || ref == "" {
+		return p, nil
+	}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id FROM tenants WHERE id = $1 OR name = $1 ORDER BY id = $1 DESC LIMIT 1`, ref).Scan(&p.TenantID)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return p, errf(http.StatusNotFound, "not_found", "no tenant %s", ref)
+	}
+	return p, err
+}
+
+// scope is the RLS scope of a read: the principal's tenant, or every
+// tenant for an operator that did not narrow it.
+func (p Principal) scope() store.Scope {
+	if p.TenantID == "" {
+		return store.System()
+	}
+	return store.Tenant(p.TenantID)
 }
 
 func bearer(r *http.Request) string { return bearerToken(r.Header.Get("Authorization")) }

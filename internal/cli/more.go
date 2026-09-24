@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -282,36 +285,101 @@ func (a *app) download(ctx context.Context, id, dst string) error {
 func (a *app) hostsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "hosts", Short: "Hosts that run your workloads"}
 	var all bool
+	var pool, state string
 	ls := &cobra.Command{
 		Use:   "ls",
 		Short: "List hosts",
+		Long: `List hosts: your tenant's and the platform's. With an operator key,
+every host, with a TENANT column (--tenant: what that tenant sees).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var resp struct {
 				Hosts []server.Host `json:"hosts"`
 			}
-			path := "/v1/hosts"
+			q := url.Values{}
 			if all {
-				path += "?all=true"
+				q.Set("all", "true")
 			}
-			if err := a.c.Do(ctxOf(cmd), "GET", path, nil, &resp); err != nil {
+			if pool != "" {
+				q.Set("pool", pool)
+			}
+			if state != "" {
+				q.Set("state", state)
+			}
+			if err := a.c.Do(ctxOf(cmd), "GET", "/v1/hosts?"+q.Encode(), nil, &resp); err != nil {
 				return err
 			}
 			if a.output == "json" {
 				return a.json(resp.Hosts)
 			}
+			tenants := false
+			for _, h := range resp.Hosts {
+				tenants = tenants || h.Tenant != ""
+			}
 			var rows [][]string
 			for _, h := range resp.Hosts {
-				state := h.State
-				if h.Draining && state != "draining" {
-					state += " (draining)"
+				row := []string{h.Name, h.Pool, hostState(h), fmt.Sprint(h.LiveRuns), fmt.Sprintf("%g/%g", h.Allocated.CPUs, h.Capacity.CPUs),
+					bytesHuman(int64(h.Allocated.Memory)) + "/" + bytesHuman(h.Capacity.Memory), ago(h.LastHeartbeat)}
+				if tenants {
+					row = append([]string{h.Name, cmp.Or(h.Tenant, "(platform)")}, row[1:]...)
 				}
-				rows = append(rows, []string{h.Name, h.Pool, state, fmt.Sprint(h.LiveRuns), fmt.Sprintf("%g", h.Capacity.CPUs), bytesHuman(h.Capacity.Memory), ago(h.LastHeartbeat)})
+				rows = append(rows, row)
 			}
-			a.table("NAME\tPOOL\tSTATE\tRUNS\tCPUS\tMEMORY\tHEARTBEAT", rows)
+			header := "NAME\tPOOL\tSTATE\tRUNS\tCPUS\tMEMORY\tHEARTBEAT"
+			if tenants {
+				header = "NAME\tTENANT\tPOOL\tSTATE\tRUNS\tCPUS\tMEMORY\tHEARTBEAT"
+			}
+			a.table(header, rows)
 			return nil
 		},
 	}
 	ls.Flags().BoolVar(&all, "all", false, "include terminated hosts")
+	ls.Flags().StringVar(&pool, "pool", "", "only this pool's hosts")
+	ls.Flags().StringVar(&state, "state", "", "only hosts in this state (provisioning, ready, draining, lost, terminated)")
+	get := &cobra.Command{
+		Use:   "get <host>",
+		Short: "Show a host (by id or name), its lifecycle and its live Runs",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var h server.Host
+			if err := a.c.Do(ctxOf(cmd), "GET", "/v1/hosts/"+args[0], nil, &h); err != nil {
+				return err
+			}
+			if a.output == "json" {
+				return a.json(h)
+			}
+			w := a.stdout
+			fmt.Fprintf(w, "id:        %s\n", h.ID)
+			fmt.Fprintf(w, "name:      %s\n", h.Name)
+			fmt.Fprintf(w, "tenant:    %s\n", cmp.Or(h.Tenant, "(platform)"))
+			fmt.Fprintf(w, "pool:      %s\n", h.Pool)
+			fmt.Fprintf(w, "state:     %s", hostState(h))
+			if h.StateReason != "" {
+				fmt.Fprintf(w, " (%s)", h.StateReason)
+			}
+			fmt.Fprintln(w)
+			if h.ProviderID != nil {
+				fmt.Fprintf(w, "provider:  %s\n", *h.ProviderID)
+			}
+			fmt.Fprintf(w, "capacity:  %g cpus, %s memory, %s disk, %d runs\n", h.Capacity.CPUs, bytesHuman(h.Capacity.Memory), bytesHuman(h.Capacity.Disk), h.Capacity.Runs)
+			fmt.Fprintf(w, "allocated: %g cpus, %s memory\n", h.Allocated.CPUs, bytesHuman(int64(h.Allocated.Memory)))
+			fmt.Fprintf(w, "heartbeat: %s\n", ago(h.LastHeartbeat))
+			fmt.Fprintln(w, "lifecycle:")
+			for _, k := range []string{"provisionRequested", "provisioned", "registered", "firstPlacement", "lastPlacementEnded",
+				"drainRequested", "terminateRequested", "terminated", "lost"} {
+				if t := h.Times[k]; t != nil {
+					fmt.Fprintf(w, "  %-19s %s\n", k, t.Format(time.RFC3339))
+				}
+			}
+			if len(h.Placements) > 0 {
+				fmt.Fprintln(w, "runs:")
+				for _, p := range h.Placements {
+					fmt.Fprintf(w, "  %s  %-10s %-9s %s  %g cpus, %s  since %s\n", p.RunID, orDash(p.RunName), p.State, p.Tenant,
+						p.Resources.CPUs, bytesHuman(int64(p.Resources.Memory)), ago(&p.Since))
+				}
+			}
+			return nil
+		},
+	}
 	drain := &cobra.Command{
 		Use:   "drain <host>",
 		Short: "Stop placing Runs on a host and move its Runs elsewhere",
@@ -320,8 +388,111 @@ func (a *app) hostsCmd() *cobra.Command {
 			return a.c.Do(ctxOf(cmd), "POST", "/v1/hosts/"+args[0]+"/drain", map[string]any{}, nil)
 		},
 	}
-	cmd.AddCommand(ls, drain)
+	cmd.AddCommand(ls, get, drain)
 	return cmd
+}
+
+func hostState(h server.Host) string {
+	if h.Draining && h.State != "draining" {
+		return h.State + " (draining)"
+	}
+	return h.State
+}
+
+func (a *app) tenantsCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "tenants", Short: "Tenants (operator keys only)"}
+	ls := &cobra.Command{
+		Use:   "ls",
+		Short: "List tenants, their quotas and what they use",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var resp struct {
+				Tenants []server.Tenant `json:"tenants"`
+			}
+			if err := a.c.Do(ctxOf(cmd), "GET", "/v1/tenants", nil, &resp); err != nil {
+				return err
+			}
+			if a.output == "json" {
+				return a.json(resp.Tenants)
+			}
+			limit := func(n *int) string {
+				if n == nil {
+					return "-"
+				}
+				return fmt.Sprint(*n)
+			}
+			var rows [][]string
+			for _, t := range resp.Tenants {
+				stored := bytesHuman(t.StoredBytes)
+				if t.MaxStorageBytes != nil {
+					stored += "/" + bytesHuman(*t.MaxStorageBytes)
+				}
+				rows = append(rows, []string{t.Name, t.ID, fmt.Sprintf("%d/%s", t.ActiveRuns, limit(t.MaxConcurrentRuns)), fmt.Sprint(t.Runs),
+					fmt.Sprintf("%d/%s", t.Hosts, limit(t.MaxHosts)), stored, fmt.Sprintf("%dd", t.RetentionDays)})
+			}
+			a.table("NAME\tID\tACTIVE\tRUNS\tHOSTS\tSTORED\tRETENTION", rows)
+			return nil
+		},
+	}
+	cmd.AddCommand(ls)
+	return cmd
+}
+
+func (a *app) statusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Runs, queue, hosts and capacity now",
+		Long: `The state of what you can see now: Runs by state, the queue and how long
+Runs waited to start, hosts by state, and capacity against what live
+placements hold. With an operator key, the whole system (--tenant narrows it).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var st server.Status
+			if err := a.c.Do(ctxOf(cmd), "GET", "/v1/status", nil, &st); err != nil {
+				return err
+			}
+			if a.output == "json" {
+				return a.json(st)
+			}
+			w := a.stdout
+			fmt.Fprintf(w, "runs:      %s\n", counts(st.Runs))
+			fmt.Fprintf(w, "running:   %d busy, %d waiting for input\n", st.Busy, st.Idle)
+			fmt.Fprintf(w, "queued:    %d", st.Queued)
+			if st.OldestQueuedAt != nil {
+				fmt.Fprintf(w, " (oldest since %s)", ago(st.OldestQueuedAt))
+			}
+			fmt.Fprintln(w)
+			if l := st.StartLatency; l.N > 0 {
+				fmt.Fprintf(w, "to start:  p50 %.1fs, p95 %.1fs, max %.1fs (%d in the last hour)\n", *l.P50, *l.P95, *l.Max, l.N)
+			}
+			fmt.Fprintf(w, "hosts:     %s\n", counts(st.Hosts))
+			c, u := st.Capacity, st.Allocated
+			fmt.Fprintf(w, "allocated: %g/%g cpus, %s/%s memory, %d/%d runs\n", u.CPUs, c.CPUs,
+				bytesHuman(u.Memory), bytesHuman(c.Memory), u.Runs, c.Runs)
+			return nil
+		},
+	}
+}
+
+// counts prints "3 running, 1 stopped", largest first.
+func counts(m map[string]int) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if m[keys[i]] != m[keys[j]] {
+			return m[keys[i]] > m[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = fmt.Sprintf("%d %s", m[k], k)
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (a *app) poolsCmd() *cobra.Command {

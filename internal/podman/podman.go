@@ -348,11 +348,13 @@ func (p *Podman) Wait(ctx context.Context, name string) (int, error) {
 
 // Usage reads a running container's resource use from its cgroup (v2).
 // Peaks come from the kernel (memory.peak, pids.peak), so short spikes
-// between samples are not missed.
+// between samples are not missed; the current values are for history.
 type Usage struct {
 	PeakMemoryBytes int64
 	PeakPids        int
 	CPUSeconds      float64
+	MemoryBytes     int64
+	Pids            int
 }
 
 func CgroupUsage(cgroupPath string) (Usage, error) {
@@ -367,6 +369,12 @@ func CgroupUsage(cgroupPath string) (Usage, error) {
 	if n, err := readInt(base + "/pids.peak"); err == nil {
 		u.PeakPids = int(n)
 	}
+	if n, err := readInt(base + "/memory.current"); err == nil {
+		u.MemoryBytes = n
+	}
+	if n, err := readInt(base + "/pids.current"); err == nil {
+		u.Pids = int(n)
+	}
 	if b, err := os.ReadFile(base + "/cpu.stat"); err == nil {
 		for _, l := range strings.Split(string(b), "\n") {
 			if v, ok := strings.CutPrefix(l, "usage_usec "); ok {
@@ -374,6 +382,56 @@ func CgroupUsage(cgroupPath string) (Usage, error) {
 				u.CPUSeconds = float64(us) / 1e6
 			}
 		}
+	}
+	return u, nil
+}
+
+// HostUsage is the whole machine's: CPU seconds used since boot (all
+// cores, from /proc/stat), memory in use (MemTotal - MemAvailable), and
+// the disk used on the filesystem holding dir.
+type HostUsage struct {
+	CPUSeconds  float64
+	MemoryBytes int64
+	DiskBytes   int64
+}
+
+func ReadHostUsage(dir string) (HostUsage, error) {
+	var u HostUsage
+	b, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return u, err
+	}
+	// cpu  user nice system idle iowait irq softirq steal ...: busy is
+	// everything but idle and iowait, in USER_HZ (100 on Linux).
+	if line, _, ok := strings.Cut(string(b), "\n"); ok && strings.HasPrefix(line, "cpu ") {
+		for i, f := range strings.Fields(line)[1:] {
+			if i == 3 || i == 4 || i >= 8 { // idle, iowait; guest time is already in user
+				continue
+			}
+			n, _ := strconv.ParseInt(f, 10, 64)
+			u.CPUSeconds += float64(n) / 100
+		}
+	}
+	if b, err := os.ReadFile("/proc/meminfo"); err == nil {
+		var total, avail int64
+		for _, l := range strings.Split(string(b), "\n") {
+			f := strings.Fields(l)
+			if len(f) < 2 {
+				continue
+			}
+			n, _ := strconv.ParseInt(f[1], 10, 64)
+			switch f[0] {
+			case "MemTotal:":
+				total = n * 1024
+			case "MemAvailable:":
+				avail = n * 1024
+			}
+		}
+		u.MemoryBytes = total - avail
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err == nil {
+		u.DiskBytes = int64(st.Blocks-st.Bfree) * st.Bsize
 	}
 	return u, nil
 }

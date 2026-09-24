@@ -27,6 +27,7 @@ import (
 type app struct {
 	url    string
 	key    string
+	tenant string
 	output string
 	stdin  io.Reader
 	stdout io.Writer
@@ -112,16 +113,19 @@ func (a *app) root() *cobra.Command {
 				return fmt.Errorf("-o must be text or json")
 			}
 			a.c = client.New(a.url, a.key)
+			a.c.Tenant = cmp.Or(a.tenant, os.Getenv("LUX_TENANT"))
 			return nil
 		},
 	}
 	root.PersistentFlags().StringVar(&a.url, "url", "", "luxd URL (env LUX_URL)")
 	root.PersistentFlags().StringVar(&a.key, "api-key", "", "API key (env LUX_API_KEY)")
+	root.PersistentFlags().StringVar(&a.tenant, "tenant", "", "with an operator key: act on this tenant only, by id or name (env LUX_TENANT)")
 	root.PersistentFlags().StringVarP(&a.output, "output", "o", "text", "output format: text | json")
 	root.AddCommand(
 		a.runCmd(), a.lsCmd(), a.getCmd(), a.logsCmd(), a.eventsCmd(), a.steerCmd(), a.interruptCmd(),
 		a.stopCmd(), a.resumeCmd(), a.cancelCmd(), a.waitCmd(), a.pushCmd(), a.snapshotsCmd(),
 		a.artifactsCmd(), a.execCmd(), a.attachCmd(), a.portForwardCmd(), a.hostsCmd(), a.poolsCmd(),
+		a.tenantsCmd(), a.statusCmd(), a.historyCmd(), a.migrateCmd(),
 	)
 	return root
 }

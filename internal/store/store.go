@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -141,6 +142,20 @@ func Migrate(ctx context.Context, dsn, appPassword string) ([]string, error) {
 // either would silently switch row-level security off, and every isolation
 // test would pass for the wrong reason.
 func ensureAppRole(ctx context.Context, conn *pgx.Conn, password string) error {
+	// Roles are the cluster's, not the database's, and advisory locks are
+	// per database: migrations of two databases at once (parallel test
+	// packages) can collide on the role. It is idempotent: try again.
+	var err error
+	for range 5 {
+		if err = ensureAppRoleOnce(ctx, conn, password); err == nil || !strings.Contains(err.Error(), "concurrently") {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return err
+}
+
+func ensureAppRoleOnce(ctx context.Context, conn *pgx.Conn, password string) error {
 	var exists bool
 	if err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lux_app')").Scan(&exists); err != nil {
 		return err

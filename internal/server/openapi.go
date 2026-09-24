@@ -13,8 +13,10 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/spec"
+	"github.com/marcioapm/lux/internal/store"
 	"github.com/marcioapm/lux/internal/version"
 )
 
@@ -169,13 +171,16 @@ func (s *Server) newAPI(mux *http.ServeMux) huma.API {
 				Description: "The lux tenant API. Every /v1 call authenticates with an API key " +
 					"(`Authorization: Bearer <key>`); a key has scopes `read`, `run` and `admin`, " +
 					"each implying the ones before it.\n\n" +
+					"An operator key (`luxd admin create-operator-key`, scope `operator`) belongs to no tenant: " +
+					"it sees and acts on every tenant through the same operations. A Run's operations act in the Run's own tenant; " +
+					"lists span every tenant unless `?tenant=` (an id or a name) narrows them; creating needs `?tenant=`.\n\n" +
 					"Errors are JSON: `{\"error\": {\"code\": \"not_found\", \"message\": \"...\", " +
 					"\"details\": [\"...\"]}}`, with a stable `code`.",
 			},
 			Components: &huma.Components{
 				Schemas: registry,
 				SecuritySchemes: map[string]*huma.SecurityScheme{
-					"apiKey": {Type: "http", Scheme: "bearer", Description: "A tenant API key (luxd admin create-key)."},
+					"apiKey": {Type: "http", Scheme: "bearer", Description: "A tenant API key (luxd admin create-key), or an operator key (luxd admin create-operator-key)."},
 				},
 			},
 			Tags: []*huma.Tag{
@@ -183,6 +188,8 @@ func (s *Server) newAPI(mux *http.ServeMux) huma.API {
 				{Name: "interactive", Description: "Steer a live Run, run commands in it, attach to it, reach its ports."},
 				{Name: "hosts", Description: "The hosts that run your workloads."},
 				{Name: "pools", Description: "Pools of hosts, and how they are provisioned."},
+				{Name: "history", Description: "The system, hosts and Runs now and over time."},
+				{Name: "operators", Description: "For operator keys: every tenant."},
 			},
 		},
 		OpenAPIPath:   "/openapi",
@@ -230,12 +237,50 @@ func asBefore(ctx huma.Context, next func(huma.Context)) {
 func (s *Server) requireKey(scope string) func(huma.Context, func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		p, err := s.authKey(ctx.Context(), bearerToken(ctx.Header("Authorization")), scope)
+		if err == nil {
+			p, err = s.operatorScope(ctx, p)
+		}
 		if err != nil {
 			r, w := humago.Unwrap(ctx)
 			s.writeError(w, r, err)
 			return
 		}
 		next(huma.WithValue(ctx, principalKey, p))
+	}
+}
+
+// operatorScope puts an operator's request in one tenant's scope where it
+// has one: the tenant owning the Run or artifact the path names (so every
+// query of the handler runs as that tenant's), or else ?tenant=. Without
+// either, the principal has no tenant: reads span every tenant, and
+// handlers that create a tenant's objects refuse it (forTenant).
+func (s *Server) operatorScope(ctx huma.Context, p Principal) (Principal, error) {
+	if !p.Operator {
+		return p, nil
+	}
+	var owner, id string
+	switch op := ctx.Operation(); {
+	case strings.HasPrefix(op.Path, "/v1/runs/{id}"):
+		owner, id = `SELECT tenant_id FROM runs WHERE id = $1`, ctx.Param("id")
+	case strings.HasPrefix(op.Path, "/v1/artifacts/{aid}"):
+		owner, id = `SELECT tenant_id FROM artifacts WHERE id = $1`, ctx.Param("aid")
+	default:
+		return s.narrow(ctx.Context(), p, ctx.Query("tenant"))
+	}
+	err := s.db.Tx(ctx.Context(), store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx.Context(), owner, id).Scan(&p.TenantID)
+	})
+	return p, err
+}
+
+// forTenant refuses an operator that did not name a tenant: what h
+// creates belongs to one.
+func forTenant[I, O any](h func(context.Context, *I) (*O, error)) func(context.Context, *I) (*O, error) {
+	return func(ctx context.Context, in *I) (*O, error) {
+		if principal(ctx).TenantID == "" {
+			return nil, errf(http.StatusBadRequest, "tenant_required", "an operator key must name a tenant: ?tenant=<id or name>")
+		}
+		return h(ctx, in)
 	}
 }
 

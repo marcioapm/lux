@@ -11,7 +11,8 @@ api_key = "lux_…"
 | Flag | Env | |
 | --- | --- | --- |
 | `--url` | `LUX_URL` | luxd's address |
-| `--api-key` | `LUX_API_KEY` | an API key (scopes: `read`, `run`, `admin`) |
+| `--api-key` | `LUX_API_KEY` | an API key (scopes: `read`, `run`, `admin`; or an operator key) |
+| `--tenant` | `LUX_TENANT` | with an operator key: one tenant only (id or name) |
 | `-o json` | | machine-readable output, for every command that prints data |
 
 **Exit codes:** `0` success; the Run's own exit code for `run --follow`,
@@ -78,11 +79,28 @@ lux artifacts <run> [--download DIR]
 ## Hosts and pools
 
 ```bash
-lux hosts ls [--all]
+lux hosts ls [--all] [--pool P] [--state S]
+lux hosts get <host>            # lifecycle, capacity, allocation, live Runs
 lux hosts drain <host>          # admin: move its Runs elsewhere, place nothing new
 lux pools ls
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON]
 ```
+
+## Status and history
+
+```bash
+lux status                      # Runs by state, queue, time to start, hosts, capacity now
+lux history [--since 24h]       # the same over time
+lux history <run>               # a Run's resource use, across placements
+lux history --host <host>
+lux events --all                # every Run's events as they happen
+```
+
+## Operators
+
+With an operator key, every command covers every tenant (`--tenant`
+narrows it), and there is more: `lux tenants ls`, `lux migrate`,
+`lux resume --to`. See [Operators and the console](operators.md).
 
 ## Interactive
 

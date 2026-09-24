@@ -1,0 +1,290 @@
+/* lux console design tokens.
+   Light is the default; dark is selected (its own steps), applied by
+   prefers-color-scheme unless overridden by <html data-theme="light|dark">. */
+
+:root {
+  color-scheme: light;
+
+  /* Neutrals */
+  --bg-page: #f4f5f7;
+  --bg-surface: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-subtle: #f0f1f4;
+  --bg-muted: #e5e7eb;
+  --bg-inset: #f7f8fa;
+  --border: #e1e3e8;
+  --border-strong: #c6cad2;
+  --fg: #16181d;
+  --fg-secondary: #4b5058;
+  --fg-muted: #6b7079;
+  --fg-faint: #a0a5ae;
+  --overlay: rgba(22, 24, 29, 0.45);
+
+  /* Accent */
+  --accent: #2a78d6;
+  --accent-hover: #256abf;
+  --accent-active: #1c5cab;
+  --accent-fg: #ffffff;
+  --accent-subtle: #e3eefc;
+  --accent-text: #1c5cab;
+  --focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px rgba(42, 120, 214, 0.55);
+
+  /* Semantic: fg is text-safe on bg-surface, bg is a tint, dot is the mark color */
+  --success-fg: #0b6e0b;
+  --success-bg: #e4f5e4;
+  --success-dot: #0ca30c;
+  --warn-fg: #7f4c00;
+  --warn-bg: #fff1d6;
+  --warn-dot: #eda100;
+  --danger-fg: #b32626;
+  --danger-bg: #fce8e8;
+  --danger-dot: #d03b3b;
+  --info-fg: #1c5cab;
+  --info-bg: #e3eefc;
+  --info-dot: #2a78d6;
+
+  /* State hue families (run + host states map onto these, see states.ts) */
+  --st-neutral-fg: #4b5058;
+  --st-neutral-bg: #eceef1;
+  --st-neutral-dot: #8a9099;
+  --st-blue-fg: var(--info-fg);
+  --st-blue-bg: var(--info-bg);
+  --st-blue-dot: var(--info-dot);
+  --st-teal-fg: #0b6b4d;
+  --st-teal-bg: #dff5ec;
+  --st-teal-dot: #1baf7a;
+  --st-green-fg: var(--success-fg);
+  --st-green-bg: var(--success-bg);
+  --st-green-dot: var(--success-dot);
+  --st-amber-fg: var(--warn-fg);
+  --st-amber-bg: var(--warn-bg);
+  --st-amber-dot: var(--warn-dot);
+  --st-red-fg: var(--danger-fg);
+  --st-red-bg: var(--danger-bg);
+  --st-red-dot: var(--danger-dot);
+  --st-violet-fg: #4a3aa7;
+  --st-violet-bg: #ebe8fa;
+  --st-violet-dot: #6f5fd0;
+
+  /* Categorical chart palette: fixed order, validated (dataviz skill) on #ffffff.
+     Slots 3, 4, 5 are under 3:1 on light; charts always ship a legend + tooltip. */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-6: #008300;
+  --chart-7: #4a3aa7;
+  --chart-8: #e34948;
+  --chart-grid: #e8e9ed;
+  --chart-axis: #c6cad2;
+  --chart-label: #6b7079;
+  --chart-cursor: #8a9099;
+
+  /* Log streams */
+  --log-stderr-bg: rgba(208, 59, 59, 0.07);
+  --log-stderr-fg: #8f2b2b;
+  --log-line-hover: rgba(22, 24, 29, 0.04);
+
+  /* Type */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-lg: 14px;
+  --text-xl: 16px;
+  --text-2xl: 20px;
+  --text-3xl: 28px;
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* Spacing */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 24px;
+  --sp-8: 32px;
+  --sp-9: 48px;
+
+  /* Radius */
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgba(22, 24, 29, 0.06);
+  --shadow-md: 0 2px 8px rgba(22, 24, 29, 0.10), 0 0 0 1px rgba(22, 24, 29, 0.05);
+  --shadow-lg: 0 12px 32px rgba(22, 24, 29, 0.18), 0 0 0 1px rgba(22, 24, 29, 0.06);
+
+  /* Motion */
+  --dur-fast: 100ms;
+  --dur-normal: 180ms;
+  --dur-slow: 300ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Layout */
+  --sidebar-w: 208px;
+  --topbar-h: 44px;
+  --row-h: 32px;
+  --control-h: 28px;
+  --control-h-sm: 24px;
+  --control-h-lg: 34px;
+}
+
+/* Dark: selected steps, applied by OS preference unless a light toggle wins,
+   and by the explicit toggle. Keep the two blocks identical. */
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --bg-page: #131417;
+    --bg-surface: #1b1c1f;
+    --bg-raised: #232529;
+    --bg-subtle: #222428;
+    --bg-muted: #2b2e33;
+    --bg-inset: #17181b;
+    --border: #2c2f35;
+    --border-strong: #3f434b;
+    --fg: #ececee;
+    --fg-secondary: #b4b8bf;
+    --fg-muted: #8b9098;
+    --fg-faint: #5f646c;
+    --overlay: rgba(0, 0, 0, 0.6);
+
+    --accent: #3987e5;
+    --accent-hover: #5598e7;
+    --accent-active: #2a78d6;
+    --accent-fg: #ffffff;
+    --accent-subtle: #17294a;
+    --accent-text: #86b6ef;
+    --focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px rgba(57, 135, 229, 0.65);
+
+    --success-fg: #5fcf5f;
+    --success-bg: #123a12;
+    --success-dot: #2eb82e;
+    --warn-fg: #f0b93d;
+    --warn-bg: #3d2c08;
+    --warn-dot: #c98500;
+    --danger-fg: #f07f7f;
+    --danger-bg: #451919;
+    --danger-dot: #e66767;
+    --info-fg: #86b6ef;
+    --info-bg: #17294a;
+    --info-dot: #3987e5;
+
+    --st-neutral-fg: #b4b8bf;
+    --st-neutral-bg: #2b2e33;
+    --st-neutral-dot: #858a93;
+    --st-teal-fg: #5ed1a4;
+    --st-teal-bg: #103528;
+    --st-teal-dot: #199e70;
+    --st-violet-fg: #b3a9f2;
+    --st-violet-bg: #29234d;
+    --st-violet-dot: #9085e9;
+
+    --chart-1: #3987e5;
+    --chart-2: #d95926;
+    --chart-3: #199e70;
+    --chart-4: #c98500;
+    --chart-5: #d55181;
+    --chart-6: #008300;
+    --chart-7: #9085e9;
+    --chart-8: #e66767;
+    --chart-grid: #26282d;
+    --chart-axis: #3f434b;
+    --chart-label: #8b9098;
+    --chart-cursor: #6b7079;
+
+    --log-stderr-bg: rgba(230, 103, 103, 0.10);
+    --log-stderr-fg: #f0a0a0;
+    --log-line-hover: rgba(255, 255, 255, 0.04);
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-page: #131417;
+  --bg-surface: #1b1c1f;
+  --bg-raised: #232529;
+  --bg-subtle: #222428;
+  --bg-muted: #2b2e33;
+  --bg-inset: #17181b;
+  --border: #2c2f35;
+  --border-strong: #3f434b;
+  --fg: #ececee;
+  --fg-secondary: #b4b8bf;
+  --fg-muted: #8b9098;
+  --fg-faint: #5f646c;
+  --overlay: rgba(0, 0, 0, 0.6);
+
+  --accent: #3987e5;
+  --accent-hover: #5598e7;
+  --accent-active: #2a78d6;
+  --accent-fg: #ffffff;
+  --accent-subtle: #17294a;
+  --accent-text: #86b6ef;
+  --focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px rgba(57, 135, 229, 0.65);
+
+  --success-fg: #5fcf5f;
+  --success-bg: #123a12;
+  --success-dot: #2eb82e;
+  --warn-fg: #f0b93d;
+  --warn-bg: #3d2c08;
+  --warn-dot: #c98500;
+  --danger-fg: #f07f7f;
+  --danger-bg: #451919;
+  --danger-dot: #e66767;
+  --info-fg: #86b6ef;
+  --info-bg: #17294a;
+  --info-dot: #3987e5;
+
+  --st-neutral-fg: #b4b8bf;
+  --st-neutral-bg: #2b2e33;
+  --st-neutral-dot: #858a93;
+  --st-teal-fg: #5ed1a4;
+  --st-teal-bg: #103528;
+  --st-teal-dot: #199e70;
+  --st-violet-fg: #b3a9f2;
+  --st-violet-bg: #29234d;
+  --st-violet-dot: #9085e9;
+
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
+  --chart-6: #008300;
+  --chart-7: #9085e9;
+  --chart-8: #e66767;
+  --chart-grid: #26282d;
+  --chart-axis: #3f434b;
+  --chart-label: #8b9098;
+  --chart-cursor: #6b7079;
+
+  --log-stderr-bg: rgba(230, 103, 103, 0.10);
+  --log-stderr-fg: #f0a0a0;
+  --log-line-hover: rgba(255, 255, 255, 0.04);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-normal: 0ms;
+    --dur-slow: 0ms;
+  }
+}

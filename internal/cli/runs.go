@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -158,16 +159,29 @@ func fillSecrets(secrets []spec.Secret, envFile string) error {
 }
 
 func (a *app) lsCmd() *cobra.Command {
-	var state string
+	var state, host string
 	var labels []string
+	var resumable bool
+	var limit int
 	cmd := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
 		Short:   "List Runs",
+		Long: `List Runs, newest first. With an operator key, every tenant's
+(--tenant narrows it), with a TENANT column.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			q := url.Values{}
 			if state != "" {
 				q.Set("state", state)
+			}
+			if resumable {
+				q.Set("resumable", "true")
+			}
+			if host != "" {
+				q.Set("host", host)
+			}
+			if limit > 0 {
+				q.Set("limit", fmt.Sprint(limit))
 			}
 			for _, l := range labels {
 				q.Add("label", l)
@@ -181,19 +195,34 @@ func (a *app) lsCmd() *cobra.Command {
 			if a.output == "json" {
 				return a.json(resp.Runs)
 			}
+			tenants := map[string]bool{}
+			for _, r := range resp.Runs {
+				tenants[r.Tenant] = true
+			}
 			var rows [][]string
 			for _, r := range resp.Runs {
 				state := r.State
 				if r.Activity == "idle" && r.State == "running" {
 					state += " (waiting for input)"
 				}
-				rows = append(rows, []string{r.ID, orDash(r.Name), state, orDash(r.Host), r.Spec.Workload.Adapter, ago(&r.CreatedAt)})
+				row := []string{r.ID, orDash(r.Name), state, orDash(r.Host), r.Spec.Workload.Adapter, ago(&r.CreatedAt)}
+				if len(tenants) > 1 {
+					row = append([]string{r.Tenant}, row...)
+				}
+				rows = append(rows, row)
 			}
-			a.table("ID\tNAME\tSTATE\tHOST\tADAPTER\tCREATED", rows)
+			header := "ID\tNAME\tSTATE\tHOST\tADAPTER\tCREATED"
+			if len(tenants) > 1 {
+				header = "TENANT\t" + header
+			}
+			a.table(header, rows)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&state, "state", "", "filter by state (comma-separated)")
+	cmd.Flags().BoolVar(&resumable, "resumable", false, "only Runs resume accepts (stopped, lost, failed)")
+	cmd.Flags().StringVar(&host, "host", "", "only Runs placed on this host (id or name), ever")
+	cmd.Flags().IntVar(&limit, "limit", 0, "at most this many (default 100, max 1000)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "filter by label key=value")
 	return cmd
 }
@@ -228,6 +257,7 @@ func (a *app) getCmd() *cobra.Command {
 			}
 			w := a.stdout
 			fmt.Fprintf(w, "id:        %s\n", run.ID)
+			fmt.Fprintf(w, "tenant:    %s\n", run.Tenant)
 			if run.Name != "" {
 				fmt.Fprintf(w, "name:      %s\n", run.Name)
 			}
@@ -272,6 +302,29 @@ func (a *app) getCmd() *cobra.Command {
 			if u := run.Usage; u != nil && u.Placements > 0 {
 				fmt.Fprintf(w, "usage:     peak memory %s, peak disk %s, cpu %.1fs\n",
 					bytesHuman(u.PeakMemoryBytes), bytesHuman(u.PeakDiskBytes), u.CPUSeconds)
+			}
+			if rs := run.Resume; rs != nil {
+				from := "from scratch"
+				if rs.Snapshot != nil {
+					from = "from " + *rs.Snapshot
+					if len(rs.OnHosts) > 0 {
+						from += " (on " + strings.Join(rs.OnHosts, ", ") + ")"
+					}
+					if !rs.Uploaded {
+						from += ", not uploaded"
+					}
+				}
+				fmt.Fprintf(w, "resume:    %s\n", from)
+				if len(rs.Secrets) > 0 {
+					held := "must be supplied again"
+					if rs.SecretsHeld {
+						held = "held by luxd (an operator may resume without them)"
+					}
+					fmt.Fprintf(w, "secrets:   %s: %s\n", strings.Join(rs.Secrets, ", "), held)
+				}
+				for _, b := range rs.Blockers {
+					fmt.Fprintf(w, "blocked:   %s\n", b)
+				}
 			}
 			return nil
 		},
@@ -399,11 +452,24 @@ func (a *app) printLogs(ctx context.Context, id, since string, follow bool, o lo
 }
 
 func (a *app) eventsCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "events <run>",
-		Short: "Print a Run's lifecycle events",
-		Args:  cobra.ExactArgs(1),
+	var all, follow bool
+	var after int64
+	cmd := &cobra.Command{
+		Use:   "events <run> | --all",
+		Short: "Print a Run's lifecycle events, or every Run's",
+		Long: `Print a Run's lifecycle events. With --all, the events of every Run you
+can see (an operator: every tenant's; --tenant narrows it) as they happen,
+from now or from --after an event id; --follow=false prints what there is.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if all == (len(args) == 1) {
+				return fmt.Errorf("give a run, or --all")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if all {
+				return a.feed(ctxOf(cmd), after, follow)
+			}
 			var resp struct {
 				Events []server.Event `json:"events"`
 			}
@@ -424,7 +490,108 @@ func (a *app) eventsCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&all, "all", false, "every Run's events")
+	cmd.Flags().BoolVar(&follow, "follow", true, "with --all: keep streaming")
+	cmd.Flags().Int64Var(&after, "after", -1, "with --all: from after this event id (default: from now)")
+	return cmd
 }
+
+// feed prints GET /v1/events: one line per event (JSON lines with -o json).
+func (a *app) feed(ctx context.Context, after int64, follow bool) error {
+	q := url.Values{"follow": {fmt.Sprint(follow)}}
+	if after >= 0 {
+		q.Set("after", fmt.Sprint(after))
+	}
+	return a.c.Stream(ctx, "/v1/events", q, func(ev client.SSEEvent) error {
+		if ev.Event != "lux" {
+			if ev.Event == "error" {
+				return fmt.Errorf("event stream: %s", ev.Data)
+			}
+			return nil
+		}
+		if a.output == "json" {
+			_, err := fmt.Fprintf(a.stdout, "%s\n", ev.Data)
+			return err
+		}
+		var e server.FeedEvent
+		if err := json.Unmarshal(ev.Data, &e); err != nil {
+			return err
+		}
+		d, _ := json.Marshal(e.Data)
+		_, err := fmt.Fprintf(a.stdout, "%s  %-10s %s  %-20s %s\n", e.Time.Local().Format("15:04:05.000"), e.Tenant, e.RunID, e.Type, d)
+		return err
+	})
+}
+
+func (a *app) migrateCmd() *cobra.Command {
+	var to, input string
+	var wait bool
+	cmd := &cobra.Command{
+		Use:   "migrate <run>",
+		Short: "Move a running Run to another host (operators)",
+		Long: `Stop a running Run, snapshotting its state, and resume it at once on
+another host: the one --to names, or any but the one it is on. An agent
+resumes its session where it was; --input is delivered once it is running
+again (if it was mid-turn, that turn was interrupted: tell it to go on).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			req := map[string]any{}
+			if to != "" {
+				req["to"] = to
+			}
+			if input != "" {
+				req["input"] = map[string]string{"text": input}
+			}
+			var run Run
+			if err := a.c.Do(ctxOf(cmd), "POST", "/v1/runs/"+args[0]+"/migrate", req, &run); err != nil {
+				return err
+			}
+			if wait {
+				from := run.Epoch
+				r, err := a.waitMoved(ctxOf(cmd), args[0], from)
+				if err != nil {
+					return err
+				}
+				run = *r
+			}
+			if a.output == "json" {
+				return a.json(run)
+			}
+			fmt.Fprintf(a.stdout, "%s %s %s\n", run.ID, run.State, run.Host)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&to, "to", "", "the host to move to (id or name); default: any other")
+	cmd.Flags().StringVar(&input, "input", "", "message to deliver once it is running again")
+	cmd.Flags().BoolVar(&wait, "wait", false, "wait until it is running on its new host")
+	return cmd
+}
+
+// waitMoved waits for a Run to run again in a placement after epoch (or to
+// end up somewhere it will not: stopped, lost, finished).
+func (a *app) waitMoved(ctx context.Context, id string, epoch int) (*Run, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	for {
+		run, err := a.getRun(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case run.State == "running" && run.Epoch > epoch:
+			return run, nil
+		case run.State == "stopped" && run.Epoch > epoch, run.State == "lost", terminalState(run.State):
+			return run, fmt.Errorf("run is %s: %s", run.State, run.StateReason)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, errors.New("timed out waiting for the Run to move")
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func terminalState(s string) bool { return s == "succeeded" || s == "failed" || s == "cancelled" }
 
 func (a *app) steerCmd() *cobra.Command {
 	var interrupt bool
@@ -504,14 +671,17 @@ func (a *app) cancelCmd() *cobra.Command {
 }
 
 func (a *app) resumeCmd() *cobra.Command {
-	var input, secretsFrom, fromSnapshot string
+	var input, secretsFrom, fromSnapshot, to string
 	var secretArgs []string
 	var follow, wait bool
 	cmd := &cobra.Command{
 		Use:   "resume <run>",
 		Short: "Resume a stopped, lost or failed Run on any host",
 		Long: `Resume a Run. Its secrets must be supplied again (lux never stores them):
-from the environment (by name), a .env file (--secrets-from), or --secret NAME=VALUE.`,
+from the environment (by name), a .env file (--secrets-from), or --secret NAME=VALUE.
+
+With an operator key, secrets may be left out while luxd still holds them
+(it has not restarted since they were supplied), and --to chooses the host.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
@@ -534,12 +704,18 @@ from the environment (by name), a .env file (--secrets-from), or --secret NAME=V
 			if err := fillSecrets(secrets, secretsFrom); err != nil {
 				return err
 			}
+			// Only what was supplied: with none, an operator's resume uses
+			// the values luxd still holds.
+			secrets = slices.DeleteFunc(secrets, func(s spec.Secret) bool { return s.Value == "" })
 			req := map[string]any{"secrets": secrets}
 			if input != "" {
 				req["input"] = map[string]string{"text": input}
 			}
 			if fromSnapshot != "" {
 				req["fromSnapshot"] = fromSnapshot
+			}
+			if to != "" {
+				req["to"] = to
 			}
 			var out Run
 			if err := a.c.Do(ctx, "POST", "/v1/runs/"+args[0]+"/resume", req, &out); err != nil {
@@ -569,6 +745,7 @@ from the environment (by name), a .env file (--secrets-from), or --secret NAME=V
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
 	cmd.Flags().StringArrayVar(&secretArgs, "secret", nil, "NAME=VALUE (repeatable)")
 	cmd.Flags().StringVar(&fromSnapshot, "from-snapshot", "", "resume from an older snapshot")
+	cmd.Flags().StringVar(&to, "to", "", "operators: resume on this host (id or name)")
 	cmd.Flags().BoolVar(&follow, "follow", false, "stream output until it ends")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait until it is running (or has ended)")
 	return cmd

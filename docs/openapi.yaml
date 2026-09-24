@@ -129,6 +129,28 @@ components:
             - array
             - "null"
       type: object
+    FeedEvent:
+      additionalProperties: false
+      properties:
+        data:
+          additionalProperties: {}
+          type: object
+        epoch:
+          format: int64
+          type: integer
+        id:
+          format: int64
+          type: integer
+        runId:
+          type: string
+        tenant:
+          type: string
+        time:
+          format: date-time
+          type: string
+        type:
+          type: string
+      type: object
     Git:
       additionalProperties: false
       properties:
@@ -141,9 +163,30 @@ components:
             - array
             - "null"
       type: object
+    History:
+      additionalProperties: false
+      properties:
+        from:
+          format: date-time
+          type: string
+        resolution:
+          format: int64
+          type: integer
+        samples:
+          items:
+            $ref: "#/components/schemas/Sample"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+      type: object
     Host:
       additionalProperties: false
       properties:
+        allocated:
+          $ref: "#/components/schemas/Resources"
         capacity:
           $ref: "#/components/schemas/Capacity"
         draining:
@@ -162,6 +205,12 @@ components:
           type: integer
         name:
           type: string
+        placements:
+          items:
+            $ref: "#/components/schemas/HostPlacement"
+          type:
+            - array
+            - "null"
         platform:
           type: boolean
         pool:
@@ -171,6 +220,9 @@ components:
         state:
           type: string
         stateReason:
+          type: string
+        tenant:
+          description: The owning tenant's name; empty for a platform host.
           type: string
         times:
           additionalProperties:
@@ -201,6 +253,26 @@ components:
           type:
             - array
             - "null"
+      type: object
+    HostPlacement:
+      additionalProperties: false
+      properties:
+        epoch:
+          format: int64
+          type: integer
+        resources:
+          $ref: "#/components/schemas/Resources"
+        runId:
+          type: string
+        runName:
+          type: string
+        since:
+          format: date-time
+          type: string
+        state:
+          type: string
+        tenant:
+          type: string
       type: object
     Image:
       additionalProperties: false
@@ -241,6 +313,16 @@ components:
           description: "A message: agents get it as a prompt, generic workloads on stdin."
           type: string
       type: object
+    ListRunsBody:
+      additionalProperties: false
+      properties:
+        runs:
+          items:
+            $ref: "#/components/schemas/Run"
+          type:
+            - array
+            - "null"
+      type: object
     Manifest:
       additionalProperties: false
       properties:
@@ -259,6 +341,16 @@ components:
           type:
             - array
             - "null"
+      type: object
+    MigrateRequest:
+      additionalProperties: false
+      properties:
+        input:
+          $ref: "#/components/schemas/ResumeInput"
+          description: A message for the workload once it runs again.
+        to:
+          description: The host to move to (id or name); by default, any other.
+          type: string
       type: object
     Network:
       additionalProperties: false
@@ -327,6 +419,22 @@ components:
           format: int64
           type: integer
       type: object
+    Percentiles:
+      additionalProperties: false
+      properties:
+        max:
+          format: double
+          type: number
+        "n":
+          format: int64
+          type: integer
+        p50:
+          format: double
+          type: number
+        p95:
+          format: double
+          type: number
+      type: object
     Placement:
       additionalProperties: false
       properties:
@@ -361,6 +469,10 @@ components:
         template:
           additionalProperties: {}
           type: object
+        tenant:
+          description: The owning tenant's name; empty for a platform pool.
+          readOnly: true
+          type: string
         warmHosts:
           format: int64
           type: integer
@@ -448,6 +560,34 @@ components:
           format: int64
           type: integer
       type: object
+    Resumability:
+      additionalProperties: false
+      properties:
+        blockers:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        onHosts:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        secrets:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        secretsHeld:
+          type: boolean
+        snapshot:
+          type: string
+        uploaded:
+          type: boolean
+      type: object
     Resume:
       additionalProperties: false
       properties:
@@ -480,6 +620,9 @@ components:
           type:
             - array
             - "null"
+        to:
+          description: "Operators: place it on this host (id or name), and nowhere else."
+          type: string
       type: object
     Run:
       additionalProperties: false
@@ -505,6 +648,10 @@ components:
           format: date-time
           type: string
         host:
+          description: The name of the host of its current placement.
+          type: string
+        hostId:
+          description: That host's id.
           type: string
         id:
           type: string
@@ -522,6 +669,8 @@ components:
           type:
             - array
             - "null"
+        resume:
+          $ref: "#/components/schemas/Resumability"
         secrets:
           items:
             $ref: "#/components/schemas/SecretRef"
@@ -538,18 +687,11 @@ components:
           type: string
         stateReason:
           type: string
+        tenant:
+          description: The owning tenant's name.
+          type: string
         usage:
           $ref: "#/components/schemas/RunUsage"
-      type: object
-    RunList:
-      additionalProperties: false
-      properties:
-        runs:
-          items:
-            $ref: "#/components/schemas/Run"
-          type:
-            - array
-            - "null"
       type: object
     RunPlacement:
       additionalProperties: false
@@ -702,6 +844,86 @@ components:
           format: double
           type: number
       type: object
+    Sample:
+      additionalProperties: false
+      properties:
+        allocCpus:
+          format: double
+          type: number
+        allocMemory:
+          format: int64
+          type: integer
+        allocatedCpus:
+          format: double
+          type: number
+        allocatedMemory:
+          format: int64
+          type: integer
+        at:
+          format: date-time
+          type: string
+        busy:
+          format: int64
+          type: integer
+        capacityCpus:
+          format: double
+          type: number
+        capacityMemory:
+          format: int64
+          type: integer
+        cpuCores:
+          format: double
+          type: number
+        diskBytes:
+          format: int64
+          type: integer
+        epoch:
+          format: int64
+          type: integer
+        finished:
+          format: int64
+          type: integer
+        hosts:
+          additionalProperties:
+            format: int64
+            type: integer
+          type: object
+        idle:
+          format: int64
+          type: integer
+        memoryBytes:
+          format: int64
+          type: integer
+        netRxRate:
+          format: double
+          type: number
+        netTxRate:
+          format: double
+          type: number
+        pids:
+          format: int64
+          type: integer
+        placements:
+          format: int64
+          type: integer
+        queued:
+          format: int64
+          type: integer
+        runs:
+          additionalProperties:
+            format: int64
+            type: integer
+          type: object
+        startP50:
+          format: double
+          type: number
+        startP95:
+          format: double
+          type: number
+        started:
+          format: int64
+          type: integer
+      type: object
     Sandbox:
       additionalProperties: false
       properties:
@@ -762,6 +984,38 @@ components:
             - array
             - "null"
       type: object
+    Status:
+      additionalProperties: false
+      properties:
+        allocated:
+          $ref: "#/components/schemas/Totals"
+        busy:
+          format: int64
+          type: integer
+        capacity:
+          $ref: "#/components/schemas/Totals"
+        hosts:
+          additionalProperties:
+            format: int64
+            type: integer
+          type: object
+        idle:
+          format: int64
+          type: integer
+        oldestQueuedAt:
+          format: date-time
+          type: string
+        queued:
+          format: int64
+          type: integer
+        runs:
+          additionalProperties:
+            format: int64
+            type: integer
+          type: object
+        startLatency:
+          $ref: "#/components/schemas/Percentiles"
+      type: object
     StatusBody:
       additionalProperties: false
       properties:
@@ -816,6 +1070,67 @@ components:
           type: string
         tty:
           type: boolean
+      type: object
+    Tenant:
+      additionalProperties: false
+      properties:
+        activeRuns:
+          format: int64
+          type: integer
+        createdAt:
+          format: date-time
+          type: string
+        hosts:
+          format: int64
+          type: integer
+        id:
+          type: string
+        maxConcurrentRuns:
+          format: int64
+          type: integer
+        maxHosts:
+          format: int64
+          type: integer
+        maxStorageBytes:
+          format: int64
+          type: integer
+        name:
+          type: string
+        retentionDays:
+          format: int64
+          type: integer
+        runs:
+          format: int64
+          type: integer
+        storedBytes:
+          format: int64
+          type: integer
+      type: object
+    TenantList:
+      additionalProperties: false
+      properties:
+        tenants:
+          items:
+            $ref: "#/components/schemas/Tenant"
+          type:
+            - array
+            - "null"
+      type: object
+    Totals:
+      additionalProperties: false
+      properties:
+        cpus:
+          format: double
+          type: number
+        disk:
+          format: int64
+          type: integer
+        memory:
+          format: int64
+          type: integer
+        runs:
+          format: int64
+          type: integer
       type: object
     Volume:
       additionalProperties: false
@@ -873,12 +1188,14 @@ components:
       type: object
   securitySchemes:
     apiKey:
-      description: A tenant API key (luxd admin create-key).
+      description: A tenant API key (luxd admin create-key), or an operator key (luxd admin create-operator-key).
       scheme: bearer
       type: http
 info:
   description: |-
     The lux tenant API. Every /v1 call authenticates with an API key (`Authorization: Bearer <key>`); a key has scopes `read`, `run` and `admin`, each implying the ones before it.
+
+    An operator key (`luxd admin create-operator-key`, scope `operator`) belongs to no tenant: it sees and acts on every tenant through the same operations. A Run's operations act in the Run's own tenant; lists span every tenant unless `?tenant=` (an id or a name) narrows them; creating needs `?tenant=`.
 
     Errors are JSON: `{"error": {"code": "not_found", "message": "...", "details": ["..."]}}`, with a stable `code`.
   title: lux
@@ -986,14 +1303,208 @@ paths:
       summary: Download an artifact
       tags:
         - runs
+  /v1/events:
+    get:
+      description: |-
+        Server-sent events: one `lux` event per Run event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). From now, from `after`, or the `last` N; with `follow=false` the stream ends after what is there now.
+
+        Needs the `read` scope.
+      operationId: eventFeed
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "From after this event id (default: from now)."
+          explode: false
+          in: query
+          name: after
+          schema:
+            description: "From after this event id (default: from now)."
+            type: string
+        - description: Start with the last N events (at most 500), instead of from now.
+          explode: false
+          in: query
+          name: last
+          schema:
+            description: Start with the last N events (at most 500), instead of from now.
+            format: int64
+            type: integer
+        - description: "false: end after what there is now."
+          explode: false
+          in: query
+          name: follow
+          schema:
+            description: "false: end after what there is now."
+            type: string
+        - description: "A reconnecting client's last event id: resumes after it."
+          in: header
+          name: Last-Event-ID
+          schema:
+            description: "A reconnecting client's last event id: resumes after it."
+            type: string
+      responses:
+        "200":
+          content:
+            text/event-stream:
+              schema:
+                description: "Server-sent events: `event: <type>` and `data: <JSON>` lines, each event ended by a blank line."
+                items:
+                  oneOf:
+                    - description: A Run's event.
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/FeedEvent"
+                        event:
+                          const: lux
+                          type: string
+                      required:
+                        - event
+                        - data
+                      title: lux
+                      type: object
+                    - description: The stream failed.
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/OutputError"
+                        event:
+                          const: error
+                          type: string
+                      required:
+                        - event
+                        - data
+                      title: error
+                      type: object
+                type: array
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Every Run's events, as they happen
+      tags:
+        - runs
+  /v1/history:
+    get:
+      description: |-
+        Samples of what GET /v1/status reports.
+
+        Needs the `read` scope.
+      operationId: history
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/History"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: The state of the system over time
+      tags:
+        - history
   /v1/hosts:
     get:
       description: |-
-        The tenant's own hosts, and platform hosts in pools it can use.
+        The tenant's own hosts, and platform hosts in pools it can use. Operators: every host.
 
         Needs the `read` scope.
       operationId: listHosts
       parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
         - description: true to include terminated hosts.
           explode: false
           in: query
@@ -1002,6 +1513,20 @@ paths:
             description: true to include terminated hosts.
             examples:
               - "true"
+            type: string
+        - description: Only this pool's hosts.
+          explode: false
+          in: query
+          name: pool
+          schema:
+            description: Only this pool's hosts.
+            type: string
+        - description: "Only hosts in this state: provisioning, ready, draining, lost or terminated."
+          explode: false
+          in: query
+          name: state
+          schema:
+            description: "Only hosts in this state: provisioning, ready, draining, lost or terminated."
             type: string
       responses:
         "200":
@@ -1039,20 +1564,97 @@ paths:
       summary: List hosts
       tags:
         - hosts
-  /v1/hosts/{id}/drain:
-    post:
+  /v1/hosts/{id}:
+    get:
       description: |-
-        No new placements; its live Runs are stopped and resumed elsewhere. Only the tenant's own hosts.
+        With its live placements.
 
-        Needs the `admin` scope.
-      operationId: drainHost
+        Needs the `read` scope.
+      operationId: getHost
       parameters:
-        - description: The host's id or name.
+        - description: The host's id or name (a name of a host that is not terminated).
           in: path
           name: id
           required: true
           schema:
-            description: The host's id or name.
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Host"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Get a host
+      tags:
+        - hosts
+  /v1/hosts/{id}/drain:
+    post:
+      description: |-
+        No new placements; its live Runs are stopped and resumed elsewhere. Only the tenant's own hosts; operators, any host.
+
+        Needs the `admin` scope.
+      operationId: drainHost
+      parameters:
+        - description: The host's id or name (a name of a host that is not terminated).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
             type: string
       responses:
         "202":
@@ -1096,13 +1698,121 @@ paths:
       summary: Drain a host
       tags:
         - hosts
+  /v1/hosts/{id}/history:
+    get:
+      description: |-
+        CPU cores and memory in use, disk used, and its live placements and what they asked for. A tenant sees its own hosts' history only.
+
+        Needs the `read` scope.
+      operationId: hostHistory
+      parameters:
+        - description: The host's id or name (a name of a host that is not terminated).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/History"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A host's resource use over time
+      tags:
+        - history
   /v1/pools:
     get:
       description: |-
-        The tenant's pools and the platform pools it can use.
+        The tenant's pools and the platform pools it can use. Operators: every pool.
 
         Needs the `read` scope.
       operationId: listPools
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
       responses:
         "200":
           content:
@@ -1122,6 +1832,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
           description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
         "500":
           content:
             application/json:
@@ -1136,6 +1852,14 @@ paths:
     post:
       description: Needs the `admin` scope.
       operationId: putPool
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
       requestBody:
         content:
           application/json:
@@ -1149,6 +1873,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/Pool"
           description: OK
+          headers:
+            Tenant:
+              schema:
+                description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+                type: string
         "401":
           content:
             application/json:
@@ -1186,6 +1915,13 @@ paths:
         Needs the `admin` scope.
       operationId: deletePool
       parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
         - description: The pool's name.
           in: path
           name: name
@@ -1239,6 +1975,13 @@ paths:
         Needs the `read` scope.
       operationId: listRuns
       parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
         - description: Only Runs in these states (comma-separated).
           explode: false
           in: query
@@ -1247,6 +1990,20 @@ paths:
             description: Only Runs in these states (comma-separated).
             examples:
               - running,stopped
+            type: string
+        - description: "Only Runs resume accepts: stopped, lost or failed."
+          explode: false
+          in: query
+          name: resumable
+          schema:
+            description: "Only Runs resume accepts: stopped, lost or failed."
+            type: boolean
+        - description: Only Runs with a placement (any epoch) on this host, by id or name.
+          explode: false
+          in: query
+          name: host
+          schema:
+            description: Only Runs with a placement (any epoch) on this host, by id or name.
             type: string
         - description: Only Runs with this label (key=value); repeat to require several.
           explode: true
@@ -1259,6 +2016,13 @@ paths:
             type:
               - array
               - "null"
+        - description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run."
+          explode: false
+          in: query
+          name: before
+          schema:
+            description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run."
+            type: string
         - description: "At most this many Runs, newest first: 1 to 1000, default 100."
           explode: false
           in: query
@@ -1273,7 +2037,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RunList"
+                $ref: "#/components/schemas/ListRunsBody"
           description: OK
         "401":
           content:
@@ -1762,6 +2526,101 @@ paths:
           $ref: "#/components/schemas/StreamData"
         open:
           $ref: "#/components/schemas/StreamOpen"
+  /v1/runs/{id}/history:
+    get:
+      description: |-
+        Across its placements: each sample carries its epoch.
+
+        Needs the `read` scope.
+      operationId: runHistory
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/History"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A Run's resource use over time
+      tags:
+        - runs
+        - history
   /v1/runs/{id}/input:
     post:
       description: |-
@@ -1837,6 +2696,75 @@ paths:
       summary: Steer a running Run
       tags:
         - interactive
+  /v1/runs/{id}/migrate:
+    post:
+      description: |-
+        It is stopped (its state snapshotted), then resumed at once on `to`, or on any host but the one it was on. An agent resumes its session; `input`, if given, is delivered once it runs again.
+
+        Needs the `operator` scope.
+      operationId: migrateRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MigrateRequest"
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: Accepted
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Move a running Run to another host
+      tags:
+        - runs
+        - operators
   /v1/runs/{id}/output:
     get:
       description: |-
@@ -2337,6 +3265,108 @@ paths:
       summary: Stop a Run
       tags:
         - runs
+  /v1/status:
+    get:
+      description: |-
+        Runs by state, the queue, time to start, hosts by state, and capacity against what live placements hold: the caller's (a tenant's Runs and the hosts it may use), or the whole system's for an operator.
+
+        Needs the `read` scope.
+      operationId: status
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: The state of the system now
+      tags:
+        - history
+  /v1/tenants:
+    get:
+      description: |-
+        Their quotas and what they use.
+
+        Needs the `operator` scope.
+      operationId: listTenants
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List tenants
+      tags:
+        - operators
 tags:
   - description: Submit Runs and follow them through their lifecycle.
     name: runs
@@ -2346,3 +3376,7 @@ tags:
     name: hosts
   - description: Pools of hosts, and how they are provisioned.
     name: pools
+  - description: The system, hosts and Runs now and over time.
+    name: history
+  - description: "For operator keys: every tenant."
+    name: operators

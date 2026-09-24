@@ -264,6 +264,8 @@ class TestEnvironment:
                 "AWS_CONFIG_FILE": "/dev/null", "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
                 "AWS_EC2_METADATA_DISABLED": "true", "LUX_EC2_ENDPOINT": "http://127.0.0.1:9",
                 "AWS_ACCESS_KEY_ID": "", "AWS_SECRET_ACCESS_KEY": "", "AWS_SESSION_TOKEN": "", "AWS_PROFILE": ""}),
+            # History fills in seconds, not minutes.
+            "LUX_SAMPLE_EVERY": "2s",
         }
 
     # -- setup --------------------------------------------------------------

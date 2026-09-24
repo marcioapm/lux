@@ -183,9 +183,9 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		next, reason = StateCancelled, "cancelled"
 	case stopReason == "timeout":
 		next, reason = StateFailed, "timeout"
-	case stopReason == "stop" || stopReason == "drain" || stopReason == "preempt":
-		// A requested stop: resumable. (A drained or preempted Run is put
-		// back in the queue by resumeAfterStop.)
+	case stopReason == "stop" || stopReason == "drain" || stopReason == "preempt" || stopReason == "migrate":
+		// A requested stop: resumable. (A drained, preempted or migrated
+		// Run is put back in the queue by resumeAfterStop.)
 		next, reason = StateStopped, stopReason
 	case st.State == "failed":
 		next, reason = StateFailed, st.Message
@@ -201,9 +201,16 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
 		return err
 	}
-	if stopReason == "drain" || stopReason == "preempt" {
-		// Moved, not stopped by a person: resume elsewhere automatically.
-		return s.requestResume(ctx, tx, tenantID, runID, nil, "auto-resume after "+stopReason)
+	if stopReason == "drain" || stopReason == "preempt" || stopReason == "migrate" {
+		// Moved, not stopped by a person: resume elsewhere automatically
+		// (with the input a migration carries, if any).
+		var in *proto.Input
+		if stopReason == "migrate" {
+			if err := tx.QueryRow(ctx, `SELECT pending_input FROM runs WHERE id = $1`, runID).Scan(&in); err != nil {
+				return err
+			}
+		}
+		return s.requestResume(ctx, tx, tenantID, runID, in, "auto-resume after "+stopReason)
 	}
 	if terminal(next) {
 		s.secrets.drop(runID)

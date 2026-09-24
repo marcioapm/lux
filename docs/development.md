@@ -15,6 +15,7 @@ internal/
   proto/        luxd ↔ runner and runner ↔ shim messages
   spec/         the RunSpec: parsing, validation, defaults
   cli/, client/ the CLI and its API client
+console/        the operator console: React + TypeScript, built with Bun; console.go embeds dist/ in luxd
 tests/          the end-to-end harness (Python, uv, pytest)
 docs/
 ```
@@ -22,10 +23,14 @@ docs/
 ## Building
 
 ```bash
-make build        # static binaries in bin/
+make build        # the console (console/dist, needs Bun), then static binaries in bin/
 make lint         # go vet, gofmt
 make unit         # go test ./... (store tests need Postgres; see below)
 ```
+
+`go build` alone works too: luxd then embeds whatever `console/dist` holds,
+and without a console build serves a page saying how to make one. To work
+on the console, see [console/README.md](../console/README.md).
 
 The toolchain and every dependency are kept at their latest release.
 

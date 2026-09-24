@@ -18,11 +18,26 @@ import (
 type Client struct {
 	Base string
 	Key  string
-	HTTP *http.Client
+	// Tenant, for an operator key: every request is narrowed to this tenant
+	// (an id or a name). Tenant keys ignore it.
+	Tenant string
+	HTTP   *http.Client
 }
 
 func New(base, key string) *Client {
 	return &Client{Base: strings.TrimRight(base, "/"), Key: key, HTTP: &http.Client{}}
+}
+
+// url is the absolute URL of path (which may carry a query).
+func (c *Client) url(path string) string {
+	if c.Tenant == "" {
+		return c.Base + path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return c.Base + path + sep + "tenant=" + url.QueryEscape(c.Tenant)
 }
 
 // APIError is an error response from luxd.
@@ -50,7 +65,7 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any, hdr .
 		}
 		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.Base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.url(path), body)
 	if err != nil {
 		return err
 	}
@@ -96,7 +111,7 @@ type SSEEvent struct {
 // Stream opens an SSE endpoint and calls fn for each event until the
 // stream ends, fn returns an error, or ctx is cancelled.
 func (c *Client) Stream(ctx context.Context, path string, q url.Values, fn func(SSEEvent) error) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.Base+path+"?"+q.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url(path+"?"+q.Encode()), nil)
 	if err != nil {
 		return err
 	}
@@ -136,7 +151,7 @@ func (c *Client) Stream(ctx context.Context, path string, q url.Values, fn func(
 // carrying JSON messages (see the server's stream.go). An API error
 // before the upgrade (not running, no such port) is returned as such.
 func (c *Client) Dial(ctx context.Context, path string) (*websocket.Conn, error) {
-	u := "ws" + strings.TrimPrefix(c.Base+path, "http")
+	u := "ws" + strings.TrimPrefix(c.url(path), "http")
 	ws, resp, err := websocket.Dial(ctx, u, &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + c.Key}},
 		HTTPClient: c.HTTP,

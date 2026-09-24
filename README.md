@@ -36,6 +36,7 @@ agent, stream-json for Claude Code, and app-server for Codex.
 - [API](docs/openapi.yaml): the tenant REST API as OpenAPI 3.1, generated from the code (luxd also serves it at `/openapi.yaml` and `/openapi.json`).
 - [Adapters](docs/adapters.md): generic, ACP, Claude Code, Codex, OpenCode.
 - [Operations](docs/operations.md): running luxd and hosts, configuration.
+- [Operators and the console](docs/operators.md): every tenant at once, migrating and resuming Runs, history, the web console.
 - [Telemetry](docs/telemetry.md): what is recorded about Runs, placements and hosts.
 - [Security](docs/security.md)
 - [Development](docs/development.md): building, the test harness.

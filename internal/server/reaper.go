@@ -141,7 +141,7 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 	var hostID string
 	var epoch int
 	err := tx.QueryRow(ctx, `UPDATE placements p SET stop_requested_at = coalesce(stop_requested_at, now()),
-			stop_reason = CASE WHEN stop_reason = '' OR $2 = 'cancel' THEN $2 ELSE stop_reason END
+			stop_reason = CASE WHEN stop_reason = '' OR $2 = 'cancel' OR (stop_reason = 'migrate' AND $2 = 'stop') THEN $2 ELSE stop_reason END
 		FROM runs r
 		WHERE r.id = $1 AND p.run_id = r.id AND p.epoch = r.current_epoch
 		  AND p.state IN `+livePlacementStates+`

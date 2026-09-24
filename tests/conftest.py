@@ -143,6 +143,15 @@ def lux(tenant_factory) -> Lux:
     return tenant_factory()
 
 
+@pytest.fixture(scope="session")
+def operator(env: TestEnvironment) -> Lux:
+    """The CLI with an operator key: every tenant. The database is shared by
+    the whole session, so tests look for their own Runs and hosts in what
+    it sees, never at totals."""
+    _require(env, "luxd", "lux")
+    return Lux(env, env.luxd_admin("create-operator-key")["apiKey"], "")
+
+
 class Runners:
     """Runners on the simulated hosts, for one tenant."""
 

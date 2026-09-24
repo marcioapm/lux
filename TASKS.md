@@ -21,6 +21,15 @@ Each step ends with an end-to-end test through `tests/run_tests.py`.
 | 13 | EC2 pools (fake EC2 in tests, `--real-ec2` for nightly), autoscaling, draining, warm pools | ✅ done |
 | 14 | Codex and OpenCode adapters | ✅ done (pulled forward) |
 
+## Operator console
+
+| # | Step | Status |
+| --- | --- | --- |
+| C1 | Operator keys: every tenant through the same API and CLI, `--tenant`, `hosts get`, `tenants ls`, `status` | ✅ done |
+| C2 | History: host, placement and system samples, rollups, retention, `lux history` | ✅ done |
+| C3 | Actions: `migrate`, `resume --to`, force resume with held secrets, resumability, `events --all` | ✅ done |
+| C4 | Web console (React, Bun), embedded in luxd at `/console/` | in progress |
+
 Also: docs in `docs/` kept current with each step; external-tool findings
 recorded in `docs/agent-protocols.md` and `docs/podman.md`.
 

@@ -270,10 +270,12 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 	mem, disk, cpu := make([]int64, n), make([]int64, n), make([]float64, n)
 	pids := make([]int, n)
 	rx, tx_ := make([]int64, n), make([]int64, n)
+	curMem, curPids := make([]int64, n), make([]int, n)
 	for i, l := range hb.Leases {
 		runs[i], epochs[i] = l.RunID, l.Epoch
 		if u := l.Usage; u != nil {
 			mem[i], disk[i], pids[i], cpu[i], rx[i], tx_[i] = u.PeakMemoryBytes, u.PeakDiskBytes, u.PeakPids, u.CPUSeconds, u.NetRxBytes, u.NetTxBytes
+			curMem[i], curPids[i] = u.MemoryBytes, u.Pids
 		}
 	}
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -286,6 +288,7 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		if err := forgetMissingCopies(ctx, tx, hostID, hb.LocalSnapshots); err != nil {
 			return err
 		}
+		s.sample(ctx, tx, func(tx pgx.Tx) error { return sampleHost(ctx, tx, hostID, hb.Usage) })
 		if n == 0 {
 			return nil
 		}
@@ -303,8 +306,40 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 			WHERE p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1
 			  AND p.state IN `+livePlacementStates,
 			hostID, interval(s.cfg.LeaseDuration), runs, epochs, mem, disk, pids, cpu, rx, tx_)
-		return err
+		if err != nil {
+			return err
+		}
+		// One sample per live placement: current levels, cumulative counters.
+		s.sample(ctx, tx, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx)
+			SELECT p.run_id, p.epoch, p.tenant_id, 0, now(), nullif(u.cpu, 0), nullif(u.mem, 0), nullif(u.disk, 0), nullif(u.pids, 0),
+				nullif(u.rx, 0), nullif(u.tx, 0)
+			FROM unnest($2::text[], $3::int[], $4::bigint[], $5::bigint[], $6::int[], $7::float8[], $8::bigint[], $9::bigint[])
+				AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx)
+			JOIN placements p ON p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1 AND p.state IN `+livePlacementStates+`
+			ON CONFLICT DO NOTHING`,
+				hostID, runs, epochs, curMem, disk, curPids, cpu, rx, tx_)
+			return err
+		})
+		return nil
 	})
+}
+
+// sample writes history in a savepoint of a heartbeat's transaction: a
+// sample that cannot be written is logged and lost, never a reason to
+// fail the heartbeat (and lose its leases).
+func (s *Server) sample(ctx context.Context, tx pgx.Tx, write func(pgx.Tx) error) {
+	sp, err := tx.Begin(ctx)
+	if err == nil {
+		if err = write(sp); err == nil {
+			err = sp.Commit(ctx)
+		} else {
+			_ = sp.Rollback(ctx)
+		}
+	}
+	if err != nil && ctx.Err() == nil {
+		s.log.Warn("history: sample not written", "err", err)
+	}
 }
 
 // recordPushes keeps, per repository, the commit this Run pushed: the

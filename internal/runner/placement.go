@@ -972,6 +972,7 @@ func (p *placement) usage() *proto.Usage {
 	if p.cgroup != "" {
 		if cu, err := podman.CgroupUsage(p.cgroup); err == nil {
 			u.PeakMemoryBytes, u.PeakPids, u.CPUSeconds = cu.PeakMemoryBytes, cu.PeakPids, cu.CPUSeconds
+			u.MemoryBytes, u.Pids = cu.MemoryBytes, cu.Pids
 		}
 	}
 	return u
