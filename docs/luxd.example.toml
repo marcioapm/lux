@@ -13,6 +13,7 @@ lease = "30s"                      # LUX_LEASE: a host silent this long is lost
 tick = "1s"                        # LUX_TICK: scheduler and reaper interval
 scale_down_after = "10m"           # LUX_SCALE_DOWN_AFTER
 launch_timeout = "10m"             # LUX_LAUNCH_TIMEOUT
+outdated_drain_percent = 10        # LUX_OUTDATED_DRAIN_PERCENT: caps concurrent outdated-binaries drains per pool (of its live hosts; at least 1)
 
 [database]
 # LUX_DATABASE_URL. serve connects as lux_app; migrate needs the database
