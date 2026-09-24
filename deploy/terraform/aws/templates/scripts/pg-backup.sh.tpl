@@ -1,15 +1,13 @@
-#!/bin/sh
-# Daily pg_dump -Fc, uploaded to S3. Run as the postgres user by
+#!/bin/bash
+# Daily pg_dump -Fc, streamed straight to S3. Run as the postgres user by
 # lux-pg-backup.timer at 00:00 UTC. Lifecycle expiry on the bucket
 # (backup_retention_days) is what actually deletes old backups; this
-# script only uploads.
-set -eu
+# script only uploads. bash, not sh: `set -o pipefail` needs it, so that
+# a pg_dump failure partway through the stream fails the whole pipeline
+# instead of only being visible in `aws s3 cp`'s (successful, from an
+# empty/truncated stdin) exit code.
+set -euo pipefail
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-dump_file="/tmp/lux-pg-$stamp.dump"
 
-pg_dump -Fc -d "${db_name}" -f "$dump_file"
-
-aws s3 cp "$dump_file" "s3://${backup_bucket}/${db_name}-$stamp.dump" --region "${region}"
-
-rm -f "$dump_file"
+pg_dump -Fc -d "${db_name}" | aws s3 cp - "s3://${backup_bucket}/${db_name}-$stamp.dump" --region "${region}"
