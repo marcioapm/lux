@@ -2,6 +2,7 @@ package shim
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"slices"
@@ -43,9 +44,8 @@ type chanBuf struct {
 	id   string
 	data []byte
 	// Streamed text (Stream): released as a typ event, built by wrap from
-	// the text; key names the message the text belongs to.
+	// the text.
 	typ   string
-	key   string
 	wrap  func(text string) any
 	timer *time.Timer
 	// since the buffer last made progress: once it is maxHold old, it is
@@ -104,7 +104,7 @@ func (o *Output) Write(ch string, p []byte) {
 	}
 	o.add(b, p)
 	// Flush complete lines now, keeping a partial last line.
-	if i := lastNewline(b.data); i >= 0 {
+	if i := bytes.LastIndexByte(b.data, '\n'); i >= 0 {
 		o.flushTo(b, i+1)
 	}
 	o.bound(b)
@@ -377,15 +377,6 @@ func (o *Output) Close() error {
 	o.w.Flush()
 	o.f.Sync()
 	return o.f.Close()
-}
-
-func lastNewline(b []byte) int {
-	for i := len(b) - 1; i >= 0; i-- {
-		if b[i] == '\n' {
-			return i
-		}
-	}
-	return -1
 }
 
 // completeRunes is len(b) less a last character not yet written whole.

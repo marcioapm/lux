@@ -36,8 +36,8 @@ func TestRedactOverlaps(t *testing.T) {
 
 func TestRedactEmpty(t *testing.T) {
 	r := NewRedactor(nil)
-	if got := r.Redact("abc"); got != "abc" || r.Longest() != 0 {
-		t.Errorf("got %q, longest %d", got, r.Longest())
+	if got := r.Redact("abc"); got != "abc" || r.longest != 0 {
+		t.Errorf("got %q, longest %d", got, r.longest)
 	}
 }
 

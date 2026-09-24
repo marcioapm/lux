@@ -52,9 +52,10 @@ func (r *Redactor) Set(values map[string]string) {
 		pairs = append(pairs, pattern{v, "[REDACTED:" + name + "]"})
 	}
 	for name, v := range values {
+		b64 := base64.StdEncoding.EncodeToString([]byte(v))
 		add(v, name)
-		add(base64.StdEncoding.EncodeToString([]byte(v)), name)
-		add(strings.TrimRight(base64.StdEncoding.EncodeToString([]byte(v)), "="), name)
+		add(b64, name)
+		add(strings.TrimRight(b64, "="), name)
 		add(base64.URLEncoding.EncodeToString([]byte(v)), name)
 		add(url.QueryEscape(v), name)
 		add(url.PathEscape(v), name)
@@ -231,12 +232,4 @@ func jsonString(v string, escapeHTML bool) string {
 	enc.SetEscapeHTML(escapeHTML)
 	_ = enc.Encode(v)
 	return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSuffix(b.String(), "\n"), `"`), `"`)
-}
-
-// Longest is the longest matched form, so a streaming writer can hold back
-// that many bytes to catch a value split across writes.
-func (r *Redactor) Longest() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.longest
 }
