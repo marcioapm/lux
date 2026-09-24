@@ -141,19 +141,12 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 				return err
 			}
 		}
-		if !draining && s.binariesOutdated(h.Arch, h.RunnerSHA256, h.ShimSHA256) {
-			if room, err := s.outdatedDrainRoom(ctx, tx, hostID); err != nil {
+		if !draining {
+			// A static host's Runs finish undisturbed and the reaper sends
+			// MsgExit once none are left; a provisioned host is replaced by
+			// the pool once it is idle.
+			if outdatedDrained, err = s.drainIfOutdated(ctx, tx, hostID, h.Arch, h.RunnerSHA256, h.ShimSHA256); err != nil {
 				return err
-			} else if room {
-				// Cordon only: no requestStop. A static host's Runs finish
-				// undisturbed and the reaper sends MsgExit once none are
-				// left; a provisioned host stops taking new Runs and the
-				// pool's existing replace path takes over once it is idle.
-				drained, err := s.drainHosts(ctx, tx, outdatedBinariesReason, "", "id = $1", hostID)
-				if err != nil {
-					return err
-				}
-				outdatedDrained = drained
 			}
 		}
 		w.HostID = hostID
@@ -367,23 +360,15 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		}
 		// A host already draining (for any reason) is left alone: never
 		// re-drained here, and its reason is not this heartbeat's to change.
-		// draining alone is enough: the UPDATE above already reconciled
-		// state with it for a host coming back from lost (same predicate
-		// registerHost's Hello uses).
 		var arch string
 		var draining bool
 		if err := tx.QueryRow(ctx, `SELECT arch, draining FROM hosts WHERE id = $1`, hostID).Scan(&arch, &draining); err != nil {
 			return err
 		}
-		if !draining && s.binariesOutdated(arch, hb.RunnerSHA256, hb.ShimSHA256) {
-			if room, err := s.outdatedDrainRoom(ctx, tx, hostID); err != nil {
+		if !draining {
+			var err error
+			if outdatedDrained, err = s.drainIfOutdated(ctx, tx, hostID, arch, hb.RunnerSHA256, hb.ShimSHA256); err != nil {
 				return err
-			} else if room {
-				drained, err := s.drainHosts(ctx, tx, outdatedBinariesReason, "", "id = $1", hostID)
-				if err != nil {
-					return err
-				}
-				outdatedDrained = drained
 			}
 		}
 		if n > 0 {

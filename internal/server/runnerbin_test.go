@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -34,15 +35,11 @@ func TestLoadRunnerBinaries(t *testing.T) {
 	s := &Server{cfg: Config{RunnerBinDir: dir}}
 	s.loadRunnerBinaries()
 
-	got, ok := s.runnerBinSHA256("arm64", "lux-runner")
-	if !ok || got != sum("runner-arm64") {
-		t.Errorf("arm64 lux-runner: %q %v", got, ok)
+	if got := s.bins["arm64"]["lux-runner"].sha256; got != sum("runner-arm64") {
+		t.Errorf("arm64 lux-runner: %q", got)
 	}
-	if _, ok := s.runnerBinSHA256("amd64", "lux-shim"); ok {
+	if _, ok := s.bins["amd64"]["lux-shim"]; ok {
 		t.Error("amd64 lux-shim: found one that was never written")
-	}
-	if _, ok := s.runnerBinSHA256("riscv64", "lux-runner"); ok {
-		t.Error("an arch luxd never heard of was offered")
 	}
 
 	m := s.runnerBinManifest()
@@ -62,8 +59,8 @@ func TestLoadRunnerBinariesEmptyDir(t *testing.T) {
 	if len(s.runnerBinManifest()) != 0 {
 		t.Errorf("manifest not empty: %+v", s.runnerBinManifest())
 	}
-	if _, ok := s.runnerBinSHA256("arm64", "lux-runner"); ok {
-		t.Error("found a binary with no configured directory")
+	if len(s.bins) != 0 {
+		t.Errorf("binaries loaded with no configured directory: %v", s.bins)
 	}
 }
 
@@ -141,23 +138,11 @@ func TestServedBytesSurviveAnInPlaceFileSwap(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sub, "lux-runner"), []byte("swapped-in bytes, different content"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := s.runnerBinSHA256("arm64", "lux-runner")
-	if !ok || got != wantSHA {
-		t.Fatalf("advertised sha256 after an in-place swap: %q, want the original %q", got, wantSHA)
+	b := s.bins["arm64"]["lux-runner"]
+	if b.sha256 != wantSHA {
+		t.Fatalf("advertised sha256 after an in-place swap: %q, want the original %q", b.sha256, wantSHA)
 	}
-	if !bytesEqual(s.bins["arm64"]["lux-runner"].data, original) {
+	if !bytes.Equal(b.data, original) {
 		t.Fatal("served bytes changed after an in-place file swap")
 	}
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
