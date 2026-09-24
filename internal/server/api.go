@@ -1114,8 +1114,12 @@ func (s *Server) pushRun(ctx context.Context, in *pushRunInput) (*requestIDOutpu
 		}
 		// An expected commit replaces the lease: a compare-and-swap.
 		for repo, sha := range req.Expect {
-			if !slices.ContainsFunc(sp.Git.Repositories, func(r spec.Repository) bool { return r.Name == repo }) {
+			i := slices.IndexFunc(sp.Git.Repositories, func(r spec.Repository) bool { return r.Name == repo })
+			if i < 0 {
 				return errf(http.StatusUnprocessableEntity, "invalid_request", "expect: the run has no repository %q", repo)
+			}
+			if !sp.Git.Repositories[i].Pushed() {
+				return errf(http.StatusUnprocessableEntity, "invalid_request", "expect: repository %q is not pushed (push: false)", repo)
 			}
 			if !isCommitID(sha) {
 				return errf(http.StatusUnprocessableEntity, "invalid_request", "expect[%s]: not a full commit id", repo)

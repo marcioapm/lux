@@ -102,7 +102,7 @@ func (a *app) waitPush(cmd *cobra.Command, runID, requestID string) error {
 				if a.output != "json" {
 					fmt.Fprintf(a.stdout, "%s → %s: %s %s\n", r["repo"], r["branch"], r["status"], r["error"])
 				}
-				if r["status"] != "pushed" && r["status"] != "up-to-date" {
+				if r["status"] != "pushed" && r["status"] != "up-to-date" && r["status"] != "skipped" {
 					failed = true
 				}
 			}

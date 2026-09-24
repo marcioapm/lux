@@ -38,6 +38,9 @@ git:
       ref: main                 # branch, tag or sha; default: the remote's HEAD
       credential: GITHUB_TOKEN  # a secret name; the runner uses it, the container never sees it
       path: /workspace/repos/api  # default: /workspace/repos/<name>
+    - name: shared-lib
+      url: https://github.com/acme/shared-lib.git
+      push: false               # for context: `lux push` leaves it alone
   push:
     branch: lux/fix-flaky-test  # where `lux push` pushes
 
@@ -238,6 +241,10 @@ starts:
   The checkout's hooks and config never run as the runner and never see the
   token.
 - Pushing with nothing new reports `up-to-date`.
+- A repository with `push: false` is never pushed: it is reported
+  `skipped`, and `expect` may not name it. Use it for repositories cloned
+  for context; their credential may be read-only. The workload can still
+  commit in such a checkout; lux just never pushes it.
 - Each repository's outcome is a `git.push` event. `--wait` prints the
   outcomes and exits non-zero unless every repository was pushed or already
   up to date.

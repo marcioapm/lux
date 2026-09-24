@@ -130,6 +130,10 @@ func (p *placement) push(ctx context.Context, req proto.Push) {
 	branch := sp.Git.Push.Branch
 	var results []gitws.PushResult
 	for _, r := range sp.Git.Repositories {
+		if !r.Pushed() {
+			results = append(results, gitws.PushResult{Repo: r.Name, Status: "skipped"})
+			continue
+		}
 		res := gitws.PushResult{Repo: r.Name, Branch: branch, Status: "failed"}
 		bundle, err := p.bundle(ctx, r)
 		if err == nil {

@@ -92,7 +92,13 @@ type Repository struct {
 	Credential string `json:"credential,omitempty" yaml:"credential,omitempty"`
 	// Path inside the container; defaults to <workspace volume>/repos/<name>.
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
+	// Push: false keeps a repository out of pushes (one cloned for context;
+	// its credential may be read-only). Default true.
+	Push *bool `json:"push,omitempty" yaml:"push,omitempty"`
 }
+
+// Pushed reports whether pushes include the repository.
+func (r Repository) Pushed() bool { return r.Push == nil || *r.Push }
 
 type Push struct {
 	Branch string `json:"branch" yaml:"branch"`

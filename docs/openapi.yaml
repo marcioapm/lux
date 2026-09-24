@@ -523,6 +523,8 @@ components:
           type: string
         path:
           type: string
+        push:
+          type: boolean
         ref:
           type: string
         url:

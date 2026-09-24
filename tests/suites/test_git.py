@@ -202,3 +202,25 @@ def test_push_onto_an_existing_branch_at_an_expected_commit(lux, runners, hosts,
         with pytest.raises(CLIError) as e:
             lux.run("push", run_id, "--expect", bad)
         assert e.value.code != 0
+
+
+def test_a_repository_marked_push_false_is_never_pushed(lux, runners, hosts, fake_image, git_server):
+    """Repositories cloned for context stay untouched: the push skips them
+    (reported as skipped), and an expected commit may not name them."""
+    git_server.create("work", {"a.txt": "base\n"})
+    git_server.create("context", {"b.txt": "base\n"})
+    runners.start(hosts[0])
+    spec = repo_spec(fake_image, git_server, "write a.txt changed", repo="work")
+    spec["git"]["repositories"].append({"name": "context", "url": git_server.url("context"), "ref": "main",
+                                        "credential": "GIT_TOKEN", "push": False})
+    run_id = lux.submit(spec)
+    lux.wait_activity(run_id, "idle")
+    commit(lux, run_id, hosts[0], "work", "change a")
+    out = lux.json("push", run_id, "--wait")
+    by_repo = {r["repo"]: r for r in out}
+    assert by_repo["work"]["status"] == "pushed", out
+    assert by_repo["context"]["status"] == "skipped" and not by_repo["context"].get("branch"), out
+    assert git_server.show("work", "lux/work", "a.txt") == "changed\n"
+    assert git_server.rev("context", "lux/work") == "", "a push: false repository got the branch"
+    bad = lux.run("push", run_id, "--expect", "context=" + "0" * 40, check=False)
+    assert bad.returncode != 0 and "not pushed" in bad.stderr, bad.stderr

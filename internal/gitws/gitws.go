@@ -220,7 +220,7 @@ type PushResult struct {
 	Repo   string `json:"repo"`
 	Branch string `json:"branch"`
 	Commit string `json:"commit,omitempty"`
-	Status string `json:"status"` // pushed | up-to-date | rejected | failed
+	Status string `json:"status"` // pushed | up-to-date | rejected | failed | skipped
 	Error  string `json:"error,omitempty"`
 }
 
