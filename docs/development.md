@@ -34,6 +34,20 @@ on the console, see [console/README.md](../console/README.md).
 
 The toolchain and every dependency are kept at their latest release.
 
+## Releases
+
+`make dist VERSION=vX.Y.Z` (`scripts/dist.sh`) builds the contract's
+tarballs into `dist/`: `lux_<version>_linux_{arm64,amd64}.tar.gz` (`bin/luxd`,
+`bin/lux`, and `lib/lux/runner/linux-{arm64,amd64}/{lux-runner,lux-shim}` —
+both runner arches in every linux tarball, so any luxd serves both),
+`lux_<version>_darwin_{arm64,amd64}.tar.gz` (CLI only), and `SHA256SUMS`
+over them. Every binary is static (`CGO_ENABLED=0`), `-trimpath`, with its
+version baked in (`lux --version`, `luxd version`). Unpacking a Linux
+tarball into `/usr/local` gives the default `runner_bin_dir` layout.
+
+`.github/workflows/release.yml` runs `make dist` and publishes the result
+as a GitHub Release on every `v*` tag.
+
 ## The API spec
 
 The tenant API (`/v1/...`, in `internal/server`) is declared with

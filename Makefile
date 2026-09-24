@@ -1,4 +1,4 @@
-.PHONY: build console test unit e2e infra lint clean
+.PHONY: build console test unit e2e infra lint dist clean
 
 GO_LDFLAGS := -s -w -X github.com/marcioapm/lux/internal/version.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BINARIES := luxd lux-runner lux-shim lux lux-fake
@@ -29,5 +29,12 @@ lint:
 	go vet ./...
 	gofmt -l . | (! grep .)
 
+# Release tarballs (docs/development.md "Releases"): lux_<version>_linux_
+# {arm64,amd64}.tar.gz (luxd, lux, both runner arches' lux-runner/lux-shim),
+# lux_<version>_darwin_{arm64,amd64}.tar.gz (lux only), and SHA256SUMS, all
+# in dist/. Static, trimmed, versioned from VERSION (the release tag).
+dist: console
+	VERSION=$(VERSION) ./scripts/dist.sh
+
 clean:
-	rm -rf bin console/node_modules && find console/dist -mindepth 1 ! -name .keep -delete
+	rm -rf bin dist console/node_modules && find console/dist -mindepth 1 ! -name .keep -delete
