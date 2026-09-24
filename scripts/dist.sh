@@ -30,32 +30,23 @@ build() {
   CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags "$LDFLAGS" -o "$out" "./cmd/$pkg"
 }
 
-# One work tree per linux arch: bin/ for luxd and lux, lib/lux/runner/ for
-# both runner arches' lux-runner and lux-shim.
+# Every linux tarball carries both runner arches: build them once into
+# lib/, shared by both work trees.
+for rarch in arm64 amd64; do
+  build linux "$rarch" lux-runner "$DIST/lib/lux/runner/linux-$rarch/lux-runner"
+  build linux "$rarch" lux-shim "$DIST/lib/lux/runner/linux-$rarch/lux-shim"
+done
 for arch in arm64 amd64; do
   work="$DIST/work-linux-$arch"
-  mkdir -p "$work/bin" "$work/lib/lux/runner/linux-arm64" "$work/lib/lux/runner/linux-amd64"
+  mkdir -p "$work/bin"
+  cp -r "$DIST/lib" "$work/lib"
   build linux "$arch" luxd "$work/bin/luxd"
   build linux "$arch" lux "$work/bin/lux"
+  chmod +x "$work/bin/"* "$work/lib/lux/runner"/*/*
+  tar "${TAR_REPRO_FLAGS[@]}" -C "$work" -czf "$DIST/lux_${VERSION}_linux_${arch}.tar.gz" bin lib
+  rm -rf "$work"
 done
-# The runner and shim binaries are the same for both linux tarballs
-# (every arch's build goes in both): build each runner arch once, copy
-# into both work trees.
-for rarch in arm64 amd64; do
-  build linux "$rarch" lux-runner "$DIST/lux-runner-linux-$rarch"
-  build linux "$rarch" lux-shim "$DIST/lux-shim-linux-$rarch"
-  for arch in arm64 amd64; do
-    cp "$DIST/lux-runner-linux-$rarch" "$DIST/work-linux-$arch/lib/lux/runner/linux-$rarch/lux-runner"
-    cp "$DIST/lux-shim-linux-$rarch" "$DIST/work-linux-$arch/lib/lux/runner/linux-$rarch/lux-shim"
-  done
-done
-rm -f "$DIST"/lux-runner-linux-* "$DIST"/lux-shim-linux-*
-
-for arch in arm64 amd64; do
-  chmod +x "$DIST/work-linux-$arch/bin/"* "$DIST/work-linux-$arch/lib/lux/runner"/*/*
-  tar "${TAR_REPRO_FLAGS[@]}" -C "$DIST/work-linux-$arch" -czf "$DIST/lux_${VERSION}_linux_${arch}.tar.gz" bin lib
-  rm -rf "$DIST/work-linux-$arch"
-done
+rm -rf "${DIST:?}/lib"
 
 # darwin: the CLI only.
 for arch in arm64 amd64; do
