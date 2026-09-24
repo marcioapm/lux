@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Badge, Button, ConfirmDialog, Dialog, IdChip, Select, useToast } from "../../ds/index.ts";
+import { Badge, Button, ConfirmDialog, Dialog, formatBytes, IdChip, Select, useToast } from "../../ds/index.ts";
 import { api, errorText, isApiError, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, useQuery, type MigrateRequest, type ResumeRequest, type Run, type Snapshot } from "../../api/index.ts";
 
 export interface RunActionsProps {
@@ -99,6 +99,10 @@ function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; 
   const [input, setInput] = useState("");
   const [to, setTo] = useState(ANY);
   const [from, setFrom] = useState(ANY);
+  // Stopped over its disk limit: offer twice the limit it had.
+  const overDisk = run.placements?.at(-1)?.stopReason === "disk";
+  const diskLimit = run.spec.resources.disk;
+  const [disk, setDisk] = useState(overDisk && diskLimit ? formatBytes(diskLimit * 2).replace(/\s|B$/g, "") : "");
   const [secretValues, setSecretValues] = useState<Record<string, string>>({});
   const [needSecrets, setNeedSecrets] = useState(!operator || (rs != null && (rs.secrets?.length ?? 0) > 0 && !rs.secretsHeld));
   const [lastError, setLastError] = useState<string | null>(null);
@@ -108,7 +112,7 @@ function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; 
 
   useEffect(() => {
     setLastError(null);
-  }, [input, to, from, secretValues]);
+  }, [input, to, from, secretValues, disk]);
 
   const missing = needSecrets ? secretNames.filter((n) => !secretValues[n]) : [];
   // Warnings, not a gate: the server decides. A chosen snapshot makes the
@@ -119,6 +123,7 @@ function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; 
     if (input.trim()) body.input = { text: input.trim() };
     if (to) body.to = to;
     if (from) body.fromSnapshot = from;
+    if (disk.trim()) body.resources = { disk: disk.trim() };
     if (needSecrets && secretNames.length > 0) body.secrets = secretNames.map((name) => ({ name, value: secretValues[name] ?? "" }));
     const err = await onConfirm(body);
     if (err == null) return;
@@ -178,6 +183,11 @@ function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; 
         <span className="field-label">From snapshot (optional)</span>
         <Select value={from} onChange={setFrom} options={snapOptions} />
       </div>
+      <label className="field">
+        <span className="field-label">Disk limit (optional; now {diskLimit ? formatBytes(diskLimit) : "the default"})</span>
+        {overDisk && <div className="warn-strip">It stopped over its disk limit: give it more, or it will stop again.</div>}
+        <input className="input mono" value={disk} onChange={(e) => setDisk(e.target.value)} placeholder="e.g. 40Gi" spellCheck={false} />
+      </label>
       {needSecrets && secretNames.length > 0 && (
         <div className="field">
           <span className="field-label">Secret values</span>

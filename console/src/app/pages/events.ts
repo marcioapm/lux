@@ -1,5 +1,6 @@
 // One-line summaries of lifecycle events, from their data payloads.
 import type { Event } from "../../api/index.ts";
+import { formatBytes } from "../../ds/index.ts";
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
@@ -39,6 +40,8 @@ export function eventSummary(e: Event): string {
       return `by ${str(d.by) ?? "?"}`;
     case "migrate.requested":
       return `from ${str(d.from) ?? "?"} to ${str(d.to) ?? "any other host"}`;
+    case "disk.exceeded":
+      return `disk ${typeof d.usedBytes === "number" ? formatBytes(d.usedBytes) : "?"} over its limit of ${typeof d.limitBytes === "number" ? formatBytes(d.limitBytes) : "?"}`;
     case "push.requested":
       return `push ${str(d.requestId) ?? ""}`;
     default: {

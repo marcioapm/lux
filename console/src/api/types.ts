@@ -292,6 +292,8 @@ export interface ResumeRequest {
   input?: { text: string };
   fromSnapshot?: string;
   to?: string;
+  /** Raise the Run's disk limit from now on: bytes, or a size ("40Gi"). */
+  resources?: { disk?: number | string };
 }
 
 export interface MigrateRequest {
