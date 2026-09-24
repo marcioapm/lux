@@ -4,19 +4,27 @@
 //
 //	{"region": "eu-west-1", "launchTemplate": "lt-0abc…" (id or name),
 //	 "instanceType": "m7i.2xlarge", "subnets": ["subnet-…", …],
-//	 "tags": {"team": "platform"}, "spot": true}
+//	 "tags": {"team": "platform"}, "spot": true, "userData": "ignition"}
 //
 // With "spot", instances are one-time spot instances, terminated on
 // interruption. Every instance's user data sets LUX_EC2_IMDS, so its
 // runner watches for the interruption notice and its Runs move to other
 // hosts before the instance goes.
 //
-// The instance's AMI (from the launch template) has Podman and lux-runner
-// installed. Its user data carries the runner's environment: luxd's URL, a
-// host token for the pool, and the instance's name; a boot script (in the
-// AMI) starts `lux-runner` with them. The runner registers with its
-// instance id as provider id, which is how luxd matches it to the host row
-// it made when it launched the instance.
+// userData picks how the runner's environment reaches the instance
+// (internal/hostboot renders all three from one source):
+//
+//   - "ignition" (default): an Ignition v3 config for Fedora CoreOS. No
+//     package installation happens at boot: FCOS ships everything lux-runner
+//     needs, so a host registers in well under a minute.
+//   - "script": a #!/bin/bash script, which cloud-init runs on a stock
+//     Fedora Cloud, Ubuntu, Debian or AL2023 image. It checks the host
+//     requirements and installs only what is missing (dnf, else apt-get).
+//   - "env": today's KEY=value lines, for a custom AMI whose own boot
+//     script reads them (the pre-self-update behaviour).
+//
+// Whichever format, the instance downloads lux-runner and lux-shim from
+// luxd (GET /runner/bin/...) rather than carrying them in the AMI.
 //
 // Credentials and region come from the standard AWS configuration of the
 // luxd process (environment, instance role). LUX_EC2_ENDPOINT points the
@@ -38,6 +46,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go"
 
+	"github.com/marcioapm/lux/internal/hostboot"
 	"github.com/marcioapm/lux/internal/server"
 )
 
@@ -49,6 +58,10 @@ type Template struct {
 	Subnets        []string          `json:"subnets"`
 	Tags           map[string]string `json:"tags"`
 	Spot           bool              `json:"spot"`
+	// UserData: "ignition" (default), "script", or "env". See the package
+	// doc. Validated when the pool is set (internal/server), so an unknown
+	// value is refused there, not here at launch time.
+	UserData string `json:"userData"`
 }
 
 type Provider struct {
@@ -105,9 +118,9 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	if env["LUX_EC2_IMDS"] == "" {
 		env["LUX_EC2_IMDS"] = "http://169.254.169.254"
 	}
-	var ud strings.Builder
-	for k, v := range env {
-		fmt.Fprintf(&ud, "%s=%s\n", k, v)
+	ud, err := renderUserData(t.UserData, env)
+	if err != nil {
+		return "", err
 	}
 	lt := &types.LaunchTemplateSpecification{Version: aws.String("$Default")}
 	if strings.HasPrefix(t.LaunchTemplate, "lt-") {
@@ -125,7 +138,7 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		MinCount:       aws.Int32(1),
 		MaxCount:       aws.Int32(1),
 		LaunchTemplate: lt,
-		UserData:       aws.String(base64.StdEncoding.EncodeToString([]byte(ud.String()))),
+		UserData:       aws.String(base64.StdEncoding.EncodeToString(ud)),
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: instTags},
 		},
@@ -216,6 +229,23 @@ func (p *Provider) Instances(ctx context.Context, template json.RawMessage, tags
 func isNotFound(err error) bool {
 	var ae smithy.APIError
 	return errors.As(err, &ae) && ae.ErrorCode() == "InvalidInstanceID.NotFound"
+}
+
+// renderUserData builds the instance's user data in the pool's chosen
+// format (default "ignition"; hostboot.ValidUserData is checked when the
+// pool is set, so format is trusted here).
+func renderUserData(format string, env map[string]string) ([]byte, error) {
+	he := hostboot.Env{URL: env["LUX_URL"], HostToken: env["LUX_HOST_TOKEN"], HostName: env["LUX_HOST_NAME"], EC2IMDS: env["LUX_EC2_IMDS"]}
+	switch format {
+	case "", "ignition":
+		return hostboot.Ignition(he)
+	case "script":
+		return []byte(hostboot.Script(he)), nil
+	case "env":
+		return []byte(he.Lines()), nil
+	default:
+		return nil, fmt.Errorf("ec2: unknown template.userData %q", format)
+	}
 }
 
 func parse(raw json.RawMessage) (Template, error) {

@@ -164,6 +164,16 @@ Host requirements:
 LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a
 ```
 
+A static host set up from a stock distro image can instead run luxd's
+bootstrap script, which checks the host requirements above, installs
+whatever is missing, and installs `lux-runner` as a systemd service
+(`GET /runner/bootstrap.sh`, no auth: it carries no secret):
+
+```bash
+curl -fsS https://luxd.example/runner/bootstrap.sh | sudo \
+  LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… LUX_HOST_NAME=host-a sh
+```
+
 | Flag | Default | |
 | --- | --- | --- |
 | `--name` | hostname | Unique within the tenant. |
@@ -282,19 +292,43 @@ Runs that cannot afford it (`placement.pool`).
 
 What an instance needs:
 
-- An AMI with the host requirements above, `lux-runner` and `lux-shim`,
-  and a boot script that reads the instance's **user data** (`KEY=value`
-  lines: `LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`) and runs
-  `lux-runner --provider-id <instance id>` with them in its environment.
-  The token is single-use per host and revoked when the host is
-  terminated.
-- A launch template (id `lt-…` or name) with that AMI, a security group
-  that reaches luxd, and an instance profile if the runner needs one (it
-  doesn't hold S3 credentials).
+- **No custom AMI.** A launch template with **no user data** (luxd's own
+  replaces it on every `RunInstances`) and one of:
+  - a stock **Fedora CoreOS** AMI (the default; see `userData` below) —
+    nothing is installed at boot, so a host registers in under a minute;
+  - a stock **Fedora Cloud, Ubuntu, Debian or AL2023** AMI with
+    `"userData": "script"` — cloud-init runs a script that installs only
+    what is missing (podman, nftables, git; `dnf` or `apt-get`);
+  - any AMI already carrying `lux-runner`/`lux-shim` and its own boot
+    script, with `"userData": "env"` (the pre-self-update behaviour: plain
+    `KEY=value` lines).
+
+  Whichever format, the instance downloads `lux-runner` and `lux-shim` from
+  luxd itself (`GET /runner/bin/...`, verified by sha256) rather than
+  carrying them in the AMI, so a new release needs no new AMI.
+- A launch template (id `lt-…` or name), a security group reaching
+  `runner_url`, egress to the package mirrors (the `script` format) and to
+  wherever images, git remotes and model APIs live, and an instance
+  profile if the runner needs one (it doesn't hold S3 credentials).
 - luxd needs EC2 permissions for `RunInstances` (with the launch template
   and `CreateTags`), `TerminateInstances` and `DescribeInstances`, from its
   standard AWS configuration (environment or instance role).
   `LUX_EC2_ENDPOINT` overrides the endpoint.
+
+`template.userData` picks the format (default `"ignition"`); a pool set
+with an unrecognized value is refused, not left to fail at boot:
+
+| Value | What it is | When to use it |
+| --- | --- | --- |
+| `ignition` (default) | An Ignition v3.4.0 config for Fedora CoreOS. | The default: no packages to install, fastest boot. |
+| `script` | A `#!/bin/bash` script cloud-init runs. | A stock Fedora Cloud, Ubuntu, Debian or AL2023 AMI. |
+| `env` | Plain `KEY=value` lines (`LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`). | A custom AMI with its own boot script, from before self-update. |
+
+Every format's token is single-use per host and revoked when the host is
+terminated. A static host (outside any pool) uses the same script as
+`userData: script`, unfilled: `curl <luxd>/runner/bootstrap.sh | sudo
+LUX_HOST_TOKEN=luxh_… LUX_URL=https://luxd.example sh` (no auth on that
+endpoint: it carries no secret, only how to reach luxd).
 
 Instances are tagged `Name=<host>`, `lux:pool=<pool>` (`<tenant>/<pool>`
 for a tenant's pool), `lux:managed=true`, `lux:deployment=<id>` (which lux

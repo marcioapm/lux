@@ -14,6 +14,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/hostboot"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -1648,6 +1649,11 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	}
 	if pl.Shared {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "only platform pools can be shared (luxd admin create-pool --shared)")
+	}
+	if pl.Provider == "ec2" {
+		if ud, ok := pl.Template["userData"].(string); ok && !hostboot.ValidUserData(ud) {
+			return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "template.userData %q: want ignition, script or env", ud)
+		}
 	}
 	if pl.Template == nil {
 		pl.Template = map[string]any{}

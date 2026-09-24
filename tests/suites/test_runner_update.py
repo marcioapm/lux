@@ -81,6 +81,66 @@ def test_a_missing_arch_or_binary_is_not_offered(env, runner_bin_dir):
     assert resp.status_code == 404
 
 
+# ---- bootstrap.sh (static hosts) --------------------------------------------
+
+def test_bootstrap_script_is_served_without_auth(env):
+    resp = requests.get(f"{env.luxd_url}/runner/bootstrap.sh", timeout=10)
+    assert resp.status_code == 200
+    assert resp.text.startswith("#!/bin/bash")
+    # Shares the unit and fetch-script text with the EC2 renderings
+    # (internal/hostboot): both markers must be present verbatim.
+    assert "lux-runner.service" in resp.text
+    assert "/runner/bin/linux-$larch/$bin" in resp.text
+
+
+def test_bootstrap_script_fetches_and_verifies_binaries_on_a_host(env, hosts, runner_bin_dir):
+    """Runs the actual downloaded script (not internal/hostboot's Go
+    source) on a simulated host, with LUX_URL/LUX_HOST_TOKEN set as
+    `curl ... | sh` would. The simulated host has no systemd PID 1, so
+    `systemctl` is stubbed out: what is checked is bootstrap.sh's own
+    idempotent writes (env file, unit file, fetch script) and, run
+    separately exactly as the unit's ExecStartPre would, that the fetch
+    script downloads and verifies both binaries against runner_bin_dir."""
+    _, token, content = runner_bin_dir
+    host = hosts[0]
+    arch = host.exec("uname", "-m").strip()
+    larch = {"aarch64": "arm64", "x86_64": "amd64"}.get(arch, arch)
+    script = requests.get(f"{env.luxd_url}/runner/bootstrap.sh", timeout=10).text
+    host.exec("sh", "-c", "cat > /tmp/bootstrap.sh", input=script.encode())
+    host.exec("sh", "-c", "printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/systemctl && chmod +x /usr/local/bin/systemctl")
+    run = lambda: host.exec(  # noqa: E731
+        "env", f"LUX_URL={env.luxd_url}", f"LUX_HOST_TOKEN={token}", "LUX_HOST_NAME=bootstrap-test",
+        "bash", "/tmp/bootstrap.sh",
+    )
+    run()
+    env_mode = host.exec("stat", "-c", "%a", "/etc/lux/runner.env").strip()
+    assert env_mode == "600", env_mode
+    runner_env = host.exec("cat", "/etc/lux/runner.env")
+    assert f"LUX_URL={env.luxd_url}" in runner_env
+    assert "LUX_HOST_NAME=bootstrap-test" in runner_env
+    unit = host.exec("cat", "/etc/systemd/system/lux-runner.service")
+    assert "ExecStartPre=/usr/local/lib/lux/fetch-binaries.sh" in unit
+    assert "Restart=always" in unit
+    fetch_mode = host.exec("stat", "-c", "%a", "/usr/local/lib/lux/fetch-binaries.sh").strip()
+    assert fetch_mode == "755", fetch_mode
+    subuid = host.exec("cat", "/etc/subuid")
+    assert "containers:2147483647:2147483648" in subuid
+    # Idempotent: a second run (a reboot) does not fail, and does not
+    # duplicate the subuid/subgid line.
+    run()
+    assert host.exec("grep", "-c", "^containers:", "/etc/subuid").strip() == "1"
+
+    # The fetch script it installed is exactly what lux-runner.service's
+    # ExecStartPre would run, with the same EnvironmentFile= it declares:
+    # exercise it the same way, as systemd would.
+    host.exec("sh", "-c", "set -a; . /etc/lux/runner.env; set +a; exec bash /usr/local/lib/lux/fetch-binaries.sh")
+    for name in ("lux-runner", "lux-shim"):
+        got = host.exec("sha256sum", f"/usr/local/lib/lux/{name}").split()[0]
+        assert got == content[larch][name], (name, got, content[larch][name])
+        mode = host.exec("stat", "-c", "%a", f"/usr/local/lib/lux/{name}").strip()
+        assert mode == "755", (name, mode)
+
+
 # ---- draining outdated hosts ------------------------------------------------
 
 def _host_arch(lux, name: str) -> str:

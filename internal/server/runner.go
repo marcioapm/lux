@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/hostboot"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -23,6 +24,20 @@ func (s *Server) runnerRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /runner/blobs/{id}", s.wrap(s.serveRunnerBlobDownload))
 	mux.Handle("GET /runner/bin/manifest", s.wrap(s.serveRunnerBinManifest))
 	mux.Handle("GET /runner/bin/{osArch}/{name}", s.wrap(s.serveRunnerBin))
+	// No auth: it carries no secret, and a static host needs it before it
+	// has a host token (curl ... | sudo LUX_HOST_TOKEN=... sh).
+	mux.Handle("GET /runner/bootstrap.sh", s.wrap(s.serveBootstrap))
+}
+
+// serveBootstrap is GET /runner/bootstrap.sh: the boot script a static
+// host runs to install lux-runner as a systemd service. It takes
+// LUX_URL, LUX_HOST_TOKEN, LUX_HOST_NAME and LUX_EC2_IMDS from its own
+// environment (unauthenticated here: it carries no secret, only how to
+// find one).
+func (s *Server) serveBootstrap(w http.ResponseWriter, r *http.Request) error {
+	w.Header().Set("Content-Type", "text/x-shellscript")
+	_, err := w.Write([]byte(hostboot.Bootstrap()))
+	return err
 }
 
 // registerHost records a runner's hello: creates the host row on first

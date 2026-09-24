@@ -21,6 +21,47 @@ from xml.sax.saxutils import escape
 NS = "http://ec2.amazonaws.com/doc/2016-11-15/"
 
 
+def _parse_user_data(userdata: str) -> dict[str, str]:
+    """The runner's env out of whichever userData format luxd rendered
+    (internal/hostboot): "ignition" (a JSON config; the env is a `data:`
+    URL at /etc/lux/runner.env), "script" (a shell script exporting the
+    env before the shared, unfilled bootstrap body), or "env" (plain
+    KEY=value lines). Never executes anything; only ignition and script
+    carry LUX_PROVIDER_ID appended by their (unexecuted) fetch step, so it
+    is never present here — the fake sets it itself via --provider-id."""
+    stripped = userdata.lstrip()
+    if stripped.startswith("{"):
+        cfg = json.loads(userdata)
+        for f in cfg.get("storage", {}).get("files", []):
+            if f["path"] == "/etc/lux/runner.env":
+                data_url = f["contents"]["source"]
+                _, b64 = data_url.split(",", 1)
+                return _parse_env_lines(base64.b64decode(b64).decode())
+        return {}
+    lines = userdata.splitlines()
+    if lines and lines[0].startswith("#!"):
+        lines = lines[1:]
+    if lines and lines[0].startswith("export "):
+        # "script": a run of `export KEY='value'` lines the exports helper
+        # wrote, then the shared bootstrap body (which reassigns
+        # LUX_HOST_NAME its own default): stop at the first non-export line.
+        env: dict[str, str] = {}
+        for line in lines:
+            if not line.startswith("export "):
+                break
+            k, v = line.removeprefix("export ").split("=", 1)
+            if v.startswith("'") and v.endswith("'"):
+                v = v[1:-1].replace("'\\''", "'")
+            env[k] = v
+        return env
+    # "env": plain KEY=value lines, the whole content.
+    return _parse_env_lines(userdata)
+
+
+def _parse_env_lines(text: str) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+
 class FakeEC2:
     real = False
 
@@ -128,7 +169,7 @@ class FakeEC2:
         if self.fail_launches:
             raise FakeError("InsufficientInstanceCapacity", "no capacity (fake)")
         userdata = base64.b64decode(q.get("UserData", "")).decode()
-        env = dict(line.split("=", 1) for line in userdata.splitlines() if "=" in line)
+        env = _parse_user_data(userdata)
         tags = {}
         i = 1
         while f"TagSpecification.1.Tag.{i}.Key" in q:
