@@ -25,7 +25,7 @@ func (s *Server) runnerRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /runner/bin/manifest", s.wrap(s.serveRunnerBinManifest))
 	mux.Handle("GET /runner/bin/{osArch}/{name}", s.wrap(s.serveRunnerBin))
 	// No auth: it carries no secret, and a static host needs it before it
-	// has a host token (curl ... | sudo LUX_HOST_TOKEN=... sh).
+	// has a host token (curl ... | sudo env LUX_HOST_TOKEN=... bash).
 	mux.Handle("GET /runner/bootstrap.sh", s.wrap(s.serveBootstrap))
 }
 
