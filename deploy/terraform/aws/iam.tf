@@ -4,6 +4,30 @@
 # role needs no iam:PassRole either — RunInstances launches the runner
 # template as-is, with no IAM role to pass.
 
+variable "create_spot_service_linked_role" {
+  description = <<-EOT
+    Whether to create the AWSServiceRoleForEC2Spot service-linked role
+    (aws_service_name = spot.amazonaws.com). The first spot RunInstances
+    call in an account needs this role to exist; luxd's own role has no
+    iam:CreateServiceLinkedRole, so without it every spot launch fails
+    with AuthFailure.ServiceLinkedRoleCreationNotPermitted. Set to false
+    on an account that has already used EC2 Spot elsewhere: this
+    resource errors if the role already exists. To adopt Terraform
+    management of an existing role instead of setting this to false, run
+    `terraform import aws_iam_service_linked_role.spot
+    arn:aws:iam::<account-id>:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot`
+    before applying with this left at its default.
+  EOT
+  type        = bool
+  default     = true
+}
+
+resource "aws_iam_service_linked_role" "spot" {
+  count = var.create_spot_service_linked_role ? 1 : 0
+
+  aws_service_name = "spot.amazonaws.com"
+}
+
 data "aws_partition" "current" {}
 
 data "aws_region" "current" {}
@@ -45,7 +69,7 @@ resource "aws_iam_role_policy" "control_luxd" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = concat([
+    Statement = [
       {
         Sid    = "RunRunnerInstances"
         Effect = "Allow"
@@ -63,6 +87,10 @@ resource "aws_iam_role_policy" "control_luxd" {
             "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:volume/*",
             "arn:${data.aws_partition.current.partition}:ec2:${var.region}::image/*",
             "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:security-group/${aws_security_group.runner.id}",
+            # Spot launches (internal/ec2/ec2.go sets InstanceMarketOptions):
+            # RunInstances is authorized against this resource type too,
+            # in addition to instance/network-interface/volume/image above.
+            "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:spot-instances-request/*",
           ]
         )
       },
@@ -123,30 +151,6 @@ resource "aws_iam_role_policy" "control_luxd" {
         Action   = ["ssm:GetParameter", "ssm:GetParameters"]
         Resource = "arn:${data.aws_partition.current.partition}:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_prefix}/*"
       },
-      {
-        Sid    = "WriteOwnSecureStrings"
-        Effect = "Allow"
-        # The box (not Terraform) generates the Postgres owner/app
-        # passwords at first boot and may keep them here instead of a
-        # root-only file (docs/luxd.example.toml notes secrets never
-        # belong in Terraform state).
-        Action   = ["ssm:PutParameter"]
-        Resource = "arn:${data.aws_partition.current.partition}:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_prefix}/*"
-      },
-      {
-        Sid      = "DecryptSSMSecureStrings"
-        Effect   = "Allow"
-        Action   = "kms:Decrypt"
-        Resource = "arn:${data.aws_partition.current.partition}:kms:${var.region}:${data.aws_caller_identity.current.account_id}:alias/aws/ssm"
-      },
-      ],
-      # GenerateDataKey is also needed when the box itself writes SecureStrings
-      # (PutParameter with SecureString type encrypts client-side via KMS).
-      [{
-        Sid      = "EncryptSSMSecureStrings"
-        Effect   = "Allow"
-        Action   = "kms:GenerateDataKey"
-        Resource = "arn:${data.aws_partition.current.partition}:kms:${var.region}:${data.aws_caller_identity.current.account_id}:alias/aws/ssm"
-    }])
+    ]
   })
 }
