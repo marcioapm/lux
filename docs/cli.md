@@ -56,6 +56,7 @@ Agents get the text as a message. Generic workloads get it on stdin. See
 ```bash
 lux stop <run> [--wait]         # graceful; snapshot; resumable
 lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--from-snapshot ID] [--disk SIZE] [--to HOST]
+           [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
 lux cancel <run> [--wait]       # final (a snapshot is still taken)
 lux snapshots <run>             # where each snapshot lives
 ```
@@ -63,6 +64,24 @@ lux snapshots <run>             # where each snapshot lives
 A resume needs the Run's secrets again. lux looks for each one in
 `--secret`, then `--secrets-from`, then an environment variable of the same
 name.
+
+`--add-repo` (repeatable) adds a repository to a stopped, lost or failed
+Run. The runner clones it into the restored workspace before the Run
+starts again (see [Git](runspec.md#git)):
+
+```bash
+lux resume run_x --add-repo two=https://github.com/o/two.git@main,credential=GIT_TOKEN
+lux resume run_x --add-repo docs=git@github.com:o/docs.git,ref=v2,push=false --request-id r-1
+```
+
+- An `@` names the ref only after the URL's last `/` and `:`, so
+  `git@github.com:o/r.git` has none. `ref=` names it explicitly (don't use both).
+- A new `credential` is a secret the runner alone uses, and its value is
+  found like any other secret's.
+- The name must be new (422 otherwise). A Run already resuming refuses an
+  added repository (409).
+- The request id, from `--request-id` or generated, is printed on stderr
+  as `request <id>`. The repository's `git.clone` event carries it.
 
 ## Git
 

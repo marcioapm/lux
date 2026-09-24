@@ -233,6 +233,53 @@ starts:
 4. On a **resume**, the checkout is already on the restored volume and is
    left exactly as the workload left it.
 
+Every clone is a `git.clone` event: `{repo, status: "cloned", commit}`, or
+`{repo, status: "failed", error}` (git's output, with the token redacted).
+`git.checkout` still follows a successful clone, with its ref and branch.
+
+Clones are the runner's, on the host, never the Run's, so a repository
+needs no `network.egress` rule and none is checked.
+
+### Adding repositories on resume
+
+A resume can add repositories to a stopped, lost or failed Run. Pass them in
+the request's `git.repositories` (`lux resume --add-repo`), in the same shape
+as the spec's:
+
+```json
+POST /v1/runs/{id}/resume
+{"requestId": "r-1",
+ "git": {"repositories": [{"name": "two", "url": "https://github.com/o/two.git", "credential": "GIT_TOKEN"}]},
+ "secrets": [{"name": "GIT_TOKEN", "value": "…"}]}
+```
+
+- They join the Run's spec, each with `addedBy` set to the request id
+  (`requestId`, or one luxd generates; the response's `Lux-Request-Id`
+  header). Only luxd sets `addedBy`: a submitted spec that sets it is
+  refused with 422 `invalid_spec`.
+- The merged spec is validated like a submitted one (422 `invalid_spec`).
+  Names must be new, and paths must be on a state volume.
+- A credential the spec doesn't declare becomes a secret the runner alone
+  uses (`as: none`). Its value must be in the resume's `secrets`, like the
+  Run's others (422 `secrets_required`). An operator's resume without
+  secrets has only the values luxd holds, so it cannot add a new
+  credential. A secret the workload already sees can't be a credential.
+- The runner clones them into the restored workspace before the container
+  starts, next to the existing checkouts. Their `git.clone` events carry
+  the `requestId`.
+- **A failed clone does not fail the Run.** The agent keeps its
+  conversation, so the Run starts without that repository. Its `git.clone`
+  event says `failed`, and luxd removes it from the spec, so later resumes
+  don't retry it and `lux push` doesn't list it. A repository in the
+  submitted spec that can't be cloned still fails the placement (stage
+  `git`).
+- `push: false` works as for any repository. Pushes include the added
+  repositories.
+- Every resume records a `resume.requested` event:
+  `{requestId, by, addedRepositories}`.
+- Adding needs a Run that is stopped, lost or failed. While it is
+  resuming, the request gets 409.
+
 `lux push <run> [--wait]` pushes each repository's current commit to
 `git.push.branch`, again with the runner's credential:
 

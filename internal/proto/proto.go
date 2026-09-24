@@ -275,6 +275,11 @@ type Artifact struct {
 // writable layer and state volumes). luxd stops it.
 const EvDiskExceeded = "disk.exceeded"
 
+// EvGitClone is a repository the runner cloned, or failed to:
+// {repo, status: cloned | failed, commit?, error?, requestId?} (requestId:
+// the resume that added it).
+const EvGitClone = "git.clone"
+
 // RunEvent is a runner-side lifecycle note (image built, volumes restored,
 // rebuild differed, DNS lookup…) stored with the Run's events.
 type RunEvent struct {

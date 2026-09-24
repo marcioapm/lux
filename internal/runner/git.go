@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/marcioapm/lux/internal/gitws"
@@ -17,36 +18,93 @@ import (
 // on the host, before the container starts. A resumed Run's checkouts are
 // already on its restored volume and are left exactly as they are.
 // Credentials are the runner's; the container never sees them.
+//
+// Each clone is a git.clone event. A repository added on resume whose clone
+// fails is dropped and the Run goes on without it (the agent keeps its
+// conversation); any other failed clone fails the placement.
 func (p *placement) materializeRepos(ctx context.Context, sp spec.RunSpec, user passwd.User) error {
 	if sp.Git == nil {
 		return nil
 	}
 	for _, r := range sp.Git.Repositories {
-		dir, err := p.hostPath(r.Path)
-		if err != nil {
+		res, err := p.materialize(ctx, r, user)
+		if err != nil && ctx.Err() != nil {
+			// Stopped meanwhile: not the repository's failure.
 			return err
 		}
-		res, err := p.r.git.Materialize(ctx, p.gitRepo(r), dir)
 		if err != nil {
-			return fmt.Errorf("repository %s: %w", r.Name, err)
-		}
-		if !res.Cloned {
+			// gitws redacts the token from git's output; the URL is scrubbed
+			// of userinfo too, should one ever get this far.
+			msg := strings.ReplaceAll(err.Error(), r.URL, gitws.Scrub(r.URL))
+			if err := p.reportClone(ctx, r, map[string]any{"status": "failed", "error": msg}); err != nil {
+				return err
+			}
+			if r.AddedBy == "" {
+				return fmt.Errorf("repository %s: %s", r.Name, msg)
+			}
+			p.logf("added repository not cloned; going on without it", "repo", r.Name, "err", msg)
+			p.dropRepo(r.Name)
 			continue
 		}
-		// Cloned by the runner as root: a fresh clone, and the directories
-		// made for it inside the volume, are handed to the workload user
-		// (the volume is idmapped, so container uids are host uids).
-		if err := chownTree(dir, user.UID, user.GID); err != nil {
-			return err
+		if res == nil {
+			continue
 		}
-		mp, _ := p.hostPath(p.volumeRoot(r.Path))
-		for d := filepath.Dir(dir); d != mp && strings.HasPrefix(d, mp+"/"); d = filepath.Dir(d) {
-			_ = os.Lchown(d, user.UID, user.GID)
+		if err := p.reportClone(ctx, r, map[string]any{"status": "cloned", "commit": res.Base}); err != nil {
+			return err
 		}
 		p.event(ctx, "git.checkout", map[string]any{"repo": r.Name, "url": gitws.Scrub(r.URL),
 			"ref": r.Ref, "branch": res.Branch, "base": res.Base})
 	}
 	return nil
+}
+
+// materialize clones one repository; nil when its checkout was already
+// there.
+func (p *placement) materialize(ctx context.Context, r spec.Repository, user passwd.User) (*gitws.Result, error) {
+	dir, err := p.hostPath(r.Path)
+	if err != nil {
+		return nil, err
+	}
+	res, err := p.r.git.Materialize(ctx, p.gitRepo(r), dir)
+	if err != nil || !res.Cloned {
+		return nil, err
+	}
+	// Cloned by the runner as root: a fresh clone, and the directories
+	// made for it inside the volume, are handed to the workload user
+	// (the volume is idmapped, so container uids are host uids).
+	if err := chownTree(dir, user.UID, user.GID); err != nil {
+		return nil, err
+	}
+	mp, _ := p.hostPath(p.volumeRoot(r.Path))
+	for d := filepath.Dir(dir); d != mp && strings.HasPrefix(d, mp+"/"); d = filepath.Dir(d) {
+		_ = os.Lchown(d, user.UID, user.GID)
+	}
+	return res, nil
+}
+
+// reportClone sends a git.clone event, retrying: luxd drops a failed added
+// repository from the Run's spec on it.
+func (p *placement) reportClone(ctx context.Context, r spec.Repository, data map[string]any) error {
+	data["repo"] = r.Name
+	if r.AddedBy != "" {
+		data["requestId"] = r.AddedBy
+	}
+	return p.reportRetrying(ctx, proto.RunEvent{Type: proto.EvGitClone, Data: data})
+}
+
+// dropRepo takes a repository out of this placement's spec (the assigned
+// one and the one kept for a runner restart), so a push does not try it.
+func (p *placement) dropRepo(name string) {
+	drop := func(sp *spec.RunSpec) {
+		if sp != nil && sp.Git != nil {
+			sp.Git.Repositories = slices.DeleteFunc(slices.Clone(sp.Git.Repositories), func(r spec.Repository) bool { return r.Name == name })
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	drop(&p.assign.Spec)
+	drop(p.state.Spec)
+	_ = writeRunState(p.dir, p.state)
 }
 
 func (p *placement) gitRepo(r spec.Repository) gitws.Repo {

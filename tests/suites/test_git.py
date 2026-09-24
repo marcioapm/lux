@@ -245,3 +245,113 @@ def test_one_script_commits_in_two_repositories(lux, runners, hosts, fake_image,
     assert git_server.show("one", "lux/work", "a.txt") == "x\n"
     assert git_server.show("two", "lux/work", "b.txt") == "y\n"
     lux.run("cancel", run_id)
+
+
+# ---- repositories added on resume ------------------------------------------------
+
+def clones(lux, run_id: str, repo: str) -> list[dict]:
+    return [e["data"] for e in lux.events(run_id, "git.clone") if e["data"]["repo"] == repo]
+
+
+def stopped_with_one(lux, fake_image, git_server) -> str:
+    """A Run with repository "one" whose agent has done a turn, stopped."""
+    git_server.create("one", {"base.txt": "1\n"})
+    run_id = lux.submit(repo_spec(fake_image, git_server, "write a.txt from-one", repo="one"))
+    lux.wait_activity(run_id, "idle")
+    lux.run("stop", run_id, "--wait")
+    return run_id
+
+
+def test_a_resume_adds_a_repository(lux, runners, hosts, fake_image, git_server):
+    """The agent goes on with its conversation and finds the new checkout
+    beside the old; its git.clone event names the resume, and a push pushes
+    both repositories."""
+    runners.start(hosts[0])
+    run_id = stopped_with_one(lux, fake_image, git_server)
+    session = lux.get(run_id)["sessionId"]
+    git_server.create("two", {"b.txt": "from two\n"})
+    p = lux.run("resume", run_id, "--wait", "--add-repo", f"two={git_server.url('two')},credential=GIT_TOKEN",
+                "--request-id", "r-1", "--secret", f"GIT_TOKEN={git_server.token}",
+                "--input", "history\nread /workspace/repos/two/b.txt")
+    assert "request r-1" in p.stderr, p.stderr
+    out = lux.wait_output(run_id, "from two")
+    run = lux.get(run_id)
+    assert run["sessionId"] == session, "the conversation continued, not restarted"
+    assert "write a.txt from-one" in out[out.index("history:"):], out
+    added = [r for r in run["spec"]["git"]["repositories"] if r["name"] == "two"]
+    assert added and added[0]["addedBy"] == "r-1", run["spec"]["git"]
+    [clone] = clones(lux, run_id, "two")
+    assert clone["status"] == "cloned" and clone["requestId"] == "r-1" and len(clone["commit"]) == 40, clone
+    assert not clones(lux, run_id, "one")[1:], "one was cloned again on resume"
+    [req] = [e["data"] for e in lux.events(run_id, "resume.requested")]
+    assert req["requestId"] == "r-1" and req["addedRepositories"] == ["two"], req
+    # The credential is declared, runner-only, and never in the container.
+    lux.run("steer", run_id, "print-secret GIT_TOKEN")
+    lux.wait_activity(run_id, "idle")
+    assert git_server.token not in lux.logs(run_id)
+
+    lux.run("steer", run_id, "\n".join(["cd /workspace/repos/one", "commit one",
+                                         "cd /workspace/repos/two", "write c.txt y", "commit two"]))
+    wait_until(lambda: lux.logs(run_id).count("committed ") == 2, 30, 0.3, "no two commits")
+    lux.wait_activity(run_id, "idle")
+    pushed = {r["repo"]: r["status"] for r in lux.json("push", run_id, "--wait")}
+    assert pushed == {"one": "pushed", "two": "pushed"}, pushed
+    assert git_server.show("one", "lux/work", "a.txt") == "from-one\n"
+    assert git_server.show("two", "lux/work", "c.txt") == "y\n"
+    lux.run("cancel", run_id)
+
+
+def test_an_added_repository_that_cannot_be_cloned_is_dropped(lux, runners, hosts, fake_image, git_server):
+    """The Run goes on without it, with its conversation: the clone's
+    failure is an event, and luxd takes the repository out of the spec."""
+    runners.start(hosts[0])
+    run_id = stopped_with_one(lux, fake_image, git_server)
+    session = lux.get(run_id)["sessionId"]
+    lux.run("resume", run_id, "--wait", "--add-repo", f"ghost={git_server.url('no-such-repo')},credential=GIT_TOKEN",
+            "--request-id", "r-2", "--secret", f"GIT_TOKEN={git_server.token}", "--input", "history")
+    out = lux.wait_output(run_id, "history:")
+    run = lux.wait_state(run_id, "running")
+    assert run["sessionId"] == session and "write a.txt from-one" in out[out.index("history:"):], out
+    [clone] = wait_until(lambda: clones(lux, run_id, "ghost"), 30, 0.3, "no git.clone for ghost")
+    assert clone["status"] == "failed" and clone["requestId"] == "r-2" and clone["error"], clone
+    assert git_server.token not in clone["error"], clone
+    names = [r["name"] for r in lux.get(run_id)["spec"]["git"]["repositories"]]
+    assert names == ["one"], names
+    lux.run("steer", run_id, "unless-exists /workspace/repos/ghost echo no ghost")
+    lux.wait_output(run_id, "no ghost")
+    # Pushes leave it out too.
+    assert [r["repo"] for r in lux.json("push", run_id, "--wait", check=False)] == ["one"]
+    lux.run("cancel", run_id)
+
+
+def test_adding_a_repository_is_refused_when_it_cannot_be(lux, runners, hosts, fake_image, git_server):
+    """A name the Run has already: 422. A Run not stopped: 409."""
+    runners.start(hosts[0])
+    run_id = stopped_with_one(lux, fake_image, git_server)
+    secret = ("--secret", f"GIT_TOKEN={git_server.token}")
+    with pytest.raises(CLIError) as e:
+        lux.run("resume", run_id, "--add-repo", f"one={git_server.url('two')}", *secret)
+    assert e.value.code == 4 and "duplicate" in e.value.stderr, e.value.stderr
+    # A new credential needs its value.
+    with pytest.raises(CLIError) as e:
+        lux.run("resume", run_id, "--add-repo", f"x={git_server.url('x')},credential=OTHER_TOKEN", *secret)
+    assert e.value.code == 4 and "OTHER_TOKEN" in e.value.stderr, e.value.stderr
+    assert [r["name"] for r in lux.get(run_id)["spec"]["git"]["repositories"]] == ["one"], "a refused resume changed the spec"
+
+    lux.run("resume", run_id, "--wait", *secret)
+    with pytest.raises(CLIError) as e:
+        lux.run("resume", run_id, "--add-repo", f"late={git_server.url('two')}", *secret)
+    assert e.value.code == 4 and "stop it first" in e.value.stderr, e.value.stderr
+    lux.run("cancel", run_id)
+
+
+def test_a_submitted_spec_cannot_set_added_by(lux, fake_image, git_server):
+    """Only luxd marks a repository as added on resume. (The CLI never sends
+    addedBy: a spec file's is dropped, so this goes to the API.)"""
+    import requests
+    spec = repo_spec(fake_image, git_server, "echo never", repo="whatever")
+    spec["git"]["repositories"][0]["addedBy"] = "r-1"
+    r = requests.post(f"{lux.env.luxd_url}/v1/runs", json=spec, timeout=10,
+                      headers={"Authorization": f"Bearer {lux.api_key}"})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "invalid_spec", r.text
+    assert "addedBy" in r.text, r.text

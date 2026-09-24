@@ -44,6 +44,14 @@ export function eventSummary(e: Event): string {
       return `disk ${typeof d.usedBytes === "number" ? formatBytes(d.usedBytes) : "?"} over its limit of ${typeof d.limitBytes === "number" ? formatBytes(d.limitBytes) : "?"}`;
     case "push.requested":
       return `push ${str(d.requestId) ?? ""}`;
+    case "resume.requested": {
+      const added = Array.isArray(d.addedRepositories) && d.addedRepositories.length > 0 ? ` · adding ${d.addedRepositories.join(", ")}` : "";
+      return `by ${str(d.by) ?? "?"}${added}`;
+    }
+    case "git.clone":
+      return d.status === "failed"
+        ? `${str(d.repo) ?? "?"} not cloned: ${str(d.error) ?? "?"}`
+        : `${str(d.repo) ?? "?"} cloned at ${(str(d.commit) ?? "?").slice(0, 12)}`;
     default: {
       const keys = Object.keys(d);
       if (keys.length === 0) return "";

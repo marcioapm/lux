@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -660,9 +661,63 @@ func (a *app) cancelCmd() *cobra.Command {
 	return a.lifecycle("cancel", "Stop a Run and make it final", "cancel", "cancelled", "succeeded", "failed")
 }
 
+// parseAddRepo reads --add-repo: name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false].
+// An @ is a ref only after the URL's last / and : (git@github.com:o/r.git
+// has none); ref= says it outright. A comma starts an option only before
+// one of those keys, so the URL may hold other commas. Options are taken
+// off the end, last first.
+func parseAddRepo(v string) (spec.Repository, error) {
+	var r spec.Repository
+	name, rest, ok := strings.Cut(v, "=")
+	if !ok || name == "" || rest == "" {
+		return r, fmt.Errorf("--add-repo %q: want name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]", v)
+	}
+	r.Name = name
+	var opts []string
+	for {
+		i := -1
+		for _, k := range []string{",ref=", ",credential=", ",path=", ",push="} {
+			i = max(i, strings.LastIndex(rest, k))
+		}
+		if i < 0 {
+			break
+		}
+		opts = append(opts, rest[i+1:])
+		rest = rest[:i]
+	}
+	r.URL = rest
+	if at := strings.LastIndex(rest, "@"); at > strings.LastIndex(rest, "/") && at > strings.LastIndex(rest, ":") {
+		r.URL, r.Ref = rest[:at], rest[at+1:]
+	}
+	for _, o := range opts {
+		k, val, _ := strings.Cut(o, "=")
+		switch k {
+		case "ref":
+			if r.Ref != "" {
+				return r, fmt.Errorf("--add-repo %s: the ref is given twice (@ and ref=)", name)
+			}
+			r.Ref = val
+		case "credential":
+			r.Credential = val
+		case "path":
+			r.Path = val
+		case "push":
+			b, err := strconv.ParseBool(val)
+			if err != nil {
+				return r, fmt.Errorf("--add-repo %s: push=%s: want true or false", name, val)
+			}
+			r.Push = &b
+		}
+	}
+	if r.URL == "" {
+		return r, fmt.Errorf("--add-repo %s: no url", name)
+	}
+	return r, nil
+}
+
 func (a *app) resumeCmd() *cobra.Command {
-	var input, secretsFrom, fromSnapshot, to, disk string
-	var secretArgs []string
+	var input, secretsFrom, fromSnapshot, to, disk, reqID string
+	var secretArgs, addRepos []string
 	var follow, wait bool
 	cmd := &cobra.Command{
 		Use:   "resume <run>",
@@ -671,10 +726,29 @@ func (a *app) resumeCmd() *cobra.Command {
 from the environment (by name), a .env file (--secrets-from), or --secret NAME=VALUE.
 
 With an operator key, secrets may be left out while luxd still holds them
-(it has not restarted since they were supplied), and --to chooses the host.`,
+(it has not restarted since they were supplied), and --to chooses the host.
+
+--add-repo adds a repository, cloned into the restored workspace before the
+Run starts again (repeatable):
+
+  --add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]
+
+An @ after the URL's last / names the ref (https://host/o/r.git@main);
+git@host:o/r.git has none. ref=REF says it outright. A credential's value
+is found like the other secrets'. If the clone fails the Run goes on
+without it. The request id (--request-id, or generated) is printed on
+stderr as "request <id>", and marks the repository's git.clone event.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
+			var repos []spec.Repository
+			for _, v := range addRepos {
+				r, err := parseAddRepo(v)
+				if err != nil {
+					return err
+				}
+				repos = append(repos, r)
+			}
 			run, err := a.getRun(ctx, args[0])
 			if err != nil {
 				return err
@@ -682,6 +756,12 @@ With an operator key, secrets may be left out while luxd still holds them
 			var secrets []spec.Secret
 			for _, ref := range run.Secrets {
 				secrets = append(secrets, spec.Secret{Name: ref.Name})
+			}
+			// Added repositories' credentials are looked for like the rest.
+			for _, r := range repos {
+				if c := r.Credential; c != "" && !slices.ContainsFunc(secrets, func(s spec.Secret) bool { return s.Name == c }) {
+					secrets = append(secrets, spec.Secret{Name: c})
+				}
 			}
 			for _, kv := range secretArgs {
 				k, v, _ := strings.Cut(kv, "=")
@@ -710,9 +790,19 @@ With an operator key, secrets may be left out while luxd still holds them
 			if disk != "" {
 				req["resources"] = map[string]string{"disk": disk}
 			}
+			if reqID != "" {
+				req["requestId"] = reqID
+			}
+			if len(repos) > 0 {
+				req["git"] = map[string]any{"repositories": repos}
+			}
 			var out Run
-			if err := a.c.Do(ctx, "POST", "/v1/runs/"+args[0]+"/resume", req, &out); err != nil {
+			hdr, err := a.c.DoHeader(ctx, "POST", "/v1/runs/"+args[0]+"/resume", req, &out)
+			if err != nil {
 				return err
+			}
+			if id := hdr.Get("Lux-Request-Id"); id != "" {
+				fmt.Fprintln(a.stderr, "request", id)
 			}
 			if follow {
 				if _, err := a.followLogs(ctx, args[0], "", logOpts{stderr: true}); err != nil {
@@ -742,6 +832,8 @@ With an operator key, secrets may be left out while luxd still holds them
 	cmd.Flags().StringVar(&disk, "disk", "", "a new disk limit from now on (e.g. 40Gi), for a Run that went over")
 	cmd.Flags().BoolVar(&follow, "follow", false, "stream output until it ends")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait until it is running (or has ended)")
+	cmd.Flags().StringArrayVar(&addRepos, "add-repo", nil, "add a repository: name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false] (repeatable)")
+	cmd.Flags().StringVar(&reqID, "request-id", "", "names this resume (in its events and added repositories); generated if absent")
 	return cmd
 }
 

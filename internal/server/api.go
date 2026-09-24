@@ -79,8 +79,11 @@ func (s *Server) routes(api huma.API) {
 	}, "run", s.stopRun)
 	register(s, api, huma.Operation{
 		OperationID: "resumeRun", Method: http.MethodPost, Path: "/v1/runs/{id}/resume", Tags: []string{"runs"},
-		Summary:       "Resume a stopped, lost or failed Run",
-		Description:   "From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming.",
+		Summary: "Resume a stopped, lost or failed Run",
+		Description: "From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming.\n\n" +
+			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +
+			"with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. " +
+			"Adding needs a stopped, lost or failed Run: while it is resuming, 409.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests},
 	}, "run", s.resumeRun)
@@ -384,14 +387,17 @@ type submitRunOutput struct {
 func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunOutput, error) {
 	p := principal(ctx)
 	sp := in.Body
-	if err := sp.Normalize(s.cfg.Defaults); err != nil {
-		var ve *spec.ValidationError
-		if errors.As(err, &ve) {
-			he := errf(http.StatusUnprocessableEntity, "invalid_spec", "%s", err.Error())
-			he.Details = ve.Problems
-			return nil, he
+	if sp.Git != nil {
+		for i, r := range sp.Git.Repositories {
+			if r.AddedBy != "" {
+				// Only luxd sets it: it marks a repository a resume added.
+				return nil, invalidSpec(&spec.ValidationError{Problems: []string{
+					fmt.Sprintf("git.repositories[%d].addedBy is set by luxd, never submitted", i)}})
+			}
 		}
-		return nil, err
+	}
+	if err := sp.Normalize(s.cfg.Defaults); err != nil {
+		return nil, invalidSpec(err)
 	}
 	if err := s.checkMCPNotControlPlane(ctx, sp); err != nil {
 		return nil, err
@@ -452,9 +458,18 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	return &submitRunOutput{http.StatusOK, run}, nil
 }
 
-// checkRunQuota enforces a tenant's limits on concurrent Runs and on
-// stored bytes (snapshots, output and artifacts not yet deleted by
-// retention). Checked when a Run is submitted or resumed.
+// invalidSpec is a 422 invalid_spec for a spec Normalize refused, with
+// every problem in details.
+func invalidSpec(err error) error {
+	var ve *spec.ValidationError
+	if errors.As(err, &ve) {
+		he := errf(http.StatusUnprocessableEntity, "invalid_spec", "%s", err.Error())
+		he.Details = ve.Problems
+		return he
+	}
+	return err
+}
+
 // requireRun is 404 unless the Run exists in the transaction's tenant.
 func requireRun(ctx context.Context, tx pgx.Tx, runID string) error {
 	var exists bool
@@ -931,12 +946,18 @@ func (s *Server) stopOrCancel(ctx context.Context, id, reason string) (*accepted
 }
 
 type resumeRequest struct {
-	Secrets []spec.Secret `json:"secrets,omitempty" doc:"A value for every one of the Run's secrets: luxd never keeps them."`
-	Input   *resumeInput  `json:"input,omitempty" doc:"A message for the workload once it is back."`
+	RequestID string        `json:"requestId,omitempty" doc:"Names this resume: in its resume.requested event, in the addedBy of the repositories it adds and in their git.clone events. Generated if absent."`
+	Secrets   []spec.Secret `json:"secrets,omitempty" doc:"A value for every one of the Run's secrets, and for the credentials of repositories it adds: luxd never keeps them."`
+	Git       *resumeGit    `json:"git,omitempty" doc:"Repositories to add. The runner clones them before the Run starts again; one whose clone fails is dropped and the Run goes on without it (a git.clone event says so)."`
+	Input     *resumeInput  `json:"input,omitempty" doc:"A message for the workload once it is back."`
 	// FromSnapshot resumes from an older snapshot (e.g. after lost).
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost)."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
 	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over)."`
+}
+
+type resumeGit struct {
+	Repositories []spec.Repository `json:"repositories" doc:"As in the spec's git.repositories; names must be new. A credential the spec does not declare becomes a secret used only by the runner, and its value must be in secrets."`
 }
 
 type resumeResources struct {
@@ -950,6 +971,13 @@ type resumeInput struct {
 type resumeRunInput struct {
 	RunPath
 	Body *resumeRequest
+}
+
+// resumeOutput is the resumed Run and the id of the request.
+type resumeOutput struct {
+	Status    int
+	RequestID string `header:"Lux-Request-Id" doc:"The resume's request id (requestId, or the one generated)."`
+	Body      *Run
 }
 
 // requireSecrets refuses a submit or resume that lacks a value (or has an
@@ -973,12 +1001,20 @@ func requireSecrets(refs []spec.SecretRef, values map[string]string) error {
 // secrets must be supplied again: luxd never kept them. An operator may
 // resume without them while this luxd still holds them in memory (it has
 // not restarted since they were last supplied), and may choose the host.
-func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRun, error) {
+//
+// Repositories added on resume join the stored spec, marked with the
+// request id; the runner clones them into the restored workspace.
+func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutput, error) {
 	p := principal(ctx)
 	id := in.ID
 	req := resumeRequest{}
 	if in.Body != nil {
 		req = *in.Body
+	}
+	req.RequestID = cmp.Or(req.RequestID, ids.New("resume"))
+	var adding []spec.Repository
+	if req.Git != nil {
+		adding = req.Git.Repositories
 	}
 	values := map[string]string{}
 	for _, sec := range req.Secrets {
@@ -998,23 +1034,40 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		var state string
 		var refs []spec.SecretRef
-		if err := tx.QueryRow(ctx, `SELECT state, secrets FROM runs WHERE id = $1 FOR UPDATE`, id).Scan(&state, &refs); err != nil {
+		var sp spec.RunSpec
+		if err := tx.QueryRow(ctx, `SELECT state, secrets, spec FROM runs WHERE id = $1 FOR UPDATE`, id).Scan(&state, &refs, &sp); err != nil {
 			return err
 		}
 		switch state {
 		case StateStopped, StateLost, StateFailed:
 		case StateResuming:
+			if len(adding) > 0 {
+				return errf(http.StatusConflict, "not_resumable", "run is resuming already: repositories can only be added to a stopped, lost or failed Run")
+			}
 			return nil // idempotent: the first resume's secrets stand
 		case StateCancelled, StateSucceeded:
 			return errf(http.StatusConflict, "not_resumable", "run is %s", state)
 		default:
 			return errf(http.StatusConflict, "not_resumable", "run is %s: stop it first", state)
 		}
-		if err := requireSecrets(refs, values); err != nil {
-			if p.Operator && len(req.Secrets) == 0 {
-				return errf(http.StatusUnprocessableEntity, "secrets_required",
-					"luxd no longer holds this Run's secrets: only the tenant can resume it, supplying them")
+		if p.Operator && len(req.Secrets) == 0 && requireSecrets(refs, values) != nil {
+			return errf(http.StatusUnprocessableEntity, "secrets_required",
+				"luxd no longer holds this Run's secrets: only the tenant can resume it, supplying them")
+		}
+		if len(adding) > 0 {
+			added, err := addRepositories(&sp, refs, adding, req.RequestID, s.cfg.Defaults)
+			if err != nil {
+				return err
 			}
+			// A new credential's value comes with the resume, like the
+			// others' (held values cover only the secrets the Run had).
+			refs = append(refs, added...)
+			stored, _, _ := sp.SplitSecrets()
+			if _, err := tx.Exec(ctx, `UPDATE runs SET spec = $2 WHERE id = $1`, id, stored); err != nil {
+				return err
+			}
+		}
+		if err := requireSecrets(refs, values); err != nil {
 			return err
 		}
 		// Rotation is allowed: record the new fingerprints.
@@ -1022,6 +1075,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 		for _, ref := range refs {
 			newRefs = append(newRefs, spec.SecretRef{Name: ref.Name, Fingerprint: spec.Fingerprint(ref.Name, values[ref.Name])})
 		}
+		slices.SortFunc(newRefs, func(a, b spec.SecretRef) int { return cmp.Compare(a.Name, b.Name) })
 		// place_on is this resume's alone: a migration's that never took
 		// effect (its host died first) does not steer it.
 		if _, err := tx.Exec(ctx, `UPDATE runs SET secrets = $2, cancel_requested = false, place_on = $3, avoid_host = NULL, pending_input = NULL WHERE id = $1`,
@@ -1064,6 +1118,14 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 		if p.Operator {
 			why = "resumed by an operator"
 		}
+		names := make([]string, 0, len(adding))
+		for _, r := range adding {
+			names = append(names, r.Name)
+		}
+		if err := addEvent(ctx, tx, p.TenantID, id, 0, "resume.requested", map[string]any{
+			"requestId": req.RequestID, "by": p.Actor(), "addedRepositories": names}); err != nil {
+			return err
+		}
 		return s.requestResume(ctx, tx, p.TenantID, id, in, why)
 	})
 	if err != nil {
@@ -1077,7 +1139,27 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*acceptedRu
 	if err != nil {
 		return nil, err
 	}
-	return &acceptedRun{http.StatusAccepted, run}, nil
+	return &resumeOutput{http.StatusAccepted, req.RequestID, run}, nil
+}
+
+// addRepositories merges repositories added on resume into a Run's stored
+// spec (see spec.AddRepositories) and returns refs for the credentials it
+// declared, whose values the resume must carry. A spec that no longer
+// validates is a 422 invalid_spec, as at submit.
+func addRepositories(sp *spec.RunSpec, refs []spec.SecretRef, repos []spec.Repository, requestID string, d spec.Defaults) ([]spec.SecretRef, error) {
+	names, err := sp.AddRepositories(repos, requestID, d)
+	if err != nil {
+		return nil, invalidSpec(err)
+	}
+	var added []spec.SecretRef
+	for _, n := range names {
+		// A secret the Run already has a ref for (declared but unused) needs
+		// no new one.
+		if !slices.ContainsFunc(refs, func(r spec.SecretRef) bool { return r.Name == n }) {
+			added = append(added, spec.SecretRef{Name: n})
+		}
+	}
+	return added, nil
 }
 
 // pushRun asks the Run's runner to push its repositories to the spec's

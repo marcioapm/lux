@@ -544,6 +544,9 @@ components:
     Repository:
       additionalProperties: false
       properties:
+        addedBy:
+          description: "Set by luxd: the resume request that added it."
+          type: string
         credential:
           type: string
         name:
@@ -627,6 +630,17 @@ components:
             - array
             - "null"
       type: object
+    ResumeGit:
+      additionalProperties: false
+      properties:
+        repositories:
+          description: As in the spec's git.repositories; names must be new. A credential the spec does not declare becomes a secret used only by the runner, and its value must be in secrets.
+          items:
+            $ref: "#/components/schemas/Repository"
+          type:
+            - array
+            - "null"
+      type: object
     ResumeInput:
       additionalProperties: false
       properties:
@@ -639,14 +653,20 @@ components:
         fromSnapshot:
           description: Resume from this snapshot instead of the latest (e.g. after lost).
           type: string
+        git:
+          $ref: "#/components/schemas/ResumeGit"
+          description: Repositories to add. The runner clones them before the Run starts again; one whose clone fails is dropped and the Run goes on without it (a git.clone event says so).
         input:
           $ref: "#/components/schemas/ResumeInput"
           description: A message for the workload once it is back.
+        requestId:
+          description: "Names this resume: in its resume.requested event, in the addedBy of the repositories it adds and in their git.clone events. Generated if absent."
+          type: string
         resources:
           $ref: "#/components/schemas/ResumeResources"
           description: Change what the Run gets from now on (e.g. more disk after it went over).
         secrets:
-          description: "A value for every one of the Run's secrets: luxd never keeps them."
+          description: "A value for every one of the Run's secrets, and for the credentials of repositories it adds: luxd never keeps them."
           items:
             $ref: "#/components/schemas/Secret"
           type:
@@ -3161,6 +3181,8 @@ paths:
       description: |-
         From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming.
 
+        git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a stopped, lost or failed Run: while it is resuming, 409.
+
         Needs the `run` scope.
       operationId: resumeRun
       parameters:
@@ -3183,6 +3205,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/Run"
           description: Accepted
+          headers:
+            Lux-Request-Id:
+              schema:
+                description: The resume's request id (requestId, or the one generated).
+                type: string
         "401":
           content:
             application/json:

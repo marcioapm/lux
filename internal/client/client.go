@@ -57,17 +57,23 @@ func (e *APIError) Error() string {
 }
 
 func (c *Client) Do(ctx context.Context, method, path string, in, out any, hdr ...string) error {
+	_, err := c.DoHeader(ctx, method, path, in, out, hdr...)
+	return err
+}
+
+// DoHeader is Do, also returning the response's headers.
+func (c *Client) DoHeader(ctx context.Context, method, path string, in, out any, hdr ...string) (http.Header, error) {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		body = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.url(path), body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Key)
 	if in != nil {
@@ -78,16 +84,16 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any, hdr .
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return decodeError(resp)
+		return resp.Header, decodeError(resp)
 	}
 	if out == nil {
-		return nil
+		return resp.Header, nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return resp.Header, json.NewDecoder(resp.Body).Decode(out)
 }
 
 func decodeError(resp *http.Response) error {

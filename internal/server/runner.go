@@ -12,6 +12,7 @@ import (
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -251,6 +252,10 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 				if err := recordPushes(ctx, tx, f.RunID, ev.Data); err != nil {
 					return err
 				}
+			case proto.EvGitClone:
+				if err := dropFailedRepo(ctx, tx, f.RunID, ev.Data); err != nil {
+					return err
+				}
 			case "image.built":
 				if err := recordImageResolved(ctx, tx, f.RunID, ev.Data); err != nil {
 					return err
@@ -372,6 +377,26 @@ func recordPushes(ctx context.Context, tx pgx.Tx, runID string, data map[string]
 		return nil
 	}
 	_, err := tx.Exec(ctx, `UPDATE runs SET pushed = pushed || $2 WHERE id = $1`, runID, pushed)
+	return err
+}
+
+// dropFailedRepo removes from the Run's spec a repository added on resume
+// whose clone failed, so later resumes do not retry it and pushes do not
+// list it. Only the one that request added: a name reused since stays.
+func dropFailedRepo(ctx context.Context, tx pgx.Tx, runID string, data map[string]any) error {
+	repo, _ := data["repo"].(string)
+	req, _ := data["requestId"].(string)
+	if data["status"] != "failed" || req == "" {
+		return nil
+	}
+	var sp spec.RunSpec
+	if err := tx.QueryRow(ctx, `SELECT spec FROM runs WHERE id = $1`, runID).Scan(&sp); err != nil {
+		return err
+	}
+	if !sp.DropRepository(repo, req) {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `UPDATE runs SET spec = $2 WHERE id = $1`, runID, sp)
 	return err
 }
 

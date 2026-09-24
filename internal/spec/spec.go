@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,6 +111,9 @@ type Repository struct {
 	// Push: false keeps a repository out of pushes (one cloned for context;
 	// its credential may be read-only). Default true.
 	Push *bool `json:"push,omitempty" yaml:"push,omitempty"`
+	// AddedBy: added to a Run on resume, not submitted with it. A clone
+	// that fails drops it rather than failing the placement.
+	AddedBy string `json:"addedBy,omitempty" yaml:"-" doc:"Set by luxd: the resume request that added it."`
 }
 
 // Pushed reports whether pushes include the repository.
@@ -502,6 +506,69 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		return &ValidationError{Problems: errs}
 	}
 	return nil
+}
+
+// AddRepositories adds repositories to a stored (normalized) spec on
+// resume, each marked as added by requestID, and declares any credential
+// not yet among its secrets (without a value: it comes with the resume, and
+// Normalize makes it runner-only, as: none). Returns the secrets it
+// declared; the spec is normalized again, so a new name must be unique.
+func (s *RunSpec) AddRepositories(repos []Repository, requestID string, d Defaults) ([]string, error) {
+	if s.Git == nil {
+		s.Git = &Git{}
+	}
+	// What the Run had before this resume: a secret it already exposes to
+	// the workload can't become a credential (it would leave the container
+	// mid-Run). One declared here, for several added repositories, can.
+	existing := map[string]bool{}
+	for _, sec := range s.Secrets {
+		existing[sec.Name] = true
+	}
+	declared := map[string]bool{}
+	var added, errs []string
+	for i, r := range repos {
+		r.AddedBy = requestID
+		s.Git.Repositories = append(s.Git.Repositories, r)
+		c := r.Credential
+		switch {
+		case c == "" || declared[c]:
+		case !existing[c]:
+			declared[c] = true
+			s.Secrets = append(s.Secrets, Secret{Name: c})
+			added = append(added, c)
+		case !s.runnerOnly(c):
+			// The container has it already: as a credential it would leave
+			// the container mid-Run, and a credential is never in it.
+			errs = append(errs, fmt.Sprintf("git.repositories[%d].credential: %q is a secret the workload sees: use a secret of its own", i, c))
+		}
+	}
+	err := s.Normalize(d)
+	if len(errs) > 0 {
+		ve := &ValidationError{Problems: errs}
+		if e, ok := err.(*ValidationError); ok {
+			ve.Problems = append(ve.Problems, e.Problems...)
+		}
+		return nil, ve
+	}
+	return added, err
+}
+
+func (s *RunSpec) runnerOnly(name string) bool {
+	i := slices.IndexFunc(s.Secrets, func(sec Secret) bool { return sec.Name == name })
+	return i >= 0 && s.Secrets[i].RunnerOnly
+}
+
+// DropRepository removes a repository added by requestID (one whose clone
+// failed); reports whether it was there. Its credential stays declared and
+// runner-only: a value handed over as a git credential never enters the
+// container later.
+func (s *RunSpec) DropRepository(name, requestID string) bool {
+	if s.Git == nil || requestID == "" {
+		return false
+	}
+	n := len(s.Git.Repositories)
+	s.Git.Repositories = slices.DeleteFunc(s.Git.Repositories, func(r Repository) bool { return r.Name == name && r.AddedBy == requestID })
+	return len(s.Git.Repositories) < n
 }
 
 // headerRe is an HTTP header name: RFC 9110 token characters.

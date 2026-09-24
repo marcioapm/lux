@@ -48,3 +48,4 @@ After v1:
 | Disk limit per Run (`resources.disk`, measured; `--disk` reservation opt-in) | ✅ done |
 | Per-repository `push: false` | ✅ done |
 | MCP servers in the RunSpec (`workload.mcpServers`, headers from secrets) | ✅ done |
+| Add repositories on resume (`git.repositories` in the resume request, `lux resume --add-repo`, `git.clone` events; a failed added clone is dropped, not fatal) | ✅ done |
