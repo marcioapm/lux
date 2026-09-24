@@ -29,31 +29,40 @@ write_files:
     owner: root:root
     content: |
       #!/bin/sh
-      # Moves the PGDG-created default cluster's data directory onto the
-      # separate gp3 volume, which survives instance replacement
-      # (Terraform's prevent_destroy on aws_ebs_volume.pg_data). Runs
-      # once: idempotent by checking whether the volume is already
-      # mounted where Postgres expects its data.
+      # Waits for the separate gp3 volume (aws_ebs_volume.pg_data; not
+      # attached until after the instance exists, so cloud-init can start
+      # before it shows up) to appear by its stable EBS device id, then
+      # moves the PGDG-created default cluster's data directory onto it.
+      # Runs once: idempotent by checking whether the volume is already
+      # mounted where Postgres expects its data. Exits non-zero if the
+      # device never appears within the wait, rather than silently
+      # continuing on the root volume: the caller (runcmd) treats this
+      # script's failure as fatal and runs nothing after it.
       set -eu
-      dev=/dev/xvdf
-      # NVMe-backed instance types rename EBS devices; fall back to the
-      # first extra NVMe disk if the xvdf alias is absent.
-      if [ ! -b "$dev" ] && [ -b /dev/nvme1n1 ]; then
-        dev=/dev/nvme1n1
-      fi
+      dev=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${volume_id_nodash}
       mnt=/var/lib/postgresql/18
       if mountpoint -q "$mnt" 2>/dev/null; then
         exit 0
       fi
+      waited=0
+      while [ ! -e "$dev" ]; do
+        if [ "$waited" -ge 300 ]; then
+          echo "lux-init-postgres: $dev did not appear after $${waited}s" >&2
+          exit 1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+      done
       if ! blkid "$dev" >/dev/null 2>&1; then
         mkfs.ext4 -L pgdata "$dev"
       fi
       pg_dropcluster --stop 18 main 2>/dev/null || true
       mkdir -p "$mnt"
-      mount "$dev" "$mnt"
-      grep -q "^$dev" /etc/fstab || echo "$dev $mnt ext4 defaults,nofail 0 2" >> /etc/fstab
+      mount LABEL=pgdata "$mnt"
+      grep -q "^LABEL=pgdata" /etc/fstab || echo "LABEL=pgdata $mnt ext4 defaults,nofail 0 2" >> /etc/fstab
       chown postgres:postgres "$mnt"
       pg_createcluster 18 main -d "$mnt/main" --start
+      sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${db_name}'" | grep -q 1 || sudo -u postgres createdb ${db_name}
 
   - path: /usr/local/sbin/lux-render-config.sh
     permissions: "0700"
@@ -79,7 +88,7 @@ write_files:
 
       mkdir -p /etc/lux
       cat > /etc/lux/luxd.toml <<TOML
-      listen = "$ip:${luxd_port}"
+      listen = "0.0.0.0:${luxd_port}"
       public_url = "${public_url}"
       runner_url = "http://$ip:${luxd_port}"
       runner_bin_dir = "${runner_bin_dir}"
@@ -116,6 +125,12 @@ write_files:
         --region "${region}" --query Parameter.Value --output text > /etc/cloudflared/token
       chmod 600 /etc/cloudflared/token
 
+  - path: /etc/systemd/system/postgresql@18-main.service.d/lux-pgdata-mount.conf
+    permissions: "0644"
+    content: |
+      [Unit]
+      RequiresMountsFor=/var/lib/postgresql/18
+
   - path: /etc/systemd/system/luxd.service
     permissions: "0644"
     content: |
@@ -123,6 +138,7 @@ write_files:
       Description=luxd
       After=network-online.target postgresql.service
       Wants=network-online.target
+      RequiresMountsFor=/var/lib/postgresql/18
 
       [Service]
       ExecStart=/usr/local/bin/luxd serve
@@ -153,6 +169,7 @@ write_files:
       Description=Deploy the lux version named in SSM
       After=network-online.target postgresql.service
       Wants=network-online.target
+      RequiresMountsFor=/var/lib/postgresql/18
 
       [Service]
       Type=oneshot
@@ -209,6 +226,16 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
+  # amazon-ssm-agent: not in the Debian archive, and the official Debian
+  # Cloud Images don't ship it, so shell access via Session Manager needs
+  # it installed explicitly. Idempotent: skips if already installed (e.g.
+  # a future Debian image that does ship it).
+  - |
+    if ! dpkg -s amazon-ssm-agent >/dev/null 2>&1; then
+      curl -fsSL https://s3.${region}.amazonaws.com/amazon-ssm-${region}/latest/debian_arm64/amazon-ssm-agent.deb -o /tmp/amazon-ssm-agent.deb
+      dpkg -i /tmp/amazon-ssm-agent.deb
+      systemctl enable --now amazon-ssm-agent
+    fi
   # Postgres 18 via PGDG: trixie ships 17 (docs/operations.md says tested
   # on 18).
   - install -d -m 0755 /usr/share/postgresql-common/pgdg
@@ -220,7 +247,12 @@ runcmd:
   - mkdir -p /etc/cloudflared
   - curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb -o /tmp/cloudflared.deb
   - dpkg -i /tmp/cloudflared.deb || apt-get install -f -y
-  - /usr/local/sbin/lux-init-postgres.sh
+  # Hard stop here if the Postgres data volume never mounts: cloud-init's
+  # runcmd otherwise keeps going past a failing entry, which would leave
+  # lux-render-config.sh and every systemctl enable below running against
+  # nothing (or against the root volume). `exit 1` here ends this whole
+  # script, since runcmd concatenates its entries into one.
+  - /usr/local/sbin/lux-init-postgres.sh || exit 1
   - /usr/local/sbin/lux-render-config.sh
   - systemctl daemon-reload
   - systemctl enable luxd

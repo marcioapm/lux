@@ -129,6 +129,7 @@ locals {
     version_parameter      = aws_ssm_parameter.lux_version.name
     tunnel_token_parameter = local.cloudflare_tunnel_token_parameter
     db_name                = var.lux_app_db_name
+    volume_id_nodash       = replace(aws_ebs_volume.pg_data.id, "-", "")
     deploy_script          = file("${path.module}/templates/scripts/deploy-lux.py")
     backup_script = templatefile("${path.module}/templates/scripts/pg-backup.sh.tpl", {
       backup_bucket = aws_s3_bucket.pg_backups.id
