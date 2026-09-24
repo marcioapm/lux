@@ -93,8 +93,12 @@ stores them:
   a tmpfs (`/.lux/secrets`, readable only by the workload's user) and
   linked at their `path`, so they are never in a snapshot.
 - **Output is redacted** before it is written anywhere. That covers the
-  exact value and its common encodings (base64, URL, hex, JSON-escaped).
-  Values shorter than 4 bytes are not redacted.
+  exact value and its common encodings (base64, URL, hex, JSON-escaped),
+  overlapping values, and values split across writes or streamed chunks:
+  a tail that could start a secret is held back until the rest arrives, a
+  turn ends, or 2 seconds pass. A secret whose pieces arrive more than 2
+  seconds apart can leak its first part. Values shorter than 4 bytes are
+  not redacted.
 - **A resume needs every secret again**, and is refused before scheduling
   if one is missing. A resume can supply new values, which rotates them.
 - **Git credentials** are used by the runner only and never enter the

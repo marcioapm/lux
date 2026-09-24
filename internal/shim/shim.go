@@ -211,8 +211,9 @@ func (s *Shim) fail(reason, msg string) int {
 }
 
 func (s *Shim) finish(info proto.ExitInfo) int {
-	info.LastSeq = s.out.Seq()
+	// Close first: it records what was still held.
 	s.out.Close()
+	info.LastSeq = s.out.Seq()
 	b, _ := json.Marshal(info)
 	path := filepath.Join(proto.ShimRunDir, proto.ExitFile(s.cfg.Epoch))
 	_ = os.WriteFile(path+".tmp", b, 0o644)
@@ -667,7 +668,10 @@ func (k *sink) Stdout(p []byte)            { k.s.out.Write("stdout", p) }
 func (k *sink) EndMessage()                { k.s.out.EndLine("stdout") }
 func (k *sink) Stderr(p []byte)            { k.s.out.Write("stderr", p) }
 func (k *sink) Event(typ string, data any) { k.s.out.Event(typ, data) }
-func (k *sink) Session(id string)          { k.s.out.Event(proto.EvSession, map[string]string{"sessionId": id}) }
+func (k *sink) Stream(typ, key, text string, wrap func(string) any) {
+	k.s.out.Stream(typ, key, text, wrap)
+}
+func (k *sink) Session(id string) { k.s.out.Event(proto.EvSession, map[string]string{"sessionId": id}) }
 func (k *sink) Activity(idle bool) {
 	a := "busy"
 	if idle {

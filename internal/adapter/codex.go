@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -239,6 +240,12 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 			sink.Stdout([]byte(p.Item.Text))
 			sink.EndMessage()
 		}
+	}
+	// Streamed text (item/agentMessage/delta, item/reasoning/textDelta,
+	// command output, …), so a secret split across deltas is redacted whole.
+	if strings.HasSuffix(strings.ToLower(m.Method), "delta") &&
+		streamEvent(sink, "codex."+m.Method, "", m.Params, [][]string{{"delta"}}) {
+		return
 	}
 	sink.Event("codex."+m.Method, json.RawMessage(m.Params))
 }

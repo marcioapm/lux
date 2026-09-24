@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -177,7 +178,8 @@ func (a *ACP) handleNotification(m rpcMsg) {
 		return
 	}
 	var p struct {
-		Update json.RawMessage `json:"update"`
+		SessionID string          `json:"sessionId"`
+		Update    json.RawMessage `json:"update"`
 	}
 	_ = json.Unmarshal(m.Params, &p)
 	var u struct {
@@ -195,6 +197,12 @@ func (a *ACP) handleNotification(m rpcMsg) {
 	a.mu.Unlock()
 	if u.Kind == "agent_message_chunk" && u.Content.Type == "text" && !loading && u.Content.Text != "" {
 		a.sink.Stdout([]byte(u.Content.Text))
+	}
+	// Chunked text (agent_message_chunk, agent_thought_chunk, …) is
+	// streamed, so a secret split across chunks is redacted whole.
+	if strings.HasSuffix(u.Kind, "_chunk") && u.Content.Type == "text" &&
+		streamEvent(a.sink, "acp."+u.Kind, p.SessionID+"\x00", p.Update, [][]string{{"content", "text"}}) {
+		return
 	}
 	a.sink.Event("acp."+u.Kind, json.RawMessage(p.Update))
 }

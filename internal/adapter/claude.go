@@ -114,6 +114,13 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 				sink.Activity(true)
 			}
 		}
+		// With --include-partial-messages, text arrives as deltas: streamed,
+		// so a secret split across them is redacted whole.
+		// Each line has its own uuid: not part of what makes chunks one.
+		if m.Type == "stream_event" && streamEvent(sink, "claude.stream_event", "", line,
+			[][]string{{"event", "delta", "text"}, {"event", "delta", "thinking"}, {"event", "delta", "partial_json"}}, "uuid") {
+			continue
+		}
 		sink.Event("claude."+m.Type, json.RawMessage(append([]byte{}, line...)))
 	}
 	return nil

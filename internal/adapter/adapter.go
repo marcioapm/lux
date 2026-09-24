@@ -13,10 +13,12 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"sync"
@@ -35,6 +37,11 @@ type Sink interface {
 	Stderr(p []byte)
 	// Event writes a structured event record (ch=event).
 	Event(typ string, data any)
+	// Stream writes streamed text (a reply token by token) as typ events,
+	// each wrap(text) for the text released so far. The sink may hold text
+	// back and coalesce chunks, so a secret split across them is redacted
+	// whole; key names the message (chunks with one key may be joined).
+	Stream(typ, key, text string, wrap func(text string) any)
 	Session(id string)
 	Activity(idle bool)
 	// InputAck: an input was delivered to the agent (or failed to be).
@@ -257,4 +264,47 @@ func command(cfg proto.ShimConfig) ([]string, error) {
 		return nil, fmt.Errorf("%s: no command", cfg.Adapter)
 	}
 	return cfg.Command, nil
+}
+
+// streamEvent writes a raw JSON event whose string at one of paths (the
+// first present) is streamed text through sink.Stream, and reports whether
+// it was one. The event keeps its shape. Chunks with the same scope that
+// differ only in that text (and in the volatile top-level fields) are one
+// message, and may be joined, the last one's fields kept.
+func streamEvent(sink Sink, typ, scope string, raw []byte, paths [][]string, volatile ...string) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber() // numbers as they were written
+	var root map[string]any
+	if dec.Decode(&root) != nil {
+		return false
+	}
+	for _, path := range paths {
+		m := root
+		for _, k := range path[:len(path)-1] {
+			if m, _ = m[k].(map[string]any); m == nil {
+				break
+			}
+		}
+		leaf := path[len(path)-1]
+		text, ok := m[leaf].(string)
+		if !ok {
+			continue
+		}
+		m[leaf] = ""
+		kept := map[string]any{}
+		for _, k := range volatile {
+			if v, ok := root[k]; ok {
+				kept[k] = v
+				delete(root, k)
+			}
+		}
+		key, _ := json.Marshal(root)
+		maps.Copy(root, kept)
+		sink.Stream(typ, scope+string(key), text, func(t string) any {
+			m[leaf] = t
+			return root
+		})
+		return true
+	}
+	return false
 }
