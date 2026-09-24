@@ -1,0 +1,23 @@
+# Copy to terraform.tfvars and fill in. Never commit terraform.tfvars: it
+# is gitignored (deploy/terraform/.gitignore).
+
+region      = "eu-north-1"
+name        = "lux"
+lux_version = "v0.1.0" # the GitHub release tag to deploy; docs/README.md "Upgrading"
+public_url  = "https://lux.example.com"
+
+amd64_runners_enabled = false
+
+cf_account_id = "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID"
+cf_zone_id    = "REPLACE_WITH_CLOUDFLARE_ZONE_ID"
+cf_access_team = "example" # example.cloudflareaccess.com
+
+cf_allowed_emails        = ["alice@example.com"]
+cf_allowed_email_domains = [] # e.g. ["example.com"] to let in the whole domain
+
+# Fedora CoreOS AMI ids for eu-north-1 (stable 44.20260829.3.1), for
+# reference: the aws module looks these up automatically per runner pool's
+# arch (runners.tf, data.aws_ami.fcos), so nothing below needs to be set
+# unless overriding a pool with image = "custom" and its own ami_id.
+#   aarch64 (arm64): ami-05a3746721dceb5c2
+#   x86_64  (amd64): ami-0974b4e605f687d53

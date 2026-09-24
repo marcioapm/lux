@@ -269,3 +269,7 @@ for a tenant's pool), `lux:managed=true`, `lux:deployment=<id>` (which lux
 database launched it: deployments sharing an account never touch each
 other's instances) and `lux:host=<host id>`, plus the
 template's `tags`. luxd also needs `DescribeInstances` filtered by tag.
+
+Reusable Terraform for running all of this on AWS — control host, S3,
+runner launch templates, Cloudflare Tunnel — is under
+[deploy/terraform/](../deploy/terraform/README.md).
