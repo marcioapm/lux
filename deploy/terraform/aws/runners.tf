@@ -126,6 +126,13 @@ resource "aws_launch_template" "runner" {
   image_id      = local.runner_ami_id[each.key]
   instance_type = each.value.instance_type
 
+  # luxd's RunInstances call launches "$Default" (internal/ec2/ec2.go), so
+  # each new version this template gets (a new FCOS AMI from most_recent,
+  # a volume size or IOPS change) must become the default too, or runners
+  # keep booting whatever AMI was current when the template was first
+  # created.
+  update_default_version = true
+
   vpc_security_group_ids = [aws_security_group.runner.id]
 
   # No iam_instance_profile: Fedora CoreOS has no SSM agent (shell access
