@@ -30,7 +30,10 @@ resource "aws_iam_service_linked_role" "spot" {
 
 data "aws_partition" "current" {}
 
-data "aws_region" "current" {}
+locals {
+  arn_prefix = "arn:${data.aws_partition.current.partition}"
+  ec2_arn    = "${local.arn_prefix}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}"
+}
 
 # --- control host ---------------------------------------------------------
 
@@ -60,7 +63,7 @@ resource "aws_iam_instance_profile" "control" {
 # key pairs).
 resource "aws_iam_role_policy_attachment" "control_ssm" {
   role       = aws_iam_role.control.name
-  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  policy_arn = "${local.arn_prefix}:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
 resource "aws_iam_role_policy" "control_luxd" {
@@ -79,18 +82,18 @@ resource "aws_iam_role_policy" "control_luxd" {
         # templates, subnets and security group stops luxd's role (if a
         # credential leaked) from launching arbitrary instances.
         Resource = concat(
-          [for lt in aws_launch_template.runner : "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:launch-template/${lt.id}"],
-          [for s in aws_subnet.public : "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:subnet/${s.id}"],
+          [for lt in aws_launch_template.runner : "${local.ec2_arn}:launch-template/${lt.id}"],
+          [for s in aws_subnet.public : "${local.ec2_arn}:subnet/${s.id}"],
           [
-            "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:instance/*",
-            "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:network-interface/*",
-            "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:volume/*",
-            "arn:${data.aws_partition.current.partition}:ec2:${var.region}::image/*",
-            "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:security-group/${aws_security_group.runner.id}",
+            "${local.ec2_arn}:instance/*",
+            "${local.ec2_arn}:network-interface/*",
+            "${local.ec2_arn}:volume/*",
+            "${local.arn_prefix}:ec2:${var.region}::image/*",
+            "${local.ec2_arn}:security-group/${aws_security_group.runner.id}",
             # Spot launches (internal/ec2/ec2.go sets InstanceMarketOptions):
             # RunInstances is authorized against this resource type too,
             # in addition to instance/network-interface/volume/image above.
-            "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:spot-instances-request/*",
+            "${local.ec2_arn}:spot-instances-request/*",
           ]
         )
       },
@@ -98,7 +101,7 @@ resource "aws_iam_role_policy" "control_luxd" {
         Sid      = "TagOnCreate"
         Effect   = "Allow"
         Action   = "ec2:CreateTags"
-        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:instance/*"
+        Resource = "${local.ec2_arn}:instance/*"
         Condition = {
           StringEquals = { "ec2:CreateAction" = "RunInstances" }
         }
@@ -107,7 +110,7 @@ resource "aws_iam_role_policy" "control_luxd" {
         Sid      = "TerminateManagedInstances"
         Effect   = "Allow"
         Action   = "ec2:TerminateInstances"
-        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:instance/*"
+        Resource = "${local.ec2_arn}:instance/*"
         Condition = {
           StringEquals = { "ec2:ResourceTag/lux:managed" = "true" }
         }
@@ -149,7 +152,7 @@ resource "aws_iam_role_policy" "control_luxd" {
         Sid      = "ReadOwnParameters"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter", "ssm:GetParameters"]
-        Resource = "arn:${data.aws_partition.current.partition}:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_prefix}/*"
+        Resource = "${local.arn_prefix}:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_prefix}/*"
       },
     ]
   })
