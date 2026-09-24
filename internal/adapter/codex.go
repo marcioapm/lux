@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -39,7 +40,7 @@ func NewCodex() *Codex { return &Codex{} }
 // CredentialFiles: Codex reads its key from ~/.codex/auth.json (what
 // `codex login --with-api-key` writes), not from OPENAI_API_KEY in the
 // environment. An OPENAI_API_KEY secret becomes that file.
-func (c *Codex) CredentialFiles(secrets map[string]string, home string) map[string][]byte {
+func (c *Codex) CredentialFiles(_ proto.ShimConfig, secrets map[string]string, home string) map[string][]byte {
 	key, ok := secrets["OPENAI_API_KEY"]
 	if !ok {
 		return nil
@@ -48,7 +49,24 @@ func (c *Codex) CredentialFiles(secrets map[string]string, home string) map[stri
 	return map[string][]byte{filepath.Join(home, ".codex", "auth.json"): b}
 }
 
-// Command runs the spec's command (default "codex") with app-server.
+// codexMCPEnv names the variable holding MCP server n's header m. Codex
+// reads header values from variables (env_http_headers), so none is in
+// argv, which the lux.workload event records.
+func codexMCPEnv(n, m int) string { return fmt.Sprintf("LUX_MCP_%d_%d", n, m) }
+
+// Environment: the MCP servers' header values.
+func (c *Codex) Environment(cfg proto.ShimConfig) map[string]string {
+	env := map[string]string{}
+	for n, s := range cfg.MCP {
+		for m, h := range s.Headers {
+			env[codexMCPEnv(n, m)] = h.Value
+		}
+	}
+	return env
+}
+
+// Command runs the spec's command (default "codex") with app-server, and
+// the MCP servers as config overrides (TOML values).
 func (c *Codex) Command(cfg proto.ShimConfig) ([]string, error) {
 	if cfg.Resume && len(cfg.ResumeCommand) > 0 {
 		return cfg.ResumeCommand, nil
@@ -57,7 +75,27 @@ func (c *Codex) Command(cfg proto.ShimConfig) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(slices.Clone(argv), "app-server"), nil
+	argv = append(slices.Clone(argv), "app-server")
+	for n, s := range cfg.MCPServers {
+		key := "mcp_servers." + s.Name // spec names are TOML bare keys
+		argv = append(argv, "-c", key+".url="+tomlString(s.URL))
+		if len(s.Headers) > 0 {
+			var kv []string
+			for m, h := range s.Headers {
+				kv = append(kv, tomlString(h.Name)+"="+tomlString(codexMCPEnv(n, m)))
+			}
+			argv = append(argv, "-c", key+".env_http_headers={"+strings.Join(kv, ",")+"}")
+		}
+	}
+	return argv, nil
+}
+
+// tomlString is s as a TOML basic string: a JSON string is one, for
+// strings without DEL (url.Parse refuses control characters; header names
+// are tokens).
+func tomlString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 func (c *Codex) call(method string, params any) (json.RawMessage, error) {

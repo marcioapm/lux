@@ -668,6 +668,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image 
 		GraceSec:     sp.Workload.Grace.Seconds(),
 		Secrets:      sp.Secrets,
 		ArtifactsDir: "/.lux/run/artifacts",
+		MCPServers:   sp.Workload.MCPServers,
 	}
 	if sp.Init != nil {
 		cfg.Init = sp.Init.Script

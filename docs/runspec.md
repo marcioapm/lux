@@ -20,6 +20,11 @@ workload:
   user: agent                   # default: the image's USER
   grace: 30s                    # graceful stop before SIGKILL
   resume: { command: [...] }    # generic only: what to run on resume
+  mcpServers:                   # remote MCP servers the agent is given
+    - name: tracker
+      url: https://mcp.acme.dev/mcp
+      headers:
+        - { name: Authorization, secret: TRACKER_TOKEN }  # the value is the secret's
 
 init:
   script: npm ci                # runs before the workload, on every start
@@ -30,6 +35,7 @@ secrets:                        # values supplied by the caller; never stored
   - { name: ANTHROPIC_API_KEY, value: sk-…, as: env }
   - { name: npmrc, value: "…", as: file, path: /home/agent/.npmrc }
   - { name: GITHUB_TOKEN, value: ghp_… }   # used as a git credential below
+  - { name: TRACKER_TOKEN, value: "Bearer …" }  # an MCP header above
 
 git:
   repositories:
@@ -60,6 +66,7 @@ placement:
 network:
   egress:                       # default deny: only these are reachable
     - host: api.anthropic.com
+    - host: mcp.acme.dev        # the MCP server needs its own rule
     - cidr: 140.82.112.0/20
   # unrestricted: true          # no egress filtering (the hard blocks still apply)
   ports:
@@ -251,6 +258,55 @@ starts:
 
 The workload commits as it likes. The checkout is a normal git repository
 owned by the workload user.
+
+## MCP servers
+
+`workload.mcpServers` gives an agent remote MCP servers (streamable HTTP),
+through its own protocol, so the same spec works for every agent adapter:
+
+```yaml
+workload:
+  adapter: claude-code
+  mcpServers:
+    - name: tracker                   # unique; lowercase, digits, - and _
+      url: https://mcp.acme.dev/mcp   # http or https, no user:password@
+      headers:
+        - { name: Authorization, secret: TRACKER_TOKEN }
+secrets:
+  - { name: TRACKER_TOKEN, value: "Bearer …" }
+network:
+  egress:
+    - host: mcp.acme.dev
+```
+
+- **Header values come only from secrets.** A header names a secret in
+  `secrets`, and its value is the secret's whole value (`Bearer …` for a
+  bearer token). The spec stores the secret's name, never its value, and
+  every resume must supply it again, like any secret. It is redacted from
+  output like any secret. A git credential can't be a header's secret: it
+  never enters the container. A secret used only as headers (or as a git
+  credential) is not put in any process's environment or files unless its
+  `as:` says so (its default is then `none`).
+- **Egress must allow the server,** or the spec is refused: its host must
+  equal a `host:` rule, or, for an IP address, fall in a `cidr:` rule. An
+  unrestricted Run needs no rule. (This matches on the name only; the
+  runner's firewall enforces the rest, as for any egress.)
+- **Never the control plane.** Every Run is blocked from luxd's address, so
+  a spec whose MCP server is luxd's host (or a name resolving to one of its
+  addresses) is refused at submit with a 422: run the MCP server
+  elsewhere.
+- **How each adapter delivers them.** None of them puts a header value in
+  the command line, which the `lux.workload` event records.
+
+  | Adapter | Delivery |
+  | --- | --- |
+  | `acp`, `opencode` | `mcpServers` on `session/new` and `session/load`, as ACP `http` servers with their headers. An agent that does not advertise `mcpCapabilities.http` gets none, and the Run gets a `lux.warning` saying so. |
+  | `claude-code` | `--mcp-config` with a file on the secrets tmpfs (mode 0400, the workload user's; never on a volume or in a snapshot). The user's own MCP config still applies: no `--strict-mcp-config`. |
+  | `codex` | `-c mcp_servers.<name>.url="…"` and `-c mcp_servers.<name>.env_http_headers={"Header"="LUX_MCP_<n>_<m>"}`; the values are in those environment variables of the agent's process (not init's, nor `lux exec`'s). Codex passes its environment on to the shell commands it runs, so those see them too. |
+  | `generic` | nothing: the servers are not passed on. |
+- **A custom `workload.resume.command` is run as written:** an adapter adds
+  nothing to it, so the MCP flags (claude-code and codex) are not added on
+  resume. Put them in it yourself if you need them there.
 
 ## Network egress
 

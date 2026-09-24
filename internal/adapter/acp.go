@@ -77,14 +77,23 @@ func (a *ACP) handshake(cfg proto.ShimConfig) error {
 	}
 	var init struct {
 		AgentCapabilities struct {
-			LoadSession bool `json:"loadSession"`
+			LoadSession     bool `json:"loadSession"`
+			MCPCapabilities struct {
+				HTTP bool `json:"http"`
+			} `json:"mcpCapabilities"`
 		} `json:"agentCapabilities"`
 	}
 	_ = json.Unmarshal(res, &init)
 	cwd := workdir(cfg)
+	mcp := acpMCPServers(cfg.MCP)
+	if len(mcp) > 0 && !init.AgentCapabilities.MCPCapabilities.HTTP {
+		// ACP lets a client send only transports the agent advertises.
+		a.sink.Event(proto.EvWarning, map[string]any{"message": "the agent does not support HTTP MCP servers: workload.mcpServers are not given to it"})
+		mcp = []any{}
+	}
 	if cfg.Resume && cfg.SessionID != "" && init.AgentCapabilities.LoadSession {
 		a.setLoading(true)
-		_, err := a.rpc.call("session/load", map[string]any{"sessionId": cfg.SessionID, "cwd": cwd, "mcpServers": []any{}})
+		_, err := a.rpc.call("session/load", map[string]any{"sessionId": cfg.SessionID, "cwd": cwd, "mcpServers": mcp})
 		a.setLoading(false)
 		if err == nil {
 			a.setSession(cfg.SessionID)
@@ -92,7 +101,7 @@ func (a *ACP) handshake(cfg proto.ShimConfig) error {
 		}
 		a.sink.Event(proto.EvWarning, map[string]any{"message": "session/load failed, starting a new session: " + err.Error()})
 	}
-	res, err = a.rpc.call("session/new", map[string]any{"cwd": cwd, "mcpServers": []any{}})
+	res, err = a.rpc.call("session/new", map[string]any{"cwd": cwd, "mcpServers": mcp})
 	if err != nil {
 		return err
 	}
@@ -109,6 +118,19 @@ func (a *ACP) handshake(cfg proto.ShimConfig) error {
 		a.mu.Unlock()
 	}
 	return nil
+}
+
+// acpMCPServers are the servers as ACP HTTP McpServer entries.
+func acpMCPServers(servers []proto.MCPServer) []any {
+	out := []any{}
+	for _, s := range servers {
+		headers := []map[string]string{}
+		for _, h := range s.Headers {
+			headers = append(headers, map[string]string{"name": h.Name, "value": h.Value})
+		}
+		out = append(out, map[string]any{"type": "http", "name": s.Name, "url": s.URL, "headers": headers})
+	}
+	return out
 }
 
 func (a *ACP) setLoading(v bool) {

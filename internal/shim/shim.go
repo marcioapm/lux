@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ import (
 	"github.com/marcioapm/lux/internal/adapter"
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 type Shim struct {
@@ -120,6 +122,8 @@ func (s *Shim) run() int {
 		return s.finish(proto.ExitInfo{ExitCode: 0, Reason: "stopped", Message: "stopped before start"})
 	}
 	s.red.Set(start.Secrets)
+	// Before any goroutine but this one reads cfg.MCP.
+	s.cfg.ResolveMCP(start.Secrets)
 
 	user, err := lookupUser(s.cfg.User)
 	if err != nil {
@@ -160,7 +164,7 @@ func (s *Shim) run() int {
 	if err != nil {
 		return s.fail("start-failed", err.Error())
 	}
-	proc, err := s.startWorkload(argv, env)
+	proc, err := s.startWorkload(argv, withAdapterEnv(env, ad, s.cfg))
 	if err != nil {
 		return s.fail("start-failed", err.Error())
 	}
@@ -442,10 +446,18 @@ func (s *Shim) writeSecretFiles(values map[string]string, ad adapter.Adapter) er
 			return err
 		}
 	}
-	// Credentials the adapter's agent reads from files (Codex's auth.json).
+	// Secrets the adapter's agent reads from files (Codex's auth.json,
+	// Claude Code's MCP config).
 	if cf, ok := ad.(adapter.CredentialFiles); ok {
-		for path, content := range cf.CredentialFiles(values, s.user.home) {
-			if err := s.placeSecret("adapter-"+filepath.Base(filepath.Dir(path))+"-"+filepath.Base(path), path, content); err != nil {
+		for path, content := range cf.CredentialFiles(s.cfg, values, s.user.home) {
+			var err error
+			// Named with the reserved prefix: never a user secret's file.
+			if filepath.Dir(path) == proto.ShimSecretsDir {
+				err = s.writeSecret(filepath.Base(path), content) // named by the adapter, with the reserved prefix
+			} else {
+				err = s.placeSecret(spec.ReservedSecretPrefix+filepath.Base(filepath.Dir(path))+"-"+filepath.Base(path), path, content)
+			}
+			if err != nil {
 				return err
 			}
 		}
@@ -460,11 +472,10 @@ func (s *Shim) writeSecretFiles(values map[string]string, ad adapter.Adapter) er
 // into place. The link can live on a state volume; the value never does,
 // so it is never in a snapshot.
 func (s *Shim) placeSecret(name, path string, value []byte) error {
-	src := filepath.Join(proto.ShimSecretsDir, name)
-	if err := os.WriteFile(src, value, 0o400); err != nil {
+	if err := s.writeSecret(name, value); err != nil {
 		return err
 	}
-	_ = os.Chown(src, s.user.uid, s.user.gid)
+	src := filepath.Join(proto.ShimSecretsDir, name)
 	if err := s.mkdirForWorkload(filepath.Dir(path)); err != nil {
 		return err
 	}
@@ -474,6 +485,31 @@ func (s *Shim) placeSecret(name, path string, value []byte) error {
 	}
 	_ = os.Lchown(path, s.user.uid, s.user.gid)
 	return nil
+}
+
+// writeSecret writes a value on the secrets tmpfs, readable only by the
+// workload user.
+func (s *Shim) writeSecret(name string, value []byte) error {
+	src := filepath.Join(proto.ShimSecretsDir, name)
+	if err := os.WriteFile(src, value, 0o400); err != nil {
+		return err
+	}
+	_ = os.Chown(src, s.user.uid, s.user.gid)
+	return nil
+}
+
+// withAdapterEnv is the workload's environment: env plus what its adapter
+// adds (see adapter.Environment).
+func withAdapterEnv(env []string, ad adapter.Adapter, cfg proto.ShimConfig) []string {
+	e, ok := ad.(adapter.Environment)
+	if !ok {
+		return env
+	}
+	out := slices.Clone(env)
+	for k, v := range e.Environment(cfg) {
+		out = append(out, k+"="+v)
+	}
+	return out
 }
 
 // mkdirForWorkload creates dir and its missing parents, for a path the

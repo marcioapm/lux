@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sync"
 	"syscall"
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // Claude drives Claude Code in stream-json mode (docs/agent-protocols.md):
@@ -45,7 +47,32 @@ func (c *Claude) Command(cfg proto.ShimConfig) ([]string, error) {
 	if cfg.Resume && cfg.SessionID != "" {
 		argv = append(argv, "--resume", cfg.SessionID)
 	}
+	// Added to the user's own MCP config (no --strict-mcp-config).
+	if len(cfg.MCPServers) > 0 {
+		argv = append(argv, "--mcp-config", claudeMCPConfig)
+	}
 	return argv, nil
+}
+
+// claudeMCPConfig is the --mcp-config file: on the secrets tmpfs, as it
+// holds header values.
+var claudeMCPConfig = filepath.Join(proto.ShimSecretsDir, spec.ReservedSecretPrefix+"claude-mcp.json")
+
+// CredentialFiles: the MCP servers, as Claude Code's --mcp-config reads them.
+func (c *Claude) CredentialFiles(cfg proto.ShimConfig, _ map[string]string, _ string) map[string][]byte {
+	if len(cfg.MCP) == 0 {
+		return nil
+	}
+	servers := map[string]any{}
+	for _, s := range cfg.MCP {
+		headers := map[string]string{}
+		for _, h := range s.Headers {
+			headers[h.Name] = h.Value
+		}
+		servers[s.Name] = map[string]any{"type": "http", "url": s.URL, "headers": headers}
+	}
+	b, _ := json.Marshal(map[string]any{"mcpServers": servers})
+	return map[string][]byte{claudeMCPConfig: b}
 }
 
 func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Sink) error {

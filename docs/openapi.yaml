@@ -323,6 +323,33 @@ components:
             - array
             - "null"
       type: object
+    MCPHeader:
+      additionalProperties: false
+      properties:
+        name:
+          description: The HTTP header's name, e.g. Authorization.
+          type: string
+        secret:
+          description: The secret (in secrets) whose value is the header's whole value, e.g. "Bearer …".
+          type: string
+      type: object
+    MCPServer:
+      additionalProperties: false
+      properties:
+        headers:
+          description: Headers sent on every request, each valued from a secret.
+          items:
+            $ref: "#/components/schemas/MCPHeader"
+          type:
+            - array
+            - "null"
+        name:
+          description: Unique name; the agent sees its tools under it. Lowercase letters, digits, - and _.
+          type: string
+        url:
+          description: "The server's streamable HTTP endpoint: http or https, without credentials."
+          type: string
+      type: object
     Manifest:
       additionalProperties: false
       properties:
@@ -1217,6 +1244,13 @@ components:
                 - 4h
               type: string
             - type: number
+        mcpServers:
+          description: MCP servers (streamable HTTP) the agent connects to, through its adapter. Each URL's host must be allowed by network.egress (unless unrestricted), and may not be the control plane's.
+          items:
+            $ref: "#/components/schemas/MCPServer"
+          type:
+            - array
+            - "null"
         prompt:
           type: string
         resume:

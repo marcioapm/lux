@@ -1,0 +1,7 @@
+# An MCP server for the tests: streamable HTTP at /mcp, one tool ("echo"),
+# every request needing `Authorization: Bearer $TOKEN`.
+FROM docker.io/library/alpine:3.24.2
+RUN apk add --no-cache python3
+COPY server.py /server.py
+EXPOSE 8080
+ENTRYPOINT ["python3", "/server.py"]

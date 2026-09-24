@@ -82,13 +82,23 @@ type Adapter interface {
 	Stop() error
 }
 
-// CredentialFiles is implemented by adapters whose agent reads its key
-// from a file rather than the environment. Given the Run's secret values
+// CredentialFiles is implemented by adapters whose agent reads secrets
+// from files rather than the environment: a key, or a config holding MCP
+// headers. Given the Run's config (with MCP resolved), its secret values
 // and the workload user's home, it returns the files to write (path →
 // contents). The shim writes them like file secrets: on the secrets tmpfs,
-// linked into place, never snapshotted.
+// readable only by the workload user, never snapshotted. A path elsewhere
+// is linked to its file there; a path under proto.ShimSecretsDir is the
+// file itself.
 type CredentialFiles interface {
-	CredentialFiles(secrets map[string]string, home string) map[string][]byte
+	CredentialFiles(cfg proto.ShimConfig, secrets map[string]string, home string) map[string][]byte
+}
+
+// Environment is implemented by adapters whose agent needs variables in
+// its environment (Codex reads MCP header values from variables it is
+// told the names of). They are the workload's only, not init's or exec's.
+type Environment interface {
+	Environment(cfg proto.ShimConfig) map[string]string
 }
 
 func New(name string) (Adapter, error) {

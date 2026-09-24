@@ -349,6 +349,33 @@ def git_server(env: TestEnvironment):
     sh("docker", "rm", "-f", name, check=False)
 
 
+# ---- an MCP server ---------------------------------------------------------------
+
+class MCPServer:
+    """An MCP server (streamable HTTP) on the run network, reachable from
+    hosts. Every request needs `Authorization: Bearer <token>`; it has one
+    tool, echo, answering "echo: <text>"."""
+
+    def __init__(self, container: str, ip: str, token: str):
+        self.container, self.ip, self.token = container, ip, token
+        self.url = f"http://{ip}:8080/mcp"
+
+    def calls(self) -> list[dict]:
+        """What reached it: method, tool, whether the auth was right."""
+        from env import sh
+        return json.loads(sh("docker", "exec", self.container, "wget", "-qO-", "http://127.0.0.1:8080/calls"))
+
+
+@pytest.fixture(scope="session")
+def mcp_server(env: TestEnvironment):
+    from env import build_test_image, sh, start_service
+    name = f"lux-e2e-{env.run_id}-mcp"
+    token = "mcp-" + uuid.uuid4().hex
+    ip = start_service(env, name, build_test_image("mcp"), TOKEN=token)
+    yield MCPServer(name, ip, token)
+    sh("docker", "rm", "-f", name, check=False)
+
+
 # ---- egress targets -----------------------------------------------------------
 
 class NetTargets:

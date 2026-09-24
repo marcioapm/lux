@@ -46,3 +46,5 @@ After v1:
 | Spot instances: interruption notice → preempt → resume elsewhere | ✅ done |
 | Review + simplify of the above (three review rounds; redaction of split secrets) | ✅ done |
 | Disk limit per Run (`resources.disk`, measured; `--disk` reservation opt-in) | ✅ done |
+| Per-repository `push: false` | ✅ done |
+| MCP servers in the RunSpec (`workload.mcpServers`, headers from secrets) | ✅ done |

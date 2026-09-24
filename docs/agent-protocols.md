@@ -321,6 +321,78 @@ capture)
 
 ---
 
+## 5. Remote MCP servers (`workload.mcpServers`)
+
+Checked 2026-09-24 against the same CLI versions, with a real MCP server
+(`tests/images/mcp`, streamable HTTP, bearer auth) on 127.0.0.1.
+
+**ACP**
+- `session/new` and `session/load` both take `mcpServers` (an array of
+  `McpServer`). An HTTP entry is `{"type":"http","name":..,"url":..,"headers":[{"name":..,"value":..}]}`;
+  in v1 `name`, `url` and `headers` are all required (send `[]` for none),
+  in v2 `headers` is optional. (from docs/source: `McpServerHttp`,
+  `HttpHeader`, `NewSessionRequest`, `LoadSessionRequest` in the v1 and v2
+  schemas)
+- An agent advertises HTTP support in `initialize` as
+  `agentCapabilities.mcpCapabilities.http: true` (v1; default `false`).
+  The schema says the HTTP transport is "Only available when the Agent
+  capabilities indicate `mcp_capabilities.http` is `true`", so lux sends
+  none to an agent without it. OpenCode 1.18.31 advertises
+  `{"http":true,"sse":true}` (verified by running, §3). v2 moves this to
+  `agentCapabilities.session.mcp.http` (an object, `{}` for yes); lux reads
+  the v1 field, which is what agents negotiating `protocolVersion: 1` send.
+  (from docs/source)
+- A tool call is a `session/update` with `sessionUpdate: "tool_call"`
+  (`toolCallId`, `title`, `status`, …), then `"tool_call_update"`s with the
+  same `toolCallId`; `status` is `pending | in_progress | completed |
+  failed`, and `content` is a list of `ToolCallContent`, e.g.
+  `{"type":"content","content":{"type":"text","text":..}}`. (from
+  docs/source; lux passes them through as `acp.tool_call` and
+  `acp.tool_call_update` events)
+- Not verified: OpenCode actually connecting to an HTTP server given this
+  way (no live run with a model).
+
+**Claude Code**
+- `--mcp-config <file>` takes `{"mcpServers":{"<name>":{"type":"http","url":..,"headers":{..}}}}`,
+  adds to the user's own MCP config (only `--strict-mcp-config` would
+  replace it), and works with `-p --input-format stream-json`. The
+  `system`/`init` line lists it: `"mcp_servers":[{"name":"t","status":"connected","source":"dynamic"}]`,
+  and its tools as `mcp__<server>__<tool>`. Every request carried the
+  configured header. (verified by running)
+- A call, as stream-json shows it: an `assistant` message with
+  `{"type":"tool_use","id":"toolu_…","name":"mcp__t__echo","input":{"text":"hello"}}`,
+  then a `user` message with
+  `{"type":"tool_result","tool_use_id":"toolu_…","content":[{"type":"text","text":"echo: hello"}]}`.
+  (verified by running, a real model call)
+- Before `initialize`, Claude Code POSTs a `server/discover` request; a
+  server that does not know it must answer with a JSON-RPC error, as the
+  test server does. (verified by running)
+
+**Codex**
+- `-c` overrides on `codex app-server` (and every subcommand) configure a
+  streamable HTTP server: `-c mcp_servers.<name>.url="<url>"` and
+  `-c mcp_servers.<name>.env_http_headers={"<Header>"="<ENV VAR>"}`, where
+  the header's value is read from that variable of Codex's own
+  environment. `codex mcp list --json` shows them as `streamable_http`
+  with `env_http_headers`. Other keys: `bearer_token_env_var`,
+  `http_headers` (literal values, which would put a secret in argv).
+  (verified by running `codex mcp add --help` and `codex -c … mcp list`)
+- With those overrides, `app-server` connects on `thread/start`
+  (`mcpServer/startupStatus/updated` notifications: `starting`, then
+  `ready`) with the header from the variable, and lists the tools.
+  (verified by running)
+- A call is a `ThreadItem` of `type: "mcpToolCall"`: `id`, `server`,
+  `tool`, `arguments`, `status` (`inProgress | completed | failed`),
+  `result` (`{"content":[..],"structuredContent"?,"_meta"?}` or null),
+  `error` (`{"message"}` or null), `durationMs`, in `item/started` and
+  `item/completed`. (from docs/source: `codex app-server
+  generate-json-schema`; lux-fake mirrors it)
+- Not verified: a model-initiated `mcpToolCall` item on the wire. In the
+  one live turn tried, the model answered that it had no such server,
+  although Codex had connected to it and listed its tools.
+
+---
+
 ## Sources
 
 - Claude Code, Codex, OpenCode: live protocol captures driven from Python scripts talking

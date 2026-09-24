@@ -224,3 +224,24 @@ def test_a_repository_marked_push_false_is_never_pushed(lux, runners, hosts, fak
     assert git_server.rev("context", "lux/work") == "", "a push: false repository got the branch"
     bad = lux.run("push", run_id, "--expect", "context=" + "0" * 40, check=False)
     assert bad.returncode != 0 and "not pushed" in bad.stderr, bad.stderr
+
+
+def test_one_script_commits_in_two_repositories(lux, runners, hosts, fake_image, git_server):
+    """lux-fake's cd moves between checkouts, so one turn can commit in
+    each, and one push pushes both."""
+    git_server.create("one", {"base.txt": "1\n"})
+    git_server.create("two", {"base.txt": "2\n"})
+    runners.start(hosts[0])
+    script = "\n".join(["cd /workspace/repos/one", "write a.txt x", "commit one",
+                        "cd ../two", "write b.txt y", "commit two"])
+    spec = repo_spec(fake_image, git_server, script, repo="one")
+    spec["git"]["repositories"].append({"name": "two", "url": git_server.url("two"), "ref": "main",
+                                        "credential": "GIT_TOKEN"})
+    run_id = lux.submit(spec)
+    out = wait_until(lambda: (o := lux.logs(run_id)).count("committed ") == 2 and o, 30, 0.3, "no two commits")
+    assert "cwd /workspace/repos/two" in out, out
+    pushed = {r["repo"]: r["status"] for r in lux.json("push", run_id, "--wait")}
+    assert pushed == {"one": "pushed", "two": "pushed"}, pushed
+    assert git_server.show("one", "lux/work", "a.txt") == "x\n"
+    assert git_server.show("two", "lux/work", "b.txt") == "y\n"
+    lux.run("cancel", run_id)

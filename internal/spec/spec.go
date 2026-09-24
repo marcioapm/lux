@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"path"
 	"regexp"
@@ -59,7 +60,21 @@ type Workload struct {
 	TTY    bool    `json:"tty,omitempty" yaml:"tty,omitempty"`
 	Resume *Resume `json:"resume,omitempty" yaml:"resume,omitempty"`
 	// Grace is how long a graceful stop waits before SIGKILL.
-	Grace Duration `json:"grace,omitempty" yaml:"grace,omitempty"`
+	Grace      Duration    `json:"grace,omitempty" yaml:"grace,omitempty"`
+	MCPServers []MCPServer `json:"mcpServers,omitempty" yaml:"mcpServers,omitempty" doc:"MCP servers (streamable HTTP) the agent connects to, through its adapter. Each URL's host must be allowed by network.egress (unless unrestricted), and may not be the control plane's."`
+}
+
+// MCPServer is a remote MCP server the agent is given. Header values come
+// only from secrets, so none is ever stored in the spec.
+type MCPServer struct {
+	Name    string      `json:"name" yaml:"name" doc:"Unique name; the agent sees its tools under it. Lowercase letters, digits, - and _."`
+	URL     string      `json:"url" yaml:"url" doc:"The server's streamable HTTP endpoint: http or https, without credentials."`
+	Headers []MCPHeader `json:"headers,omitempty" yaml:"headers,omitempty" doc:"Headers sent on every request, each valued from a secret."`
+}
+
+type MCPHeader struct {
+	Name   string `json:"name" yaml:"name" doc:"The HTTP header's name, e.g. Authorization."`
+	Secret string `json:"secret" yaml:"secret" doc:"The secret (in secrets) whose value is the header's whole value, e.g. \"Bearer …\"."`
 }
 
 type Resume struct {
@@ -73,7 +88,7 @@ type Init struct {
 type Secret struct {
 	Name  string `json:"name" yaml:"name"`
 	Value string `json:"value,omitempty" yaml:"value,omitempty"`
-	As    string `json:"as,omitempty" yaml:"as,omitempty"` // env | file
+	As    string `json:"as,omitempty" yaml:"as,omitempty"` // env | file | none
 	Path  string `json:"path,omitempty" yaml:"path,omitempty"`
 	// Git marks a secret used only by the runner (a git credential): it is
 	// never placed in the container.
@@ -334,11 +349,19 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		if seen[sec.Name] {
 			fail("secrets: duplicate %q", sec.Name)
 		}
+		if strings.HasPrefix(sec.Name, ReservedSecretPrefix) {
+			fail("secrets[%d]: %q: the %s prefix is reserved", i, sec.Name, ReservedSecretPrefix)
+		}
 		seen[sec.Name] = true
 		if sec.As == "" {
+			// Used only as git credentials or MCP headers: nowhere else.
 			sec.As = "env"
+			if s.onlyCredential(sec.Name) {
+				sec.As = "none"
+			}
 		}
 		switch sec.As {
+		case "none":
 		case "env":
 			if !envRe.MatchString(sec.Name) {
 				fail("secrets[%d]: %q is not a valid environment variable name", i, sec.Name)
@@ -348,7 +371,7 @@ func (s *RunSpec) Normalize(d Defaults) error {
 				fail("secrets[%d]: file secrets need an absolute path", i)
 			}
 		default:
-			fail("secrets[%d].as must be env or file", i)
+			fail("secrets[%d].as must be env, file or none", i)
 		}
 	}
 
@@ -410,14 +433,13 @@ func (s *RunSpec) Normalize(d Defaults) error {
 			fail("git.push.branch is required")
 		}
 	}
-	// Git credentials are the runner's, never the container's.
+	s.normalizeMCP(seen, fail)
+	// Git credentials are the runner's, never the container's. (The shim
+	// still gets every value, to redact, and to value MCP headers from; no
+	// header may name a git credential.)
 	for i := range s.Secrets {
-		if s.Git != nil {
-			for _, r := range s.Git.Repositories {
-				if r.Credential == s.Secrets[i].Name {
-					s.Secrets[i].RunnerOnly = true
-				}
-			}
+		if s.isGitCredential(s.Secrets[i].Name) {
+			s.Secrets[i].RunnerOnly = true
 		}
 	}
 
@@ -480,6 +502,96 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		return &ValidationError{Problems: errs}
 	}
 	return nil
+}
+
+// headerRe is an HTTP header name: RFC 9110 token characters.
+var headerRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+func (s *RunSpec) normalizeMCP(secrets map[string]bool, fail func(string, ...any)) {
+	names := map[string]bool{}
+	for i, m := range s.Workload.MCPServers {
+		at := fmt.Sprintf("workload.mcpServers[%d]", i)
+		if !volumeRe.MatchString(m.Name) || names[m.Name] {
+			fail("%s: invalid or duplicate name %q (lowercase, digits, - and _)", at, m.Name)
+		}
+		names[m.Name] = true
+		u, err := url.Parse(m.URL)
+		switch {
+		case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "":
+			fail("%s.url: need an http or https URL with a host", at)
+			continue
+		case u.User != nil:
+			// It would be stored with the spec: header values come from secrets.
+			fail("%s.url must not carry credentials: use headers with a secret", at)
+		}
+		hdrs := map[string]bool{}
+		for j, h := range m.Headers {
+			if !headerRe.MatchString(h.Name) {
+				fail("%s.headers[%d]: invalid header name %q", at, j, h.Name)
+			}
+			if hdrs[strings.ToLower(h.Name)] {
+				fail("%s.headers[%d]: duplicate header %q", at, j, h.Name)
+			}
+			hdrs[strings.ToLower(h.Name)] = true
+			if !secrets[h.Secret] {
+				fail("%s.headers[%d].secret: no secret named %q", at, j, h.Secret)
+			} else if s.isGitCredential(h.Secret) {
+				// The header would put it in the container, where a git
+				// credential never is.
+				fail("%s.headers[%d].secret: %q is a git credential, which never enters the container: use another secret", at, j, h.Secret)
+			}
+		}
+		if !s.Network.Unrestricted && !s.Network.allows(u.Hostname()) {
+			fail("%s: network.egress does not allow MCP server %q at %s: add an egress rule for it (host: for a name, cidr: for an address)", at, m.Name, u.Hostname())
+		}
+	}
+}
+
+// ReservedSecretPrefix names files lux itself writes on the secrets tmpfs
+// (adapters' credential and config files): no secret may use it.
+const ReservedSecretPrefix = "lux-"
+
+// onlyCredential reports whether a secret is used as a git credential or an
+// MCP header and is referenced nowhere else a spec can name it.
+func (s *RunSpec) onlyCredential(name string) bool {
+	if s.isGitCredential(name) {
+		return true
+	}
+	for _, m := range s.Workload.MCPServers {
+		for _, h := range m.Headers {
+			if h.Secret == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *RunSpec) isGitCredential(name string) bool {
+	if s.Git != nil {
+		for _, r := range s.Git.Repositories {
+			if r.Credential == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// allows reports whether an egress rule covers host: a hostname equal to a
+// host rule, or an address in a cidr rule. The runner's firewall enforces
+// the rest (what a name resolves to).
+func (n Network) allows(host string) bool {
+	ip, ipErr := netip.ParseAddr(host)
+	for _, e := range n.Egress {
+		if e.Host != "" && strings.EqualFold(strings.TrimSuffix(e.Host, "."), strings.TrimSuffix(host, ".")) {
+			return true
+		}
+		if p, err := netip.ParsePrefix(e.CIDR); err == nil && ipErr == nil && p.Contains(ip.Unmap()) {
+			return true
+		}
+	}
+	return false
 }
 
 // volumeFor is the volume a path is on: the most specific one, as mounts

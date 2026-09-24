@@ -393,6 +393,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		}
 		return nil, err
 	}
+	if err := s.checkMCPNotControlPlane(ctx, sp); err != nil {
+		return nil, err
+	}
 	stored, refs, values := sp.SplitSecrets()
 	if err := requireSecrets(refs, values); err != nil {
 		return nil, err

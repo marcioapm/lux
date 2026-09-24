@@ -57,6 +57,33 @@ type ShimConfig struct {
 	Secrets []spec.Secret `json:"secrets,omitempty"`
 	// ArtifactsDir is watched for on-demand artifacts ($LUX_ARTIFACTS).
 	ArtifactsDir string `json:"artifactsDir,omitempty"`
+	// MCPServers as the spec has them: header values are secret names.
+	MCPServers []spec.MCPServer `json:"mcpServers,omitempty"`
+	// MCP is MCPServers with header values resolved from the secrets in
+	// "start", by the shim, for its adapter. Never serialized: the config
+	// file holds no secrets.
+	MCP []MCPServer `json:"-"`
+}
+
+// MCPServer is an MCP server as an adapter hands it to its agent.
+type MCPServer struct {
+	Name    string
+	URL     string
+	Headers []MCPHeader
+}
+
+type MCPHeader struct{ Name, Value string }
+
+// ResolveMCP fills cfg.MCP from the spec's servers and the secret values.
+func (cfg *ShimConfig) ResolveMCP(secrets map[string]string) {
+	cfg.MCP = nil
+	for _, m := range cfg.MCPServers {
+		r := MCPServer{Name: m.Name, URL: m.URL}
+		for _, h := range m.Headers {
+			r.Headers = append(r.Headers, MCPHeader{Name: h.Name, Value: secrets[h.Secret]})
+		}
+		cfg.MCP = append(cfg.MCP, r)
+	}
 }
 
 // ShimMsg is one line on the shim socket, either direction.

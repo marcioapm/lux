@@ -43,6 +43,15 @@ Agents authenticate however they normally do, through secrets:
 File secrets live on a tmpfs, so they are never snapshotted, and they are
 supplied again on every resume.
 
+## MCP servers
+
+`workload.mcpServers` gives the agent remote MCP servers through its own
+protocol: ACP `mcpServers` on `session/new` and `session/load`, Claude
+Code's `--mcp-config` (a file on the secrets tmpfs), Codex's
+`-c mcp_servers.*` overrides with header values in environment variables.
+Header values come from secrets and are never in the command line. See
+[MCP servers](runspec.md#mcp-servers).
+
 ## What every adapter gives you
 
 - **Idle or busy.** The Run's `activity` field says whether an agent is

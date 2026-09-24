@@ -2,7 +2,9 @@
 // three agent protocols lux has adapters for, so steering, stop and resume
 // on another host are tested without a model:
 //
-//	lux-fake                                   ACP (JSON-RPC over stdio)
+//	lux-fake [--no-mcp-http]                   ACP (JSON-RPC over stdio);
+//	                                           --no-mcp-http: without the
+//	                                           HTTP MCP capability
 //	lux-fake -p --input-format stream-json …   Claude Code's stream-json
 //	lux-fake app-server                        Codex's app-server
 //	lux-fake plain                             a line-oriented generic workload
@@ -27,6 +29,13 @@
 //	history                reply with every prompt so far in this session
 //	exit <code>            exit the process
 //	ask                    request a permission (ACP only); reply with the outcome
+//	cd <path>              change the working directory for the lines that
+//	                       follow (and the rest of the session); reply "cwd <path>"
+//	mcp-call <server> <tool> <text>
+//	                       call a tool on an MCP server the client configured
+//	                       (streamable HTTP), with {"text": <text>}; report it
+//	                       as the protocol's tool events and reply with the
+//	                       result's text
 //
 // Anything else is echoed back as "you said: …".
 package main
@@ -81,6 +90,11 @@ type agent struct {
 	steer   []string      // extra prompts for the running turn
 	emit    func(text string)
 	ask     func() string
+	// mcp: the MCP servers the client gave, by name. tool reports a tool
+	// call in the protocol's own events: started (result and err empty),
+	// then done.
+	mcp  map[string]mcpServer
+	tool func(call toolCall)
 }
 
 func newAgent() *agent {
@@ -89,6 +103,7 @@ func newAgent() *agent {
 		a.cwd = wd
 	}
 	a.ask = func() string { return "not supported" }
+	a.tool = func(toolCall) {}
 	return a
 }
 
@@ -318,6 +333,20 @@ func (a *agent) runLine(line string, cancel chan struct{}) bool {
 		os.Exit(code)
 	case "ask":
 		a.say("permission: " + a.ask())
+	case "cd":
+		dir := filepath.Clean(a.path(rest))
+		if fi, err := os.Stat(dir); err != nil {
+			a.say("error: " + err.Error())
+		} else if !fi.IsDir() {
+			a.say("error: " + dir + " is not a directory")
+		} else {
+			a.cwd = dir
+			a.say("cwd " + dir)
+		}
+	case "mcp-call":
+		server, rest, _ := strings.Cut(rest, " ")
+		tool, text, _ := strings.Cut(rest, " ")
+		a.say(a.mcpCall(server, tool, text))
 	default:
 		a.say("you said: " + line)
 	}
@@ -397,6 +426,20 @@ func acp() {
 		}})
 		return string(<-ch)
 	}
+	// An MCP tool call is a tool_call, then a tool_call_update.
+	a.tool = func(c toolCall) {
+		u := map[string]any{"sessionUpdate": "tool_call", "toolCallId": c.ID, "title": c.Server + ": " + c.Tool,
+			"kind": "other", "status": "in_progress", "rawInput": c.Args}
+		if c.Done {
+			u = map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": c.ID, "status": "completed",
+				"content": []any{map[string]any{"type": "content", "content": map[string]string{"type": "text", "text": c.Result}}}}
+			if c.Err != "" {
+				u["status"] = "failed"
+				u["content"] = []any{map[string]any{"type": "content", "content": map[string]string{"type": "text", "text": c.Err}}}
+			}
+		}
+		rpc(map[string]any{"method": "session/update", "params": map[string]any{"sessionId": a.session, "update": u}})
+	}
 	reply := func(id json.RawMessage, result any) { rpc(map[string]any{"id": id, "result": result}) }
 	fail := func(id json.RawMessage, code int, msg string) {
 		rpc(map[string]any{"id": id, "error": map[string]any{"code": code, "message": msg}})
@@ -417,17 +460,20 @@ func acp() {
 			continue
 		}
 		var p struct {
-			SessionID string     `json:"sessionId"`
-			Cwd       string     `json:"cwd"`
-			Prompt    textBlocks `json:"prompt"`
+			SessionID  string          `json:"sessionId"`
+			Cwd        string          `json:"cwd"`
+			Prompt     textBlocks      `json:"prompt"`
+			MCPServers json.RawMessage `json:"mcpServers"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		switch m.Method {
 		case "initialize":
-			reply(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{"loadSession": true},
+			reply(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{"loadSession": true,
+				"mcpCapabilities": map[string]bool{"http": !slices.Contains(os.Args, "--no-mcp-http"), "sse": false}},
 				"agentInfo": map[string]string{"name": "lux-fake", "version": "1"}})
 		case "session/new":
 			a.cwd = p.Cwd
+			a.setMCP(acpMCP(p.MCPServers))
 			a.newSession()
 			reply(m.ID, map[string]any{"sessionId": a.session})
 		case "session/load":
@@ -436,6 +482,7 @@ func acp() {
 				continue
 			}
 			a.cwd = p.Cwd
+			a.setMCP(acpMCP(p.MCPServers))
 			for _, e := range a.history() {
 				kind := "agent_message_chunk"
 				if e.Role == "user" {
@@ -488,6 +535,24 @@ func streamJSON() {
 		a.send(map[string]any{"type": "assistant", "session_id": a.session,
 			"message": map[string]any{"role": "assistant", "content": []map[string]string{{"type": "text", "text": s}}}})
 	}
+	// An MCP tool call is a tool_use in an assistant message, then its
+	// tool_result in a user message; Claude Code names the tool
+	// mcp__<server>__<tool>.
+	a.tool = func(c toolCall) {
+		if !c.Done {
+			a.send(map[string]any{"type": "assistant", "session_id": a.session, "message": map[string]any{"role": "assistant",
+				"content": []map[string]any{{"type": "tool_use", "id": c.ID, "name": "mcp__" + c.Server + "__" + c.Tool, "input": c.Args}}}})
+			return
+		}
+		text := c.Result
+		if c.Err != "" {
+			text = c.Err
+		}
+		a.send(map[string]any{"type": "user", "session_id": a.session, "message": map[string]any{"role": "user",
+			"content": []map[string]any{{"type": "tool_result", "tool_use_id": c.ID, "is_error": c.Err != "",
+				"content": []map[string]string{{"type": "text", "text": text}}}}}})
+	}
+	a.setMCP(claudeMCP(os.Args))
 	if i := slices.Index(os.Args, "--resume"); i >= 0 && i+1 < len(os.Args) {
 		if err := a.loadSession(os.Args[i+1]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -570,6 +635,27 @@ func appServer() {
 		a.send(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": a.session, "turnId": id,
 			"item": map[string]any{"type": "agentMessage", "id": fmt.Sprintf("msg-%d", time.Now().UnixNano()), "text": s}}})
 	}
+	// An MCP tool call is an mcpToolCall item, started then completed (the
+	// shape of codex app-server's generated schema, ThreadItem).
+	a.tool = func(c toolCall) {
+		turnMu.Lock()
+		id := turnID
+		turnMu.Unlock()
+		item := map[string]any{"type": "mcpToolCall", "id": c.ID, "server": c.Server, "tool": c.Tool,
+			"arguments": c.Args, "status": "inProgress", "result": nil, "error": nil, "durationMs": nil}
+		method := "item/started"
+		if c.Done {
+			method = "item/completed"
+			item["status"], item["durationMs"] = "completed", time.Since(c.Started).Milliseconds()
+			item["result"] = map[string]any{"content": []map[string]string{{"type": "text", "text": c.Result}}}
+			if c.Err != "" {
+				item["status"], item["result"] = "failed", nil
+				item["error"] = map[string]string{"message": c.Err}
+			}
+		}
+		a.send(map[string]any{"method": method, "params": map[string]any{"threadId": a.session, "turnId": id, "item": item}})
+	}
+	a.setMCP(codexMCP(os.Args))
 	reply := func(id json.RawMessage, result any) { a.send(map[string]any{"id": id, "result": result}) }
 	fail := func(id json.RawMessage, err error) {
 		a.send(map[string]any{"id": id, "error": map[string]any{"code": -32600, "message": err.Error()}})
