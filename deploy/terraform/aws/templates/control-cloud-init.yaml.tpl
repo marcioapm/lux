@@ -71,11 +71,27 @@ write_files:
       #!/bin/sh
       # Writes /etc/lux/luxd.toml and generates the Postgres owner and
       # lux_app passwords on first boot, kept only in root-only files
-      # (never in Terraform state). Safe to re-run: reuses existing
-      # passwords and overwrites the config with the current private IP.
+      # (never in Terraform state). Run on every lux-deploy.service
+      # invocation (the 5-minute timer, not just first boot): public_url,
+      # the Access team/AUD and the blob bucket come from SSM here, not
+      # from cloud-init's one-time render, so changing one of those in
+      # Terraform reaches the box without replacing the instance
+      # (aws_instance.control ignores ami/user_data changes — see
+      # control.tf). Restarts luxd only if the rendered config actually
+      # changed, and only if luxd is already running (on first boot,
+      # deploy-lux.py starts it after migrate).
       set -eu
       umask 077
       ip=$(hostname -I | awk '{print $1}')
+
+      get_param() {
+        aws ssm get-parameter --name "$1" --region "${region}" \
+          --query Parameter.Value --output text
+      }
+      public_url=$(get_param "${public_url_parameter}")
+      cf_access_team=$(get_param "${cf_access_team_parameter}")
+      cf_access_aud=$(get_param "${cf_access_aud_parameter}")
+      blob_bucket=$(get_param "${blob_bucket_parameter}")
 
       owner_pw_file=/root/.lux-pg-owner-password
       app_pw_file=/root/.lux-app-password
@@ -86,10 +102,14 @@ write_files:
 
       sudo -u postgres psql -v ON_ERROR_STOP=1 -c "ALTER USER postgres WITH PASSWORD '$owner_pw';"
 
+      console_auth=key
+      [ -z "$cf_access_team" ] || console_auth=cloudflare-access
+
       mkdir -p /etc/lux
-      cat > /etc/lux/luxd.toml <<TOML
+      new_toml=$(mktemp /etc/lux/.luxd.toml.XXXXXX)
+      cat > "$new_toml" <<TOML
       listen = "0.0.0.0:${luxd_port}"
-      public_url = "${public_url}"
+      public_url = "$public_url"
       runner_url = "http://$ip:${luxd_port}"
       runner_bin_dir = "${runner_bin_dir}"
 
@@ -98,22 +118,30 @@ write_files:
       app_password = "$app_pw"
 
       [s3]
-      bucket = "${blob_bucket}"
+      bucket = "$blob_bucket"
       region = "${region}"
 
       [console]
-      auth = "${cf_access_team != "" ? "cloudflare-access" : "key"}"
+      auth = "$console_auth"
 
       [console.cloudflare_access]
-      team = "${cf_access_team}"
-      aud = "${cf_access_aud}"
+      team = "$cf_access_team"
+      aud = "$cf_access_aud"
       TOML
-      chmod 600 /etc/lux/luxd.toml
+      chmod 600 "$new_toml"
+
+      config_changed=0
+      cmp -s "$new_toml" /etc/lux/luxd.toml 2>/dev/null || config_changed=1
+      mv "$new_toml" /etc/lux/luxd.toml
 
       cat > /root/.lux-migrate-dsn <<DSN
       postgres://postgres:$owner_pw@127.0.0.1:5432/${db_name}?sslmode=disable
       DSN
       chmod 600 /root/.lux-migrate-dsn
+
+      if [ "$config_changed" = 1 ] && systemctl is-active --quiet luxd; then
+        systemctl restart luxd
+      fi
 
   - path: /usr/local/sbin/lux-fetch-cf-token.sh
     permissions: "0700"
@@ -179,6 +207,13 @@ write_files:
       Environment=LUX_MIGRATE_DSN_FILE=/root/.lux-migrate-dsn
       Environment=LUX_HEALTH_URL=http://127.0.0.1:${luxd_port}/health
       Environment=LUX_RUNNER_BIN_DIR=${runner_bin_dir}
+      # Re-renders luxd.toml from the current SSM parameter values before
+      # each deploy attempt, so a public_url/Access-team/bucket change in
+      # Terraform reaches the box on the next 5-minute tick, restarting
+      # luxd itself if the config changed and it's already running (see
+      # lux-render-config.sh); deploy-lux.py's own restart, below, covers
+      # the case where this run is also switching to a new lux version.
+      ExecStartPre=/usr/local/sbin/lux-render-config.sh
       ExecStart=/usr/bin/python3 /usr/local/lib/lux/deploy-lux.py
 
   - path: /etc/systemd/system/lux-pg-backup.timer
@@ -251,11 +286,10 @@ runcmd:
   - dpkg -i /tmp/cloudflared.deb || apt-get install -f -y
   # Hard stop here if the Postgres data volume never mounts: cloud-init's
   # runcmd otherwise keeps going past a failing entry, which would leave
-  # lux-render-config.sh and every systemctl enable below running against
-  # nothing (or against the root volume). `exit 1` here ends this whole
-  # script, since runcmd concatenates its entries into one.
+  # every systemctl enable below running against nothing (or against the
+  # root volume). `exit 1` here ends this whole script, since runcmd
+  # concatenates its entries into one.
   - /usr/local/sbin/lux-init-postgres.sh || exit 1
-  - /usr/local/sbin/lux-render-config.sh
   - systemctl daemon-reload
   - systemctl enable luxd
   - systemctl enable --now lux-deploy.timer

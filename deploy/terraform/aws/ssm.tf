@@ -1,11 +1,17 @@
-# SSM Parameter Store: the desired lux version (set by Terraform) and the
+# SSM Parameter Store: the desired lux version (set by Terraform), the
 # Cloudflare Tunnel token (a SecureString, created only if
 # manage_cloudflare_tunnel_token is true — otherwise Terraform expects it
 # to already exist, e.g. created out of band or by
-# deploy/terraform/cloudflare). Postgres passwords are generated on the
-# control host itself and never touch Terraform state (see control.tf);
-# they may end up under this same prefix as SecureStrings the box writes,
-# which is why iam.tf grants PutParameter there too.
+# deploy/terraform/cloudflare), and the handful of config values that can
+# change without replacing the control host (public_url, cf_access_team,
+# cf_access_aud, the bucket names — see the lifecycle block on
+# aws_instance.control in control.tf). lux-render-config.sh re-reads
+# those on every deploy run, not just at first boot, so changing one is a
+# plain `terraform apply` — no instance replacement, no cloud-init rerun.
+# Postgres passwords are generated on the control host itself and never
+# touch Terraform state (see control.tf); they may end up under this same
+# prefix as SecureStrings the box writes, which is why iam.tf grants
+# PutParameter there too.
 
 variable "ssm_prefix" {
   description = "SSM Parameter Store path prefix for this deployment's parameters."

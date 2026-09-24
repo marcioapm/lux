@@ -62,6 +62,47 @@ variable "lux_app_db_name" {
   default     = "lux"
 }
 
+# --- values that can change after first boot --------------------------
+# aws_instance.control ignores changes to ami and user_data (see its
+# lifecycle block below), so cloud-init's write_files/runcmd only ever
+# run once, at first boot. Anything that legitimately changes later
+# (public_url, the Access team/AUD, bucket names) goes through SSM
+# instead: lux-render-config.sh reads these parameters and rewrites
+# /etc/lux/luxd.toml on every lux-deploy.service run (every 5 minutes),
+# so a `terraform apply` that only changes one of these values reaches
+# the box without replacing the instance or rerunning cloud-init.
+resource "aws_ssm_parameter" "public_url" {
+  name  = "${local.ssm_prefix}/public_url"
+  type  = "String"
+  value = var.public_url
+
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "cf_access_team" {
+  name  = "${local.ssm_prefix}/cf_access_team"
+  type  = "String"
+  value = var.cf_access_team
+
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "cf_access_aud" {
+  name  = "${local.ssm_prefix}/cf_access_aud"
+  type  = "String"
+  value = var.cf_access_aud
+
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "blob_bucket" {
+  name  = "${local.ssm_prefix}/blob_bucket"
+  type  = "String"
+  value = aws_s3_bucket.blobs.id
+
+  tags = var.tags
+}
+
 data "aws_ami" "debian" {
   most_recent = true
   owners      = [var.debian_ami_owner]
@@ -115,22 +156,22 @@ resource "aws_volume_attachment" "pg_data" {
 
 locals {
   cloud_init = templatefile("${path.module}/templates/control-cloud-init.yaml.tpl", {
-    hostname               = var.name
-    luxd_port              = var.luxd_port
-    public_url             = var.public_url
-    runner_bin_dir         = "/usr/local/lib/lux/runner"
-    blob_bucket            = aws_s3_bucket.blobs.id
-    backup_bucket          = aws_s3_bucket.pg_backups.id
-    region                 = var.region
-    cf_access_team         = var.cf_access_team
-    cf_access_aud          = var.cf_access_aud
-    lux_repo               = var.lux_repo
-    ssm_prefix             = local.ssm_prefix
-    version_parameter      = aws_ssm_parameter.lux_version.name
-    tunnel_token_parameter = local.cloudflare_tunnel_token_parameter
-    db_name                = var.lux_app_db_name
-    volume_id_nodash       = replace(aws_ebs_volume.pg_data.id, "-", "")
-    deploy_script          = file("${path.module}/templates/scripts/deploy-lux.py")
+    hostname                 = var.name
+    luxd_port                = var.luxd_port
+    runner_bin_dir           = "/usr/local/lib/lux/runner"
+    backup_bucket            = aws_s3_bucket.pg_backups.id
+    region                   = var.region
+    lux_repo                 = var.lux_repo
+    ssm_prefix               = local.ssm_prefix
+    version_parameter        = aws_ssm_parameter.lux_version.name
+    public_url_parameter     = aws_ssm_parameter.public_url.name
+    cf_access_team_parameter = aws_ssm_parameter.cf_access_team.name
+    cf_access_aud_parameter  = aws_ssm_parameter.cf_access_aud.name
+    blob_bucket_parameter    = aws_ssm_parameter.blob_bucket.name
+    tunnel_token_parameter   = local.cloudflare_tunnel_token_parameter
+    db_name                  = var.lux_app_db_name
+    volume_id_nodash         = replace(aws_ebs_volume.pg_data.id, "-", "")
+    deploy_script            = file("${path.module}/templates/scripts/deploy-lux.py")
     backup_script = templatefile("${path.module}/templates/scripts/pg-backup.sh.tpl", {
       backup_bucket = aws_s3_bucket.pg_backups.id
       db_name       = var.lux_app_db_name
@@ -152,8 +193,7 @@ resource "aws_instance" "control" {
   # rule from 0.0.0.0/0 — see network.tf), not by withholding the address.
   associate_public_ip_address = true
 
-  user_data                   = local.cloud_init
-  user_data_replace_on_change = false
+  user_data = local.cloud_init
 
   root_block_device {
     volume_size           = var.control_root_volume_size
@@ -168,6 +208,22 @@ resource "aws_instance" "control" {
   }
 
   tags = merge(var.tags, { Name = "${var.name}-control", "lux:managed" = "true" })
+
+  lifecycle {
+    # ami: most_recent on data.aws_ami.debian means a newer Debian image
+    # would otherwise make every `plan` propose replacing this instance
+    # (downtime, a full reinstall, new Postgres/luxd passwords). Replace
+    # it only deliberately (terraform taint / apply -replace).
+    #
+    # user_data: cloud-init runs write_files/runcmd once, at first boot;
+    # changing user_data here wouldn't rerun it, only recreate the
+    # instance (the AWS provider requires a stop/start or replace to
+    # apply a new user_data value). Values that legitimately change
+    # after first boot go through SSM instead (see the parameters
+    # above and ssm.tf's module comment), which lux-render-config.sh
+    # re-reads on every deploy run without touching this resource.
+    ignore_changes = [ami, user_data]
+  }
 }
 
 output "control_instance_id" {
