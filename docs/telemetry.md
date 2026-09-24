@@ -74,6 +74,12 @@ epoch. Events are append-only: the application's database role cannot
 update or delete them. `lux events --all` follows every Run's events at
 once (`GET /v1/events`, SSE).
 
+Followers are woken, not polling: each insert into `run_events` notifies
+the `lux_events` channel, and every luxd holds one connection listening
+to it. The feed and output streams then re-read under their own tenant's
+scope (a notification carries nothing), so an event reaches a browser or
+`lux logs -f` within milliseconds, whichever luxd wrote it.
+
 ## History
 
 The columns above are lifecycle times, peaks and totals. Use over time is

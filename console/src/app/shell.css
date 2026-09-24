@@ -111,6 +111,14 @@
   align-items: center;
   gap: var(--sp-4);
 }
+.live-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
 
 .content {
   flex: 1;

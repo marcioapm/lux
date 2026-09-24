@@ -23,7 +23,7 @@ export function RunPage({ id }: { id: string }) {
       setActive(isRunActive(r.state));
       return r;
     },
-    { interval: active ? 3000 : 15_000 },
+    { interval: active ? 3000 : 15_000, live: active ? 15_000 : 60_000 },
   );
   const run = q.data;
 

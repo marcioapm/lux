@@ -102,3 +102,16 @@ def test_run_page_streams_output_and_stops_the_run(page, operator, lux, runners,
     wait_until(lambda: lux.get(run_id)["state"] == "stopped", 60, 0.5, "the console's stop never took effect")
     assert not page.errors, page.errors
     lux.run("cancel", run_id)
+
+
+def test_pages_update_live_from_events(page, operator, tenant_factory):
+    """A new Run shows up on the Runs page within a moment, pushed by its
+    event: while the stream is live, the page's own poll is a minute."""
+    a = tenant_factory()
+    page.sign_in(operator.api_key, "/console/runs")
+    page.get_by_text("live", exact=True).first.wait_for(timeout=15_000)
+    name = f"pushed-{a.tenant_id[-6:]}"
+    run_id = _parked(a, name)
+    page.get_by_text(name, exact=True).wait_for(timeout=5_000)
+    assert not page.errors, page.errors
+    a.run("cancel", run_id)

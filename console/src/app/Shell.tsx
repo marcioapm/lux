@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
-import { IconButton, TenantPicker, TimeRangePicker, useTheme, type Tenant } from "../ds/index.ts";
+import { IconButton, LiveDot, TenantPicker, TimeRangePicker, useTheme, type Tenant } from "../ds/index.ts";
 import { IconGrid, IconLayers, IconLogout, IconMoon, IconPalette, IconPlay, IconServer, IconSun, IconUsers } from "../ds/icons.tsx";
-import { signOut } from "../api/index.ts";
+import { signOut, useLiveState } from "../api/index.ts";
 import { Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
 
@@ -63,6 +63,7 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
         <header className="topbar">
           <h1 className="topbar-title">{title}</h1>
           <div className="topbar-controls">
+            <LiveIndicator />
             {operator && <TenantPicker tenants={tenants} value={scope.tenant} onChange={scope.setTenant} />}
             <TimeRangePicker value={scope.range} onChange={scope.setRange} />
             <IconButton size="sm" label={resolved === "dark" ? "Switch to light theme" : "Switch to dark theme"} onClick={toggle}>
@@ -76,5 +77,23 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
         <main className="content">{children}</main>
       </div>
     </div>
+  );
+}
+
+/** Whether the event stream is up: pages update as things happen, or fall back to polling. */
+function LiveIndicator() {
+  const { status, error } = useLiveState();
+  if (status === "live") {
+    return (
+      <span className="live-indicator" title="Live: pages update as runs change">
+        <LiveDot /> live
+      </span>
+    );
+  }
+  const label = status === "reconnecting" ? "reconnecting…" : status === "off" ? "offline" : "connecting…";
+  return (
+    <span className="live-indicator" title={`Event stream ${label} Polling meanwhile.${error ? ` ${error}` : ""}`}>
+      <LiveDot hue={status === "off" ? "red" : "amber"} label={label} /> {label}
+    </span>
   );
 }

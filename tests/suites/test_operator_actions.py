@@ -117,12 +117,15 @@ def test_events_feed(operator, tenant_factory):
     assert {e["runId"] for e in _feed(operator, start, "--tenant", a.tenant_id)} & {ra, rb} == {ra}
     # A tenant's feed is its own.
     assert {e["runId"] for e in _feed(b, start)} & {ra, rb} == {rb}
-    # Followed: new events arrive as they happen.
+    # Followed: new events arrive as they happen, pushed (not polled: well
+    # under the feed's fallback of 5s).
     p = operator.popen("events", "--all", "-o", "json", "--tenant", a.tenant_id)
     try:
         time.sleep(1)
+        start = time.monotonic()
         a.run("cancel", ra)
         assert json.loads(p.stdout.readline())["runId"] == ra
+        assert time.monotonic() - start < 2.5, "the event was not pushed"
     finally:
         p.kill()
     b.run("cancel", rb)

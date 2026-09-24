@@ -36,7 +36,7 @@ export function Runs() {
   // Only the newest page is polled. "Load more" pages further back (by
   // creation time) and keeps what it loaded, merged under the fresh first
   // page (which wins). A filter or tenant change starts over.
-  const q = useScopedQuery(`runs:${filterKey}`, (t, s) => api.runs(t, { ...filter, limit: PAGE }, s), { interval: 5000 });
+  const q = useScopedQuery(`runs:${filterKey}`, (t, s) => api.runs(t, { ...filter, limit: PAGE }, s), { interval: 5000, live: 60_000 });
   const olderKey = `${scope.tenant}|${filterKey}`;
   const [older, setOlder] = useState<{ key: string; runs: Run[]; full: boolean; loading: boolean; error: string | null }>({ key: olderKey, runs: [], full: false, loading: false, error: null });
   const olderHere = older.key === olderKey ? older : null;
@@ -142,7 +142,7 @@ export function Runs() {
           .
         </span>
       </form>
-      <Card flush title="Runs" subtitle={`${runs.length}${full ? "+" : ""} · newest first · refreshes every 5s`}>
+      <Card flush title="Runs" subtitle={`${runs.length}${full ? "+" : ""} · newest first`}>
         <ErrorStrip error={runs.length > 0 ? q.error ?? olderHere?.error ?? null : null} />
         {q.error && runs.length === 0 && !q.loading ? (
           <ErrorBlock error={q.error} onRetry={q.refetch} />

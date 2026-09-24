@@ -211,10 +211,11 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 			return send("end", outputEnd{lastEvent, cur.String(), runState})
 		}
 		if !progressed {
-			select {
-			case <-ctx.Done():
+			// An event (a state change, a new placement) wakes it at once;
+			// output uploads and the like are checked every half second.
+			s.wakeups.wait(ctx, 500*time.Millisecond)
+			if ctx.Err() != nil {
 				return nil
-			case <-time.After(500 * time.Millisecond):
 			}
 		}
 	}

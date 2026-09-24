@@ -28,14 +28,20 @@ type feedInput struct {
 
 // feedSettle: event ids are taken when an event is written, not when its
 // transaction commits, so a lower id can become visible after a higher
-// one. The feed re-reads events this young on every poll (sending each
+// one. The feed re-reads events this young on every read (sending each
 // once), so a late commit is still delivered.
 const feedSettle = 10 * time.Second
+
+// feedFallback: how long the feed waits without a notification before
+// reading anyway (a luxd's LISTEN connection may be reconnecting, and
+// young events are re-read until they settle).
+const feedFallback = 5 * time.Second
 
 const feedPage = 500
 
 // serveFeed is GET /v1/events: every event of every Run the caller sees
-// (an operator's: all tenants, or ?tenant=), as SSE, in id order.
+// (an operator's: all tenants, or ?tenant=), as SSE, in id order. It reads
+// when an event is written (events.go), not on a timer.
 func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput) error {
 	ctx := r.Context()
 	p := principal(ctx)
@@ -113,10 +119,15 @@ func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput
 		if in.Follow == "false" {
 			return nil
 		}
-		select {
-		case <-ctx.Done():
+		// Young events still settling are re-read soon; otherwise at the
+		// next event (or the fallback).
+		wait := feedFallback
+		if len(sent) > 0 {
+			wait = time.Second
+		}
+		s.wakeups.wait(ctx, wait)
+		if ctx.Err() != nil {
 			return nil
-		case <-time.After(500 * time.Millisecond):
 		}
 	}
 }

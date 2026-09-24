@@ -30,7 +30,7 @@ function useRunEvents(id: string, live: boolean) {
       }
       return a.events;
     },
-    { interval: live ? 5000 : 0 },
+    { interval: live ? 5000 : 0, live: 60_000 },
   );
 }
 
@@ -57,8 +57,8 @@ export function RunEvents({ run, live }: { run: Run; live: boolean }) {
 }
 
 export function RunSnapshots({ run, live }: { run: Run; live: boolean }) {
-  const snaps = useQuery(`run-snapshots:${run.id}`, (s) => api.snapshots(run.id, s), { interval: live ? 10_000 : 0 });
-  const arts = useQuery(`run-artifacts:${run.id}`, (s) => api.artifacts(run.id, s), { interval: live ? 10_000 : 0 });
+  const snaps = useQuery(`run-snapshots:${run.id}`, (s) => api.snapshots(run.id, s), { interval: live ? 10_000 : 0, live: 60_000 });
+  const arts = useQuery(`run-artifacts:${run.id}`, (s) => api.artifacts(run.id, s), { interval: live ? 10_000 : 0, live: 60_000 });
   const toast = useToast();
   const [downloading, setDownloading] = useState<string | null>(null);
 

@@ -3,6 +3,7 @@ import { ToastProvider, type Tenant as PickerTenant } from "../ds/index.ts";
 import { api, errorText, isApiError, setRole, useQuery, useSession } from "../api/index.ts";
 import { matchPath, usePath } from "./router.tsx";
 import { ScopeProvider, useScope } from "./scope.tsx";
+import { useLiveUpdates } from "./live.ts";
 import { Shell } from "./Shell.tsx";
 import { SignIn } from "./SignIn.tsx";
 import { StyleGuide } from "../styleguide/StyleGuide.tsx";
@@ -73,6 +74,7 @@ function Router() {
   const session = useSession();
   const role = useRole();
   const { operator } = useScope();
+  useLiveUpdates();
   // The tenant picker's list: operators only.
   const tenants = useQuery("tenants", (signal) => api.tenants(signal), { interval: 60_000, enabled: operator });
   const picker = useMemo<PickerTenant[]>(

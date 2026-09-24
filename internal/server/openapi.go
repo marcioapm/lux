@@ -249,26 +249,44 @@ func (s *Server) requireKey(scope string) func(huma.Context, func(huma.Context))
 	}
 }
 
+// owner says how an operation finds the tenant owning the object its path
+// names: a query selecting tenant_id by the path parameter param. Declared
+// when the operation is registered (ownedBy), read by operatorScope.
+type owner struct {
+	param, query string
+}
+
+var (
+	runOwner      = owner{"id", `SELECT tenant_id FROM runs WHERE id = $1`}
+	artifactOwner = owner{"aid", `SELECT tenant_id FROM artifacts WHERE id = $1`}
+)
+
+const ownerKey = "lux-owner"
+
+// ownedBy declares an operation's owner.
+func ownedBy(o owner, op huma.Operation) huma.Operation {
+	if op.Metadata == nil {
+		op.Metadata = map[string]any{}
+	}
+	op.Metadata[ownerKey] = o
+	return op
+}
+
 // operatorScope puts an operator's request in one tenant's scope where it
-// has one: the tenant owning the Run or artifact the path names (so every
-// query of the handler runs as that tenant's), or else ?tenant=. Without
-// either, the principal has no tenant: reads span every tenant, and
-// handlers that create a tenant's objects refuse it (forTenant).
+// has one: the tenant owning the object the operation declares it acts on
+// (so every query of the handler runs as that tenant's), or else ?tenant=.
+// Without either, the principal has no tenant: reads span every tenant,
+// and handlers that create a tenant's objects refuse it (forTenant).
 func (s *Server) operatorScope(ctx huma.Context, p Principal) (Principal, error) {
 	if !p.Operator {
 		return p, nil
 	}
-	var owner, id string
-	switch op := ctx.Operation(); {
-	case strings.HasPrefix(op.Path, "/v1/runs/{id}"):
-		owner, id = `SELECT tenant_id FROM runs WHERE id = $1`, ctx.Param("id")
-	case strings.HasPrefix(op.Path, "/v1/artifacts/{aid}"):
-		owner, id = `SELECT tenant_id FROM artifacts WHERE id = $1`, ctx.Param("aid")
-	default:
+	o, ok := ctx.Operation().Metadata[ownerKey].(owner)
+	if !ok {
 		return s.narrow(ctx.Context(), p, ctx.Query("tenant"))
 	}
 	err := s.db.Tx(ctx.Context(), store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx.Context(), owner, id).Scan(&p.TenantID)
+		return tx.QueryRow(ctx.Context(), o.query, ctx.Param(o.param)).Scan(&p.TenantID)
 	})
 	return p, err
 }
@@ -287,6 +305,12 @@ func forTenant[I, O any](h func(context.Context, *I) (*O, error)) func(context.C
 // register declares one operation. A scope makes it need an API key with
 // that scope. Handler errors become lux errors as they always have.
 func register[I, O any](s *Server, api huma.API, op huma.Operation, scope string, h func(context.Context, *I) (*O, error)) {
+	// An operation on one tenant's object must say how to find its tenant,
+	// or an operator's request would run without one.
+	if _, ok := op.Metadata[ownerKey]; !ok && scope != "" &&
+		(strings.HasPrefix(op.Path, "/v1/runs/{") || strings.HasPrefix(op.Path, "/v1/artifacts/{")) {
+		panic("server: " + op.OperationID + " acts on a tenant's object: register it ownedBy its owner")
+	}
 	if scope != "" {
 		op.Security = []map[string][]string{{"apiKey": {}}}
 		op.Middlewares = append(op.Middlewares, s.requireKey(scope))

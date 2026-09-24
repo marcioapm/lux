@@ -1,51 +1,18 @@
-import { useEffect, useState } from "react";
 import { Badge, Card, formatClock, LiveDot, Spinner } from "../../ds/index.ts";
-import { errorText, streamSSE, type FeedEvent } from "../../api/index.ts";
+import { useLiveState } from "../../api/index.ts";
 import { useScope } from "../scope.tsx";
 import { ErrorStrip, RunLink } from "./common.tsx";
 import { eventSummary } from "./events.ts";
 
-const MAX = 50;
-
-/** Live feed from GET /v1/events (SSE), newest first. */
+/** The newest Run events from the tab's live stream, newest first. */
 export function ActivityFeed() {
   const scope = useScope();
-  const [events, setEvents] = useState<FeedEvent[]>([]);
-  const [status, setStatus] = useState<"connecting" | "live" | "error">("connecting");
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const ctrl = new AbortController();
-    setEvents([]);
-    setStatus("connecting");
-    void streamSSE("/events", {
-      query: { follow: true, last: MAX },
-      tenant: scope.apiTenant,
-      signal: ctrl.signal,
-      onOpen: () => {
-        setStatus("live");
-        setError(null);
-      },
-      onMessage: (m) => {
-        if (m.event !== "lux") return;
-        try {
-          const e = JSON.parse(m.data) as FeedEvent;
-          setEvents((xs) => [e, ...xs].slice(0, MAX));
-        } catch {}
-      },
-      onClose: (_reason, err) => {
-        setStatus("error");
-        // A clean end (no error) keeps the last error visible until a healthy reconnect.
-        if (err) setError(errorText(err));
-      },
-    });
-    return () => ctrl.abort();
-  }, [scope.apiTenant]);
+  const { recent: events, status, error } = useLiveState();
 
   return (
     <Card
       title="Activity"
-      subtitle={status === "live" ? "live" : status === "connecting" ? "connecting…" : "reconnecting…"}
+      subtitle={status === "live" ? "live" : status === "reconnecting" ? "reconnecting…" : status === "off" ? "offline" : "connecting…"}
       actions={status === "live" ? <LiveDot /> : <Spinner size={12} />}
       flush
       className="feed-card"

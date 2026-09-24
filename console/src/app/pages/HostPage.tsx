@@ -12,7 +12,7 @@ export function HostPage({ id }: { id: string }) {
   const host = useQuery(`host:${id}`, (s) => api.host(id, s), { interval: 5000 });
   const history = useQuery(`host-history:${id}:${scope.range}`, (s) => api.hostHistory(id, scope.range, s), { interval: 30_000 });
   // By host id: tenant-independent, and an operator sees every tenant's runs there.
-  const recent = useScopedQuery(`host-runs:${id}`, (t, s) => api.runs(t, { host: id, limit: 50 }, s), { interval: 15_000 });
+  const recent = useScopedQuery(`host-runs:${id}`, (t, s) => api.runs(t, { host: id, limit: 50 }, s), { interval: 15_000, live: 60_000 });
   const [drainOpen, setDrainOpen] = useState(false);
   const [draining, setDraining] = useState(false);
 

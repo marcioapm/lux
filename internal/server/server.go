@@ -55,6 +55,8 @@ type Server struct {
 	// secrets holds submitted secret values in memory, by run id, until
 	// the placement that needs them has been assigned. Never persisted.
 	secrets *secretCache
+	// wakeups wake followers of Run events (events.go).
+	wakeups *wakeups
 	kick    chan struct{}
 	// lastAliveCheck: when the provisioner last asked providers which
 	// hosts still exist.
@@ -92,6 +94,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		blobs:   blobs,
 		log:     log,
 		secrets: newSecretCache(),
+		wakeups: newWakeups(),
 		kick:    make(chan struct{}, 1),
 	}
 	s.hub = newHub(s)
@@ -120,12 +123,13 @@ func (s *Server) Handler() http.Handler {
 // Run starts the background loops and serves until ctx ends.
 func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	s.wg.Add(5)
+	s.wg.Add(6)
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.provisionerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.reaperLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.hub.deliveryLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.historyLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.listenLoop(ctx) }()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	s.log.Info("luxd listening", "addr", s.cfg.Listen)
