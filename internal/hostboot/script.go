@@ -1,21 +1,14 @@
 package hostboot
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
-// scriptBody is shared between two renderings: userData "script" (cloud-init
-// runs it on a stock EC2 image, with the env exported ahead of it — see
-// Script) and GET /runner/bootstrap.sh (a static host, unfilled: it reads
-// the env from its own environment, and defaults the host name to
-// `hostname`). It never assumes Fedora CoreOS: it checks the host
-// requirements from docs/operations.md and only installs what is missing,
-// with dnf if present, else apt-get, else it fails loudly (the intent is a
-// stock Fedora Cloud, Ubuntu, Debian or AL2023 image that already has
-// everything, so the common case installs nothing).
-//
-// Idempotent: every write is safe to repeat, and the unit is started only
-// if not already running, so a rerun (a reboot, a second manual run) never
-// disturbs a live lux-runner. Output goes to stdout/stderr, which cloud-init
-// and a manual `sh` both send to the console and the journal.
+// scriptBody backs both userData "script" (Script) and GET
+// /runner/bootstrap.sh (Bootstrap). It checks the host requirements from
+// docs/operations.md and installs only what is missing (dnf, else
+// apt-get). Idempotent: a rerun never disturbs a running lux-runner.
 const scriptBody = `#!/bin/bash
 [ -n "${BASH_VERSION:-}" ] || { echo "lux: run this script with bash, not sh (curl ... | sudo env ... bash)" >&2; exit 1; }
 set -euo pipefail
@@ -77,32 +70,21 @@ echo "lux: bootstrap complete"
 `
 
 // Script renders the userData "script" format: scriptBody with the env
-// exported ahead of it, so cloud-init's execution needs nothing from the
-// instance environment.
+// exported ahead of it.
 func Script(env Env) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\n")
 	for _, kv := range env.pairs() {
-		b.WriteString("export ")
-		b.WriteString(kv[0])
-		b.WriteString("=")
-		b.WriteString(shellQuote(kv[1]))
-		b.WriteString("\n")
+		fmt.Fprintf(&b, "export %s=%s\n", kv[0], shellQuote(kv[1]))
 	}
-	// scriptBody already starts with its own #!/bin/bash; drop it once we
-	// have our own shebang plus the exports above.
 	b.WriteString(strings.TrimPrefix(scriptBody, "#!/bin/bash\n"))
 	return b.String()
 }
 
-// Bootstrap renders GET /runner/bootstrap.sh: the same script, unfilled —
-// it takes LUX_URL, LUX_HOST_TOKEN, LUX_HOST_NAME and LUX_EC2_IMDS from
-// whatever environment it is run with (curl ... | sudo env LUX_HOST_TOKEN=...
-// LUX_URL=... bash), and defaults the host name to `hostname`. No auth: it
-// carries no secret. The script uses bash arrays and set -o pipefail, so
-// its first line (after the guard, before either) refuses to run under a
-// bare `sh`: on Debian and Ubuntu that is dash, which a piped `| sh`
-// silently ignores the #!/bin/bash shebang for.
+// Bootstrap renders GET /runner/bootstrap.sh: the same script, taking its
+// env from the environment it runs in (curl ... | sudo env LUX_URL=...
+// LUX_HOST_TOKEN=... bash). Its guard line refuses a bare `sh` (dash on
+// Debian/Ubuntu), which ignores the shebang when piped.
 func Bootstrap() string { return scriptBody }
 
 func shellQuote(s string) string {

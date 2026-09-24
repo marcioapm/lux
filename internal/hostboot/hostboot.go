@@ -39,12 +39,8 @@ func (e Env) pairs() [][2]string {
 	return out
 }
 
-// Lines is the "env" userData format: KEY=value lines, for a custom AMI
-// whose own boot script reads them (this is what every EC2 launch sent
-// before self-update and Ignition existed; kept for AMIs already built
-// around it). Also /etc/lux/runner.env's content for the ignition and
-// script formats: lux-runner and the fetch script both read it with
-// EnvironmentFile=/os.Getenv, whichever wrote it.
+// Lines renders KEY=value lines: the "env" userData format (for a custom
+// AMI whose own boot script reads them) and /etc/lux/runner.env.
 func (e Env) Lines() string {
 	var b strings.Builder
 	for _, kv := range e.pairs() {
@@ -53,33 +49,20 @@ func (e Env) Lines() string {
 	return b.String()
 }
 
-// InstallDir is where every format installs the runner binaries and the
-// fetch script: /usr/local/bin, not /usr/local/lib/lux. Fedora CoreOS
-// enforces SELinux, and its policy labels /usr/local/bin bin_t (systemd
-// can ExecStart it); /usr/local/lib gets no such label by default, and a
-// binary systemd tries to exec from an unlabeled path fails with EACCES
-// (203/EXEC). runner_bin_dir, the directory *luxd* serves these binaries
-// from on its own host, is unrelated and unchanged (LUX_RUNNER_BIN_DIR,
-// still /usr/local/lib/lux/runner by default): this is only where a
-// runner host installs what it downloads.
+// InstallDir is where a runner host installs the binaries and the fetch
+// script. /usr/local/bin because Fedora CoreOS's SELinux policy labels it
+// bin_t; systemd cannot exec from /usr/local/lib (203/EXEC). Unrelated to
+// luxd's own runner_bin_dir.
 const InstallDir = "/usr/local/bin"
 
 // UnitName is the systemd unit every format installs.
 const UnitName = "lux-runner.service"
 
-// Unit is lux-runner.service. EnvironmentFile supplies LUX_URL,
-// LUX_HOST_TOKEN, LUX_HOST_NAME, LUX_EC2_IMDS, which lux-runner reads
-// directly (cmd/lux-runner/main.go); LUX_PROVIDER_ID is appended to the
-// same file by ExecStartPre once it has it (EC2's instance id, resolved
-// through LUX_EC2_IMDS — static hosts never get one, so lux-runner starts
-// without --provider-id, as today). ExecStartPre re-downloads only
-// binaries whose sha256 has changed on every start, including the
-// restart after an exit luxd asked for: the running binary is never
-// patched in place. StartLimitIntervalSec=0 and RestartSec=10s: a luxd
-// outage or a missing binary must not exhaust systemd's default start
-// limit (5 starts in 10s) and leave the unit dead — the fetch script
-// itself falls back to already-installed binaries when it can reach
-// neither luxd nor a full pair (see FetchBinariesScript).
+// Unit is lux-runner.service. ExecStartPre (FetchBinariesScript) updates
+// the binaries on every start, including the restart after an exit luxd
+// asked for, and appends LUX_PROVIDER_ID to the env file on EC2.
+// StartLimitIntervalSec=0 and RestartSec=10s: a luxd outage must not
+// exhaust systemd's default start limit and leave the unit dead.
 const Unit = `[Unit]
 Description=lux runner
 After=network-online.target
@@ -100,24 +83,13 @@ WantedBy=multi-user.target
 // FetchBinariesPath is where every format installs FetchBinariesScript.
 const FetchBinariesPath = InstallDir + "/lux-fetch-binaries.sh"
 
-// FetchBinariesScript is lux-runner.service's ExecStartPre. It first
-// appends the runner's subuid/subgid range (SubuidRange) if no
-// `containers:` entry exists yet — the one place this happens, so
-// Ignition (which has no native "append if absent") and the script
-// format share this instead of each implementing it separately and
-// risking drift. Idempotent: a second run finds the entry already there
-// and skips it. It then fetches LUX_URL/runner/bin/manifest, and
-// downloads only lux-runner and/or lux-shim whose sha256 there differs
-// from (or is missing from) what is already installed, verifying each
-// against the manifest and its X-Lux-Sha256 header before installing; the
-// pair is installed atomically (both staged, then both renamed into
-// place), so a fetch that fails partway through never leaves a new
-// runner next to an old shim or vice versa. curl retries transient
-// failures (connection refused: luxd mid-restart) before giving up. If
-// the fetch fails for any reason and both binaries are already installed
-// and were previously verified (a sha256 recorded alongside them), it
-// warns and exits 0: the old version keeps running rather than the unit
-// spinning or going dead.
+// FetchBinariesScript is lux-runner.service's ExecStartPre. It appends
+// the subuid/subgid range if absent (the one place both formats do it:
+// Ignition has no "append if absent"), then downloads only the binaries
+// whose sha256 differs from luxd's manifest, verifies them against it
+// and X-Lux-Sha256, and installs the pair together. On any failure it
+// keeps previously verified binaries (exit 0) rather than leave the unit
+// dead.
 const FetchBinariesScript = `#!/bin/bash
 [ -n "${BASH_VERSION:-}" ] || { echo "lux: fetch-binaries.sh needs bash, not sh" >&2; exit 1; }
 set -uo pipefail
