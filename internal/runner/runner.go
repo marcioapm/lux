@@ -11,8 +11,11 @@ package runner
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -180,10 +183,24 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	// /proc/self/exe on some minimal containers) just means luxd never
 	// drains this runner for being outdated.
 	if exe, err := os.Executable(); err == nil {
-		r.runnerSHA256, _ = proto.SHA256File(exe)
+		r.runnerSHA256 = sha256File(exe)
 	}
-	r.shimSHA256, _ = proto.SHA256File(cfg.Shim)
+	r.shimSHA256 = sha256File(cfg.Shim)
 	return r, nil
+}
+
+// sha256File is path's content sha256, hex, or "" when it cannot be read.
+func sha256File(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -453,13 +470,9 @@ func (r *Runner) livePlacements() []*placement {
 	return ps
 }
 
-// binariesMatchManifest fetches luxd's current manifest and reports
-// whether it lists this host's arch with the shas this runner already
-// has: the binaries an exit would have downloaded are already in place
-// (a race between the exit and this host's own restart), so the exit is
-// stale and safe to ignore. A manifest luxd cannot be reached for, or
-// that does not offer this arch, never matches: only a positive match
-// silences the exit.
+// binariesMatchManifest reports whether luxd's current manifest lists this
+// arch with exactly this runner's shas. An unreachable luxd or a missing
+// arch never matches.
 func (r *Runner) binariesMatchManifest(ctx context.Context) bool {
 	var manifest map[string]map[string]string
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -472,11 +485,8 @@ func (r *Runner) binariesMatchManifest(ctx context.Context) bool {
 		have["lux-shim"] != "" && have["lux-shim"] == r.shimSHA256
 }
 
-// shouldExit decides whether a MsgExit is still actionable: a redelivered
-// exit can arrive after this host already undrained (a race between the
-// ack and a reconnect) or while it is placing new work, neither of which
-// is safe to act on. Logs either way, since both cases mean luxd's and
-// the runner's view of this host briefly diverged.
+// shouldExit reports whether a MsgExit is still actionable: a redelivered
+// exit can arrive after this host took new work or already caught up.
 func (r *Runner) shouldExit(ctx context.Context, e proto.ExitHost) bool {
 	if live := r.livePlacements(); len(live) > 0 {
 		r.log.Warn("ignoring exit: this host holds live placements", "reason", e.Reason, "code", e.Code, "placements", len(live))

@@ -48,31 +48,22 @@ func (a *api) postJSON(ctx context.Context, path string, in, out any) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	r, err := a.req(ctx, http.MethodPost, path, bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	r.Header.Set("Content-Type", "application/json")
-	resp, err := a.http.Do(r)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%s %s: %s: %s", http.MethodPost, path, resp.Status, bytes.TrimSpace(msg))
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return a.doJSON(ctx, http.MethodPost, path, bytes.NewReader(b), out)
 }
 
 func (a *api) getJSON(ctx context.Context, path string, out any) error {
+	return a.doJSON(ctx, http.MethodGet, path, nil, out)
+}
+
+func (a *api) doJSON(ctx context.Context, method, path string, body io.Reader, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	r, err := a.req(ctx, http.MethodGet, path, nil)
+	r, err := a.req(ctx, method, path, body)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		r.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := a.http.Do(r)
 	if err != nil {
@@ -81,7 +72,7 @@ func (a *api) getJSON(ctx context.Context, path string, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%s %s: %s: %s", http.MethodGet, path, resp.Status, bytes.TrimSpace(msg))
+		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, bytes.TrimSpace(msg))
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
