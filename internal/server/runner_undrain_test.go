@@ -45,13 +45,7 @@ func exitMessageCount(t *testing.T, s *Server, ctx context.Context, id string) i
 // host references it) and returns a *hostToken for it.
 func testHostToken(t *testing.T, s *Server, ctx context.Context) *hostToken {
 	t.Helper()
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO host_tokens (id, token_hash) VALUES ('tok1', 'hash1')`)
-		return err
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, token_hash) VALUES ('tok1', 'hash1')`)
 	return &hostToken{ID: "tok1"}
 }
 
@@ -181,13 +175,7 @@ func TestHelloLeavesAnOtherReasonDrainAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE hosts SET draining = true, state = 'draining', state_reason = 'drain requested' WHERE id = $1`, w.HostID)
-		return err
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	execSQL(t, s, ctx, `UPDATE hosts SET draining = true, state = 'draining', state_reason = 'drain requested' WHERE id = $1`, w.HostID)
 
 	if _, err := s.registerHost(ctx, tok, proto.Hello{
 		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
