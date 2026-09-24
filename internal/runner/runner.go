@@ -11,11 +11,8 @@ package runner
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -183,23 +180,10 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	// /proc/self/exe on some minimal containers) just means luxd never
 	// drains this runner for being outdated.
 	if exe, err := os.Executable(); err == nil {
-		r.runnerSHA256, _ = sha256File(exe)
+		r.runnerSHA256, _ = proto.SHA256File(exe)
 	}
-	r.shimSHA256, _ = sha256File(cfg.Shim)
+	r.shimSHA256, _ = proto.SHA256File(cfg.Shim)
 	return r, nil
-}
-
-func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func (r *Runner) Run(ctx context.Context) error {

@@ -71,9 +71,9 @@ func TestLoadRunnerBinariesEmptyDir(t *testing.T) {
 // differs from what the runner reports; an older runner (no shas) or an
 // arch luxd serves nothing for are never grounds to drain.
 func TestBinariesOutdated(t *testing.T) {
-	s := &Server{bins: map[string]map[string]string{
-		"arm64": {"lux-runner": "r1", "lux-shim": "s1"},
-		"riscv": {"lux-runner": "r1"}, // only one of the pair
+	s := &Server{bins: map[string]map[string]runnerBin{
+		"arm64": {"lux-runner": {sha256: "r1"}, "lux-shim": {sha256: "s1"}},
+		"riscv": {"lux-runner": {sha256: "r1"}}, // only one of the pair
 	}}
 	cases := []struct {
 		name               string
@@ -95,9 +95,9 @@ func TestBinariesOutdated(t *testing.T) {
 }
 
 func TestBinariesMatch(t *testing.T) {
-	s := &Server{bins: map[string]map[string]string{
-		"arm64": {"lux-runner": "r1", "lux-shim": "s1"},
-		"riscv": {"lux-runner": "r1"}, // only one of the pair
+	s := &Server{bins: map[string]map[string]runnerBin{
+		"arm64": {"lux-runner": {sha256: "r1"}, "lux-shim": {sha256: "s1"}},
+		"riscv": {"lux-runner": {sha256: "r1"}}, // only one of the pair
 	}}
 	if !s.binariesMatch("arm64", "r1", "s1") {
 		t.Error("matching shas did not match")
@@ -111,4 +111,53 @@ func TestBinariesMatch(t *testing.T) {
 	if s.binariesMatch("riscv", "r1", "s1") {
 		t.Error("matched an arch luxd only half serves")
 	}
+}
+
+// serveRunnerBin serves the bytes read at startup, never reopening
+// runner_bin_dir: a file replaced on disk in place (as a rolling deploy
+// would, if it skipped a luxd restart) must not change what luxd serves
+// or its X-Lux-Sha256, since the in-memory copy and its hash were taken
+// together and never re-read.
+func TestServedBytesSurviveAnInPlaceFileSwap(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "linux-arm64")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("original runner bytes")
+	if err := os.WriteFile(filepath.Join(sub, "lux-runner"), original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "lux-shim"), []byte("shim bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{cfg: Config{RunnerBinDir: dir}}
+	s.loadRunnerBinaries()
+	wantSHA := sha256Hex(original)
+
+	// A release replaces the file on disk in place, without restarting
+	// luxd (what the review flags as unsafe): the served content and its
+	// advertised hash must still be the original bytes.
+	if err := os.WriteFile(filepath.Join(sub, "lux-runner"), []byte("swapped-in bytes, different content"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := s.runnerBinSHA256("arm64", "lux-runner")
+	if !ok || got != wantSHA {
+		t.Fatalf("advertised sha256 after an in-place swap: %q, want the original %q", got, wantSHA)
+	}
+	if !bytesEqual(s.bins["arm64"]["lux-runner"].data, original) {
+		t.Fatal("served bytes changed after an in-place file swap")
+	}
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

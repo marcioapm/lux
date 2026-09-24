@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,14 +23,23 @@ var runnerArches = []string{"arm64", "amd64"}
 // runnerBinNames are the files expected under runner_bin_dir/linux-<arch>/.
 var runnerBinNames = []string{"lux-runner", "lux-shim"}
 
-// loadRunnerBinaries hashes (sha256) whatever runner_bin_dir holds, once at
-// startup: arch/linux-arm64/lux-runner and lux-shim, and the amd64
-// equivalents. A missing arch directory or file is simply not offered; the
-// binaries themselves are never re-read after this (a new release needs a
-// restart, which is also how a drained host's replacement runs the new
-// build).
+// runnerBin is one binary read into memory at startup: its bytes and their
+// sha256, together, so serving one can never disagree with the other.
+type runnerBin struct {
+	data   []byte
+	sha256 string
+}
+
+// loadRunnerBinaries reads whatever runner_bin_dir holds into memory, once
+// at startup: arch/linux-arm64/lux-runner and lux-shim, and the amd64
+// equivalents, hashed as they are read. A missing arch directory or file
+// is simply not offered. Serving from these bytes (serveRunnerBin), rather
+// than reopening the path on every request, means a release that replaces
+// the files on disk in place can never make luxd serve bytes that don't
+// match the sha256 it already told a host: the new build only takes
+// effect on luxd's own restart, same as any other config.
 func (s *Server) loadRunnerBinaries() {
-	bins := map[string]map[string]string{}
+	bins := map[string]map[string]runnerBin{}
 	if s.cfg.RunnerBinDir == "" {
 		s.bins = bins
 		return
@@ -36,30 +47,22 @@ func (s *Server) loadRunnerBinaries() {
 	for _, arch := range runnerArches {
 		for _, name := range runnerBinNames {
 			path := filepath.Join(s.cfg.RunnerBinDir, "linux-"+arch, name)
-			sum, err := sha256File(path)
+			data, err := os.ReadFile(path)
 			if err != nil {
 				continue
 			}
 			if bins[arch] == nil {
-				bins[arch] = map[string]string{}
+				bins[arch] = map[string]runnerBin{}
 			}
-			bins[arch][name] = sum
+			bins[arch][name] = runnerBin{data: data, sha256: sha256Hex(data)}
 		}
 	}
 	s.bins = bins
 }
 
-func sha256File(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // outdatedBinariesReason is the drain reason luxd uses when a host's
@@ -75,7 +78,7 @@ const outdatedBinariesReason = "outdated binaries"
 func (s *Server) hasBothBinaries(arch string) bool {
 	have := s.bins[arch]
 	for _, name := range runnerBinNames {
-		if have[name] == "" {
+		if _, ok := have[name]; !ok {
 			return false
 		}
 	}
@@ -93,10 +96,10 @@ func (s *Server) binariesOutdated(arch, runnerSHA, shimSHA string) bool {
 		return false
 	}
 	have := s.bins[arch]
-	if runnerSHA != "" && have["lux-runner"] != runnerSHA {
+	if runnerSHA != "" && have["lux-runner"].sha256 != runnerSHA {
 		return true
 	}
-	if shimSHA != "" && have["lux-shim"] != shimSHA {
+	if shimSHA != "" && have["lux-shim"].sha256 != shimSHA {
 		return true
 	}
 	return false
@@ -116,7 +119,7 @@ func (s *Server) binariesMatch(arch, runnerSHA, shimSHA string) bool {
 // max(1, OutdatedDrainPercent% of the pool's live hosts): a release must
 // not cordon a whole pool's worth of capacity in one instant. A pool's
 // live hosts and its currently-draining-for-this-reason hosts are counted
-// together (coalesce(tenant_id,”), pool): the same grouping a pool's
+// together (coalesce(tenant_id, ”), pool): the same grouping a pool's
 // hosts share.
 func (s *Server) outdatedDrainRoom(ctx context.Context, tx pgx.Tx, hostID string) (bool, error) {
 	var live, draining int
@@ -136,8 +139,8 @@ func (s *Server) outdatedDrainRoom(ctx context.Context, tx pgx.Tx, hostID string
 }
 
 func (s *Server) runnerBinSHA256(arch, name string) (string, bool) {
-	sum, ok := s.bins[arch][name]
-	return sum, ok
+	b, ok := s.bins[arch][name]
+	return b.sha256, ok
 }
 
 // runnerBinManifest is the contract's {"linux-arm64": {"lux-runner": sha,
@@ -146,10 +149,15 @@ func (s *Server) runnerBinSHA256(arch, name string) (string, bool) {
 // meets an arch luxd can only half serve.
 func (s *Server) runnerBinManifest() map[string]map[string]string {
 	out := map[string]map[string]string{}
-	for arch := range s.bins {
-		if s.hasBothBinaries(arch) {
-			out["linux-"+arch] = s.bins[arch]
+	for arch, m := range s.bins {
+		if !s.hasBothBinaries(arch) {
+			continue
 		}
+		shas := map[string]string{}
+		for name, b := range m {
+			shas[name] = b.sha256
+		}
+		out["linux-"+arch] = shas
 	}
 	return out
 }
@@ -165,8 +173,10 @@ func (s *Server) serveRunnerBinManifest(w http.ResponseWriter, r *http.Request) 
 }
 
 // serveRunnerBin is GET /runner/bin/linux-{arch}/{lux-runner|lux-shim}:
-// streams the binary (~20MB), with its length and sha256 (X-Lux-Sha256) so
-// the downloader can verify it without a second round trip.
+// serves the binary (~20MB) held in memory since startup (loadRunnerBinaries),
+// never reopening the path — a release that replaces the file on disk in
+// place can never make this serve bytes whose sha256 differs from what it
+// advertises, in X-Lux-Sha256 and the manifest, for the process's life.
 func (s *Server) serveRunnerBin(w http.ResponseWriter, r *http.Request) error {
 	if _, err := s.authHostToken(r); err != nil {
 		return err
@@ -174,26 +184,17 @@ func (s *Server) serveRunnerBin(w http.ResponseWriter, r *http.Request) error {
 	osArch := r.PathValue("osArch")
 	name := r.PathValue("name")
 	arch, ok := strings.CutPrefix(osArch, "linux-")
-	if !ok || (name != "lux-runner" && name != "lux-shim") {
+	if !ok || !slices.Contains(runnerBinNames, name) {
 		return errNotFound
 	}
-	sum, ok := s.runnerBinSHA256(arch, name)
+	b, ok := s.bins[arch][name]
 	if !ok {
 		return errNotFound
 	}
-	f, err := os.Open(filepath.Join(s.cfg.RunnerBinDir, osArch, name))
-	if err != nil {
-		return errNotFound
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return err
-	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
-	w.Header().Set("X-Lux-Sha256", sum)
-	if _, err := io.Copy(w, f); err != nil {
+	w.Header().Set("Content-Length", strconv.Itoa(len(b.data)))
+	w.Header().Set("X-Lux-Sha256", b.sha256)
+	if _, err := io.Copy(w, bytes.NewReader(b.data)); err != nil {
 		s.log.Warn("runner binary download cut short", "arch", arch, "name", name, "err", err)
 		panic(http.ErrAbortHandler) // abort the response: never a clean end
 	}

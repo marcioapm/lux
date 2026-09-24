@@ -13,8 +13,8 @@ import (
 // matchingBins is a runner_bin_dir-equivalent map for one arch, both
 // binaries present, hashing to "r1"/"s1": what a Hello or Heartbeat
 // reporting those shas is considered up to date against.
-func matchingBins() map[string]map[string]string {
-	return map[string]map[string]string{"arm64": {"lux-runner": "r1", "lux-shim": "s1"}}
+func matchingBins() map[string]map[string]runnerBin {
+	return map[string]map[string]runnerBin{"arm64": {"lux-runner": {sha256: "r1"}, "lux-shim": {sha256: "s1"}}}
 }
 
 func hostState(t *testing.T, s *Server, ctx context.Context, id string) (draining bool, state, reason string, exitRequested, drainRequested bool) {
@@ -277,7 +277,7 @@ func TestTwoReleaseCyclesEachExitOnce(t *testing.T) {
 
 	// Release 2: luxd now holds "r2"/"s2". The same host, still on r1/s1,
 	// heartbeats and is drained again.
-	s.bins = map[string]map[string]string{"arm64": {"lux-runner": "r2", "lux-shim": "s2"}}
+	s.bins = map[string]map[string]runnerBin{"arm64": {"lux-runner": {sha256: "r2"}, "lux-shim": {sha256: "s2"}}}
 	if err := s.heartbeat(ctx, w.HostID, proto.Heartbeat{RunnerSHA256: "r1", ShimSHA256: "s1"}); err != nil {
 		t.Fatal(err)
 	}

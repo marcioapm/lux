@@ -88,9 +88,12 @@ type Server struct {
 	// deployments sharing a cloud account never take each other's
 	// instances for orphans (read by the provisioner).
 	deployment string
-	// bins: sha256 of the runner binaries on disk (runner_bin_dir), by
-	// arch then name (lux-runner, lux-shim). Hashed once at startup.
-	bins map[string]map[string]string
+	// bins: the runner binaries (runner_bin_dir), by arch then name
+	// (lux-runner, lux-shim), read into memory and hashed once at
+	// startup. Served from these bytes, never reopened, so an in-place
+	// file swap can never make luxd serve bytes that don't match the
+	// sha256 it advertises.
+	bins map[string]map[string]runnerBin
 	wg   sync.WaitGroup
 }
 

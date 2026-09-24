@@ -9,7 +9,11 @@
 package proto
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
+	"os"
 	"time"
 
 	"github.com/marcioapm/lux/internal/spec"
@@ -17,6 +21,23 @@ import (
 
 // Version of the runner protocol. luxd refuses runners that do not match.
 const Version = 1
+
+// SHA256File hashes a file's content: how both sides of the runner
+// binary self-update contract compute a sha256 — the runner for
+// os.Executable() and its --shim (Hello, Heartbeat), luxd for whatever
+// runner_bin_dir holds (the manifest, X-Lux-Sha256).
+func SHA256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
 
 // Frame is the envelope for every message in either direction.
 type Frame struct {
