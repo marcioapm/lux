@@ -106,6 +106,49 @@ func TestConfigFlag(t *testing.T) {
 	}
 }
 
+// runner_url defaults to public_url, but can be set separately (a private
+// address runners reach that clients cannot).
+func TestRunnerURLDefaultsToPublicURL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "luxd.toml")
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(`public_url = "https://luxd.example"`)
+	c, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RunnerURL != "" {
+		t.Errorf("runner_url defaulted at config load: %q (server.New applies the default)", c.RunnerURL)
+	}
+
+	write(`
+public_url = "https://luxd.example"
+runner_url = "http://10.0.1.10:7070"
+`)
+	c, err = loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RunnerURL != "http://10.0.1.10:7070" {
+		t.Errorf("runner_url from file: %q", c.RunnerURL)
+	}
+
+	t.Setenv("LUX_RUNNER_URL", "http://10.0.1.20:7070")
+	c, err = loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RunnerURL != "http://10.0.1.20:7070" {
+		t.Errorf("LUX_RUNNER_URL over file: %q", c.RunnerURL)
+	}
+}
+
 // LUX_DEBUG turns debug on with any value but false and 0, as it always has.
 func TestDebugFlag(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "empty.toml")

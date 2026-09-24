@@ -62,6 +62,7 @@ its variable; the table below lists them by variable.
 | `LUX_APP_PASSWORD` | `lux_app` | `migrate` sets `lux_app`'s password to it, each run. Set your own. |
 | `LUX_LISTEN` | `127.0.0.1:7070` | Address to serve on. |
 | `LUX_PUBLIC_URL` | — | The URL runners and clients use. |
+| `LUX_RUNNER_URL` | = public_url | The URL runners dial, if different from `LUX_PUBLIC_URL` (a private IP such as `http://10.0.1.10:7070`, unreachable from outside the VPC). Only clients, the console and MCP use `LUX_PUBLIC_URL`. |
 | `LUX_S3_BUCKET` | — | Where snapshots, output and artifacts go. |
 | `LUX_S3_ENDPOINT` | AWS | For MinIO and other S3-compatible stores (path-style). |
 | `LUX_S3_PUBLIC_ENDPOINT` | = endpoint | The endpoint presigned URLs are signed for, if runners and clients reach S3 by another name. |

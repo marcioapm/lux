@@ -424,7 +424,7 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 	if err != nil {
 		return err
 	}
-	env := map[string]string{"LUX_URL": s.cfg.PublicURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
+	env := map[string]string{"LUX_URL": s.cfg.RunnerURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
 	tags := s.poolTags(pl)
 	tags["Name"], tags[tagHost] = name, hostID
 	pid, err := prov.Launch(ctx, pl.Template, tags, env)

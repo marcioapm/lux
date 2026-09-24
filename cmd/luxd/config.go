@@ -29,6 +29,10 @@ type config struct {
 	} `toml:"database"`
 	Listen    string `toml:"listen" env:"LUX_LISTEN"`
 	PublicURL string `toml:"public_url" env:"LUX_PUBLIC_URL"`
+	// RunnerURL is what runners dial (LUX_URL in a provisioned host's
+	// env); it may be a private address unreachable from clients. Empty:
+	// PublicURL.
+	RunnerURL string `toml:"runner_url" env:"LUX_RUNNER_URL"`
 	Debug     onFlag `toml:"debug" env:"LUX_DEBUG"`
 	S3        struct {
 		Bucket         string `toml:"bucket" env:"LUX_S3_BUCKET"`

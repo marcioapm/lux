@@ -25,6 +25,10 @@ const (
 type Config struct {
 	Listen    string
 	PublicURL string
+	// RunnerURL is the URL runners use to reach luxd (LUX_URL in their
+	// env), which may be a private address clients can't reach. Empty:
+	// PublicURL.
+	RunnerURL string
 	// LeaseDuration is how long a host may go without a heartbeat before it
 	// and its live Runs are lost.
 	LeaseDuration time.Duration
@@ -89,6 +93,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	if cfg.Defaults == (spec.Defaults{}) {
 		cfg.Defaults = spec.BuiltinDefaults
 	}
+	cfg.RunnerURL = cmp.Or(cfg.RunnerURL, cfg.PublicURL)
 	cfg.SampleEvery = cmp.Or(cfg.SampleEvery, 10*time.Second)
 	cfg.HistoryRaw = cmp.Or(cfg.HistoryRaw, DefaultHistoryRaw)
 	cfg.HistoryMinutes = cmp.Or(cfg.HistoryMinutes, DefaultHistoryMinutes)

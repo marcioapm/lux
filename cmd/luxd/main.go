@@ -149,6 +149,7 @@ func serve(ctx context.Context, c config) error {
 	srv := server.New(server.Config{
 		Listen:         c.Listen,
 		PublicURL:      c.PublicURL,
+		RunnerURL:      c.RunnerURL,
 		LeaseDuration:  c.Lease.Duration,
 		Tick:           c.Tick.Duration,
 		ScaleDownAfter: c.ScaleDownAfter.Duration,
