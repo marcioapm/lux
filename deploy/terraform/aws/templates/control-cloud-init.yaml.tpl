@@ -240,9 +240,6 @@ write_files:
       [Service]
       Type=oneshot
       User=postgres
-      Environment=BACKUP_BUCKET=${backup_bucket}
-      Environment=LUX_DB_NAME=${db_name}
-      Environment=LUX_REGION=${region}
       ExecStart=/usr/local/lib/lux/pg-backup.sh
 
   - path: /etc/systemd/system/cloudflared.service

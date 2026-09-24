@@ -159,10 +159,8 @@ locals {
     hostname                 = var.name
     luxd_port                = var.luxd_port
     runner_bin_dir           = "/usr/local/lib/lux/runner"
-    backup_bucket            = aws_s3_bucket.pg_backups.id
     region                   = var.region
     lux_repo                 = var.lux_repo
-    ssm_prefix               = local.ssm_prefix
     version_parameter        = aws_ssm_parameter.lux_version.name
     public_url_parameter     = aws_ssm_parameter.public_url.name
     cf_access_team_parameter = aws_ssm_parameter.cf_access_team.name
