@@ -323,17 +323,7 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 	case proto.MsgExit:
 		var e proto.ExitHost
 		_ = json.Unmarshal(f.Data, &e)
-		// A redelivered exit can arrive after this host already undrained
-		// (a race between the ack and a reconnect) or while it is placing
-		// new work: neither is safe to act on. Log it either way, since
-		// both cases mean luxd's and the runner's view of this host
-		// briefly diverged.
-		if live := r.livePlacements(); len(live) > 0 {
-			r.log.Warn("ignoring exit: this host holds live placements", "reason", e.Reason, "code", e.Code, "placements", len(live))
-			return
-		}
-		if r.binariesMatchManifest(ctx) {
-			r.log.Warn("ignoring exit: this host's binaries already match luxd's manifest", "reason", e.Reason, "code", e.Code)
+		if !r.shouldExit(ctx, e) {
 			return
 		}
 		r.log.Warn("luxd asked this host to exit", "reason", e.Reason, "code", e.Code)
@@ -480,6 +470,23 @@ func (r *Runner) binariesMatchManifest(ctx context.Context) bool {
 	have := manifest["linux-"+runtime.GOARCH]
 	return have["lux-runner"] != "" && have["lux-runner"] == r.runnerSHA256 &&
 		have["lux-shim"] != "" && have["lux-shim"] == r.shimSHA256
+}
+
+// shouldExit decides whether a MsgExit is still actionable: a redelivered
+// exit can arrive after this host already undrained (a race between the
+// ack and a reconnect) or while it is placing new work, neither of which
+// is safe to act on. Logs either way, since both cases mean luxd's and
+// the runner's view of this host briefly diverged.
+func (r *Runner) shouldExit(ctx context.Context, e proto.ExitHost) bool {
+	if live := r.livePlacements(); len(live) > 0 {
+		r.log.Warn("ignoring exit: this host holds live placements", "reason", e.Reason, "code", e.Code, "placements", len(live))
+		return false
+	}
+	if r.binariesMatchManifest(ctx) {
+		r.log.Warn("ignoring exit: this host's binaries already match luxd's manifest", "reason", e.Reason, "code", e.Code)
+		return false
+	}
+	return true
 }
 
 // usageLoop samples disk and network use of live placements, in parallel,
