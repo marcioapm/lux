@@ -7,6 +7,7 @@
 //	luxd admin create-pool --name N --provider static|ec2 [--tenant T] [--shared] ...
 //	luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--retention-days N]
 //	luxd serve                                    run the API, scheduler and reapers
+//	luxd openapi                                  print the tenant API's OpenAPI spec (YAML)
 //
 // Configuration is environment variables; see docs/operations.md.
 package main
@@ -20,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +31,7 @@ import (
 	"github.com/marcioapm/lux/internal/blob"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/server"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 	"github.com/marcioapm/lux/internal/version"
 )
@@ -47,6 +50,11 @@ func main() {
 		err = admin(ctx, os.Args[2:])
 	case "serve":
 		err = serve(ctx)
+	case "openapi":
+		var doc []byte
+		if doc, err = server.OpenAPI(); err == nil {
+			_, err = os.Stdout.Write(doc)
+		}
 	case "version", "--version":
 		fmt.Println(version.Version)
 	default:
@@ -59,7 +67,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: luxd migrate | admin <command> | serve | version
+	fmt.Fprintln(os.Stderr, `usage: luxd migrate | admin <command> | serve | openapi | version
 
 admin commands:
   create-tenant --name N [--max-runs N] [--max-hosts N] [--retention-days N]
@@ -147,6 +155,9 @@ func serve(ctx context.Context) error {
 	if cfg.LaunchTimeout, err = durationEnv("LUX_LAUNCH_TIMEOUT", server.DefaultLaunchTimeout); err != nil {
 		return err
 	}
+	if cfg.Defaults, err = resourceDefaults(); err != nil {
+		return err
+	}
 	cfg.Providers, err = providers(ctx, log)
 	if err != nil {
 		return err
@@ -163,6 +174,32 @@ func durationEnv(name string, def time.Duration) (time.Duration, error) {
 	d, err := time.ParseDuration(v)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	return d, nil
+}
+
+// resourceDefaults are a Run's resources where its spec leaves them unset:
+// LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY ("8Gi"), LUX_DEFAULT_PIDS.
+func resourceDefaults() (spec.Defaults, error) {
+	d := spec.BuiltinDefaults
+	if v := os.Getenv("LUX_DEFAULT_CPUS"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil || n <= 0 {
+			return d, fmt.Errorf("LUX_DEFAULT_CPUS: %q is not a positive number", v)
+		}
+		d.CPUs = n
+	}
+	if v := os.Getenv("LUX_DEFAULT_MEMORY"); v != "" {
+		if err := json.Unmarshal(fmt.Appendf(nil, "%q", v), &d.Memory); err != nil || d.Memory <= 0 {
+			return d, fmt.Errorf("LUX_DEFAULT_MEMORY: %q is not a size", v)
+		}
+	}
+	if v := os.Getenv("LUX_DEFAULT_PIDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return d, fmt.Errorf("LUX_DEFAULT_PIDS: %q is not a positive number", v)
+		}
+		d.Pids = n
 	}
 	return d, nil
 }

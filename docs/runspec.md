@@ -83,8 +83,13 @@ artifacts:
   at `path`). A file secret is never in a snapshot. Every resume must
   supply every secret again.
 - Volume paths must be absolute. `/.lux` is reserved.
-- Resources default to 2 CPUs, 4 GiB of memory, 1024 PIDs. Sizes accept
-  `512Mi`, `8Gi`, `1G`, or bytes.
+- **Resources** are what a Run gets and what the scheduler reserves on its
+  host: `cpus` (a CPU quota; `0.5` is half a CPU), `memory` (the limit,
+  with no swap beyond it), `pids` (processes). They default to **2 CPUs,
+  8 GiB and 1024 processes**, and an operator can change the defaults
+  (`LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_PIDS` on luxd).
+  Sizes accept `512Mi`, `8Gi`, `1G`, or bytes. A Run waits until a host in
+  its pool has that much free; an image build is held to the same limits.
 
 ## Images
 

@@ -139,3 +139,22 @@ def test_scopes_are_enforced(env, lux):
     with pytest.raises(CLIError) as e:
         reader.submit(generic(ALPINE_IMAGE, "true"))
     assert "scope" in e.value.stderr
+
+
+def test_resource_defaults_and_requests_reach_the_container(lux, runners, hosts):
+    """A Run without resources gets the defaults (2 CPUs, 8 GiB, 1024
+    processes); one that asks gets what it asked for — as the container's
+    own cgroup limits."""
+    runners.start(hosts[0])
+    show = "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max"
+    default = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show))
+    lux.wait_state(default, "succeeded")
+    out = lux.logs(default).split()  # cpu.max is "<quota> <period>"
+    assert out[:2] == ["200000", "100000"] and int(out[2]) == 8 << 30 and int(out[3]) == 1024, out
+    spec = lux.get(default)["spec"]["resources"]
+    assert spec["cpus"] == 2 and spec["memory"] == 8 << 30 and spec["pids"] == 1024, spec
+
+    asked = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show, resources={"cpus": 0.5, "memory": "512Mi", "pids": 64}))
+    lux.wait_state(asked, "succeeded")
+    out = lux.logs(asked).split()
+    assert out[:2] == ["50000", "100000"] and int(out[2]) == 512 << 20 and int(out[3]) == 64, out

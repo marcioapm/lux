@@ -24,17 +24,32 @@ import (
 
 func (a *app) pushCmd() *cobra.Command {
 	var wait bool
+	var expect []string
 	cmd := &cobra.Command{
 		Use:   "push <run>",
 		Short: "Push the Run's repositories to its git.push branch",
 		Long: `Push each repository's current commit to the spec's git.push branch,
 with credentials only the runner holds. A branch that moved since this Run
-last pushed it is not overwritten. --wait prints each repository's outcome
-and fails unless every one was pushed or already up to date.`,
+last pushed it is not overwritten. --expect repo=sha instead pushes only if
+the branch is at that commit (for pushing onto a branch someone else owns).
+--wait prints each repository's outcome and fails unless every one was
+pushed or already up to date.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			body := map[string]any{}
+			if len(expect) > 0 {
+				ex := map[string]string{}
+				for _, kv := range expect {
+					repo, sha, ok := strings.Cut(kv, "=")
+					if !ok {
+						return fmt.Errorf("--expect %q: want repo=sha", kv)
+					}
+					ex[repo] = sha
+				}
+				body["expect"] = ex
+			}
 			var resp map[string]string
-			if err := a.c.Do(ctxOf(cmd), "POST", "/v1/runs/"+args[0]+"/push", map[string]any{}, &resp); err != nil {
+			if err := a.c.Do(ctxOf(cmd), "POST", "/v1/runs/"+args[0]+"/push", body, &resp); err != nil {
 				return err
 			}
 			if !wait {
@@ -48,6 +63,7 @@ and fails unless every one was pushed or already up to date.`,
 		},
 	}
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the outcome")
+	cmd.Flags().StringArrayVar(&expect, "expect", nil, "repo=sha: push only if the branch is at that commit (repeatable)")
 	return cmd
 }
 

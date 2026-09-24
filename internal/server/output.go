@@ -53,6 +53,22 @@ type OutputRecord struct {
 	Event  json.RawMessage `json:"event,omitempty"`
 }
 
+// The other SSE events' data. Fields in key order: they were maps.
+type outputGap struct {
+	Epoch  int    `json:"epoch"`
+	Reason string `json:"reason"`
+}
+
+type outputError struct {
+	Error string `json:"error"`
+}
+
+type outputEnd struct {
+	AfterEvent int64  `json:"afterEvent" doc:"The last lifecycle event sent (afterEvent)."`
+	Cursor     string `json:"cursor" doc:"Where to resume (since)."`
+	State      string `json:"state" doc:"The Run's state."`
+}
+
 type placementOutput struct {
 	runID     string
 	epoch     int
@@ -63,25 +79,28 @@ type placementOutput struct {
 	outputSeq *int64
 }
 
+type outputInput struct {
+	RunPath
+	Since      string `query:"since" doc:"Only records after this cursor (from a record or the end event)." example:"1.42"`
+	Follow     string `query:"follow" doc:"true to keep streaming until the Run stops or finishes." example:"true"`
+	Events     string `query:"events" doc:"true to interleave lifecycle events (lux events)." example:"true"`
+	AfterEvent string `query:"afterEvent" doc:"With events, only lifecycle events after this id." example:"0"`
+}
+
 // serveOutput is GET /v1/runs/{id}/output: the Run's output as SSE, from
 // wherever it is. A live placement's records come from its host, relayed
 // over the runner's WebSocket; an exited one's from S3 (or from its host if
 // the upload has not finished). Lifecycle events from Postgres are
 // interleaved as "lux" events.
-//
-//	?since=<cursor>  records after this cursor
-//	&follow=true     keep streaming until the Run stops or finishes
-//	&events=true     include lifecycle events
-func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request) error {
-	p := principal(r)
-	runID := r.PathValue("id")
-	q := r.URL.Query()
-	cur, err := ParseCursor(q.Get("since"))
+func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputInput) error {
+	p := principal(r.Context())
+	runID := in.ID
+	cur, err := ParseCursor(in.Since)
 	if err != nil {
 		return errf(http.StatusBadRequest, "bad_request", "%v", err)
 	}
-	follow := q.Get("follow") == "true"
-	withEvents := q.Get("events") == "true"
+	follow := in.Follow == "true"
+	withEvents := in.Events == "true"
 	if _, err := s.loadRun(r.Context(), p.TenantID, runID, false); err != nil {
 		return err
 	}
@@ -93,7 +112,7 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 
 	var lastEvent int64
-	if after, err := strconv.ParseInt(q.Get("afterEvent"), 10, 64); err == nil {
+	if after, err := strconv.ParseInt(in.AfterEvent, 10, 64); err == nil {
 		lastEvent = after
 	}
 	send := func(event string, v any) error {
@@ -126,7 +145,7 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request) error {
 	for {
 		placements, runState, err := s.placementsFrom(ctx, p.TenantID, runID, cur.Epoch)
 		if err != nil {
-			return send("error", map[string]string{"error": err.Error()})
+			return send("error", outputError{err.Error()})
 		}
 		progressed := false
 		for _, pl := range placements {
@@ -148,7 +167,7 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request) error {
 				done = true
 			case pl.state == "lost" && pl.blobLoc != "host":
 				// Its host died before saving it: gone, by design.
-				_ = send("gap", map[string]any{"epoch": pl.epoch, "reason": "output lost with its host"})
+				_ = send("gap", outputGap{pl.epoch, "output lost with its host"})
 				done = true
 			case s.hub.Streaming(pl.hostID):
 				done, err = s.relayOutput(ctx, pl, since, follow && liveNow, emit, flushEvents)
@@ -158,7 +177,7 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request) error {
 				done = false
 			default:
 				if pl.state == "exited" || pl.state == "lost" {
-					_ = send("gap", map[string]any{"epoch": pl.epoch, "reason": "host unreachable; output not uploaded yet"})
+					_ = send("gap", outputGap{pl.epoch, "host unreachable; output not uploaded yet"})
 				}
 				done = !liveNow
 			}
@@ -171,7 +190,7 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request) error {
 					// dropped relay): keep the cursor and try again.
 					done = false
 				} else {
-					_ = send("gap", map[string]any{"epoch": pl.epoch, "reason": err.Error()})
+					_ = send("gap", outputGap{pl.epoch, err.Error()})
 					done = true
 				}
 			}
@@ -189,7 +208,7 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request) error {
 		}
 		ended := terminal(runState) || runState == StateStopped || runState == StateLost
 		if !follow || (ended && allDone(placements, cur)) {
-			return send("end", map[string]any{"cursor": cur.String(), "state": runState, "afterEvent": lastEvent})
+			return send("end", outputEnd{lastEvent, cur.String(), runState})
 		}
 		if !progressed {
 			select {

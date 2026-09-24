@@ -27,7 +27,7 @@ type RunSpec struct {
 	Secrets   []Secret          `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 	Git       *Git              `json:"git,omitempty" yaml:"git,omitempty"`
 	Volumes   []Volume          `json:"volumes,omitempty" yaml:"volumes,omitempty"`
-	Resources Resources         `json:"resources" yaml:"resources"`
+	Resources Resources         `json:"resources" yaml:"resources" doc:"What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_PIDS)."`
 	Timeout   Duration          `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	Placement Placement         `json:"placement" yaml:"placement"`
 	Network   Network           `json:"network" yaml:"network"`
@@ -253,16 +253,23 @@ var (
 
 // Defaults applied by Normalize.
 const (
-	DefaultCPUs    = 2
-	DefaultMemory  = Bytes(4 << 30)
-	DefaultPids    = 1024
 	DefaultTimeout = 24 * time.Hour
 	DefaultGrace   = 30 * time.Second
 )
 
+// Defaults are the resources a Run gets when its spec leaves them unset.
+// An operator sets them per luxd.
+type Defaults struct {
+	CPUs   float64
+	Memory Bytes
+	Pids   int
+}
+
+var BuiltinDefaults = Defaults{CPUs: 2, Memory: 8 << 30, Pids: 1024}
+
 // Normalize validates the spec and fills defaults. It returns every problem
 // at once so a caller can fix a spec in one round trip.
-func (s *RunSpec) Normalize() error {
+func (s *RunSpec) Normalize(d Defaults) error {
 	var errs []string
 	fail := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
 
@@ -420,13 +427,13 @@ func (s *RunSpec) Normalize() error {
 
 	r := &s.Resources
 	if r.CPUs == 0 {
-		r.CPUs = DefaultCPUs
+		r.CPUs = d.CPUs
 	}
 	if r.Memory == 0 {
-		r.Memory = DefaultMemory
+		r.Memory = d.Memory
 	}
 	if r.Pids == 0 {
-		r.Pids = DefaultPids
+		r.Pids = int64(d.Pids)
 	}
 	if r.CPUs < 0 || r.Memory < 0 || r.Pids < 0 {
 		fail("resources must not be negative")

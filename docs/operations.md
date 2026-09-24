@@ -23,6 +23,10 @@ luxd serve        # as many as you like
 | `LUX_S3_ACCESS_KEY`, `LUX_S3_SECRET_KEY` | AWS chain | Only luxd holds S3 credentials. |
 | `LUX_LEASE` | `30s` | A host that misses heartbeats this long is lost, along with its live placements. |
 | `LUX_TICK` | `1s` | Scheduler and reaper interval. |
+| `LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_PIDS` | `2`, `8Gi`, `1024` | Resources a Run gets when its spec sets none. |
+| `LUX_SCALE_DOWN_AFTER` | `10m` | How long a provisioned host stays idle before it is drained and terminated. |
+| `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
+| `LUX_EC2_ENDPOINT` | AWS | Overrides the EC2 endpoint (tests). |
 | `LUX_DEBUG` | — | Debug logging. |
 
 ### Tenants, keys and quotas

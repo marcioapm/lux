@@ -1,0 +1,2348 @@
+components:
+  schemas:
+    Artifact:
+      additionalProperties: false
+      properties:
+        available:
+          type: boolean
+        contentType:
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        epoch:
+          format: int64
+          type: integer
+        id:
+          type: string
+        path:
+          type: string
+        sha256:
+          type: string
+        size:
+          format: int64
+          type: integer
+      type: object
+    ArtifactList:
+      additionalProperties: false
+      properties:
+        artifacts:
+          items:
+            $ref: "#/components/schemas/Artifact"
+          type:
+            - array
+            - "null"
+      type: object
+    Artifacts:
+      additionalProperties: false
+      properties:
+        paths:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+      type: object
+    Build:
+      additionalProperties: false
+      properties:
+        args:
+          additionalProperties:
+            type: string
+          type: object
+        containerfile:
+          type: string
+        context:
+          type: string
+      type: object
+    Capacity:
+      additionalProperties: false
+      properties:
+        cpus:
+          format: double
+          type: number
+        disk:
+          format: int64
+          type: integer
+        memory:
+          format: int64
+          type: integer
+        runs:
+          format: int64
+          type: integer
+      type: object
+    EgressRule:
+      additionalProperties: false
+      properties:
+        cidr:
+          type: string
+        host:
+          type: string
+      type: object
+    Error:
+      additionalProperties: false
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorInfo"
+      type: object
+    ErrorInfo:
+      additionalProperties: false
+      properties:
+        code:
+          description: Stable error code, e.g. not_found, invalid_spec, quota_exceeded.
+          type: string
+        details:
+          description: Every problem, when there are several (invalid_spec, secrets_required, validation).
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        message:
+          type: string
+      type: object
+    Event:
+      additionalProperties: false
+      properties:
+        data:
+          additionalProperties: {}
+          type: object
+        epoch:
+          format: int64
+          type: integer
+        id:
+          format: int64
+          type: integer
+        time:
+          format: date-time
+          type: string
+        type:
+          type: string
+      type: object
+    EventList:
+      additionalProperties: false
+      properties:
+        events:
+          items:
+            $ref: "#/components/schemas/Event"
+          type:
+            - array
+            - "null"
+      type: object
+    Git:
+      additionalProperties: false
+      properties:
+        push:
+          $ref: "#/components/schemas/Push"
+        repositories:
+          items:
+            $ref: "#/components/schemas/Repository"
+          type:
+            - array
+            - "null"
+      type: object
+    Host:
+      additionalProperties: false
+      properties:
+        capacity:
+          $ref: "#/components/schemas/Capacity"
+        draining:
+          type: boolean
+        id:
+          type: string
+        labels:
+          additionalProperties:
+            type: string
+          type: object
+        lastHeartbeat:
+          format: date-time
+          type: string
+        liveRuns:
+          format: int64
+          type: integer
+        name:
+          type: string
+        platform:
+          type: boolean
+        pool:
+          type: string
+        providerId:
+          type: string
+        state:
+          type: string
+        stateReason:
+          type: string
+        times:
+          additionalProperties:
+            format: date-time
+            type:
+              - string
+              - "null"
+          type: object
+        versions:
+          additionalProperties: {}
+          type: object
+      type: object
+    HostDrain:
+      additionalProperties: false
+      properties:
+        draining:
+          type: boolean
+        host:
+          description: The host's id.
+          type: string
+      type: object
+    HostList:
+      additionalProperties: false
+      properties:
+        hosts:
+          items:
+            $ref: "#/components/schemas/Host"
+          type:
+            - array
+            - "null"
+      type: object
+    Image:
+      additionalProperties: false
+      properties:
+        build:
+          $ref: "#/components/schemas/Build"
+        ref:
+          type: string
+      type: object
+    ImageResolution:
+      additionalProperties: false
+      properties:
+        containerfile:
+          type: string
+        imageId:
+          type: string
+      type: object
+    Init:
+      additionalProperties: false
+      properties:
+        script:
+          type: string
+      type: object
+    InputRequest:
+      additionalProperties: false
+      properties:
+        interrupt:
+          description: Stop the current turn first.
+          type: boolean
+        raw:
+          contentEncoding: base64
+          description: Raw bytes for a generic workload's stdin.
+          type: string
+        requestId:
+          description: "Makes retries safe: the runner delivers each id once. Generated if absent."
+          type: string
+        text:
+          description: "A message: agents get it as a prompt, generic workloads on stdin."
+          type: string
+      type: object
+    Manifest:
+      additionalProperties: false
+      properties:
+        epoch:
+          format: int64
+          type: integer
+        runId:
+          type: string
+        sessionId:
+          type: string
+        snapshotId:
+          type: string
+        volumes:
+          items:
+            $ref: "#/components/schemas/VolumeSnapshot"
+          type:
+            - array
+            - "null"
+      type: object
+    Network:
+      additionalProperties: false
+      properties:
+        egress:
+          items:
+            $ref: "#/components/schemas/EgressRule"
+          type:
+            - array
+            - "null"
+        ports:
+          items:
+            $ref: "#/components/schemas/Port"
+          type:
+            - array
+            - "null"
+        unrestricted:
+          type: boolean
+      type: object
+    OutputEnd:
+      additionalProperties: false
+      properties:
+        afterEvent:
+          description: The last lifecycle event sent (afterEvent).
+          format: int64
+          type: integer
+        cursor:
+          description: Where to resume (since).
+          type: string
+        state:
+          description: The Run's state.
+          type: string
+      type: object
+    OutputError:
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+      type: object
+    OutputGap:
+      additionalProperties: false
+      properties:
+        epoch:
+          format: int64
+          type: integer
+        reason:
+          type: string
+      type: object
+    OutputRecord:
+      additionalProperties: false
+      properties:
+        ch:
+          type: string
+        cursor:
+          type: string
+        data:
+          type: string
+        epoch:
+          format: int64
+          type: integer
+        event: {}
+        seq:
+          format: int64
+          type: integer
+        t:
+          format: int64
+          type: integer
+      type: object
+    Placement:
+      additionalProperties: false
+      properties:
+        pool:
+          type: string
+        prefers:
+          additionalProperties:
+            type: string
+          type: object
+        requires:
+          additionalProperties:
+            type: string
+          type: object
+      type: object
+    Pool:
+      additionalProperties: false
+      properties:
+        maxHosts:
+          format: int64
+          type: integer
+        minHosts:
+          format: int64
+          type: integer
+        name:
+          type: string
+        platform:
+          type: boolean
+        provider:
+          type: string
+        shared:
+          type: boolean
+        template:
+          additionalProperties: {}
+          type: object
+        warmHosts:
+          format: int64
+          type: integer
+      type: object
+    PoolList:
+      additionalProperties: false
+      properties:
+        pools:
+          items:
+            $ref: "#/components/schemas/Pool"
+          type:
+            - array
+            - "null"
+      type: object
+    Port:
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        port:
+          format: int64
+          type: integer
+      type: object
+    Push:
+      additionalProperties: false
+      properties:
+        branch:
+          type: string
+      type: object
+    PushRequest:
+      additionalProperties: false
+      properties:
+        expect:
+          additionalProperties:
+            type: string
+          description: Per repository name, the commit (full id) the push branch must be at for the push to go ahead.
+          type: object
+        requestId:
+          description: Names the push in its git.push event. Generated if absent.
+          type: string
+      type: object
+    Repository:
+      additionalProperties: false
+      properties:
+        credential:
+          type: string
+        name:
+          type: string
+        path:
+          type: string
+        ref:
+          type: string
+        url:
+          type: string
+      type: object
+    RequestAccepted:
+      additionalProperties: false
+      properties:
+        requestId:
+          type: string
+      type: object
+    Resources:
+      additionalProperties: false
+      properties:
+        cpus:
+          format: double
+          type: number
+        disk:
+          description: "A number of bytes, or a size: \"8Gi\", \"512Mi\", \"1G\". Responses carry the number."
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        memory:
+          description: "A number of bytes, or a size: \"8Gi\", \"512Mi\", \"1G\". Responses carry the number."
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        pids:
+          format: int64
+          type: integer
+      type: object
+    Resume:
+      additionalProperties: false
+      properties:
+        command:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+      type: object
+    ResumeInput:
+      additionalProperties: false
+      properties:
+        text:
+          type: string
+      type: object
+    ResumeRequest:
+      additionalProperties: false
+      properties:
+        fromSnapshot:
+          description: Resume from this snapshot instead of the latest (e.g. after lost).
+          type: string
+        input:
+          $ref: "#/components/schemas/ResumeInput"
+          description: A message for the workload once it is back.
+        secrets:
+          description: "A value for every one of the Run's secrets: luxd never keeps them."
+          items:
+            $ref: "#/components/schemas/Secret"
+          type:
+            - array
+            - "null"
+      type: object
+    Run:
+      additionalProperties: false
+      properties:
+        activity:
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        epoch:
+          format: int64
+          type: integer
+        exitCode:
+          format: int64
+          type: integer
+        finishedAt:
+          format: date-time
+          type: string
+        firstScheduledAt:
+          format: date-time
+          type: string
+        firstStartedAt:
+          format: date-time
+          type: string
+        host:
+          type: string
+        id:
+          type: string
+        image:
+          $ref: "#/components/schemas/ImageResolution"
+        labels:
+          additionalProperties:
+            type: string
+          type: object
+        name:
+          type: string
+        placements:
+          items:
+            $ref: "#/components/schemas/RunPlacement"
+          type:
+            - array
+            - "null"
+        secrets:
+          items:
+            $ref: "#/components/schemas/SecretRef"
+          type:
+            - array
+            - "null"
+        sessionId:
+          type: string
+        snapshotId:
+          type: string
+        spec:
+          $ref: "#/components/schemas/RunSpec"
+        state:
+          type: string
+        stateReason:
+          type: string
+        usage:
+          $ref: "#/components/schemas/RunUsage"
+      type: object
+    RunList:
+      additionalProperties: false
+      properties:
+        runs:
+          items:
+            $ref: "#/components/schemas/Run"
+          type:
+            - array
+            - "null"
+      type: object
+    RunPlacement:
+      additionalProperties: false
+      properties:
+        acceptedAt:
+          format: date-time
+          type: string
+        assignedAt:
+          format: date-time
+          type: string
+        containerStartedAt:
+          format: date-time
+          type: string
+        cpuSeconds:
+          format: double
+          type: number
+        epoch:
+          format: int64
+          type: integer
+        exitCode:
+          format: int64
+          type: integer
+        exitReason:
+          type: string
+        exitedAt:
+          format: date-time
+          type: string
+        host:
+          type: string
+        hostName:
+          type: string
+        imageReadyAt:
+          format: date-time
+          type: string
+        netRxBytes:
+          format: int64
+          type: integer
+        netTxBytes:
+          format: int64
+          type: integer
+        peakDiskBytes:
+          format: int64
+          type: integer
+        peakMemoryBytes:
+          format: int64
+          type: integer
+        peakPids:
+          format: int64
+          type: integer
+        snapshotBytes:
+          format: int64
+          type: integer
+        snapshotDoneAt:
+          format: date-time
+          type: string
+        state:
+          type: string
+        stopReason:
+          type: string
+        stopRequestedAt:
+          format: date-time
+          type: string
+        uploadedAt:
+          format: date-time
+          type: string
+        volumesRestoredAt:
+          format: date-time
+          type: string
+        workloadStartedAt:
+          format: date-time
+          type: string
+      type: object
+    RunSpec:
+      additionalProperties: false
+      properties:
+        artifacts:
+          $ref: "#/components/schemas/Artifacts"
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        git:
+          $ref: "#/components/schemas/Git"
+        image:
+          $ref: "#/components/schemas/Image"
+        init:
+          $ref: "#/components/schemas/Init"
+        labels:
+          additionalProperties:
+            type: string
+          type: object
+        name:
+          type: string
+        network:
+          $ref: "#/components/schemas/Network"
+        placement:
+          $ref: "#/components/schemas/Placement"
+        resources:
+          $ref: "#/components/schemas/Resources"
+          description: "What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_PIDS)."
+        sandbox:
+          $ref: "#/components/schemas/Sandbox"
+        secrets:
+          items:
+            $ref: "#/components/schemas/Secret"
+          type:
+            - array
+            - "null"
+        timeout:
+          description: A Go duration ("4h", "90s"), or a number of seconds. Responses carry the string.
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        volumes:
+          items:
+            $ref: "#/components/schemas/Volume"
+          type:
+            - array
+            - "null"
+        workload:
+          $ref: "#/components/schemas/Workload"
+      type: object
+    RunUsage:
+      additionalProperties: false
+      properties:
+        cpuSeconds:
+          format: double
+          type: number
+        netRxBytes:
+          format: int64
+          type: integer
+        netTxBytes:
+          format: int64
+          type: integer
+        peakDiskBytes:
+          format: int64
+          type: integer
+        peakMemoryBytes:
+          format: int64
+          type: integer
+        peakPids:
+          format: int64
+          type: integer
+        placements:
+          format: int64
+          type: integer
+        queueSeconds:
+          format: double
+          type: number
+      type: object
+    Sandbox:
+      additionalProperties: false
+      properties:
+        nestedContainers:
+          type: boolean
+        readOnlyRoot:
+          type: boolean
+      type: object
+    Secret:
+      additionalProperties: false
+      properties:
+        as:
+          type: string
+        name:
+          type: string
+        path:
+          type: string
+        runnerOnly:
+          type: boolean
+        value:
+          type: string
+      type: object
+    SecretRef:
+      additionalProperties: false
+      properties:
+        fingerprint:
+          type: string
+        name:
+          type: string
+      type: object
+    Snapshot:
+      additionalProperties: false
+      properties:
+        available:
+          type: boolean
+        createdAt:
+          format: date-time
+          type: string
+        epoch:
+          format: int64
+          type: integer
+        id:
+          type: string
+        manifest:
+          $ref: "#/components/schemas/Manifest"
+        onHost:
+          type: string
+        uploaded:
+          type: boolean
+      type: object
+    SnapshotList:
+      additionalProperties: false
+      properties:
+        snapshots:
+          items:
+            $ref: "#/components/schemas/Snapshot"
+          type:
+            - array
+            - "null"
+      type: object
+    StatusBody:
+      additionalProperties: false
+      properties:
+        status:
+          examples:
+            - ok
+          type: string
+      type: object
+    StreamData:
+      additionalProperties: false
+      properties:
+        ch:
+          type: string
+        cols:
+          format: int64
+          type: integer
+        data:
+          contentEncoding: base64
+          type: string
+        eof:
+          type: boolean
+        error:
+          type: string
+        exitCode:
+          format: int64
+          type: integer
+        rows:
+          format: int64
+          type: integer
+      type: object
+    StreamOpen:
+      additionalProperties: false
+      properties:
+        cols:
+          format: int64
+          type: integer
+        command:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        kind:
+          type: string
+        port:
+          format: int64
+          type: integer
+        rows:
+          format: int64
+          type: integer
+        streamId:
+          type: string
+        tty:
+          type: boolean
+      type: object
+    Volume:
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+        name:
+          type: string
+        path:
+          type: string
+      type: object
+    VolumeSnapshot:
+      additionalProperties: false
+      properties:
+        blobId:
+          type: string
+        name:
+          type: string
+        path:
+          type: string
+        sha256:
+          type: string
+        size:
+          format: int64
+          type: integer
+      type: object
+    Workload:
+      additionalProperties: false
+      properties:
+        adapter:
+          type: string
+        command:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        grace:
+          description: A Go duration ("4h", "90s"), or a number of seconds. Responses carry the string.
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        prompt:
+          type: string
+        resume:
+          $ref: "#/components/schemas/Resume"
+        tty:
+          type: boolean
+        user:
+          type: string
+        workdir:
+          type: string
+      type: object
+  securitySchemes:
+    apiKey:
+      description: A tenant API key (luxd admin create-key).
+      scheme: bearer
+      type: http
+info:
+  description: |-
+    The lux tenant API. Every /v1 call authenticates with an API key (`Authorization: Bearer <key>`); a key has scopes `read`, `run` and `admin`, each implying the ones before it.
+
+    Errors are JSON: `{"error": {"code": "not_found", "message": "...", "details": ["..."]}}`, with a stable `code`.
+  title: lux
+  version: dev
+openapi: 3.1.0
+paths:
+  /health:
+    get:
+      operationId: health
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusBody"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Error
+      summary: Check luxd is up
+  /v1/artifacts/{aid}:
+    get:
+      description: |-
+        The file the Run wrote, streamed through luxd. Content-Length and X-Lux-SHA256 let a client tell a whole download from one cut short (the response is aborted, never ended cleanly, on a failure mid-way). 409 not_uploaded (with Retry-After) while it is still on its host; 410 gone once deleted by retention.
+
+        Needs the `read` scope.
+      operationId: downloadArtifact
+      parameters:
+        - description: The artifact's id.
+          in: path
+          name: aid
+          required: true
+          schema:
+            description: The artifact's id.
+            type: string
+      responses:
+        "200":
+          content:
+            application/octet-stream:
+              schema:
+                contentMediaType: application/octet-stream
+                format: binary
+                type: string
+          description: The file.
+          headers:
+            Content-Disposition:
+              description: attachment, with the file's name.
+              schema:
+                type: string
+            Content-Length:
+              description: The file's size.
+              schema:
+                type: integer
+            X-Lux-SHA256:
+              description: The file's SHA-256, hex.
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "410":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Gone
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Download an artifact
+      tags:
+        - runs
+  /v1/hosts:
+    get:
+      description: |-
+        The tenant's own hosts, and platform hosts in pools it can use.
+
+        Needs the `read` scope.
+      operationId: listHosts
+      parameters:
+        - description: true to include terminated hosts.
+          explode: false
+          in: query
+          name: all
+          schema:
+            description: true to include terminated hosts.
+            examples:
+              - "true"
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List hosts
+      tags:
+        - hosts
+  /v1/hosts/{id}/drain:
+    post:
+      description: |-
+        No new placements; its live Runs are stopped and resumed elsewhere. Only the tenant's own hosts.
+
+        Needs the `admin` scope.
+      operationId: drainHost
+      parameters:
+        - description: The host's id or name.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name.
+            type: string
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostDrain"
+          description: Accepted
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Drain a host
+      tags:
+        - hosts
+  /v1/pools:
+    get:
+      description: |-
+        The tenant's pools and the platform pools it can use.
+
+        Needs the `read` scope.
+      operationId: listPools
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List pools
+      tags:
+        - pools
+    post:
+      description: Needs the `admin` scope.
+      operationId: putPool
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Pool"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pool"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Create or update a pool
+      tags:
+        - pools
+  /v1/pools/{name}:
+    delete:
+      description: |-
+        Its provisioned hosts are drained, then terminated; its Runs wait for a pool of that name again.
+
+        Needs the `admin` scope.
+      operationId: deletePool
+      parameters:
+        - description: The pool's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The pool's name.
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Remove a pool
+      tags:
+        - pools
+  /v1/runs:
+    get:
+      description: |-
+        Newest first.
+
+        Needs the `read` scope.
+      operationId: listRuns
+      parameters:
+        - description: Only Runs in these states (comma-separated).
+          explode: false
+          in: query
+          name: state
+          schema:
+            description: Only Runs in these states (comma-separated).
+            examples:
+              - running,stopped
+            type: string
+        - description: Only Runs with this label (key=value); repeat to require several.
+          explode: true
+          in: query
+          name: label
+          schema:
+            description: Only Runs with this label (key=value); repeat to require several.
+            items:
+              type: string
+            type:
+              - array
+              - "null"
+        - description: "At most this many Runs, newest first: 1 to 1000, default 100."
+          explode: false
+          in: query
+          name: limit
+          schema:
+            description: "At most this many Runs, newest first: 1 to 1000, default 100."
+            examples:
+              - "100"
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List Runs
+      tags:
+        - runs
+    post:
+      description: |-
+        Validates and normalizes the RunSpec (docs/runspec.md) and queues the Run. Secret values are held in memory until the Run is placed, never stored.
+
+        Needs the `run` scope.
+      operationId: submitRun
+      parameters:
+        - description: "Makes the submission safe to retry: another with the same key returns the first Run (200) instead of creating one."
+          in: header
+          name: Idempotency-Key
+          schema:
+            description: "Makes the submission safe to retry: another with the same key returns the first Run (200) instead of creating one."
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunSpec"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: An earlier submission with the same Idempotency-Key.
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "429":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Too Many Requests
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Submit a Run
+      tags:
+        - runs
+  /v1/runs/{id}:
+    get:
+      description: |-
+        With its placements and resource usage.
+
+        Needs the `read` scope.
+      operationId: getRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Get a Run
+      tags:
+        - runs
+  /v1/runs/{id}/artifacts:
+    get:
+      description: Needs the `read` scope.
+      operationId: listArtifacts
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List a Run's artifacts
+      tags:
+        - runs
+  /v1/runs/{id}/attach:
+    get:
+      description: |-
+        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. Needs a generic workload with workload.tty. Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
+
+        Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
+
+        Needs the `run` scope.
+      operationId: attachRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "101":
+          description: Switching to the WebSocket.
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusBody"
+          description: The stream can be opened (no Upgrade header).
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Service Unavailable
+      security:
+        - apiKey: []
+      summary: Attach to a running Run's terminal
+      tags:
+        - interactive
+      x-websocket:
+        message:
+          $ref: "#/components/schemas/StreamData"
+  /v1/runs/{id}/cancel:
+    post:
+      description: |-
+        It ends as cancelled and cannot be resumed. Idempotent.
+
+        Needs the `run` scope.
+      operationId: cancelRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: Accepted
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Cancel a Run
+      tags:
+        - runs
+  /v1/runs/{id}/events:
+    get:
+      description: Needs the `read` scope.
+      operationId: listEvents
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: Only events after this id (up to 1000 at a time).
+          explode: false
+          in: query
+          name: after
+          schema:
+            description: Only events after this id (up to 1000 at a time).
+            examples:
+              - "0"
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List a Run's lifecycle events
+      tags:
+        - runs
+  /v1/runs/{id}/exec:
+    get:
+      description: |-
+        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. The client's first message is a StreamOpen: `{"command": [...], "tty": true, "rows": 24, "cols": 80}`. Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
+
+        Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
+
+        Needs the `run` scope.
+      operationId: execRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "101":
+          description: Switching to the WebSocket.
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusBody"
+          description: The stream can be opened (no Upgrade header).
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Service Unavailable
+      security:
+        - apiKey: []
+      summary: Run a command in a running Run
+      tags:
+        - interactive
+      x-websocket:
+        message:
+          $ref: "#/components/schemas/StreamData"
+        open:
+          $ref: "#/components/schemas/StreamOpen"
+  /v1/runs/{id}/input:
+    post:
+      description: |-
+        Agents get text as a message (queued until the current turn ends if the agent cannot take it mid-turn); generic workloads get it on stdin. A stopped Run takes its input through resume instead.
+
+        Needs the `run` scope.
+      operationId: postInput
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InputRequest"
+        required: true
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestAccepted"
+          description: Accepted
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Steer a running Run
+      tags:
+        - interactive
+  /v1/runs/{id}/output:
+    get:
+      description: |-
+        The Run's output as server-sent events, from wherever it is: relayed from its host while it runs, from S3 once uploaded. Events: `record` (one output record; its `cursor` resumes the stream with `since`), `lux` (a lifecycle event, with `events=true`), `gap` (output that cannot be had, e.g. lost with its host), `error` (the stream failed) and `end` (the last event: where to resume and the Run's state). Without `follow` the stream ends after what is there now.
+
+        Needs the `read` scope.
+      operationId: streamOutput
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: Only records after this cursor (from a record or the end event).
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: Only records after this cursor (from a record or the end event).
+            examples:
+              - "1.42"
+            type: string
+        - description: true to keep streaming until the Run stops or finishes.
+          explode: false
+          in: query
+          name: follow
+          schema:
+            description: true to keep streaming until the Run stops or finishes.
+            examples:
+              - "true"
+            type: string
+        - description: true to interleave lifecycle events (lux events).
+          explode: false
+          in: query
+          name: events
+          schema:
+            description: true to interleave lifecycle events (lux events).
+            examples:
+              - "true"
+            type: string
+        - description: With events, only lifecycle events after this id.
+          explode: false
+          in: query
+          name: afterEvent
+          schema:
+            description: With events, only lifecycle events after this id.
+            examples:
+              - "0"
+            type: string
+      responses:
+        "200":
+          content:
+            text/event-stream:
+              schema:
+                description: "Server-sent events: `event: <type>` and `data: <JSON>` lines, each event ended by a blank line."
+                items:
+                  oneOf:
+                    - description: One output record.
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/OutputRecord"
+                        event:
+                          const: record
+                          type: string
+                      required:
+                        - event
+                        - data
+                      title: record
+                      type: object
+                    - description: A lifecycle event (events=true).
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/Event"
+                        event:
+                          const: lux
+                          type: string
+                      required:
+                        - event
+                        - data
+                      title: lux
+                      type: object
+                    - description: Output of a placement that cannot be had.
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/OutputGap"
+                        event:
+                          const: gap
+                          type: string
+                      required:
+                        - event
+                        - data
+                      title: gap
+                      type: object
+                    - description: The stream failed.
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/OutputError"
+                        event:
+                          const: error
+                          type: string
+                      required:
+                        - event
+                        - data
+                      title: error
+                      type: object
+                    - description: The last event.
+                      properties:
+                        data:
+                          $ref: "#/components/schemas/OutputEnd"
+                        event:
+                          const: end
+                          type: string
+                      required:
+                        - event
+                        - data
+                      title: end
+                      type: object
+                type: array
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Stream a Run's output
+      tags:
+        - runs
+  /v1/runs/{id}/ports/{name}:
+    get:
+      description: |-
+        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. A TCP connection to a port the spec declares in network.ports, carried as StreamData. Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
+
+        Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
+
+        Needs the `run` scope.
+      operationId: portForward
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: The port's name in the spec's network.ports.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The port's name in the spec's network.ports.
+            type: string
+      responses:
+        "101":
+          description: Switching to the WebSocket.
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusBody"
+          description: The stream can be opened (no Upgrade header).
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Service Unavailable
+      security:
+        - apiKey: []
+      summary: Reach one of a running Run's ports
+      tags:
+        - interactive
+      x-websocket:
+        message:
+          $ref: "#/components/schemas/StreamData"
+  /v1/runs/{id}/push:
+    post:
+      description: |-
+        To the spec's git.push branch, with the runner's credentials. The outcome arrives as a git.push event carrying the request id.
+
+        expect: per repository, the commit the push branch must be at for the push to go ahead (a compare-and-swap). Without it, the lease is what this Run last pushed, or, the first time, that the branch does not exist.
+
+        Needs the `run` scope.
+      operationId: pushRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushRequest"
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestAccepted"
+          description: Accepted
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Push a running Run's repositories
+      tags:
+        - runs
+  /v1/runs/{id}/resume:
+    post:
+      description: |-
+        From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming.
+
+        Needs the `run` scope.
+      operationId: resumeRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResumeRequest"
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: Accepted
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "429":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Too Many Requests
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Resume a stopped, lost or failed Run
+      tags:
+        - runs
+  /v1/runs/{id}/snapshots:
+    get:
+      description: Needs the `read` scope.
+      operationId: listSnapshots
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List a Run's snapshots
+      tags:
+        - runs
+  /v1/runs/{id}/stop:
+    post:
+      description: |-
+        Gracefully: its state volumes are snapshotted and it can be resumed. Idempotent.
+
+        Needs the `run` scope.
+      operationId: stopRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: Accepted
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Stop a Run
+      tags:
+        - runs
+tags:
+  - description: Submit Runs and follow them through their lifecycle.
+    name: runs
+  - description: Steer a live Run, run commands in it, attach to it, reach its ports.
+    name: interactive
+  - description: The hosts that run your workloads.
+    name: hosts
+  - description: Pools of hosts, and how they are provisioned.
+    name: pools

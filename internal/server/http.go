@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/ids"
@@ -38,19 +40,45 @@ type ctxKey int
 const (
 	principalKey ctxKey = iota
 	hostKey
+	requestKey
 )
 
-func principal(r *http.Request) Principal { return r.Context().Value(principalKey).(Principal) }
+// principal is who the request is from, put in its context by requireKey.
+func principal(ctx context.Context) Principal { return ctx.Value(principalKey).(Principal) }
 
-// HTTPError is an error with a status and a stable code.
+// HTTPError is an error with a status and a stable code. On the wire:
+// {"error":{"code":..., "details":[...], "message":...}}.
 type HTTPError struct {
 	Status  int
 	Code    string
 	Message string
-	Details any
+	Details []string
 }
 
 func (e *HTTPError) Error() string { return e.Message }
+
+// GetStatus makes it a huma.StatusError.
+func (e *HTTPError) GetStatus() int { return e.Status }
+
+// errorBody is the error envelope; fields in the order the map-based
+// encoding this replaced produced them.
+type errorBody struct {
+	Error errorInfo `json:"error"`
+}
+
+type errorInfo struct {
+	Code    string   `json:"code" doc:"Stable error code, e.g. not_found, invalid_spec, quota_exceeded."`
+	Details []string `json:"details,omitempty" doc:"Every problem, when there are several (invalid_spec, secrets_required, validation)."`
+	Message string   `json:"message"`
+}
+
+func (e *HTTPError) MarshalJSON() ([]byte, error) {
+	return json.Marshal(errorBody{errorInfo{Code: e.Code, Details: e.Details, Message: e.Message}})
+}
+
+func (e *HTTPError) Schema(r huma.Registry) *huma.Schema {
+	return r.Schema(reflect.TypeFor[errorBody](), true, "Error")
+}
 
 func errf(status int, code, f string, a ...any) *HTTPError {
 	return &HTTPError{Status: status, Code: code, Message: fmt.Sprintf(f, a...)}
@@ -69,22 +97,25 @@ func (s *Server) wrap(h handler) http.HandlerFunc {
 }
 
 func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
+	if he := s.httpError(err, r.Method, r.URL.Path); he != nil {
+		writeJSON(w, he.Status, he)
+	}
+}
+
+// httpError maps a handler's error to what the client sees: nil when the
+// client has gone. Anything unexpected is logged and hidden.
+func (s *Server) httpError(err error, method, path string) *HTTPError {
 	var he *HTTPError
-	if !errors.As(err, &he) {
-		if errors.Is(err, pgx.ErrNoRows) {
-			he = errNotFound
-		} else if errors.Is(err, context.Canceled) {
-			return
-		} else {
-			s.log.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
-			he = errf(http.StatusInternalServerError, "internal", "internal error")
-		}
+	switch {
+	case errors.As(err, &he):
+		return he
+	case errors.Is(err, pgx.ErrNoRows):
+		return errNotFound
+	case errors.Is(err, context.Canceled):
+		return nil
 	}
-	body := map[string]any{"error": map[string]any{"code": he.Code, "message": he.Message}}
-	if he.Details != nil {
-		body["error"].(map[string]any)["details"] = he.Details
-	}
-	writeJSON(w, he.Status, body)
+	s.log.Error("request failed", "method", method, "path", path, "err", err)
+	return errf(http.StatusInternalServerError, "internal", "internal error")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -94,7 +125,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func readJSON(r *http.Request, v any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 8<<20))
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return errf(http.StatusBadRequest, "bad_request", "invalid JSON body: %v", err)
@@ -102,43 +133,44 @@ func readJSON(r *http.Request, v any) error {
 	return nil
 }
 
-// withKey authenticates a tenant API key and requires a scope.
-func (s *Server) withKey(scope string, h handler) http.HandlerFunc {
-	return s.wrap(func(w http.ResponseWriter, r *http.Request) error {
-		key := bearer(r)
-		if key == "" {
-			return errf(http.StatusUnauthorized, "unauthorized", "missing API key")
-		}
-		var p Principal
-		var stale bool
-		err := s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-			err := tx.QueryRow(r.Context(), `
-				SELECT tenant_id, id, scopes, coalesce(last_used_at < now() - interval '1 minute', true)
-				FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL`, ids.Hash(key)).
-				Scan(&p.TenantID, &p.KeyID, &p.Scopes, &stale)
-			if err != nil || !stale {
-				return err
-			}
-			// last_used_at is coarse on purpose: writing it on every request
-			// would put a row lock and a WAL write on every call.
-			_, err = tx.Exec(r.Context(), `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, p.KeyID)
-			return err
-		})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return errf(http.StatusUnauthorized, "unauthorized", "invalid API key")
-		}
-		if err != nil {
+// maxBody bounds a JSON request body.
+const maxBody = 8 << 20
+
+// authKey authenticates a tenant API key and requires a scope.
+func (s *Server) authKey(ctx context.Context, key, scope string) (Principal, error) {
+	var p Principal
+	if key == "" {
+		return p, errf(http.StatusUnauthorized, "unauthorized", "missing API key")
+	}
+	var stale bool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `
+			SELECT tenant_id, id, scopes, coalesce(last_used_at < now() - interval '1 minute', true)
+			FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL`, ids.Hash(key)).
+			Scan(&p.TenantID, &p.KeyID, &p.Scopes, &stale)
+		if err != nil || !stale {
 			return err
 		}
-		if !p.Can(scope) {
-			return errf(http.StatusForbidden, "forbidden", "this key lacks the %q scope", scope)
-		}
-		return h(w, r.WithContext(context.WithValue(r.Context(), principalKey, p)))
+		// last_used_at is coarse on purpose: writing it on every request
+		// would put a row lock and a WAL write on every call.
+		_, err = tx.Exec(ctx, `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, p.KeyID)
+		return err
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return p, errf(http.StatusUnauthorized, "unauthorized", "invalid API key")
+	}
+	if err != nil {
+		return p, err
+	}
+	if !p.Can(scope) {
+		return p, errf(http.StatusForbidden, "forbidden", "this key lacks the %q scope", scope)
+	}
+	return p, nil
 }
 
-func bearer(r *http.Request) string {
-	h := r.Header.Get("Authorization")
+func bearer(r *http.Request) string { return bearerToken(r.Header.Get("Authorization")) }
+
+func bearerToken(h string) string {
 	if v, ok := strings.CutPrefix(h, "Bearer "); ok {
 		return strings.TrimSpace(v)
 	}

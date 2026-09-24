@@ -134,15 +134,21 @@ type Artifact struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
-func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) error {
-	p := principal(r)
+type listArtifactsOutput struct {
+	Body struct {
+		Artifacts []Artifact `json:"artifacts"`
+	} `nameHint:"ArtifactList"`
+}
+
+func (s *Server) listArtifacts(ctx context.Context, in *RunPath) (*listArtifactsOutput, error) {
+	p := principal(ctx)
 	out := []Artifact{}
-	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		if err := requireRun(r.Context(), tx, r.PathValue("id")); err != nil {
+	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		if err := requireRun(ctx, tx, in.ID); err != nil {
 			return err
 		}
-		rows, err := tx.Query(r.Context(), `SELECT a.id, a.epoch, a.path, a.content_type, a.size, a.sha256, b.location = 's3', a.created_at
-			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.run_id = $1 ORDER BY a.epoch, a.path`, r.PathValue("id"))
+		rows, err := tx.Query(ctx, `SELECT a.id, a.epoch, a.path, a.content_type, a.size, a.sha256, b.location = 's3', a.created_at
+			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.run_id = $1 ORDER BY a.epoch, a.path`, in.ID)
 		if err != nil {
 			return err
 		}
@@ -157,22 +163,27 @@ func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) error {
 		return rows.Err()
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"artifacts": out})
-	return nil
+	res := &listArtifactsOutput{}
+	res.Body.Artifacts = out
+	return res, nil
+}
+
+type artifactPath struct {
+	AID string `path:"aid" doc:"The artifact's id."`
 }
 
 // downloadArtifact streams an artifact through luxd, as the file the Run
 // wrote. (Blobs are stored zstd-compressed, so a presigned URL would hand
 // out the compressed bytes; luxd decompresses on the way.)
-func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) error {
-	p := principal(r)
+func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request, in *artifactPath) error {
+	p := principal(r.Context())
 	var key, location, ctype, name, sum string
 	var size int64
 	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location, a.content_type, a.path, a.size, a.sha256
-			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.id = $1`, r.PathValue("aid")).Scan(&key, &location, &ctype, &name, &size, &sum)
+			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.id = $1`, in.AID).Scan(&key, &location, &ctype, &name, &size, &sum)
 	})
 	if err != nil {
 		return err
@@ -202,7 +213,7 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) error 
 	w.Header().Set("X-Lux-SHA256", sum)
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(name)}))
 	if _, err := io.Copy(w, zr); err != nil {
-		s.log.Warn("artifact download cut short", "artifact", r.PathValue("aid"), "err", err)
+		s.log.Warn("artifact download cut short", "artifact", in.AID, "err", err)
 		panic(http.ErrAbortHandler) // abort the response: never a clean end
 	}
 	return nil

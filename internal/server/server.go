@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/marcioapm/lux/internal/blob"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -34,6 +35,9 @@ type Config struct {
 	ScaleDownAfter time.Duration
 	// LaunchTimeout is how long a launched host may take to register.
 	LaunchTimeout time.Duration
+	// Defaults are a Run's resources where its spec leaves them unset
+	// (zero: spec.BuiltinDefaults).
+	Defaults spec.Defaults
 }
 
 type Server struct {
@@ -65,6 +69,9 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	if cfg.LaunchTimeout == 0 {
 		cfg.LaunchTimeout = DefaultLaunchTimeout
 	}
+	if cfg.Defaults == (spec.Defaults{}) {
+		cfg.Defaults = spec.BuiltinDefaults
+	}
 	s := &Server{
 		cfg:     cfg,
 		db:      db,
@@ -87,10 +94,7 @@ func (s *Server) Kick() {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-	s.routes(mux)
+	s.newAPI(mux)
 	s.runnerRoutes(mux)
 	return logMiddleware(s.log, mux)
 }

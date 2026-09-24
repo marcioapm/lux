@@ -32,7 +32,7 @@ func TestNormalizeExample(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(example), &s); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Normalize(); err != nil {
+	if err := s.Normalize(BuiltinDefaults); err != nil {
 		t.Fatal(err)
 	}
 	if s.Resources.Memory != 512<<20 || s.Timeout.Duration != 90*time.Minute || s.Resources.CPUs != 1.5 {
@@ -62,7 +62,7 @@ func TestNormalizeExample(t *testing.T) {
 
 func TestAdapterStatePathsMustBeOnStateVolume(t *testing.T) {
 	s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Adapter: "claude-code"}}
-	err := s.Normalize()
+	err := s.Normalize(BuiltinDefaults)
 	if err == nil || !strings.Contains(err.Error(), "/home/agent/.claude") {
 		t.Fatalf("want state path error, got %v", err)
 	}
@@ -70,7 +70,7 @@ func TestAdapterStatePathsMustBeOnStateVolume(t *testing.T) {
 
 func TestAllProblemsAtOnce(t *testing.T) {
 	s := RunSpec{Workload: Workload{Adapter: "nope"}, Env: map[string]string{"LUX_X": "1"}}
-	err := s.Normalize()
+	err := s.Normalize(BuiltinDefaults)
 	ve, ok := err.(*ValidationError)
 	if !ok || len(ve.Problems) < 3 {
 		t.Fatalf("want several problems, got %v", err)
@@ -104,7 +104,7 @@ func TestGitPathsMustBeOnAStateVolume(t *testing.T) {
 		"/opt/api":             false, // on no volume
 	} {
 		s := base(path)
-		err := s.Normalize()
+		err := s.Normalize(BuiltinDefaults)
 		if (err == nil) != ok {
 			t.Errorf("%s: %v", path, err)
 		}
@@ -115,7 +115,7 @@ func TestGitURLWithCredentialsIsRefused(t *testing.T) {
 	s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}},
 		Volumes: []Volume{{Name: "workspace", Path: "/workspace"}},
 		Git:     &Git{Repositories: []Repository{{Name: "a", URL: "https://user:tok@x/a.git"}}}}
-	if err := s.Normalize(); err == nil || !strings.Contains(err.Error(), "must not carry credentials") {
+	if err := s.Normalize(BuiltinDefaults); err == nil || !strings.Contains(err.Error(), "must not carry credentials") {
 		t.Fatalf("got %v", err)
 	}
 }

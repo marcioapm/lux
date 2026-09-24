@@ -39,9 +39,8 @@ type streamTarget struct {
 }
 
 // resolveStream checks a stream can be opened and finds where it goes.
-func (s *Server) resolveStream(r *http.Request, kind string) (streamTarget, error) {
-	p := principal(r)
-	runID := r.PathValue("id")
+func (s *Server) resolveStream(r *http.Request, kind, runID, port string) (streamTarget, error) {
+	p := principal(r.Context())
 	var t streamTarget
 	err := s.db.Tx(r.Context(), store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		var state string
@@ -61,14 +60,13 @@ func (s *Server) resolveStream(r *http.Request, kind string) (streamTarget, erro
 				return errf(http.StatusConflict, "no_terminal", "attach needs a generic workload with workload.tty")
 			}
 		case "tunnel":
-			name := r.PathValue("name")
 			for _, dp := range sp.Network.Ports {
-				if dp.Name == name {
+				if dp.Name == port {
 					t.port = dp.Port
 				}
 			}
 			if t.port == 0 {
-				return errf(http.StatusNotFound, "not_found", "the Run declares no port named %q", name)
+				return errf(http.StatusNotFound, "not_found", "the Run declares no port named %q", port)
 			}
 		}
 		return nil
@@ -82,9 +80,22 @@ func (s *Server) resolveStream(r *http.Request, kind string) (streamTarget, erro
 	return t, nil
 }
 
-func (s *Server) streamHandler(kind string) handler {
-	return func(w http.ResponseWriter, r *http.Request) error {
-		t, err := s.resolveStream(r, kind)
+type portInput struct {
+	RunPath
+	Name string `path:"name" doc:"The port's name in the spec's network.ports."`
+}
+
+// runStream is exec or attach: portInput without the port.
+func (s *Server) runStream(kind string) func(http.ResponseWriter, *http.Request, *RunPath) error {
+	h := s.streamHandler(kind)
+	return func(w http.ResponseWriter, r *http.Request, in *RunPath) error {
+		return h(w, r, &portInput{RunPath: *in})
+	}
+}
+
+func (s *Server) streamHandler(kind string) func(http.ResponseWriter, *http.Request, *portInput) error {
+	return func(w http.ResponseWriter, r *http.Request, in *portInput) error {
+		t, err := s.resolveStream(r, kind, in.ID, in.Name)
 		if err != nil {
 			return err
 		}
@@ -98,7 +109,7 @@ func (s *Server) streamHandler(kind string) handler {
 		}
 		ws.SetReadLimit(4 << 20)
 		defer ws.CloseNow()
-		s.relayStream(r.Context(), ws, r.PathValue("id"), kind, t)
+		s.relayStream(r.Context(), ws, in.ID, kind, t)
 		return nil
 	}
 }

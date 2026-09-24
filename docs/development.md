@@ -29,6 +29,22 @@ make unit         # go test ./... (store tests need Postgres; see below)
 
 The toolchain and every dependency are kept at their latest release.
 
+## The API spec
+
+The tenant API (`/v1/...`, in `internal/server`) is declared with
+[huma](https://huma.rocks): each operation is registered with typed input
+and output structs, and the OpenAPI spec is generated from them. The
+committed copy is `docs/openapi.yaml`; after changing an operation or a
+type it carries, regenerate it:
+
+```bash
+go run ./cmd/luxd openapi > docs/openapi.yaml
+```
+
+`TestOpenAPIIsCurrent` fails while the committed copy is stale. A running
+luxd serves the same spec at `/openapi.yaml` and `/openapi.json`. The
+runner's routes (`/runner/...`) are not part of it.
+
 ## The end-to-end harness
 
 lux's real bugs live at the seams between luxd, the runner, Podman, the

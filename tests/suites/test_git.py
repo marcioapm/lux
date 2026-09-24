@@ -174,3 +174,31 @@ def test_a_hostile_checkout_cannot_hijack_the_push(lux, runners, hosts, fake_ima
 
 def in_container(host, run_id: str, repo: str, script: str):
     host.exec("sh", "-c", f"podman exec --user agent -w /workspace/repos/{repo} lux-{run_id} sh -c \"{script}\"")
+
+
+def test_push_onto_an_existing_branch_at_an_expected_commit(lux, runners, hosts, fake_image, git_server):
+    """--expect pushes onto a branch that already exists (a work item's
+    branch another system owns) only if it is at the given commit: a
+    compare-and-swap, for the first push and later ones alike."""
+    git_server.create("cas", {"a.txt": "base\n"})
+    start = git_server.commit_on("cas", "lux/work", "a.txt", "theirs\n")
+    runners.start(hosts[0])
+    run_id = lux.submit(repo_spec(fake_image, git_server, "write b.txt mine", repo="cas"))
+    lux.wait_activity(run_id, "idle")
+    commit(lux, run_id, hosts[0], "cas", "mine")
+    # Without --expect the first push refuses an existing branch.
+    p = lux.run("push", run_id, "--wait", check=False)
+    assert p.returncode != 0 and "rejected" in p.stdout, p.stdout
+    # Wrong expectation: refused, the branch untouched.
+    p = lux.run("push", run_id, "--wait", "--expect", "cas=" + "0" * 40, check=False)
+    assert p.returncode != 0 and "rejected" in p.stdout, p.stdout
+    assert git_server.rev("cas", "lux/work") == start
+    # Right expectation: pushed.
+    out = lux.run("push", run_id, "--wait", "--expect", f"cas={start}").stdout
+    assert "pushed" in out, out
+    assert git_server.show("cas", "lux/work", "b.txt") == "mine\n"
+    # An unknown repository or a partial id is refused up front.
+    for bad in ("nope=" + "0" * 40, "cas=abc123"):
+        with pytest.raises(CLIError) as e:
+            lux.run("push", run_id, "--expect", bad)
+        assert e.value.code != 0

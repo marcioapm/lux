@@ -33,7 +33,7 @@ agent, stream-json for Claude Code, and app-server for Codex.
 - [Concepts](docs/concepts.md): Runs, placements, epochs, snapshots, and what survives a move.
 - [The RunSpec](docs/runspec.md): every field.
 - [CLI](docs/cli.md)
-- [API](docs/api.md)
+- [API](docs/openapi.yaml): the tenant REST API as OpenAPI 3.1, generated from the code (luxd also serves it at `/openapi.yaml` and `/openapi.json`).
 - [Adapters](docs/adapters.md): generic, ACP, Claude Code, Codex, OpenCode.
 - [Operations](docs/operations.md): running luxd and hosts, configuration.
 - [Telemetry](docs/telemetry.md): what is recorded about Runs, placements and hosts.
