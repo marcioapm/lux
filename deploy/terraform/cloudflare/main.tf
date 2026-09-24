@@ -1,24 +1,37 @@
 # Cloudflare Tunnel + Access in front of luxd: nothing exposed directly.
-# The tunnel's only ingress is http://localhost:7070 (luxd, reached over
-# loopback since cloudflared runs on the control host itself); DNS for the
-# chosen hostname points at the tunnel; an Access application gates the
-# console for people, with a policy allowing the given emails/domains.
+# The tunnel's only ingress is http://localhost:<origin_port> (luxd,
+# reached over loopback since cloudflared runs on the control host
+# itself); DNS for the chosen hostname points at the tunnel.
 #
-# API/CLI clients authenticate with lux API keys (docs/operators.md
-# "Signing in"), not Access: luxd's own check
-# (internal/server/access.go, consoleUser) only ever runs for a request
-# with no API key — any request carrying `Authorization: Bearer <key>`
-# already authenticates without Access, regardless of what's in front of
-# it. So the tunnel does not need to single out the API path at all: an
-# Access `session_duration`/`require` on the browser session governs the
-# console; API calls with a key pass whether or not they also present an
-# Access identity. What Access *does* still gate, without a bypass, is
-# any request with no API key and no Access session — exactly what should
-# be blocked. No bypass policy or service token is configured by default;
-# `access_bypass_path_prefix` exists only for exposing something under
-# this hostname that is not luxd's own key-authenticated API and cannot
-# carry an Access session (a webhook receiver, say). Leave it empty
-# unless something like that is added.
+# Access sits at Cloudflare's edge, in front of the tunnel, and makes its
+# allow/deny decision purely on request domain/path against an
+# application's policies — it never looks at the request body or headers
+# (an `Authorization: Bearer <key>` does not make Access let a request
+# through). So two Access applications, not one:
+#
+#   - "console", on the bare hostname: an allow policy for the given
+#     emails/domains. This is what gates a person opening the console in
+#     a browser.
+#   - "api-bypass", on the /v1/* and /runner/* destinations under the
+#     same hostname: a `bypass` decision, matching everyone. Runners
+#     authenticate with a per-host runner token and API/CLI clients with
+#     lux API keys (docs/operators.md "Signing in"), both checked by
+#     luxd itself, not Access — internal/server/access.go's consoleUser
+#     only ever runs for a request with *no* API key. Without this
+#     second application, every /v1 and /runner request would need an
+#     Access session before it even reached luxd, which breaks runners
+#     and the CLI outright (neither can obtain one).
+#
+# Access resolves overlapping applications by specificity (more specific
+# path wins — see the provider's docs on application paths), so
+# api-bypass's narrower match on /v1/* and /runner/* takes precedence
+# over console's bare-hostname match for those paths, and console's
+# allow policy still governs everything else. The console's own browser
+# calls to /v1 (e.g. streaming output) go through api-bypass at the edge
+# and are unauthenticated *there*, but still carry the CF_Authorization
+# cookie Access set when the person signed in; luxd's own consoleUser
+# check reads that cookie directly, so the console keeps working without
+# Access gating /v1 a second time.
 
 variable "account_id" {
   description = "Cloudflare account id."
@@ -26,7 +39,7 @@ variable "account_id" {
 }
 
 variable "zone_id" {
-  description = "Cloudflare zone id for the DNS record and Access application."
+  description = "Cloudflare zone id for the DNS record and Access applications."
   type        = string
 }
 
@@ -65,10 +78,10 @@ variable "access_session_duration" {
   default     = "24h"
 }
 
-variable "access_bypass_path_prefix" {
-  description = "A path prefix under this hostname Access lets through unauthenticated (see the module comment). Empty: no bypass."
-  type        = string
-  default     = ""
+variable "enable_api_bypass" {
+  description = "Whether to create the api-bypass Access application that exempts /v1/* and /runner/* (see the module comment) from needing an Access session. On by default: without it, runners and API/CLI clients — which authenticate with lux keys, not Access — cannot reach luxd through the tunnel at all."
+  type        = bool
+  default     = true
 }
 
 resource "random_id" "tunnel_secret" {
@@ -91,22 +104,15 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "lux" {
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.lux.id
 
   config = {
-    ingress = concat(
-      var.access_bypass_path_prefix != "" ? [{
+    ingress = [
+      {
         hostname = var.hostname
-        path     = "${var.access_bypass_path_prefix}.*"
         service  = "http://localhost:${var.origin_port}"
-      }] : [],
-      [
-        {
-          hostname = var.hostname
-          service  = "http://localhost:${var.origin_port}"
-        },
-        {
-          service = "http_status:404"
-        },
-      ]
-    )
+      },
+      {
+        service = "http_status:404"
+      },
+    ]
   }
 }
 
@@ -139,6 +145,35 @@ resource "cloudflare_zero_trust_access_policy" "lux" {
     [for e in var.allowed_emails : { email = { email = e } }],
     [for d in var.allowed_email_domains : { email_domain = { domain = d } }],
   )
+}
+
+# Narrower than "lux" above, so it takes precedence on these two path
+# prefixes (see the module comment): luxd's own key/token checks are the
+# only gate here, not an Access session.
+resource "cloudflare_zero_trust_access_application" "api_bypass" {
+  count = var.enable_api_bypass ? 1 : 0
+
+  zone_id              = var.zone_id
+  name                 = "${var.name} api bypass"
+  type                 = "self_hosted"
+  session_duration     = var.access_session_duration
+  app_launcher_visible = false
+
+  destinations = [
+    { type = "public", uri = "${var.hostname}/v1/*" },
+    { type = "public", uri = "${var.hostname}/runner/*" },
+  ]
+
+  policies = [cloudflare_zero_trust_access_policy.api_bypass[0].id]
+}
+
+resource "cloudflare_zero_trust_access_policy" "api_bypass" {
+  count = var.enable_api_bypass ? 1 : 0
+
+  account_id = var.account_id
+  name       = "${var.name} api bypass"
+  decision   = "bypass"
+  include    = [{ everyone = {} }]
 }
 
 output "tunnel_id" {

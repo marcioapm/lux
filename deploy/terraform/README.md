@@ -59,10 +59,13 @@ separate private repo should hold the real values and state.
   the Cloudflare Tunnel token, written by Terraform only if a value is
   given (otherwise expected to already exist).
 - **Cloudflare** (`cloudflare/`, optional): a Tunnel to the control host
-  (`http://localhost:7070`), its DNS record, and an Access application +
-  policy gating the console to the given emails/domains. lux API keys
-  authenticate independently of Access (see the module's comment for why
-  no bypass is needed by default).
+  (`http://localhost:7070`), its DNS record, and two Access applications:
+  one gating the console (bare hostname) to the given emails/domains,
+  and one — on by default (`enable_api_bypass`) — with a `bypass`
+  decision scoped to `/v1/*` and `/runner/*`, since those paths
+  authenticate with lux API keys and runner tokens that luxd itself
+  checks (see the module's comment for how Access resolves the overlap
+  between the two applications).
 
 ## Cost (eu-north-1, monthly, on-demand unless noted)
 
