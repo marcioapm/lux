@@ -63,6 +63,7 @@ its variable; the table below lists them by variable.
 | `LUX_LISTEN` | `127.0.0.1:7070` | Address to serve on. |
 | `LUX_PUBLIC_URL` | — | The URL runners and clients use. |
 | `LUX_RUNNER_URL` | = public_url | The URL runners dial, if different from `LUX_PUBLIC_URL` (a private IP such as `http://10.0.1.10:7070`, unreachable from outside the VPC). Only clients, the console and MCP use `LUX_PUBLIC_URL`. |
+| `LUX_RUNNER_BIN_DIR` | `/usr/local/lib/lux/runner` | Runner binaries luxd serves and hashes (sha256) at startup, for self-update: `<dir>/linux-{arm64,amd64}/{lux-runner,lux-shim}`. A missing arch or file is simply not offered. |
 | `LUX_S3_BUCKET` | — | Where snapshots, output and artifacts go. |
 | `LUX_S3_ENDPOINT` | AWS | For MinIO and other S3-compatible stores (path-style). |
 | `LUX_S3_PUBLIC_ENDPOINT` | = endpoint | The endpoint presigned URLs are signed for, if runners and clients reach S3 by another name. |
@@ -193,6 +194,24 @@ EOF
 Host tokens come from `luxd admin create-host-token --tenant T [--pool P]
 [--label k=v]`. Restarting `lux-runner` does not touch running containers
 (Podman is daemonless). The new runner re-adopts them.
+
+### Binary distribution and self-update
+
+luxd serves the runner binaries a host needs, so no custom AMI or
+config-management run has to carry them:
+
+- `GET /runner/bin/manifest` (host-token auth): `{"linux-arm64":
+  {"lux-runner": "<sha256>", "lux-shim": "<sha256>"}, "linux-amd64": {...}}`
+  for whatever `LUX_RUNNER_BIN_DIR` holds.
+- `GET /runner/bin/linux-{arch}/{lux-runner|lux-shim}` streams the binary,
+  with `Content-Length` and its sha256 in `X-Lux-Sha256`.
+
+luxd hashes what it finds under `LUX_RUNNER_BIN_DIR` once at startup; a
+missing arch or file is simply not offered. A host downloads its arch's
+binaries before starting `lux-runner` (its systemd unit's
+`ExecStartPre`), so an upgrade is: replace luxd's `runner_bin_dir`,
+restart luxd, then restart or replace each host — never patch a running
+binary in place.
 
 ## EC2 pools
 

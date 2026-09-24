@@ -6,6 +6,7 @@
 listen = "127.0.0.1:7070"          # LUX_LISTEN
 public_url = ""                    # LUX_PUBLIC_URL: the URL runners and clients use
 runner_url = ""                    # LUX_RUNNER_URL: what runners dial, if different (a private IP); empty: public_url
+runner_bin_dir = "/usr/local/lib/lux/runner"  # LUX_RUNNER_BIN_DIR: runner binaries luxd serves and hashes for self-update
 debug = false                      # LUX_DEBUG
 
 lease = "30s"                      # LUX_LEASE: a host silent this long is lost

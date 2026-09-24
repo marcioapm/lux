@@ -33,8 +33,11 @@ type config struct {
 	// env); it may be a private address unreachable from clients. Empty:
 	// PublicURL.
 	RunnerURL string `toml:"runner_url" env:"LUX_RUNNER_URL"`
-	Debug     onFlag `toml:"debug" env:"LUX_DEBUG"`
-	S3        struct {
+	// RunnerBinDir holds runner binaries luxd serves for self-update:
+	// <dir>/linux-{arm64,amd64}/{lux-runner,lux-shim}.
+	RunnerBinDir string `toml:"runner_bin_dir" env:"LUX_RUNNER_BIN_DIR"`
+	Debug        onFlag `toml:"debug" env:"LUX_DEBUG"`
+	S3           struct {
 		Bucket         string `toml:"bucket" env:"LUX_S3_BUCKET"`
 		Endpoint       string `toml:"endpoint" env:"LUX_S3_ENDPOINT"`
 		PublicEndpoint string `toml:"public_endpoint" env:"LUX_S3_PUBLIC_ENDPOINT"`
@@ -132,6 +135,7 @@ func defaultConfig() config {
 	c.Database.AppPassword = "lux_app"
 	c.Listen = "127.0.0.1:7070"
 	c.S3.Region = "us-east-1"
+	c.RunnerBinDir = "/usr/local/lib/lux/runner"
 	c.Lease.Duration = 30 * time.Second
 	c.Tick.Duration = time.Second
 	c.ScaleDownAfter.Duration = server.DefaultScaleDownAfter

@@ -150,6 +150,7 @@ func serve(ctx context.Context, c config) error {
 		Listen:         c.Listen,
 		PublicURL:      c.PublicURL,
 		RunnerURL:      c.RunnerURL,
+		RunnerBinDir:   c.RunnerBinDir,
 		LeaseDuration:  c.Lease.Duration,
 		Tick:           c.Tick.Duration,
 		ScaleDownAfter: c.ScaleDownAfter.Duration,

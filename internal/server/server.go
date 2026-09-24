@@ -29,6 +29,10 @@ type Config struct {
 	// env), which may be a private address clients can't reach. Empty:
 	// PublicURL.
 	RunnerURL string
+	// RunnerBinDir holds runner binaries luxd serves and hashes at
+	// startup for self-update: <dir>/linux-{arm64,amd64}/{lux-runner,lux-shim}.
+	// Empty: luxd offers none, and never drains a host for being outdated.
+	RunnerBinDir string
 	// LeaseDuration is how long a host may go without a heartbeat before it
 	// and its live Runs are lost.
 	LeaseDuration time.Duration
@@ -74,7 +78,10 @@ type Server struct {
 	// deployments sharing a cloud account never take each other's
 	// instances for orphans (read by the provisioner).
 	deployment string
-	wg         sync.WaitGroup
+	// bins: sha256 of the runner binaries on disk (runner_bin_dir), by
+	// arch then name (lux-runner, lux-shim). Hashed once at startup.
+	bins map[string]map[string]string
+	wg   sync.WaitGroup
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {
@@ -111,6 +118,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		s.cfAccess = newCFAccess(cfg.ConsoleAuth.CFTeam, cfg.ConsoleAuth.CFAud)
 	}
 	s.hub = newHub(s)
+	s.loadRunnerBinaries()
 	return s
 }
 

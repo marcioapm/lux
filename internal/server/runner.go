@@ -21,6 +21,8 @@ func (s *Server) runnerRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /runner/poll", s.wrap(s.servePoll))
 	mux.Handle("PUT /runner/blobs/{id}", s.wrap(s.serveBlobUpload))
 	mux.Handle("GET /runner/blobs/{id}", s.wrap(s.serveRunnerBlobDownload))
+	mux.Handle("GET /runner/bin/manifest", s.wrap(s.serveRunnerBinManifest))
+	mux.Handle("GET /runner/bin/{osArch}/{name}", s.wrap(s.serveRunnerBin))
 }
 
 // registerHost records a runner's hello: creates the host row on first
