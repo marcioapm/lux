@@ -184,6 +184,12 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 		return s.heartbeat(ctx, hostID, hb)
 	case proto.MsgHello:
 		return errors.New("hello after welcome")
+	case proto.MsgHostEvicting:
+		var ev proto.Evicting
+		if err := json.Unmarshal(f.Data, &ev); err != nil {
+			return err
+		}
+		return s.hostEvicting(ctx, hostID, ev)
 	}
 
 	var kicked bool
@@ -436,4 +442,28 @@ func msToTime(ms int64) *time.Time {
 	}
 	t := time.UnixMilli(ms)
 	return &t
+}
+
+// hostEvicting: the host's provider takes it away soon (a spot
+// interruption). Its Runs are preempted: each stops, snapshots, and resumes
+// on another host (a provisioned pool launches one); nothing new is placed
+// on it.
+func (s *Server) hostEvicting(ctx context.Context, hostID string, ev proto.Evicting) error {
+	var hosts []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var err error
+		reason := "evicting: " + truncate(ev.Reason, 100)
+		if !ev.Deadline.IsZero() {
+			reason += " at " + ev.Deadline.UTC().Format(time.RFC3339)
+		}
+		hosts, err = s.drainHosts(ctx, tx, reason, "preempt", "id = $1", hostID)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	s.log.Warn("host evicting", "host", hostID, "reason", ev.Reason, "deadline", ev.Deadline)
+	s.notifyAll(hosts)
+	s.Kick()
+	return nil
 }

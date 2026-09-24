@@ -800,12 +800,13 @@ func (p *placement) pendingStop() string {
 // sendStop asks the shim for a graceful stop; if the shim cannot be
 // reached, Podman stops the container (SIGTERM, then SIGKILL after grace).
 func (p *placement) sendStop(ctx context.Context, reason string) {
-	if err := p.sendShim(proto.ShimMsg{Type: proto.ShimStop, Reason: reason}); err != nil {
-		grace := 30 * time.Second
-		if p.assign != nil {
-			grace = p.assign.Spec.Workload.Grace.Duration
-		}
-		go p.r.pm.Stop(context.WithoutCancel(ctx), containerName(p.runID), grace)
+	grace := 30 * time.Second
+	if p.assign != nil {
+		grace = p.assign.Spec.Workload.Grace.Duration
+	}
+	short := p.r.evictionGrace(grace)
+	if err := p.sendShim(proto.ShimMsg{Type: proto.ShimStop, Reason: reason, GraceSec: short.Seconds()}); err != nil {
+		go p.r.pm.Stop(context.WithoutCancel(ctx), containerName(p.runID), min(grace, short))
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/marcioapm/lux/internal/egress"
@@ -46,6 +47,9 @@ type Config struct {
 	ForcePoll bool
 	// HostTTL is how long local snapshot copies are kept after upload.
 	HostTTL time.Duration
+	// EC2IMDS is the EC2 instance metadata endpoint to watch for a spot
+	// interruption notice ("" does not watch).
+	EC2IMDS string
 	// Nested offers nested containers (sandbox.nestedContainers): the host
 	// is labelled nested=true, and such Runs get what rootless Podman
 	// inside them needs (see nested.go).
@@ -77,6 +81,10 @@ type Runner struct {
 	nestedSeccomp string
 	git           *gitws.Manager
 	mounts        sync.Map // volume name → mountpoint
+	// evictBy is when the provider takes this host away (zero: not
+	// evicting). Stops before it get a grace that leaves time to snapshot
+	// and upload.
+	evictBy atomic.Pointer[time.Time]
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -174,6 +182,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	go r.usageLoop(ctx)
 	go r.egress.Run(ctx)
 	go r.gcLoop(ctx)
+	if r.cfg.EC2IMDS != "" {
+		go r.watchSpot(ctx, r.cfg.EC2IMDS)
+	}
 	r.conn.loop(ctx)
 	return nil
 }

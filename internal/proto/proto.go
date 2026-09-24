@@ -10,6 +10,7 @@ package proto
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/marcioapm/lux/internal/spec"
 )
@@ -59,6 +60,7 @@ const (
 	MsgOutputRecords = "output.records"
 	MsgOutputEnd     = "output.end"
 	MsgRunEvent      = "run.event"
+	MsgHostEvicting  = "host.evicting"
 )
 
 type Hello struct {
@@ -187,6 +189,13 @@ type Input struct {
 	// Raw bytes for generic workloads, base64 in JSON.
 	Raw       []byte `json:"raw,omitempty"`
 	Interrupt bool   `json:"interrupt,omitempty"`
+}
+
+// Evicting: the host's provider is taking it away (a spot interruption)
+// at Deadline. luxd moves its Runs elsewhere.
+type Evicting struct {
+	Deadline time.Time `json:"deadline"`
+	Reason   string    `json:"reason"`
 }
 
 type StopRequest struct {

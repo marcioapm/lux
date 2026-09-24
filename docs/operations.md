@@ -114,6 +114,8 @@ LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a
 | `--label k=v` | | Host labels, matched by `placement.requires` and `prefers`. Also `LUX_LABELS=k=v,…`. |
 | `--max-runs`, `--cpus`, `--memory` | 16, all, all | Capacity offered to the scheduler. |
 | `--host-ttl` | `24h` | How long uploaded local copies are kept. |
+| `--provider-id` | | The cloud instance id, for provisioned hosts. Also `LUX_PROVIDER_ID`. |
+| `--ec2-imds` | off | EC2 instance metadata URL (`http://169.254.169.254`) to watch for spot interruptions. Also `LUX_EC2_IMDS`. |
 | `--poll` | off | Use HTTP polling instead of a WebSocket. There is no live output in this mode: output arrives after exit. |
 
 Host tokens come from `luxd admin create-host-token --tenant T [--pool P]
@@ -142,13 +144,43 @@ lux pools rm burst      # drains and terminates its hosts
 - **Failures:** a launch that fails is retried on the next pass. A host
   that never registers within `LUX_LAUNCH_TIMEOUT` (default 10m) is
   terminated. An instance EC2 no longer has is written off and replaced.
-- One luxd instance does all this at a time (a Postgres advisory lock).
+- **Orphans:** once a minute luxd lists the pool's instances by tag. One
+  no host row claims (a launch whose reply was lost) is terminated; a host
+  EC2 no longer lists is written off. A host lost for over 5 minutes is
+  terminated.
+- One luxd instance does all this at a time (a lease in Postgres).
+
+### Spot instances
+
+Add `"spot": true` to the template to launch one-time spot instances:
+
+```bash
+lux pools set burst --provider ec2 --max 10 \
+  --template '{"region":"eu-west-1","launchTemplate":"lux-runner","spot":true}'
+```
+
+EC2 gives two minutes' notice before it takes a spot instance back. Each
+instance's runner watches for it (user data sets `LUX_EC2_IMDS`, which the
+runner reads as `--ec2-imds`; IMDSv2 must be reachable). On the notice:
+
+1. The runner tells luxd, which drains the host: nothing new is placed on
+   it, and each of its Runs is asked to stop with reason `preempt`.
+2. Stops from then on get a grace of at most half the time left, so the
+   Run has time to snapshot its state volumes and upload them.
+3. Each preempted Run is resumed automatically from that snapshot, on
+   another host. If the pool has none free it launches one. An agent picks
+   its session back up, as after any resume.
+
+A Run whose stop or upload cannot finish in time (a very large state
+volume) is lost when the instance goes. It is resumable from its previous
+snapshot. Keep state volumes small on spot pools, or use on-demand for
+Runs that cannot afford it (`placement.pool`).
 
 What an instance needs:
 
 - An AMI with the host requirements above, `lux-runner` and `lux-shim`,
   and a boot script that reads the instance's **user data** (`KEY=value`
-  lines: `LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`) and runs
+  lines: `LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`) and runs
   `lux-runner --provider-id <instance id>` with them in its environment.
   The token is single-use per host and revoked when the host is
   terminated.
@@ -160,5 +192,6 @@ What an instance needs:
   standard AWS configuration (environment or instance role).
   `LUX_EC2_ENDPOINT` overrides the endpoint.
 
-Instances are tagged `Name=<host>`, `lux:pool=<pool>`, `lux:managed=true`,
-plus the template's `tags`.
+Instances are tagged `Name=<host>`, `lux:pool=<pool>` (`<tenant>/<pool>`
+for a tenant's pool), `lux:managed=true` and `lux:host=<host id>`, plus the
+template's `tags`. luxd also needs `DescribeInstances` filtered by tag.

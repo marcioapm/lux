@@ -99,7 +99,7 @@ func (s *Shim) run() int {
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		for range sigs {
-			s.stop("signal")
+			s.stop("signal", 0)
 		}
 	}()
 
@@ -318,7 +318,7 @@ func (s *Shim) handleConn(c net.Conn) {
 				}
 			}
 		case proto.ShimStop:
-			s.stop(m.Reason)
+			s.stop(m.Reason, time.Duration(m.GraceSec*float64(time.Second)))
 		case proto.ShimStream:
 			// The connection is the stream's from now on.
 			if m.Stream != nil {
@@ -356,8 +356,9 @@ func (s *Shim) deliver(in proto.Input) {
 }
 
 // stop winds the workload down: the adapter's graceful stop, then SIGKILL
-// to its whole process group after the grace period.
-func (s *Shim) stop(reason string) {
+// to its whole process group after the grace period, or after shorter when
+// set (the host is being taken away).
+func (s *Shim) stop(reason string, shorter time.Duration) {
 	s.mu.Lock()
 	if s.stopping {
 		s.mu.Unlock()
@@ -378,6 +379,9 @@ func (s *Shim) stop(reason string) {
 		grace := time.Duration(s.cfg.GraceSec * float64(time.Second))
 		if grace <= 0 {
 			grace = 30 * time.Second
+		}
+		if shorter > 0 {
+			grace = min(grace, shorter)
 		}
 		time.AfterFunc(grace, func() {
 			_ = syscall.Kill(-proc.Cmd.Process.Pid, syscall.SIGKILL)

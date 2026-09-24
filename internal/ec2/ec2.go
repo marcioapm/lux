@@ -4,7 +4,12 @@
 //
 //	{"region": "eu-west-1", "launchTemplate": "lt-0abc…" (id or name),
 //	 "instanceType": "m7i.2xlarge", "subnets": ["subnet-…", …],
-//	 "tags": {"team": "platform"}}
+//	 "tags": {"team": "platform"}, "spot": true}
+//
+// With "spot", instances are one-time spot instances, terminated on
+// interruption. Every instance's user data sets LUX_EC2_IMDS, so its
+// runner watches for the interruption notice and its Runs move to other
+// hosts before the instance goes.
 //
 // The instance's AMI (from the launch template) has Podman and lux-runner
 // installed. Its user data carries the runner's environment: luxd's URL, a
@@ -24,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -40,6 +46,7 @@ type Template struct {
 	InstanceType   string            `json:"instanceType"`
 	Subnets        []string          `json:"subnets"`
 	Tags           map[string]string `json:"tags"`
+	Spot           bool              `json:"spot"`
 }
 
 type Provider struct {
@@ -90,6 +97,12 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	if err != nil {
 		return "", err
 	}
+	// Every instance's runner watches for spot interruptions (on-demand
+	// instances simply never get one).
+	env = maps.Clone(env)
+	if env["LUX_EC2_IMDS"] == "" {
+		env["LUX_EC2_IMDS"] = "http://169.254.169.254"
+	}
 	var ud strings.Builder
 	for k, v := range env {
 		fmt.Fprintf(&ud, "%s=%s\n", k, v)
@@ -115,6 +128,15 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: instTags},
 		},
+	}
+	if t.Spot {
+		in.InstanceMarketOptions = &types.InstanceMarketOptionsRequest{
+			MarketType: types.MarketTypeSpot,
+			SpotOptions: &types.SpotMarketOptions{
+				SpotInstanceType:             types.SpotInstanceTypeOneTime,
+				InstanceInterruptionBehavior: types.InstanceInterruptionBehaviorTerminate,
+			},
+		}
 	}
 	if t.InstanceType != "" {
 		in.InstanceType = types.InstanceType(t.InstanceType)

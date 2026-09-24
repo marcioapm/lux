@@ -161,3 +161,32 @@ def test_an_instance_whose_launch_reply_was_lost_is_terminated(lux, ec2):
     ec2.no_boot = False
     lux.wait_state(run_id, "succeeded", timeout=240)
     wait_until(lambda: orphan not in {i["id"] for i in ec2.running()}, 120, 1, "the orphan was never terminated")
+
+
+def test_a_spot_interruption_moves_runs_to_another_host(lux, ec2):
+    """EC2 takes a spot instance back, with two minutes' notice. Its runner
+    sees the notice; the Run on it stops, snapshots, and resumes on a new
+    instance with its state, before the old one is gone. Nothing is lost."""
+    fake_only(ec2)
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--max", "2",
+            "--template", json.dumps({**ec2.template, "spot": True}))
+    script = "echo start >> /w/log; echo starts=$(wc -l < /w/log); trap 'exit 0' TERM; while :; do sleep 1; done"
+    spec = generic(ALPINE_IMAGE, "sh", "-c", script, placement={"pool": "burst"},
+                   volumes=[{"name": "w", "path": "/w", "kind": "state"}])
+    spec["workload"]["grace"] = "30s"
+    run_id = lux.submit(spec)
+    lux.wait_output(run_id, "starts=1", timeout=120)
+    (inst,) = ec2.running()
+    assert inst["market"] == "spot", inst
+
+    ec2.interrupt(inst["id"], seconds=90)
+    # Moved before EC2 takes the instance: a new placement, its state carried.
+    lux.wait_output(run_id, "starts=2", timeout=85)
+    run = lux.get(run_id)
+    assert run["state"] == "running", run
+    first, second = run["placements"][-2:]
+    assert first["host"] != second["host"], run["placements"]
+    assert first["stopReason"] == "preempt" and first["state"] == "exited", first
+    # The interrupted host was drained and let go of, not written off.
+    wait_until(lambda: inst["id"] not in {i["id"] for i in ec2.running()}, 90, 1, "the interrupted instance stayed")
+    lux.run("cancel", run_id, "--wait")

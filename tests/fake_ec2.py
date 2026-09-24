@@ -10,7 +10,9 @@ provider code runs; `run_tests.py --real-ec2` swaps in real AWS instead.
 from __future__ import annotations
 
 import base64
+import json
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -31,6 +33,7 @@ class FakeEC2:
         self.fail_launches = False
         self.no_boot = False  # launched instances never start a runner
         self.lose_reply = False
+        self.notices: dict[str, dict] = {}  # id → spot instance-action
         self.server = ThreadingHTTPServer((env.gateway, 0), self._handler())
         self.url = f"http://{env.gateway}:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -53,6 +56,15 @@ class FakeEC2:
         stops right after the call)."""
         self.lose_reply = True
 
+    def interrupt(self, instance_id: str, seconds: float = 120):
+        """A spot interruption: the notice appears in the instance's metadata
+        now, and EC2 terminates it `seconds` later."""
+        at = time.time() + seconds
+        with self.lock:
+            self.notices[instance_id] = {"action": "terminate",
+                                         "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))}
+        threading.Timer(seconds, self._terminate, args=(instance_id,)).start()
+
     def kill(self, instance_id: str):
         """An instance vanishing behind lux's back."""
         self._terminate(instance_id)
@@ -71,6 +83,25 @@ class FakeEC2:
         class H(BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
+
+            def do_PUT(self):  # IMDSv2 session token
+                self._imds(lambda iid: (200, "fake-imds-token"))
+
+            def do_GET(self):  # the instance metadata a spot runner watches
+                def action(iid):
+                    with fake.lock:
+                        notice = fake.notices.get(iid)
+                    return (200, json.dumps(notice)) if notice else (404, "")
+                self._imds(action)
+
+            def _imds(self, answer):
+                parts = self.path.split("/")  # /imds/<instance>/latest/...
+                code, text = answer(parts[2]) if len(parts) > 2 and parts[1] == "imds" else (404, "")
+                out = text.encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
 
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
@@ -107,7 +138,8 @@ class FakeEC2:
         with self.lock:
             self.instances[iid] = {"state": "pending", "host": None, "tags": tags, "env": env,
                                    "launchTemplate": q.get("LaunchTemplate.LaunchTemplateId") or q.get("LaunchTemplate.LaunchTemplateName"),
-                                   "instanceType": q.get("InstanceType"), "subnet": q.get("SubnetId")}
+                                   "instanceType": q.get("InstanceType"), "subnet": q.get("SubnetId"),
+                                   "market": q.get("InstanceMarketOptions.MarketType")}
         threading.Thread(target=self._boot, args=(iid,), daemon=True).start()
         if self.lose_reply:
             self.lose_reply = False
@@ -136,7 +168,9 @@ class FakeEC2:
         if self.no_boot:
             return
         e = inst["env"]
-        host.start_runner(self.env, e["LUX_HOST_TOKEN"], "--provider-id", iid, name=name, url=e.get("LUX_URL"))
+        # The instance's metadata endpoint is this fake's, per instance.
+        host.start_runner(self.env, e["LUX_HOST_TOKEN"], "--provider-id", iid, "--ec2-imds", f"{self.url}/imds/{iid}",
+                          name=name, url=e.get("LUX_URL"))
 
     def _TerminateInstances(self, q):
         ids = _list(q, "InstanceId")

@@ -67,6 +67,9 @@ type ShimMsg struct {
 	Input   *Input            `json:"input,omitempty"` // start (first input), input
 	// stop
 	Reason string `json:"reason,omitempty"`
+	// GraceSec, when set, shortens the stop's grace (the host is going
+	// away sooner than the workload's own grace allows).
+	GraceSec float64 `json:"graceSec,omitempty"`
 	// A stream's handshake: the connection then carries StreamData lines.
 	Stream *StreamOpen `json:"stream,omitempty"`
 	// replies

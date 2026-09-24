@@ -1104,7 +1104,7 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var err error
-		hosts, err = s.drainHosts(ctx, tx, "drain requested",
+		hosts, err = s.drainHosts(ctx, tx, "drain requested", "drain",
 			"(id = $1 OR name = $1) AND tenant_id = $2", ref, p.TenantID)
 		if err == nil && len(hosts) == 0 {
 			return errNotFound
@@ -1121,9 +1121,10 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 }
 
 // drainHosts takes hosts out of service (no new placements) and asks their
-// live placements to stop; where selects them (placeholders from $1).
+// live placements to stop with stopReason (drain or preempt: both resume
+// elsewhere); where selects them (placeholders from $1).
 // Returns their ids, to notify once the transaction commits.
-func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, where string, args ...any) ([]string, error) {
+func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, stopReason, where string, args ...any) ([]string, error) {
 	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
 			state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
 			state_reason = $%d, drain_requested_at = coalesce(drain_requested_at, now())
@@ -1141,7 +1142,7 @@ func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, where string
 		return nil, err
 	}
 	for _, p := range live {
-		if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, "drain"); err != nil {
+		if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, stopReason); err != nil {
 			return nil, err
 		}
 	}
@@ -1219,7 +1220,7 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 		if tag.RowsAffected() == 0 {
 			return errNotFound
 		}
-		hosts, err = s.drainHosts(ctx, tx, "pool removed",
+		hosts, err = s.drainHosts(ctx, tx, "pool removed", "drain",
 			"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
 		return err
 	})
