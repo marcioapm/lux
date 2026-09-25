@@ -51,13 +51,11 @@ func (a *agent) httpCall(args string) {
 		var d net.Dialer
 		return d.DialContext(ctx, "unix", addr)
 	}}, Timeout: 2 * time.Minute}
-	var body *strings.Reader
+	var body string
 	if len(parts) == 4 {
-		body = strings.NewReader(parts[3])
-	} else {
-		body = strings.NewReader("")
+		body = parts[3]
 	}
-	req, err := http.NewRequest(method, "http://"+name+path, body)
+	req, err := http.NewRequest(method, "http://"+name+path, strings.NewReader(body))
 	if err != nil {
 		a.say("error: " + err.Error())
 		return

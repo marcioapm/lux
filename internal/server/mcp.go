@@ -34,15 +34,22 @@ func (s *Server) checkMCPNotControlPlane(ctx context.Context, sp spec.RunSpec) e
 		return nil
 	}
 	luxd := lookupAddrs(ctx, pu.Hostname())
+	luxdHost := strings.TrimSuffix(pu.Hostname(), ".")
 	for _, m := range eps {
 		u, err := url.Parse(m.url)
 		if err != nil {
 			continue
 		}
 		host := u.Hostname()
-		same := strings.EqualFold(strings.TrimSuffix(host, "."), strings.TrimSuffix(pu.Hostname(), "."))
-		for a := range lookupAddrs(ctx, host) {
-			same = same || luxd[a]
+		// The same name needs no lookup.
+		same := strings.EqualFold(strings.TrimSuffix(host, "."), luxdHost)
+		if !same {
+			for a := range lookupAddrs(ctx, host) {
+				if luxd[a] {
+					same = true
+					break
+				}
+			}
 		}
 		if same {
 			return errf(http.StatusUnprocessableEntity, "invalid_request",

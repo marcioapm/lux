@@ -433,12 +433,12 @@ func acp() {
 		u := map[string]any{"sessionUpdate": "tool_call", "toolCallId": c.ID, "title": c.Server + ": " + c.Tool,
 			"kind": "other", "status": "in_progress", "rawInput": c.Args}
 		if c.Done {
-			u = map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": c.ID, "status": "completed",
-				"content": []any{map[string]any{"type": "content", "content": map[string]string{"type": "text", "text": c.Result}}}}
+			status, text := "completed", c.Result
 			if c.Err != "" {
-				u["status"] = "failed"
-				u["content"] = []any{map[string]any{"type": "content", "content": map[string]string{"type": "text", "text": c.Err}}}
+				status, text = "failed", c.Err
 			}
+			u = map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": c.ID, "status": status,
+				"content": []any{map[string]any{"type": "content", "content": map[string]string{"type": "text", "text": text}}}}
 		}
 		rpc(map[string]any{"method": "session/update", "params": map[string]any{"sessionId": a.session, "update": u}})
 	}

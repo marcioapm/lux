@@ -585,11 +585,9 @@ func (s *RunSpec) DropRepository(name, requestID string) bool {
 var headerRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 func (s *RunSpec) normalizeMCP(secrets map[string]bool, fail func(string, ...any)) {
+	names := map[string]bool{}
 	for i, m := range s.Workload.MCPServers {
 		s.normalizeEndpoint(fmt.Sprintf("workload.mcpServers[%d]", i), "MCP server", m.Name, m.URL, m.Headers, secrets, fail)
-	}
-	names := map[string]bool{}
-	for _, m := range s.Workload.MCPServers {
 		if names[m.Name] {
 			fail("workload.mcpServers: duplicate name %q", m.Name)
 		}
@@ -598,10 +596,13 @@ func (s *RunSpec) normalizeMCP(secrets map[string]bool, fail func(string, ...any
 	names = map[string]bool{}
 	for i, v := range s.Workload.Services {
 		s.normalizeEndpoint(fmt.Sprintf("workload.services[%d]", i), "service", v.Name, v.URL, v.Headers, secrets, fail)
-		if names[v.Name] {
-			fail("workload.services: duplicate name %q", v.Name)
+		// Unique as their environment variable (LUX_SERVICE_<NAME>, - as _)
+		// names them too: my-svc and my_svc would be the same.
+		key := strings.ReplaceAll(v.Name, "-", "_")
+		if names[key] {
+			fail("workload.services: duplicate name %q (- and _ are the same in LUX_SERVICE_*)", v.Name)
 		}
-		names[v.Name] = true
+		names[key] = true
 	}
 }
 
@@ -665,14 +666,7 @@ func (s *RunSpec) onlyCredential(name string) bool {
 }
 
 func (s *RunSpec) isGitCredential(name string) bool {
-	if s.Git != nil {
-		for _, r := range s.Git.Repositories {
-			if r.Credential == name {
-				return true
-			}
-		}
-	}
-	return false
+	return s.Git != nil && slices.ContainsFunc(s.Git.Repositories, func(r Repository) bool { return r.Credential == name })
 }
 
 // allows reports whether an egress rule covers host: a hostname equal to a

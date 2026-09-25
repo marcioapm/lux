@@ -61,7 +61,7 @@ func (p *placement) materializeRepos(ctx context.Context, sp spec.RunSpec, user 
 // materialize clones one repository; nil when its checkout was already
 // there.
 func (p *placement) materialize(ctx context.Context, r spec.Repository, user passwd.User) (*gitws.Result, error) {
-	dir, err := p.hostPath(r.Path)
+	mp, dir, err := p.checkoutDir(r.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -75,11 +75,53 @@ func (p *placement) materialize(ctx context.Context, r spec.Repository, user pas
 	if err := chownTree(dir, user.UID, user.GID); err != nil {
 		return nil, err
 	}
-	mp, _ := p.hostPath(p.volumeRoot(r.Path))
 	for d := filepath.Dir(dir); d != mp && strings.HasPrefix(d, mp+"/"); d = filepath.Dir(d) {
 		_ = os.Lchown(d, user.UID, user.GID)
 	}
 	return res, nil
+}
+
+// checkoutDir is where a checkout goes on the host: inside its volume,
+// whatever the volume holds. The volume is the workload's (restored from
+// its snapshot on a resume), so a directory on the way may be a symlink
+// it planted; the runner, root on the host, must never follow one out.
+// Parents are made through an os.Root (which refuses to leave the
+// volume), then resolved and checked to be inside it; the checkout itself
+// may not be a symlink. The workload is not running meanwhile (its
+// container starts after), so nothing changes between check and use.
+func (p *placement) checkoutDir(path string) (mountpoint, dir string, err error) {
+	vol := p.volumeRoot(path)
+	mp, err := p.hostPath(vol)
+	if err != nil {
+		return "", "", err
+	}
+	if mp, err = filepath.EvalSymlinks(mp); err != nil {
+		return "", "", err
+	}
+	rel := strings.TrimPrefix(strings.TrimPrefix(path, vol), "/")
+	if rel == "" {
+		return "", "", fmt.Errorf("%s: a checkout needs a directory of its own on its volume", path)
+	}
+	root, err := os.OpenRoot(mp)
+	if err != nil {
+		return "", "", err
+	}
+	defer root.Close()
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+		return "", "", fmt.Errorf("%s: %w", path, err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Join(mp, filepath.Dir(rel)))
+	if err != nil {
+		return "", "", err
+	}
+	if parent != mp && !strings.HasPrefix(parent, mp+"/") {
+		return "", "", fmt.Errorf("%s: leads outside its volume", path)
+	}
+	dir = filepath.Join(parent, filepath.Base(rel))
+	if fi, err := os.Lstat(dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return "", "", fmt.Errorf("%s is a symlink", path)
+	}
+	return mp, dir, nil
 }
 
 // reportClone sends a git.clone event, retrying: luxd drops a failed added
@@ -108,7 +150,7 @@ func (p *placement) dropRepo(name string) {
 }
 
 func (p *placement) gitRepo(r spec.Repository) gitws.Repo {
-	return gitws.Repo{Name: r.Name, URL: r.URL, Ref: r.Ref, Token: p.assign.Secrets[r.Credential]}
+	return gitws.Repo{Tenant: p.tenantID, Name: r.Name, URL: r.URL, Ref: r.Ref, Token: p.assign.Secrets[r.Credential]}
 }
 
 // hostPath is where a container path on one of the Run's volumes is on the

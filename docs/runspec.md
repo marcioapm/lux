@@ -223,7 +223,8 @@ lux clones repositories for you, on the host, before the container
 starts:
 
 1. Each repository is fetched into a **mirror** on the host. The mirror is
-   shared by every Run there and updated on use, so a second Run on the
+   shared by the tenant's Runs there (never another tenant's: one may hold
+   what another can't read) and updated on use, so a second Run on the
    same host fetches only what is new. The scheduler prefers hosts that
    already hold the mirrors a spec needs.
 2. It is cloned from the mirror into the Run's `path`, which must be on a
@@ -412,6 +413,14 @@ echo $LUX_SERVICE_TRACKER_API   # unix:/.lux/services/tracker-api.sock
 - **Each placement** serves them again: a resume supplies the header
   secrets with the rest, as always.
 - Requests leave from the Run's network, under its egress rules.
+- **Point a service only at an API that never echoes request headers
+  back.** The workload chooses the path. A debug, echo or verbose-error
+  endpoint anywhere on that host would hand it the credential in a
+  response body. Prefer a narrow base URL, and a token scoped to what the
+  Run needs.
+- A path with a `..` segment is refused (400), so the workload can't climb
+  out of `url`'s path. Paths are otherwise forwarded as sent: trailing
+  slashes and escaped characters (`%2F`) are kept.
 
 ## Network egress
 

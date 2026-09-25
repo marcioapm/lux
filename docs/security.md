@@ -50,9 +50,11 @@ are in the linked pages.
   (`workload.services`): lux-shim adds them to each request it forwards
   from a socket in the container. The values are only in the shim's
   memory, and the shim is not dumpable, so even container root (without
-  `CAP_SYS_PTRACE`, which no Run has) can't read them from `/proc`. Git
-  credentials never enter the container at all: the runner clones and
-  pushes.
+  `CAP_SYS_PTRACE`, which no Run has) can't read them from `/proc`. The
+  workload does choose the request path, so point a service only at an
+  API with no endpoint that reflects request headers. Git credentials
+  never enter the container at all: the runner clones and pushes. Git
+  mirrors on a host are per tenant: one tenant never clones from another's.
 
 ## Deployment
 

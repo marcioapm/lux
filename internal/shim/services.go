@@ -81,7 +81,7 @@ func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor)
 		IdleConnTimeout:       90 * time.Second,
 		ForceAttemptHTTP2:     true,
 	}
-	return &httputil.ReverseProxy{
+	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 			r.Out.Host = target.Host
@@ -100,5 +100,17 @@ func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor)
 			w.WriteHeader(http.StatusBadGateway)
 			fmt.Fprintf(w, "lux: service %s unreachable: %s\n", svc.Name, red.Redact(reason))
 		},
-	}, nil
+	}
+	// url's path is a prefix the workload can't climb out of: a ".." segment
+	// is refused, not cleaned (cleaning would also drop trailing slashes and
+	// decode %2F, which APIs care about).
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, seg := range strings.Split(r.URL.Path, "/") {
+			if seg == ".." {
+				http.Error(w, "lux: a service path may not contain ..", http.StatusBadRequest)
+				return
+			}
+		}
+		proxy.ServeHTTP(w, r)
+	}), nil
 }

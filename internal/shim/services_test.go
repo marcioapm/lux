@@ -2,7 +2,9 @@ package shim
 
 import (
 	"bufio"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,6 +55,34 @@ func TestServiceProxy(t *testing.T) {
 	}
 	if got.URL.Path != "/base/items" || got.URL.RawQuery != "x=1" || got.Method != "POST" || gotBody != `{"a":1}` {
 		t.Fatalf("forwarded %s %s?%s %q", got.Method, got.URL.Path, got.URL.RawQuery, gotBody)
+	}
+
+	// An absolute or //host target still goes to url's host, with the
+	// header; ".." is refused; trailing slashes and %2F are kept.
+	send := func(target string) string {
+		c, err := net.Dial("tcp", strings.TrimPrefix(proxy.URL, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", target)
+		b, _ := io.ReadAll(c)
+		status, _, _ := strings.Cut(string(b), "\r\n")
+		return status
+	}
+	for _, target := range []string{"//evil.example/etc", "http://evil.example/etc"} {
+		send(target)
+		if !strings.HasPrefix(got.URL.Path, "/base/") || got.Header.Get("Authorization") != "Bearer s3cret" {
+			t.Fatalf("%s forwarded to %s", target, got.URL.Path)
+		}
+	}
+	got = nil
+	if st := send("/../../etc"); !strings.Contains(st, "400") || got != nil {
+		t.Fatalf(".. was forwarded: %s", st)
+	}
+	send("/projects/group%2Fproject/issues/")
+	if got.URL.EscapedPath() != "/base/projects/group%2Fproject/issues/" {
+		t.Fatalf("path changed: %s", got.URL.EscapedPath())
 	}
 
 	// Streamed: each event arrives before the next is sent.

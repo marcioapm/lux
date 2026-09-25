@@ -30,10 +30,13 @@ import (
 
 // Repo is one repository to materialize or push to.
 type Repo struct {
-	Name  string
-	URL   string
-	Ref   string // branch, tag or sha
-	Token string // credential for fetch and push; "" for public repos
+	// Tenant owns the mirror it is fetched into: mirrors are never shared
+	// between tenants, since one may hold what another can't read.
+	Tenant string
+	Name   string
+	URL    string
+	Ref    string // branch, tag or sha
+	Token  string // credential for fetch and push; "" for public repos
 }
 
 // Result is what was checked out.
@@ -48,16 +51,25 @@ type Manager struct {
 	mirrors string
 	mu      sync.Mutex
 	locks   map[string]*sync.Mutex
-	known   map[string]bool // mirrored URLs
+	known   map[string]bool // mirrored "tenant\x00url"
 }
 
 func New(dataDir string) *Manager {
 	m := &Manager{mirrors: filepath.Join(dataDir, "mirrors"), locks: map[string]*sync.Mutex{}, known: map[string]bool{}}
 	entries, _ := os.ReadDir(m.mirrors)
 	for _, e := range entries {
-		if b, err := os.ReadFile(filepath.Join(m.mirrors, e.Name(), "lux-url")); err == nil {
-			m.known[strings.TrimSpace(string(b))] = true
+		b, err := os.ReadFile(filepath.Join(m.mirrors, e.Name(), "lux-url"))
+		if err != nil {
+			continue
 		}
+		t, _ := os.ReadFile(filepath.Join(m.mirrors, e.Name(), "lux-tenant"))
+		if len(t) == 0 {
+			// From before mirrors had owners: owned by nobody, so used by no
+			// one; removed so it can't be taken for anyone's.
+			os.RemoveAll(filepath.Join(m.mirrors, e.Name()))
+			continue
+		}
+		m.known[string(t)+"\x00"+strings.TrimSpace(string(b))] = true
 	}
 	return m
 }
@@ -74,19 +86,26 @@ func (m *Manager) lock(key string) func() {
 	return l.Unlock
 }
 
-// Mirrors lists the URLs this host has mirrors for (for scheduling).
+// Mirrors lists the URLs this host has mirrors of, whoever's: a scheduling
+// hint only (a Run lands where its repositories are likely warm; its
+// tenant's own mirror is the only one it ever clones from).
 func (m *Manager) Mirrors() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]string, 0, len(m.known))
-	for u := range m.known {
-		out = append(out, u)
+	seen := map[string]bool{}
+	var out []string
+	for k := range m.known {
+		_, u, _ := strings.Cut(k, "\x00")
+		if !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
 	}
 	return out
 }
 
-func (m *Manager) mirrorPath(u string) string {
-	h := sha256.Sum256([]byte(u))
+func (m *Manager) mirrorPath(tenant, u string) string {
+	h := sha256.Sum256([]byte(tenant + "\x00" + u))
 	return filepath.Join(m.mirrors, hex.EncodeToString(h[:12])+".git")
 }
 
@@ -121,7 +140,10 @@ var shaRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // A branch is fetched every time (it moves); a full sha already in the
 // mirror is not.
 func (m *Manager) mirror(ctx context.Context, r Repo) (string, error) {
-	path := m.mirrorPath(r.URL)
+	if r.Tenant == "" {
+		return "", fmt.Errorf("repository %s: no tenant", r.Name)
+	}
+	path := m.mirrorPath(r.Tenant, r.URL)
 	defer m.lock(path)()
 	if _, err := os.Stat(filepath.Join(path, "HEAD")); err == nil {
 		if shaRe.MatchString(r.Ref) {
@@ -147,11 +169,14 @@ func (m *Manager) mirror(ctx context.Context, r Repo) (string, error) {
 	if err := os.WriteFile(filepath.Join(tmp, "lux-url"), []byte(r.URL), 0o600); err != nil {
 		return "", err
 	}
+	if err := os.WriteFile(filepath.Join(tmp, "lux-tenant"), []byte(r.Tenant), 0o600); err != nil {
+		return "", err
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		return "", err
 	}
 	m.mu.Lock()
-	m.known[r.URL] = true
+	m.known[r.Tenant+"\x00"+r.URL] = true
 	m.mu.Unlock()
 	return path, nil
 }
@@ -235,7 +260,7 @@ func (m *Manager) Push(ctx context.Context, r Repo, bundle, branch, lease string
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	res := PushResult{Repo: r.Name, Branch: branch, Status: "failed"}
-	mirror, err := m.mirror(ctx, Repo{Name: r.Name, URL: r.URL, Ref: branch, Token: r.Token})
+	mirror, err := m.mirror(ctx, Repo{Tenant: r.Tenant, Name: r.Name, URL: r.URL, Ref: branch, Token: r.Token})
 	if err != nil {
 		res.Error = err.Error()
 		return res

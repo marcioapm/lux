@@ -466,10 +466,11 @@ func (s *Shim) writeSecretFiles(values map[string]string, ad adapter.Adapter) er
 	// Claude Code's MCP config).
 	if cf, ok := ad.(adapter.CredentialFiles); ok {
 		for path, content := range cf.CredentialFiles(s.cfg, values, s.user.home) {
+			// Named with the reserved prefix (by the adapter, for a file on
+			// the tmpfs): never a user secret's file.
 			var err error
-			// Named with the reserved prefix: never a user secret's file.
 			if filepath.Dir(path) == proto.ShimSecretsDir {
-				err = s.writeSecret(filepath.Base(path), content) // named by the adapter, with the reserved prefix
+				err = s.writeSecret(filepath.Base(path), content)
 			} else {
 				err = s.placeSecret(spec.ReservedSecretPrefix+filepath.Base(filepath.Dir(path))+"-"+filepath.Base(path), path, content)
 			}
