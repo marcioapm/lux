@@ -265,7 +265,8 @@ A pool with `provider: ec2` is sized by luxd:
 ```bash
 lux pools set burst --provider ec2 --min 0 --max 10 --warm 1 \
   --template '{"region":"eu-west-1","launchTemplate":"lux-runner","instanceType":"m7i.2xlarge","subnets":["subnet-a","subnet-b"]}'
-lux pools rm burst      # drains and terminates its hosts
+lux pools rm burst      # cordons its hosts; each is terminated once idle
+lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they resume elsewhere at once
 ```
 
 - **Scale up:** when Runs for the pool wait in `provisioning`, luxd launches
@@ -273,9 +274,11 @@ lux pools rm burst      # drains and terminates its hosts
   least `--min` hosts and never more than `--max`. Launches alternate
   across the template's subnets.
 - **Scale down:** a host idle longer than `LUX_SCALE_DOWN_AFTER` (default
-  10m), above the minimum and warm count, is drained. It is terminated once
-  it has no live placements and nothing left to upload. The same applies
-  to `lux pools rm`, and a Run on a drained host is stopped (snapshotted),
+  10m), above the minimum and warm count, is cordoned. It is terminated once
+  it has no live placements and nothing left to upload. `lux pools rm`
+  cordons the pool's hosts the same way, without `--force-evict`: a Run on
+  one finishes where it is and the host is terminated once idle; with
+  `--force-evict` it is stopped (snapshotted) and resumed elsewhere at once,
   never cut short.
 - **Failures:** a launch that fails is retried on the next pass. A host
   that never registers within `LUX_LAUNCH_TIMEOUT` (default 10m) is

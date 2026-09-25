@@ -74,6 +74,13 @@ components:
           format: int64
           type: integer
       type: object
+    DrainHostInputBody:
+      additionalProperties: false
+      properties:
+        forceEvict:
+          description: Also stop this host's live Runs so they resume elsewhere. Without it, they finish where they are; only new placements are refused.
+          type: boolean
+      type: object
     EgressRule:
       additionalProperties: false
       properties:
@@ -1786,7 +1793,7 @@ paths:
   /v1/hosts/{id}/drain:
     post:
       description: |-
-        No new placements; its live Runs are stopped and resumed elsewhere. Only the tenant's own hosts; operators, any host.
+        No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere (also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.
 
         Needs the `admin` scope.
       operationId: drainHost
@@ -1805,6 +1812,12 @@ paths:
           schema:
             description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
             type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DrainHostInputBody"
+        required: true
       responses:
         "202":
           content:
@@ -2059,7 +2072,7 @@ paths:
   /v1/pools/{name}:
     delete:
       description: |-
-        Its provisioned hosts are drained, then terminated; its Runs wait for a pool of that name again.
+        Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. forceEvict also stops its hosts' live Runs so they resume elsewhere.
 
         Needs the `admin` scope.
       operationId: deletePool
@@ -2078,6 +2091,13 @@ paths:
           schema:
             description: The pool's name.
             type: string
+        - description: Also stop this pool's live Runs so they resume elsewhere, instead of finishing where they are.
+          explode: false
+          in: query
+          name: forceEvict
+          schema:
+            description: Also stop this pool's live Runs so they resume elsewhere, instead of finishing where they are.
+            type: boolean
       responses:
         "204":
           description: No Content

@@ -52,7 +52,7 @@ same name; an operator then names it by id, or with `--tenant`.
 ## Acting
 
 ```bash
-lux hosts drain <host>                          # no new Runs; its Runs move elsewhere
+lux hosts drain <host> [--force-evict]          # no new Runs; --force-evict also moves its Runs elsewhere
 lux stop <run> / lux cancel <run>
 lux migrate <run> [--to HOST] [--input TEXT] [--wait]
 lux resume <run> [--to HOST] [--from-snapshot S] [--input TEXT]
@@ -61,12 +61,12 @@ lux resume <run> [--to HOST] [--from-snapshot S] [--input TEXT]
 **Migrate** moves a running Run: it is stopped (its state volumes
 snapshotted, as on any stop), then resumed at once on `--to`, or anywhere
 but the host it was on (if no other host can take it, it goes back there
-rather than wait). It is the path a drain takes, for one Run. An agent
-resumes its session, so it has its whole conversation; if it was in the
-middle of a turn, that turn was interrupted. Nothing is said to it unless
-`--input` is given: that text is delivered once it runs again ("go on where
-you left off", say). A generic workload restarts its command with its state
-volumes restored.
+rather than wait). It is the path a force-evict drain takes, for one Run. An
+agent resumes its session, so it has its whole conversation; if it was in
+the middle of a turn, that turn was interrupted. Nothing is said to it
+unless `--input` is given: that text is delivered once it runs again ("go
+on where you left off", say). A generic workload restarts its command with
+its state volumes restored.
 
 A Run already being stopped (by its tenant, a drain, a cancel) cannot also
 be migrated. A tenant's `stop` during a migration wins: the Run stays

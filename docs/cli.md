@@ -100,9 +100,10 @@ lux artifacts <run> [--download DIR]
 ```bash
 lux hosts ls [--all] [--pool P] [--state S]
 lux hosts get <host>            # lifecycle, capacity, allocation, live Runs
-lux hosts drain <host>          # admin: move its Runs elsewhere, place nothing new
+lux hosts drain <host> [--force-evict]   # admin: no new Runs; without --force-evict its live Runs finish where they are
 lux pools ls
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON]
+lux pools rm <name> [--force-evict]      # admin: cordons its hosts, terminated once idle; --force-evict stops their live Runs too
 ```
 
 ## Status and history
