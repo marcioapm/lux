@@ -28,11 +28,8 @@ export function HostPage({ id }: { id: string }) {
     setDraining(true);
     try {
       await api.drainHost(id, forceEvict);
-      const description = forceEvict
-        ? h?.liveRuns
-          ? `${h.liveRuns} live runs will be moved`
-          : undefined
-        : "New placements are refused; live runs finish where they are";
+      let description: string | undefined = "New placements are refused; live runs finish where they are";
+      if (forceEvict) description = h?.liveRuns ? `${h.liveRuns} live runs will be moved` : undefined;
       toast({ title: `Draining ${h?.name ?? id}`, description, tone: "warn" });
       setDrainOpen(false);
       await host.refetch();
@@ -58,6 +55,12 @@ export function HostPage({ id }: { id: string }) {
   // cordons, which it already is, and a force evict would stop 0 runs).
   const canAct = h.state !== "terminated" && (!h.draining || h.liveRuns > 0);
   const forceOnly = h.draining;
+  const oneRun = h.liveRuns === 1;
+  const liveRunsText = `${h.liveRuns} live run${oneRun ? "" : "s"}`;
+  let dialogDescription = "No new placements will be assigned. It has no live runs. A provisioned host is terminated once empty.";
+  if (forceOnly) dialogDescription = `Its ${liveRunsText} will be stopped and resumed elsewhere.`;
+  else if (h.liveRuns)
+    dialogDescription = `No new placements will be assigned. Its ${liveRunsText} ${oneRun ? "finishes where it is" : "finish where they are"}, unless forced. A provisioned host is terminated once empty.`;
   return (
     <div className="page">
       <PageHeader
@@ -135,11 +138,7 @@ export function HostPage({ id }: { id: string }) {
       <ConfirmDialog
         open={drainOpen}
         title={forceOnly ? `Force evict ${h.name}?` : `Drain ${h.name}?`}
-        description={
-          forceOnly
-            ? `Its ${h.liveRuns} live run${h.liveRuns === 1 ? "" : "s"} will be stopped and resumed elsewhere.`
-            : `No new placements will be assigned. ${h.liveRuns ? `Its ${h.liveRuns} live run${h.liveRuns === 1 ? "" : "s"} finish${h.liveRuns === 1 ? "s" : ""} where ${h.liveRuns === 1 ? "it is" : "they are"}, unless forced.` : "It has no live runs."} A provisioned host is terminated once empty.`
-        }
+        description={dialogDescription}
         confirmLabel={forceOnly ? "Force evict" : "Drain host"}
         tone="danger"
         confirmText={h.name}
