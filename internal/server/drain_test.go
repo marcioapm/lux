@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -34,30 +35,6 @@ func drainState(t *testing.T, s *Server, ctx context.Context, hostID, runID stri
 	return
 }
 
-// hostStateReason reads back a host's state_reason.
-func hostStateReason(t *testing.T, s *Server, ctx context.Context, hostID string) string {
-	t.Helper()
-	var reason string
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT state_reason FROM hosts WHERE id = $1`, hostID).Scan(&reason)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return reason
-}
-
-// hostDrainCauses reads back a host's drain_causes.
-func hostDrainCauses(t *testing.T, s *Server, ctx context.Context, hostID string) []string {
-	t.Helper()
-	var causes []string
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT drain_causes FROM hosts WHERE id = $1`, hostID).Scan(&causes)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return causes
-}
-
 // drainFixture is a tenant with one ready host and one running Run placed
 // on it (current_epoch = 1, matching its placement, so requestStop can
 // find it): the common setup every drain test starts from.
@@ -69,62 +46,24 @@ func drainFixture(t *testing.T, s *Server, ctx context.Context) {
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
 }
 
-// A plain drainHost (forceEvict false) cordons the host but leaves its
-// live placement alone: no stop is requested. A control step then
-// force-evicts the same fixture and checks the stop does flip, so a
-// forceEvict the handler ignored would not pass silently.
-func TestDrainHostWithoutForceEvictLeavesRunAlone(t *testing.T) {
-	s := testServer(t)
-	ctx := context.Background()
-	drainFixture(t, s, ctx)
-
-	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
-	in := &drainHostInput{}
-	in.ID = "h1"
-	if _, err := s.drainHost(ctx, in); err != nil {
-		t.Fatal(err)
-	}
-
-	draining, stopRequested, _ := drainState(t, s, context.Background(), "h1", "r1")
-	if !draining {
-		t.Error("host was not cordoned")
-	}
-	if stopRequested {
-		t.Error("a plain drain requested a stop; want the running Run left alone")
-	}
-
-	// Control: the same fixture, force-evicted, must show the stop flip.
-	in2 := &drainHostInput{HostPath: HostPath{ID: "h1"}, Body: &drainHostRequest{ForceEvict: true}}
-	if _, err := s.drainHost(ctx, in2); err != nil {
-		t.Fatal(err)
-	}
-	if _, stopRequested, reason := drainState(t, s, context.Background(), "h1", "r1"); !stopRequested || reason != "drain" {
-		t.Fatalf("force-evict on the control step: stopRequested=%v stopReason=%q, want true/\"drain\" (the fixture cannot detect an eviction otherwise)", stopRequested, reason)
-	}
-}
-
-// forceEvict on drainHost stops the host's live placement, and does so
-// even when the host is already draining.
-func TestDrainHostWithForceEvictStopsRun(t *testing.T) {
+// A plain drainHost cordons the host but leaves its live placement alone;
+// forceEvict then stops it, even though the host is already draining.
+func TestDrainHostCordonsThenForceEvictStopsRun(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	drainFixture(t, s, ctx)
 
 	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 
-	// First a plain drain (as the console's dialog would do by default).
-	in := &drainHostInput{}
-	in.ID = "h1"
-	if _, err := s.drainHost(ctx, in); err != nil {
+	if _, err := s.drainHost(ctx, &drainHostInput{HostPath: HostPath{ID: "h1"}}); err != nil {
 		t.Fatal(err)
 	}
 	if draining, stopRequested, _ := drainState(t, s, context.Background(), "h1", "r1"); !draining || stopRequested {
 		t.Fatalf("after plain drain: draining=%v stopRequested=%v", draining, stopRequested)
 	}
 
-	// forceEvict on the already-draining host must still evict its Run.
-	in2 := &drainHostInput{HostPath: HostPath{ID: "h1"}, Body: &drainHostRequest{ForceEvict: true}}
-	if _, err := s.drainHost(ctx, in2); err != nil {
+	in := &drainHostInput{HostPath: HostPath{ID: "h1"}, Body: &drainHostRequest{ForceEvict: true}}
+	if _, err := s.drainHost(ctx, in); err != nil {
 		t.Fatal(err)
 	}
 	draining, stopRequested, reason := drainState(t, s, context.Background(), "h1", "r1")
@@ -170,61 +109,41 @@ func TestDrainHostHTTPWithNoBodyCordonsOnly(t *testing.T) {
 	}
 }
 
-// deletePool without forceEvict cordons the pool's provisioned hosts and
-// leaves their live Runs running; its own hosts are picked up by the
-// provisioner's replace path once idle (not exercised here).
-func TestDeletePoolWithoutForceEvictLeavesRunsAlone(t *testing.T) {
-	s := testServer(t)
-	ctx := context.Background()
-	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id) VALUES ('h1', 't1', 'h1', 'burst', 'ready', 'i-123')`)
-	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
+// deletePool cordons the pool's provisioned hosts and retires the pool;
+// only with forceEvict are their live Runs stopped.
+func TestDeletePoolForceEvict(t *testing.T) {
+	for _, forceEvict := range []bool{false, true} {
+		t.Run(fmt.Sprintf("forceEvict=%v", forceEvict), func(t *testing.T) {
+			s := testServer(t)
+			ctx := context.Background()
+			execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+			execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
+			execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id) VALUES ('h1', 't1', 'h1', 'burst', 'ready', 'i-123')`)
+			execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
+			execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
 
-	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
-	in := &deletePoolInput{Name: "burst"}
-	if _, err := s.deletePool(ctx, in); err != nil {
-		t.Fatal(err)
-	}
+			actx := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+			if _, err := s.deletePool(actx, &deletePoolInput{Name: "burst", ForceEvict: forceEvict}); err != nil {
+				t.Fatal(err)
+			}
 
-	draining, stopRequested, _ := drainState(t, s, context.Background(), "h1", "r1")
-	if !draining {
-		t.Error("the pool's host was not cordoned")
-	}
-	if stopRequested {
-		t.Error("deletePool without forceEvict requested a stop; want the running Run left alone")
-	}
-	var retired bool
-	if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(context.Background(), `SELECT retired FROM pools WHERE id = 'pool1'`).Scan(&retired)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !retired {
-		t.Error("the pool was not retired")
-	}
-}
-
-// deletePool with forceEvict also stops the pool's hosts' live Runs.
-func TestDeletePoolWithForceEvictStopsRuns(t *testing.T) {
-	s := testServer(t)
-	ctx := context.Background()
-	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id) VALUES ('h1', 't1', 'h1', 'burst', 'ready', 'i-123')`)
-	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
-
-	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
-	in := &deletePoolInput{Name: "burst", ForceEvict: true}
-	if _, err := s.deletePool(ctx, in); err != nil {
-		t.Fatal(err)
-	}
-
-	draining, stopRequested, reason := drainState(t, s, context.Background(), "h1", "r1")
-	if !draining || !stopRequested || reason != "drain" {
-		t.Fatalf("deletePool with forceEvict: draining=%v stopRequested=%v stopReason=%q, want draining/true/\"drain\"", draining, stopRequested, reason)
+			draining, stopRequested, reason := drainState(t, s, ctx, "h1", "r1")
+			if !draining {
+				t.Error("the pool's host was not cordoned")
+			}
+			if stopRequested != forceEvict || (forceEvict && reason != "drain") {
+				t.Errorf("stopRequested=%v stopReason=%q, want a \"drain\" stop only with forceEvict", stopRequested, reason)
+			}
+			var retired bool
+			if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `SELECT retired FROM pools WHERE id = 'pool1'`).Scan(&retired)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if !retired {
+				t.Error("the pool was not retired")
+			}
+		})
 	}
 }
 
@@ -277,23 +196,21 @@ func TestPlainDrainKeepsAnEarlierDrainReason(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if causes := hostDrainCauses(t, s, ctx, "h1"); !slices.Contains(causes, causeOutdated) {
+	if _, _, _, causes, _, _ := hostState(t, s, ctx, "h1"); !slices.Contains(causes, causeOutdated) {
 		t.Fatalf("after the outdated-binaries drain: drain_causes = %v, want it to contain %q", causes, causeOutdated)
 	}
 
 	// Then a plain drain (an operator's) on the same host: must add its
 	// own cause, not remove the earlier one.
 	ctx = context.WithValue(ctx, principalKey, Principal{Operator: true, Scopes: []string{"admin", "operator"}})
-	in := &drainHostInput{}
-	in.ID = "h1"
-	if _, err := s.drainHost(ctx, in); err != nil {
+	if _, err := s.drainHost(ctx, &drainHostInput{HostPath: HostPath{ID: "h1"}}); err != nil {
 		t.Fatal(err)
 	}
-	causes := hostDrainCauses(t, s, ctx, "h1")
+	_, _, reason, causes, _, _ := hostState(t, s, ctx, "h1")
 	if !slices.Contains(causes, causeOutdated) || !slices.Contains(causes, causeManual) {
 		t.Fatalf("after a plain drain on top: drain_causes = %v, want both %q and %q", causes, causeOutdated, causeManual)
 	}
-	if reason := hostStateReason(t, s, ctx, "h1"); reason != "drain requested" {
+	if reason != "drain requested" {
 		t.Fatalf("after a plain drain on top: state_reason = %q, want the latest drain's display text", reason)
 	}
 }

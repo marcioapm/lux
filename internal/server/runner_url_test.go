@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"testing"
@@ -41,7 +42,7 @@ func TestLaunchSetsLuxURLFromRunnerURL(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
 			s.cfg.PublicURL = c.publicURL
-			s.cfg.RunnerURL = firstNonEmpty(c.runnerURL, c.publicURL)
+			s.cfg.RunnerURL = cmp.Or(c.runnerURL, c.publicURL)
 			ctx := context.Background()
 			execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
 			pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2"}
@@ -54,13 +55,4 @@ func TestLaunchSetsLuxURLFromRunnerURL(t *testing.T) {
 			}
 		})
 	}
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

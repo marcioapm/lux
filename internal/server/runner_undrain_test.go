@@ -48,6 +48,33 @@ func exitMessageCount(t *testing.T, s *Server, ctx context.Context, id string) i
 	return n
 }
 
+// hello registers host "h1" reporting runnerSHA/shimSHA for arm64 and
+// returns its id.
+func hello(t *testing.T, s *Server, ctx context.Context, tok *hostToken, runnerSHA, shimSHA string) string {
+	t.Helper()
+	w, err := s.registerHost(ctx, tok, proto.Hello{
+		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
+		RunnerSHA256: runnerSHA, ShimSHA256: shimSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w.HostID
+}
+
+// queueExit does what the reaper does once an outdated host is idle.
+func queueExit(t *testing.T, s *Server, ctx context.Context, hostID string) {
+	t.Helper()
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE hosts SET exit_requested_at = now() WHERE id = $1`, hostID); err != nil {
+			return err
+		}
+		return enqueue(ctx, tx, hostID, "", 0, proto.MsgExit, proto.ExitHost{Reason: outdatedBinariesReason, Code: proto.ExitCodeOutdatedBinaries})
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // testHostToken inserts a host_tokens row (registerHost's INSERT of a new
 // host references it) and returns a *hostToken for it.
 func testHostToken(t *testing.T, s *Server, ctx context.Context) *hostToken {
@@ -67,45 +94,26 @@ func TestHelloReconnectWhileOutdatedPreservesReasonAndExitPath(t *testing.T) {
 	tok := testHostToken(t, s, ctx)
 
 	// First Hello: mismatched shas, drains the host for outdated binaries.
-	w, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "old-r", ShimSHA256: "old-s",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	draining, state, reason, causes, _, drainReq := hostState(t, s, ctx, w.HostID)
+	hostID := hello(t, s, ctx, tok, "old-r", "old-s")
+	draining, state, reason, causes, _, drainReq := hostState(t, s, ctx, hostID)
 	if !draining || state != "draining" || reason != outdatedBinariesReason || !slices.Contains(causes, causeOutdated) || drainReq == nil {
 		t.Fatalf("after first Hello: draining=%v state=%q reason=%q causes=%v drainRequested=%v", draining, state, reason, causes, drainReq)
 	}
 
 	// The reaper would now queue an exit once idle; simulate it directly.
-	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE hosts SET exit_requested_at = now() WHERE id = $1`, w.HostID); err != nil {
-			return err
-		}
-		return enqueue(ctx, tx, w.HostID, "", 0, proto.MsgExit, proto.ExitHost{Reason: outdatedBinariesReason, Code: proto.ExitCodeOutdatedBinaries})
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	queueExit(t, s, ctx, hostID)
 
 	// A reconnect before the runner has new binaries (luxd restarted, or
 	// the WebSocket blipped): the Hello still reports the old shas.
-	if _, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "old-r", ShimSHA256: "old-s",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	draining, state, reason, causes, exitReq, drainReq := hostState(t, s, ctx, w.HostID)
+	hello(t, s, ctx, tok, "old-r", "old-s")
+	draining, state, reason, causes, exitReq, drainReq := hostState(t, s, ctx, hostID)
 	if !draining || state != "draining" || reason != outdatedBinariesReason || !slices.Contains(causes, causeOutdated) {
 		t.Fatalf("after reconnect (still outdated): draining=%v state=%q reason=%q causes=%v, want still draining for outdated binaries", draining, state, reason, causes)
 	}
 	if exitReq == nil || drainReq == nil {
 		t.Fatalf("after reconnect (still outdated): exitRequested=%v drainRequested=%v, want both still set (reaper's queued exit intact)", exitReq, drainReq)
 	}
-	if n := exitMessageCount(t, s, ctx, w.HostID); n != 1 {
+	if n := exitMessageCount(t, s, ctx, hostID); n != 1 {
 		t.Fatalf("exit messages after reconnect: %d, want still 1", n)
 	}
 }
@@ -120,32 +128,13 @@ func TestHelloUndrainsOnceBinariesMatch(t *testing.T) {
 	ctx := context.Background()
 	tok := testHostToken(t, s, ctx)
 
-	w, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "old-r", ShimSHA256: "old-s",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE hosts SET exit_requested_at = now() WHERE id = $1`, w.HostID); err != nil {
-			return err
-		}
-		return enqueue(ctx, tx, w.HostID, "", 0, proto.MsgExit, proto.ExitHost{Reason: outdatedBinariesReason, Code: proto.ExitCodeOutdatedBinaries})
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	hostID := hello(t, s, ctx, tok, "old-r", "old-s")
+	queueExit(t, s, ctx, hostID)
 
 	// The restart's ExecStartPre re-downloaded the binaries: this Hello
 	// matches.
-	if _, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "r1", ShimSHA256: "s1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	draining, state, reason, causes, exitReq, drainReq := hostState(t, s, ctx, w.HostID)
+	hello(t, s, ctx, tok, "r1", "s1")
+	draining, state, reason, causes, exitReq, drainReq := hostState(t, s, ctx, hostID)
 	if draining || state != "ready" || reason != "" || len(causes) != 0 {
 		t.Fatalf("after undrain: draining=%v state=%q reason=%q causes=%v, want ready with no reason or cause", draining, state, reason, causes)
 	}
@@ -153,9 +142,9 @@ func TestHelloUndrainsOnceBinariesMatch(t *testing.T) {
 		t.Fatalf("after undrain: exitRequested=%v drainRequested=%v, want both cleared", exitReq, drainReq)
 	}
 	var acked int
-	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*) FROM host_messages WHERE host_id = $1 AND type = $2 AND acked_at IS NOT NULL`,
-			w.HostID, proto.MsgExit).Scan(&acked)
+			hostID, proto.MsgExit).Scan(&acked)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -175,23 +164,12 @@ func TestHelloLeavesAnOtherReasonDrainAlone(t *testing.T) {
 	ctx := context.Background()
 	tok := testHostToken(t, s, ctx)
 
-	w, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "r1", ShimSHA256: "s1", // matches: not outdated
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	hostID := hello(t, s, ctx, tok, "r1", "s1") // matches: not outdated
 	execSQL(t, s, ctx, `UPDATE hosts SET draining = true, state = 'draining', state_reason = 'drain requested',
-		drain_causes = ARRAY[$2] WHERE id = $1`, w.HostID, causeManual)
+		drain_causes = ARRAY[$2] WHERE id = $1`, hostID, causeManual)
 
-	if _, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "r1", ShimSHA256: "s1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	draining, state, reason, causes, _, _ := hostState(t, s, ctx, w.HostID)
+	hello(t, s, ctx, tok, "r1", "s1")
+	draining, state, reason, causes, _, _ := hostState(t, s, ctx, hostID)
 	if !draining || state != "draining" || reason != "drain requested" || !slices.Contains(causes, causeManual) {
 		t.Fatalf("a manual drain was disturbed: draining=%v state=%q reason=%q causes=%v", draining, state, reason, causes)
 	}
@@ -210,34 +188,28 @@ func TestHeartbeatDrainsForOutdatedBinaries(t *testing.T) {
 	ctx := context.Background()
 	tok := testHostToken(t, s, ctx)
 
-	w, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "r1", ShimSHA256: "s1",
-	})
-	if err != nil {
+	hostID := hello(t, s, ctx, tok, "r1", "s1")
+	if err := s.heartbeat(ctx, hostID, proto.Heartbeat{RunnerSHA256: "old-r", ShimSHA256: "old-s"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.heartbeat(ctx, w.HostID, proto.Heartbeat{RunnerSHA256: "old-r", ShimSHA256: "old-s"}); err != nil {
-		t.Fatal(err)
-	}
-	draining, state, reason, causes, _, drainReq1 := hostState(t, s, ctx, w.HostID)
+	draining, state, reason, causes, _, drainReq1 := hostState(t, s, ctx, hostID)
 	if !draining || state != "draining" || reason != outdatedBinariesReason || !slices.Contains(causes, causeOutdated) || drainReq1 == nil {
 		t.Fatalf("after heartbeat reporting outdated binaries: draining=%v state=%q reason=%q causes=%v drainRequested=%v", draining, state, reason, causes, drainReq1)
 	}
-	msgs1 := exitMessageCount(t, s, ctx, w.HostID)
+	msgs1 := exitMessageCount(t, s, ctx, hostID)
 
 	// A second heartbeat, still outdated, must not re-drain: the
 	// drain_requested_at timestamp, host_messages count and cause set
 	// must all be unchanged (a boolean presence check cannot fail here,
 	// since a re-drain would not clear draining or the timestamp column).
-	if err := s.heartbeat(ctx, w.HostID, proto.Heartbeat{RunnerSHA256: "old-r", ShimSHA256: "old-s"}); err != nil {
+	if err := s.heartbeat(ctx, hostID, proto.Heartbeat{RunnerSHA256: "old-r", ShimSHA256: "old-s"}); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, causes2, _, drainReq2 := hostState(t, s, ctx, w.HostID)
+	_, _, _, causes2, _, drainReq2 := hostState(t, s, ctx, hostID)
 	if drainReq1 == nil || drainReq2 == nil || !drainReq1.Equal(*drainReq2) {
 		t.Fatalf("a second outdated heartbeat moved drain_requested_at: %v -> %v", drainReq1, drainReq2)
 	}
-	if msgs2 := exitMessageCount(t, s, ctx, w.HostID); msgs2 != msgs1 {
+	if msgs2 := exitMessageCount(t, s, ctx, hostID); msgs2 != msgs1 {
 		t.Fatalf("a second outdated heartbeat changed host_messages: %d -> %d", msgs1, msgs2)
 	}
 	if !slices.Equal(causes, causes2) {
@@ -256,28 +228,17 @@ func TestTwoReleaseCyclesEachExitOnce(t *testing.T) {
 
 	// Release 1: luxd holds "r1"/"s1"; the runner starts on an older pair.
 	s.bins = matchingBins()
-	w, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "r0", ShimSHA256: "s0",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	hostID := hello(t, s, ctx, tok, "r0", "s0")
 	if err := s.reapOutdatedStaticHosts(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n := exitMessageCount(t, s, ctx, w.HostID); n != 1 {
+	if n := exitMessageCount(t, s, ctx, hostID); n != 1 {
 		t.Fatalf("release 1: exit messages = %d, want 1", n)
 	}
 	// The unit restarts; ExecStartPre re-downloads r1/s1: a matching Hello
 	// undrains the host, clearing exit_requested_at and drain_requested_at.
-	if _, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "r1", ShimSHA256: "s1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	draining, _, _, _, exitReq, drainReq := hostState(t, s, ctx, w.HostID)
+	hello(t, s, ctx, tok, "r1", "s1")
+	draining, _, _, _, exitReq, drainReq := hostState(t, s, ctx, hostID)
 	if draining || exitReq != nil || drainReq != nil {
 		t.Fatalf("after release 1's undrain: draining=%v exitRequested=%v drainRequested=%v, want all clear", draining, exitReq, drainReq)
 	}
@@ -285,17 +246,17 @@ func TestTwoReleaseCyclesEachExitOnce(t *testing.T) {
 	// Release 2: luxd now holds "r2"/"s2". The same host, still on r1/s1,
 	// heartbeats and is drained again.
 	s.bins = map[string]map[string]runnerBin{"arm64": {"lux-runner": {sha256: "r2"}, "lux-shim": {sha256: "s2"}}}
-	if err := s.heartbeat(ctx, w.HostID, proto.Heartbeat{RunnerSHA256: "r1", ShimSHA256: "s1"}); err != nil {
+	if err := s.heartbeat(ctx, hostID, proto.Heartbeat{RunnerSHA256: "r1", ShimSHA256: "s1"}); err != nil {
 		t.Fatal(err)
 	}
-	draining, state, reason, causes, _, _ := hostState(t, s, ctx, w.HostID)
+	draining, state, reason, causes, _, _ := hostState(t, s, ctx, hostID)
 	if !draining || state != "draining" || reason != outdatedBinariesReason || !slices.Contains(causes, causeOutdated) {
 		t.Fatalf("release 2: draining=%v state=%q reason=%q causes=%v, want drained for outdated binaries again", draining, state, reason, causes)
 	}
 	if err := s.reapOutdatedStaticHosts(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n := exitMessageCount(t, s, ctx, w.HostID); n != 2 {
+	if n := exitMessageCount(t, s, ctx, hostID); n != 2 {
 		t.Fatalf("release 2: total exit messages = %d, want 2 (exit_requested_at from release 1 must have been cleared on undrain)", n)
 	}
 }
@@ -310,27 +271,21 @@ func TestLostMidUpdateStillUndrainsOnMatchingHello(t *testing.T) {
 	ctx := context.Background()
 	tok := testHostToken(t, s, ctx)
 
-	w, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "old-r", ShimSHA256: "old-s",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	hostID := hello(t, s, ctx, tok, "old-r", "old-s")
 	if err := s.reapOutdatedStaticHosts(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n := exitMessageCount(t, s, ctx, w.HostID); n != 1 {
+	if n := exitMessageCount(t, s, ctx, hostID); n != 1 {
 		t.Fatalf("exit messages before the lost window: %d, want 1", n)
 	}
 
 	// The restart takes longer than the lease: reapHosts marks it lost,
 	// overwriting state_reason (display text) with "missed heartbeats".
-	execSQL(t, s, ctx, `UPDATE hosts SET last_heartbeat = now() - interval '1 hour' WHERE id = $1`, w.HostID)
+	execSQL(t, s, ctx, `UPDATE hosts SET last_heartbeat = now() - interval '1 hour' WHERE id = $1`, hostID)
 	if err := s.reapHosts(ctx); err != nil {
 		t.Fatal(err)
 	}
-	_, state, reason, causes, _, _ := hostState(t, s, ctx, w.HostID)
+	_, state, reason, causes, _, _ := hostState(t, s, ctx, hostID)
 	if state != "lost" || reason != "missed heartbeats" {
 		t.Fatalf("after reapHosts: state=%q reason=%q, want lost/missed heartbeats", state, reason)
 	}
@@ -341,13 +296,8 @@ func TestLostMidUpdateStillUndrainsOnMatchingHello(t *testing.T) {
 	// ExecStartPre re-downloaded the binaries: the matching Hello that
 	// follows the restart must undrain the host, exactly as if it had
 	// never gone lost.
-	if _, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "r1", ShimSHA256: "s1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	draining, state, _, causes, exitReq, drainReq := hostState(t, s, ctx, w.HostID)
+	hello(t, s, ctx, tok, "r1", "s1")
+	draining, state, _, causes, exitReq, drainReq := hostState(t, s, ctx, hostID)
 	if draining || state != "ready" || len(causes) != 0 {
 		t.Fatalf("after the matching Hello: draining=%v state=%q causes=%v, want ready with no causes", draining, state, causes)
 	}
@@ -361,12 +311,9 @@ func TestLostMidUpdateStillUndrainsOnMatchingHello(t *testing.T) {
 // stays draining for "manual" — an operator's drain is never silently
 // undone by a release. The reaper must not send this host an exit either
 // order: a manual drain means the operator owns the host now. Both
-// causes are added directly through drainHosts (as drainIfOutdated and
-// drainHost each do at the SQL level) rather than through a heartbeat or
-// Hello: those already leave a draining host alone regardless of order
-// (pre-existing, documented behavior, unrelated to cause-coexistence),
-// so going through them could never exercise the manual-then-outdated
-// ordering at all.
+// causes are added through drainHosts directly: a heartbeat or Hello
+// leaves an already-draining host alone, so could never add "outdated"
+// after "manual".
 func TestOutdatedAndManualDrainCoexistAcrossAnUndrain(t *testing.T) {
 	for _, order := range []string{"outdated-then-manual", "manual-then-outdated"} {
 		t.Run(order, func(t *testing.T) {
@@ -375,26 +322,18 @@ func TestOutdatedAndManualDrainCoexistAcrossAnUndrain(t *testing.T) {
 			ctx := context.Background()
 			tok := testHostToken(t, s, ctx)
 
-			w, err := s.registerHost(ctx, tok, proto.Hello{
-				Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-				RunnerSHA256: "r1", ShimSHA256: "s1", // matches: starts not outdated
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
+			hostID := hello(t, s, ctx, tok, "r1", "s1") // matches: starts not outdated
 
-			drainOutdated := func() {
-				execSQL(t, s, ctx, `UPDATE hosts SET draining = true, state = 'draining', state_reason = $2,
-					drain_causes = CASE WHEN $3 = ANY(drain_causes) THEN drain_causes ELSE array_append(drain_causes, $3) END,
-					drain_requested_at = coalesce(drain_requested_at, now())
-					WHERE id = $1`, w.HostID, outdatedBinariesReason, causeOutdated)
+			drain := func(reason, cause string) {
+				if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+					_, err := s.drainHosts(ctx, tx, reason, cause, "", "id = $1", hostID)
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
 			}
-			drainManual := func() {
-				execSQL(t, s, ctx, `UPDATE hosts SET draining = true, state = 'draining', state_reason = 'drain requested',
-					drain_causes = CASE WHEN $2 = ANY(drain_causes) THEN drain_causes ELSE array_append(drain_causes, $2) END,
-					drain_requested_at = coalesce(drain_requested_at, now())
-					WHERE id = $1`, w.HostID, causeManual)
-			}
+			drainOutdated := func() { drain(outdatedBinariesReason, causeOutdated) }
+			drainManual := func() { drain("drain requested", causeManual) }
 			if order == "outdated-then-manual" {
 				drainOutdated()
 				drainManual()
@@ -403,7 +342,7 @@ func TestOutdatedAndManualDrainCoexistAcrossAnUndrain(t *testing.T) {
 				drainOutdated()
 			}
 
-			draining, state, _, causes, _, _ := hostState(t, s, ctx, w.HostID)
+			draining, state, _, causes, _, _ := hostState(t, s, ctx, hostID)
 			if !draining || state != "draining" || !slices.Contains(causes, causeOutdated) || !slices.Contains(causes, causeManual) {
 				t.Fatalf("%s: draining=%v state=%q causes=%v, want both outdated and manual present", order, draining, state, causes)
 			}
@@ -413,20 +352,15 @@ func TestOutdatedAndManualDrainCoexistAcrossAnUndrain(t *testing.T) {
 			if err := s.reapOutdatedStaticHosts(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if n := exitMessageCount(t, s, ctx, w.HostID); n != 0 {
+			if n := exitMessageCount(t, s, ctx, hostID); n != 0 {
 				t.Fatalf("%s: the reaper sent an exit to a host also manually drained: %d messages", order, n)
 			}
 
 			// Binaries now match again (a restart re-downloaded them): the
 			// Hello must remove only "outdated" and leave the host draining
 			// for "manual".
-			if _, err := s.registerHost(ctx, tok, proto.Hello{
-				Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-				RunnerSHA256: "r1", ShimSHA256: "s1",
-			}); err != nil {
-				t.Fatal(err)
-			}
-			draining, state, _, causes, _, _ = hostState(t, s, ctx, w.HostID)
+			hello(t, s, ctx, tok, "r1", "s1")
+			draining, state, _, causes, _, _ = hostState(t, s, ctx, hostID)
 			if !draining || state != "draining" || slices.Contains(causes, causeOutdated) || !slices.Contains(causes, causeManual) {
 				t.Fatalf("%s: after the matching Hello: draining=%v state=%q causes=%v, want still draining for manual only", order, draining, state, causes)
 			}
@@ -446,22 +380,16 @@ func TestForceEvictOnAnOutdatedHostSurvivesTheUpdate(t *testing.T) {
 	t1 := "t1"
 	tok := &hostToken{ID: "tok1", TenantID: &t1}
 
-	w, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "old-r", ShimSHA256: "old-s",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	hostID := hello(t, s, ctx, tok, "old-r", "old-s")
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', $1, 1, 'running')`, w.HostID)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', $1, 1, 'running')`, hostID)
 
 	octx := context.WithValue(ctx, principalKey, Principal{Operator: true, Scopes: []string{"admin", "operator"}})
-	in := &drainHostInput{HostPath: HostPath{ID: w.HostID}, Body: &drainHostRequest{ForceEvict: true}}
+	in := &drainHostInput{HostPath: HostPath{ID: hostID}, Body: &drainHostRequest{ForceEvict: true}}
 	if _, err := s.drainHost(octx, in); err != nil {
 		t.Fatal(err)
 	}
-	draining, stopRequested, stopReason := drainState(t, s, ctx, w.HostID, "r1")
+	draining, stopRequested, stopReason := drainState(t, s, ctx, hostID, "r1")
 	if !draining || !stopRequested || stopReason != "drain" {
 		t.Fatalf("after force-evict: draining=%v stopRequested=%v stopReason=%q", draining, stopRequested, stopReason)
 	}
@@ -469,13 +397,8 @@ func TestForceEvictOnAnOutdatedHostSurvivesTheUpdate(t *testing.T) {
 	// A matching Hello (its restart's ExecStartPre re-downloaded the
 	// binaries) must remove only "outdated" and leave the host draining
 	// for the operator's force-evict.
-	if _, err := s.registerHost(ctx, tok, proto.Hello{
-		Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64",
-		RunnerSHA256: "r1", ShimSHA256: "s1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	draining, state, _, causes, _, _ := hostState(t, s, ctx, w.HostID)
+	hello(t, s, ctx, tok, "r1", "s1")
+	draining, state, _, causes, _, _ := hostState(t, s, ctx, hostID)
 	if !draining || state != "draining" || slices.Contains(causes, causeOutdated) || !slices.Contains(causes, causeManual) {
 		t.Fatalf("after the matching Hello: draining=%v state=%q causes=%v, want still draining for manual only", draining, state, causes)
 	}

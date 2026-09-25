@@ -11,6 +11,26 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
+// drainIfOutdatedTx runs drainIfOutdated for hostID reporting outdated
+// arm64 binaries, in its own transaction.
+func drainIfOutdatedTx(s *Server, ctx context.Context, hostID string) error {
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := s.drainIfOutdated(ctx, tx, hostID, "arm64", "old-r", "old-s")
+		return err
+	})
+}
+
+func outdatedDrainingCount(t *testing.T, s *Server, ctx context.Context) int {
+	t.Helper()
+	var n int
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM hosts WHERE draining AND $1 = ANY(drain_causes)`, causeOutdated).Scan(&n)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 // The per-pool cap on outdated-binaries drains must hold even when every
 // host in the pool reports outdated binaries in the same instant (a luxd
 // restart wakes every runner in a pool at once): pg_advisory_xact_lock in
@@ -36,10 +56,7 @@ func TestDrainIfOutdatedCapHoldsUnderConcurrentHellos(t *testing.T) {
 		wg.Add(1)
 		go func(i int, id string) {
 			defer wg.Done()
-			errs[i] = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-				_, err := s.drainIfOutdated(ctx, tx, id, "arm64", "old-r", "old-s")
-				return err
-			})
+			errs[i] = drainIfOutdatedTx(s, ctx, id)
 		}(i, id)
 	}
 	wg.Wait()
@@ -49,14 +66,7 @@ func TestDrainIfOutdatedCapHoldsUnderConcurrentHellos(t *testing.T) {
 		}
 	}
 
-	var draining int
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM hosts WHERE draining AND $1 = ANY(drain_causes)`, causeOutdated).Scan(&draining)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if draining != 2 {
+	if draining := outdatedDrainingCount(t, s, ctx); draining != 2 {
 		t.Fatalf("hosts cordoned for outdated binaries: %d, want exactly 2 (max(1, 20*10/100))", draining)
 	}
 }
@@ -77,22 +87,10 @@ func TestDrainIfOutdatedCapIgnoresTerminatedHosts(t *testing.T) {
 		('gone', 'gone', 'burst', 'terminated', true, $1, ARRAY[$2])`, outdatedBinariesReason, causeOutdated)
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('h1', 'h1', 'burst', 'ready')`)
 
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := s.drainIfOutdated(ctx, tx, "h1", "arm64", "old-r", "old-s")
-		return err
-	})
-	if err != nil {
+	if err := drainIfOutdatedTx(s, ctx, "h1"); err != nil {
 		t.Fatal(err)
 	}
-
-	var draining bool
-	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT draining FROM hosts WHERE id = 'h1'`).Scan(&draining)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !draining {
+	if draining, _, _, _, _, _ := hostState(t, s, ctx, "h1"); !draining {
 		t.Fatal("h1 was not drained: a terminated host still carrying the outdated cause was counted against the cap")
 	}
 }
@@ -115,29 +113,15 @@ func TestDrainIfOutdatedCapPercentMaths(t *testing.T) {
 			s.cfg.OutdatedDrainPercent = 10
 			ctx := context.Background()
 
-			ids := make([]string, c.live)
 			for i := range c.live {
-				ids[i] = fmt.Sprintf("h%02d", i)
-				execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ($1, $1, 'default', 'ready')`, ids[i])
+				execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ($1, $1, 'default', 'ready')`, fmt.Sprintf("h%02d", i))
 			}
-			for _, id := range ids {
-				err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-					_, err := s.drainIfOutdated(ctx, tx, id, "arm64", "old-r", "old-s")
-					return err
-				})
-				if err != nil {
+			for i := range c.live {
+				if err := drainIfOutdatedTx(s, ctx, fmt.Sprintf("h%02d", i)); err != nil {
 					t.Fatal(err)
 				}
 			}
-
-			var draining int
-			err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-				return tx.QueryRow(ctx, `SELECT count(*) FROM hosts WHERE draining AND $1 = ANY(drain_causes)`, causeOutdated).Scan(&draining)
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if draining != c.want {
+			if draining := outdatedDrainingCount(t, s, ctx); draining != c.want {
 				t.Fatalf("hosts cordoned out of %d: %d, want %d", c.live, draining, c.want)
 			}
 		})

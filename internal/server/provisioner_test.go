@@ -24,7 +24,7 @@ func TestPoolStateHoldsBackADrainingHostWithALivePlacement(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
 
-	pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2", TenantID: strPtr("t1")}
+	pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2", TenantID: new("t1")}
 
 	var st poolState
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.poolState(ctx, tx, pl, &st) }); err != nil {
@@ -47,5 +47,3 @@ func TestPoolStateHoldsBackADrainingHostWithALivePlacement(t *testing.T) {
 		t.Error("a draining, idle host (its placement exited) is not in terminate")
 	}
 }
-
-func strPtr(s string) *string { return &s }
