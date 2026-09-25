@@ -61,8 +61,8 @@ its variable; the table below lists them by variable.
 | `LUX_DATABASE_URL` | — | For `serve`, a DSN for the `lux_app` role; for `migrate`, the owner's. One file can serve both: set this variable per command. |
 | `LUX_APP_PASSWORD` | `lux_app` | `migrate` sets `lux_app`'s password to it, each run. Set your own. |
 | `LUX_LISTEN` | `127.0.0.1:7070` | Address to serve on. |
-| `LUX_PUBLIC_URL` | — | The URL runners and clients use. |
-| `LUX_RUNNER_URL` | = public_url | The URL runners dial, if different from `LUX_PUBLIC_URL` (a private IP such as `http://10.0.1.10:7070`, unreachable from outside the VPC). Only clients, the console and MCP use `LUX_PUBLIC_URL`. |
+| `LUX_PUBLIC_URL` | — | The URL clients use. Runners too, unless `LUX_RUNNER_URL` is set. |
+| `LUX_RUNNER_URL` | = public_url | The URL runners dial, if different from `LUX_PUBLIC_URL` (a private IP such as `http://10.0.1.10:7070`, unreachable from outside the VPC). |
 | `LUX_RUNNER_BIN_DIR` | `/usr/local/lib/lux/runner` | Runner binaries luxd serves and hashes (sha256) at startup, for self-update: `<dir>/linux-{arm64,amd64}/{lux-runner,lux-shim}`. A missing arch or file is simply not offered. |
 | `LUX_S3_BUCKET` | — | Where snapshots, output and artifacts go. |
 | `LUX_S3_ENDPOINT` | AWS | For MinIO and other S3-compatible stores (path-style). |
@@ -72,7 +72,7 @@ its variable; the table below lists them by variable.
 | `LUX_LEASE` | `30s` | A host that misses heartbeats this long is lost, along with its live placements. |
 | `LUX_TICK` | `1s` | Scheduler and reaper interval. |
 | `LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_DISK`, `LUX_DEFAULT_PIDS` | `2`, `8Gi`, `20Gi`, `1024` | Resources a Run gets when its spec sets none. |
-| `LUX_SCALE_DOWN_AFTER` | `10m` | How long a provisioned host stays idle before it is drained and terminated. |
+| `LUX_SCALE_DOWN_AFTER` | `10m` | How long a provisioned host stays idle before it is cordoned, then terminated once idle. |
 | `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
 | `LUX_OUTDATED_DRAIN_PERCENT` | `10` | Caps concurrent outdated-binaries drains per pool, as a percentage of its live hosts (at least 1 regardless). |
 | `LUX_EC2_ENDPOINT` | AWS | Overrides the EC2 endpoint (tests). |
