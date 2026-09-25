@@ -166,3 +166,30 @@ def test_a_header_only_secret_is_not_in_the_workloads_environment(lux, runners, 
     out = lux.run("exec", run_id, "--", "sh", "-c", "env; echo end").stdout
     assert "end" in out and "MCP_TOKEN" not in out and mcp_server.token not in out, out
     assert mcp_server.token not in lux.logs(run_id)
+
+
+@pytest.mark.parametrize("adapter", PROTOCOLS)
+def test_an_mcp_server_backed_by_a_service(lux, runners, hosts, fake_image, mcp_server, adapter):
+    """An MCP server named by a loopback service: the agent is given
+    http://127.0.0.1:<port>, the service adds the header, and the token is
+    in nothing the agent or the workload can see."""
+    runners.start(hosts[0])
+    spec = fake_agent(fake_image, "mcp-call tools echo hello", adapter=adapter)
+    spec["workload"]["services"] = [{"name": "tools", "url": f"http://{mcp_server.ip}:8080",
+                                     "headers": [{"name": "Authorization", "secret": "MCP_TOKEN"}], "loopback": True}]
+    spec["workload"]["mcpServers"] = [{"name": "tools", "service": "tools", "path": "/mcp"}]
+    spec["secrets"] = [{"name": "MCP_TOKEN", "value": f"Bearer {mcp_server.token}"}]
+    spec["network"] = {"egress": [{"cidr": f"{mcp_server.ip}/32"}]}
+    before = len(mcp_server.calls())
+    run_id = lux.submit(spec)
+    replied(lux, run_id)
+    calls = calls_since(mcp_server, before)
+    assert calls and all(c["auth"] for c in calls), f"the server saw wrong or no auth: {calls}"
+    assert "echo: hello" in lux.logs(run_id)
+    probe = ("env; cat /.lux/secrets/* 2>/dev/null; cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\\0' ' '; "
+             "cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n'; echo end")
+    out = lux.run("exec", run_id, "--", "sh", "-c", probe).stdout
+    assert "end" in out and mcp_server.token not in out, "the token is visible in the container"
+    assert "LUX_SERVICE_TOOLS_URL=http://127.0.0.1:41000" in out
+    assert mcp_server.token not in everything_visible(lux, run_id)
+    lux.run("cancel", run_id)

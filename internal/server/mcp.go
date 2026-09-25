@@ -21,7 +21,9 @@ func (s *Server) checkMCPNotControlPlane(ctx context.Context, sp spec.RunSpec) e
 	type endpoint struct{ what, name, url string }
 	var eps []endpoint
 	for _, m := range sp.Workload.MCPServers {
-		eps = append(eps, endpoint{"workload.mcpServers", m.Name, m.URL})
+		if m.URL != "" { // a service-backed one is its service's
+			eps = append(eps, endpoint{"workload.mcpServers", m.Name, m.URL})
+		}
 	}
 	for _, v := range sp.Workload.Services {
 		eps = append(eps, endpoint{"workload.services", v.Name, v.URL})

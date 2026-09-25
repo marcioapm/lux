@@ -82,14 +82,33 @@ type Service struct {
 	Name    string      `json:"name" yaml:"name" doc:"Unique name: the socket is /.lux/services/<name>.sock. Lowercase letters, digits, - and _."`
 	URL     string      `json:"url" yaml:"url" doc:"Where requests go: http or https, without credentials. A request's path is appended to this URL's."`
 	Headers []MCPHeader `json:"headers,omitempty" yaml:"headers,omitempty" doc:"Headers set on every request (replacing the workload's own of the same name), each valued from a secret."`
+	// Loopback also serves it on 127.0.0.1 in the Run (for clients that
+	// take a URL, not a socket: an agent's MCP client).
+	Loopback bool `json:"loopback,omitempty" yaml:"loopback,omitempty" doc:"Also serve it on http://127.0.0.1:<port> inside the Run (LUX_SERVICE_<NAME>_URL), for clients that need a URL; an mcpServers entry can then name it."`
+}
+
+// ServiceBasePort: a loopback service's port is this plus its index in
+// workload.services, the same on every placement.
+const ServiceBasePort = 41000
+
+// ServicePort is the loopback port of the named service, or 0.
+func (s *RunSpec) ServicePort(name string) int {
+	for i, v := range s.Workload.Services {
+		if v.Name == name && v.Loopback {
+			return ServiceBasePort + i
+		}
+	}
+	return 0
 }
 
 // MCPServer is a remote MCP server the agent is given. Header values come
 // only from secrets, so none is ever stored in the spec.
 type MCPServer struct {
 	Name    string      `json:"name" yaml:"name" doc:"Unique name; the agent sees its tools under it. Lowercase letters, digits, - and _."`
-	URL     string      `json:"url" yaml:"url" doc:"The server's streamable HTTP endpoint: http or https, without credentials."`
-	Headers []MCPHeader `json:"headers,omitempty" yaml:"headers,omitempty" doc:"Headers sent on every request, each valued from a secret."`
+	URL     string      `json:"url,omitempty" yaml:"url,omitempty" doc:"The server's streamable HTTP endpoint: http or https, without credentials. Or service instead."`
+	Headers []MCPHeader `json:"headers,omitempty" yaml:"headers,omitempty" doc:"Headers sent on every request, each valued from a secret (the agent then holds them; prefer service)."`
+	Service string      `json:"service,omitempty" yaml:"service,omitempty" doc:"A workload.services entry with loopback: the agent is given its loopback address, and the service adds the headers, so the agent never holds them. Instead of url and headers."`
+	Path    string      `json:"path,omitempty" yaml:"path,omitempty" doc:"With service: the MCP endpoint's path, appended to the service's URL (default: none, the URL itself)."`
 }
 
 type MCPHeader struct {
@@ -531,6 +550,9 @@ func (s *RunSpec) Normalize(d Defaults) error {
 			fail("network.ports[%d]: need a port 1-65535 and a unique name", i)
 		}
 		ports[p.Name] = true
+		if j := p.Port - ServiceBasePort; j >= 0 && j < len(s.Workload.Services) && s.Workload.Services[j].Loopback {
+			fail("network.ports[%d]: %d is service %q's loopback port", i, p.Port, s.Workload.Services[j].Name)
+		}
 	}
 	for i, p := range s.Artifacts.Paths {
 		if !path.IsAbs(p) {
@@ -612,8 +634,31 @@ var headerRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 func (s *RunSpec) normalizeMCP(secrets map[string]bool, fail func(string, ...any)) {
 	names := map[string]bool{}
-	for i, m := range s.Workload.MCPServers {
-		s.normalizeEndpoint(fmt.Sprintf("workload.mcpServers[%d]", i), "MCP server", m.Name, m.URL, m.Headers, secrets, fail)
+	for i := range s.Workload.MCPServers {
+		m := &s.Workload.MCPServers[i]
+		at := fmt.Sprintf("workload.mcpServers[%d]", i)
+		if m.Service != "" {
+			// Its service's URL, egress and headers are checked as the
+			// service's; the agent gets only the loopback address.
+			if !volumeRe.MatchString(m.Name) {
+				fail("%s: invalid name %q (lowercase, digits, - and _)", at, m.Name)
+			}
+			if m.URL != "" || len(m.Headers) > 0 {
+				fail("%s: service replaces url and headers: give one or the other", at)
+			}
+			if s.ServicePort(m.Service) == 0 {
+				fail("%s.service: no service %q with loopback: true", at, m.Service)
+			}
+			// No path: the service's URL as it is.
+			if m.Path != "" && (!strings.HasPrefix(m.Path, "/") || strings.ContainsAny(m.Path, "?# ") || slices.Contains(strings.Split(m.Path, "/"), "..")) {
+				fail("%s.path: need an absolute path, no query and no ..", at)
+			}
+		} else {
+			if m.Path != "" {
+				fail("%s.path: only with service", at)
+			}
+			s.normalizeEndpoint(at, "MCP server", m.Name, m.URL, m.Headers, secrets, fail)
+		}
 		if names[m.Name] {
 			fail("workload.mcpServers: duplicate name %q", m.Name)
 		}

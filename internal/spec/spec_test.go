@@ -319,3 +319,36 @@ func TestAddRepositoriesSharingANewCredential(t *testing.T) {
 		t.Fatalf("added %v, secrets %+v", added, s.Secrets)
 	}
 }
+
+func TestServiceBackedMCPRules(t *testing.T) {
+	base := func() RunSpec {
+		return RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"},
+			Services: []Service{{Name: "tools", URL: "https://t.example/", Headers: []MCPHeader{{Name: "Authorization", Secret: "TOK"}}, Loopback: true},
+				{Name: "plain", URL: "https://p.example/"}},
+			MCPServers: []MCPServer{{Name: "tools", Service: "tools"}}},
+			Secrets: []Secret{{Name: "TOK", Value: "Bearer t"}}, Network: Network{Unrestricted: true}}
+	}
+	s := base()
+	if err := s.Normalize(BuiltinDefaults); err != nil || s.Workload.MCPServers[0].Path != "" || s.ServicePort("tools") != ServiceBasePort {
+		t.Fatalf("%v %+v", err, s.Workload.MCPServers)
+	}
+	if s.Secrets[0].As != "none" {
+		t.Fatalf("a service header's secret is placed nowhere: %+v", s.Secrets)
+	}
+	for name, mut := range map[string]func(*RunSpec){
+		"no loopback":   func(s *RunSpec) { s.Workload.MCPServers[0].Service = "plain" },
+		"no service":    func(s *RunSpec) { s.Workload.MCPServers[0].Service = "nope" },
+		"url too":       func(s *RunSpec) { s.Workload.MCPServers[0].URL = "https://x/" },
+		"headers too":   func(s *RunSpec) { s.Workload.MCPServers[0].Headers = []MCPHeader{{Name: "X", Secret: "TOK"}} },
+		"relative path": func(s *RunSpec) { s.Workload.MCPServers[0].Path = "mcp" },
+		"dotdot path":   func(s *RunSpec) { s.Workload.MCPServers[0].Path = "/../x" },
+		"path, no svc":  func(s *RunSpec) { s.Workload.MCPServers[0] = MCPServer{Name: "m", URL: "https://m/", Path: "/x"} },
+		"port clash":    func(s *RunSpec) { s.Network.Ports = []Port{{Name: "web", Port: ServiceBasePort}} },
+	} {
+		s := base()
+		mut(&s)
+		if err := s.Normalize(BuiltinDefaults); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

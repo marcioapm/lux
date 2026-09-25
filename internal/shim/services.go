@@ -36,7 +36,7 @@ func ServiceSocket(name string) string {
 // serveServices starts a proxy per service, its socket owned by the
 // workload user (mode 0600).
 func (s *Shim) serveServices(secrets map[string]string) error {
-	for _, svc := range s.cfg.Services {
+	for i, svc := range s.cfg.Services {
 		h, err := newServiceProxy(svc, secrets, s.red)
 		if err != nil {
 			return fmt.Errorf("service %s: %w", svc.Name, err)
@@ -55,8 +55,22 @@ func (s *Shim) serveServices(secrets map[string]string) error {
 		}
 		srv := &http.Server{Handler: h, ReadHeaderTimeout: 30 * time.Second}
 		go func() { _ = srv.Serve(ln) }()
+		if svc.Loopback {
+			// Bound before the workload starts, so nothing else holds the
+			// port; the same port on every placement (spec.ServicePort).
+			tcp, err := net.Listen("tcp", ServiceAddr(i))
+			if err != nil {
+				return fmt.Errorf("service %s on %s: %w", svc.Name, ServiceAddr(i), err)
+			}
+			go func() { _ = srv.Serve(tcp) }()
+		}
 	}
 	return nil
+}
+
+// ServiceAddr is the loopback address of the i-th service.
+func ServiceAddr(i int) string {
+	return fmt.Sprintf("127.0.0.1:%d", spec.ServiceBasePort+i)
 }
 
 // newServiceProxy forwards every request to svc.URL (its path joined with

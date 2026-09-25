@@ -1,6 +1,7 @@
 package proto
 
 import (
+	"fmt"
 	"strconv"
 
 	"github.com/marcioapm/lux/internal/spec"
@@ -84,12 +85,27 @@ type MCPHeader struct{ Name, Value string }
 func (cfg *ShimConfig) ResolveMCP(secrets map[string]string) {
 	cfg.MCP = nil
 	for _, m := range cfg.MCPServers {
-		r := MCPServer{Name: m.Name, URL: m.URL}
+		r := MCPServer{Name: m.Name, URL: cfg.MCPURL(m)}
 		for _, h := range m.Headers {
 			r.Headers = append(r.Headers, MCPHeader{Name: h.Name, Value: secrets[h.Secret]})
 		}
 		cfg.MCP = append(cfg.MCP, r)
 	}
+}
+
+// MCPURL is where the agent reaches an MCP server: its url, or for one
+// backed by a service, that service's loopback address (which adds the
+// headers, so the agent is given none).
+func (cfg *ShimConfig) MCPURL(m spec.MCPServer) string {
+	if m.Service == "" {
+		return m.URL
+	}
+	for i, v := range cfg.Services {
+		if v.Name == m.Service {
+			return fmt.Sprintf("http://127.0.0.1:%d%s", spec.ServiceBasePort+i, m.Path)
+		}
+	}
+	return ""
 }
 
 // ShimMsg is one line on the shim socket, either direction.

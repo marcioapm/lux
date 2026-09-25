@@ -443,6 +443,27 @@ network:
     - host: mcp.acme.dev
 ```
 
+- **To keep the credential from the agent, back the server with a
+  service.** With `headers`, the agent's MCP client holds the value
+  (that's how it sends it). Instead, name a [service](#services) that has
+  `loopback: true`. The agent is given its loopback address and no
+  headers, and the service adds them on the way out:
+
+  ```yaml
+  workload:
+    services:
+      - name: tracker
+        url: https://mcp.acme.dev
+        headers: [{ name: Authorization, secret: TRACKER_TOKEN }]
+        loopback: true
+    mcpServers:
+      - { name: tracker, service: tracker, path: /mcp }   # → http://127.0.0.1:41000/mcp
+  ```
+
+  `service` replaces `url` and `headers`. `path`, if given, is appended to
+  the service's URL (without it, the agent is sent to the URL itself, so
+  `url: https://mcp.acme.dev/mcp` with no `path` works as well). The
+  service's URL, egress and headers are checked as the service's.
 - **Header values come only from secrets.** A header names a secret in
   `secrets`, and its value is the secret's whole value (`Bearer …` for a
   bearer token). The spec stores the secret's name, never its value, and
@@ -521,6 +542,14 @@ echo $LUX_SERVICE_TRACKER_API   # unix:/.lux/services/tracker-api.sock
   allow its host (`host:`) or address (`cidr:`), unless unrestricted;
   never the control plane's address; no duplicate header names; a git
   credential can't be a header's secret.
+- **`loopback: true`** also serves the service on
+  `http://127.0.0.1:<port>` inside the Run, for clients that take a URL
+  rather than a socket (an agent's MCP client). The port is
+  41000 plus the service's position in `workload.services`, the same on
+  every placement, and `LUX_SERVICE_<NAME>_URL` holds the full address.
+  A `network.ports` entry can't use that port.
+  Anything in the container can call it while the Run lives, as with the
+  socket; the credential still never leaves the shim.
 - **Each placement** serves them again: a resume supplies the header
   secrets with the rest, as always.
 - Requests leave from the Run's network, under its egress rules.

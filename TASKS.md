@@ -51,3 +51,4 @@ After v1:
 | Add repositories on resume (`git.repositories` in the resume request, `lux resume --add-repo`, `git.clone` events; a failed added clone is dropped, not fatal) | ✅ done |
 | Services: credential-injecting proxy (`workload.services`) | ✅ done |
 | Images: registry login (`image.registryAuth`, runner-only), shared build cache (`image.build.cache`), GC of pulled images and under disk pressure (`--image-disk-high`) | ✅ done |
+| Loopback services; MCP servers backed by a service | ✅ done |

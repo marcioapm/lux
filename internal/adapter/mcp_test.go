@@ -191,3 +191,36 @@ func TestACPHandshakeMCP(t *testing.T) {
 		t.Fatalf("none: %s %v", params["mcpServers"], sink.events)
 	}
 }
+
+// An MCP server backed by a service: every adapter gives the agent the
+// service's loopback address and no headers; the secret is the service's,
+// and never in argv, the Claude config, ACP params or the environment.
+func TestServiceBackedMCPServer(t *testing.T) {
+	cfg := proto.ShimConfig{Command: []string{"agent"},
+		Services:   []spec.Service{{Name: "other", URL: "https://o.example"}, {Name: "tools", URL: "http://10.0.0.5:8080/api", Headers: []spec.MCPHeader{{Name: "Authorization", Secret: "MCP_TOKEN"}}, Loopback: true}},
+		MCPServers: []spec.MCPServer{{Name: "tools", Service: "tools", Path: "/mcp"}}}
+	cfg.ResolveMCP(map[string]string{"MCP_TOKEN": mcpToken})
+	want := "http://127.0.0.1:41001/mcp"
+	if len(cfg.MCP) != 1 || cfg.MCP[0].URL != want || len(cfg.MCP[0].Headers) != 0 {
+		t.Fatalf("resolved %+v", cfg.MCP)
+	}
+	b, _ := json.Marshal(acpMCPServers(cfg.MCP))
+	if !strings.Contains(string(b), want) || strings.Contains(string(b), "s3cr3t") {
+		t.Fatalf("acp %s", b)
+	}
+	c := NewClaude()
+	for _, f := range c.CredentialFiles(cfg, nil, "/home/agent") {
+		if !strings.Contains(string(f), want) || strings.Contains(string(f), "s3cr3t") {
+			t.Fatalf("claude config %s", f)
+		}
+	}
+	x := NewCodex()
+	argv, _ := x.Command(cfg)
+	noSecret(t, argv)
+	if !strings.Contains(strings.Join(argv, " "), `mcp_servers.tools.url="`+want+`"`) || strings.Contains(strings.Join(argv, " "), "env_http_headers") {
+		t.Fatalf("codex %q", argv)
+	}
+	if env := x.Environment(cfg); len(env) != 0 {
+		t.Fatalf("codex env %v", env)
+	}
+}

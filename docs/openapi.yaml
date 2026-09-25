@@ -347,7 +347,7 @@ components:
       additionalProperties: false
       properties:
         headers:
-          description: Headers sent on every request, each valued from a secret.
+          description: Headers sent on every request, each valued from a secret (the agent then holds them; prefer service).
           items:
             $ref: "#/components/schemas/MCPHeader"
           type:
@@ -356,8 +356,14 @@ components:
         name:
           description: Unique name; the agent sees its tools under it. Lowercase letters, digits, - and _.
           type: string
+        path:
+          description: "With service: the MCP endpoint's path, appended to the service's URL (default: none, the URL itself)."
+          type: string
+        service:
+          description: "A workload.services entry with loopback: the agent is given its loopback address, and the service adds the headers, so the agent never holds them. Instead of url and headers."
+          type: string
         url:
-          description: "The server's streamable HTTP endpoint: http or https, without credentials."
+          description: "The server's streamable HTTP endpoint: http or https, without credentials. Or service instead."
           type: string
       type: object
     Manifest:
@@ -1048,6 +1054,9 @@ components:
           type:
             - array
             - "null"
+        loopback:
+          description: Also serve it on http://127.0.0.1:<port> inside the Run (LUX_SERVICE_<NAME>_URL), for clients that need a URL; an mcpServers entry can then name it.
+          type: boolean
         name:
           description: "Unique name: the socket is /.lux/services/<name>.sock. Lowercase letters, digits, - and _."
           type: string

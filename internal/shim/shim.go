@@ -432,9 +432,12 @@ func (s *Shim) environment(secrets map[string]string) []string {
 	if s.cfg.ArtifactsDir != "" {
 		env["LUX_ARTIFACTS"] = s.cfg.ArtifactsDir
 	}
-	for _, svc := range s.cfg.Services {
+	for i, svc := range s.cfg.Services {
 		k, v := ServiceEnv(svc.Name)
 		env[k] = v
+		if svc.Loopback {
+			env[k+"_URL"] = "http://" + ServiceAddr(i)
+		}
 	}
 	for k, v := range s.cfg.Env {
 		env[k] = v

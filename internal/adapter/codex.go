@@ -78,7 +78,7 @@ func (c *Codex) Command(cfg proto.ShimConfig) ([]string, error) {
 	argv = append(slices.Clone(argv), "app-server")
 	for n, s := range cfg.MCPServers {
 		key := "mcp_servers." + s.Name // spec names are TOML bare keys
-		argv = append(argv, "-c", key+".url="+tomlString(s.URL))
+		argv = append(argv, "-c", key+".url="+tomlString(cfg.MCPURL(s)))
 		if len(s.Headers) > 0 {
 			var kv []string
 			for m, h := range s.Headers {
