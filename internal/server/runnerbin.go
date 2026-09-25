@@ -60,10 +60,8 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// outdatedBinariesReason is the display text (state_reason) for an
-// outdated-binaries drain, and the ExitHost.Reason sent with the exit.
-// Never read back to decide anything: causeOutdated in drain_causes is
-// what the reaper, the undrain check and the per-pool cap key off.
+// outdatedBinariesReason is the state_reason for an outdated-binaries
+// drain, and the ExitHost.Reason sent with the exit.
 const outdatedBinariesReason = "outdated binaries"
 
 // hasBothBinaries reports whether luxd holds every binary in
@@ -112,13 +110,10 @@ func (s *Server) binariesMatch(arch, runnerSHA, shimSHA string) bool {
 // stopped) when its binaries are outdated and its pool has room for one
 // more such drain: at most max(1, OutdatedDrainPercent% of the pool's live
 // hosts) at once, so a release never cordons a whole pool in one instant.
-// pg_advisory_xact_lock, keyed on the pool, serializes the count and the
-// cordon against every other Hello or heartbeat for the same pool in the
-// same instant (a luxd restart wakes every runner in a pool at once):
-// without it, two transactions under READ COMMITTED can both read the
-// count before either's cordon commits, and both proceed, overshooting
-// the cap. The lock is released when the caller's transaction ends.
-// Returns the hosts to notify.
+// The pool's pg_advisory_xact_lock serializes count-then-cordon across
+// concurrent Hellos (a luxd restart wakes a whole pool at once); under
+// READ COMMITTED they would otherwise all read the same count and
+// overshoot the cap. Returns the hosts to notify.
 func (s *Server) drainIfOutdated(ctx context.Context, tx pgx.Tx, hostID, arch, runnerSHA, shimSHA string) ([]string, error) {
 	if !s.binariesOutdated(arch, runnerSHA, shimSHA) {
 		return nil, nil

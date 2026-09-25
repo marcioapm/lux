@@ -475,10 +475,7 @@ func (s *Server) provisionLease(ctx context.Context) (bool, error) {
 // drainForScaleDown cordons an idle host; the next pass terminates it once
 // it has nothing left to upload.
 // Only if it is still idle: the scheduler may have placed a Run on it
-// since the pool was counted. Cordon only (no stopReason): the WHERE
-// clause already restricts this to hosts with no live placement, so
-// nothing needs stopping — a Run that lands in the race window finishes
-// instead of being evicted.
+// since the pool was counted.
 func (s *Server) drainForScaleDown(ctx context.Context, hostID string) (bool, error) {
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {

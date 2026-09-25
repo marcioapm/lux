@@ -140,14 +140,9 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 // systemd unit restarts it, whose ExecStartPre re-downloads first. A
 // provisioned host takes the existing drain→terminate→relaunch path
 // instead (reconcilePool); this is only for hosts nothing else replaces.
-// Keys off the "outdated" cause in drain_causes, never state_reason: a
-// host also carrying "manual" (an operator's drain, or pools rm) is
-// skipped — the operator owns it now, and it only updates once they
-// undrain it or restart it by hand (docs/operations.md).
-//
-// A host whose exit_requested_at is stale (the runner ignored it, or the
-// fetch failed and it kept its old binaries) is re-sent: still outdated,
-// idle, and requested more than 10 minutes ago.
+// A host also carrying causeManual is skipped: the operator owns it
+// (docs/operations.md). An exit still unanswered after 10 minutes (the
+// runner ignored it, or its fetch failed) is re-sent.
 func (s *Server) reapOutdatedStaticHosts(ctx context.Context) error {
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {

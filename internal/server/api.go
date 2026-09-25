@@ -1501,10 +1501,9 @@ type drainHostOutput struct {
 	} `nameHint:"HostDrain"`
 }
 
-// drainHost stops new placements on a host. With forceEvict, it also
-// stops the host's live Runs so they resume elsewhere (that also applies
-// to a host that is already draining). A tenant drains only its own
-// hosts; an operator, any host.
+// drainHost stops new placements on a host; with forceEvict, it also
+// stops its live Runs so they resume elsewhere, even on a host already
+// draining. A tenant drains only its own hosts; an operator, any host.
 func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostOutput, error) {
 	p := principal(ctx)
 	stopReason := evictReason(in.Body != nil && in.Body.ForceEvict)
@@ -1530,29 +1529,23 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 }
 
 // Drain causes, tracked independently in hosts.drain_causes so several can
-// coexist without one drain's reason clobbering another's: drainIfOutdated
-// adds causeOutdated, an operator's drain or pools rm adds causeManual, a
-// pool's scale-down adds causeScaleDown, a spot interruption adds
-// causePreempt. state_reason stays what it always was — display text any
-// path may overwrite — since drain_causes, not it, is what the reaper, the
-// undrain check and the per-pool cap key off.
+// coexist. The reaper, the undrain check and the per-pool cap key off
+// these; state_reason is display text any path may overwrite.
 const (
 	causeOutdated  = "outdated"
-	causeManual    = "manual"
+	causeManual    = "manual" // drainHost, deletePool
 	causeScaleDown = "scale-down"
 	causePreempt   = "preempt"
 )
 
-// drainHosts takes hosts out of service (no new placements), records cause
-// in their drain_causes (added if not already present; idempotent), sets
-// state_reason to reason (display text: the latest caller's wins), and,
-// unless stopReason is "" (cordon only), asks their live placements to
-// stop with it (drain or preempt: both resume elsewhere); where selects
-// them (placeholders from $1). Cordon-only leaves running Runs to finish
+// drainHosts takes hosts out of service (no new placements), adds cause to
+// their drain_causes, sets state_reason to reason, and, unless stopReason
+// is "" (cordon only), asks their live placements to stop with it (drain
+// or preempt: both resume elsewhere), including on hosts already draining;
+// where selects them (placeholders from $1). A cordoned host's Runs finish
 // where they are: the reaper (static hosts) or the pool's replace path
-// (provisioned) takes the host once it is idle. Calling it again with a
-// stopReason on a host that is already draining still evicts its current
-// placements. Returns their ids, to notify once the transaction commits.
+// (provisioned) takes it once idle. Returns their ids, to notify once the
+// transaction commits.
 func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopReason, where string, args ...any) ([]string, error) {
 	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
 			state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
@@ -1643,11 +1636,9 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 }
 
 // deletePool removes one of the tenant's pools. Its provisioned hosts are
-// cordoned (no new placements) and terminated by the provisioner once
-// they are idle (their provider is known from the pool row, kept as
-// `retired`); its Runs wait for a pool of that name again. With
-// forceEvict, its hosts' live Runs are also stopped and resumed
-// elsewhere instead of finishing where they are.
+// cordoned and terminated by the provisioner once idle (their provider is
+// known from the pool row, kept as `retired`); forceEvict also stops their
+// live Runs. Its Runs wait for a pool of that name again.
 type deletePoolInput struct {
 	TenantQuery
 	Name       string `path:"name" doc:"The pool's name."`

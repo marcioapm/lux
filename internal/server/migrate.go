@@ -84,10 +84,7 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 			return errf(http.StatusConflict, "not_running", "run is %s: only a running Run can be migrated (a stopped one: resume --to)", state)
 		case stopping != "":
 			// Its stop decides what becomes of it: one reason per stop.
-			// This also covers a force-evicted Run: its host's drain
-			// already gave it a stop with reason "drain" or "preempt". A
-			// merely cordoned host (plain drain, scale-down, pools rm) sets
-			// no stop, so migrate still applies here.
+			// A force-evicted Run lands here; a merely cordoned host's does not.
 			return errf(http.StatusConflict, "stopping", "the Run is already being stopped (%s)", stopping)
 		case state != StateRunning:
 			return errf(http.StatusConflict, "not_running", "run is %s", state)

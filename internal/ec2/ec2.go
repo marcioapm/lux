@@ -12,8 +12,7 @@
 // hosts before the instance goes.
 //
 // userData picks how the runner's environment reaches the instance
-// (internal/hostboot.Render is the one place all three are implemented;
-// hostboot.ValidUserData checks the value when the pool is set):
+// (hostboot.Render implements all three):
 //
 //   - "ignition" (default): an Ignition v3 config for Fedora CoreOS. No
 //     package installation happens at boot: FCOS ships everything lux-runner
@@ -233,9 +232,7 @@ func isNotFound(err error) bool {
 }
 
 // renderUserData builds the instance's user data in the pool's chosen
-// format (default "ignition"; hostboot.ValidUserData is checked when the
-// pool is set, so format is trusted here): hostboot.Render is the one
-// place every format is implemented.
+// format (hostboot.ValidUserData is checked when the pool is set).
 func renderUserData(format string, env map[string]string) ([]byte, error) {
 	he := hostboot.Env{URL: env["LUX_URL"], HostToken: env["LUX_HOST_TOKEN"], HostName: env["LUX_HOST_NAME"], EC2IMDS: env["LUX_EC2_IMDS"]}
 	return hostboot.Render(format, he)
