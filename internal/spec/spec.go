@@ -39,8 +39,16 @@ type RunSpec struct {
 
 // Image is exactly one of a pinned reference or a build.
 type Image struct {
-	Ref   string `json:"ref,omitempty" yaml:"ref,omitempty"`
-	Build *Build `json:"build,omitempty" yaml:"build,omitempty"`
+	Ref          string         `json:"ref,omitempty" yaml:"ref,omitempty"`
+	Build        *Build         `json:"build,omitempty" yaml:"build,omitempty"`
+	RegistryAuth []RegistryAuth `json:"registryAuth,omitempty" yaml:"registryAuth,omitempty" doc:"Credentials for private registries, used by the runner for every pull and push of the placement (image.ref, FROM bases, the build cache). Never in the container."`
+}
+
+// RegistryAuth logs the runner in to a registry. The secret stays the
+// runner's: it never enters the container.
+type RegistryAuth struct {
+	Registry string `json:"registry" yaml:"registry" doc:"The registry's host, with an optional port: ghcr.io, 123.dkr.ecr.eu-west-1.amazonaws.com, 10.0.0.5:5000. No scheme or path."`
+	Secret   string `json:"secret" yaml:"secret" doc:"The secret (in secrets) holding user:password, or a bare token (sent as the password, with the user lux)."`
 }
 
 type Build struct {
@@ -48,6 +56,7 @@ type Build struct {
 	// Context is an optional artifact id whose contents are the build context.
 	Context string            `json:"context,omitempty" yaml:"context,omitempty"`
 	Args    map[string]string `json:"args,omitempty" yaml:"args,omitempty"`
+	Cache   string            `json:"cache,omitempty" yaml:"cache,omitempty" doc:"A registry repository (no tag), e.g. registry.example.com/team/lux-cache, shared by hosts: a host pulls <cache>:<build key> instead of building, and pushes what it builds there. The key covers the tenant, egress rules, pinned Containerfile and args."`
 }
 
 type Workload struct {
@@ -319,6 +328,9 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		if b.Context != "" {
 			fail("image.build.context is not supported yet: COPY and ADD have no build context")
 		}
+		if b.Cache != "" && !validCacheRepo(b.Cache) {
+			fail("image.build.cache: need a repository with its registry and no tag, e.g. registry.example.com/team/lux-cache")
+		}
 	}
 
 	w := &s.Workload
@@ -389,6 +401,20 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		}
 	}
 
+	regs := map[string]bool{}
+	for i, a := range s.Image.RegistryAuth {
+		if !validRegistry(a.Registry) {
+			fail("image.registryAuth[%d].registry: need a host with an optional port (ghcr.io, 10.0.0.5:5000), no scheme or path", i)
+		}
+		if regs[strings.ToLower(a.Registry)] {
+			fail("image.registryAuth: duplicate registry %q", a.Registry)
+		}
+		regs[strings.ToLower(a.Registry)] = true
+		if !seen[a.Secret] {
+			fail("image.registryAuth[%d].secret: no secret named %q", i, a.Secret)
+		}
+	}
+
 	vols := map[string]bool{}
 	for i := range s.Volumes {
 		v := &s.Volumes[i]
@@ -448,11 +474,11 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		}
 	}
 	s.normalizeMCP(seen, fail)
-	// Git credentials are the runner's, never the container's. (The shim
-	// still gets every value, to redact, and to value MCP headers from; no
-	// header may name a git credential.)
+	// Git and registry credentials are the runner's, never the
+	// container's. (The shim still gets every value, to redact, and to
+	// value MCP headers from; no header may name one.)
 	for i := range s.Secrets {
-		if s.isGitCredential(s.Secrets[i].Name) {
+		if s.isGitCredential(s.Secrets[i].Name) || s.isRegistryCredential(s.Secrets[i].Name) {
 			s.Secrets[i].RunnerOnly = true
 		}
 	}
@@ -637,6 +663,8 @@ func (s *RunSpec) normalizeEndpoint(at, what, name, rawURL string, headers []MCP
 			// The header would put it in the container, where a git
 			// credential never is.
 			fail("%s.headers[%d].secret: %q is a git credential, which never enters the container: use another secret", at, j, h.Secret)
+		} else if s.isRegistryCredential(h.Secret) {
+			fail("%s.headers[%d].secret: %q is a registry credential, which never enters the container: use another secret", at, j, h.Secret)
 		}
 	}
 	if !s.Network.Unrestricted && !s.Network.allows(u.Hostname()) {
@@ -648,11 +676,11 @@ func (s *RunSpec) normalizeEndpoint(at, what, name, rawURL string, headers []MCP
 // (adapters' credential and config files): no secret may use it.
 const ReservedSecretPrefix = "lux-"
 
-// onlyCredential reports whether a secret is used as a git credential or an
-// MCP server's or service's header and is referenced nowhere else a spec
-// can name it.
+// onlyCredential reports whether a secret is used as a git or registry
+// credential or an MCP server's or service's header and is referenced
+// nowhere else a spec can name it.
 func (s *RunSpec) onlyCredential(name string) bool {
-	if s.isGitCredential(name) {
+	if s.isGitCredential(name) || s.isRegistryCredential(name) {
 		return true
 	}
 	var headers []MCPHeader
@@ -668,6 +696,45 @@ func (s *RunSpec) onlyCredential(name string) bool {
 func (s *RunSpec) isGitCredential(name string) bool {
 	return s.Git != nil && slices.ContainsFunc(s.Git.Repositories, func(r Repository) bool { return r.Credential == name })
 }
+
+func (s *RunSpec) isRegistryCredential(name string) bool {
+	return slices.ContainsFunc(s.Image.RegistryAuth, func(a RegistryAuth) bool { return a.Secret == name })
+}
+
+// validRegistry is a registry as auth.json keys it: a lowercase host name
+// or IPv4 address, and an optional port. Not the runner's own host: its
+// pulls and pushes go out from the host, outside the Run's egress rules.
+func validRegistry(r string) bool {
+	host, port, hasPort := strings.Cut(r, ":")
+	if hasPort {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || port != strconv.Itoa(n) {
+			return false
+		}
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return false
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return ip.Is4() && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsLinkLocalUnicast()
+	}
+	return hostLabelsRe.MatchString(host)
+}
+
+// validCacheRepo is a repository with its registry (see validRegistry)
+// and a path, and no tag or digest.
+func validCacheRepo(repo string) bool {
+	reg, path, ok := strings.Cut(repo, "/")
+	// The registry must be named as one (a dot or a port), or it would
+	// read as a Docker Hub path.
+	named := strings.ContainsAny(reg, ".:")
+	return ok && named && validRegistry(reg) && repoPathRe.MatchString(path)
+}
+
+var (
+	hostLabelsRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+	repoPathRe   = regexp.MustCompile(`^[a-z0-9]+([._-]+[a-z0-9]+)*(/[a-z0-9]+([._-]+[a-z0-9]+)*)*$`)
+)
 
 // allows reports whether an egress rule covers host: a hostname equal to a
 // host rule, or an address in a cidr rule. The runner's firewall enforces

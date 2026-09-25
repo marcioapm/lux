@@ -57,6 +57,10 @@ type Config struct {
 	// UsageEvery is how often disk and network use are sampled, which
 	// bounds how far past its disk limit a Run can write (default 15s).
 	UsageEvery time.Duration
+	// ImageDiskHigh is the percentage of the disk holding Podman's storage
+	// over which the GC removes lux's unused images, least recently used
+	// first (0: off).
+	ImageDiskHigh float64
 	// Nested offers nested containers (sandbox.nestedContainers): the host
 	// is labelled nested=true, and such Runs get what rootless Podman
 	// inside them needs (see nested.go).
@@ -79,6 +83,8 @@ type Runner struct {
 	control    *serialQueues
 	egress     *egress.Firewall
 	images     *imageUse
+	graph      string // Podman's graph root, once asked
+	graphOnce  sync.Once
 	// recordMu serializes read-modify-write of snapshot records (uploader,
 	// discard, report).
 	recordMu sync.Mutex
@@ -130,6 +136,9 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	if cfg.HostTTL == 0 {
 		cfg.HostTTL = 24 * time.Hour
 	}
+	// tmp holds what a pull, push or build needed while it ran (registry
+	// auth files among them): whatever a stopped runner left there is stale.
+	os.RemoveAll(filepath.Join(cfg.DataDir, "tmp"))
 	for _, d := range []string{"runs", "snapshots", "tmp"} {
 		if err := os.MkdirAll(filepath.Join(cfg.DataDir, d), 0o700); err != nil {
 			return nil, err

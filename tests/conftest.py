@@ -349,6 +349,56 @@ def git_server(env: TestEnvironment):
     sh("docker", "rm", "-f", name, check=False)
 
 
+# ---- a private registry ----------------------------------------------------------
+
+class Registry:
+    """A registry on the run network behind basic auth, over plain HTTP
+    (every host lists it as insecure)."""
+
+    def __init__(self, container: str, ip: str, user: str, password: str):
+        self.container, self.user, self.password = container, user, password
+        self.address = f"{ip}:5000"
+
+    @property
+    def creds(self) -> str:
+        return f"{self.user}:{self.password}"
+
+    def push(self, host: Host, image: str, repo: str) -> str:
+        """Pushes an image of its own, on a host's image, to
+        <registry>/<repo>; returns the reference. Its own (a unique label):
+        pulling the host's image back under another name would give that
+        image the registry's digest, and builds pin FROM to it. Made in a
+        storage of its own, so the host has none of it."""
+        ref = f"{self.address}/{repo}"
+        store = "--root /var/tmp/lux-test-push --runroot /run/lux-test-push"
+        host.exec("sh", "-c", f"set -e; podman save -q {image} | podman {store} load -q >/dev/null; "
+                  f"printf 'FROM {image}\\nLABEL lux.test={uuid.uuid4().hex}\\n' | podman {store} build -q -t {ref} -f - >/dev/null; "
+                  f"podman {store} push -q --creds {self.creds} {ref}; podman {store} rmi -a -f >/dev/null")
+        return ref
+
+    def tags(self, repo: str) -> list[str]:
+        """The registry's tags of a repository."""
+        import requests
+        r = requests.get(f"http://{self.address}/v2/{repo}/tags/list", auth=(self.user, self.password), timeout=10)
+        return (r.json().get("tags") or []) if r.ok else []
+
+
+@pytest.fixture(scope="session")
+def registry(env: TestEnvironment):
+    from env import build_test_image, sh, start_service
+    name = f"lux-e2e-{env.run_id}-registry"
+    password = "regpw-" + uuid.uuid4().hex
+    ip = start_service(env, name, build_test_image("registry"), REG_USER="luxtest", REG_PASSWORD=password)
+    reg = Registry(name, ip, "luxtest", password)
+    for h in env.hosts:
+        h.insecure_registry(reg.address)
+    wait_until(lambda: "401" in sh("docker", "exec", name, "sh", "-c",
+                                   "wget -S -q -O /dev/null http://127.0.0.1:5000/v2/ 2>&1; true"),
+               30, 0.5, "the registry did not start")
+    yield reg
+    sh("docker", "rm", "-f", name, check=False)
+
+
 # ---- an MCP server ---------------------------------------------------------------
 
 class MCPServer:

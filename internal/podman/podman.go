@@ -65,7 +65,8 @@ func (p *Podman) run(ctx context.Context, env []string, args ...string) ([]byte,
 	c.Stdout, c.Stderr = &stdout, &stderr
 	if err := c.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
-		if strings.Contains(msg, "no such") || strings.Contains(msg, "not found") || strings.Contains(msg, "does not exist") {
+		if strings.Contains(msg, "no such") || strings.Contains(msg, "not found") || strings.Contains(msg, "does not exist") ||
+			strings.Contains(msg, "image not known") {
 			return nil, fmt.Errorf("%w: podman %s: %s", ErrNotFound, args[0], msg)
 		}
 		return nil, fmt.Errorf("podman %s: %v: %s", strings.Join(args, " "), err, msg)
@@ -88,9 +89,81 @@ func (p *Podman) ImageExists(ctx context.Context, ref string) bool {
 	return err == nil
 }
 
-func (p *Podman) Pull(ctx context.Context, ref string) error {
-	_, err := p.Run(ctx, "pull", "-q", ref)
+// Pull pulls ref; with an authfile (a containers auth.json), with the
+// credentials it holds.
+func (p *Podman) Pull(ctx context.Context, ref, authfile string) error {
+	_, err := p.Run(ctx, withAuth([]string{"pull", "-q"}, authfile, ref)...)
 	return err
+}
+
+// Push pushes a local image to dest.
+func (p *Podman) Push(ctx context.Context, image, dest, authfile string) error {
+	_, err := p.Run(ctx, withAuth([]string{"push", "-q"}, authfile, image, dest)...)
+	return err
+}
+
+func withAuth(args []string, authfile string, rest ...string) []string {
+	if authfile != "" {
+		args = append(args, "--authfile", authfile)
+	}
+	return append(args, rest...)
+}
+
+// IsManifestUnknown reports whether a pull failed because the registry
+// has no such image (or repository), rather than for any other reason.
+func IsManifestUnknown(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := strings.ToLower(err.Error())
+	// Registries answer 404 with MANIFEST_UNKNOWN (no such tag) or
+	// NAME_UNKNOWN (no such repository).
+	return strings.Contains(m, "manifest unknown") || strings.Contains(m, "name unknown")
+}
+
+// ImageInfo is what the image GC weighs: an image's id, every name it
+// has, and its size.
+type ImageInfo struct {
+	ID    string
+	Names []string
+	Size  int64
+}
+
+// ImageInspect returns what ref names.
+func (p *Podman) ImageInspect(ctx context.Context, ref string) (ImageInfo, error) {
+	out, err := p.Run(ctx, "image", "inspect", ref)
+	if err != nil {
+		return ImageInfo{}, err
+	}
+	var raw []struct {
+		ID       string   `json:"Id"`
+		RepoTags []string `json:"RepoTags"`
+		Size     int64    `json:"Size"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil || len(raw) == 0 {
+		return ImageInfo{}, fmt.Errorf("image inspect %s: %v", ref, err)
+	}
+	return ImageInfo{ID: raw[0].ID, Names: raw[0].RepoTags, Size: raw[0].Size}, nil
+}
+
+// ContainerImages is the set of image ids any container (running or not)
+// is made from.
+func (p *Podman) ContainerImages(ctx context.Context) (map[string]bool, error) {
+	out, err := p.Run(ctx, "ps", "-a", "--no-trunc", "--format", "{{.ImageID}}")
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]bool{}
+	for _, id := range fields(out) {
+		m[strings.TrimPrefix(id, "sha256:")] = true
+	}
+	return m, nil
+}
+
+// GraphRoot is where Podman keeps images and containers.
+func (p *Podman) GraphRoot(ctx context.Context) (string, error) {
+	out, err := p.Run(ctx, "info", "--format", "{{.Store.GraphRoot}}")
+	return strings.TrimSpace(string(out)), err
 }
 
 // ImageID returns the local image id for ref.

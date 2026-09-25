@@ -1,0 +1,12 @@
+# A private registry for the tests: distribution with htpasswd basic auth,
+# over plain HTTP (hosts list it as insecure). The one user is REG_USER with
+# REG_PASSWORD.
+FROM docker.io/library/registry:3.1.2
+RUN apk add --no-cache apache2-utils
+COPY run.sh /run.sh
+ENV REGISTRY_AUTH=htpasswd \
+    REGISTRY_AUTH_HTPASSWD_REALM=lux-test \
+    REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+    REGISTRY_LOG_LEVEL=info
+EXPOSE 5000
+ENTRYPOINT ["sh", "/run.sh"]

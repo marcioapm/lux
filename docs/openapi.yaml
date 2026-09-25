@@ -50,6 +50,9 @@ components:
           additionalProperties:
             type: string
           type: object
+        cache:
+          description: "A registry repository (no tag), e.g. registry.example.com/team/lux-cache, shared by hosts: a host pulls <cache>:<build key> instead of building, and pushes what it builds there. The key covers the tenant, egress rules, pinned Containerfile and args."
+          type: string
         containerfile:
           type: string
         context:
@@ -281,6 +284,13 @@ components:
           $ref: "#/components/schemas/Build"
         ref:
           type: string
+        registryAuth:
+          description: Credentials for private registries, used by the runner for every pull and push of the placement (image.ref, FROM bases, the build cache). Never in the container.
+          items:
+            $ref: "#/components/schemas/RegistryAuth"
+          type:
+            - array
+            - "null"
       type: object
     ImageResolution:
       additionalProperties: false
@@ -539,6 +549,16 @@ components:
           type: object
         requestId:
           description: Names the push in its git.push event. Generated if absent.
+          type: string
+      type: object
+    RegistryAuth:
+      additionalProperties: false
+      properties:
+        registry:
+          description: "The registry's host, with an optional port: ghcr.io, 123.dkr.ecr.eu-west-1.amazonaws.com, 10.0.0.5:5000. No scheme or path."
+          type: string
+        secret:
+          description: The secret (in secrets) holding user:password, or a bare token (sent as the password, with the user lux).
           type: string
       type: object
     Repository:

@@ -126,8 +126,9 @@ artifacts:
 `image.ref` names an image. Pin it by digest (`name@sha256:…`) for a Run
 that is the same everywhere. It is pulled once per host and cached.
 
-`image.build` builds a Containerfile on the host that runs the Run. There
-is no registry:
+`image.build` builds a Containerfile on the host that runs the Run. It
+needs no registry (see [the build cache](#a-shared-build-cache) for
+sharing builds between hosts):
 
 ```yaml
 image:
@@ -164,6 +165,116 @@ image:
   is refused. `scratch` and earlier stages are left alone.
 - Not yet: a build context. `COPY` and `ADD` have nothing to copy from, so
   a spec with `image.build.context` is refused.
+
+### Private registries
+
+`image.registryAuth` logs the runner in to registries, for every pull and
+push of the placement: the `image.ref` pull, `FROM` bases, and the
+[build cache](#a-shared-build-cache).
+
+```yaml
+image:
+  ref: ghcr.io/acme/agent@sha256:…
+  registryAuth:
+    - { registry: ghcr.io, secret: GHCR }
+secrets:
+  - { name: GHCR, value: "acme-bot:ghp_…" }
+```
+
+- `registry` is the registry's host, in lowercase, with an optional port:
+  `ghcr.io`, `123.dkr.ecr.eu-west-1.amazonaws.com`, `10.0.0.5:5000`. No
+  scheme or path. Each registry once. Registries not listed get no
+  credentials. Not `localhost`, a loopback or a link-local address: the
+  runner pulls from the host itself, outside the Run's egress rules.
+- **A private image is its puller's.** Images are kept per host, not per
+  tenant, so a Run reuses a local copy only if its tenant has pulled that
+  image itself. Otherwise it pulls it again, with its own credentials,
+  which is cheap when the layers are already there, and fails without
+  access. Images the host had before lux are anyone's.
+- The secret's value is `user:password`, or a bare token. A bare token is
+  sent as the password of the user `lux`. Many registries take a token
+  with any user name. For those that want a particular user (Docker Hub,
+  for example), use `user:token`.
+- **The credential is the runner's.** Like a git credential, it is
+  runner-only and `as: none` by default. It never enters the container,
+  even with an explicit `as`, and no MCP or service header may use it. The
+  runner writes it to a temporary `auth.json` (mode 0600, in its data
+  directory), passes it to podman with `--authfile`, and deletes it once
+  the image is ready. It is redacted from errors, and no event or log line
+  carries it.
+- **ECR:** the secret can be `AWS:<token>` from
+  `aws ecr get-login-password`, which expires after 12 hours. Resuming a
+  Run later needs a fresh token, supplied with the resume like any secret.
+  Using the host's instance role (a credential helper) is future work.
+- Registries should be HTTPS. A plain-HTTP registry must be listed as
+  insecure on every host ([operations](operations.md#hosts)).
+
+### A shared build cache
+
+`image.build.cache` names a registry repository, with no tag, where hosts
+share their builds:
+
+```yaml
+image:
+  build:
+    containerfile: |
+      FROM docker.io/library/node:24
+      RUN npm install -g pnpm
+    cache: registry.example.com/team/lux-cache
+  registryAuth:
+    - { registry: registry.example.com, secret: CACHE_CREDS }
+```
+
+- A build is cached as `<cache>:<key>`. The key is the same one the host
+  tags its local build with: the tenant, the egress rules, the pinned
+  Containerfile, and the args. Different tenants or rules never share an
+  image, as on a single host.
+- A host without the image locally first pulls `<cache>:<key>`. On a hit
+  it runs that image, with no build (an `image.cache` event,
+  `{hit: true, ref}`). When the cache does not have it, the host builds.
+  Any other pull error is recorded as `image.cache` with a `warning`, and
+  the host builds too.
+- After a build, the host pushes it to the cache in the background. The
+  Run doesn't wait for the push. Then comes an `image.cache` event with
+  `{pushed: true, ref}`, or with a `warning` if the push failed.
+- Pinning is unchanged: the first placement pins every `FROM` and records
+  the result, and later placements use it. A hit is therefore the same
+  pinned Containerfile. The `image.built` event records the cached image's
+  id (with `fromCache: true`), and `image.rebuild-differs` compares it as
+  it would a build.
+- Each Run pins an unpinned `FROM` on the host of its first placement, to
+  the digest that host has for it. Two hosts can have different digests
+  for the same image (for example, one that loaded it and one that pulled
+  it), and different digests give different keys. So for cache hits
+  across Runs, pin `FROM` by digest yourself.
+- The cache's registry usually has a `registryAuth` entry. Without one,
+  the cache is used anonymously.
+- Two hosts that build the same key at once both push it. The last push
+  wins, and either image is the build.
+- lux never deletes from the cache. Old keys go through the registry's own
+  retention (an ECR lifecycle rule, for example).
+- Keys keep tenants apart, but a credential that can push to the
+  repository can push any tag. Share a cache repository's push
+  credentials only among tenants you trust with each other's images.
+
+### Images on hosts
+
+Hosts remove the images lux put there once they go unused:
+
+- lux records the images it pulled (`image.ref`, `FROM` bases, cache
+  pulls), built, or tagged, with their last use on the host. After the
+  host TTL (`lux-runner --host-ttl`, 24h by default) without use, it
+  removes them.
+- Images the host already had when a Run needed them are the operator's.
+  lux never removes them, and never prunes unnamed images either.
+- An image a starting Run is about to use is never removed, however long
+  its volumes take to restore.
+- When the disk holding Podman's storage is over `--image-disk-high` (80%
+  by default), each pass removes lux's images that no container uses,
+  least recently used first, until it is under the mark. Images used in
+  the last ten minutes are spared, and so is an image that also has a name
+  lux didn't give it.
+- An image a container still uses is never removed. A later pass retries.
 
 ## Nested containers
 

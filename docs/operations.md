@@ -171,10 +171,23 @@ LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a
 | `--max-runs`, `--cpus`, `--memory` | 16, all, all | Capacity offered to the scheduler. |
 | `--disk` | not reserved | Bytes of disk the scheduler reserves Runs' `resources.disk` from. Without it, disk is not reserved (Runs still stop at their own limit). Set it to the space under `/var/lib/containers`, more to overcommit. |
 | `--usage-every` | `15s` | How often each Run's disk use is sampled, and its disk limit checked. |
-| `--host-ttl` | `24h` | How long uploaded local copies are kept. |
+| `--host-ttl` | `24h` | How long uploaded local copies are kept, and images lux pulled or built after their last use ([images on hosts](runspec.md#images-on-hosts)). |
+| `--image-disk-high` | `80` | Percent use of the disk holding Podman's storage (its graph root, `/var/lib/containers`) over which lux's unused images are removed, least recently used first, until under it. `0` turns it off. Images the host had before lux are never removed. |
 | `--provider-id` | | The cloud instance id, for provisioned hosts. Also `LUX_PROVIDER_ID`. |
 | `--ec2-imds` | off | EC2 instance metadata URL (`http://169.254.169.254`) to watch for spot interruptions. Also `LUX_EC2_IMDS`. |
 | `--poll` | off | Use HTTP polling instead of a WebSocket. There is no live output in this mode: output arrives after exit. |
+
+Private registries ([`image.registryAuth`](runspec.md#private-registries))
+should be HTTPS. For a plain-HTTP registry (a test or air-gapped one),
+list it as insecure on every host:
+
+```bash
+cat > /etc/containers/registries.conf.d/50-internal.conf <<'EOF'
+[[registry]]
+location = "10.0.0.5:5000"
+insecure = true
+EOF
+```
 
 Host tokens come from `luxd admin create-host-token --tenant T [--pool P]
 [--label k=v]`. Restarting `lux-runner` does not touch running containers

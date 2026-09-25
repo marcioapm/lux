@@ -160,6 +160,13 @@ class Host:
             start_new_session=True,
         )
 
+    def insecure_registry(self, address: str) -> None:
+        """Let Podman here use a plain-HTTP registry (the tests' own).
+        Production registries are HTTPS and need none of this."""
+        name = address.replace(":", "_")
+        self.exec("sh", "-c", f"mkdir -p /etc/containers/registries.conf.d && printf '[[registry]]\\nlocation = \"{address}\"\\ninsecure = true\\n' "
+                  f"> /etc/containers/registries.conf.d/50-lux-test-{name}.conf")
+
     def running(self, *argv: str) -> bool:
         """Whether a process with exactly this command line runs here."""
         want = "\x00".join(argv) + "\x00"

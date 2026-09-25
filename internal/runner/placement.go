@@ -236,6 +236,11 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	image, err := p.ensureImage(startCtx, sp, network)
+	// Pinned until its container exists (then podman itself refuses to
+	// remove it): the GC must not take it while volumes and repositories
+	// are being prepared.
+	unpin := p.r.images.pin(image)
+	defer unpin() // on any early return; idempotent
 	if err != nil {
 		fail("image", err)
 		return
@@ -262,7 +267,9 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 
-	if err := p.createContainer(ctx, sp, image, network, a); err != nil {
+	err = p.createContainer(ctx, sp, image, network, a)
+	unpin()
+	if err != nil {
 		fail("container", err)
 		return
 	}
