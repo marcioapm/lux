@@ -105,45 +105,33 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		}
 		// Un-drain a host drained for outdated binaries once its binaries
 		// match again (its restart's ExecStartPre re-downloaded them):
-		// remove only the "outdated" cause, keeping the row locked
-		// (FOR UPDATE) until this Hello's own UPDATE commits, so a
-		// drainHost or deletePool committing concurrently can never be
-		// undone by this Hello writing a stale draining value.
+		// remove only the "outdated" cause. FOR UPDATE holds the row until
+		// this transaction commits, so a concurrent drainHost or deletePool
+		// cannot add a cause the UPDATE below would then overwrite.
 		var wasDraining bool
 		var causes []string
 		if err := tx.QueryRow(ctx, `SELECT draining, drain_causes FROM hosts WHERE id = $1 FOR UPDATE`, hostID).Scan(&wasDraining, &causes); err != nil {
 			return err
 		}
 		undrainOutdated := wasDraining && slices.Contains(causes, causeOutdated) && s.binariesMatch(h.Arch, h.RunnerSHA256, h.ShimSHA256)
-		// The UPDATE recomputes draining from what remains after removing
-		// "outdated" (a CTE over the row this transaction already holds
-		// locked, from the SELECT above): a drain that committed before
-		// that lock was taken is reflected here, and none can commit
-		// between the lock and this UPDATE, so this Hello never writes a
-		// stale draining = false.
-		var draining bool
-		err = tx.QueryRow(ctx, `
-			WITH cur AS (
-				SELECT CASE WHEN $9 THEN array_remove(drain_causes, $10) ELSE drain_causes END AS causes
-				FROM hosts WHERE id = $1
-			)
-			UPDATE hosts SET
-				drain_causes = cur.causes,
-				draining = cardinality(cur.causes) > 0,
-				state = CASE WHEN cardinality(cur.causes) > 0 THEN 'draining' ELSE 'ready' END,
-				state_reason = CASE WHEN cardinality(cur.causes) > 0 THEN hosts.state_reason ELSE '' END,
-				drain_requested_at = CASE WHEN cardinality(cur.causes) > 0 THEN hosts.drain_requested_at ELSE NULL END,
-				exit_requested_at = CASE WHEN cardinality(cur.causes) > 0 THEN hosts.exit_requested_at ELSE NULL END,
+		if undrainOutdated {
+			causes = slices.DeleteFunc(causes, func(c string) bool { return c == causeOutdated })
+		}
+		draining := len(causes) > 0
+		_, err = tx.Exec(ctx, `UPDATE hosts SET
+				drain_causes = $9,
+				draining = $10,
+				state = CASE WHEN $10 THEN 'draining' ELSE 'ready' END,
+				state_reason = CASE WHEN $10 THEN state_reason ELSE '' END,
+				drain_requested_at = CASE WHEN $10 THEN drain_requested_at ELSE NULL END,
+				exit_requested_at = CASE WHEN $10 THEN exit_requested_at ELSE NULL END,
 				labels = $2, arch = $3, capacity = $4, versions = $5, caches = $6,
-				local_snapshots = $7, provider_id = coalesce(nullif($8, ''), hosts.provider_id),
-				registered_at = coalesce(hosts.registered_at, now()),
-				provisioned_at = coalesce(hosts.provisioned_at, now()),
+				local_snapshots = $7, provider_id = coalesce(nullif($8, ''), provider_id),
+				registered_at = coalesce(registered_at, now()),
+				provisioned_at = coalesce(provisioned_at, now()),
 				last_heartbeat = now(), lost_at = NULL
-			FROM cur
-			WHERE hosts.id = $1
-			RETURNING hosts.draining`,
-			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, undrainOutdated, causeOutdated).
-			Scan(&draining)
+			WHERE id = $1`,
+			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, nonNil(causes), draining)
 		if err != nil {
 			return err
 		}
