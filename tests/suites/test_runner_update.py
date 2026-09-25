@@ -206,9 +206,15 @@ def test_an_outdated_static_host_is_drained_once(env, lux, runners, hosts):
     """luxd holds a binary for this host's arch that differs from what its
     runner reports: it is drained, with a clear reason, cordoned (no Run
     stopped: outdated-binaries drains never call requestStop), and the
-    reaper's `exit` message is queued exactly once even across several
-    heartbeats — not merely "the timestamp doesn't move" (coalesce makes
-    that true regardless of how many times the host is drained)."""
+    reaper's `exit` message is queued exactly once — a second reaper tick
+    before the runner acts on it (exit_requested_at is set in the same
+    UPDATE that enqueues the message) must not queue another. This host is
+    idle from the start, so the runner receives that exit and exits within
+    a couple of seconds, well inside one heartbeat interval: its actually
+    exiting (not a fixed sleep, and not waiting on heartbeats that will
+    never come) is what proves the reaper's coalescing held, since nothing
+    else could have queued a second message once no runner remains to
+    receive one."""
     host = runners.start(hosts[0])
     host_id = lux.json("hosts", "get", host.name)["id"]
     arch = _host_arch(lux, host.name)
@@ -221,18 +227,13 @@ def test_an_outdated_static_host_is_drained_once(env, lux, runners, hosts):
                        30, 0.5, "the outdated host was never drained")
         assert h["stateReason"] == "outdated binaries", h
 
-        # Idle and drained: the reaper queues exactly one exit message.
+        # Idle and drained: the reaper queues exactly one exit message,
+        # and the runner acts on it and exits with the outdated-binaries
+        # code (proto.ExitCodeOutdatedBinaries).
         wait_until(lambda: _host_message_count(env, host_id, "exit") == 1, 30, 0.5,
                    "the reaper never queued an exit message")
-        # Several more heartbeats (and reaper ticks) must not queue a
-        # second one: wait for two more heartbeats to actually land
-        # (lastHeartbeat advancing), not a fixed sleep, then check the
-        # real count.
-        hb1 = lux.json("hosts", "get", host.name)["lastHeartbeat"]
-        hb2 = wait_until(lambda: (lambda hb: hb if hb != hb1 else None)(lux.json("hosts", "get", host.name)["lastHeartbeat"]),
-                          15, 0.3, "no heartbeat landed after the drain")
-        wait_until(lambda: (lambda hb: hb if hb != hb2 else None)(lux.json("hosts", "get", host.name)["lastHeartbeat"]),
-                   15, 0.3, "no second heartbeat landed after the drain")
+        code = runners.procs[host.name].wait(timeout=60)
+        assert code == 42, f"exit code {code}, want 42 (ExitCodeOutdatedBinaries)"
         assert _host_message_count(env, host_id, "exit") == 1, "a second exit message was queued"
         # Cordon-only: no live placement ever exists here (idle from the
         # start), so no stop request either — proving the outdated-binaries

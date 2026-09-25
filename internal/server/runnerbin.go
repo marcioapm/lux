@@ -134,7 +134,7 @@ func (s *Server) drainIfOutdated(ctx context.Context, tx pgx.Tx, hostID, arch, r
 	err := tx.QueryRow(ctx, `
 		SELECT
 			count(*) FILTER (WHERE state IN ('ready', 'draining')),
-			count(*) FILTER (WHERE draining AND $3 = ANY(drain_causes))
+			count(*) FILTER (WHERE state = 'draining' AND $3 = ANY(drain_causes))
 		FROM hosts
 		WHERE coalesce(tenant_id, '') = $1 AND pool = $2`,
 		tenant, pool, causeOutdated).Scan(&live, &draining)

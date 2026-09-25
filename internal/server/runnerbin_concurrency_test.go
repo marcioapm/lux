@@ -61,6 +61,42 @@ func TestDrainIfOutdatedCapHoldsUnderConcurrentHellos(t *testing.T) {
 	}
 }
 
+// A terminated host still carrying the "outdated" cause (the provisioner's
+// replace path terminates a drained host without ever clearing
+// drain_causes or draining) must not count against the pool's cap
+// forever: only a host still draining counts, so the pool's continuous
+// replace-the-next-outdated-instance cycle is never stuck below its own
+// cap once earlier instances are gone.
+func TestDrainIfOutdatedCapIgnoresTerminatedHosts(t *testing.T) {
+	s := testServer(t)
+	s.bins = matchingBins()
+	s.cfg.OutdatedDrainPercent = 100
+	ctx := context.Background()
+
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, draining, state_reason, drain_causes) VALUES
+		('gone', 'gone', 'burst', 'terminated', true, $1, ARRAY[$2])`, outdatedBinariesReason, causeOutdated)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('h1', 'h1', 'burst', 'ready')`)
+
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := s.drainIfOutdated(ctx, tx, "h1", "arm64", "old-r", "old-s")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var draining bool
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT draining FROM hosts WHERE id = 'h1'`).Scan(&draining)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !draining {
+		t.Fatal("h1 was not drained: a terminated host still carrying the outdated cause was counted against the cap")
+	}
+}
+
 // The percentage maths: max(1, live*percent/100), so a pool of 5 with a
 // 10% cap still cordons 1 (not 0), and a pool of 30 with a 10% cap
 // cordons 3.
