@@ -68,10 +68,12 @@ unless `--input` is given: that text is delivered once it runs again ("go
 on where you left off", say). A generic workload restarts its command with
 its state volumes restored.
 
-A Run already being stopped (by its tenant, a drain, a cancel) cannot also
-be migrated. A tenant's `stop` during a migration wins: the Run stays
-stopped. A chosen host that stops taking Runs (drained, lost) before the Run
-gets there no longer holds it: it goes wherever it may.
+A Run already being stopped (by its tenant, a force-evict drain, a cancel)
+cannot also be migrated. A Run on a host that is merely cordoned (a plain
+drain, scale-down, `pools rm`) is not being stopped by that alone, so
+migrate still applies to it. A tenant's `stop` during a migration wins: the
+Run stays stopped. A chosen host that stops taking Runs (drained, lost)
+before the Run gets there no longer holds it: it goes wherever it may.
 
 **Resume** by an operator can choose the host (`--to`). A Run's secrets are
 never stored: luxd holds their values in memory from the submit or resume

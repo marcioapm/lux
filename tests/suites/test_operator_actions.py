@@ -161,14 +161,28 @@ def test_migrate_refuses_a_run_already_stopping(operator, lux, runners, hosts):
     lux.run("cancel", run_id)
 
 
-def test_migrate_leaves_a_draining_hosts_runs_to_the_drain(operator, lux, runners, hosts):
-    """A draining (or evicting) host's Runs are already being moved: a
-    migration without a target would only race the drain."""
+def test_migrate_leaves_a_forced_eviction_to_the_drain(operator, lux, runners, hosts):
+    """A force-evicted host's Runs are already being moved: a migration
+    without a target would only race the eviction. A plainly drained
+    (cordoned) host is not moving its Runs, so migrate still works there."""
     runners.start(hosts[0])
     run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "trap 'sleep 5; exit 0' TERM; sleep 300 & wait"))
     host = lux.wait_state(run_id, "running")["host"]
-    lux.run("hosts", "drain", host)
+    lux.run("hosts", "drain", host, "--force-evict")
     with pytest.raises(CLIError) as e:
         operator.run("migrate", run_id)
-    assert "draining" in e.value.stderr
+    assert "already being stopped" in e.value.stderr
+    lux.run("cancel", run_id)
+
+
+def test_migrate_a_run_on_a_plainly_drained_host_succeeds(operator, lux, runners, hosts):
+    """A plain drain only cordons its host: nothing is moving the Run, so
+    an operator can still migrate it off elsewhere."""
+    runners.start(hosts[0])
+    runners.start(hosts[1])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sleep", "300"))
+    host = lux.wait_state(run_id, "running")["host"]
+    lux.run("hosts", "drain", host)
+    run = operator.json("migrate", run_id, "--wait", timeout=200)
+    assert run["host"] != host and run["state"] == "running", run
     lux.run("cancel", run_id)
