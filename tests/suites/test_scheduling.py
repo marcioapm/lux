@@ -73,7 +73,6 @@ def test_plain_drain_leaves_running_run_and_places_new_elsewhere(lux, runners, h
     h = wait_until(lambda: (lambda x: x if x["draining"] else None)(lux.json("hosts", "get", hosts[0].name)),
                    15, 0.3, "the host was never cordoned")
     assert h["times"]["drainRequested"]
-    time.sleep(3)
     run = lux.get(run_id)
     assert run["state"] == "running" and len(run["placements"]) == 1, run
     assert run["placements"][0]["hostName"] == hosts[0].name
@@ -92,7 +91,9 @@ def test_force_evict_on_an_already_draining_host_moves_its_run(lux, runners, hos
     lux.wait_state(run_id, "running")
     lux.run("hosts", "drain", hosts[0].name)
     wait_until(lambda: lux.json("hosts", "get", hosts[0].name)["draining"], 15, 0.3, "plain drain never took")
-    assert lux.get(run_id)["state"] == "running", "the plain drain stopped the Run"
+    run = lux.get(run_id)
+    assert run["state"] == "running", "the plain drain stopped the Run"
+    assert not run["placements"][0].get("stopRequestedAt"), run["placements"][0]
     runners.start(hosts[1])
     lux.run("hosts", "drain", hosts[0].name, "--force-evict")
     run = wait_until(lambda: (lambda r: r if len(r["placements"]) == 2 and r["state"] == "running" else None)(lux.get(run_id)),

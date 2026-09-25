@@ -550,7 +550,9 @@ terminated once idle; their live Runs finish where they are.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := "/v1/pools/" + args[0]
 			if forceEvict {
-				path += "?forceEvict=true"
+				q := url.Values{}
+				q.Set("forceEvict", "true")
+				path += "?" + q.Encode()
 			}
 			return a.c.Do(ctxOf(cmd), "DELETE", path, nil, nil)
 		},
