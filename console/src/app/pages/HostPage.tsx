@@ -24,15 +24,16 @@ export function HostPage({ id }: { id: string }) {
   const disk = useSeries(samples, [(s) => s.diskBytes, cap?.disk]);
   const placements = useSeries(samples, [(s) => s.placements, cap?.runs]);
 
-  const drain = async (_input: string | undefined, forceEvict: boolean | undefined) => {
+  const drain = async (forceEvict: boolean) => {
     setDraining(true);
     try {
-      await api.drainHost(id, !!forceEvict);
-      toast({
-        title: `Draining ${h?.name ?? id}`,
-        description: forceEvict ? (h?.liveRuns ? `${h.liveRuns} live runs will be moved` : undefined) : "New placements are refused; live runs finish where they are",
-        tone: "warn",
-      });
+      await api.drainHost(id, forceEvict);
+      const description = forceEvict
+        ? h?.liveRuns
+          ? `${h.liveRuns} live runs will be moved`
+          : undefined
+        : "New placements are refused; live runs finish where they are";
+      toast({ title: `Draining ${h?.name ?? id}`, description, tone: "warn" });
       setDrainOpen(false);
       await host.refetch();
     } catch (e) {
@@ -52,7 +53,10 @@ export function HostPage({ id }: { id: string }) {
 
   if (!h) return <PageSkeleton />;
 
-  const canDrain = h.state !== "terminated" && !h.draining;
+  // A draining host (plain drain, scale-down, outdated binaries, …) can
+  // still be acted on: the only action left for it is a force evict.
+  const canAct = h.state !== "terminated";
+  const forceOnly = h.draining;
   return (
     <div className="page">
       <PageHeader
@@ -76,8 +80,8 @@ export function HostPage({ id }: { id: string }) {
         }
         note={h.stateReason}
         actions={
-          <Button variant="danger" disabled={!canDrain} onClick={() => setDrainOpen(true)}>
-            Drain
+          <Button variant="danger" disabled={!canAct} onClick={() => setDrainOpen(true)}>
+            {forceOnly ? "Force evict" : "Drain"}
           </Button>
         }
       />
@@ -129,14 +133,23 @@ export function HostPage({ id }: { id: string }) {
 
       <ConfirmDialog
         open={drainOpen}
-        title={`Drain ${h.name}?`}
-        description={`No new placements will be assigned. ${h.liveRuns ? `Its ${h.liveRuns} live run${h.liveRuns === 1 ? "" : "s"} finish${h.liveRuns === 1 ? "s" : ""} where ${h.liveRuns === 1 ? "it is" : "they are"}, unless forced.` : "It has no live runs."} A provisioned host is terminated once empty.`}
-        confirmLabel="Drain host"
+        title={forceOnly ? `Force evict ${h.name}?` : `Drain ${h.name}?`}
+        description={
+          forceOnly
+            ? `Its ${h.liveRuns} live run${h.liveRuns === 1 ? "" : "s"} will be stopped and resumed elsewhere.`
+            : `No new placements will be assigned. ${h.liveRuns ? `Its ${h.liveRuns} live run${h.liveRuns === 1 ? "" : "s"} finish${h.liveRuns === 1 ? "s" : ""} where ${h.liveRuns === 1 ? "it is" : "they are"}, unless forced.` : "It has no live runs."} A provisioned host is terminated once empty.`
+        }
+        confirmLabel={forceOnly ? "Force evict" : "Drain host"}
         tone="danger"
         confirmText={h.name}
-        checkbox={{ label: "Force evict running Runs", help: "Stops its live runs now: they are snapshotted and resumed elsewhere, instead of finishing on this host." }}
+        checkbox={{
+          label: "Force evict running Runs",
+          help: "Stops its live runs now: they are snapshotted and resumed elsewhere, instead of finishing on this host.",
+          checked: forceOnly,
+          locked: forceOnly,
+        }}
         loading={draining}
-        onConfirm={(_input, checked) => void drain(_input, checked)}
+        onConfirm={(_input, checked) => void drain(!!checked)}
         onCancel={() => setDrainOpen(false)}
       />
     </div>

@@ -14,7 +14,7 @@ export interface ConfirmDialogProps {
   /** Prompt for free text (e.g. a reason) and pass it to onConfirm. */
   input?: { label: string; placeholder?: string; required?: boolean };
   /** An opt-in checkbox (e.g. force-evict); its state is passed to onConfirm. */
-  checkbox?: { label: string; help?: string };
+  checkbox?: { label: string; help?: string; checked?: boolean; locked?: boolean };
   loading?: boolean;
   onConfirm: (input?: string, checked?: boolean) => void;
   onCancel: () => void;
@@ -33,10 +33,10 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
     if (open && !d.open) {
       setTyped("");
       setText("");
-      setChecked(false);
+      setChecked(!!checkbox?.checked);
       d.showModal();
     } else if (!open && d.open) d.close();
-  }, [open]);
+  }, [open, checkbox?.checked]);
 
   const blocked = (confirmText != null && typed !== confirmText) || (input?.required && text.trim() === "");
 
@@ -70,7 +70,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
         )}
         {checkbox && (
           <label className="check">
-            <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} />
+            <input type="checkbox" checked={checked} disabled={checkbox.locked} onChange={(e) => setChecked(e.target.checked)} />
             {checkbox.label}
           </label>
         )}
