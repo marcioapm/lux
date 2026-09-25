@@ -74,7 +74,7 @@ components:
           format: int64
           type: integer
       type: object
-    DrainHostInputBody:
+    DrainHostRequest:
       additionalProperties: false
       properties:
         forceEvict:
@@ -1816,8 +1816,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/DrainHostInputBody"
-        required: true
+              $ref: "#/components/schemas/DrainHostRequest"
       responses:
         "202":
           content:

@@ -1,17 +1,22 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/store"
 )
 
 // drainState reads back a host's draining flag and its live placement's
-// stop_requested_at (empty runID: only the host is checked).
-func drainState(t *testing.T, s *Server, ctx context.Context, hostID, runID string) (draining bool, stopRequested bool) {
+// stop_requested_at and stop_reason (empty runID: only the host is checked).
+func drainState(t *testing.T, s *Server, ctx context.Context, hostID, runID string) (draining bool, stopRequested bool, stopReason string) {
 	t.Helper()
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `SELECT draining FROM hosts WHERE id = $1`, hostID).Scan(&draining); err != nil {
@@ -20,28 +25,45 @@ func drainState(t *testing.T, s *Server, ctx context.Context, hostID, runID stri
 		if runID == "" {
 			return nil
 		}
-		return tx.QueryRow(ctx, `SELECT stop_requested_at IS NOT NULL FROM placements WHERE run_id = $1`, runID).Scan(&stopRequested)
+		return tx.QueryRow(ctx, `SELECT stop_requested_at IS NOT NULL, stop_reason FROM placements WHERE run_id = $1`, runID).
+			Scan(&stopRequested, &stopReason)
 	}); err != nil {
 		t.Fatal(err)
 	}
 	return
 }
 
+// hostStateReason reads back a host's state_reason.
+func hostStateReason(t *testing.T, s *Server, ctx context.Context, hostID string) string {
+	t.Helper()
+	var reason string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT state_reason FROM hosts WHERE id = $1`, hostID).Scan(&reason)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return reason
+}
+
+// drainFixture is a tenant with one ready host and one running Run placed
+// on it (current_epoch = 1, matching its placement, so requestStop can
+// find it): the common setup every drain test starts from.
+func drainFixture(t *testing.T, s *Server, ctx context.Context) {
+	t.Helper()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state) VALUES ('h1', 't1', 'h1', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
+}
+
 // A plain drainHost (forceEvict false) cordons the host but leaves its
-// live placement alone: no stop is requested.
+// live placement alone: no stop is requested. A control step then
+// force-evicts the same fixture and checks the stop does flip, so a
+// forceEvict the handler ignored would not pass silently.
 func TestDrainHostWithoutForceEvictLeavesRunAlone(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
-	exec := func(q string, args ...any) {
-		t.Helper()
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q, args...); return err }); err != nil {
-			t.Fatal(err)
-		}
-	}
-	exec(`INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	exec(`INSERT INTO hosts (id, tenant_id, name, state) VALUES ('h1', 't1', 'h1', 'ready')`)
-	exec(`INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{}', 'running')`)
-	exec(`INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
+	drainFixture(t, s, ctx)
 
 	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 	in := &drainHostInput{}
@@ -50,12 +72,21 @@ func TestDrainHostWithoutForceEvictLeavesRunAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	draining, stopRequested := drainState(t, s, context.Background(), "h1", "r1")
+	draining, stopRequested, _ := drainState(t, s, context.Background(), "h1", "r1")
 	if !draining {
 		t.Error("host was not cordoned")
 	}
 	if stopRequested {
 		t.Error("a plain drain requested a stop; want the running Run left alone")
+	}
+
+	// Control: the same fixture, force-evicted, must show the stop flip.
+	in2 := &drainHostInput{HostPath: HostPath{ID: "h1"}, Body: &drainHostRequest{ForceEvict: true}}
+	if _, err := s.drainHost(ctx, in2); err != nil {
+		t.Fatal(err)
+	}
+	if _, stopRequested, reason := drainState(t, s, context.Background(), "h1", "r1"); !stopRequested || reason != "drain" {
+		t.Fatalf("force-evict on the control step: stopRequested=%v stopReason=%q, want true/\"drain\" (the fixture cannot detect an eviction otherwise)", stopRequested, reason)
 	}
 }
 
@@ -64,16 +95,7 @@ func TestDrainHostWithoutForceEvictLeavesRunAlone(t *testing.T) {
 func TestDrainHostWithForceEvictStopsRun(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
-	exec := func(q string, args ...any) {
-		t.Helper()
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q, args...); return err }); err != nil {
-			t.Fatal(err)
-		}
-	}
-	exec(`INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	exec(`INSERT INTO hosts (id, tenant_id, name, state) VALUES ('h1', 't1', 'h1', 'ready')`)
-	exec(`INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
-	exec(`INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
+	drainFixture(t, s, ctx)
 
 	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 
@@ -83,20 +105,55 @@ func TestDrainHostWithForceEvictStopsRun(t *testing.T) {
 	if _, err := s.drainHost(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	if draining, stopRequested := drainState(t, s, context.Background(), "h1", "r1"); !draining || stopRequested {
+	if draining, stopRequested, _ := drainState(t, s, context.Background(), "h1", "r1"); !draining || stopRequested {
 		t.Fatalf("after plain drain: draining=%v stopRequested=%v", draining, stopRequested)
 	}
 
 	// forceEvict on the already-draining host must still evict its Run.
-	in2 := &drainHostInput{}
-	in2.ID = "h1"
-	in2.Body.ForceEvict = true
+	in2 := &drainHostInput{HostPath: HostPath{ID: "h1"}, Body: &drainHostRequest{ForceEvict: true}}
 	if _, err := s.drainHost(ctx, in2); err != nil {
 		t.Fatal(err)
 	}
-	draining, stopRequested := drainState(t, s, context.Background(), "h1", "r1")
-	if !draining || !stopRequested {
-		t.Fatalf("after forceEvict on an already-draining host: draining=%v stopRequested=%v, want both true", draining, stopRequested)
+	draining, stopRequested, reason := drainState(t, s, context.Background(), "h1", "r1")
+	if !draining || !stopRequested || reason != "drain" {
+		t.Fatalf("after forceEvict on an already-draining host: draining=%v stopRequested=%v stopReason=%q, want draining/true/\"drain\"", draining, stopRequested, reason)
+	}
+}
+
+// A POST with no body at all (the old spec had no request body: curl
+// scripts, and clients generated from it, send none) must still cordon
+// the host cordon-only: the body is optional, not required.
+func TestDrainHostHTTPWithNoBodyCordonsOnly(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	drainFixture(t, s, ctx)
+	key := ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('key1', 't1', 'k', $1, ARRAY['admin'])`, ids.Hash(key))
+
+	h := s.Handler()
+	req := httptest.NewRequest(http.MethodPost, "/v1/hosts/h1/drain", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("POST /drain with no body: %d %s, want 202", w.Code, w.Body)
+	}
+	var body struct {
+		Draining bool `json:"draining"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(w.Body.Bytes())).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Draining {
+		t.Error("response says draining=false")
+	}
+
+	draining, stopRequested, _ := drainState(t, s, context.Background(), "h1", "r1")
+	if !draining {
+		t.Error("host was not cordoned")
+	}
+	if stopRequested {
+		t.Error("a bodiless drain requested a stop; want cordon-only")
 	}
 }
 
@@ -106,17 +163,11 @@ func TestDrainHostWithForceEvictStopsRun(t *testing.T) {
 func TestDeletePoolWithoutForceEvictLeavesRunsAlone(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
-	exec := func(q string, args ...any) {
-		t.Helper()
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q, args...); return err }); err != nil {
-			t.Fatal(err)
-		}
-	}
-	exec(`INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	exec(`INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
-	exec(`INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id) VALUES ('h1', 't1', 'h1', 'burst', 'ready', 'i-123')`)
-	exec(`INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
-	exec(`INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id) VALUES ('h1', 't1', 'h1', 'burst', 'ready', 'i-123')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
 
 	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 	in := &deletePoolInput{Name: "burst"}
@@ -124,7 +175,7 @@ func TestDeletePoolWithoutForceEvictLeavesRunsAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	draining, stopRequested := drainState(t, s, context.Background(), "h1", "r1")
+	draining, stopRequested, _ := drainState(t, s, context.Background(), "h1", "r1")
 	if !draining {
 		t.Error("the pool's host was not cordoned")
 	}
@@ -146,17 +197,11 @@ func TestDeletePoolWithoutForceEvictLeavesRunsAlone(t *testing.T) {
 func TestDeletePoolWithForceEvictStopsRuns(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
-	exec := func(q string, args ...any) {
-		t.Helper()
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q, args...); return err }); err != nil {
-			t.Fatal(err)
-		}
-	}
-	exec(`INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	exec(`INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
-	exec(`INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id) VALUES ('h1', 't1', 'h1', 'burst', 'ready', 'i-123')`)
-	exec(`INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
-	exec(`INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id) VALUES ('h1', 't1', 'h1', 'burst', 'ready', 'i-123')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
 
 	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 	in := &deletePoolInput{Name: "burst", ForceEvict: true}
@@ -164,26 +209,24 @@ func TestDeletePoolWithForceEvictStopsRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	draining, stopRequested := drainState(t, s, context.Background(), "h1", "r1")
-	if !draining || !stopRequested {
-		t.Fatalf("deletePool with forceEvict: draining=%v stopRequested=%v, want both true", draining, stopRequested)
+	draining, stopRequested, reason := drainState(t, s, context.Background(), "h1", "r1")
+	if !draining || !stopRequested || reason != "drain" {
+		t.Fatalf("deletePool with forceEvict: draining=%v stopRequested=%v stopReason=%q, want draining/true/\"drain\"", draining, stopRequested, reason)
 	}
 }
 
-// A static (non-provisioned) host in a deleted pool is cordoned like any
-// other: deletePool never touches placements outside the pool's own hosts.
+// deletePool never touches hosts outside the pool it removes: neither a
+// platform host in another pool, nor a static host inside the very pool
+// being deleted (deletePool only selects provider_id IS NOT NULL rows).
 func TestDeletePoolOnlyTouchesItsOwnHosts(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
-	exec := func(q string, args ...any) {
-		t.Helper()
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q, args...); return err }); err != nil {
-			t.Fatal(err)
-		}
-	}
-	exec(`INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	exec(`INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
-	exec(`INSERT INTO hosts (id, tenant_id, name, pool, state) VALUES ('h-other', 't1', 'h-other', 'default', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state) VALUES ('h-other', 't1', 'h-other', 'default', 'ready')`)
+	// A static host inside the pool being deleted: no provider_id, so it
+	// stays uncordoned (the provisioner never terminates it either).
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state) VALUES ('h-static', 't1', 'h-static', 'burst', 'ready')`)
 
 	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 	in := &deletePoolInput{Name: "burst", ForceEvict: true}
@@ -191,8 +234,54 @@ func TestDeletePoolOnlyTouchesItsOwnHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	draining, _ := drainState(t, s, context.Background(), "h-other", "")
+	draining, _, _ := drainState(t, s, context.Background(), "h-other", "")
 	if draining {
 		t.Error("deletePool cordoned a host outside the deleted pool")
+	}
+	draining, _, _ = drainState(t, s, context.Background(), "h-static", "")
+	if draining {
+		t.Error("deletePool cordoned a static host in the deleted pool")
+	}
+}
+
+// A plain drain on a host already draining for outdated binaries must not
+// clobber that reason: the reaper's WHERE state_reason = outdatedBinariesReason
+// keys off it, so overwriting it would strand a static host cordoned
+// forever, never told to exit.
+func TestPlainDrainKeepsAnEarlierDrainReason(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h1', 'h1', 'ready')`)
+
+	// First, drained for outdated binaries (as drainIfOutdated does).
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := s.drainHosts(ctx, tx, outdatedBinariesReason, "", "id = $1", "h1")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if reason := hostStateReason(t, s, ctx, "h1"); reason != outdatedBinariesReason {
+		t.Fatalf("after the outdated-binaries drain: state_reason = %q, want %q", reason, outdatedBinariesReason)
+	}
+
+	// Then a plain drain (an operator's) on the same host: must not
+	// overwrite the reason.
+	ctx = context.WithValue(ctx, principalKey, Principal{Operator: true, Scopes: []string{"admin", "operator"}})
+	in := &drainHostInput{}
+	in.ID = "h1"
+	if _, err := s.drainHost(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if reason := hostStateReason(t, s, ctx, "h1"); reason != outdatedBinariesReason {
+		t.Fatalf("after a plain drain on top: state_reason = %q, want still %q (not clobbered)", reason, outdatedBinariesReason)
+	}
+
+	// The reaper still recognizes the host and sends it the exit.
+	if err := s.reapOutdatedStaticHosts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	requested := exitRequested(t, s, ctx)
+	if !requested["h1"] {
+		t.Error("the reaper did not send the exit: the plain drain must have clobbered the outdated-binaries reason")
 	}
 }

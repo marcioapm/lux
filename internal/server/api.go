@@ -1483,12 +1483,14 @@ func (s *Server) resolveHost(ctx context.Context, tx pgx.Tx, p Principal, ref st
 	return found[0], nil
 }
 
+type drainHostRequest struct {
+	ForceEvict bool `json:"forceEvict,omitempty" doc:"Also stop this host's live Runs so they resume elsewhere. Without it, they finish where they are; only new placements are refused."`
+}
+
 type drainHostInput struct {
 	HostPath
 	TenantQuery
-	Body struct {
-		ForceEvict bool `json:"forceEvict,omitempty" doc:"Also stop this host's live Runs so they resume elsewhere. Without it, they finish where they are; only new placements are refused."`
-	}
+	Body *drainHostRequest
 }
 
 type drainHostOutput struct {
@@ -1505,10 +1507,7 @@ type drainHostOutput struct {
 // hosts; an operator, any host.
 func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostOutput, error) {
 	p := principal(ctx)
-	stopReason := ""
-	if in.Body.ForceEvict {
-		stopReason = "drain"
-	}
+	stopReason := evictReason(in.Body != nil && in.Body.ForceEvict)
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		id, err := s.resolveHost(ctx, tx, p, in.ID, false)
@@ -1537,12 +1536,16 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 // they are: the reaper (static hosts) or the pool's replace path
 // (provisioned) takes the host once it is idle. Calling it again with a
 // stopReason on a host that is already draining still evicts its current
-// placements.
+// placements. reason only overwrites state_reason on a host not already
+// draining: a plain drain (or scale-down, or a pool's cordon) must not
+// clobber an earlier drain's reason (e.g. outdated binaries), or the
+// reaper waiting on that reason would never see its exit.
 // Returns their ids, to notify once the transaction commits.
 func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, stopReason, where string, args ...any) ([]string, error) {
 	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
 			state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
-			state_reason = $%d, drain_requested_at = coalesce(drain_requested_at, now())
+			state_reason = CASE WHEN draining THEN state_reason ELSE $%d END,
+			drain_requested_at = coalesce(drain_requested_at, now())
 		WHERE state <> 'terminated' AND %s
 		RETURNING id`, len(args)+1, where), append(args, reason)...)
 	if err != nil {
@@ -1568,6 +1571,15 @@ func (s *Server) notifyAll(hosts []string) {
 	for _, h := range hosts {
 		s.hub.Notify(h)
 	}
+}
+
+// evictReason is the placements' stop reason for a drain: "drain" with
+// forceEvict, or "" for cordon-only (drainHosts then leaves them running).
+func evictReason(force bool) string {
+	if force {
+		return "drain"
+	}
+	return ""
 }
 
 type Pool struct {
@@ -1632,10 +1644,7 @@ type deletePoolInput struct {
 func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}, error) {
 	p := principal(ctx)
 	name := in.Name
-	stopReason := ""
-	if in.ForceEvict {
-		stopReason = "drain"
-	}
+	stopReason := evictReason(in.ForceEvict)
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
