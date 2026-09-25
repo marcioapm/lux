@@ -166,21 +166,20 @@ func (s *Server) reapOutdatedStaticHosts(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		var resent []string
-		for rows.Next() {
-			var id string
-			var wasResent bool
-			if err := rows.Scan(&id, &wasResent); err != nil {
-				rows.Close()
-				return err
-			}
-			hosts = append(hosts, id)
-			if wasResent {
-				resent = append(resent, id)
-			}
+		type candidate struct {
+			ID     string
+			Resend bool
 		}
-		if err := rows.Err(); err != nil {
+		candidates, err := pgx.CollectRows(rows, pgx.RowToStructByPos[candidate])
+		if err != nil {
 			return err
+		}
+		var resent []string
+		for _, c := range candidates {
+			hosts = append(hosts, c.ID)
+			if c.Resend {
+				resent = append(resent, c.ID)
+			}
 		}
 		if len(resent) > 0 {
 			s.log.Warn("re-sending exit: the host is still outdated", "hosts", resent)
