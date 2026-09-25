@@ -24,11 +24,15 @@ export function HostPage({ id }: { id: string }) {
   const disk = useSeries(samples, [(s) => s.diskBytes, cap?.disk]);
   const placements = useSeries(samples, [(s) => s.placements, cap?.runs]);
 
-  const drain = async () => {
+  const drain = async (_input: string | undefined, forceEvict: boolean | undefined) => {
     setDraining(true);
     try {
-      await api.drainHost(id);
-      toast({ title: `Draining ${h?.name ?? id}`, description: h?.liveRuns ? `${h.liveRuns} live runs will be moved` : undefined, tone: "warn" });
+      await api.drainHost(id, !!forceEvict);
+      toast({
+        title: `Draining ${h?.name ?? id}`,
+        description: forceEvict ? (h?.liveRuns ? `${h.liveRuns} live runs will be moved` : undefined) : "New placements are refused; live runs finish where they are",
+        tone: "warn",
+      });
       setDrainOpen(false);
       await host.refetch();
     } catch (e) {
@@ -126,12 +130,13 @@ export function HostPage({ id }: { id: string }) {
       <ConfirmDialog
         open={drainOpen}
         title={`Drain ${h.name}?`}
-        description={`No new placements will be assigned. ${h.liveRuns ? `Its ${h.liveRuns} live run${h.liveRuns === 1 ? "" : "s"} are stopped, snapshotted and resumed elsewhere.` : "It has no live runs."} A provisioned host is terminated once empty.`}
+        description={`No new placements will be assigned. ${h.liveRuns ? `Its ${h.liveRuns} live run${h.liveRuns === 1 ? "" : "s"} finish${h.liveRuns === 1 ? "s" : ""} where ${h.liveRuns === 1 ? "it is" : "they are"}, unless forced.` : "It has no live runs."} A provisioned host is terminated once empty.`}
         confirmLabel="Drain host"
         tone="danger"
         confirmText={h.name}
+        checkbox={{ label: "Force evict running Runs", help: "Stops its live runs now: they are snapshotted and resumed elsewhere, instead of finishing on this host." }}
         loading={draining}
-        onConfirm={() => void drain()}
+        onConfirm={(_input, checked) => void drain(_input, checked)}
         onCancel={() => setDrainOpen(false)}
       />
     </div>

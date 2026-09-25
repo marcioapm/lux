@@ -30,7 +30,7 @@ export const api = {
   hosts: (tenant: Scope, p: HostListParams = {}, signal?: Sig) => request<{ hosts: Host[] }>("/hosts", { tenant, query: { all: p.all, pool: p.pool, state: p.state }, signal }).then((r) => r.hosts),
   host: (id: string, signal?: Sig) => request<Host>(`/hosts/${enc(id)}`, { signal }),
   hostHistory: (id: string, since: string, signal?: Sig) => request<History>(`/hosts/${enc(id)}/history`, { query: { since }, signal }),
-  drainHost: (id: string) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST" }),
+  drainHost: (id: string, forceEvict = false) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST", body: { forceEvict } }),
 
   pools: (tenant: Scope, signal?: Sig) => request<{ pools: Pool[] }>("/pools", { tenant, signal }).then((r) => r.pools),
   tenants: (signal?: Sig) => request<{ tenants: Tenant[] }>("/tenants", { signal }).then((r) => r.tenants),

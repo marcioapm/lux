@@ -13,16 +13,19 @@ export interface ConfirmDialogProps {
   confirmText?: string;
   /** Prompt for free text (e.g. a reason) and pass it to onConfirm. */
   input?: { label: string; placeholder?: string; required?: boolean };
+  /** An opt-in checkbox (e.g. force-evict); its state is passed to onConfirm. */
+  checkbox?: { label: string; help?: string };
   loading?: boolean;
-  onConfirm: (input?: string) => void;
+  onConfirm: (input?: string, checked?: boolean) => void;
   onCancel: () => void;
 }
 
 export function ConfirmDialog(props: ConfirmDialogProps) {
-  const { open, title, description, confirmLabel = "Confirm", cancelLabel = "Cancel", tone = "default", confirmText, input, loading, onConfirm, onCancel } = props;
+  const { open, title, description, confirmLabel = "Confirm", cancelLabel = "Cancel", tone = "default", confirmText, input, checkbox, loading, onConfirm, onCancel } = props;
   const ref = useRef<HTMLDialogElement>(null);
   const [typed, setTyped] = useState("");
   const [text, setText] = useState("");
+  const [checked, setChecked] = useState(false);
 
   useEffect(() => {
     const d = ref.current;
@@ -30,6 +33,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
     if (open && !d.open) {
       setTyped("");
       setText("");
+      setChecked(false);
       d.showModal();
     } else if (!open && d.open) d.close();
   }, [open]);
@@ -53,7 +57,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
         className="dialog-form"
         onSubmit={(e) => {
           e.preventDefault();
-          if (!blocked) onConfirm(input ? text : undefined);
+          if (!blocked) onConfirm(input ? text : undefined, checkbox ? checked : undefined);
         }}
       >
         <h2 className="dialog-title">{title}</h2>
@@ -64,6 +68,13 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
             <input className="input" value={text} placeholder={input.placeholder} onChange={(e) => setText(e.target.value)} autoFocus />
           </label>
         )}
+        {checkbox && (
+          <label className="check">
+            <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} />
+            {checkbox.label}
+          </label>
+        )}
+        {checkbox?.help && <div className="muted">{checkbox.help}</div>}
         {confirmText != null && (
           <label className="field">
             <span className="field-label">
