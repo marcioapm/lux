@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -102,40 +103,51 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		case err != nil:
 			return err
 		}
-		// Un-drain a host drained for exactly this reason once its
-		// binaries match again (its restart's ExecStartPre re-downloaded
-		// them); read before this Hello's own UPDATE.
+		// Un-drain a host drained for outdated binaries once its binaries
+		// match again (its restart's ExecStartPre re-downloaded them):
+		// remove only the "outdated" cause, keeping the row locked
+		// (FOR UPDATE) until this Hello's own UPDATE commits, so a
+		// drainHost or deletePool committing concurrently can never be
+		// undone by this Hello writing a stale draining value.
 		var wasDraining bool
-		var reason string
-		if err := tx.QueryRow(ctx, `SELECT draining, state_reason FROM hosts WHERE id = $1`, hostID).Scan(&wasDraining, &reason); err != nil {
+		var causes []string
+		if err := tx.QueryRow(ctx, `SELECT draining, drain_causes FROM hosts WHERE id = $1 FOR UPDATE`, hostID).Scan(&wasDraining, &causes); err != nil {
 			return err
 		}
-		undrain := wasDraining && reason == outdatedBinariesReason && s.binariesMatch(h.Arch, h.RunnerSHA256, h.ShimSHA256)
-		draining := wasDraining && !undrain
-		// state_reason survives while still draining: a Hello (a reconnect,
-		// or luxd itself restarting) must not wipe the marker the reaper
-		// and this same undrain check depend on. Only an actual undrain
-		// clears it, along with the timestamps a later drain cycle needs
-		// to start clean, and any exit message still queued from the drain
-		// this Hello just ended (redelivered otherwise, to a host that is
-		// current again).
-		_, err = tx.Exec(ctx, `UPDATE hosts SET
-				draining = $9,
-				state = CASE WHEN $9 THEN 'draining' ELSE 'ready' END,
-				state_reason = CASE WHEN $9 THEN state_reason ELSE '' END,
-				drain_requested_at = CASE WHEN $9 THEN drain_requested_at ELSE NULL END,
-				exit_requested_at = CASE WHEN $9 THEN exit_requested_at ELSE NULL END,
+		undrainOutdated := wasDraining && slices.Contains(causes, causeOutdated) && s.binariesMatch(h.Arch, h.RunnerSHA256, h.ShimSHA256)
+		// The UPDATE recomputes draining from what remains after removing
+		// "outdated" (a CTE over the row this transaction already holds
+		// locked, from the SELECT above): a drain that committed before
+		// that lock was taken is reflected here, and none can commit
+		// between the lock and this UPDATE, so this Hello never writes a
+		// stale draining = false.
+		var draining bool
+		err = tx.QueryRow(ctx, `
+			WITH cur AS (
+				SELECT CASE WHEN $9 THEN array_remove(drain_causes, $10) ELSE drain_causes END AS causes
+				FROM hosts WHERE id = $1
+			)
+			UPDATE hosts SET
+				drain_causes = cur.causes,
+				draining = cardinality(cur.causes) > 0,
+				state = CASE WHEN cardinality(cur.causes) > 0 THEN 'draining' ELSE 'ready' END,
+				state_reason = CASE WHEN cardinality(cur.causes) > 0 THEN hosts.state_reason ELSE '' END,
+				drain_requested_at = CASE WHEN cardinality(cur.causes) > 0 THEN hosts.drain_requested_at ELSE NULL END,
+				exit_requested_at = CASE WHEN cardinality(cur.causes) > 0 THEN hosts.exit_requested_at ELSE NULL END,
 				labels = $2, arch = $3, capacity = $4, versions = $5, caches = $6,
-				local_snapshots = $7, provider_id = coalesce(nullif($8, ''), provider_id),
-				registered_at = coalesce(registered_at, now()),
-				provisioned_at = coalesce(provisioned_at, now()),
+				local_snapshots = $7, provider_id = coalesce(nullif($8, ''), hosts.provider_id),
+				registered_at = coalesce(hosts.registered_at, now()),
+				provisioned_at = coalesce(hosts.provisioned_at, now()),
 				last_heartbeat = now(), lost_at = NULL
-			WHERE id = $1`,
-			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, draining)
+			FROM cur
+			WHERE hosts.id = $1
+			RETURNING hosts.draining`,
+			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, undrainOutdated, causeOutdated).
+			Scan(&draining)
 		if err != nil {
 			return err
 		}
-		if undrain {
+		if undrainOutdated {
 			if _, err := tx.Exec(ctx, `UPDATE host_messages SET acked_at = now()
 				WHERE host_id = $1 AND type = $2 AND acked_at IS NULL`, hostID, proto.MsgExit); err != nil {
 				return err
@@ -600,7 +612,7 @@ func (s *Server) hostEvicting(ctx context.Context, hostID string, ev proto.Evict
 		if !ev.Deadline.IsZero() {
 			reason += " at " + ev.Deadline.UTC().Format(time.RFC3339)
 		}
-		hosts, err = s.drainHosts(ctx, tx, reason, "preempt", "id = $1", hostID)
+		hosts, err = s.drainHosts(ctx, tx, reason, causePreempt, "preempt", "id = $1", hostID)
 		return err
 	})
 	if err != nil {

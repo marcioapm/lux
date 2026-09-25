@@ -60,10 +60,10 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// outdatedBinariesReason is the drain reason luxd uses when a host's
-// runner or shim no longer match runner_bin_dir; also read back to
-// recognize a host drained for exactly this (so a heartbeat never
-// re-drains it, and a matching restart can be un-drained).
+// outdatedBinariesReason is the display text (state_reason) for an
+// outdated-binaries drain, and the ExitHost.Reason sent with the exit.
+// Never read back to decide anything: causeOutdated in drain_causes is
+// what the reaper, the undrain check and the per-pool cap key off.
 const outdatedBinariesReason = "outdated binaries"
 
 // hasBothBinaries reports whether luxd holds every binary in
@@ -112,24 +112,36 @@ func (s *Server) binariesMatch(arch, runnerSHA, shimSHA string) bool {
 // stopped) when its binaries are outdated and its pool has room for one
 // more such drain: at most max(1, OutdatedDrainPercent% of the pool's live
 // hosts) at once, so a release never cordons a whole pool in one instant.
+// pg_advisory_xact_lock, keyed on the pool, serializes the count and the
+// cordon against every other Hello or heartbeat for the same pool in the
+// same instant (a luxd restart wakes every runner in a pool at once):
+// without it, two transactions under READ COMMITTED can both read the
+// count before either's cordon commits, and both proceed, overshooting
+// the cap. The lock is released when the caller's transaction ends.
 // Returns the hosts to notify.
 func (s *Server) drainIfOutdated(ctx context.Context, tx pgx.Tx, hostID, arch, runnerSHA, shimSHA string) ([]string, error) {
 	if !s.binariesOutdated(arch, runnerSHA, shimSHA) {
 		return nil, nil
 	}
+	var tenant, pool string
+	if err := tx.QueryRow(ctx, `SELECT coalesce(tenant_id, ''), pool FROM hosts WHERE id = $1`, hostID).Scan(&tenant, &pool); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('outdated-drain:' || $1 || '/' || $2, 0))`, tenant, pool); err != nil {
+		return nil, err
+	}
 	var live, draining int
 	err := tx.QueryRow(ctx, `
-		WITH h AS (SELECT coalesce(tenant_id, '') AS tenant, pool FROM hosts WHERE id = $1)
 		SELECT
 			count(*) FILTER (WHERE state IN ('ready', 'draining')),
-			count(*) FILTER (WHERE draining AND state_reason = $2)
-		FROM hosts, h
-		WHERE coalesce(hosts.tenant_id, '') = h.tenant AND hosts.pool = h.pool`,
-		hostID, outdatedBinariesReason).Scan(&live, &draining)
+			count(*) FILTER (WHERE draining AND $3 = ANY(drain_causes))
+		FROM hosts
+		WHERE coalesce(tenant_id, '') = $1 AND pool = $2`,
+		tenant, pool, causeOutdated).Scan(&live, &draining)
 	if err != nil || draining >= max(1, live*s.cfg.OutdatedDrainPercent/100) {
 		return nil, err
 	}
-	return s.drainHosts(ctx, tx, outdatedBinariesReason, "", "id = $1", hostID)
+	return s.drainHosts(ctx, tx, outdatedBinariesReason, causeOutdated, "", "id = $1", hostID)
 }
 
 // runnerBinManifest is the contract's {"linux-arm64": {"lux-runner": sha,

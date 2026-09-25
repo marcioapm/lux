@@ -1514,7 +1514,7 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 		if err != nil {
 			return err
 		}
-		hosts, err = s.drainHosts(ctx, tx, "drain requested", stopReason, "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
+		hosts, err = s.drainHosts(ctx, tx, "drain requested", causeManual, stopReason, "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
 		if err == nil && len(hosts) == 0 {
 			return errNotFound
 		}
@@ -1529,25 +1529,38 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 	return out, nil
 }
 
-// drainHosts takes hosts out of service (no new placements) and, unless
-// stopReason is "" (cordon only), asks their live placements to stop with
-// it (drain or preempt: both resume elsewhere); where selects them
-// (placeholders from $1). Cordon-only leaves running Runs to finish where
-// they are: the reaper (static hosts) or the pool's replace path
+// Drain causes, tracked independently in hosts.drain_causes so several can
+// coexist without one drain's reason clobbering another's: drainIfOutdated
+// adds causeOutdated, an operator's drain or pools rm adds causeManual, a
+// pool's scale-down adds causeScaleDown, a spot interruption adds
+// causePreempt. state_reason stays what it always was — display text any
+// path may overwrite — since drain_causes, not it, is what the reaper, the
+// undrain check and the per-pool cap key off.
+const (
+	causeOutdated  = "outdated"
+	causeManual    = "manual"
+	causeScaleDown = "scale-down"
+	causePreempt   = "preempt"
+)
+
+// drainHosts takes hosts out of service (no new placements), records cause
+// in their drain_causes (added if not already present; idempotent), sets
+// state_reason to reason (display text: the latest caller's wins), and,
+// unless stopReason is "" (cordon only), asks their live placements to
+// stop with it (drain or preempt: both resume elsewhere); where selects
+// them (placeholders from $1). Cordon-only leaves running Runs to finish
+// where they are: the reaper (static hosts) or the pool's replace path
 // (provisioned) takes the host once it is idle. Calling it again with a
 // stopReason on a host that is already draining still evicts its current
-// placements. reason only overwrites state_reason on a host not already
-// draining: a plain drain (or scale-down, or a pool's cordon) must not
-// clobber an earlier drain's reason (e.g. outdated binaries), or the
-// reaper waiting on that reason would never see its exit.
-// Returns their ids, to notify once the transaction commits.
-func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, stopReason, where string, args ...any) ([]string, error) {
+// placements. Returns their ids, to notify once the transaction commits.
+func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopReason, where string, args ...any) ([]string, error) {
 	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
 			state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
-			state_reason = CASE WHEN draining THEN state_reason ELSE $%d END,
+			state_reason = $%d,
+			drain_causes = CASE WHEN $%d = ANY(drain_causes) THEN drain_causes ELSE array_append(drain_causes, $%d) END,
 			drain_requested_at = coalesce(drain_requested_at, now())
 		WHERE state <> 'terminated' AND %s
-		RETURNING id`, len(args)+1, where), append(args, reason)...)
+		RETURNING id`, len(args)+1, len(args)+2, len(args)+2, where), append(args, reason, cause)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1655,7 +1668,7 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 		if tag.RowsAffected() == 0 {
 			return errNotFound
 		}
-		hosts, err = s.drainHosts(ctx, tx, "pool removed", stopReason,
+		hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
 			"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
 		return err
 	})

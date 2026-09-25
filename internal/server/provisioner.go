@@ -483,7 +483,7 @@ func (s *Server) drainForScaleDown(ctx context.Context, hostID string) (bool, er
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var err error
-		hosts, err = s.drainHosts(ctx, tx, "idle: scaling down", "", `id = $1 AND state = 'ready'
+		hosts, err = s.drainHosts(ctx, tx, "idle: scaling down", causeScaleDown, "", `id = $1 AND state = 'ready'
 			AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.host_id = hosts.id AND p.state IN `+livePlacementStates+`)`, hostID)
 		return err
 	})

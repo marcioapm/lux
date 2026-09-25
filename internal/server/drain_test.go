@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -43,6 +44,18 @@ func hostStateReason(t *testing.T, s *Server, ctx context.Context, hostID string
 		t.Fatal(err)
 	}
 	return reason
+}
+
+// hostDrainCauses reads back a host's drain_causes.
+func hostDrainCauses(t *testing.T, s *Server, ctx context.Context, hostID string) []string {
+	t.Helper()
+	var causes []string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT drain_causes FROM hosts WHERE id = $1`, hostID).Scan(&causes)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return causes
 }
 
 // drainFixture is a tenant with one ready host and one running Run placed
@@ -120,9 +133,9 @@ func TestDrainHostWithForceEvictStopsRun(t *testing.T) {
 	}
 }
 
-// A POST with no body at all (the old spec had no request body: curl
-// scripts, and clients generated from it, send none) must still cordon
-// the host cordon-only: the body is optional, not required.
+// A POST with no body at all (curl scripts, and clients generated from
+// the spec, send none) must still cordon the host cordon-only: the body
+// is optional, not required.
 func TestDrainHostHTTPWithNoBodyCordonsOnly(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -244,10 +257,14 @@ func TestDeletePoolOnlyTouchesItsOwnHosts(t *testing.T) {
 	}
 }
 
-// A plain drain on a host already draining for outdated binaries must not
-// clobber that reason: the reaper's WHERE state_reason = outdatedBinariesReason
-// keys off it, so overwriting it would strand a static host cordoned
-// forever, never told to exit.
+// A plain drain on a host already draining for outdated binaries adds its
+// own cause ("manual") alongside "outdated" rather than clobbering it:
+// both coexist in drain_causes, and state_reason is free to show
+// whichever drain called last (display text, not a marker). Once
+// "manual" is present the reaper leaves the host alone (the operator
+// owns it now: see TestOutdatedAndManualDrainCoexistAcrossAnUndrain for
+// the exit-skipped and undrain-order coverage); this test only checks
+// that the earlier cause was not clobbered.
 func TestPlainDrainKeepsAnEarlierDrainReason(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -255,33 +272,28 @@ func TestPlainDrainKeepsAnEarlierDrainReason(t *testing.T) {
 
 	// First, drained for outdated binaries (as drainIfOutdated does).
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := s.drainHosts(ctx, tx, outdatedBinariesReason, "", "id = $1", "h1")
+		_, err := s.drainHosts(ctx, tx, outdatedBinariesReason, causeOutdated, "", "id = $1", "h1")
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if reason := hostStateReason(t, s, ctx, "h1"); reason != outdatedBinariesReason {
-		t.Fatalf("after the outdated-binaries drain: state_reason = %q, want %q", reason, outdatedBinariesReason)
+	if causes := hostDrainCauses(t, s, ctx, "h1"); !slices.Contains(causes, causeOutdated) {
+		t.Fatalf("after the outdated-binaries drain: drain_causes = %v, want it to contain %q", causes, causeOutdated)
 	}
 
-	// Then a plain drain (an operator's) on the same host: must not
-	// overwrite the reason.
+	// Then a plain drain (an operator's) on the same host: must add its
+	// own cause, not remove the earlier one.
 	ctx = context.WithValue(ctx, principalKey, Principal{Operator: true, Scopes: []string{"admin", "operator"}})
 	in := &drainHostInput{}
 	in.ID = "h1"
 	if _, err := s.drainHost(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	if reason := hostStateReason(t, s, ctx, "h1"); reason != outdatedBinariesReason {
-		t.Fatalf("after a plain drain on top: state_reason = %q, want still %q (not clobbered)", reason, outdatedBinariesReason)
+	causes := hostDrainCauses(t, s, ctx, "h1")
+	if !slices.Contains(causes, causeOutdated) || !slices.Contains(causes, causeManual) {
+		t.Fatalf("after a plain drain on top: drain_causes = %v, want both %q and %q", causes, causeOutdated, causeManual)
 	}
-
-	// The reaper still recognizes the host and sends it the exit.
-	if err := s.reapOutdatedStaticHosts(ctx); err != nil {
-		t.Fatal(err)
-	}
-	requested := exitRequested(t, s, ctx)
-	if !requested["h1"] {
-		t.Error("the reaper did not send the exit: the plain drain must have clobbered the outdated-binaries reason")
+	if reason := hostStateReason(t, s, ctx, "h1"); reason != "drain requested" {
+		t.Fatalf("after a plain drain on top: state_reason = %q, want the latest drain's display text", reason)
 	}
 }

@@ -236,20 +236,29 @@ build to a host mid-update.
 Every `Hello` and `Heartbeat` a runner sends carries the sha256 of its own
 binary (`os.Executable()`) and of its `--shim`; older runners simply omit
 them. When luxd holds both binaries for that host's arch and either sha
-differs, it cordons the host once (reason `outdated binaries`; no Run is
-stopped — a host already draining for another reason is left alone, this
-never re-drains a host on a later heartbeat, and at most
-`LUX_OUTDATED_DRAIN_PERCENT`% of a pool's live hosts, at least one, cordon
-at a time). A cordoned **provisioned** host stops taking new Runs; once its
-existing ones finish and it goes idle it is terminated same as any other
-drain, and the pool launches a fresh one with the running luxd's binaries.
-A cordoned **static** host keeps its Runs; once none are left and it has
-nothing left to upload, luxd asks it to exit: its systemd unit's
-`Restart=always` brings it back, and its `ExecStartPre` re-downloads the
-binaries first. A `Hello` reporting matching binaries un-drains the host
-in the same transaction that acks any exit still queued for it, and a
-runner ignores a redelivered `exit` if its binaries already match what
-luxd's manifest last showed, or if it holds live placements.
+differs, and the host is not already draining, it cordons the host once,
+recording an `outdated` cause (`hosts.drain_causes`; no Run is stopped,
+and at most `LUX_OUTDATED_DRAIN_PERCENT`% of a pool's live hosts, at
+least one, cordon at a time — enforced under a per-pool lock, so a burst
+of Hellos after a luxd restart cannot overshoot it). `state_reason` is display text
+only, shown as `outdated binaries` while that is the most recent cause set,
+but never read back by luxd itself. A cordoned **provisioned** host stops
+taking new Runs; once its existing ones finish and it goes idle it is
+terminated same as any other drain, and the pool launches a fresh one with
+the running luxd's binaries. A cordoned **static** host keeps its Runs;
+once none are left and it has nothing left to upload, luxd asks it to
+exit: its systemd unit's `Restart=always` brings it back, and its
+`ExecStartPre` re-downloads the binaries first. If that exit goes
+unacknowledged for 10 minutes and the host is still outdated and idle,
+the reaper sends it again (logged each time). A `Hello` reporting matching
+binaries removes only the `outdated` cause, in the same transaction that
+acks any exit still queued for it; the host stays draining if another
+cause remains (an operator's `lux hosts drain`, or `pools rm`) — an
+operator's drain always outranks a release, so a host also carrying a
+manual cause is left alone by the reaper too: it updates only once the
+operator undrains it, or restarts it by hand. A runner ignores a
+redelivered `exit` if its binaries already match what luxd's manifest
+last showed, or if it holds live placements (logged either way).
 
 A host installs the downloaded `lux-runner`, `lux-shim` and the fetch
 script itself under `/usr/local/bin`, not under `/usr/local/lib` — Fedora

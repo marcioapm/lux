@@ -140,21 +140,50 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 // systemd unit restarts it, whose ExecStartPre re-downloads first. A
 // provisioned host takes the existing drain→terminate→relaunch path
 // instead (reconcilePool); this is only for hosts nothing else replaces.
+// Keys off the "outdated" cause in drain_causes, never state_reason: a
+// host also carrying "manual" (an operator's drain, or pools rm) is
+// skipped — the operator owns it now, and it only updates once they
+// undrain it or restart it by hand (docs/operations.md).
+//
+// A host whose exit_requested_at is stale (the runner ignored it, or the
+// fetch failed and it kept its old binaries) is re-sent: still outdated,
+// idle, and requested more than 10 minutes ago.
 func (s *Server) reapOutdatedStaticHosts(ctx context.Context) error {
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `UPDATE hosts SET exit_requested_at = now()
-			WHERE draining AND state_reason = $1 AND provision_requested_at IS NULL
-			  AND exit_requested_at IS NULL
-			  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.host_id = hosts.id AND p.state IN `+livePlacementStates+`)
-			  AND NOT EXISTS (SELECT 1 FROM blobs b WHERE b.host_id = hosts.id AND b.location = 'host')
-			RETURNING id`, outdatedBinariesReason)
+		rows, err := tx.Query(ctx, `
+			WITH candidates AS (
+				SELECT id, exit_requested_at IS NOT NULL AS resend FROM hosts
+				WHERE draining AND $1 = ANY(drain_causes) AND NOT ($2 = ANY(drain_causes)) AND provision_requested_at IS NULL
+				  AND (exit_requested_at IS NULL OR exit_requested_at < now() - interval '10 minutes')
+				  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.host_id = hosts.id AND p.state IN `+livePlacementStates+`)
+				  AND NOT EXISTS (SELECT 1 FROM blobs b WHERE b.host_id = hosts.id AND b.location = 'host')
+				FOR UPDATE OF hosts
+			)
+			UPDATE hosts SET exit_requested_at = now()
+			FROM candidates WHERE hosts.id = candidates.id
+			RETURNING hosts.id, candidates.resend`, causeOutdated, causeManual)
 		if err != nil {
 			return err
 		}
-		hosts, err = pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil {
+		var resent []string
+		for rows.Next() {
+			var id string
+			var wasResent bool
+			if err := rows.Scan(&id, &wasResent); err != nil {
+				rows.Close()
+				return err
+			}
+			hosts = append(hosts, id)
+			if wasResent {
+				resent = append(resent, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
 			return err
+		}
+		if len(resent) > 0 {
+			s.log.Warn("re-sending exit: the host is still outdated", "hosts", resent)
 		}
 		for _, h := range hosts {
 			if err := enqueue(ctx, tx, h, "", 0, proto.MsgExit,
