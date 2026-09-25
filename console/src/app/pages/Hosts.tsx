@@ -1,9 +1,9 @@
 import { useMemo } from "react";
-import { Badge, Button, Card, formatBytes, formatCores, HOST_STATE_LIST, Select, Table, type Column } from "../../ds/index.ts";
+import { Badge, Button, Card, formatBytes, formatCores, HOST_STATE_LIST, PageHeader, Select, Table, type Column } from "../../ds/index.ts";
 import { api, type Host } from "../../api/index.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, hostPath, hostRunsPath, IdLink, RelativeTime, StateCell, UsageBar } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, HostLink, hostPath, hostRunsPath, IdLink, RelativeTime, StateCell, UsageBar } from "./common.tsx";
 
 export function Hosts() {
   const { showTenant } = useScope();
@@ -26,11 +26,11 @@ export function Hosts() {
 
   const cols = useMemo<Column<Host>[]>(() => {
     const c: Column<Host>[] = [
-      { key: "name", header: "Host", cell: (h) => <IdLink value={h.name} to={hostPath(h.id)} />, sortValue: (h) => h.name, mono: true, width: 220 },
+      { key: "name", header: "Host", cell: (h) => <HostLink id={h.id} name={h.name} />, sortValue: (h) => h.name, lead: true, width: 170 },
     ];
-    if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (h) => (h.platform ? <Badge outline>platform</Badge> : h.tenant || DASH), sortValue: (h) => (h.platform ? "" : h.tenant), width: 110, nowrap: true });
+    if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (h) => (h.platform ? <span className="muted">platform</span> : h.tenant || DASH), sortValue: (h) => (h.platform ? "" : h.tenant), width: 120, optional: true });
     c.push(
-      { key: "pool", header: "Pool", cell: (h) => h.pool, sortValue: (h) => h.pool, width: 110, nowrap: true },
+      { key: "pool", header: "Pool", cell: (h) => h.pool, sortValue: (h) => h.pool, width: 110 },
       {
         key: "state",
         header: "State",
@@ -40,12 +40,12 @@ export function Hosts() {
           </StateCell>
         ),
         sortValue: (h) => h.state,
-        width: 200,
       },
-      { key: "runs", header: "Live runs", cell: (h) => <Link to={hostRunsPath(h.id)} title="Runs placed on this host">{`${h.liveRuns} / ${h.capacity.runs}`}</Link>, sortValue: (h) => h.liveRuns, align: "right", mono: true, width: 90 },
-      { key: "cpu", header: "CPU", cell: (h) => <UsageBar used={h.allocated.cpus ?? 0} total={h.capacity.cpus} unit="cores" />, sortValue: (h) => (h.capacity.cpus ? (h.allocated.cpus ?? 0) / h.capacity.cpus : 0), width: 160 },
-      { key: "mem", header: "Memory", cell: (h) => <UsageBar used={h.allocated.memory ?? 0} total={h.capacity.memory} unit="bytes" width={170} />, sortValue: (h) => (h.capacity.memory ? (h.allocated.memory ?? 0) / h.capacity.memory : 0), width: 190 },
-      { key: "hb", header: "Heartbeat", cell: (h) => <RelativeTime at={h.lastHeartbeat} />, sortValue: (h) => (h.lastHeartbeat ? Date.parse(h.lastHeartbeat) : null), align: "right", width: 96 },
+      { key: "runs", header: "Live runs", cell: (h) => <Link to={hostRunsPath(h.id)} title="Runs placed on this host">{`${h.liveRuns} / ${h.capacity.runs}`}</Link>, sortValue: (h) => h.liveRuns, align: "right", mono: true, width: 96 },
+      { key: "cpu", header: "CPU", cell: (h) => <UsageBar used={h.allocated.cpus ?? 0} total={h.capacity.cpus} unit="cores" />, sortValue: (h) => (h.capacity.cpus ? (h.allocated.cpus ?? 0) / h.capacity.cpus : 0), width: 150 },
+      { key: "mem", header: "Memory", cell: (h) => <UsageBar used={h.allocated.memory ?? 0} total={h.capacity.memory} unit="bytes" />, sortValue: (h) => (h.capacity.memory ? (h.allocated.memory ?? 0) / h.capacity.memory : 0), width: 150 },
+      { key: "id", header: "Id", cell: (h) => <IdLink value={h.id} to={hostPath(h.id)} />, sortValue: (h) => h.id, mono: true, width: 210, optional: true },
+      { key: "hb", header: "Heartbeat", cell: (h) => <RelativeTime at={h.lastHeartbeat} />, sortValue: (h) => (h.lastHeartbeat ? Date.parse(h.lastHeartbeat) : null), align: "right", width: 100 },
     );
     return c;
   }, [showTenant]);
@@ -64,7 +64,11 @@ export function Hosts() {
   }, [hosts]);
 
   return (
-    <div className="page">
+    <div className="page page-list">
+      <PageHeader
+        title="Hosts"
+        description={<span>{hosts.length} hosts · ready and draining: {formatCores(totals.cpus)} of {formatCores(totals.capCpus)} CPU, {formatBytes(totals.mem)} of {formatBytes(totals.capMem)} memory allocated</span>}
+      />
       <div className="filters">
         <Select size="sm" prefix="Pool" value={pool} onChange={setPool} options={poolOptions} width={150} searchable={poolOptions.length > 8} />
         <Select size="sm" prefix="State" value={state} onChange={setState} options={[{ value: "", label: "Any state", text: "Any state" }, ...HOST_STATE_LIST.map((s) => ({ value: s, label: s, text: s }))]} width={150} />
@@ -78,12 +82,12 @@ export function Hosts() {
           </Button>
         )}
       </div>
-      <Card flush title="Hosts" subtitle={`${hosts.length} hosts · ready and draining: ${formatCores(totals.cpus)} of ${formatCores(totals.capCpus)} CPU, ${formatBytes(totals.mem)} of ${formatBytes(totals.capMem)} memory allocated`}>
+      <Card flush>
         <ErrorStrip error={hosts.length > 0 ? q.error : null} />
         {q.error && hosts.length === 0 && !q.loading ? (
           <ErrorBlock error={q.error} onRetry={q.refetch} />
         ) : (
-          <Table columns={cols} rows={hosts} rowKey={(h) => h.id} loading={q.loading} defaultSort={{ key: "name", dir: "asc" }} onRowClick={(h) => go(hostPath(h.id))} empty="No hosts match these filters." dense />
+          <Table columns={cols} rows={hosts} rowKey={(h) => h.id} loading={q.loading} defaultSort={{ key: "name", dir: "asc" }} onRowClick={(h) => go(hostPath(h.id))} empty="No hosts match these filters." />
         )}
       </Card>
     </div>

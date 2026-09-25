@@ -40,7 +40,7 @@ export function RunActions({ run, operator, onChanged }: RunActionsProps) {
   };
 
   return (
-    <div className="row">
+    <>
       <Button disabled={!canStop} onClick={() => setOpen("stop")}>
         Stop
       </Button>
@@ -78,7 +78,7 @@ export function RunActions({ run, operator, onChanged }: RunActionsProps) {
       />
       {open === "resume" && <ResumeDialog run={run} operator={operator} busy={busy} onConfirm={(body) => act("Resume", () => api.resumeRun(run.id, body))} onCancel={() => setOpen(null)} />}
       {open === "migrate" && <MigrateDialog run={run} busy={busy} onConfirm={(body) => act("Migrate", () => api.migrateRun(run.id, body))} onCancel={() => setOpen(null)} />}
-    </div>
+    </>
   );
 }
 
@@ -148,7 +148,7 @@ function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; 
               <span className="row" style={{ gap: 4 }}>
                 {rs.uploaded && <Badge tone="success">uploaded</Badge>}
                 {(rs.onHosts ?? []).map((h) => (
-                  <Badge key={h} mono outline>
+                  <Badge key={h} outline>
                     on {h}
                   </Badge>
                 ))}
@@ -192,11 +192,9 @@ function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; 
         <div className="field">
           <span className="field-label">Secret values</span>
           {secretNames.map((n) => (
-            <label key={n} className="row">
-              <span className="mono" style={{ width: 140 }}>
-                {n}
-              </span>
-              <input className="input mono" type="password" style={{ flex: 1 }} value={secretValues[n] ?? ""} onChange={(e) => setSecretValues((v) => ({ ...v, [n]: e.target.value }))} autoComplete="off" />
+            <label key={n} className="secret-row">
+              <span className="mono secret-name">{n}</span>
+              <input className="input mono" type="password" value={secretValues[n] ?? ""} onChange={(e) => setSecretValues((v) => ({ ...v, [n]: e.target.value }))} autoComplete="off" />
             </label>
           ))}
         </div>

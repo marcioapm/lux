@@ -13,7 +13,7 @@ export interface IdChipProps {
   className?: string;
 }
 
-/** Monospace id chip. Click the copy icon (or the chip when no href) to copy. */
+/** A quiet id: plain mono, muted, with a copy affordance on hover or focus. Click the icon (or the text when no href) to copy. */
 export function IdChip({ value, truncate, prefix, href, onLinkClick, className }: IdChipProps) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {

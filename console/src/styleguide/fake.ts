@@ -28,6 +28,7 @@ const fakeTenants: Tenant[] = [
 
 export interface FakeRun {
   id: string;
+  name: string;
   tenant: string;
   state: RunState;
   activity: "busy" | "idle" | null;
@@ -51,6 +52,7 @@ export const fakeRuns: FakeRun[] = Array.from({ length: 24 }, (_, i) => {
   const live = ["running", "starting", "stopping"].includes(state);
   return {
     id: id("run"),
+    name: `${pick(["web-build", "nightly-report", "agent-session", "batch", "etl", "quick-ok", "cpu-burner"])}-${String(i + 1).padStart(2, "0")}`,
     tenant: pick(fakeTenants).id,
     state,
     activity: state === "running" ? (st === "idle" ? "idle" : rand() > 0.3 ? "busy" : "idle") : null,

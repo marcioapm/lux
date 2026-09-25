@@ -19,7 +19,9 @@ import {
   KeyValue,
   LiveDot,
   LogView,
+  PageHeader,
   RUN_STATE_LIST,
+  SectionHeader,
   Select,
   Skeleton,
   SkeletonLines,
@@ -33,6 +35,7 @@ import {
   TimeSeriesChart,
   Timeline,
   Tooltip,
+  useDensity,
   useToast,
   type Column,
   type TimeRange,
@@ -52,7 +55,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["colors", "type", "spacing", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "timeline", "logs", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "timeline", "logs", "keyvalue", "dialogs", "feedback", "format"];
 
 export function StyleGuide() {
   return (
@@ -65,15 +68,11 @@ export function StyleGuide() {
         ))}
       </nav>
       <div className="sg-body">
-        <div className="page-head">
-          <div>
-            <h1 className="page-title">Style guide</h1>
-            <p className="page-desc">Every token and component in the lux console design system, with fake data. Toggle the theme in the top bar.</p>
-          </div>
-        </div>
+        <PageHeader title="Style guide" description="Every token and component in the lux console design system, with fake data. Toggle the theme and the density in the top bar." />
         <Colors />
         <Type />
         <Spacing />
+        <Layout />
         <Buttons />
         <Badges />
         <States />
@@ -140,16 +139,16 @@ function Colors() {
 
 function Type() {
   const sizes: [string, string][] = [
-    ["--text-xs", "11px · table headers, meta"],
-    ["--text-sm", "12px · secondary, pills, chart labels"],
-    ["--text-md", "13px · body, tables, controls"],
-    ["--text-lg", "14px · card titles, top bar"],
-    ["--text-xl", "16px"],
-    ["--text-2xl", "20px · page titles"],
-    ["--text-3xl", "28px · stat values (proportional figures)"],
+    ["--text-xs", "12 / 11px · meta, tick labels"],
+    ["--text-sm", "13 / 12px · secondary, pills, table headers"],
+    ["--text-md", "14 / 13px · body, tables, controls"],
+    ["--text-lg", "15 / 14px · brand"],
+    ["--text-xl", "17 / 16px · dialog titles"],
+    ["--text-2xl", "22 / 20px · page titles"],
+    ["--text-3xl", "30 / 28px · stat values (proportional figures)"],
   ];
   return (
-    <Section id="type" title="Type" note="System sans everywhere; monospace with tabular numerals for ids, hosts, logs and numeric table columns.">
+    <Section id="type" title="Type" note="System sans everywhere, names lead. Monospace (tabular numerals) is kept for ids, logs and numeric columns; host names, labels and adapters are set in the sans. Sizes are comfortable / compact.">
       <div className="sg-type">
         {sizes.map(([v, d]) => (
           <div className="sg-type-row" key={v}>
@@ -161,7 +160,7 @@ function Type() {
         <div className="sg-type-row">
           <code className="sg-type-token">--font-mono</code>
           <span className="mono">run_4h2kq7m3xw5ybzta i-0a1b2c3d4e5f60718 1,284.50</span>
-          <span className="muted">ids, hosts, numbers (tabular-nums)</span>
+          <span className="muted">ids, logs, numbers (tabular-nums)</span>
         </div>
         <div className="sg-type-row">
           <code className="sg-type-token">weights</code>
@@ -201,6 +200,122 @@ function Spacing() {
       <p className="sg-note" style={{ marginTop: 12 }}>
         Motion: <Code>--dur-fast</Code> 100ms for hover, <Code>--dur-normal</Code> 180ms for enter/exit, <Code>--dur-slow</Code> 300ms for layout; all zero under <Code>prefers-reduced-motion</Code>.
       </p>
+    </Section>
+  );
+}
+
+function Layout() {
+  const { density, set } = useDensity();
+  const rows: [string, string, string][] = [
+    ["body text", "14px", "13px"],
+    ["table row", "40px (dense 34px)", "32px (dense 28px)"],
+    ["control", "32px (sm 26px)", "28px (sm 24px)"],
+    ["card padding", "20px", "16px"],
+    ["grid gap", "20px / 28px", "16px / 20px"],
+    ["chart height", "200 · 240 · 280px", "180 · 210 · 240px"],
+  ];
+  return (
+    <Section id="layout" title="Density, breakpoints, shell" note="Comfortable is the default; compact is the old dense tuning. The setting lives in the top bar and persists like the theme (localStorage lux.density, applied before first paint as <html data-density>). It switches a handful of tokens; every component reads them.">
+      <div className="sg-row">
+        <Button variant={density === "comfortable" ? "primary" : "default"} onClick={() => set("comfortable")}>
+          Comfortable
+        </Button>
+        <Button variant={density === "compact" ? "primary" : "default"} onClick={() => set("compact")}>
+          Compact
+        </Button>
+        <span className="muted">currently {density}</span>
+      </div>
+      <table className="table sg-fmt">
+        <thead>
+          <tr>
+            <th>Token</th>
+            <th>Comfortable</th>
+            <th>Compact</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([k, a, b]) => (
+            <tr key={k}>
+              <td>{k}</td>
+              <td className="mono">{a}</td>
+              <td className="mono">{b}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <h3 className="sg-h3">Breakpoints</h3>
+      <table className="table sg-fmt sg-fmt-wide">
+        <thead>
+          <tr>
+            <th>Viewport</th>
+            <th>Sidebar</th>
+            <th>Top bar</th>
+            <th>Content</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td className="mono">&lt; 768</td>
+            <td>off-canvas drawer behind a menu button</td>
+            <td>brand, live dot, one scope menu (tenant, range, density, theme, session)</td>
+            <td>one column; state chips scroll sideways; tables scroll inside their card with the first column pinned; header actions drop below the title</td>
+          </tr>
+          <tr>
+            <td className="mono">768–1279</td>
+            <td>icon rail (56px)</td>
+            <td>full controls</td>
+            <td>charts 2 across; optional table columns (ids, adapter, epoch) drop out under ~1100px of content</td>
+          </tr>
+          <tr>
+            <td className="mono">1280–1919</td>
+            <td>full (232px), collapsible to the rail (persisted)</td>
+            <td>full controls</td>
+            <td>overview feed becomes a side column at 1200px of content; charts 2–3 across</td>
+          </tr>
+          <tr>
+            <td className="mono">1920, 2560</td>
+            <td>full</td>
+            <td>full controls</td>
+            <td>charts grow (240, 280px) and go 3–4 across; the feed widens; lists cap at 1760px, detail pages at 1920px and centre</td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="sg-note">
+        Inside the content area, grids react to the container (<Code>@container content</Code>), not the viewport, so a rail and a full sidebar both get the right layout. Page widths: <Code>.page</Code> (detail, 1920px), <Code>.page-list</Code> (tables, 1760px), <Code>.page-wide</Code> (dashboards, unbounded).
+      </p>
+      <h3 className="sg-h3">Page header</h3>
+      <Card>
+        <PageHeader
+          title="web-build"
+          badges={
+            <>
+              <StatePill kind="run" state="running" activity="busy" />
+              <Badge outline>generic</Badge>
+              <Badge outline>epoch 2</Badge>
+            </>
+          }
+          description={
+            <>
+              <IdChip value="run_4h2kq7m3xw5ybzta" />
+              <span>tenant acme</span>
+              <span>
+                on <a className="name-link" href="#layout">i-0a1b2c3d4e5f60718</a>
+              </span>
+            </>
+          }
+          note="waiting for capacity: no ready host in pool gpu-a10"
+          actions={
+            <>
+              <Button>Stop</Button>
+              <Button variant="danger">Cancel</Button>
+              <Button variant="primary" disabled>
+                Resume
+              </Button>
+            </>
+          }
+        />
+        <SectionHeader title="Section header" note="a quiet label between groups of cards" />
+      </Card>
     </Section>
   );
 }
@@ -253,10 +368,8 @@ function Badges() {
         <Badge tone="danger">danger</Badge>
         <Badge tone="info">info</Badge>
         <Badge outline>outline</Badge>
-        <Badge mono>epoch 3</Badge>
-        <Badge mono outline>
-          acp
-        </Badge>
+        <Badge outline>epoch 3</Badge>
+        <Badge mono>e2</Badge>
       </div>
     </Section>
   );
@@ -326,23 +439,24 @@ function Cards() {
 function RunsTable() {
   const [selected, setSelected] = useState<string | null>(null);
   const cols: Column<FakeRun>[] = [
-    { key: "id", header: "Run", cell: (r) => <IdChip value={r.id} truncate={14} href={`#run-${r.id}`} />, sortValue: (r) => r.id, mono: true, width: 190 },
+    { key: "name", header: "Run", cell: (r) => <a className="name-link" href={`#run-${r.id}`}>{r.name}</a>, sortValue: (r) => r.name, lead: true, width: "20%" },
+    { key: "id", header: "Id", cell: (r) => <IdChip value={r.id} truncate={14} href={`#run-${r.id}`} />, sortValue: (r) => r.id, mono: true, width: 170, optional: true },
     { key: "state", header: "State", cell: (r) => <StatePill kind="run" state={r.state} activity={r.activity} />, sortValue: (r) => r.state, width: 150 },
-    { key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, width: 90 },
-    { key: "adapter", header: "Adapter", cell: (r) => <Badge mono outline>{r.adapter}</Badge>, sortValue: (r) => r.adapter, width: 110 },
-    { key: "image", header: "Image", cell: (r) => r.image, sortValue: (r) => r.image, mono: true, nowrap: true },
-    { key: "host", header: "Host", cell: (r) => r.host ?? <span className="muted">–</span>, sortValue: (r) => r.host, mono: true, width: 190 },
-    { key: "epoch", header: "Epoch", cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 70 },
+    { key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, width: 100 },
+    { key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.adapter}</span>, sortValue: (r) => r.adapter, width: 110, optional: true },
+    { key: "image", header: "Image", cell: (r) => r.image, sortValue: (r) => r.image, mono: true },
+    { key: "host", header: "Host", cell: (r) => r.host ?? <span className="muted">–</span>, sortValue: (r) => r.host, width: 170 },
+    { key: "epoch", header: "Epoch", cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 76, optional: true },
     { key: "cpu", header: "CPU", cell: (r) => formatDuration(r.cpuSeconds), sortValue: (r) => r.cpuSeconds, align: "right", mono: true, width: 90 },
     { key: "mem", header: "Peak mem", cell: (r) => formatBytes(r.peakMemoryBytes), sortValue: (r) => r.peakMemoryBytes, align: "right", mono: true, width: 100 },
-    { key: "age", header: "Created", cell: (r) => <Tooltip content={formatTimestamp(r.createdAt)}><span>{formatRelative(r.createdAt, NOW)}</span></Tooltip>, sortValue: (r) => r.createdAt, align: "right", width: 90 },
+    { key: "age", header: "Created", cell: (r) => <Tooltip content={formatTimestamp(r.createdAt)}><span>{formatRelative(r.createdAt, NOW)}</span></Tooltip>, sortValue: (r) => r.createdAt, align: "right", width: 100 },
   ];
   return <Table columns={cols} rows={fakeRuns} rowKey={(r) => r.id} onRowClick={(r) => setSelected(r.id)} selected={selected} defaultSort={{ key: "age", dir: "desc" }} maxHeight={360} />;
 }
 
 function HostsTable() {
   const cols: Column<FakeHost>[] = [
-    { key: "id", header: "Host", cell: (h) => <IdChip value={h.id} />, sortValue: (h) => h.id, mono: true, width: 210 },
+    { key: "id", header: "Host", cell: (h) => h.id, sortValue: (h) => h.id, lead: true, width: 210 },
     { key: "state", header: "State", cell: (h) => <StatePill kind="host" state={h.state} />, sortValue: (h) => h.state, width: 130 },
     { key: "pool", header: "Pool", cell: (h) => h.pool, sortValue: (h) => h.pool, width: 100 },
     { key: "pl", header: "Placements", cell: (h) => `${h.placements} / ${h.capacity}`, sortValue: (h) => h.placements, align: "right", mono: true, width: 100 },
@@ -360,11 +474,11 @@ function Tables() {
     { key: "state", header: "State", cell: (r) => r.state },
   ];
   return (
-    <Section id="tables" title="Table" note="Sticky header inside a scroll container, sortable columns (click a header), 32px rows (28px dense), mono columns for ids and numbers, row click and selection, skeleton and empty states.">
+    <Section id="tables" title="Table" note="Fixed layout: columns with a width keep it, the rest share what is left, so wide screens stretch names rather than gaps. Sticky header, sortable columns, a lead column (the name) in the foreground weight, quiet mono ids, optional columns that drop out in narrow content, sideways scroll with the first column pinned when there is no room, row click and selection, skeleton and empty states.">
       <Card title="Runs" subtitle="24 fake runs · click a row to select · sortable" flush>
         <RunsTable />
       </Card>
-      <Card title="Hosts" subtitle="dense rows, inline sparklines" flush>
+      <Card title="Hosts" subtitle="dense rows, inline sparklines, names in the sans" flush>
         <HostsTable />
       </Card>
       <div className="grid grid-2">
@@ -443,19 +557,19 @@ function Selects() {
 function Charts() {
   const s = useMemo(() => fakeSeries(), []);
   return (
-    <Section id="charts" title="TimeSeriesChart" note="uPlot line charts: 2px lines, hairline grid, one y axis (never two), crosshair with one tooltip listing every series, click a legend entry to hide a series. Units format axes and tooltips. Series slots are fixed to the entity, so filtering never repaints survivors.">
-      <div className="grid grid-2">
+    <Section id="charts" title="TimeSeriesChart" note="uPlot line charts: 2px lines, hairline grid, one y axis (never two), crosshair with one tooltip listing every series, click a legend entry to hide a series. Units format axes and tooltips. Series slots are fixed to the entity, so filtering never repaints survivors. Height comes from --chart-h (200 / 240 / 280px as the screen grows; less when compact); the chart grid adds columns as the content widens.">
+      <div className="grid grid-charts">
         <Card title="Runs" subtitle="last 24 hours, 1-minute samples">
-          <TimeSeriesChart x={s.x} ys={[s.running, s.idle, s.queued]} series={[{ label: "Running", color: 1, area: true }, { label: "Idle", color: 3 }, { label: "Queued", color: 2 }]} unit="count" height={200} />
+          <TimeSeriesChart x={s.x} ys={[s.running, s.idle, s.queued]} series={[{ label: "Running", color: 1, area: true }, { label: "Idle", color: 3 }, { label: "Queued", color: 2 }]} unit="count" />
         </Card>
         <Card title="Hosts" subtitle="stepped: count changes only on scale events">
-          <TimeSeriesChart x={s.x} ys={[s.hosts]} series={[{ label: "Hosts", color: 1, step: true, area: true }]} unit="count" height={200} />
+          <TimeSeriesChart x={s.x} ys={[s.hosts]} series={[{ label: "Hosts", color: 1, step: true, area: true }]} unit="count" />
         </Card>
         <Card title="CPU" subtitle="fleet-wide used cores, with a capacity line">
-          <TimeSeriesChart x={s.x} ys={[s.cpu, s.hosts.map((h) => h * 8)]} series={[{ label: "Used", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="cores" height={200} />
+          <TimeSeriesChart x={s.x} ys={[s.cpu, s.hosts.map((h) => h * 8)]} series={[{ label: "Used", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="cores" />
         </Card>
         <Card title="Memory" subtitle="bytes formatting on axis and tooltip">
-          <TimeSeriesChart x={s.x} ys={[s.mem]} series={[{ label: "Peak memory", color: 7, area: true }]} unit="bytes" height={200} />
+          <TimeSeriesChart x={s.x} ys={[s.mem]} series={[{ label: "Peak memory", color: 7, area: true }]} unit="bytes" />
         </Card>
       </div>
       <h3 className="sg-h3">Sparkline</h3>
@@ -494,7 +608,7 @@ function Logs() {
 
 function KeyValueDemo() {
   return (
-    <Section id="keyvalue" title="KeyValue, IdChip, Code">
+    <Section id="keyvalue" title="KeyValue, IdChip, Code" note="Ids are quiet: plain mono in the muted colour, with a copy affordance on hover or focus. Names lead everywhere; ids support.">
       <Card title="Run" subtitle="detail header">
         <KeyValue
           columns={2}
@@ -502,7 +616,7 @@ function KeyValueDemo() {
             { key: "Run", value: <IdChip value="run_4h2kq7m3xw5ybzta" /> },
             { key: "State", value: <StatePill kind="run" state="running" activity="busy" /> },
             { key: "Tenant", value: "acme" },
-            { key: "Adapter", value: <Badge mono outline>acp</Badge> },
+            { key: "Adapter", value: <Badge outline>acp</Badge> },
             { key: "Image", value: "ghcr.io/acme/agent:1.14", mono: true },
             { key: "Host", value: <IdChip value="i-0a1b2c3d4e5f60718" href="#host" /> },
             { key: "Epoch", value: "3", mono: true },

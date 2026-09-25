@@ -12,8 +12,9 @@
   --bg-subtle: #f0f1f4;
   --bg-muted: #e5e7eb;
   --bg-inset: #f7f8fa;
-  --border: #e1e3e8;
-  --border-strong: #c6cad2;
+  --border: #e4e6ea;
+  --border-soft: #edeef1;
+  --border-strong: #cdd1d8;
   --fg: #16181d;
   --fg-secondary: #4b5058;
   --fg-muted: #6b7079;
@@ -89,15 +90,9 @@
   /* Type */
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --text-xs: 11px;
-  --text-sm: 12px;
-  --text-md: 13px;
-  --text-lg: 14px;
-  --text-xl: 16px;
-  --text-2xl: 20px;
-  --text-3xl: 28px;
+  /* Sizes are set by the density block below (comfortable by default). */
   --leading-tight: 1.25;
-  --leading-normal: 1.45;
+  --leading-normal: 1.5;
   --weight-normal: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
@@ -120,7 +115,7 @@
   --radius-pill: 999px;
 
   /* Elevation */
-  --shadow-sm: 0 1px 2px rgba(22, 24, 29, 0.06);
+  --shadow-sm: 0 1px 2px rgba(22, 24, 29, 0.04);
   --shadow-md: 0 2px 8px rgba(22, 24, 29, 0.10), 0 0 0 1px rgba(22, 24, 29, 0.05);
   --shadow-lg: 0 12px 32px rgba(22, 24, 29, 0.18), 0 0 0 1px rgba(22, 24, 29, 0.06);
 
@@ -130,13 +125,96 @@
   --dur-slow: 300ms;
   --ease: cubic-bezier(0.2, 0, 0, 1);
 
-  /* Layout */
+  /* Layout (fixed) */
+  --sidebar-rail-w: 56px;
+  --page-list-w: 1760px;
+  --page-detail-w: 1920px;
+  --feed-w: 360px;
+}
+
+/* Density. Comfortable is the default (14px body, 40px rows, 32px controls);
+   compact is the old dense tuning (13px body, 32px rows, 28px controls).
+   Set by <html data-density="compact">, persisted in localStorage["lux.density"]. */
+:root {
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 15px;
+  --text-xl: 17px;
+  --text-2xl: 22px;
+  --text-3xl: 30px;
+  --sidebar-w: 232px;
+  --topbar-h: 52px;
+  --row-h: 40px;
+  --row-h-dense: 34px;
+  --control-h: 32px;
+  --control-h-sm: 26px;
+  --control-h-lg: 38px;
+  --pad-card: 20px;
+  --pad-cell: 14px;
+  --gap: 20px;
+  --gap-lg: 28px;
+  --pad-page: 32px;
+  --chart-h: 200px;
+}
+:root[data-density="compact"] {
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-lg: 14px;
+  --text-xl: 16px;
+  --text-2xl: 20px;
+  --text-3xl: 28px;
   --sidebar-w: 208px;
   --topbar-h: 44px;
   --row-h: 32px;
+  --row-h-dense: 28px;
   --control-h: 28px;
   --control-h-sm: 24px;
   --control-h-lg: 34px;
+  --pad-card: 16px;
+  --pad-cell: 12px;
+  --gap: 16px;
+  --gap-lg: 20px;
+  --pad-page: 24px;
+  --chart-h: 180px;
+}
+
+/* Breakpoints (viewport): 640 phone, 768 drawer/rail, 1280 full sidebar,
+   1920 and 2560 wide. Charts grow with the screen; page padding shrinks. */
+@media (min-width: 1920px) {
+  :root {
+    --chart-h: 240px;
+    --feed-w: 400px;
+  }
+  :root[data-density="compact"] {
+    --chart-h: 210px;
+  }
+}
+@media (min-width: 2560px) {
+  :root {
+    --chart-h: 280px;
+    --feed-w: 440px;
+  }
+  :root[data-density="compact"] {
+    --chart-h: 240px;
+  }
+}
+@media (max-width: 1279px) {
+  :root,
+  :root[data-density="compact"] {
+    --pad-page: 24px;
+  }
+}
+@media (max-width: 767px) {
+  :root,
+  :root[data-density="compact"] {
+    --pad-page: 16px;
+    --pad-card: 16px;
+    --gap: 16px;
+    --gap-lg: 20px;
+    --chart-h: 180px;
+  }
 }
 
 /* Dark: selected steps, applied by OS preference unless a light toggle wins,
@@ -150,8 +228,9 @@
     --bg-subtle: #222428;
     --bg-muted: #2b2e33;
     --bg-inset: #17181b;
-    --border: #2c2f35;
-    --border-strong: #3f434b;
+    --border: #2a2d33;
+    --border-soft: #24272c;
+    --border-strong: #3d414a;
     --fg: #ececee;
     --fg-secondary: #b4b8bf;
     --fg-muted: #8b9098;
@@ -220,8 +299,9 @@
   --bg-subtle: #222428;
   --bg-muted: #2b2e33;
   --bg-inset: #17181b;
-  --border: #2c2f35;
-  --border-strong: #3f434b;
+  --border: #2a2d33;
+  --border-soft: #24272c;
+  --border-strong: #3d414a;
   --fg: #ececee;
   --fg-secondary: #b4b8bf;
   --fg-muted: #8b9098;

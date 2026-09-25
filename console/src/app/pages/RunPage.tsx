@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Badge, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, KeyValue, StatePill, Tabs } from "../../ds/index.ts";
+import { Badge, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, KeyValue, PageHeader, StatePill, Tabs } from "../../ds/index.ts";
 import { api, isRunActive, useNow, useQuery, type Run } from "../../api/index.ts";
 import { useScope } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, HostLink, labelsText, PageSkeleton } from "./common.tsx";
@@ -46,32 +46,30 @@ export function RunPage({ id }: { id: string }) {
 
   return (
     <div className="page">
-      <div className="page-head">
-        <div className="stack" style={{ gap: 4 }}>
-          <div className="row">
-            <h1 className="page-title">{run.name || <span className="mono">{run.id}</span>}</h1>
+      <PageHeader
+        title={run.name || <span className="mono">{run.id}</span>}
+        badges={
+          <>
             <StatePill kind="run" state={run.state} activity={run.activity} />
-            <Badge mono outline>
-              {run.spec.workload.adapter}
-            </Badge>
-            <Badge mono outline>
-              epoch {run.epoch}
-            </Badge>
-          </div>
-          <div className="row page-desc">
-            <IdChip value={run.id} prefix="run" />
+            <Badge outline>{run.spec.workload.adapter}</Badge>
+            <Badge outline>epoch {run.epoch}</Badge>
+          </>
+        }
+        description={
+          <>
+            {run.name && <IdChip value={run.id} />}
             {operator && <span>tenant {run.tenant}</span>}
             {run.hostId ? (
               <span>
                 on <HostLink id={run.hostId} name={run.host} />
               </span>
             ) : null}
-            {run.exitCode != null && !run.stateReason?.includes(`exit code ${run.exitCode}`) && <span className="mono">exit {run.exitCode}</span>}
-          </div>
-          {run.stateReason && <div className="state-reason-lg">{run.stateReason}</div>}
-        </div>
-        <RunActions run={run} operator={operator} onChanged={onChanged} />
-      </div>
+            {run.exitCode != null && !run.stateReason?.includes(`exit code ${run.exitCode}`) && <span>exit {run.exitCode}</span>}
+          </>
+        }
+        note={run.stateReason}
+        actions={<RunActions run={run} operator={operator} onChanged={onChanged} />}
+      />
       <ErrorStrip error={q.error} />
 
       <KeyValue
@@ -82,8 +80,8 @@ export function RunPage({ id }: { id: string }) {
           { key: "First started", value: run.firstStartedAt ? `${formatTimestamp(run.firstStartedAt)} · queued ${formatDuration(run.usage?.queueSeconds)}` : DASH },
           { key: "Finished", value: run.finishedAt ? `${formatTimestamp(run.finishedAt)} · ${formatRelative(run.finishedAt, now)}` : DASH },
           { key: "Image", value: run.spec.image.ref ?? (run.spec.image.build ? `built from ${run.spec.image.build.containerfile}` : DASH), mono: true },
-          { key: "Resources", value: `${run.spec.resources.cpus ?? "–"} cpus · ${formatBytes(run.spec.resources.memory)} · ${formatBytes(run.spec.resources.disk)} disk`, mono: true },
-          { key: "Usage", value: run.usage ? `CPU ${formatDuration(run.usage.cpuSeconds)} · peak mem ${formatBytes(run.usage.peakMemoryBytes)} · ${run.usage.placements} placement${run.usage.placements === 1 ? "" : "s"}` : DASH, mono: true },
+          { key: "Resources", value: `${run.spec.resources.cpus ?? "–"} cpus · ${formatBytes(run.spec.resources.memory)} · ${formatBytes(run.spec.resources.disk)} disk` },
+          { key: "Usage", value: run.usage ? `CPU ${formatDuration(run.usage.cpuSeconds)} · peak mem ${formatBytes(run.usage.peakMemoryBytes)} · ${run.usage.placements} placement${run.usage.placements === 1 ? "" : "s"}` : DASH },
           { key: "Session", value: run.sessionId ? <IdChip value={run.sessionId} truncate={24} /> : DASH },
           { key: "Snapshot", value: run.snapshotId ? <IdChip value={run.snapshotId} truncate={24} /> : DASH },
           { key: "Labels", value: Object.keys(run.labels ?? {}).length ? <span className="mono">{labelsText(run.labels)}</span> : DASH },

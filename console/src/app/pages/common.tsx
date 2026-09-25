@@ -1,7 +1,7 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
 import { useMemo, type ReactNode } from "react";
-import { Badge, Button, EmptyState, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type Column, type Unit } from "../../ds/index.ts";
+import { Button, EmptyState, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type Column, type Unit } from "../../ds/index.ts";
 import { useNow, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
 
@@ -45,33 +45,44 @@ export const hostPath = (id: string) => `/hosts/${encodeURIComponent(id)}`;
 /** The runs list filtered to runs placed (any epoch) on a host. */
 export const hostRunsPath = (hostId: string) => `/runs?host=${encodeURIComponent(hostId)}`;
 
-/** Copyable id chip that links to `to` (client-side, keeping the scope). */
+/** Quiet, copyable id that links to `to` (client-side, keeping the scope). */
 export function IdLink({ value, to, truncate, prefix }: { value: string; to: string; truncate?: number; prefix?: string }) {
   const l = linkTo(to, useSearch());
   return <IdChip value={value} truncate={truncate} prefix={prefix} href={l.href} onLinkClick={l.onClick} />;
 }
 
-export function RunLink({ id, truncate = 16 }: { id: string; truncate?: number }) {
+export function RunLink({ id, truncate }: { id: string; truncate?: number }) {
   return <IdLink value={id} to={runPath(id)} truncate={truncate} />;
+}
+
+/**
+ * A run by name, linked; the id is the quiet fallback when it has none.
+ * In tables the id sits in its own column, so this is the lead cell.
+ */
+export function RunNameLink({ id, name }: { id: string; name?: string }) {
+  if (!name) return <RunLink id={id} />;
+  return (
+    <Link to={runPath(id)} className="name-link" title={id}>
+      {name}
+    </Link>
+  );
 }
 
 /** A host by name, linked by id (names can be reused). */
 export function HostLink({ id, name }: { id: string; name?: string }) {
   return (
-    <Link to={hostPath(id)} className="mono" title={id}>
+    <Link to={hostPath(id)} className={name ? "name-link" : "name-link mono"} title={id}>
       {name || id}
     </Link>
   );
 }
 
-/** State pill with the reason (why it waits, why it ended) dimmed below. */
+/** State pill with the reason (why it waits, why it ended) beside it. */
 export function StateCell({ kind, state, activity, reason, children }: { kind: "run" | "host"; state: string; activity?: string; reason?: string; children?: ReactNode }) {
   return (
     <span className="state-cell">
-      <span className="row" style={{ gap: 6 }}>
-        <StatePill kind={kind} state={state} activity={activity} />
-        {children}
-      </span>
+      <StatePill kind={kind} state={state} activity={activity} />
+      {children}
       {reason && (
         <span className="state-reason" title={reason}>
           {reason}
@@ -92,20 +103,22 @@ export function RelativeTime({ at }: { at: string | null | undefined }) {
   );
 }
 
-/** Shared columns of a runs table. */
+/**
+ * Shared columns of a runs table. The name leads; the id is a quiet mono
+ * column beside it. Name and state share the flexible width.
+ */
 export function runColumns({ tenant, host = true, adapter = true }: { tenant: boolean; host?: boolean; adapter?: boolean }): Column<Run>[] {
-  const c: Column<Run>[] = [];
-  if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, width: 110, nowrap: true });
+  const c: Column<Run>[] = [
+    { key: "name", header: "Run", cell: (r) => <RunNameLink id={r.id} name={r.name} />, sortValue: (r) => r.name || r.id, lead: true, width: "22%" },
+    { key: "id", header: "Id", cell: (r) => <RunLink id={r.id} />, sortValue: (r) => r.id, mono: true, width: 200, optional: true },
+  ];
+  if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, width: 120 });
+  c.push({ key: "state", header: "State", cell: (r) => <StateCell kind="run" state={r.state} activity={r.activity} reason={r.stateReason} />, sortValue: (r) => r.state });
+  if (host) c.push({ key: "host", header: "Host", cell: (r) => (r.hostId ? <HostLink id={r.hostId} name={r.host} /> : DASH), sortValue: (r) => r.host, width: 150 });
+  if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.spec.workload.adapter}</span>, sortValue: (r) => r.spec.workload.adapter, width: 110, optional: true });
   c.push(
-    { key: "id", header: "Run", cell: (r) => <RunLink id={r.id} />, sortValue: (r) => r.id, mono: true, width: 200 },
-    { key: "name", header: "Name", cell: (r) => r.name || DASH, sortValue: (r) => r.name, nowrap: true },
-    { key: "state", header: "State", cell: (r) => <StateCell kind="run" state={r.state} activity={r.activity} reason={r.stateReason} />, sortValue: (r) => r.state, width: 200 },
-  );
-  if (host) c.push({ key: "host", header: "Host", cell: (r) => (r.hostId ? <HostLink id={r.hostId} name={r.host} /> : DASH), sortValue: (r) => r.host, mono: true, width: 180, nowrap: true });
-  if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <Badge mono outline>{r.spec.workload.adapter}</Badge>, sortValue: (r) => r.spec.workload.adapter, width: 100 });
-  c.push(
-    { key: "epoch", header: "Epoch", cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 64 },
-    { key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} />, sortValue: (r) => Date.parse(r.createdAt), align: "right", width: 96 },
+    { key: "epoch", header: "Epoch", cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 76, optional: true },
+    { key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} />, sortValue: (r) => Date.parse(r.createdAt), align: "right", width: 104 },
   );
   return c;
 }
@@ -144,7 +157,7 @@ function ratioText(used: number | null | undefined, total: number | null | undef
 }
 
 /** Thin allocation bar: used over total, with the ratio as its label. */
-export function UsageBar({ used, total, unit, width = 140 }: { used: number | null | undefined; total: number | null | undefined; unit: Unit; width?: number }) {
+export function UsageBar({ used, total, unit, width = "100%" }: { used: number | null | undefined; total: number | null | undefined; unit: Unit; width?: number | string }) {
   const ratio = used != null && total ? Math.min(1, used / total) : 0;
   const tone = ratio >= 0.95 ? "is-hot" : ratio >= 0.8 ? "is-warm" : "";
   return (
@@ -152,7 +165,7 @@ export function UsageBar({ used, total, unit, width = 140 }: { used: number | nu
       <span className={["usage-track", tone].join(" ").trim()}>
         <span className="usage-fill" style={{ width: formatPercent(ratio) }} />
       </span>
-      <span className="usage-text mono">{ratioText(used, total, unit)}</span>
+      <span className="usage-text num">{ratioText(used, total, unit)}</span>
     </span>
   );
 }

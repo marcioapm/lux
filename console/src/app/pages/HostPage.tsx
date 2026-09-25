@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, ConfirmDialog, formatBytes, formatCores, formatRelative, formatTimestamp, IdChip, KeyValue, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage } from "../../ds/index.ts";
+import { Badge, Button, Card, ConfirmDialog, formatBytes, formatCores, formatRelative, formatTimestamp, IdChip, KeyValue, PageHeader, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage } from "../../ds/index.ts";
 import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type HostTimeKey, type Run } from "../../api/index.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, RelativeTime, RunLink, runColumns, runPath, useSeries } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, RelativeTime, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
 
 export function HostPage({ id }: { id: string }) {
   const scope = useScope();
@@ -51,30 +51,32 @@ export function HostPage({ id }: { id: string }) {
   const canDrain = h.state !== "terminated" && !h.draining;
   return (
     <div className="page">
-      <div className="page-head">
-        <div className="stack" style={{ gap: 4 }}>
-          <div className="row">
-            <h1 className="page-title mono">{h.name}</h1>
+      <PageHeader
+        title={h.name}
+        badges={
+          <>
             <StatePill kind="host" state={h.state} />
             {h.draining && h.state !== "draining" && <Badge tone="warn">draining</Badge>}
             {h.platform && <Badge outline>platform</Badge>}
-          </div>
-          <div className="row page-desc">
-            <IdChip value={h.id} prefix="host" />
+          </>
+        }
+        description={
+          <>
+            <IdChip value={h.id} />
             {h.tenant && <span>tenant {h.tenant}</span>}
             <span>pool {h.pool}</span>
             <Link to={hostRunsPath(h.id)}>
               {h.liveRuns} live run{h.liveRuns === 1 ? "" : "s"} · all runs on this host
             </Link>
-          </div>
-          {h.stateReason && <div className="state-reason-lg">{h.stateReason}</div>}
-        </div>
-        <div className="row">
+          </>
+        }
+        note={h.stateReason}
+        actions={
           <Button variant="danger" disabled={!canDrain} onClick={() => setDrainOpen(true)}>
             Drain
           </Button>
-        </div>
-      </div>
+        }
+      />
       <ErrorStrip error={host.error} />
 
       <div className="grid grid-2">
@@ -84,8 +86,8 @@ export function HostPage({ id }: { id: string }) {
             items={[
               { key: "Provider id", value: h.providerId ? <IdChip value={h.providerId} /> : DASH },
               { key: "Heartbeat", value: h.lastHeartbeat ? `${formatRelative(h.lastHeartbeat, now)} (${formatTimestamp(h.lastHeartbeat)})` : DASH },
-              { key: "Capacity", value: `${formatCores(h.capacity.cpus)} · ${formatBytes(h.capacity.memory)} · ${formatBytes(h.capacity.disk)} disk · ${h.capacity.runs} runs`, mono: true },
-              { key: "Allocated", value: `${formatCores(h.allocated.cpus ?? 0)} · ${formatBytes(h.allocated.memory ?? 0)} · ${formatBytes(h.allocated.disk ?? 0)} disk · ${h.liveRuns} live`, mono: true },
+              { key: "Capacity", value: `${formatCores(h.capacity.cpus)} · ${formatBytes(h.capacity.memory)} · ${formatBytes(h.capacity.disk)} disk · ${h.capacity.runs} runs` },
+              { key: "Allocated", value: `${formatCores(h.allocated.cpus ?? 0)} · ${formatBytes(h.allocated.memory ?? 0)} · ${formatBytes(h.allocated.disk ?? 0)} disk · ${h.liveRuns} live` },
               { key: "Labels", value: Object.keys(h.labels).length ? <span className="mono">{labelsText(h.labels)}</span> : DASH },
               { key: "Versions", value: Object.keys(h.versions).length ? <span className="mono">{labelsText(h.versions)}</span> : DASH },
             ]}
@@ -101,18 +103,18 @@ export function HostPage({ id }: { id: string }) {
       </Card>
 
       <ErrorStrip error={history.error} />
-      <div className="grid grid-2">
+      <div className="grid grid-charts">
         <Card title="CPU" subtitle="used cores vs capacity, and allocated">
-          <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Used", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="cores" height={180} />
+          <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Used", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="cores" />
         </Card>
         <Card title="Memory" subtitle="used vs capacity, and allocated">
-          <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Used", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="bytes" height={180} />
+          <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Used", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="bytes" />
         </Card>
         <Card title="Disk" subtitle="used vs capacity">
-          <TimeSeriesChart x={disk.x} ys={disk.ys} series={[{ label: "Used", color: 4, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" height={180} />
+          <TimeSeriesChart x={disk.x} ys={disk.ys} series={[{ label: "Used", color: 4, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
         </Card>
         <Card title="Placements" subtitle="live placements vs run capacity">
-          <TimeSeriesChart x={placements.x} ys={placements.ys} series={[{ label: "Placements", color: 3, step: true, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="count" height={180} />
+          <TimeSeriesChart x={placements.x} ys={placements.ys} series={[{ label: "Placements", color: 3, step: true, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="count" />
         </Card>
       </div>
 
@@ -162,13 +164,13 @@ function hostStages(h: Host): TimelineStage[] {
 
 function PlacementsTable({ placements, loading, tenant }: { placements: HostPlacement[]; loading: boolean; tenant: boolean }) {
   const cols = useMemo<Column<HostPlacement>[]>(() => {
-    const c: Column<HostPlacement>[] = [{ key: "run", header: "Run", cell: (p) => <RunLink id={p.runId} />, mono: true, width: 200 }];
-    c.push({ key: "name", header: "Name", cell: (p) => p.runName || DASH, nowrap: true });
-    if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => p.tenant, width: 110 });
+    const c: Column<HostPlacement>[] = [{ key: "name", header: "Run", cell: (p) => <RunNameLink id={p.runId} name={p.runName} />, lead: true, width: "24%" }];
+    c.push({ key: "run", header: "Id", cell: (p) => <RunLink id={p.runId} />, mono: true, width: 190, optional: true });
+    if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => p.tenant, width: 120 });
     c.push(
-      { key: "epoch", header: "Epoch", cell: (p) => p.epoch, align: "right", mono: true, width: 64 },
-      { key: "state", header: "Placement", cell: (p) => <Badge mono outline>{p.state}</Badge>, width: 110 },
-      { key: "res", header: "Resources", cell: (p) => `${formatCores(p.resources.cpus ?? 0)} · ${formatBytes(p.resources.memory ?? 0)}`, mono: true, width: 200 },
+      { key: "epoch", header: "Epoch", cell: (p) => p.epoch, align: "right", mono: true, width: 72 },
+      { key: "state", header: "Placement", cell: (p) => <span className="secondary">{p.state}</span>, width: 120 },
+      { key: "res", header: "Resources", cell: (p) => `${formatCores(p.resources.cpus ?? 0)} · ${formatBytes(p.resources.memory ?? 0)}`, mono: true },
       { key: "since", header: "Since", cell: (p) => <RelativeTime at={p.since} />, align: "right", width: 110 },
     );
     return c;

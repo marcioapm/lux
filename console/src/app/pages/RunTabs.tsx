@@ -39,11 +39,11 @@ export function RunEvents({ run, live }: { run: Run; live: boolean }) {
   const [open, setOpen] = useState<number | null>(null);
   const cols = useMemo<Column<Event>[]>(
     () => [
-      { key: "id", header: "#", cell: (e) => e.id, sortValue: (e) => e.id, align: "right", mono: true, width: 70 },
-      { key: "time", header: "Time", cell: (e) => formatTimestamp(e.time), sortValue: (e) => Date.parse(e.time), mono: true, width: 170 },
-      { key: "epoch", header: "Epoch", cell: (e) => (e.epoch ? e.epoch : DASH), sortValue: (e) => e.epoch ?? 0, align: "right", mono: true, width: 64 },
-      { key: "type", header: "Type", cell: (e) => <Badge mono outline>{e.type}</Badge>, sortValue: (e) => e.type, width: 150 },
-      { key: "summary", header: "Details", cell: (e) => (open === e.id ? <JsonBlock value={e.data} /> : <span className="ellipsis">{eventSummary(e)}</span>) },
+      { key: "id", header: "#", cell: (e) => e.id, sortValue: (e) => e.id, align: "right", mono: true, width: 76 },
+      { key: "time", header: "Time", cell: (e) => formatTimestamp(e.time), sortValue: (e) => Date.parse(e.time), mono: true, width: 180 },
+      { key: "epoch", header: "Epoch", cell: (e) => (e.epoch ? e.epoch : DASH), sortValue: (e) => e.epoch ?? 0, align: "right", mono: true, width: 72, optional: true },
+      { key: "type", header: "Type", cell: (e) => <span className="secondary">{e.type}</span>, sortValue: (e) => e.type, width: 150 },
+      { key: "summary", header: "Details", cell: (e) => (open === e.id ? <JsonBlock value={e.data} /> : eventSummary(e)), wrap: true },
     ],
     [open],
   );
@@ -51,7 +51,7 @@ export function RunEvents({ run, live }: { run: Run; live: boolean }) {
   return (
     <Card flush title="Events" subtitle={`${q.data?.length ?? 0} events · click a row to expand its data`} actions={<IconButton size="sm" label="Refresh" onClick={() => void q.refetch()}><IconRefresh size={14} /></IconButton>}>
       <ErrorStrip error={q.error} />
-      <Table columns={cols} rows={q.data ?? []} rowKey={(e) => String(e.id)} loading={q.loading} defaultSort={{ key: "id", dir: "desc" }} onRowClick={(e) => setOpen((o) => (o === e.id ? null : e.id))} selected={open != null ? String(open) : null} empty="No events." dense />
+      <Table columns={cols} rows={q.data ?? []} rowKey={(e) => String(e.id)} loading={q.loading} defaultSort={{ key: "id", dir: "desc" }} onRowClick={(e) => setOpen((o) => (o === e.id ? null : e.id))} selected={open != null ? String(open) : null} empty="No events." dense minWidth={640} />
     </Card>
   );
 }
@@ -76,23 +76,23 @@ export function RunSnapshots({ run, live }: { run: Run; live: boolean }) {
   const snapCols = useMemo<Column<Snapshot>[]>(
     () => [
       { key: "id", header: "Snapshot", cell: (s) => <IdChip value={s.id} truncate={18} />, mono: true, width: 210 },
-      { key: "epoch", header: "Epoch", cell: (s) => s.epoch, align: "right", mono: true, width: 64 },
-      { key: "current", header: "", cell: (s) => (run.snapshotId === s.id ? <Badge tone="accent">current</Badge> : null), width: 80 },
-      { key: "volumes", header: "Volumes", cell: (s) => s.manifest.volumes.map((v) => `${v.name} (${formatBytes(v.size)})`).join(", ") || DASH, nowrap: true },
-      { key: "size", header: "Size", cell: (s) => formatBytes(s.manifest.volumes.reduce((n, v) => n + v.size, 0)), align: "right", mono: true, width: 90 },
-      { key: "where", header: "Where", cell: (s) => (s.available ? <span className="row" style={{ gap: 4 }}>{s.uploaded && <Badge tone="success">uploaded</Badge>}{s.onHost && <Badge mono outline>{s.onHost}</Badge>}{!s.uploaded && !s.onHost && <Badge tone="warn">nowhere</Badge>}</span> : <Badge tone="danger">deleted</Badge>), width: 220 },
-      { key: "created", header: "Created", cell: (s) => formatTimestamp(s.createdAt), align: "right", mono: true, width: 170 },
+      { key: "epoch", header: "Epoch", cell: (s) => s.epoch, align: "right", mono: true, width: 72 },
+      { key: "current", header: "", cell: (s) => (run.snapshotId === s.id ? <Badge tone="accent">current</Badge> : null), width: 90 },
+      { key: "volumes", header: "Volumes", cell: (s) => s.manifest.volumes.map((v) => `${v.name} (${formatBytes(v.size)})`).join(", ") || DASH },
+      { key: "size", header: "Size", cell: (s) => formatBytes(s.manifest.volumes.reduce((n, v) => n + v.size, 0)), align: "right", mono: true, width: 96 },
+      { key: "where", header: "Where", cell: (s) => (s.available ? <span className="row" style={{ gap: 4 }}>{s.uploaded && <Badge tone="success">uploaded</Badge>}{s.onHost && <Badge outline>on {s.onHost}</Badge>}{!s.uploaded && !s.onHost && <Badge tone="warn">nowhere</Badge>}</span> : <Badge tone="danger">deleted</Badge>), width: 220 },
+      { key: "created", header: "Created", cell: (s) => formatTimestamp(s.createdAt), align: "right", mono: true, width: 180, optional: true },
     ],
     [run.snapshotId],
   );
   const artCols = useMemo<Column<Artifact>[]>(
     () => [
-      { key: "path", header: "Path", cell: (a) => <span className="mono">{a.path}</span>, sortValue: (a) => a.path },
-      { key: "epoch", header: "Epoch", cell: (a) => a.epoch, sortValue: (a) => a.epoch, align: "right", mono: true, width: 64 },
-      { key: "type", header: "Type", cell: (a) => <span className="mono muted">{a.contentType}</span>, width: 160, nowrap: true },
-      { key: "size", header: "Size", cell: (a) => formatBytes(a.size), sortValue: (a) => a.size, align: "right", mono: true, width: 90 },
-      { key: "sha", header: "SHA-256", cell: (a) => <IdChip value={a.sha256} truncate={12} />, mono: true, width: 150 },
-      { key: "created", header: "Created", cell: (a) => formatTimestamp(a.createdAt), sortValue: (a) => Date.parse(a.createdAt), align: "right", mono: true, width: 170 },
+      { key: "path", header: "Path", cell: (a) => <span className="mono">{a.path}</span>, sortValue: (a) => a.path, lead: true },
+      { key: "epoch", header: "Epoch", cell: (a) => a.epoch, sortValue: (a) => a.epoch, align: "right", mono: true, width: 72, optional: true },
+      { key: "type", header: "Type", cell: (a) => <span className="muted">{a.contentType}</span>, width: 170, optional: true },
+      { key: "size", header: "Size", cell: (a) => formatBytes(a.size), sortValue: (a) => a.size, align: "right", mono: true, width: 96 },
+      { key: "sha", header: "SHA-256", cell: (a) => <IdChip value={a.sha256} truncate={12} />, mono: true, width: 150, optional: true },
+      { key: "created", header: "Created", cell: (a) => formatTimestamp(a.createdAt), sortValue: (a) => Date.parse(a.createdAt), align: "right", mono: true, width: 180, optional: true },
       {
         key: "dl",
         header: "",
@@ -105,7 +105,7 @@ export function RunSnapshots({ run, live }: { run: Run; live: boolean }) {
             <Badge tone="warn">not uploaded</Badge>
           ),
         align: "right",
-        width: 120,
+        width: 130,
       },
     ],
     [downloading],

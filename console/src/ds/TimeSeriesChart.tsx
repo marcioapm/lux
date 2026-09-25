@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { formatClock, formatTimestamp, formatUnit, type Unit } from "./format.ts";
-import { cssVar, useTheme } from "./theme.ts";
+import { cssVar, useDensity, useTheme } from "./theme.ts";
 
 export interface Series {
   label: string;
@@ -23,6 +23,7 @@ export interface TimeSeriesChartProps {
   ys: (number | null)[][];
   series: Series[];
   unit: Unit;
+  /** Plot height in px; defaults to the --chart-h token (grows with the screen, shrinks when compact). */
   height?: number;
   /** Start the y axis at zero (default true; counts/bytes should). */
   zeroBase?: boolean;
@@ -41,6 +42,19 @@ export interface ChartMark {
 }
 
 const MAX_SERIES = 8;
+
+/** The --chart-h token as a number, tracking density and viewport changes. */
+function useChartHeight(): number {
+  const { density } = useDensity();
+  const [h, setH] = useState(() => parseInt(cssVar("--chart-h")) || 200);
+  useEffect(() => {
+    const read = () => setH(parseInt(cssVar("--chart-h")) || 200);
+    read();
+    window.addEventListener("resize", read);
+    return () => window.removeEventListener("resize", read);
+  }, [density]);
+  return h;
+}
 
 function seriesColor(s: Series, i: number): string {
   if (typeof s.color === "string") return s.color;
@@ -62,10 +76,12 @@ interface Hover {
 }
 
 /** uPlot line chart: crosshair + one tooltip for every series, unit-aware axes, theme-aware, resizes. */
-export function TimeSeriesChart({ x, ys, series, unit, height = 200, zeroBase = true, yMax, legend, marks, className }: TimeSeriesChartProps) {
+export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroBase = true, yMax, legend, marks, className }: TimeSeriesChartProps) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const { resolved } = useTheme();
+  const tokenHeight = useChartHeight();
+  const height = heightProp ?? tokenHeight;
   const [hover, setHover] = useState<Hover | null>(null);
   const [hidden, setHidden] = useState<Set<number>>(() => new Set());
   const marksRef = useRef(marks);

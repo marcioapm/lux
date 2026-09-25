@@ -1,4 +1,4 @@
-import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, StatTile, TimeSeriesChart } from "../../ds/index.ts";
+import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, SectionHeader, StatTile, TimeSeriesChart } from "../../ds/index.ts";
 import { api, useNow } from "../../api/index.ts";
 import { go } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
@@ -7,6 +7,8 @@ import { ActivityFeed } from "./ActivityFeed.tsx";
 
 /** What the Queued tile counts. */
 const QUEUED = ["submitted", "resuming", "provisioning"];
+
+const RANGE_LABEL: Record<string, string> = { "1h": "the last hour", "6h": "the last 6 hours", "24h": "the last 24 hours", "7d": "the last 7 days", "30d": "the last 30 days" };
 
 export function Overview() {
   const scope = useScope();
@@ -30,9 +32,11 @@ export function Overview() {
   const lostHosts = hosts.lost ?? 0;
   const resolution = history.data?.resolution;
   const interval = resolution === 0 ? "10s" : resolution === 60 ? "1m" : resolution === 3600 ? "1h" : undefined;
+  const where = scope.apiTenant ? `tenant ${scope.apiTenant}` : scope.operator ? "all tenants" : "your runs and hosts";
 
   return (
-    <div className="page">
+    <div className="page page-wide">
+      <PageHeader title="Overview" description={<span>{where} · charts over {RANGE_LABEL[scope.range] ?? scope.range}</span>} />
       {status.error && !st && <ErrorBlock error={status.error} onRetry={status.refetch} />}
       {status.error && st && <ErrorStrip error={`Showing stale numbers: the last refresh failed (${status.error}).`} />}
       <div className="grid grid-stats">
@@ -46,25 +50,26 @@ export function Overview() {
       </div>
       <div className="overview-grid">
         <div className="stack overview-charts">
+          <SectionHeader title="Trends" note={interval ? `${interval} samples` : undefined} />
           <ErrorStrip error={history.error} />
-          <div className="grid grid-2">
+          <div className="grid grid-charts">
             <Card title="Runs" subtitle="running and queued">
-              <TimeSeriesChart x={runSeries.x} ys={runSeries.ys} series={[{ label: "Running", color: 1, area: true }, { label: "Queued", color: 2 }]} unit="count" height={180} />
+              <TimeSeriesChart x={runSeries.x} ys={runSeries.ys} series={[{ label: "Running", color: 1, area: true }, { label: "Queued", color: 2 }]} unit="count" />
             </Card>
             <Card title="Started / finished" subtitle={interval ? `per ${interval} interval` : "per interval"}>
-              <TimeSeriesChart x={flow.x} ys={flow.ys} series={[{ label: "Started", color: 1, step: true }, { label: "Finished", color: 3, step: true }]} unit="count" height={180} />
+              <TimeSeriesChart x={flow.x} ys={flow.ys} series={[{ label: "Started", color: 1, step: true }, { label: "Finished", color: 3, step: true }]} unit="count" />
             </Card>
             <Card title="Start latency" subtitle="submit to first workload start">
-              <TimeSeriesChart x={latency.x} ys={latency.ys} series={[{ label: "p50", color: 1 }, { label: "p95", color: 2, dashed: true }]} unit="duration" height={180} />
+              <TimeSeriesChart x={latency.x} ys={latency.ys} series={[{ label: "p50", color: 1 }, { label: "p95", color: 2, dashed: true }]} unit="duration" />
             </Card>
             <Card title="Hosts" subtitle="by state">
-              <TimeSeriesChart x={hostSeries.x} ys={hostSeries.ys} series={[{ label: "Ready", color: 3, step: true, area: true }, { label: "Draining", color: 4, step: true }, { label: "Lost", color: 8, step: true }]} unit="count" height={180} />
+              <TimeSeriesChart x={hostSeries.x} ys={hostSeries.ys} series={[{ label: "Ready", color: 3, step: true, area: true }, { label: "Draining", color: 4, step: true }, { label: "Lost", color: 8, step: true }]} unit="count" />
             </Card>
             <Card title="CPU" subtitle="allocated vs capacity">
-              <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Allocated", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="cores" height={180} />
+              <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Allocated", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="cores" />
             </Card>
             <Card title="Memory" subtitle="allocated vs capacity">
-              <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Allocated", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" height={180} />
+              <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Allocated", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
             </Card>
           </div>
         </div>

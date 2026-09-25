@@ -1,6 +1,6 @@
 import { Badge, Card, formatBytes, formatDuration, Timeline, type TimelineStage } from "../../ds/index.ts";
 import type { Placement, Run } from "../../api/index.ts";
-import { hostPath, IdLink } from "./common.tsx";
+import { HostLink } from "./common.tsx";
 
 type Stamp = keyof Placement;
 
@@ -69,16 +69,15 @@ export function RunTimeline({ run, now }: { run: Run; now: number }) {
           title={
             <span className="row">
               <span>Epoch {p.epoch}</span>
-              <Badge mono outline>
-                {p.state}
-              </Badge>
+              <Badge outline>{p.state}</Badge>
               {p.epoch === run.epoch && <Badge tone="accent">current</Badge>}
             </span>
           }
           subtitle={
-            <span className="row">
-              <span>on</span>
-              <IdLink value={p.hostName || p.host} to={hostPath(p.host)} />
+            <span className="row" style={{ gap: "var(--sp-2) var(--sp-3)" }}>
+              <span>
+                on <HostLink id={p.host} name={p.hostName} />
+              </span>
               {p.cpuSeconds != null && <span>· CPU {formatDuration(p.cpuSeconds)}</span>}
               {p.peakMemoryBytes != null && <span>· peak mem {formatBytes(p.peakMemoryBytes)}</span>}
               {p.peakDiskBytes != null && <span>· peak disk {formatBytes(p.peakDiskBytes)}</span>}

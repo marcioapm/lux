@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Button, Card, RUN_STATE_LIST, runStateStyle, Table } from "../../ds/index.ts";
+import { Button, Card, PageHeader, RUN_STATE_LIST, runStateStyle, Table } from "../../ds/index.ts";
 import { api, errorText, useQuery, type Run, type RunListParams } from "../../api/index.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
@@ -85,64 +85,69 @@ export function Runs() {
   const cols = useMemo(() => runColumns({ tenant: scope.showTenant }), [scope.showTenant]);
 
   return (
-    <div className="page">
-      <div className="filters">
-        <div className="chips" role="group" aria-label="States">
-          {RUN_STATE_LIST.map((s) => {
-            const st = runStateStyle(s);
-            const on = states.includes(s);
-            return (
-              <button key={s} type="button" className={["chip", `chip-${st.hue}`, on ? "is-on" : ""].join(" ").trim()} onClick={() => toggleState(s)} aria-pressed={on}>
-                {st.label}
-              </button>
-            );
-          })}
+    <div className="page page-list">
+      <PageHeader title="Runs" description={<span>{runs.length}{full ? "+" : ""} {filtered ? "matching" : ""} runs · newest first{scope.showTenant ? " · all tenants" : ""}</span>} />
+      <div className="filters-bar">
+        <div className="filters">
+          <div className="chips" role="group" aria-label="States">
+            {RUN_STATE_LIST.map((s) => {
+              const st = runStateStyle(s);
+              const on = states.includes(s);
+              return (
+                <button key={s} type="button" className={["chip", `chip-${st.hue}`, on ? "is-on" : ""].join(" ").trim()} onClick={() => toggleState(s)} aria-pressed={on}>
+                  {st.label}
+                </button>
+              );
+            })}
+          </div>
+          <label className="check" title="Stopped, lost or failed: what resume accepts">
+            <input type="checkbox" checked={resumable} onChange={(e) => setSearchParams({ resumable: e.target.checked ? "true" : null })} />
+            Resumable
+          </label>
         </div>
-        <label className="check" title="Stopped, lost or failed: what resume accepts">
-          <input type="checkbox" checked={resumable} onChange={(e) => setSearchParams({ resumable: e.target.checked ? "true" : null })} />
-          Resumable
-        </label>
-      </div>
-      <form className="filters" onSubmit={submitText}>
-        <input className="input input-sm mono" placeholder="host id or name" value={hostDraft} onChange={(e) => setHostDraft(e.target.value)} style={{ width: 190 }} />
-        <input className="input input-sm mono" placeholder="label k=v" value={labelDraft} onChange={(e) => setLabelDraft(e.target.value)} style={{ width: 150 }} />
-        <Button size="sm" type="submit">
-          Apply
-        </Button>
-        {filtered && (
-          <Button size="sm" variant="ghost" onClick={clear}>
-            Clear
+        <form className="filters" onSubmit={submitText}>
+          <input className="input input-sm mono" placeholder="host id or name" value={hostDraft} onChange={(e) => setHostDraft(e.target.value)} style={{ width: 200 }} />
+          <input className="input input-sm mono" placeholder="label k=v" value={labelDraft} onChange={(e) => setLabelDraft(e.target.value)} style={{ width: 160 }} />
+          <Button size="sm" type="submit">
+            Apply
           </Button>
-        )}
-        <span className="filter-summary">
-          Showing {filtered ? "runs" : "all runs"}
-          {states.length > 0 && (
-            <>
-              {" "}in state <span className="mono">{states.join(" or ")}</span>
-            </>
+          {filtered && (
+            <Button size="sm" variant="ghost" onClick={clear}>
+              Clear
+            </Button>
           )}
-          {resumable && <>{states.length > 0 ? " and" : ""} resumable (stopped, lost or failed)</>}
-          {host && (
-            <>
-              {" "}placed on{" "}
-              {hostInfo.data ? (
-                <Link to={hostPath(hostInfo.data.id)} className="mono">
-                  {hostInfo.data.name}
-                </Link>
-              ) : (
-                <span className="mono">{host}</span>
+          {filtered && (
+            <span className="filter-summary">
+              Showing runs
+              {states.length > 0 && (
+                <>
+                  {" "}in state <span className="mono">{states.join(" or ")}</span>
+                </>
               )}
-            </>
+              {resumable && <>{states.length > 0 ? " and" : ""} resumable (stopped, lost or failed)</>}
+              {host && (
+                <>
+                  {" "}placed on{" "}
+                  {hostInfo.data ? (
+                    <Link to={hostPath(hostInfo.data.id)}>
+                      {hostInfo.data.name}
+                    </Link>
+                  ) : (
+                    <span className="mono">{host}</span>
+                  )}
+                </>
+              )}
+              {label && (
+                <>
+                  {" "}labelled <span className="mono">{label}</span>
+                </>
+              )}
+              .
+            </span>
           )}
-          {label && (
-            <>
-              {" "}labelled <span className="mono">{label}</span>
-            </>
-          )}
-          .
-        </span>
-      </form>
-      <Card flush title="Runs" subtitle={`${runs.length}${full ? "+" : ""} · newest first`}>
+        </form>
+      </div>
+      <Card flush>
         <ErrorStrip error={runs.length > 0 ? q.error ?? olderHere?.error ?? null : null} />
         {q.error && runs.length === 0 && !q.loading ? (
           <ErrorBlock error={q.error} onRetry={q.refetch} />

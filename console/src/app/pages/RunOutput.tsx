@@ -42,7 +42,7 @@ export function RunOutput({ run }: { run: Run }) {
   };
 
   return (
-    <div className="stack">
+    <div className="stack stack-tight">
       <div className="row output-status">
         {out.status === "streaming" && <Badge tone="success">streaming</Badge>}
         {out.status === "connecting" && (
@@ -55,9 +55,9 @@ export function RunOutput({ run }: { run: Run }) {
         {out.error && <span className="muted">{out.error}</span>}
         {out.cursor && <span className="muted mono">cursor {out.cursor}</span>}
       </div>
-      <LogView lines={out.lines} height="calc(100vh - 380px)" lineNumbers emptyText={out.status === "connecting" ? "Connecting…" : "No output."} />
-      <form className="row" onSubmit={send}>
-        <input className="input mono" style={{ flex: 1 }} placeholder={canInput ? "Send input to the agent…" : "Input needs a starting or running run"} value={text} onChange={(e) => setText(e.target.value)} disabled={!canInput || sending} />
+      <LogView lines={out.lines} height="clamp(320px, calc(100vh - 470px), 720px)" lineNumbers emptyText={out.status === "connecting" ? "Connecting…" : "No output."} />
+      <form className="output-form" onSubmit={send}>
+        <input className="input mono" placeholder={canInput ? "Send input to the agent…" : "Input needs a starting or running run"} value={text} onChange={(e) => setText(e.target.value)} disabled={!canInput || sending} />
         <Button type="submit" icon={<IconSend size={14} />} disabled={!canInput || text.trim() === ""} loading={sending}>
           Send
         </Button>

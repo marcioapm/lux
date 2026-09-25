@@ -36,25 +36,25 @@ export function RunResources({ run }: { run: Run }) {
   const limit = { label: "Requested", color: "var(--fg-faint)", dashed: true } as const;
   return (
     <div className="stack">
-      <div className="muted">
+      <div className="muted" style={{ fontSize: "var(--text-sm)" }}>
         {q.data ? `${q.data.samples.length} samples over ${since}${q.data.resolution ? ` at ${q.data.resolution}s` : ""}` : "Loading…"}
         {marks.length > 0 && " · dashed verticals mark placement epochs"}
       </div>
-      <div className="grid grid-2">
+      <div className="grid grid-charts">
         <Card title="CPU" subtitle="cores used">
-          <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Used", color: 1, area: true }, limit]} unit="cores" height={180} marks={marks} />
+          <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Used", color: 1, area: true }, limit]} unit="cores" marks={marks} />
         </Card>
         <Card title="Memory">
-          <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Used", color: 7, area: true }, limit]} unit="bytes" height={180} marks={marks} />
+          <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Used", color: 7, area: true }, limit]} unit="bytes" marks={marks} />
         </Card>
         <Card title="Disk">
-          <TimeSeriesChart x={disk.x} ys={disk.ys} series={[{ label: "Used", color: 4, area: true }, limit]} unit="bytes" height={180} marks={marks} />
+          <TimeSeriesChart x={disk.x} ys={disk.ys} series={[{ label: "Used", color: 4, area: true }, limit]} unit="bytes" marks={marks} />
         </Card>
         <Card title="Processes">
-          <TimeSeriesChart x={pids.x} ys={pids.ys} series={[{ label: "Pids", color: 3, step: true, area: true }]} unit="count" height={180} marks={marks} />
+          <TimeSeriesChart x={pids.x} ys={pids.ys} series={[{ label: "Pids", color: 3, step: true, area: true }]} unit="count" marks={marks} />
         </Card>
         <Card title="Network" subtitle="bytes per second">
-          <TimeSeriesChart x={net.x} ys={net.ys} series={[{ label: "Received", color: 1 }, { label: "Sent", color: 2 }]} unit="rate" height={180} marks={marks} />
+          <TimeSeriesChart x={net.x} ys={net.ys} series={[{ label: "Received", color: 1 }, { label: "Sent", color: 2 }]} unit="rate" marks={marks} />
         </Card>
       </div>
     </div>

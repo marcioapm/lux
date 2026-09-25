@@ -1,4 +1,6 @@
-/* Component styles. One file, sections per component, tokens only. */
+/* Component styles. One file, sections per component, tokens only.
+   Sizes come from the density tokens (tokens.css): row/control heights,
+   text sizes and paddings switch between comfortable and compact. */
 
 /* ---------- Button ---------- */
 .btn {
@@ -30,7 +32,7 @@
   background: var(--bg-muted);
 }
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 .btn-sm {
@@ -57,11 +59,12 @@
 }
 .btn-danger {
   background: var(--bg-surface);
-  border-color: var(--danger-dot);
+  border-color: var(--border-strong);
   color: var(--danger-fg);
 }
 .btn-danger:hover {
   background: var(--danger-bg);
+  border-color: var(--danger-dot);
 }
 .btn-danger:active {
   background: var(--danger-dot);
@@ -145,7 +148,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  height: 18px;
+  height: calc(var(--text-xs) + 8px);
   padding: 0 var(--sp-3);
   border-radius: var(--radius-sm);
   font-size: var(--text-xs);
@@ -178,7 +181,9 @@
 }
 .badge-outline {
   background: transparent;
-  border-color: var(--border-strong);
+  border-color: var(--border);
+  color: var(--fg-muted);
+  font-weight: var(--weight-normal);
 }
 
 /* ---------- StatePill ---------- */
@@ -186,7 +191,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--sp-3);
-  height: 20px;
+  height: calc(var(--text-sm) + 10px);
   padding: 0 var(--sp-4) 0 var(--sp-3);
   border-radius: var(--radius-pill);
   font-size: var(--text-sm);
@@ -199,6 +204,7 @@
 .pill-compact {
   padding: 0;
   width: 20px;
+  height: 20px;
   justify-content: center;
 }
 .pill-dot {
@@ -300,34 +306,42 @@
   transform: translateY(-50%);
 }
 
-/* ---------- Card ---------- */
+/* ---------- Card ----------
+   The one elevated surface. A soft hairline, no shadow, a quiet header
+   (title, optional one-line subtitle) with no rule under it: the content
+   itself gives the rhythm. */
 .card {
   display: flex;
   flex-direction: column;
   min-width: 0;
   background: var(--bg-surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
 }
 .card-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--sp-5);
-  padding: var(--sp-4) var(--sp-6);
-  min-height: 40px;
-  border-bottom: 1px solid var(--border);
+  padding: var(--pad-card) var(--pad-card) var(--sp-4);
+}
+.card-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 .card-title {
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-tight);
+  color: var(--fg);
 }
 .card-subtitle {
   font-size: var(--text-sm);
   color: var(--fg-muted);
-  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .card-actions {
   display: flex;
@@ -336,15 +350,21 @@
   flex: none;
 }
 .card-body {
-  padding: var(--sp-6);
+  padding: 0 var(--pad-card) var(--pad-card);
   min-width: 0;
+}
+.card-body:first-child {
+  padding-top: var(--pad-card);
 }
 .card-body-flush {
   padding: 0;
 }
+.card-head + .card-body-flush {
+  border-top: 1px solid var(--border-soft);
+}
 .card-foot {
-  padding: var(--sp-4) var(--sp-6);
-  border-top: 1px solid var(--border);
+  padding: var(--sp-4) var(--pad-card);
+  border-top: 1px solid var(--border-soft);
   font-size: var(--text-sm);
   color: var(--fg-muted);
 }
@@ -353,8 +373,9 @@
 .kv {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 0 var(--sp-7);
+  gap: 0 var(--gap-lg);
   margin: 0;
+  container-type: inline-size;
 }
 .kv-cols-2 {
   grid-template-columns: 1fr 1fr;
@@ -362,12 +383,23 @@
 .kv-cols-3 {
   grid-template-columns: 1fr 1fr 1fr;
 }
+@container (max-width: 900px) {
+  .kv-cols-3 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+@container (max-width: 560px) {
+  .kv-cols-2,
+  .kv-cols-3 {
+    grid-template-columns: 1fr;
+  }
+}
 .kv-row {
   display: grid;
-  grid-template-columns: minmax(96px, 36%) 1fr;
+  grid-template-columns: minmax(96px, 34%) 1fr;
   gap: var(--sp-5);
-  padding: var(--sp-3) 0;
-  border-bottom: 1px solid var(--border);
+  padding: var(--sp-4) 0;
+  border-bottom: 1px solid var(--border-soft);
   min-width: 0;
 }
 .kv-key {
@@ -376,6 +408,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  padding-top: 1px;
 }
 .kv-value {
   margin: 0;
@@ -383,20 +416,19 @@
   overflow-wrap: anywhere;
 }
 
-/* ---------- IdChip / Code ---------- */
+/* ---------- IdChip / Code ----------
+   Ids are quiet: plain mono in the muted colour, the copy affordance
+   appears on hover or focus. Names lead; ids support. */
 .idchip {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  height: 20px;
-  padding: 0 var(--sp-2) 0 var(--sp-3);
-  border-radius: var(--radius-sm);
-  background: var(--bg-subtle);
-  border: 1px solid var(--border);
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--fg);
+  font-size: 0.93em;
+  color: var(--fg-muted);
   max-width: 100%;
+  min-width: 0;
+  vertical-align: baseline;
 }
 .idchip-prefix {
   color: var(--fg-faint);
@@ -407,6 +439,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: inherit;
+}
+.idchip-text:hover {
+  color: var(--fg);
 }
 a.idchip-text:hover {
   color: var(--accent-text);
@@ -423,11 +458,15 @@ a.idchip-text:hover {
   cursor: pointer;
   opacity: 0;
   transition: opacity var(--dur-fast);
+  flex: none;
 }
 .idchip:hover .idchip-copy,
-.idchip-copy:focus-visible,
+.idchip:focus-within .idchip-copy,
 .idchip.is-copied .idchip-copy {
   opacity: 1;
+}
+.idchip-copy:hover {
+  color: var(--fg);
 }
 .idchip.is-copied .idchip-copy {
   color: var(--success-fg);
@@ -436,8 +475,7 @@ a.idchip-text:hover {
   padding: 1px var(--sp-2);
   border-radius: var(--radius-sm);
   background: var(--bg-subtle);
-  border: 1px solid var(--border);
-  font-size: var(--text-sm);
+  font-size: 0.93em;
 }
 
 /* ---------- EmptyState ---------- */
@@ -450,7 +488,7 @@ a.idchip-text:hover {
   color: var(--fg-muted);
 }
 .empty-compact {
-  padding: var(--sp-7) var(--sp-6);
+  padding: var(--sp-8) var(--sp-6);
 }
 .empty-icon {
   color: var(--fg-faint);
@@ -463,7 +501,7 @@ a.idchip-text:hover {
 .empty-desc {
   font-size: var(--text-sm);
   margin-top: var(--sp-2);
-  max-width: 360px;
+  max-width: 380px;
 }
 .empty-action {
   margin-top: var(--sp-5);
@@ -478,13 +516,13 @@ a.idchip-text:hover {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
-  width: 340px;
+  width: 360px;
   max-width: calc(100vw - 2 * var(--sp-6));
 }
 .toast {
   display: flex;
   gap: var(--sp-4);
-  padding: var(--sp-4) var(--sp-5);
+  padding: var(--sp-5) var(--sp-5);
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-left: 3px solid var(--toast-color);
@@ -507,7 +545,7 @@ a.idchip-text:hover {
 .toast-icon {
   color: var(--toast-color);
   display: inline-flex;
-  margin-top: 2px;
+  margin-top: 3px;
 }
 .toast-body {
   flex: 1;
@@ -520,6 +558,7 @@ a.idchip-text:hover {
   font-size: var(--text-sm);
   color: var(--fg-muted);
   margin-top: 2px;
+  overflow-wrap: anywhere;
 }
 .toast-close {
   border: 0;
@@ -548,8 +587,9 @@ a.idchip-text:hover {
   background: var(--bg-raised);
   color: var(--fg);
   box-shadow: var(--shadow-lg);
-  width: 420px;
+  width: 440px;
   max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
 }
 .dialog::backdrop {
   background: var(--overlay);
@@ -557,16 +597,17 @@ a.idchip-text:hover {
 .dialog-form {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-5);
-  padding: var(--sp-6);
+  gap: var(--sp-6);
+  padding: var(--sp-7);
 }
 .dialog-title {
-  font-size: var(--text-lg);
+  font-size: var(--text-xl);
   font-weight: var(--weight-semibold);
 }
 .dialog-desc {
   color: var(--fg-secondary);
   font-size: var(--text-md);
+  margin-top: calc(-1 * var(--sp-4));
 }
 .dialog-actions {
   display: flex;
@@ -574,12 +615,17 @@ a.idchip-text:hover {
   gap: var(--sp-4);
   margin-top: var(--sp-2);
 }
+@media (max-width: 767px) {
+  .dialog-form {
+    padding: var(--sp-6);
+  }
+}
 
 /* ---------- Field / Input ---------- */
 .field {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
 }
 .field-label {
   font-size: var(--text-sm);
@@ -587,12 +633,13 @@ a.idchip-text:hover {
 }
 .input {
   height: var(--control-h);
-  padding: 0 var(--sp-4);
+  padding: 0 var(--sp-5);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   background: var(--bg-surface);
   color: var(--fg);
   font-size: var(--text-md);
+  min-width: 0;
 }
 .input::placeholder {
   color: var(--fg-faint);
@@ -606,12 +653,17 @@ a.idchip-text:hover {
   display: flex;
   gap: var(--sp-2);
   border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 .tab {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-3);
-  height: 34px;
+  height: calc(var(--control-h) + 6px);
   padding: 0 var(--sp-4);
   margin-bottom: -1px;
   border: 0;
@@ -621,9 +673,11 @@ a.idchip-text:hover {
   font-size: var(--text-md);
   font-weight: var(--weight-medium);
   cursor: pointer;
+  white-space: nowrap;
+  flex: none;
 }
 .tabs-sm .tab {
-  height: 28px;
+  height: var(--control-h);
   font-size: var(--text-sm);
 }
 .tab:hover {
@@ -652,6 +706,7 @@ a.idchip-text:hover {
 .select {
   position: relative;
   display: inline-block;
+  max-width: 100%;
 }
 .select-trigger {
   display: inline-flex;
@@ -666,6 +721,7 @@ a.idchip-text:hover {
   font-size: var(--text-md);
   cursor: pointer;
   white-space: nowrap;
+  max-width: 100%;
 }
 .select-sm .select-trigger {
   height: var(--control-h-sm);
@@ -701,7 +757,7 @@ a.idchip-text:hover {
   left: 0;
   min-width: 100%;
   width: max-content;
-  max-width: 320px;
+  max-width: min(320px, calc(100vw - 32px));
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -725,6 +781,7 @@ a.idchip-text:hover {
   outline: none;
   font-size: var(--text-md);
   color: var(--fg);
+  min-width: 0;
 }
 .select-list {
   list-style: none;
@@ -787,17 +844,24 @@ a.idchip-text:hover {
   min-width: 160px;
 }
 
-/* ---------- Table ---------- */
+/* ---------- Table ----------
+   Fixed layout: columns with a width keep it, the rest share what is left
+   (names and reasons), so wide screens stretch the text columns, not the
+   gaps. The table has a minimum width and scrolls inside its card on
+   narrow screens, with the first column pinned. Columns marked optional
+   drop out in narrow content areas. */
 .table-wrap {
   overflow: auto;
   position: relative;
   transition: opacity var(--dur-normal);
+  overscroll-behavior-x: contain;
 }
 .table-wrap.is-refreshing {
   opacity: 0.6;
 }
 .table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
   font-size: var(--text-md);
@@ -805,16 +869,16 @@ a.idchip-text:hover {
 .table th {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 2;
   background: var(--bg-surface);
-  padding: 0 var(--sp-5);
-  height: 30px;
-  font-size: var(--text-xs);
+  padding: 0 var(--pad-cell);
+  height: calc(var(--row-h) - 4px);
+  font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   border-bottom: 1px solid var(--border);
   user-select: none;
 }
@@ -831,6 +895,7 @@ a.idchip-text:hover {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
+  max-width: 100%;
 }
 .th-sort {
   display: inline-flex;
@@ -844,13 +909,16 @@ a.idchip-text:hover {
 }
 .table td {
   height: var(--row-h);
-  padding: 0 var(--sp-5);
-  border-bottom: 1px solid var(--border);
+  padding: 0 var(--pad-cell);
+  border-bottom: 1px solid var(--border-soft);
   vertical-align: middle;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: var(--bg-surface);
 }
 .table-dense td {
-  height: 28px;
+  height: var(--row-h-dense);
 }
 .table tbody tr:last-child td {
   border-bottom-color: transparent;
@@ -859,7 +927,7 @@ a.idchip-text:hover {
   cursor: pointer;
 }
 .table tr.is-clickable:hover td {
-  background: var(--bg-subtle);
+  background: var(--bg-inset);
 }
 .table tr.is-selected td {
   background: var(--accent-subtle);
@@ -870,36 +938,57 @@ a.idchip-text:hover {
 .table tr:focus-visible td {
   box-shadow: inset 0 0 0 1px var(--accent);
 }
-.td-nowrap {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.table td.td-wrap {
+  white-space: normal;
 }
 .td-empty {
   height: auto !important;
   padding: 0 !important;
+  white-space: normal !important;
 }
 .row-skeleton td {
   padding-top: 2px;
+}
+/* Pinned first column (matters once the table scrolls sideways). */
+.table th:first-child,
+.table td:first-child {
+  position: sticky;
+  left: 0;
+}
+.table th:first-child {
+  z-index: 3;
+}
+.table td:first-child {
+  z-index: 1;
+}
+.table-wrap.is-scrolled th:first-child,
+.table-wrap.is-scrolled td:first-child {
+  box-shadow: inset -1px 0 0 var(--border);
+}
+/* Cells that lead a row: the name, in the foreground colour, medium weight. */
+.table .td-lead,
+.table .td-lead a {
+  color: var(--fg);
+  font-weight: var(--weight-medium);
 }
 
 /* ---------- StatTile ---------- */
 .stat {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   min-width: 0;
-  padding: var(--sp-5) var(--sp-6);
+  padding: var(--pad-card);
   background: var(--bg-surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
   text-align: left;
   color: inherit;
   font: inherit;
 }
 .stat.is-clickable {
   cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease);
 }
 .stat.is-clickable:hover {
   border-color: var(--border-strong);
@@ -913,13 +1002,19 @@ a.idchip-text:hover {
   align-items: flex-end;
   justify-content: space-between;
   gap: var(--sp-5);
+  min-width: 0;
 }
 .stat-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--sp-3);
   font-size: var(--text-3xl);
   font-weight: var(--weight-semibold);
   line-height: 1.1;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
   color: var(--fg);
+  min-width: 0;
 }
 .stat-warn .stat-value {
   color: var(--warn-fg);
@@ -931,10 +1026,12 @@ a.idchip-text:hover {
   color: var(--success-fg);
 }
 .stat-unit {
-  margin-left: var(--sp-2);
-  font-size: var(--text-lg);
+  font-size: var(--text-sm);
   font-weight: var(--weight-normal);
   color: var(--fg-muted);
+  letter-spacing: 0;
+  white-space: nowrap;
+  line-height: 1.4;
 }
 .stat-spark {
   flex: none;
@@ -966,7 +1063,7 @@ a.idchip-text:hover {
   display: grid;
   place-items: center;
   font-size: var(--text-sm);
-  border: 1px dashed var(--border);
+  background: var(--bg-inset);
   border-radius: var(--radius-md);
 }
 .tschart .uplot {
@@ -1021,7 +1118,7 @@ a.idchip-text:hover {
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2) var(--sp-5);
-  padding: var(--sp-3) 0 0 var(--sp-2);
+  padding: var(--sp-4) 0 0 var(--sp-2);
 }
 .tschart-legend-item {
   display: inline-flex;
@@ -1088,7 +1185,7 @@ a.idchip-text:hover {
   grid-template-columns: var(--tl-label-w) 1fr;
   gap: var(--sp-5);
   align-items: center;
-  height: 26px;
+  height: 28px;
   border-radius: var(--radius-sm);
 }
 .timeline-row.is-active {
@@ -1120,7 +1217,7 @@ a.idchip-text:hover {
 }
 .timeline-bar {
   position: absolute;
-  top: 7px;
+  top: 8px;
   height: 12px;
   min-width: 3px;
   border-radius: 2px;
@@ -1155,6 +1252,15 @@ a.idchip-text:hover {
 .timeline-empty {
   padding: var(--sp-6);
 }
+@media (max-width: 767px) {
+  .timeline {
+    --tl-label-w: 104px !important;
+  }
+  .timeline-axis-track,
+  .timeline-track {
+    margin-right: 48px;
+  }
+}
 
 /* ---------- LogView ---------- */
 .logview {
@@ -1162,8 +1268,8 @@ a.idchip-text:hover {
   flex-direction: column;
   min-width: 0;
   background: var(--bg-inset);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
   overflow: hidden;
   font-family: var(--font-mono);
   font-size: var(--text-sm);
@@ -1191,7 +1297,7 @@ a.idchip-text:hover {
 .logline {
   display: flex;
   align-items: center;
-  line-height: 18px;
+  line-height: 20px;
   padding: 0 var(--sp-5);
   white-space: pre;
   color: var(--fg);
@@ -1236,9 +1342,9 @@ a.idchip-text:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 26px;
+  height: 30px;
   padding: 0 var(--sp-4) 0 var(--sp-5);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-soft);
   background: var(--bg-surface);
   font-family: var(--font-sans);
   font-size: var(--text-xs);
@@ -1247,7 +1353,7 @@ a.idchip-text:hover {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  height: 20px;
+  height: 22px;
   padding: 0 var(--sp-3);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -1260,4 +1366,69 @@ a.idchip-text:hover {
   background: var(--accent-subtle);
   border-color: transparent;
   color: var(--accent-text);
+}
+
+/* ---------- PageHeader ----------
+   Every page opens with one: title, one line of context, primary actions
+   on the right (they drop below the title on narrow screens). */
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-5) var(--gap-lg);
+  flex-wrap: wrap;
+  padding-bottom: var(--sp-2);
+}
+.page-head-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+  flex: 1 1 320px;
+}
+.page-head-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-4);
+  min-width: 0;
+}
+.page-title {
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.page-desc {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-5);
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  min-width: 0;
+}
+.page-note {
+  color: var(--fg-secondary);
+  font-size: var(--text-md);
+  padding-left: var(--sp-5);
+  border-left: 2px solid var(--border-strong);
+}
+.page-head-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+  flex: none;
+  padding-top: 2px;
+}
+@media (max-width: 767px) {
+  .page-head-actions {
+    width: 100%;
+  }
+  .page-head-actions .btn {
+    flex: 1 1 auto;
+  }
 }
