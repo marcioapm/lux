@@ -12,13 +12,21 @@ import (
 	"github.com/marcioapm/lux/internal/spec"
 )
 
-// checkMCPNotControlPlane refuses MCP servers on luxd's own host: every
-// runner blocks the control plane (every address its URL's host resolves
-// to), so the agent could never reach it. Refused here rather than failing
-// in the Run. Lookups are best effort: one that fails proves nothing, and
-// the runner's block holds anyway.
+// checkMCPNotControlPlane refuses MCP servers and services on luxd's own
+// host: every runner blocks the control plane (every address its URL's host
+// resolves to), so the workload could never reach it. Refused here rather
+// than failing in the Run. Lookups are best effort: one that fails proves
+// nothing, and the runner's block holds anyway.
 func (s *Server) checkMCPNotControlPlane(ctx context.Context, sp spec.RunSpec) error {
-	if len(sp.Workload.MCPServers) == 0 || s.cfg.PublicURL == "" {
+	type endpoint struct{ what, name, url string }
+	var eps []endpoint
+	for _, m := range sp.Workload.MCPServers {
+		eps = append(eps, endpoint{"workload.mcpServers", m.Name, m.URL})
+	}
+	for _, v := range sp.Workload.Services {
+		eps = append(eps, endpoint{"workload.services", v.Name, v.URL})
+	}
+	if len(eps) == 0 || s.cfg.PublicURL == "" {
 		return nil
 	}
 	pu, err := url.Parse(s.cfg.PublicURL)
@@ -26,8 +34,8 @@ func (s *Server) checkMCPNotControlPlane(ctx context.Context, sp spec.RunSpec) e
 		return nil
 	}
 	luxd := lookupAddrs(ctx, pu.Hostname())
-	for _, m := range sp.Workload.MCPServers {
-		u, err := url.Parse(m.URL)
+	for _, m := range eps {
+		u, err := url.Parse(m.url)
 		if err != nil {
 			continue
 		}
@@ -38,8 +46,8 @@ func (s *Server) checkMCPNotControlPlane(ctx context.Context, sp spec.RunSpec) e
 		}
 		if same {
 			return errf(http.StatusUnprocessableEntity, "invalid_request",
-				"workload.mcpServers %q: %s is the control plane's address, which a Run can never reach: run the MCP server elsewhere",
-				m.Name, host)
+				"%s %q: %s is the control plane's address, which a Run can never reach: run it elsewhere",
+				m.what, m.name, host)
 		}
 	}
 	return nil

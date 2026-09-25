@@ -46,6 +46,13 @@ are in the linked pages.
   WebSocket, and output is redacted before it is written anywhere
   ([Concepts](concepts.md)). A workload can still write a secret into its
   state volumes; that is its choice, and is snapshotted like anything else.
+- **Credentials a workload uses but must not hold** go through a service
+  (`workload.services`): lux-shim adds them to each request it forwards
+  from a socket in the container. The values are only in the shim's
+  memory, and the shim is not dumpable, so even container root (without
+  `CAP_SYS_PTRACE`, which no Run has) can't read them from `/proc`. Git
+  credentials never enter the container at all: the runner clones and
+  pushes.
 
 ## Deployment
 

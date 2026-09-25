@@ -613,6 +613,8 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 		"-v", p.r.cfg.Shim+":"+proto.ShimBinary+":ro",
 		"-v", runtimeVolume(p.runID)+":"+proto.ShimRunDir+":idmap",
 		"--tmpfs", proto.ShimSecretsDir+":rw,size=16m,mode=0700,nosuid,nodev",
+		// Service sockets: in memory, never in the image or a snapshot.
+		"--tmpfs", proto.ShimServicesDir+":rw,size=1m,mode=0755,nosuid,nodev,noexec",
 		"--cpus", fmt.Sprintf("%g", sp.Resources.CPUs),
 		"--memory", fmt.Sprintf("%d", int64(sp.Resources.Memory)),
 		"--memory-swap", fmt.Sprintf("%d", int64(sp.Resources.Memory)),
@@ -669,6 +671,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image 
 		Secrets:      sp.Secrets,
 		ArtifactsDir: "/.lux/run/artifacts",
 		MCPServers:   sp.Workload.MCPServers,
+		Services:     sp.Workload.Services,
 	}
 	if sp.Init != nil {
 		cfg.Init = sp.Init.Script

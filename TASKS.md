@@ -49,3 +49,4 @@ After v1:
 | Per-repository `push: false` | ✅ done |
 | MCP servers in the RunSpec (`workload.mcpServers`, headers from secrets) | ✅ done |
 | Add repositories on resume (`git.repositories` in the resume request, `lux resume --add-repo`, `git.clone` events; a failed added clone is dropped, not fatal) | ✅ done |
+| Services: credential-injecting proxy (`workload.services`) | ✅ done |

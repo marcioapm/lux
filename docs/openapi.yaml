@@ -1018,6 +1018,23 @@ components:
         name:
           type: string
       type: object
+    Service:
+      additionalProperties: false
+      properties:
+        headers:
+          description: Headers set on every request (replacing the workload's own of the same name), each valued from a secret.
+          items:
+            $ref: "#/components/schemas/MCPHeader"
+          type:
+            - array
+            - "null"
+        name:
+          description: "Unique name: the socket is /.lux/services/<name>.sock. Lowercase letters, digits, - and _."
+          type: string
+        url:
+          description: "Where requests go: http or https, without credentials. A request's path is appended to this URL's."
+          type: string
+      type: object
     Snapshot:
       additionalProperties: false
       properties:
@@ -1275,6 +1292,13 @@ components:
           type: string
         resume:
           $ref: "#/components/schemas/Resume"
+        services:
+          description: "HTTP services the workload calls through a local socket (/.lux/services/<name>.sock, named in LUX_SERVICE_<NAME>), which adds their headers: the workload never holds the credentials. Same URL rules as mcpServers."
+          items:
+            $ref: "#/components/schemas/Service"
+          type:
+            - array
+            - "null"
         tty:
           type: boolean
         user:

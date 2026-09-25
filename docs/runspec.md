@@ -25,6 +25,11 @@ workload:
       url: https://mcp.acme.dev/mcp
       headers:
         - { name: Authorization, secret: TRACKER_TOKEN }  # the value is the secret's
+  services:                     # HTTP services called through a local socket
+    - name: tracker-api         # /.lux/services/tracker-api.sock, $LUX_SERVICE_TRACKER_API
+      url: https://api.acme.dev/v2
+      headers:
+        - { name: Authorization, secret: TRACKER_TOKEN }  # added by lux; the workload never has it
 
 init:
   script: npm ci                # runs before the workload, on every start
@@ -354,6 +359,59 @@ network:
 - **A custom `workload.resume.command` is run as written:** an adapter adds
   nothing to it, so the MCP flags (claude-code and codex) are not added on
   resume. Put them in it yourself if you need them there.
+
+## Services
+
+`workload.services` lets the workload call an HTTP service as its Run
+without ever holding the credential. lux-shim serves each service on a
+unix socket in the container and adds the service's headers to every
+request:
+
+```yaml
+workload:
+  services:
+    - name: tracker-api
+      url: https://api.acme.dev/v2
+      headers:
+        - { name: Authorization, secret: TRACKER_TOKEN }
+network:
+  egress:
+    - { host: api.acme.dev }
+secrets:
+  - { name: TRACKER_TOKEN, value: "Bearer …" }
+```
+
+```bash
+# inside the container
+curl --unix-socket /.lux/services/tracker-api.sock http://tracker-api/items?open=1
+echo $LUX_SERVICE_TRACKER_API   # unix:/.lux/services/tracker-api.sock
+```
+
+- **The socket:** `/.lux/services/<name>.sock`, mode 0600 and owned by the
+  workload user, on a tmpfs, so it is never in the image or a snapshot.
+  `LUX_SERVICE_<NAME>=unix:/.lux/services/<name>.sock` (the name
+  upper-cased, `-` as `_`) is set for the agent, init and `lux exec`.
+- **Requests:** any method, forwarded to `url` with the request's path
+  appended to `url`'s path (`/items` above goes to `/v2/items`) and its
+  query kept. The service's headers are set over any the workload sent
+  with the same names. Request and response bodies stream both ways (SSE
+  and chunked responses arrive as they are sent). Nothing is cached. If the
+  service can't be reached, the workload gets `502` with a short text body.
+- **The credential stays out of the workload's reach.** Header values come
+  only from secrets, and a secret used only for headers is placed nowhere
+  else (its `as:` defaults to `none`). They live only in lux-shim's memory:
+  never in a file, an environment or argv. The shim is not dumpable, so its
+  `/proc` entries and memory are closed to the workload even when it runs
+  as container root: Runs have no `CAP_SYS_PTRACE`. They are redacted from
+  output like any secret.
+- **The same rules as MCP servers:** unique names (lowercase, digits, `-`,
+  `_`); an http or https URL with no credentials; `network.egress` must
+  allow its host (`host:`) or address (`cidr:`), unless unrestricted;
+  never the control plane's address; no duplicate header names; a git
+  credential can't be a header's secret.
+- **Each placement** serves them again: a resume supplies the header
+  secrets with the rest, as always.
+- Requests leave from the Run's network, under its egress rules.
 
 ## Network egress
 

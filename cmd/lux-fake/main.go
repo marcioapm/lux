@@ -343,6 +343,8 @@ func (a *agent) runLine(line string, cancel chan struct{}) bool {
 			a.cwd = dir
 			a.say("cwd " + dir)
 		}
+	case "http":
+		a.httpCall(rest)
 	case "mcp-call":
 		server, rest, _ := strings.Cut(rest, " ")
 		tool, text, _ := strings.Cut(rest, " ")

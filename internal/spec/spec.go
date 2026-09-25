@@ -63,6 +63,16 @@ type Workload struct {
 	// Grace is how long a graceful stop waits before SIGKILL.
 	Grace      Duration    `json:"grace,omitempty" yaml:"grace,omitempty"`
 	MCPServers []MCPServer `json:"mcpServers,omitempty" yaml:"mcpServers,omitempty" doc:"MCP servers (streamable HTTP) the agent connects to, through its adapter. Each URL's host must be allowed by network.egress (unless unrestricted), and may not be the control plane's."`
+	Services   []Service   `json:"services,omitempty" yaml:"services,omitempty" doc:"HTTP services the workload calls through a local socket (/.lux/services/<name>.sock, named in LUX_SERVICE_<NAME>), which adds their headers: the workload never holds the credentials. Same URL rules as mcpServers."`
+}
+
+// Service is an HTTP service proxied into the container. Header values come
+// only from secrets and stay in lux-shim's memory: the workload never has
+// them.
+type Service struct {
+	Name    string      `json:"name" yaml:"name" doc:"Unique name: the socket is /.lux/services/<name>.sock. Lowercase letters, digits, - and _."`
+	URL     string      `json:"url" yaml:"url" doc:"Where requests go: http or https, without credentials. A request's path is appended to this URL's."`
+	Headers []MCPHeader `json:"headers,omitempty" yaml:"headers,omitempty" doc:"Headers set on every request (replacing the workload's own of the same name), each valued from a secret."`
 }
 
 // MCPServer is a remote MCP server the agent is given. Header values come
@@ -575,42 +585,61 @@ func (s *RunSpec) DropRepository(name, requestID string) bool {
 var headerRe = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 func (s *RunSpec) normalizeMCP(secrets map[string]bool, fail func(string, ...any)) {
-	names := map[string]bool{}
 	for i, m := range s.Workload.MCPServers {
-		at := fmt.Sprintf("workload.mcpServers[%d]", i)
-		if !volumeRe.MatchString(m.Name) || names[m.Name] {
-			fail("%s: invalid or duplicate name %q (lowercase, digits, - and _)", at, m.Name)
+		s.normalizeEndpoint(fmt.Sprintf("workload.mcpServers[%d]", i), "MCP server", m.Name, m.URL, m.Headers, secrets, fail)
+	}
+	names := map[string]bool{}
+	for _, m := range s.Workload.MCPServers {
+		if names[m.Name] {
+			fail("workload.mcpServers: duplicate name %q", m.Name)
 		}
 		names[m.Name] = true
-		u, err := url.Parse(m.URL)
-		switch {
-		case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "":
-			fail("%s.url: need an http or https URL with a host", at)
-			continue
-		case u.User != nil:
-			// It would be stored with the spec: header values come from secrets.
-			fail("%s.url must not carry credentials: use headers with a secret", at)
+	}
+	names = map[string]bool{}
+	for i, v := range s.Workload.Services {
+		s.normalizeEndpoint(fmt.Sprintf("workload.services[%d]", i), "service", v.Name, v.URL, v.Headers, secrets, fail)
+		if names[v.Name] {
+			fail("workload.services: duplicate name %q", v.Name)
 		}
-		hdrs := map[string]bool{}
-		for j, h := range m.Headers {
-			if !headerRe.MatchString(h.Name) {
-				fail("%s.headers[%d]: invalid header name %q", at, j, h.Name)
-			}
-			if hdrs[strings.ToLower(h.Name)] {
-				fail("%s.headers[%d]: duplicate header %q", at, j, h.Name)
-			}
-			hdrs[strings.ToLower(h.Name)] = true
-			if !secrets[h.Secret] {
-				fail("%s.headers[%d].secret: no secret named %q", at, j, h.Secret)
-			} else if s.isGitCredential(h.Secret) {
-				// The header would put it in the container, where a git
-				// credential never is.
-				fail("%s.headers[%d].secret: %q is a git credential, which never enters the container: use another secret", at, j, h.Secret)
-			}
+		names[v.Name] = true
+	}
+}
+
+// normalizeEndpoint checks one MCP server or service: an http(s) URL with
+// no credentials, headers valued from secrets (never a git credential), and
+// egress that allows its host.
+func (s *RunSpec) normalizeEndpoint(at, what, name, rawURL string, headers []MCPHeader, secrets map[string]bool, fail func(string, ...any)) {
+	if !volumeRe.MatchString(name) {
+		fail("%s: invalid name %q (lowercase, digits, - and _)", at, name)
+	}
+	u, err := url.Parse(rawURL)
+	switch {
+	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "":
+		fail("%s.url: need an http or https URL with a host", at)
+		return
+	case u.User != nil:
+		// It would be stored with the spec: header values come from secrets.
+		fail("%s.url must not carry credentials: use headers with a secret", at)
+	}
+	hdrs := map[string]bool{}
+	for j, h := range headers {
+		if !headerRe.MatchString(h.Name) {
+			fail("%s.headers[%d]: invalid header name %q", at, j, h.Name)
 		}
-		if !s.Network.Unrestricted && !s.Network.allows(u.Hostname()) {
-			fail("%s: network.egress does not allow MCP server %q at %s: add an egress rule for it (host: for a name, cidr: for an address)", at, m.Name, u.Hostname())
+		if hdrs[strings.ToLower(h.Name)] {
+			fail("%s.headers[%d]: duplicate header %q", at, j, h.Name)
 		}
+		hdrs[strings.ToLower(h.Name)] = true
+		if !secrets[h.Secret] {
+			fail("%s.headers[%d].secret: no secret named %q", at, j, h.Secret)
+		} else if s.isGitCredential(h.Secret) {
+			// The header would put it in the container, where a git
+			// credential never is.
+			fail("%s.headers[%d].secret: %q is a git credential, which never enters the container: use another secret", at, j, h.Secret)
+		}
+	}
+	if !s.Network.Unrestricted && !s.Network.allows(u.Hostname()) {
+		fail("%s: network.egress does not allow %s %q at %s: add an egress rule for it (host: for a name, cidr: for an address)", at, what, name, u.Hostname())
 	}
 }
 
@@ -619,19 +648,20 @@ func (s *RunSpec) normalizeMCP(secrets map[string]bool, fail func(string, ...any
 const ReservedSecretPrefix = "lux-"
 
 // onlyCredential reports whether a secret is used as a git credential or an
-// MCP header and is referenced nowhere else a spec can name it.
+// MCP server's or service's header and is referenced nowhere else a spec
+// can name it.
 func (s *RunSpec) onlyCredential(name string) bool {
 	if s.isGitCredential(name) {
 		return true
 	}
+	var headers []MCPHeader
 	for _, m := range s.Workload.MCPServers {
-		for _, h := range m.Headers {
-			if h.Secret == name {
-				return true
-			}
-		}
+		headers = append(headers, m.Headers...)
 	}
-	return false
+	for _, v := range s.Workload.Services {
+		headers = append(headers, v.Headers...)
+	}
+	return slices.ContainsFunc(headers, func(h MCPHeader) bool { return h.Secret == name })
 }
 
 func (s *RunSpec) isGitCredential(name string) bool {

@@ -143,7 +143,7 @@ func TestMCPServers(t *testing.T) {
 		{"a name is not matched by a cidr", base(Network{Egress: []EgressRule{{CIDR: "0.0.0.0/0"}}}, MCPServer{Name: "a", URL: "https://x.example/mcp"}), "add an egress rule"},
 		{"no rules", base(Network{}, MCPServer{Name: "a", URL: "https://mcp.example.com/mcp"}), "add an egress rule"},
 		{"duplicate names", base(byHost, MCPServer{Name: "a", URL: "https://mcp.example.com/"}, MCPServer{Name: "a", URL: "https://mcp.example.com/"}), "duplicate name"},
-		{"bad name", base(byHost, MCPServer{Name: "Bad Name", URL: "https://mcp.example.com/"}), "invalid or duplicate name"},
+		{"bad name", base(byHost, MCPServer{Name: "Bad Name", URL: "https://mcp.example.com/"}), "invalid name"},
 		{"not http", base(byHost, MCPServer{Name: "a", URL: "ftp://mcp.example.com/"}), "http or https"},
 		{"no host", base(byHost, MCPServer{Name: "a", URL: "https:///mcp"}), "http or https"},
 		{"relative", base(byHost, MCPServer{Name: "a", URL: "/mcp"}), "http or https"},

@@ -63,7 +63,13 @@ type ShimConfig struct {
 	// "start", by the shim, for its adapter. Never serialized: the config
 	// file holds no secrets.
 	MCP []MCPServer `json:"-"`
+	// Services the shim proxies (header values are secret names); their
+	// values stay in the shim's memory.
+	Services []spec.Service `json:"services,omitempty"`
 }
+
+// ShimServicesDir holds each service's socket (a tmpfs of its own).
+const ShimServicesDir = "/.lux/services"
 
 // MCPServer is an MCP server as an adapter hands it to its agent.
 type MCPServer struct {

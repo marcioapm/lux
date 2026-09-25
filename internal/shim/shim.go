@@ -30,6 +30,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
+
 	"github.com/marcioapm/lux/internal/adapter"
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/proto"
@@ -73,6 +75,13 @@ func Main() int {
 	var cfg proto.ShimConfig
 	if err := json.Unmarshal(cfgBytes, &cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "lux-shim: bad config:", err)
+		return 125
+	}
+	// Not dumpable: its memory and /proc entries (which will hold service
+	// credentials) are root's and closed to ptrace, so a workload without
+	// CAP_SYS_PTRACE cannot read them, even as container root.
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		fmt.Fprintln(os.Stderr, "lux-shim: PR_SET_DUMPABLE:", err)
 		return 125
 	}
 	s := &Shim{
@@ -137,6 +146,9 @@ func (s *Shim) run() int {
 	s.env = env
 	s.mu.Unlock()
 	s.prepareVolumes()
+	if err := s.serveServices(start.Secrets); err != nil {
+		return s.fail("start-failed", err.Error())
+	}
 	ad, err := adapter.New(s.cfg.Adapter)
 	if err != nil {
 		return s.fail("start-failed", err.Error())
@@ -419,6 +431,10 @@ func (s *Shim) environment(secrets map[string]string) []string {
 	env["LUX_EPOCH"] = strconv.Itoa(s.cfg.Epoch)
 	if s.cfg.ArtifactsDir != "" {
 		env["LUX_ARTIFACTS"] = s.cfg.ArtifactsDir
+	}
+	for _, svc := range s.cfg.Services {
+		k, v := ServiceEnv(svc.Name)
+		env[k] = v
 	}
 	for k, v := range s.cfg.Env {
 		env[k] = v
