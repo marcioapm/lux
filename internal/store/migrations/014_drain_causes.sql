@@ -6,3 +6,8 @@
 -- any cause remains (an operator's drain or force-evict survives a
 -- binaries-matching reconnect).
 ALTER TABLE hosts ADD COLUMN drain_causes text[] NOT NULL DEFAULT '{}';
+
+-- reapOutdatedStaticHosts' NOT EXISTS on blobs (and poolState's) filter
+-- on host_id under location = 'host': a seq scan on blobs at 200k rows
+-- (EXPLAIN ANALYZE on a seeded test DB), an index scan under it.
+CREATE INDEX blobs_host_id_on_host ON blobs (host_id) WHERE location = 'host';
