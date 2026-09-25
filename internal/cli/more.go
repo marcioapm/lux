@@ -380,14 +380,19 @@ every host, with a TENANT column (--tenant: what that tenant sees).`,
 			return nil
 		},
 	}
+	var forceEvict bool
 	drain := &cobra.Command{
 		Use:   "drain <host>",
-		Short: "Stop placing Runs on a host and move its Runs elsewhere",
-		Args:  cobra.ExactArgs(1),
+		Short: "Stop placing new Runs on a host",
+		Long: `Stop placing new Runs on a host. Its live Runs finish where they are;
+--force-evict stops them too, so they resume elsewhere.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.c.Do(ctxOf(cmd), "POST", "/v1/hosts/"+args[0]+"/drain", map[string]any{}, nil)
+			body := map[string]any{"forceEvict": forceEvict}
+			return a.c.Do(ctxOf(cmd), "POST", "/v1/hosts/"+args[0]+"/drain", body, nil)
 		},
 	}
+	drain.Flags().BoolVar(&forceEvict, "force-evict", false, "also stop the host's live Runs so they resume elsewhere")
 	cmd.AddCommand(ls, get, drain)
 	return cmd
 }
@@ -534,14 +539,23 @@ func (a *app) poolsCmd() *cobra.Command {
 			return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", p, nil)
 		},
 	}
+	var forceEvict bool
 	rm := &cobra.Command{
 		Use:   "rm <name>",
-		Short: "Remove a pool (its provisioned hosts are drained and terminated)",
-		Args:  cobra.ExactArgs(1),
+		Short: "Remove a pool (its provisioned hosts are cordoned and terminated once idle)",
+		Long: `Remove a pool. Its provisioned hosts are cordoned (no new placements) and
+terminated once idle; their live Runs finish where they are.
+--force-evict stops those Runs too, so they resume elsewhere.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.c.Do(ctxOf(cmd), "DELETE", "/v1/pools/"+args[0], nil, nil)
+			path := "/v1/pools/" + args[0]
+			if forceEvict {
+				path += "?forceEvict=true"
+			}
+			return a.c.Do(ctxOf(cmd), "DELETE", path, nil, nil)
 		},
 	}
+	rm.Flags().BoolVar(&forceEvict, "force-evict", false, "also stop the pool's live Runs so they resume elsewhere")
 	defer cmd.AddCommand(rm)
 	set.Flags().StringVar(&p.Provider, "provider", "static", "static | ec2")
 	set.Flags().IntVar(&p.MinHosts, "min", 0, "minimum hosts")

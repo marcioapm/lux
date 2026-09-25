@@ -182,8 +182,9 @@ func (s *Server) routes(api huma.API) {
 	}, "read", s.hostHistory)
 	register(s, api, huma.Operation{
 		OperationID: "drainHost", Method: http.MethodPost, Path: "/v1/hosts/{id}/drain", Tags: []string{"hosts"},
-		Summary:       "Drain a host",
-		Description:   "No new placements; its live Runs are stopped and resumed elsewhere. Only the tenant's own hosts; operators, any host.",
+		Summary: "Drain a host",
+		Description: "No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere " +
+			"(also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound},
 	}, "admin", s.drainHost)
@@ -228,9 +229,10 @@ func (s *Server) routes(api huma.API) {
 	}, "admin", forTenant(s.putPool))
 	register(s, api, huma.Operation{
 		OperationID: "deletePool", Method: http.MethodDelete, Path: "/v1/pools/{name}", Tags: []string{"pools"},
-		Summary:     "Remove a pool",
-		Description: "Its provisioned hosts are drained, then terminated; its Runs wait for a pool of that name again.",
-		Errors:      []int{http.StatusNotFound},
+		Summary: "Remove a pool",
+		Description: "Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. " +
+			"forceEvict also stops its hosts' live Runs so they resume elsewhere.",
+		Errors: []int{http.StatusNotFound},
 	}, "admin", forTenant(s.deletePool))
 }
 
@@ -1484,6 +1486,9 @@ func (s *Server) resolveHost(ctx context.Context, tx pgx.Tx, p Principal, ref st
 type drainHostInput struct {
 	HostPath
 	TenantQuery
+	Body struct {
+		ForceEvict bool `json:"forceEvict,omitempty" doc:"Also stop this host's live Runs so they resume elsewhere. Without it, they finish where they are; only new placements are refused."`
+	}
 }
 
 type drainHostOutput struct {
@@ -1494,18 +1499,23 @@ type drainHostOutput struct {
 	} `nameHint:"HostDrain"`
 }
 
-// drainHost stops new placements on a host and moves its live Runs
-// elsewhere (stop → auto-resume). A tenant drains only its own hosts; an
-// operator, any host.
+// drainHost stops new placements on a host. With forceEvict, it also
+// stops the host's live Runs so they resume elsewhere (that also applies
+// to a host that is already draining). A tenant drains only its own
+// hosts; an operator, any host.
 func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostOutput, error) {
 	p := principal(ctx)
+	stopReason := ""
+	if in.Body.ForceEvict {
+		stopReason = "drain"
+	}
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		id, err := s.resolveHost(ctx, tx, p, in.ID, false)
 		if err != nil {
 			return err
 		}
-		hosts, err = s.drainHosts(ctx, tx, "drain requested", "drain", "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
+		hosts, err = s.drainHosts(ctx, tx, "drain requested", stopReason, "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
 		if err == nil && len(hosts) == 0 {
 			return errNotFound
 		}
@@ -1523,11 +1533,11 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 // drainHosts takes hosts out of service (no new placements) and, unless
 // stopReason is "" (cordon only), asks their live placements to stop with
 // it (drain or preempt: both resume elsewhere); where selects them
-// (placeholders from $1). Cordon-only is for a reason that must not
-// preempt anything running (outdated binaries): the host simply stops
-// taking new work, and whatever runs on it finishes on its own — the
-// reaper (static hosts) or the pool's replace path (provisioned) picks it
-// up once it is idle.
+// (placeholders from $1). Cordon-only leaves running Runs to finish where
+// they are: the reaper (static hosts) or the pool's replace path
+// (provisioned) takes the host once it is idle. Calling it again with a
+// stopReason on a host that is already draining still evicts its current
+// placements.
 // Returns their ids, to notify once the transaction commits.
 func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, stopReason, where string, args ...any) ([]string, error) {
 	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
@@ -1608,17 +1618,24 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 }
 
 // deletePool removes one of the tenant's pools. Its provisioned hosts are
-// drained, and terminated by the provisioner once they are done (their
-// provider is known from the pool row, kept as `retired`); its Runs wait
-// for a pool of that name again.
+// cordoned (no new placements) and terminated by the provisioner once
+// they are idle (their provider is known from the pool row, kept as
+// `retired`); its Runs wait for a pool of that name again. With
+// forceEvict, its hosts' live Runs are also stopped and resumed
+// elsewhere instead of finishing where they are.
 type deletePoolInput struct {
 	TenantQuery
-	Name string `path:"name" doc:"The pool's name."`
+	Name       string `path:"name" doc:"The pool's name."`
+	ForceEvict bool   `query:"forceEvict" doc:"Also stop this pool's live Runs so they resume elsewhere, instead of finishing where they are."`
 }
 
 func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}, error) {
 	p := principal(ctx)
 	name := in.Name
+	stopReason := ""
+	if in.ForceEvict {
+		stopReason = "drain"
+	}
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
@@ -1629,7 +1646,7 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 		if tag.RowsAffected() == 0 {
 			return errNotFound
 		}
-		hosts, err = s.drainHosts(ctx, tx, "pool removed", "drain",
+		hosts, err = s.drainHosts(ctx, tx, "pool removed", stopReason,
 			"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
 		return err
 	})
