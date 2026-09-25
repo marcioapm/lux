@@ -82,9 +82,9 @@ def test_operator_hosts_status_and_drain(operator, tenant_factory, env, hosts):
         assert operator.json("status", "--tenant", b.tenant_id)["runs"]["running"] == 1
         assert operator.json("status")["runs"]["running"] >= 1
         assert "running" not in a.json("status")["runs"]
-        # The operator drains another tenant's host: its Run is stopped
-        # (no other host to go to).
-        operator.run("hosts", "drain", host_b["id"])
+        # The operator force-evicts another tenant's host: its Run is
+        # stopped (no other host to go to).
+        operator.run("hosts", "drain", host_b["id"], "--force-evict")
         assert b.wait_state(run_b, "stopped", "resuming")["state"] in ("stopped", "resuming")
         assert b.json("hosts", "get", "op-host")["draining"]
         assert not a.json("hosts", "get", "op-host")["draining"]

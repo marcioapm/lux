@@ -109,9 +109,9 @@ def test_a_failed_launch_is_retried(lux, ec2):
 
 
 def test_a_busy_host_is_drained_before_it_is_terminated(lux, ec2):
-    """Removing the pool never cuts a Run short: its host is drained (the
-    Run stops and snapshots), and terminated only once that snapshot is
-    uploaded — never while the Run is still live on it."""
+    """Removing a pool with --force-evict never cuts a Run short: its host
+    is drained (the Run stops and snapshots), and terminated only once
+    that snapshot is uploaded — never while the Run is still live on it."""
     pool(lux, ec2, max=1)
     # Slow to stop (a grace period it uses in full), so a terminate that
     # does not wait for the drain would catch it live.
@@ -121,7 +121,7 @@ def test_a_busy_host_is_drained_before_it_is_terminated(lux, ec2):
     spec["workload"]["grace"] = "30s"
     run_id = lux.submit(spec)
     lux.wait_output(run_id, "up", timeout=120)
-    lux.run("pools", "rm", "burst")
+    lux.run("pools", "rm", "burst", "--force-evict")
     # While the Run stops, its instance is still there.
     wait_until(lambda: lux.get(run_id)["state"] == "stopping", 30, 0.3, "never asked to stop")
     assert ec2.running(), "terminated while its Run was still stopping"
@@ -130,6 +130,24 @@ def test_a_busy_host_is_drained_before_it_is_terminated(lux, ec2):
     assert snaps and snaps[-1]["uploaded"], snaps
     run = lux.get(run_id)
     assert run["placements"][-1]["exitReason"] != "lost", run
+
+
+def test_pools_rm_without_force_evict_stops_nothing(lux, ec2):
+    """Without --force-evict, removing a pool only cordons its hosts: a
+    running Run keeps its placement and finishes on its own; the host is
+    still terminated once it goes idle."""
+    pool(lux, ec2, max=1)
+    script = "echo up; sleep 5; echo done"
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", script, placement={"pool": "burst"}))
+    lux.wait_output(run_id, "up", timeout=120)
+    lux.run("pools", "rm", "burst")
+    wait_until(lambda: ec2_hosts(lux, states=("draining",)), 30, 0.5, "the pool's host was never cordoned")
+    # The Run was never asked to stop; it runs to completion on its own.
+    run = lux.get(run_id)
+    assert not run["placements"][0].get("stopRequestedAt"), run["placements"][0]
+    lux.wait_state(run_id, "succeeded", timeout=60)
+    # Idle now: terminated by the same path as scale-down.
+    wait_until(lambda: not ec2.running(), 90, 1, "the idle, cordoned host was never terminated")
 
 
 def test_a_purged_instance_does_not_write_off_the_others(lux, ec2):

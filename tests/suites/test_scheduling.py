@@ -49,7 +49,7 @@ def test_drain_moves_runs_elsewhere(lux, runners, hosts, fake_image):
     lux.wait_output(run_id, "ready")
     lux.wait_activity(run_id, "idle")
     runners.start(hosts[1])
-    lux.run("hosts", "drain", hosts[0].name)
+    lux.run("hosts", "drain", hosts[0].name, "--force-evict")
     # Stopped with reason drain, then automatically resumed on the other host.
     run = wait_until(lambda: (lambda r: r if len(r["placements"]) == 2 and r["state"] == "running" else None)(lux.get(run_id)),
                      90, 0.5, "drained Run never resumed elsewhere")
@@ -60,6 +60,46 @@ def test_drain_moves_runs_elsewhere(lux, runners, hosts, fake_image):
     hs = {h["name"]: h for h in lux.json("hosts", "ls")}
     assert hs[hosts[0].name]["draining"]
     assert hs[hosts[0].name]["times"]["drainRequested"]
+
+
+def test_plain_drain_leaves_running_run_and_places_new_elsewhere(lux, runners, hosts):
+    """Without --force-evict, drain only cordons the host: its running Run
+    keeps its one placement, and a new Run lands on the other host."""
+    runners.start(hosts[0])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sleep", "300"))
+    lux.wait_state(run_id, "running")
+    runners.start(hosts[1])
+    lux.run("hosts", "drain", hosts[0].name)
+    h = wait_until(lambda: (lambda x: x if x["draining"] else None)(lux.json("hosts", "get", hosts[0].name)),
+                   15, 0.3, "the host was never cordoned")
+    assert h["times"]["drainRequested"]
+    time.sleep(3)
+    run = lux.get(run_id)
+    assert run["state"] == "running" and len(run["placements"]) == 1, run
+    assert run["placements"][0]["hostName"] == hosts[0].name
+    assert not run["placements"][0].get("stopRequestedAt"), run["placements"][0]
+    other = lux.submit(generic(ALPINE_IMAGE, "echo", "elsewhere"))
+    lux.wait_state(other, "succeeded")
+    assert lux.get(other)["placements"][0]["hostName"] == hosts[1].name
+    lux.run("cancel", run_id)
+
+
+def test_force_evict_on_an_already_draining_host_moves_its_run(lux, runners, hosts):
+    """--force-evict on a host that is already draining (a plain drain
+    happened first) still evicts its current placement."""
+    runners.start(hosts[0])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sleep", "300"))
+    lux.wait_state(run_id, "running")
+    lux.run("hosts", "drain", hosts[0].name)
+    wait_until(lambda: lux.json("hosts", "get", hosts[0].name)["draining"], 15, 0.3, "plain drain never took")
+    assert lux.get(run_id)["state"] == "running", "the plain drain stopped the Run"
+    runners.start(hosts[1])
+    lux.run("hosts", "drain", hosts[0].name, "--force-evict")
+    run = wait_until(lambda: (lambda r: r if len(r["placements"]) == 2 and r["state"] == "running" else None)(lux.get(run_id)),
+                     90, 0.5, "force-evicted Run never resumed elsewhere")
+    assert [p["hostName"] for p in run["placements"]] == [hosts[0].name, hosts[1].name], run["placements"]
+    assert run["placements"][0]["stopReason"] == "drain"
+    lux.run("cancel", run_id)
 
 
 def test_cancel_right_after_submit_is_not_lost(lux, runners, hosts):
