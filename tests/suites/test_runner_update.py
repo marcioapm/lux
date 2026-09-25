@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import time
 
 import psycopg
 import pytest
@@ -226,8 +225,14 @@ def test_an_outdated_static_host_is_drained_once(env, lux, runners, hosts):
         wait_until(lambda: _host_message_count(env, host_id, "exit") == 1, 30, 0.5,
                    "the reaper never queued an exit message")
         # Several more heartbeats (and reaper ticks) must not queue a
-        # second one: a real count, not a timestamp coalesce can't move.
-        time.sleep(3)
+        # second one: wait for two more heartbeats to actually land
+        # (lastHeartbeat advancing), not a fixed sleep, then check the
+        # real count.
+        hb1 = lux.json("hosts", "get", host.name)["lastHeartbeat"]
+        hb2 = wait_until(lambda: (lambda hb: hb if hb != hb1 else None)(lux.json("hosts", "get", host.name)["lastHeartbeat"]),
+                          15, 0.3, "no heartbeat landed after the drain")
+        wait_until(lambda: (lambda hb: hb if hb != hb2 else None)(lux.json("hosts", "get", host.name)["lastHeartbeat"]),
+                   15, 0.3, "no second heartbeat landed after the drain")
         assert _host_message_count(env, host_id, "exit") == 1, "a second exit message was queued"
         # Cordon-only: no live placement ever exists here (idle from the
         # start), so no stop request either — proving the outdated-binaries

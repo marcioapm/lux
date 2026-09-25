@@ -2,11 +2,16 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/marcioapm/lux/internal/ids"
 )
 
 func TestLoadRunnerBinaries(t *testing.T) {
@@ -114,8 +119,13 @@ func TestBinariesMatch(t *testing.T) {
 // runner_bin_dir: a file replaced on disk in place (as a rolling deploy
 // would, if it skipped a luxd restart) must not change what luxd serves
 // or its X-Lux-Sha256, since the in-memory copy and its hash were taken
-// together and never re-read.
+// together and never re-read. Exercised through s.Handler(), a real
+// GET /runner/bin/linux-arm64/lux-runner with a host token: a handler
+// that reopened the path on every request would serve the swapped bytes
+// and would still pass a test that only reads s.bins directly.
 func TestServedBytesSurviveAnInPlaceFileSwap(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "linux-arm64")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
@@ -128,21 +138,32 @@ func TestServedBytesSurviveAnInPlaceFileSwap(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sub, "lux-shim"), []byte("shim bytes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{cfg: Config{RunnerBinDir: dir}}
+	s.cfg.RunnerBinDir = dir
 	s.loadRunnerBinaries()
 	wantSHA := sha256Hex(original)
 
+	token := ids.Secret("luxh")
+	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, token_hash) VALUES ('tok1', $1)`, ids.Hash(token))
+
 	// A release replaces the file on disk in place, without restarting
-	// luxd (what the review flags as unsafe): the served content and its
-	// advertised hash must still be the original bytes.
+	// luxd: the served content and its advertised hash must still be the
+	// original bytes.
 	if err := os.WriteFile(filepath.Join(sub, "lux-runner"), []byte("swapped-in bytes, different content"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	b := s.bins["arm64"]["lux-runner"]
-	if b.sha256 != wantSHA {
-		t.Fatalf("advertised sha256 after an in-place swap: %q, want the original %q", b.sha256, wantSHA)
+
+	h := s.Handler()
+	req := httptest.NewRequest(http.MethodGet, "/runner/bin/linux-arm64/lux-runner", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /runner/bin/linux-arm64/lux-runner: %d %s", w.Code, w.Body)
 	}
-	if !bytes.Equal(b.data, original) {
-		t.Fatal("served bytes changed after an in-place file swap")
+	if got := w.Header().Get("X-Lux-Sha256"); got != wantSHA {
+		t.Fatalf("X-Lux-Sha256 after an in-place swap: %q, want the original %q", got, wantSHA)
+	}
+	if !bytes.Equal(w.Body.Bytes(), original) {
+		t.Fatalf("served body after an in-place file swap: %q, want the original %q", w.Body.Bytes(), original)
 	}
 }

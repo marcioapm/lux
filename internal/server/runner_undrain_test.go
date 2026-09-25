@@ -57,10 +57,9 @@ func testHostToken(t *testing.T, s *Server, ctx context.Context) *hostToken {
 }
 
 // A Hello that still does not match the outdated binaries keeps the
-// "outdated" cause and the reaper's exit_requested_at path working: this
-// is the exact reconnect race the drain-state bugs were found from (a
-// Hello wipes the cause unconditionally, or the reaper's timestamp is
-// never reset).
+// "outdated" cause and the reaper's exit_requested_at path working: a
+// reconnect (luxd itself restarting, or a WebSocket blip) must not wipe
+// the cause, and the reaper's queued exit must survive it.
 func TestHelloReconnectWhileOutdatedPreservesReasonAndExitPath(t *testing.T) {
 	s := testServer(t)
 	s.bins = matchingBins()
@@ -297,7 +296,7 @@ func TestTwoReleaseCyclesEachExitOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n := exitMessageCount(t, s, ctx, w.HostID); n != 2 {
-		t.Fatalf("release 2: total exit messages = %d, want 2 (this is the exact bug: exit_requested_at surviving release 1 would block this)", n)
+		t.Fatalf("release 2: total exit messages = %d, want 2 (exit_requested_at from release 1 must have been cleared on undrain)", n)
 	}
 }
 

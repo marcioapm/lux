@@ -3,6 +3,9 @@ package hostboot
 import (
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -114,8 +117,67 @@ func TestIgnitionAndScriptShareOneSubuidAppend(t *testing.T) {
 	if string(decoded) != FetchBinariesScript {
 		t.Error("the fetch script Ignition embeds diverged from FetchBinariesScript")
 	}
-	if !strings.Contains(FetchBinariesScript, "grep -q '^containers:' /etc/subuid") {
-		t.Error("FetchBinariesScript no longer appends the subuid range idempotently")
+}
+
+// The subuid/subgid append inside FetchBinariesScript is idempotent: run
+// twice (as a reboot's ExecStartPre would), it leaves exactly one entry.
+// Extracted from the constant itself (not reimplemented) and redirected
+// at temp files instead of /etc/subuid and /etc/subgid, so it runs
+// without root and still catches a regression in the real logic.
+func TestFetchScriptsSubuidAppendIsIdempotent(t *testing.T) {
+	var lines []string
+	for _, l := range strings.Split(FetchBinariesScript, "\n") {
+		if strings.Contains(l, "containers:") && strings.Contains(l, "grep -q") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("FetchBinariesScript: found %d subuid/subgid append lines, want 2", len(lines))
+	}
+	dir := t.TempDir()
+	subuid := filepath.Join(dir, "subuid")
+	subgid := filepath.Join(dir, "subgid")
+	script := strings.NewReplacer("/etc/subuid", subuid, "/etc/subgid", subgid).Replace(strings.Join(lines, "\n"))
+
+	run := func() {
+		t.Helper()
+		if out, err := exec.Command("bash", "-c", script).CombinedOutput(); err != nil {
+			t.Fatalf("running the subuid append: %v\n%s", err, out)
+		}
+	}
+	run()
+	run()
+
+	got, err := os.ReadFile(subuid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := strings.Split(strings.TrimRight(string(got), "\n"), "\n")
+	if len(entries) != 1 || entries[0] != SubuidRange {
+		t.Errorf("subuid after two runs: %q, want exactly one entry %q", got, SubuidRange)
+	}
+}
+
+// A value with a shell metacharacter is quoted, not interpolated raw: a
+// host token or URL is never trusted to be shell-safe as given. Runs the
+// env-export prefix Script produces under bash and prints the token
+// back, rather than pattern-matching the quoted form, so a differently
+// spelled but still-safe quoting would also pass, and an unsafe one
+// would fail by actually breaking out.
+func TestScriptQuotesValues(t *testing.T) {
+	token := "a'; rm -rf /; echo '"
+	env := Env{URL: "http://x", HostToken: token}
+	got := Script(env)
+	prefix, _, ok := strings.Cut(got, strings.TrimPrefix(scriptBody, "#!/bin/bash\n"))
+	if !ok {
+		t.Fatal("Script's body diverged from scriptBody; cannot isolate the exported prefix")
+	}
+	out, err := exec.Command("bash", "-c", prefix+`printf '%s' "$LUX_HOST_TOKEN"`).Output()
+	if err != nil {
+		t.Fatalf("running the exported env under bash: %v", err)
+	}
+	if string(out) != token {
+		t.Errorf("LUX_HOST_TOKEN round-tripped through bash as %q, want %q", out, token)
 	}
 }
 
@@ -132,21 +194,18 @@ func TestScriptWrapsBootstrap(t *testing.T) {
 	}
 }
 
-// A value with a shell metacharacter is quoted, not interpolated raw: a
-// host token or URL is never trusted to be shell-safe as given.
-func TestScriptQuotesValues(t *testing.T) {
-	env := Env{URL: "http://x", HostToken: "a'; rm -rf /; echo '"}
-	got := Script(env)
-	if !strings.Contains(got, `export LUX_HOST_TOKEN='a'\''; rm -rf /; echo '\'''`) {
-		t.Errorf("token not safely quoted:\n%s", got[:300])
+// bootstrap.sh's env checks run before anything else (guard, then
+// set -euo pipefail, then the ": ${VAR:?msg}" checks), so running it
+// with LUX_URL unset is safe: it exits non-zero with the message before
+// touching packages or files.
+func TestBootstrapWithNoLuxURLExitsNonZeroWithTheMessage(t *testing.T) {
+	cmd := exec.Command("bash", "-c", Bootstrap())
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "LUX_HOST_TOKEN=tok"} // LUX_URL deliberately unset
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("bootstrap.sh with no LUX_URL exited 0; want non-zero. Output:\n%s", out)
 	}
-}
-
-func TestBootstrapTakesEnvFromEnvironment(t *testing.T) {
-	b := Bootstrap()
-	for _, want := range []string{`LUX_URL:?LUX_URL is required`, `LUX_HOST_TOKEN:?LUX_HOST_TOKEN is required`, `LUX_HOST_NAME:-$(hostname)`} {
-		if !strings.Contains(b, want) {
-			t.Errorf("bootstrap.sh missing %q", want)
-		}
+	if !strings.Contains(string(out), "LUX_URL is required") {
+		t.Errorf("bootstrap.sh with no LUX_URL: output %q, want it to mention LUX_URL is required", out)
 	}
 }
