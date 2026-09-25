@@ -12,7 +12,8 @@
 // hosts before the instance goes.
 //
 // userData picks how the runner's environment reaches the instance
-// (internal/hostboot renders all three from one source):
+// (internal/hostboot.Render is the one place all three are implemented;
+// hostboot.ValidUserData checks the value when the pool is set):
 //
 //   - "ignition" (default): an Ignition v3 config for Fedora CoreOS. No
 //     package installation happens at boot: FCOS ships everything lux-runner
@@ -20,8 +21,8 @@
 //   - "script": a #!/bin/bash script, which cloud-init runs on a stock
 //     Fedora Cloud, Ubuntu, Debian or AL2023 image. It checks the host
 //     requirements and installs only what is missing (dnf, else apt-get).
-//   - "env": today's KEY=value lines, for a custom AMI whose own boot
-//     script reads them (the pre-self-update behaviour).
+//   - "env": KEY=value lines, for a custom AMI whose own boot script reads
+//     them (the pre-self-update behaviour).
 //
 // Whichever format, the instance downloads lux-runner and lux-shim from
 // luxd (GET /runner/bin/...) rather than carrying them in the AMI.
@@ -233,19 +234,11 @@ func isNotFound(err error) bool {
 
 // renderUserData builds the instance's user data in the pool's chosen
 // format (default "ignition"; hostboot.ValidUserData is checked when the
-// pool is set, so format is trusted here).
+// pool is set, so format is trusted here): hostboot.Render is the one
+// place every format is implemented.
 func renderUserData(format string, env map[string]string) ([]byte, error) {
 	he := hostboot.Env{URL: env["LUX_URL"], HostToken: env["LUX_HOST_TOKEN"], HostName: env["LUX_HOST_NAME"], EC2IMDS: env["LUX_EC2_IMDS"]}
-	switch format {
-	case "", "ignition":
-		return hostboot.Ignition(he)
-	case "script":
-		return []byte(hostboot.Script(he)), nil
-	case "env":
-		return []byte(he.Lines()), nil
-	default:
-		return nil, fmt.Errorf("ec2: unknown template.userData %q", format)
-	}
+	return hostboot.Render(format, he)
 }
 
 func parse(raw json.RawMessage) (Template, error) {

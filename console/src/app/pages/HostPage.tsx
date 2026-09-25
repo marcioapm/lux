@@ -53,9 +53,10 @@ export function HostPage({ id }: { id: string }) {
 
   if (!h) return <PageSkeleton />;
 
-  // A draining host (plain drain, scale-down, outdated binaries, …) can
-  // still be acted on: the only action left for it is a force evict.
-  const canAct = h.state !== "terminated";
+  // A draining host with a live run can still be force-evicted; one with
+  // none has nothing left for a drain action to do (a plain drain only
+  // cordons, which it already is, and a force evict would stop 0 runs).
+  const canAct = h.state !== "terminated" && (!h.draining || h.liveRuns > 0);
   const forceOnly = h.draining;
   return (
     <div className="page">

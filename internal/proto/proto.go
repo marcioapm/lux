@@ -48,8 +48,8 @@ const (
 	MsgAck             = "ack" // luxd acking a runner report (reply)
 	MsgNack            = "nack"
 	MsgWelcome         = "welcome"
-	// MsgExit asks the runner to exit with Exit.Code: sent only once luxd
-	// has drained the host and it has nothing left to lose, so the
+	// MsgExit asks the runner to exit with ExitHost.Code: sent only once
+	// luxd has drained the host and it has nothing left to lose, so the
 	// runner's systemd unit restarts it and its ExecStartPre re-downloads
 	// the binaries first. Never a signal to replace itself in place.
 	MsgExit = "exit"
@@ -233,7 +233,8 @@ type StopRequest struct {
 // ExitHost tells a static runner to exit once it has drained: its
 // binaries are outdated, and its systemd unit's Restart=always brings it
 // back after ExecStartPre re-downloads them. Code distinguishes this exit
-// from a crash in the unit's condition, and in logs.
+// from a crash in logs and, for the runner, from a bug (os.Exit(Code),
+// not a panic or a signal).
 type ExitHost struct {
 	Reason string `json:"reason"`
 	Code   int    `json:"code"`

@@ -182,14 +182,28 @@ fi
 // /etc/subgid, never replacing what a distro already put there.
 const SubuidRange = "containers:2147483647:2147483648"
 
-// ValidUserData reports whether v is a recognized template.userData value
-// ("" defaults to "ignition"): checked when a pool is set, so a typo is
-// refused there rather than surfacing as a boot failure no one is
-// watching for.
-func ValidUserData(v string) bool {
-	switch v {
-	case "", "ignition", "script", "env":
-		return true
+// Render builds a host's user data in format ("" defaults to "ignition"):
+// the one place every userData value is rendered, so internal/ec2 and
+// ValidUserData can never drift on what formats exist.
+func Render(format string, env Env) ([]byte, error) {
+	switch format {
+	case "", "ignition":
+		return Ignition(env)
+	case "script":
+		return []byte(Script(env)), nil
+	case "env":
+		return []byte(env.Lines()), nil
+	default:
+		return nil, fmt.Errorf("hostboot: unknown userData format %q", format)
 	}
-	return false
+}
+
+// ValidUserData reports whether v is a recognized template.userData value:
+// checked when a pool is set, so a typo is refused there rather than
+// surfacing as a boot failure no one is watching for. A render attempt
+// against an empty Env, rather than a separate list of format names, so
+// this can never list a format Render itself does not handle.
+func ValidUserData(v string) bool {
+	_, err := Render(v, Env{})
+	return err == nil
 }
