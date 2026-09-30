@@ -62,9 +62,17 @@ for arch in arm64 amd64; do
   build linux "$arch" lux "$work/bin/lux"
   chmod +x "$work/bin/"* "$work/lib/lux/runner"/*/*
   printf '%s\n' "${FEATURES[@]}" > "$work/FEATURES"
-  tar "${TAR_REPRO_FLAGS[@]}" -C "$work" -czf "$DIST/lux_${VERSION}_linux_${arch}.tar.gz" FEATURES bin lib share
-  if [ "$(tar -xzOf "$DIST/lux_${VERSION}_linux_${arch}.tar.gz" FEATURES)" != "$(printf '%s\n' "${FEATURES[@]}")" ]; then
+  tarball="$DIST/lux_${VERSION}_linux_${arch}.tar.gz"
+  tar "${TAR_REPRO_FLAGS[@]}" -C "$work" -czf "$tarball" FEATURES bin lib share
+  if [ "$(tar -xzOf "$tarball" FEATURES)" != "$(printf '%s\n' "${FEATURES[@]}")" ]; then
     echo "dist.sh: FEATURES missing from lux_${VERSION}_linux_${arch}.tar.gz" >&2
+    exit 1
+  fi
+  # Independent of FEATURES above: what the deploy reconciler looks for.
+  # Captured first: grep -q closing the pipe early would fail tar under pipefail.
+  members="$(tar -tzf "$tarball")"
+  if ! grep -qx 'FEATURES' <<<"$members" || ! grep -qx 'validate' <<<"$(tar -xzOf "$tarball" FEATURES)"; then
+    echo "dist.sh: lux_${VERSION}_linux_${arch}.tar.gz: no root FEATURES with the line validate" >&2
     exit 1
   fi
   rm -rf "$work"
