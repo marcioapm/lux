@@ -138,6 +138,13 @@ func (c *Codex) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink 
 		c.drain()
 	}
 	<-done
+	c.mu.Lock()
+	why := errors.New("the agent exited before it read it")
+	if c.stopped {
+		why = errors.New("the Run stopped before the agent read it")
+	}
+	c.mu.Unlock()
+	c.inputs.close(sink, why)
 	return nil
 }
 

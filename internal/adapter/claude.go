@@ -200,10 +200,14 @@ func (c *Claude) exited() {
 	sink := c.sink
 	c.mu.Unlock()
 	for _, in := range sent {
-		if c.inputs.open(in.RequestID) {
+		if c.inputs.pending(in.RequestID) {
 			c.inputs.fail(sink, in, why)
 		}
 	}
+	c.inputs.close(sink, why)
+	c.mu.Lock()
+	c.resent = nil
+	c.mu.Unlock()
 }
 
 // claudeUUID is the uuid a request id's line carries: derived from it
@@ -223,10 +227,13 @@ func (c *Claude) send(in proto.Input) {
 	uuid := claudeUUID(in.RequestID)
 	c.inputs.track(in)
 	c.mu.Lock()
-	if c.sent == nil {
-		c.sent = map[string]proto.Input{}
+	// Without lifecycle frames nothing ever ends a line: keep none.
+	if !c.known || c.lifecycle {
+		if c.sent == nil {
+			c.sent = map[string]proto.Input{}
+		}
+		c.sent[uuid] = in
 	}
-	c.sent[uuid] = in
 	c.mu.Unlock()
 	// Never "priority": "now" aborts the running turn at its next tool
 	// boundary, "later" holds the line until the turn ends.
@@ -310,6 +317,11 @@ func (c *Claude) lifecycleFrame(uuid, state string) {
 		}
 	case "refused":
 		c.inputs.fail(c.sink, in, fmt.Errorf("claude: the message was %s", state))
+	}
+	if !c.inputs.pending(in.RequestID) {
+		c.mu.Lock()
+		delete(c.resent, in.RequestID)
+		c.mu.Unlock()
 	}
 	if state != "queued" && state != "started" {
 		c.maybeIdle()
