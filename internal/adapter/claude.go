@@ -231,14 +231,7 @@ func (c *Claude) send(in proto.Input) {
 		c.sent[uuid] = in
 	}
 	c.mu.Unlock()
-	// Never "priority": "now" aborts the running turn at its next tool
-	// boundary, "later" holds the line until the turn ends.
-	err := c.lw.send(map[string]any{
-		"type":               "user",
-		"message":            map[string]any{"role": "user", "content": textInput(in.Text)},
-		"parent_tool_use_id": nil,
-		"uuid":               uuid,
-	})
+	err := c.writeLine(uuid, in.Text)
 	c.mu.Lock()
 	if err != nil {
 		delete(c.sent, uuid)
@@ -345,19 +338,25 @@ func (c *Claude) resend(in proto.Input) bool {
 	c.mu.Lock()
 	c.sent[uuid] = in
 	c.mu.Unlock()
-	err := c.lw.send(map[string]any{
-		"type":               "user",
-		"message":            map[string]any{"role": "user", "content": textInput(in.Text)},
-		"parent_tool_use_id": nil,
-		"uuid":               uuid,
-	})
-	if err != nil {
+	if err := c.writeLine(uuid, in.Text); err != nil {
 		c.mu.Lock()
 		delete(c.sent, uuid)
 		c.mu.Unlock()
 		return false
 	}
 	return true
+}
+
+// writeLine writes a user line. Never "priority": "now" aborts the running
+// turn at its next tool boundary, "later" holds the line until the turn
+// ends.
+func (c *Claude) writeLine(uuid, text string) error {
+	return c.lw.send(map[string]any{
+		"type":               "user",
+		"message":            map[string]any{"role": "user", "content": textInput(text)},
+		"parent_tool_use_id": nil,
+		"uuid":               uuid,
+	})
 }
 
 // maybeIdle reports idle once no turn runs and no line waits: with
