@@ -161,6 +161,7 @@ def test_resource_defaults_and_requests_reach_the_container(lux, runners, hosts)
     lux.wait_state(asked, "succeeded")
     out = lux.logs(asked).split()
     assert out[:2] == ["50000", "100000"] and int(out[2]) == hosts[0].memory_limit(512 << 20) and int(out[3]) == 64, out
+    assert lux.get(asked)["placements"][0]["memoryLimit"] == int(out[2])
 
 
 def test_memory_is_the_hosts_share(lux, runners, hosts):
@@ -178,6 +179,9 @@ def test_memory_is_the_hosts_share(lux, runners, hosts):
     half = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show, resources={"memory": "512Mi"}))
     lux.wait_state(half, "succeeded")
     assert int(lux.logs(half).split()[0]) == 256 << 20
+    # The placement says the limit its container got.
+    assert lux.get(whole)["placements"][0]["memoryLimit"] == 512 << 20
+    assert lux.get(half)["placements"][0]["memoryLimit"] == 256 << 20
 
 
 def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):

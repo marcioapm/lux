@@ -1939,6 +1939,10 @@ components:
         imageReadyAt:
           format: date-time
           type: string
+        memoryLimit:
+          description: "Bytes: the container's memory limit, the Run's resources.memory scaled to its host's share (MemTotal less the runner's headroom, over the memory the host offers). Absent until the container starts, and for placements from before luxd recorded it."
+          format: int64
+          type: integer
         netRxBytes:
           format: int64
           type: integer

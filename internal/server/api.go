@@ -496,6 +496,7 @@ type Placement struct {
 	NetRxBytes         *int64     `json:"netRxBytes,omitempty"`
 	NetTxBytes         *int64     `json:"netTxBytes,omitempty"`
 	SnapshotBytes      *int64     `json:"snapshotBytes,omitempty"`
+	MemoryLimit        *int64     `json:"memoryLimit,omitempty" doc:"Bytes: the container's memory limit, the Run's resources.memory scaled to its host's share (MemTotal less the runner's headroom, over the memory the host offers). Absent until the container starts, and for placements from before luxd recorded it."`
 }
 
 // RunUsage rolls placements up: peaks are maxima, totals are sums.
@@ -950,7 +951,7 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 		rows, err := tx.Query(ctx, `SELECT p.epoch, p.host_id, h.name, p.state, p.exit_code, p.exit_reason, p.stop_reason,
 				p.created_at, p.accepted_at, p.image_ready_at, p.volumes_restored_at, p.container_started_at, p.workload_started_at,
 				p.stop_requested_at, p.exited_at, p.snapshot_done_at, p.uploaded_at,
-				p.peak_memory_bytes, p.peak_disk_bytes, p.peak_pids, p.cpu_seconds, p.net_rx_bytes, p.net_tx_bytes, p.snapshot_bytes
+				p.peak_memory_bytes, p.peak_disk_bytes, p.peak_pids, p.cpu_seconds, p.net_rx_bytes, p.net_tx_bytes, p.snapshot_bytes, p.memory_limit
 			FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = $1 ORDER BY p.epoch`, id)
 		if err != nil {
 			return err
@@ -962,7 +963,7 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 			if err := rows.Scan(&pl.Epoch, &pl.Host, &pl.HostName, &pl.State, &pl.ExitCode, &pl.ExitReason, &pl.StopReason,
 				&pl.AssignedAt, &pl.AcceptedAt, &pl.ImageReadyAt, &pl.VolumesRestoredAt, &pl.ContainerStartedAt, &pl.WorkloadStartedAt,
 				&pl.StopRequestedAt, &pl.ExitedAt, &pl.SnapshotDoneAt, &pl.UploadedAt,
-				&pl.PeakMemoryBytes, &pl.PeakDiskBytes, &pl.PeakPids, &pl.CPUSeconds, &pl.NetRxBytes, &pl.NetTxBytes, &pl.SnapshotBytes); err != nil {
+				&pl.PeakMemoryBytes, &pl.PeakDiskBytes, &pl.PeakPids, &pl.CPUSeconds, &pl.NetRxBytes, &pl.NetTxBytes, &pl.SnapshotBytes, &pl.MemoryLimit); err != nil {
 				return err
 			}
 			run.Placements = append(run.Placements, pl)
