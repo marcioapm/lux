@@ -9,8 +9,9 @@ const FLEX_MIN = 140;
 
 /**
  * Whether optional columns drop at a container `width`: under NARROW, or
- * when with them the fixed and percentage widths would leave a column that
- * has no width under FLEX_MIN.
+ * when with them the table would not fit: the fixed and percentage widths
+ * leave each column without a width under FLEX_MIN (with none, when they
+ * alone are wider than the container).
  */
 export function dropsOptional(columns: readonly Pick<Column<unknown>, "width" | "optional">[], width: number): boolean {
   if (width <= 0) return false;
@@ -23,7 +24,7 @@ export function dropsOptional(columns: readonly Pick<Column<unknown>, "width" | 
     else if (typeof c.width === "string" && c.width.endsWith("%")) fixed += (parseFloat(c.width) / 100) * width;
     else flex++;
   }
-  return flex > 0 && (width - fixed) / flex < FLEX_MIN;
+  return width - fixed < flex * FLEX_MIN;
 }
 
 export type SortDir = "asc" | "desc";
@@ -58,7 +59,7 @@ export interface Column<Row> {
   wrap?: boolean;
   /** The row's name: rendered in the foreground colour, medium weight. */
   lead?: boolean;
-  /** Dropped when the table's container is under 1100px, or too narrow to give each column without a width 140px with it. */
+  /** Dropped when the table's container is under 1100px, or too narrow for the table with it (each column without a width gets 140px). */
   optional?: boolean;
 }
 
