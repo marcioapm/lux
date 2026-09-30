@@ -79,11 +79,16 @@ type ACP struct {
 	steerKick chan struct{}
 	// settleMu serializes settle. suspect: steers seen stored and
 	// unanswered with no loop running, by message id, and when first seen.
+	// resent: request ids settle sent again since the ACP turn ended.
+	// settleErrs: settle's looks in a row OpenCode did not answer.
 	settleMu    sync.Mutex
 	suspect     map[string]time.Time
+	resent      map[string]bool
+	settleErrs  int
 	settleEvery time.Duration
 	rechecking  bool
-	recheckT    *time.Timer
+	recheckStop func() bool
+	clock       settleClock
 	ctx         context.Context
 	// closed: Run is returning; no goroutine starts after it.
 	closed bool
@@ -96,7 +101,28 @@ func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
 // NewOpenCode is the ACP adapter for OpenCode.
 func NewOpenCode() *ACP {
 	return &ACP{ready: make(chan struct{}), opencode: true, steerKick: make(chan struct{}, 1),
-		suspect: map[string]time.Time{}, settleEvery: time.Second}
+		suspect: map[string]time.Time{}, resent: map[string]bool{}, settleEvery: time.Second, clock: wallClock{}}
+}
+
+// settleClock is the time settle reads and schedules its next look by.
+type settleClock interface {
+	now() time.Time
+	// afterFunc runs f after d; stop reports whether it stopped f first.
+	afterFunc(d time.Duration, f func()) (stop func() bool)
+}
+
+type wallClock struct{}
+
+// settle's bounds: a steer sent again and still stored, unread and idle
+// for settleGiveUp fails; GET errors back off up to settleMaxBackoff.
+const (
+	settleGiveUp     = 2 * time.Minute
+	settleMaxBackoff = 30 * time.Second
+)
+
+func (wallClock) now() time.Time { return time.Now() }
+func (wallClock) afterFunc(d time.Duration, f func()) func() bool {
+	return time.AfterFunc(d, f).Stop
 }
 
 // Command: for OpenCode, `opencode acp` also serves its HTTP API on a
@@ -326,7 +352,7 @@ func (a *ACP) exited(cancel context.CancelFunc) {
 	a.mu.Lock()
 	a.closed = true
 	stopped := a.stopped
-	if a.rechecking && a.recheckT.Stop() {
+	if a.rechecking && a.recheckStop() {
 		a.bg.Done()
 	}
 	a.mu.Unlock()
@@ -471,18 +497,22 @@ func (a *ACP) anotherLoop() {
 //   - a steer an assistant step answered is consumed;
 //   - while a prompt_async is in flight the Run stays busy (its return
 //     settles again), and while OpenCode runs a loop, until session.idle;
-//   - a steer not stored yet is still on its way;
+//   - a steer not stored yet is still on its way, unless OpenCode has run
+//     no loop for settleGiveUp since: then it fails;
 //   - a steer stored and unanswered while no loop runs was dropped: by a
 //     loop cancelled after it was sent, when seen so on two looks
 //     settleEvery apart, or else by a loop that ended just as it was
 //     stored, when seen so for 3×settleEvery (a loop it started would have
 //     run or answered it by then). It is sent again, so it starts the next
-//     loop, or fails if the Run is stopping;
+//     loop, or fails if the Run is stopping. A copy sent again that way
+//     without an interrupt, and again stored and unanswered with no loop
+//     for settleGiveUp, fails: OpenCode will not read it;
 //   - with none of these, the Run's work has ended (busTurnEnded).
 //
-// While it waits it looks again every settleEvery, so a lost session.idle
-// cannot leave the Run busy. Also run when the event stream (re)connects;
-// before the ACP turn has ended it only consumes.
+// While it waits it looks again every settleEvery (backing off while
+// OpenCode's GETs fail), so a lost session.idle cannot leave the Run busy.
+// Also run when the event stream (re)connects; before the ACP turn has
+// ended it only consumes.
 func (a *ACP) settle() {
 	if a.bus == nil {
 		return
@@ -513,22 +543,39 @@ func (a *ACP) settle() {
 		a.busTurnEnded()
 		return
 	}
+	a.mu.Lock()
+	if err != nil || !ok {
+		a.settleErrs++
+	} else {
+		a.settleErrs = 0
+	}
+	if busy {
+		clear(a.suspect)
+	}
+	a.mu.Unlock()
 	if err != nil || !ok || busy {
-		a.mu.Lock()
-		if busy {
-			clear(a.suspect)
-		}
-		a.mu.Unlock()
 		if busy {
 			a.anotherLoop()
 		}
 		a.recheck()
 		return
 	}
-	now, waiting := time.Now(), false
+	now, waiting := a.clock.now(), false
 	for _, in := range a.inputs.unread("bus") {
 		msgID, gen := a.bus.messageOf(in.RequestID)
 		if !stored[msgID] {
+			// Accepted (204) and never stored, with no loop running.
+			a.mu.Lock()
+			since, seen := a.suspect[msgID]
+			if !seen {
+				a.suspect[msgID] = now
+			}
+			a.mu.Unlock()
+			if seen && now.Sub(since) >= settleGiveUp {
+				a.bus.untrackRequest(in.RequestID)
+				a.inputs.fail(a.sink, in, errors.New("OpenCode accepted it and never stored it"))
+				continue
+			}
 			waiting = true
 			continue
 		}
@@ -537,9 +584,16 @@ func (a *ACP) settle() {
 		if !seen {
 			a.suspect[msgID] = now
 		}
+		cancelled := a.cancelGen > gen
 		wait := 3 * a.settleEvery
-		if a.cancelGen > gen {
+		if cancelled {
 			wait = a.settleEvery
+		}
+		// A copy dropped by an interrupt is always sent again; one dropped
+		// without is sent again once, then given settleGiveUp to be read.
+		giveUp := !cancelled && a.resent[in.RequestID]
+		if giveUp {
+			wait = settleGiveUp
 		}
 		a.mu.Unlock()
 		if !seen || now.Sub(since) < wait {
@@ -549,6 +603,11 @@ func (a *ACP) settle() {
 		a.mu.Lock()
 		delete(a.suspect, msgID)
 		a.mu.Unlock()
+		if giveUp {
+			a.bus.untrackRequest(in.RequestID)
+			a.inputs.fail(a.sink, in, errors.New("OpenCode stored it and never read it, also when sent again"))
+			continue
+		}
 		if a.carry(ctx, session, in) {
 			waiting = true
 		}
@@ -560,16 +619,21 @@ func (a *ACP) settle() {
 	a.busTurnEnded()
 }
 
-// recheck settles again in settleEvery, unless a look is already due.
+// recheck settles again in settleEvery, unless a look is already due;
+// after GET errors in a row, in twice as long each, up to settleMaxBackoff.
 func (a *ACP) recheck() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.rechecking || a.closed || a.ctx == nil || a.ctx.Err() != nil {
 		return
 	}
+	d := a.settleEvery
+	for range a.settleErrs {
+		d = min(2*d, settleMaxBackoff)
+	}
 	a.rechecking = true
 	a.bg.Add(1)
-	a.recheckT = time.AfterFunc(a.settleEvery, func() {
+	a.recheckStop = a.clock.afterFunc(d, func() {
 		defer a.bg.Done()
 		a.mu.Lock()
 		a.rechecking = false
@@ -594,6 +658,9 @@ func (a *ACP) carry(ctx context.Context, session string, in proto.Input) bool {
 	}
 	msgID := a.bus.messageID(time.Now())
 	a.bus.track(msgID, in.RequestID, gen)
+	a.mu.Lock()
+	a.resent[in.RequestID] = true
+	a.mu.Unlock()
 	a.anotherLoop()
 	if err := a.bus.promptAsync(ctx, session, msgID, in.Text); err != nil {
 		a.bus.untrack(msgID)
@@ -611,6 +678,7 @@ func (a *ACP) busTurnEnded() {
 	a.mu.Lock()
 	held, extra := a.endHeld, a.extraLoop
 	a.busTurn, a.busy, a.endHeld, a.extraLoop = false, false, nil, false
+	clear(a.resent)
 	idle := len(a.queue) == 0
 	a.mu.Unlock()
 	switch {
