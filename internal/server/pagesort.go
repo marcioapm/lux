@@ -33,8 +33,10 @@ type sortKey struct {
 	// notNull: the value is never NULL, so the order and the keyset are
 	// plain (value, id), which an index on them serves.
 	notNull bool
-	// runOnly: the value needs no join (runs: read from runs alone).
-	runOnly bool
+	// from: the joins the value needs beyond the list's own table (runs r,
+	// hosts h), with {now} where the clock goes; empty for a value of that
+	// table alone. A page's keys are read from only these.
+	from string
 }
 
 // sqlArgs collects one statement's placeholders.
@@ -222,6 +224,14 @@ func (p *paging) expr(arg func(any) string) string {
 		now = arg(p.cursor.At) + "::timestamptz"
 	}
 	return "(" + strings.ReplaceAll(p.sk.expr, "{now}", now) + ")"
+}
+
+// from is the sort key's joins with the clock at, a page's stamp.
+func (p *paging) from(at string, arg func(any) string) string {
+	if !strings.Contains(p.sk.from, "{now}") {
+		return p.sk.from
+	}
+	return strings.ReplaceAll(p.sk.from, "{now}", arg(at)+"::timestamptz")
 }
 
 // order is the ORDER BY of the page's rows; reversed reads backwards (for
