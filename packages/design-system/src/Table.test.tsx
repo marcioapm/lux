@@ -172,13 +172,23 @@ describe("Table in a DOM", () => {
 
   test("controlled client sort: a parent that refuses the change keeps the order and the header", async () => {
     const asked: SortState[] = [];
-    const { th, ids } = await render(<Table columns={cols} rows={data} rowKey={(r) => r.id} sort={{ key: "name", dir: "asc" }} onSortChange={(s) => asked.push(s)} />);
+    let release!: () => void;
+    function Parent() {
+      const [controlled, setControlled] = useState(true);
+      release = () => setControlled(false);
+      return <Table columns={cols} rows={data} rowKey={(r) => r.id} defaultSort={{ key: "id", dir: "asc" }} sort={controlled ? { key: "name", dir: "asc" } : undefined} onSortChange={(s) => asked.push(s)} />;
+    }
+    const { th, ids } = await render(<Parent />);
     expect(ids()).toEqual(["b", "a", "c", "d"]);
     await act(async () => th("N").click());
     expect(asked).toEqual([{ key: "n", dir: "desc" }]);
     expect(ids()).toEqual(["b", "a", "c", "d"]);
     expect(th("N").getAttribute("aria-sort")).toBe("none");
     expect(th("Name").getAttribute("aria-sort")).toBe("ascending");
+    // Released, the table is back on its own sort: the refused one was never taken.
+    await act(async () => release());
+    expect(th("Id").getAttribute("aria-sort")).toBe("ascending");
+    expect(ids()).toEqual(["a", "b", "c", "d"]);
   });
 
   test("a sort by an optional column holds when a narrow container drops the column", async () => {
@@ -186,9 +196,18 @@ describe("Table in a DOM", () => {
     Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => 800 });
     try {
       const withOptional: Column<R>[] = [cols[0]!, { ...cols[2]!, optional: true }];
-      const { th, ids } = await render(<Table columns={withOptional} rows={data} rowKey={(r) => r.id} defaultSort={{ key: "n", dir: "desc" }} />);
-      expect(th("N")).toBeUndefined();
+      const el = document.createElement("div");
+      document.body.appendChild(el);
+      const root = createRoot(el);
+      mounted.push({ el, root });
+      const show = (rows: R[]) => act(async () => root.render(<Table columns={withOptional} rows={rows} rowKey={(r) => r.id} defaultSort={{ key: "n", dir: "desc" }} />));
+      const ids = () => [...el.querySelectorAll("tbody tr")].map((tr) => tr.querySelector("td")?.textContent);
+      await show(data);
+      expect([...el.querySelectorAll("thead th")].map((h) => h.textContent)).toEqual(["Id↕"]);
       expect(ids()).toEqual(["c", "a", "d", "b"]);
+      // New rows (a poll) while narrow: still sorted by the dropped column.
+      await show([...data, { id: "e", name: "e", n: 5 }]);
+      expect(ids()).toEqual(["c", "e", "a", "d", "b"]);
     } finally {
       if (width) Object.defineProperty(HTMLElement.prototype, "clientWidth", width);
     }
