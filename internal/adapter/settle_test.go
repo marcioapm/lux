@@ -168,9 +168,7 @@ func TestOpenCodeSettleFailsAfterNormalEnd(t *testing.T) {
 func TestOpenCodeSettleForeignStepMakesSteerUncertain(t *testing.T) {
 	a, b, w, sink, clk, _ := settleStart(t)
 	foreign := a.bus.messageID(clk.now()) // sorts after the steer
-	b.mu.Lock()
-	b.stored = append(b.stored, map[string]string{"id": foreign, "role": "user"})
-	b.mu.Unlock()
+	b.storeUser(foreign)
 	b.answer(foreign)
 	for range 3 {
 		clk.fire(t)
@@ -191,16 +189,12 @@ func TestOpenCodeNoACPFallbackWhileHTTPSteerUnread(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "http", Text: "execute once"})
 	sink.wait(t, "accepted http")
 	httpID := b.postedID(t, 0)
-	b.mu.Lock()
-	b.status = http.StatusBadRequest
-	b.mu.Unlock()
+	b.setStatus(http.StatusBadRequest)
 	a.Deliver(proto.Input{RequestID: "fallback", Text: "another instruction"})
 	b.postedID(t, 1)
 	w.none() // no session/prompt during the loop
 	waitQueued(t, a, 1)
-	b.mu.Lock()
-	b.status = http.StatusNoContent
-	b.mu.Unlock()
+	b.setStatus(http.StatusNoContent)
 	onBus(t, a, b.answer(httpID))
 	b.setLoop(false)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
@@ -223,9 +217,7 @@ func TestOpenCodeOwnACPFallbackNeverResendsReadSteer(t *testing.T) {
 	a, b, w, sink, first := ocWithBusClock(t, clk)
 	a.Deliver(proto.Input{RequestID: "http", Text: "execute once"})
 	sink.wait(t, "accepted http")
-	b.mu.Lock()
-	b.status = http.StatusBadRequest
-	b.mu.Unlock()
+	b.setStatus(http.StatusBadRequest)
 	a.Deliver(proto.Input{RequestID: "fallback", Text: "another instruction"})
 	b.postedID(t, 1)
 	var joined string
@@ -235,15 +227,11 @@ func TestOpenCodeOwnACPFallbackNeverResendsReadSteer(t *testing.T) {
 		// and the loop's next step answers it.
 		joined = string(m["id"])
 		vendor := a.bus.messageID(clk.now())
-		b.mu.Lock()
-		b.stored = append(b.stored, map[string]string{"id": vendor, "role": "user"})
-		b.mu.Unlock()
+		b.storeUser(vendor)
 		b.answer(vendor)
 	case <-time.After(300 * time.Millisecond):
 	}
-	b.mu.Lock()
-	b.status = http.StatusNoContent
-	b.mu.Unlock()
+	b.setStatus(http.StatusNoContent)
 	b.setLoop(false)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
 	if joined != "" {
@@ -276,9 +264,7 @@ func TestOpenCodeRefusedCarryDoesNotInventLoop(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
 	w.next("session/cancel")
 	sink.wait(t, "accepted int-1")
-	b.mu.Lock()
-	b.status = http.StatusBadRequest
-	b.mu.Unlock()
+	b.setStatus(http.StatusBadRequest)
 	b.setLoop(false)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
 	clk.fire(t)
@@ -297,9 +283,7 @@ func TestOpenCodeInterruptDoesNotCarryASteerAStepFollowed(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
 	sink.wait(t, "accepted s1")
 	foreign := a.bus.messageID(clk.now()) // sorts after the steer
-	b.mu.Lock()
-	b.stored = append(b.stored, map[string]string{"id": foreign, "role": "user"})
-	b.mu.Unlock()
+	b.storeUser(foreign)
 	onBus(t, a, b.answer(foreign))
 	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
 	w.next("session/cancel")
@@ -417,17 +401,12 @@ func TestOpenCodeSettleGivesUpOnAMessageNeverStored(t *testing.T) {
 func TestOpenCodeSettleErrorsReportNoEndWhileALoopMayRun(t *testing.T) {
 	clk := newTestClock()
 	a, b, w, sink, first := ocWithBusClock(t, clk)
-	hold := make(chan struct{})
-	b.mu.Lock()
-	b.hold = hold
-	b.mu.Unlock()
+	hold := b.holdPosts()
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	msg := b.postedID(t, 0)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
 	waitHeld(t, a)
-	b.mu.Lock()
-	b.statusFail = true
-	b.mu.Unlock()
+	b.setStatusFail(true)
 	close(hold)
 	sink.wait(t, "accepted late")
 	onBus(t, a, b.answer(msg)) // the steer's own loop
@@ -435,9 +414,7 @@ func TestOpenCodeSettleErrorsReportNoEndWhileALoopMayRun(t *testing.T) {
 		clk.fire(t)
 		noTurnEnd(t, sink, "while OpenCode's status is unknown")
 	}
-	b.mu.Lock()
-	b.statusFail = false
-	b.mu.Unlock()
+	b.setStatusFail(false)
 	b.setLoop(false)
 	clk.fire(t)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
@@ -448,9 +425,7 @@ func TestOpenCodeSettleErrorsReportNoEndWhileALoopMayRun(t *testing.T) {
 // good answer brings the interval back to settleEvery.
 func TestOpenCodeSettleBacksOffOnErrors(t *testing.T) {
 	_, b, w, sink, clk, msg := settleStart(t)
-	b.mu.Lock()
-	b.statusFail = true
-	b.mu.Unlock()
+	b.setStatusFail(true)
 	for range 7 {
 		clk.fire(t)
 	}
@@ -458,9 +433,7 @@ func TestOpenCodeSettleBacksOffOnErrors(t *testing.T) {
 	if got := clk.lastDelays(7); !slices.Equal(got, want) {
 		t.Fatalf("delays after GET errors %v, want %v", got, want)
 	}
-	b.mu.Lock()
-	b.statusFail = false
-	b.mu.Unlock()
+	b.setStatusFail(false)
 	b.setLoop(true)
 	clk.fire(t)
 	if got := clk.lastDelays(1); got[0] != time.Second {

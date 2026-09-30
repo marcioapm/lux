@@ -218,6 +218,35 @@ func (b *fakeBus) setLoop(on bool) {
 	b.mu.Unlock()
 }
 
+// setStatus is the status prompt_async answers with.
+func (b *fakeBus) setStatus(code int) {
+	b.mu.Lock()
+	b.status = code
+	b.mu.Unlock()
+}
+
+func (b *fakeBus) setStatusFail(fail bool) {
+	b.mu.Lock()
+	b.statusFail = fail
+	b.mu.Unlock()
+}
+
+// holdPosts makes every prompt_async wait for the returned channel to close.
+func (b *fakeBus) holdPosts() chan struct{} {
+	hold := make(chan struct{})
+	b.mu.Lock()
+	b.hold = hold
+	b.mu.Unlock()
+	return hold
+}
+
+// storeUser stores a user message lux did not send.
+func (b *fakeBus) storeUser(id string) {
+	b.mu.Lock()
+	b.stored = append(b.stored, map[string]string{"id": id, "role": "user"})
+	b.mu.Unlock()
+}
+
 // postedID is the messageID of the nth prompt_async, once it came.
 func (b *fakeBus) postedID(t *testing.T, n int) string {
 	t.Helper()
@@ -375,10 +404,7 @@ func TestOpenCodeSteerCarriedPastInterrupt(t *testing.T) {
 // again, as a steer the turn left unread.
 func TestOpenCodeReservedSteerCarriedPastInterrupt(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
-	hold := make(chan struct{})
-	b.mu.Lock()
-	b.hold = hold
-	b.mu.Unlock()
+	hold := b.holdPosts()
 	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
 	b.postedID(t, 0)
 	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
@@ -421,9 +447,7 @@ func TestOpenCodeUntrackedParentReadsNothing(t *testing.T) {
 func TestOpenCodeSteerSortsAfterStoredMessages(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
 	ahead := fmt.Sprintf("msg_%012x%s", (time.Now().Add(time.Hour).UnixMilli()*0x1000+7)&(1<<48-1), "BBBBBBBBBBBBBB")
-	b.mu.Lock()
-	b.stored = append(b.stored, map[string]string{"id": ahead, "role": "user"})
-	b.mu.Unlock()
+	b.storeUser(ahead)
 	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
 	sink.wait(t, "accepted s1")
 	steer := b.postedID(t, 0)
@@ -510,10 +534,7 @@ func waitBusTurn(t *testing.T, a *ACP) {
 // session.idle arrives. No turn end is reported while that loop runs.
 func TestOpenCodeLateHTTPAcceptance(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
-	hold := make(chan struct{})
-	b.mu.Lock()
-	b.hold = hold
-	b.mu.Unlock()
+	hold := b.holdPosts()
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	msgID := b.postedID(t, 0)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
@@ -533,10 +554,7 @@ func TestOpenCodeLateHTTPAcceptance(t *testing.T) {
 // the steer's acceptance.
 func TestOpenCodeReservedAlreadyReadEndsOnce(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
-	hold := make(chan struct{})
-	b.mu.Lock()
-	b.hold = hold
-	b.mu.Unlock()
+	hold := b.holdPosts()
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	msgID := b.postedID(t, 0)
 	onBus(t, a, b.answer(msgID))
@@ -554,10 +572,7 @@ func TestOpenCodeReservedAlreadyReadEndsOnce(t *testing.T) {
 // admission had not completed after the ACP result. One turn end.
 func TestOpenCodeHeldOriginalAnswerSeenLateEndsOnce(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
-	hold := make(chan struct{})
-	b.mu.Lock()
-	b.hold = hold
-	b.mu.Unlock()
+	hold := b.holdPosts()
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	msg := b.postedID(t, 0)
 	b.setLoop(false)
@@ -576,10 +591,7 @@ func TestOpenCodeHeldOriginalAnswerSeenLateEndsOnce(t *testing.T) {
 // (one transcript turn holding two loops), and only once OpenCode is idle.
 func TestOpenCodeLoopAnsweredBeforeHTTPResponseEndsOnceAfterIdle(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
-	hold := make(chan struct{})
-	b.mu.Lock()
-	b.hold = hold
-	b.mu.Unlock()
+	hold := b.holdPosts()
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	msg := b.postedID(t, 0)
 	b.setLoop(false)
@@ -638,9 +650,7 @@ func TestOpenCodeReceiptAcrossReconnect(t *testing.T) {
 // a second ACP prompt instead.
 func TestOpenCodeFallsBackToACP(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
-	b.mu.Lock()
-	b.status = http.StatusBadRequest
-	b.mu.Unlock()
+	b.setStatus(http.StatusBadRequest)
 	a.Deliver(proto.Input{RequestID: "s", Text: "x"})
 	second, _ := w.next("session/prompt")
 	sink.wait(t, "accepted s next_step receipt=false")
