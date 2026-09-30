@@ -87,13 +87,12 @@ export function usePaged<T>(prefix: string, view: string, fetch: (req: PagedRequ
   const self = useRef<{ key: string; cursor?: string }>({ key: "" });
   const fetchRef = useRef(fetch);
   fetchRef.current = fetch;
-  const pageNo = here.page;
-  const navNow = here.nav;
+  const page = here.page;
   const q = useQuery(
     key,
     async (signal) => {
       const cur = self.current.key === key ? self.current.cursor : undefined;
-      return { key, res: await fetchRef.current(pageRequest(sort, size, navNow, cur, pageNo), signal) };
+      return { key, res: await fetchRef.current(pageRequest(sort, size, here.nav, cur, page), signal) };
     },
     { interval: opts.interval, live: opts.live, keep: true },
   );
@@ -106,12 +105,11 @@ export function usePaged<T>(prefix: string, view: string, fetch: (req: PagedRequ
   const move = useCallback((n: Nav, page: number) => setNav((o) => ({ view, nav: n, page, seq: o.seq + 1 })), [view]);
   // A page past the first that comes back empty, or (a cursor page) with
   // nothing before it, has lost its place: start over at the top.
-  const lost = data != null && pageNo > 1 && (data.rows.length === 0 || (navNow.kind !== "offset" && !data.prev));
+  const lost = data != null && page > 1 && (data.rows.length === 0 || (here.nav.kind !== "offset" && !data.prev));
   useEffect(() => {
     if (lost) move({ kind: "first" }, 1);
   }, [lost, move]);
   const counted = shown?.total != null;
-  const page = pageNo;
   return useMemo(
     () => ({
       rows: shown?.rows ?? [],

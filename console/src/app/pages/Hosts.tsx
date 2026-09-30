@@ -48,6 +48,21 @@ const LIFECYCLE = [
 ] as const;
 type Lifecycle = (typeof LIFECYCLE)[number]["value"];
 
+/** The URL's lifecycle; the older ?all=true reads as All. */
+function lifecycleOf(params: URLSearchParams): Lifecycle {
+  const v = params.get("lifecycle");
+  if (v === "all" || params.get("all") === "true") return "all";
+  if (v === "ended") return "ended";
+  return "live";
+}
+
+/** The API's lifecycle. Live with a state filter is left to the server's default, which lets ?state=terminated or launch_failed through. */
+function lifecycleParam(lifecycle: Lifecycle, state: string): "live" | "ended" | undefined {
+  if (lifecycle === "ended") return "ended";
+  if (lifecycle === "live" && !state) return "live";
+  return undefined;
+}
+
 export function Hosts() {
   const params = useSearchParams();
   const pool = params.get("pool") ?? "";
@@ -63,7 +78,7 @@ export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: s
   // Filters live in the URL, so a filtered list is a link.
   const params = useSearchParams();
   const state = params.get("state") ?? "";
-  const lifecycle: Lifecycle = params.get("lifecycle") === "all" || params.get("all") === "true" ? "all" : params.get("lifecycle") === "ended" ? "ended" : "live";
+  const lifecycle = lifecycleOf(params);
   const setPool = (v: string) => setSearchParams({ pool: v || null });
   const setState = (v: string) => setSearchParams({ state: v || null });
   const setLifecycle = (v: Lifecycle) => setSearchParams({ lifecycle: v === "live" ? null : v, all: null });
@@ -72,7 +87,7 @@ export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: s
     "hosts",
     view,
     (req, s) =>
-      api.hostsPage(apiTenant, { ...req, pool: poolId ? undefined : pool || undefined, poolId, state: state || undefined, all: lifecycle === "all" || undefined, lifecycle: lifecycle === "ended" ? "ended" : lifecycle === "live" && !state ? "live" : undefined }, s),
+      api.hostsPage(apiTenant, { ...req, pool: poolId ? undefined : pool || undefined, poolId, state: state || undefined, all: lifecycle === "all" || undefined, lifecycle: lifecycleParam(lifecycle, state) }, s),
     { defaultSort: { key: "created", dir: "desc" }, defaultSize: 25, interval: 5000 },
   );
   // The pool filter's options and the allocation summary (over every live
