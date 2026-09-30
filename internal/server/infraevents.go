@@ -679,8 +679,11 @@ func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTa
 			if c := cond(q, expr); c != "" {
 				where += " AND " + c
 			}
+			if order != "" {
+				where += " ORDER BY " + order
+			}
 			rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at, id::text AS key_id, `+expr+`::text AS key_value FROM `+t.table+`
-				WHERE `+where+` ORDER BY `+order+` LIMIT `+strconv.Itoa(limit), q.list...)
+				WHERE `+where+` LIMIT `+strconv.Itoa(limit), q.list...)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -720,7 +723,8 @@ func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTa
 			if pg.cursor == nil {
 				return false, nil
 			}
-			ahead, _, err := read(func(q *sqlArgs, expr string) string { return pg.beforeWhere(expr, "id", first, q.arg) }, "id", 1)
+			// Existence only, unordered.
+			ahead, _, err := read(func(q *sqlArgs, expr string) string { return pg.beforeWhere(expr, "id", first, q.arg) }, "", 1)
 			return len(ahead) > 0, err
 		})
 		out.Body.Events, out.Body.Next, out.Body.Prev, out.Body.Page = evs, next, prev, self
