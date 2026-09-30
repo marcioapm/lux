@@ -254,6 +254,12 @@ func (s *Server) routes(api huma.API) {
 		Summary: "List hosts", Description: "The tenant's own hosts, and platform hosts in pools it can use. Operators: every host.",
 	}, "read", s.listHosts)
 	register(s, api, huma.Operation{
+		OperationID: "hostSummary", Method: http.MethodGet, Path: "/v1/hosts/summary", Tags: []string{"hosts"},
+		Summary: "Live hosts in total",
+		Description: "Over the hosts GET /v1/hosts lists without filters (not terminated, the caller's view): how many, and the capacity of the ready and draining ones against what their live placements hold (a tenant: its own placements). " +
+			"A host named summary is read by its id.",
+	}, "read", s.hostSummary)
+	register(s, api, huma.Operation{
 		OperationID: "getHost", Method: http.MethodGet, Path: "/v1/hosts/{id}", Tags: []string{"hosts"},
 		Summary: "Get a host", Description: "With its live placements.",
 		Errors: []int{http.StatusNotFound, http.StatusConflict},
@@ -1901,6 +1907,40 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 			return err
 		}
 		return listHostsPage(ctx, tx, pg, in.Offset, p.TenantID, where, args, out)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+type HostResources struct {
+	CPUs   float64 `json:"cpus"`
+	Memory int64   `json:"memory"`
+}
+
+type hostSummaryOutput struct {
+	Body struct {
+		Live      int           `json:"live" doc:"Hosts not terminated."`
+		Capacity  HostResources `json:"capacity" doc:"Of the ready and draining hosts."`
+		Allocated HostResources `json:"allocated" doc:"What live placements on the ready and draining hosts hold (a tenant: its own)."`
+	} `nameHint:"HostSummary"`
+}
+
+// hostSummary is the totals of the hosts GET /v1/hosts lists unfiltered,
+// as a sum over its rows' allocated and capacity would give them, in one
+// grouped read instead of the whole list.
+func (s *Server) hostSummary(ctx context.Context, _ *TenantQuery) (*hostSummaryOutput, error) {
+	p := principal(ctx)
+	out := &hostSummaryOutput{}
+	b := &out.Body
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		const up = `FILTER (WHERE h.state IN ('ready', 'draining'))`
+		return tx.QueryRow(ctx, `SELECT count(*),
+				coalesce(sum((h.capacity->>'cpus')::float8) `+up+`, 0), coalesce(sum((h.capacity->>'memory')::int8) `+up+`, 0)::bigint,
+				coalesce(sum(hl.cpus), 0), coalesce(sum(hl.mem), 0)::bigint
+			FROM hosts h`+hostLoadSortJoin+` WHERE `+visibleHosts+` AND h.state <> 'terminated'`, p.TenantID).
+			Scan(&b.Live, &b.Capacity.CPUs, &b.Capacity.Memory, &b.Allocated.CPUs, &b.Allocated.Memory)
 	})
 	if err != nil {
 		return nil, err

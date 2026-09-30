@@ -142,6 +142,11 @@ range a 400). The unpaged-only parameters (`before`, events' `after`), and
 `id`, `type`, or `detail`: type, then the event's data as JSON text (not
 the summary a console shows).
 
+`GET /v1/hosts/summary` is the totals of the unfiltered host list in one
+read: how many hosts are live, and the capacity of the ready and draining
+ones against what their live placements hold (a tenant: its own), the same
+figures a sum over `GET /v1/hosts`' rows gives, without reading every row.
+
 A Run carries its **placement time**: for each placement, from when the Run
 needed a host (it was created, or its previous placement ended, or it was
 resumed) until that placement's workload started, summed over its
