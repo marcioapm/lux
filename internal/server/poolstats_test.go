@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +99,8 @@ func poolFixtureMore(t *testing.T, s *Server, ctx context.Context) {
 		('fa-old', 'ta', 'fa-old', 'p-a', 'terminated', now() - interval '3 days', 'failed', now() - interval '3 days', 'old error', now() - interval '3 days'),
 		('fp', NULL, 'fp', 'p-shared', 'terminated', now() - interval '5 minutes', 'failed', now() - interval '5 minutes', 'UnauthorizedOperation arn:aws:iam::123456789012:role/x', now() - interval '5 minutes'),
 		('fb', 'tb', 'fb', 'p-shared', 'terminated', now() - interval '1 minute', 'failed', now() - interval '1 minute', 'b error', now() - interval '1 minute')`)
+	// The reason the provisioner writes with a failed launch.
+	execSQL(t, s, ctx, `UPDATE hosts SET state_reason = 'launch failed: ' || launch_error WHERE launch_outcome = 'failed'`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, pool_id, current_epoch, created_at, needs_host_since, name) VALUES
 		('rb3', 'tb', '{}', 'submitted', 'p-shared', 0, now() - interval '20 minutes', now() - interval '20 minutes', 'run-b3')`)
 	execSQL(t, s, ctx, `UPDATE runs SET needs_host_since = now() - interval '5 minutes' WHERE id = 'rb2'`)
@@ -201,39 +204,53 @@ func TestPoolFigures(t *testing.T) {
 		t.Errorf("a's own pool over 4 days: %d launch failures, want 2", m.Now.LaunchFailures)
 	}
 	// The same through the host list: a tenant never reads a platform
-	// host's provider error, its own hosts' it does.
+	// host's provider error, its own hosts' it does; nor through the
+	// state reason the provisioner wrote with it.
 	var hl struct {
 		Hosts []struct {
-			ID     string
-			Launch *HostLaunch
+			ID          string
+			StateReason string
+			Launch      *HostLaunch
 		}
+	}
+	reason := func(err string) string {
+		if err == "" {
+			return "launch failed"
+		}
+		return "launch failed: " + err
 	}
 	for who, want := range map[string]map[string]string{
 		"a":  {"fa-new": "InsufficientInstanceCapacity", "fa-old": "old error", "fp": ""},
 		"op": {"fa-new": "InsufficientInstanceCapacity", "fa-old": "old error", "fb": "b error", "fp": "UnauthorizedOperation arn:aws:iam::123456789012:role/x"},
+		// An operator narrowed to a: what a sees.
+		"op?tenant=a": {"fa-new": "InsufficientInstanceCapacity", "fa-old": "old error", "fp": ""},
 	} {
+		key, narrow, _ := strings.Cut(who, "?")
 		for _, path := range []string{"/v1/hosts?state=launch_failed", "/v1/hosts?state=launch_failed&sort=name"} {
 			hl.Hosts = nil
-			get(who, path, &hl)
+			if narrow != "" {
+				path += "&" + narrow
+			}
+			get(key, path, &hl)
 			got := map[string]string{}
 			for _, h := range hl.Hosts {
 				got[h.ID] = h.Launch.Error
+				if h.StateReason != reason(h.Launch.Error) {
+					t.Errorf("%s %s: %s stateReason %q, want %q", who, path, h.ID, h.StateReason, reason(h.Launch.Error))
+				}
 			}
 			if fmt.Sprint(got) != fmt.Sprint(want) {
 				t.Errorf("%s %s: errors %v, want %v", who, path, got, want)
 			}
 		}
 		var one hostView
-		get(who, "/v1/hosts/fp", &one)
-		if one.Launch == nil || one.Launch.Outcome != "failed" || one.Launch.Error != want["fp"] {
-			t.Errorf("%s GET /v1/hosts/fp: %+v", who, one.Launch)
+		path := "/v1/hosts/fp"
+		if narrow != "" {
+			path += "?" + narrow
 		}
-	}
-	hl.Hosts = nil
-	get("op", "/v1/hosts?state=launch_failed&tenant=a", &hl)
-	for _, h := range hl.Hosts {
-		if h.ID == "fp" && h.Launch.Error != "" {
-			t.Errorf("operator narrowed to a reads fp's error")
+		get(key, path, &one)
+		if one.Launch == nil || one.Launch.Outcome != "failed" || one.Launch.Error != want["fp"] || one.StateReason != reason(want["fp"]) {
+			t.Errorf("%s GET /v1/hosts/fp: reason %q, %+v", who, one.StateReason, one.Launch)
 		}
 	}
 

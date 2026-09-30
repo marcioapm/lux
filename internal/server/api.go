@@ -1744,7 +1744,7 @@ const visiblePlacements = "($1 = '' OR pl.tenant_id = $1)"
 
 // Select hostColumns FROM hostsFrom ($1: the principal's tenant id, for
 // which of its placements count).
-const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''), coalesce(h.pool_id, ''), h.state, h.state_reason,
+const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''), coalesce(h.pool_id, ''), h.state, ` + hostStateReason + `,
 	h.draining, h.labels, h.capacity, h.versions, h.tenant_id IS NULL,
 	hl.n, jsonb_build_object('cpus', hl.cpus, 'memory', hl.mem, 'disk', hl.disk),
 	h.provider_id, h.instance_type, h.zone, h.market, h.last_heartbeat,
@@ -1752,11 +1752,17 @@ const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''),
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at,
 	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + ``
 
-// hostLaunchError, for SQL on hosts h with $1 as visibleHosts: a platform
-// host's provider error (account ids, role ARNs) only for a principal that
-// sees platform events ($1 empty: an operator not narrowed to a tenant), as
-// for its pool.launch_failed events.
-const hostLaunchError = `CASE WHEN h.tenant_id IS NOT NULL OR $1 = '' THEN coalesce(h.launch_error, '') ELSE '' END`
+// hostSeesProviderError, for SQL on hosts h with $1 as visibleHosts: a
+// platform host's provider error (account ids, role ARNs) is only for a
+// principal that sees platform events ($1 empty: an operator not narrowed to
+// a tenant), as for its pool.launch_failed events.
+const hostSeesProviderError = `(h.tenant_id IS NOT NULL OR $1 = '')`
+
+const hostLaunchError = `CASE WHEN ` + hostSeesProviderError + ` THEN coalesce(h.launch_error, '') ELSE '' END`
+
+// hostStateReason: the provisioner writes "launch failed: <provider error>"
+// as a failed launch's reason, so it is redacted under the same rule.
+const hostStateReason = `CASE WHEN h.launch_outcome = 'failed' AND NOT ` + hostSeesProviderError + ` THEN 'launch failed' ELSE h.state_reason END`
 
 const hostsFrom = `hosts h` + hostTenantJoin + hostPoolJoin + hostLoadJoin
 
