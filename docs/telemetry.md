@@ -134,7 +134,13 @@ the clock the first page was read at, which the cursors carry. Hosts also
 take `offset` for numbered pages and return `total` and `offset`. Without
 any of these, each list answers as it always has (hosts: every one, by
 name; Runs: newest first with `before` and `limit`; events: by id with
-`before`/`after`).
+`before`/`after`). For hosts, `limit` or `offset` alone pages too (newest
+first); for Runs and events `limit` alone does not, and keeps its unpaged
+meaning (Runs: 1 to 1000, out of range ignored; paged: 1 to 200, out of
+range a 400). The unpaged-only parameters (`before`, events' `after`), and
+`offset` with a cursor, are 400s in a paged request. Events sort by `time`,
+`id`, `type`, or `detail`: type, then the event's data as JSON text (not
+the summary a console shows).
 
 A Run carries its **placement time**: for each placement, from when the Run
 needed a host (it was created, or its previous placement ended, or it was
