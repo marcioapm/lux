@@ -140,4 +140,28 @@ describe("Table in a DOM", () => {
     expect(asked.at(-1)).toEqual({ key: "n", dir: "asc" });
     expect(el.querySelector(".the-footer")?.textContent).toBe("pages");
   });
+
+  test("controlled client sort: a parent that refuses the change keeps the order and the header", async () => {
+    const asked: SortState[] = [];
+    const { th, ids } = await render(<Table columns={cols} rows={data} rowKey={(r) => r.id} sort={{ key: "name", dir: "asc" }} onSortChange={(s) => asked.push(s)} />);
+    expect(ids()).toEqual(["b", "a", "c", "d"]);
+    await act(async () => th("N").click());
+    expect(asked).toEqual([{ key: "n", dir: "desc" }]);
+    expect(ids()).toEqual(["b", "a", "c", "d"]);
+    expect(th("N").getAttribute("aria-sort")).toBe("none");
+    expect(th("Name").getAttribute("aria-sort")).toBe("ascending");
+  });
+
+  test("a sort by an optional column holds when a narrow container drops the column", async () => {
+    const width = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => 800 });
+    try {
+      const withOptional: Column<R>[] = [cols[0]!, { ...cols[2]!, optional: true }];
+      const { th, ids } = await render(<Table columns={withOptional} rows={data} rowKey={(r) => r.id} defaultSort={{ key: "n", dir: "desc" }} />);
+      expect(th("N")).toBeUndefined();
+      expect(ids()).toEqual(["c", "a", "d", "b"]);
+    } finally {
+      if (width) Object.defineProperty(HTMLElement.prototype, "clientWidth", width);
+    }
+  });
 });

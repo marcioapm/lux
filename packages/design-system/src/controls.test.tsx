@@ -104,6 +104,41 @@ describe("in a DOM", () => {
     expect(calls).toEqual(["next"]);
   });
 
+  const button = (el: HTMLElement, t: string) => [...el.querySelectorAll("button")].find((b) => b.textContent?.includes(t)) as HTMLButtonElement;
+
+  test("Pagination, cursor mode: past page 1, First stays on even when the page has lost its previous one", async () => {
+    const calls: string[] = [];
+    const el = await render(<Pagination mode="cursor" page={3} count={0} pageSize={50} hasPrev={false} hasNext={false} onFirst={() => calls.push("first")} onPrev={() => calls.push("prev")} onNext={() => calls.push("next")} />);
+    expect([button(el, "First").disabled, button(el, "Previous").disabled, button(el, "Next").disabled]).toEqual([false, true, true]);
+    await act(async () => button(el, "First").click());
+    expect(calls).toEqual(["first"]);
+  });
+
+  test("Pagination, count mode: Next off on the last page; an empty result reads 0–0 of 0", async () => {
+    const onPage = () => {};
+    const el = await render(
+      <>
+        <div className="last">
+          <Pagination mode="count" page={52} pageSize={25} total={1284} noun="hosts" onPage={onPage} />
+        </div>
+        <div className="none">
+          <Pagination mode="count" page={1} pageSize={25} total={0} noun="hosts" onPage={onPage} />
+        </div>
+      </>,
+    );
+    const last = el.querySelector(".last") as HTMLElement;
+    expect([button(last, "Previous").disabled, button(last, "Next").disabled]).toEqual([false, true]);
+    expect(el.querySelector(".none .pager-range")?.textContent).toBe("0–0 of 0 hosts");
+  });
+
+  test("Pagination, count mode: busy, a page click does nothing", async () => {
+    const asked: number[] = [];
+    const el = await render(<Pagination mode="count" page={1} pageSize={25} total={1284} busy onPage={(p) => asked.push(p)} />);
+    await act(async () => (el.querySelector('[aria-label="Page 2"]') as HTMLElement).click());
+    await act(async () => button(el, "Next").click());
+    expect(asked).toEqual([]);
+  });
+
   test("SegmentedControl: one radio checked; choosing another reports it", async () => {
     const got: string[] = [];
     const el = await render(
@@ -188,5 +223,23 @@ describe("in a DOM", () => {
     await act(async () => setTerminalScheme("auto"));
     expect(localStorage.getItem(TERMINAL_THEME_KEY)).toBeNull();
     expect(seen).toBe("auto/light");
+  });
+
+  test("terminal scheme: another tab's change (a storage event) reaches this one", async () => {
+    let seen = "";
+    function Probe() {
+      seen = useTerminalScheme().pref;
+      return null;
+    }
+    await render(<Probe />);
+    expect(seen).toBe("auto");
+    await act(async () => {
+      localStorage.setItem(TERMINAL_THEME_KEY, "dark");
+      window.dispatchEvent(new StorageEvent("storage", { key: "lux.theme" }));
+    });
+    // Another key: not re-read.
+    expect(seen).toBe("auto");
+    await act(async () => window.dispatchEvent(new StorageEvent("storage", { key: TERMINAL_THEME_KEY })));
+    expect(seen).toBe("dark");
   });
 });

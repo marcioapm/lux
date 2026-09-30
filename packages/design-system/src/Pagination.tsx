@@ -115,7 +115,8 @@ export function Pagination(props: PaginationProps) {
       </span>
       {sortLabel && <span className="muted">· {sortLabel}</span>}
       <span className="pager-grow" />
-      <Button size="sm" variant="ghost" disabled={!hasPrev} onClick={() => !busy && onFirst()}>
+      {/* Past page 1 the top is always reachable, even when the page lost its previous one. */}
+      <Button size="sm" variant="ghost" disabled={page <= 1 && !hasPrev} onClick={() => !busy && onFirst()}>
         « First
       </Button>
       <Button size="sm" variant="ghost" disabled={!hasPrev} onClick={() => !busy && onPrev()}>
