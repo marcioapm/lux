@@ -36,14 +36,41 @@ arrive, a few seconds late.
 
 ### Upgrading
 
-1. Run `luxd migrate` with the owner's DSN. It applies what is new and is
+1. Check the configuration with the new binary: `luxd validate`, run as
+   the service user with the unit's environment. It fails (exit 1) on
+   anything `luxd serve` would refuse before connecting, with the same
+   message; the running luxd is untouched.
+2. Run `luxd migrate` with the owner's DSN. It applies what is new and is
    safe to run again; running luxds keep working meanwhile.
-2. Restart (or roll) every `luxd serve` onto the new binary.
+3. Restart (or roll) every `luxd serve` onto the new binary.
 
 Migrate first: a luxd newer than its schema does not check it, and fails
 requests that touch what is missing (luxds older than the schema keep
 working). Configuration through the environment alone keeps working: a
 configuration file is optional.
+
+Each Linux release tarball has a `FEATURES` file at its root, one feature
+per line. A deployer reads it before running anything from the release,
+since older releases lack both the file and the commands it names:
+
+| Feature | Since the release says it, a deployer may |
+| --- | --- |
+| `validate` | run `luxd [--config FILE] validate` against the host's configuration before migrating or switching to the release. |
+
+A release with no `FEATURES` file, or no `validate` line, predates
+`luxd validate`.
+
+#### Configuration compatibility
+
+A configuration that one release accepts, the next accepts too:
+
+- A new setting always has a default or is optional: a file written for the
+  previous release needs no edit.
+- A removed setting stays accepted for one more release. luxd ignores it and
+  warns `luxd: warning: retired: <key>; remove it` (the TOML key or the
+  variable, never its value). The release after that refuses it as an
+  unknown key. Retired settings are listed in `retiredKeys`
+  (`cmd/luxd/config.go`).
 
 ### Configuration
 
@@ -55,6 +82,19 @@ a bad value stops luxd, naming it. luxd warns when others can read the
 file: keep it `chmod 600`, or keep secrets in the environment.
 [luxd.example.toml](luxd.example.toml) has every key with its default and
 its variable; the table below lists them by variable.
+
+`luxd [--config FILE] validate` checks a configuration the way `luxd serve`
+does before it opens any connection, and connects to nothing, binds
+nothing and writes nothing: the file and the environment are loaded
+(unknown keys, types, values), `database.url` and `s3.bucket` must be set,
+the database URL must parse, the S3 client must configure (AWS shared
+configuration included), `listen` must be `host:port`, and the console,
+preview, cost-plugin, defaults, history and cost settings must be
+consistent. It prints `ok: FILE` (or `ok: no file`) and exits 0; warnings
+(a readable file, a retired key) go to stderr, naming the key, never a
+value. On a refusal it prints what `serve` would and exits 1; extra
+arguments exit 2. Whether the database and bucket are reachable is not
+checked. `luxd check-config` is an alias of `validate`.
 
 | Variable | Default | |
 | --- | --- | --- |
