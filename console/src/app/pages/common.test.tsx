@@ -36,3 +36,10 @@ test("a negative runtime or placement time from the server reads 0s, never a min
   // Never run: a dash.
   expect(await text(<RuntimeCell run={run({ epoch: 0 })} />)).toBe("–");
 });
+
+test("ratioText: one unit when both figures share it", () => {
+  const { ratioText } = common;
+  expect(ratioText(162, 576, "cores")).toBe("162 / 576 cores");
+  expect(ratioText(4 * 1024 ** 3, 16 * 1024 ** 3, "bytes")).toBe("4 / 16 GiB");
+  expect(ratioText(512 * 1024 ** 2, 16 * 1024 ** 3, "bytes")).toBe("512 MiB / 16 GiB");
+});

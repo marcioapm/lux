@@ -14,11 +14,11 @@ interface PoolRow extends Pool {
   stats?: PoolStats;
 }
 
-/** A pool's settings in a line: its size bounds, or that it is static. */
+/** A pool's settings in a line: its provider, and its size bounds or that it is static. */
 function settingsText(p: Pool): string {
   if (p.provider === "static") return p.hourlyPrice ? `static hosts · ${p.hourlyPrice} ${p.currency ?? ""}/h` : "static hosts";
   const spot = p.template?.spot ? " · spot" : "";
-  return `min ${p.minHosts} · warm ${p.warmHosts}${p.warmWhileActive ? " (in use)" : ""} · max ${p.maxHosts || "∞"}${spot}`;
+  return `${p.provider} · min ${p.minHosts} · warm ${p.warmHosts}${p.warmWhileActive ? " (in use)" : ""} · max ${p.maxHosts || "∞"}${spot}`;
 }
 
 /** Cost figures sort by their first currency's amount (ordering only). */
@@ -55,20 +55,19 @@ export function Pools() {
         ),
         sortValue: (p) => p.name,
         lead: true,
-        width: 190,
+        width: 168,
       },
     ];
-    if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => (p.platform ? <span className="muted">platform</span> : p.tenant || DASH), sortValue: (p) => (p.platform ? "" : p.tenant), width: 110 });
+    if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => (p.platform ? <span className="muted">platform</span> : p.tenant || DASH), sortValue: (p) => (p.platform ? "" : p.tenant), width: 96 });
     c.push(
-      { key: "provider", header: "Provider", cell: (p) => <span className="secondary">{p.provider}</span>, sortValue: (p) => p.provider, width: 90 },
-      { key: "hosts", header: "Hosts", cell: (p) => `${p.readyCount} ready / ${p.hostCount}`, sortValue: (p) => p.readyCount * 1e6 + p.hostCount, align: "right", mono: true, width: 130 },
+      { key: "hosts", header: "Hosts", cell: (p) => `${p.readyCount} ready / ${p.hostCount}`, sortValue: (p) => p.readyCount * 1e6 + p.hostCount, align: "right", mono: true, width: 132 },
       {
         key: "cpu",
         header: "CPU allocated",
         cell: (p) => (p.stats && p.stats.capacityCpus > 0 ? <UsageBar used={p.stats.allocatedCpus} total={p.stats.capacityCpus} unit="cores" /> : DASH),
         sortValue: (p) => (p.stats && p.stats.capacityCpus > 0 ? p.stats.allocatedCpus / p.stats.capacityCpus : null),
         sortFirst: "desc",
-        width: 160,
+        width: 150,
       },
       {
         key: "runs",
@@ -76,7 +75,7 @@ export function Pools() {
         cell: (p) =>
           p.stats ? (
             <span className="spark-row">
-              <Sparkline values={p.stats.runsHourly} width={88} height={20} color="var(--chart-1)" endDot={false} title={`${p.stats.runsStarted} Runs started, per hour`} />
+              <Sparkline values={p.stats.runsHourly} width={56} height={20} color="var(--chart-1)" endDot={false} title={`${p.stats.runsStarted} Runs started, per hour`} />
               <span className="mono muted">{p.stats.runsStarted}</span>
             </span>
           ) : (
@@ -84,7 +83,7 @@ export function Pools() {
           ),
         sortValue: (p) => p.stats?.runsStarted,
         sortFirst: "desc",
-        width: 150,
+        width: 128,
       },
       {
         key: "fails",
@@ -93,11 +92,13 @@ export function Pools() {
         sortValue: (p) => p.stats?.launchFailures,
         align: "right",
         mono: true,
-        width: 112,
+        width: 120,
       },
-      { key: "cost", header: `Cost (${range})`, cell: (p) => (p.stats ? <MoneyList amounts={p.stats.cost} /> : DASH), sortValue: costValue, align: "right", mono: true, width: 120 },
-      // The one column without a width: it takes what is left.
-      { key: "settings", header: "Settings", cell: (p) => <span className="muted">{settingsText(p)}</span>, sortValue: (p) => settingsText(p) },
+      { key: "cost", header: `Cost (${range})`, cell: (p) => (p.stats ? <MoneyList amounts={p.stats.cost} /> : DASH), sortValue: costValue, align: "right", mono: true, width: 116 },
+      // The one column without a width: it takes what is left, and wraps
+      // rather than clip. The provider leads it (the pool page's header
+      // shows it as a badge).
+      { key: "settings", header: "Settings", cell: (p) => <span className="muted">{settingsText(p)}</span>, sortValue: (p) => settingsText(p), wrap: true },
       {
         key: "actions",
         header: "",
@@ -134,7 +135,7 @@ export function Pools() {
             </span>
           ) : null,
         align: "right",
-        width: 80,
+        width: 84,
       },
     );
     return c;
