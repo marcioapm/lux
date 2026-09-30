@@ -739,8 +739,8 @@ type listRunsInput struct {
 	Resumable bool     `query:"resumable" doc:"Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused."`
 	Host      string   `query:"host" doc:"Only Runs with a placement (any epoch) on this host, by id or name."`
 	Label     []string `query:"label,explode" doc:"Only Runs with this label (key=value); repeat to require several."`
-	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run."`
-	Limit     string   `query:"limit" doc:"At most this many Runs, newest first: 1 to 1000, default 100. Paged lists (sort or a cursor): 1 to 200, default 50." example:"100"`
+	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."`
+	Limit     string   `query:"limit" doc:"Unpaged lists: at most this many Runs, newest first, 1 to 1000 (default 100; a value out of range is ignored). Paged lists (sort or a cursor): Runs per page, 1 to 200 (default 50; out of range is a 400). limit alone does not page." example:"100"`
 }
 
 // Resolve reads every label as given: huma drops them all when the first
@@ -812,6 +812,9 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		return nil, err
 	}
 	if paged {
+		if in.Before != "" {
+			return nil, errf(http.StatusBadRequest, "bad_request", "before does not go with sort and cursors")
+		}
 		return s.listRunsPage(ctx, p, pg, where, args)
 	}
 	if in.Before != "" {
@@ -1791,8 +1794,8 @@ type listHostsInput struct {
 	PoolID    string `query:"poolId" doc:"Only the hosts of the pool with this id (names repeat across owners)."`
 	State     string `query:"state" doc:"Only hosts in this state: provisioning, ready, draining, lost or terminated; or launch_failed, the terminated hosts whose launch the provider refused (terminated then means the others)."`
 	Lifecycle string `query:"lifecycle" enum:"live,ended," doc:"live: hosts not terminated; ended: terminated ones (launch failures included). Implies all."`
-	Limit     string `query:"limit" doc:"Paged lists: hosts per page, 1 to 500 (default 25)."`
-	Offset    string `query:"offset" doc:"Paged lists: skip this many hosts (a numbered page), instead of a cursor."`
+	Limit     string `query:"limit" doc:"Hosts per page, 1 to 500 (default 25). limit alone (or offset alone) pages the list too, newest first (sort=created)."`
+	Offset    string `query:"offset" doc:"Paged lists: skip this many hosts (a numbered page), instead of a cursor; with next, prev or at it is a 400."`
 }
 
 type listHostsOutput struct {
@@ -1872,6 +1875,9 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 	pg, paged, err := resolvePaging(in.PageQuery, hostSortKeys, "created", in.Limit, 25, 500)
 	if err != nil {
 		return nil, err
+	}
+	if in.Offset != "" && pg != nil && pg.cursor != nil {
+		return nil, errf(http.StatusBadRequest, "bad_request", "offset does not go with next, prev or at")
 	}
 	if !paged && (in.Limit != "" || in.Offset != "") {
 		pg, _, err = resolvePaging(PageQuery{Sort: "created"}, hostSortKeys, "created", in.Limit, 25, 500)

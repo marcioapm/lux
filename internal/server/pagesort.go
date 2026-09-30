@@ -4,10 +4,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"maps"
+	"math/big"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Paged lists (GET /v1/hosts, /v1/runs, /v1/pools/{name}/events with
@@ -134,6 +136,9 @@ func resolvePaging(q PageQuery, keys map[string]sortKey, def string, limit strin
 		return nil, false, errf(http.StatusBadRequest, "bad_request", "sort: one of %s", sortKeysDoc(keys))
 	}
 	p.sk = sk
+	if c := p.cursor; c != nil && (!validClock(c.At) || c.V != nil && !validSortValue(sk.cast, *c.V)) {
+		return nil, false, errf(http.StatusBadRequest, "bad_request", "%s: not a cursor", cursorParam[mode])
+	}
 	if p.dir == "" {
 		p.dir = sk.first
 	}
@@ -148,6 +153,62 @@ func resolvePaging(q PageQuery, keys map[string]sortKey, def string, limit strin
 		p.limit = n
 	}
 	return p, true, nil
+}
+
+// pgTimestampLayouts: timestamptz as Postgres prints it (DateStyle ISO), with
+// an hour, hour:minute or hour:minute:second offset.
+var pgTimestampLayouts = []string{
+	"2006-01-02 15:04:05.999999999-07",
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05.999999999-07:00:00",
+}
+
+// validSortValue: v parses as cast, so a tampered cursor is a 400 rather
+// than a failed cast in the page query.
+func validSortValue(cast, v string) bool {
+	switch cast {
+	case "text":
+		return true
+	case "bigint":
+		_, err := strconv.ParseInt(v, 10, 64)
+		return err == nil
+	case "float8":
+		_, err := strconv.ParseFloat(v, 64)
+		return err == nil
+	case "numeric":
+		_, ok := new(big.Rat).SetString(v)
+		return ok || v == "NaN" || v == "Infinity" || v == "-Infinity"
+	case "timestamptz":
+		if v == "infinity" || v == "-infinity" {
+			return true
+		}
+		for _, l := range pgTimestampLayouts {
+			if _, err := time.Parse(l, v); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// validClock: a cursor's clock is absent or RFC 3339.
+func validClock(at string) bool {
+	if at == "" {
+		return true
+	}
+	_, err := time.Parse(time.RFC3339Nano, at)
+	return err == nil
+}
+
+// checkIDCast is a 400 for a cursor whose id is not of the list's id type.
+func (p *paging) checkIDCast() error {
+	if p.cursor == nil || p.idCast != "bigint" {
+		return nil
+	}
+	if _, err := strconv.ParseInt(p.cursor.ID, 10, 64); err != nil {
+		return errf(http.StatusBadRequest, "bad_request", "%s: not a cursor", cursorParam[p.mode])
+	}
+	return nil
 }
 
 // expr is the sort value's SQL with the clock filled in: the cursor's for a

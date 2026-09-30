@@ -3156,19 +3156,19 @@ paths:
               - ended
               - ""
             type: string
-        - description: "Paged lists: hosts per page, 1 to 500 (default 25)."
+        - description: Hosts per page, 1 to 500 (default 25). limit alone (or offset alone) pages the list too, newest first (sort=created).
           explode: false
           in: query
           name: limit
           schema:
-            description: "Paged lists: hosts per page, 1 to 500 (default 25)."
+            description: Hosts per page, 1 to 500 (default 25). limit alone (or offset alone) pages the list too, newest first (sort=created).
             type: string
-        - description: "Paged lists: skip this many hosts (a numbered page), instead of a cursor."
+        - description: "Paged lists: skip this many hosts (a numbered page), instead of a cursor; with next, prev or at it is a 400."
           explode: false
           in: query
           name: offset
           schema:
-            description: "Paged lists: skip this many hosts (a numbered page), instead of a cursor."
+            description: "Paged lists: skip this many hosts (a numbered page), instead of a cursor; with next, prev or at it is a 400."
             type: string
       responses:
         "200":
@@ -4636,19 +4636,19 @@ paths:
             type:
               - array
               - "null"
-        - description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run."
+        - description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."
           explode: false
           in: query
           name: before
           schema:
-            description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run."
+            description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."
             type: string
-        - description: "At most this many Runs, newest first: 1 to 1000, default 100. Paged lists (sort or a cursor): 1 to 200, default 50."
+        - description: "Unpaged lists: at most this many Runs, newest first, 1 to 1000 (default 100; a value out of range is ignored). Paged lists (sort or a cursor): Runs per page, 1 to 200 (default 50; out of range is a 400). limit alone does not page."
           explode: false
           in: query
           name: limit
           schema:
-            description: "At most this many Runs, newest first: 1 to 1000, default 100. Paged lists (sort or a cursor): 1 to 200, default 50."
+            description: "Unpaged lists: at most this many Runs, newest first, 1 to 1000 (default 100; a value out of range is ignored). Paged lists (sort or a cursor): Runs per page, 1 to 200 (default 50; out of range is a 400). limit alone does not page."
             examples:
               - "100"
             type: string
