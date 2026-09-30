@@ -204,12 +204,14 @@ func samplePools(ctx context.Context, tx pgx.Tx, from time.Time) error {
 			WHERE r.pool_id IS NOT NULL AND (r.first_started_at > w.since AND r.first_started_at <= w.until OR r.finished_at > w.since AND r.finished_at <= w.until)
 			GROUP BY GROUPING SETS ((r.pool_id, r.tenant_id), (r.pool_id))
 		),
+		-- Launches requested in the last day: hosts_launch_requested bounds
+		-- the scan; a failure answered in the window was requested within it.
 		launch AS (
 			SELECT h.pool_id,
 				count(*) FILTER (WHERE h.provision_requested_at > w.since AND h.provision_requested_at <= w.until) AS launches,
 				count(*) FILTER (WHERE h.launch_outcome = 'failed' AND h.launch_finished_at > w.since AND h.launch_finished_at <= w.until) AS failures
 			FROM hosts h, w
-			WHERE h.pool_id IS NOT NULL AND h.provision_requested_at > w.since - interval '1 day'
+			WHERE h.provision_requested_at > $1::timestamptz - interval '1 day' AND h.pool_id IS NOT NULL
 			GROUP BY h.pool_id
 		),
 		keys AS (
