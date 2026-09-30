@@ -180,7 +180,9 @@ export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: s
             {q.total != null ? `${q.total.toLocaleString()} ${filtered ? "matching " : ""}hosts · ` : ""}
             {summary.data
               ? `${summary.data.live} live · ready and draining: ${formatCores(summary.data.allocated.cpus)} of ${formatCores(summary.data.capacity.cpus)} CPU, ${formatBytes(summary.data.allocated.memory)} of ${formatBytes(summary.data.capacity.memory)} memory allocated`
-              : DASH}
+              : summary.error
+                ? "summary unavailable"
+                : DASH}
           </span>
         }
       />
