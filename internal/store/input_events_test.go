@@ -12,13 +12,13 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// Input events recorded before 039 are known to it: a repeat of one is
+// Input events recorded before 043 are known to it: a repeat of one is
 // still a conflict after the upgrade. Events without a request id, or
 // with a JSON null one, have no key.
 func TestRunInputEventsBackfill(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "038_pool_id"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "042_dashboard_indexes"); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := pgx.Connect(ctx, owner)
@@ -60,7 +60,7 @@ func TestRunInputEventsBackfill(t *testing.T) {
 func TestRunInputEventsBackfillLetsRunsBeWritten(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "038_pool_id"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "042_dashboard_indexes"); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := pgx.Connect(ctx, owner)
