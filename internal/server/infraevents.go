@@ -705,8 +705,8 @@ func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTa
 		// ahead, whether any event precedes ahead (existence only, unordered).
 		read := func(ahead *keyRow) ([]LifecycleEvent, []keyRow, error) {
 			q, from, expr := pg.keySource(t.table, "", []any{owner})
-			where, limit, reversed := t.owner+` = $1`, pg.limit+1, pg.mode == "before"
-			order := ""
+			where, limit := t.owner+` = $1`, pg.limit+1
+			order, outer := "", ""
 			if ahead != nil {
 				where += " AND " + pg.beforeWhere(expr, "id", *ahead, q.arg)
 				limit = 1
@@ -714,10 +714,8 @@ func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTa
 				if pg.cursor != nil {
 					where += " AND " + pg.where(expr, "id", q.arg)
 				}
+				reversed := pg.mode == "before"
 				order = pg.order(expr, "id", reversed)
-			}
-			outer := ""
-			if order != "" {
 				outer = ` ORDER BY ` + pg.order("k.v", "k.id", reversed)
 			}
 			rows, err := tx.Query(ctx, `SELECT e.id, e.type, e.data, e.count, e.created_at, e.last_at, k.id::text, k.v::text FROM (`+
