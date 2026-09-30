@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage, RelativeTime } from "@lux/design-system";
+import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage } from "@lux/design-system";
 import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type HostTimeKey, type Run } from "../../api/index.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
@@ -229,7 +229,6 @@ function LaunchFailedHost({ host: h }: { host: Host }) {
             { key: "requested", label: "Launch requested", start: l.requestedAt ? Date.parse(l.requestedAt) : null, end: l.finishedAt ? Date.parse(l.finishedAt) : null, tone: "accent" },
             { key: "failed", label: "Launch failed", note: "host row closed, its one-use token revoked", start: l.finishedAt ? Date.parse(l.finishedAt) : null, point: true, tone: "red" },
           ]}
-          now={Date.now()}
         />
       </Card>
       {(!h.platform || (scope.operator && !scope.apiTenant)) && (

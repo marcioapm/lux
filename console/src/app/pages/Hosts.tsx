@@ -30,7 +30,7 @@ const launchFailed = (h: Host) => hostDisplayState(h) === "launch_failed";
  * Uptime: created to terminated, or to now while the host is up; none for a
  * launch that failed (no instance ever ran).
  */
-export function HostUptime({ host: h }: { host: Host }) {
+function HostUptime({ host: h }: { host: Host }) {
   const now = useNow();
   if (launchFailed(h)) return <DurationCell seconds={null} missing="Never launched: no instance ran" />;
   const created = Date.parse(h.times.created ?? "");
