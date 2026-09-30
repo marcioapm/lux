@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -51,8 +52,10 @@ type Shim struct {
 	started   bool
 	startCh   chan proto.ShimMsg
 	delivered map[string]bool
-	stopping  bool
-	stopWhy   string
+	// inputPhases: the lux.input phases recorded, by request id and phase.
+	inputPhases map[string]bool
+	stopping    bool
+	stopWhy     string
 	// hookPgid is a running beforeStop's process group; hookBy is its
 	// deadline, set before the hook starts and only moved earlier by a
 	// shorter stop. hookDone closes when it has ended.
@@ -941,13 +944,39 @@ func (k *sink) Activity(idle bool) {
 	}
 	k.s.out.Event(proto.EvActivity, map[string]string{"activity": a})
 }
-func (k *sink) InputAck(in proto.Input, err error) {
+func (k *sink) InputAccepted(in proto.Input, d adapter.Delivery) {
+	k.input(in, proto.InputAccepted, map[string]any{"lands": d.Lands, "receipt": d.Receipt}, nil)
+}
+
+func (k *sink) InputConsumed(requestID string) {
+	k.input(proto.Input{RequestID: requestID}, proto.InputConsumed, nil, nil)
+}
+
+func (k *sink) InputFailed(in proto.Input, err error) {
+	k.input(in, proto.InputFailed, nil, err)
+}
+
+// input writes one lux.input record, at most once per request id and
+// phase: an adapter that reports a phase twice is not heard twice.
+func (k *sink) input(in proto.Input, phase string, extra map[string]any, err error) {
 	if in.RequestID == "" {
+		return
+	}
+	k.s.mu.Lock()
+	if k.s.inputPhases == nil {
+		k.s.inputPhases = map[string]bool{}
+	}
+	key := in.RequestID + "\x00" + phase
+	seen := k.s.inputPhases[key]
+	k.s.inputPhases[key] = true
+	k.s.mu.Unlock()
+	if seen {
 		return
 	}
 	// What was delivered, up to a limit (the record stream is not for
 	// whole files); secrets in it are redacted like all output.
-	d := map[string]any{"requestId": in.RequestID}
+	d := map[string]any{"requestId": in.RequestID, "phase": phase}
+	maps.Copy(d, extra)
 	text := in.Text
 	if text == "" && len(in.Raw) > 0 {
 		text = string(in.Raw)

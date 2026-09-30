@@ -598,20 +598,50 @@ func (s *Server) applyAdapterEvent(ctx context.Context, tx pgx.Tx, tenantID, run
 		addEvent(ctx, tx, tenantID, runID, epoch, "activity", map[string]any{"activity": ev.Activity})
 	}
 	if ev.InputAck != "" {
-		d := map[string]any{"requestId": ev.InputAck}
+		return applyInputEvent(ctx, tx, tenantID, runID, epoch, ev)
+	}
+	return nil
+}
+
+// applyInputEvent records an input's phase as input.delivered (accepted),
+// input.consumed or input.failed, once per request id and type: the runner
+// re-reports what it tails after a restart or reconnect.
+func applyInputEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, ev proto.AdapterEvent) error {
+	phase := ev.InputPhase
+	if phase == "" {
+		phase = proto.InputAccepted
+		if ev.InputError != "" {
+			phase = proto.InputFailed
+		}
+	}
+	d := map[string]any{"requestId": ev.InputAck, "phase": phase}
+	typ := "input.delivered"
+	switch phase {
+	case proto.InputConsumed:
+		typ = "input.consumed"
+	case proto.InputFailed:
+		typ, d["error"] = "input.failed", ev.InputError
+	case proto.InputAccepted:
+		if ev.InputLands != "" {
+			d["lands"], d["receipt"] = ev.InputLands, ev.InputReceipt
+		}
+	default:
+		return nil
+	}
+	if phase != proto.InputConsumed {
 		if ev.InputText != "" {
 			d["text"] = ev.InputText
 		}
 		if ev.InputTruncated {
 			d["truncated"] = true
 		}
-		typ := "input.delivered"
-		if ev.InputError != "" {
-			typ, d["error"] = "input.failed", ev.InputError
-		}
-		addEvent(ctx, tx, tenantID, runID, epoch, typ, d)
 	}
-	return nil
+	var seen bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM run_events WHERE run_id = $1 AND type = $2 AND data->>'requestId' = $3)`,
+		runID, typ, ev.InputAck).Scan(&seen); err != nil || seen {
+		return err
+	}
+	return addEvent(ctx, tx, tenantID, runID, epoch, typ, d)
 }
 
 // discardOldCopies tells every other host holding a local copy of a Run's

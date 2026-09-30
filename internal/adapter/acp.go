@@ -167,7 +167,7 @@ func (a *ACP) drain() {
 	a.mu.Unlock()
 
 	a.sink.Activity(false)
-	a.sink.InputAck(in, nil)
+	a.sink.InputAccepted(in, Delivery{Lands: LandsNextTurn})
 	go func() {
 		res, err := a.rpc.call("session/prompt", map[string]any{"sessionId": session, "prompt": textInput(in.Text)})
 		var pr struct {
