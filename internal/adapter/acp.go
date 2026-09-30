@@ -341,7 +341,7 @@ func (a *ACP) steer(in proto.Input) {
 		a.queueInput(in)
 		return
 	}
-	if a.bus != nil && a.bus.isConnected() {
+	if a.bus != nil && a.bus.waitConnected(5*time.Second) {
 		msgID := a.bus.messageID(time.Now())
 		a.bus.track(msgID, in.RequestID)
 		err := a.bus.promptAsync(session, msgID, in.Text)
@@ -355,6 +355,12 @@ func (a *ACP) steer(in proto.Input) {
 			return
 		}
 		a.sink.Event(proto.EvWarning, map[string]any{"message": "opencode: steering over ACP instead: " + err.Error()})
+	} else if a.bus != nil {
+		msg := "opencode: its event stream is not connected; steering over ACP, without a receipt"
+		if err := a.bus.err(); err != nil {
+			msg += ": " + err.Error()
+		}
+		a.sink.Event(proto.EvWarning, map[string]any{"message": msg})
 	}
 	a.mu.Lock()
 	if !a.busy || a.busTurn || a.stopped {

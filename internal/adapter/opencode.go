@@ -31,9 +31,12 @@ type opencodeBus struct {
 	port int
 	dir  string
 	hc   *http.Client
+	// stream: for the event stream, which has no timeout (ctx ends it).
+	stream *http.Client
 
 	mu        sync.Mutex
 	connected bool
+	lastErr   error
 	// expect maps a steer's message id to its lux request id.
 	expect map[string]string
 	lastMs int64
@@ -51,8 +54,11 @@ func freeLoopbackPort() (int, error) {
 }
 
 func newOpencodeBus(port int, dir string) *opencodeBus {
+	// Straight to loopback: never through a proxy the Run's environment
+	// names (HTTP_PROXY).
+	direct := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext}
 	return &opencodeBus{port: port, dir: dir, expect: map[string]string{},
-		hc: &http.Client{Timeout: 30 * time.Second}}
+		hc: &http.Client{Timeout: 30 * time.Second, Transport: direct}, stream: &http.Client{Transport: direct}}
 }
 
 func (b *opencodeBus) url(path string) string {
@@ -63,6 +69,26 @@ func (b *opencodeBus) isConnected() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.connected
+}
+
+// waitConnected waits up to d for the event stream; OpenCode's server
+// comes up a little after its ACP answers.
+func (b *opencodeBus) waitConnected(d time.Duration) bool {
+	for end := time.Now().Add(d); ; time.Sleep(50 * time.Millisecond) {
+		if b.isConnected() {
+			return true
+		}
+		if time.Now().After(end) {
+			return false
+		}
+	}
+}
+
+// err is why the event stream is not connected, if it failed.
+func (b *opencodeBus) err() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastErr
 }
 
 // busEvent is what lux reads of a bus event.
@@ -87,9 +113,12 @@ type busEvent struct {
 func (b *opencodeBus) follow(ctx context.Context, on func(busEvent)) {
 	for ctx.Err() == nil {
 		if err := b.followOnce(ctx, on); err != nil && ctx.Err() == nil {
+			b.mu.Lock()
+			b.lastErr = err
+			b.mu.Unlock()
 			select {
 			case <-ctx.Done():
-			case <-time.After(300 * time.Millisecond):
+			case <-time.After(100 * time.Millisecond):
 			}
 		}
 	}
@@ -102,8 +131,7 @@ func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent)) error {
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("x-opencode-directory", b.dir)
-	// No timeout: the stream is long-lived; ctx ends it.
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := b.stream.Do(req)
 	if err != nil {
 		return err
 	}
