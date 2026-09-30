@@ -115,6 +115,8 @@ type fakeBus struct {
 	// drop ends the open event stream.
 	drop chan struct{}
 	gets int
+	// statusFail: GET /session/status answers 500.
+	statusFail bool
 }
 
 func newFakeBus(t *testing.T) *fakeBus {
@@ -170,8 +172,12 @@ func newFakeBus(t *testing.T) *fakeBus {
 	})
 	mux.HandleFunc("GET /session/status", func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
-		loop := b.loop
+		loop, fail := b.loop, b.statusFail
 		b.mu.Unlock()
+		if fail {
+			http.Error(w, "down", http.StatusInternalServerError)
+			return
+		}
 		if loop {
 			fmt.Fprintf(w, `{"%s":{"type":"busy"}}`, ocSession)
 			return
@@ -237,10 +243,19 @@ const ocIdle = `{"type":"session.idle","properties":{"sessionID":"` + ocSession 
 
 func ocWithBus(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
 	t.Helper()
+	return ocWithBusClock(t, nil)
+}
+
+// ocWithBusClock is ocWithBus with settle on clk (a wall clock if nil).
+func ocWithBusClock(t *testing.T, clk *testClock) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
+	t.Helper()
 	b := newFakeBus(t)
 	a := NewOpenCode()
 	a.bus = newOpencodeBus(b.port(), "/workspace")
 	a.settleEvery = 20 * time.Millisecond
+	if clk != nil {
+		a.clock, a.settleEvery = clk, time.Second
+	}
 	b.setLoop(true) // the first prompt's loop
 	w, sink, first := ocStarted(t, a)
 	for end := time.Now().Add(5 * time.Second); !a.bus.isConnected(); time.Sleep(5 * time.Millisecond) {
