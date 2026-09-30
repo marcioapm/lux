@@ -64,7 +64,10 @@ type ACP struct {
 	reserved int
 	// cancelGen counts the session/cancels sent.
 	cancelGen int
-	steers    chan proto.Input
+	// steers: inputs for the running turn, in the order they came, which
+	// steerLoop delivers; steerKick wakes it.
+	steers    []proto.Input
+	steerKick chan struct{}
 	// settleMu serializes settle. suspect: steers seen stored and
 	// unanswered with no loop running, by message id, and when first seen.
 	settleMu    sync.Mutex
@@ -83,10 +86,8 @@ func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
 
 // NewOpenCode is the ACP adapter for OpenCode.
 func NewOpenCode() *ACP {
-	a := &ACP{ready: make(chan struct{}), opencode: true, steers: make(chan proto.Input, 256),
+	return &ACP{ready: make(chan struct{}), opencode: true, steerKick: make(chan struct{}, 1),
 		suspect: map[string]time.Time{}, settleEvery: time.Second}
-	go a.steerLoop()
-	return a
 }
 
 // Command: for OpenCode, `opencode acp` also serves its HTTP API on a
@@ -122,6 +123,9 @@ func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Si
 		a.rpc.readLoop(p.Stdout, a.handleRequest, a.handleNotification, sink.Stdout)
 	}()
 
+	if a.opencode {
+		a.spawn(func() { a.steerLoop(ctx) })
+	}
 	if a.bus != nil {
 		a.bg.Add(1)
 		go func() {
@@ -321,6 +325,13 @@ func (a *ACP) exited(cancel context.CancelFunc) {
 	why := errors.New("the agent exited before it read it")
 	if stopped {
 		why = errors.New("the Run stopped before the agent read it")
+	}
+	a.mu.Lock()
+	undelivered := a.steers
+	a.steers = nil
+	a.mu.Unlock()
+	for _, in := range undelivered {
+		a.inputs.fail(a.sink, in, why)
 	}
 	a.inputs.close(a.sink, why)
 }
@@ -541,10 +552,24 @@ func (a *ACP) busTurnEnded() {
 	a.drain()
 }
 
-// steerLoop delivers steers one at a time, in the order they came.
-func (a *ACP) steerLoop() {
-	for in := range a.steers {
-		a.steer(in)
+// steerLoop delivers steers one at a time, in the order they came, until
+// the Run ends.
+func (a *ACP) steerLoop(ctx context.Context) {
+	for {
+		a.mu.Lock()
+		if len(a.steers) > 0 && ctx.Err() == nil {
+			in := a.steers[0]
+			a.steers = a.steers[1:]
+			a.mu.Unlock()
+			a.steer(in)
+			continue
+		}
+		a.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return
+		case <-a.steerKick:
+		}
 	}
 }
 
@@ -751,9 +776,13 @@ func (a *ACP) Deliver(in proto.Input) {
 		}
 		return
 	}
-	if a.opencode && a.busy && !a.busTurn && !a.stopped && !in.Interrupt && in.Text != "" {
+	if a.opencode && a.busy && !a.busTurn && !a.stopped && !a.closed && !in.Interrupt && in.Text != "" {
+		a.steers = append(a.steers, in)
 		a.mu.Unlock()
-		a.steers <- in
+		select {
+		case a.steerKick <- struct{}{}:
+		default:
+		}
 		return
 	}
 	a.queue = append(a.queue, in)
