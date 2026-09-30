@@ -119,19 +119,25 @@ func writeConfig(t *testing.T, mode os.FileMode, body string) string {
 	return path
 }
 
-func validConfig(dbURL string) string {
-	return fmt.Sprintf("listen = \"127.0.0.1:0\"\n[database]\nurl = %q\n[s3]\nbucket = \"lux-test\"\nendpoint = \"http://127.0.0.1:1\"\n", dbURL)
+// validConfig is a configuration serve accepts, with its S3 endpoint at
+// s3URL and no static keys.
+func validConfig(dbURL, s3URL string) string {
+	return fmt.Sprintf("listen = \"127.0.0.1:0\"\n[database]\nurl = %q\n[s3]\nbucket = \"lux-test\"\nendpoint = %q\n", dbURL, s3URL)
 }
+
+// staticKeys follows validConfig's [s3] table: with them the SDK needs no
+// credential source to sign a request.
+const staticKeys = "access_key = \"AKIATEST\"\nsecret_key = \"s3-secret-value\"\n"
 
 // badConfigs are configurations serve refuses before connecting, each
 // with the exact message luxd prints. validate and serve must agree on
 // every one of them.
-func badConfigs(dbURL string) []struct {
+func badConfigs(dbURL, s3URL string) []struct {
 	name, file string
 	env        []string
 	want       string
 } {
-	valid := validConfig(dbURL)
+	valid := validConfig(dbURL, s3URL)
 	previewEnv := []string{"LUX_PREVIEW_DOMAIN=lux.example.com", "LUX_PUBLIC_URL=https://lux.example.com"}
 	return []struct {
 		name, file string
@@ -196,7 +202,7 @@ func badConfigs(dbURL string) []struct {
 // An empty host, port 0 and a bracketed IPv6 host are valid listen addresses.
 func TestValidateAcceptsListenPorts(t *testing.T) {
 	pg := newFakePostgres(t)
-	path := writeConfig(t, 0o600, validConfig(pg.url()))
+	path := writeConfig(t, 0o600, validConfig(pg.url(), "http://127.0.0.1:1"))
 	for _, addr := range []string{":0", ":8080", "[::1]:8080"} {
 		env := []string{"LUX_LISTEN=" + addr}
 		preview := []string{"LUX_PREVIEW_DOMAIN=lux.example.com", "LUX_PUBLIC_URL=https://lux.example.com", "LUX_PREVIEW_LISTEN=" + addr}
@@ -230,7 +236,8 @@ func newCountingServer(t *testing.T) *countingServer {
 func TestValidateDoesNotAskIMDS(t *testing.T) {
 	pg := newFakePostgres(t)
 	imds := newCountingServer(t)
-	path := writeConfig(t, 0o600, validConfig(pg.url())+"access_key = \"AKIATEST\"\nsecret_key = \"test-secret\"\n")
+	s3 := newCountingServer(t)
+	path := writeConfig(t, 0o600, validConfig(pg.url(), s3.URL)+staticKeys)
 	env := []string{
 		"AWS_EC2_METADATA_DISABLED=false",
 		"AWS_EC2_METADATA_SERVICE_ENDPOINT=" + imds.URL,
@@ -243,6 +250,9 @@ func TestValidateDoesNotAskIMDS(t *testing.T) {
 	}
 	if n := imds.requests.Load(); n != 0 {
 		t.Fatalf("validate made %d requests to IMDS", n)
+	}
+	if n := s3.requests.Load(); n != 0 {
+		t.Fatalf("validate made %d requests to S3", n)
 	}
 
 	// The control: building the S3 client from the same plan and
@@ -270,7 +280,7 @@ func TestValidateDoesNotAskIMDS(t *testing.T) {
 // the SDK look it up with no deadline; validate must not wait on it.
 func TestValidateIgnoresContainerCredentials(t *testing.T) {
 	pg := newFakePostgres(t)
-	path := writeConfig(t, 0o600, validConfig(pg.url()))
+	path := writeConfig(t, 0o600, validConfig(pg.url(), "http://127.0.0.1:1"))
 	start := time.Now()
 	r := runLuxd(t, []string{"AWS_CONTAINER_CREDENTIALS_FULL_URI=http://unresolvable.invalid/creds"}, "--config", path, "validate")
 	if r.code != 0 || r.stdout != "ok: "+path+"\n" {
@@ -283,7 +293,17 @@ func TestValidateIgnoresContainerCredentials(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	pg := newFakePostgres(t)
-	valid := writeConfig(t, 0o600, validConfig(pg.url()))
+	s3 := newCountingServer(t)
+	// The control: a request to the fixture is counted.
+	resp, err := http.Get(s3.URL + "/lux-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if n := s3.requests.Load(); n != 1 {
+		t.Fatalf("the S3 fixture counted %d requests for 1", n)
+	}
+	valid := writeConfig(t, 0o600, validConfig(pg.url(), s3.URL)+staticKeys)
 
 	for _, cmd := range []string{"validate", "check-config"} {
 		t.Run(cmd, func(t *testing.T) {
@@ -297,13 +317,13 @@ func TestValidate(t *testing.T) {
 			}
 			// The environment alone, when no file exists at the default path.
 			if _, err := os.Stat(defaultConfigPath); errors.Is(err, os.ErrNotExist) {
-				r := runLuxd(t, []string{"LUX_DATABASE_URL=" + pg.url(), "LUX_S3_BUCKET=b"}, cmd)
+				r := runLuxd(t, []string{"LUX_DATABASE_URL=" + pg.url(), "LUX_S3_BUCKET=b", "LUX_S3_ENDPOINT=" + s3.URL}, cmd)
 				if r.code != 0 || r.stdout != "ok: no file\n" {
 					t.Fatalf("no file: %+v", r)
 				}
 			}
 
-			for _, bad := range badConfigs(pg.url()) {
+			for _, bad := range badConfigs(pg.url(), s3.URL) {
 				t.Run(bad.name, func(t *testing.T) {
 					path := writeConfig(t, 0o600, bad.file)
 					r := runLuxd(t, bad.env, "--config", path, cmd)
@@ -319,7 +339,7 @@ func TestValidate(t *testing.T) {
 			}
 
 			t.Run("world-readable", func(t *testing.T) {
-				path := writeConfig(t, 0o644, validConfig(pg.url())+"access_key = \"AKIA\"\nsecret_key = \"s3-secret-value\"\n")
+				path := writeConfig(t, 0o644, validConfig(pg.url(), s3.URL)+"access_key = \"AKIA\"\nsecret_key = \"s3-secret-value\"\n")
 				r := runLuxd(t, nil, "--config", path, cmd)
 				if r.code != 0 || r.stdout != "ok: "+path+"\n" || !strings.Contains(r.stderr, "warning: others can read "+path) {
 					t.Fatalf("got %+v", r)
@@ -340,6 +360,9 @@ func TestValidate(t *testing.T) {
 	if n := pg.connections(); n != 0 {
 		t.Fatalf("validate connected to the database %d times", n)
 	}
+	if n := s3.requests.Load() - 1; n != 0 {
+		t.Fatalf("validate made %d requests to S3", n)
+	}
 }
 
 // serve refuses exactly the configurations validate refuses, with the
@@ -347,7 +370,8 @@ func TestValidate(t *testing.T) {
 // gets as far as the database.
 func TestServeRefusesWhatValidateRefuses(t *testing.T) {
 	pg := newFakePostgres(t)
-	for _, bad := range badConfigs(pg.url()) {
+	s3 := newCountingServer(t)
+	for _, bad := range badConfigs(pg.url(), s3.URL) {
 		t.Run(bad.name, func(t *testing.T) {
 			path := writeConfig(t, 0o600, bad.file)
 			v := runLuxd(t, bad.env, "--config", path, "validate")
@@ -368,10 +392,13 @@ func TestServeRefusesWhatValidateRefuses(t *testing.T) {
 	if n := pg.connections(); n != 0 {
 		t.Fatalf("serve connected to the database %d times with a refused configuration", n)
 	}
+	if n := s3.requests.Load(); n != 0 {
+		t.Fatalf("serve made %d requests to S3 with a refused configuration", n)
+	}
 
 	// The control: the listener does see serve when the configuration passes.
 	pg = newFakePostgres(t)
-	path := writeConfig(t, 0o600, validConfig(pg.url()))
+	path := writeConfig(t, 0o600, validConfig(pg.url(), s3.URL)+staticKeys)
 	if r := runLuxd(t, nil, "--config", path, "validate"); r.code != 0 {
 		t.Fatalf("validate: %+v", r)
 	}
