@@ -2330,6 +2330,46 @@ type Pool struct {
 	Currency    string `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
 	// IsDefault: nil in a request leaves the mark as it is.
 	IsDefault *bool `json:"isDefault,omitempty" doc:"Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body without provider changes only the mark of an existing pool: besides name and isDefault its fields must be absent or zero (\"\", 0, false, null, {}); any other value needs provider."`
+	// HostSize, HostSizeFrom and InstanceType are read-only: a request's
+	// are ignored (poolReadOnly).
+	HostSize     *HostSize `json:"hostSize,omitempty" readOnly:"true" doc:"The capacity the pool's hosts register with, as the scheduler plans new hosts: the minimum of each resource over the latest 8 registrations (for an ec2 pool, of its current template), so a pool scaled to zero still has one. Runs ask in these terms: a Run's resources.memory is a share of hostSize.memory. Absent when no host ever registered in the pool."`
+	HostSizeFrom string    `json:"hostSizeFrom,omitempty" readOnly:"true" enum:"running,history" doc:"running: the pool has at least one ready or draining host now; history: hostSize comes only from hosts that have gone. Absent with hostSize."`
+	InstanceType string    `json:"instanceType,omitempty" readOnly:"true" doc:"The provider's instance type of the latest host hostSize is taken from; absent for static hosts and with hostSize." example:"c7a.8xlarge"`
+}
+
+// HostSize is a host's capacity as it registers: CPUs, and bytes of
+// memory and disk (disk 0: the host reserves none).
+type HostSize struct {
+	CPUs   float64 `json:"cpus" doc:"CPUs."`
+	Memory int64   `json:"memory" doc:"Bytes of memory: the machine's gross memory, in which Runs ask."`
+	Disk   int64   `json:"disk" doc:"Bytes of disk reserved for Runs; 0 when the host reserves none."`
+}
+
+// Pool.HostSizeFrom values.
+const (
+	HostSizeFromRunning = "running"
+	HostSizeFromHistory = "history"
+)
+
+// poolReadOnly are the Pool fields luxd reports and a request cannot set.
+var poolReadOnly = []string{"platform", "hostSize", "hostSizeFrom", "instanceType"}
+
+// withHostSizes sets each of pools' host size, from one query.
+func withHostSizes(ctx context.Context, tx pgx.Tx, pools []Pool) error {
+	ids := make([]string, len(pools))
+	for i, pl := range pools {
+		ids[i] = pl.ID
+	}
+	sizes, err := poolHostSizes(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
+	for i := range pools {
+		if s, ok := sizes[pools[i].ID]; ok {
+			pools[i].HostSize, pools[i].HostSizeFrom, pools[i].InstanceType = &s.Size, s.From, s.InstanceType
+		}
+	}
+	return nil
 }
 
 // poolInput is putPool's body: a Pool (its schema too, newAPI), decoded
@@ -2357,7 +2397,7 @@ func (pl *Pool) markerOnly() (bool, []string) {
 	v := reflect.ValueOf(*pl)
 	for i, f := range reflect.VisibleFields(v.Type()) {
 		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
-		if name == "name" || name == "isDefault" || name == "platform" {
+		if name == "name" || name == "isDefault" || slices.Contains(poolReadOnly, name) {
 			continue
 		}
 		fv := v.Field(i)
@@ -2408,7 +2448,10 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 			}
 			pools = append(pools, pl)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return withHostSizes(ctx, tx, pools)
 	})
 	if err != nil {
 		return nil, err
