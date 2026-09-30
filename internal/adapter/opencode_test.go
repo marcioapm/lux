@@ -502,3 +502,32 @@ func TestOpenCodeCommand(t *testing.T) {
 		t.Fatalf("generic acp %q", argv)
 	}
 }
+
+// A server that answers GET /event and closes the stream at once is not
+// asked again in a hot loop: every end of the stream is followed by a
+// backoff.
+func TestOpenCodeBusBacksOffAfterCleanEOF(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	b := newOpencodeBus(srv.Listener.Addr().(*net.TCPAddr).Port, "/")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); b.follow(ctx, func(busEvent) {}, nil) }()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	// 100 ms, then 200 ms, each at least half that: at most 4 requests.
+	if calls > 4 {
+		t.Fatalf("%d GET /event in 200 ms", calls)
+	}
+}

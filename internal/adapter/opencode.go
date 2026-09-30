@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -125,19 +126,46 @@ type busEvent struct {
 // not up yet or the stream drops, and hands each event to on. connected
 // runs each time the stream is (re)established, before its first event:
 // what happened while it was down is not replayed.
+//
+// Every end of the stream, clean or not, is followed by a wait: capped
+// exponential backoff with jitter, back to its start after a stream that
+// stayed up for healthyStream.
 func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected func()) {
+	wait := followMin
 	for ctx.Err() == nil {
-		if err := b.followOnce(ctx, on, connected); err != nil && ctx.Err() == nil {
-			b.mu.Lock()
-			b.lastErr = err
-			b.mu.Unlock()
-			select {
-			case <-ctx.Done():
-			case <-time.After(100 * time.Millisecond):
-			}
+		began := time.Now()
+		err := b.followOnce(ctx, on, connected)
+		if ctx.Err() != nil {
+			return
 		}
+		if err == nil {
+			err = errors.New("GET /event: the stream ended")
+		}
+		b.mu.Lock()
+		b.lastErr = err
+		b.mu.Unlock()
+		if time.Since(began) >= healthyStream {
+			wait = followMin
+		}
+		// Jitter: between half and all of wait.
+		d := wait/2 + time.Duration(mrand.Int64N(int64(wait/2)+1))
+		t := time.NewTimer(d)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		wait = min(wait*2, followMax)
 	}
 }
+
+// Reconnect backoff of the event stream.
+const (
+	followMin     = 100 * time.Millisecond
+	followMax     = 5 * time.Second
+	healthyStream = 10 * time.Second
+)
 
 func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connected func()) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.url("/event"), nil)
