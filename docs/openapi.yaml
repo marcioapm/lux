@@ -1425,6 +1425,9 @@ components:
           type: string
         stateReason:
           type: string
+        steer:
+          $ref: "#/components/schemas/Steer"
+          description: What the Run's adapter does with input sent while the agent works (POST /v1/runs/{id}/input).
         tenant:
           description: The owning tenant's name.
           type: string
@@ -2032,6 +2035,19 @@ components:
           examples:
             - ok
           type: string
+      type: object
+    Steer:
+      additionalProperties: false
+      properties:
+        lands:
+          description: "When the agent reads input sent while it works: next_step, at its next model step (possibly within the running turn); next_turn, only once the running turn ends."
+          enum:
+            - next_step
+            - next_turn
+          type: string
+        receipt:
+          description: "The adapter can report when the agent read an input (lux.input phase consumed). Each input's accepted record says whether it will: it will not for Codex below 0.155, Claude Code without msg_lifecycle_v1, or an opencode command lux did not build."
+          type: boolean
       type: object
     StreamData:
       additionalProperties: false
@@ -4549,7 +4565,7 @@ paths:
   /v1/runs/{id}/input:
     post:
       description: |-
-        Agents get text as a message (queued until the current turn ends if the agent cannot take it mid-turn); generic workloads get it on stdin. A stopped Run takes its input through resume instead.
+        Agents get text as a message, read at their next model step where the adapter can (the Run's steer says), else when the current turn ends; generic workloads get it on stdin. Its progress is lux.input records (phase accepted, then consumed where the adapter has a receipt, or failed) and input.delivered, input.consumed and input.failed events. A stopped Run takes its input through resume instead.
 
         Needs the `run` scope.
       operationId: postInput

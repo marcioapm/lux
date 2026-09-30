@@ -180,7 +180,7 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "postInput", Method: http.MethodPost, Path: "/v1/runs/{id}/input", Tags: []string{"interactive"},
 		Summary:       "Steer a running Run",
-		Description:   "Agents get text as a message (queued until the current turn ends if the agent cannot take it mid-turn); generic workloads get it on stdin. A stopped Run takes its input through resume instead.",
+		Description:   "Agents get text as a message, read at their next model step where the adapter can (the Run's steer says), else when the current turn ends; generic workloads get it on stdin. Its progress is lux.input records (phase accepted, then consumed where the adapter has a receipt, or failed) and input.delivered, input.consumed and input.failed events. A stopped Run takes its input through resume instead.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict},
 	}, "run", s.postInput)
@@ -420,6 +420,7 @@ type Run struct {
 	State       string            `json:"state"`
 	StateReason string            `json:"stateReason,omitempty"`
 	Activity    string            `json:"activity,omitempty"`
+	Steer       *spec.Steer       `json:"steer,omitempty" doc:"What the Run's adapter does with input sent while the agent works (POST /v1/runs/{id}/input)."`
 	ExitCode    *int              `json:"exitCode,omitempty"`
 	Epoch       int               `json:"epoch"`
 	SessionID   string            `json:"sessionId,omitempty"`
@@ -533,6 +534,10 @@ func scanRun(row pgx.Row) (*Run, error) {
 	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
 		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince)
+	if info, ok := spec.Adapters[r.Spec.Workload.Adapter]; ok && info.Steer.Lands != "" {
+		st := info.Steer
+		r.Steer = &st
+	}
 	return &r, err
 }
 
