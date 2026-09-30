@@ -249,6 +249,13 @@ func defaultConfig() config {
 // loadConfig reads path (or LUX_CONFIG, or defaultConfigPath if it exists)
 // over the defaults, then the environment over that, and checks the result.
 func loadConfig(path string) (config, error) {
+	c, _, err := loadConfigFile(path)
+	return c, err
+}
+
+// loadConfigFile is loadConfig that also says which file it read: empty
+// when none was (the default path absent, the environment alone).
+func loadConfigFile(path string) (config, string, error) {
 	c := defaultConfig()
 	named := path != ""
 	if !named {
@@ -257,22 +264,24 @@ func loadConfig(path string) (config, error) {
 	if !named {
 		path = defaultConfigPath
 	}
+	read := ""
 	b, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		read = path
 		warnReadable(path)
 		dec := toml.NewDecoder(bytes.NewReader(b))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&c); err != nil {
-			return c, fmt.Errorf("%s: %s", path, tomlError(err))
+			return c, read, fmt.Errorf("%s: %s", path, tomlError(err))
 		}
 	case named || !errors.Is(err, fs.ErrNotExist):
-		return c, err
+		return c, read, err
 	}
 	if err := applyEnv(reflect.ValueOf(&c).Elem()); err != nil {
-		return c, err
+		return c, read, err
 	}
-	return c, c.check()
+	return c, read, c.check()
 }
 
 // applyEnv sets every field whose env variable is set (and not empty).
