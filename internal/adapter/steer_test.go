@@ -280,9 +280,11 @@ func TestCodexOldVersionHasNoReceipt(t *testing.T) {
 	c.Deliver(proto.Input{RequestID: "steer-4B54AB", Text: "s"})
 	id, _ = w.next("turn/steer")
 	w.send(`{"id":` + id + `,"result":{"turnId":"` + cxTurn + `"}}`)
+	sink.wait(t, "accepted steer-4B54AB")
 	w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"01a0f28d-960d","clientId":"steer-4B54AB","content":[]},"threadId":"` + cxThread + `","turnId":"` + cxTurn + `"}}`)
 	w.send(cxCompleted("completed"))
 	sink.waitLast(t, "idle")
+	w.exit()
 	for _, l := range sink.lines() {
 		if strings.HasPrefix(l, "consumed") || strings.HasPrefix(l, "failed") || strings.Contains(l, "receipt=true") {
 			t.Fatalf("0.144: %q", sink.lines())
@@ -382,4 +384,68 @@ func TestCodexSteerFailsWhenRunStops(t *testing.T) {
 	w.send(`{"id":` + id + `,"result":{}}`)
 	w.send(cxCompleted("interrupted"))
 	sink.wait(t, "failed s1: the Run stopped before the agent read it")
+}
+
+// A late turn/steer result and turn/completed both find a steer its turn
+// left unread: it is carried once. Steers are carried in the order they
+// came, not the order Codex answered their turn/steer.
+func TestCodexCarriesEachSteerOnce(t *testing.T) {
+	c, w, sink := codexStarted(t, "lux/0.155.1")
+	accepted, done, release := make(chan string, 8), make(chan string, 8), make(chan struct{})
+	c.onSteer = func(stage, id string) {
+		if stage == "done" {
+			done <- id
+			return
+		}
+		accepted <- id
+		<-release
+	}
+	c.Deliver(proto.Input{RequestID: "s1", Text: "one"})
+	c.Deliver(proto.Input{RequestID: "s2", Text: "two"})
+	steers := map[string]string{}
+	for range 2 {
+		id, p := w.next("turn/steer")
+		steers[str(p, "clientUserMessageId")] = id
+	}
+	// Codex answers s2 first; each result is held after its acceptance.
+	for _, s := range []string{"s2", "s1"} {
+		w.send(`{"id":` + steers[s] + `,"result":{"turnId":"` + cxTurn + `"}}`)
+		if got := <-accepted; got != s {
+			t.Fatalf("accepted %s, want %s", got, s)
+		}
+	}
+	w.send(cxCompleted("interrupted"))
+	// Sent: the outbound messages from here on, by method and input.
+	sent := map[string]int{}
+	id, p := w.next("turn/start")
+	sent["turn/start "+str(p, "clientUserMessageId")]++
+	if str(p, "clientUserMessageId") != "s1" {
+		t.Fatalf("the next turn starts with %s, not s1, which came first", str(p, "clientUserMessageId"))
+	}
+	// Now both held results check whether their turn ended.
+	close(release)
+	<-done
+	<-done
+	const next = "01a0f2bb-dd3b-71c3-8d08-f3a1cb53a3e9"
+	w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + next + `","status":"inProgress"}}}`)
+	id, p = w.next("turn/steer")
+	sent["turn/steer "+str(p, "clientUserMessageId")]++
+	w.send(`{"id":` + id + `,"result":{"turnId":"` + next + `"}}`)
+	<-accepted
+	<-done
+	for _, s := range []string{"s1", "s2"} {
+		w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u-` + s + `","clientId":"` + s + `","content":[]},"threadId":"` + cxThread + `","turnId":"` + next + `"}}`)
+	}
+	w.send(`{"method":"turn/completed","params":{"threadId":"` + cxThread + `","turn":{"id":"` + next + `","status":"completed"}}}`)
+	sink.waitLast(t, "idle")
+	w.none()
+	w.exit()
+	if want := map[string]int{"turn/start s1": 1, "turn/steer s2": 1}; fmt.Sprint(sent) != fmt.Sprint(want) {
+		t.Fatalf("after the interrupt the adapter sent %v, want %v", sent, want)
+	}
+	for _, x := range sink.lines() {
+		if strings.HasPrefix(x, "failed") {
+			t.Fatalf("%q", sink.lines())
+		}
+	}
 }

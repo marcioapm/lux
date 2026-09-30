@@ -248,6 +248,8 @@ type inputState struct {
 	// tag is the adapter's own note on the input (the Codex turn it was
 	// steered into).
 	tag string
+	// seq: the order inputs were first tracked or accepted in, which is
+	// the order they came in when the adapter tracks them on arrival.
 	seq int
 }
 
@@ -270,7 +272,12 @@ func (l *inputLedger) track(in proto.Input) {
 		return
 	}
 	l.mu.Lock()
-	l.state(in.RequestID).in = in
+	st := l.state(in.RequestID)
+	st.in = in
+	if st.seq == 0 {
+		l.seq++
+		st.seq = l.seq
+	}
 	l.mu.Unlock()
 }
 
@@ -285,8 +292,10 @@ func (l *inputLedger) accept(sink Sink, in proto.Input, d Delivery, tag string) 
 	if st.done {
 		return
 	}
-	l.seq++
-	st.seq = l.seq
+	if st.seq == 0 {
+		l.seq++
+		st.seq = l.seq
+	}
 	if st.accepted {
 		// Sent again (carried into the next turn): only its turn changes.
 		st.tag = tag
@@ -342,6 +351,16 @@ func (l *inputLedger) fail(sink Sink, in proto.Input, err error) {
 	sink.InputFailed(in, err)
 }
 
+// order is the input's seq, 0 if unknown.
+func (l *inputLedger) order(id string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if st := l.m[id]; st != nil {
+		return st.seq
+	}
+	return 0
+}
+
 // forget drops an input the adapter will send again (as a new turn): its
 // phases start over.
 func (l *inputLedger) forget(id string) {
@@ -351,10 +370,26 @@ func (l *inputLedger) forget(id string) {
 }
 
 // unread returns the inputs accepted with a receipt, not yet read, whose
-// tag is tag, in the order they were accepted.
+// tag is tag, in the order they came (seq).
 func (l *inputLedger) unread(tag string) []proto.Input {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.unreadLocked(tag)
+}
+
+// claim is unread, retagging what it returns to to under the same lock:
+// of two callers claiming one tag, only one gets each input.
+func (l *inputLedger) claim(tag, to string) []proto.Input {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := l.unreadLocked(tag)
+	for _, in := range out {
+		l.m[in.RequestID].tag = to
+	}
+	return out
+}
+
+func (l *inputLedger) unreadLocked(tag string) []proto.Input {
 	var sts []*inputState
 	for _, st := range l.m {
 		if st.accepted && st.receipt && !st.done && st.tag == tag {

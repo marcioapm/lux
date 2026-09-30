@@ -40,6 +40,13 @@ type Codex struct {
 	// reads it (0.155 on); older ones emit it on admission.
 	receipt bool
 	inputs  inputLedger
+	// carried: steers an ended turn left unread, in the order they came;
+	// they start the next turn, ahead of queue.
+	carried []proto.Input
+	// onSteer, if set, runs in a turn/steer's goroutine at "accepted"
+	// (before lux checks whether its turn has ended) and "done" (a test
+	// seam for interleavings).
+	onSteer func(stage, requestID string)
 }
 
 func NewCodex() *Codex { return &Codex{} }
@@ -218,10 +225,12 @@ func userInput(params map[string]any, in proto.Input) map[string]any {
 
 func (c *Codex) drain() {
 	c.mu.Lock()
-	if !c.ready || c.stopped || c.turn != "" || len(c.queue) == 0 {
+	if !c.ready || c.stopped || c.turn != "" || len(c.carried)+len(c.queue) == 0 {
 		c.mu.Unlock()
 		return
 	}
+	c.queue = append(c.carried, c.queue...)
+	c.carried = nil
 	in := c.queue[0]
 	c.queue = c.queue[1:]
 	// Input queued behind it (steers carried over from an interrupted
@@ -334,7 +343,7 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 			usage = nil
 		}
 		c.usage, c.usageTurn = nil, ""
-		idle := len(c.queue) == 0
+		idle := len(c.queue)+len(c.carried) == 0
 		c.mu.Unlock()
 		// The turn's end, with the agent's usage as it reported it (the
 		// counterpart of acp.turn_end and claude.turn_end).
@@ -420,8 +429,9 @@ func (c *Codex) Deliver(in proto.Input) {
 		c.mu.Unlock()
 		return
 	}
+	// Tracked on arrival: carried inputs keep the order they came in.
+	c.inputs.track(in)
 	go func() {
-		c.inputs.track(in)
 		res, err := c.call("turn/steer", userInput(map[string]any{"threadId": thread, "expectedTurnId": turn}, in))
 		if err != nil {
 			if !codexTurnGone(err) {
@@ -442,6 +452,10 @@ func (c *Codex) Deliver(in proto.Input) {
 			r.TurnID = turn
 		}
 		c.inputs.accept(c.sink, in, c.delivery(), r.TurnID)
+		if c.onSteer != nil {
+			c.onSteer("accepted", in.RequestID)
+			defer c.onSteer("done", in.RequestID)
+		}
 		// A turn that ended between the steer's result and here leaves it
 		// unread; turn/completed may already have run its check.
 		c.mu.Lock()
@@ -467,20 +481,28 @@ func codexTurnGone(err error) bool {
 // carryUnread handles the inputs steered into a turn that ended without
 // the model reading them (Codex drops a turn's pending steers when it is
 // interrupted): they start the next turn, in the order they came, under
-// the same request ids, unless the Run is stopping, where they fail. It
-// reports whether any were carried.
+// the same request ids, unless the Run is stopping, where they fail. Each
+// is claimed from the ended turn atomically, so the turn/completed handler
+// and a late turn/steer result cannot both carry it. It reports whether
+// any were carried.
 func (c *Codex) carryUnread(turn string) bool {
 	if turn == "" {
 		return false
 	}
-	unread := c.inputs.unread(turn)
+	unread := c.inputs.claim(turn, "carried")
 	if len(unread) == 0 {
 		return false
 	}
 	c.mu.Lock()
 	stopped := c.stopped
+	var now []proto.Input
 	if !stopped {
-		c.queue = append(unread, c.queue...)
+		c.carried = append(c.carried, unread...)
+		slices.SortStableFunc(c.carried, func(a, b proto.Input) int { return c.inputs.order(a.RequestID) - c.inputs.order(b.RequestID) })
+		if c.turn != "" {
+			// The next turn has started already: steered into it.
+			now, c.carried = c.carried, nil
+		}
 	}
 	c.mu.Unlock()
 	if stopped {
@@ -488,6 +510,9 @@ func (c *Codex) carryUnread(turn string) bool {
 			c.inputs.fail(c.sink, in, errors.New("the Run stopped before the agent read it"))
 		}
 		return false
+	}
+	for _, in := range now {
+		c.Deliver(in)
 	}
 	return true
 }
