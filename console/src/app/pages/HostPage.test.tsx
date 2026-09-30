@@ -10,6 +10,7 @@ let ScopeProvider: typeof import("../scope.tsx").ScopeProvider;
 let ToastProvider: typeof import("@lux/design-system").ToastProvider;
 let formatTimestamp: typeof import("@lux/design-system").formatTimestamp;
 let fakeApi: typeof import("../testing.ts").fakeApi;
+let hostStages: typeof import("./hostStages.ts").hostStages;
 let api: typeof import("../../api/index.ts");
 beforeAll(async () => {
   GlobalRegistrator.register();
@@ -17,6 +18,7 @@ beforeAll(async () => {
   ({ ScopeProvider } = await import("../scope.tsx"));
   ({ ToastProvider, formatTimestamp } = await import("@lux/design-system"));
   ({ fakeApi } = await import("../testing.ts"));
+  ({ hostStages } = await import("./hostStages.ts"));
   api = await import("../../api/index.ts");
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -126,4 +128,19 @@ test("a host whose launch failed pages its events the same way", async () => {
   await pagesThroughEvents(
     host({ state: "terminated", launch: { outcome: "failed", requestedAt: iso(0), finishedAt: iso(5), error: "InsufficientInstanceCapacity" }, times: { provisionRequested: iso(0) } as Host["times"] }),
   );
+});
+
+test("an ended host's last stage is a point where it ended; a live host's is in progress", () => {
+  const ended = hostStages(host({ state: "terminated", times: { registered: iso(10), terminateRequested: iso(100), terminated: iso(130) } as Host["times"] }));
+  expect(ended.map((s) => [s.key, s.start, s.end ?? null, !!s.point])).toEqual([
+    ["created", T0, T0 + 10_000, false],
+    ["registered", T0 + 10_000, T0 + 100_000, false],
+    ["terminateRequested", T0 + 100_000, T0 + 130_000, false],
+    ["terminated", T0 + 130_000, null, true],
+  ]);
+  const lost = hostStages(host({ state: "lost", times: { registered: iso(10), lost: iso(40) } as Host["times"] }));
+  expect(lost.at(-1)).toMatchObject({ key: "lost", start: T0 + 40_000, point: true });
+  const live = hostStages(host({ times: { registered: iso(10) } as Host["times"] }));
+  expect(live.at(-1)).toMatchObject({ key: "registered", start: T0 + 10_000, end: null });
+  expect(live.some((s) => s.point)).toBe(false);
 });
