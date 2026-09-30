@@ -48,11 +48,12 @@ func fetchPage(t *testing.T, s *Server, key, path, field string) page {
 }
 
 // walkPages reads a list's pages in order through next, from base (whose
-// query names the sort, dir and limit), calling between(i) after page i so
-// a test can change the data mid-walk. It checks, for every page, that its
-// prev leads back to the page before and at re-reads it unchanged, and
-// returns every id in page order.
-func walkPages(t *testing.T, s *Server, key, base, field string, between func(i int)) []string {
+// query names the sort, dir and limit), calling between(i, p) after page i
+// so a test can change the data mid-walk. It checks, for every page, that
+// at re-reads it unchanged after between ran (changes a test makes must be
+// ahead of or behind the page), and that prev leads back through the same
+// pages. Returns every id in page order.
+func walkPages(t *testing.T, s *Server, key, base, field string, between func(i int, p page)) []string {
 	t.Helper()
 	sep := "&"
 	var all []string
@@ -67,11 +68,13 @@ func walkPages(t *testing.T, s *Server, key, base, field string, between func(i 
 		if i == 0 && p.Prev != "" {
 			t.Fatalf("%s: the first page has a prev", base)
 		}
-		if again := fetchPage(t, s, key, base+sep+"at="+url.QueryEscape(p.Self), field); p.Self != "" && !slices.Equal(again.IDs, p.IDs) && between == nil {
-			t.Fatalf("%s: page %d read again at its cursor: %v, was %v", base, i, again.IDs, p.IDs)
-		}
 		if between != nil {
-			between(i)
+			between(i, p)
+		}
+		if p.Self != "" {
+			if again := fetchPage(t, s, key, base+sep+"at="+url.QueryEscape(p.Self), field); !slices.Equal(again.IDs, p.IDs) {
+				t.Fatalf("%s: page %d read again at its cursor: %v, was %v", base, i, again.IDs, p.IDs)
+			}
 		}
 		if p.Next == "" {
 			break
@@ -81,14 +84,12 @@ func walkPages(t *testing.T, s *Server, key, base, field string, between func(i 
 		}
 		p = fetchPage(t, s, key, base+sep+"next="+url.QueryEscape(p.Next), field)
 	}
-	// Back through prev, without changes: the same pages, in reverse.
-	if between == nil {
-		q := pages[len(pages)-1]
-		for i := len(pages) - 2; i >= 0; i-- {
-			q = fetchPage(t, s, key, base+sep+"prev="+url.QueryEscape(q.Prev), field)
-			if !slices.Equal(q.IDs, pages[i].IDs) {
-				t.Fatalf("%s: prev of page %d: %v, want %v", base, i+1, q.IDs, pages[i].IDs)
-			}
+	// Back through prev: the same pages, in reverse.
+	q := pages[len(pages)-1]
+	for i := len(pages) - 2; i >= 0; i-- {
+		q = fetchPage(t, s, key, base+sep+"prev="+url.QueryEscape(q.Prev), field)
+		if !slices.Equal(q.IDs, pages[i].IDs) {
+			t.Fatalf("%s: prev of page %d: %v, want %v", base, i+1, q.IDs, pages[i].IDs)
 		}
 	}
 	return all
@@ -281,7 +282,7 @@ func TestHostsPagedStableUnderChanges(t *testing.T) {
 	ctx := context.Background()
 	key := operatorKey(t, s, ctx)
 	hosts := hostsFixture(t, s, ctx)
-	got := walkPages(t, s, key, "/v1/hosts?all=true&limit=6&sort=created", "hosts", func(i int) {
+	got := walkPages(t, s, key, "/v1/hosts?all=true&limit=6&sort=created", "hosts", func(i int, _ page) {
 		execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, created_at) VALUES ($1, $1, 'pool1', 'ready', now())`, fmt.Sprintf("new%02d", i))
 		execSQL(t, s, ctx, `UPDATE hosts SET state = 'terminated', terminated_at = now() WHERE id = (
 			SELECT id FROM hosts WHERE state = 'ready' AND id LIKE 'h%' ORDER BY id LIMIT 1)`)
@@ -361,12 +362,232 @@ func TestRunsPagedSortEveryFamily(t *testing.T) {
 		}
 	}
 	// Created, newest first, while Runs arrive and change state: each once.
-	got := walkPages(t, s, key, "/v1/runs?limit=4&sort=created", "runs", func(i int) {
+	got := walkPages(t, s, key, "/v1/runs?limit=4&sort=created", "runs", func(i int, _ page) {
 		execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ($1, 't1', '{}', 'submitted')`, fmt.Sprintf("new%02d", i))
 		execSQL(t, s, ctx, `UPDATE runs SET state = 'failed' WHERE id = (SELECT id FROM runs WHERE state = 'succeeded' ORDER BY id LIMIT 1)`)
 	})
 	if len(got) != len(ids) || len(slices.Compact(slices.Sorted(slices.Values(got)))) != len(ids) {
 		t.Fatalf("walked %v, want each of %d once", got, len(ids))
+	}
+}
+
+// fixtureRun is one Run of TestRunsPagedSortEveryKey, with its expected
+// sort values; the clock-dependent ones as a function of the page clock.
+type fixtureRun struct {
+	id, tenant, name, state, pool, adapter, host string
+	epoch                                        int64
+	cost                                         *string
+	runtime, placement                           func(clock time.Time) *float64
+	placing                                      bool
+}
+
+// GET /v1/runs pages in every sort key's order, both ways, with running
+// and still-starting placements whose values grow with the clock. The
+// clock-dependent walks wait between pages, so a key read at the server's
+// now() instead of the cursor's clock would reorder the list mid-walk.
+func TestRunsPagedSortEveryKey(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	key := operatorKey(t, s, ctx)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 'alpha'), ('t2', 'beta')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('p1', 'burst', 'ec2'), ('p2', 'alpine', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('ha', 'h-a', 'ready'), ('hb', 'h-b', 'ready'), ('hc', 'h-c', 'ready')`)
+	T := time.Now().UTC().Truncate(time.Microsecond)
+	at := func(sec float64) time.Time { return T.Add(time.Duration(sec * float64(time.Second))) }
+	fixed := func(v float64) func(time.Time) *float64 { return func(time.Time) *float64 { return &v } }
+	// Values that grow with the clock count from L, which reanchor moves
+	// to just before each clock-dependent walk.
+	L := T
+	since := func(base, from float64) func(time.Time) *float64 {
+		return func(c time.Time) *float64 {
+			v := base + c.Sub(L.Add(time.Duration(from*float64(time.Second)))).Seconds()
+			return &v
+		}
+	}
+	none := func(time.Time) *float64 { return nil }
+	str := func(s string) *string { return &s }
+	type pl struct {
+		host, state                      string
+		created                          float64
+		needed, workload, started, ended *float64
+	}
+	f := func(v float64) *float64 { return &v }
+	runs := []struct {
+		fixtureRun
+		created   float64
+		needsHost *float64
+		poolID    string
+		pls       []pl
+		costs     [][2]string
+	}{
+		{fixtureRun{id: "ra", tenant: "t1", name: "zeta", state: "succeeded", pool: "burst", adapter: "generic", host: "h-b", epoch: 1,
+			cost: str("3"), runtime: fixed(100), placement: fixed(15)}, -1010, nil, "p1",
+			[]pl{{"hb", "exited", -1000, f(-1010), f(-995), f(-995), f(-895)}}, [][2]string{{"3", "USD"}}},
+		// Running: its runtime passes ra's a second into the walk.
+		{fixtureRun{id: "rb", tenant: "t2", state: "running", pool: "burst", adapter: "acp", host: "h-a", epoch: 1,
+			cost: str("1"), runtime: since(0, -99.5), placement: fixed(10)}, -130, nil, "p1",
+			[]pl{{"ha", "running", -120, f(-120), f(-110), f(-99.5), nil}}, [][2]string{{"1", "EUR"}, {"50", "USD"}}},
+		// Queued, never ran: waiting since 5s ago.
+		{fixtureRun{id: "rc", tenant: "t1", state: "submitted", runtime: none, placement: since(0, -5), placing: true}, -5, f(-5), "", nil, nil},
+		// Still starting: its start passes rj's 30s a second into the walk.
+		{fixtureRun{id: "rd", tenant: "t2", name: "mid", state: "starting", pool: "alpine", adapter: "generic", host: "h-a", epoch: 1,
+			runtime: none, placement: since(0, -29.5), placing: true}, -40, nil, "p2",
+			[]pl{{"ha", "starting", -29.5, f(-29.5), nil, nil, nil}}, nil},
+		// No needed_since: the Run's creation, then the previous end. The
+		// first ended without starting (start to its end); the second
+		// never reported its workload's start (start to started_at).
+		{fixtureRun{id: "re", tenant: "t1", state: "failed", pool: "burst", adapter: "codex", host: "h-c", epoch: 2,
+			cost: str("3"), runtime: fixed(90), placement: fixed(100 + 30 + 70 + 10)}, -600, nil, "p1",
+			[]pl{{"hb", "exited", -500, nil, nil, nil, f(-470)}, {"hc", "exited", -400, nil, nil, f(-390), f(-300)}},
+			[][2]string{{"1", "USD"}, {"2", "USD"}}},
+		// Its runner's clock is ahead: started_at in the future counts 0.
+		{fixtureRun{id: "rf", tenant: "t2", state: "running", pool: "alpine", adapter: "generic", host: "h-c", epoch: 1,
+			runtime: fixed(0), placement: fixed(10)}, -60, nil, "p2",
+			[]pl{{"hc", "running", -60, f(-60), f(-50), f(60), nil}}, nil},
+		{fixtureRun{id: "rg", tenant: "t1", state: "cancelled", adapter: "generic", cost: str("2"), runtime: none, placement: fixed(0)}, -50, nil, "",
+			nil, [][2]string{{"2", "EUR"}}},
+		{fixtureRun{id: "rh", tenant: "t1", name: "aardvark", state: "lost", pool: "burst", host: "h-a", epoch: 1,
+			cost: str("0.75"), runtime: fixed(90), placement: fixed(10)}, -300, nil, "p1",
+			[]pl{{"ha", "lost", -300, f(-300), f(-290), f(-290), f(-200)}}, [][2]string{{"0.5", "USD"}, {"0.25", "USD"}}},
+		// Queued again after a placement: its wait counts since needs_host_since.
+		{fixtureRun{id: "ri", tenant: "t2", state: "provisioning", pool: "alpine", adapter: "acp", host: "h-b", epoch: 1,
+			runtime: fixed(90), placement: since(10, -25), placing: true}, -800, f(-25), "p2",
+			[]pl{{"hb", "exited", -800, f(-800), f(-790), f(-790), f(-700)}}, nil},
+		{fixtureRun{id: "rj", tenant: "t2", state: "succeeded", pool: "burst", adapter: "generic", host: "h-c", epoch: 1,
+			runtime: fixed(70), placement: fixed(30)}, -900, nil, "p1",
+			[]pl{{"hc", "exited", -900, f(-900), f(-870), f(-870), f(-800)}}, nil},
+		// needed_since after its assignment (clock skew): waited 0, not -10.
+		{fixtureRun{id: "rk", tenant: "t1", state: "stopped", adapter: "acp", host: "h-a", epoch: 1,
+			cost: str("9"), runtime: fixed(85), placement: fixed(15)}, -700, nil, "",
+			[]pl{{"ha", "exited", -700, f(-690), f(-685), f(-685), f(-600)}}, [][2]string{{"10", "USD"}, {"-1", "USD"}}},
+		// Running, its runner never reported the workload's start: placed
+		// once luxd saw it running, not still placing.
+		{fixtureRun{id: "rl", tenant: "t2", state: "running", pool: "alpine", adapter: "generic", host: "h-b", epoch: 1,
+			runtime: since(0, -3600), placement: fixed(60)}, -3700, nil, "p2",
+			[]pl{{"hb", "running", -3660, f(-3660), nil, f(-3600), nil}}, nil},
+	}
+	opt := func(v *float64) any {
+		if v == nil {
+			return nil
+		}
+		return at(*v)
+	}
+	for _, r := range runs {
+		spec := `{}`
+		if r.adapter != "" {
+			spec = `{"workload":{"adapter":"` + r.adapter + `"}}`
+		}
+		execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, created_at, current_epoch, name, pool_id, needs_host_since)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, nullif($8, ''), $9)`, r.id, r.tenant, spec, r.state, at(r.created), r.epoch, r.name, r.poolID, opt(r.needsHost))
+		for i, p := range r.pls {
+			execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, created_at, needed_since, workload_started_at, started_at, ended_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, fmt.Sprintf("%s-%d", r.id, i+1), r.tenant, r.id, p.host, i+1, p.state,
+				at(p.created), opt(p.needed), opt(p.workload), opt(p.started), opt(p.ended))
+		}
+		for _, c := range r.costs {
+			execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, family, item, amount, currency, period_from, period_to, final)
+				VALUES ($1, $2, 'compute', 'compute', $3, $4, $5, $6, $6, true)`, r.tenant, r.id, c[0]+c[1], c[0], c[1], T)
+		}
+	}
+	byID := map[string]fixtureRun{}
+	var ids []string
+	for _, r := range runs {
+		byID[r.id] = r.fixtureRun
+		ids = append(ids, r.id)
+	}
+	slices.Sort(ids)
+
+	// Each Run's own values, as the list shows them.
+	var list struct {
+		Runs []*Run `json:"runs"`
+	}
+	getJSON(t, s, key, "/v1/runs?limit=100", &list)
+	for _, r := range list.Runs {
+		want := byID[r.ID]
+		if r.Placing != want.placing {
+			t.Errorf("%s: placing %v, want %v", r.ID, r.Placing, want.placing)
+		}
+		if v := want.placement(time.Now()); v != nil && !want.placing && r.PlacementSeconds != *v {
+			t.Errorf("%s: placementSeconds %v, want %v", r.ID, r.PlacementSeconds, *v)
+		}
+		if v := want.runtime(time.Now()); r.RuntimeSeconds < 0 || v != nil && *v == 0 && r.RuntimeSeconds != 0 {
+			t.Errorf("%s: runtimeSeconds %v", r.ID, r.RuntimeSeconds)
+		}
+	}
+
+	text := func(get func(r fixtureRun) string) func(string) *string {
+		return func(id string) *string {
+			if v := get(byID[id]); v != "" {
+				return &v
+			}
+			return nil
+		}
+	}
+	num := func(v float64) *float64 { return &v }
+	stateOrder := []string{"submitted", "scheduled", "provisioning", "starting", "running", "stopping", "stopped", "resuming", "succeeded", "failed", "cancelled", "lost"}
+	tenants := map[string]string{"t1": "alpha", "t2": "beta"}
+	for _, dir := range []string{"asc", "desc"} {
+		for k, v := range map[string]func(string) *string{
+			"id":      func(id string) *string { return &id },
+			"name":    func(id string) *string { n := cmp.Or(byID[id].name, id); return &n },
+			"tenant":  text(func(r fixtureRun) string { return tenants[r.tenant] }),
+			"host":    text(func(r fixtureRun) string { return r.host }),
+			"pool":    text(func(r fixtureRun) string { return r.pool }),
+			"adapter": text(func(r fixtureRun) string { return r.adapter }),
+		} {
+			got := walkPages(t, s, key, "/v1/runs?limit=3&sort="+k+"&dir="+dir, "runs", nil)
+			if want := sorted(ids, v, dir); !slices.Equal(got, want) {
+				t.Errorf("sort=%s dir=%s:\n got %v\nwant %v", k, dir, got, want)
+			}
+		}
+		for k, v := range map[string]func(string) *float64{
+			"state":      func(id string) *float64 { return num(float64(slices.Index(stateOrder, byID[id].state))) },
+			"placements": func(id string) *float64 { return num(float64(byID[id].epoch)) },
+			"cost": func(id string) *float64 {
+				if c := byID[id].cost; c != nil {
+					n, _ := strconv.ParseFloat(*c, 64)
+					return &n
+				}
+				return nil
+			},
+		} {
+			got := walkPages(t, s, key, "/v1/runs?limit=3&sort="+k+"&dir="+dir, "runs", nil)
+			if want := sorted(ids, v, dir); !slices.Equal(got, want) {
+				t.Errorf("sort=%s dir=%s:\n got %v\nwant %v", k, dir, got, want)
+			}
+		}
+		for _, k := range []string{"runtime", "placement"} {
+			// rb's runtime and rd's start cross ra's and rj's half a second
+			// after the first page.
+			L = time.Now().UTC().Truncate(time.Microsecond)
+			l := func(sec float64) time.Time { return L.Add(time.Duration(sec * float64(time.Second))) }
+			execSQL(t, s, ctx, `UPDATE placements SET started_at = $1 WHERE id = 'rb-1'`, l(-99.5))
+			execSQL(t, s, ctx, `UPDATE placements SET created_at = $1, needed_since = $1 WHERE id = 'rd-1'`, l(-29.5))
+			execSQL(t, s, ctx, `UPDATE placements SET started_at = $1 WHERE id = 'rl-1'`, l(-3600))
+			execSQL(t, s, ctx, `UPDATE runs SET needs_host_since = $1 WHERE id = 'rc'`, l(-5))
+			execSQL(t, s, ctx, `UPDATE runs SET needs_host_since = $1 WHERE id = 'ri'`, l(-25))
+			base := "/v1/runs?limit=1&sort=" + k + "&dir=" + dir
+			first := fetchPage(t, s, key, base, "runs")
+			c, err := decodeCursor(first.Self)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock, _ := time.Parse(time.RFC3339Nano, c.At)
+			got := walkPages(t, s, key, base, "runs", func(i int, _ page) {
+				if i == 0 {
+					time.Sleep(1200 * time.Millisecond)
+				}
+			})
+			want := sorted(ids, func(id string) *float64 {
+				if k == "runtime" {
+					return byID[id].runtime(clock)
+				}
+				return byID[id].placement(clock)
+			}, dir)
+			if !slices.Equal(got, want) {
+				t.Errorf("sort=%s dir=%s:\n got %v\nwant %v", k, dir, got, want)
+			}
+		}
 	}
 }
 

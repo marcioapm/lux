@@ -532,15 +532,27 @@ var runsFrom = runsFromAt("now()")
 // times count to) at now: a paged list sorts by the clock its first page
 // was read at.
 func runsFromAt(now string) string {
-	return `runs r JOIN tenants rt ON rt.id = r.tenant_id
-	LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
-	LEFT JOIN hosts rh ON rh.id = rp.host_id
-	LEFT JOIN pools rpool ON rpool.id = r.pool_id
-	CROSS JOIN LATERAL (SELECT
-			coalesce(sum(extract(epoch FROM coalesce(p.ended_at, CASE WHEN p.state IN ` + livePlacementStates + ` THEN ` + now + ` ELSE p.started_at END) - p.started_at)), 0)::float8 AS seconds,
+	return `runs r ` + runTenantJoin + runHostJoin + runPoolJoin + runRuntimeJoin(now) + runPlacementJoin(now)
+}
+
+// The joins of runsFrom, one per alias, so a paged list's keys read only
+// what their sort value needs (runSortKeys' from).
+const (
+	runTenantJoin = ` JOIN tenants rt ON rt.id = r.tenant_id`
+	runHostJoin   = ` LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
+	LEFT JOIN hosts rh ON rh.id = rp.host_id`
+	runPoolJoin = ` LEFT JOIN pools rpool ON rpool.id = r.pool_id`
+)
+
+func runRuntimeJoin(now string) string {
+	return ` CROSS JOIN LATERAL (SELECT
+			coalesce(sum(greatest(0, extract(epoch FROM coalesce(p.ended_at, CASE WHEN p.state IN ` + livePlacementStates + ` THEN ` + now + ` ELSE p.started_at END) - p.started_at))), 0)::float8 AS seconds,
 			max(p.started_at) FILTER (WHERE p.ended_at IS NULL AND p.state IN ` + livePlacementStates + `) AS since
-		FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) rr
-	CROSS JOIN LATERAL (` + placementTimeSQL(now) + `) rpt`
+		FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) rr`
+}
+
+func runPlacementJoin(now string) string {
+	return ` CROSS JOIN LATERAL (` + placementTimeSQL(now) + `) rpt`
 }
 
 // placementTimeSQL is a lateral over the Run r's placements (one scan of
@@ -548,17 +560,18 @@ func runsFromAt(now string) string {
 // needed_since, else the previous placement's end, else the Run's
 // creation, until assigned) plus, while the Run is queued now, the wait
 // since it last needed one; start, the seconds from assignment until its
-// workload started (or it ended without starting; one still starting
-// counts to now); placing, whether either is still counting. now is the
+// workload started, else until luxd saw it running (started_at: runners
+// that never report the workload's start), else until it ended; one still
+// starting counts to now. placing: either is still counting. now is the
 // clock (a cursor's, when a page sorts by it).
 func placementTimeSQL(now string) string {
 	return `SELECT
 			coalesce(sum(greatest(0, extract(epoch FROM x.created_at - x.req))), 0)::float8
 				+ CASE WHEN r.state IN ` + queuedRunStates + ` THEN greatest(0, extract(epoch FROM ` + now + ` - coalesce(r.needs_host_since, max(x.ended_at), r.created_at)))::float8 ELSE 0 END AS wait,
-			coalesce(sum(greatest(0, extract(epoch FROM coalesce(x.workload_started_at, x.ended_at,
+			coalesce(sum(greatest(0, extract(epoch FROM coalesce(x.workload_started_at, x.started_at, x.ended_at,
 				CASE WHEN x.state IN ` + livePlacementStates + ` THEN ` + now + ` ELSE x.created_at END) - x.created_at))), 0)::float8 AS start,
-			r.state IN ` + queuedRunStates + ` OR coalesce(bool_or(x.workload_started_at IS NULL AND x.ended_at IS NULL AND x.state IN ` + livePlacementStates + `), false) AS placing
-		FROM (SELECT p.created_at, p.ended_at, p.workload_started_at, p.state,
+			r.state IN ` + queuedRunStates + ` OR coalesce(bool_or(x.workload_started_at IS NULL AND x.started_at IS NULL AND x.ended_at IS NULL AND x.state IN ` + livePlacementStates + `), false) AS placing
+		FROM (SELECT p.created_at, p.ended_at, p.workload_started_at, p.started_at, p.state,
 				coalesce(p.needed_since, lag(p.ended_at) OVER (ORDER BY p.epoch), r.created_at) AS req
 			FROM placements p WHERE p.run_id = r.id) x`
 }
@@ -762,22 +775,24 @@ type listRunsBody struct {
 	Page string `json:"page,omitempty" doc:"Paged lists: this page's own cursor (?at=), to read it again in place."`
 }
 
-// runSortKeys: GET /v1/runs' sort keys, over runsFromAt. cost is the total
-// in the first of its currencies (as totals list them), a Run with no cost
-// reported yet last; runtime is missing for a Run that never ran.
+// runSortKeys: GET /v1/runs' sort keys. cost is the total in the first of
+// its currencies (as totals list them), a Run with no cost reported yet
+// last, read once per Run by one grouped read of cost_lines; runtime is
+// missing for a Run that never ran.
 var runSortKeys = map[string]sortKey{
-	"created":    {expr: `r.created_at`, cast: "timestamptz", first: "desc", notNull: true, runOnly: true},
-	"id":         {expr: `r.id`, cast: "text", first: "asc", notNull: true, runOnly: true},
-	"name":       {expr: `coalesce(nullif(r.name, ''), r.id)`, cast: "text", first: "asc", notNull: true, runOnly: true},
-	"tenant":     {expr: `rt.name`, cast: "text", first: "asc", notNull: true},
+	"created":    {expr: `r.created_at`, cast: "timestamptz", first: "desc", notNull: true},
+	"id":         {expr: `r.id`, cast: "text", first: "asc", notNull: true},
+	"name":       {expr: `coalesce(nullif(r.name, ''), r.id)`, cast: "text", first: "asc", notNull: true},
+	"tenant":     {expr: `rt.name`, cast: "text", first: "asc", notNull: true, from: runTenantJoin},
 	"state":      {expr: `array_position(ARRAY['submitted', 'scheduled', 'provisioning', 'starting', 'running', 'stopping', 'stopped', 'resuming', 'succeeded', 'failed', 'cancelled', 'lost'], r.state)`, cast: "bigint", first: "asc"},
-	"host":       {expr: `rh.name`, cast: "text", first: "asc"},
-	"pool":       {expr: `rpool.name`, cast: "text", first: "asc"},
-	"adapter":    {expr: `r.spec->'workload'->>'adapter'`, cast: "text", first: "asc", runOnly: true},
-	"runtime":    {expr: `CASE WHEN rr.seconds > 0 OR rr.since IS NOT NULL THEN rr.seconds END`, cast: "float8", first: "desc"},
-	"placements": {expr: `r.current_epoch`, cast: "bigint", first: "desc", notNull: true, runOnly: true},
-	"placement":  {expr: `rpt.wait + rpt.start`, cast: "float8", first: "desc", notNull: true},
-	"cost":       {expr: `(SELECT sum(cl.amount) FROM cost_lines cl WHERE cl.run_id = r.id GROUP BY cl.currency ORDER BY cl.currency LIMIT 1)`, cast: "numeric", first: "desc"},
+	"host":       {expr: `rh.name`, cast: "text", first: "asc", from: runHostJoin},
+	"pool":       {expr: `rpool.name`, cast: "text", first: "asc", from: runPoolJoin},
+	"adapter":    {expr: `r.spec->'workload'->>'adapter'`, cast: "text", first: "asc"},
+	"runtime":    {expr: `CASE WHEN rr.seconds > 0 OR rr.since IS NOT NULL THEN rr.seconds END`, cast: "float8", first: "desc", from: runRuntimeJoin("{now}")},
+	"placements": {expr: `r.current_epoch`, cast: "bigint", first: "desc", notNull: true},
+	"placement":  {expr: `rpt.wait + rpt.start`, cast: "float8", first: "desc", notNull: true, from: runPlacementJoin("{now}")},
+	"cost": {expr: `rc.amount`, cast: "numeric", first: "desc", from: ` LEFT JOIN (SELECT DISTINCT ON (cl.run_id) cl.run_id, sum(cl.amount) AS amount
+		FROM cost_lines cl GROUP BY cl.run_id, cl.currency ORDER BY cl.run_id, cl.currency) rc ON rc.run_id = r.id`},
 }
 
 // listRuns lists the Runs the caller sees (an operator: every tenant's,
@@ -872,10 +887,7 @@ func (s *Server) listRunsPage(ctx context.Context, p Principal, pg *paging, wher
 		filter := strings.Join(where, " AND ")
 		keysFor := func(extra func(q *sqlArgs, expr string) string, order string, limit int) ([]keyRow, error) {
 			q := &sqlArgs{slices.Clone(base)}
-			src := `runs r`
-			if !pg.sk.runOnly {
-				src = runsFromAt(q.arg(stamp) + "::timestamptz")
-			}
+			src := `runs r` + pg.from(stamp, q.arg)
 			expr := "(" + pg.sk.expr + ")"
 			cond := filter
 			if c := extra(q, expr); c != "" {
