@@ -1415,20 +1415,36 @@ a.idchip-text:hover {
 .timeline-bar.is-live {
   background: repeating-linear-gradient(135deg, var(--tl-color) 0 6px, color-mix(in srgb, var(--tl-color) 70%, var(--bg-surface)) 6px 12px);
 }
-.timeline-bar.tone-neutral {
+.timeline-bar.tone-neutral,
+.timeline-point.tone-neutral {
   --tl-color: var(--st-neutral-dot);
 }
-.timeline-bar.tone-accent {
+.timeline-bar.tone-accent,
+.timeline-point.tone-accent {
   --tl-color: var(--accent);
 }
-.timeline-bar.tone-teal {
+.timeline-bar.tone-teal,
+.timeline-point.tone-teal {
   --tl-color: var(--st-teal-dot);
 }
-.timeline-bar.tone-amber {
+.timeline-bar.tone-amber,
+.timeline-point.tone-amber {
   --tl-color: var(--st-amber-dot);
 }
-.timeline-bar.tone-red {
+.timeline-bar.tone-red,
+.timeline-point.tone-red {
   --tl-color: var(--st-red-dot);
+}
+/* A point stage: an instant, drawn as a dot centred on it. */
+.timeline-point {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--tl-color);
+  box-shadow: 0 0 0 2px var(--bg-surface);
 }
 .timeline-dur {
   position: absolute;

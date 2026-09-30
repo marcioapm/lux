@@ -205,27 +205,29 @@ function LaunchFailedHost({ host: h }: { host: Host }) {
         }
       />
       <Card title="Launch" subtitle="its recorded outcome, not parsed from the state reason">
-        <KeyValue
-          columns={3}
-          items={[
-            { key: "Outcome", value: "Launch failed" },
-            { key: "Requested", value: l.requestedAt ? <span title={formatTimestampZone(l.requestedAt)}>{formatTimestamp(l.requestedAt)}</span> : DASH },
-            { key: "Failed", value: l.finishedAt ? <span title={formatTimestampZone(l.finishedAt)}>{formatTimestamp(l.finishedAt)}{took != null ? ` (${formatDuration(took)})` : ""}</span> : DASH },
-            { key: "Provider instance", value: <span className="muted">– none</span> },
-          ]}
-        />
-        {l.error && (
-          <div className="stack" style={{ gap: 6, marginTop: 14 }}>
-            <span className="muted">Provider error</span>
-            <Code>{l.error}</Code>
-          </div>
-        )}
+        <div className="stack">
+          <KeyValue
+            columns={3}
+            items={[
+              { key: "Outcome", value: "Launch failed" },
+              { key: "Requested", value: l.requestedAt ? <span title={formatTimestampZone(l.requestedAt)}>{formatTimestamp(l.requestedAt)}</span> : DASH },
+              { key: "Failed", value: l.finishedAt ? <span title={formatTimestampZone(l.finishedAt)}>{formatTimestamp(l.finishedAt)}{took != null ? ` (${formatDuration(took)})` : ""}</span> : DASH },
+              { key: "Provider instance", value: <span className="muted">– none</span> },
+            ]}
+          />
+          {l.error && (
+            <div className="field">
+              <span className="field-label">Provider error</span>
+              <Code>{l.error}</Code>
+            </div>
+          )}
+        </div>
       </Card>
       <Card title="Timeline">
         <Timeline
           stages={[
             { key: "requested", label: "Launch requested", start: l.requestedAt ? Date.parse(l.requestedAt) : null, end: l.finishedAt ? Date.parse(l.finishedAt) : null, tone: "accent" },
-            { key: "failed", label: "Launch failed: host row closed, its one-use token revoked", start: l.finishedAt ? Date.parse(l.finishedAt) : null, end: l.finishedAt ? Date.parse(l.finishedAt) + 1000 : null, tone: "red" },
+            { key: "failed", label: "Launch failed", note: "host row closed, its one-use token revoked", start: l.finishedAt ? Date.parse(l.finishedAt) : null, point: true, tone: "red" },
           ]}
           now={Date.now()}
         />
