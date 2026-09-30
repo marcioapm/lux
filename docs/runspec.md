@@ -108,8 +108,11 @@ artifacts:
   supply every secret again.
 - Volume paths must be absolute. `/.lux` is reserved.
 - **Resources** are what a Run gets and what the scheduler reserves on its
-  host: `cpus` (a CPU quota; `0.5` is half a CPU), `memory` (the limit,
-  with no swap beyond it), `disk` (what it may write: its container's
+  host: `cpus` (a CPU quota; `0.5` is half a CPU), `memory` (what the Run
+  asks for, in its host's terms, the machine's gross memory; the
+  container's limit, with no swap beyond it, is this × the host's factor,
+  [MemTotal less headroom over what the host offers](concepts.md#memory-the-hosts-terms-scaled-to-what-linux-sees),
+  and a placement reports it as `memoryLimit`), `disk` (what it may write: its container's
   writable layer plus its state volumes), `pids` (processes). They default
   to **2 CPUs, 8 GiB of memory, 20 GiB of disk and 1024 processes**, and an
   operator can change the defaults (`LUX_DEFAULT_CPUS`,
