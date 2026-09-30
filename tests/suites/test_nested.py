@@ -22,17 +22,6 @@ def test_a_run_runs_containers_inside(lux, runners, hosts):
     runners.start(hosts[0], "--nested")
     run_id = lux.submit(nested(f"{INNER} echo inner-ok"))
     run = lux.wait_state(run_id, "succeeded", "failed", timeout=120)
-    if run["state"] != "succeeded":
-        # What the host and the Run's container see, to tell why.
-        probe = lux.submit(nested(
-            "uname -r; cat /proc/self/attr/current; cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns; "
-            "unshare -U -r true && echo userns-ok; podman info --format '{{.Store.GraphDriverName}}'; "
-            f"podman load -q -i /opt/alpine.tar; podman --log-level=debug run --rm {ALPINE_IMAGE} true 2>&1 | tail -25"))
-        lux.wait_state(probe, "succeeded", "failed", timeout=120)
-        print("host:", hosts[0].exec("sh", "-c", "uname -r; cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns; "
-                                     "cat /proc/self/attr/current; podman info --format '{{.Host.Security.AppArmorEnabled}}'",
-                                     check=False))
-        print("probe:", lux.logs(probe))
     assert run["state"] == "succeeded" and "inner-ok" in lux.logs(run_id), (run.get("stateReason"), lux.logs(run_id))
 
 
