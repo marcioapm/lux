@@ -143,10 +143,7 @@ export function HostPage({ id }: { id: string }) {
       {/* The host history rule: operators, and a tenant for its own host (a tenant sees no other non-platform host). */}
       {(scope.operator || !h.platform) && <HostCost id={h.id} range={scope.range} operator={scope.operator} />}
 
-      {/* A platform host's events are the operators', not narrowed to a tenant (they name other tenants' Runs). */}
-      {(!h.platform || (scope.operator && !scope.apiTenant)) && (
-        <HostEvents id={id} interval={5000} subtitle="registration, placements, drains, termination" />
-      )}
+      <HostEvents id={id} platform={h.platform} interval={5000} subtitle="registration, placements, drains, termination" />
 
       <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
         <ErrorStrip error={recent.error} />
@@ -232,7 +229,7 @@ function LaunchFailedHost({ host: h }: { host: Host }) {
           ]}
         />
       </Card>
-      {(!h.platform || (scope.operator && !scope.apiTenant)) && <HostEvents id={h.id} interval={15_000} subtitle="what was recorded on the host" />}
+      <HostEvents id={h.id} platform={h.platform} interval={15_000} subtitle="what was recorded on the host" />
     </div>
   );
 }
@@ -240,9 +237,12 @@ function LaunchFailedHost({ host: h }: { host: Host }) {
 /**
  * A host's events, server-sorted cursor pages. Not refetched by live.ts:
  * drains, readiness and loss are not Run feed events, so it keeps its poll.
+ * A platform host's events are the operators', not narrowed to a tenant
+ * (they name other tenants' Runs).
  */
-function HostEvents({ id, interval, subtitle }: { id: string; interval: number; subtitle: string }) {
+function HostEvents({ id, platform, interval, subtitle }: { id: string; platform: boolean; interval: number; subtitle: string }) {
   const scope = useScope();
+  if (platform && !(scope.operator && !scope.apiTenant)) return null;
   return <PagedEvents prefix="host-events" view={`${scope.tenant}|${id}`} fetch={(req, s) => api.hostEventsPage(id, scope.apiTenant, req, s)} interval={interval} subtitle={subtitle} />;
 }
 
