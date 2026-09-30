@@ -107,52 +107,135 @@ def _check_phases(lux, run_id: str, harness, request_id: str) -> None:
     assert events == ["input.delivered", "input.consumed"][:len(want)], events
 
 
-def _steer_mid_tool(lux, harness, run_id: str, marker: str, steer: str, request_id: str) -> None:
-    """Steer once the turn's tool (its sleep) is running."""
-    if harness.real:
-        wait_until(lambda: any(marker in json.dumps(r.get("event", {})) for r in lux.records(run_id, "--events")),
-                   harness.timeout, 0.5, "the agent never ran its tool")
-        time.sleep(2)
-    else:
-        lux.wait_output(run_id, marker)
+def _tool_calls(records: list[dict]) -> list[dict]:
+    """The agent's shell tool calls, from its protocol's own events, in
+    output order: {"id", "command", "start", "done", "output"}, where start
+    and done are record indexes (done None while it runs).
+
+    Claude Code: a Bash tool_use, then its tool_result. Codex: a
+    commandExecution item, started then completed. OpenCode (ACP): an
+    execute tool_call, an in_progress update naming the command, then
+    completed or failed with its output."""
+    calls: dict[str, dict] = {}
+
+    def started(i, cid, command):
+        c = calls.setdefault(cid, {"id": cid, "command": None, "start": None, "done": None, "output": None})
+        if command and c["start"] is None:
+            c["command"], c["start"] = command, i
+
+    def finished(i, cid, output):
+        c = calls.get(cid)
+        if c is not None and c["done"] is None:
+            c["done"], c["output"] = i, output or ""
+
+    for i, r in enumerate(records):
+        ev = r.get("event") or {}
+        typ, d = ev.get("type"), ev.get("data") or {}
+        if typ == "claude.assistant":
+            for b in d.get("message", {}).get("content", []):
+                if b.get("type") == "tool_use" and b.get("name") == "Bash":
+                    started(i, b["id"], b.get("input", {}).get("command"))
+        elif typ == "claude.user":
+            for b in d.get("message", {}).get("content", []) if isinstance(d.get("message", {}).get("content"), list) else []:
+                if b.get("type") == "tool_result":
+                    out = b.get("content")
+                    if isinstance(out, list):
+                        out = "".join(x.get("text", "") for x in out)
+                    finished(i, b["tool_use_id"], out)
+        elif typ in ("codex.item/started", "codex.item/completed"):
+            item = d.get("item", {})
+            if item.get("type") == "commandExecution":
+                started(i, item["id"], item.get("command"))
+                if typ == "codex.item/completed":
+                    finished(i, item["id"], item.get("aggregatedOutput"))
+        elif typ in ("acp.tool_call", "acp.tool_call_update") and (d.get("kind") in (None, "execute")):
+            cid = d.get("toolCallId")
+            if not cid:
+                continue
+            if cid not in calls and d.get("kind") != "execute":
+                continue
+            started(i, cid, (d.get("rawInput") or {}).get("command"))
+            if d.get("status") in ("completed", "failed"):
+                out = (d.get("rawOutput") or {}).get("output")
+                if out is None:
+                    out = "".join((c.get("content") or {}).get("text", "") for c in d.get("content") or [])
+                finished(i, cid, out)
+    return sorted((c for c in calls.values() if c["start"] is not None), key=lambda c: c["start"])
+
+
+def _tool(calls: list[dict], word: str) -> dict | None:
+    """The first tool call whose command has word in it."""
+    return next((c for c in calls if word in c["command"]), None)
+
+
+def _wait_tool(lux, harness, run_id: str, word: str, what: str) -> dict:
+    """Wait for the tool call whose command has word in it to finish; on
+    timeout, say what the agent did instead."""
+    try:
+        return wait_until(lambda: (t := _tool(_tool_calls(lux.records(run_id, "--events")), word)) and t["done"] is not None and t,
+                          harness.timeout, 0.5, what)
+    except AssertionError as e:
+        records = lux.records(run_id, "--events")
+        seen = {"tools": [{k: c[k] for k in ("command", "start", "done")} for c in _tool_calls(records)],
+                "inputs": [r["event"] for r in records if r.get("event", {}).get("type", "").startswith("lux.input")],
+                "turn_ends": [i for i, r in enumerate(records) if r.get("event", {}).get("type") in TURN_ENDS],
+                "reply": lux.logs(run_id)[-1500:]}
+        raise AssertionError(f"{e}; {json.dumps(seen)[:6000]}") from None
+
+
+def _steer_mid_tool(lux, harness, run_id: str, sleep: str, steer: str, request_id: str) -> dict:
+    """Steer once the agent's tool running `sleep` has started (by its
+    protocol's own tool-start event); returns that tool call."""
+    try:
+        tool = wait_until(lambda: _tool(_tool_calls(lux.records(run_id, "--events")), sleep),
+                          harness.timeout, 0.3, f"the agent never started its `{sleep}` tool")
+    except AssertionError as e:
+        seen = [json.dumps(r.get("event"))[:300] for r in lux.records(run_id, "--events") if r.get("event")]
+        raise AssertionError(f"{e}; events: {seen[-40:]}") from None
     lux.run("steer", run_id, steer, "--request-id", request_id)
+    return tool
+
+
+def _prompts(harness, token: str) -> tuple[str, str]:
+    """The turn and the steer of the steering tests: FIRST after a sleep,
+    then SECOND, each its own shell tool call; the steer runs STEER."""
+    if harness.real:
+        return (("Run `sleep 20 && echo FIRST` with your shell tool. Wait for its output; only after that, "
+                 "in a separate tool call, run `echo SECOND`. Then reply DONE. One tool call at a time."),
+                f"Before anything else after the current command, run `echo STEER-{token}` with your shell tool, then continue.")
+    return "sh sleep 5 && echo FIRST\nsh echo SECOND", f"sh echo STEER-{token}"
 
 
 def test_mid_turn_steering(lux, runners, hosts, harness):
     """Input sent while the agent's tool runs is never lost, and the tool is
     not cancelled. Where the protocol can, it is read at the agent's next
-    step, in the running turn; otherwise it runs after it. lux says when
-    the input was accepted and, where it can, when the agent read it."""
+    step, in the running turn: its tool runs after the running one ends and
+    before the turn's next one. Otherwise it runs after the turn. lux says
+    when the input was accepted and, where it can, when the agent read it."""
     runners.start(hosts[0])
     token = f"{int(time.time() * 1000) % 1000000:06d}"
-    if harness.real:
-        prompt = ("Run `sleep 20 && echo FIRST` with your shell tool. Wait for its output; only after that, "
-                  "in a separate tool call, run `echo SECOND`. Then reply DONE. One tool call at a time.")
-        steer = f"Before anything else after the current command, run `echo STEER-{token}`, then continue."
-        marker, first_out, steered, second = "sleep 20", "FIRST", f"STEER-{token}", "SECOND"
-    else:
-        prompt, steer = "echo turn-one\nsleep 3\necho turn-one-done", f"echo steered-{token}"
-        marker, first_out, steered, second = "turn-one", "turn-one", f"steered-{token}", "turn-one-done"
+    prompt, steer = _prompts(harness, token)
+    steered = f"STEER-{token}"
     run_id = lux.submit(harness.spec(prompt))
-    _steer_mid_tool(lux, harness, run_id, marker, steer, "mid-1")
-    wait_until(lambda: steered in lux.logs(run_id) or any(steered in json.dumps(r.get("event", {}))
-                                                          for r in lux.records(run_id, "--events")),
-               harness.timeout, 0.5, "the steer never ran")
+    first = _steer_mid_tool(lux, harness, run_id, "sleep", steer, "mid-1")
+    _wait_tool(lux, harness, run_id, steered, "the steer's tool never ran")
     lux.wait_activity(run_id, "idle", timeout=harness.timeout)
     records = lux.records(run_id, "--events")
-    everything = "\n".join(json.dumps(r) for r in records) + lux.logs(run_id)
-    # The tool that was running when the steer came finished.
-    assert first_out in everything and "cancelled" not in lux.logs(run_id).split(), everything[-2000:]
-    turn_ends = [r for r in records if r.get("event", {}).get("type") in TURN_ENDS]
+    calls = _tool_calls(records)
+    first = next(c for c in calls if c["id"] == first["id"])
+    steer_call, second = _tool(calls, steered), _tool(calls, "SECOND")
+    # The tool that was running when the steer came finished, and ran.
+    assert first["done"] is not None and "FIRST" in first["output"], first
+    assert steered in steer_call["output"], steer_call
+    assert second is not None and "SECOND" in second["output"], calls
+    turn_ends = [i for i, r in enumerate(records) if r.get("event", {}).get("type") in TURN_ENDS]
     if harness.caps.steer_joins_turn:
+        # Read at the next step: after the running tool, before the next.
+        assert first["done"] < steer_call["start"] < second["start"], calls
         assert len(turn_ends) == 1, turn_ends
-        if not harness.real:
-            out = lux.logs(run_id)
-            assert out.index(steered) < out.index(second), out
     else:
+        assert second["done"] < turn_ends[0] < steer_call["start"], (calls, turn_ends)
         assert len(turn_ends) == 2, turn_ends
-        out = lux.logs(run_id)
-        assert out.index(second) < out.index(steered), out
     _check_phases(lux, run_id, harness, "mid-1")
     # Once each: the prompt's too.
     assert [r["step"] for r in _input_records(lux, run_id, "prompt")][0] == "accepted"
@@ -162,37 +245,44 @@ def test_mid_turn_steering(lux, runners, hosts, harness):
 @harnesses(lambda h: h.caps.steer_joins_turn)
 def test_interrupt_carries_an_unread_steer(lux, runners, hosts, harness):
     """"Interrupt now": a steer accepted during a long tool, then an
-    interrupt with no text. The running turn ends; the steer is not failed
-    but read in the turn after it, consumed exactly once."""
+    interrupt with no text. The running turn ends, its tool cut short; the
+    steer is not failed but run in the turn after it, consumed exactly
+    once."""
     runners.start(hosts[0])
     token = f"{int(time.time() * 1000) % 1000000:06d}"
+    steered = f"STEER-{token}"
+    # Claude Code refuses a `sleep` of a minute before another command
+    # (it asks for its Monitor tool instead); 20 s is the mid-turn test's.
     if harness.real:
-        prompt = "Run `sleep 60 && echo FIRST` with your shell tool, then reply DONE."
-        steer = f"Stop what you were doing and just run `echo STEER-{token}`."
-        marker, steered = "sleep 60", f"STEER-{token}"
+        prompt = "Run `sleep 20 && echo FIRST` with your shell tool, then reply DONE."
+        steer = f"Stop what you were doing and just run `echo {steered}` with your shell tool."
     else:
-        prompt, steer = "echo long-tool\nsleep 60\necho never", f"echo steered-{token}"
-        marker, steered = "long-tool", f"steered-{token}"
+        prompt, steer = "sh sleep 60 && echo FIRST", f"sh echo {steered}"
     run_id = lux.submit(harness.spec(prompt))
-    _steer_mid_tool(lux, harness, run_id, marker, steer, "carry-1")
+    first = _steer_mid_tool(lux, harness, run_id, "sleep", steer, "carry-1")
     wait_until(lambda: any(r["step"] == "accepted" for r in _input_records(lux, run_id, "carry-1")),
                harness.timeout, 0.3, "the steer was never accepted")
+    running = next(c for c in _tool_calls(lux.records(run_id, "--events")) if c["id"] == first["id"])
+    assert running["done"] is None, f"the tool was not running when the interrupt was sent: {running}"
     # What POST input {"interrupt": true} with no text does (dude's
     # "Interrupt now").
     lux.run("interrupt", run_id)
-    wait_until(lambda: steered in lux.logs(run_id) or any(steered in json.dumps(r.get("event", {}))
-                                                          for r in lux.records(run_id, "--events")),
-               harness.timeout, 0.5, "the steer was never run")
+    _wait_tool(lux, harness, run_id, steered, "the carried steer's tool never ran")
     lux.wait_activity(run_id, "idle", timeout=harness.timeout)
     _check_phases(lux, run_id, harness, "carry-1")
     records = lux.records(run_id, "--events")
-    types = [r.get("event", {}).get("type") for r in records]
-    turn_ends = [i for i, t in enumerate(types) if t in TURN_ENDS]
+    calls = _tool_calls(records)
+    first = next(c for c in calls if c["id"] == first["id"])
+    steer_call = _tool(calls, steered)
+    turn_ends = [i for i, r in enumerate(records) if r.get("event", {}).get("type") in TURN_ENDS]
     consumed = [i for i, r in enumerate(records) if r.get("event", {}).get("type") == "lux.input.consumed"
                 and r["event"]["data"] == {"requestId": "carry-1"}]
-    # In the turn after the interrupted one: after its end, before the next.
+    # The interrupted tool never finished its work.
+    assert "FIRST" not in [l.strip() for l in (first["output"] or "").splitlines()], first
+    # Read and run in the turn after the interrupted one: after its end,
+    # before the next one's.
     assert len(turn_ends) >= 2 and turn_ends[0] < consumed[0] < turn_ends[1], (turn_ends, consumed)
-    assert "never" not in lux.logs(run_id).lower().split()
+    assert turn_ends[0] < steer_call["start"] < turn_ends[1] and steered in steer_call["output"], (turn_ends, steer_call)
     lux.run("cancel", run_id)
 
 

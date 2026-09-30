@@ -191,7 +191,11 @@ sent during a turn is read after the script line running when it came
 acp --port <p>`). It follows a script from the prompt (`write f text`,
 `sleep 5`, `history`, …; see `cmd/lux-fake/main.go`), keeps a transcript on
 a state volume, and resumes from it. Its ACP replies stream in chunks
-without line breaks, as real agents' do.
+without line breaks, as real agents' do. `sh <command>` runs a command as
+the agent's shell tool, reported as each protocol reports a real one
+(Claude Code's `Bash` tool_use and tool_result, Codex's
+`commandExecution` item, OpenCode's `execute` tool_call), so the steering
+tests assert the same tool events on fake and real variants.
 
 ### EC2 pools: fake by default, real nightly
 

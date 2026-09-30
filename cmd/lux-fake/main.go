@@ -32,6 +32,9 @@
 //	ask                    request a permission (ACP only); reply with the outcome
 //	cd <path>              change the working directory for the lines that
 //	                       follow (and the rest of the session); reply "cwd <path>"
+//	sh <command>           run command with sh -c as the agent's shell tool,
+//	                       reported as the protocol's shell tool events
+//	                       (shell.go); a cancel kills it
 //	mcp-call <server> <tool> <text>
 //	                       call a tool on an MCP server the client configured
 //	                       (streamable HTTP), with {"text": <text>}; report it
@@ -114,6 +117,8 @@ type agent struct {
 	// then done.
 	mcp  map[string]mcpServer
 	tool func(call toolCall)
+	// shell reports a shell tool call the same way (shell.go).
+	shell func(call shellCall)
 }
 
 // prompt is a user message and the client's id for it.
@@ -128,6 +133,7 @@ func newAgent() *agent {
 	}
 	a.ask = func() string { return "not supported" }
 	a.tool = func(toolCall) {}
+	a.shell = func(shellCall) {}
 	return a
 }
 
@@ -424,6 +430,8 @@ func (a *agent) runLine(line string, cancel chan struct{}) bool {
 			a.cwd = dir
 			a.say("cwd " + dir)
 		}
+	case "sh":
+		return a.runShell(rest, cancel)
 	case "http":
 		a.httpCall(rest)
 	case "mcp-call":
@@ -526,6 +534,28 @@ func acp() {
 				"content": []any{map[string]any{"type": "content", "content": map[string]string{"type": "text", "text": text}}}}
 		}
 		rpc(map[string]any{"method": "session/update", "params": map[string]any{"sessionId": a.session, "update": u}})
+	}
+	// A shell command is OpenCode's bash tool: a pending tool_call, an
+	// in_progress update naming the command, then completed (or failed)
+	// with its output (opencode-acp-legacy-1).
+	a.shell = func(c shellCall) {
+		up := func(u map[string]any) {
+			u["toolCallId"] = c.ID
+			rpc(map[string]any{"method": "session/update", "params": map[string]any{"sessionId": a.session, "update": u}})
+		}
+		if !c.Done {
+			up(map[string]any{"sessionUpdate": "tool_call", "title": "bash", "kind": "execute", "status": "pending", "rawInput": map[string]any{}})
+			up(map[string]any{"sessionUpdate": "tool_call_update", "status": "in_progress", "kind": "execute", "title": c.Command,
+				"rawInput": map[string]any{"command": c.Command}})
+			return
+		}
+		status := "completed"
+		if c.Cancelled || c.ExitCode != 0 {
+			status = "failed"
+		}
+		up(map[string]any{"sessionUpdate": "tool_call_update", "status": status, "title": c.Command,
+			"content":   []any{map[string]any{"type": "content", "content": map[string]string{"type": "text", "text": c.Output}}},
+			"rawOutput": map[string]any{"output": c.Output, "metadata": map[string]any{"output": c.Output, "exit": c.ExitCode}}})
 	}
 	reply := func(id json.RawMessage, result any) { rpc(map[string]any{"id": id, "result": result}) }
 	fail := func(id json.RawMessage, code int, msg string) {
@@ -692,6 +722,21 @@ func streamJSON() {
 			"content": []map[string]any{{"type": "tool_result", "tool_use_id": c.ID, "is_error": c.Err != "",
 				"content": []map[string]string{{"type": "text", "text": text}}}}}})
 	}
+	// A shell command is the Bash tool: a tool_use, then its tool_result
+	// (claude-line-uuid-2).
+	a.shell = func(c shellCall) {
+		if !c.Done {
+			a.send(map[string]any{"type": "assistant", "session_id": a.session, "message": map[string]any{"role": "assistant",
+				"content": []map[string]any{{"type": "tool_use", "id": c.ID, "name": "Bash", "input": map[string]string{"command": c.Command}}}}})
+			return
+		}
+		out := c.Output
+		if c.Cancelled {
+			out = "Interrupted"
+		}
+		a.send(map[string]any{"type": "user", "session_id": a.session, "parent_tool_use_id": nil, "message": map[string]any{"role": "user",
+			"content": []map[string]any{{"type": "tool_result", "tool_use_id": c.ID, "content": out, "is_error": c.Cancelled || c.ExitCode != 0}}}})
+	}
 	a.setMCP(claudeMCP(os.Args))
 	if i := slices.Index(os.Args, "--resume"); i >= 0 && i+1 < len(os.Args) {
 		if err := a.loadSession(os.Args[i+1]); err != nil {
@@ -821,6 +866,24 @@ func appServer() {
 			if c.Err != "" {
 				item["status"], item["result"] = "failed", nil
 				item["error"] = map[string]string{"message": c.Err}
+			}
+		}
+		a.send(map[string]any{"method": method, "params": map[string]any{"threadId": a.session, "turnId": id, "item": item}})
+	}
+	// A shell command is a commandExecution item, started, then completed
+	// with its aggregatedOutput (codex-appserver-1).
+	a.shell = func(c shellCall) {
+		turnMu.Lock()
+		id := turnID
+		turnMu.Unlock()
+		item := map[string]any{"type": "commandExecution", "id": c.ID, "command": "/bin/sh -c '" + c.Command + "'",
+			"cwd": a.cwd, "status": "inProgress", "aggregatedOutput": nil, "exitCode": nil}
+		method := "item/started"
+		if c.Done {
+			method = "item/completed"
+			item["status"], item["aggregatedOutput"], item["exitCode"] = "completed", c.Output, c.ExitCode
+			if c.Cancelled || c.ExitCode != 0 {
+				item["status"] = "failed"
 			}
 		}
 		a.send(map[string]any{"method": method, "params": map[string]any{"threadId": a.session, "turnId": id, "item": item}})
