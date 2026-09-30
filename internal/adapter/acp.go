@@ -770,54 +770,11 @@ func (a *ACP) steer(in proto.Input) {
 		a.queueInput(in)
 		return
 	}
-	if a.bus != nil && a.bus.waitConnected(ctx, 5*time.Second) {
-		a.bus.seed(ctx, session)
-		msgID := a.bus.messageID(time.Now())
-		// Reserved against the running turn: it is not settled until the
-		// request returns.
-		a.mu.Lock()
-		if !a.busy || a.busTurn || a.stopped {
-			a.mu.Unlock()
-			a.queueInput(in)
+	if a.bus != nil {
+		if a.bus.waitConnected(ctx, 5*time.Second) {
+			a.steerHTTP(ctx, session, in)
 			return
 		}
-		a.reserved++
-		a.bus.track(msgID, in.RequestID, a.cancelGen)
-		a.mu.Unlock()
-		err := a.bus.promptAsync(ctx, session, msgID, in.Text)
-		if err == nil {
-			// Already answered (untracked): the ACP turn's own loop read it.
-			tracked, _ := a.bus.messageOf(in.RequestID)
-			a.mu.Lock()
-			if a.busTurn && tracked == msgID {
-				a.admittedLate[msgID] = true
-			}
-			a.mu.Unlock()
-			a.inputs.accept(a.sink, in, Delivery{Lands: LandsNextStep, Receipt: true}, "bus")
-		} else {
-			a.bus.untrack(msgID)
-		}
-		a.mu.Lock()
-		a.reserved--
-		settle := a.busTurn && a.reserved == 0
-		a.mu.Unlock()
-		switch {
-		case err == nil:
-		case !errors.Is(err, errNotSent):
-			a.inputs.fail(a.sink, in, err)
-		case settle || len(a.inputs.unread("bus")) > 0:
-			// The turn ended while OpenCode refused it, or a steer sent over
-			// HTTP is unread (see steerACP): the next turn.
-			a.queueInput(in)
-		default:
-			a.sink.Event(proto.EvWarning, map[string]any{"message": "opencode: steering over ACP instead: " + err.Error()})
-			a.steerACP(session, in)
-		}
-		if settle {
-			a.settle()
-		}
-		return
-	} else if a.bus != nil {
 		msg := "opencode: its event stream is not connected; steering over ACP, without a receipt"
 		if err := a.bus.err(); err != nil {
 			msg += ": " + err.Error()
@@ -825,6 +782,57 @@ func (a *ACP) steer(in proto.Input) {
 		a.sink.Event(proto.EvWarning, map[string]any{"message": msg})
 	}
 	a.steerACP(session, in)
+}
+
+// steerHTTP sends a steer through prompt_async under a message id lux
+// chooses, with a receipt. One OpenCode certainly did not take goes as a
+// second session/prompt, or to the next turn.
+func (a *ACP) steerHTTP(ctx context.Context, session string, in proto.Input) {
+	a.bus.seed(ctx, session)
+	msgID := a.bus.messageID(time.Now())
+	// Reserved against the running turn: it is not settled until the
+	// request returns.
+	a.mu.Lock()
+	if !a.busy || a.busTurn || a.stopped {
+		a.mu.Unlock()
+		a.queueInput(in)
+		return
+	}
+	a.reserved++
+	a.bus.track(msgID, in.RequestID, a.cancelGen)
+	a.mu.Unlock()
+	err := a.bus.promptAsync(ctx, session, msgID, in.Text)
+	if err == nil {
+		// Already answered (untracked): the ACP turn's own loop read it.
+		tracked, _ := a.bus.messageOf(in.RequestID)
+		a.mu.Lock()
+		if a.busTurn && tracked == msgID {
+			a.admittedLate[msgID] = true
+		}
+		a.mu.Unlock()
+		a.inputs.accept(a.sink, in, Delivery{Lands: LandsNextStep, Receipt: true}, "bus")
+	} else {
+		a.bus.untrack(msgID)
+	}
+	a.mu.Lock()
+	a.reserved--
+	settle := a.busTurn && a.reserved == 0
+	a.mu.Unlock()
+	switch {
+	case err == nil:
+	case !errors.Is(err, errNotSent):
+		a.inputs.fail(a.sink, in, err)
+	case settle || len(a.inputs.unread("bus")) > 0:
+		// The turn ended while OpenCode refused it, or a steer sent over
+		// HTTP is unread (see steerACP): the next turn.
+		a.queueInput(in)
+	default:
+		a.sink.Event(proto.EvWarning, map[string]any{"message": "opencode: steering over ACP instead: " + err.Error()})
+		a.steerACP(session, in)
+	}
+	if settle {
+		a.settle()
+	}
 }
 
 // steerACP sends a steer as a second session/prompt, which OpenCode joins
