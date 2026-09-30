@@ -250,3 +250,46 @@ test("invalidating the key prefix refetches a mounted list", async () => {
     await m.unmount();
   }
 });
+
+const sleep = (ms: number) => act(() => new Promise<void>((r) => setTimeout(r, ms)));
+
+/** Polls of a list whose fetch answers at once, over `ms`, with the event stream live or not. */
+async function pollsOver(ms: number, streaming: boolean, live: number | undefined): Promise<number> {
+  const { fakeApi } = await import("./testing.ts");
+  const { useLiveState, useLiveStream } = await import("../api/index.ts");
+  const fake = fakeApi(() => ({}));
+  let calls = 0;
+  let status = "";
+  function Stream() {
+    useLiveStream(undefined);
+    const st = useLiveState();
+    status = st.status + (st.error ? `: ${st.error}` : "");
+    return null;
+  }
+  function List() {
+    usePaged("polls", "v", async () => (calls++, { rows: [] }), { defaultSort: { key: "created", dir: "desc" }, defaultSize: 2, interval: 20, live });
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  try {
+    if (streaming) {
+      await act(async () => root.render(<Stream />));
+      for (let i = 0; i < 50 && status !== "live"; i++) await sleep(10);
+      expect(status).toBe("live");
+    }
+    await act(async () => root.render(streaming ? <><Stream /><List /></> : <List />));
+    await sleep(ms);
+    return calls;
+  } finally {
+    await act(async () => root.unmount());
+    fake.restore();
+  }
+}
+
+test("live reaches useQuery: while the event stream is live the list polls at live, not interval", async () => {
+  expect(await pollsOver(200, true, 10_000)).toBe(1);
+});
+
+test("without live, a live stream does not slow the poll", async () => {
+  expect(await pollsOver(200, true, undefined)).toBeGreaterThan(2);
+});
