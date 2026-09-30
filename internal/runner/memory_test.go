@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"math/big"
 	"os"
 	"slices"
 	"strconv"
@@ -57,23 +58,45 @@ func TestMemoryScaleNeverAboveOne(t *testing.T) {
 	}
 }
 
+// wantLimit is the limit's contract in arbitrary precision: the request
+// unchanged when nothing is scaled, else
+// max(floor(req × (total − headroom) / capacity) down to a page, 1).
+func wantLimit(req, total, headroom, capacity int64) int64 {
+	allocatable := total - headroom
+	if allocatable >= capacity {
+		return req
+	}
+	n := new(big.Int).Mul(big.NewInt(req), big.NewInt(allocatable))
+	n.Quo(n, big.NewInt(capacity))
+	page := big.NewInt(int64(os.Getpagesize()))
+	n.Mul(n.Quo(n, page), page)
+	if n.Sign() == 0 {
+		return 1
+	}
+	return n.Int64()
+}
+
 func TestMemoryScaleRoundsDown(t *testing.T) {
+	page := int64(os.Getpagesize())
 	for _, c := range []struct{ total, headroom, capacity int64 }{
 		{30*gib + gib/2, gib / 2, 32 * gib},
 		{64418888 << 10, DefaultMemoryHeadroom, 64 * gib},
 		{7, 0, 9},
 		{1<<62 + 3, 1, 1<<62 + 5},
+		{1<<62 + 5, 3, 1<<62 - 1},
+		{1<<63 - 1, 1, 1<<62 + page},
+		{64 * gib, gib / 2, 16 * gib},
+		{32 * gib, 0, 32 * gib},
 	} {
 		m := mustScale(t, c.total, c.headroom, c.capacity)
-		page := float64(os.Getpagesize())
-		for _, req := range []int64{1, 2, 3, 4095, 4096, 1<<20 + 1, 256 << 20, 8*gib + 7, c.capacity, 1<<62 + 5} {
-			got := m.limit(req)
-			exact := float64(req) * float64(c.total-c.headroom) / float64(c.capacity)
-			if got > req || got < 1 || float64(got) > exact+1 || float64(got) < exact-exact*1e-9-page {
-				t.Errorf("%+v: limit(%d) = %d, want floor(%v) to a page, within the request and at least 1", c, req, got, exact)
-			}
-			if got > 1 && got%int64(page) != 0 {
-				t.Errorf("%+v: limit(%d) = %d, not whole pages", c, req, got)
+		reqs := []int64{1, 2, 3, 256 << 20, 8*gib + 7, c.capacity, c.capacity - 1, c.capacity + 1,
+			1<<62 - page - 1, 1<<62 - page, 1<<62 - 1, 1 << 62, 1<<62 + 1, 1<<62 + 5, 1<<62 + page + 1}
+		for _, k := range []int64{1, 2, 3, 1 << 20, 1 << 40} {
+			reqs = append(reqs, k*page-1, k*page, k*page+1)
+		}
+		for _, req := range reqs {
+			if got, want := m.limit(req), wantLimit(req, c.total, c.headroom, c.capacity); got != want {
+				t.Errorf("%+v: limit(%d) = %d, want %d", c, req, got, want)
 			}
 		}
 	}
