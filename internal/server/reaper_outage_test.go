@@ -3,19 +3,11 @@ package server
 import (
 	"context"
 	"testing"
-
-	"github.com/jackc/pgx/v5"
-
-	"github.com/marcioapm/lux/internal/store"
 )
 
 func hostAndPlacement(ctx context.Context, t *testing.T, s *Server) (host, placement string) {
 	t.Helper()
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT h.state, p.state FROM hosts h JOIN placements p ON p.host_id = h.id WHERE h.id = 'h1'`).Scan(&host, &placement)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	systemScan(t, s, `SELECT h.state, p.state FROM hosts h JOIN placements p ON p.host_id = h.id WHERE h.id = 'h1'`, nil, &host, &placement)
 	return host, placement
 }
 

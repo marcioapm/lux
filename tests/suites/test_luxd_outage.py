@@ -9,10 +9,6 @@ from conftest import generic
 from env import ALPINE_IMAGE, wait_until
 
 
-def ticks(lux, run_id: str) -> int:
-    return lux.logs(run_id).count("tick-")
-
-
 def test_a_running_run_survives_a_luxd_outage(env, lux, runners, hosts):
     runners.start(hosts[0])
     run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", 'i=0; while true; do i=$((i+1)); echo "tick-$i"; sleep 1; done'))
@@ -30,18 +26,17 @@ def test_a_running_run_survives_a_luxd_outage(env, lux, runners, hosts):
     env.start_luxd()
 
     # The runner reaches the new luxd and renews: host and lease fresh again.
-    def renewed():
-        with psycopg.connect(env.owner_dsn) as conn:
-            return conn.execute(
-                """SELECT h.state = 'ready' AND h.last_heartbeat > %s AND p.state = 'running' AND p.lease_expires_at > now()
-                   FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = %s AND p.state <> 'lost'""",
-                (restarted, run_id)).fetchone()
-    wait_until(lambda: (r := renewed()) and r[0], 60, 0.5, "the host never renewed its heartbeat and lease")
+    with psycopg.connect(env.owner_dsn, autocommit=True) as conn:
+        wait_until(lambda: conn.execute(
+            """SELECT EXISTS (SELECT 1 FROM placements p JOIN hosts h ON h.id = p.host_id
+                 WHERE p.run_id = %s AND p.state = 'running' AND p.lease_expires_at > now()
+                   AND h.state = 'ready' AND h.last_heartbeat > %s)""",
+            (run_id, restarted)).fetchone()[0], 60, 0.5, "the host never renewed its heartbeat and lease")
 
     run = lux.get(run_id)
     assert run["state"] == "running", run
     assert len(run["placements"]) == 1, run["placements"]
     # And the same container goes on.
-    seen = ticks(lux, run_id)
-    wait_until(lambda: ticks(lux, run_id) > seen, 30, 0.5, "no output after the outage")
+    seen = lux.logs(run_id).count("tick-")
+    lux.wait_output(run_id, f"tick-{seen + 1}", timeout=30)
     lux.run("cancel", run_id)

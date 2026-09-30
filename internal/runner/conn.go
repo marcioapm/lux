@@ -49,7 +49,8 @@ func (c *conn) wsURL() string {
 
 // loop keeps a connection up until ctx ends.
 func (c *conn) loop(ctx context.Context) {
-	backoff := 500 * time.Millisecond
+	const minBackoff = 500 * time.Millisecond
+	backoff := minBackoff
 	for ctx.Err() == nil {
 		c.welcomed = time.Time{}
 		var err error
@@ -69,7 +70,7 @@ func (c *conn) loop(ctx context.Context) {
 		// A connection that lasted starts the backoff over: a luxd restart
 		// is met within a second, not after the longest wait.
 		if !c.welcomed.IsZero() && time.Since(c.welcomed) > proto.MaxReconnectWait {
-			backoff = 500 * time.Millisecond
+			backoff = minBackoff
 		}
 		select {
 		case <-ctx.Done():
