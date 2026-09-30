@@ -3,7 +3,6 @@ package adapter
 import (
 	"net/http"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -292,7 +291,7 @@ func TestOpenCodeInterruptDoesNotCarryASteerAStepFollowed(t *testing.T) {
 	w.resolve(first, ocCancelled)
 	for range 3 {
 		clk.fire(t)
-		if slices.ContainsFunc(sink.lines(), func(l string) bool { return strings.HasPrefix(l, "failed s1") }) {
+		if sink.has("failed s1") {
 			break
 		}
 	}
@@ -359,7 +358,7 @@ func TestOpenCodeSettleGivesUp(t *testing.T) {
 	wantPosts(t, b, 2, "the one resend")
 	b.setLoop(false) // the resent copy is dropped too
 	looks, limit := 0, int(settleGiveUp/time.Second)+3
-	for ; looks < limit && !slices.ContainsFunc(sink.lines(), func(l string) bool { return strings.HasPrefix(l, "failed s1") }); looks++ {
+	for ; looks < limit && !sink.has("failed s1"); looks++ {
 		clk.fire(t)
 		wantPosts(t, b, 2, "after the resend")
 	}
@@ -384,7 +383,7 @@ func TestOpenCodeSettleGivesUpOnAMessageNeverStored(t *testing.T) {
 	b.setLoop(false)
 	w.resolve(first, ocResult)
 	looks, limit := 0, int(settleGiveUp/time.Second)+3
-	for ; looks < limit && !slices.ContainsFunc(sink.lines(), func(l string) bool { return strings.HasPrefix(l, "failed s1") }); looks++ {
+	for ; looks < limit && !sink.has("failed s1"); looks++ {
 		clk.fire(t)
 	}
 	if looks < int(settleGiveUp/time.Second) || looks > limit-1 {
