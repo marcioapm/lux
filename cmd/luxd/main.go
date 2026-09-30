@@ -32,6 +32,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/blob"
 	"github.com/marcioapm/lux/internal/ec2"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/server"
@@ -61,10 +62,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "luxd: %s takes no arguments: %s\n", cmd, strings.Join(args, " "))
 			usage()
 		}
-		err = validate(ctx, path, os.Stdout)
+		err = validate(path, os.Stdout)
 	case "serve":
 		var plan servePlan
-		if cfg, _, plan, err = loadServe(ctx, path); err != nil {
+		if cfg, _, plan, err = loadServe(path); err != nil {
 			break
 		}
 		if len(args) > 0 {
@@ -147,7 +148,10 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 		return err
 	}
 	defer db.Close()
-	blobs := plan.blobs
+	blobs, err := blob.New(ctx, plan.s3)
+	if err != nil {
+		return err
+	}
 	if err := blobs.Check(ctx); err != nil {
 		return fmt.Errorf("blob store: %w", err)
 	}

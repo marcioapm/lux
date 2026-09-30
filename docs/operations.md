@@ -87,14 +87,17 @@ its variable; the table below lists them by variable.
 does before it opens any connection, and connects to nothing, binds
 nothing and writes nothing: the file and the environment are loaded
 (unknown keys, types, values), `database.url` and `s3.bucket` must be set,
-the database URL must parse, the S3 client must configure (AWS shared
-configuration included), `listen` must be `host:port`, and the console,
+the database URL must parse, `s3.endpoint` and `s3.public_endpoint` (when
+set) must be absolute http(s) URLs, `s3.region` must not be empty,
+`s3.access_key` and `s3.secret_key` must be set together or not at all,
+`listen` must be `host:port`, and the console,
 preview, cost-plugin, defaults, history and cost settings must be
 consistent. It prints `ok: FILE` (or `ok: no file`) and exits 0; warnings
 (a readable file, a retired key) go to stderr, naming the key, never a
 value. On a refusal it prints what `serve` would and exits 1; extra
-arguments exit 2. Whether the database and bucket are reachable is not
-checked. `luxd check-config` is an alias of `validate`.
+arguments exit 2. Not checked: whether the database and bucket are
+reachable, and AWS shared config and credential sources, which the SDK
+resolves when serve connects. `luxd check-config` is an alias of `validate`.
 
 | Variable | Default | |
 | --- | --- | --- |
