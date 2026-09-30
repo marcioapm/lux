@@ -55,8 +55,11 @@ func freeLoopbackPort() (int, error) {
 
 func newOpencodeBus(port int, dir string) *opencodeBus {
 	// Straight to loopback: never through a proxy the Run's environment
-	// names (HTTP_PROXY).
-	direct := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext}
+	// names (HTTP_PROXY). A request OpenCode accepts while it is still
+	// starting gets no response headers at all (1.18.31): time it out and
+	// try again.
+	direct := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 3 * time.Second}
 	return &opencodeBus{port: port, dir: dir, expect: map[string]string{},
 		hc: &http.Client{Timeout: 30 * time.Second, Transport: direct}, stream: &http.Client{Transport: direct}}
 }

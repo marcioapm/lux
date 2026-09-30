@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -231,6 +232,35 @@ func TestOpenCodeFallsBackToACP(t *testing.T) {
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
 	w.send(`{"jsonrpc":"2.0","id":` + second + `,` + ocResult + `}`)
 	sink.waitLast(t, "idle")
+}
+
+// A /event request OpenCode takes while starting and never answers
+// (1.18.31 does this) is retried, so the stream still connects.
+func TestOpenCodeBusRetriesUnansweredStream(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			<-r.Context().Done() // no headers, ever
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"server.connected\",\"properties\":{}}\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	b := newOpencodeBus(srv.Listener.Addr().(*net.TCPAddr).Port, "/")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.follow(ctx, func(busEvent) {})
+	if !b.waitConnected(8 * time.Second) {
+		t.Fatalf("never connected: %v", b.err())
+	}
 }
 
 // The command gets a loopback --port only when lux builds it.
