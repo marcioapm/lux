@@ -17,15 +17,70 @@ The adapter runs inside the container, in `lux-shim`. Pick one with
 | --- | --- | --- | --- | --- | --- | --- |
 | `generic` | `command` as given | text + newline (or raw bytes) on stdin | — | SIGINT | SIGTERM | re-runs `resume.command`, or `command` |
 | `acp` | any [ACP](https://agentclientprotocol.com) agent | `session/prompt` | queued until the turn ends | `session/cancel` | cancel, close stdin | `session/load` if the agent supports it |
-| `claude-code` | `claude -p --input-format stream-json --output-format stream-json --verbose` | a `user` JSON line | native (Claude Code queues it) | `control_request` interrupt | **SIGINT** (ends the turn cleanly) | `--resume <session id>` |
-| `codex` | `codex app-server` | `turn/start` | native (`turn/steer`) | `turn/interrupt` | interrupt, close stdin | `thread/resume` |
-| `opencode` | `opencode acp` | as `acp` | as `acp` | as `acp` | as `acp` | as `acp` |
+| `claude-code` | `claude -p --input-format stream-json --output-format stream-json --verbose` | a `user` JSON line, with a `uuid` | written at once; read at the next step | `control_request` interrupt | **SIGINT** (ends the turn cleanly) | `--resume <session id>` |
+| `codex` | `codex app-server` | `turn/start` | `turn/steer`; read at the next step | `turn/interrupt` | interrupt, close stdin | `thread/resume` |
+| `opencode` | `opencode acp --port <p> --hostname 127.0.0.1` | as `acp` | joined to the running turn; read at the next step | as `acp` | as `acp` | as `acp` |
 
 The exact messages, verified against the real CLIs, are in
 [agent-protocols.md](agent-protocols.md). Each adapter is tested end to end
 against `lux-fake` speaking its protocol, and against the real CLI (Claude
 Code, Codex and OpenCode) in an opt-in suite: steered, stopped, and resumed
 on another host with its conversation intact.
+
+## Input: accepted and consumed
+
+An input sent while the agent works reaches it at its **next model step**
+where the adapter can: after the tool call running now (which is not
+cancelled), within the same turn. The shim reports each input as `lux.input`
+records in the output, one per phase, at most once per request id and
+phase (redelivery after a reconnect included), and luxd records each as an
+event:
+
+| Record | Event | When |
+| --- | --- | --- |
+| `{"requestId", "phase":"accepted", "lands", "receipt", "text"?, "truncated"?}` | `input.delivered` | the agent has taken it |
+| `{"requestId", "phase":"consumed"}` | `input.consumed` | its model's next step has it in context; only when `receipt` was true |
+| `{"requestId", "phase":"failed", "error", "text"?}` | `input.failed` | it was not delivered, or the agent dropped it unread (an interrupted turn) |
+
+- `lands`: `next_step`, read at the agent's next model step, possibly within
+  the running turn; `next_turn`, read only when the running turn ends.
+- `receipt`: whether a `consumed` record will follow.
+- The workload's first prompt is reported the same way, as request id
+  `prompt`. A consumer that ignores `phase` sees what it always did: one
+  record per input, with `error` on failure.
+- A Run says what its adapter does before anything is sent:
+  `steer: {lands, receipt}` on `GET /v1/runs/{id}`. The accepted record is
+  what holds for each input (a Codex older than 0.155 has no receipt).
+
+| Adapter | `lands` | `receipt` | accepted | consumed | failed |
+| --- | --- | --- | --- | --- | --- |
+| `claude-code` | `next_step` | yes | `command_lifecycle` `queued` | `command_lifecycle` `started` | `cancelled`, `discarded`, `refused`; a failed write |
+| `codex` | `next_step` | from Codex 0.155 | `turn/start` or `turn/steer` result | `item/started` of the `userMessage` whose `clientId` is the request id | a `turn/steer` refusal other than a stale turn; a turn interrupted before reading it |
+| `opencode` | `next_step` | yes, with OpenCode's server up | the steer stored (`prompt_async` 204), or a second `session/prompt` written | the first assistant `message.updated` whose `parentID` is the steer's message id | a cancelled turn before reading it; a failed write |
+| `acp` | `next_turn` | no | its `session/prompt` written | — | a failed write |
+| `generic` | `next_step` | no | written to stdin | — | a failed write |
+
+Per agent:
+
+- **Claude Code** reads a line sent during a turn at its next step when a
+  tool call follows (one turn, one `result`). When the model's step ends the
+  turn with no tool call, Claude Code runs the line as the next turn instead:
+  it is still read at the agent's next model step, but not in the same turn.
+  Without `msg_lifecycle_v1` a line is accepted when written, with no
+  receipt.
+- **Codex:** input that arrives while `turn/start` is in flight is steered
+  into that turn once its id is known. A `turn/steer` refused because its
+  turn has ended starts the next turn.
+- **OpenCode:** the adapter adds `--port <free port> --hostname 127.0.0.1`
+  to an `opencode acp` command, so OpenCode's HTTP server runs in the same
+  process, on loopback only, without credentials of its own. A steer goes
+  through its `prompt_async` under a message id lux chooses, and the event
+  bus says when a model step answered it. Without the server (a command lux
+  did not build, or the server not up within 5 s) the steer goes as a
+  second `session/prompt`, joined to the running turn without a receipt,
+  and a `lux.warning` says why. A turn with joined prompts ends once.
+- **Generic ACP** agents keep a queue: the ACP spec does not say what a
+  second prompt during a turn does.
 
 ## Credentials
 
@@ -57,9 +112,11 @@ Header values come from secrets and are never in the command line. See
 - **Idle or busy.** The Run's `activity` field says whether an agent is
   working or waiting for input. `lux ls` shows `running (waiting for
   input)` instead of leaving you to guess whether it is hung.
-- **Acknowledged input.** Every `lux steer` gets a request id. A delivered
-  input shows up as an `input.delivered` event, and a failed one as
-  `input.failed`. The shim delivers each id once, so retrying a steer
+- **Acknowledged input.** Every `lux steer` gets a request id. What happens
+  to it is reported in phases (see [Input: accepted and
+  consumed](#input-accepted-and-consumed)): `input.delivered` when the agent
+  has taken it, `input.consumed` when its model has read it, `input.failed`
+  if it never will. The shim delivers each id once, so retrying a steer
   (`--request-id`) never sends it twice.
 - **Structured events.** The agent's own protocol messages are kept as
   events in the output (`lux logs --events`). The reply text also goes to
