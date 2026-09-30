@@ -342,7 +342,6 @@ function PoolCostTab({ name, owner, operatorView }: { name: string; owner?: Pool
 }
 
 function PoolHostsTab({ pool }: { pool: Pool }) {
-  const scope = useScope();
   const template = pool.template && Object.keys(pool.template).length > 0 ? <span className="mono">{labelsText(pool.template)}</span> : DASH;
   return (
     <div className="stack">
@@ -357,7 +356,7 @@ function PoolHostsTab({ pool }: { pool: Pool }) {
           ]}
         />
       </Card>
-      <HostsList pool={pool.name} poolId={pool.id} view={scope.tenant} embedded />
+      <HostsList pool={pool.name} poolId={pool.id} embedded />
     </div>
   );
 }
@@ -365,7 +364,7 @@ function PoolHostsTab({ pool }: { pool: Pool }) {
 /** A pool's events, a page at a time in the sort chosen (server-side). */
 function PoolEvents({ name, owner }: { name: string; owner?: PoolOwner }) {
   const scope = useScope();
-  const q = usePaged(`${scope.tenant}|${name}|${owner}`, (req, s) => api.poolEventsPage(name, scope.apiTenant, owner, req, s), { defaultSort: { key: "time", dir: "desc" }, defaultSize: 50, interval: POLL });
+  const q = usePaged("pool-events", `${scope.tenant}|${name}|${owner}`, (req, s) => api.poolEventsPage(name, scope.apiTenant, owner, req, s), { defaultSort: { key: "time", dir: "desc" }, defaultSize: 50, interval: POLL });
   const words: Record<string, [string, "time" | "number" | "text"]> = { time: ["Time", "time"], id: ["#", "number"], type: ["Type", "text"], detail: ["Details", "text"] };
   const w = words[q.sort.key] ?? ["Time", "time"];
   return (

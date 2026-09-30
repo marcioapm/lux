@@ -49,36 +49,36 @@ const LIFECYCLE = [
 type Lifecycle = (typeof LIFECYCLE)[number]["value"];
 
 export function Hosts() {
-  const { tenant } = useScope();
   const params = useSearchParams();
   const pool = params.get("pool") ?? "";
-  return <HostsList pool={pool} view={tenant} />;
+  return <HostsList pool={pool} />;
 }
 
 /**
  * The hosts table with its filters and pager: the Hosts page, or one
  * pool's hosts (fixed, by id: the pool page's Hosts tab).
  */
-export function HostsList({ pool, poolId, view: scopeView, embedded }: { pool: string; poolId?: string; view: string; embedded?: boolean }) {
+export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: string; embedded?: boolean }) {
   const { showTenant, tenant, apiTenant } = useScope();
   // Filters live in the URL, so a filtered list is a link.
   const params = useSearchParams();
   const state = params.get("state") ?? "";
   const lifecycle: Lifecycle = params.get("lifecycle") === "all" || params.get("all") === "true" ? "all" : params.get("lifecycle") === "ended" ? "ended" : "live";
   const setPool = (v: string) => setSearchParams({ pool: v || null });
-  void scopeView;
   const setState = (v: string) => setSearchParams({ state: v || null });
   const setLifecycle = (v: Lifecycle) => setSearchParams({ lifecycle: v === "live" ? null : v, all: null });
   const view = `${tenant}|${pool}|${poolId ?? ""}|${state}|${lifecycle}`;
   const q = usePaged<Host>(
+    "hosts",
     view,
     (req, s) =>
       api.hostsPage(apiTenant, { ...req, pool: poolId ? undefined : pool || undefined, poolId, state: state || undefined, all: lifecycle === "all" || undefined, lifecycle: lifecycle === "ended" ? "ended" : lifecycle === "live" && !state ? "live" : undefined }, s),
     { defaultSort: { key: "created", dir: "desc" }, defaultSize: 25, interval: 5000 },
   );
-  const pools = useScopedQuery("pools", api.pools, { interval: 60_000 });
-  // The allocation summary is over every live host, not the page.
-  const live = useScopedQuery("hosts-live", (t, s) => api.hosts(t, {}, s), { interval: 15_000 });
+  // The pool filter's options and the allocation summary (over every live
+  // host, not the page): the Hosts page's only; the pool page has its own.
+  const pools = useScopedQuery("pools", api.pools, { interval: 60_000, enabled: !embedded });
+  const live = useScopedQuery("hosts-live", (t, s) => api.hosts(t, {}, s), { interval: 15_000, enabled: !embedded });
 
   const poolOptions = useMemo(() => {
     const names = new Set<string>((pools.data ?? []).map((p) => p.name));
