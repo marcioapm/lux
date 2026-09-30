@@ -292,6 +292,34 @@ func TestHostsPagedSortEveryFamily(t *testing.T) {
 	}
 }
 
+// GET /v1/hosts with limit and a dir but no sort pages as limit alone does:
+// by created, newest first, the dir ignored.
+func TestHostsLimitWithDirWithoutSortIsNewestFirst(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	key := operatorKey(t, s, ctx)
+	hosts := hostsFixture(t, s, ctx)
+	var ids []string
+	for id := range hosts {
+		ids = append(ids, id)
+	}
+	newest := sorted(ids, func(id string) *int64 { v := hosts[id].created.UnixMicro(); return &v }, "desc")
+	for _, q := range []string{"limit=5&dir=asc", "limit=5&dir=desc", "limit=5"} {
+		p := fetchPage(t, s, key, "/v1/hosts?all=true&"+q, "hosts")
+		if !slices.Equal(p.IDs, newest[:5]) || *p.Total != len(ids) || p.Next == "" {
+			t.Errorf("%s: %v (total %d), want %v", q, p.IDs, *p.Total, newest[:5])
+		}
+		c, err := decodeCursor(p.Next)
+		if err != nil || c.Sort != "created" || c.Dir != "desc" {
+			t.Errorf("%s: next cursor %+v, want sort=created dir=desc", q, c)
+		}
+	}
+	// Its cursors carry the sort: followed without dir, the whole list.
+	if got := walkPages(t, s, key, "/v1/hosts?all=true&limit=5", "hosts", nil); !slices.Equal(got, newest) {
+		t.Errorf("limit=5 walk:\n got %v\nwant %v", got, newest)
+	}
+}
+
 // GET /v1/hosts pages by the keys computed from a host's placements, its
 // owner and pool, and its state, both ways, and filters by lifecycle.
 func TestHostsPagedSortByLoadOwnerAndState(t *testing.T) {
