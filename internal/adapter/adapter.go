@@ -233,10 +233,20 @@ func pump(r io.Reader, out func([]byte)) {
 // consumption before the adapter has seen the call that accepted it return
 // (both arrive on one stream, handled by two goroutines), so a consumption
 // seen early is held until accepted.
+//
+// An input's payload is kept only while the adapter may send it again:
+// until it is accepted without a receipt, consumed, or failed. After that
+// its entry is a tombstone (request id and flags) that keeps a repeated
+// phase from being reported twice. open holds the inputs accepted with a
+// receipt and not yet read, so a turn's end does not walk the history.
 type inputLedger struct {
-	mu  sync.Mutex
-	m   map[string]*inputState
-	seq int
+	mu   sync.Mutex
+	m    map[string]*inputState
+	open map[string]*inputState
+	seq  int
+	// closed: the agent has exited (close); what is accepted from here on
+	// cannot be read.
+	closed error
 }
 
 type inputState struct {
@@ -265,6 +275,12 @@ func (l *inputLedger) state(id string) *inputState {
 	return st
 }
 
+// settled drops an input's payload once nothing will send it again.
+func (l *inputLedger) settled(st *inputState) {
+	st.in = proto.Input{RequestID: st.in.RequestID}
+	delete(l.open, st.in.RequestID)
+}
+
 // track registers an input before it is sent, so its consumption is known
 // to be ours.
 func (l *inputLedger) track(in proto.Input) {
@@ -273,7 +289,9 @@ func (l *inputLedger) track(in proto.Input) {
 	}
 	l.mu.Lock()
 	st := l.state(in.RequestID)
-	st.in = in
+	if !st.done && !st.accepted {
+		st.in = in
+	}
 	if st.seq == 0 {
 		l.seq++
 		st.seq = l.seq
@@ -302,10 +320,24 @@ func (l *inputLedger) accept(sink Sink, in proto.Input, d Delivery, tag string) 
 		return
 	}
 	st.in, st.accepted, st.receipt, st.tag = in, true, d.Receipt, tag
+	st.in.RequestID = in.RequestID
 	sink.InputAccepted(in, d)
-	if st.early && st.receipt {
+	switch {
+	case !st.receipt:
+		l.settled(st)
+	case st.early:
 		st.consumed, st.done = true, true
+		l.settled(st)
 		sink.InputConsumed(in.RequestID)
+	case l.closed != nil:
+		st.done = true
+		l.settled(st)
+		sink.InputFailed(in, l.closed)
+	default:
+		if l.open == nil {
+			l.open = map[string]*inputState{}
+		}
+		l.open[in.RequestID] = st
 	}
 }
 
@@ -325,13 +357,15 @@ func (l *inputLedger) consume(sink Sink, id string) bool {
 	}
 	if st.receipt {
 		st.consumed, st.done = true, true
+		l.settled(st)
 		sink.InputConsumed(id)
 	}
 	return true
 }
 
-// open reports whether the input is known and neither read nor failed.
-func (l *inputLedger) open(id string) bool {
+// pending reports whether the input is known and neither read nor failed
+// nor accepted without a receipt: something may still happen to it.
+func (l *inputLedger) pending(id string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	st := l.m[id]
@@ -355,8 +389,26 @@ func (l *inputLedger) fail(sink Sink, in proto.Input, err error) {
 			return
 		}
 		st.done = true
+		st.in.RequestID = in.RequestID
+		l.settled(st)
 	}
 	sink.InputFailed(in, err)
+}
+
+// close fails every input accepted with a receipt and not read (the agent
+// has exited: nothing reads it now), drops the payloads still held, and
+// makes a later acceptance with a receipt fail at once.
+func (l *inputLedger) close(sink Sink, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.closed = err
+	for _, st := range l.sortedLocked(func(st *inputState) bool { return true }) {
+		st.done = true
+		sink.InputFailed(st.in, err)
+	}
+	for _, st := range l.m {
+		l.settled(st)
+	}
 }
 
 // order is the input's seq, 0 if unknown.
@@ -374,6 +426,7 @@ func (l *inputLedger) order(id string) int {
 func (l *inputLedger) forget(id string) {
 	l.mu.Lock()
 	delete(l.m, id)
+	delete(l.open, id)
 	l.mu.Unlock()
 }
 
@@ -382,7 +435,7 @@ func (l *inputLedger) forget(id string) {
 func (l *inputLedger) unread(tag string) []proto.Input {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.unreadLocked(tag)
+	return inputsOf(l.sortedLocked(func(st *inputState) bool { return st.tag == tag }))
 }
 
 // claim is unread, retagging what it returns to to under the same lock:
@@ -390,21 +443,26 @@ func (l *inputLedger) unread(tag string) []proto.Input {
 func (l *inputLedger) claim(tag, to string) []proto.Input {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	out := l.unreadLocked(tag)
-	for _, in := range out {
-		l.m[in.RequestID].tag = to
+	sts := l.sortedLocked(func(st *inputState) bool { return st.tag == tag })
+	for _, st := range sts {
+		st.tag = to
 	}
-	return out
+	return inputsOf(sts)
 }
 
-func (l *inputLedger) unreadLocked(tag string) []proto.Input {
+// sortedLocked: the open inputs that match, by seq.
+func (l *inputLedger) sortedLocked(match func(*inputState) bool) []*inputState {
 	var sts []*inputState
-	for _, st := range l.m {
-		if st.accepted && st.receipt && !st.done && st.tag == tag {
+	for _, st := range l.open {
+		if match(st) {
 			sts = append(sts, st)
 		}
 	}
 	slices.SortFunc(sts, func(a, b *inputState) int { return a.seq - b.seq })
+	return sts
+}
+
+func inputsOf(sts []*inputState) []proto.Input {
 	out := make([]proto.Input, len(sts))
 	for i, st := range sts {
 		out[i] = st.in

@@ -322,9 +322,7 @@ func (a *ACP) exited(cancel context.CancelFunc) {
 	if stopped {
 		why = errors.New("the Run stopped before the agent read it")
 	}
-	for _, in := range a.inputs.unread("bus") {
-		a.inputs.fail(a.sink, in, why)
-	}
+	a.inputs.close(a.sink, why)
 }
 
 // runCtx is the Run's context: HTTP calls to OpenCode end with it.
