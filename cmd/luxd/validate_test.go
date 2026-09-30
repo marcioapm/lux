@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/marcioapm/lux/internal/blob"
 )
 
 // TestMain lets tests run luxd itself: the test binary re-executed with
@@ -157,6 +161,91 @@ func badConfigs(dbURL string) []struct {
 			"configuration: costs.plugin[0].name must be nonempty, unique and not compute"},
 		{"defaults", valid, []string{"LUX_DEFAULT_PIDS=-1"},
 			"configuration: defaults.pids (LUX_DEFAULT_PIDS) must be a positive number"},
+		{"s3.endpoint relative", valid, []string{"LUX_S3_ENDPOINT=minio:9000"},
+			"s3.endpoint (LUX_S3_ENDPOINT): want an absolute http or https URL"},
+		{"s3.endpoint scheme", valid, []string{"LUX_S3_ENDPOINT=ftp://secret-host/"},
+			"s3.endpoint (LUX_S3_ENDPOINT): want an absolute http or https URL"},
+		{"s3.public_endpoint no host", valid, []string{"LUX_S3_PUBLIC_ENDPOINT=https://"},
+			"s3.public_endpoint (LUX_S3_PUBLIC_ENDPOINT): want an absolute http or https URL"},
+		{"s3.region empty", valid + "region = \"\"\n", nil,
+			"s3.region (LUX_S3_REGION) is empty: set a region or remove the key (default us-east-1)"},
+		{"s3.access_key alone", valid, []string{"LUX_S3_ACCESS_KEY=AKIA"},
+			"s3.access_key and s3.secret_key (LUX_S3_ACCESS_KEY, LUX_S3_SECRET_KEY): set both or neither"},
+		{"s3.secret_key alone", valid, []string{"LUX_S3_SECRET_KEY=s3-secret-value"},
+			"s3.access_key and s3.secret_key (LUX_S3_ACCESS_KEY, LUX_S3_SECRET_KEY): set both or neither"},
+	}
+}
+
+// countingServer is an HTTP endpoint that counts the requests it gets.
+type countingServer struct {
+	*httptest.Server
+	requests atomic.Int32
+}
+
+func newCountingServer(t *testing.T) *countingServer {
+	t.Helper()
+	s := &countingServer{}
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.requests.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+// validate builds no AWS client: with defaults mode auto the SDK asks IMDS
+// for the instance's region even when the keys are static.
+func TestValidateDoesNotAskIMDS(t *testing.T) {
+	pg := newFakePostgres(t)
+	imds := newCountingServer(t)
+	path := writeConfig(t, 0o600, validConfig(pg.url())+"access_key = \"AKIATEST\"\nsecret_key = \"test-secret\"\n")
+	env := []string{
+		"AWS_EC2_METADATA_DISABLED=false",
+		"AWS_EC2_METADATA_SERVICE_ENDPOINT=" + imds.URL,
+		"AWS_DEFAULTS_MODE=auto",
+	}
+	for _, cmd := range []string{"validate", "check-config"} {
+		if r := runLuxd(t, env, "--config", path, cmd); r.code != 0 {
+			t.Fatalf("%s: %+v", cmd, r)
+		}
+	}
+	if n := imds.requests.Load(); n != 0 {
+		t.Fatalf("validate made %d requests to IMDS", n)
+	}
+
+	// The control: building the S3 client from the same plan and
+	// environment does reach the fixture.
+	for _, e := range env {
+		k, v, _ := strings.Cut(e, "=")
+		t.Setenv(k, v)
+	}
+	home := t.TempDir()
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(home, "aws-config"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(home, "aws-credentials"))
+	_, _, plan, err := loadServe(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blob.New(context.Background(), plan.s3); err != nil {
+		t.Fatal(err)
+	}
+	if imds.requests.Load() == 0 {
+		t.Fatal("blob.New never reached the IMDS fixture: the zero-request assertion proves nothing")
+	}
+}
+
+// A container credentials URL naming a host that does not resolve makes
+// the SDK look it up with no deadline; validate must not wait on it.
+func TestValidateIgnoresContainerCredentials(t *testing.T) {
+	pg := newFakePostgres(t)
+	path := writeConfig(t, 0o600, validConfig(pg.url()))
+	start := time.Now()
+	r := runLuxd(t, []string{"AWS_CONTAINER_CREDENTIALS_FULL_URI=http://unresolvable.invalid/creds"}, "--config", path, "validate")
+	if r.code != 0 || r.stdout != "ok: "+path+"\n" {
+		t.Fatalf("got %+v", r)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("validate took %v", d)
 	}
 }
 
@@ -190,7 +279,8 @@ func TestValidate(t *testing.T) {
 					if r.code != 1 || r.stderr != "luxd: "+want+"\n" || r.stdout != "" {
 						t.Fatalf("got %+v\nwant exit 1 and %q", r, want)
 					}
-					if strings.Contains(r.stderr, "secret") {
+					// Every secret value in badConfigs is spelled -secret or secret-.
+					if strings.Contains(r.stderr, "-secret") || strings.Contains(r.stderr, "secret-") {
 						t.Fatalf("a secret was printed: %q", r.stderr)
 					}
 				})
@@ -237,7 +327,7 @@ func TestServeRefusesWhatValidateRefuses(t *testing.T) {
 				k, val, _ := strings.Cut(e, "=")
 				t.Setenv(k, val)
 			}
-			_, _, _, err := loadServe(context.Background(), path)
+			_, _, _, err := loadServe(path)
 			if err == nil || "luxd: "+err.Error()+"\n" != v.stderr {
 				t.Fatalf("loadServe: %v, validate printed %q", err, v.stderr)
 			}

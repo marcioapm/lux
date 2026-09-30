@@ -1,11 +1,11 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -15,15 +15,15 @@ import (
 // servePlan is what serve has settled from its configuration before it
 // opens any connection: nothing in it has touched the network.
 type servePlan struct {
-	db    *pgxpool.Config
-	blobs *blob.Store
+	db *pgxpool.Config
+	s3 blob.Config
 }
 
 // prepareServe runs every check serve makes on its configuration before
 // connecting to PostgreSQL or S3. validate runs exactly this, so a release
 // whose validate passes is refused by serve only for reasons outside the
-// configuration (a database or bucket it cannot reach).
-func prepareServe(ctx context.Context, c config) (servePlan, error) {
+// configuration (a database or bucket it cannot reach, AWS host settings).
+func prepareServe(c config) (servePlan, error) {
 	dsn, err := require(c.Database.URL, "database.url", "LUX_DATABASE_URL")
 	if err != nil {
 		return servePlan{}, err
@@ -38,17 +38,10 @@ func prepareServe(ctx context.Context, c config) (servePlan, error) {
 	if err != nil {
 		return servePlan{}, errors.New("database.url (LUX_DATABASE_URL) is not a valid PostgreSQL connection string")
 	}
-	// blob.New reads the AWS shared configuration (profile, region) but
-	// makes no request.
-	blobs, err := blob.New(ctx, blob.Config{
-		Endpoint:       c.S3.Endpoint,
-		PublicEndpoint: c.S3.PublicEndpoint,
-		Region:         c.S3.Region,
-		Bucket:         bucket,
-		AccessKey:      c.S3.AccessKey,
-		SecretKey:      c.S3.SecretKey,
-	})
-	if err != nil {
+	// The S3 client is built by serve once the database is open: loading the
+	// AWS configuration may call IMDS or resolve a credentials host. Only
+	// lux's own S3 settings are checked here.
+	if err := checkS3(c); err != nil {
 		return servePlan{}, err
 	}
 	// http.Server binds only after the database and bucket answer: a
@@ -58,24 +51,56 @@ func prepareServe(ctx context.Context, c config) (servePlan, error) {
 			return servePlan{}, fmt.Errorf("listen (LUX_LISTEN) %q: want host:port", c.Listen)
 		}
 	}
-	return servePlan{db: db, blobs: blobs}, nil
+	return servePlan{db: db, s3: blob.Config{
+		Endpoint:       c.S3.Endpoint,
+		PublicEndpoint: c.S3.PublicEndpoint,
+		Region:         c.S3.Region,
+		Bucket:         bucket,
+		AccessKey:      c.S3.AccessKey,
+		SecretKey:      c.S3.SecretKey,
+	}}, nil
+}
+
+func checkS3(c config) error {
+	for _, e := range []struct{ v, key, env string }{
+		{c.S3.Endpoint, "s3.endpoint", "LUX_S3_ENDPOINT"},
+		{c.S3.PublicEndpoint, "s3.public_endpoint", "LUX_S3_PUBLIC_ENDPOINT"},
+	} {
+		if e.v == "" {
+			continue
+		}
+		// The value is not quoted: an endpoint URL may carry userinfo.
+		if u, err := url.Parse(e.v); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("%s (%s): want an absolute http or https URL", e.key, e.env)
+		}
+	}
+	// An empty variable is ignored, so only the file can clear the default.
+	if c.S3.Region == "" {
+		return errors.New("s3.region (LUX_S3_REGION) is empty: set a region or remove the key (default us-east-1)")
+	}
+	// blob.New pairs access_key with whatever secret_key is, and ignores a
+	// lone secret_key in favour of the AWS default chain.
+	if (c.S3.AccessKey == "") != (c.S3.SecretKey == "") {
+		return errors.New("s3.access_key and s3.secret_key (LUX_S3_ACCESS_KEY, LUX_S3_SECRET_KEY): set both or neither")
+	}
+	return nil
 }
 
 // loadServe is the configuration half of serve: load the file and the
 // environment, then prepareServe. serve and validate both start here.
-func loadServe(ctx context.Context, path string) (config, string, servePlan, error) {
+func loadServe(path string) (config, string, servePlan, error) {
 	c, file, err := loadConfigFile(path)
 	if err != nil {
 		return c, file, servePlan{}, err
 	}
-	plan, err := prepareServe(ctx, c)
+	plan, err := prepareServe(c)
 	return c, file, plan, err
 }
 
 // validate refuses what serve would refuse on configuration grounds, and
 // connects to nothing. On success it prints the file it read.
-func validate(ctx context.Context, path string, stdout io.Writer) error {
-	_, file, _, err := loadServe(ctx, path)
+func validate(path string, stdout io.Writer) error {
+	_, file, _, err := loadServe(path)
 	if err != nil {
 		return err
 	}
