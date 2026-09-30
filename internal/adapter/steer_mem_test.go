@@ -129,7 +129,7 @@ func TestOpenCodePendingSteerBytesAreBounded(t *testing.T) {
 	sink.wait(t, "accepted r1 ")
 	onBus(t, a, b.answer(b.postedID(t, 1)))
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"failed r2: "+errPendingSteersLimit, "accepted r0 next_step receipt=true", "accepted r1 next_step receipt=true",
 		"consumed r0", "consumed r1", "turn_end", "idle")
