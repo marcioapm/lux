@@ -84,12 +84,13 @@ type ACP struct {
 	// unanswered with no loop running, by message id, and when first seen.
 	// resent: request ids settle sent again since the ACP turn ended.
 	// settleErrs: settle's looks in a row OpenCode did not answer.
+	// recheckStop: stops settle's next look while one is scheduled; nil
+	// otherwise.
 	settleMu    sync.Mutex
 	suspect     map[string]time.Time
 	resent      map[string]bool
 	settleErrs  int
 	settleEvery time.Duration
-	rechecking  bool
 	recheckStop func() bool
 	clock       settleClock
 	ctx         context.Context
@@ -373,7 +374,7 @@ func (a *ACP) exited(cancel context.CancelFunc) {
 	a.mu.Lock()
 	a.closed = true
 	stopped := a.stopped
-	if a.rechecking && a.recheckStop() {
+	if a.recheckStop != nil && a.recheckStop() {
 		a.bg.Done()
 	}
 	a.mu.Unlock()
@@ -653,19 +654,18 @@ func (a *ACP) failSteer(in proto.Input, err error) {
 func (a *ACP) recheck() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.rechecking || a.closed || a.ctx == nil || a.ctx.Err() != nil {
+	if a.recheckStop != nil || a.closed || a.ctx == nil || a.ctx.Err() != nil {
 		return
 	}
 	d := a.settleEvery
 	for range a.settleErrs {
 		d = min(2*d, settleMaxBackoff)
 	}
-	a.rechecking = true
 	a.bg.Add(1)
 	a.recheckStop = a.clock.afterFunc(d, func() {
 		defer a.bg.Done()
 		a.mu.Lock()
-		a.rechecking = false
+		a.recheckStop = nil
 		a.mu.Unlock()
 		a.settle()
 	})
