@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage } from "@lux/design-system";
-import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type HostTimeKey, type Run } from "../../api/index.ts";
+import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column } from "@lux/design-system";
+import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type Run } from "../../api/index.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, poolPath, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
 import { HostCost } from "./HostCost.tsx";
+import { hostStages } from "./hostStages.ts";
 import { PagedEvents } from "./PagedEvents.tsx";
 import { ProcessCards, runnerProcesses } from "./ProcessCards.tsx";
 
@@ -243,30 +244,6 @@ function LaunchFailedHost({ host: h }: { host: Host }) {
 function HostEvents({ id, interval, subtitle }: { id: string; interval: number; subtitle: string }) {
   const scope = useScope();
   return <PagedEvents prefix="host-events" view={`${scope.tenant}|${id}`} fetch={(req, s) => api.hostEventsPage(id, scope.apiTenant, req, s)} interval={interval} subtitle={subtitle} />;
-}
-
-const HOST_TIMES: { key: HostTimeKey; label: string; tone: TimelineStage["tone"] }[] = [
-  { key: "created", label: "Created", tone: "neutral" },
-  { key: "provisionRequested", label: "Provision requested", tone: "neutral" },
-  { key: "provisioned", label: "Provisioned", tone: "accent" },
-  { key: "registered", label: "Registered", tone: "accent" },
-  { key: "firstPlacement", label: "First placement", tone: "teal" },
-  { key: "lastPlacementEnded", label: "Last placement ended", tone: "teal" },
-  { key: "drainRequested", label: "Drain requested", tone: "amber" },
-  { key: "terminateRequested", label: "Terminate requested", tone: "amber" },
-  { key: "lost", label: "Lost", tone: "red" },
-  { key: "terminated", label: "Terminated", tone: "neutral" },
-];
-
-/** Host times are instants; each stage runs from its stamp to the next one that happened. */
-function hostStages(h: Host): TimelineStage[] {
-  const stamped = HOST_TIMES.map((t) => ({ ...t, at: h.times[t.key] ? Date.parse(h.times[t.key]!) : null })).filter((t) => t.at != null && Number.isFinite(t.at));
-  stamped.sort((a, b) => a.at! - b.at!);
-  const ended = h.state === "terminated" || h.state === "lost";
-  return stamped.map((t, i) => {
-    const next = stamped[i + 1];
-    return { key: t.key, label: t.label, start: t.at, end: next ? next.at : ended ? t.at! + 1000 : null, tone: t.tone };
-  });
 }
 
 function PlacementsTable({ placements, loading, tenant }: { placements: HostPlacement[]; loading: boolean; tenant: boolean }) {
