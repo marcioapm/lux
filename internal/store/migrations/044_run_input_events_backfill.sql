@@ -1,5 +1,5 @@
--- 040_run_input_events_backfill.sql — the keys of the input events
--- recorded before 039. A transaction of its own: it scans all of
+-- 044_run_input_events_backfill.sql — the keys of the input events
+-- recorded before 043. A transaction of its own: it scans all of
 -- run_events, and holds on runs and tenants only the row locks of its
 -- foreign-key checks, which do not block their writes. An event without a
 -- request id (absent or JSON null) has no key.

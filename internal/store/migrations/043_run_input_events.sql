@@ -1,4 +1,4 @@
--- 039_run_input_events.sql — luxd records each input event once per
+-- 043_run_input_events.sql — luxd records each input event once per
 -- request id and type, whatever the runner re-reports after a restart or
 -- reconnect. The key it deduplicates on is a row here, inserted with the
 -- event (ON CONFLICT DO NOTHING): one primary-key probe, not a search of
@@ -7,7 +7,7 @@
 -- Postgres does not push the non-leakproof ->> into an index condition.)
 --
 -- The table is empty here, so the foreign keys' locks on runs and tenants
--- (which block writes to them) last only as long as this file; 040 fills
+-- (which block writes to them) last only as long as this file; 044 fills
 -- it in a transaction of its own. lux_app's grants come with every
 -- migrate (ensureAppRole).
 
