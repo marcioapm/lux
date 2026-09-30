@@ -184,7 +184,7 @@ export const SLOW_PLACEMENT_S = 300;
  * the Tooltip splits the two.
  */
 export function PlacementTimeCell({ run }: { run: Run }) {
-  const total = Math.max(0, run.placementSeconds + useExtrapolated(run, run.placing));
+  const total = Math.max(0, run.placementSeconds + useExtrapolated(run, !!run.placing));
   const n = Math.max(1, run.epoch + (run.placing && !run.hostId ? 1 : 0));
   const tip = [
     `${n} placement${n === 1 ? "" : "s"}`,
