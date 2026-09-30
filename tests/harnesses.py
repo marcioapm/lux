@@ -90,7 +90,7 @@ HARNESSES = [
         name="claude",
         adapter="claude-code",
         caps=Caps(steer_joins_turn=True, steer_receipt=True, steer_in_final_step_is_next_turn=True, stop_is_sigint=True),
-        real_command=lambda: ["claude", "--model", "haiku", "--permission-mode", "bypassPermissions"],
+        real_command=lambda: ["claude", "--model", _env("LUX_TEST_CLAUDE_MODEL") or "haiku", "--permission-mode", "bypassPermissions"],
         real_secrets=lambda: [{"name": "ANTHROPIC_API_KEY", "value": _env("LUX_TEST_ANTHROPIC_API_KEY")}],
         real_env=lambda: {"ANTHROPIC_BASE_URL": b} if (b := _env("LUX_TEST_ANTHROPIC_BASE_URL")) else {},
         credentials=("LUX_TEST_ANTHROPIC_API_KEY",),
