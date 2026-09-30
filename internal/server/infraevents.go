@@ -613,6 +613,9 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 			return nil, errf(http.StatusBadRequest, "bad_request", "before and after (event ids) do not go with sort and cursors")
 		}
 		pg.idCast = "bigint"
+		if err := pg.checkIDCast(); err != nil {
+			return nil, err
+		}
 		return s.lifecycleEventsPage(ctx, p, t, owner, pg)
 	}
 	limit := 100

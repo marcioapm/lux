@@ -3,8 +3,11 @@ package server
 import (
 	"cmp"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strconv"
@@ -451,4 +454,98 @@ func TestPoolEventsPagedSort(t *testing.T) {
 func mustAtoi(s string) int {
 	n, _ := strconv.Atoi(strings.TrimLeft(s, "0"))
 	return n
+}
+
+// getError GETs path with key: the status and the error message.
+func getError(t *testing.T, s *Server, key, path string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	var body struct {
+		Error struct{ Message string }
+		// huma's own validation errors.
+		Detail string
+	}
+	json.Unmarshal(w.Body.Bytes(), &body)
+	if body.Error.Message != "" {
+		return w.Code, body.Error.Message
+	}
+	return w.Code, body.Detail
+}
+
+// Every way a paging request can be wrong is a 400 naming the parameter,
+// never a 500 from a failed cast and never a silently different page.
+func TestPagingRejects(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	key := operatorKey(t, s, ctx)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h1', 'h1', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{}', 'running')`)
+	execSQL(t, s, ctx, `INSERT INTO pool_events (pool_id, type) VALUES ('pool1', 'pool.scale_up')`)
+	b64 := func(s string) string { return url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte(s))) }
+	cur := func(c pageCursor) string { return url.QueryEscape(c.encode()) }
+	v := func(s string) *string { return &s }
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	created := pageCursor{Sort: "created", Dir: "desc", V: v("2026-09-01 12:00:00+00"), ID: "h1", At: now}
+	cases := []struct{ path, want string }{
+		{"/v1/hosts?all=true&sort=nope", "sort: one of cpu, created, heartbeat, id, memory, name, pool, runs, state, tenant, terminated, uptime"},
+		{"/v1/hosts?all=true&sort=created&limit=0", "limit: 1 to 500"},
+		{"/v1/hosts?all=true&sort=created&limit=501", "limit: 1 to 500"},
+		{"/v1/hosts?all=true&sort=created&limit=x", "limit: 1 to 500"},
+		{"/v1/hosts?all=true&next=" + url.QueryEscape("!!!"), "next: not a cursor"},
+		{"/v1/hosts?all=true&next=" + b64(`{}`), "next: not a cursor"},
+		{"/v1/hosts?all=true&prev=" + b64(`nonsense`), "prev: not a cursor"},
+		{"/v1/hosts?all=true&next=" + b64(`{"s":"created","d":"desc","i":""}`), "next: not a cursor"},
+		{"/v1/hosts?all=true&sort=name&next=" + cur(created), "next: a cursor of another sort"},
+		{"/v1/hosts?all=true&dir=asc&at=" + cur(created), "at: a cursor of another sort"},
+		{"/v1/hosts?all=true&next=" + cur(created) + "&prev=" + cur(created), "at most one of next, prev and at"},
+		{"/v1/hosts?all=true&sort=created&offset=-1", "offset: a count of hosts"},
+		{"/v1/hosts?all=true&sort=created&offset=x", "offset: a count of hosts"},
+		{"/v1/hosts?all=true&offset=5&next=" + cur(created), "offset does not go with next, prev or at"},
+		{"/v1/hosts?all=true&next=" + cur(pageCursor{Sort: "zzz", Dir: "desc", ID: "h1"}), "sort: one of cpu, created, heartbeat, id, memory, name, pool, runs, state, tenant, terminated, uptime"},
+		{"/v1/hosts?all=true&next=" + cur(pageCursor{Sort: "created", Dir: "up", V: v("2026-09-01 12:00:00+00"), ID: "h1"}), "dir: asc or desc"},
+		// A value that is not of its sort key's type, and a bad clock.
+		{"/v1/hosts?all=true&next=" + cur(pageCursor{Sort: "created", Dir: "desc", V: v("not-a-time"), ID: "h1"}), "next: not a cursor"},
+		{"/v1/hosts?all=true&prev=" + cur(pageCursor{Sort: "uptime", Dir: "desc", V: v("1.5x"), ID: "h1"}), "prev: not a cursor"},
+		{"/v1/hosts?all=true&at=" + cur(pageCursor{Sort: "state", Dir: "asc", V: v("2.5"), ID: "h1"}), "at: not a cursor"},
+		{"/v1/hosts?all=true&next=" + cur(pageCursor{Sort: "uptime", Dir: "desc", V: v("1.5"), ID: "h1", At: "yesterday"}), "next: not a cursor"},
+		{"/v1/runs?next=" + cur(pageCursor{Sort: "created", Dir: "desc", V: v("xx"), ID: "r1"}), "next: not a cursor"},
+		{"/v1/runs?next=" + cur(pageCursor{Sort: "cost", Dir: "desc", V: v("abc"), ID: "r1"}), "next: not a cursor"},
+		{"/v1/runs?next=" + cur(pageCursor{Sort: "placements", Dir: "desc", V: v("1e3"), ID: "r1"}), "next: not a cursor"},
+		{"/v1/runs?sort=created&before=2020-01-01T00:00:00Z", "before does not go with sort and cursors"},
+		{"/v1/runs?sort=created&limit=201", "limit: 1 to 200"},
+		{"/v1/pools/burst/events?owner=platform&next=" + cur(pageCursor{Sort: "time", Dir: "desc", V: v("x"), ID: "1"}), "next: not a cursor"},
+		{"/v1/pools/burst/events?owner=platform&next=" + cur(pageCursor{Sort: "time", Dir: "desc", V: v("2026-09-01 12:00:00+00"), ID: "one"}), "next: not a cursor"},
+		{"/v1/pools/burst/events?owner=platform&sort=time&before=5", "before and after (event ids) do not go with sort and cursors"},
+	}
+	for _, c := range cases {
+		if code, msg := getError(t, s, key, c.path); code != http.StatusBadRequest || msg != c.want {
+			t.Errorf("GET %s: %d %q, want 400 %q", c.path, code, msg, c.want)
+		}
+	}
+	// Values of each cast as Postgres prints them are cursors.
+	for _, c := range []pageCursor{
+		{Sort: "created", Dir: "desc", V: v("2026-09-01 12:00:00.123456+00"), ID: "h1"},
+		{Sort: "created", Dir: "desc", V: v("2026-09-01 12:00:00+05:30"), ID: "h1"},
+		{Sort: "uptime", Dir: "desc", V: v("1.5e+06"), ID: "h1", At: now},
+		{Sort: "state", Dir: "asc", V: v("2"), ID: "h1"},
+		{Sort: "state", Dir: "asc", ID: "h1"},
+	} {
+		if code, msg := getError(t, s, key, "/v1/hosts?all=true&next="+cur(c)); code != http.StatusOK {
+			t.Errorf("cursor %+v: %d %s", c, code, msg)
+		}
+	}
+	if code, msg := getError(t, s, key, "/v1/runs?next="+cur(pageCursor{Sort: "cost", Dir: "desc", V: v("12.500"), ID: "r1"})); code != http.StatusOK {
+		t.Errorf("cost cursor: %d %s", code, msg)
+	}
+	// huma validates the enums before the handler.
+	for _, path := range []string{"/v1/hosts?all=true&sort=created&dir=up", "/v1/hosts?lifecycle=gone"} {
+		if code, _ := getError(t, s, key, path); code != http.StatusUnprocessableEntity {
+			t.Errorf("GET %s: %d, want 422", path, code)
+		}
+	}
 }
