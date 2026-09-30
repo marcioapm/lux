@@ -49,6 +49,16 @@ func (c *rpcConn) attach(w io.Writer) {
 
 // call sends a request and waits for its response.
 func (c *rpcConn) call(method string, params any) (json.RawMessage, error) {
+	wait, err := c.start(method, params)
+	if err != nil {
+		return nil, err
+	}
+	return wait()
+}
+
+// start sends a request and returns once it is written; wait blocks for
+// its response.
+func (c *rpcConn) start(method string, params any) (wait func() (json.RawMessage, error), err error) {
 	id := c.nextID.Add(1)
 	ch := make(chan rpcResponse, 1)
 	c.mu.Lock()
@@ -60,11 +70,13 @@ func (c *rpcConn) call(method string, params any) (json.RawMessage, error) {
 		c.mu.Unlock()
 		return nil, err
 	}
-	r := <-ch
-	if r.Err != nil {
-		return nil, fmt.Errorf("%s: %s (%d)", method, r.Err.Message, r.Err.Code)
-	}
-	return r.Result, nil
+	return func() (json.RawMessage, error) {
+		r := <-ch
+		if r.Err != nil {
+			return nil, fmt.Errorf("%s: %s (%d)", method, r.Err.Message, r.Err.Code)
+		}
+		return r.Result, nil
+	}, nil
 }
 
 func (c *rpcConn) notify(method string, params any) error {
