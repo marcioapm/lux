@@ -728,8 +728,8 @@ func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Net
 		// Service sockets: in memory, never in the image or a snapshot.
 		"--tmpfs", proto.ShimServicesDir+":rw,size=1m,mode=0755,nosuid,nodev,noexec",
 		"--cpus", fmt.Sprintf("%g", sp.Resources.CPUs),
-		"--memory", fmt.Sprintf("%d", int64(sp.Resources.Memory)),
-		"--memory-swap", fmt.Sprintf("%d", int64(sp.Resources.Memory)),
+		"--memory", fmt.Sprintf("%d", p.r.mem.limit(int64(sp.Resources.Memory))),
+		"--memory-swap", fmt.Sprintf("%d", p.r.mem.limit(int64(sp.Resources.Memory))),
 		"--pids-limit", fmt.Sprintf("%d", sp.Resources.Pids),
 	)
 	if sp.Sandbox.ReadOnlyRoot {
