@@ -181,7 +181,7 @@ export function runColumns({ tenant, host = true, adapter = true, cost = false, 
 }
 
 /** Placement time over this many seconds reads in the warn tone. */
-export const SLOW_PLACEMENT_S = 300;
+const SLOW_PLACEMENT_S = 300;
 
 /**
  * Placement time (placementSeconds): waiting for a host plus starting on
