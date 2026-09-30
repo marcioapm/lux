@@ -41,7 +41,6 @@ jobs:
       - name: make lint
         run: make lint
 
-      # internal/cli's TestMain keeps the CLI tests off any LUX_* settings.
       - name: make unit
         run: make unit
 
