@@ -17,7 +17,7 @@ jobs:
   # go vet, gofmt and every Go test. The store tests need Postgres: the same
   # image and credentials the e2e harness uses (tests/env.py).
   go:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     services:
       postgres:
         image: postgres:18.6-alpine
@@ -59,7 +59,7 @@ jobs:
 
   # The console: typecheck, its tests, and the build luxd embeds.
   console:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
 
@@ -72,7 +72,7 @@ jobs:
 
   # The e2e harness's own configuration; no Docker.
   harness:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
 
@@ -90,7 +90,7 @@ jobs:
   # hosts, Postgres and S3 in Docker, luxd on the runner. The agent suites
   # skip without their API keys, the real-EC2 ones without --real-ec2.
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -123,6 +123,13 @@ jobs:
       - name: Install Chromium for Playwright
         working-directory: tests
         run: uv run playwright install --with-deps chromium
+
+      # The simulated hosts' Podman cannot apply AppArmor profiles, so the
+      # apparmor=unconfined a nested Run gets does nothing there, and the
+      # runner kernel's userns restriction stops pasta inside it. Real
+      # Ubuntu hosts may hit the same (follow-up: handle it in the runner).
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: e2e shard
         working-directory: tests
