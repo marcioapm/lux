@@ -40,7 +40,7 @@ event:
 | --- | --- | --- |
 | `{"requestId", "phase":"accepted", "lands", "receipt", "text"?, "truncated"?}` | `input.delivered` | the agent has taken it |
 | `{"requestId", "phase":"consumed"}` | `input.consumed` | its model's next step has it in context; only when `receipt` was true |
-| `{"requestId", "phase":"failed", "error", "text"?}` | `input.failed` | it was not delivered, or the agent dropped it unread (an interrupted turn) |
+| `{"requestId", "phase":"failed", "error", "text"?}` | `input.failed` | it was not delivered, or it can no longer be read (the Run stopped first) |
 
 - `lands`: `next_step`, read at the agent's next model step, possibly within
   the running turn; `next_turn`, read only when the running turn ends.
@@ -54,11 +54,22 @@ event:
 
 | Adapter | `lands` | `receipt` | accepted | consumed | failed |
 | --- | --- | --- | --- | --- | --- |
-| `claude-code` | `next_step` | yes | `command_lifecycle` `queued` | `command_lifecycle` `started` | `cancelled`, `discarded`, `refused`; a failed write |
-| `codex` | `next_step` | from Codex 0.155 | `turn/start` or `turn/steer` result | `item/started` of the `userMessage` whose `clientId` is the request id | a `turn/steer` refusal other than a stale turn; a turn interrupted before reading it |
-| `opencode` | `next_step` | yes, with OpenCode's server up | the steer stored (`prompt_async` 204), or a second `session/prompt` written | the first assistant `message.updated` whose `parentID` is the steer's message id | a cancelled turn before reading it; a failed write |
+| `claude-code` | `next_step` | yes | `command_lifecycle` `queued` | `command_lifecycle` `started` | `refused`; `cancelled`/`discarded` while the Run stops (or 3 times); a failed write |
+| `codex` | `next_step` | from Codex 0.155 | `turn/start` or `turn/steer` result | `item/started` of the `userMessage` whose `clientId` is the request id | a `turn/steer` refusal other than a stale turn; the Run stopping before it was read |
+| `opencode` | `next_step` | yes, with OpenCode's server up | the steer stored (`prompt_async` 204), or a second `session/prompt` written | the first assistant `message.updated` whose `parentID` is the steer's message id | the Run stopping before it was read; a failed write |
 | `acp` | `next_turn` | no | its `session/prompt` written | — | a failed write |
 | `generic` | `next_step` | no | written to stdin | — | a failed write |
+
+**An interrupt does not lose a steer.** Interrupting a turn (`lux
+interrupt`, or input with `interrupt` and no text) ends it at once, and the
+agent drops what was steered into it and not yet read. lux sends those
+inputs again, in the order they came and under the same request ids, as
+the next turn: they are consumed there, once, and never failed. Only a Run
+that is stopping fails them. Per adapter: Codex, the unread steers start
+the next `turn/start`; OpenCode, they go again through `prompt_async`
+(under a new message id) once the cancelled loop ends; Claude Code, a line
+reported `cancelled` or `discarded` after an interrupt is written again
+with a new `uuid`.
 
 Per agent:
 

@@ -103,6 +103,8 @@ type agent struct {
 	// its end and goes on (Codex, OpenCode).
 	finalStepEndsTurn bool
 	carry             []prompt
+	// dropped reports the steers a cancelled turn never read.
+	dropped func([]prompt)
 	// mcp: the MCP servers the client gave, by name. tool reports a tool
 	// call in the protocol's own events: started (result and err empty),
 	// then done.
@@ -260,10 +262,14 @@ func (a *agent) runTurn(first prompt, c chan struct{}) (cancelled bool) {
 		cancelled = a.runSteers(c)
 	}
 	// Steers accepted into a cancelled turn are dropped unread, as Codex
-	// drops them.
+	// and OpenCode drop them (Claude Code reports them cancelled).
 	a.mu.Lock()
+	dropped := a.steer
 	a.steer, a.cancel = nil, nil
 	a.mu.Unlock()
+	if a.dropped != nil {
+		a.dropped(dropped)
+	}
 	return true
 }
 
@@ -638,6 +644,14 @@ func streamJSON() {
 		}
 	}
 	var started []prompt // read in the running turn
+	a.dropped = func(ps []prompt) {
+		go func() {
+			time.Sleep(20 * time.Millisecond) // after the result
+			for _, p := range ps {
+				lifecycle(p, "cancelled")
+			}
+		}()
+	}
 	a.read = func(p prompt) {
 		started = append(started, p)
 		lifecycle(p, "started")
@@ -747,6 +761,9 @@ func streamJSON() {
 			if m.Request.Subtype == "interrupt" {
 				a.cancelTurn()
 			}
+			// interrupt_cancel_queued_v1: the lines queued behind the turn
+			// are cancelled with it (command_lifecycle cancelled, after the
+			// turn's result).
 			a.send(map[string]any{"type": "control_response", "response": map[string]any{
 				"subtype": "success", "request_id": m.RequestID, "response": map[string]any{"still_queued": []string{}}}})
 		}

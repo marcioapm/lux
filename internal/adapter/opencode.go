@@ -230,6 +230,17 @@ func (b *opencodeBus) untrack(msgID string) {
 	b.mu.Unlock()
 }
 
+// untrackRequest forgets the message ids of a request.
+func (b *opencodeBus) untrackRequest(requestID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for m, id := range b.expect {
+		if id == requestID {
+			delete(b.expect, m)
+		}
+	}
+}
+
 // answered returns the request id whose message an assistant step with
 // this parentID answers, once.
 func (b *opencodeBus) answered(parentID string) (string, bool) {

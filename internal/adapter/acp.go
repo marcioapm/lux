@@ -276,11 +276,12 @@ func (a *ACP) endTurn(data map[string]any) {
 		cancelled := a.cancelled
 		a.mu.Unlock()
 		if cancelled || data["stopReason"] == "cancelled" {
-			// A cancelled loop does not read what was steered into it; the
-			// messages stay in the conversation for the next turn.
-			for _, in := range a.inputs.unread("bus") {
-				a.inputs.fail(a.sink, in, errors.New("the turn was cancelled before the agent read it"))
-			}
+			// A cancelled loop does not read what was steered into it: the
+			// steers start the next turn (carryBus, after this turn's end).
+			defer a.carryBus()
+			a.mu.Lock()
+			a.busTurn, a.cancelled = true, false
+			a.mu.Unlock()
 		} else {
 			// A steer that reached OpenCode as its loop ended starts a loop
 			// of its own: the Run stays busy until the bus says it ended.
@@ -305,6 +306,42 @@ func (a *ACP) endTurn(data map[string]any) {
 		a.sink.Activity(true)
 	}
 	a.drain()
+}
+
+// carryBus sends the steers a cancelled loop left unread again, in order,
+// under the same request ids, so they start the next turn: OpenCode runs a
+// loop for them, which the bus follows (busTurn). Each goes under a new
+// message id, whose answering step is its consumed; the cancelled loop's
+// copy stays in the conversation, unanswered. When the Run is stopping, or
+// OpenCode refuses one, it fails instead.
+func (a *ACP) carryBus() {
+	a.mu.Lock()
+	stopped, session := a.stopped, a.session
+	a.mu.Unlock()
+	carried := false
+	for _, in := range a.inputs.unread("bus") {
+		a.bus.untrackRequest(in.RequestID)
+		if stopped {
+			a.inputs.fail(a.sink, in, errors.New("the Run stopped before the agent read it"))
+			continue
+		}
+		msgID := a.bus.messageID(time.Now())
+		a.bus.track(msgID, in.RequestID)
+		if err := a.bus.promptAsync(session, msgID, in.Text); err != nil {
+			a.bus.untrack(msgID)
+			a.inputs.fail(a.sink, in, fmt.Errorf("sending it again after the turn was cancelled: %w", err))
+			continue
+		}
+		carried = true
+	}
+	if !carried {
+		a.mu.Lock()
+		bt := a.busTurn
+		a.mu.Unlock()
+		if bt {
+			a.busTurnEnded()
+		}
+	}
 }
 
 // busTurnEnded ends a loop OpenCode ran outside any ACP prompt.
@@ -414,10 +451,12 @@ func (a *ACP) onBus(ev busEvent) {
 		end := p.SessionID == session && a.busTurn
 		cancelled := a.cancelled
 		a.mu.Unlock()
-		if end && cancelled {
-			for _, in := range a.inputs.unread("bus") {
-				a.inputs.fail(a.sink, in, errors.New("the turn was cancelled before the agent read it"))
-			}
+		if end && cancelled && len(a.inputs.unread("bus")) > 0 {
+			a.mu.Lock()
+			a.cancelled = false
+			a.mu.Unlock()
+			a.carryBus()
+			return
 		}
 		if end && len(a.inputs.unread("bus")) == 0 {
 			a.busTurnEnded()
@@ -493,12 +532,22 @@ func (a *ACP) Deliver(in proto.Input) {
 	a.mu.Lock()
 	if in.Interrupt && a.busy {
 		// Put it first, then cancel the running turn; drain sends it when
-		// the cancelled prompt returns.
-		a.queue = append([]proto.Input{in}, a.queue...)
+		// the cancelled prompt returns. An interrupt alone sends nothing:
+		// steers the turn left unread start the next one (carryBus).
+		if in.Text != "" {
+			a.queue = append([]proto.Input{in}, a.queue...)
+		}
 		session := a.session
 		a.cancelled = true
 		a.mu.Unlock()
-		_ = a.rpc.notify("session/cancel", map[string]any{"sessionId": session})
+		err := a.rpc.notify("session/cancel", map[string]any{"sessionId": session})
+		if in.Text == "" {
+			if err != nil {
+				a.inputs.fail(a.sink, in, err)
+			} else {
+				a.inputs.accept(a.sink, in, Delivery{Lands: LandsNextTurn}, "interrupt")
+			}
+		}
 		return
 	}
 	if a.opencode && a.busy && !a.busTurn && !a.stopped && !in.Interrupt && in.Text != "" {
