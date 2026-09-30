@@ -36,6 +36,15 @@ func ocStarted(t *testing.T, a *ACP) (*agentWire, *inputSink, string) {
 // The result both prompts of a joined turn get (opencode-acp-prompt-1).
 const ocResult = `"result":{"stopReason":"end_turn","usage":{"inputTokens":6,"outputTokens":5,"totalTokens":8380,"cachedReadTokens":8286,"cachedWriteTokens":83},"_meta":{}}`
 
+// The result of a prompt whose turn was cancelled.
+const ocCancelled = `"result":{"stopReason":"cancelled","_meta":{}}`
+
+// resolve answers the adapter's session/prompt id with result.
+func (w *agentWire) resolve(id, result string) {
+	w.t.Helper()
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,` + result + `}`)
+}
+
 // checkLines waits for the log's last line, then ends the agent's process
 // and waits for the adapter's Run to return (joining the adapter's own
 // goroutines), and compares the complete log.
@@ -60,8 +69,8 @@ func TestOpenCodeSteerJoinsTurnOverACP(t *testing.T) {
 		t.Fatalf("params %v", p)
 	}
 	sink.wait(t, "accepted steer-1")
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
-	w.send(`{"jsonrpc":"2.0","id":` + second + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
+	w.resolve(second, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"accepted steer-1 next_step receipt=false", "turn_end", "idle")
 }
@@ -73,10 +82,10 @@ func TestACPQueuesUntilTurnEnds(t *testing.T) {
 	w, sink, first := ocStarted(t, a)
 	a.Deliver(proto.Input{RequestID: "later", Text: "x"})
 	w.none()
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	second, _ := w.next("session/prompt")
 	sink.wait(t, "accepted later next_turn receipt=false")
-	w.send(`{"jsonrpc":"2.0","id":` + second + `,` + ocResult + `}`)
+	w.resolve(second, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_turn receipt=false", "turn_end",
 		"busy", "accepted later next_turn receipt=false", "turn_end", "idle")
 }
@@ -85,7 +94,7 @@ func TestACPQueuesUntilTurnEnds(t *testing.T) {
 func TestACPPromptNotWrittenFails(t *testing.T) {
 	a := NewACP()
 	w, sink, first := ocStarted(t, a)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	sink.waitLast(t, "idle")
 	a.rpc.lw.close()
 	a.Deliver(proto.Input{RequestID: "lost", Text: "x"})
@@ -348,7 +357,7 @@ func TestOpenCodeSteerReceiptFromBus(t *testing.T) {
 	onBus(t, a, b.answer(msgID))
 	onBus(t, a, b.answer(msgID3))
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"accepted steer-2 next_step receipt=true", "accepted steer-3 next_step receipt=true",
 		"consumed steer-2", "consumed steer-3", "turn_end", "idle")
@@ -365,7 +374,7 @@ func TestOpenCodeOneStepReadsSeveralSteers(t *testing.T) {
 	b.events <- b.answer(b.postedID(t, 1))
 	sink.wait(t, "consumed s2")
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"accepted s1 next_step receipt=true", "accepted s2 next_step receipt=true",
 		"consumed s1", "consumed s2", "turn_end", "idle")
@@ -384,7 +393,7 @@ func TestOpenCodeSteerCarriedPastInterrupt(t *testing.T) {
 	w.next("session/cancel")
 	sink.wait(t, "accepted int-1")
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	w.resolve(first, ocCancelled)
 	again := b.postedID(t, 1)
 	if again == firstID {
 		t.Fatalf("sent again under the same id %q", again)
@@ -410,7 +419,7 @@ func TestOpenCodeReservedSteerCarriedPastInterrupt(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
 	w.next("session/cancel")
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	w.resolve(first, ocCancelled)
 	waitHeld(t, a)
 	b.mu.Lock()
 	b.hold = nil
@@ -458,7 +467,7 @@ func TestOpenCodeSteerSortsAfterStoredMessages(t *testing.T) {
 	noConsumed(t, sink, "a step answering the stored message")
 	onBus(t, a, b.answer(steer))
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"accepted s1 next_step receipt=true", "consumed s1", "turn_end", "idle")
 }
@@ -501,7 +510,7 @@ func TestOpenCodeLateSteerKeepsRunBusy(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	sink.wait(t, "accepted late")
 	msgID := b.postedID(t, 0)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	waitBusTurn(t, a)
 	b.events <- b.answer(msgID)
 	sink.wait(t, "consumed late")
@@ -537,7 +546,7 @@ func TestOpenCodeLateHTTPAcceptance(t *testing.T) {
 	hold := b.holdPosts()
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	msgID := b.postedID(t, 0)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	waitHeld(t, a)
 	close(hold)
 	sink.wait(t, "accepted late")
@@ -559,7 +568,7 @@ func TestOpenCodeReservedAlreadyReadEndsOnce(t *testing.T) {
 	msgID := b.postedID(t, 0)
 	onBus(t, a, b.answer(msgID))
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	waitHeld(t, a)
 	close(hold)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
@@ -576,7 +585,7 @@ func TestOpenCodeHeldOriginalAnswerSeenLateEndsOnce(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	msg := b.postedID(t, 0)
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	waitHeld(t, a)
 	onBus(t, a, b.answer(msg))
 	close(hold)
@@ -595,7 +604,7 @@ func TestOpenCodeLoopAnsweredBeforeHTTPResponseEndsOnceAfterIdle(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	msg := b.postedID(t, 0)
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	waitHeld(t, a)
 	b.setLoop(true) // the steer's own loop
 	onBus(t, a, b.answer(msg))
@@ -641,7 +650,7 @@ func TestOpenCodeReceiptAcrossReconnect(t *testing.T) {
 	b.drop <- struct{}{}
 	b.answer(b.postedID(t, 0)) // stored, never published
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"accepted s next_step receipt=true", "consumed s", "turn_end", "idle")
 }
@@ -654,8 +663,8 @@ func TestOpenCodeFallsBackToACP(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "s", Text: "x"})
 	second, _ := w.next("session/prompt")
 	sink.wait(t, "accepted s next_step receipt=false")
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
-	w.send(`{"jsonrpc":"2.0","id":` + second + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
+	w.resolve(second, ocResult)
 	sink.waitLast(t, "idle")
 }
 
@@ -763,7 +772,7 @@ func TestOpenCodeRunJoinsItsWorkers(t *testing.T) {
 	id, _ = w.next("session/new")
 	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"sessionId":"` + ocSession + `"}}`)
 	first, _ := w.next("session/prompt")
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	<-sink.entered
 	w.out.Close()
 	// Run's shutdown has begun once its context is cancelled.
@@ -816,7 +825,7 @@ func TestOpenCodeRunLeavesNoGoroutines(t *testing.T) {
 		a.Deliver(proto.Input{RequestID: "s", Text: "x"})
 		sink.wait(t, "accepted s")
 		b.setLoop(false)
-		w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+		w.resolve(first, ocResult)
 		sink.wait(t, "turn_end")
 		_ = a.Stop()
 		w.exit()

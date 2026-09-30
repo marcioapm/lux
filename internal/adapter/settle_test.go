@@ -110,7 +110,7 @@ func settleStart(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, *testClo
 	sink.wait(t, "accepted s1")
 	msg := b.postedID(t, 0)
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	clk.waitDue(t)
 	wantPosts(t, b, 1, "first look at a stored, unanswered steer with no loop")
 	return a, b, w, sink, clk, msg
@@ -197,10 +197,10 @@ func TestOpenCodeNoACPFallbackWhileHTTPSteerUnread(t *testing.T) {
 	b.setStatus(http.StatusNoContent)
 	onBus(t, a, b.answer(httpID))
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	second, _ := w.next("session/prompt")
 	sink.wait(t, "accepted fallback")
-	w.send(`{"jsonrpc":"2.0","id":` + second + `,` + ocResult + `}`)
+	w.resolve(second, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"accepted http next_step receipt=true", "consumed http", "turn_end",
 		"busy", "accepted fallback next_step receipt=false", "turn_end", "idle")
@@ -233,9 +233,9 @@ func TestOpenCodeOwnACPFallbackNeverResendsReadSteer(t *testing.T) {
 	}
 	b.setStatus(http.StatusNoContent)
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	if joined != "" {
-		w.send(`{"jsonrpc":"2.0","id":` + joined + `,` + ocResult + `}`)
+		w.resolve(joined, ocResult)
 	}
 	for range 3 {
 		clk.fire(t)
@@ -244,7 +244,7 @@ func TestOpenCodeOwnACPFallbackNeverResendsReadSteer(t *testing.T) {
 	if joined == "" {
 		next, _ := w.next("session/prompt")
 		sink.wait(t, "accepted fallback")
-		w.send(`{"jsonrpc":"2.0","id":` + next + `,` + ocResult + `}`)
+		w.resolve(next, ocResult)
 	}
 	sink.waitLast(t, "idle")
 	wantPosts(t, b, 2, "the original two")
@@ -266,7 +266,7 @@ func TestOpenCodeRefusedCarryDoesNotInventLoop(t *testing.T) {
 	sink.wait(t, "accepted int-1")
 	b.setStatus(http.StatusBadRequest)
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	w.resolve(first, ocCancelled)
 	clk.fire(t)
 	wantPosts(t, b, 2, "the refused resend")
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
@@ -289,7 +289,7 @@ func TestOpenCodeInterruptDoesNotCarryASteerAStepFollowed(t *testing.T) {
 	w.next("session/cancel")
 	sink.wait(t, "accepted int-1")
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	w.resolve(first, ocCancelled)
 	for range 3 {
 		clk.fire(t)
 		if slices.ContainsFunc(sink.lines(), func(l string) bool { return strings.HasPrefix(l, "failed s1") }) {
@@ -328,7 +328,7 @@ func TestOpenCodeSettleResendsOnceAfterCancel(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
 	w.next("session/cancel")
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	w.resolve(first, ocCancelled)
 	clk.waitDue(t)
 	wantPosts(t, b, 1, "first look after the cancel")
 	clk.fire(t)
@@ -354,7 +354,7 @@ func TestOpenCodeSettleGivesUp(t *testing.T) {
 	w.next("session/cancel")
 	sink.wait(t, "accepted int-1")
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	w.resolve(first, ocCancelled)
 	clk.fire(t)
 	wantPosts(t, b, 2, "the one resend")
 	b.setLoop(false) // the resent copy is dropped too
@@ -382,7 +382,7 @@ func TestOpenCodeSettleGivesUpOnAMessageNeverStored(t *testing.T) {
 	b.stored = nil // lost by OpenCode
 	b.mu.Unlock()
 	b.setLoop(false)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	looks, limit := 0, int(settleGiveUp/time.Second)+3
 	for ; looks < limit && !slices.ContainsFunc(sink.lines(), func(l string) bool { return strings.HasPrefix(l, "failed s1") }); looks++ {
 		clk.fire(t)
@@ -404,7 +404,7 @@ func TestOpenCodeSettleErrorsReportNoEndWhileALoopMayRun(t *testing.T) {
 	hold := b.holdPosts()
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	msg := b.postedID(t, 0)
-	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	w.resolve(first, ocResult)
 	waitHeld(t, a)
 	b.setStatusFail(true)
 	close(hold)
