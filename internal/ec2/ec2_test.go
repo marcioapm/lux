@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/server"
 )
@@ -139,8 +140,9 @@ func TestLaunchReturnsInstanceFacts(t *testing.T) {
 	}
 }
 
-// fakeEC2 answers DescribeInstanceTypes (memMiB, or an error when 0) and
-// RunInstances, counting calls and keeping each launch's user data.
+// fakeEC2 answers DescribeInstanceTypes (memMiB, an error when 0, no answer
+// until the client gives up when negative) and RunInstances, counting calls
+// and keeping each launch's user data.
 func fakeEC2(t *testing.T, memMiB int) (url string, calls map[string]int, userData *[]string) {
 	t.Helper()
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
@@ -157,6 +159,10 @@ func fakeEC2(t *testing.T, memMiB int) (url string, calls map[string]int, userDa
 		w.Header().Set("Content-Type", "text/xml")
 		switch action {
 		case "DescribeInstanceTypes":
+			if memMiB < 0 {
+				<-r.Context().Done()
+				return
+			}
 			if memMiB == 0 {
 				w.WriteHeader(http.StatusForbidden)
 				fmt.Fprint(w, `<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>no</Message></Error></Errors><RequestID>1</RequestID></Response>`)
@@ -213,3 +219,31 @@ func TestLaunchWithoutTheInstanceTypesMemory(t *testing.T) {
 }
 
 var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// A lookup that never answers costs its own timeout, not the launch; the
+// type is not asked again while its failure is recent.
+func TestLaunchDoesNotWaitOnAHangingLookup(t *testing.T) {
+	url, calls, userData := fakeEC2(t, -1)
+	p := New(url, discard)
+	p.memoryTimeout = 100 * time.Millisecond
+	template := json.RawMessage(`{"region": "eu-west-1", "launchTemplate": "lt-1", "userData": "env", "instanceType": "c7a.8xlarge"}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for range 2 {
+		start := time.Now()
+		if _, err := p.Launch(ctx, template, nil, map[string]string{"LUX_URL": "http://luxd"}); err != nil {
+			t.Fatalf("launch failed with the lookup hanging: %v", err)
+		}
+		if d := time.Since(start); d > 2*time.Second {
+			t.Errorf("launch took %s with a %s lookup timeout", d, p.memoryTimeout)
+		}
+	}
+	if calls["DescribeInstanceTypes"] != 1 || calls["RunInstances"] != 2 {
+		t.Errorf("calls %v, want one DescribeInstanceTypes for two RunInstances", calls)
+	}
+	for _, ud := range *userData {
+		if strings.Contains(ud, "LUX_RUNNER_MEMORY") {
+			t.Errorf("user data with a memory nobody gave:\n%s", ud)
+		}
+	}
+}

@@ -42,6 +42,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -75,13 +76,23 @@ type Provider struct {
 	// memory is each instance type's memory in bytes, per region, as
 	// DescribeInstanceTypes gave it: fixed for a type, so asked once.
 	memory map[[2]string]int64
-	log    *slog.Logger
+	// memoryFailed is when each type's lookup last failed: within
+	// memoryRetryAfter of it, launches go ahead without asking again.
+	memoryFailed map[[2]string]time.Time
+	// memoryTimeout bounds one lookup, which runs before RunInstances.
+	memoryTimeout time.Duration
+	log           *slog.Logger
 }
+
+const (
+	memoryLookupTimeout = 5 * time.Second
+	memoryRetryAfter    = 10 * time.Minute
+)
 
 // New builds the provider. endpoint overrides the EC2 endpoint (tests).
 func New(endpoint string, log *slog.Logger) *Provider {
 	return &Provider{endpoint: endpoint, clients: map[string]*awsec2.Client{}, next: map[string]int{},
-		memory: map[[2]string]int64{}, log: log}
+		memory: map[[2]string]int64{}, memoryFailed: map[[2]string]time.Time{}, memoryTimeout: memoryLookupTimeout, log: log}
 }
 
 func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, error) {
@@ -263,21 +274,29 @@ func isNotFound(err error) bool {
 }
 
 // instanceMemory is instanceType's memory in bytes (DescribeInstanceTypes'
-// MemoryInfo.SizeInMiB), asked once per region and type for the process.
+// MemoryInfo.SizeInMiB), asked once per region and type for the process,
+// within memoryTimeout, and not again for memoryRetryAfter after a failure.
 func (p *Provider) instanceMemory(ctx context.Context, c *awsec2.Client, region, instanceType string) (int64, error) {
 	key := [2]string{region, instanceType}
 	if mem, ok := p.memory[key]; ok {
 		return mem, nil
 	}
+	if at, ok := p.memoryFailed[key]; ok && time.Since(at) < memoryRetryAfter {
+		return 0, fmt.Errorf("ec2 DescribeInstanceTypes failed %s ago; not asked again before %s", time.Since(at).Round(time.Second), memoryRetryAfter)
+	}
+	ctx, cancel := context.WithTimeout(ctx, p.memoryTimeout)
+	defer cancel()
 	out, err := c.DescribeInstanceTypes(ctx, &awsec2.DescribeInstanceTypesInput{
 		InstanceTypes: []types.InstanceType{types.InstanceType(instanceType)},
 	})
+	if err == nil && (len(out.InstanceTypes) != 1 || out.InstanceTypes[0].MemoryInfo == nil || aws.ToInt64(out.InstanceTypes[0].MemoryInfo.SizeInMiB) <= 0) {
+		err = errors.New("no memory in the reply")
+	}
 	if err != nil {
+		p.memoryFailed[key] = time.Now()
 		return 0, fmt.Errorf("ec2 DescribeInstanceTypes: %w", err)
 	}
-	if len(out.InstanceTypes) != 1 || out.InstanceTypes[0].MemoryInfo == nil || aws.ToInt64(out.InstanceTypes[0].MemoryInfo.SizeInMiB) <= 0 {
-		return 0, errors.New("ec2 DescribeInstanceTypes: no memory in the reply")
-	}
+	delete(p.memoryFailed, key)
 	mem := aws.ToInt64(out.InstanceTypes[0].MemoryInfo.SizeInMiB) << 20
 	p.memory[key] = mem
 	return mem, nil
