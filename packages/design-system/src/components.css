@@ -1036,6 +1036,13 @@ a.idchip-text:hover {
   text-overflow: ellipsis;
   background: var(--bg-surface);
 }
+/* A row's icon actions (IconButton size sm), right-aligned in a narrow last column. */
+.table .row-actions {
+  display: inline-flex;
+  gap: var(--sp-1);
+  justify-content: flex-end;
+  vertical-align: middle;
+}
 .table-dense td {
   height: var(--row-h-dense);
 }

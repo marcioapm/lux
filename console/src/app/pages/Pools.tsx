@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, ConfirmDialog, ListPriceNote, MoneyList, PageHeader, Sparkline, Table, useToast, type Column } from "@lux/design-system";
+import { Badge, Card, ConfirmDialog, IconButton, ListPriceNote, MoneyList, PageHeader, Sparkline, Table, useToast, type Column } from "@lux/design-system";
+import { IconPencil, IconStar } from "@lux/design-system/icons";
 import { api, errorText, type Pool, type PoolStats } from "../../api/index.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
@@ -12,8 +13,6 @@ interface PoolRow extends Pool {
   readyCount: number;
   stats?: PoolStats;
 }
-
-const RANGE_WORDS: Record<string, string> = { "1h": "1h", "6h": "6h", "24h": "24h", "7d": "7d", "30d": "30d" };
 
 /** A pool's settings in a line: its size bounds, or that it is static. */
 function settingsText(p: Pool): string {
@@ -51,29 +50,29 @@ export function Pools() {
         header: "Pool",
         cell: (p) => (
           <>
-            <Link to={poolLink(p, showTenant)}>{p.name}</Link> {p.isDefault && <Badge tone="accent">Default</Badge>}
+            <Link to={poolLink(p, showTenant)}>{p.name}</Link> {p.isDefault && <Badge tone="accent">Default</Badge>} {p.shared && <Badge tone="info">shared</Badge>}
           </>
         ),
         sortValue: (p) => p.name,
         lead: true,
-        width: 200,
+        width: 190,
       },
     ];
-    if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => (p.platform ? <span className="muted">platform</span> : p.tenant || DASH), sortValue: (p) => (p.platform ? "" : p.tenant), width: 130 });
+    if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => (p.platform ? <span className="muted">platform</span> : p.tenant || DASH), sortValue: (p) => (p.platform ? "" : p.tenant), width: 110 });
     c.push(
-      { key: "provider", header: "Provider", cell: (p) => <span className="secondary">{p.provider}</span>, sortValue: (p) => p.provider, width: 100 },
-      { key: "hosts", header: "Hosts", cell: (p) => `${p.readyCount} ready / ${p.hostCount}`, sortValue: (p) => p.readyCount * 1e6 + p.hostCount, align: "right", mono: true, width: 150 },
+      { key: "provider", header: "Provider", cell: (p) => <span className="secondary">{p.provider}</span>, sortValue: (p) => p.provider, width: 90 },
+      { key: "hosts", header: "Hosts", cell: (p) => `${p.readyCount} ready / ${p.hostCount}`, sortValue: (p) => p.readyCount * 1e6 + p.hostCount, align: "right", mono: true, width: 130 },
       {
         key: "cpu",
         header: "CPU allocated",
         cell: (p) => (p.stats && p.stats.capacityCpus > 0 ? <UsageBar used={p.stats.allocatedCpus} total={p.stats.capacityCpus} unit="cores" /> : DASH),
         sortValue: (p) => (p.stats && p.stats.capacityCpus > 0 ? p.stats.allocatedCpus / p.stats.capacityCpus : null),
         sortFirst: "desc",
-        width: 170,
+        width: 160,
       },
       {
         key: "runs",
-        header: `Runs (${RANGE_WORDS[range] ?? range})`,
+        header: `Runs (${range})`,
         cell: (p) =>
           p.stats ? (
             <span className="spark-row">
@@ -85,7 +84,7 @@ export function Pools() {
           ),
         sortValue: (p) => p.stats?.runsStarted,
         sortFirst: "desc",
-        width: 160,
+        width: 150,
       },
       {
         key: "fails",
@@ -94,11 +93,11 @@ export function Pools() {
         sortValue: (p) => p.stats?.launchFailures,
         align: "right",
         mono: true,
-        width: 116,
+        width: 112,
       },
-      { key: "cost", header: `Cost (${RANGE_WORDS[range] ?? range})`, cell: (p) => (p.stats ? <MoneyList amounts={p.stats.cost} /> : DASH), sortValue: costValue, align: "right", mono: true, width: 130 },
-      { key: "settings", header: "Settings", cell: (p) => <span className="muted">{settingsText(p)}</span>, sortValue: (p) => settingsText(p), optional: true },
-      { key: "shared", header: "Shared", cell: (p) => (p.shared ? <Badge tone="info">shared</Badge> : DASH), sortValue: (p) => (p.shared ? 1 : 0), sortFirst: "desc", width: 90, optional: true },
+      { key: "cost", header: `Cost (${range})`, cell: (p) => (p.stats ? <MoneyList amounts={p.stats.cost} /> : DASH), sortValue: costValue, align: "right", mono: true, width: 120 },
+      // The one column without a width: it takes what is left.
+      { key: "settings", header: "Settings", cell: (p) => <span className="muted">{settingsText(p)}</span>, sortValue: (p) => settingsText(p) },
       {
         key: "actions",
         header: "",
@@ -107,35 +106,35 @@ export function Pools() {
         // pool's page: the buttons' click and Enter stay here.
         cell: (p) =>
           operator || !p.platform ? (
-            <>
+            <span className="row-actions">
               {!p.isDefault && (
-                <Button
+                <IconButton
                   size="sm"
-                  variant="ghost"
+                  label="Make default"
                   onClick={(e) => {
                     e.stopPropagation();
                     setMarking(p);
                   }}
                   onKeyDown={(e) => e.stopPropagation()}
                 >
-                  Make default
-                </Button>
-              )}{" "}
-              <Button
+                  <IconStar size={14} />
+                </IconButton>
+              )}
+              <IconButton
                 size="sm"
-                variant="ghost"
+                label="Rename"
                 onClick={(e) => {
                   e.stopPropagation();
                   setRenaming(p);
                 }}
                 onKeyDown={(e) => e.stopPropagation()}
               >
-                Rename
-              </Button>
-            </>
+                <IconPencil size={14} />
+              </IconButton>
+            </span>
           ) : null,
         align: "right",
-        width: 200,
+        width: 80,
       },
     );
     return c;
@@ -182,7 +181,7 @@ export function Pools() {
         title="Pools"
         description={
           <>
-            <span>{rows.length} pools · Runs, launch failures and cost over the last {RANGE_WORDS[range] ?? range}; hosts now (terminated excluded)</span>
+            <span>{rows.length} pools · Runs, launch failures and cost over the last {range}; hosts now (terminated excluded)</span>
             <ListPriceNote>costs are list prices</ListPriceNote>
           </>
         }
