@@ -31,23 +31,26 @@ on another host with its conversation intact.
 
 An input sent while the agent works reaches it at its **next model step**
 where the adapter can: after the tool call running now (which is not
-cancelled), within the same turn. The shim reports each input as `lux.input`
-records in the output, one per phase, at most once per request id and
-phase (redelivery after a reconnect included), and luxd records each as an
-event:
+cancelled), within the same turn. The shim reports each input's first
+answer as exactly one `lux.input` record, and what happens to it after it
+was accepted as records of their own, each at most once per request id
+(redelivery after a reconnect included). luxd records each as an event:
 
 | Record | Event | When |
 | --- | --- | --- |
-| `{"requestId", "phase":"accepted", "lands", "receipt", "text"?, "truncated"?}` | `input.delivered` | the agent has taken it |
-| `{"requestId", "phase":"consumed"}` | `input.consumed` | its model's next step has it in context; only when `receipt` was true |
-| `{"requestId", "phase":"failed", "error", "text"?}` | `input.failed` | it was not delivered, or it can no longer be read (the Run stopped first) |
+| `lux.input` `{"requestId", "phase":"accepted", "lands", "receipt", "text"?, "truncated"?}` | `input.delivered` | the agent has taken it |
+| `lux.input` `{"requestId", "phase":"failed", "error", "text"?}` | `input.failed` | it was never accepted |
+| `lux.input.consumed` `{"requestId"}` | `input.consumed` | its model's next step has it in context; only when `receipt` was true |
+| `lux.input.failed` `{"requestId", "error"}` | `input.failed` | accepted, but it can no longer be read (the Run stopped first, the agent dropped it); never after `lux.input.consumed` |
 
 - `lands`: `next_step`, read at the agent's next model step, possibly within
   the running turn; `next_turn`, read only when the running turn ends.
-- `receipt`: whether a `consumed` record will follow.
+- `receipt`: whether a `lux.input.consumed` will follow (or, if the input is
+  lost first, a `lux.input.failed`).
 - The workload's first prompt is reported the same way, as request id
-  `prompt`. A consumer that ignores `phase` sees what it always did: one
-  record per input, with `error` on failure.
+  `prompt`. A consumer that knows only `lux.input` and ignores `phase`
+  sees what it always did: one record per input, with `error` on failure.
+  A runner or luxd from before these records ignores the two later types.
 - A Run says what its adapter does before anything is sent:
   `steer: {lands, receipt}` on `GET /v1/runs/{id}`. The accepted record is
   what holds for each input (a Codex older than 0.155 has no receipt).

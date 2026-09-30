@@ -598,14 +598,18 @@ func (s *Server) applyAdapterEvent(ctx context.Context, tx pgx.Tx, tenantID, run
 		addEvent(ctx, tx, tenantID, runID, epoch, "activity", map[string]any{"activity": ev.Activity})
 	}
 	if ev.InputAck != "" {
-		return applyInputEvent(ctx, tx, tenantID, runID, epoch, ev)
+		if err := applyInputEvent(ctx, tx, tenantID, runID, epoch, ev); err != nil {
+			return err
+		}
+	}
+	if p := ev.InputProgress; p != nil && p.RequestID != "" {
+		return applyInputProgress(ctx, tx, tenantID, runID, epoch, *p)
 	}
 	return nil
 }
 
-// applyInputEvent records an input's phase as input.delivered (accepted),
-// input.consumed or input.failed, once per request id and type: the runner
-// re-reports what it tails after a restart or reconnect.
+// applyInputEvent records an input's first answer (lux.input) as
+// input.delivered (accepted) or input.failed.
 func applyInputEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, ev proto.AdapterEvent) error {
 	phase := ev.InputPhase
 	if phase == "" {
@@ -617,8 +621,6 @@ func applyInputEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epo
 	d := map[string]any{"requestId": ev.InputAck, "phase": phase}
 	typ := "input.delivered"
 	switch phase {
-	case proto.InputConsumed:
-		typ = "input.consumed"
 	case proto.InputFailed:
 		typ, d["error"] = "input.failed", ev.InputError
 	case proto.InputAccepted:
@@ -628,17 +630,33 @@ func applyInputEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epo
 	default:
 		return nil
 	}
-	if phase != proto.InputConsumed {
-		if ev.InputText != "" {
-			d["text"] = ev.InputText
-		}
-		if ev.InputTruncated {
-			d["truncated"] = true
-		}
+	if ev.InputText != "" {
+		d["text"] = ev.InputText
 	}
+	if ev.InputTruncated {
+		d["truncated"] = true
+	}
+	return addInputEvent(ctx, tx, tenantID, runID, epoch, typ, ev.InputAck, d)
+}
+
+// applyInputProgress records what happened to an accepted input
+// (lux.input.consumed, lux.input.failed) as input.consumed or input.failed.
+func applyInputProgress(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, p proto.InputProgress) error {
+	switch p.Phase {
+	case proto.InputConsumed:
+		return addInputEvent(ctx, tx, tenantID, runID, epoch, "input.consumed", p.RequestID, map[string]any{"requestId": p.RequestID})
+	case proto.InputFailed:
+		return addInputEvent(ctx, tx, tenantID, runID, epoch, "input.failed", p.RequestID, map[string]any{"requestId": p.RequestID, "error": p.Error})
+	}
+	return nil
+}
+
+// addInputEvent adds an input event once per request id and type: the
+// runner re-reports what it tails after a restart or reconnect.
+func addInputEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, typ, requestID string, d map[string]any) error {
 	var seen bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM run_events WHERE run_id = $1 AND type = $2 AND data->>'requestId' = $3)`,
-		runID, typ, ev.InputAck).Scan(&seen); err != nil || seen {
+		runID, typ, requestID).Scan(&seen); err != nil || seen {
 		return err
 	}
 	return addEvent(ctx, tx, tenantID, runID, epoch, typ, d)

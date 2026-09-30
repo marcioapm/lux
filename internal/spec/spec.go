@@ -316,7 +316,7 @@ type AdapterInfo struct {
 // Steer is what an adapter does with input sent while the agent works.
 type Steer struct {
 	Lands   string `json:"lands" enum:"next_step,next_turn" doc:"When the agent reads input sent while it works: next_step, at its next model step (possibly within the running turn); next_turn, only once the running turn ends."`
-	Receipt bool   `json:"receipt" doc:"The adapter can report when the agent read an input (lux.input phase consumed). Each input's accepted record says whether it will: it will not for Codex below 0.155, Claude Code without msg_lifecycle_v1, or an opencode command lux did not build."`
+	Receipt bool   `json:"receipt" doc:"The adapter can report when the agent read an input (a lux.input.consumed record, an input.consumed event). Each input's accepted record says whether it will: it will not for Codex below 0.155, Claude Code without msg_lifecycle_v1, or an opencode command lux did not build."`
 }
 
 // Duration marshals as a Go duration string ("4h", "90s").

@@ -180,7 +180,7 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "postInput", Method: http.MethodPost, Path: "/v1/runs/{id}/input", Tags: []string{"interactive"},
 		Summary:       "Steer a running Run",
-		Description:   "Agents get text as a message, read at their next model step where the adapter can (the Run's steer says), else when the current turn ends; generic workloads get it on stdin. Its progress is lux.input records (phase accepted, then consumed where the adapter has a receipt, or failed) and input.delivered, input.consumed and input.failed events. A stopped Run takes its input through resume instead.",
+		Description:   "Agents get text as a message, read at their next model step where the adapter can (the Run's steer says), else when the current turn ends; generic workloads get it on stdin. Its first answer is one lux.input record (phase accepted, or failed) and an input.delivered or input.failed event; after acceptance, lux.input.consumed (where the adapter has a receipt) or lux.input.failed records, and input.consumed or input.failed events. A stopped Run takes its input through resume instead.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict},
 	}, "run", s.postInput)
