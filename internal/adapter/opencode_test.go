@@ -186,10 +186,10 @@ func newFakeBus(t *testing.T) *fakeBus {
 func (b *fakeBus) port() int { return b.srv.Listener.Addr().(*net.TCPAddr).Port }
 
 // answer stores a model step answering parent, as OpenCode does before it
-// publishes it.
+// publishes it, under an id of OpenCode's own generator.
 func (b *fakeBus) answer(parent string) string {
 	b.mu.Lock()
-	id := fmt.Sprintf("msg_ffffffffffff%014d", len(b.stored))
+	id := fmt.Sprintf("msg_%012x%014d", time.Now().UnixMilli()*0x1000&(1<<48-1), len(b.stored))
 	b.stored = append(b.stored, map[string]string{"id": id, "role": "assistant", "parentID": parent})
 	b.mu.Unlock()
 	return assistant(parent)
@@ -373,7 +373,49 @@ func TestOpenCodeReservedSteerCarriedPastInterrupt(t *testing.T) {
 		"turn_end", "accepted s1 next_step receipt=true", "consumed s1", "turn_end", "idle")
 }
 
-// Message ids sort after each other, as OpenCode orders messages by id.
+// A step answering a message lux did not send reads no steer, however the
+// two generators' ids sort: OpenCode's per-millisecond counter can be ahead
+// of lux's in the same millisecond, so its original prompt sorts after a
+// steer sent at once.
+func TestOpenCodeUntrackedParentReadsNothing(t *testing.T) {
+	b := newOpencodeBus(1, "/")
+	steer, prompt := "msg_0f29d9777001AAAAAAAAAAAAAA", "msg_0f29d9777002AAAAAAAAAAAAAA"
+	b.track(steer, "s1", 0)
+	if got := b.answered(prompt); len(got) != 0 {
+		t.Fatalf("original prompt parent %s receipts later steer %s: %q", prompt, steer, got)
+	}
+	if got := b.answered(steer); !slices.Equal(got, []string{"s1"}) {
+		t.Fatalf("the steer's own step: %q", got)
+	}
+}
+
+// A resumed session whose stored messages carry ids ahead of this clock
+// (written on a host whose clock ran ahead): a steer still sorts after
+// them, and a step answering one of them reads no steer.
+func TestOpenCodeSteerSortsAfterStoredMessages(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	ahead := fmt.Sprintf("msg_%012x%s", (time.Now().Add(time.Hour).UnixMilli()*0x1000+7)&(1<<48-1), "BBBBBBBBBBBBBB")
+	b.mu.Lock()
+	b.stored = append(b.stored, map[string]string{"id": ahead, "role": "user"})
+	b.mu.Unlock()
+	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
+	sink.wait(t, "accepted s1")
+	steer := b.postedID(t, 0)
+	if steer <= ahead {
+		t.Fatalf("steer %s sorts before the stored %s", steer, ahead)
+	}
+	onBus(t, a, b.answer(ahead))
+	noConsumed(t, sink, "a step answering the stored message")
+	onBus(t, a, b.answer(steer))
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted s1 next_step receipt=true", "consumed s1", "turn_end", "idle")
+}
+
+// Message ids sort after each other, as OpenCode orders messages by id,
+// within a millisecond, past its 4,096 counter values, and when the clock
+// steps back.
 func TestOpenCodeMessageIDsAscend(t *testing.T) {
 	b := newOpencodeBus(1, "/")
 	now := time.UnixMilli(1790776809335)
@@ -382,6 +424,20 @@ func TestOpenCodeMessageIDsAscend(t *testing.T) {
 		id := b.messageID(now.Add(time.Duration(i/2) * time.Millisecond))
 		if id <= prev || !strings.HasPrefix(id, "msg_0f29d977") {
 			t.Fatalf("%s after %s", id, prev)
+		}
+		prev = id
+	}
+	for i := range 5001 {
+		at := now.Add(time.Millisecond)
+		switch {
+		case i == 5000:
+			at = now.Add(2 * time.Millisecond)
+		case i%1000 == 999:
+			at = now.Add(-time.Second)
+		}
+		id := b.messageID(at)
+		if id <= prev {
+			t.Fatalf("#%d: %s after %s", i, id, prev)
 		}
 		prev = id
 	}
