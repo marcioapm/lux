@@ -119,3 +119,19 @@ def test_s3_port_precedence(env, port):
         cwd=TESTS_DIR, env={**clean, **env}, capture_output=True, text=True, check=True,
     ).stdout
     assert int(out) == port
+
+
+def test_clean_environ_drops_the_developers_lux_settings(monkeypatch):
+    from env import clean_environ
+
+    for k, v in {"LUX_TENANT": "their-tenant", "LUX_URL": "https://their.lux", "LUX_API_KEY": "theirs",
+                 "LUX_CONFIG": "/etc/their/luxd.toml", "XDG_CONFIG_HOME": "/home/them/.config",
+                 "LUX_TEST_S3_PORT": "59100", "LUX_DEBUG": "1", "PATH_FOR_TEST": "kept"}.items():
+        monkeypatch.setenv(k, v)
+    env = clean_environ()
+    for gone in ("LUX_TENANT", "LUX_URL", "LUX_API_KEY", "XDG_CONFIG_HOME"):
+        assert gone not in env, gone
+    # An empty config file: not theirs, and not /etc/lux/luxd.toml either.
+    config = Path(env["LUX_CONFIG"])
+    assert config.read_text() == "" and config.stat().st_mode & 0o077 == 0
+    assert env["LUX_TEST_S3_PORT"] == "59100" and env["LUX_DEBUG"] == "1" and env["PATH_FOR_TEST"] == "kept"

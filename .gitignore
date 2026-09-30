@@ -11,3 +11,6 @@ __pycache__/
 .claude/
 /node_modules/
 .suite-seconds.json
+
+# The e2e harness's empty luxd config (tests/env.py).
+tests/.luxd-empty.toml

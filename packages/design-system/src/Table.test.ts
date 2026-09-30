@@ -26,3 +26,7 @@ test("the floor leaves each flexible column 140px beside percentage columns", ()
   expect(tableFloor(cols)).toBe(Math.ceil(744 / 0.78));
   expect(tableFloor([{ width: 100 }, {}])).toBe(240);
 });
+
+test("a malformed percentage width counts as none, not NaN", () => {
+  expect(tableFloor([{ width: "%" }, {}])).toBe(140);
+});

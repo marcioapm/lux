@@ -38,7 +38,7 @@ export function tableFloor(columns: readonly Pick<Column<unknown>, "width">[]): 
   let pct = 0;
   for (const c of columns) {
     if (typeof c.width === "number") fixed += c.width;
-    else if (typeof c.width === "string" && c.width.endsWith("%")) pct += parseFloat(c.width) / 100;
+    else if (typeof c.width === "string" && c.width.endsWith("%")) pct += parseFloat(c.width) / 100 || 0;
     else fixed += c.width ? 120 : FLEX_MIN;
   }
   return Math.ceil(fixed / Math.max(1 - pct, 0.1));
