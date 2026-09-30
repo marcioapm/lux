@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
@@ -72,7 +73,7 @@ func TestLaunchOutcomeFailedVersusLaunchedThenTerminated(t *testing.T) {
 		t.Fatalf("GET launched host: %d", code)
 	}
 	if f.State != "terminated" || f.Launch == nil || f.Launch.Outcome != "failed" || f.Launch.FinishedAt == nil ||
-		f.Launch.Error == "" || f.Launch.RequestedAt == nil {
+		f.Launch.Error != providerErrorText(refused) || f.Launch.Error != refused.Error() || f.Launch.RequestedAt == nil {
 		t.Errorf("failed launch: %+v %+v", f, f.Launch)
 	}
 	if f.Times["terminated"] != nil || f.Times["terminateRequested"] != nil {
@@ -98,6 +99,47 @@ func TestLaunchOutcomeFailedVersusLaunchedThenTerminated(t *testing.T) {
 	}
 	if code := getJSON(t, s, key, "/v1/hosts", &list); code != http.StatusOK || len(list.Hosts) != 0 {
 		t.Errorf("live hosts: %+v, want none", list.Hosts)
+	}
+}
+
+// blockingProvider's Launch waits for release, after telling started.
+type blockingProvider struct {
+	fakeLaunchProvider
+	started, release chan struct{}
+}
+
+func (p *blockingProvider) Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (Launched, error) {
+	close(p.started)
+	<-p.release
+	return p.fakeLaunchProvider.Launch(ctx, template, tags, env)
+}
+
+// While the provider has not answered, the launch is requested (with its
+// request time and no answer); then launched.
+func TestLaunchOutcomeRequestedUntilAnswered(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
+	key := operatorKey(t, s, ctx)
+	pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2", TenantID: new("t1")}
+	p := &blockingProvider{fakeLaunchProvider{launched: Launched{ProviderID: "i-slow"}}, make(chan struct{}), make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- s.launch(ctx, p, pl, nil) }()
+	<-p.started
+	id := queryOne[string](t, s, `SELECT id FROM hosts`)
+	var mid hostView
+	if code := getJSON(t, s, key, "/v1/hosts/"+id, &mid); code != http.StatusOK || mid.Launch == nil ||
+		mid.Launch.Outcome != "requested" || mid.Launch.RequestedAt == nil || mid.Launch.FinishedAt != nil {
+		close(p.release)
+		t.Fatalf("in flight: %d %+v", code, mid.Launch)
+	}
+	close(p.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if o := queryOne[string](t, s, `SELECT launch_outcome FROM hosts WHERE id = $1`, id); o != "launched" {
+		t.Fatalf("answered: %s", o)
 	}
 }
 

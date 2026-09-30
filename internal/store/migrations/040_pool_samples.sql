@@ -1,5 +1,6 @@
--- 040_pool_samples.sql — a pool's history, per pool id (rename keeps it; a
--- new pool of an old name starts its own), sampled with system_samples and
+-- 040_pool_samples.sql — a pool's history, per pool id (a rename keeps it;
+-- so does a pool removed and set again under its name, which is the same
+-- row and id), sampled with system_samples and
 -- rolled up and expired as they are (docs/telemetry.md). History starts
 -- when this ships: nothing is backfilled.
 --

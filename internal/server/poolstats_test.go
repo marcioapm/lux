@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -77,6 +78,208 @@ func poolFixture(t *testing.T, s *Server, ctx context.Context) map[string]string
 	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool_id, allocated, unallocated) VALUES
 		($1, 'compute', 'compute', 'USD', 'hp', 'p-shared', 0.40, 0.25)`, hour)
 	return keys
+}
+
+// poolFixtureMore adds to poolFixture what the figures need to tell right
+// from wrong: a tenant b host on the shared pool (tenant a must not count
+// it), two launch failures on p-a (one in range, one 3 days old) and one on
+// the shared platform pool whose error names an account, a retired pool, a
+// plugin-family cost line with no pool_id (it goes by ra's pool), a
+// tenant b launch failure on the shared pool (the newest), 11 more
+// Runs on the shared pool with cost, and a second queued Run.
+func poolFixtureMore(t *testing.T, s *Server, ctx context.Context) {
+	t.Helper()
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider, retired) VALUES ('p-old', 'ta', 'gone', 'static', true)`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, capacity) VALUES
+		('hb-shared', 'tb', 'hb-shared', 'p-shared', 'ready', '{"cpus": 16, "memory": 1000}')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, launch_outcome, launch_finished_at, launch_error, terminated_at) VALUES
+		('fa-new', 'ta', 'fa-new', 'p-a', 'terminated', now() - interval '10 minutes', 'failed', now() - interval '10 minutes', 'InsufficientInstanceCapacity', now() - interval '10 minutes'),
+		('fa-old', 'ta', 'fa-old', 'p-a', 'terminated', now() - interval '3 days', 'failed', now() - interval '3 days', 'old error', now() - interval '3 days'),
+		('fp', NULL, 'fp', 'p-shared', 'terminated', now() - interval '5 minutes', 'failed', now() - interval '5 minutes', 'UnauthorizedOperation arn:aws:iam::123456789012:role/x', now() - interval '5 minutes'),
+		('fb', 'tb', 'fb', 'p-shared', 'terminated', now() - interval '1 minute', 'failed', now() - interval '1 minute', 'b error', now() - interval '1 minute')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, pool_id, current_epoch, created_at, needs_host_since, name) VALUES
+		('rb3', 'tb', '{}', 'submitted', 'p-shared', 0, now() - interval '20 minutes', now() - interval '20 minutes', 'run-b3')`)
+	execSQL(t, s, ctx, `UPDATE runs SET needs_host_since = now() - interval '5 minutes' WHERE id = 'rb2'`)
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount) VALUES
+		($1, 'ta', 'ra', 'llm', 'llm', 'USD', NULL, NULL, 0.02)`, hour)
+	for i := range 11 {
+		id := fmt.Sprintf("rx%02d", i)
+		execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, pool_id, current_epoch, first_started_at, name) VALUES
+			($1, 'ta', '{}', 'succeeded', 'p-shared', 1, now() - interval '90 minutes', $1)`, id)
+		execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount) VALUES
+			($1, 'ta', $2, 'compute', 'compute', 'EUR', 'hp', 'p-shared', $3)`, hour, id, fmt.Sprintf("0.%02d", i+1))
+	}
+}
+
+// The figures of stats, metrics and cost, exactly, with the pool's hosts
+// seen as GET /v1/hosts shows them to each caller and a platform pool's
+// provider errors only an operator's.
+func TestPoolFigures(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	keys := poolFixture(t, s, ctx)
+	poolFixtureMore(t, s, ctx)
+	if err := s.sampleSystem(ctx); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, s, ctx, `UPDATE pool_samples SET at = at - interval '1 minute'`)
+	get := func(who, path string, out any) {
+		t.Helper()
+		if code := getJSON(t, s, keys[who], path, out); code != http.StatusOK {
+			t.Fatalf("%s GET %s: %d", who, path, code)
+		}
+	}
+	// Stats: tenant a sees the shared pool's platform host, not b's; one
+	// launch failure in range on its own pool; starts per hour; no retired.
+	stats := func(who, q string) map[string]PoolStats {
+		t.Helper()
+		var list struct{ Pools []PoolStats }
+		get(who, "/v1/pools/stats"+q, &list)
+		by := map[string]PoolStats{}
+		for _, p := range list.Pools {
+			by[p.ID] = p
+		}
+		return by
+	}
+	a := stats("a", "?since=2h")
+	if _, ok := a["p-old"]; ok || len(a) != 2 {
+		t.Fatalf("a's pools: %v", a)
+	}
+	if sh := a["p-shared"]; sh.Hosts["ready"] != 1 || sh.CapacityCPUs != 8 || sh.LaunchFailures != 1 {
+		t.Errorf("a's shared pool: hosts %v cpus %v launch failures %d, want 1 ready of 8 cpus and 1", sh.Hosts, sh.CapacityCPUs, sh.LaunchFailures)
+	}
+	// ra, ra-own started 3 minutes ago (the last hour); the rx Runs 90
+	// minutes ago (the first).
+	if own := a["p-a"]; own.LaunchFailures != 1 || fmt.Sprint(own.RunsHourly) != "[0 1]" || own.RunsStarted != 1 {
+		t.Errorf("a's own pool: launch failures %d, hourly %v", own.LaunchFailures, own.RunsHourly)
+	}
+	if sh := a["p-shared"]; fmt.Sprint(sh.RunsHourly) != "[11 1]" || sh.RunsStarted != 12 {
+		t.Errorf("a's shared pool: hourly %v started %d, want [11 1] and 12", sh.RunsHourly, sh.RunsStarted)
+	}
+	// Cost on the shared pool for a: ra's compute 0.10 and llm 0.02 (no
+	// pool_id: by ra's pool), and 0.01..0.11 EUR.
+	if c := money(a["p-shared"].Cost); c["USD"] != "0.12" || c["EUR"] != "0.66" {
+		t.Errorf("a's shared cost %v, want USD 0.12, EUR 0.66", c)
+	}
+	if op := stats("op", "?since=2h")["p-shared"]; op.Hosts["ready"] != 2 || op.CapacityCPUs != 24 || op.LaunchFailures != 2 {
+		t.Errorf("operator's shared pool: %+v", op)
+	}
+
+	// Metrics now: the same host rule, launch failures in range, the
+	// oldest queued, the platform pool's provider error for operators only.
+	var m metricsBody
+	get("a", "/v1/pools/shared/metrics?owner=platform&since=1h", &m)
+	if m.Now.Hosts["ready"] != 1 || m.Now.CapacityCPUs != 8 || m.Now.LaunchFailures != 1 || m.Now.LastLaunchError != "" {
+		t.Errorf("a's shared metrics: %+v", m.Now)
+	}
+	var mb struct {
+		metricsBody
+		HistoryFrom *time.Time
+	}
+	get("b", "/v1/pools/shared/metrics?owner=platform&since=1h", &mb)
+	if mb.Now.Hosts["ready"] != 2 || mb.Now.Queued != 2 || mb.Now.OldestQueuedAt == nil || time.Since(*mb.Now.OldestQueuedAt) < 19*time.Minute {
+		t.Errorf("b's shared metrics: %+v", mb.Now)
+	}
+	var mo metricsBody
+	get("op", "/v1/pools/shared/metrics?owner=platform&since=1h", &mo)
+	if mo.Now.LastLaunchError != "b error" || mo.Now.LaunchFailures != 2 {
+		t.Errorf("operator's shared metrics: %+v", mo.Now)
+	}
+	mo = metricsBody{}
+	get("op", "/v1/pools/shared/metrics?owner=platform&since=1h&tenant=a", &mo)
+	if mo.Now.LastLaunchError != "" {
+		t.Errorf("operator narrowed to a sees the platform's launch error: %q", mo.Now.LastLaunchError)
+	}
+	m = metricsBody{}
+	get("a", "/v1/pools/own/metrics?since=1h", &m)
+	if m.Now.LaunchFailures != 1 || m.Now.LastLaunchError != "InsufficientInstanceCapacity" {
+		t.Errorf("a's own pool metrics: %+v", m.Now)
+	}
+	get("a", "/v1/pools/own/metrics?since=4d&res=3600", &m)
+	if m.Now.LaunchFailures != 2 {
+		t.Errorf("a's own pool over 4 days: %d launch failures, want 2", m.Now.LaunchFailures)
+	}
+	// The same through the host list: a tenant never reads a platform
+	// host's provider error, its own hosts' it does.
+	var hl struct {
+		Hosts []struct {
+			ID     string
+			Launch *HostLaunch
+		}
+	}
+	for who, want := range map[string]map[string]string{
+		"a":  {"fa-new": "InsufficientInstanceCapacity", "fa-old": "old error", "fp": ""},
+		"op": {"fa-new": "InsufficientInstanceCapacity", "fa-old": "old error", "fb": "b error", "fp": "UnauthorizedOperation arn:aws:iam::123456789012:role/x"},
+	} {
+		for _, path := range []string{"/v1/hosts?state=launch_failed", "/v1/hosts?state=launch_failed&sort=name"} {
+			hl.Hosts = nil
+			get(who, path, &hl)
+			got := map[string]string{}
+			for _, h := range hl.Hosts {
+				got[h.ID] = h.Launch.Error
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("%s %s: errors %v, want %v", who, path, got, want)
+			}
+		}
+		var one hostView
+		get(who, "/v1/hosts/fp", &one)
+		if one.Launch == nil || one.Launch.Outcome != "failed" || one.Launch.Error != want["fp"] {
+			t.Errorf("%s GET /v1/hosts/fp: %+v", who, one.Launch)
+		}
+	}
+	hl.Hosts = nil
+	get("op", "/v1/hosts?state=launch_failed&tenant=a", &hl)
+	for _, h := range hl.Hosts {
+		if h.ID == "fp" && h.Launch.Error != "" {
+			t.Errorf("operator narrowed to a reads fp's error")
+		}
+	}
+
+	// History: the first sample.
+	execSQL(t, s, ctx, `INSERT INTO pool_samples (pool_id, tenant_id, res, at) VALUES ('p-shared', '', 0, now() - interval '30 minutes')`)
+	get("b", "/v1/pools/shared/metrics?owner=platform&since=1h&res=0", &mb)
+	if mb.HistoryFrom == nil || time.Since(*mb.HistoryFrom) < 29*time.Minute || len(mb.Samples) != 2 {
+		t.Errorf("historyFrom %v, samples %d", mb.HistoryFrom, len(mb.Samples))
+	}
+
+	// The sampler: launch failures in its window on p-a; no row for the
+	// retired pool with nothing on it.
+	if n := queryOne[int](t, s, `SELECT count(*) FROM pool_samples WHERE pool_id = 'p-old'`); n != 0 {
+		t.Errorf("retired pool sampled: %d rows", n)
+	}
+	execSQL(t, s, ctx, `DELETE FROM pool_samples`)
+	execSQL(t, s, ctx, `DELETE FROM system_samples`)
+	execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, window_end) VALUES ('', 0, now() - interval '1 hour', now() - interval '20 minutes')`)
+	if err := s.sampleSystem(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := queryOne[string](t, s, `SELECT launches || '/' || launch_failures FROM pool_samples WHERE pool_id = 'p-a' AND tenant_id = '' AND res = 0`); got != "1/1" {
+		t.Errorf("p-a sample launches/failures %s, want 1/1", got)
+	}
+
+	// Cost: the costliest 10 per currency; the plugin family by its Run's
+	// pool; host time only for an operator not narrowed to a tenant.
+	var c costBody
+	get("a", "/v1/pools/shared/cost?owner=platform&since=6h", &c)
+	var eur []string
+	for _, r := range c.TopRuns {
+		if r.Currency == "EUR" {
+			eur = append(eur, r.ID+"="+r.Amount)
+		}
+	}
+	if want := "[rx10=0.11 rx09=0.1 rx08=0.09 rx07=0.08 rx06=0.07 rx05=0.06 rx04=0.05 rx03=0.04 rx02=0.03 rx01=0.02]"; fmt.Sprint(eur) != want {
+		t.Errorf("EUR top runs %v, want %s", eur, want)
+	}
+	if got := money(c.Totals); got["USD"] != "0.12" || got["EUR"] != "0.66" {
+		t.Errorf("a's shared cost totals %v", got)
+	}
+	c = costBody{}
+	get("op", "/v1/pools/shared/cost?owner=platform&since=6h&tenant=a", &c)
+	if len(c.Idle) != 0 || len(c.Hosts) != 0 || len(c.HostSeries) != 0 || money(c.Totals)["USD"] != "0.12" {
+		t.Errorf("operator narrowed to a: idle %v hosts %v series %v totals %v", c.Idle, c.Hosts, c.HostSeries, c.Totals)
+	}
 }
 
 func money(ms []MoneyAmount) map[string]string {
@@ -187,8 +390,9 @@ func TestPoolMetricsAndCostTenantIsolation(t *testing.T) {
 	}
 }
 
-// A pool's history follows its id: a rename keeps it, and a pool removed
-// and a new one set with its old name keep theirs apart.
+// A pool's history follows its id: a rename keeps it, and so does removing
+// the pool and setting it again under its name (DELETE then POST revives
+// the retired row, with its id).
 func TestPoolMetricsRenameAndRecreate(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -208,16 +412,24 @@ func TestPoolMetricsRenameAndRecreate(t *testing.T) {
 	if code := getJSON(t, s, keys["a"], "/v1/pools/renamed/cost?since=6h", &c); code != http.StatusOK || money(c.Totals)["USD"] != "1" {
 		t.Fatalf("renamed pool cost: %d %+v", code, c.Totals)
 	}
-	// The old name, taken by a new pool: none of the old one's history.
-	execSQL(t, s, ctx, `UPDATE pools SET retired = true WHERE id = 'p-a'`)
-	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('p-a2', 'ta', 'own', 'static')`)
+	// Removed, then set again under its name: the same pool, its history
+	// continued.
+	if code, body := call(t, s, keys["a"], http.MethodDelete, "/v1/pools/renamed", nil); code != http.StatusNoContent && code != http.StatusOK {
+		t.Fatalf("delete: %d %s", code, body)
+	}
+	if code, body := call(t, s, keys["a"], http.MethodPost, "/v1/pools", Pool{Name: "renamed", Provider: "static"}); code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("recreate: %d %s", code, body)
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM pools WHERE tenant_id = 'ta' AND name = 'renamed'`); n != 1 {
+		t.Fatalf("pools named renamed: %d", n)
+	}
 	m = metricsBody{}
-	if code := getJSON(t, s, keys["a"], "/v1/pools/own/metrics?since=1h", &m); code != http.StatusOK || m.PoolID != "p-a2" || len(m.Samples) != 0 {
-		t.Fatalf("new pool of an old name: %d %s %+v", code, m.PoolID, m.Samples)
+	if code := getJSON(t, s, keys["a"], "/v1/pools/renamed/metrics?since=1h", &m); code != http.StatusOK || m.PoolID != "p-a" || len(m.Samples) != 1 {
+		t.Fatalf("re-created pool: %d %s %+v", code, m.PoolID, m.Samples)
 	}
 	c = costBody{}
-	if code := getJSON(t, s, keys["a"], "/v1/pools/own/cost?since=6h", &c); code != http.StatusOK || len(c.Totals) != 0 {
-		t.Fatalf("new pool of an old name, cost: %d %+v", code, c.Totals)
+	if code := getJSON(t, s, keys["a"], "/v1/pools/renamed/cost?since=6h", &c); code != http.StatusOK || c.PoolID != "p-a" || money(c.Totals)["USD"] != "1" {
+		t.Fatalf("re-created pool, cost: %d %+v", code, c.Totals)
 	}
 }
 
