@@ -586,39 +586,32 @@ func (a *ACP) settle() {
 	now, waiting := a.clock.now(), false
 	for _, in := range a.inputs.unread("bus") {
 		msgID, gen := a.bus.messageOf(in.RequestID)
-		if !stored[msgID] {
-			// Accepted (204) and never stored, with no loop running.
-			a.mu.Lock()
-			since, seen := a.suspect[msgID]
-			if !seen {
-				a.suspect[msgID] = now
-			}
-			a.mu.Unlock()
-			if seen && now.Sub(since) >= settleGiveUp {
-				a.bus.untrackRequest(in.RequestID)
-				a.inputs.fail(a.sink, in, errors.New("OpenCode accepted it and never stored it"))
-				continue
-			}
-			waiting = true
-			continue
-		}
 		a.mu.Lock()
 		since, seen := a.suspect[msgID]
 		if !seen {
 			a.suspect[msgID] = now
 		}
 		cancelled := a.cancelGen > gen
-		wait := 3 * a.settleEvery
-		if cancelled {
-			wait = a.settleEvery
-		}
 		// A copy dropped by an interrupt is sent again; that copy, dropped
 		// without one, is given settleGiveUp to be read.
 		giveUp := !cancelled && a.resent[in.RequestID]
-		if giveUp {
+		a.mu.Unlock()
+		if !stored[msgID] {
+			// Accepted (204) and never stored, with no loop running.
+			if seen && now.Sub(since) >= settleGiveUp {
+				a.failSteer(in, errors.New("OpenCode accepted it and never stored it"))
+				continue
+			}
+			waiting = true
+			continue
+		}
+		wait := 3 * a.settleEvery
+		switch {
+		case cancelled:
+			wait = a.settleEvery
+		case giveUp:
 			wait = settleGiveUp
 		}
-		a.mu.Unlock()
 		if !seen || now.Sub(since) < wait {
 			waiting = true
 			continue
@@ -632,18 +625,11 @@ func (a *ACP) settle() {
 		followed := lastStep >= steerMs>>12
 		switch {
 		case giveUp:
-			a.bus.untrackRequest(in.RequestID)
-			a.inputs.fail(a.sink, in, errors.New("OpenCode stored it and never read it, also when sent again"))
+			a.failSteer(in, errors.New("OpenCode stored it and never read it, also when sent again"))
 		case !cancelled:
-			// The loop that could have read it ran to its end: lux cannot
-			// tell whether it did (a step answering a message OpenCode
-			// stored under its own id reads it unseen), so it is not sent
-			// again.
-			a.bus.untrackRequest(in.RequestID)
-			a.inputs.fail(a.sink, in, errors.New(uncertainNoStep))
+			a.failSteer(in, errors.New(uncertainNoStep))
 		case followed:
-			a.bus.untrackRequest(in.RequestID)
-			a.inputs.fail(a.sink, in, errors.New(uncertainCancelled))
+			a.failSteer(in, errors.New(uncertainCancelled))
 		case a.carry(ctx, session, in):
 			waiting = true
 		}
@@ -653,6 +639,13 @@ func (a *ACP) settle() {
 		return
 	}
 	a.busTurnEnded()
+}
+
+// failSteer fails a steer sent over HTTP and stops following its message
+// ids on the bus.
+func (a *ACP) failSteer(in proto.Input, err error) {
+	a.bus.untrackRequest(in.RequestID)
+	a.inputs.fail(a.sink, in, err)
 }
 
 // recheck settles again in settleEvery, unless a look is already due;
