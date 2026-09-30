@@ -184,20 +184,12 @@ export const SLOW_PLACEMENT_S = 300;
  * the Tooltip splits the two.
  */
 export function PlacementTimeCell({ run }: { run: Run }) {
-  useNow(); // re-render on the shared clock
-  const now = Date.now();
-  let seen = runSeenAt.get(run);
-  if (seen === undefined) {
-    seen = now;
-    runSeenAt.set(run, now);
-  }
-  const grow = run.placing ? Math.min(now - seen, RUNTIME_EXTRAPOLATE_MS) / 1000 : 0;
-  const total = run.placementSeconds + grow;
+  const total = Math.max(0, run.placementSeconds + useExtrapolated(run, run.placing));
   const n = Math.max(1, run.epoch + (run.placing && !run.hostId ? 1 : 0));
   const tip = [
     `${n} placement${n === 1 ? "" : "s"}`,
-    `waiting for a host ${formatDuration(run.placementWaitSeconds)}`,
-    `starting ${formatDuration(run.placementStartSeconds)}`,
+    `waiting for a host ${formatDuration(Math.max(0, run.placementWaitSeconds))}`,
+    `starting ${formatDuration(Math.max(0, run.placementStartSeconds))}`,
     run.placing ? "so far: still being placed" : "",
   ]
     .filter(Boolean)
@@ -216,20 +208,30 @@ const runSeenAt = new WeakMap<Run, number>();
 const RUNTIME_EXTRAPOLATE_MS = 60_000;
 
 /**
- * Time the Run's placements have spent running, summed (runtimeSeconds);
- * ticks on the shared clock while a placement runs (runtimeSince). An en
- * dash for a Run that has never run.
+ * Seconds to add to a figure of this response while it is still growing
+ * (growing): the time since the response was first rendered, up to
+ * RUNTIME_EXTRAPOLATE_MS. Re-renders on the shared clock.
  */
-function RuntimeCell({ run }: { run: Run }) {
-  useNow(); // re-render on the shared clock
+function useExtrapolated(run: Run, growing: boolean): number {
+  useNow();
   const now = Date.now();
   let seen = runSeenAt.get(run);
   if (seen === undefined) {
     seen = now;
     runSeenAt.set(run, now);
   }
+  return growing ? Math.min(now - seen, RUNTIME_EXTRAPOLATE_MS) / 1000 : 0;
+}
+
+/**
+ * Time the Run's placements have spent running, summed (runtimeSeconds);
+ * ticks on the shared clock while a placement runs (runtimeSince). An en
+ * dash for a Run that has never run; never below zero.
+ */
+export function RuntimeCell({ run }: { run: Run }) {
+  const grow = useExtrapolated(run, !!run.runtimeSince);
   if (!run.runtimeSince && !run.runtimeSeconds) return DASH;
-  const secs = run.runtimeSeconds + (run.runtimeSince ? Math.min(now - seen, RUNTIME_EXTRAPOLATE_MS) / 1000 : 0);
+  const secs = Math.max(0, run.runtimeSeconds + grow);
   return <span>{formatDuration(secs >= 1 ? Math.floor(secs) : secs)}</span>;
 }
 
