@@ -105,6 +105,11 @@ Per agent:
   is not sent as a second `session/prompt` (OpenCode would store it under
   an id of its own, and the step answering it would read the first steer
   unseen); it is accepted and sent as the next turn's prompt.
+  A second turn end is reported only when OpenCode is seen running
+  another loop after the ACP turn ended: its status busy then, a step
+  answering a steer whose `prompt_async` returned after that end, or a
+  steer sent again that OpenCode accepted. A step of the turn's own loop
+  seen late, or a resend OpenCode refused, adds none.
 - **Generic ACP** agents keep a queue: the ACP spec does not say what a
   second prompt during a turn does.
 
