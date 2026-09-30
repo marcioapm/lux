@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import { Badge, Button, Card, DurationCell, formatBytes, formatCores, HOST_STATE_LIST, hostDisplayState, PageHeader, Pagination, RelativeTime, SegmentedControl, Select, Table, Tooltip, useNow, type Column } from "@lux/design-system";
-import { api, type Host } from "../../api/index.ts";
+import { api, type Host, type HostSummary } from "../../api/index.ts";
 import { usePaged } from "../paged.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
@@ -178,11 +178,7 @@ export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: s
         description={
           <span>
             {q.total != null ? `${q.total.toLocaleString()} ${filtered ? "matching " : ""}hosts · ` : ""}
-            {summary.data
-              ? `${summary.data.live} live · ready and draining: ${formatCores(summary.data.allocated.cpus)} of ${formatCores(summary.data.capacity.cpus)} CPU, ${formatBytes(summary.data.allocated.memory)} of ${formatBytes(summary.data.capacity.memory)} memory allocated`
-              : summary.error
-                ? "summary unavailable"
-                : DASH}
+            {summaryText(summary.data, summary.error)}
           </span>
         }
       />
@@ -190,4 +186,12 @@ export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: s
       {table}
     </div>
   );
+}
+
+/** The header's live totals: a dash while the first read is pending. */
+function summaryText(s: HostSummary | undefined, error: unknown): ReactNode {
+  if (s) {
+    return `${s.live} live · ready and draining: ${formatCores(s.allocated.cpus)} of ${formatCores(s.capacity.cpus)} CPU, ${formatBytes(s.allocated.memory)} of ${formatBytes(s.capacity.memory)} memory allocated`;
+  }
+  return error ? "summary unavailable" : DASH;
 }
