@@ -33,25 +33,14 @@ KEPT_LUX_ENV = ("LUX_DEBUG",)
 def clean_environ() -> dict[str, str]:
     """This process's environment for a lux binary, without the developer's
     own lux settings, which would point it at their deployment: LUX_*
-    (LUX_TENANT, LUX_URL...), their config files (a luxd with no LUX_CONFIG
-    reads /etc/lux/luxd.toml; the CLI reads $XDG_CONFIG_HOME/lux/config.toml).
-    Each caller sets what it needs. The harness's own LUX_TEST_* stay, and
-    KEPT_LUX_ENV."""
+    (LUX_TENANT, LUX_URL...) and the CLI's config ($XDG_CONFIG_HOME/lux).
+    Each caller sets what it needs; a luxd also gets a LUX_CONFIG of its
+    own (TestEnvironment.luxd_config). The harness's own LUX_TEST_* stay,
+    and KEPT_LUX_ENV."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("LUX_") or k.startswith("LUX_TEST_") or k in KEPT_LUX_ENV}
     env.pop("XDG_CONFIG_HOME", None)
-    env["LUX_CONFIG"] = str(_empty_luxd_config())
     return env
-
-
-def _empty_luxd_config() -> Path:
-    """An empty luxd config file, mode 600 (luxd warns about one others can
-    read, as /dev/null is). Emptied and re-moded every time, so a stale or
-    edited copy never reaches a test luxd."""
-    path = Path(__file__).resolve().parent / ".luxd-empty.toml"
-    path.write_bytes(b"")
-    path.chmod(0o600)
-    return path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -371,6 +360,16 @@ class TestEnvironment:
     def data_dir(self) -> str:
         return str(Path(self.log_dir) / "luxd-data")
 
+    def luxd_config(self) -> str:
+        """This environment's luxd config file: empty, so luxd reads no
+        /etc/lux/luxd.toml, and 600, so it does not warn that others can
+        read it (as it would /dev/null)."""
+        path = Path(self.log_dir) / "luxd.toml"
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(mode=0o600)
+        return str(path)
+
     def luxd_env(self) -> dict[str, str]:
         return {
             "LUX_DATABASE_URL": self.app_dsn,
@@ -538,7 +537,7 @@ class TestEnvironment:
     def _migrate(self) -> None:
         result = subprocess.run(
             [str(BIN_DIR / "luxd"), "migrate"],
-            env={**clean_environ(), "LUX_DATABASE_URL": self.owner_dsn, "LUX_APP_PASSWORD": PG_APP_PASSWORD},
+            env={**clean_environ(), "LUX_CONFIG": self.luxd_config(), "LUX_DATABASE_URL": self.owner_dsn, "LUX_APP_PASSWORD": PG_APP_PASSWORD},
             capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -552,7 +551,7 @@ class TestEnvironment:
         # outlives the harness.
         proc = subprocess.Popen(
             [str(BIN_DIR / "luxd"), "serve"],
-            env={**clean_environ(), **self.luxd_env(), **self.extra.get("luxd_env", {}), **overrides},
+            env={**clean_environ(), "LUX_CONFIG": self.luxd_config(), **self.luxd_env(), **self.extra.get("luxd_env", {}), **overrides},
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
         )
         (Path(self.log_dir) / "luxd.pid").write_text(str(proc.pid))
@@ -607,7 +606,7 @@ class TestEnvironment:
     def luxd_admin(self, *args: str) -> dict:
         result = subprocess.run(
             [str(BIN_DIR / "luxd"), "admin", *args],
-            env={**clean_environ(), "LUX_DATABASE_URL": self.owner_dsn},
+            env={**clean_environ(), "LUX_CONFIG": self.luxd_config(), "LUX_DATABASE_URL": self.owner_dsn},
             capture_output=True, text=True,
         )
         if result.returncode != 0:

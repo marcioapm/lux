@@ -129,9 +129,6 @@ def test_clean_environ_drops_the_developers_lux_settings(monkeypatch):
                  "LUX_TEST_S3_PORT": "59100", "LUX_DEBUG": "1", "PATH_FOR_TEST": "kept"}.items():
         monkeypatch.setenv(k, v)
     env = clean_environ()
-    for gone in ("LUX_TENANT", "LUX_URL", "LUX_API_KEY", "XDG_CONFIG_HOME"):
+    for gone in ("LUX_TENANT", "LUX_URL", "LUX_API_KEY", "LUX_CONFIG", "XDG_CONFIG_HOME"):
         assert gone not in env, gone
-    # An empty config file: not theirs, and not /etc/lux/luxd.toml either.
-    config = Path(env["LUX_CONFIG"])
-    assert config.read_text() == "" and config.stat().st_mode & 0o077 == 0
     assert env["LUX_TEST_S3_PORT"] == "59100" and env["LUX_DEBUG"] == "1" and env["PATH_FOR_TEST"] == "kept"

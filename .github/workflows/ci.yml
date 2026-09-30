@@ -41,11 +41,8 @@ jobs:
       - name: make lint
         run: make lint
 
-      # Unset in CI, but a developer's LUX_TENANT changes CLI queries: keep
-      # it empty so the CLI tests see what they expect.
+      # internal/cli's TestMain keeps the CLI tests off any LUX_* settings.
       - name: make unit
-        env:
-          LUX_TENANT: ""
         run: make unit
 
       # The store tests skip when Postgres is unreachable: here it must
