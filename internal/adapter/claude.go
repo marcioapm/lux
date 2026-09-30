@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -179,7 +180,30 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 		}
 		sink.Event("claude."+m.Type, json.RawMessage(append([]byte{}, line...)))
 	}
+	c.exited()
 	return nil
+}
+
+// exited fails every line written that Claude Code never started, once
+// its stdout has ended (the process exited or its output broke off):
+// nothing reads them now. SIGINT (Stop) ends with an aborted result and
+// exit, without a lifecycle frame for queued lines. A line already read is
+// left alone.
+func (c *Claude) exited() {
+	c.mu.Lock()
+	why := errors.New("the agent exited before it read it")
+	if c.stopping {
+		why = errors.New("the Run stopped before the agent read it")
+	}
+	sent := c.sent
+	c.sent = nil
+	sink := c.sink
+	c.mu.Unlock()
+	for _, in := range sent {
+		if c.inputs.open(in.RequestID) {
+			c.inputs.fail(sink, in, why)
+		}
+	}
 }
 
 // claudeUUID is the uuid a request id's line carries: derived from it
