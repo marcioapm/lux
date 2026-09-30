@@ -1879,19 +1879,17 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 	default:
 		where = append(where, "h.state = "+arg(in.State))
 	}
-	pg, paged, err := resolvePaging(in.PageQuery, hostSortKeys, "created", in.Limit, 25, 500)
+	pq := in.PageQuery
+	if pq == (PageQuery{Dir: pq.Dir}) && (in.Limit != "" || in.Offset != "") {
+		// limit or offset alone pages too, newest first (a dir alone is ignored).
+		pq = PageQuery{Sort: "created"}
+	}
+	pg, paged, err := resolvePaging(pq, hostSortKeys, "created", in.Limit, 25, 500)
 	if err != nil {
 		return nil, err
 	}
-	if in.Offset != "" && pg != nil && pg.cursor != nil {
+	if in.Offset != "" && paged && pg.cursor != nil {
 		return nil, errf(http.StatusBadRequest, "bad_request", "offset does not go with next, prev or at")
-	}
-	if !paged && (in.Limit != "" || in.Offset != "") {
-		pg, _, err = resolvePaging(PageQuery{Sort: "created"}, hostSortKeys, "created", in.Limit, 25, 500)
-		if err != nil {
-			return nil, err
-		}
-		paged = true
 	}
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		if !paged {
