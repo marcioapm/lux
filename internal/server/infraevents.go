@@ -677,18 +677,22 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 }
 
 // eventKeys is the SQL of a page's keys: id, and v (the sort value expr,
-// when not empty), of an owner's events matching where, in order. Reading
-// only these, an index on the keys that includes tenant_id (043) serves
-// the page and row-level security alone and stops at the page's end; the
-// caller then reads the page's rows by id. Reading every column instead,
-// the planner's low estimate of the rows the policy passes makes it sort
-// all of the owner's events.
+// when not empty), of an owner's events matching where, in order (any
+// order when order is empty: an existence probe). Reading only these, an
+// index on the keys that includes tenant_id (043, 044) serves the page and
+// row-level security alone and stops at the page's end; the caller then
+// reads the page's rows by id. Reading every column instead, the planner's
+// low estimate of the rows the policy passes makes it sort all of the
+// owner's events.
 func eventKeys(t eventTable, expr, where, order string, limit int) string {
 	cols := "id"
 	if expr != "" {
 		cols += ", " + expr + " AS v"
 	}
-	return `SELECT ` + cols + ` FROM ` + t.table + ` WHERE ` + where + ` ORDER BY ` + order + ` LIMIT ` + strconv.Itoa(limit)
+	if order != "" {
+		where += ` ORDER BY ` + order
+	}
+	return `SELECT ` + cols + ` FROM ` + t.table + ` WHERE ` + where + ` LIMIT ` + strconv.Itoa(limit)
 }
 
 // lifecycleEventsPage is a page of an owner's events in a sort key's
@@ -702,14 +706,17 @@ func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTa
 		read := func(ahead *keyRow) ([]LifecycleEvent, []keyRow, error) {
 			q, _, expr := pg.keySource(t.table, "", []any{owner})
 			where, limit, reversed := t.owner+` = $1`, pg.limit+1, pg.mode == "before"
+			order := ""
 			if ahead != nil {
-				// The nearest event ahead of the page first.
 				where += " AND " + pg.beforeWhere(expr, "id", *ahead, q.arg)
-				limit, reversed = 1, !reversed
-			} else if pg.cursor != nil {
-				where += " AND " + pg.where(expr, "id", q.arg)
+				limit = 1
+			} else {
+				if pg.cursor != nil {
+					where += " AND " + pg.where(expr, "id", q.arg)
+				}
+				order = pg.order(expr, "id", reversed)
 			}
-			keySQL := eventKeys(t, expr, where, pg.order(expr, "id", reversed), limit)
+			keySQL := eventKeys(t, expr, where, order, limit)
 			rows, err := tx.Query(ctx, `SELECT e.id, e.type, e.data, e.count, e.created_at, e.last_at, k.id::text, k.v::text FROM (`+
 				keySQL+`) k JOIN `+t.table+` e ON e.id = k.id ORDER BY `+pg.order("k.v", "k.id", reversed), q.list...)
 			if err != nil {
