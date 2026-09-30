@@ -132,8 +132,7 @@ jobs:
       - name: Let nested Podman's pasta run unconfined
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          for p in /etc/apparmor.d/usr.bin.pas*; do [ -e "$p" ] && sudo apparmor_parser -R "$p" || true; done
-          sudo aa-status | grep -iE 'pasta|passt' || echo "no pasta/passt profile loaded"
+          sudo apparmor_parser -R /etc/apparmor.d/usr.bin.pas* 2>/dev/null || true
 
       - name: e2e shard
         working-directory: tests
