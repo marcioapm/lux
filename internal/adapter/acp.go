@@ -65,10 +65,13 @@ type ACP struct {
 	// endHeld: the ACP turn's acp.turn_end, held while that turn ended with
 	// reservations: whether a steer in flight joined that loop or starts
 	// another is known only once it is accepted. extraLoop: after the ACP
-	// turn ended, OpenCode ran another loop (status busy, a steer answered
-	// only then, or one sent again), which gets a turn end of its own.
-	endHeld   map[string]any
-	extraLoop bool
+	// turn ended, OpenCode ran another loop (status busy then, a step
+	// answering a steer admittedLate, or one sent again), which gets a turn
+	// end of its own. admittedLate: message ids of steers whose prompt_async
+	// returned after the ACP turn ended.
+	endHeld      map[string]any
+	extraLoop    bool
+	admittedLate map[string]bool
 	// endMu keeps the held turn end before the next loop's.
 	endMu sync.Mutex
 	// cancelGen counts the session/cancels sent.
@@ -103,7 +106,7 @@ func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
 // NewOpenCode is the ACP adapter for OpenCode.
 func NewOpenCode() *ACP {
 	return &ACP{ready: make(chan struct{}), opencode: true, steerKick: make(chan struct{}, 1),
-		suspect: map[string]time.Time{}, resent: map[string]bool{}, settleEvery: time.Second, clock: wallClock{}}
+		suspect: map[string]time.Time{}, resent: map[string]bool{}, admittedLate: map[string]bool{}, settleEvery: time.Second, clock: wallClock{}}
 }
 
 // settleClock is the time settle reads and schedules its next look by.
@@ -466,15 +469,19 @@ func (a *ACP) receipts(ctx context.Context) (map[string]bool, bool) {
 	return stored, true
 }
 
-// read consumes the steers a model step answering parent has read. A step
-// first seen once the ACP turn has ended ran in a loop after it.
+// read consumes the steers a model step answering parent has read. The
+// step ran in a loop after the ACP turn's only if parent's prompt_async
+// returned after that turn ended (admittedLate): a step of the ACP turn's
+// own loop can be seen late, since stdout, the bus and stored messages are
+// read separately.
 func (a *ACP) read(parent string) {
 	ids := a.bus.answered(parent)
 	if len(ids) == 0 {
 		return
 	}
 	a.mu.Lock()
-	after := a.busTurn
+	after := a.busTurn && a.admittedLate[parent]
+	delete(a.admittedLate, parent)
 	a.mu.Unlock()
 	if after {
 		a.anotherLoop()
@@ -700,6 +707,7 @@ func (a *ACP) busTurnEnded() {
 	held, extra := a.endHeld, a.extraLoop
 	a.busTurn, a.busy, a.endHeld, a.extraLoop = false, false, nil, false
 	clear(a.resent)
+	clear(a.admittedLate)
 	idle := len(a.queue) == 0
 	a.mu.Unlock()
 	switch {
@@ -774,6 +782,13 @@ func (a *ACP) steer(in proto.Input) {
 		a.mu.Unlock()
 		err := a.bus.promptAsync(ctx, session, msgID, in.Text)
 		if err == nil {
+			// Already answered (untracked): the ACP turn's own loop read it.
+			tracked, _ := a.bus.messageOf(in.RequestID)
+			a.mu.Lock()
+			if a.busTurn && tracked == msgID {
+				a.admittedLate[msgID] = true
+			}
+			a.mu.Unlock()
 			a.inputs.accept(a.sink, in, Delivery{Lands: LandsNextStep, Receipt: true}, "bus")
 		} else {
 			a.bus.untrack(msgID)
