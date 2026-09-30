@@ -9,6 +9,9 @@ capabilities, never its name.
 
 from __future__ import annotations
 
+import json
+import time
+
 from conftest import harnesses
 from env import wait_until
 
@@ -62,22 +65,103 @@ def test_interrupt_ends_the_turn_not_the_run(lux, runners, hosts, harness):
     assert "never" not in lux.logs(run_id).lower().split()
 
 
+TURN_ENDS = ("codex.turn/completed", "claude.result", "acp.turn_end")
+
+
+def _input_records(lux, run_id: str, request_id: str) -> list[dict]:
+    """The lux.input records of one input, in output order."""
+    return [r["event"]["data"] for r in lux.records(run_id, "--events")
+            if r.get("event", {}).get("type") == "lux.input" and r["event"]["data"].get("requestId") == request_id]
+
+
+def _check_phases(lux, run_id: str, harness, request_id: str) -> None:
+    """accepted, then consumed where the adapter has a receipt: once each,
+    in order, in the output and as luxd events."""
+    want = ["accepted", "consumed"] if harness.caps.steer_receipt else ["accepted"]
+    try:
+        recs = wait_until(lambda: (r := _input_records(lux, run_id, request_id)) and len(r) >= len(want) and r,
+                          harness.timeout, 0.5, f"no lux.input records for {request_id}")
+    except AssertionError as e:
+        warnings = [r["event"]["data"] for r in lux.records(run_id, "--events")
+                    if r.get("event", {}).get("type") == "lux.warning"]
+        raise AssertionError(f"{e}: {_input_records(lux, run_id, request_id)}; warnings: {warnings}") from None
+    assert [r["phase"] for r in recs] == want, recs
+    lands = "next_step" if harness.caps.steer_joins_turn else "next_turn"
+    assert recs[0]["lands"] == lands and recs[0]["receipt"] == harness.caps.steer_receipt, recs[0]
+    events = [e["type"] for e in lux.json("events", run_id)
+              if e["type"].startswith("input.") and e["data"].get("requestId") == request_id]
+    assert events == ["input.delivered", "input.consumed"][:len(want)], events
+
+
+def _steer_mid_tool(lux, harness, run_id: str, marker: str, steer: str, request_id: str) -> None:
+    """Steer once the turn's tool (its sleep) is running."""
+    if harness.real:
+        wait_until(lambda: any(marker in json.dumps(r.get("event", {})) for r in lux.records(run_id, "--events")),
+                   harness.timeout, 0.5, "the agent never ran its tool")
+        time.sleep(2)
+    else:
+        lux.wait_output(run_id, marker)
+    lux.run("steer", run_id, steer, "--request-id", request_id)
+
+
 def test_mid_turn_steering(lux, runners, hosts, harness):
-    """Input sent during a turn is never lost. Where the protocol can, it
-    joins the running turn (Codex); otherwise it runs after it."""
+    """Input sent while the agent's tool runs is never lost, and the tool is
+    not cancelled. Where the protocol can, it is read at the agent's next
+    step, in the running turn; otherwise it runs after it. lux says when
+    the input was accepted and, where it can, when the agent read it."""
+    runners.start(hosts[0])
+    token = f"{int(time.time() * 1000) % 1000000:06d}"
+    if harness.real:
+        prompt = ("Run `sleep 20 && echo FIRST` with your shell tool. Wait for its output; only after that, "
+                  "in a separate tool call, run `echo SECOND`. Then reply DONE. One tool call at a time.")
+        steer = f"Before anything else after the current command, run `echo STEER-{token}`, then continue."
+        marker, first_out, steered, second = "sleep 20", "FIRST", f"STEER-{token}", "SECOND"
+    else:
+        prompt, steer = "echo turn-one\nsleep 3\necho turn-one-done", f"echo steered-{token}"
+        marker, first_out, steered, second = "turn-one", "turn-one", f"steered-{token}", "turn-one-done"
+    run_id = lux.submit(harness.spec(prompt))
+    _steer_mid_tool(lux, harness, run_id, marker, steer, "mid-1")
+    wait_until(lambda: steered in lux.logs(run_id) or any(steered in json.dumps(r.get("event", {}))
+                                                          for r in lux.records(run_id, "--events")),
+               harness.timeout, 0.5, "the steer never ran")
+    lux.wait_activity(run_id, "idle", timeout=harness.timeout)
+    records = lux.records(run_id, "--events")
+    everything = "\n".join(json.dumps(r) for r in records) + lux.logs(run_id)
+    # The tool that was running when the steer came finished.
+    assert first_out in everything and "cancelled" not in lux.logs(run_id).split(), everything[-2000:]
+    turn_ends = [r for r in records if r.get("event", {}).get("type") in TURN_ENDS]
+    if harness.caps.steer_joins_turn:
+        assert len(turn_ends) == 1, turn_ends
+        if not harness.real:
+            out = lux.logs(run_id)
+            assert out.index(steered) < out.index(second), out
+    else:
+        assert len(turn_ends) == 2, turn_ends
+        out = lux.logs(run_id)
+        assert out.index(second) < out.index(steered), out
+    _check_phases(lux, run_id, harness, "mid-1")
+    # Once each: the prompt's too.
+    assert [r["phase"] for r in _input_records(lux, run_id, "prompt")][0] == "accepted"
+    lux.run("cancel", run_id)
+
+
+@harnesses(lambda h: h.caps.steer_joins_turn)
+def test_steer_in_the_final_step(lux, runners, hosts, harness):
+    """A steer that arrives during the turn's final step (no tool call
+    follows) is still read: in the same turn, or as the next turn where the
+    agent ends its turn first (Claude Code)."""
     if harness.real:
         import pytest
         pytest.skip("depends on scripted timing")
     runners.start(hosts[0])
-    run_id = lux.submit(harness.spec("echo turn-one\nsleep 2\necho turn-one-done"))
-    lux.wait_output(run_id, "turn-one")
-    lux.run("steer", run_id, "echo steered")
-    out = lux.wait_output(run_id, "steered")
-    assert out.index("turn-one-done") < out.index("steered")
+    run_id = lux.submit(harness.spec("echo last-step\nsleep 3"))
+    lux.wait_output(run_id, "last-step")
+    lux.run("steer", run_id, "echo after-last", "--request-id", "final-1")
+    lux.wait_output(run_id, "after-last")
     lux.wait_activity(run_id, "idle")
-    turn_ends = [r for r in lux.records(run_id, "--events")
-                 if r.get("event", {}).get("type") in ("codex.turn/completed", "claude.result", "acp.turn_end")]
-    assert len(turn_ends) == (1 if harness.caps.steer_joins_turn else 2), turn_ends
+    turn_ends = [r for r in lux.records(run_id, "--events") if r.get("event", {}).get("type") in TURN_ENDS]
+    assert len(turn_ends) == (2 if harness.caps.steer_in_final_step_is_next_turn else 1), turn_ends
+    _check_phases(lux, run_id, harness, "final-1")
 
 
 def test_stop_resume_elsewhere_and_remember(lux, runners, hosts, harness):
