@@ -180,8 +180,9 @@ Make default `IconStar`, Rename `IconPencil`).
 `table-layout: fixed`; columns with a `width` keep it and
 the rest share the remainder. `lead` marks the name column, `optional`
 columns drop out when the table's container is under 1100px, or when with
-them a column without a width would get under 140px (a State pill beside a
-Cost column at 1100–1300px reads whole; `dropsOptional`). Below the
+them the table would not fit: a column without a width would get under
+140px, or, when every column has one, their sum is wider than the container
+(`dropsOptional`). Below the
 table's minimum width (the column widths, or `minWidth`) it scrolls sideways
 with the first column pinned.
 

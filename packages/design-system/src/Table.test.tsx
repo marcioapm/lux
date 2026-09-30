@@ -6,8 +6,8 @@ import { eventSortInWords } from "./EventTable.tsx";
 import { dropsOptional, firstSortDir, sortInWords, sortRows, Table, type Column, type SortState } from "./Table.tsx";
 import { rangeText } from "./TimeRangePicker.tsx";
 
-// The Runs list's widths: name 22%, Id, State flexible, Host, Adapter,
-// Runtime, Placements, Cost, Created; Id/Adapter/Placements optional.
+// A list with a percentage name, one flexible column and three optional
+// ones: name 22%, Id, State, Host, Adapter, Runtime, Placements, Cost, Created.
 const runs = [{ width: "22%" }, { width: 200, optional: true }, {}, { width: 150 }, { width: 110, optional: true }, { width: 90 }, { width: 116, optional: true }, { width: 120 }, { width: 104 }];
 
 test("optional columns drop under 1100px", () => {
@@ -21,6 +21,10 @@ test("optional columns drop when with them a flexible column would get under 140
   expect(dropsOptional(runs, 1300)).toBe(true);
   // 1400px: 1400 - 308 - 890 = 202px.
   expect(dropsOptional(runs, 1400)).toBe(false);
+  // Every width fixed: they drop when the fixed widths alone overflow.
+  const fixed = [{ width: 600 }, { width: 300, optional: true }, { width: 300 }];
+  expect(dropsOptional(fixed, 1199)).toBe(true);
+  expect(dropsOptional(fixed, 1200)).toBe(false);
   // No optional column: nothing to drop.
   expect(dropsOptional(runs.map(({ width }) => ({ width })), 1300)).toBe(false);
 });
