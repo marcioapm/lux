@@ -917,6 +917,15 @@ function TimelineDemo() {
       <Card title="Fresh placement" subtitle="only the first two stages have happened">
         <Timeline stages={fakePlacementStages.map((st, i) => (i < 2 ? st : i === 2 ? { ...st, end: null } : { ...st, start: null, end: null }))} now={fakePlacementStages[2]!.start! + 9_000} />
       </Card>
+      <Card title="A launch the provider refused" subtitle="point stage: an instant is a dot with its clock time, no duration; the axis ends at it">
+        <Timeline
+          stages={[
+            { key: "requested", label: "Launch requested", start: NOW - 601_200, end: NOW - 600_000, tone: "accent" },
+            { key: "failed", label: "Launch failed", note: "host row closed, its one-use token revoked", start: NOW - 600_000, point: true, tone: "red" },
+          ]}
+          now={NOW}
+        />
+      </Card>
     </Section>
   );
 }
