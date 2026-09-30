@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"strconv"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -47,8 +48,8 @@ func prepareServe(c config) (servePlan, error) {
 	// http.Server binds only after the database and bucket answer: a
 	// malformed address is refused here instead. Empty is net/http's ":http".
 	if c.Listen != "" {
-		if _, _, err := net.SplitHostPort(c.Listen); err != nil {
-			return servePlan{}, fmt.Errorf("listen (LUX_LISTEN) %q: want host:port", c.Listen)
+		if err := checkListen(c.Listen); err != nil {
+			return servePlan{}, fmt.Errorf("listen (LUX_LISTEN) %q: %w", c.Listen, err)
 		}
 	}
 	return servePlan{db: db, s3: blob.Config{
@@ -59,6 +60,22 @@ func prepareServe(c config) (servePlan, error) {
 		AccessKey:      c.S3.AccessKey,
 		SecretKey:      c.S3.SecretKey,
 	}}, nil
+}
+
+// checkListen accepts host:port where port is empty (net.Listen then picks
+// one, as it always has) or a decimal 0-65535. The host is not resolved.
+func checkListen(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return errors.New("want host:port")
+	}
+	if port == "" {
+		return nil
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return errors.New("want a port number 0-65535, not a service name")
+	}
+	return nil
 }
 
 func checkS3(c config) error {

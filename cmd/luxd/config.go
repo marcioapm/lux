@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"math"
-	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -550,8 +549,8 @@ func (c config) check() error {
 		if strings.HasPrefix(p.Domain, ".") || strings.HasPrefix(p.Domain, "*") || strings.Contains(p.Domain, "/") || !strings.Contains(p.Domain, ".") {
 			problems = append(problems, fmt.Sprintf("preview.domain (LUX_PREVIEW_DOMAIN) %q: want a domain, e.g. lux.example.com", p.Domain))
 		}
-		if _, _, err := net.SplitHostPort(p.Listen); err != nil {
-			problems = append(problems, fmt.Sprintf("preview.listen (LUX_PREVIEW_LISTEN) %q: want host:port", p.Listen))
+		if err := checkListen(p.Listen); err != nil {
+			problems = append(problems, fmt.Sprintf("preview.listen (LUX_PREVIEW_LISTEN) %q: %v", p.Listen, err))
 		}
 		if p.Listen == c.Listen {
 			problems = append(problems, "preview.listen must differ from listen: the preview listener only ever proxies")
