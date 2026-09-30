@@ -1,7 +1,7 @@
 // A small polling query hook. One in-flight request at a time, refetch on an
-// interval (paused while the tab is hidden) and on invalidate(), cancelled on
-// unmount or when the key changes. No cache: pages are short-lived and the
-// API is local.
+// interval (paused while the tab is hidden, skipped while a fetch is in
+// flight) and on invalidate(), cancelled on unmount or when the key changes.
+// No cache: pages are short-lived and the API is local.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText } from "./client.ts";
 import { useLiveStatus } from "./live.ts";
@@ -142,8 +142,13 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
   useEffect(() => {
     if (!enabled) return;
     let timer: ReturnType<typeof setInterval> | undefined;
+    // A tick while a fetch is in flight is skipped, not an abort: a request
+    // slower than the interval still lands.
+    const tick = () => {
+      if (!inFlight.current) void run();
+    };
     const start = () => {
-      if (interval > 0 && timer == null) timer = setInterval(() => void run(), interval);
+      if (interval > 0 && timer == null) timer = setInterval(tick, interval);
     };
     const stop = () => {
       if (timer != null) clearInterval(timer);
@@ -152,7 +157,7 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
     const onVis = () => {
       if (document.hidden) stop();
       else {
-        void run();
+        tick();
         start();
       }
     };
