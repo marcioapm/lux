@@ -989,8 +989,9 @@ func TestLifecycleEventsReadOnlyTheScopesRows(t *testing.T) {
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	owners := map[string]*string{"t1": new("t1"), "t2": new("t2"), "platform": nil}
 	whose := map[string]string{}
+	ownerOf := map[string]string{"host_events": "h1", "pool_events": "pool1"}
 	for _, tbl := range []eventTable{hostEvents, poolEvents} {
-		owner := map[string]string{"host_events": "h1", "pool_events": "pool1"}[tbl.table]
+		owner := ownerOf[tbl.table]
 		// Foreign rows at both ends of each order and between t1's.
 		for i := range 24 {
 			who := []string{"platform", "t1", "t2", "t1"}[i%4]
@@ -1018,7 +1019,7 @@ func TestLifecycleEventsReadOnlyTheScopesRows(t *testing.T) {
 		{"operator", Principal{Operator: true}, map[string]bool{"t1": true, "t2": true, "platform": true}},
 	} {
 		for _, tbl := range []eventTable{hostEvents, poolEvents} {
-			owner := map[string]string{"host_events": "h1", "pool_events": "pool1"}[tbl.table]
+			owner := ownerOf[tbl.table]
 			want := 0
 			for k, who := range whose {
 				if c.sees[who] && strings.HasPrefix(k, tbl.table) {
