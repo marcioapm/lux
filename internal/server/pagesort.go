@@ -4,8 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"maps"
-	"math/big"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -175,11 +175,11 @@ func validSortValue(cast, v string) bool {
 		_, err := strconv.ParseInt(v, 10, 64)
 		return err == nil
 	case "float8":
+		// ParseFloat also reads Go's digit separators, which Postgres does not.
 		_, err := strconv.ParseFloat(v, 64)
-		return err == nil
+		return err == nil && !strings.Contains(v, "_")
 	case "numeric":
-		_, ok := new(big.Rat).SetString(v)
-		return ok || v == "NaN" || v == "Infinity" || v == "-Infinity"
+		return validNumeric(v)
 	case "timestamptz":
 		if v == "infinity" || v == "-infinity" {
 			return true
@@ -191,6 +191,32 @@ func validSortValue(cast, v string) bool {
 		}
 	}
 	return false
+}
+
+// numericText is a decimal as Postgres' numeric input reads it (without the
+// surrounding space and case-folding it also allows).
+var numericText = regexp.MustCompile(`^[+-]?(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d{1,5}))?$`)
+
+// Postgres' numeric bounds: digits before the point and display scale.
+const numericMaxInt, numericMaxScale = 131072, 16383
+
+// validNumeric: v casts to numeric. Within the pattern, a value overflows
+// when its integer digits or its scale pass Postgres' bounds; the integer
+// count ignores leading zeros of the fraction, so it errs towards a 400.
+func validNumeric(v string) bool {
+	if v == "NaN" || v == "Infinity" || v == "-Infinity" {
+		return true
+	}
+	m := numericText.FindStringSubmatch(v)
+	if m == nil || m[1] == "" && m[2] == "" {
+		return false
+	}
+	exp := 0
+	if m[3] != "" {
+		exp, _ = strconv.Atoi(m[3])
+	}
+	intDigits := len(strings.TrimLeft(m[1], "0"))
+	return intDigits+exp <= numericMaxInt && len(m[2])-exp <= numericMaxScale
 }
 
 // validClock: a cursor's clock is absent or RFC 3339.
