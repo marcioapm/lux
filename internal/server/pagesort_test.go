@@ -946,6 +946,12 @@ func TestPagingRejects(t *testing.T) {
 		{"/v1/runs?next=" + cur(pageCursor{Sort: "created", Dir: "desc", V: v("xx"), ID: "r1"}), "next: not a cursor"},
 		{"/v1/runs?next=" + cur(pageCursor{Sort: "cost", Dir: "desc", V: v("abc"), ID: "r1"}), "next: not a cursor"},
 		{"/v1/runs?next=" + cur(pageCursor{Sort: "placements", Dir: "desc", V: v("1e3"), ID: "r1"}), "next: not a cursor"},
+		// Go reads these as numbers; Postgres does not, or overflows.
+		{"/v1/hosts?all=true&next=" + cur(pageCursor{Sort: "uptime", Dir: "desc", V: v("1_000.5"), ID: "h1"}), "next: not a cursor"},
+		{"/v1/runs?next=" + cur(pageCursor{Sort: "cost", Dir: "desc", V: v("1/2"), ID: "r1"}), "next: not a cursor"},
+		{"/v1/runs?next=" + cur(pageCursor{Sort: "cost", Dir: "desc", V: v("1e200000"), ID: "r1"}), "next: not a cursor"},
+		{"/v1/runs?next=" + cur(pageCursor{Sort: "cost", Dir: "desc", V: v("10e131071"), ID: "r1"}), "next: not a cursor"},
+		{"/v1/runs?next=" + cur(pageCursor{Sort: "cost", Dir: "desc", V: v("0.01e-16382"), ID: "r1"}), "next: not a cursor"},
 		{"/v1/runs?sort=created&before=2020-01-01T00:00:00Z", "before does not go with sort and cursors"},
 		{"/v1/runs?sort=created&limit=201", "limit: 1 to 200"},
 		{"/v1/pools/burst/events?owner=platform&next=" + cur(pageCursor{Sort: "time", Dir: "desc", V: v("x"), ID: "1"}), "next: not a cursor"},
@@ -964,13 +970,17 @@ func TestPagingRejects(t *testing.T) {
 		{Sort: "uptime", Dir: "desc", V: v("1.5e+06"), ID: "h1", At: now},
 		{Sort: "state", Dir: "asc", V: v("2"), ID: "h1"},
 		{Sort: "state", Dir: "asc", ID: "h1"},
+		// Postgres' specials cast too.
+		{Sort: "created", Dir: "desc", V: v("infinity"), ID: "h1"},
 	} {
 		if code, msg := getError(t, s, key, "/v1/hosts?all=true&next="+cur(c)); code != http.StatusOK {
 			t.Errorf("cursor %+v: %d %s", c, code, msg)
 		}
 	}
-	if code, msg := getError(t, s, key, "/v1/runs?next="+cur(pageCursor{Sort: "cost", Dir: "desc", V: v("12.500"), ID: "r1"})); code != http.StatusOK {
-		t.Errorf("cost cursor: %d %s", code, msg)
+	for _, c := range []string{"12.500", "NaN", "-Infinity", ".5", "1e99999", "0.01e-16381"} {
+		if code, msg := getError(t, s, key, "/v1/runs?next="+cur(pageCursor{Sort: "cost", Dir: "desc", V: v(c), ID: "r1"})); code != http.StatusOK {
+			t.Errorf("cost cursor %s: %d %s", c, code, msg)
+		}
 	}
 	// huma validates the enums before the handler.
 	for _, path := range []string{"/v1/hosts?all=true&sort=created&dir=up", "/v1/hosts?lifecycle=gone"} {
