@@ -56,6 +56,9 @@ func runLuxd(t *testing.T, env []string, args ...string) luxdResult {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("luxd %q did not finish before its deadline: %v", args, ctx.Err())
+	}
 	var exit *exec.ExitError
 	code := 0
 	if errors.As(err, &exit) {
@@ -199,11 +202,12 @@ func badConfigs(dbURL, s3URL string) []struct {
 	}
 }
 
-// An empty host, port 0 and a bracketed IPv6 host are valid listen addresses.
+// An empty host, an empty port, ports 0 and 65535 and a bracketed IPv6 host
+// are valid listen addresses, and so is an empty listen setting.
 func TestValidateAcceptsListenPorts(t *testing.T) {
 	pg := newFakePostgres(t)
 	path := writeConfig(t, 0o600, validConfig(pg.url(), "http://127.0.0.1:1"))
-	for _, addr := range []string{":0", ":8080", "[::1]:8080"} {
+	for _, addr := range []string{":0", ":8080", ":65535", "127.0.0.1:", "[::1]:8080"} {
 		env := []string{"LUX_LISTEN=" + addr}
 		preview := []string{"LUX_PREVIEW_DOMAIN=lux.example.com", "LUX_PUBLIC_URL=https://lux.example.com", "LUX_PREVIEW_LISTEN=" + addr}
 		for _, env := range [][]string{env, preview} {
@@ -211,6 +215,12 @@ func TestValidateAcceptsListenPorts(t *testing.T) {
 				t.Fatalf("%q: %+v", env, r)
 			}
 		}
+	}
+	// An empty variable is ignored, so an empty listen can only come from the file.
+	body := strings.Replace(validConfig(pg.url(), "http://127.0.0.1:1"), `listen = "127.0.0.1:0"`, `listen = ""`, 1)
+	emptyListen := writeConfig(t, 0o600, body)
+	if r := runLuxd(t, nil, "--config", emptyListen, "validate"); r.code != 0 || r.stdout != "ok: "+emptyListen+"\n" || r.stderr != "" {
+		t.Fatalf("empty listen: %+v", r)
 	}
 }
 
@@ -281,13 +291,9 @@ func TestValidateDoesNotAskIMDS(t *testing.T) {
 func TestValidateIgnoresContainerCredentials(t *testing.T) {
 	pg := newFakePostgres(t)
 	path := writeConfig(t, 0o600, validConfig(pg.url(), "http://127.0.0.1:1"))
-	start := time.Now()
 	r := runLuxd(t, []string{"AWS_CONTAINER_CREDENTIALS_FULL_URI=http://unresolvable.invalid/creds"}, "--config", path, "validate")
-	if r.code != 0 || r.stdout != "ok: "+path+"\n" {
+	if r.code != 0 || r.stdout != "ok: "+path+"\n" || r.stderr != "" {
 		t.Fatalf("got %+v", r)
-	}
-	if d := time.Since(start); d > 3*time.Second {
-		t.Fatalf("validate took %v", d)
 	}
 }
 
