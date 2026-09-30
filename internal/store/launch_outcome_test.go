@@ -33,8 +33,35 @@ func TestLaunchOutcomeMigration(t *testing.T) {
 		('static', 'f', 'terminated', 'launch failed: typed by hand', NULL, NULL, now(), now())`); err != nil {
 		t.Fatal(err)
 	}
+	// Runs queued now: since their last placement's end, else creation.
+	if _, err := conn.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1');
+		INSERT INTO runs (id, tenant_id, spec, state, created_at) VALUES
+			('queued-again', 't1', '{}', 'provisioning', '2026-01-01 00:00:00+00'),
+			('submitted', 't1', '{}', 'submitted', '2026-01-02 00:00:00+00'),
+			('resuming', 't1', '{}', 'resuming', '2026-01-03 00:00:00+00'),
+			('running', 't1', '{}', 'running', '2026-01-04 00:00:00+00');
+		INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, ended_at) VALUES
+			('p1', 't1', 'queued-again', 'never-registered', 1, 'exited', '2026-01-01 01:00:00+00'),
+			('p2', 't1', 'queued-again', 'never-registered', 2, 'lost', '2026-01-01 02:00:00+00'),
+			('p3', 't1', 'running', 'never-registered', 1, 'running', NULL)`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.Migrate(ctx, owner, "lux_app"); err != nil {
 		t.Fatal(err)
+	}
+	for id, w := range map[string]string{
+		"queued-again": "2026-01-01 02:00:00+00",
+		"submitted":    "2026-01-02 00:00:00+00",
+		"resuming":     "2026-01-03 00:00:00+00",
+		"running":      "<nil>",
+	} {
+		var got string
+		if err := conn.QueryRow(ctx, `SELECT coalesce(to_char(needs_host_since AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || '+00', '<nil>') FROM runs WHERE id = $1`, id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != w {
+			t.Errorf("run %s: needs_host_since %s, want %s", id, got, w)
+		}
 	}
 	want := map[string]string{
 		"refused":          "failed|InsufficientInstanceCapacity|launch failed: InsufficientInstanceCapacity|true",
