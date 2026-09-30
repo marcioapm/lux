@@ -99,7 +99,10 @@ consistent. It prints `ok: FILE` (or `ok: no file`) and exits 0; warnings
 value. On a refusal it prints what `serve` would and exits 1; extra
 arguments exit 2. Not checked: whether the database and bucket are
 reachable, and AWS shared config and credential sources, which the SDK
-resolves when serve connects. `luxd check-config` is an alias of `validate`.
+resolves when serve connects. It reads only local files: the
+configuration, and any password, service or TLS files the database URL
+names. A named pipe there would block it, so a caller should still run it
+under a timeout. `luxd check-config` is an alias of `validate`.
 
 | Variable | Default | |
 | --- | --- | --- |
