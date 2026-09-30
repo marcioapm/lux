@@ -29,15 +29,23 @@ func (s *Server) reaperLoop(ctx context.Context) {
 	}
 }
 
-// aliveGap is the longest luxd may go without recording itself alive
-// before the time counts as a gap: a sixth of the lease (or a couple of
-// ticks). Every luxd should share LUX_LEASE and LUX_TICK, or they judge
-// gaps differently.
-func (s *Server) aliveGap() time.Duration {
-	return max(s.cfg.LeaseDuration/6, 2*s.cfg.Tick)
+// aliveEvery is how often luxd records itself alive: a sixth of the lease,
+// at most every 5s (the default 30s lease), at least every tick.
+func (s *Server) aliveEvery() time.Duration {
+	return max(min(s.cfg.LeaseDuration/6, 5*time.Second), s.cfg.Tick)
 }
 
-// aliveLoop records, every tick, that a luxd is running and reaches
+// aliveGap is the longest luxd may go without recording itself alive
+// before the time counts as a gap: two records missed, a third of the
+// lease. A shorter outage needs no allowance: runners reconnect within a
+// second of a luxd that restarted, and renew within a heartbeat interval.
+// Every luxd should share LUX_LEASE and LUX_TICK, or they judge gaps
+// differently.
+func (s *Server) aliveGap() time.Duration {
+	return 2 * s.aliveEvery()
+}
+
+// aliveLoop records, every aliveEvery, that a luxd is running and reaches
 // Postgres, and when one came back from a gap (luxd_alive). It is apart
 // from reaperLoop, so a slow reap is not taken for a gap.
 func (s *Server) aliveLoop(ctx context.Context) {
@@ -51,20 +59,22 @@ func (s *Server) aliveLoop(ctx context.Context) {
 	}); err != nil && ctx.Err() == nil {
 		s.log.Warn("pruning luxd_alive", "err", err)
 	}
-	t := time.NewTicker(s.cfg.Tick)
+	// The first record at once: a luxd back from a gap says so before its
+	// first reap.
+	t := time.NewTicker(s.aliveEvery())
 	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
 		gap, err := s.recordAlive(ctx)
 		switch {
 		case err != nil && ctx.Err() == nil:
 			s.log.Warn("recording luxd alive", "err", err)
 		case err == nil && gap != nil:
 			s.log.Warn("no luxd heard heartbeats for a while: no host or lease is lost for it", "gap", gap.Round(time.Millisecond))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
 	}
 }
