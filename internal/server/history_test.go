@@ -132,7 +132,8 @@ func TestRollupHistory(t *testing.T) {
 
 // The rollup's table-wide lower bound skips nothing: a key whose newest
 // bucket lags another key's is still rolled up, in the rollup that follows
-// and in the next hour's.
+// and in the next hour's; a sample committed late into the newest rolled-up
+// minute is still read (pb's hour h0, rolled up before it, keeps its value).
 func TestRollupAcrossKeys(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -192,6 +193,9 @@ func TestRollupAcrossKeys(t *testing.T) {
 	if err := s.rollupHistory(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// A sample of pb committed late, in pa's newest rolled-up minute: the
+	// table-wide bound is that minute's start, so it is still read.
+	insert("pb", m(h0, 2, 30), 40)
 	// Next hour pb has more minutes than pa.
 	insert("pa", m(h1, 0, 0), 1,
 		"pb", m(h1, 0, 0), 20, "pb", m(h1, 1, 0), 30)
@@ -202,7 +206,7 @@ func TestRollupAcrossKeys(t *testing.T) {
 	}
 	want := []bucket{
 		{"pa", 60, m(h0, 0, 0), 3, 2}, {"pa", 60, m(h0, 1, 0), 6, 1}, {"pa", 60, m(h0, 2, 0), 8, 1}, {"pa", 60, m(h1, 0, 0), 1, 1},
-		{"pb", 60, m(h0, 0, 0), 10, 1}, {"pb", 60, m(h1, 0, 0), 20, 1}, {"pb", 60, m(h1, 1, 0), 30, 1},
+		{"pb", 60, m(h0, 0, 0), 10, 1}, {"pb", 60, m(h0, 2, 0), 40, 1}, {"pb", 60, m(h1, 0, 0), 20, 1}, {"pb", 60, m(h1, 1, 0), 30, 1},
 		{"pa", 3600, h0, 6, 4}, {"pa", 3600, h1, 1, 1},
 		{"pb", 3600, h0, 10, 1}, {"pb", 3600, h1, 25, 2},
 	}

@@ -599,6 +599,8 @@ func TestRunsPagedSortEveryKey(t *testing.T) {
 		{fixtureRun{id: "rl", tenant: "t2", state: "running", pool: "alpine", adapter: "generic", host: "h-b", epoch: 1,
 			runtime: since(0, -3600), placement: fixed(60)}, -3700, nil, "p2",
 			[]pl{{"hb", "running", -3660, f(-3660), nil, f(-3600), nil}}, nil},
+		// Scheduled, no placement yet: ranks between submitted and provisioning.
+		{fixtureRun{id: "rm", tenant: "t1", state: "scheduled", adapter: "acp", runtime: none, placement: fixed(0)}, -2, nil, "", nil, nil},
 	}
 	opt := func(v *float64) any {
 		if v == nil {
