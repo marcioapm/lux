@@ -274,6 +274,130 @@ func TestHostsPagedSortEveryFamily(t *testing.T) {
 	}
 }
 
+// GET /v1/hosts pages by the keys computed from a host's placements, its
+// owner and pool, and its state, both ways, and filters by lifecycle.
+func TestHostsPagedSortByLoadOwnerAndState(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	key := operatorKey(t, s, ctx)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 'alpha'), ('t2', 'beta')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pa', 'burst', 'ec2'), ('pb', 'alpine', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{}', 'running')`)
+	type fh struct {
+		id, tenant, pool, state, outcome string
+		cpus                             float64
+		held                             []float64 // live placements' cpus
+		ended                            bool      // with an ended placement too
+	}
+	hosts := []fh{
+		{"h1", "", "pa", "ready", "launched", 8, []float64{2, 2}, true},
+		{"h2", "t1", "pa", "ready", "", 4, []float64{2}, false},
+		{"h3", "t2", "pb", "draining", "", 4, []float64{1, 1, 1}, false},
+		{"h4", "", "", "ready", "", 0, nil, false},
+		{"h5", "t1", "pb", "provisioning", "requested", 8, nil, false},
+		// Not ready: its placements are not counted in its sort values.
+		{"h6", "", "pa", "lost", "launched", 8, []float64{4}, false},
+		{"h7", "t2", "", "terminated", "launched", 8, nil, true},
+		{"h8", "", "pa", "terminated", "failed", 8, nil, false},
+		{"h9", "t1", "pb", "ready", "", 16, nil, true},
+		{"h10", "", "pb", "terminated", "failed", 2, nil, false},
+		{"h11", "t2", "pa", "ready", "", 8, []float64{8}, false},
+	}
+	n := 0
+	for _, h := range hosts {
+		execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool_id, state, capacity, launch_outcome)
+			VALUES ($1, $1, nullif($2, ''), nullif($3, ''), $4, jsonb_build_object('cpus', $5::float8), nullif($6, ''))`, h.id, h.tenant, h.pool, h.state, h.cpus, h.outcome)
+		for _, c := range h.held {
+			n++
+			execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources) VALUES ($1, 't1', 'r1', $2, $3, 'running', jsonb_build_object('cpus', $4::float8))`,
+				fmt.Sprintf("p%d", n), h.id, n, c)
+		}
+		if h.ended {
+			n++
+			execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources) VALUES ($1, 't1', 'r1', $2, $3, 'exited', '{"cpus": 99}')`,
+				fmt.Sprintf("p%d", n), h.id, n)
+		}
+	}
+	byID := map[string]fh{}
+	var ids []string
+	for _, h := range hosts {
+		byID[h.id] = h
+		ids = append(ids, h.id)
+	}
+	slices.Sort(ids)
+	serving := func(h fh) bool { return h.state == "ready" || h.state == "draining" }
+	num := func(v float64) *float64 { return &v }
+	stateRank := map[string]float64{"provisioning": 1, "ready": 2, "draining": 3, "lost": 4, "terminated": 5}
+	tenants := map[string]string{"t1": "alpha", "t2": "beta"}
+	pools := map[string]string{"pa": "burst", "pb": "alpine"}
+	for _, dir := range []string{"asc", "desc"} {
+		for k, v := range map[string]func(string) *float64{
+			"state": func(id string) *float64 {
+				if h := byID[id]; h.outcome == "failed" && h.state == "terminated" {
+					return num(6)
+				}
+				return num(stateRank[byID[id].state])
+			},
+			"runs": func(id string) *float64 {
+				if h := byID[id]; serving(h) {
+					return num(float64(len(h.held)))
+				}
+				return nil
+			},
+			"cpu": func(id string) *float64 {
+				h := byID[id]
+				if !serving(h) || h.cpus == 0 {
+					return nil
+				}
+				var sum float64
+				for _, c := range h.held {
+					sum += c
+				}
+				return num(sum / h.cpus)
+			},
+		} {
+			got := walkPages(t, s, key, "/v1/hosts?all=true&limit=3&sort="+k+"&dir="+dir, "hosts", nil)
+			if want := sorted(ids, v, dir); !slices.Equal(got, want) {
+				t.Errorf("sort=%s dir=%s:\n got %v\nwant %v", k, dir, got, want)
+			}
+		}
+		for k, v := range map[string]func(string) *string{
+			"tenant": func(id string) *string {
+				if n, ok := tenants[byID[id].tenant]; ok {
+					return &n
+				}
+				return nil
+			},
+			"pool": func(id string) *string {
+				if n, ok := pools[byID[id].pool]; ok {
+					return &n
+				}
+				return nil
+			},
+		} {
+			got := walkPages(t, s, key, "/v1/hosts?all=true&limit=3&sort="+k+"&dir="+dir, "hosts", nil)
+			if want := sorted(ids, v, dir); !slices.Equal(got, want) {
+				t.Errorf("sort=%s dir=%s:\n got %v\nwant %v", k, dir, got, want)
+			}
+		}
+	}
+	// Lifecycle: exact sets, launch failures among the ended; the count
+	// and a pool filter by name agree.
+	for q, want := range map[string][]string{
+		"lifecycle=live":                      {"h1", "h11", "h2", "h3", "h4", "h5", "h6", "h9"},
+		"lifecycle=ended":                     {"h10", "h7", "h8"},
+		"lifecycle=ended&state=launch_failed": {"h10", "h8"},
+		"lifecycle=live&pool=alpine":          {"h3", "h5", "h9"},
+		"all=true&pool=burst&sort=cpu":        {"h1", "h11", "h2", "h6", "h8"},
+	} {
+		p := fetchPage(t, s, key, "/v1/hosts?limit=100&"+q, "hosts")
+		got := slices.Sorted(slices.Values(p.IDs))
+		if !slices.Equal(got, want) || *p.Total != len(want) {
+			t.Errorf("%s: %v (total %d), want %v", q, got, *p.Total, want)
+		}
+	}
+}
+
 // Paging while the list changes: a host created meanwhile (newest, so
 // ahead of the cursor) and one that ends meanwhile neither repeat nor
 // drop a host, and equal creation times never skip one.

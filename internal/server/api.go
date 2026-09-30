@@ -1752,10 +1752,23 @@ const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''),
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at,
 	h.launch_outcome, h.launch_finished_at, coalesce(h.launch_error, '')`
 
-const hostsFrom = `hosts h LEFT JOIN tenants ht ON ht.id = h.tenant_id LEFT JOIN pools hp ON hp.id = h.pool_id
-	CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(sum((pl.resources->>'cpus')::float8), 0) AS cpus,
+const hostsFrom = `hosts h` + hostTenantJoin + hostPoolJoin + hostLoadJoin
+
+// The joins of hostsFrom, so a paged list's keys and counts read only what
+// their sort value and filter need (hostSortKeys' from). hl is only read for
+// ready and draining hosts' sort values.
+const (
+	hostTenantJoin = ` LEFT JOIN tenants ht ON ht.id = h.tenant_id`
+	hostPoolJoin   = ` LEFT JOIN pools hp ON hp.id = h.pool_id`
+	hostLoadJoin   = ` CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(sum((pl.resources->>'cpus')::float8), 0) AS cpus,
 		coalesce(sum((pl.resources->>'memory')::int8), 0) AS mem, coalesce(sum((pl.resources->>'disk')::int8), 0) AS disk
 		FROM placements pl WHERE pl.host_id = h.id AND pl.state IN ` + livePlacementStates + ` AND ` + visiblePlacements + `) hl`
+	// The same for a sort value, which is NULL unless ready or draining:
+	// a one-time filter skips the scan for every other host.
+	hostLoadSortJoin = ` CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(sum((pl.resources->>'cpus')::float8), 0) AS cpus,
+		coalesce(sum((pl.resources->>'memory')::int8), 0) AS mem
+		FROM placements pl WHERE h.state IN ('ready', 'draining') AND pl.host_id = h.id AND pl.state IN ` + livePlacementStates + ` AND ` + visiblePlacements + `) hl`
+)
 
 func scanHost(row pgx.Row) (Host, error) {
 	var h Host
@@ -1832,12 +1845,12 @@ const hostFailedSQL = `(h.state = 'terminated' AND h.launch_outcome IS NOT DISTI
 var hostSortKeys = map[string]sortKey{
 	"name":       {expr: `h.name`, cast: "text", first: "asc", notNull: true},
 	"id":         {expr: `h.id`, cast: "text", first: "asc", notNull: true},
-	"tenant":     {expr: `ht.name`, cast: "text", first: "asc"},
-	"pool":       {expr: `hp.name`, cast: "text", first: "asc"},
+	"tenant":     {expr: `ht.name`, cast: "text", first: "asc", from: hostTenantJoin},
+	"pool":       {expr: `hp.name`, cast: "text", first: "asc", from: hostPoolJoin},
 	"state":      {expr: `CASE WHEN ` + hostFailedSQL + ` THEN 6 ELSE array_position(ARRAY['provisioning', 'ready', 'draining', 'lost', 'terminated'], h.state) END`, cast: "bigint", first: "asc"},
-	"runs":       {expr: `CASE WHEN h.state IN ('ready', 'draining') THEN hl.n END`, cast: "bigint", first: "desc"},
-	"cpu":        {expr: `CASE WHEN h.state IN ('ready', 'draining') AND (h.capacity->>'cpus')::float8 > 0 THEN hl.cpus / (h.capacity->>'cpus')::float8 END`, cast: "float8", first: "desc"},
-	"memory":     {expr: `CASE WHEN h.state IN ('ready', 'draining') AND (h.capacity->>'memory')::float8 > 0 THEN hl.mem / (h.capacity->>'memory')::float8 END`, cast: "float8", first: "desc"},
+	"runs":       {expr: `CASE WHEN h.state IN ('ready', 'draining') THEN hl.n END`, cast: "bigint", first: "desc", from: hostLoadSortJoin},
+	"cpu":        {expr: `CASE WHEN h.state IN ('ready', 'draining') AND (h.capacity->>'cpus')::float8 > 0 THEN hl.cpus / (h.capacity->>'cpus')::float8 END`, cast: "float8", first: "desc", from: hostLoadSortJoin},
+	"memory":     {expr: `CASE WHEN h.state IN ('ready', 'draining') AND (h.capacity->>'memory')::float8 > 0 THEN hl.mem / (h.capacity->>'memory')::float8 END`, cast: "float8", first: "desc", from: hostLoadSortJoin},
 	"created":    {expr: `h.created_at`, cast: "timestamptz", first: "desc", notNull: true},
 	"terminated": {expr: `CASE WHEN NOT ` + hostFailedSQL + ` THEN h.terminated_at END`, cast: "timestamptz", first: "desc"},
 	"uptime":     {expr: `CASE WHEN NOT ` + hostFailedSQL + ` THEN extract(epoch FROM coalesce(h.terminated_at, {now}) - h.created_at) END`, cast: "float8", first: "desc"},
@@ -1870,7 +1883,9 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 		return nil, errf(http.StatusBadRequest, "bad_request", "lifecycle: live or ended")
 	}
 	if in.Pool != "" {
-		where = append(where, "hp.name = "+arg(in.Pool))
+		// Not hp.name: a filter on hosts h alone, so a page's count
+		// reads hosts only.
+		where = append(where, "h.pool_id IN (SELECT id FROM pools WHERE name = "+arg(in.Pool)+")")
 	}
 	if in.PoolID != "" {
 		where = append(where, "h.pool_id = "+arg(in.PoolID))
@@ -1917,7 +1932,9 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 
 // listHostsPage reads one page of hosts, the count of all that match and
 // how many precede the page, in one transaction. base holds the filter's
-// placeholders.
+// placeholders; the filter reads hosts h alone. As listRunsPage, the page's
+// ids and sort values come first, from hosts h and only the joins the sort
+// key needs; then its rows, by id.
 func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, where []string, base []any, out *listHostsOutput) error {
 	var at time.Time
 	if pg.cursor != nil && pg.cursor.At != "" {
@@ -1933,7 +1950,7 @@ func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, wh
 	pg.cursor = withClock(pg.cursor, stamp)
 	filter := strings.Join(where, " AND ")
 	var total int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM `+hostsFrom+` WHERE `+filter, base...).Scan(&total); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM hosts h WHERE `+filter, base...).Scan(&total); err != nil {
 		return err
 	}
 	skip := 0
@@ -1944,37 +1961,22 @@ func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, wh
 		}
 		skip = n
 	}
+	// src is the key queries' FROM: hosts h and the sort key's joins.
+	src := `hosts h` + pg.sk.from
 	q := &sqlArgs{slices.Clone(base)}
 	expr := pg.expr(q.arg)
 	keyed := filter
 	if pg.cursor.ID != "" {
 		keyed += " AND " + pg.where(expr, "h.id", q.arg)
 	}
-	rows, err := tx.Query(ctx, `SELECT `+hostColumns+`, h.id AS key_id, `+expr+`::text AS key_value FROM `+hostsFrom+` WHERE `+keyed+
+	rows, err := tx.Query(ctx, `SELECT h.id AS key_id, `+expr+`::text AS key_value FROM `+src+` WHERE `+keyed+
 		` ORDER BY `+pg.order(expr, "h.id", pg.mode == "before")+` LIMIT `+strconv.Itoa(pg.limit+1)+` OFFSET `+strconv.Itoa(skip), q.list...)
 	if err != nil {
 		return err
 	}
-	var keys []keyRow
-	hosts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Host, error) {
-		var h Host
-		var k keyRow
-		dest := hostScanDest(&h)
-		if err := row.Scan(append(dest.fields, &k.ID, &k.V)...); err != nil {
-			return h, err
-		}
-		dest.finish()
-		keys = append(keys, k)
-		return h, nil
-	})
+	keys, err := pgx.CollectRows(rows, pgx.RowToStructByPos[keyRow])
 	if err != nil {
 		return err
-	}
-	if len(hosts) > pg.limit {
-		hosts = hosts[:pg.limit]
-	}
-	if pg.mode == "before" {
-		slices.Reverse(hosts)
 	}
 	// How many matching hosts come before the page's first, in its order:
 	// its offset, and whether there is a previous page.
@@ -1982,7 +1984,7 @@ func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, wh
 	countBefore := func(first keyRow) error {
 		c := &sqlArgs{slices.Clone(base)}
 		e := pg.expr(c.arg)
-		return tx.QueryRow(ctx, `SELECT count(*) FROM `+hostsFrom+` WHERE `+filter+` AND `+pg.beforeWhere(e, "h.id", first, c.arg), c.list...).Scan(&before)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM `+src+` WHERE `+filter+` AND `+pg.beforeWhere(e, "h.id", first, c.arg), c.list...).Scan(&before)
 	}
 	page, next, prev, self, err := pg.pageLinks(keys, stamp, func(first keyRow) (bool, error) {
 		if pg.cursor.ID == "" {
@@ -1997,6 +1999,29 @@ func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, wh
 	if pg.mode == "before" && len(page) > 0 {
 		if err := countBefore(page[0]); err != nil {
 			return err
+		}
+	}
+	ids := make([]string, len(page))
+	for i, k := range page {
+		ids[i] = k.ID
+	}
+	// $1 stays the principal's tenant: hostsFrom's placements read it.
+	rows, err = tx.Query(ctx, `SELECT `+hostColumns+` FROM `+hostsFrom+` WHERE h.id = ANY($2)`, base[0], ids)
+	if err != nil {
+		return err
+	}
+	loaded, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Host, error) { return scanHost(row) })
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]Host, len(loaded))
+	for _, h := range loaded {
+		byID[h.ID] = h
+	}
+	hosts := make([]Host, 0, len(ids))
+	for _, id := range ids {
+		if h, ok := byID[id]; ok {
+			hosts = append(hosts, h)
 		}
 	}
 	out.Body.Hosts, out.Body.Total, out.Body.Offset, out.Body.Next, out.Body.Prev, out.Body.Page = hosts, &total, &before, next, prev, self
