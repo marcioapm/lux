@@ -550,6 +550,39 @@ func TestOpenCodeHeldOriginalAnswerSeenLateEndsOnce(t *testing.T) {
 		"accepted late next_step receipt=true", "consumed late", "turn_end", "idle")
 }
 
+// The complement of the test above: the original loop ends without reading
+// the steer, OpenCode stores it and runs a new loop that answers it and
+// ends, all before prompt_async's response reaches lux. lux cannot tell
+// this from the original loop's step seen late, so it reports one turn end
+// (one transcript turn holding two loops), and only once OpenCode is idle.
+func TestOpenCodeLoopAnsweredBeforeHTTPResponseEndsOnceAfterIdle(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	hold := make(chan struct{})
+	b.mu.Lock()
+	b.hold = hold
+	b.mu.Unlock()
+	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
+	msg := b.postedID(t, 0)
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	waitHeld(t, a)
+	b.setLoop(true) // the steer's own loop
+	onBus(t, a, b.answer(msg))
+	noTurnEnd(t, sink, "while the second loop runs")
+	b.setLoop(false)
+	close(hold)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted late next_step receipt=true", "consumed late", "turn_end", "idle")
+}
+
+// noTurnEnd fails if a turn end was reported.
+func noTurnEnd(t *testing.T, sink *inputSink, when string) {
+	t.Helper()
+	if slices.Contains(sink.lines(), "turn_end") {
+		t.Fatalf("turn end %s: %q", when, sink.lines())
+	}
+}
+
 // waitHeld waits until the adapter has handled the ACP result of a turn
 // whose steers' prompt_async are still in flight.
 func waitHeld(t *testing.T, a *ACP) {
