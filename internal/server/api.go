@@ -1750,7 +1750,13 @@ const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''),
 	h.provider_id, h.instance_type, h.zone, h.market, h.last_heartbeat,
 	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at,
-	h.launch_outcome, h.launch_finished_at, coalesce(h.launch_error, '')`
+	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + ``
+
+// hostLaunchError, for SQL on hosts h with $1 as visibleHosts: a platform
+// host's provider error (account ids, role ARNs) only for a principal that
+// sees platform events ($1 empty: an operator not narrowed to a tenant), as
+// for its pool.launch_failed events.
+const hostLaunchError = `CASE WHEN h.tenant_id IS NOT NULL OR $1 = '' THEN coalesce(h.launch_error, '') ELSE '' END`
 
 const hostsFrom = `hosts h` + hostTenantJoin + hostPoolJoin + hostLoadJoin
 

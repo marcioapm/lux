@@ -4343,7 +4343,7 @@ paths:
   /v1/pools/{name}/metrics:
     get:
       description: |-
-        Now: hosts by state, capacity and what live placements hold, Runs running and queued, launch failures in the range. Over time: the pool's samples (by its id: a rename keeps them; a new pool of an old name starts its own) of the same, with starts, finishes and launches per sample. Samples begin when luxd started taking them (historyFrom); earlier is a gap, not zero. A tenant's Runs and allocation are its own.
+        Now: hosts by state, capacity and what live placements hold, Runs running and queued, launch failures in the range. Over time: the pool's samples (by its id: a rename keeps them, and a pool removed and set again under its name is the same pool, whose history continues) of the same, with starts, finishes and launches per sample. Samples begin when luxd started taking them (historyFrom); earlier is a gap, not zero. A tenant's Runs and allocation are its own.
 
         Needs the `read` scope.
       operationId: poolMetrics
