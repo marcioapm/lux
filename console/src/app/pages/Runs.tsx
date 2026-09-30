@@ -1,27 +1,11 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Button, Card, ListPriceNote, PageHeader, Pagination, RUN_STATE_LIST, runStateStyle, Table, TimeSeriesChart } from "@lux/design-system";
+import { Button, Card, ListPriceNote, PageHeader, Pagination, rangeText, RUN_STATE_LIST, runStateStyle, sortInWords, Table, TimeSeriesChart } from "@lux/design-system";
 import { api, useQuery, type RunListParams } from "../../api/index.ts";
-import { sortLabel, usePaged } from "../paged.ts";
+import { usePaged } from "../paged.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, hostPath, runColumns, runPath, useSeries } from "./common.tsx";
 
-const RANGE_LABEL: Record<string, string> = { "1h": "last hour", "6h": "last 6 hours", "24h": "last 24 hours", "7d": "last 7 days", "30d": "last 30 days" };
-/** How each sort key reads in the pager. */
-const SORT_WORDS: Record<string, [string, "time" | "number" | "text"]> = {
-  created: ["Created", "time"],
-  name: ["Run", "text"],
-  id: ["Id", "text"],
-  tenant: ["Tenant", "text"],
-  state: ["State", "text"],
-  host: ["Host", "text"],
-  pool: ["Pool", "text"],
-  adapter: ["Adapter", "text"],
-  runtime: ["Runtime", "number"],
-  placements: ["Placements", "number"],
-  placement: ["Placement time", "number"],
-  cost: ["Cost", "number"],
-};
 
 /**
  * Runs list. Every filter lives in the URL (?state=a,b&resumable=true&host=&label=),
@@ -67,7 +51,7 @@ export function Runs() {
   const flow = useSeries(h, [(x) => x.started, (x) => x.finished]);
   const res = history.data?.resolution;
   const every = res === 0 ? "10s" : res === 60 ? "1m" : res === 3600 ? "1h" : undefined;
-  const rangeText = RANGE_LABEL[scope.range] ?? scope.range;
+  const range = rangeText(scope.range);
 
   // Show a host id filter by name (a name filter is shown as typed).
   const hostInfo = useQuery(`host-name:${host}`, (s) => api.host(host, s), { enabled: host.startsWith("host_") });
@@ -84,7 +68,6 @@ export function Runs() {
   const filtered = states.length > 0 || resumable || host !== "" || label !== "";
 
   const cols = useMemo(() => runColumns({ tenant: scope.showTenant, cost: true, placement: true }).map((c) => ({ ...c, sortable: true })), [scope.showTenant]);
-  const words = SORT_WORDS[q.sort.key] ?? [q.sort.key, "text"];
 
   return (
     <div className="page page-list">
@@ -99,10 +82,10 @@ export function Runs() {
       />
       <ErrorStrip error={history.error} />
       <div className="grid grid-2">
-        <Card title="Runs over time" subtitle={`running and queued · ${rangeText}${every ? ` · ${every} samples` : ""}${filtered ? " · all runs in scope, not filtered" : ""}`}>
+        <Card title="Runs over time" subtitle={`running and queued · ${range}${every ? ` · ${every} samples` : ""}${filtered ? " · all runs in scope, not filtered" : ""}`}>
           <TimeSeriesChart x={level.x} ys={level.ys} series={[{ label: "Running", color: 1, area: true }, { label: "Queued", color: 2 }]} unit="count" />
         </Card>
-        <Card title="Started / finished" subtitle={`per ${every ?? "sample"} · ${rangeText}${filtered ? " · all runs in scope, not filtered" : ""}`}>
+        <Card title="Started / finished" subtitle={`per ${every ?? "sample"} · ${range}${filtered ? " · all runs in scope, not filtered" : ""}`}>
           <TimeSeriesChart x={flow.x} ys={flow.ys} series={[{ label: "Started", color: 1, step: true }, { label: "Finished", color: 3, step: true }]} unit="count" />
         </Card>
       </div>
@@ -197,7 +180,7 @@ export function Runs() {
                   onPrev={q.prev}
                   onNext={q.next}
                   noun="runs"
-                  sortLabel={sortLabel(words[0], q.sort, words[1])}
+                  sortLabel={sortInWords(cols, q.sort)}
                 />
               ) : undefined
             }

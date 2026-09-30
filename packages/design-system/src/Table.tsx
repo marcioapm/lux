@@ -43,6 +43,10 @@ export interface Column<Row> {
    * durations (right-aligned columns, or a numeric sortValue), "asc" for text.
    */
   sortFirst?: SortDir;
+  /** What the sort orders, for the sort in words (sortInWords): newest/oldest, largest/smallest, A→Z. Default: number when right-aligned, else text. */
+  sortKind?: "time" | "number" | "text";
+  /** The header as plain text, where `header` is an element. */
+  label?: string;
   align?: "left" | "right";
   /** Monospace + tabular numerals (ids, logs, numbers). Names and labels stay in the sans. */
   mono?: boolean;
@@ -122,6 +126,20 @@ export function firstSortDir<Row>(c: Column<Row>, rows: readonly Row[] = []): So
 export function nextSort<Row>(sort: SortState | undefined, c: Column<Row>, rows: readonly Row[] = []): SortState {
   if (sort?.key === c.key) return { key: c.key, dir: sort.dir === "asc" ? "desc" : "asc" };
   return { key: c.key, dir: firstSortDir(c, rows) };
+}
+
+/**
+ * A sort in words, for a cursor pager: "Created, newest first",
+ * "Cost, largest first", "Pool, A→Z". Undefined for a key no column has.
+ */
+export function sortInWords<Row>(columns: readonly Column<Row>[], sort: SortState): string | undefined {
+  const c = columns.find((x) => x.key === sort.key);
+  if (!c) return undefined;
+  const name = c.label ?? (typeof c.header === "string" ? c.header : c.key);
+  const kind = c.sortKind ?? (c.align === "right" ? "number" : "text");
+  if (kind === "time") return `${name}, ${sort.dir === "desc" ? "newest" : "oldest"} first`;
+  if (kind === "number") return `${name}, ${sort.dir === "desc" ? "largest" : "smallest"} first`;
+  return `${name}, ${sort.dir === "asc" ? "A→Z" : "Z→A"}`;
 }
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -301,7 +319,7 @@ export function Table<Row>(props: TableProps<Row>) {
   );
   if (!footer) return table;
   return (
-    <div className={["table-paged", className ?? ""].join(" ").trim()}>
+    <div className={className}>
       {table}
       {footer}
     </div>
