@@ -130,9 +130,15 @@ type agentWire struct {
 
 func startWire(t *testing.T, ad Adapter, cfg proto.ShimConfig) (*agentWire, *inputSink) {
 	t.Helper()
+	sink := &inputSink{}
+	return startWireSink(t, ad, cfg, sink), sink
+}
+
+// startWireSink is startWire reporting to sink.
+func startWireSink(t *testing.T, ad Adapter, cfg proto.ShimConfig, sink Sink) *agentWire {
+	t.Helper()
 	toAgent, fromAdapter := io.Pipe()
 	fromAgent, toAdapter := io.Pipe()
-	sink := &inputSink{}
 	w := &agentWire{t: t, in: bufio.NewScanner(toAgent), out: toAdapter, sent: make(chan map[string]json.RawMessage, 64), done: make(chan struct{})}
 	go func() {
 		for w.in.Scan() {
@@ -147,7 +153,7 @@ func startWire(t *testing.T, ad Adapter, cfg proto.ShimConfig) (*agentWire, *inp
 		_ = ad.Run(context.Background(), p, cfg, sink)
 	}()
 	t.Cleanup(func() { toAdapter.Close(); toAgent.Close() })
-	return w, sink
+	return w
 }
 
 // exit closes the agent's stdout, as its process exiting does, and waits
