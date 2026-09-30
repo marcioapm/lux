@@ -139,10 +139,7 @@ func (c *Codex) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink 
 	}
 	<-done
 	c.mu.Lock()
-	why := errors.New("the agent exited before it read it")
-	if c.stopped {
-		why = errors.New("the Run stopped before the agent read it")
-	}
+	why := unreadWhy(c.stopped)
 	c.mu.Unlock()
 	c.inputs.close(sink, why)
 	return nil
@@ -514,7 +511,7 @@ func (c *Codex) carryUnread(turn string) bool {
 	c.mu.Unlock()
 	if stopped {
 		for _, in := range unread {
-			c.inputs.fail(c.sink, in, errors.New("the Run stopped before the agent read it"))
+			c.inputs.fail(c.sink, in, errStoppedUnread)
 		}
 		return false
 	}
