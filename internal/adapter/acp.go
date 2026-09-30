@@ -122,6 +122,11 @@ const (
 	settleMaxBackoff = 30 * time.Second
 )
 
+// uncertainNoStep: a steer stored and not seen answered when the loop that
+// could have read it ended normally. It may have been read (by a step
+// answering a message lux did not send), so lux does not send it again.
+const uncertainNoStep = "uncertain: OpenCode stored it and its loop ended with no step lux saw answer it; it may have been read, so it is not sent again"
+
 // Steers waiting for the one in flight: past either limit, a new one
 // fails at once.
 const (
@@ -509,14 +514,14 @@ func (a *ACP) anotherLoop() {
 //     settles again), and while OpenCode runs a loop, until session.idle;
 //   - a steer not stored yet is still on its way, unless OpenCode has run
 //     no loop for settleGiveUp since: then it fails;
-//   - a steer stored and unanswered while no loop runs was dropped: by a
+//   - a steer stored and unanswered while no loop runs was dropped by a
 //     loop cancelled after it was sent, when seen so on two looks
-//     settleEvery apart, or else by a loop that ended just as it was
-//     stored, when seen so for 3×settleEvery (a loop it started would have
-//     run or answered it by then). It is sent again, so it starts the next
-//     loop, or fails if the Run is stopping. A copy sent again that way
-//     without an interrupt, and again stored and unanswered with no loop
-//     for settleGiveUp, fails: OpenCode will not read it;
+//     settleEvery apart: it is sent again, so it starts the next loop, or
+//     fails if the Run is stopping. That copy, again stored and unanswered
+//     with no loop for settleGiveUp, fails: OpenCode will not read it;
+//   - a steer stored and unanswered for 3×settleEvery after a loop that
+//     ended normally fails as uncertain (uncertainNoStep): that loop may
+//     have read it, so it is never sent again;
 //   - with none of these, the Run's work has ended (busTurnEnded).
 //
 // While it waits it looks again every settleEvery (backing off while
@@ -599,8 +604,8 @@ func (a *ACP) settle() {
 		if cancelled {
 			wait = a.settleEvery
 		}
-		// A copy dropped by an interrupt is always sent again; one dropped
-		// without is sent again once, then given settleGiveUp to be read.
+		// A copy dropped by an interrupt is sent again; that copy, dropped
+		// without one, is given settleGiveUp to be read.
 		giveUp := !cancelled && a.resent[in.RequestID]
 		if giveUp {
 			wait = settleGiveUp
@@ -613,12 +618,18 @@ func (a *ACP) settle() {
 		a.mu.Lock()
 		delete(a.suspect, msgID)
 		a.mu.Unlock()
-		if giveUp {
+		switch {
+		case giveUp:
 			a.bus.untrackRequest(in.RequestID)
 			a.inputs.fail(a.sink, in, errors.New("OpenCode stored it and never read it, also when sent again"))
-			continue
-		}
-		if a.carry(ctx, session, in) {
+		case !cancelled:
+			// The loop that could have read it ran to its end: lux cannot
+			// tell whether it did (a step answering a message OpenCode
+			// stored under its own id reads it unseen), so it is not sent
+			// again.
+			a.bus.untrackRequest(in.RequestID)
+			a.inputs.fail(a.sink, in, errors.New(uncertainNoStep))
+		case a.carry(ctx, session, in):
 			waiting = true
 		}
 	}
@@ -775,8 +786,9 @@ func (a *ACP) steer(in proto.Input) {
 		case err == nil:
 		case !errors.Is(err, errNotSent):
 			a.inputs.fail(a.sink, in, err)
-		case settle:
-			// The turn ended while OpenCode refused it: the next turn.
+		case settle || len(a.inputs.unread("bus")) > 0:
+			// The turn ended while OpenCode refused it, or a steer sent over
+			// HTTP is unread (see steerACP): the next turn.
 			a.queueInput(in)
 		default:
 			a.sink.Event(proto.EvWarning, map[string]any{"message": "opencode: steering over ACP instead: " + err.Error()})
@@ -797,10 +809,14 @@ func (a *ACP) steer(in proto.Input) {
 }
 
 // steerACP sends a steer as a second session/prompt, which OpenCode joins
-// to the running loop; no receipt.
+// to the running loop; no receipt. Not while a steer sent over HTTP is
+// unread: OpenCode stores the prompt under an id of its own, so a step
+// answering it would read that steer without lux knowing. It waits for the
+// next turn instead.
 func (a *ACP) steerACP(session string, in proto.Input) {
+	unreadHTTP := a.bus != nil && len(a.inputs.unread("bus")) > 0
 	a.mu.Lock()
-	if !a.busy || a.busTurn || a.stopped {
+	if !a.busy || a.busTurn || a.stopped || unreadHTTP {
 		a.mu.Unlock()
 		a.queueInput(in)
 		return

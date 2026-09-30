@@ -59,7 +59,7 @@ was accepted as records of their own, each at most once per request id
 | --- | --- | --- | --- | --- | --- |
 | `claude-code` | `next_step` | yes | `command_lifecycle` `queued` | `command_lifecycle` `started` | `refused`; `cancelled`/`discarded` while the Run stops (or 3 times); a failed write |
 | `codex` | `next_step` | from Codex 0.155 | `turn/start` or `turn/steer` result | `item/started` of the `userMessage` whose `clientId` is the request id | a `turn/steer` refusal other than a stale turn; the Run stopping before it was read |
-| `opencode` | `next_step` | yes, with OpenCode's server up | the steer stored (`prompt_async` 204), or a second `session/prompt` written | the first assistant `message.updated` whose `parentID` is the message id of this steer or of a later one lux sent | the Run stopping before it was read; a failed write; OpenCode idle for 2 minutes with it unread after sending it again once, or never storing it |
+| `opencode` | `next_step` | yes, with OpenCode's server up | the steer stored (`prompt_async` 204), or a second `session/prompt` written | the first assistant `message.updated` whose `parentID` is the message id of this steer or of a later one lux sent | the Run stopping before it was read; a failed write; stored and not seen read when its loop ended normally (uncertain: never sent again); OpenCode idle for 2 minutes with it unread after sending it again past an interrupt, or never storing it |
 | `acp` | `next_turn` | no | its `session/prompt` written | — | a failed write |
 | `generic` | `next_step` | no | written to stdin | — | a failed write |
 
@@ -95,6 +95,16 @@ Per agent:
   and a `lux.warning` says why. A turn with joined prompts ends once.
   Steers go through `prompt_async` one at a time; at most 256 (32 MiB of
   text) wait behind the one in flight, and one more fails at once.
+  lux never sends again a steer OpenCode may have read. It sends one
+  again only when it knows it was not: past an interrupt, when the
+  cancelled loop left it stored and unanswered. A steer stored and not
+  seen answered when its loop ended normally fails as uncertain (a step
+  answering a message lux did not send reads it unseen); one never stored
+  fails after 2 minutes. The two paths are not mixed in one loop: while a
+  steer sent through `prompt_async` is unread, one `prompt_async` refuses
+  is not sent as a second `session/prompt` (OpenCode would store it under
+  an id of its own, and the step answering it would read the first steer
+  unseen); it is accepted and sent as the next turn's prompt.
 - **Generic ACP** agents keep a queue: the ACP spec does not say what a
   second prompt during a turn does.
 

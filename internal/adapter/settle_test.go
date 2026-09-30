@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -148,24 +149,135 @@ func TestOpenCodeSettleWaitsForABusyLoop(t *testing.T) {
 		"accepted s1 next_step receipt=true", "turn_end", "consumed s1", "turn_end", "idle")
 }
 
-// Unanswered and idle for 3×settleEvery after a normal end: sent again
-// exactly once, and consumed when the loop it starts answers it.
-func TestOpenCodeSettleResendsOnceAfterNormalEnd(t *testing.T) {
+// Unanswered and idle for 3×settleEvery after a normal end: the loop that
+// could have read it ran, so it fails as uncertain and is never sent again.
+func TestOpenCodeSettleFailsAfterNormalEnd(t *testing.T) {
 	_, b, w, sink, clk, _ := settleStart(t)
 	clk.fire(t) // +1 s
 	clk.fire(t) // +2 s
-	wantPosts(t, b, 1, "before 3×settleEvery")
 	clk.fire(t) // +3 s
-	wantPosts(t, b, 2, "at 3×settleEvery")
-	again := b.postedID(t, 1)
-	clk.fire(t) // the loop it started runs
-	wantPosts(t, b, 2, "while the resent steer's loop runs")
-	b.answer(again)
-	b.setLoop(false)
-	clk.fire(t)
-	wantPosts(t, b, 2, "after the answer")
+	wantPosts(t, b, 1, "at 3×settleEvery after a normal end")
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
-		"accepted s1 next_step receipt=true", "turn_end", "consumed s1", "turn_end", "idle")
+		"accepted s1 next_step receipt=true", "turn_end", "failed s1: "+uncertainNoStep, "idle")
+}
+
+// A step answering a user message lux did not send (another client's, or
+// one OpenCode stored under its own id) stored after the steer had the
+// steer in context: the steer is uncertain, fails, and is not sent again.
+func TestOpenCodeSettleForeignStepMakesSteerUncertain(t *testing.T) {
+	a, b, w, sink, clk, _ := settleStart(t)
+	foreign := a.bus.messageID(clk.now()) // sorts after the steer
+	b.mu.Lock()
+	b.stored = append(b.stored, map[string]string{"id": foreign, "role": "user"})
+	b.mu.Unlock()
+	b.answer(foreign)
+	for range 3 {
+		clk.fire(t)
+	}
+	wantPosts(t, b, 1, "a steer a later foreign step may have read")
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted s1 next_step receipt=true", "turn_end", "failed s1: "+uncertainNoStep, "idle")
+}
+
+// A steer OpenCode refuses over HTTP while a steer sent over HTTP in the
+// same loop is unread is not sent as a second session/prompt: OpenCode
+// would store it under an id of its own, and a step answering it would
+// read the HTTP steer without lux seeing it. It starts the next turn; the
+// HTTP steer is consumed by its own step, and nothing is posted again.
+func TestOpenCodeNoACPFallbackWhileHTTPSteerUnread(t *testing.T) {
+	clk := newTestClock()
+	a, b, w, sink, first := ocWithBusClock(t, clk)
+	a.Deliver(proto.Input{RequestID: "http", Text: "execute once"})
+	sink.wait(t, "accepted http")
+	httpID := b.postedID(t, 0)
+	b.mu.Lock()
+	b.status = http.StatusBadRequest
+	b.mu.Unlock()
+	a.Deliver(proto.Input{RequestID: "fallback", Text: "another instruction"})
+	b.postedID(t, 1)
+	w.none() // no session/prompt during the loop
+	waitQueued(t, a, 1)
+	b.mu.Lock()
+	b.status = http.StatusNoContent
+	b.mu.Unlock()
+	onBus(t, a, b.answer(httpID))
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	second, _ := w.next("session/prompt")
+	sink.wait(t, "accepted fallback")
+	w.send(`{"jsonrpc":"2.0","id":` + second + `,` + ocResult + `}`)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted http next_step receipt=true", "consumed http", "turn_end",
+		"busy", "accepted fallback next_step receipt=false", "turn_end", "idle")
+	wantPosts(t, b, 2, "the HTTP steer and the refused one")
+}
+
+// The mixed path: HTTP steer A stored, then B refused over HTTP. Were B
+// sent as a second session/prompt, OpenCode would store it under an id of
+// its own and the step answering it would read A unseen by lux. Whichever
+// way B goes, A is never posted again: it is consumed or fails as
+// uncertain, and B is accepted once.
+func TestOpenCodeOwnACPFallbackNeverResendsReadSteer(t *testing.T) {
+	clk := newTestClock()
+	a, b, w, sink, first := ocWithBusClock(t, clk)
+	a.Deliver(proto.Input{RequestID: "http", Text: "execute once"})
+	sink.wait(t, "accepted http")
+	b.mu.Lock()
+	b.status = http.StatusBadRequest
+	b.mu.Unlock()
+	a.Deliver(proto.Input{RequestID: "fallback", Text: "another instruction"})
+	b.postedID(t, 1)
+	var joined string
+	select {
+	case m := <-w.sent:
+		// B went as a second session/prompt: OpenCode stores it after A,
+		// and the loop's next step answers it.
+		joined = string(m["id"])
+		vendor := a.bus.messageID(clk.now())
+		b.mu.Lock()
+		b.stored = append(b.stored, map[string]string{"id": vendor, "role": "user"})
+		b.mu.Unlock()
+		b.answer(vendor)
+	case <-time.After(300 * time.Millisecond):
+	}
+	b.mu.Lock()
+	b.status = http.StatusNoContent
+	b.mu.Unlock()
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	if joined != "" {
+		w.send(`{"jsonrpc":"2.0","id":` + joined + `,` + ocResult + `}`)
+	}
+	for range 3 {
+		clk.fire(t)
+		wantPosts(t, b, 2, "the original two")
+	}
+	if joined == "" {
+		next, _ := w.next("session/prompt")
+		sink.wait(t, "accepted fallback")
+		w.send(`{"jsonrpc":"2.0","id":` + next + `,` + ocResult + `}`)
+	}
+	sink.waitLast(t, "idle")
+	wantPosts(t, b, 2, "the original two")
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted http next_step receipt=true", "turn_end", "failed http: "+uncertainNoStep,
+		"busy", "accepted fallback next_step receipt=false", "turn_end", "idle")
+}
+
+// waitQueued waits until n inputs wait for the next turn.
+func waitQueued(t *testing.T, a *ACP, n int) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(2 * time.Millisecond) {
+		a.mu.Lock()
+		got := len(a.queue)
+		a.mu.Unlock()
+		if got == n {
+			return
+		}
+		if time.Now().After(end) {
+			t.Fatalf("%d inputs queued, want %d", got, n)
+		}
+	}
 }
 
 // After an interrupt the threshold is one settleEvery: the first look only
@@ -196,10 +308,16 @@ func TestOpenCodeSettleResendsOnceAfterCancel(t *testing.T) {
 // third time: once it has been so for settleGiveUp it fails, and the Run
 // goes idle.
 func TestOpenCodeSettleGivesUp(t *testing.T) {
-	_, b, w, sink, clk, _ := settleStart(t)
-	for range 3 {
-		clk.fire(t)
-	}
+	clk := newTestClock()
+	a, b, w, sink, first := ocWithBusClock(t, clk)
+	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
+	sink.wait(t, "accepted s1")
+	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
+	w.next("session/cancel")
+	sink.wait(t, "accepted int-1")
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	clk.fire(t)
 	wantPosts(t, b, 2, "the one resend")
 	b.setLoop(false) // the resent copy is dropped too
 	looks, limit := 0, int(settleGiveUp/time.Second)+3
@@ -211,7 +329,7 @@ func TestOpenCodeSettleGivesUp(t *testing.T) {
 		t.Fatalf("failed after %d looks a second apart, want about %v", looks, settleGiveUp)
 	}
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
-		"accepted s1 next_step receipt=true", "turn_end",
+		"accepted s1 next_step receipt=true", "accepted int-1 next_turn receipt=false", "turn_end",
 		"failed s1: OpenCode stored it and never read it, also when sent again", "turn_end", "idle")
 }
 
