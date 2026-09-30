@@ -55,15 +55,33 @@ function host(over: Partial<Host> = {}): Host {
 
 const events = (from: number, n: number): LifecycleEvent[] => Array.from({ length: n }, (_, i) => ({ id: from - i, type: "host.placement_assigned", data: { run: `r${from - i}` }, count: 1, time: iso(from - i) }));
 
+/** A ready host, registered 10s after it was created. */
+const registered = (over: Partial<Host> = {}) => host({ times: { registered: iso(10) } as Host["times"], ...over });
+
 const launchFailed = (over: Partial<Host> = {}) =>
   host({ state: "terminated", launch: { outcome: "failed", requestedAt: iso(0), finishedAt: iso(5), error: "InsufficientInstanceCapacity" }, times: { provisionRequested: iso(0) } as Host["times"], ...over });
 
-/** The host page with a fake API: the host, and its events as cursor pages of 50. url is the page's (its ?tenant= narrows an operator). */
-async function render(h: Host, url = "http://localhost/hosts/h1") {
+/** A request path's query, as an object. */
+const query = (path: string) => Object.fromEntries(new URLSearchParams(path.split("?")[1]));
+
+/** Clicks the card's Next page button. */
+async function clickNext(card: Element) {
+  const next = [...card.querySelectorAll("button")].find((b) => b.textContent?.includes("Next")) as HTMLButtonElement;
+  await act(async () => next.click());
+  await sleep(50);
+}
+
+/**
+ * The host page, signed in as role, with a fake API: the host, and its
+ * events as cursor pages of 50. url is the page's (its ?tenant= narrows an
+ * operator).
+ */
+async function render(h: Host, role: "tenant" | "operator" = "tenant", url = "http://localhost/hosts/h1") {
+  api.signIn("k");
+  api.setRole(role);
   const fake = fakeApi((path) => {
     if (path.startsWith("/v1/hosts/h1/events")) {
-      const q = new URLSearchParams(path.split("?")[1]);
-      return q.get("next") ? { events: events(50, 50), prev: "p2", page: "s2" } : { events: events(100, 50), next: "n1", page: "s1" };
+      return query(path).next ? { events: events(50, 50), prev: "p2", page: "s2" } : { events: events(100, 50), next: "n1", page: "s1" };
     }
     if (path.startsWith("/v1/hosts/h1/history")) return { from: iso(0), to: iso(60), resolution: 60, samples: [] };
     if (path.startsWith("/v1/hosts/h1/cost")) return { hostId: "h1", from: iso(0), to: iso(60), basis: "list", hours: [] };
@@ -94,19 +112,17 @@ async function render(h: Host, url = "http://localhost/hosts/h1") {
       await act(async () => root.unmount());
       el.remove();
       fake.restore();
+      api.signOut();
     },
   };
 }
 
 async function pagesThroughEvents(h: Host) {
-  api.signIn("k");
-  api.setRole("tenant");
   const p = await render(h);
   try {
     // The first page: sorted by time, newest first, 50 at a time; no
     // before/after (the old unpaged reads).
-    const first = new URLSearchParams(p.eventCalls()[0]!.split("?")[1]);
-    expect(Object.fromEntries(first)).toEqual({ sort: "time", dir: "desc", limit: "50" });
+    expect(query(p.eventCalls()[0]!)).toEqual({ sort: "time", dir: "desc", limit: "50" });
     const card = p.eventsCard()!;
     expect(card).toBeDefined();
     expect(card.querySelectorAll("tbody tr").length).toBe(50);
@@ -114,21 +130,17 @@ async function pagesThroughEvents(h: Host) {
     expect(card.textContent).toContain("Time, newest first");
     expect(card.textContent).not.toContain("Load older");
     // Next reads the next page by its cursor, in the same sort.
-    const next = [...card.querySelectorAll("button")].find((b) => b.textContent?.includes("Next")) as HTMLButtonElement;
-    await act(async () => next.click());
-    await sleep(50);
-    const second = new URLSearchParams(p.eventCalls().at(-1)!.split("?")[1]);
-    expect(Object.fromEntries(second)).toEqual({ sort: "time", dir: "desc", limit: "50", next: "n1" });
+    await clickNext(card);
+    expect(query(p.eventCalls().at(-1)!)).toEqual({ sort: "time", dir: "desc", limit: "50", next: "n1" });
     expect(card.textContent).toContain("Page 2");
     expect(card.querySelector("tbody tr")?.textContent).toContain(formatTimestamp(iso(50)));
   } finally {
     await p.done();
-    api.signOut();
   }
 }
 
 test("a host's events are server-sorted cursor pages", async () => {
-  await pagesThroughEvents(host({ times: { registered: iso(10) } as Host["times"] }));
+  await pagesThroughEvents(registered());
 });
 
 test("a host whose launch failed pages its events the same way", async () => {
@@ -136,8 +148,6 @@ test("a host whose launch failed pages its events the same way", async () => {
 });
 
 async function noEventsAsTenant(h: Host) {
-  api.signIn("k");
-  api.setRole("tenant");
   const p = await render(h);
   try {
     expect(p.fake.calls.some((c) => c.startsWith("/v1/hosts/h1"))).toBe(true);
@@ -146,12 +156,11 @@ async function noEventsAsTenant(h: Host) {
     expect(p.eventCalls()).toEqual([]);
   } finally {
     await p.done();
-    api.signOut();
   }
 }
 
 test("a tenant sees no events of a platform host and reads none", async () => {
-  await noEventsAsTenant(host({ platform: true, tenant: "", times: { registered: iso(10) } as Host["times"] }));
+  await noEventsAsTenant(registered({ platform: true, tenant: "" }));
 });
 
 test("a tenant sees no events of a platform host whose launch failed and reads none", async () => {
@@ -159,16 +168,11 @@ test("a tenant sees no events of a platform host whose launch failed and reads n
 });
 
 test("an operator narrowed to a tenant reads the host's events as that tenant; a scope change starts over at page 1", async () => {
-  api.signIn("k");
-  api.setRole("operator");
-  const p = await render(host({ times: { registered: iso(10) } as Host["times"] }), "http://localhost/hosts/h1?tenant=acme");
+  const p = await render(registered(), "operator", "http://localhost/hosts/h1?tenant=acme");
   try {
-    const query = (c: string) => Object.fromEntries(new URLSearchParams(c.split("?")[1]));
     expect(query(p.eventCalls()[0]!)).toEqual({ tenant: "acme", sort: "time", dir: "desc", limit: "50" });
     const card = p.eventsCard()!;
-    const next = [...card.querySelectorAll("button")].find((b) => b.textContent?.includes("Next")) as HTMLButtonElement;
-    await act(async () => next.click());
-    await sleep(50);
+    await clickNext(card);
     expect(query(p.eventCalls().at(-1)!)).toEqual({ tenant: "acme", sort: "time", dir: "desc", limit: "50", next: "n1" });
     expect(card.textContent).toContain("Page 2");
     const before = p.eventCalls().length;
@@ -178,20 +182,17 @@ test("an operator narrowed to a tenant reads the host's events as that tenant; a
     expect(p.eventsCard()!.textContent).toContain("Page 1");
   } finally {
     await p.done();
-    api.signOut();
   }
 });
 
 test("sorting by the Details column asks the server for its detail key", async () => {
-  api.signIn("k");
-  api.setRole("tenant");
-  const p = await render(host({ times: { registered: iso(10) } as Host["times"] }));
+  const p = await render(registered());
   try {
     const th = [...p.eventsCard()!.querySelectorAll("th")].find((t) => t.textContent?.startsWith("Details")) as HTMLElement;
     expect(th.getAttribute("aria-sort")).toBe("none");
     await act(async () => th.click());
     await sleep(50);
-    const q = Object.fromEntries(new URLSearchParams(p.eventCalls().at(-1)!.split("?")[1]));
+    const q = query(p.eventCalls().at(-1)!);
     expect(q).toEqual({ sort: "detail", dir: q.dir!, limit: "50" });
     expect(["asc", "desc"]).toContain(q.dir!);
     // The column the server sorts by is the one shown sorted.
@@ -199,7 +200,6 @@ test("sorting by the Details column asks the server for its detail key", async (
     expect(shown.getAttribute("aria-sort")).toBe(q.dir === "asc" ? "ascending" : "descending");
   } finally {
     await p.done();
-    api.signOut();
   }
 });
 
@@ -213,7 +213,7 @@ test("an ended host's last stage is a point where it ended; a live host's is in 
   ]);
   const lost = hostStages(host({ state: "lost", times: { registered: iso(10), lost: iso(40) } as Host["times"] }));
   expect(lost.at(-1)).toMatchObject({ key: "lost", start: T0 + 40_000, point: true });
-  const live = hostStages(host({ times: { registered: iso(10) } as Host["times"] }));
+  const live = hostStages(registered());
   expect(live.at(-1)).toMatchObject({ key: "registered", start: T0 + 10_000, end: null });
   expect(live.some((s) => s.point)).toBe(false);
 });
