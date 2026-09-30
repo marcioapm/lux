@@ -641,6 +641,57 @@ func TestOpenCodeBusBacksOffAfterCleanEOF(t *testing.T) {
 	}
 }
 
+// heldSink holds the adapter's report of a turn end until release closes;
+// nothing the adapter cancels can end that wait.
+type heldSink struct {
+	*inputSink
+	entered, release, finished chan struct{}
+}
+
+func (s *heldSink) Event(typ string, v any) {
+	if typ == "acp.turn_end" {
+		close(s.entered)
+		<-s.release
+		defer close(s.finished)
+	}
+	s.inputSink.Event(typ, v)
+}
+
+// Run returns only after the adapter's own goroutines have: a prompt
+// waiter still reporting its turn's end when the agent exits holds Run
+// until it is done.
+func TestOpenCodeRunJoinsItsWorkers(t *testing.T) {
+	a := NewOpenCode()
+	sink := &heldSink{inputSink: &inputSink{}, entered: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
+	w := startWireSink(t, a, proto.ShimConfig{Prompt: "p"}, sink)
+	id, _ := w.next("initialize")
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":1}}`)
+	id, _ = w.next("session/new")
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"sessionId":"` + ocSession + `"}}`)
+	first, _ := w.next("session/prompt")
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	<-sink.entered
+	w.out.Close()
+	// Run's shutdown has begun once its context is cancelled.
+	for end := time.Now().Add(5 * time.Second); a.runCtx().Err() == nil; time.Sleep(time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("Run never began to shut down")
+		}
+	}
+	select {
+	case <-w.done:
+		t.Fatal("Run returned while the prompt waiter was still reporting the turn end")
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(sink.release)
+	<-w.done
+	select {
+	case <-sink.finished:
+	default:
+		t.Fatal("Run returned before the prompt waiter finished")
+	}
+}
+
 // An OpenCode adapter leaves nothing running once its Run has returned:
 // its steering worker, bus follower and prompt waiters end with it.
 func TestOpenCodeRunLeavesNoGoroutines(t *testing.T) {
