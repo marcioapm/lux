@@ -382,13 +382,8 @@ func (a *ACP) exited(cancel context.CancelFunc) {
 	a.mu.Lock()
 	undelivered := a.steers
 	a.steers, a.steerBytes = nil, 0
-	held := a.endHeld
-	a.endHeld = nil
 	a.mu.Unlock()
-	if held != nil {
-		a.sink.EndMessage()
-		a.sink.Event("acp.turn_end", held)
-	}
+	a.reportHeldEnd()
 	for _, in := range undelivered {
 		a.inputs.fail(a.sink, in, why)
 	}
@@ -421,10 +416,7 @@ func (a *ACP) endTurn(data map[string]any) {
 		}
 		a.mu.Unlock()
 	}
-	// Replies stream in chunks without line breaks: end the turn's text
-	// on a line of its own.
-	a.sink.EndMessage()
-	a.sink.Event("acp.turn_end", data)
+	a.reportTurnEnd(data)
 	a.mu.Lock()
 	a.busy = false
 	idle := len(a.queue) == 0
@@ -433,6 +425,24 @@ func (a *ACP) endTurn(data map[string]any) {
 		a.sink.Activity(true)
 	}
 	a.drain()
+}
+
+// reportTurnEnd writes acp.turn_end. Replies stream in chunks without line
+// breaks: the turn's text ends on a line of its own first.
+func (a *ACP) reportTurnEnd(data map[string]any) {
+	a.sink.EndMessage()
+	a.sink.Event("acp.turn_end", data)
+}
+
+// reportHeldEnd reports the ACP turn's end if endTurn held it.
+func (a *ACP) reportHeldEnd() {
+	a.mu.Lock()
+	held := a.endHeld
+	a.endHeld = nil
+	a.mu.Unlock()
+	if held != nil {
+		a.reportTurnEnd(held)
+	}
 }
 
 // receipts consumes the steers OpenCode's stored messages show read
@@ -572,14 +582,7 @@ func (a *ACP) settle() {
 	// OpenCode runs no loop now and every prompt_async has returned: the
 	// ACP turn's end, if held, is reported; a loop started after this
 	// (a steer sent again) ends with busTurnEnded.
-	a.mu.Lock()
-	held := a.endHeld
-	a.endHeld = nil
-	a.mu.Unlock()
-	if held != nil {
-		a.sink.EndMessage()
-		a.sink.Event("acp.turn_end", held)
-	}
+	a.reportHeldEnd()
 	now, waiting := a.clock.now(), false
 	for _, in := range a.inputs.unread("bus") {
 		msgID, gen := a.bus.messageOf(in.RequestID)
@@ -722,12 +725,10 @@ func (a *ACP) busTurnEnded() {
 	idle := len(a.queue) == 0
 	a.mu.Unlock()
 	if held != nil {
-		a.sink.EndMessage()
-		a.sink.Event("acp.turn_end", held)
+		a.reportTurnEnd(held)
 	}
 	if extra {
-		a.sink.EndMessage()
-		a.sink.Event("acp.turn_end", map[string]any{"stopReason": "end_turn", "source": "opencode-bus"})
+		a.reportTurnEnd(map[string]any{"stopReason": "end_turn", "source": "opencode-bus"})
 	}
 	if idle {
 		a.sink.Activity(true)
