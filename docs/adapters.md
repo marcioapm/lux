@@ -93,6 +93,8 @@ Per agent:
   did not build, or the server not up within 5 s) the steer goes as a
   second `session/prompt`, joined to the running turn without a receipt,
   and a `lux.warning` says why. A turn with joined prompts ends once.
+  Steers go through `prompt_async` one at a time; at most 256 (32 MiB of
+  text) wait behind the one in flight, and one more fails at once.
 - **Generic ACP** agents keep a queue: the ACP spec does not say what a
   second prompt during a turn does.
 

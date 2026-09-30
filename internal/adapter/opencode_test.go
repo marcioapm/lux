@@ -107,8 +107,10 @@ type fakeBus struct {
 	events chan string
 	posted []map[string]any
 	status int
-	// hold, if set, is waited on before prompt_async answers.
-	hold chan struct{}
+	// hold, if set, is waited on before prompt_async answers; holdN[n]
+	// instead, for the nth.
+	hold  chan struct{}
+	holdN map[int]chan struct{}
 	// stored: the session's messages; loop: OpenCode runs one.
 	stored []map[string]string
 	loop   bool
@@ -117,6 +119,9 @@ type fakeBus struct {
 	gets int
 	// statusFail: GET /session/status answers 500.
 	statusFail bool
+	// dropParts: posted keeps no text, so a test can measure the adapter's
+	// heap alone.
+	dropParts bool
 }
 
 func newFakeBus(t *testing.T) *fakeBus {
@@ -148,7 +153,13 @@ func newFakeBus(t *testing.T) *fakeBus {
 		body["directory"] = r.Header.Get("x-opencode-directory")
 		b.mu.Lock()
 		b.posted = append(b.posted, body)
+		if b.dropParts {
+			delete(body, "parts")
+		}
 		st, hold := b.status, b.hold
+		if h, ok := b.holdN[len(b.posted)-1]; ok {
+			hold = h
+		}
 		if st/100 == 2 {
 			// Stored, and joined to the running loop or starting one.
 			id, _ := body["messageID"].(string)

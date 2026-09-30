@@ -74,9 +74,11 @@ type ACP struct {
 	// cancelGen counts the session/cancels sent.
 	cancelGen int
 	// steers: inputs for the running turn, in the order they came, which
-	// steerLoop delivers; steerKick wakes it.
-	steers    []proto.Input
-	steerKick chan struct{}
+	// steerLoop delivers; steerKick wakes it. steerBytes: their text's
+	// size, bounded with their count (maxPendingSteers).
+	steers     []proto.Input
+	steerBytes int
+	steerKick  chan struct{}
 	// settleMu serializes settle. suspect: steers seen stored and
 	// unanswered with no loop running, by message id, and when first seen.
 	// resent: request ids settle sent again since the ACP turn ended.
@@ -118,6 +120,14 @@ type wallClock struct{}
 const (
 	settleGiveUp     = 2 * time.Minute
 	settleMaxBackoff = 30 * time.Second
+)
+
+// Steers waiting for the one in flight: past either limit, a new one
+// fails at once.
+const (
+	maxPendingSteers      = 256
+	maxPendingSteerBytes  = 32 << 20
+	errPendingSteersLimit = "too many inputs wait for the agent (256 inputs or 32 MiB)"
 )
 
 func (wallClock) now() time.Time { return time.Now() }
@@ -363,7 +373,7 @@ func (a *ACP) exited(cancel context.CancelFunc) {
 	}
 	a.mu.Lock()
 	undelivered := a.steers
-	a.steers = nil
+	a.steers, a.steerBytes = nil, 0
 	held := a.endHeld
 	a.endHeld = nil
 	a.mu.Unlock()
@@ -703,7 +713,13 @@ func (a *ACP) steerLoop(ctx context.Context) {
 		a.mu.Lock()
 		if len(a.steers) > 0 && ctx.Err() == nil {
 			in := a.steers[0]
+			// Clear the slot: the backing array outlives the steer.
+			a.steers[0] = proto.Input{}
 			a.steers = a.steers[1:]
+			a.steerBytes -= len(in.Text)
+			if len(a.steers) == 0 {
+				a.steers = nil
+			}
 			a.mu.Unlock()
 			a.steer(in)
 			continue
@@ -923,7 +939,13 @@ func (a *ACP) Deliver(in proto.Input) {
 		return
 	}
 	if a.opencode && a.busy && !a.busTurn && !a.stopped && !a.closed && !in.Interrupt && in.Text != "" {
+		if len(a.steers) >= maxPendingSteers || a.steerBytes+len(in.Text) > maxPendingSteerBytes {
+			a.mu.Unlock()
+			a.inputs.fail(a.sink, in, errors.New(errPendingSteersLimit))
+			return
+		}
 		a.steers = append(a.steers, in)
+		a.steerBytes += len(in.Text)
 		a.mu.Unlock()
 		select {
 		case a.steerKick <- struct{}{}:
