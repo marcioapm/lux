@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -468,6 +469,19 @@ func inputsOf(sts []*inputState) []proto.Input {
 		out[i] = st.in
 	}
 	return out
+}
+
+var (
+	errStoppedUnread = errors.New("the Run stopped before the agent read it")
+	errExitedUnread  = errors.New("the agent exited before it read it")
+)
+
+// unreadWhy is why an input the agent never read fails once it has exited.
+func unreadWhy(stopped bool) error {
+	if stopped {
+		return errStoppedUnread
+	}
+	return errExitedUnread
 }
 
 // lineWriter serializes JSON lines to a process's stdin.

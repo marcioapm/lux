@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -191,10 +190,7 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 // left alone.
 func (c *Claude) exited() {
 	c.mu.Lock()
-	why := errors.New("the agent exited before it read it")
-	if c.stopping {
-		why = errors.New("the Run stopped before the agent read it")
-	}
+	why := unreadWhy(c.stopping)
 	sent := c.sent
 	c.sent = nil
 	sink := c.sink

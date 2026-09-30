@@ -378,10 +378,7 @@ func (a *ACP) exited(cancel context.CancelFunc) {
 	}
 	a.mu.Unlock()
 	a.bg.Wait()
-	why := errors.New("the agent exited before it read it")
-	if stopped {
-		why = errors.New("the Run stopped before the agent read it")
-	}
+	why := unreadWhy(stopped)
 	a.mu.Lock()
 	undelivered := a.steers
 	a.steers, a.steerBytes = nil, 0
@@ -689,7 +686,7 @@ func (a *ACP) carry(ctx context.Context, session string, in proto.Input) bool {
 	stopped, gen := a.stopped, a.cancelGen
 	a.mu.Unlock()
 	if stopped {
-		a.inputs.fail(a.sink, in, errors.New("the Run stopped before the agent read it"))
+		a.inputs.fail(a.sink, in, errStoppedUnread)
 		return false
 	}
 	msgID := a.bus.messageID(time.Now())
