@@ -51,8 +51,8 @@ func fetchPage(t *testing.T, s *Server, key, path, field string) page {
 // query names the sort, dir and limit), calling between(i, p) after page i
 // so a test can change the data mid-walk. It checks, for every page, that
 // at re-reads it unchanged after between ran (changes a test makes must be
-// ahead of or behind the page), and that prev leads back through the same
-// pages. Returns every id in page order.
+// ahead of or behind the page), and, without between, that prev leads back
+// through the same pages. Returns every id in page order.
 func walkPages(t *testing.T, s *Server, key, base, field string, between func(i int, p page)) []string {
 	t.Helper()
 	sep := "&"
@@ -72,7 +72,13 @@ func walkPages(t *testing.T, s *Server, key, base, field string, between func(i 
 			between(i, p)
 		}
 		if p.Self != "" {
-			if again := fetchPage(t, s, key, base+sep+"at="+url.QueryEscape(p.Self), field); !slices.Equal(again.IDs, p.IDs) {
+			// A last page has room: rows added behind it may follow.
+			again := fetchPage(t, s, key, base+sep+"at="+url.QueryEscape(p.Self), field)
+			same := slices.Equal(again.IDs, p.IDs)
+			if p.Next == "" && between != nil {
+				same = len(again.IDs) >= len(p.IDs) && slices.Equal(again.IDs[:len(p.IDs)], p.IDs)
+			}
+			if !same {
 				t.Fatalf("%s: page %d read again at its cursor: %v, was %v", base, i, again.IDs, p.IDs)
 			}
 		}
@@ -84,7 +90,11 @@ func walkPages(t *testing.T, s *Server, key, base, field string, between func(i 
 		}
 		p = fetchPage(t, s, key, base+sep+"next="+url.QueryEscape(p.Next), field)
 	}
-	// Back through prev: the same pages, in reverse.
+	// Back through prev: the same pages, in reverse. Only without changes:
+	// rows inserted between pages already read show up on the way back.
+	if between != nil {
+		return all
+	}
 	q := pages[len(pages)-1]
 	for i := len(pages) - 2; i >= 0; i-- {
 		q = fetchPage(t, s, key, base+sep+"prev="+url.QueryEscape(q.Prev), field)
@@ -792,6 +802,79 @@ func TestPoolEventsPagedSort(t *testing.T) {
 		want = sorted(pad(ids), func(id string) *string { v := byID[fmt.Sprint(mustAtoi(id))].Type; return &v }, dir)
 		if !slices.Equal(pad(got), want) {
 			t.Errorf("sort=type dir=%s:\n got %v\nwant %v", dir, pad(got), want)
+		}
+		// detail: type, then the data's JSON text, byte order.
+		detail := map[string]string{}
+		for _, id := range ids {
+			detail[fmt.Sprintf("%06s", id)] = queryOne[string](t, s, `SELECT type || chr(1) || data::text FROM pool_events WHERE id = $1::bigint`, id)
+		}
+		got = walkPages(t, s, key, "/v1/pools/burst/events?owner=platform&limit=4&sort=detail&dir="+dir, "events", nil)
+		want = sorted(pad(ids), func(id string) *string { v := detail[id]; return &v }, dir)
+		if !slices.Equal(pad(got), want) {
+			t.Errorf("sort=detail dir=%s:\n got %v\nwant %v", dir, pad(got), want)
+		}
+	}
+}
+
+// Pool events by time while new ones arrive: now, and at the instant of a
+// row already read (a tie broken by id). Every event there was is read once
+// and in order, each page re-reads in place, and none repeats.
+func TestPoolEventsPagedStableUnderInserts(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	key := operatorKey(t, s, ctx)
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	pad := func(x string) string { return fmt.Sprintf("%06s", x) }
+	// One pool per direction, each with 40 events over 5 instants.
+	for _, dir := range []string{"desc", "asc"} {
+		execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ($1, $1, 'ec2')`, dir)
+		for i := range 40 {
+			execSQL(t, s, ctx, `INSERT INTO pool_events (pool_id, type, created_at) VALUES ($1, 'pool.scale_up', $2)`, dir, at.Add(time.Duration(i%5)*time.Second))
+		}
+		when := map[string]time.Time{}
+		var ids []string
+		for _, id := range queryOne[[]int64](t, s, `SELECT array_agg(id) FROM pool_events WHERE pool_id = $1`, dir) {
+			k := fmt.Sprint(id)
+			when[k] = queryOne[time.Time](t, s, `SELECT created_at FROM pool_events WHERE id = $1`, id)
+			ids = append(ids, k)
+		}
+		var added []string
+		got := walkPages(t, s, key, "/v1/pools/"+dir+"/events?owner=platform&limit=6&sort=time&dir="+dir, "events", func(i int, p page) {
+			// A tie outside the page: in desc order a larger id at the
+			// first row's instant is ahead of it; in asc, at the last
+			// row's, behind it.
+			edge := p.IDs[0]
+			if dir == "asc" {
+				edge = p.IDs[len(p.IDs)-1]
+			}
+			for _, tie := range []any{when[edge], nil} {
+				id := queryOne[int64](t, s, `INSERT INTO pool_events (pool_id, type, created_at) VALUES ($1, 'pool.scale_up', coalesce($2, now())) RETURNING id`, dir, tie)
+				k := fmt.Sprint(id)
+				when[k] = queryOne[time.Time](t, s, `SELECT created_at FROM pool_events WHERE id = $1`, id)
+				added = append(added, k)
+			}
+		})
+		seen := map[string]bool{}
+		var old []string
+		for _, id := range got {
+			if seen[id] {
+				t.Fatalf("dir=%s: event %s read twice", dir, id)
+			}
+			seen[id] = true
+			if !slices.Contains(added, id) {
+				old = append(old, pad(id))
+			}
+		}
+		var padded []string
+		for _, id := range ids {
+			padded = append(padded, pad(id))
+		}
+		want := sorted(padded, func(id string) *int64 { v := when[fmt.Sprint(mustAtoi(id))].UnixMicro(); return &v }, dir)
+		if !slices.Equal(old, want) {
+			t.Errorf("dir=%s: events there were:\n got %v\nwant %v", dir, old, want)
+		}
+		if dir == "desc" && len(got) != len(ids) {
+			t.Errorf("desc: new events ahead of the cursor were read: %v", got)
 		}
 	}
 }
