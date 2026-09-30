@@ -12,6 +12,7 @@ let formatTimestamp: typeof import("@lux/design-system").formatTimestamp;
 let fakeApi: typeof import("../testing.ts").fakeApi;
 let hostStages: typeof import("./hostStages.ts").hostStages;
 let api: typeof import("../../api/index.ts");
+let setSearchParams: typeof import("../router.tsx").setSearchParams;
 beforeAll(async () => {
   GlobalRegistrator.register();
   ({ HostPage } = await import("./HostPage.tsx"));
@@ -20,6 +21,7 @@ beforeAll(async () => {
   ({ fakeApi } = await import("../testing.ts"));
   ({ hostStages } = await import("./hostStages.ts"));
   api = await import("../../api/index.ts");
+  ({ setSearchParams } = await import("../router.tsx"));
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
 afterAll(async () => {
@@ -53,8 +55,11 @@ function host(over: Partial<Host> = {}): Host {
 
 const events = (from: number, n: number): LifecycleEvent[] => Array.from({ length: n }, (_, i) => ({ id: from - i, type: "host.placement_assigned", data: { run: `r${from - i}` }, count: 1, time: iso(from - i) }));
 
-/** The host page with a fake API: the host, and its events as cursor pages of 50. */
-async function render(h: Host) {
+const launchFailed = (over: Partial<Host> = {}) =>
+  host({ state: "terminated", launch: { outcome: "failed", requestedAt: iso(0), finishedAt: iso(5), error: "InsufficientInstanceCapacity" }, times: { provisionRequested: iso(0) } as Host["times"], ...over });
+
+/** The host page with a fake API: the host, and its events as cursor pages of 50. url is the page's (its ?tenant= narrows an operator). */
+async function render(h: Host, url = "http://localhost/hosts/h1") {
   const fake = fakeApi((path) => {
     if (path.startsWith("/v1/hosts/h1/events")) {
       const q = new URLSearchParams(path.split("?")[1]);
@@ -66,6 +71,7 @@ async function render(h: Host) {
     if (path.startsWith("/v1/runs")) return { runs: [] };
     return {};
   });
+  (window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM.setURL(url);
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
@@ -83,6 +89,7 @@ async function render(h: Host) {
     el,
     fake,
     eventCalls: () => fake.calls.filter((c) => c.startsWith("/v1/hosts/h1/events")),
+    eventsCard: () => [...el.querySelectorAll(".card")].find((c) => c.querySelector(".card-title")?.textContent === "Events"),
     done: async () => {
       await act(async () => root.unmount());
       el.remove();
@@ -100,7 +107,7 @@ async function pagesThroughEvents(h: Host) {
     // before/after (the old unpaged reads).
     const first = new URLSearchParams(p.eventCalls()[0]!.split("?")[1]);
     expect(Object.fromEntries(first)).toEqual({ sort: "time", dir: "desc", limit: "50" });
-    const card = [...p.el.querySelectorAll(".card")].find((c) => c.querySelector(".card-title")?.textContent === "Events")!;
+    const card = p.eventsCard()!;
     expect(card).toBeDefined();
     expect(card.querySelectorAll("tbody tr").length).toBe(50);
     expect(card.textContent).toContain("Page 1");
@@ -125,9 +132,75 @@ test("a host's events are server-sorted cursor pages", async () => {
 });
 
 test("a host whose launch failed pages its events the same way", async () => {
-  await pagesThroughEvents(
-    host({ state: "terminated", launch: { outcome: "failed", requestedAt: iso(0), finishedAt: iso(5), error: "InsufficientInstanceCapacity" }, times: { provisionRequested: iso(0) } as Host["times"] }),
-  );
+  await pagesThroughEvents(launchFailed());
+});
+
+async function noEventsAsTenant(h: Host) {
+  api.signIn("k");
+  api.setRole("tenant");
+  const p = await render(h);
+  try {
+    expect(p.fake.calls.some((c) => c.startsWith("/v1/hosts/h1"))).toBe(true);
+    expect(p.el.querySelector(".page-title")).not.toBeNull();
+    expect(p.eventsCard()).toBeUndefined();
+    expect(p.eventCalls()).toEqual([]);
+  } finally {
+    await p.done();
+    api.signOut();
+  }
+}
+
+test("a tenant sees no events of a platform host and reads none", async () => {
+  await noEventsAsTenant(host({ platform: true, tenant: "", times: { registered: iso(10) } as Host["times"] }));
+});
+
+test("a tenant sees no events of a platform host whose launch failed and reads none", async () => {
+  await noEventsAsTenant(launchFailed({ platform: true, tenant: "" }));
+});
+
+test("an operator narrowed to a tenant reads the host's events as that tenant; a scope change starts over at page 1", async () => {
+  api.signIn("k");
+  api.setRole("operator");
+  const p = await render(host({ times: { registered: iso(10) } as Host["times"] }), "http://localhost/hosts/h1?tenant=acme");
+  try {
+    const query = (c: string) => Object.fromEntries(new URLSearchParams(c.split("?")[1]));
+    expect(query(p.eventCalls()[0]!)).toEqual({ tenant: "acme", sort: "time", dir: "desc", limit: "50" });
+    const card = p.eventsCard()!;
+    const next = [...card.querySelectorAll("button")].find((b) => b.textContent?.includes("Next")) as HTMLButtonElement;
+    await act(async () => next.click());
+    await sleep(50);
+    expect(query(p.eventCalls().at(-1)!)).toEqual({ tenant: "acme", sort: "time", dir: "desc", limit: "50", next: "n1" });
+    expect(card.textContent).toContain("Page 2");
+    const before = p.eventCalls().length;
+    await act(async () => setSearchParams({ tenant: "globex" }));
+    await sleep(50);
+    expect(p.eventCalls().slice(before).map(query)).toEqual([{ tenant: "globex", sort: "time", dir: "desc", limit: "50" }]);
+    expect(p.eventsCard()!.textContent).toContain("Page 1");
+  } finally {
+    await p.done();
+    api.signOut();
+  }
+});
+
+test("sorting by the Details column asks the server for its detail key", async () => {
+  api.signIn("k");
+  api.setRole("tenant");
+  const p = await render(host({ times: { registered: iso(10) } as Host["times"] }));
+  try {
+    const th = [...p.eventsCard()!.querySelectorAll("th")].find((t) => t.textContent?.startsWith("Details")) as HTMLElement;
+    expect(th.getAttribute("aria-sort")).toBe("none");
+    await act(async () => th.click());
+    await sleep(50);
+    const q = Object.fromEntries(new URLSearchParams(p.eventCalls().at(-1)!.split("?")[1]));
+    expect(q).toEqual({ sort: "detail", dir: q.dir!, limit: "50" });
+    expect(["asc", "desc"]).toContain(q.dir!);
+    // The column the server sorts by is the one shown sorted.
+    const shown = [...p.eventsCard()!.querySelectorAll("th")].find((t) => t.textContent?.startsWith("Details"))!;
+    expect(shown.getAttribute("aria-sort")).toBe(q.dir === "asc" ? "ascending" : "descending");
+  } finally {
+    await p.done();
+    api.signOut();
+  }
 });
 
 test("an ended host's last stage is a point where it ended; a live host's is in progress", () => {
