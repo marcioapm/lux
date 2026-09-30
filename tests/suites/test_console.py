@@ -679,14 +679,41 @@ def test_pool_page_shows_its_settings_and_events(page, tenant_factory):
     assert not page.errors, page.errors
 
 
-def test_host_page_shows_its_events(page, lux, runners, hosts):
+def test_host_page_shows_its_events(page, env, lux, runners, hosts):
+    """A host's events are server pages, newest first, like a pool's: its
+    own registration, and with more than a page of events, Next to the
+    older ones."""
     runners.start(hosts[0])
     host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
                                        if h["name"] == hosts[0].name and h["state"] == "ready"), None),
                          30, 1, "the host never registered")
     page.sign_in(lux.api_key, f"/hosts/{host_id}")
-    expect(page.get_by_role("heading", name="Events", exact=True)).to_have_count(1, timeout=15_000)
-    expect(page.locator("tr", has_text="host.registered")).to_have_count(1, timeout=15_000)
+    card = page.locator(".card", has=page.get_by_role("heading", name="Events", exact=True))
+    expect(card).to_have_count(1, timeout=15_000)
+    expect(card.locator("tr", has_text="host.registered")).to_have_count(1, timeout=15_000)
+    pager = card.get_by_role("navigation", name="Pages")
+    expect(pager).to_contain_text("Time, newest first")
+    expect(pager.get_by_role("button", name="Next ›")).to_be_disabled()
+
+    # 60 more, newer than its registration: two pages of 50.
+    with psycopg.connect(env.owner_dsn) as conn:
+        conn.execute("""INSERT INTO host_events (tenant_id, host_id, type, data)
+            SELECT h.tenant_id, h.id, 'host.placement_assigned', jsonb_build_object('run', 'hev-' || i, 'epoch', 1, 'host', 'h')
+            FROM hosts h, generate_series(1, 60) i WHERE h.id = %s ORDER BY i""", (host_id,))
+    tags = lambda: card.evaluate("""c => [...c.querySelectorAll('tbody tr')]
+        .map(tr => (/(hev-\\d+) epoch/.exec(tr.textContent) || [])[1]).filter(Boolean)""")
+    # The next poll (5s) reads the new page 1.
+    expect(pager).to_contain_text("Page 1 · events 1–50", timeout=15_000)
+    expect(card.locator("tbody tr").first).to_contain_text("hev-60 epoch", timeout=15_000)
+    assert tags() == [f"hev-{i}" for i in range(60, 10, -1)], tags()
+    expect(card.locator("tr", has_text="host.registered")).to_have_count(0)
+    pager.get_by_role("button", name="Next ›").click()
+    expect(pager).to_contain_text("Page 2 · events 51–", timeout=15_000)
+    expect(card.locator("tbody tr").first).to_contain_text("hev-10 epoch", timeout=15_000)
+    assert tags() == [f"hev-{i}" for i in range(10, 0, -1)], tags()
+    expect(card.locator("tr", has_text="host.registered")).to_have_count(1)
+    pager.get_by_role("button", name="‹ Previous").click()
+    expect(card.locator("tbody tr").first).to_contain_text("hev-60 epoch", timeout=15_000)
     assert not page.errors, page.errors
 
 

@@ -5,7 +5,7 @@ import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, poolPath, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
 import { HostCost } from "./HostCost.tsx";
-import { InfraEvents } from "./InfraEvents.tsx";
+import { PagedEvents } from "./PagedEvents.tsx";
 import { ProcessCards, runnerProcesses } from "./ProcessCards.tsx";
 
 export function HostPage({ id }: { id: string }) {
@@ -144,7 +144,7 @@ export function HostPage({ id }: { id: string }) {
 
       {/* A platform host's events are the operators', not narrowed to a tenant (they name other tenants' Runs). */}
       {(!h.platform || (scope.operator && !scope.apiTenant)) && (
-        <InfraEvents queryKey={`host-events:${id}@${scope.tenant}`} page={(q, s) => api.hostEvents(id, scope.apiTenant, q, s)} interval={5000} subtitle="registration, placements, drains, termination" />
+        <HostEvents id={id} interval={5000} subtitle="registration, placements, drains, termination" />
       )}
 
       <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
@@ -231,11 +231,18 @@ function LaunchFailedHost({ host: h }: { host: Host }) {
           ]}
         />
       </Card>
-      {(!h.platform || (scope.operator && !scope.apiTenant)) && (
-        <InfraEvents queryKey={`host-events:${h.id}@${scope.tenant}`} page={(q, s) => api.hostEvents(h.id, scope.apiTenant, q, s)} interval={15_000} subtitle="what was recorded on the host" />
-      )}
+      {(!h.platform || (scope.operator && !scope.apiTenant)) && <HostEvents id={h.id} interval={15_000} subtitle="what was recorded on the host" />}
     </div>
   );
+}
+
+/**
+ * A host's events, server-sorted cursor pages. Not refetched by live.ts:
+ * drains, readiness and loss are not Run feed events, so it keeps its poll.
+ */
+function HostEvents({ id, interval, subtitle }: { id: string; interval: number; subtitle: string }) {
+  const scope = useScope();
+  return <PagedEvents prefix="host-events" view={`${scope.tenant}|${id}`} fetch={(req, s) => api.hostEventsPage(id, scope.apiTenant, req, s)} interval={interval} subtitle={subtitle} />;
 }
 
 const HOST_TIMES: { key: HostTimeKey; label: string; tone: TimelineStage["tone"] }[] = [
