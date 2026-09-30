@@ -130,6 +130,94 @@ func TestRollupHistory(t *testing.T) {
 	}
 }
 
+// The rollup's table-wide lower bound skips nothing: a key whose newest
+// bucket lags another key's is still rolled up, in the rollup that follows
+// and in the next hour's.
+func TestRollupAcrossKeys(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	h0 := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	h1 := h0.Add(time.Hour)
+	insert := func(rows ...any) {
+		t.Helper()
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			for i := 0; i < len(rows); i += 3 {
+				if _, err := tx.Exec(ctx, `INSERT INTO pool_samples (pool_id, tenant_id, res, at, running, started) VALUES ($1, '', 0, $2, $3, 1)`,
+					rows[i], rows[i+1], rows[i+2]); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	type bucket struct {
+		pool    string
+		res     int
+		at      time.Time
+		running int
+		started int
+	}
+	read := func() []bucket {
+		t.Helper()
+		var got []bucket
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			rows, _ := tx.Query(ctx, `SELECT pool_id, res, at, running, started FROM pool_samples WHERE res > 0 ORDER BY res, pool_id, at`)
+			var err error
+			got, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (bucket, error) {
+				var b bucket
+				return b, r.Scan(&b.pool, &b.res, &b.at, &b.running, &b.started)
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO pools (id, name, provider) VALUES ('pa', 'a', 'static'), ('pb', 'b', 'static')`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := func(h time.Time, min int, sec int) time.Time {
+		return h.Add(time.Duration(min)*time.Minute + time.Duration(sec)*time.Second)
+	}
+	// pb's samples stop after its first minute; pa's go on for two more.
+	insert("pa", m(h0, 0, 0), 2, "pa", m(h0, 0, 30), 4, "pa", m(h0, 1, 0), 6, "pa", m(h0, 2, 0), 8,
+		"pb", m(h0, 0, 0), 10)
+	if err := s.rollupHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Next hour pb has more minutes than pa.
+	insert("pa", m(h1, 0, 0), 1,
+		"pb", m(h1, 0, 0), 20, "pb", m(h1, 1, 0), 30)
+	for range 2 {
+		if err := s.rollupHistory(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []bucket{
+		{"pa", 60, m(h0, 0, 0), 3, 2}, {"pa", 60, m(h0, 1, 0), 6, 1}, {"pa", 60, m(h0, 2, 0), 8, 1}, {"pa", 60, m(h1, 0, 0), 1, 1},
+		{"pb", 60, m(h0, 0, 0), 10, 1}, {"pb", 60, m(h1, 0, 0), 20, 1}, {"pb", 60, m(h1, 1, 0), 30, 1},
+		{"pa", 3600, h0, 6, 4}, {"pa", 3600, h1, 1, 1},
+		{"pb", 3600, h0, 10, 1}, {"pb", 3600, h1, 25, 2},
+	}
+	got := read()
+	if len(got) != len(want) {
+		t.Fatalf("buckets:\n got %v\nwant %v", got, want)
+	}
+	for i := range want {
+		g, w := got[i], want[i]
+		if g.pool != w.pool || g.res != w.res || !g.at.Equal(w.at) || g.running != w.running || g.started != w.started {
+			t.Fatalf("bucket %d:\n got %+v\nwant %+v", i, g, w)
+		}
+	}
+}
+
 // sampleSystem counts each tenant's Runs and the whole system's; a tenant's
 // hosts are its own and the platform's; a start is counted once its window
 // reaches it.
