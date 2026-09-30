@@ -175,3 +175,34 @@ func TestClaudeWithoutLifecycle(t *testing.T) {
 	w.send(clResult)
 	checkLines(t, w, sink, "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
 }
+
+// Stop is SIGINT: Claude Code ends the turn with an aborted result and
+// exits, with no lifecycle frame for a line still queued. That line fails,
+// once; the line already read stays consumed.
+func TestClaudeQueuedLineFailsWhenTheAgentExits(t *testing.T) {
+	c, w, sink, prompt := claudeStarted(t)
+	w.send(clLifecycle(prompt, "queued"))
+	w.send(clLifecycle(prompt, "started"))
+	c.Deliver(proto.Input{RequestID: "s", Text: "x"})
+	steer := userLine(t, w)
+	w.send(clLifecycle(steer, "queued"))
+	sink.wait(t, "accepted s")
+	c.mu.Lock()
+	c.stopping = true // what Stop sets before its SIGINT
+	c.mu.Unlock()
+	w.send(strings.Replace(clResult, `"completed"`, `"aborted_streaming"`, 1))
+	sink.wait(t, "turn_end")
+	w.exit()
+	n := 0
+	for _, l := range sink.lines() {
+		if strings.HasPrefix(l, "failed prompt") {
+			t.Fatalf("the line read was failed: %q", sink.lines())
+		}
+		if l == "failed s: the Run stopped before the agent read it" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("queued line failed %d times: %q", n, sink.lines())
+	}
+}

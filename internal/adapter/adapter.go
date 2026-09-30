@@ -330,6 +330,14 @@ func (l *inputLedger) consume(sink Sink, id string) bool {
 	return true
 }
 
+// open reports whether the input is known and neither read nor failed.
+func (l *inputLedger) open(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	st := l.m[id]
+	return st != nil && !st.done && !(st.accepted && !st.receipt)
+}
+
 // unreadOne reports whether the input is accepted and not yet read.
 func (l *inputLedger) unreadOne(id string) bool {
 	l.mu.Lock()
