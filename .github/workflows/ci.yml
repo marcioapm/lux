@@ -124,12 +124,16 @@ jobs:
         working-directory: tests
         run: uv run playwright install --with-deps chromium
 
-      # The simulated hosts' Podman cannot apply AppArmor profiles, so the
-      # apparmor=unconfined a nested Run gets does nothing there, and the
-      # runner kernel's userns restriction stops pasta inside it. Real
-      # Ubuntu hosts may hit the same (follow-up: handle it in the runner).
-      - name: Allow unprivileged user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The runner image ships passt, whose AppArmor profile attaches to
+      # /usr/bin/pasta by path, in containers too: rootless Podman inside a
+      # nested Run keeps its netns under /tmp/storage-run-<uid>, which the
+      # profile does not allow. Real Ubuntu hosts with passt installed hit
+      # the same (follow-up: handle it in the runner).
+      - name: Let nested Podman's pasta run unconfined
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          for p in /etc/apparmor.d/usr.bin.pas*; do [ -e "$p" ] && sudo apparmor_parser -R "$p" || true; done
+          sudo aa-status | grep -iE 'pasta|passt' || echo "no pasta/passt profile loaded"
 
       - name: e2e shard
         working-directory: tests
