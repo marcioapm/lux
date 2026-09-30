@@ -88,8 +88,10 @@ is `launched`; everything else was left without an outcome.
 ## Pools over time
 
 Each system sample also writes one row per pool into `pool_samples`
-(migration 040), keyed by the pool's id, so a rename keeps a pool's history
-and a removed pool and a new one of its name stay apart. The pool's own row
+(migration 040), keyed by the pool's id, so a rename keeps a pool's history.
+A pool removed (`DELETE /v1/pools/{name}`) and then set again under the same
+name by the same owner is the same pool: `POST /v1/pools` revives the
+retired row, with its id, so its samples and cost history continue. The pool's own row
 (tenant `''`) holds its hosts by state, the capacity of its ready and
 draining hosts, what live placements on its hosts hold, its Runs running
 and queued, Runs first started and finished in the sample's window, and the
@@ -98,6 +100,16 @@ that tenant's part (its Runs, allocation, starts and finishes) and nothing
 of the pool's hosts. They roll up and expire with the other samples. The
 first rows are written when this ships: an older range is a gap, never an
 invented zero (`historyFrom` says where a pool's history starts).
+
+Sizing: one row per key per sample, where the keys are the pools sampled
+(live ones, and retired ones with hosts or Runs) plus each (tenant, pool)
+pair with Runs or placements on it. At the default resolutions (raw every
+10 s, minutes and hours) a pool's history takes about
+`keys × (8640 × raw_days + 1440 × minute_days + 24 × hour_days) × 210 B`,
+indexes included: 143 keys at 2 days raw, 30 days of minutes and 400 days of
+hours is about 10 M rows and 2.1 GB. A pool's own row is written every
+sample, idle or not. Each minute's rollup reads only the rows since the
+newest bucket already rolled up, not the whole retention.
 
 `GET /v1/pools/{name}/metrics` reads them (with the pool's figures now),
 `GET /v1/pools/{name}/cost` reads `cost_hourly` by the pool's id (its Runs'
@@ -128,8 +140,10 @@ A Run carries its **placement time**: for each placement, from when the Run
 needed a host (it was created, or its previous placement ended, or it was
 resumed) until that placement's workload started, summed over its
 placements (`placementSeconds` = `placementWaitSeconds`, waiting for a host,
-+ `placementStartSeconds`, starting on it). While a Run waits or starts it
-counts up (`placing`).
++ `placementStartSeconds`, starting on it). A placement's start ends when
+its workload starts, else when luxd saw it running (a runner that does not
+report the workload's start), else when it ended. While a Run waits or
+starts it counts up (`placing`).
 
 What happened to a host, and to its pool, is also an event log of its own
 (`lux hosts events <host>`, `lux pools events <pool>`; see the

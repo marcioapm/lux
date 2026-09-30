@@ -34,7 +34,7 @@ func (s *Server) poolRoutes(api huma.API) {
 		OperationID: "poolMetrics", Method: http.MethodGet, Path: "/v1/pools/{name}/metrics", Tags: []string{"pools", "history"},
 		Summary: "A pool now, and over time",
 		Description: "Now: hosts by state, capacity and what live placements hold, Runs running and queued, launch failures in the range. " +
-			"Over time: the pool's samples (by its id: a rename keeps them; a new pool of an old name starts its own) of the same, with starts, finishes and launches per sample. " +
+			"Over time: the pool's samples (by its id: a rename keeps them, and a pool removed and set again under its name is the same pool, whose history continues) of the same, with starts, finishes and launches per sample. " +
 			"Samples begin when luxd started taking them (historyFrom); earlier is a gap, not zero. A tenant's Runs and allocation are its own.",
 		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict},
 	}, "read", s.poolMetrics)
@@ -290,7 +290,8 @@ func (s *Server) poolMetrics(ctx context.Context, in *poolMetricsInput) (*poolMe
 			return err
 		}
 		if err := tx.QueryRow(ctx, `SELECT count(*), max(h.launch_finished_at),
-				coalesce((SELECT x.launch_error FROM hosts x WHERE x.pool_id = $2 AND x.launch_outcome = 'failed' ORDER BY x.launch_finished_at DESC NULLS LAST LIMIT 1), '')
+				coalesce((SELECT `+hostLaunchError+` FROM hosts h WHERE h.pool_id = $2 AND h.launch_outcome = 'failed' AND `+visibleHosts+`
+					ORDER BY h.launch_finished_at DESC NULLS LAST LIMIT 1), '')
 			FROM hosts h WHERE h.pool_id = $2 AND h.launch_outcome = 'failed' AND h.launch_finished_at > $3 AND `+visibleHosts,
 			p.TenantID, pool.ID, from).Scan(&now.LaunchFailures, &now.LastLaunchFailure, &now.LastLaunchError); err != nil {
 			return err
