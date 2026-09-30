@@ -99,10 +99,8 @@ func TestACPPromptNotWrittenFails(t *testing.T) {
 	a.rpc.lw.close()
 	a.Deliver(proto.Input{RequestID: "lost", Text: "x"})
 	sink.wait(t, "failed lost: process stdin is closed")
-	for _, l := range sink.lines() {
-		if strings.HasPrefix(l, "accepted lost") {
-			t.Fatalf("%q", sink.lines())
-		}
+	if sink.has("accepted lost") {
+		t.Fatalf("%q", sink.lines())
 	}
 }
 
@@ -318,10 +316,8 @@ func ocWithBusClock(t *testing.T, clk *testClock) (*ACP, *fakeBus, *agentWire, *
 // noConsumed fails if anything was reported read.
 func noConsumed(t *testing.T, sink *inputSink, when string) {
 	t.Helper()
-	for _, l := range sink.lines() {
-		if strings.HasPrefix(l, "consumed") {
-			t.Fatalf("%s: %q", when, sink.lines())
-		}
+	if sink.has("consumed") {
+		t.Fatalf("%s: %q", when, sink.lines())
 	}
 }
 

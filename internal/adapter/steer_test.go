@@ -92,14 +92,17 @@ func checkCarried(t *testing.T, w *agentWire, sink *inputSink, id string) {
 	}
 }
 
+// has reports whether the sink has a line starting with prefix.
+func (s *inputSink) has(prefix string) bool {
+	return slices.ContainsFunc(s.lines(), func(l string) bool { return strings.HasPrefix(l, prefix) })
+}
+
 // wait polls until the sink has a line with want, or fails.
 func (s *inputSink) wait(t *testing.T, want string) {
 	t.Helper()
 	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
-		for _, l := range s.lines() {
-			if strings.HasPrefix(l, want) {
-				return
-			}
+		if s.has(want) {
+			return
 		}
 	}
 	t.Fatalf("no %q in %q", want, s.lines())
