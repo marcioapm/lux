@@ -140,38 +140,42 @@ export function StateCell({ kind, state, activity, reason, children }: { kind: "
 
 /**
  * Shared columns of a runs table. The name leads; the id is a quiet mono
- * column beside it. Name and state share the flexible width. Every column
- * sorts: the loaded rows by default, or, with server, the server's order
- * (the keys are GET /v1/runs' sort keys).
+ * column beside it. Every width is fixed (the table spreads what is left):
+ * State fits its widest pill, and Id, Adapter and Placements drop first
+ * when the container is narrow. Every column sorts: the loaded rows by
+ * default, or, with server, the server's order (the keys are GET /v1/runs'
+ * sort keys).
  */
 export function runColumns({ tenant, host = true, adapter = true, cost = false, placement = false }: { tenant: boolean; host?: boolean; adapter?: boolean; cost?: boolean; placement?: boolean }): Column<Run>[] {
   const c: Column<Run>[] = [
-    { key: "name", header: "Run", cell: (r) => <RunNameLink id={r.id} name={r.name} />, sortValue: (r) => r.name || r.id, lead: true, width: "22%" },
-    { key: "id", header: "Id", cell: (r) => <RunLink id={r.id} />, sortValue: (r) => r.id, mono: true, width: 200, optional: true },
+    { key: "name", header: "Run", cell: (r) => <RunNameLink id={r.id} name={r.name} />, sortValue: (r) => r.name || r.id, sortKind: "text", lead: true, width: 190 },
+    { key: "id", header: "Id", cell: (r) => <RunLink id={r.id} />, sortValue: (r) => r.id, sortKind: "text", mono: true, width: 170, optional: true },
   ];
-  if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, width: 120 });
-  c.push({ key: "state", header: "State", cell: (r) => <StateCell kind="run" state={r.state} activity={r.activity} reason={r.stateReason} />, sortValue: (r) => RUN_STATE_LIST.indexOf(r.state as RunState), sortFirst: "asc" });
-  if (host) c.push({ key: "host", header: "Host", cell: (r) => (r.hostId ? <HostLink id={r.hostId} name={r.host} /> : DASH), sortValue: (r) => r.host, width: 150 });
-  c.push({ key: "pool", header: "Pool", cell: (r) => r.pool || DASH, sortValue: (r) => r.pool });
-  if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.spec.workload.adapter}</span>, sortValue: (r) => r.spec.workload.adapter, width: 110, optional: true });
+  if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, sortKind: "text", width: 100 });
+  c.push({ key: "state", header: "State", cell: (r) => <StateCell kind="run" state={r.state} activity={r.activity} reason={r.stateReason} />, sortValue: (r) => RUN_STATE_LIST.indexOf(r.state as RunState), sortFirst: "asc", sortKind: "text", width: 130 });
+  if (host) c.push({ key: "host", header: "Host", cell: (r) => (r.hostId ? <HostLink id={r.hostId} name={r.host} /> : DASH), sortValue: (r) => r.host, sortKind: "text", width: 136 });
+  c.push({ key: "pool", header: "Pool", cell: (r) => r.pool || DASH, sortValue: (r) => r.pool, sortKind: "text", width: 110 });
+  if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.spec.workload.adapter}</span>, sortValue: (r) => r.spec.workload.adapter, sortKind: "text", width: 104, optional: true });
   c.push(
-    { key: "runtime", header: "Runtime", cell: (r) => <RuntimeCell run={r} />, sortValue: (r) => (r.runtimeSince || r.runtimeSeconds ? r.runtimeSeconds : null), align: "right", mono: true, width: 90 },
+    { key: "runtime", header: "Runtime", cell: (r) => <RuntimeCell run={r} />, sortValue: (r) => (r.runtimeSince || r.runtimeSeconds ? r.runtimeSeconds : null), sortKind: "number", align: "right", mono: true, width: 90 },
     // The API field is epoch: it goes up by one per placement. A title, not
     // a Tooltip: table headers clip overflow.
-    { key: "placements", header: <span title="Times this Run has been placed on a host">Placements</span>, cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 116, optional: true },
+    { key: "placements", header: <span title="Times this Run has been placed on a host">Placements</span>, label: "Placements", cell: (r) => r.epoch, sortValue: (r) => r.epoch, sortKind: "number", align: "right", mono: true, width: 112, optional: true },
   );
   if (placement)
     c.push({
       key: "placement",
       header: <span title="Getting the Run onto a host and started, summed over its placements">Placement time</span>,
+      label: "Placement time",
       cell: (r) => <PlacementTimeCell run={r} />,
       sortValue: (r) => r.placementSeconds,
+      sortKind: "number",
       align: "right",
       mono: true,
       width: 132,
     });
-  if (cost) c.push({ key: "cost", header: "Cost", cell: (r) => <RunCostCell run={r} />, sortValue: (r) => costSortValue(r), align: "right", mono: true, width: 120 });
-  c.push({ key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} label="Created" />, sortValue: (r) => Date.parse(r.createdAt), align: "right", width: 104 });
+  if (cost) c.push({ key: "cost", header: "Cost", cell: (r) => <RunCostCell run={r} />, sortValue: (r) => costSortValue(r), sortKind: "number", align: "right", mono: true, width: 110 });
+  c.push({ key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} label="Created" />, sortValue: (r) => Date.parse(r.createdAt), sortKind: "time", align: "right", width: 100 });
   return c;
 }
 

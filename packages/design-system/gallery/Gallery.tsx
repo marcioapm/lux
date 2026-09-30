@@ -75,7 +75,7 @@ import {
   type TerminalHandle,
   type TimeRange,
 } from "../src/index.ts";
-import { IconDots, IconInfo, IconMinus, IconMoon, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
+import { IconDots, IconInfo, IconMinus, IconMoon, IconPencil, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconStar, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
 import { fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeShellScript, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
@@ -547,6 +547,13 @@ function Buttons() {
         </IconButton>
         <IconButton label="Active" active>
           <IconDots size={15} />
+        </IconButton>
+        <span className="muted">row actions (a Pools row):</span>
+        <IconButton label="Make default" size="sm">
+          <IconStar size={14} />
+        </IconButton>
+        <IconButton label="Rename" size="sm">
+          <IconPencil size={14} />
         </IconButton>
       </div>
     </Section>
