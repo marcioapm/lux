@@ -61,7 +61,7 @@ reordered report cannot lower a peak.
 | `drainRequested` | Draining was requested. |
 | `terminateRequested` | luxd asked the provider to terminate it. |
 | `terminated` | The provider confirmed. |
-| `lost` | It missed heartbeats for a whole lease period. |
+| `lost` | It missed heartbeats for a whole lease period (not counting time no luxd could hear it: see `LUX_LEASE` in [operations](operations.md)). |
 
 Plus `lastHeartbeat`, which is updated with every heartbeat.
 
@@ -79,7 +79,7 @@ provisioned host went is recorded apart, in `launch`:
 | `failed` | The provider refused (`error`: its message). No instance ever existed: the host is `terminated` operationally (its one-use token revoked, as before), but reports no `terminateRequested` or `terminated` time and has no uptime or host cost. The console shows it as "Launch failed", and `GET /v1/hosts?state=launch_failed` lists these (`state=terminated` then lists the others). |
 | `abandoned` | No answer was ever recorded (luxd stopped mid-launch) and the row was written off; an instance found later by its tags is an orphan and is terminated. |
 
-Hosts that registered themselves have no `launch`. Migration 039 filled in
+Hosts that registered themselves have no `launch`. Migration 040 filled in
 history only where it is unambiguous: a terminated provisioned host whose
 reason starts `launch failed:` and that never had an instance id or a
 registration is `failed` (its reason text is kept); one with an instance id
@@ -88,7 +88,7 @@ is `launched`; everything else was left without an outcome.
 ## Pools over time
 
 Each system sample also writes one row per pool into `pool_samples`
-(migration 040), keyed by the pool's id, so a rename keeps a pool's history.
+(migration 041), keyed by the pool's id, so a rename keeps a pool's history.
 A pool removed (`DELETE /v1/pools/{name}`) and then set again under the same
 name by the same owner is the same pool: `POST /v1/pools` revives the
 retired row, with its id, so its samples and cost history continue. The pool's own row

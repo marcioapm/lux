@@ -1,4 +1,4 @@
--- 039_launch_outcome.sql — how a provisioned host's launch went, apart
+-- 040_launch_outcome.sql — how a provisioned host's launch went, apart
 -- from its operational state.
 --
 -- A host whose launch the provider refused is still operationally

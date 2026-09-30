@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { eventSortInWords } from "./EventTable.tsx";
-import { dropsOptional, firstSortDir, sortInWords, sortRows, Table, type Column, type SortState } from "./Table.tsx";
+import { dropsOptional, firstSortDir, sortInWords, sortRows, Table, tableFloor, type Column, type SortState } from "./Table.tsx";
 import { rangeText } from "./TimeRangePicker.tsx";
 
 // A list with a percentage name, one flexible column and three optional
@@ -212,4 +212,11 @@ describe("Table in a DOM", () => {
       if (width) Object.defineProperty(HTMLElement.prototype, "clientWidth", width);
     }
   });
+});
+
+test("the floor leaves each flexible column 140px beside percentage columns", () => {
+  // 464px fixed and two flexible columns at 140px are the other 78%.
+  const cols = [{ width: "22%" }, {}, { width: 150 }, {}, { width: 90 }, { width: 120 }, { width: 104 }];
+  expect(tableFloor(cols)).toBe(Math.ceil(744 / 0.78));
+  expect(tableFloor([{ width: 100 }, {}])).toBe(240);
 });

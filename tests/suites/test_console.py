@@ -19,10 +19,19 @@ from fake_cost_plugin import FakeCostPlugin
 pytestmark = pytest.mark.console
 
 
-@pytest.fixture
-def page(browser, env):
-    """A page with a console error collector; sign in with page.sign_in(key)."""
-    ctx = browser.new_context(viewport={"width": 1400, "height": 900})
+@pytest.fixture(scope="module")
+def _console_page(browser, env):
+    """One browser page for the whole file: a context and page cost more
+    than the checks most tests make. A new suite file that drives the
+    console gets its own, so keep a file's tests alike."""
+    ctx = browser.new_context(viewport=VIEWPORT)
+    # Every document starts with the key sign_in set (window.name survives
+    # navigation within the tab, unlike a fresh sessionStorage write racing
+    # the app's first read).
+    ctx.add_init_script("""(() => {
+        const k = window.name.startsWith('lux-key:') ? window.name.slice(8) : '';
+        if (k) sessionStorage.setItem('lux.key', k); else sessionStorage.removeItem('lux.key');
+    })()""")
     pg = ctx.new_page()
     pg.errors = []
     pg.on("pageerror", lambda e: pg.errors.append(str(e)))
@@ -31,11 +40,31 @@ def page(browser, env):
     pg.on("console", lambda m: m.type == "error" and "401" not in m.text and pg.errors.append(m.text))
 
     def sign_in(key: str, path: str = "/"):
-        ctx.add_init_script(f"sessionStorage.setItem('lux.key', {key!r})")
+        pg.evaluate("k => { window.name = 'lux-key:' + k }", key)
         pg.goto(env.luxd_url + path)
     pg.sign_in = sign_in
     yield pg
     ctx.close()
+
+
+VIEWPORT = {"width": 1400, "height": 900}
+
+
+@pytest.fixture
+def page(_console_page, env):
+    """The file's page, reset for a test: signed out, default size and theme,
+    no errors carried over. Sign in with page.sign_in(key, path)."""
+    pg = _console_page
+    pg.set_viewport_size(VIEWPORT)
+    pg.errors.clear()
+    yield pg
+    # Signed out and on a blank page before the next test: an open page
+    # keeps its live stream to luxd (which a test may restart), and local
+    # settings (theme, rail) would carry over.
+    if pg.url.startswith(env.luxd_url):
+        pg.evaluate("() => localStorage.clear()")
+    pg.evaluate("() => { window.name = '' }")
+    pg.goto("about:blank")
 
 
 def test_console_is_served_with_client_routing(env):
@@ -289,9 +318,11 @@ def test_a_tenant_key_overview_has_no_control_host(page, tenant_factory):
     assert not page.errors, page.errors
 
 
-def _priced_host(lux, runners, host, price: str = "0.40") -> str:
+def _priced_host(lux, runners, host, price: str = "4") -> str:
     """A ready static host of the tenant's, priced before any Run is placed
-    on it, so its Runs' compute lines have a rate from their start."""
+    on it, so its Runs' compute lines have a rate from their start. A few
+    seconds of a small share of it must still show as whole cents, not
+    "<$0.0001", so the price is high."""
     runners.start(host)
     host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
                                        if h["name"] == host.name and h["state"] == "ready"), None),
@@ -320,8 +351,8 @@ def test_runs_list_shows_runtime_and_placements(page, env, lux, runners, hosts):
     never_name = f"runtime-never-{lux.tenant_id[-6:]}"
     never = _parked(lux, never_name)
     # Wide enough that the optional Placements column is shown.
-    page.set_viewport_size({"width": 1800, "height": 900})
     page.sign_in(lux.api_key, "/runs")
+    page.set_viewport_size({"width": 1800, "height": 900})
     headers = page.locator("table thead th")
     runtime = page.get_by_role("columnheader", name="Runtime", exact=True)
     expect(runtime).to_have_count(1, timeout=15_000)
