@@ -112,11 +112,16 @@ export function PoolPage({ name }: { name: string }) {
   );
 }
 
+/** Costs are hourly: the 1h range reads 6h. */
+function costSince(range: string): string {
+  return range === "1h" ? "6h" : range;
+}
+
 function PoolTiles({ pool, metrics, loading }: { pool: Pool; metrics?: PoolMetrics; loading: boolean }) {
   const scope = useScope();
   const clock = useNow();
   const n = metrics?.now;
-  const since = scope.range === "1h" ? "6h" : scope.range;
+  const since = costSince(scope.range);
   const cost = useScopedQuery(`pool-cost-tile:${pool.id}:${since}`, (t, s) => api.poolCost(pool.name, t, pool.platform ? "platform" : "tenant", since, "hour", s), { interval: 60_000 });
   return (
     <div className="grid grid-stats">
@@ -200,15 +205,20 @@ interface FamilyChart {
   series: { label: string; color: string }[];
 }
 
-/** One stacked chart per currency: a series per family over every bucket (a bucket without a row is a gap, not zero). */
-function familyCharts(d: PoolCost | undefined): FamilyChart[] {
-  if (!d?.series.length) return [];
+/** Every bucket of the range, in epoch seconds, and each one's position. */
+function bucketAxis(d: PoolCost): { x: number[]; index: Map<number, number> } {
   const step = d.interval === "hour" ? 3600 : 86400;
   const start = Math.floor(Date.parse(d.from) / 1000 / step) * step;
   const end = Math.floor(Date.parse(d.to) / 1000);
   const x: number[] = [];
   for (let t = start; t < end; t += step) x.push(t);
-  const index = new Map(x.map((t, i) => [t, i]));
+  return { x, index: new Map(x.map((t, i) => [t, i])) };
+}
+
+/** One stacked chart per currency: a series per family over every bucket (a bucket without a row is a gap, not zero). */
+function familyCharts(d: PoolCost | undefined): FamilyChart[] {
+  if (!d?.series.length) return [];
+  const { x, index } = bucketAxis(d);
   const meta = new Map((d.families ?? []).map((f) => [f.family, f]));
   return [...new Set(d.series.map((r) => r.currency))].sort().map((currency) => {
     const rows = d.series.filter((r) => r.currency === currency);
@@ -227,12 +237,7 @@ function familyCharts(d: PoolCost | undefined): FamilyChart[] {
 /** Host time per bucket, allocated and idle, per currency. */
 function hostTimeCharts(d: PoolCost | undefined): FamilyChart[] {
   if (!d?.hostSeries?.length) return [];
-  const step = d.interval === "hour" ? 3600 : 86400;
-  const start = Math.floor(Date.parse(d.from) / 1000 / step) * step;
-  const end = Math.floor(Date.parse(d.to) / 1000);
-  const x: number[] = [];
-  for (let t = start; t < end; t += step) x.push(t);
-  const index = new Map(x.map((t, i) => [t, i]));
+  const { x, index } = bucketAxis(d);
   return [...new Set(d.hostSeries.map((r) => r.currency))].sort().map((currency) => {
     const ys = [x.map((): number | null => null), x.map((): number | null => null)];
     for (const r of d.hostSeries!.filter((h) => h.currency === currency)) {
@@ -264,8 +269,8 @@ interface HostTimeRow {
 
 function PoolCostTab({ name, owner, operatorView }: { name: string; owner?: PoolOwner; operatorView: boolean }) {
   const scope = useScope();
-  // Costs are hourly: the 1h range reads 6h; 30d reads daily.
-  const since = scope.range === "1h" ? "6h" : scope.range;
+  // 30d reads daily.
+  const since = costSince(scope.range);
   const interval: "hour" | "day" = since === "30d" ? "day" : "hour";
   const q = useScopedQuery(`pool-cost:${name}:${owner}:${since}:${interval}`, (t, s) => api.poolCost(name, t, owner, since, interval, s), { interval: 60_000 });
   const charts = useMemo(() => familyCharts(q.data), [q.data]);
