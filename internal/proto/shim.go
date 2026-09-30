@@ -155,25 +155,33 @@ const (
 const (
 	EvSession  = "lux.session"  // {"sessionId"}
 	EvActivity = "lux.activity" // {"activity": "idle" | "busy"}
-	// EvInputAck is an input's progress, once per request id and phase:
+	// EvInputAck is an input's first answer, exactly one per request id:
 	//   {"requestId", "phase":"accepted", "lands":"next_step"|"next_turn", "receipt", "text"?, "truncated"?}
-	//   {"requestId", "phase":"consumed"}             (only after an accepted with receipt)
-	//   {"requestId", "phase":"failed", "error", "text"?}
-	// The first prompt's id is "prompt".
-	EvInputAck   = "lux.input"
-	EvInit       = "lux.init"       // {"phase": "start" | "done", "exitCode"?}
-	EvWorkload   = "lux.workload"   // {"phase": "start", "pid"}
-	EvStop       = "lux.stop"       // {"reason"}
-	EvBeforeStop = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
-	EvWarning    = "lux.warning"    // {"message"}
-	EvArtifact   = "lux.artifact"   // {"path"}
+	//   {"requestId", "phase":"failed", "error", "text"?}   (never accepted)
+	// A consumer that reads only requestId and error sees what it did before
+	// phases existed. The first prompt's id is "prompt".
+	EvInputAck = "lux.input"
+	// EvInputConsumed: an accepted input with receipt is in the context of
+	// the agent's model step. {"requestId"}; at most once per request id.
+	EvInputConsumed = "lux.input.consumed"
+	// EvInputFailed: an accepted input the agent will never read (the Run
+	// stopped first, or the agent dropped it). {"requestId", "error"}; at
+	// most once per request id, never after EvInputConsumed.
+	EvInputFailed = "lux.input.failed"
+	EvInit        = "lux.init"       // {"phase": "start" | "done", "exitCode"?}
+	EvWorkload    = "lux.workload"   // {"phase": "start", "pid"}
+	EvStop        = "lux.stop"       // {"reason"}
+	EvBeforeStop  = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
+	EvWarning     = "lux.warning"    // {"message"}
+	EvArtifact    = "lux.artifact"   // {"path"}
 	// EvServer is a server process's start or exit, a ch=server record
 	// naming the server: {"phase": "start"|"exit", "gen", "pid"?,
 	// "exitCode"?, "error"?}.
 	EvServer = "lux.server"
 )
 
-// lux.input phases.
+// Input phases: lux.input's phase (accepted, failed), and
+// AdapterEvent.InputProgress's (consumed, failed).
 const (
 	InputAccepted = "accepted"
 	InputConsumed = "consumed"

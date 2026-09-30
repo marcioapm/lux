@@ -1014,6 +1014,10 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 		case proto.EvInputAck:
 			ae = &proto.AdapterEvent{InputAck: d.RequestID, InputPhase: d.Phase, InputError: d.Error, InputText: d.Text,
 				InputTruncated: d.Truncated, InputLands: d.Lands, InputReceipt: d.Receipt}
+		case proto.EvInputConsumed:
+			ae = &proto.AdapterEvent{InputProgress: &proto.InputProgress{RequestID: d.RequestID, Phase: proto.InputConsumed}}
+		case proto.EvInputFailed:
+			ae = &proto.AdapterEvent{InputProgress: &proto.InputProgress{RequestID: d.RequestID, Phase: proto.InputFailed, Error: d.Error}}
 		case proto.EvWorkload:
 			if d.Phase == "start" {
 				p.mark("workloadStarted")

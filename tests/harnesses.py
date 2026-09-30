@@ -31,7 +31,7 @@ class Caps:
     # step (Codex turn/steer, OpenCode), rather than running after it as a
     # turn of its own (generic ACP).
     steer_joins_turn: bool = False
-    # A steer is reported read (lux.input phase consumed) when the agent's
+    # A steer is reported read (lux.input.consumed) when the agent's
     # model step has it.
     steer_receipt: bool = False
     # With steer_joins_turn: a steer that arrives during the turn's final

@@ -288,9 +288,9 @@ type Status struct {
 type AdapterEvent struct {
 	SessionID string `json:"sessionId,omitempty"`
 	Activity  string `json:"activity,omitempty"` // idle | busy
-	// InputAck names an input by request id; InputPhase says what happened
-	// to it (proto.InputAccepted, InputConsumed, InputFailed; "" from an
-	// older runner is accepted, or failed with InputError).
+	// InputAck names an input by request id: its first answer, once.
+	// InputPhase is accepted or failed ("" from an older runner: accepted,
+	// or failed with InputError).
 	InputAck   string `json:"inputAck,omitempty"`
 	InputPhase string `json:"inputPhase,omitempty"`
 	InputError string `json:"inputError,omitempty"`
@@ -301,6 +301,17 @@ type AdapterEvent struct {
 	// and whether a consumed follows.
 	InputLands   string `json:"inputLands,omitempty"`
 	InputReceipt bool   `json:"inputReceipt,omitempty"`
+	// InputProgress is what happened to an input after it was accepted. A
+	// field of its own, so a luxd that does not know it ignores it rather
+	// than reading it as a second InputAck.
+	InputProgress *InputProgress `json:"inputProgress,omitempty"`
+}
+
+// InputProgress: an accepted input consumed, or failed.
+type InputProgress struct {
+	RequestID string `json:"requestId"`
+	Phase     string `json:"phase"` // InputConsumed | InputFailed
+	Error     string `json:"error,omitempty"`
 }
 
 // SnapshotDone ends every placement, however it exited: its state volumes,

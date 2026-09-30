@@ -176,7 +176,7 @@ what its protocol can do (`Caps`). `tests/suites/test_agents.py` takes a
 Tests assert from capabilities, never from an agent's name. For example,
 input sent mid-turn joins the running turn only where
 `caps.steer_joins_turn` (Codex, OpenCode, Claude Code when a tool call
-follows), and a `consumed` receipt is expected only where
+follows), and a `lux.input.consumed` receipt is expected only where
 `caps.steer_receipt`. **Adding an agent is one `Harness` entry**
 (plus a `lux-fake` protocol mode if it speaks a new protocol). Every
 existing test then covers it. Use `@harnesses(pred)` to limit a test to

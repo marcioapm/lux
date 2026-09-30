@@ -68,15 +68,28 @@ def test_interrupt_ends_the_turn_not_the_run(lux, runners, hosts, harness):
 TURN_ENDS = ("codex.turn/completed", "claude.result", "acp.turn_end")
 
 
+INPUT_RECORDS = {"lux.input", "lux.input.consumed", "lux.input.failed"}
+
+
 def _input_records(lux, run_id: str, request_id: str) -> list[dict]:
-    """The lux.input records of one input, in output order."""
-    return [r["event"]["data"] for r in lux.records(run_id, "--events")
-            if r.get("event", {}).get("type") == "lux.input" and r["event"]["data"].get("requestId") == request_id]
+    """An input's records, in output order, each with "record" (its type)
+    and "step": lux.input's phase (accepted or failed), then consumed or
+    failed from lux.input.consumed / lux.input.failed."""
+    out = []
+    for r in lux.records(run_id, "--events"):
+        ev = r.get("event", {})
+        if ev.get("type") in INPUT_RECORDS and ev["data"].get("requestId") == request_id:
+            d = dict(ev["data"], record=ev["type"])
+            d["step"] = d["phase"] if ev["type"] == "lux.input" else ev["type"].removeprefix("lux.input.")
+            out.append(d)
+    return out
 
 
 def _check_phases(lux, run_id: str, harness, request_id: str) -> None:
     """accepted, then consumed where the adapter has a receipt: once each,
-    in order, in the output and as luxd events."""
+    in order, in the output and as luxd events. lux.input itself is written
+    exactly once: a consumer that ignores the later records sees one
+    answer per input."""
     want = ["accepted", "consumed"] if harness.caps.steer_receipt else ["accepted"]
     try:
         recs = wait_until(lambda: (r := _input_records(lux, run_id, request_id)) and len(r) >= len(want) and r,
@@ -85,7 +98,8 @@ def _check_phases(lux, run_id: str, harness, request_id: str) -> None:
         warnings = [r["event"]["data"] for r in lux.records(run_id, "--events")
                     if r.get("event", {}).get("type") == "lux.warning"]
         raise AssertionError(f"{e}: {_input_records(lux, run_id, request_id)}; warnings: {warnings}") from None
-    assert [r["phase"] for r in recs] == want, recs
+    assert [r["step"] for r in recs] == want, recs
+    assert [r["record"] for r in recs].count("lux.input") == 1, recs
     lands = "next_step" if harness.caps.steer_joins_turn else "next_turn"
     assert recs[0]["lands"] == lands and recs[0]["receipt"] == harness.caps.steer_receipt, recs[0]
     events = [e["type"] for e in lux.json("events", run_id)
@@ -141,7 +155,7 @@ def test_mid_turn_steering(lux, runners, hosts, harness):
         assert out.index(second) < out.index(steered), out
     _check_phases(lux, run_id, harness, "mid-1")
     # Once each: the prompt's too.
-    assert [r["phase"] for r in _input_records(lux, run_id, "prompt")][0] == "accepted"
+    assert [r["step"] for r in _input_records(lux, run_id, "prompt")][0] == "accepted"
     lux.run("cancel", run_id)
 
 
@@ -161,7 +175,7 @@ def test_interrupt_carries_an_unread_steer(lux, runners, hosts, harness):
         marker, steered = "long-tool", f"steered-{token}"
     run_id = lux.submit(harness.spec(prompt))
     _steer_mid_tool(lux, harness, run_id, marker, steer, "carry-1")
-    wait_until(lambda: any(r["phase"] == "accepted" for r in _input_records(lux, run_id, "carry-1")),
+    wait_until(lambda: any(r["step"] == "accepted" for r in _input_records(lux, run_id, "carry-1")),
                harness.timeout, 0.3, "the steer was never accepted")
     # What POST input {"interrupt": true} with no text does (dude's
     # "Interrupt now").
@@ -174,8 +188,8 @@ def test_interrupt_carries_an_unread_steer(lux, runners, hosts, harness):
     records = lux.records(run_id, "--events")
     types = [r.get("event", {}).get("type") for r in records]
     turn_ends = [i for i, t in enumerate(types) if t in TURN_ENDS]
-    consumed = [i for i, r in enumerate(records) if r.get("event", {}).get("type") == "lux.input"
-                and r["event"]["data"] == {"requestId": "carry-1", "phase": "consumed"}]
+    consumed = [i for i, r in enumerate(records) if r.get("event", {}).get("type") == "lux.input.consumed"
+                and r["event"]["data"] == {"requestId": "carry-1"}]
     # In the turn after the interrupted one: after its end, before the next.
     assert len(turn_ends) >= 2 and turn_ends[0] < consumed[0] < turn_ends[1], (turn_ends, consumed)
     assert "never" not in lux.logs(run_id).lower().split()
