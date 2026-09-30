@@ -229,6 +229,11 @@ class Host:
                 "--name", name or self.name,
                 "--data-dir", "/var/lib/lux",
                 "--shim", "/opt/lux/lux-shim",
+                # The same capacity on any machine: by default a runner
+                # offers the whole machine, and a 16 GB CI runner fits one
+                # Run at the 8 GiB default where a workstation fits several.
+                # A test's own --cpus or --memory, later, wins.
+                "--cpus", "16", "--memory", str(64 << 30),
                 *extra,
             ],
             stdout=log,
