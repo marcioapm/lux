@@ -672,17 +672,21 @@ func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTa
 	out := &lifecycleEventsOutput{}
 	out.Body.Events = []LifecycleEvent{}
 	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
-		read := func(cond func(q *sqlArgs, expr string) string, order string, limit int) ([]LifecycleEvent, []keyRow, error) {
-			q := &sqlArgs{[]any{owner}}
-			expr := "(" + pg.sk.expr + ")"
-			where := t.owner + ` = $1`
-			if c := cond(q, expr); c != "" {
-				where += " AND " + c
+		// read reads the page's events and keys, one past its end; with
+		// ahead, whether any event precedes ahead (existence only, unordered).
+		read := func(ahead *keyRow) ([]LifecycleEvent, []keyRow, error) {
+			q, from, expr := pg.keySource(t.table, "", []any{owner})
+			where, limit := t.owner+` = $1`, pg.limit+1
+			if ahead != nil {
+				where += " AND " + pg.beforeWhere(expr, "id", *ahead, q.arg)
+				limit = 1
+			} else {
+				if pg.cursor != nil {
+					where += " AND " + pg.where(expr, "id", q.arg)
+				}
+				where += " ORDER BY " + pg.order(expr, "id", pg.mode == "before")
 			}
-			if order != "" {
-				where += " ORDER BY " + order
-			}
-			rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at, id::text AS key_id, `+expr+`::text AS key_value FROM `+t.table+`
+			rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at, id::text AS key_id, `+expr+`::text AS key_value FROM `+from+`
 				WHERE `+where+` LIMIT `+strconv.Itoa(limit), q.list...)
 			if err != nil {
 				return nil, nil, err
@@ -703,13 +707,7 @@ func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTa
 			})
 			return evs, keys, err
 		}
-		expr := "(" + pg.sk.expr + ")"
-		evs, keys, err := read(func(q *sqlArgs, expr string) string {
-			if pg.cursor == nil {
-				return ""
-			}
-			return pg.where(expr, "id", q.arg)
-		}, pg.order(expr, "id", pg.mode == "before"), pg.limit+1)
+		evs, keys, err := read(nil)
 		if err != nil {
 			return err
 		}
@@ -723,8 +721,7 @@ func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTa
 			if pg.cursor == nil {
 				return false, nil
 			}
-			// Existence only, unordered.
-			ahead, _, err := read(func(q *sqlArgs, expr string) string { return pg.beforeWhere(expr, "id", first, q.arg) }, "", 1)
+			ahead, _, err := read(&first)
 			return len(ahead) > 0, err
 		})
 		out.Body.Events, out.Body.Next, out.Body.Prev, out.Body.Page = evs, next, prev, self

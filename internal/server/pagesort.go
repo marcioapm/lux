@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"maps"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Paged lists (GET /v1/hosts, /v1/runs, /v1/pools/{name}/events with
@@ -46,9 +49,6 @@ func (a *sqlArgs) arg(v any) string {
 	a.list = append(a.list, v)
 	return "$" + strconv.Itoa(len(a.list))
 }
-
-// fork is a copy for another statement sharing the placeholders so far.
-func (a *sqlArgs) fork() *sqlArgs { return &sqlArgs{slices.Clone(a.list)} }
 
 // pageCursor is a cursor's content. V is the sort value as Postgres
 // prints it (nil: NULL), At the clock the page was read at.
@@ -239,25 +239,43 @@ func (p *paging) checkIDCast() error {
 	return nil
 }
 
-// expr is the sort value's SQL with the clock filled in: the cursor's for a
-// page read from one, else now().
-func (p *paging) expr(arg func(any) string) string {
-	if !strings.Contains(p.sk.expr, "{now}") {
-		return "(" + p.sk.expr + ")"
-	}
-	now := "now()"
-	if p.cursor != nil && p.cursor.At != "" {
-		now = arg(p.cursor.At) + "::timestamptz"
-	}
-	return "(" + strings.ReplaceAll(p.sk.expr, "{now}", now) + ")"
+// keySource starts a statement over a page's keys: its placeholders (base's,
+// then the clock's), the list's table (with its alias) plus the sort key's
+// joins, and the sort value. {now} in either is at, the page's clock.
+func (p *paging) keySource(table, at string, base []any) (q *sqlArgs, from, expr string) {
+	q = &sqlArgs{slices.Clone(base)}
+	from = table + atClock(p.sk.from, at, q.arg)
+	expr = "(" + atClock(p.sk.expr, at, q.arg) + ")"
+	return q, from, expr
 }
 
-// from is the sort key's joins with the clock at, a page's stamp.
-func (p *paging) from(at string, arg func(any) string) string {
-	if !strings.Contains(p.sk.from, "{now}") {
-		return p.sk.from
+// atClock is sql with {now} as at (now() when at is empty).
+func atClock(sql, at string, arg func(any) string) string {
+	if !strings.Contains(sql, "{now}") {
+		return sql
 	}
-	return strings.ReplaceAll(p.sk.from, "{now}", arg(at)+"::timestamptz")
+	now := "now()"
+	if at != "" {
+		now = arg(at) + "::timestamptz"
+	}
+	return strings.ReplaceAll(sql, "{now}", now)
+}
+
+// pageClock is the clock a page's computed sort values are read at: its
+// cursor's, or now for a first page (which its cursors then carry).
+func pageClock(ctx context.Context, tx pgx.Tx, pg *paging) (string, error) {
+	if pg.cursor != nil && pg.cursor.At != "" {
+		t, err := time.Parse(time.RFC3339Nano, pg.cursor.At)
+		if err != nil {
+			return "", errf(http.StatusBadRequest, "bad_request", "not a cursor")
+		}
+		return t.UTC().Format(time.RFC3339Nano), nil
+	}
+	var at time.Time
+	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&at); err != nil {
+		return "", err
+	}
+	return at.UTC().Format(time.RFC3339Nano), nil
 }
 
 // order is the ORDER BY of the page's rows; reversed reads backwards (for
@@ -357,6 +375,30 @@ func (p *paging) pageLinks(rows []keyRow, at string, hasBefore func(first keyRow
 		prev = cur(rows[0])
 	}
 	return rows, next, prev, cur(rows[0]), nil
+}
+
+func pageIDs(page []keyRow) []string {
+	ids := make([]string, len(page))
+	for i, k := range page {
+		ids[i] = k.ID
+	}
+	return ids
+}
+
+// inPageOrder is rows in the order of ids, the page's; an id with no row
+// (deleted since its key was read) is skipped.
+func inPageOrder[T any](ids []string, rows []T, id func(T) string) []T {
+	byID := make(map[string]T, len(rows))
+	for _, r := range rows {
+		byID[id(r)] = r
+	}
+	ordered := make([]T, 0, len(ids))
+	for _, i := range ids {
+		if r, ok := byID[i]; ok {
+			ordered = append(ordered, r)
+		}
+	}
+	return ordered
 }
 
 // beforeWhere: the rows ahead of first in the page's order.

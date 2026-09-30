@@ -885,95 +885,58 @@ func (s *Server) listRunsPage(ctx context.Context, p Principal, pg *paging, wher
 			return err
 		}
 		filter := strings.Join(where, " AND ")
-		keysFor := func(extra func(q *sqlArgs, expr string) string, order string, limit int) ([]keyRow, error) {
-			q := &sqlArgs{slices.Clone(base)}
-			src := `runs r` + pg.from(stamp, q.arg)
-			expr := "(" + pg.sk.expr + ")"
-			cond := filter
-			if c := extra(q, expr); c != "" {
-				cond += " AND " + c
+		// keys reads the page's keys, one past its end; with ahead, whether
+		// any row precedes ahead, existence only: an order there can lead the
+		// planner away from the predicate's own plan.
+		keys := func(ahead *keyRow) ([]keyRow, error) {
+			q, from, expr := pg.keySource(`runs r`, stamp, base)
+			cond, limit := filter, pg.limit+1
+			if ahead != nil {
+				cond += " AND " + pg.beforeWhere(expr, "r.id", *ahead, q.arg)
+				limit = 1
+			} else {
+				if pg.cursor != nil {
+					cond += " AND " + pg.where(expr, "r.id", q.arg)
+				}
+				cond += " ORDER BY " + pg.order(expr, "r.id", pg.mode == "before")
 			}
-			if order != "" {
-				cond += " ORDER BY " + order
-			}
-			rows, err := tx.Query(ctx, `SELECT r.id AS key_id, `+expr+`::text AS key_value FROM `+src+` WHERE `+cond+` LIMIT `+strconv.Itoa(limit), q.list...)
+			rows, err := tx.Query(ctx, `SELECT r.id AS key_id, `+expr+`::text AS key_value FROM `+from+` WHERE `+cond+` LIMIT `+strconv.Itoa(limit), q.list...)
 			if err != nil {
 				return nil, err
 			}
 			return pgx.CollectRows(rows, pgx.RowToStructByPos[keyRow])
 		}
-		expr := "(" + pg.sk.expr + ")"
-		keys, err := keysFor(func(q *sqlArgs, expr string) string {
-			if pg.cursor == nil || pg.cursor.ID == "" {
-				return ""
-			}
-			return pg.where(expr, "r.id", q.arg)
-		}, pg.order(expr, "r.id", pg.mode == "before"), pg.limit+1)
+		found, err := keys(nil)
 		if err != nil {
 			return err
 		}
-		page, next, prev, self, err := pg.pageLinks(keys, stamp, func(first keyRow) (bool, error) {
-			if pg.cursor == nil || pg.cursor.ID == "" {
+		page, next, prev, self, err := pg.pageLinks(found, stamp, func(first keyRow) (bool, error) {
+			if pg.cursor == nil {
 				return false, nil
 			}
-			// Existence only: an order here can lead the planner away from
-			// the predicate's own plan.
-			ahead, err := keysFor(func(q *sqlArgs, expr string) string { return pg.beforeWhere(expr, "r.id", first, q.arg) }, "", 1)
+			ahead, err := keys(&first)
 			return len(ahead) > 0, err
 		})
 		if err != nil {
 			return err
 		}
 		out.Body.Next, out.Body.Prev, out.Body.Page = next, prev, self
-		ids := make([]string, len(page))
-		for i, k := range page {
-			ids[i] = k.ID
-		}
+		ids := pageIDs(page)
 		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id = ANY($1)`, ids)
 		if err != nil {
 			return err
 		}
-		byID := map[string]*Run{}
-		for rows.Next() {
-			run, err := scanRun(rows)
-			if err != nil {
-				rows.Close()
-				return err
-			}
-			byID[run.ID] = run
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
+		loaded, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (*Run, error) { return scanRun(row) })
+		if err != nil {
 			return err
 		}
-		for _, id := range ids {
-			if r := byID[id]; r != nil {
-				out.Body.Runs = append(out.Body.Runs, r)
-			}
-		}
+		out.Body.Runs = inPageOrder(ids, loaded, func(r *Run) string { return r.ID })
 		return s.listRunCosts(ctx, tx, out.Body.Runs)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
-}
-
-// pageClock is the clock a page's computed sort values are read at: its
-// cursor's, or now for a first page (which its cursors then carry).
-func pageClock(ctx context.Context, tx pgx.Tx, pg *paging) (string, error) {
-	if pg.cursor != nil && pg.cursor.At != "" {
-		t, err := time.Parse(time.RFC3339Nano, pg.cursor.At)
-		if err != nil {
-			return "", errf(http.StatusBadRequest, "bad_request", "not a cursor")
-		}
-		return t.UTC().Format(time.RFC3339Nano), nil
-	}
-	var at time.Time
-	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&at); err != nil {
-		return "", err
-	}
-	return at.UTC().Format(time.RFC3339Nano), nil
 }
 
 func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) (*Run, error) {
@@ -1953,40 +1916,29 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 // ids and sort values come first, from hosts h and only the joins the sort
 // key needs; then its rows, by id.
 func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, where []string, base []any, out *listHostsOutput) error {
-	var at time.Time
-	if pg.cursor != nil && pg.cursor.At != "" {
-		t, err := time.Parse(time.RFC3339Nano, pg.cursor.At)
-		if err != nil {
-			return errf(http.StatusBadRequest, "bad_request", "not a cursor")
-		}
-		at = t
-	} else if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&at); err != nil {
+	stamp, err := pageClock(ctx, tx, pg)
+	if err != nil {
 		return err
 	}
-	stamp := at.UTC().Format(time.RFC3339Nano)
-	pg.cursor = withClock(pg.cursor, stamp)
 	filter := strings.Join(where, " AND ")
 	var total int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM hosts h WHERE `+filter, base...).Scan(&total); err != nil {
 		return err
 	}
 	skip := 0
-	if offset != "" && pg.cursor.ID == "" {
+	if offset != "" && pg.cursor == nil {
 		n, err := strconv.Atoi(offset)
 		if err != nil || n < 0 {
 			return errf(http.StatusBadRequest, "bad_request", "offset: a count of hosts")
 		}
 		skip = n
 	}
-	// src is the key queries' FROM: hosts h and the sort key's joins.
-	src := `hosts h` + pg.sk.from
-	q := &sqlArgs{slices.Clone(base)}
-	expr := pg.expr(q.arg)
+	q, from, expr := pg.keySource(`hosts h`, stamp, base)
 	keyed := filter
-	if pg.cursor.ID != "" {
+	if pg.cursor != nil {
 		keyed += " AND " + pg.where(expr, "h.id", q.arg)
 	}
-	rows, err := tx.Query(ctx, `SELECT h.id AS key_id, `+expr+`::text AS key_value FROM `+src+` WHERE `+keyed+
+	rows, err := tx.Query(ctx, `SELECT h.id AS key_id, `+expr+`::text AS key_value FROM `+from+` WHERE `+keyed+
 		` ORDER BY `+pg.order(expr, "h.id", pg.mode == "before")+` LIMIT `+strconv.Itoa(pg.limit+1)+` OFFSET `+strconv.Itoa(skip), q.list...)
 	if err != nil {
 		return err
@@ -1999,12 +1951,11 @@ func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, wh
 	// its offset, and whether there is a previous page.
 	before := skip
 	countBefore := func(first keyRow) error {
-		c := &sqlArgs{slices.Clone(base)}
-		e := pg.expr(c.arg)
-		return tx.QueryRow(ctx, `SELECT count(*) FROM `+src+` WHERE `+filter+` AND `+pg.beforeWhere(e, "h.id", first, c.arg), c.list...).Scan(&before)
+		c, from, expr := pg.keySource(`hosts h`, stamp, base)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM `+from+` WHERE `+filter+` AND `+pg.beforeWhere(expr, "h.id", first, c.arg), c.list...).Scan(&before)
 	}
 	page, next, prev, self, err := pg.pageLinks(keys, stamp, func(first keyRow) (bool, error) {
-		if pg.cursor.ID == "" {
+		if pg.cursor == nil {
 			return skip > 0, nil
 		}
 		err := countBefore(first)
@@ -2018,10 +1969,7 @@ func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, wh
 			return err
 		}
 	}
-	ids := make([]string, len(page))
-	for i, k := range page {
-		ids[i] = k.ID
-	}
+	ids := pageIDs(page)
 	// $1 stays the principal's tenant: hostsFrom's placements read it.
 	rows, err = tx.Query(ctx, `SELECT `+hostColumns+` FROM `+hostsFrom+` WHERE h.id = ANY($2)`, base[0], ids)
 	if err != nil {
@@ -2031,28 +1979,9 @@ func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, wh
 	if err != nil {
 		return err
 	}
-	byID := make(map[string]Host, len(loaded))
-	for _, h := range loaded {
-		byID[h.ID] = h
-	}
-	hosts := make([]Host, 0, len(ids))
-	for _, id := range ids {
-		if h, ok := byID[id]; ok {
-			hosts = append(hosts, h)
-		}
-	}
+	hosts := inPageOrder(ids, loaded, func(h Host) string { return h.ID })
 	out.Body.Hosts, out.Body.Total, out.Body.Offset, out.Body.Next, out.Body.Prev, out.Body.Page = hosts, &total, &before, next, prev, self
 	return nil
-}
-
-// withClock is c with its clock set, or an empty cursor carrying only the clock.
-func withClock(c *pageCursor, at string) *pageCursor {
-	if c == nil {
-		return &pageCursor{At: at}
-	}
-	cc := *c
-	cc.At = at
-	return &cc
 }
 
 // HostPath names a host, by id or name.
