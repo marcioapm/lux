@@ -265,6 +265,29 @@ func TestOpenCodeOwnACPFallbackNeverResendsReadSteer(t *testing.T) {
 		"busy", "accepted fallback next_step receipt=false", "turn_end", "idle")
 }
 
+// After an interrupt, OpenCode refuses the steer sent again (400): it
+// failed with the reason of that case, and since nothing was sent no other
+// loop ran: one turn end.
+func TestOpenCodeRefusedCarryDoesNotInventLoop(t *testing.T) {
+	clk := newTestClock()
+	a, b, w, sink, first := ocWithBusClock(t, clk)
+	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
+	sink.wait(t, "accepted s1")
+	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
+	w.next("session/cancel")
+	sink.wait(t, "accepted int-1")
+	b.mu.Lock()
+	b.status = http.StatusBadRequest
+	b.mu.Unlock()
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	clk.fire(t)
+	wantPosts(t, b, 2, "the refused resend")
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted s1 next_step receipt=true", "accepted int-1 next_turn receipt=false", "turn_end",
+		"failed s1: sending it again after the turn was cancelled: not sent: prompt_async: 400 Bad Request", "idle")
+}
+
 // waitQueued waits until n inputs wait for the next turn.
 func waitQueued(t *testing.T, a *ACP, n int) {
 	t.Helper()

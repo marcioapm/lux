@@ -688,13 +688,20 @@ func (a *ACP) carry(ctx context.Context, session string, in proto.Input) bool {
 	a.bus.track(msgID, in.RequestID, gen)
 	a.mu.Lock()
 	a.resent[in.RequestID] = true
+	// A step answering this copy runs in a loop after the ACP turn's, even
+	// one seen before prompt_async returns.
+	a.admittedLate[msgID] = true
 	a.mu.Unlock()
-	a.anotherLoop()
 	if err := a.bus.promptAsync(ctx, session, msgID, in.Text); err != nil {
+		// Refused or undialled, nothing ran: no loop of its own.
 		a.bus.untrack(msgID)
+		a.mu.Lock()
+		delete(a.admittedLate, msgID)
+		a.mu.Unlock()
 		a.inputs.fail(a.sink, in, fmt.Errorf("sending it again after the turn was cancelled: %w", err))
 		return false
 	}
+	a.anotherLoop()
 	return true
 }
 
