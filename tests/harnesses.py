@@ -52,6 +52,9 @@ class Harness:
     real_command: Callable[[], list[str]] = field(default=lambda: [])
     real_secrets: Callable[[], list[dict]] = field(default=lambda: [])
     real_env: Callable[[], dict] = field(default=lambda: {})
+    # Env for the real variant that keeps a shell tool in the foreground,
+    # for tests that need it still running when they steer or interrupt.
+    foreground_env: dict = field(default_factory=dict)
     # Environment variables the real variant needs.
     credentials: tuple[str, ...] = ()
     # The fake variant's command, when lux-fake needs arguments to act as
@@ -93,6 +96,9 @@ HARNESSES = [
         real_command=lambda: ["claude", "--model", _env("LUX_TEST_CLAUDE_MODEL") or "haiku", "--permission-mode", "bypassPermissions"],
         real_secrets=lambda: [{"name": "ANTHROPIC_API_KEY", "value": _env("LUX_TEST_ANTHROPIC_API_KEY")}],
         real_env=lambda: {"ANTHROPIC_BASE_URL": b} if (b := _env("LUX_TEST_ANTHROPIC_BASE_URL")) else {},
+        # 2.1.280: drops run_in_background from Bash and never
+        # auto-backgrounds a long command.
+        foreground_env={"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"},
         credentials=("LUX_TEST_ANTHROPIC_API_KEY",),
         secret_values=lambda: [_env("LUX_TEST_ANTHROPIC_API_KEY")],
     ),
@@ -173,6 +179,12 @@ class Variant:
             else:
                 spec[k] = v
         return spec
+
+    def foreground_spec(self, prompt: str) -> dict:
+        """spec, with the agent's shell tool kept in the foreground."""
+        if self.real and self.harness.foreground_env:
+            return self.spec(prompt, env=dict(self.harness.foreground_env))
+        return self.spec(prompt)
 
     def resume_secrets(self, spec: dict) -> list[str]:
         """--secret arguments to resume a Run built from spec."""

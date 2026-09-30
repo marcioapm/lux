@@ -200,10 +200,22 @@ def _prompts(harness, token: str) -> tuple[str, str]:
     """The turn and the steer of the steering tests: FIRST after a sleep,
     then SECOND, each its own shell tool call; the steer runs STEER."""
     if harness.real:
-        return (("Run `sleep 20 && echo FIRST` with your shell tool. Wait for its output; only after that, "
-                 "in a separate tool call, run `echo SECOND`. Then reply DONE. One tool call at a time."),
+        return (("Run `sleep 20 && echo FIRST` with your shell tool, in the foreground; do not background it. "
+                 "Wait for its output; only after that, in a separate tool call, run `echo SECOND`. "
+                 "Then reply DONE. One tool call at a time."),
                 f"Before anything else after the current command, run `echo STEER-{token}` with your shell tool, then continue.")
     return "sh sleep 5 && echo FIRST\nsh echo SECOND", f"sh echo STEER-{token}"
+
+
+def _skip_if_backgrounded(call: dict) -> None:
+    """These tests need the agent's tool running while they steer: skip,
+    rather than fail on that precondition, when the agent ran it as a
+    background task (its tool call returns at once, saying so)."""
+    out = (call.get("output") or "").lower()
+    if call.get("done") is not None and "first" not in out and (
+            "background" in out or "process running with session" in out):
+        import pytest
+        pytest.skip(f"skipped: agent ran the tool in the background: {call['output'][:200]}")
 
 
 def test_mid_turn_steering(lux, runners, hosts, harness):
@@ -216,13 +228,14 @@ def test_mid_turn_steering(lux, runners, hosts, harness):
     token = f"{int(time.time() * 1000) % 1000000:06d}"
     prompt, steer = _prompts(harness, token)
     steered = f"STEER-{token}"
-    run_id = lux.submit(harness.spec(prompt))
+    run_id = lux.submit(harness.foreground_spec(prompt))
     first = _steer_mid_tool(lux, harness, run_id, "sleep", steer, "mid-1")
     _wait_tool(lux, harness, run_id, steered, "the steer's tool never ran")
     lux.wait_activity(run_id, "idle", timeout=harness.timeout)
     records = lux.records(run_id, "--events")
     calls = _tool_calls(records)
     first = next(c for c in calls if c["id"] == first["id"])
+    _skip_if_backgrounded(first)
     steer_call, second = _tool(calls, steered), _tool(calls, "SECOND")
     # The tool that was running when the steer came finished, and ran.
     assert first["done"] is not None and "FIRST" in first["output"], first
@@ -254,15 +267,17 @@ def test_interrupt_carries_an_unread_steer(lux, runners, hosts, harness):
     # Claude Code refuses a `sleep` of a minute before another command
     # (it asks for its Monitor tool instead); 20 s is the mid-turn test's.
     if harness.real:
-        prompt = "Run `sleep 20 && echo FIRST` with your shell tool, then reply DONE."
+        prompt = ("Run `sleep 20 && echo FIRST` with your shell tool, in the foreground; do not background it. "
+                  "Then reply DONE.")
         steer = f"Stop what you were doing and just run `echo {steered}` with your shell tool."
     else:
         prompt, steer = "sh sleep 60 && echo FIRST", f"sh echo {steered}"
-    run_id = lux.submit(harness.spec(prompt))
+    run_id = lux.submit(harness.foreground_spec(prompt))
     first = _steer_mid_tool(lux, harness, run_id, "sleep", steer, "carry-1")
     wait_until(lambda: any(r["step"] == "accepted" for r in _input_records(lux, run_id, "carry-1")),
                harness.timeout, 0.3, "the steer was never accepted")
     running = next(c for c in _tool_calls(lux.records(run_id, "--events")) if c["id"] == first["id"])
+    _skip_if_backgrounded(running)
     assert running["done"] is None, f"the tool was not running when the interrupt was sent: {running}"
     # What POST input {"interrupt": true} with no text does (dude's
     # "Interrupt now").
