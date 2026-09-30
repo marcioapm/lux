@@ -261,19 +261,22 @@ func TestPoolFigures(t *testing.T) {
 		t.Errorf("historyFrom %v, samples %d", mb.HistoryFrom, len(mb.Samples))
 	}
 
-	// The sampler: launch failures in its window on p-a; no row for the
-	// retired pool with nothing on it.
+	// The sampler: launch failures in its window on p-a, one of them for a
+	// launch requested well before the window; no row for the retired pool
+	// with nothing on it.
 	if n := queryOne[int](t, s, `SELECT count(*) FROM pool_samples WHERE pool_id = 'p-old'`); n != 0 {
 		t.Errorf("retired pool sampled: %d rows", n)
 	}
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, launch_outcome, launch_finished_at, launch_error, terminated_at) VALUES
+		('fa-late', 'ta', 'fa-late', 'p-a', 'terminated', now() - interval '2 hours', 'failed', now() - interval '5 minutes', 'late error', now() - interval '5 minutes')`)
 	execSQL(t, s, ctx, `DELETE FROM pool_samples`)
 	execSQL(t, s, ctx, `DELETE FROM system_samples`)
 	execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, window_end) VALUES ('', 0, now() - interval '1 hour', now() - interval '20 minutes')`)
 	if err := s.sampleSystem(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got := queryOne[string](t, s, `SELECT launches || '/' || launch_failures FROM pool_samples WHERE pool_id = 'p-a' AND tenant_id = '' AND res = 0`); got != "1/1" {
-		t.Errorf("p-a sample launches/failures %s, want 1/1", got)
+	if got := queryOne[string](t, s, `SELECT launches || '/' || launch_failures FROM pool_samples WHERE pool_id = 'p-a' AND tenant_id = '' AND res = 0`); got != "1/2" {
+		t.Errorf("p-a sample launches/failures %s, want 1/2", got)
 	}
 
 	// Cost: the costliest 10 per currency; the plugin family by its Run's

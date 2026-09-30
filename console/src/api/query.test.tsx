@@ -29,13 +29,17 @@ test("a poll tick while a fetch is in flight is skipped, not an abort: a slow re
   try {
     expect(calls.length).toBe(1);
     // Several intervals pass with the first request unanswered.
-    await sleep(110);
+    await sleep(200);
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.signal.aborted).toBe(false);
+    // The tab becoming visible again is a tick too: skipped, not an abort.
+    await act(async () => void document.dispatchEvent(new Event("visibilitychange")));
     expect(calls.length).toBe(1);
     expect(calls[0]!.signal.aborted).toBe(false);
     await act(async () => calls[0]!.resolve("slow answer"));
     expect(data).toBe("slow answer");
     // Once it has landed, polling resumes.
-    await sleep(60);
+    await sleep(200);
     expect(calls.length).toBeGreaterThan(1);
   } finally {
     await act(async () => root.unmount());
