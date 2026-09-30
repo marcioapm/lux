@@ -306,6 +306,9 @@ func TestHostsLimitWithDirWithoutSortIsNewestFirst(t *testing.T) {
 	newest := sorted(ids, func(id string) *int64 { v := hosts[id].created.UnixMicro(); return &v }, "desc")
 	for _, q := range []string{"limit=5&dir=asc", "limit=5&dir=desc", "limit=5"} {
 		p := fetchPage(t, s, key, "/v1/hosts?all=true&"+q, "hosts")
+		if p.Total == nil {
+			t.Fatalf("%s: no total", q)
+		}
 		if !slices.Equal(p.IDs, newest[:5]) || *p.Total != len(ids) || p.Next == "" {
 			t.Errorf("%s: %v (total %d), want %v", q, p.IDs, *p.Total, newest[:5])
 		}
