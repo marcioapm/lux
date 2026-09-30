@@ -97,6 +97,12 @@ type agent struct {
 	// started): at the turn's start, and for a steer at the next step.
 	read func(p prompt)
 	ask  func() string
+	// finalStepEndsTurn: a prompt steered in during the turn's last step
+	// (no tool call follows) is not read in this turn; runTurn leaves it in
+	// carry, for the next (Claude Code). Otherwise the turn reads it at
+	// its end and goes on (Codex, OpenCode).
+	finalStepEndsTurn bool
+	carry             []prompt
 	// mcp: the MCP servers the client gave, by name. tool reports a tool
 	// call in the protocol's own events: started (result and err empty),
 	// then done.
@@ -244,8 +250,9 @@ func (a *agent) runTurn(first prompt, c chan struct{}) (cancelled bool) {
 	cancelled = a.runScript(first.text, c)
 	for !cancelled {
 		a.mu.Lock()
-		if len(a.steer) == 0 {
-			a.cancel = nil
+		if len(a.steer) == 0 || a.finalStepEndsTurn {
+			a.carry = append(a.carry, a.steer...)
+			a.steer, a.cancel = nil, nil
 			a.mu.Unlock()
 			return false
 		}
@@ -307,11 +314,13 @@ func (a *agent) commit(message string) string {
 // runScript runs one prompt; true if it was cancelled. Prompts steered in
 // during a line are read and run after it: the next step.
 func (a *agent) runScript(script string, cancel chan struct{}) bool {
+	var lines []string
 	for _, line := range strings.Split(script, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
 		}
+	}
+	for i, line := range lines {
 		if a.runLine(line, cancel) {
 			return true
 		}
@@ -320,6 +329,9 @@ func (a *agent) runScript(script string, cancel chan struct{}) bool {
 			a.say("cancelled")
 			return true
 		default:
+		}
+		if i == len(lines)-1 && a.finalStepEndsTurn {
+			break
 		}
 		if a.runSteers(cancel) {
 			return true
@@ -606,13 +618,30 @@ func acp() {
 //
 //	lux-fake -p --input-format stream-json --output-format stream-json --verbose [--resume <id>]
 //
-// User messages queue and run one turn at a time, each ending with a
-// "result" event. A control_request interrupt cancels the running turn.
+// A user message sent during a turn is read at the turn's next step, after
+// the script line running when it came (a tool boundary), and the turn goes
+// on: one "result". Sent during the turn's last line (its final step, no
+// tool call after it), it runs as the next turn, as Claude Code does. A
+// line with a "uuid" gets msg_lifecycle_v1 command_lifecycle frames:
+// queued, started when read, completed (or cancelled with its turn).
+// A control_request interrupt cancels the running turn.
 // SIGINT ends the turn cleanly and exits 0, as the real CLI does in -p
 // mode. When stdin closes, queued turns
 // finish before it exits, as the real CLI does in -p mode.
 func streamJSON() {
 	a := newAgent()
+	a.finalStepEndsTurn = true
+	lifecycle := func(p prompt, state string) {
+		if p.id != "" {
+			a.send(map[string]any{"type": "command_lifecycle", "command_uuid": p.id, "state": state,
+				"uuid": fmt.Sprintf("lc-%d", time.Now().UnixNano()), "session_id": a.session})
+		}
+	}
+	var started []prompt // read in the running turn
+	a.read = func(p prompt) {
+		started = append(started, p)
+		lifecycle(p, "started")
+	}
 	a.emit = func(s string) {
 		a.send(map[string]any{"type": "assistant", "session_id": a.session,
 			"message": map[string]any{"role": "assistant", "content": []map[string]string{{"type": "text", "text": s}}}})
@@ -644,7 +673,7 @@ func streamJSON() {
 		a.newSession()
 	}
 	a.send(map[string]any{"type": "system", "subtype": "init", "session_id": a.session, "cwd": a.cwd,
-		"capabilities": []string{"interrupt_receipt_v1"}})
+		"capabilities": []string{"interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"}})
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT)
@@ -654,20 +683,42 @@ func streamJSON() {
 		time.Sleep(100 * time.Millisecond)
 		os.Exit(0)
 	}()
-	turns := make(chan string, 64)
+	turns := make(chan prompt, 64)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for text := range turns {
+		next := func() (prompt, bool) {
+			a.mu.Lock()
+			if len(a.carry) > 0 {
+				p := a.carry[0]
+				a.carry = a.carry[1:]
+				a.mu.Unlock()
+				return p, true
+			}
+			a.mu.Unlock()
+			p, ok := <-turns
+			return p, ok
+		}
+		for p, ok := next(); ok; p, ok = next() {
 			c, _ := a.startTurn()
+			started = nil
 			reason := "completed"
-			if a.runTurn(prompt{text: text}, c) {
+			if a.runTurn(p, c) {
 				reason = "aborted_streaming"
 			}
+			// Steers the turn read end with it, then its result, then the
+			// prompt that started it (as claude 2.1.280 orders them).
+			for _, s := range started[1:] {
+				lifecycle(s, "completed")
+			}
+			a.mu.Lock()
+			queued := len(turns) + len(a.carry)
+			a.mu.Unlock()
 			a.send(map[string]any{"type": "result", "subtype": "success", "session_id": a.session,
-				"terminal_reason": reason, "queued_turn_count": len(turns),
+				"terminal_reason": reason, "queued_turn_count": queued, "num_turns": len(started),
 				// Usage as Claude Code reports it on its result line.
 				"usage": map[string]any{"input_tokens": 3, "output_tokens": 9}, "total_cost_usd": 0.0001})
+			lifecycle(started[0], map[bool]string{true: "cancelled", false: "completed"}[reason != "completed"])
 		}
 	}()
 	for sc := scanner(); sc.Scan(); {
@@ -680,13 +731,18 @@ func streamJSON() {
 			Message struct {
 				Content textBlocks `json:"content"`
 			} `json:"message"`
+			UUID string `json:"uuid"`
 		}
 		if json.Unmarshal(sc.Bytes(), &m) != nil {
 			continue
 		}
 		switch m.Type {
 		case "user":
-			turns <- m.Message.Content.String()
+			p := prompt{text: m.Message.Content.String(), id: m.UUID}
+			lifecycle(p, "queued")
+			if !a.addSteer(p) {
+				turns <- p
+			}
 		case "control_request":
 			if m.Request.Subtype == "interrupt" {
 				a.cancelTurn()

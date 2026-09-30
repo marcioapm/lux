@@ -34,6 +34,10 @@ class Caps:
     # A steer is reported read (lux.input phase consumed) when the agent's
     # model step has it.
     steer_receipt: bool = False
+    # With steer_joins_turn: a steer that arrives during the turn's final
+    # step (no tool call follows it) runs as the next turn instead (Claude
+    # Code ends the turn, then runs the queued message).
+    steer_in_final_step_is_next_turn: bool = False
     # Stopping must be SIGINT, which ends the running turn cleanly; SIGTERM
     # would leave it unfinished (Claude Code).
     stop_is_sigint: bool = False
@@ -85,7 +89,7 @@ HARNESSES = [
     Harness(
         name="claude",
         adapter="claude-code",
-        caps=Caps(stop_is_sigint=True),
+        caps=Caps(steer_joins_turn=True, steer_receipt=True, steer_in_final_step_is_next_turn=True, stop_is_sigint=True),
         real_command=lambda: ["claude", "--model", "haiku", "--permission-mode", "bypassPermissions"],
         real_secrets=lambda: [{"name": "ANTHROPIC_API_KEY", "value": _env("LUX_TEST_ANTHROPIC_API_KEY")}],
         real_env=lambda: {"ANTHROPIC_BASE_URL": b} if (b := _env("LUX_TEST_ANTHROPIC_BASE_URL")) else {},

@@ -129,6 +129,8 @@ func (w *agentWire) next(method string) (id string, params map[string]json.RawMe
 	return "", nil
 }
 
+func waitTimeout() <-chan time.Time { return time.After(5 * time.Second) }
+
 func (w *agentWire) none() {
 	w.t.Helper()
 	select {
