@@ -76,6 +76,9 @@ type placement struct {
 	srvSet *proto.Servers
 	// diffing: a live diff is under way (diff.go).
 	diffing bool
+	// memoryLimit: the container's memory limit, once this placement
+	// started it (0 when re-adopted).
+	memoryLimit int64
 }
 
 func newPlacement(r *Runner, a proto.Assign) *placement {
@@ -90,6 +93,13 @@ func containerName(runID string) string    { return "lux-" + runID }
 func volumeName(runID, name string) string { return "lux-" + runID + "-" + name }
 func runtimeVolume(runID string) string    { return "lux-" + runID + "--rt" }
 func networkName(runID string) string      { return "lux-" + runID }
+
+func (p *placement) runningStatus() proto.Status {
+	p.mu.Lock()
+	limit := p.memoryLimit
+	p.mu.Unlock()
+	return proto.Status{State: "running", Times: p.times(), MemoryLimit: limit}
+}
 
 // liveState is the state reported in heartbeats; "" when not live.
 func (p *placement) liveState() string {
@@ -334,6 +344,9 @@ func (p *placement) run(ctx context.Context) {
 	p.mark("containerStarted")
 	p.state.Phase = "started"
 	_ = writeRunState(p.dir, p.state)
+	p.mu.Lock()
+	p.memoryLimit = p.r.mem.limit(int64(sp.Resources.Memory))
+	p.mu.Unlock()
 	if st, err := p.r.pm.Inspect(ctx, containerName(p.runID)); err == nil {
 		p.mu.Lock()
 		p.cgroup = st.CgroupPath
@@ -345,7 +358,7 @@ func (p *placement) run(ctx context.Context) {
 		_ = p.r.pm.Kill(ctx, containerName(p.runID), "KILL")
 	} else {
 		p.setPhase("running")
-		go p.report(ctx, proto.MsgStatus, proto.Status{State: "running", Times: p.times()})
+		go p.report(ctx, proto.MsgStatus, p.runningStatus())
 	}
 	// A stop that arrived while starting.
 	if why := p.pendingStop(); why != "" {
@@ -1014,7 +1027,7 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 		case proto.EvWorkload:
 			if d.Phase == "start" {
 				p.mark("workloadStarted")
-				go p.report(ctx, proto.MsgStatus, proto.Status{State: "running", Times: p.times()})
+				go p.report(ctx, proto.MsgStatus, p.runningStatus())
 			}
 		}
 		if ae != nil {
