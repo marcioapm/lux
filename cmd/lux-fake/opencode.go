@@ -20,6 +20,9 @@ import (
 //	POST /session/{id}/prompt_async     {"messageID", "parts"}: store a user
 //	                                    message under messageID and join it
 //	                                    to the running loop (204)
+//	GET  /session/{id}/message          the stored messages, oldest first
+//	GET  /session/status                {sessionID: {"type":"busy"}} while a
+//	                                    loop runs, {} otherwise
 //
 // The bus reports each stored user message (message.updated, role user),
 // each model step as an assistant message.updated whose parentID is the
@@ -29,6 +32,9 @@ type opencodeServer struct {
 	mu   sync.Mutex
 	subs []chan []byte
 	n    int
+	// msgs: the session's stored messages; busy: a loop runs.
+	msgs []map[string]string
+	busy bool
 	// run starts a loop for a prompt when none is running.
 	run func(p prompt)
 }
@@ -50,6 +56,8 @@ func (o *opencodeServer) listen(args []string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /event", o.events)
 	mux.HandleFunc("POST /session/{id}/prompt_async", o.promptAsync)
+	mux.HandleFunc("GET /session/{id}/message", o.messages)
+	mux.HandleFunc("GET /session/status", o.sessionStatus)
 	go http.Serve(l, mux)
 }
 
@@ -99,20 +107,54 @@ func (o *opencodeServer) messageID() string {
 	return fmt.Sprintf("msg_%012x%014d", time.Now().UnixMilli()*0x1000&(1<<48-1), n)
 }
 
+func (o *opencodeServer) messages(w http.ResponseWriter, r *http.Request) {
+	o.mu.Lock()
+	out := []map[string]any{}
+	for _, m := range o.msgs {
+		out = append(out, map[string]any{"info": m, "parts": []any{}})
+	}
+	o.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (o *opencodeServer) sessionStatus(w http.ResponseWriter, r *http.Request) {
+	o.mu.Lock()
+	st := map[string]any{}
+	if o.busy {
+		st[o.a.session] = map[string]string{"type": "busy"}
+	}
+	o.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(st)
+}
+
+func (o *opencodeServer) store(m map[string]string) {
+	o.mu.Lock()
+	o.msgs = append(o.msgs, m)
+	o.mu.Unlock()
+}
+
 // stored reports a user message saved to the session.
 func (o *opencodeServer) stored(p prompt) {
+	o.store(map[string]string{"id": p.id, "role": "user", "sessionID": o.a.session})
 	o.publish("message.updated", map[string]any{"sessionID": o.a.session, "info": map[string]any{
 		"id": p.id, "role": "user", "sessionID": o.a.session, "time": map[string]any{"created": time.Now().UnixMilli()}}})
 }
 
 // step reports a model step answering the user message parent.
 func (o *opencodeServer) step(parent string) {
+	id := o.messageID()
+	o.store(map[string]string{"id": id, "role": "assistant", "parentID": parent, "sessionID": o.a.session})
 	o.publish("message.updated", map[string]any{"sessionID": o.a.session, "info": map[string]any{
-		"id": o.messageID(), "role": "assistant", "parentID": parent, "sessionID": o.a.session,
+		"id": id, "role": "assistant", "parentID": parent, "sessionID": o.a.session,
 		"time": map[string]any{"created": time.Now().UnixMilli()}}})
 }
 
 func (o *opencodeServer) status(busy bool) {
+	o.mu.Lock()
+	o.busy = busy
+	o.mu.Unlock()
 	if busy {
 		o.publish("session.status", map[string]any{"sessionID": o.a.session, "status": map[string]string{"type": "busy"}})
 		return

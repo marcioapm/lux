@@ -61,10 +61,10 @@ func (s *inputSink) InputFailed(in proto.Input, err error) {
 // checkCarried checks a steer carried past an interrupt: accepted in the
 // interrupted turn, consumed once after that turn's end and before the
 // next one's, never failed, and the Run idle at the end.
-func checkCarried(t *testing.T, sink *inputSink, id string) {
+func checkCarried(t *testing.T, w *agentWire, sink *inputSink, id string) {
 	t.Helper()
 	sink.waitLast(t, "idle")
-	time.Sleep(50 * time.Millisecond)
+	w.exit()
 	l := sink.lines()
 	at := func(want string, from int) int {
 		for i := from; i < len(l); i++ {
@@ -122,8 +122,10 @@ func (s *inputSink) waitLast(t *testing.T, want string) {
 type agentWire struct {
 	t    *testing.T
 	in   *bufio.Scanner
-	out  io.Writer
+	out  io.WriteCloser
 	sent chan map[string]json.RawMessage
+	// done closes when the adapter's Run has returned.
+	done chan struct{}
 }
 
 func startWire(t *testing.T, ad Adapter, cfg proto.ShimConfig) (*agentWire, *inputSink) {
@@ -131,7 +133,7 @@ func startWire(t *testing.T, ad Adapter, cfg proto.ShimConfig) (*agentWire, *inp
 	toAgent, fromAdapter := io.Pipe()
 	fromAgent, toAdapter := io.Pipe()
 	sink := &inputSink{}
-	w := &agentWire{t: t, in: bufio.NewScanner(toAgent), out: toAdapter, sent: make(chan map[string]json.RawMessage, 64)}
+	w := &agentWire{t: t, in: bufio.NewScanner(toAgent), out: toAdapter, sent: make(chan map[string]json.RawMessage, 64), done: make(chan struct{})}
 	go func() {
 		for w.in.Scan() {
 			var m map[string]json.RawMessage
@@ -140,9 +142,24 @@ func startWire(t *testing.T, ad Adapter, cfg proto.ShimConfig) (*agentWire, *inp
 		}
 	}()
 	p := &Process{Cmd: &exec.Cmd{}, Stdin: fromAdapter, Stdout: fromAgent, Stderr: io.NopCloser(strings.NewReader(""))}
-	go func() { _ = ad.Run(context.Background(), p, cfg, sink) }()
+	go func() {
+		defer close(w.done)
+		_ = ad.Run(context.Background(), p, cfg, sink)
+	}()
 	t.Cleanup(func() { toAdapter.Close(); toAgent.Close() })
 	return w, sink
+}
+
+// exit closes the agent's stdout, as its process exiting does, and waits
+// for the adapter's Run to return.
+func (w *agentWire) exit() {
+	w.t.Helper()
+	w.out.Close()
+	select {
+	case <-w.done:
+	case <-time.After(5 * time.Second):
+		w.t.Fatal("Run did not return after the agent exited")
+	}
 }
 
 // next returns the next message the adapter sent; method must match.
@@ -350,7 +367,7 @@ func TestCodexSteerCarriedPastInterrupt(t *testing.T) {
 	w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u2","clientId":"s1","content":[]},"threadId":"` + cxThread + `","turnId":"` + next + `"}}`)
 	w.send(`{"method":"turn/completed","params":{"threadId":"` + cxThread + `","turn":{"id":"` + next + `","status":"completed"}}}`)
 	sink.wait(t, "accepted int-1 next_step receipt=false")
-	checkCarried(t, sink, "s1")
+	checkCarried(t, w, sink, "s1")
 }
 
 // Stopping the Run is the one end of a turn that fails its unread steers.
