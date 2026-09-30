@@ -108,6 +108,21 @@ def _assert_unclipped(tip):
     assert hidden is None, hidden
 
 
+def _cores(n: float) -> str:
+    """The design system's formatCores: 0, 100m, 1 core, 2.5 cores."""
+
+    def trim(s: str) -> str:
+        return re.sub(r"\.?0+$", "", s) if "." in s else s
+
+    if n == 0:
+        return "0"
+    if abs(n * 1000) < 10:
+        return f"{trim(f'{n * 1000:.1f}')}m"
+    if abs(n) < 1:
+        return f"{round(n * 1000)}m"
+    return f"{trim(f'{n:.2f}')} {'core' if abs(n) == 1 else 'cores'}"
+
+
 def _parked(lux, name: str) -> str:
     """A Run that waits for a host that will never come: it stays listed."""
     return lux.submit(generic(ALPINE_IMAGE, "true", name=name, placement={"requires": {"nowhere": "yes"}}))
@@ -229,8 +244,15 @@ def test_hosts_live_runs_shows_the_count_and_the_cap_only_near_it(page, lux, run
     page.sign_in(lux.api_key, "/hosts")
     # The header's live summary, from GET /v1/hosts/summary (the same figures).
     summary = lux.api("/v1/hosts/summary").json()
-    assert summary["live"] >= 1 and summary["capacity"]["cpus"] > 0, summary
-    expect(page.get_by_text(re.compile(rf"\b{summary['live']} live · ready and draining: .+ CPU, .+ memory allocated"))).to_be_visible(timeout=15_000)
+    rows = lux.api("/v1/hosts").json()["hosts"]
+    up = [h for h in rows if h["state"] in ("ready", "draining")]
+    assert summary["live"] == len(rows), (summary, rows)
+    for part in ("capacity", "allocated"):
+        assert summary[part]["memory"] == sum(h[part].get("memory", 0) for h in up), (part, summary, rows)
+        assert summary[part]["cpus"] == pytest.approx(sum(h[part].get("cpus", 0) for h in up)), (part, summary, rows)
+    alloc, cap = summary["allocated"]["cpus"], summary["capacity"]["cpus"]
+    assert summary["live"] >= 1 and cap >= 1, summary
+    expect(page.get_by_text(re.compile(rf"\b{summary['live']} live · ready and draining: {re.escape(_cores(alloc))} of {re.escape(_cores(cap))} CPU, .+ memory allocated"))).to_be_visible(timeout=15_000)
     row = page.get_by_role("row").filter(has=page.locator(f'a[href^="/hosts/{host_id}"]'))
     link = row.locator(f'a[href^="/runs?host={host_id}"]')
     cell = row.locator("td", has=page.locator(f'a[href^="/runs?host={host_id}"]'))
