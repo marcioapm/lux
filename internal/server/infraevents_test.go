@@ -1054,8 +1054,15 @@ func TestLifecycleEventsReadOnlyTheScopesRows(t *testing.T) {
 						if (pg.Body.Prev != "") != (i > 0) {
 							t.Errorf("%s, %s %s page %d: prev %q", c.name, tbl.table, shape, i, pg.Body.Prev)
 						}
+						// Read again at its own cursor, a page keeps its prev: on
+						// page 1 only foreign rows can precede it, so a probe
+						// outside the caller's scope would give it one.
 						if pg.Body.Page != "" {
-							check(shape+" at", read(c.p, tbl, owner, EventPage{Limit: "3"}, PageQuery{From: pg.Body.Page}).Body.Events)
+							again := read(c.p, tbl, owner, EventPage{Limit: "3"}, PageQuery{From: pg.Body.Page})
+							check(shape+" at", again.Body.Events)
+							if again.Body.Prev != pg.Body.Prev {
+								t.Errorf("%s, %s %s page %d at: prev %q, was %q", c.name, tbl.table, shape, i, again.Body.Prev, pg.Body.Prev)
+							}
 						}
 						if pg.Body.Prev != "" {
 							check(shape+" prev", read(c.p, tbl, owner, EventPage{Limit: "3"}, PageQuery{Before: pg.Body.Prev}).Body.Events)
