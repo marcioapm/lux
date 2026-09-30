@@ -1,4 +1,4 @@
--- 041_dashboard_indexes.sql — indexes for the dashboards' reads.
+-- 042_dashboard_indexes.sql — indexes for the dashboards' reads.
 --
 -- A pool's and a host's events in time order (the console's default sort,
 -- ?sort=time): the page and its (created_at, id) keyset read the index.
@@ -10,7 +10,7 @@ CREATE INDEX host_events_host_time ON host_events (host_id, created_at, id);
 -- (other families) go by their Run's pool.
 CREATE INDEX cost_hourly_pool_hour ON cost_hourly (pool_id, hour) WHERE run_id IS NOT NULL;
 
--- 040's were chosen by no plan: the sampler's flow reads runs by
+-- 041's were chosen by no plan: the sampler's flow reads runs by
 -- first_started_at and finished_at, stats reads every visible pool. The
 -- sampler's launches read recent requests, pool or not.
 DROP INDEX runs_pool_started;

@@ -9,14 +9,14 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// 039 records a launch outcome only where history is unambiguous: a
+// 040 records a launch outcome only where history is unambiguous: a
 // terminated, provisioned host whose reason says its launch failed and that
 // never had an instance or registered is failed (its reason kept); one with
 // an instance is launched; a self-registered host has none.
 func TestLaunchOutcomeMigration(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "038_pool_id"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "039_luxd_alive"); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := pgx.Connect(ctx, owner)
