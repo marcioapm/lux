@@ -50,10 +50,12 @@ export function Runs() {
   // A page of the whole result, in the sort chosen, read by the server.
   // A filter, tenant, sort or size change starts at the first page; a
   // refresh re-reads the page on screen in place.
-  const q = usePaged(`${scope.tenant}|${filterKey}`, (req, sig) => api.runsPage(scope.apiTenant, { ...filter, ...req }, sig), {
+  // Keyed under runs: so Run events refetch it (live.ts).
+  const q = usePaged("runs", `${scope.tenant}|${filterKey}`, (req, sig) => api.runsPage(scope.apiTenant, { ...filter, ...req }, sig), {
     defaultSort: { key: "created", dir: "desc" },
     defaultSize: 50,
     interval: 5000,
+    live: 60_000,
   });
   const runs = q.rows;
 

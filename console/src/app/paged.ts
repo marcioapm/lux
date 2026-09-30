@@ -2,10 +2,10 @@
 // was read from, and the request that reads it. Filters, tenant, sort and
 // size changes start over at the first page; a request made for an older
 // view is aborted, and its answer, if it lands anyway, is dropped. A
-// refresh re-reads the page on screen from its first row (the page's own
-// cursor), so polling never moves the reader to another page; the first
-// page is re-read from the top, where new rows arrive.
-import { useCallback, useMemo, useRef, useState } from "react";
+// refresh re-reads the page on screen in place: a cursor page from its own
+// cursor, a counted page at its offset. The first page is re-read from the
+// top, where new rows arrive.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SortState } from "@lux/design-system";
 import { useQuery, type Page, type PageParams } from "../api/index.ts";
 
@@ -17,15 +17,14 @@ export interface PagedRequest extends PageParams {
   offset?: number;
 }
 
-/** The request for a view at nav; a refresh (self: the page's own cursor) re-reads that page in place. */
+/** The request for a view at nav; a refresh of a cursor page (self: the page's own cursor) re-reads it in place. */
 export function pageRequest(sort: SortState, size: number, nav: Nav, self: string | undefined, pageNo: number): PagedRequest {
   const base: PagedRequest = { sort: sort.key, dir: sort.dir, limit: size };
+  if (nav.kind === "offset") return nav.offset > 0 ? { ...base, offset: nav.offset } : base;
   if (self && pageNo > 1) return { ...base, at: self };
   switch (nav.kind) {
     case "first":
       return base;
-    case "offset":
-      return nav.offset > 0 ? { ...base, offset: nav.offset } : base;
     case "next":
       return { ...base, next: nav.cursor };
     case "prev":
@@ -42,7 +41,7 @@ export interface Paged<T> {
   setSort: (s: SortState) => void;
   size: number;
   setSize: (n: number) => void;
-  /** 1-based: counted from the offset (counted lists), else from Next/Previous. */
+  /** 1-based, from navigation: Next/Previous, or the page asked for. */
   page: number;
   total?: number;
   hasNext: boolean;
@@ -54,40 +53,65 @@ export interface Paged<T> {
   goto: (page: number) => void;
 }
 
+export interface PagedOptions {
+  defaultSort: SortState;
+  defaultSize: number;
+  interval: number;
+  /** useQuery's live: the slower poll while the event stream is up (for lists that live.ts invalidates). */
+  live?: number;
+}
+
+interface NavState {
+  view: string;
+  nav: Nav;
+  page: number;
+  /** Bumped by every navigation: part of the query key, so no two views or pages share one. */
+  seq: number;
+}
+
 /**
- * view: what the list shows (tenant and filters); a change starts over.
- * fetch reads one page for a request.
+ * prefix: the query key's prefix (`${prefix}:paged:…`), what invalidate()
+ * matches. view: what the list shows (tenant and filters); a change starts
+ * over. fetch reads one page for a request.
  */
-export function usePaged<T>(view: string, fetch: (req: PagedRequest, signal: AbortSignal) => Promise<Page<T>>, opts: { defaultSort: SortState; defaultSize: number; interval: number }): Paged<T> {
+export function usePaged<T>(prefix: string, view: string, fetch: (req: PagedRequest, signal: AbortSignal) => Promise<Page<T>>, opts: PagedOptions): Paged<T> {
   const [sort, setSortState] = useState(opts.defaultSort);
   const [size, setSizeState] = useState(opts.defaultSize);
-  const [nav, setNav] = useState<{ view: string; nav: Nav; page: number; seq: number }>({ view, nav: { kind: "first" }, page: 1, seq: 0 });
-  // A view change starts over at the first page.
-  const here = nav.view === view ? nav : { view, nav: { kind: "first" } as Nav, page: 1, seq: nav.seq + 1 };
-  const key = `${view}|${sort.key}:${sort.dir}|${size}|${here.seq}`;
-  // The page on screen's own cursor, for refreshes of that page.
+  const [nav, setNav] = useState<NavState>({ view, nav: { kind: "first" }, page: 1, seq: 0 });
+  // A view change starts over at the first page, and is stored: going back
+  // to an earlier view starts over too.
+  const here: NavState = nav.view === view ? nav : { view, nav: { kind: "first" }, page: 1, seq: nav.seq + 1 };
+  if (here !== nav) setNav(here);
+  const key = `${prefix}:paged:${view}|${sort.key}:${sort.dir}|${size}|${here.seq}`;
+  // The page on screen's own cursor, from the answer shown for this key.
   const self = useRef<{ key: string; cursor?: string }>({ key: "" });
   const fetchRef = useRef(fetch);
   fetchRef.current = fetch;
   const pageNo = here.page;
   const navNow = here.nav;
   const q = useQuery(
-    `paged:${key}`,
+    key,
     async (signal) => {
       const cur = self.current.key === key ? self.current.cursor : undefined;
-      const res = await fetchRef.current(pageRequest(sort, size, navNow, cur, pageNo), signal);
-      if (!signal.aborted) self.current = { key, cursor: res.page };
-      return { key, res };
+      return { key, res: await fetchRef.current(pageRequest(sort, size, navNow, cur, pageNo), signal) };
     },
-    { interval: opts.interval, keep: true },
+    { interval: opts.interval, live: opts.live, keep: true },
   );
+  // keep: until this key's answer lands, q.data is the previous key's. It
+  // is shown, but its cursors belong to another view or page.
   const data = q.data?.key === key ? q.data.res : undefined;
-  const stale = q.data && q.data.key !== key ? q.data.res : undefined;
-  const shown = data ?? stale;
+  const shown = data ?? q.data?.res;
+  if (data) self.current = { key, cursor: data.page };
 
-  const move = useCallback((n: Nav, page: number) => setNav((o) => ({ view, nav: n, page, seq: (o.view === view ? o.seq : o.seq + 1) + 1 })), [view]);
+  const move = useCallback((n: Nav, page: number) => setNav((o) => ({ view, nav: n, page, seq: o.seq + 1 })), [view]);
+  // A page past the first that comes back empty, or (a cursor page) with
+  // nothing before it, has lost its place: start over at the top.
+  const lost = data != null && pageNo > 1 && (data.rows.length === 0 || (navNow.kind !== "offset" && !data.prev));
+  useEffect(() => {
+    if (lost) move({ kind: "first" }, 1);
+  }, [lost, move]);
   const counted = shown?.total != null;
-  const page = data?.offset != null ? Math.floor(data.offset / size) + 1 : pageNo;
+  const page = pageNo;
   return useMemo(
     () => ({
       rows: shown?.rows ?? [],
