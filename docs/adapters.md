@@ -95,9 +95,11 @@ Per agent:
   and a `lux.warning` says why. A turn with joined prompts ends once.
   Steers go through `prompt_async` one at a time; at most 256 (32 MiB of
   text) wait behind the one in flight, and one more fails at once.
-  lux never sends again a steer OpenCode may have read. It sends one
-  again only when it knows it was not: past an interrupt, when the
-  cancelled loop left it stored and unanswered. A steer stored and not
+  lux never sends again a steer OpenCode may have read. Past an interrupt,
+  a steer the cancelled loop left stored and unanswered is sent again only
+  if no model step was stored after it before the cancel; a step stored
+  after it had it in context, so it fails as uncertain ("it may have been
+  read before the interrupt; not sent again"). A steer stored and not
   seen answered when its loop ended normally fails as uncertain (a step
   answering a message lux did not send reads it unseen); one never stored
   fails after 2 minutes. The two paths are not mixed in one loop: while a
@@ -105,11 +107,18 @@ Per agent:
   is not sent as a second `session/prompt` (OpenCode would store it under
   an id of its own, and the step answering it would read the first steer
   unseen); it is accepted and sent as the next turn's prompt.
-  A second turn end is reported only when OpenCode is seen running
+  No turn end is reported while an OpenCode loop may still run: while a
+  steer is unread or its `prompt_async` has not returned, the ACP turn's
+  end waits until OpenCode reports no loop running (and while its status
+  cannot be read, it waits). A second turn end is reported, after that
+  one and also only once OpenCode is idle, when OpenCode was seen running
   another loop after the ACP turn ended: its status busy then, a step
   answering a steer whose `prompt_async` returned after that end, or a
   steer sent again that OpenCode accepted. A step of the turn's own loop
-  seen late, or a resend OpenCode refused, adds none.
+  seen late, or a resend OpenCode refused, adds none. Where lux cannot tell one loop
+  from two (a new loop that answers a steer before its `prompt_async`
+  returns looks like the turn's own step seen late), it reports one end,
+  after the last loop: one turn may hold two loops, never an early end.
 - **Generic ACP** agents keep a queue: the ACP spec does not say what a
   second prompt during a turn does.
 
