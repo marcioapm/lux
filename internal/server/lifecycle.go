@@ -652,11 +652,12 @@ func applyInputProgress(ctx context.Context, tx pgx.Tx, tenantID, runID string, 
 }
 
 // addInputEvent adds an input event once per request id and type: the
-// runner re-reports what it tails after a restart or reconnect.
+// runner re-reports what it tails after a restart or reconnect. The key is
+// claimed in run_input_events first, a primary-key insert.
 func addInputEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, typ, requestID string, d map[string]any) error {
-	var seen bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM run_events WHERE run_id = $1 AND type = $2 AND data->>'requestId' = $3)`,
-		runID, typ, requestID).Scan(&seen); err != nil || seen {
+	tag, err := tx.Exec(ctx, `INSERT INTO run_input_events (tenant_id, run_id, type, request_id) VALUES ($1, $2, $3, $4)
+		ON CONFLICT DO NOTHING`, tenantID, runID, typ, requestID)
+	if err != nil || tag.RowsAffected() == 0 {
 		return err
 	}
 	return addEvent(ctx, tx, tenantID, runID, epoch, typ, d)
