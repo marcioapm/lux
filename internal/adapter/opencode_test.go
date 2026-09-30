@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -529,5 +530,55 @@ func TestOpenCodeBusBacksOffAfterCleanEOF(t *testing.T) {
 	// 100 ms, then 200 ms, each at least half that: at most 4 requests.
 	if calls > 4 {
 		t.Fatalf("%d GET /event in 200 ms", calls)
+	}
+}
+
+// An OpenCode adapter leaves nothing running once its Run has returned:
+// its steering worker, bus follower and prompt waiters end with it.
+func TestOpenCodeRunLeavesNoGoroutines(t *testing.T) {
+	b := newFakeBus(t)
+	// stable is the goroutine count once it has stopped falling.
+	stable := func() int {
+		n, same := runtime.NumGoroutine(), 0
+		for same < 5 {
+			time.Sleep(20 * time.Millisecond)
+			if m := runtime.NumGoroutine(); m < n {
+				n, same = m, 0
+			} else {
+				same++
+			}
+		}
+		return n
+	}
+	// The fake server's own connections come and go: count from a warm
+	// start, then look for growth per lifecycle.
+	lifecycle := func() {
+		a := NewOpenCode()
+		a.bus = newOpencodeBus(b.port(), "/workspace")
+		b.setLoop(true)
+		w, sink, first := ocStarted(t, a)
+		for !a.bus.isConnected() {
+			time.Sleep(5 * time.Millisecond)
+		}
+		a.Deliver(proto.Input{RequestID: "s", Text: "x"})
+		sink.wait(t, "accepted s")
+		b.setLoop(false)
+		w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+		sink.wait(t, "turn_end")
+		_ = a.Stop()
+		w.exit()
+		w.out.Close()
+	}
+	lifecycle()
+	b.srv.CloseClientConnections()
+	base := stable()
+	for range 10 {
+		lifecycle()
+	}
+	b.srv.CloseClientConnections()
+	n := stable()
+	if n > base {
+		buf := make([]byte, 1<<20)
+		t.Fatalf("%d goroutines after 10 lifecycles, %d before\n%s", n, base, buf[:runtime.Stack(buf, true)])
 	}
 }
