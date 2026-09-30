@@ -495,12 +495,15 @@ type lifecycleEventsOutput struct {
 }
 
 // eventSortKeys: the sort keys of a pool's or host's events. time is when
-// it (first) happened; detail orders by its data.
+// it (first) happened; detail is its type, then its data as JSON text (a
+// grouping by kind, not the order of a console's summary). It is one text
+// value for the keyset, in byte order: chr(1) sorts below every character
+// of a type, so it orders as (type, data::text).
 var eventSortKeys = map[string]sortKey{
 	"time":   {expr: `created_at`, cast: "timestamptz", first: "desc", notNull: true},
 	"id":     {expr: `id`, cast: "bigint", first: "desc", notNull: true},
 	"type":   {expr: `type`, cast: "text", first: "asc", notNull: true},
-	"detail": {expr: `data::text`, cast: "text", first: "asc", notNull: true},
+	"detail": {expr: `(type || chr(1) || data::text) COLLATE "C"`, cast: "text", first: "asc", notNull: true},
 }
 
 type listPoolEventsInput struct {
@@ -554,6 +557,7 @@ type namedPool struct {
 // the platform's of the same name, as for its Runs; an operator not
 // narrowed to a tenant sees every tenant's pool, and a name two of them
 // share is ambiguous. A live pool wins over a retired one of the name.
+// (pools_name is unique per owner and name, so today there is at most one.)
 func resolveNamedPool(ctx context.Context, tx pgx.Tx, p Principal, name, owner string) (namedPool, error) {
 	rows, err := tx.Query(ctx, `SELECT id, tenant_id IS NULL, tenant_id FROM pools
 		WHERE name = $2
@@ -613,6 +617,9 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 			return nil, errf(http.StatusBadRequest, "bad_request", "before and after (event ids) do not go with sort and cursors")
 		}
 		pg.idCast = "bigint"
+		if err := pg.checkIDCast(); err != nil {
+			return nil, err
+		}
 		return s.lifecycleEventsPage(ctx, p, t, owner, pg)
 	}
 	limit := 100

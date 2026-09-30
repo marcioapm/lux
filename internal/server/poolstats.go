@@ -34,7 +34,7 @@ func (s *Server) poolRoutes(api huma.API) {
 		OperationID: "poolMetrics", Method: http.MethodGet, Path: "/v1/pools/{name}/metrics", Tags: []string{"pools", "history"},
 		Summary: "A pool now, and over time",
 		Description: "Now: hosts by state, capacity and what live placements hold, Runs running and queued, launch failures in the range. " +
-			"Over time: the pool's samples (by its id: a rename keeps them; a new pool of an old name starts its own) of the same, with starts, finishes and launches per sample. " +
+			"Over time: the pool's samples (by its id: a rename keeps them, and a pool removed and set again under its name is the same pool, whose history continues) of the same, with starts, finishes and launches per sample. " +
 			"Samples begin when luxd started taking them (historyFrom); earlier is a gap, not zero. A tenant's Runs and allocation are its own.",
 		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict},
 	}, "read", s.poolMetrics)
@@ -187,9 +187,8 @@ func (s *Server) poolStats(ctx context.Context, in *poolStatsInput) (*poolStatsO
 		}); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT coalesce(c.pool_id, r.pool_id), c.currency, trim_scale(sum(c.amount))::text
-			FROM cost_hourly c JOIN runs r ON r.id = c.run_id
-			WHERE c.run_id IS NOT NULL AND coalesce(c.pool_id, r.pool_id) = ANY($1) AND c.hour >= date_trunc('hour', $2::timestamptz) AND c.hour < $3
+		rows, err = tx.Query(ctx, `SELECT c.pool, c.currency, trim_scale(sum(c.amount))::text
+			FROM `+poolRunCost("= ANY($1)", "date_trunc('hour', $2::timestamptz)", "$3")+`
 			GROUP BY 1, 2 ORDER BY 1, 2`, ids, out.Body.From, out.Body.To)
 		if err != nil {
 			return err
@@ -291,7 +290,8 @@ func (s *Server) poolMetrics(ctx context.Context, in *poolMetricsInput) (*poolMe
 			return err
 		}
 		if err := tx.QueryRow(ctx, `SELECT count(*), max(h.launch_finished_at),
-				coalesce((SELECT x.launch_error FROM hosts x WHERE x.pool_id = $2 AND x.launch_outcome = 'failed' ORDER BY x.launch_finished_at DESC NULLS LAST LIMIT 1), '')
+				coalesce((SELECT `+hostLaunchError+` FROM hosts h WHERE h.pool_id = $2 AND h.launch_outcome = 'failed' AND `+visibleHosts+`
+					ORDER BY h.launch_finished_at DESC NULLS LAST LIMIT 1), '')
 			FROM hosts h WHERE h.pool_id = $2 AND h.launch_outcome = 'failed' AND h.launch_finished_at > $3 AND `+visibleHosts,
 			p.TenantID, pool.ID, from).Scan(&now.LaunchFailures, &now.LastLaunchFailure, &now.LastLaunchError); err != nil {
 			return err
@@ -331,7 +331,7 @@ func (s *Server) poolMetrics(ctx context.Context, in *poolMetricsInput) (*poolMe
 		}
 		return tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE state = 'running'), count(*) FILTER (WHERE state IN `+queuedRunStates+`),
 				min(coalesce(needs_host_since, updated_at)) FILTER (WHERE state IN `+queuedRunStates+`)
-			FROM runs WHERE pool_id = $1`, pool.ID).Scan(&now.Running, &now.Queued, &now.OldestQueuedAt)
+			FROM runs WHERE pool_id = $1 AND (state = 'running' OR state IN `+queuedRunStates+`)`, pool.ID).Scan(&now.Running, &now.Queued, &now.OldestQueuedAt)
 	})
 	if err != nil {
 		return nil, err
@@ -386,6 +386,21 @@ type poolCostOutput struct {
 	} `nameHint:"PoolCost"`
 }
 
+// poolRunCost is a FROM item c of the Runs' cost_hourly rows on the pools
+// pool (SQL comparing a pool id: "= $1", "= ANY($1)") in [from, to): c.pool,
+// c.hour, c.run_id, c.family, c.currency, c.amount. A Run's cost is its
+// pool's: compute by the host it ran on (the row's pool_id), other families
+// (no pool_id) by the pool the Run is bound to. The two are read apart,
+// which is coalesce(c.pool_id, r.pool_id) pool, so the first is served by
+// cost_hourly_pool_hour instead of a join to runs for every row in range.
+func poolRunCost(pool, from, to string) string {
+	return `(SELECT c.pool_id AS pool, c.hour, c.run_id, c.family, c.currency, c.amount FROM cost_hourly c
+			WHERE c.run_id IS NOT NULL AND c.pool_id ` + pool + ` AND c.hour >= ` + from + ` AND c.hour < ` + to + `
+		UNION ALL
+		SELECT r.pool_id, c.hour, c.run_id, c.family, c.currency, c.amount FROM cost_hourly c JOIN runs r ON r.id = c.run_id
+			WHERE c.run_id IS NOT NULL AND c.pool_id IS NULL AND r.pool_id ` + pool + ` AND c.hour >= ` + from + ` AND c.hour < ` + to + `) c`
+}
+
 // poolCost reads cost_hourly by the pool's id: Runs' cost under the
 // caller's scope (RLS gives a tenant its own rows only), and, for an
 // operator over every tenant, the pool's host time. Buckets are whole
@@ -419,20 +434,17 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		return nil, err
 	}
 	b.PoolID = pool.ID
-	// A Run's cost is its pool's: compute by the host it ran on, other
-	// families by the pool the Run is bound to.
-	const onPool = `c.run_id IS NOT NULL AND coalesce(c.pool_id, r.pool_id) = $1 AND c.hour >= $2 AND c.hour < $3`
+	onPool := poolRunCost("= $1", "$2", "$3")
 	err = s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT c.currency, trim_scale(sum(c.amount))::text FROM cost_hourly c JOIN runs r ON r.id = c.run_id
-			WHERE `+onPool+` GROUP BY 1 ORDER BY 1`, pool.ID, from, to)
+		rows, err := tx.Query(ctx, `SELECT c.currency, trim_scale(sum(c.amount))::text FROM `+onPool+` GROUP BY 1 ORDER BY 1`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}
 		if b.Totals, err = pgx.CollectRows(rows, pgx.RowToStructByPos[MoneyAmount]); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT `+bucket+`, c.family, c.currency, trim_scale(sum(c.amount))::text FROM cost_hourly c JOIN runs r ON r.id = c.run_id
-			WHERE `+onPool+` GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`, pool.ID, from, to)
+		rows, err = tx.Query(ctx, `SELECT `+bucket+`, c.family, c.currency, trim_scale(sum(c.amount))::text FROM `+onPool+`
+			GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}
@@ -446,8 +458,8 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 				SELECT r.id, r.name, c.currency, trim_scale(sum(c.amount)) AS amount,
 					EXISTS (SELECT 1 FROM cost_lines l WHERE l.run_id = r.id AND NOT l.final) AS estimate,
 					row_number() OVER (PARTITION BY c.currency ORDER BY sum(c.amount) DESC, r.id) AS rank
-				FROM cost_hourly c JOIN runs r ON r.id = c.run_id
-				WHERE `+onPool+` GROUP BY r.id, r.name, c.currency) x
+				FROM `+onPool+` JOIN runs r ON r.id = c.run_id
+				GROUP BY r.id, r.name, c.currency) x
 			WHERE rank <= 10 ORDER BY currency, rank`, pool.ID, from, to)
 		if err != nil {
 			return err

@@ -204,12 +204,14 @@ func samplePools(ctx context.Context, tx pgx.Tx, from time.Time) error {
 			WHERE r.pool_id IS NOT NULL AND (r.first_started_at > w.since AND r.first_started_at <= w.until OR r.finished_at > w.since AND r.finished_at <= w.until)
 			GROUP BY GROUPING SETS ((r.pool_id, r.tenant_id), (r.pool_id))
 		),
+		-- Launches requested in the last day: hosts_launch_requested bounds
+		-- the scan; a failure answered in the window was requested within it.
 		launch AS (
 			SELECT h.pool_id,
 				count(*) FILTER (WHERE h.provision_requested_at > w.since AND h.provision_requested_at <= w.until) AS launches,
 				count(*) FILTER (WHERE h.launch_outcome = 'failed' AND h.launch_finished_at > w.since AND h.launch_finished_at <= w.until) AS failures
 			FROM hosts h, w
-			WHERE h.pool_id IS NOT NULL AND h.provision_requested_at > w.since - interval '1 day'
+			WHERE h.provision_requested_at > $1::timestamptz - interval '1 day' AND h.pool_id IS NOT NULL
 			GROUP BY h.pool_id
 		),
 		keys AS (
@@ -266,9 +268,18 @@ func (s *Server) rollupHistory(ctx context.Context) error {
 // take the maximum (counters only grow), flows are summed. A process's
 // counter is the exception: it starts again when the process does, so a
 // bucket keeps its last reading, and that reading's start (procRow.columns).
+//
+// rollupSince's first bound is table-wide: the newest target bucket of any
+// key. Every key is rolled up by one statement to one cutoff, so no key has
+// an unrolled source row older than that bucket's start, and ON CONFLICT
+// absorbs that one bucket read again. It must stay an uncorrelated
+// `(SELECT coalesce(max(..)))`: that form is an index condition on
+// (res, at), so a rollup reads only the rows since the last one instead of
+// running the per-key subquery for every row still in retention.
 const (
 	rollupBucket = `to_timestamp(floor(extract(epoch FROM at) / $2::int) * $2::int)`
-	rollupSince  = `at >= coalesce((SELECT max(d.at) + make_interval(secs => $2::int) FROM %s d WHERE d.res = $2::int AND %s), '-infinity')
+	rollupSince  = `at >= (SELECT coalesce(max(g.at), '-infinity') FROM %[1]s g WHERE g.res = $2::int)
+		AND at >= coalesce((SELECT max(d.at) + make_interval(secs => $2::int) FROM %[1]s d WHERE d.res = $2::int AND %[2]s), '-infinity')
 		AND at < to_timestamp(floor(extract(epoch FROM now() - interval '1 minute') / $2::int) * $2::int)`
 )
 
