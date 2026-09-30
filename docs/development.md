@@ -56,13 +56,19 @@ The toolchain and every dependency are kept at their latest release.
 ## Releases
 
 `make dist VERSION=vX.Y.Z` (`scripts/dist.sh`) builds the contract's
-tarballs into `dist/`: `lux_<version>_linux_{arm64,amd64}.tar.gz` (`bin/luxd`,
-`bin/lux`, and `lib/lux/runner/linux-{arm64,amd64}/{lux-runner,lux-shim}` —
+tarballs into `dist/`: `lux_<version>_linux_{arm64,amd64}.tar.gz` (`FEATURES`,
+`bin/luxd`, `bin/lux`, and `lib/lux/runner/linux-{arm64,amd64}/{lux-runner,lux-shim}` —
 both runner arches in every linux tarball, so any luxd serves both),
 `lux_<version>_darwin_{arm64,amd64}.tar.gz` (CLI only), and `SHA256SUMS`
 over them. Every binary is static (`CGO_ENABLED=0`), `-trimpath`, with its
 version baked in (`lux --version`, `luxd version`). Unpacking a Linux
 tarball into `/usr/local` gives the default `runner_bin_dir` layout.
+
+`FEATURES` (the `FEATURES` array in `scripts/dist.sh`) names, one per line,
+what a deployer may rely on in this release ([Operations](operations.md#upgrading));
+`dist.sh` fails if a tarball lacks it. A feature a deployer must detect
+before using it adds a line there. Configuration changes follow
+[the compatibility rules](operations.md#configuration-compatibility).
 
 `.github/workflows/release.yml` runs `make dist` and publishes the result
 as a GitHub Release on every `v*` tag.
@@ -92,6 +98,12 @@ CLI** wherever possible, which tests the CLI and the behaviour at once. They
 go around it only for admin bootstrap (`luxd admin`), for things no client
 can see (the database, a host's disk, nftables), and for fault injection.
 
+**Console suites share one browser page per file.** A suite that drives the
+web console signs in on one page for the whole file (`test_console.py`'s
+`page` fixture resets it between tests: signed out, default size, local
+settings cleared). So keep a file's tests alike, and start a new file for
+a different part of the console rather than growing one without end.
+
 ```bash
 cd tests
 uv run python run_tests.py -j 4              # all suites, across 4 environments (~4 min; make e2e)
@@ -103,6 +115,12 @@ uv run python run_tests.py --hosts 3         # more simulated hosts
 uv run python run_tests.py --real-ec2        # EC2 suites against real AWS (nightly)
 uv run pytest test_harness_config.py         # the harness's own config; no Docker (make harness-unit)
 ```
+
+Your own lux settings never reach the harness's `lux` and `luxd`: every
+`LUX_*` variable is dropped except the harness's `LUX_TEST_*` and
+`LUX_DEBUG`, and so are your CLI config (`XDG_CONFIG_HOME`) and any
+`/etc/lux/luxd.toml`. A `LUX_TENANT` pointing at your deployment, say,
+changes nothing in a test.
 
 Each invocation:
 
