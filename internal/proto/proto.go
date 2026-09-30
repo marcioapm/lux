@@ -288,12 +288,19 @@ type Status struct {
 type AdapterEvent struct {
 	SessionID string `json:"sessionId,omitempty"`
 	Activity  string `json:"activity,omitempty"` // idle | busy
-	// InputAck acknowledges delivery of an input by request id.
+	// InputAck names an input by request id; InputPhase says what happened
+	// to it (proto.InputAccepted, InputConsumed, InputFailed; "" from an
+	// older runner is accepted, or failed with InputError).
 	InputAck   string `json:"inputAck,omitempty"`
+	InputPhase string `json:"inputPhase,omitempty"`
 	InputError string `json:"inputError,omitempty"`
 	// InputText is what was delivered (capped; InputTruncated if so).
 	InputText      string `json:"inputText,omitempty"`
 	InputTruncated bool   `json:"inputTruncated,omitempty"`
+	// InputLands and InputReceipt: on accepted, when the agent reads it,
+	// and whether a consumed follows.
+	InputLands   string `json:"inputLands,omitempty"`
+	InputReceipt bool   `json:"inputReceipt,omitempty"`
 }
 
 // SnapshotDone ends every placement, however it exited: its state volumes,

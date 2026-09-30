@@ -90,9 +90,13 @@ type agent struct {
 	session string
 	cwd     string
 	cancel  chan struct{} // the running turn's; nil when idle
-	steer   []string      // extra prompts for the running turn
+	steer   []prompt      // extra prompts for the running turn
 	emit    func(text string)
-	ask     func() string
+	// read reports a prompt entering the model's context, as the protocol
+	// does (Codex's userMessage item, Claude Code's command_lifecycle
+	// started): at the turn's start, and for a steer at the next step.
+	read func(p prompt)
+	ask  func() string
 	// mcp: the MCP servers the client gave, by name. tool reports a tool
 	// call in the protocol's own events: started (result and err empty),
 	// then done.
@@ -100,8 +104,13 @@ type agent struct {
 	tool func(call toolCall)
 }
 
+// prompt is a user message and the client's id for it.
+type prompt struct {
+	text, id string
+}
+
 func newAgent() *agent {
-	a := &agent{out: json.NewEncoder(os.Stdout), cwd: "."}
+	a := &agent{out: json.NewEncoder(os.Stdout), cwd: ".", read: func(prompt) {}}
 	if wd, err := os.Getwd(); err == nil {
 		a.cwd = wd
 	}
@@ -192,39 +201,63 @@ func (a *agent) cancelTurn() {
 }
 
 // addSteer adds a prompt to the running turn; false if none is running.
-func (a *agent) addSteer(text string) bool {
+func (a *agent) addSteer(p prompt) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.cancel == nil {
 		return false
 	}
-	a.steer = append(a.steer, text)
+	a.steer = append(a.steer, p)
 	return true
 }
 
-// runTurn runs a prompt, then any prompts steered into the turn, and ends
-// the turn. Steers are taken and the turn ended under one lock, so a steer
-// is either run in this turn or refused (addSteer false): never lost.
-func (a *agent) runTurn(prompt string, c chan struct{}) (cancelled bool) {
-	for text := prompt; ; {
-		a.record("user", text)
-		if a.runScript(text, c) {
-			cancelled = true
-		}
+// takeSteers returns the prompts steered into the running turn so far.
+func (a *agent) takeSteers() []prompt {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.steer
+	a.steer = nil
+	return s
+}
+
+// runTurn runs a prompt, and ends the turn. Prompts steered into it are
+// read at its next step, after the script line running when they arrived
+// (as a real agent reads them after the running tool call), and run then.
+// Steers are taken and the turn ended under one lock, so a steer is either
+// run in this turn or refused (addSteer false): never lost.
+func (a *agent) runTurn(first prompt, c chan struct{}) (cancelled bool) {
+	a.read(first)
+	a.record("user", first.text)
+	cancelled = a.runScript(first.text, c)
+	for !cancelled {
 		a.mu.Lock()
-		if len(a.steer) == 0 || cancelled {
-			// Steers accepted into a cancelled turn are still part of the
-			// conversation; record them, not run them.
-			for _, t := range a.steer {
-				a.record("user", t)
-			}
-			a.steer, a.cancel = nil, nil
+		if len(a.steer) == 0 {
+			a.cancel = nil
 			a.mu.Unlock()
-			return cancelled
+			return false
 		}
-		text, a.steer = a.steer[0], a.steer[1:]
 		a.mu.Unlock()
+		cancelled = a.runSteers(c)
 	}
+	// Steers accepted into a cancelled turn are dropped unread, as Codex
+	// drops them.
+	a.mu.Lock()
+	a.steer, a.cancel = nil, nil
+	a.mu.Unlock()
+	return true
+}
+
+// runSteers reads and runs the prompts steered in so far; true if the turn
+// was cancelled.
+func (a *agent) runSteers(c chan struct{}) bool {
+	for _, p := range a.takeSteers() {
+		a.read(p)
+		a.record("user", p.text)
+		if a.runScript(p.text, c) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *agent) path(p string) string {
@@ -258,7 +291,8 @@ func (a *agent) commit(message string) string {
 	return "committed " + sha
 }
 
-// runScript runs one prompt; true if it was cancelled.
+// runScript runs one prompt; true if it was cancelled. Prompts steered in
+// during a line are read and run after it: the next step.
 func (a *agent) runScript(script string, cancel chan struct{}) bool {
 	for _, line := range strings.Split(script, "\n") {
 		line = strings.TrimSpace(line)
@@ -273,6 +307,9 @@ func (a *agent) runScript(script string, cancel chan struct{}) bool {
 			a.say("cancelled")
 			return true
 		default:
+		}
+		if a.runSteers(cancel) {
+			return true
 		}
 	}
 	return false
@@ -506,7 +543,7 @@ func acp() {
 					c, ok = a.startTurn()
 				}
 				stop := "end_turn"
-				if a.runTurn(text, c) {
+				if a.runTurn(prompt{text: text}, c) {
 					stop = "cancelled"
 				}
 				// Usage as OpenCode reports it (lux passes it through).
@@ -584,7 +621,7 @@ func streamJSON() {
 		for text := range turns {
 			c, _ := a.startTurn()
 			reason := "completed"
-			if a.runTurn(text, c) {
+			if a.runTurn(prompt{text: text}, c) {
 				reason = "aborted_streaming"
 			}
 			a.send(map[string]any{"type": "result", "subtype": "success", "session_id": a.session,
@@ -660,6 +697,23 @@ func appServer() {
 		}
 		a.send(map[string]any{"method": method, "params": map[string]any{"threadId": a.session, "turnId": id, "item": item}})
 	}
+	// A user message entering the turn is a userMessage item, started and
+	// completed, carrying the client's id (null without one). Codex 0.155
+	// emits it when the model's next step reads it.
+	a.read = func(p prompt) {
+		turnMu.Lock()
+		id := turnID
+		turnMu.Unlock()
+		var client any
+		if p.id != "" {
+			client = p.id
+		}
+		item := map[string]any{"type": "userMessage", "id": fmt.Sprintf("um-%d", time.Now().UnixNano()), "clientId": client,
+			"content": []map[string]any{{"type": "text", "text": p.text, "text_elements": []any{}}}}
+		for _, method := range []string{"item/started", "item/completed"} {
+			a.send(map[string]any{"method": method, "params": map[string]any{"threadId": a.session, "turnId": id, "item": item}})
+		}
+	}
 	a.setMCP(codexMCP(os.Args))
 	reply := func(id json.RawMessage, result any) { a.send(map[string]any{"id": id, "result": result}) }
 	fail := func(id json.RawMessage, err error) {
@@ -679,6 +733,8 @@ func appServer() {
 			TurnID         string     `json:"turnId"`
 			ExpectedTurnID string     `json:"expectedTurnId"`
 			Input          textBlocks `json:"input"`
+			// Echoed as the userMessage item's clientId.
+			ClientUserMessageID string `json:"clientUserMessageId"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		turnMu.Lock()
@@ -686,7 +742,8 @@ func appServer() {
 		turnMu.Unlock()
 		switch m.Method {
 		case "initialize":
-			reply(m.ID, map[string]any{"userAgent": "lux-fake/1"})
+			// The real server names its version here; lux reads it.
+			reply(m.ID, map[string]any{"userAgent": "lux/0.155.1 (lux-fake)"})
 		case "thread/start":
 			if p.Cwd != "" {
 				a.cwd = p.Cwd
@@ -717,9 +774,9 @@ func appServer() {
 			turn := map[string]any{"id": id, "status": "inProgress"}
 			reply(m.ID, map[string]any{"turn": turn})
 			a.send(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": a.session, "turn": turn}})
-			go func(text string) {
+			go func(first prompt) {
 				status := "completed"
-				if a.runTurn(text, c) {
+				if a.runTurn(first, c) {
 					status = "interrupted"
 				}
 				turnMu.Lock()
@@ -733,13 +790,22 @@ func appServer() {
 						"modelContextWindow": 200000}}})
 				a.send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": a.session,
 					"turn": map[string]any{"id": id, "status": status}}})
-			}(p.Input.String())
+			}(prompt{p.Input.String(), p.ClientUserMessageID})
 		case "turn/steer":
-			if current == "" || p.ExpectedTurnID != current || !a.addSteer(p.Input.String()) {
-				fail(m.ID, errors.New("expectedTurnId does not match the active turn"))
+			// The real server's errors (codex 0.155.1).
+			if current == "" {
+				fail(m.ID, errors.New("no active turn to steer"))
 				continue
 			}
-			reply(m.ID, map[string]any{})
+			if p.ExpectedTurnID != current {
+				fail(m.ID, fmt.Errorf("expected active turn id `%s` but found `%s`", p.ExpectedTurnID, current))
+				continue
+			}
+			if !a.addSteer(prompt{p.Input.String(), p.ClientUserMessageID}) {
+				fail(m.ID, errors.New("no active turn to steer"))
+				continue
+			}
+			reply(m.ID, map[string]any{"turnId": current})
 		case "turn/interrupt":
 			if p.TurnID == current {
 				a.cancelTurn()

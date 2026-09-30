@@ -167,7 +167,11 @@ func (c *Claude) send(in proto.Input) {
 	if err == nil {
 		sink.Activity(false)
 	}
-	sink.InputAck(in, err)
+	if err != nil {
+		sink.InputFailed(in, err)
+	} else {
+		sink.InputAccepted(in, Delivery{Lands: LandsNextStep})
+	}
 }
 
 // Deliver writes the message now: Claude Code queues mid-turn messages
@@ -187,7 +191,7 @@ func (c *Claude) Deliver(in proto.Input) {
 	if in.Text != "" {
 		c.send(in)
 	} else if in.RequestID != "" {
-		c.sink.InputAck(in, nil)
+		c.sink.InputAccepted(in, Delivery{Lands: LandsNextStep})
 	}
 }
 

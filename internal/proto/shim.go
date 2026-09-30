@@ -153,9 +153,14 @@ const (
 // Event types the shim writes as ch=event records. The runner forwards the
 // lux.* ones to luxd as adapter events; all are visible in the output.
 const (
-	EvSession    = "lux.session"    // {"sessionId"}
-	EvActivity   = "lux.activity"   // {"activity": "idle" | "busy"}
-	EvInputAck   = "lux.input"      // {"requestId", "text"?, "truncated"?, "error"?}; the first prompt's id is "prompt"
+	EvSession  = "lux.session"  // {"sessionId"}
+	EvActivity = "lux.activity" // {"activity": "idle" | "busy"}
+	// EvInputAck is an input's progress, once per request id and phase:
+	//   {"requestId", "phase":"accepted", "lands":"next_step"|"next_turn", "receipt", "text"?, "truncated"?}
+	//   {"requestId", "phase":"consumed"}             (only after an accepted with receipt)
+	//   {"requestId", "phase":"failed", "error", "text"?}
+	// The first prompt's id is "prompt".
+	EvInputAck   = "lux.input"
 	EvInit       = "lux.init"       // {"phase": "start" | "done", "exitCode"?}
 	EvWorkload   = "lux.workload"   // {"phase": "start", "pid"}
 	EvStop       = "lux.stop"       // {"reason"}
@@ -166,6 +171,13 @@ const (
 	// naming the server: {"phase": "start"|"exit", "gen", "pid"?,
 	// "exitCode"?, "error"?}.
 	EvServer = "lux.server"
+)
+
+// lux.input phases.
+const (
+	InputAccepted = "accepted"
+	InputConsumed = "consumed"
+	InputFailed   = "failed"
 )
 
 // ExitInfo is the shim's account of how the workload ended.
