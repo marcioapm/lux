@@ -21,6 +21,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"syscall"
 
@@ -233,8 +234,9 @@ func pump(r io.Reader, out func([]byte)) {
 // (both arrive on one stream, handled by two goroutines), so a consumption
 // seen early is held until accepted.
 type inputLedger struct {
-	mu sync.Mutex
-	m  map[string]*inputState
+	mu  sync.Mutex
+	m   map[string]*inputState
+	seq int
 }
 
 type inputState struct {
@@ -246,6 +248,7 @@ type inputState struct {
 	// tag is the adapter's own note on the input (the Codex turn it was
 	// steered into).
 	tag string
+	seq int
 }
 
 func (l *inputLedger) state(id string) *inputState {
@@ -279,7 +282,14 @@ func (l *inputLedger) accept(sink Sink, in proto.Input, d Delivery, tag string) 
 		return
 	}
 	st := l.state(in.RequestID)
-	if st.accepted || st.done {
+	if st.done {
+		return
+	}
+	l.seq++
+	st.seq = l.seq
+	if st.accepted {
+		// Sent again (carried into the next turn): only its turn changes.
+		st.tag = tag
 		return
 	}
 	st.in, st.accepted, st.receipt, st.tag = in, true, d.Receipt, tag
@@ -311,6 +321,14 @@ func (l *inputLedger) consume(sink Sink, id string) bool {
 	return true
 }
 
+// unreadOne reports whether the input is accepted and not yet read.
+func (l *inputLedger) unreadOne(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	st := l.m[id]
+	return st != nil && st.accepted && !st.done
+}
+
 func (l *inputLedger) fail(sink Sink, in proto.Input, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -333,15 +351,20 @@ func (l *inputLedger) forget(id string) {
 }
 
 // unread returns the inputs accepted with a receipt, not yet read, whose
-// tag is tag.
+// tag is tag, in the order they were accepted.
 func (l *inputLedger) unread(tag string) []proto.Input {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	var out []proto.Input
+	var sts []*inputState
 	for _, st := range l.m {
 		if st.accepted && st.receipt && !st.done && st.tag == tag {
-			out = append(out, st.in)
+			sts = append(sts, st)
 		}
+	}
+	slices.SortFunc(sts, func(a, b *inputState) int { return a.seq - b.seq })
+	out := make([]proto.Input, len(sts))
+	for i, st := range sts {
+		out[i] = st.in
 	}
 	return out
 }

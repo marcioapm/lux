@@ -183,6 +183,41 @@ func TestOpenCodeSteerReceiptFromBus(t *testing.T) {
 		"accepted steer-2 next_step receipt=true", "consumed steer-2", "turn_end", "idle")
 }
 
+// Interrupted with steers unread: OpenCode's cancelled loop never reads
+// them, so they are sent again (same request id, new message id) and start
+// the next turn, followed on the bus; consumed once, nothing fails.
+func TestOpenCodeSteerCarriedPastInterrupt(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
+	sink.wait(t, "accepted s1")
+	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
+	w.next("session/cancel")
+	sink.wait(t, "accepted int-1")
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	var again string
+	for end := time.Now().Add(5 * time.Second); again == "" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		b.mu.Lock()
+		if len(b.posted) == 2 {
+			again = b.posted[1]["messageID"].(string)
+		}
+		b.mu.Unlock()
+	}
+	b.mu.Lock()
+	firstID := b.posted[0]["messageID"].(string)
+	b.mu.Unlock()
+	if again == "" || again == firstID {
+		t.Fatalf("not sent again: %q", again)
+	}
+	w.none()                       // no empty prompt for the interrupt
+	b.events <- assistant(firstID) // the cancelled copy: not ours any more
+	b.events <- `{"type":"session.status","properties":{"sessionID":"` + ocSession + `","status":{"type":"busy"}}}`
+	b.events <- assistant(again)
+	b.events <- `{"type":"session.idle","properties":{"sessionID":"` + ocSession + `"}}`
+	checkLines(t, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted s1 next_step receipt=true", "accepted int-1 next_turn receipt=false", "turn_end",
+		"consumed s1", "turn_end", "idle")
+}
+
 // Message ids sort after each other, as OpenCode orders messages by id.
 func TestOpenCodeMessageIDsAscend(t *testing.T) {
 	b := newOpencodeBus(1, "/")

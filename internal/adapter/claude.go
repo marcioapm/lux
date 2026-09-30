@@ -49,6 +49,10 @@ type Claude struct {
 	// line folded into the running turn leaves unbalanced.
 	lifecycle, known bool
 	inTurn           int
+	// stopping: Stop was called; lines cancelled from here on fail.
+	stopping bool
+	// resent: how often each request id's line was written again.
+	resent map[string]int
 }
 
 func NewClaude() *Claude { return &Claude{} }
@@ -272,12 +276,56 @@ func (c *Claude) lifecycleFrame(uuid, state string) {
 		// A line can start without a queued frame first.
 		c.inputs.accept(c.sink, in, Delivery{Lands: LandsNextStep, Receipt: true}, "")
 		c.inputs.consume(c.sink, in.RequestID)
-	case "cancelled", "discarded", "refused":
+	case "cancelled", "discarded":
+		// Claude Code cancels the lines still queued when a turn is
+		// interrupted (interrupt_cancel_queued_v1). One not yet read is
+		// written again, so it starts the next turn; only a stopping Run
+		// fails it.
+		if !c.resend(in) {
+			c.inputs.fail(c.sink, in, fmt.Errorf("claude: the message was %s", state))
+		}
+	case "refused":
 		c.inputs.fail(c.sink, in, fmt.Errorf("claude: the message was %s", state))
 	}
 	if state != "queued" && state != "started" {
 		c.maybeIdle()
 	}
+}
+
+// resend writes an accepted, unread line again, under a new uuid mapped to
+// the same request id; false if it must fail instead (the Run is stopping,
+// it was read already, or it was cancelled three times).
+func (c *Claude) resend(in proto.Input) bool {
+	c.mu.Lock()
+	if c.resent == nil {
+		c.resent = map[string]int{}
+	}
+	n := c.resent[in.RequestID] + 1
+	ok := !c.stopping && n <= 3
+	if ok {
+		c.resent[in.RequestID] = n
+	}
+	c.mu.Unlock()
+	if !ok || !c.inputs.unreadOne(in.RequestID) {
+		return false
+	}
+	uuid := claudeUUID(fmt.Sprintf("%s#%d", in.RequestID, n))
+	c.mu.Lock()
+	c.sent[uuid] = in
+	c.mu.Unlock()
+	err := c.lw.send(map[string]any{
+		"type":               "user",
+		"message":            map[string]any{"role": "user", "content": textInput(in.Text)},
+		"parent_tool_use_id": nil,
+		"uuid":               uuid,
+	})
+	if err != nil {
+		c.mu.Lock()
+		delete(c.sent, uuid)
+		c.mu.Unlock()
+		return false
+	}
+	return true
 }
 
 // maybeIdle reports idle once no turn runs and no line waits: with
@@ -314,7 +362,7 @@ func (c *Claude) Deliver(in proto.Input) {
 		c.send(in)
 	} else if in.RequestID != "" {
 		// An interrupt alone: nothing for the agent to read.
-		c.sink.InputAccepted(in, Delivery{Lands: LandsNextStep})
+		c.inputs.accept(c.sink, in, Delivery{Lands: LandsNextStep}, "")
 	}
 }
 
@@ -331,6 +379,7 @@ func (c *Claude) Interrupt() error {
 // turn unfinished.)
 func (c *Claude) Stop() error {
 	c.mu.Lock()
+	c.stopping = true
 	p := c.proc
 	c.mu.Unlock()
 	if p == nil {

@@ -113,20 +113,58 @@ func TestClaudeSteerAfterFinalStepIsNextTurn(t *testing.T) {
 		"busy", "accepted s next_step receipt=true", "turn_end", "consumed s", "turn_end", "idle")
 }
 
-// A line Claude Code discards before reading it fails; one it had already
-// read (consumed) stays consumed when its turn is then cancelled.
-func TestClaudeCancelledLineFails(t *testing.T) {
+// An interrupt cancels the lines still queued (interrupt_cancel_queued_v1).
+// One lux had accepted and the agent had not read is written again (same
+// request id, a new uuid) and consumed in the next turn; nothing fails.
+// A line already read stays consumed.
+func TestClaudeSteerCarriedPastInterrupt(t *testing.T) {
 	c, w, sink, prompt := claudeStarted(t)
 	w.send(clLifecycle(prompt, "queued"))
 	w.send(clLifecycle(prompt, "started"))
 	c.Deliver(proto.Input{RequestID: "s", Text: "x"})
 	steer := userLine(t, w)
 	w.send(clLifecycle(steer, "queued"))
+	sink.wait(t, "accepted s")
+	c.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
+	select {
+	case m := <-w.sent:
+		if str(m, "type") != "control_request" {
+			t.Fatalf("sent %v", m)
+		}
+	case <-waitTimeout():
+		t.Fatal("no interrupt")
+	}
 	w.send(strings.Replace(clResult, `"completed"`, `"aborted_streaming"`, 1))
 	w.send(clLifecycle(prompt, "cancelled"))
-	w.send(clLifecycle(steer, "discarded"))
+	w.send(clLifecycle(steer, "cancelled"))
+	again := userLine(t, w)
+	if again == steer || again != claudeUUID("s#1") {
+		t.Fatalf("resent as %s", again)
+	}
+	w.send(clLifecycle(again, "queued"))
+	w.send(clLifecycle(again, "started"))
+	w.send(clResult)
+	w.send(clLifecycle(again, "completed"))
 	checkLines(t, sink, "busy", "accepted prompt next_step receipt=true", "consumed prompt",
-		"busy", "accepted s next_step receipt=true", "turn_end", "failed s: claude: the message was discarded", "idle")
+		"busy", "accepted s next_step receipt=true", "accepted int-1 next_step receipt=false", "turn_end",
+		"consumed s", "turn_end", "idle")
+}
+
+// When the Run is stopping, a cancelled unread line fails.
+func TestClaudeCancelledLineFailsOnStop(t *testing.T) {
+	c, w, sink, prompt := claudeStarted(t)
+	w.send(clLifecycle(prompt, "queued"))
+	w.send(clLifecycle(prompt, "started"))
+	c.Deliver(proto.Input{RequestID: "s", Text: "x"})
+	steer := userLine(t, w)
+	w.send(clLifecycle(steer, "queued"))
+	sink.wait(t, "accepted s")
+	c.mu.Lock()
+	c.stopping = true // what Stop sets before its SIGINT
+	c.mu.Unlock()
+	w.send(strings.Replace(clResult, `"completed"`, `"aborted_streaming"`, 1))
+	w.send(clLifecycle(steer, "discarded"))
+	sink.wait(t, "failed s: claude: the message was discarded")
 }
 
 // A Claude Code without msg_lifecycle_v1: accepted as written, no

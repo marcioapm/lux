@@ -146,6 +146,43 @@ def test_mid_turn_steering(lux, runners, hosts, harness):
 
 
 @harnesses(lambda h: h.caps.steer_joins_turn)
+def test_interrupt_carries_an_unread_steer(lux, runners, hosts, harness):
+    """"Interrupt now": a steer accepted during a long tool, then an
+    interrupt with no text. The running turn ends; the steer is not failed
+    but read in the turn after it, consumed exactly once."""
+    runners.start(hosts[0])
+    token = f"{int(time.time() * 1000) % 1000000:06d}"
+    if harness.real:
+        prompt = "Run `sleep 60 && echo FIRST` with your shell tool, then reply DONE."
+        steer = f"Stop what you were doing and just run `echo STEER-{token}`."
+        marker, steered = "sleep 60", f"STEER-{token}"
+    else:
+        prompt, steer = "echo long-tool\nsleep 60\necho never", f"echo steered-{token}"
+        marker, steered = "long-tool", f"steered-{token}"
+    run_id = lux.submit(harness.spec(prompt))
+    _steer_mid_tool(lux, harness, run_id, marker, steer, "carry-1")
+    wait_until(lambda: any(r["phase"] == "accepted" for r in _input_records(lux, run_id, "carry-1")),
+               harness.timeout, 0.3, "the steer was never accepted")
+    # What POST input {"interrupt": true} with no text does (dude's
+    # "Interrupt now").
+    lux.run("interrupt", run_id)
+    wait_until(lambda: steered in lux.logs(run_id) or any(steered in json.dumps(r.get("event", {}))
+                                                          for r in lux.records(run_id, "--events")),
+               harness.timeout, 0.5, "the steer was never run")
+    lux.wait_activity(run_id, "idle", timeout=harness.timeout)
+    _check_phases(lux, run_id, harness, "carry-1")
+    records = lux.records(run_id, "--events")
+    types = [r.get("event", {}).get("type") for r in records]
+    turn_ends = [i for i, t in enumerate(types) if t in TURN_ENDS]
+    consumed = [i for i, r in enumerate(records) if r.get("event", {}).get("type") == "lux.input"
+                and r["event"]["data"] == {"requestId": "carry-1", "phase": "consumed"}]
+    # In the turn after the interrupted one: after its end, before the next.
+    assert len(turn_ends) >= 2 and turn_ends[0] < consumed[0] < turn_ends[1], (turn_ends, consumed)
+    assert "never" not in lux.logs(run_id).lower().split()
+    lux.run("cancel", run_id)
+
+
+@harnesses(lambda h: h.caps.steer_joins_turn)
 def test_steer_in_the_final_step(lux, runners, hosts, harness):
     """A steer that arrives during the turn's final step (no tool call
     follows) is still read: in the same turn, or as the next turn where the

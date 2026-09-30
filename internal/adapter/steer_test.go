@@ -291,14 +291,45 @@ func TestCodexSteerErrors(t *testing.T) {
 	}
 }
 
-// A steer accepted into a turn that is then interrupted is never read
-// (Codex drops it): it fails rather than waiting for a receipt forever.
-func TestCodexSteerDroppedByInterrupt(t *testing.T) {
+// A steer accepted into a turn that is then interrupted is never read in
+// it (Codex drops a turn's pending steers): it starts the next turn, under
+// the same request id, and is consumed there, once; nothing fails.
+func TestCodexSteerCarriedPastInterrupt(t *testing.T) {
 	c, w, sink := codexStarted(t, "lux/0.155.1")
 	c.Deliver(proto.Input{RequestID: "s1", Text: "y"})
 	id, _ := w.next("turn/steer")
 	w.send(`{"id":` + id + `,"result":{"turnId":"` + cxTurn + `"}}`)
 	sink.wait(t, "accepted s1")
+	go c.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
+	id, p := w.next("turn/interrupt")
+	if str(p, "turnId") != cxTurn {
+		t.Fatalf("turn/interrupt %v", p)
+	}
+	w.send(`{"id":` + id + `,"result":{}}`)
 	w.send(cxCompleted("interrupted"))
-	sink.wait(t, "failed s1: the turn ended before the agent read it")
+	id, p = w.next("turn/start")
+	if str(p, "clientUserMessageId") != "s1" {
+		t.Fatalf("turn/start %v", p)
+	}
+	const next = "01a0f2bb-dd3b-71c3-8d08-f3a1cb53a3e9"
+	w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + next + `","status":"inProgress"}}}`)
+	w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u2","clientId":"s1","content":[]},"threadId":"` + cxThread + `","turnId":"` + next + `"}}`)
+	w.send(`{"method":"turn/completed","params":{"threadId":"` + cxThread + `","turn":{"id":"` + next + `","status":"completed"}}}`)
+	checkLines(t, sink, "idle", "busy", "accepted prompt next_step receipt=true", "consumed prompt",
+		"accepted s1 next_step receipt=true", "accepted int-1 next_step receipt=false", "turn_end",
+		"busy", "consumed s1", "turn_end", "idle")
+}
+
+// Stopping the Run is the one end of a turn that fails its unread steers.
+func TestCodexSteerFailsWhenRunStops(t *testing.T) {
+	c, w, sink := codexStarted(t, "lux/0.155.1")
+	c.Deliver(proto.Input{RequestID: "s1", Text: "y"})
+	id, _ := w.next("turn/steer")
+	w.send(`{"id":` + id + `,"result":{"turnId":"` + cxTurn + `"}}`)
+	sink.wait(t, "accepted s1")
+	go c.Stop()
+	id, _ = w.next("turn/interrupt")
+	w.send(`{"id":` + id + `,"result":{}}`)
+	w.send(cxCompleted("interrupted"))
+	sink.wait(t, "failed s1: the Run stopped before the agent read it")
 }

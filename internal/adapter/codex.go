@@ -224,6 +224,12 @@ func (c *Codex) drain() {
 	}
 	in := c.queue[0]
 	c.queue = c.queue[1:]
+	// Input queued behind it (steers carried over from an interrupted
+	// turn) is steered into the turn it starts, not held for the next.
+	for len(c.queue) > 0 && !c.queue[0].Interrupt {
+		c.early = append(c.early, c.queue[0])
+		c.queue = c.queue[1:]
+	}
 	c.turn = "starting"
 	c.usage, c.usageTurn = nil, ""
 	thread := c.thread
@@ -334,7 +340,9 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 		// counterpart of acp.turn_end and claude.turn_end).
 		// Sent before idle and before the next turn starts.
 		sink.Event("codex.turn_end", withUsage(map[string]any{"status": p.Turn.Status}, usage))
-		c.dropUnread(p.Turn.ID)
+		if c.carryUnread(p.Turn.ID) {
+			idle = false
+		}
 		if idle {
 			sink.Activity(true)
 		}
@@ -395,7 +403,18 @@ func (c *Codex) Deliver(in proto.Input) {
 		return
 	}
 	if in.Interrupt {
-		_, _ = c.call("turn/interrupt", map[string]any{"threadId": thread, "turnId": turn})
+		_, err := c.call("turn/interrupt", map[string]any{"threadId": thread, "turnId": turn})
+		if in.Text == "" {
+			// An interrupt alone: steers the turn left unread start the
+			// next one (carryUnread).
+			if err != nil {
+				c.inputs.fail(c.sink, in, err)
+			} else {
+				// Nothing for the model to read: no receipt.
+				c.inputs.accept(c.sink, in, Delivery{Lands: LandsNextStep}, "")
+			}
+			return
+		}
 		c.mu.Lock()
 		c.queue = append([]proto.Input{in}, c.queue...)
 		c.mu.Unlock()
@@ -429,7 +448,9 @@ func (c *Codex) Deliver(in proto.Input) {
 		gone := c.turn != r.TurnID
 		c.mu.Unlock()
 		if gone {
-			c.dropUnread(r.TurnID)
+			if c.carryUnread(r.TurnID) {
+				c.drain()
+			}
 		}
 	}()
 }
@@ -443,15 +464,32 @@ func codexTurnGone(err error) bool {
 	return strings.Contains(s, "no active turn") || strings.Contains(s, "expected active turn id")
 }
 
-// dropUnread fails the inputs steered into a turn that ended without the
-// model reading them: an interrupted turn discards its pending steers.
-func (c *Codex) dropUnread(turn string) {
+// carryUnread handles the inputs steered into a turn that ended without
+// the model reading them (Codex drops a turn's pending steers when it is
+// interrupted): they start the next turn, in the order they came, under
+// the same request ids, unless the Run is stopping, where they fail. It
+// reports whether any were carried.
+func (c *Codex) carryUnread(turn string) bool {
 	if turn == "" {
-		return
+		return false
 	}
-	for _, in := range c.inputs.unread(turn) {
-		c.inputs.fail(c.sink, in, errors.New("the turn ended before the agent read it"))
+	unread := c.inputs.unread(turn)
+	if len(unread) == 0 {
+		return false
 	}
+	c.mu.Lock()
+	stopped := c.stopped
+	if !stopped {
+		c.queue = append(unread, c.queue...)
+	}
+	c.mu.Unlock()
+	if stopped {
+		for _, in := range unread {
+			c.inputs.fail(c.sink, in, errors.New("the Run stopped before the agent read it"))
+		}
+		return false
+	}
+	return true
 }
 
 func (c *Codex) Interrupt() error {
