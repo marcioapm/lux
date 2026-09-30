@@ -69,8 +69,7 @@ func TestClaudeUUID(t *testing.T) {
 
 // A steer folded into the running turn at the tool boundary: queued is
 // accepted, started is consumed, and the Run goes idle after the one
-// result. On main the adapter counted a line per result, and never went
-// idle here.
+// result.
 func TestClaudeFoldedSteerGoesIdle(t *testing.T) {
 	c, w, sink, prompt := claudeStarted(t)
 	w.send(clLifecycle(prompt, "queued"))
