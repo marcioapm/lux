@@ -761,16 +761,26 @@ func TestPlacementTime(t *testing.T) {
 	}
 }
 
-// A pool's events page by time (many sharing one instant) and by type.
+// A pool's events page by time (many sharing one instant), by type, and by
+// detail: type, then data, in byte order.
 func TestPoolEventsPagedSort(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	key := operatorKey(t, s, ctx)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	types := []string{"pool.scale_up", "pool.launch_failed", "pool.placement"}
+	// One type a prefix of another, the next character '_' against the
+	// separator; data that differs by number text and by letter case (a
+	// linguistic collation puts "a" before "B", bytes the reverse). Each
+	// data is as jsonb prints it.
+	types := []string{"pool.scale", "pool.scale_up", "pool.launch_failed"}
+	datas := []string{`{}`, `{"n": 1}`, `{"n": 10}`, `{"n": 2}`, `{"host": "B"}`, `{"host": "a"}`}
+	detailOf := map[int64]string{}
 	for i := range 31 {
-		execSQL(t, s, ctx, `INSERT INTO pool_events (pool_id, type, created_at) VALUES ('pool1', $1, $2)`, types[i%3], at.Add(time.Duration(i%4)*time.Second))
+		typ, data := types[i%3], datas[(i/3)%len(datas)]
+		id := queryOne[int64](t, s, `INSERT INTO pool_events (pool_id, type, data, created_at) VALUES ('pool1', $1, $2::jsonb, $3) RETURNING id`,
+			typ, data, at.Add(time.Duration(i%4)*time.Second))
+		detailOf[id] = typ + "\x01" + data
 	}
 	type ev struct {
 		ID   int64
@@ -805,10 +815,10 @@ func TestPoolEventsPagedSort(t *testing.T) {
 		if !slices.Equal(pad(got), want) {
 			t.Errorf("sort=type dir=%s:\n got %v\nwant %v", dir, pad(got), want)
 		}
-		// detail: type, then the data's JSON text, byte order.
+		// detail: the key built here, compared as Go strings (bytes).
 		detail := map[string]string{}
 		for _, id := range ids {
-			detail[fmt.Sprintf("%06s", id)] = queryOne[string](t, s, `SELECT type || chr(1) || data::text FROM pool_events WHERE id = $1::bigint`, id)
+			detail[fmt.Sprintf("%06s", id)] = detailOf[int64(mustAtoi(id))]
 		}
 		got = walkPages(t, s, key, "/v1/pools/burst/events?owner=platform&limit=4&sort=detail&dir="+dir, "events", nil)
 		want = sorted(pad(ids), func(id string) *string { v := detail[id]; return &v }, dir)
