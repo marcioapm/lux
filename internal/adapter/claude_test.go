@@ -145,9 +145,8 @@ func TestClaudeSteerCarriedPastInterrupt(t *testing.T) {
 	w.send(clLifecycle(again, "started"))
 	w.send(clResult)
 	w.send(clLifecycle(again, "completed"))
-	checkLines(t, sink, "busy", "accepted prompt next_step receipt=true", "consumed prompt",
-		"busy", "accepted s next_step receipt=true", "accepted int-1 next_step receipt=false", "turn_end",
-		"consumed s", "turn_end", "idle")
+	sink.wait(t, "accepted int-1 next_step receipt=false")
+	checkCarried(t, sink, "s")
 }
 
 // When the Run is stopping, a cancelled unread line fails.
