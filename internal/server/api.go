@@ -1900,7 +1900,7 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 			out.Body.Hosts, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Host, error) { return scanHost(row) })
 			return err
 		}
-		return listHostsPage(ctx, tx, pg, in.Offset, where, args, out)
+		return listHostsPage(ctx, tx, pg, in.Offset, p.TenantID, where, args, out)
 	})
 	if err != nil {
 		return nil, err
@@ -1912,8 +1912,9 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 // how many precede the page, in one transaction. base holds the filter's
 // placeholders; the filter reads hosts h alone. As listRunsPage, the page's
 // ids and sort values come first, from hosts h and only the joins the sort
-// key needs; then its rows, by id.
-func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, where []string, base []any, out *listHostsOutput) error {
+// key needs; then its rows, by id. tenant is the principal's tenant id
+// (visibleHosts' $1), which the rows' placements are read under.
+func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset, tenant string, where []string, base []any, out *listHostsOutput) error {
 	stamp, err := pageClock(ctx, tx, pg)
 	if err != nil {
 		return err
@@ -1968,8 +1969,7 @@ func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, wh
 		}
 	}
 	ids := pageIDs(page)
-	// $1 stays the principal's tenant: hostsFrom's placements read it.
-	rows, err = tx.Query(ctx, `SELECT `+hostColumns+` FROM `+hostsFrom+` WHERE h.id = ANY($2)`, base[0], ids)
+	rows, err = tx.Query(ctx, `SELECT `+hostColumns+` FROM `+hostsFrom+` WHERE h.id = ANY($2)`, tenant, ids)
 	if err != nil {
 		return err
 	}
