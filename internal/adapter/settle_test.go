@@ -288,6 +288,36 @@ func TestOpenCodeRefusedCarryDoesNotInventLoop(t *testing.T) {
 		"failed s1: sending it again after the turn was cancelled: not sent: prompt_async: 400 Bad Request", "idle")
 }
 
+// A steer stored, then a user message lux did not send stored after it and
+// answered, then an interrupt: that step had the steer in context, so it
+// may have been read. It fails as uncertain and is not sent again.
+func TestOpenCodeInterruptDoesNotCarryASteerAStepFollowed(t *testing.T) {
+	clk := newTestClock()
+	a, b, w, sink, first := ocWithBusClock(t, clk)
+	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
+	sink.wait(t, "accepted s1")
+	foreign := a.bus.messageID(clk.now()) // sorts after the steer
+	b.mu.Lock()
+	b.stored = append(b.stored, map[string]string{"id": foreign, "role": "user"})
+	b.mu.Unlock()
+	onBus(t, a, b.answer(foreign))
+	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
+	w.next("session/cancel")
+	sink.wait(t, "accepted int-1")
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	for range 3 {
+		clk.fire(t)
+		if slices.ContainsFunc(sink.lines(), func(l string) bool { return strings.HasPrefix(l, "failed s1") }) {
+			break
+		}
+	}
+	wantPosts(t, b, 1, "a steer a step followed before the interrupt")
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted s1 next_step receipt=true", "accepted int-1 next_turn receipt=false", "turn_end",
+		"failed s1: "+uncertainCancelled, "idle")
+}
+
 // waitQueued waits until n inputs wait for the next turn.
 func waitQueued(t *testing.T, a *ACP, n int) {
 	t.Helper()
