@@ -13,8 +13,8 @@ import (
 )
 
 // The memory limit a runner reports for a placement's container is kept
-// with the placement and returned by GET /v1/runs/{id}; a later report
-// without one does not clear it, and a placement never reported has none.
+// with the placement and returned by GET /v1/runs/{id}: the first nonzero
+// report wins, and a report without one neither sets nor clears it.
 func TestPlacementMemoryLimit(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -44,9 +44,14 @@ func TestPlacementMemoryLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	report(proto.Status{State: "running"})
+	if pl := placements(); len(pl) != 1 || pl[0].MemoryLimit != nil {
+		t.Fatalf("a report without a limit must leave it absent: %+v", pl)
+	}
 	report(proto.Status{State: "running", MemoryLimit: 15 << 30})
+	report(proto.Status{State: "running", MemoryLimit: 16 << 30})
 	report(proto.Status{State: "running"})
 	if pl := placements(); len(pl) != 1 || pl[0].MemoryLimit == nil || *pl[0].MemoryLimit != 15<<30 {
-		t.Fatalf("after the report: %+v", pl)
+		t.Fatalf("after the reports: %+v, want the first nonzero, 15 GiB", pl)
 	}
 }
