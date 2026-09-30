@@ -376,23 +376,29 @@ func TestHostSummary(t *testing.T) {
 	poolFixtureMore(t, s, ctx)
 	// A draining host of a's with one of a's Runs; a provisioning platform
 	// host (not counted in capacity or allocation, though a placement names
-	// it); an ended placement on hp (not live).
+	// it); an ended placement on hp (not live); a lost host of a's and a
+	// lost platform host with a placement of each tenant's (counted live,
+	// not in capacity or allocation).
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, capacity) VALUES
 		('hd', 'ta', 'hd', 'p-a', 'draining', '{"cpus": 4, "memory": 400}'),
-		('hprov', NULL, 'hprov', 'p-shared', 'provisioning', '{"cpus": 32, "memory": 3200}')`)
+		('hprov', NULL, 'hprov', 'p-shared', 'provisioning', '{"cpus": 32, "memory": 3200}'),
+		('hlost-a', 'ta', 'hlost-a', 'p-a', 'lost', '{"cpus": 128, "memory": 12800}'),
+		('hlost-p', NULL, 'hlost-p', 'p-shared', 'lost', '{"cpus": 64, "memory": 6400}')`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources) VALUES
 		('pd', 'ta', 'ra-own', 'hd', 2, 'running', '{"cpus": 1, "memory": 50}'),
 		('pprov', 'ta', 'ra', 'hprov', 2, 'assigned', '{"cpus": 5, "memory": 500}'),
-		('pend', 'tb', 'rb', 'hp', 3, 'exited', '{"cpus": 7, "memory": 700}')`)
+		('pend', 'tb', 'rb', 'hp', 3, 'exited', '{"cpus": 7, "memory": 700}'),
+		('plost-a', 'ta', 'ra', 'hlost-p', 3, 'running', '{"cpus": 9, "memory": 900}'),
+		('plost-b', 'tb', 'rb', 'hlost-p', 4, 'running', '{"cpus": 11, "memory": 1100}')`)
 	type sum struct {
 		Live                int
 		Capacity, Allocated HostResources
 	}
 	for who, want := range map[string]sum{
-		"a":           {4, HostResources{14, 1500}, HostResources{3, 60}},
-		"op?tenant=a": {4, HostResources{14, 1500}, HostResources{3, 60}},
-		"b":           {4, HostResources{28, 2200}, HostResources{5, 30}},
-		"op":          {6, HostResources{34, 2700}, HostResources{8, 90}},
+		"a":           {6, HostResources{14, 1500}, HostResources{3, 60}},
+		"op?tenant=a": {6, HostResources{14, 1500}, HostResources{3, 60}},
+		"b":           {5, HostResources{28, 2200}, HostResources{5, 30}},
+		"op":          {8, HostResources{34, 2700}, HostResources{8, 90}},
 	} {
 		key, narrow, _ := strings.Cut(who, "?")
 		q := ""
