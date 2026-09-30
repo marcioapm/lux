@@ -529,6 +529,27 @@ func TestOpenCodeReservedAlreadyReadEndsOnce(t *testing.T) {
 		"accepted late next_step receipt=true", "consumed late", "turn_end", "idle")
 }
 
+// The original loop reads a steer whose prompt_async is still in flight and
+// ends; the step answering it reaches lux only after the ACP result, and
+// before the acceptance. Seeing it late is not another loop: that steer's
+// admission had not completed after the ACP result. One turn end.
+func TestOpenCodeHeldOriginalAnswerSeenLateEndsOnce(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	hold := make(chan struct{})
+	b.mu.Lock()
+	b.hold = hold
+	b.mu.Unlock()
+	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
+	msg := b.postedID(t, 0)
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	waitHeld(t, a)
+	onBus(t, a, b.answer(msg))
+	close(hold)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted late next_step receipt=true", "consumed late", "turn_end", "idle")
+}
+
 // waitHeld waits until the adapter has handled the ACP result of a turn
 // whose steers' prompt_async are still in flight.
 func waitHeld(t *testing.T, a *ACP) {

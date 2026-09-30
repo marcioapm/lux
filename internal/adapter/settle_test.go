@@ -116,9 +116,10 @@ func settleStart(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, *testClo
 	return a, b, w, sink, clk, msg
 }
 
-// A steer seen stored, unanswered and idle once is not sent again: the
-// step answering it may not be stored yet. It comes before the threshold
-// (3×settleEvery after a normal end): consumed, never resent.
+// A steer seen stored, unanswered and idle once is not failed: the step
+// answering it may not be stored yet. It comes before the threshold
+// (3×settleEvery after a normal end): consumed. OpenCode never reported a
+// loop after the ACP turn, so that step was the turn's own: one turn end.
 func TestOpenCodeSettleWaitsForALateAnswer(t *testing.T) {
 	_, b, w, sink, clk, msg := settleStart(t)
 	clk.fire(t) // +1 s
@@ -127,7 +128,7 @@ func TestOpenCodeSettleWaitsForALateAnswer(t *testing.T) {
 	clk.fire(t) // +2 s
 	wantPosts(t, b, 1, "after the answer")
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
-		"accepted s1 next_step receipt=true", "turn_end", "consumed s1", "turn_end", "idle")
+		"accepted s1 next_step receipt=true", "turn_end", "consumed s1", "idle")
 }
 
 // OpenCode reports a loop before the threshold: the steer is waited for,
