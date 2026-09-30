@@ -52,7 +52,9 @@ func fetchPage(t *testing.T, s *Server, key, path, field string) page {
 // so a test can change the data mid-walk. It checks, for every page, that
 // at re-reads it unchanged after between ran (changes a test makes must be
 // ahead of or behind the page), and, without between, that prev leads back
-// through the same pages. Returns every id in page order.
+// through the same pages. A page read again at its cursor has a prev
+// exactly when it had one (with between: keeps one it had). Returns every
+// id in page order.
 func walkPages(t *testing.T, s *Server, key, base, field string, between func(i int, p page)) []string {
 	t.Helper()
 	sep := "&"
@@ -80,6 +82,12 @@ func walkPages(t *testing.T, s *Server, key, base, field string, between func(i 
 			}
 			if !same {
 				t.Fatalf("%s: page %d read again at its cursor: %v, was %v", base, i, again.IDs, p.IDs)
+			}
+			// A re-read keeps the page's prev. Rows between adds ahead of a
+			// page give it one it did not have, so with between only a
+			// prev once there must stay.
+			if (again.Prev == "") != (p.Prev == "") && (between == nil || p.Prev != "") {
+				t.Fatalf("%s: page %d read again at its cursor: prev %q, was %q", base, i, again.Prev, p.Prev)
 			}
 		}
 		if p.Next == "" {
