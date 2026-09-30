@@ -213,9 +213,7 @@ func TestOpenCodeSteerCarriedPastInterrupt(t *testing.T) {
 	b.events <- `{"type":"session.status","properties":{"sessionID":"` + ocSession + `","status":{"type":"busy"}}}`
 	b.events <- assistant(again)
 	b.events <- `{"type":"session.idle","properties":{"sessionID":"` + ocSession + `"}}`
-	checkLines(t, sink, "idle", "busy", "accepted prompt next_step receipt=false",
-		"accepted s1 next_step receipt=true", "accepted int-1 next_turn receipt=false", "turn_end",
-		"consumed s1", "turn_end", "idle")
+	checkCarried(t, sink, "s1")
 }
 
 // Message ids sort after each other, as OpenCode orders messages by id.

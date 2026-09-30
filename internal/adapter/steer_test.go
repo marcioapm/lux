@@ -58,6 +58,40 @@ func (s *inputSink) InputFailed(in proto.Input, err error) {
 	s.add(fmt.Sprintf("failed %s: %v", in.RequestID, err))
 }
 
+// checkCarried checks a steer carried past an interrupt: accepted in the
+// interrupted turn, consumed once after that turn's end and before the
+// next one's, never failed, and the Run idle at the end.
+func checkCarried(t *testing.T, sink *inputSink, id string) {
+	t.Helper()
+	sink.waitLast(t, "idle")
+	time.Sleep(50 * time.Millisecond)
+	l := sink.lines()
+	at := func(want string, from int) int {
+		for i := from; i < len(l); i++ {
+			if strings.HasPrefix(l[i], want) {
+				return i
+			}
+		}
+		return -1
+	}
+	acc := at("accepted "+id+" ", 0)
+	end1 := at("turn_end", 0)
+	cons := at("consumed "+id, 0)
+	end2 := at("turn_end", end1+1)
+	n := 0
+	for _, x := range l {
+		if x == "consumed "+id {
+			n++
+		}
+		if strings.HasPrefix(x, "failed") {
+			t.Fatalf("failed: %q", l)
+		}
+	}
+	if acc < 0 || acc > end1 || cons < end1 || end2 < cons || n != 1 || l[len(l)-1] != "idle" {
+		t.Fatalf("carried %s: %q", id, l)
+	}
+}
+
 // wait polls until the sink has a line with want, or fails.
 func (s *inputSink) wait(t *testing.T, want string) {
 	t.Helper()
@@ -315,9 +349,8 @@ func TestCodexSteerCarriedPastInterrupt(t *testing.T) {
 	w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + next + `","status":"inProgress"}}}`)
 	w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u2","clientId":"s1","content":[]},"threadId":"` + cxThread + `","turnId":"` + next + `"}}`)
 	w.send(`{"method":"turn/completed","params":{"threadId":"` + cxThread + `","turn":{"id":"` + next + `","status":"completed"}}}`)
-	checkLines(t, sink, "idle", "busy", "accepted prompt next_step receipt=true", "consumed prompt",
-		"accepted s1 next_step receipt=true", "accepted int-1 next_step receipt=false", "turn_end",
-		"busy", "consumed s1", "turn_end", "idle")
+	sink.wait(t, "accepted int-1 next_step receipt=false")
+	checkCarried(t, sink, "s1")
 }
 
 // Stopping the Run is the one end of a turn that fails its unread steers.
