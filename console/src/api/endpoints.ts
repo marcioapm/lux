@@ -67,15 +67,12 @@ export const api = {
     request<Pool>(`/pools/${enc(name)}/rename`, { method: "POST", tenant, query: platform ? { owner: "platform" } : {}, body: { name: newName } }),
   /** Marks one of a tenant's pools as its default (tenant: the pool's, for an operator). */
   makePoolDefault: (tenant: Scope, name: string) => request<Pool>("/pools", { method: "POST", tenant, body: { name, isDefault: true } }),
-  /** owner: which pool of that name, where a tenant's and the platform's share it; undefined: the server's default. */
-  poolEvents: (name: string, tenant: Scope, owner: PoolOwner | undefined, page: EventRange, signal?: Sig) =>
-    request<{ events: LifecycleEvent[] }>(`/pools/${enc(name)}/events`, { tenant, query: { owner, ...page, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
   /** Every pool's figures over since, in one read. */
   poolStats: (tenant: Scope, since: string, signal?: Sig) => request<{ pools: PoolStats[] }>("/pools/stats", { tenant, query: { since }, signal }).then((r) => r.pools),
   poolMetrics: (name: string, tenant: Scope, owner: PoolOwner | undefined, since: string, signal?: Sig) => request<PoolMetrics>(`/pools/${enc(name)}/metrics`, { tenant, query: { owner, since }, signal }),
   poolCost: (name: string, tenant: Scope, owner: PoolOwner | undefined, since: string, interval: "hour" | "day", signal?: Sig) =>
     request<PoolCost>(`/pools/${enc(name)}/cost`, { tenant, query: { owner, since, interval }, signal }),
-  /** A page of a pool's events in a sort's order. */
+  /** A page of a pool's events in a sort's order. owner: which pool of that name, where a tenant's and the platform's share it; undefined: the server's default. */
   poolEventsPage: (name: string, tenant: Scope, owner: PoolOwner | undefined, p: PageParams & { limit: number }, signal?: Sig) =>
     request<{ events: LifecycleEvent[]; next?: string; prev?: string; page?: string }>(`/pools/${enc(name)}/events`, { tenant, query: { owner, limit: p.limit, ...pageQuery(p) }, signal }).then(
       (r): Page<LifecycleEvent> => ({ rows: r.events, next: r.next, prev: r.prev, page: r.page }),

@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table sort and columns, EventTable, Pagination, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
+bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
 ```
 
 ## Using it
@@ -95,7 +95,10 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
 The terminal's colours are its own. `useTerminalScheme()` reads and sets
 the choice, "auto" (Match console: the console's resolved theme), "light"
 or "dark" (Solarized), persisted in `localStorage["lux.terminal.theme"]`
-(anything else reads as auto). Pass its `resolved` to `Terminal`'s
+(`TERMINAL_THEME_KEY`; anything else reads as auto). Outside React,
+`readTerminalScheme()` reads it and `setTerminalScheme(pref)` stores it
+and updates every mounted hook; a change in another tab (a `storage`
+event on that key) reaches this one. Pass its `resolved` to `Terminal`'s
 `scheme`: the terminal updates xterm's theme in place (no remount, so the
 connection, scrollback and selection stay) and sets its frame colours on
 `.term[data-term-scheme]`. It never writes `lux.theme` or
@@ -151,12 +154,28 @@ order, so a sorted page is the whole list sorted, never the visible rows
 re-ordered. `footer` holds its `Pagination`.
 
 `Pagination` has two modes. Count (`mode="count"`): "1–25 of 1,284 hosts",
-numbered pages (first, last, the current and its neighbours) and a page
-size, where the server counts the whole result. Cursor (`mode="cursor"`):
+numbered pages (first, last, the current and its neighbours: `pageList`)
+and a page size, where the server counts the whole result; an empty result
+reads "0–0 of 0". Cursor (`mode="cursor"`):
 "Page 3 · runs 101–150", First / Previous / Next in the current sort
 order and a page size, where an exact total is costly or keeps moving
-(runs, events). The page owns the cursors; a refresh re-reads the page it
-is on and never moves the reader to another.
+(runs, events). First is on whenever the page is past 1, even when the
+server gave that page no previous one. `busy` keeps the buttons in place
+but inert. The page owns the cursors; a refresh re-reads the page it
+is on and never moves the reader to another. The sort in words beside the
+range comes from the columns: `sortInWords(columns, sort)` reads the
+sorted column's `label` (or its header, when that is text) and its
+`sortKind` (`time`: newest/oldest first, `number`: largest/smallest first,
+`text`: A→Z / Z→A; right-aligned columns default to number):
+"Created, newest first". `eventSortInWords(sort)` is the same for an
+EventTable's columns.
+
+Table helpers: `isSortable(column)`, `firstSortDir(column, rows)`,
+`nextSort(sort, column, rows)` (the sort after a header click: the other
+direction on the sorted column, else its first direction), `sortRows`,
+`dropsOptional`. Row actions: icon buttons (`IconButton size="sm"`) in a
+`span.row-actions` in a narrow, header-less last column (the Pools list:
+Make default `IconStar`, Rename `IconPencil`).
 
 `table-layout: fixed`; columns with a `width` keep it and
 the rest share the remainder. `lead` marks the name column, `optional`
@@ -259,6 +278,19 @@ SectionHeader, ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
 EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`, `useTerminalScheme`, `useNow` (the shared
 clock relative times tick on), `useCopy`. All exported
 from `src/index.ts` with typed props; icons from `@lux/design-system/icons`.
+
+Formatting and utility classes used beside the components:
+
+| Export / class | What |
+| --- | --- |
+| `formatTimestamp(t)`, `formatTimestampZone(t)` | "2026-09-30 22:38:08", and the same with the browser's zone name: the hover text of an exact time (`RelativeTime`, the launch-failed host's times) |
+| `formatDuration(s)` | "1h 12m", "3.2s", "450ms", "0s" for zero; a negative figure keeps its sign, so callers clamp what cannot be negative |
+| `rangeText(range)` | a `TIME_RANGES` value in running text: "last 24 hours" |
+| `.pill-outline` | the outlined pill variant (`StatePill` for launch failed): the hue on the border, no fill |
+| `.text-danger` | a figure in the danger colour beside its label (a non-zero failure count in a table) |
+| `.spark-row` | an inline `Sparkline` with its figure, in a table cell |
+| `.row-actions` | a table row's icon buttons, right-aligned (above) |
+| `.field`, `.field-label` | a labelled value or control, the label above it (a form field; the launch-failed host's provider error) |
 
 Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
 "costs"):

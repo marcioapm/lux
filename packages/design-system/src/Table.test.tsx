@@ -2,7 +2,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { dropsOptional, firstSortDir, sortRows, Table, type Column, type SortState } from "./Table.tsx";
+import { eventSortInWords } from "./EventTable.tsx";
+import { dropsOptional, firstSortDir, sortInWords, sortRows, Table, type Column, type SortState } from "./Table.tsx";
+import { rangeText } from "./TimeRangePicker.tsx";
 
 // The Runs list's widths: name 22%, Id, State flexible, Host, Adapter,
 // Runtime, Placements, Cost, Created; Id/Adapter/Placements optional.
@@ -49,6 +51,29 @@ test("first click: text A→Z; numbers, times and durations largest first", () =
   expect(firstSortDir<R>({ key: "n", header: "", cell: () => null, sortValue: (r) => r.n }, data)).toBe("desc");
   expect(firstSortDir<R>({ key: "t", header: "", cell: () => null, sortable: true, align: "right" })).toBe("desc");
   expect(firstSortDir<R>({ key: "t", header: "", cell: () => null, sortable: true, sortFirst: "desc" })).toBe("desc");
+});
+
+test("sortInWords: from the column's label and sortKind (right-aligned reads as a number)", () => {
+  const c: Column<R>[] = [
+    { key: "created", header: "Created", cell: () => null, sortKind: "time" },
+    { key: "placement", header: null, label: "Placement time", cell: () => null, sortKind: "number" },
+    { key: "n", header: "N", cell: () => null, align: "right" },
+    { key: "pool", header: "Pool", cell: () => null },
+  ];
+  expect(sortInWords(c, { key: "created", dir: "desc" })).toBe("Created, newest first");
+  expect(sortInWords(c, { key: "created", dir: "asc" })).toBe("Created, oldest first");
+  expect(sortInWords(c, { key: "placement", dir: "desc" })).toBe("Placement time, largest first");
+  expect(sortInWords(c, { key: "n", dir: "asc" })).toBe("N, smallest first");
+  expect(sortInWords(c, { key: "pool", dir: "asc" })).toBe("Pool, A→Z");
+  expect(sortInWords(c, { key: "pool", dir: "desc" })).toBe("Pool, Z→A");
+  expect(sortInWords(c, { key: "nope", dir: "desc" })).toBeUndefined();
+  expect(eventSortInWords({ key: "time", dir: "desc" })).toBe("Time, newest first");
+  expect(eventSortInWords({ key: "id", dir: "asc" })).toBe("#, smallest first");
+  expect(eventSortInWords({ key: "summary", dir: "asc" })).toBe("Details, A→Z");
+});
+
+test("rangeText: a time range in running text", () => {
+  expect(["1h", "24h", "30d", "90d"].map(rangeText)).toEqual(["last hour", "last 24 hours", "last 30 days", "90d"]);
 });
 
 const mounted: { el: HTMLElement; root: Root }[] = [];

@@ -1,7 +1,7 @@
 import { useMemo } from "react";
-import { Badge, Card, compareMoney, EmptyState, EventTable, familyDisplay, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, ListPriceNote, Money, MoneyList, PageHeader, Pagination, SectionHeader, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
+import { Badge, Card, compareMoney, EmptyState, EventTable, eventSortInWords, familyDisplay, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, ListPriceNote, Money, MoneyList, PageHeader, Pagination, rangeText, SectionHeader, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
 import { api, type Pool, type PoolCost, type PoolMetrics, type PoolOwner } from "../../api/index.ts";
-import { sortLabel, usePaged } from "../paged.ts";
+import { usePaged } from "../paged.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostPath, JsonBlock, labelsText, PageSkeleton, RunLink, RunNameLink, runPath } from "./common.tsx";
@@ -12,7 +12,6 @@ import { HostsList } from "./Hosts.tsx";
 const POLL = 15_000;
 const TABS = ["metrics", "cost", "hosts", "events"] as const;
 type Tab = (typeof TABS)[number];
-const RANGE_LABEL: Record<string, string> = { "1h": "the last hour", "6h": "the last 6 hours", "24h": "the last 24 hours", "7d": "the last 7 days", "30d": "the last 30 days" };
 
 export function PoolPage({ name }: { name: string }) {
   const scope = useScope();
@@ -82,7 +81,7 @@ export function PoolPage({ name }: { name: string }) {
                 {now.hosts.ready ?? 0} ready / {hostTotal} hosts
               </span>
             )}
-            <span>charts over {RANGE_LABEL[scope.range] ?? scope.range}</span>
+            <span>charts over the {rangeText(scope.range)}</span>
           </>
         }
         actions={
@@ -121,14 +120,14 @@ function PoolTiles({ pool, metrics, loading }: { pool: Pool; metrics?: PoolMetri
   const cost = useScopedQuery(`pool-cost-tile:${pool.id}:${since}`, (t, s) => api.poolCost(pool.name, t, pool.platform ? "platform" : "tenant", since, "hour", s), { interval: 60_000 });
   return (
     <div className="grid grid-stats">
-      <StatTile label="Hosts ready" loading={loading} value={formatCount(n?.hosts.ready ?? 0)} unit={n ? `${n.hosts.provisioning ?? 0} provisioning · ${n.hosts.draining ?? 0} draining` : undefined} />
-      <StatTile label="CPU allocated" loading={loading} value={formatCores(n?.allocatedCpus)} unit={`of ${formatCores(n?.capacityCpus)}`} />
-      <StatTile label="Memory allocated" loading={loading} value={formatBytes(n?.allocatedMemory)} unit={`of ${formatBytes(n?.capacityMemory)}`} />
-      <StatTile label="Runs running" loading={loading} value={formatCount(n?.running ?? 0)} unit={n ? `${n.queued} queued${n.oldestQueuedAt ? ` · oldest ${formatElapsed(n.oldestQueuedAt, clock)}` : ""}` : undefined} />
+      <StatTile label="Hosts ready" loading={loading} value={formatCount(n ? (n.hosts.ready ?? 0) : null)} unit={n ? `${n.hosts.provisioning ?? 0} provisioning · ${n.hosts.draining ?? 0} draining` : undefined} />
+      <StatTile label="CPU allocated" loading={loading} value={formatCores(n?.allocatedCpus)} unit={n ? `of ${formatCores(n.capacityCpus)}` : undefined} />
+      <StatTile label="Memory allocated" loading={loading} value={formatBytes(n?.allocatedMemory)} unit={n ? `of ${formatBytes(n.capacityMemory)}` : undefined} />
+      <StatTile label="Runs running" loading={loading} value={formatCount(n?.running)} unit={n ? `${n.queued} queued${n.oldestQueuedAt ? ` · oldest ${formatElapsed(n.oldestQueuedAt, clock)}` : ""}` : undefined} />
       <StatTile
         label={`Launch failures (${scope.range})`}
         loading={loading}
-        value={formatCount(n?.launchFailures ?? 0)}
+        value={formatCount(n?.launchFailures)}
         tone={(n?.launchFailures ?? 0) > 0 ? "danger" : "default"}
         unit={n?.lastLaunchFailure ? `last ${formatClock(n.lastLaunchFailure)}${n.lastLaunchError ? ` · ${n.lastLaunchError.slice(0, 40)}` : ""}` : pool.provider === "static" ? "static pool" : undefined}
       />
@@ -365,8 +364,8 @@ function PoolHostsTab({ pool }: { pool: Pool }) {
 function PoolEvents({ name, owner }: { name: string; owner?: PoolOwner }) {
   const scope = useScope();
   const q = usePaged("pool-events", `${scope.tenant}|${name}|${owner}`, (req, s) => api.poolEventsPage(name, scope.apiTenant, owner, req, s), { defaultSort: { key: "time", dir: "desc" }, defaultSize: 50, interval: POLL });
-  const words: Record<string, [string, "time" | "number" | "text"]> = { time: ["Time", "time"], id: ["#", "number"], type: ["Type", "text"], detail: ["Details", "text"] };
-  const w = words[q.sort.key] ?? ["Time", "time"];
+  // The server's key for the Details column is detail.
+  const shown = q.sort.key === "detail" ? { key: "summary", dir: q.sort.dir } : q.sort;
   return (
     <Card flush title="Events" subtitle="scale-ups, launches, placements and releases · click a row to expand">
       <ErrorStrip error={q.error} />
@@ -376,11 +375,11 @@ function PoolEvents({ name, owner }: { name: string; owner?: PoolOwner }) {
         detail={(e) => <JsonBlock value={e.data} />}
         loading={q.loading}
         empty="Nothing has happened yet."
-        sort={q.sort.key === "detail" ? { key: "summary", dir: q.sort.dir } : q.sort}
+        sort={shown}
         onSortChange={(s) => q.setSort(s.key === "summary" ? { key: "detail", dir: s.dir } : s)}
         footer={
           q.rows.length > 0 || q.page > 1 ? (
-            <Pagination mode="cursor" page={q.page} count={q.rows.length} pageSize={q.size} pageSizes={[50, 100, 200]} onPageSize={q.setSize} hasPrev={q.hasPrev} hasNext={q.hasNext} onFirst={q.first} onPrev={q.prev} onNext={q.next} noun="events" sortLabel={sortLabel(w[0], q.sort, w[1])} />
+            <Pagination mode="cursor" page={q.page} count={q.rows.length} pageSize={q.size} pageSizes={[50, 100, 200]} onPageSize={q.setSize} hasPrev={q.hasPrev} hasNext={q.hasNext} onFirst={q.first} onPrev={q.prev} onNext={q.next} noun="events" sortLabel={eventSortInWords(shown)} />
           ) : undefined
         }
       />

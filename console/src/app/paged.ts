@@ -141,10 +141,3 @@ export function usePaged<T>(prefix: string, view: string, fetch: (req: PagedRequ
     [shown, data, q.loading, q.fetching, q.error, q.refetch, sort, size, page, counted, move],
   );
 }
-
-/** "Created, newest first": a sort in words, for a cursor pager. */
-export function sortLabel(header: string, s: SortState, kind: "time" | "number" | "text"): string {
-  if (kind === "time") return `${header}, ${s.dir === "desc" ? "newest" : "oldest"} first`;
-  if (kind === "number") return `${header}, ${s.dir === "desc" ? "largest" : "smallest"} first`;
-  return `${header}, ${s.dir === "asc" ? "A→Z" : "Z→A"}`;
-}
