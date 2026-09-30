@@ -27,9 +27,13 @@ from conftest import AGENT_VOLUMES
 class Caps:
     """What an agent's protocol does, as seen through its adapter."""
 
-    # Input sent during a turn joins that turn (Codex turn/steer) rather
-    # than running after it as a turn of its own (ACP, Claude Code).
+    # Input sent during a turn joins that turn, read at the agent's next
+    # step (Codex turn/steer, OpenCode), rather than running after it as a
+    # turn of its own (generic ACP).
     steer_joins_turn: bool = False
+    # A steer is reported read (lux.input phase consumed) when the agent's
+    # model step has it.
+    steer_receipt: bool = False
     # Stopping must be SIGINT, which ends the running turn cleanly; SIGTERM
     # would leave it unfinished (Claude Code).
     stop_is_sigint: bool = False
@@ -46,6 +50,9 @@ class Harness:
     real_env: Callable[[], dict] = field(default=lambda: {})
     # Environment variables the real variant needs.
     credentials: tuple[str, ...] = ()
+    # The fake variant's command, when lux-fake needs arguments to act as
+    # this agent (opencode's adapter adds --port only to an `acp` command).
+    fake_command: list[str] = field(default_factory=lambda: ["lux-fake"])
     # Credential values that must never appear in output.
     secret_values: Callable[[], list[str]] = field(default=lambda: [])
 
@@ -88,7 +95,7 @@ HARNESSES = [
     Harness(
         name="codex",
         adapter="codex",
-        caps=Caps(steer_joins_turn=True),
+        caps=Caps(steer_joins_turn=True, steer_receipt=True),
         real_command=_codex_command,
         # An ordinary env secret: the codex adapter writes the auth.json
         # Codex reads.
@@ -99,7 +106,8 @@ HARNESSES = [
     Harness(
         name="opencode",
         adapter="opencode",
-        caps=Caps(),
+        caps=Caps(steer_joins_turn=True, steer_receipt=True),
+        fake_command=["lux-fake", "acp"],
         real_command=lambda: ["opencode", "acp"],
         # Providers in opencode.json, keys in auth.json: real user config, so
         # both are file secrets (tmpfs, never snapshotted).
@@ -145,7 +153,7 @@ class Variant:
         spec = {
             "image": {"ref": self.image},
             "workload": {"adapter": h.adapter, "prompt": prompt, "workdir": "/workspace",
-                         "command": h.real_command() if self.real else ["lux-fake"]},
+                         "command": h.real_command() if self.real else list(h.fake_command)},
             "volumes": [dict(v) for v in AGENT_VOLUMES],
             "secrets": h.real_secrets() if self.real else [],
         }

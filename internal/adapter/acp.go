@@ -3,10 +3,14 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -17,6 +21,12 @@ import (
 // ACP has no mid-turn message, so input that arrives during a turn is
 // queued and sent as the next session/prompt when the turn ends; with
 // interrupt it cancels the turn (session/cancel) first.
+//
+// OpenCode (NewOpenCode) takes input during a turn at the agent's next
+// step: lux sends it through OpenCode's HTTP server (opencode.go), which
+// says when it was read, or else as a second session/prompt, which
+// OpenCode joins to the running loop. Either way the turn ends once, when
+// every prompt of it has resolved.
 //
 // Permission requests are answered by policy, since nobody is watching:
 // the first allow_once option (the Run is already sandboxed; its limits are
@@ -33,11 +43,51 @@ type ACP struct {
 	// loading: session/load replays the conversation as updates; they are
 	// events, not new output.
 	loading bool
+	inputs  inputLedger
+
+	// OpenCode only.
+	opencode bool
+	bus      *opencodeBus
+	// inflight: session/prompt calls of the running turn not yet
+	// resolved; the turn ends when it drops to 0. turnEnd is the
+	// turn-starting prompt's result, which acp.turn_end reports (joined
+	// prompts resolve with the same stopReason and usage).
+	inflight int
+	turnEnd  map[string]any
+	// busTurn: a loop OpenCode runs for a steer that reached it just after
+	// the ACP turn ended, followed on the bus.
+	busTurn bool
+	// cancelled: session/cancel was sent during the running turn.
+	cancelled bool
+	steers    chan proto.Input
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
 
-func (a *ACP) Command(cfg proto.ShimConfig) ([]string, error) { return command(cfg) }
+// NewOpenCode is the ACP adapter for OpenCode.
+func NewOpenCode() *ACP {
+	a := &ACP{ready: make(chan struct{}), opencode: true, steers: make(chan proto.Input, 256)}
+	go a.steerLoop()
+	return a
+}
+
+// Command: for OpenCode, `opencode acp` also serves its HTTP API on a
+// loopback port (--port), which lux steers through. A command lux did not
+// build (no "acp" argument, a --port of its own, or a resume command) is
+// run as given, and steers go over ACP only.
+func (a *ACP) Command(cfg proto.ShimConfig) ([]string, error) {
+	argv, err := command(cfg)
+	if err != nil || !a.opencode || (cfg.Resume && len(cfg.ResumeCommand) > 0) ||
+		!slices.Contains(argv, "acp") || slices.ContainsFunc(argv, func(s string) bool { return strings.HasPrefix(s, "--port") || strings.HasPrefix(s, "--hostname") }) {
+		return argv, err
+	}
+	port, perr := freeLoopbackPort()
+	if perr != nil {
+		return argv, nil
+	}
+	a.bus = newOpencodeBus(port, workdir(cfg))
+	return append(slices.Clone(argv), "--port", strconv.Itoa(port), "--hostname", "127.0.0.1"), nil
+}
 
 func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Sink) error {
 	a.mu.Lock()
@@ -52,6 +102,11 @@ func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Si
 		a.rpc.readLoop(p.Stdout, a.handleRequest, a.handleNotification, sink.Stdout)
 	}()
 
+	if a.bus != nil {
+		busCtx, stopBus := context.WithCancel(ctx)
+		defer stopBus()
+		go a.bus.follow(busCtx, a.onBus)
+	}
 	err := a.handshake(cfg)
 	if err != nil {
 		sink.Event(proto.EvWarning, map[string]any{"message": "acp: " + err.Error()})
@@ -162,36 +217,206 @@ func (a *ACP) drain() {
 	}
 	in := a.queue[0]
 	a.queue = a.queue[1:]
-	a.busy = true
+	a.busy, a.inflight, a.turnEnd, a.cancelled = true, 1, nil, false
 	session := a.session
 	a.mu.Unlock()
 
 	a.sink.Activity(false)
-	a.sink.InputAccepted(in, Delivery{Lands: LandsNextTurn})
+	wait, err := a.rpc.start("session/prompt", map[string]any{"sessionId": session, "prompt": textInput(in.Text)})
+	if err != nil {
+		a.inputs.fail(a.sink, in, err)
+		a.promptDone(nil, err, true)
+		return
+	}
+	// A prompt that starts a turn is read by its first step; lux has no
+	// signal for that on ACP.
+	lands := LandsNextTurn
+	if a.opencode {
+		lands = LandsNextStep
+	}
+	a.inputs.accept(a.sink, in, Delivery{Lands: lands}, "")
 	go func() {
-		res, err := a.rpc.call("session/prompt", map[string]any{"sessionId": session, "prompt": textInput(in.Text)})
-		var pr struct {
-			StopReason string          `json:"stopReason"`
-			Usage      json.RawMessage `json:"usage"`
-		}
-		_ = json.Unmarshal(res, &pr)
-		data := withUsage(map[string]any{"stopReason": pr.StopReason}, pr.Usage)
-		if err != nil {
-			data["error"] = err.Error()
-		}
-		// Replies stream in chunks without line breaks: end the turn's text
-		// on a line of its own.
-		a.sink.EndMessage()
-		a.sink.Event("acp.turn_end", data)
-		a.mu.Lock()
-		a.busy = false
-		idle := len(a.queue) == 0
-		a.mu.Unlock()
-		if idle {
-			a.sink.Activity(true)
-		}
-		a.drain()
+		res, err := wait()
+		a.promptDone(res, err, true)
 	}()
+}
+
+// promptDone is a session/prompt of the running turn resolving; the last
+// one ends the turn. first: the prompt that started the turn, whose result
+// the turn's acp.turn_end carries.
+func (a *ACP) promptDone(res json.RawMessage, err error, first bool) {
+	var pr struct {
+		StopReason string          `json:"stopReason"`
+		Usage      json.RawMessage `json:"usage"`
+	}
+	_ = json.Unmarshal(res, &pr)
+	data := withUsage(map[string]any{"stopReason": pr.StopReason}, pr.Usage)
+	if err != nil {
+		data["error"] = err.Error()
+	}
+	a.mu.Lock()
+	a.inflight--
+	if first || a.turnEnd == nil {
+		a.turnEnd = data
+	}
+	if a.inflight > 0 {
+		a.mu.Unlock()
+		return
+	}
+	data = a.turnEnd
+	a.mu.Unlock()
+	a.endTurn(data)
+}
+
+// endTurn ends the running turn: acp.turn_end, then idle unless more input
+// waits.
+func (a *ACP) endTurn(data map[string]any) {
+	if a.bus != nil && len(a.inputs.unread("bus")) > 0 {
+		a.mu.Lock()
+		cancelled := a.cancelled
+		a.mu.Unlock()
+		if cancelled || data["stopReason"] == "cancelled" {
+			// A cancelled loop does not read what was steered into it; the
+			// messages stay in the conversation for the next turn.
+			for _, in := range a.inputs.unread("bus") {
+				a.inputs.fail(a.sink, in, errors.New("the turn was cancelled before the agent read it"))
+			}
+		} else {
+			// A steer that reached OpenCode as its loop ended starts a loop
+			// of its own: the Run stays busy until the bus says it ended.
+			a.mu.Lock()
+			a.busTurn = true
+			a.mu.Unlock()
+		}
+	}
+	// Replies stream in chunks without line breaks: end the turn's text
+	// on a line of its own.
+	a.sink.EndMessage()
+	a.sink.Event("acp.turn_end", data)
+	a.mu.Lock()
+	if a.busTurn {
+		a.mu.Unlock()
+		return
+	}
+	a.busy = false
+	idle := len(a.queue) == 0
+	a.mu.Unlock()
+	if idle {
+		a.sink.Activity(true)
+	}
+	a.drain()
+}
+
+// busTurnEnded ends a loop OpenCode ran outside any ACP prompt.
+func (a *ACP) busTurnEnded() {
+	a.mu.Lock()
+	a.busTurn, a.busy = false, false
+	idle := len(a.queue) == 0
+	a.mu.Unlock()
+	a.sink.EndMessage()
+	a.sink.Event("acp.turn_end", map[string]any{"stopReason": "end_turn", "source": "opencode-bus"})
+	if idle {
+		a.sink.Activity(true)
+	}
+	a.drain()
+}
+
+// steerLoop delivers steers one at a time, in the order they came.
+func (a *ACP) steerLoop() {
+	for in := range a.steers {
+		a.steer(in)
+	}
+}
+
+// steer delivers input to OpenCode's running turn, read at its next step:
+// through the HTTP server, with a receipt, or else as a second
+// session/prompt, which OpenCode joins to the running loop (without one).
+func (a *ACP) steer(in proto.Input) {
+	a.inputs.track(in)
+	a.mu.Lock()
+	session, busy := a.session, a.busy && !a.busTurn
+	a.mu.Unlock()
+	if !busy {
+		// The turn ended meanwhile: the input starts the next one.
+		a.queueInput(in)
+		return
+	}
+	if a.bus != nil && a.bus.isConnected() {
+		msgID := a.bus.messageID(time.Now())
+		a.bus.track(msgID, in.RequestID)
+		err := a.bus.promptAsync(session, msgID, in.Text)
+		if err == nil {
+			a.inputs.accept(a.sink, in, Delivery{Lands: LandsNextStep, Receipt: true}, "bus")
+			return
+		}
+		a.bus.untrack(msgID)
+		if !errors.Is(err, errNotSent) {
+			a.inputs.fail(a.sink, in, err)
+			return
+		}
+		a.sink.Event(proto.EvWarning, map[string]any{"message": "opencode: steering over ACP instead: " + err.Error()})
+	}
+	a.mu.Lock()
+	if !a.busy || a.busTurn || a.stopped {
+		a.mu.Unlock()
+		a.queueInput(in)
+		return
+	}
+	a.inflight++
+	a.mu.Unlock()
+	wait, err := a.rpc.start("session/prompt", map[string]any{"sessionId": session, "prompt": textInput(in.Text)})
+	if err != nil {
+		a.inputs.fail(a.sink, in, err)
+		a.promptDone(nil, err, false)
+		return
+	}
+	a.inputs.accept(a.sink, in, Delivery{Lands: LandsNextStep}, "")
+	go func() {
+		res, err := wait()
+		a.promptDone(res, err, false)
+	}()
+}
+
+// queueInput holds input for the next turn.
+func (a *ACP) queueInput(in proto.Input) {
+	a.inputs.forget(in.RequestID)
+	a.mu.Lock()
+	a.queue = append(a.queue, in)
+	a.mu.Unlock()
+	a.drain()
+}
+
+// onBus follows OpenCode's bus: an assistant step answering a steer's
+// message is the steer read; a loop OpenCode runs outside any ACP turn (a
+// steer that arrived as the turn ended) ends with session.idle.
+func (a *ACP) onBus(ev busEvent) {
+	a.mu.Lock()
+	session := a.session
+	a.mu.Unlock()
+	p := ev.Properties
+	switch ev.Type {
+	case "message.updated":
+		if p.Info.Role == "assistant" && p.Info.SessionID == session && p.Info.ParentID != "" {
+			if id, ok := a.bus.answered(p.Info.ParentID); ok {
+				a.inputs.consume(a.sink, id)
+			}
+		}
+	case "session.idle":
+		// The loop a late steer started has ended once it has read every
+		// steer (an idle before that is the ACP turn's own loop ending).
+		a.mu.Lock()
+		end := p.SessionID == session && a.busTurn
+		cancelled := a.cancelled
+		a.mu.Unlock()
+		if end && cancelled {
+			for _, in := range a.inputs.unread("bus") {
+				a.inputs.fail(a.sink, in, errors.New("the turn was cancelled before the agent read it"))
+			}
+		}
+		if end && len(a.inputs.unread("bus")) == 0 {
+			a.busTurnEnded()
+		}
+	}
 }
 
 func (a *ACP) handleNotification(m rpcMsg) {
@@ -265,8 +490,14 @@ func (a *ACP) Deliver(in proto.Input) {
 		// the cancelled prompt returns.
 		a.queue = append([]proto.Input{in}, a.queue...)
 		session := a.session
+		a.cancelled = true
 		a.mu.Unlock()
 		_ = a.rpc.notify("session/cancel", map[string]any{"sessionId": session})
+		return
+	}
+	if a.opencode && a.busy && !a.busTurn && !a.stopped && !in.Interrupt && in.Text != "" {
+		a.mu.Unlock()
+		a.steers <- in
 		return
 	}
 	a.queue = append(a.queue, in)
@@ -277,6 +508,9 @@ func (a *ACP) Deliver(in proto.Input) {
 func (a *ACP) Interrupt() error {
 	a.mu.Lock()
 	session, busy := a.session, a.busy
+	if busy {
+		a.cancelled = true
+	}
 	a.mu.Unlock()
 	if !busy {
 		return nil

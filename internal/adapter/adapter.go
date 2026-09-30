@@ -124,8 +124,10 @@ func New(name string) (Adapter, error) {
 	switch name {
 	case "generic", "":
 		return &Generic{}, nil
-	case "acp", "opencode":
+	case "acp":
 		return NewACP(), nil
+	case "opencode":
+		return NewOpenCode(), nil
 	case "claude-code":
 		return NewClaude(), nil
 	case "codex":

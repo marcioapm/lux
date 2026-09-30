@@ -211,6 +211,19 @@ func (a *agent) addSteer(p prompt) bool {
 	return true
 }
 
+// join adds a prompt to the running turn and, under the same lock, calls
+// then; false (and then not called) if no turn is running.
+func (a *agent) join(p prompt, then func()) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancel == nil {
+		return false
+	}
+	a.steer = append(a.steer, p)
+	then()
+	return true
+}
+
 // takeSteers returns the prompts steered into the running turn so far.
 func (a *agent) takeSteers() []prompt {
 	a.mu.Lock()
@@ -434,9 +447,13 @@ type rpcMsg struct {
 }
 
 // acp speaks the Agent Client Protocol. Replies stream as several chunks
-// without line breaks, as real agents' do.
+// without line breaks, as real agents' do. As OpenCode does, a
+// session/prompt sent during a turn joins it: it is read at the turn's next
+// step, and every prompt of the turn gets its result when the turn ends.
+// With --port it also serves OpenCode's HTTP server (opencode.go).
 func acp() {
 	a := newAgent()
+	oc := &opencodeServer{a: a}
 	var pmu sync.Mutex
 	pending := map[string]chan json.RawMessage{}
 	nextID := 0
@@ -486,6 +503,38 @@ func acp() {
 	fail := func(id json.RawMessage, code int, msg string) {
 		rpc(map[string]any{"id": id, "error": map[string]any{"code": code, "message": msg}})
 	}
+	// waiters: the session/prompt ids joined to the running loop (guarded
+	// by a.mu, through join).
+	var waiters []json.RawMessage
+	// Each model step reading a user message is an assistant message whose
+	// parentID is that message.
+	a.read = func(p prompt) { oc.step(p.id) }
+	// runLoop runs a loop for its first prompt and any joined to it, then
+	// answers every prompt of it with the same result.
+	runLoop := func(first prompt, ids []json.RawMessage) {
+		c, ok := a.startTurn()
+		for !ok {
+			// A loop is ending; the prompt starts the next one.
+			time.Sleep(20 * time.Millisecond)
+			c, ok = a.startTurn()
+		}
+		oc.status(true)
+		stop := "end_turn"
+		if a.runTurn(first, c) {
+			stop = "cancelled"
+		}
+		a.mu.Lock()
+		ids = append(ids, waiters...)
+		waiters = nil
+		a.mu.Unlock()
+		oc.status(false)
+		for _, id := range ids {
+			// Usage as OpenCode reports it (lux passes it through).
+			reply(id, map[string]any{"stopReason": stop, "usage": map[string]any{"inputTokens": 2, "outputTokens": 10, "totalTokens": 12}, "_meta": map[string]any{}})
+		}
+	}
+	oc.run = func(p prompt) { runLoop(p, nil) }
+	oc.listen(os.Args)
 	for sc := scanner(); sc.Scan(); {
 		var m rpcMsg
 		if json.Unmarshal(sc.Bytes(), &m) != nil {
@@ -534,21 +583,12 @@ func acp() {
 			}
 			reply(m.ID, map[string]any{})
 		case "session/prompt":
-			id, text := m.ID, p.Prompt.String()
-			go func() {
-				// ACP has no mid-turn message; a prompt during a turn waits.
-				c, ok := a.startTurn()
-				for !ok {
-					time.Sleep(50 * time.Millisecond)
-					c, ok = a.startTurn()
-				}
-				stop := "end_turn"
-				if a.runTurn(prompt{text: text}, c) {
-					stop = "cancelled"
-				}
-				// Usage as OpenCode reports it (lux passes it through).
-				reply(id, map[string]any{"stopReason": stop, "usage": map[string]any{"inputTokens": 2, "outputTokens": 10, "totalTokens": 12}, "_meta": map[string]any{}})
-			}()
+			pr := prompt{text: p.Prompt.String(), id: oc.messageID()}
+			oc.stored(pr)
+			if a.join(pr, func() { waiters = append(waiters, m.ID) }) {
+				continue
+			}
+			go runLoop(pr, []json.RawMessage{m.ID})
 		case "session/cancel":
 			a.cancelTurn()
 		default:
