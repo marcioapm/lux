@@ -62,6 +62,7 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
   // and whether one is owed once the in-flight fetch lands (rather than
   // aborting it, so a burst of events cannot starve a slow request).
   const last = useRef(0);
+  const lastDur = useRef(0);
   const pending = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inFlight = useRef(false);
   const owed = useRef(false);
@@ -72,7 +73,8 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
     ctrl.current = c;
     if (pending.current != null) clearTimeout(pending.current);
     pending.current = null;
-    last.current = Date.now();
+    const started = Date.now();
+    last.current = started;
     owed.current = false;
     inFlight.current = true;
     setFetching(true);
@@ -86,6 +88,7 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
       setError(errorText(e));
     } finally {
       if (!c.signal.aborted) {
+        lastDur.current = Date.now() - started;
         inFlight.current = false;
         setLoading(false);
         setFetching(false);
@@ -105,7 +108,9 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
         pending.current = null;
         void run();
       },
-      Math.max(0, last.current + COALESCE_MS - Date.now()),
+      // A slow query waits twice its own duration from its last start, so a
+      // stream of events keeps it at most half busy.
+      Math.max(0, last.current + Math.max(COALESCE_MS, 2 * lastDur.current) - Date.now()),
     );
   }, [run]);
 
