@@ -470,26 +470,44 @@ func TestOpenCodeMessageIDsAscend(t *testing.T) {
 }
 
 // A steer that reaches OpenCode as its loop ends starts a loop of its own:
-// the Run stays busy until the bus says that loop ended.
+// the Run stays busy until the bus says that loop ended, and no turn end is
+// reported while it runs; then one for each loop.
 func TestOpenCodeLateSteerKeepsRunBusy(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	sink.wait(t, "accepted late")
 	msgID := b.postedID(t, 0)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
-	sink.wait(t, "turn_end")
+	waitBusTurn(t, a)
 	b.events <- b.answer(msgID)
 	sink.wait(t, "consumed late")
+	noTurnEnd(t, sink, "while the steer's loop runs")
 	b.setLoop(false)
 	b.events <- ocIdle
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
-		"accepted late next_step receipt=true", "turn_end", "consumed late", "turn_end", "idle")
+		"accepted late next_step receipt=true", "consumed late", "turn_end", "turn_end", "idle")
+}
+
+// waitBusTurn waits until the adapter has handled the ACP turn's result.
+func waitBusTurn(t *testing.T, a *ACP) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		a.mu.Lock()
+		bt := a.busTurn
+		a.mu.Unlock()
+		if bt {
+			return
+		}
+		if time.Now().After(end) {
+			t.Fatal("the ACP result was never handled")
+		}
+	}
 }
 
 // prompt_async answering only after the ACP turn has ended: the steer was
 // reserved against that turn, so the Run stays busy for the loop it
 // started, whose end is found by asking OpenCode even though no
-// session.idle arrives.
+// session.idle arrives. No turn end is reported while that loop runs.
 func TestOpenCodeLateHTTPAcceptance(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
 	hold := make(chan struct{})
@@ -504,9 +522,10 @@ func TestOpenCodeLateHTTPAcceptance(t *testing.T) {
 	sink.wait(t, "accepted late")
 	b.events <- b.answer(msgID)
 	sink.wait(t, "consumed late")
+	noTurnEnd(t, sink, "while the steer's loop runs")
 	b.setLoop(false) // and its session.idle is lost
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
-		"accepted late next_step receipt=true", "turn_end", "consumed late", "turn_end", "idle")
+		"accepted late next_step receipt=true", "consumed late", "turn_end", "turn_end", "idle")
 }
 
 // A steer read by the running loop whose prompt_async answers only after

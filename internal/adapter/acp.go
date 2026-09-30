@@ -62,18 +62,16 @@ type ACP struct {
 	// reserved: steers whose prompt_async has not returned; a turn cannot
 	// be settled until they have.
 	reserved int
-	// endHeld: the ACP turn's acp.turn_end, held while that turn ended with
-	// reservations: whether a steer in flight joined that loop or starts
-	// another is known only once it is accepted. extraLoop: after the ACP
-	// turn ended, OpenCode ran another loop (status busy then, a step
-	// answering a steer admittedLate, or one sent again), which gets a turn
-	// end of its own. admittedLate: message ids of steers whose prompt_async
-	// returned after the ACP turn ended.
+	// endHeld: the ACP turn's acp.turn_end, held while lux cannot yet tell
+	// that no loop runs (a steer's prompt_async not returned, or a steer
+	// unread). extraLoop: after the ACP turn ended, OpenCode ran another
+	// loop (status busy then, a step answering a steer admittedLate, or one
+	// sent again), which gets a turn end of its own. Both are reported only
+	// once OpenCode is idle (busTurnEnded). admittedLate: message ids of
+	// steers whose prompt_async returned after the ACP turn ended.
 	endHeld      map[string]any
 	extraLoop    bool
 	admittedLate map[string]bool
-	// endMu keeps the held turn end before the next loop's.
-	endMu sync.Mutex
 	// cancelGen counts the session/cancels sent.
 	cancelGen int
 	// steers: inputs for the running turn, in the order they came, which
@@ -406,14 +404,14 @@ func (a *ACP) runCtx() context.Context {
 }
 
 // endTurn ends the running turn: acp.turn_end, then idle unless more input
-// waits. With OpenCode's server, a turn with steers not known to be read is
-// settled first (settle); one whose steers' prompt_async have not all
-// returned holds its turn end until they have (endHeld).
+// waits. With OpenCode's server, a turn with a steer whose prompt_async has
+// not returned, or one not known read, holds its turn end (endHeld) and is
+// settled: that steer may run in a loop after this one.
 func (a *ACP) endTurn(data map[string]any) {
 	if a.bus != nil {
 		a.receipts(a.runCtx())
 		a.mu.Lock()
-		if a.reserved > 0 {
+		if a.reserved > 0 || len(a.inputs.unread("bus")) > 0 {
 			a.busTurn, a.endHeld, a.extraLoop = true, data, false
 			a.mu.Unlock()
 			a.settle()
@@ -426,12 +424,6 @@ func (a *ACP) endTurn(data map[string]any) {
 	a.sink.EndMessage()
 	a.sink.Event("acp.turn_end", data)
 	a.mu.Lock()
-	if a.bus != nil && len(a.inputs.unread("bus")) > 0 {
-		a.busTurn, a.extraLoop = true, false
-		a.mu.Unlock()
-		a.settle()
-		return
-	}
 	a.busy = false
 	idle := len(a.queue) == 0
 	a.mu.Unlock()
@@ -491,25 +483,14 @@ func (a *ACP) read(parent string) {
 	}
 }
 
-// anotherLoop notes that OpenCode runs a loop after the ACP turn's: the
-// ACP turn's end, if held, is reported now, and that loop gets its own
-// (busTurnEnded).
+// anotherLoop notes that OpenCode runs a loop after the ACP turn's. Both
+// ends wait for busTurnEnded: none is reported while a loop may run.
 func (a *ACP) anotherLoop() {
-	a.endMu.Lock()
-	defer a.endMu.Unlock()
 	a.mu.Lock()
-	if !a.busTurn {
-		a.mu.Unlock()
-		return
+	if a.busTurn {
+		a.extraLoop = true
 	}
-	a.extraLoop = true
-	held := a.endHeld
-	a.endHeld = nil
 	a.mu.Unlock()
-	if held != nil {
-		a.sink.EndMessage()
-		a.sink.Event("acp.turn_end", held)
-	}
 }
 
 // settle decides, once the ACP turn has ended (busTurn), whether OpenCode
@@ -559,12 +540,6 @@ func (a *ACP) settle() {
 	// Read after the status: a message stored and unanswered here was
 	// stored while no loop ran.
 	stored, ok := a.receipts(ctx)
-	if (err != nil || !ok) && len(a.inputs.unread("bus")) == 0 {
-		// OpenCode does not say, and nothing of lux's is unread: any loop
-		// still running reads only what it has read.
-		a.busTurnEnded()
-		return
-	}
 	a.mu.Lock()
 	if err != nil || !ok {
 		a.settleErrs++
@@ -576,11 +551,23 @@ func (a *ACP) settle() {
 	}
 	a.mu.Unlock()
 	if err != nil || !ok || busy {
+		// A loop may run while OpenCode does not answer: no end yet.
 		if busy {
 			a.anotherLoop()
 		}
 		a.recheck()
 		return
+	}
+	// OpenCode runs no loop now and every prompt_async has returned: the
+	// ACP turn's end, if held, is reported; a loop started after this
+	// (a steer sent again) ends with busTurnEnded.
+	a.mu.Lock()
+	held := a.endHeld
+	a.endHeld = nil
+	a.mu.Unlock()
+	if held != nil {
+		a.sink.EndMessage()
+		a.sink.Event("acp.turn_end", held)
 	}
 	now, waiting := a.clock.now(), false
 	for _, in := range a.inputs.unread("bus") {
@@ -705,11 +692,10 @@ func (a *ACP) carry(ctx context.Context, session string, in proto.Input) bool {
 	return true
 }
 
-// busTurnEnded ends the Run's work after its ACP turn: one turn end for
-// the ACP turn if it was held and no other loop ran, one for the loops
-// OpenCode ran after it if any did.
+// busTurnEnded ends the Run's work after its ACP turn, once no loop runs:
+// the ACP turn's end if it was held, then one for the loops OpenCode ran
+// after it if any did. Only settle calls it (under settleMu).
 func (a *ACP) busTurnEnded() {
-	a.endMu.Lock()
 	a.mu.Lock()
 	held, extra := a.endHeld, a.extraLoop
 	a.busTurn, a.busy, a.endHeld, a.extraLoop = false, false, nil, false
@@ -717,15 +703,14 @@ func (a *ACP) busTurnEnded() {
 	clear(a.admittedLate)
 	idle := len(a.queue) == 0
 	a.mu.Unlock()
-	switch {
-	case held != nil:
+	if held != nil {
 		a.sink.EndMessage()
 		a.sink.Event("acp.turn_end", held)
-	case extra:
+	}
+	if extra {
 		a.sink.EndMessage()
 		a.sink.Event("acp.turn_end", map[string]any{"stopReason": "end_turn", "source": "opencode-bus"})
 	}
-	a.endMu.Unlock()
 	if idle {
 		a.sink.Activity(true)
 	}

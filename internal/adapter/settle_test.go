@@ -381,6 +381,39 @@ func TestOpenCodeSettleGivesUpOnAMessageNeverStored(t *testing.T) {
 		"accepted s1 next_step receipt=true", "turn_end", "failed s1: OpenCode accepted it and never stored it", "idle")
 }
 
+// GET /session/status failing after the ACP turn, with a loop OpenCode
+// started for a late steer: everything lux sent is read, but that loop may
+// still run, so no turn end and no idle until OpenCode says it is idle.
+func TestOpenCodeSettleErrorsReportNoEndWhileALoopMayRun(t *testing.T) {
+	clk := newTestClock()
+	a, b, w, sink, first := ocWithBusClock(t, clk)
+	hold := make(chan struct{})
+	b.mu.Lock()
+	b.hold = hold
+	b.mu.Unlock()
+	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
+	msg := b.postedID(t, 0)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	waitHeld(t, a)
+	b.mu.Lock()
+	b.statusFail = true
+	b.mu.Unlock()
+	close(hold)
+	sink.wait(t, "accepted late")
+	onBus(t, a, b.answer(msg)) // the steer's own loop
+	for range 3 {
+		clk.fire(t)
+		noTurnEnd(t, sink, "while OpenCode's status is unknown")
+	}
+	b.mu.Lock()
+	b.statusFail = false
+	b.mu.Unlock()
+	b.setLoop(false)
+	clk.fire(t)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted late next_step receipt=true", "consumed late", "turn_end", "turn_end", "idle")
+}
+
 // GET errors while settling back off, doubling up to settleMaxBackoff; a
 // good answer brings the interval back to settleEvery.
 func TestOpenCodeSettleBacksOffOnErrors(t *testing.T) {
