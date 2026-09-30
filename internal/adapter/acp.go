@@ -128,6 +128,11 @@ const (
 // answering a message lux did not send), so lux does not send it again.
 const uncertainNoStep = "uncertain: OpenCode stored it and its loop ended with no step lux saw answer it; it may have been read, so it is not sent again"
 
+// uncertainCancelled: a steer stored and not seen answered when its loop
+// was interrupted, after a model step stored after it (which had it in
+// context).
+const uncertainCancelled = "uncertain: it may have been read before the interrupt; not sent again"
+
 // Steers waiting for the one in flight: past either limit, a new one
 // fails at once.
 const (
@@ -435,30 +440,36 @@ func (a *ACP) endTurn(data map[string]any) {
 
 // receipts consumes the steers OpenCode's stored messages show read
 // (bus.answered for each assistant step's parent). It returns the ids of
-// the user messages stored, and false if OpenCode did not answer.
-func (a *ACP) receipts(ctx context.Context) (map[string]bool, bool) {
+// the user messages stored, the newest assistant step's id time in unix ms
+// (0 if none), and false if OpenCode did not answer.
+func (a *ACP) receipts(ctx context.Context) (map[string]bool, int64, bool) {
 	oldest := a.bus.oldest()
 	if oldest == "" {
-		return nil, true
+		return nil, 0, true
 	}
 	a.mu.Lock()
 	session := a.session
 	a.mu.Unlock()
 	msgs, err := a.bus.messagesSince(ctx, session, oldest)
 	if err != nil {
-		return nil, false
+		return nil, 0, false
 	}
-	stored := map[string]bool{}
+	stored, lastStep := map[string]bool{}, int64(0)
 	for _, m := range msgs {
 		a.bus.observe(m.Info.ID)
 		switch {
 		case m.Info.Role == "user":
 			stored[m.Info.ID] = true
-		case m.Info.Role == "assistant" && m.Info.ParentID != "":
-			a.read(m.Info.ParentID)
+		case m.Info.Role == "assistant":
+			if v, ok := idValue(m.Info.ID); ok {
+				lastStep = max(lastStep, v>>12)
+			}
+			if m.Info.ParentID != "" {
+				a.read(m.Info.ParentID)
+			}
 		}
 	}
-	return stored, true
+	return stored, lastStep, true
 }
 
 // read consumes the steers a model step answering parent has read. The
@@ -504,9 +515,12 @@ func (a *ACP) anotherLoop() {
 //     no loop for settleGiveUp since: then it fails;
 //   - a steer stored and unanswered while no loop runs was dropped by a
 //     loop cancelled after it was sent, when seen so on two looks
-//     settleEvery apart: it is sent again, so it starts the next loop, or
-//     fails if the Run is stopping. That copy, again stored and unanswered
-//     with no loop for settleGiveUp, fails: OpenCode will not read it;
+//     settleEvery apart, and no assistant step was stored after it: it is
+//     sent again, so it starts the next loop, or fails if the Run is
+//     stopping. That copy, again stored and unanswered with no loop for
+//     settleGiveUp, fails: OpenCode will not read it. With a step stored
+//     after it, that step may have read it: it fails as uncertain
+//     (uncertainCancelled) and is not sent again;
 //   - a steer stored and unanswered for 3×settleEvery after a loop that
 //     ended normally fails as uncertain (uncertainNoStep): that loop may
 //     have read it, so it is never sent again;
@@ -539,7 +553,7 @@ func (a *ACP) settle() {
 	busy, err := a.bus.sessionBusy(ctx, session)
 	// Read after the status: a message stored and unanswered here was
 	// stored while no loop ran.
-	stored, ok := a.receipts(ctx)
+	stored, lastStep, ok := a.receipts(ctx)
 	a.mu.Lock()
 	if err != nil || !ok {
 		a.settleErrs++
@@ -612,6 +626,10 @@ func (a *ACP) settle() {
 		a.mu.Lock()
 		delete(a.suspect, msgID)
 		a.mu.Unlock()
+		// A step stored at or after the steer (ids in ms: two generators
+		// do not order within one) had it in context, whatever its parent.
+		steerMs, _ := idValue(msgID)
+		followed := lastStep >= steerMs>>12
 		switch {
 		case giveUp:
 			a.bus.untrackRequest(in.RequestID)
@@ -623,6 +641,9 @@ func (a *ACP) settle() {
 			// again.
 			a.bus.untrackRequest(in.RequestID)
 			a.inputs.fail(a.sink, in, errors.New(uncertainNoStep))
+		case followed:
+			a.bus.untrackRequest(in.RequestID)
+			a.inputs.fail(a.sink, in, errors.New(uncertainCancelled))
 		case a.carry(ctx, session, in):
 			waiting = true
 		}

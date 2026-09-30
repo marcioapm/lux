@@ -240,16 +240,26 @@ const idMask = 1<<48 - 1
 
 // observe raises the floor of messageID to a message id OpenCode stored.
 func (b *opencodeBus) observe(id string) {
-	if len(id) < 16 || id[:4] != "msg_" {
-		return
-	}
-	v, err := strconv.ParseInt(id[4:16], 16, 64)
-	if err != nil || v >= idMask {
+	v, ok := idValue(id)
+	if !ok {
 		return
 	}
 	b.mu.Lock()
 	b.last = max(b.last, v)
 	b.mu.Unlock()
+}
+
+// idValue is the 12-hex-digit value of a message id: unix ms × 0x1000 plus
+// its generator's counter.
+func idValue(id string) (int64, bool) {
+	if len(id) < 16 || id[:4] != "msg_" {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(id[4:16], 16, 64)
+	if err != nil || v >= idMask {
+		return 0, false
+	}
+	return v, true
 }
 
 // seed observes, once per session, its newest stored message, so the next
