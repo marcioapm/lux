@@ -23,13 +23,14 @@ export function formatRate(n: number | null | undefined): string {
   return n == null ? MISSING : `${formatBytes(n)}/s`;
 }
 
-/** Duration in seconds → "1h 12m", "3.2s", "450ms". Two largest units. */
+/** Duration in seconds → "1h 12m", "3.2s", "450ms"; zero is "0s". Two largest units. */
 export function formatDuration(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds)) return MISSING;
   const neg = seconds < 0;
   let s = Math.abs(seconds);
   let out: string;
-  if (s < 1) out = `${Math.round(s * 1000)}ms`;
+  if (s === 0) out = "0s";
+  else if (s < 1) out = `${Math.round(s * 1000)}ms`;
   else if (s < 60) out = `${trimZeros(s.toFixed(1))}s`;
   else {
     const parts: string[] = [];
