@@ -41,7 +41,9 @@ arrive, a few seconds late.
    anything `luxd serve` would refuse before connecting, with the same
    message; the running luxd is untouched.
 2. Run `luxd migrate` with the owner's DSN. It applies what is new and is
-   safe to run again; running luxds keep working meanwhile.
+   safe to run again; running luxds keep working meanwhile. A migration
+   that builds an index blocks writes to its table until it commits: 043
+   (pool and host events) takes about 2 s per million events.
 3. Restart (or roll) every `luxd serve` onto the new binary.
 
 Migrate first: a luxd newer than its schema does not check it, and fails

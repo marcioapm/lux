@@ -643,10 +643,20 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 	sc := p.scope()
 	out := &lifecycleEventsOutput{}
 	out.Body.Events = []LifecycleEvent{}
+	// Each bound only when given: "$2 IS NULL OR id < $2" is no index
+	// condition, so a before= page would scan every newer event.
+	q := &sqlArgs{[]any{owner}}
+	where := t.owner + ` = $1`
+	if before != nil {
+		where += ` AND id < ` + q.arg(*before) + `::bigint`
+	}
+	if after != nil {
+		where += ` AND id > ` + q.arg(*after) + `::bigint`
+	}
 	err = s.db.Tx(ctx, sc, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at FROM `+t.table+`
-			WHERE `+t.owner+` = $1 AND ($2::bigint IS NULL OR id < $2) AND ($4::bigint IS NULL OR id > $4)
-			ORDER BY id DESC LIMIT $3`, owner, before, limit, after)
+		rows, err := tx.Query(ctx, `SELECT e.id, e.type, e.data, e.count, e.created_at, e.last_at FROM (`+
+			eventKeys(t, "", where, "id DESC", limit)+`) k JOIN `+t.table+` e ON e.id = k.id
+			ORDER BY k.id DESC`, q.list...)
 		if err != nil {
 			return err
 		}
@@ -666,6 +676,21 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 	return out, err
 }
 
+// eventKeys is the SQL of a page's keys: id, and v (the sort value expr,
+// when not empty), of an owner's events matching where, in order. Reading
+// only these, an index on the keys that includes tenant_id (043) serves
+// the page and row-level security alone and stops at the page's end; the
+// caller then reads the page's rows by id. Reading every column instead,
+// the planner's low estimate of the rows the policy passes makes it sort
+// all of the owner's events.
+func eventKeys(t eventTable, expr, where, order string, limit int) string {
+	cols := "id"
+	if expr != "" {
+		cols += ", " + expr + " AS v"
+	}
+	return `SELECT ` + cols + ` FROM ` + t.table + ` WHERE ` + where + ` ORDER BY ` + order + ` LIMIT ` + strconv.Itoa(limit)
+}
+
 // lifecycleEventsPage is a page of an owner's events in a sort key's
 // order, keyed by (value, id), under the same scope as lifecycleEvents.
 func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTable, owner string, pg *paging) (*lifecycleEventsOutput, error) {
@@ -675,19 +700,18 @@ func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTa
 		// read reads the page's events and keys, one past its end; with
 		// ahead, whether any event precedes ahead (existence only, unordered).
 		read := func(ahead *keyRow) ([]LifecycleEvent, []keyRow, error) {
-			q, from, expr := pg.keySource(t.table, "", []any{owner})
-			where, limit := t.owner+` = $1`, pg.limit+1
+			q, _, expr := pg.keySource(t.table, "", []any{owner})
+			where, limit, reversed := t.owner+` = $1`, pg.limit+1, pg.mode == "before"
 			if ahead != nil {
+				// The nearest event ahead of the page first.
 				where += " AND " + pg.beforeWhere(expr, "id", *ahead, q.arg)
-				limit = 1
-			} else {
-				if pg.cursor != nil {
-					where += " AND " + pg.where(expr, "id", q.arg)
-				}
-				where += " ORDER BY " + pg.order(expr, "id", pg.mode == "before")
+				limit, reversed = 1, !reversed
+			} else if pg.cursor != nil {
+				where += " AND " + pg.where(expr, "id", q.arg)
 			}
-			rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at, id::text AS key_id, `+expr+`::text AS key_value FROM `+from+`
-				WHERE `+where+` LIMIT `+strconv.Itoa(limit), q.list...)
+			keySQL := eventKeys(t, expr, where, pg.order(expr, "id", reversed), limit)
+			rows, err := tx.Query(ctx, `SELECT e.id, e.type, e.data, e.count, e.created_at, e.last_at, k.id::text, k.v::text FROM (`+
+				keySQL+`) k JOIN `+t.table+` e ON e.id = k.id ORDER BY `+pg.order("k.v", "k.id", reversed), q.list...)
 			if err != nil {
 				return nil, nil, err
 			}
