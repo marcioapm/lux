@@ -96,7 +96,11 @@ type agent struct {
 	// does (Codex's userMessage item, Claude Code's command_lifecycle
 	// started): at the turn's start, and for a steer at the next step.
 	read func(p prompt)
-	ask  func() string
+	// readAll, if set, reports the prompts steered in during one step
+	// entering the next step's context together (OpenCode: one assistant
+	// step, whose parent is the newest of them); else read, each.
+	readAll func(ps []prompt)
+	ask     func() string
 	// finalStepEndsTurn: a prompt steered in during the turn's last step
 	// (no tool call follows) is not read in this turn; runTurn leaves it in
 	// carry, for the next (Claude Code). Otherwise the turn reads it at
@@ -276,8 +280,14 @@ func (a *agent) runTurn(first prompt, c chan struct{}) (cancelled bool) {
 // runSteers reads and runs the prompts steered in so far; true if the turn
 // was cancelled.
 func (a *agent) runSteers(c chan struct{}) bool {
-	for _, p := range a.takeSteers() {
-		a.read(p)
+	steers := a.takeSteers()
+	if a.readAll != nil {
+		a.readAll(steers)
+	}
+	for _, p := range steers {
+		if a.readAll == nil {
+			a.read(p)
+		}
 		a.record("user", p.text)
 		if a.runScript(p.text, c) {
 			return true
@@ -527,6 +537,11 @@ func acp() {
 	// Each model step reading a user message is an assistant message whose
 	// parentID is that message.
 	a.read = func(p prompt) { oc.step(p.id) }
+	a.readAll = func(ps []prompt) {
+		if len(ps) > 0 {
+			oc.step(ps[len(ps)-1].id)
+		}
+	}
 	// runLoop runs a loop for its first prompt and any joined to it, then
 	// answers every prompt of it with the same result.
 	runLoop := func(first prompt, ids []json.RawMessage) {

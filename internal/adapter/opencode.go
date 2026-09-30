@@ -11,6 +11,8 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -25,8 +27,9 @@ import (
 // message under it, and joins the running agent loop (never the v2
 // /api/session/{id}/prompt: mixed with ACP it starts a second, concurrent
 // loop). Each model step is an assistant message.updated whose parentID is
-// the user message it answers, so the first one naming the steer's id is
-// the step that read it.
+// the newest user message when the step began; message ids ascend, and the
+// step has every user message up to its parent in context, so it read
+// every steer whose id sorts at or before that parent.
 type opencodeBus struct {
 	port int
 	dir  string
@@ -37,8 +40,9 @@ type opencodeBus struct {
 	mu        sync.Mutex
 	connected bool
 	lastErr   error
-	// expect maps a steer's message id to its lux request id.
-	expect map[string]string
+	// expect maps a steer's message id to its lux request id, and the
+	// adapter's cancel generation when it was sent.
+	expect map[string]busSteer
 	lastMs int64
 	seq    int64
 }
@@ -60,7 +64,7 @@ func newOpencodeBus(port int, dir string) *opencodeBus {
 	// try again.
 	direct := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 		ResponseHeaderTimeout: 3 * time.Second}
-	return &opencodeBus{port: port, dir: dir, expect: map[string]string{},
+	return &opencodeBus{port: port, dir: dir, expect: map[string]busSteer{},
 		hc: &http.Client{Timeout: 30 * time.Second, Transport: direct}, stream: &http.Client{Transport: direct}}
 }
 
@@ -76,15 +80,21 @@ func (b *opencodeBus) isConnected() bool {
 
 // waitConnected waits up to d for the event stream; OpenCode's server
 // comes up a little after its ACP answers.
-func (b *opencodeBus) waitConnected(d time.Duration) bool {
-	for end := time.Now().Add(d); ; time.Sleep(50 * time.Millisecond) {
-		if b.isConnected() {
-			return true
-		}
-		if time.Now().After(end) {
+func (b *opencodeBus) waitConnected(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for !b.isConnected() {
+		select {
+		case <-ctx.Done():
 			return false
+		case <-t.C:
+			return false
+		case <-tick.C:
 		}
 	}
+	return true
 }
 
 // err is why the event stream is not connected, if it failed.
@@ -112,10 +122,12 @@ type busEvent struct {
 }
 
 // follow reads GET /event until ctx ends, reconnecting while the server is
-// not up yet or the stream drops, and hands each event to on.
-func (b *opencodeBus) follow(ctx context.Context, on func(busEvent)) {
+// not up yet or the stream drops, and hands each event to on. connected
+// runs each time the stream is (re)established, before its first event:
+// what happened while it was down is not replayed.
+func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected func()) {
 	for ctx.Err() == nil {
-		if err := b.followOnce(ctx, on); err != nil && ctx.Err() == nil {
+		if err := b.followOnce(ctx, on, connected); err != nil && ctx.Err() == nil {
 			b.mu.Lock()
 			b.lastErr = err
 			b.mu.Unlock()
@@ -127,7 +139,7 @@ func (b *opencodeBus) follow(ctx context.Context, on func(busEvent)) {
 	}
 }
 
-func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent)) error {
+func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connected func()) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.url("/event"), nil)
 	if err != nil {
 		return err
@@ -150,6 +162,9 @@ func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent)) error {
 		b.connected = false
 		b.mu.Unlock()
 	}()
+	if connected != nil {
+		connected()
+	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64<<10), 64<<20)
 	for sc.Scan() {
@@ -163,6 +178,11 @@ func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent)) error {
 		}
 	}
 	return sc.Err()
+}
+
+type busSteer struct {
+	requestID string
+	gen       int
 }
 
 const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -195,9 +215,9 @@ var errNotSent = errors.New("not sent")
 // promptAsync stores text as the user message msgID of session and joins
 // it to the running loop (starting one if none runs). An error wrapping
 // errNotSent means OpenCode did not take it.
-func (b *opencodeBus) promptAsync(session, msgID, text string) error {
+func (b *opencodeBus) promptAsync(ctx context.Context, session, msgID, text string) error {
 	body, _ := json.Marshal(map[string]any{"messageID": msgID, "parts": textInput(text)})
-	req, err := http.NewRequest(http.MethodPost, b.url("/session/"+session+"/prompt_async"), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.url("/session/"+session+"/prompt_async"), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("%w: %v", errNotSent, err)
 	}
@@ -218,9 +238,74 @@ func (b *opencodeBus) promptAsync(session, msgID, text string) error {
 	return nil
 }
 
-func (b *opencodeBus) track(msgID, requestID string) {
+// storedMessage is what lux reads of a message GET /session/{id}/message
+// lists.
+type storedMessage struct {
+	Info struct {
+		ID       string `json:"id"`
+		Role     string `json:"role"`
+		ParentID string `json:"parentID"`
+	} `json:"info"`
+}
+
+// messagesSince lists the session's stored messages, newest page first, back
+// to the first page holding a message with an id before since (OpenCode
+// pages newest-first; x-next-cursor is the older page's cursor).
+func (b *opencodeBus) messagesSince(ctx context.Context, session, since string) ([]storedMessage, error) {
+	var all []storedMessage
+	cursor := ""
+	for {
+		q := url.Values{"limit": {"100"}}
+		if cursor != "" {
+			q.Set("before", cursor)
+		}
+		var page []storedMessage
+		next, err := b.get(ctx, "/session/"+session+"/message?"+q.Encode(), &page)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if next == "" || len(page) == 0 || page[0].Info.ID < since {
+			return all, nil
+		}
+		cursor = next
+	}
+}
+
+// sessionBusy reports whether OpenCode runs a loop for the session: GET
+// /session/status lists only sessions that are not idle.
+func (b *opencodeBus) sessionBusy(ctx context.Context, session string) (bool, error) {
+	var st map[string]struct {
+		Type string `json:"type"`
+	}
+	if _, err := b.get(ctx, "/session/status", &st); err != nil {
+		return false, err
+	}
+	s, ok := st[session]
+	return ok && s.Type != "idle", nil
+}
+
+// get decodes a JSON GET and returns its x-next-cursor header.
+func (b *opencodeBus) get(ctx context.Context, path string, v any) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.url(path), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("x-opencode-directory", b.dir)
+	resp, err := b.hc.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET %s: %s", path, resp.Status)
+	}
+	return resp.Header.Get("x-next-cursor"), json.NewDecoder(resp.Body).Decode(v)
+}
+
+func (b *opencodeBus) track(msgID, requestID string, gen int) {
 	b.mu.Lock()
-	b.expect[msgID] = requestID
+	b.expect[msgID] = busSteer{requestID, gen}
 	b.mu.Unlock()
 }
 
@@ -234,19 +319,56 @@ func (b *opencodeBus) untrack(msgID string) {
 func (b *opencodeBus) untrackRequest(requestID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for m, id := range b.expect {
-		if id == requestID {
+	for m, st := range b.expect {
+		if st.requestID == requestID {
 			delete(b.expect, m)
 		}
 	}
 }
 
-// answered returns the request id whose message an assistant step with
-// this parentID answers, once.
-func (b *opencodeBus) answered(parentID string) (string, bool) {
+// messageOf is the message id a request was last sent under ("" if none),
+// and the cancel generation it was sent in.
+func (b *opencodeBus) messageOf(requestID string) (string, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	id, ok := b.expect[parentID]
-	delete(b.expect, parentID)
-	return id, ok
+	for m, st := range b.expect {
+		if st.requestID == requestID {
+			return m, st.gen
+		}
+	}
+	return "", 0
+}
+
+// oldest is the smallest message id tracked, "" if none.
+func (b *opencodeBus) oldest() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	o := ""
+	for m := range b.expect {
+		if o == "" || m < o {
+			o = m
+		}
+	}
+	return o
+}
+
+// answered returns, once, the request ids of the steers a model step whose
+// parentID is parentID has in context: every tracked message whose id
+// sorts at or before it, in id order.
+func (b *opencodeBus) answered(parentID string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var msgs []string
+	for m := range b.expect {
+		if m <= parentID {
+			msgs = append(msgs, m)
+		}
+	}
+	slices.Sort(msgs)
+	ids := make([]string, len(msgs))
+	for i, m := range msgs {
+		ids[i] = b.expect[m].requestID
+		delete(b.expect, m)
+	}
+	return ids
 }

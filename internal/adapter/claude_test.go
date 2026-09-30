@@ -89,7 +89,7 @@ func TestClaudeFoldedSteerGoesIdle(t *testing.T) {
 	w.send(clLifecycle(steer, "completed"))
 	w.send(clResult)
 	w.send(clLifecycle(prompt, "completed"))
-	checkLines(t, sink, "busy", "accepted prompt next_step receipt=true", "consumed prompt",
+	checkLines(t, w, sink, "busy", "accepted prompt next_step receipt=true", "consumed prompt",
 		"busy", "accepted steer-1 next_step receipt=true", "consumed steer-1", "turn_end", "idle")
 }
 
@@ -109,7 +109,7 @@ func TestClaudeSteerAfterFinalStepIsNextTurn(t *testing.T) {
 	w.send(clInit)
 	w.send(strings.Replace(clResult, `"num_turns":4`, `"num_turns":2`, 1))
 	w.send(clLifecycle(steer, "completed"))
-	checkLines(t, sink, "busy", "accepted prompt next_step receipt=true", "consumed prompt",
+	checkLines(t, w, sink, "busy", "accepted prompt next_step receipt=true", "consumed prompt",
 		"busy", "accepted s next_step receipt=true", "turn_end", "consumed s", "turn_end", "idle")
 }
 
@@ -146,7 +146,7 @@ func TestClaudeSteerCarriedPastInterrupt(t *testing.T) {
 	w.send(clResult)
 	w.send(clLifecycle(again, "completed"))
 	sink.wait(t, "accepted int-1 next_step receipt=false")
-	checkCarried(t, sink, "s")
+	checkCarried(t, w, sink, "s")
 }
 
 // When the Run is stopping, a cancelled unread line fails.
@@ -173,5 +173,5 @@ func TestClaudeWithoutLifecycle(t *testing.T) {
 	w.send(clInitNoLife)
 	sink.wait(t, "accepted prompt next_step receipt=false")
 	w.send(clResult)
-	checkLines(t, sink, "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+	checkLines(t, w, sink, "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
 }

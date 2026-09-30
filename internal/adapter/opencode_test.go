@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,10 +35,13 @@ func ocStarted(t *testing.T, a *ACP) (*agentWire, *inputSink, string) {
 // The result both prompts of a joined turn get (opencode-acp-prompt-1).
 const ocResult = `"result":{"stopReason":"end_turn","usage":{"inputTokens":6,"outputTokens":5,"totalTokens":8380,"cachedReadTokens":8286,"cachedWriteTokens":83},"_meta":{}}`
 
-func checkLines(t *testing.T, sink *inputSink, want ...string) {
+// checkLines waits for the log's last line, then ends the agent's process
+// and waits for the adapter's Run to return (joining the adapter's own
+// goroutines), and compares the complete log.
+func checkLines(t *testing.T, w *agentWire, sink *inputSink, want ...string) {
 	t.Helper()
 	sink.waitLast(t, want[len(want)-1])
-	time.Sleep(50 * time.Millisecond) // nothing more follows
+	w.exit()
 	if got := sink.lines(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
@@ -57,7 +61,7 @@ func TestOpenCodeSteerJoinsTurnOverACP(t *testing.T) {
 	sink.wait(t, "accepted steer-1")
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
 	w.send(`{"jsonrpc":"2.0","id":` + second + `,` + ocResult + `}`)
-	checkLines(t, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"accepted steer-1 next_step receipt=false", "turn_end", "idle")
 }
 
@@ -72,7 +76,7 @@ func TestACPQueuesUntilTurnEnds(t *testing.T) {
 	second, _ := w.next("session/prompt")
 	sink.wait(t, "accepted later next_turn receipt=false")
 	w.send(`{"jsonrpc":"2.0","id":` + second + `,` + ocResult + `}`)
-	checkLines(t, sink, "idle", "busy", "accepted prompt next_turn receipt=false", "turn_end",
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_turn receipt=false", "turn_end",
 		"busy", "accepted later next_turn receipt=false", "turn_end", "idle")
 }
 
@@ -92,25 +96,41 @@ func TestACPPromptNotWrittenFails(t *testing.T) {
 	}
 }
 
-// fakeBus is OpenCode's HTTP server as the adapter uses it.
+// fakeBus is OpenCode's HTTP server as the adapter uses it: prompt_async
+// stores a user message, emit publishes an event (and stores the assistant
+// message it reports), and GET /session/{id}/message and /session/status
+// answer from what is stored.
 type fakeBus struct {
 	srv    *httptest.Server
 	mu     sync.Mutex
 	events chan string
 	posted []map[string]any
 	status int
+	// hold, if set, is waited on before prompt_async answers.
+	hold chan struct{}
+	// stored: the session's messages; loop: OpenCode runs one.
+	stored []map[string]string
+	loop   bool
+	// drop ends the open event stream.
+	drop chan struct{}
+	gets int
 }
 
 func newFakeBus(t *testing.T) *fakeBus {
-	b := &fakeBus{events: make(chan string, 64), status: http.StatusNoContent}
+	b := &fakeBus{events: make(chan string, 64), status: http.StatusNoContent, drop: make(chan struct{}, 1)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /event", func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		b.gets++
+		b.mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"type\":\"server.connected\",\"properties\":{}}\n\n")
 		w.(http.Flusher).Flush()
 		for {
 			select {
 			case <-r.Context().Done():
+				return
+			case <-b.drop:
 				return
 			case e := <-b.events:
 				fmt.Fprintf(w, "data: %s\n\n", e)
@@ -125,9 +145,37 @@ func newFakeBus(t *testing.T) *fakeBus {
 		body["directory"] = r.Header.Get("x-opencode-directory")
 		b.mu.Lock()
 		b.posted = append(b.posted, body)
-		st := b.status
+		st, hold := b.status, b.hold
+		if st/100 == 2 {
+			// Stored, and joined to the running loop or starting one.
+			id, _ := body["messageID"].(string)
+			b.stored = append(b.stored, map[string]string{"id": id, "role": "user"})
+			b.loop = true
+		}
 		b.mu.Unlock()
+		if hold != nil {
+			<-hold
+		}
 		w.WriteHeader(st)
+	})
+	mux.HandleFunc("GET /session/{id}/message", func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		var out []map[string]any
+		for _, m := range b.stored {
+			out = append(out, map[string]any{"info": map[string]string{"id": m["id"], "role": m["role"], "parentID": m["parentID"]}, "parts": []any{}})
+		}
+		b.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(out)
+	})
+	mux.HandleFunc("GET /session/status", func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		loop := b.loop
+		b.mu.Unlock()
+		if loop {
+			fmt.Fprintf(w, `{"%s":{"type":"busy"}}`, ocSession)
+			return
+		}
+		fmt.Fprint(w, `{}`)
 	})
 	b.srv = httptest.NewServer(mux)
 	t.Cleanup(b.srv.Close)
@@ -136,17 +184,63 @@ func newFakeBus(t *testing.T) *fakeBus {
 
 func (b *fakeBus) port() int { return b.srv.Listener.Addr().(*net.TCPAddr).Port }
 
+// answer stores a model step answering parent, as OpenCode does before it
+// publishes it.
+func (b *fakeBus) answer(parent string) string {
+	b.mu.Lock()
+	id := fmt.Sprintf("msg_ffffffffffff%014d", len(b.stored))
+	b.stored = append(b.stored, map[string]string{"id": id, "role": "assistant", "parentID": parent})
+	b.mu.Unlock()
+	return assistant(parent)
+}
+
+func (b *fakeBus) setLoop(on bool) {
+	b.mu.Lock()
+	b.loop = on
+	b.mu.Unlock()
+}
+
+// postedID is the messageID of the nth prompt_async, once it came.
+func (b *fakeBus) postedID(t *testing.T, n int) string {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		b.mu.Lock()
+		if len(b.posted) > n {
+			id, _ := b.posted[n]["messageID"].(string)
+			b.mu.Unlock()
+			return id
+		}
+		b.mu.Unlock()
+	}
+	t.Fatalf("no prompt_async #%d", n+1)
+	return ""
+}
+
 // assistant is a model step answering the user message parent, as
 // opencode 1.18.31 reports it (opencode-acp-legacy-1).
 func assistant(parent string) string {
 	return `{"id":"evt_0f29ddf72001","type":"message.updated","properties":{"sessionID":"` + ocSession + `","info":{"id":"msg_0f275509d001A2KKdHyv8k2LwM","role":"assistant","parentID":"` + parent + `","sessionID":"` + ocSession + `","time":{"created":1790774169757}}}}`
 }
 
+// onBus hands the adapter one bus event and returns once it has handled it.
+func onBus(t *testing.T, a *ACP, ev string) {
+	t.Helper()
+	var e busEvent
+	if err := json.Unmarshal([]byte(ev), &e); err != nil {
+		t.Fatal(err)
+	}
+	a.onBus(e)
+}
+
+const ocIdle = `{"type":"session.idle","properties":{"sessionID":"` + ocSession + `"}}`
+
 func ocWithBus(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
 	t.Helper()
 	b := newFakeBus(t)
 	a := NewOpenCode()
 	a.bus = newOpencodeBus(b.port(), "/workspace")
+	a.settleEvery = 20 * time.Millisecond
+	b.setLoop(true) // the first prompt's loop
 	w, sink, first := ocStarted(t, a)
 	for end := time.Now().Add(5 * time.Second); !a.bus.isConnected(); time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(end) {
@@ -156,9 +250,20 @@ func ocWithBus(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
 	return a, b, w, sink, first
 }
 
+// noConsumed fails if anything was reported read.
+func noConsumed(t *testing.T, sink *inputSink, when string) {
+	t.Helper()
+	for _, l := range sink.lines() {
+		if strings.HasPrefix(l, "consumed") {
+			t.Fatalf("%s: %q", when, sink.lines())
+		}
+	}
+}
+
 // With OpenCode's HTTP server: a steer goes through prompt_async under a
 // client message id, and is consumed at the first model step answering
-// that message.
+// that message, not before; two steers of the same text are told apart by
+// their ids.
 func TestOpenCodeSteerReceiptFromBus(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
 	a.Deliver(proto.Input{RequestID: "steer-2", Text: "Before anything else, run `echo STEER`"})
@@ -173,47 +278,98 @@ func TestOpenCodeSteerReceiptFromBus(t *testing.T) {
 		string(parts) != `[{"text":"Before anything else, run `+"`echo STEER`"+`","type":"text"}]` {
 		t.Fatalf("prompt_async %v", post)
 	}
-	// The running step (the sleep) still answers the first prompt.
-	b.events <- assistant("msg_0f274ed8a001VXpumPDla0AnsH")
-	b.events <- assistant(msgID)
-	b.events <- assistant(msgID)
-	sink.wait(t, "consumed steer-2")
+	a.Deliver(proto.Input{RequestID: "steer-3", Text: "Before anything else, run `echo STEER`"})
+	sink.wait(t, "accepted steer-3 next_step receipt=true")
+	msgID3 := b.postedID(t, 1)
+	// The running step (the sleep) still answers the first prompt: neither
+	// steer is read.
+	onBus(t, a, b.answer("msg_0f274ed8a001VXpumPDla0AnsH"))
+	noConsumed(t, sink, "an unrelated step")
+	onBus(t, a, b.answer(msgID))
+	if l := sink.lines(); l[len(l)-1] != "consumed steer-2" || slices.Contains(l, "consumed steer-3") {
+		t.Fatalf("step answering steer-2: %q", l)
+	}
+	onBus(t, a, b.answer(msgID))
+	onBus(t, a, b.answer(msgID3))
+	b.setLoop(false)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
-	checkLines(t, sink, "idle", "busy", "accepted prompt next_step receipt=false",
-		"accepted steer-2 next_step receipt=true", "consumed steer-2", "turn_end", "idle")
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted steer-2 next_step receipt=true", "accepted steer-3 next_step receipt=true",
+		"consumed steer-2", "consumed steer-3", "turn_end", "idle")
+}
+
+// Two steers stored during one tool call are both in the context of the
+// model step after it, which names only the newer as its parent: both are
+// read, and the turn ends once.
+func TestOpenCodeOneStepReadsSeveralSteers(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
+	a.Deliver(proto.Input{RequestID: "s2", Text: "y"})
+	sink.wait(t, "accepted s2")
+	b.events <- b.answer(b.postedID(t, 1))
+	sink.wait(t, "consumed s2")
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted s1 next_step receipt=true", "accepted s2 next_step receipt=true",
+		"consumed s1", "consumed s2", "turn_end", "idle")
 }
 
 // Interrupted with steers unread: OpenCode's cancelled loop never reads
 // them, so they are sent again (same request id, new message id) and start
-// the next turn, followed on the bus; consumed once, nothing fails.
+// the next turn, followed on the bus; consumed once, nothing fails. A step
+// answering the cancelled copy is not the steer read.
 func TestOpenCodeSteerCarriedPastInterrupt(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
 	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
 	sink.wait(t, "accepted s1")
+	firstID := b.postedID(t, 0)
 	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
 	w.next("session/cancel")
 	sink.wait(t, "accepted int-1")
+	b.setLoop(false)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
-	var again string
-	for end := time.Now().Add(5 * time.Second); again == "" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
-		b.mu.Lock()
-		if len(b.posted) == 2 {
-			again = b.posted[1]["messageID"].(string)
-		}
-		b.mu.Unlock()
-	}
-	b.mu.Lock()
-	firstID := b.posted[0]["messageID"].(string)
-	b.mu.Unlock()
-	if again == "" || again == firstID {
-		t.Fatalf("not sent again: %q", again)
+	again := b.postedID(t, 1)
+	if again == firstID {
+		t.Fatalf("sent again under the same id %q", again)
 	}
 	w.none()                       // no empty prompt for the interrupt
-	b.events <- assistant(firstID) // the cancelled copy: not ours any more
-	b.events <- `{"type":"session.status","properties":{"sessionID":"` + ocSession + `","status":{"type":"busy"}}}`
-	b.events <- assistant(again)
-	b.events <- `{"type":"session.idle","properties":{"sessionID":"` + ocSession + `"}}`
-	checkCarried(t, sink, "s1")
+	onBus(t, a, b.answer(firstID)) // the cancelled copy: not ours any more
+	noConsumed(t, sink, "a step answering the cancelled copy")
+	b.events <- b.answer(again)
+	sink.wait(t, "consumed s1")
+	b.setLoop(false)
+	b.events <- ocIdle
+	checkCarried(t, w, sink, "s1")
+}
+
+// A steer whose prompt_async is still in flight when the interrupted turn
+// ends is not lost: the turn waits for it, and once accepted it is sent
+// again, as a steer the turn left unread.
+func TestOpenCodeReservedSteerCarriedPastInterrupt(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	hold := make(chan struct{})
+	b.mu.Lock()
+	b.hold = hold
+	b.mu.Unlock()
+	a.Deliver(proto.Input{RequestID: "s1", Text: "x"})
+	b.postedID(t, 0)
+	a.Deliver(proto.Input{RequestID: "int-1", Interrupt: true})
+	w.next("session/cancel")
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
+	sink.wait(t, "turn_end")
+	b.mu.Lock()
+	b.hold = nil
+	b.mu.Unlock()
+	close(hold)
+	again := b.postedID(t, 1)
+	b.events <- b.answer(again)
+	sink.wait(t, "consumed s1")
+	b.setLoop(false)
+	b.events <- ocIdle
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "accepted int-1 next_turn receipt=false",
+		"turn_end", "accepted s1 next_step receipt=true", "consumed s1", "turn_end", "idle")
 }
 
 // Message ids sort after each other, as OpenCode orders messages by id.
@@ -236,20 +392,53 @@ func TestOpenCodeLateSteerKeepsRunBusy(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	sink.wait(t, "accepted late")
-	b.mu.Lock()
-	msgID := b.posted[0]["messageID"].(string)
-	b.mu.Unlock()
+	msgID := b.postedID(t, 0)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
 	sink.wait(t, "turn_end")
-	time.Sleep(50 * time.Millisecond)
-	if l := sink.lines(); l[len(l)-1] == "idle" {
-		t.Fatalf("idle with a steer unread: %q", l)
-	}
-	b.events <- `{"type":"session.status","properties":{"sessionID":"` + ocSession + `","status":{"type":"busy"}}}`
-	b.events <- assistant(msgID)
-	b.events <- `{"type":"session.idle","properties":{"sessionID":"` + ocSession + `"}}`
-	checkLines(t, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+	b.events <- b.answer(msgID)
+	sink.wait(t, "consumed late")
+	b.setLoop(false)
+	b.events <- ocIdle
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"accepted late next_step receipt=true", "turn_end", "consumed late", "turn_end", "idle")
+}
+
+// prompt_async answering only after the ACP turn has ended: the steer was
+// reserved against that turn, so the Run stays busy for the loop it
+// started, whose end is found by asking OpenCode even though no
+// session.idle arrives.
+func TestOpenCodeLateHTTPAcceptance(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	hold := make(chan struct{})
+	b.mu.Lock()
+	b.hold = hold
+	b.mu.Unlock()
+	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
+	msgID := b.postedID(t, 0)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	sink.wait(t, "turn_end")
+	close(hold)
+	sink.wait(t, "accepted late")
+	b.events <- b.answer(msgID)
+	sink.wait(t, "consumed late")
+	b.setLoop(false) // and its session.idle is lost
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"turn_end", "accepted late next_step receipt=true", "consumed late", "turn_end", "idle")
+}
+
+// The event stream drops across the step that answers the steer: on
+// reconnect, and when the ACP turn ends, lux reads OpenCode's stored
+// messages, so the steer is still reported read and the Run goes idle.
+func TestOpenCodeReceiptAcrossReconnect(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	a.Deliver(proto.Input{RequestID: "s", Text: "x"})
+	sink.wait(t, "accepted s")
+	b.drop <- struct{}{}
+	b.answer(b.postedID(t, 0)) // stored, never published
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted s next_step receipt=true", "consumed s", "turn_end", "idle")
 }
 
 // prompt_async refusing the steer (it never reached OpenCode): it goes as
@@ -290,8 +479,8 @@ func TestOpenCodeBusRetriesUnansweredStream(t *testing.T) {
 	b := newOpencodeBus(srv.Listener.Addr().(*net.TCPAddr).Port, "/")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go b.follow(ctx, func(busEvent) {})
-	if !b.waitConnected(8 * time.Second) {
+	go b.follow(ctx, func(busEvent) {}, nil)
+	if !b.waitConnected(context.Background(), 8*time.Second) {
 		t.Fatalf("never connected: %v", b.err())
 	}
 }
