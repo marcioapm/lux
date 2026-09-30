@@ -59,7 +59,7 @@ was accepted as records of their own, each at most once per request id
 | --- | --- | --- | --- | --- | --- |
 | `claude-code` | `next_step` | yes | `command_lifecycle` `queued` | `command_lifecycle` `started` | `refused`; `cancelled`/`discarded` while the Run stops (or 3 times); a failed write |
 | `codex` | `next_step` | from Codex 0.155 | `turn/start` or `turn/steer` result | `item/started` of the `userMessage` whose `clientId` is the request id | a `turn/steer` refusal other than a stale turn; the Run stopping before it was read |
-| `opencode` | `next_step` | yes, with OpenCode's server up | the steer stored (`prompt_async` 204), or a second `session/prompt` written | the first assistant `message.updated` whose `parentID` is the steer's message id | the Run stopping before it was read; a failed write |
+| `opencode` | `next_step` | yes, with OpenCode's server up | the steer stored (`prompt_async` 204), or a second `session/prompt` written | the first assistant `message.updated` whose `parentID` is the message id of this steer or of a later one lux sent | the Run stopping before it was read; a failed write |
 | `acp` | `next_turn` | no | its `session/prompt` written | — | a failed write |
 | `generic` | `next_step` | no | written to stdin | — | a failed write |
 

@@ -373,9 +373,9 @@ func (a *ACP) endTurn(data map[string]any) {
 	a.drain()
 }
 
-// receipts consumes the steers OpenCode's stored messages show read: every
-// tracked message at or before an assistant step's parent. It returns the
-// ids of the user messages stored, and false if OpenCode did not answer.
+// receipts consumes the steers OpenCode's stored messages show read
+// (bus.answered for each assistant step's parent). It returns the ids of
+// the user messages stored, and false if OpenCode did not answer.
 func (a *ACP) receipts(ctx context.Context) (map[string]bool, bool) {
 	oldest := a.bus.oldest()
 	if oldest == "" {
@@ -390,6 +390,7 @@ func (a *ACP) receipts(ctx context.Context) (map[string]bool, bool) {
 	}
 	stored := map[string]bool{}
 	for _, m := range msgs {
+		a.bus.observe(m.Info.ID)
 		switch {
 		case m.Info.Role == "user":
 			stored[m.Info.ID] = true
@@ -588,6 +589,7 @@ func (a *ACP) steer(in proto.Input) {
 		return
 	}
 	if a.bus != nil && a.bus.waitConnected(ctx, 5*time.Second) {
+		a.bus.seed(ctx, session)
 		msgID := a.bus.messageID(time.Now())
 		// Reserved against the running turn: it is not settled until the
 		// request returns.
@@ -668,9 +670,9 @@ func (a *ACP) queueInput(in proto.Input) {
 	a.drain()
 }
 
-// onBus follows OpenCode's bus: an assistant step is every steer at or
-// before its parent read; session.idle after the ACP turn has ended
-// settles the Run's work.
+// onBus follows OpenCode's bus: an assistant step answering a steer lux
+// sent has read it and the steers sent before it (bus.answered);
+// session.idle after the ACP turn has ended settles the Run's work.
 func (a *ACP) onBus(ev busEvent) {
 	a.mu.Lock()
 	session, bt := a.session, a.busTurn
@@ -678,6 +680,9 @@ func (a *ACP) onBus(ev busEvent) {
 	p := ev.Properties
 	switch ev.Type {
 	case "message.updated":
+		if p.Info.SessionID == session {
+			a.bus.observe(p.Info.ID)
+		}
 		if p.Info.Role == "assistant" && p.Info.SessionID == session && p.Info.ParentID != "" {
 			for _, id := range a.bus.answered(p.Info.ParentID) {
 				a.inputs.consume(a.sink, id)

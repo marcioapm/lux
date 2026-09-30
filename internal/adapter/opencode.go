@@ -28,9 +28,9 @@ import (
 // message under it, and joins the running agent loop (never the v2
 // /api/session/{id}/prompt: mixed with ACP it starts a second, concurrent
 // loop). Each model step is an assistant message.updated whose parentID is
-// the newest user message when the step began; message ids ascend, and the
-// step has every user message up to its parent in context, so it read
-// every steer whose id sorts at or before that parent.
+// the newest user message when the step began; the step has every user
+// message up to its parent in context. When that parent is a steer lux
+// sent, the step read it and every steer lux sent before it (answered).
 type opencodeBus struct {
 	port int
 	dir  string
@@ -44,8 +44,11 @@ type opencodeBus struct {
 	// expect maps a steer's message id to its lux request id, and the
 	// adapter's cancel generation when it was sent.
 	expect map[string]busSteer
-	lastMs int64
-	seq    int64
+	// last: the largest message id value (the 12 hex digits) lux made or
+	// saw OpenCode store.
+	last int64
+	// seeded: the session whose stored messages last was raised to.
+	seeded string
 }
 
 // freeLoopbackPort is a port nothing listens on at 127.0.0.1 now.
@@ -215,18 +218,15 @@ type busSteer struct {
 
 const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-// messageID is a new ascending OpenCode message id: "msg_", 12 hex digits
-// of (unix ms × 0x1000 + a per-ms counter), then 14 random base62
-// characters. OpenCode orders messages by id, so it must sort after the
-// messages already stored.
+// messageID is a new OpenCode message id: "msg_", 12 hex digits of (unix
+// ms × 0x1000 + a counter), then 14 random base62 characters. OpenCode
+// orders messages by id, so it must sort after every message already
+// stored: the value is strictly above both the last one lux made and the
+// largest OpenCode id lux has seen (observe), whatever the clock does.
 func (b *opencodeBus) messageID(now time.Time) string {
 	b.mu.Lock()
-	ms := now.UnixMilli()
-	if ms > b.lastMs {
-		b.lastMs, b.seq = ms, 0
-	}
-	b.seq++
-	v := (b.lastMs*0x1000 + b.seq) & (1<<48 - 1)
+	v := max((now.UnixMilli()*0x1000+1)&idMask, b.last+1)
+	b.last = v
 	b.mu.Unlock()
 	suffix := make([]byte, 14)
 	for i := range suffix {
@@ -234,6 +234,45 @@ func (b *opencodeBus) messageID(now time.Time) string {
 		suffix[i] = base62[n.Int64()]
 	}
 	return fmt.Sprintf("msg_%012x%s", v, suffix)
+}
+
+const idMask = 1<<48 - 1
+
+// observe raises the floor of messageID to a message id OpenCode stored.
+func (b *opencodeBus) observe(id string) {
+	if len(id) < 16 || id[:4] != "msg_" {
+		return
+	}
+	v, err := strconv.ParseInt(id[4:16], 16, 64)
+	if err != nil || v >= idMask {
+		return
+	}
+	b.mu.Lock()
+	b.last = max(b.last, v)
+	b.mu.Unlock()
+}
+
+// seed observes, once per session, its newest stored message, so the next
+// messageID sorts after it: a resumed session may hold ids made by a clock
+// ahead of this one. After that, observe keeps up from the bus and the
+// stored messages lux reads. Best effort: lux's own ids ascend without it.
+func (b *opencodeBus) seed(ctx context.Context, session string) {
+	b.mu.Lock()
+	done := b.seeded == session
+	b.mu.Unlock()
+	if done {
+		return
+	}
+	var page []storedMessage
+	if _, err := b.get(ctx, "/session/"+session+"/message?limit=1", &page); err != nil {
+		return
+	}
+	for _, m := range page {
+		b.observe(m.Info.ID)
+	}
+	b.mu.Lock()
+	b.seeded = session
+	b.mu.Unlock()
 }
 
 // errNotSent: the steer certainly did not reach OpenCode; another path
@@ -381,11 +420,17 @@ func (b *opencodeBus) oldest() string {
 }
 
 // answered returns, once, the request ids of the steers a model step whose
-// parentID is parentID has in context: every tracked message whose id
-// sorts at or before it, in id order.
+// parentID is parentID has in context. Only a parent lux sent says so: the
+// step then has every user message up to it, and lux's own ids ascend, so
+// every tracked message at or before it, in id order. A parent OpenCode
+// made (the turn's prompt, a resumed transcript) reads none: its id and
+// lux's come from separate generators and do not order each other.
 func (b *opencodeBus) answered(parentID string) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if _, ok := b.expect[parentID]; !ok {
+		return nil
+	}
 	var msgs []string
 	for m := range b.expect {
 		if m <= parentID {
