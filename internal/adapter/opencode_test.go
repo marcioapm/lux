@@ -359,7 +359,7 @@ func TestOpenCodeReservedSteerCarriedPastInterrupt(t *testing.T) {
 	w.next("session/cancel")
 	b.setLoop(false)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,"result":{"stopReason":"cancelled","_meta":{}}}`)
-	sink.wait(t, "turn_end")
+	waitHeld(t, a)
 	b.mu.Lock()
 	b.hold = nil
 	b.mu.Unlock()
@@ -370,7 +370,7 @@ func TestOpenCodeReservedSteerCarriedPastInterrupt(t *testing.T) {
 	b.setLoop(false)
 	b.events <- ocIdle
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "accepted int-1 next_turn receipt=false",
-		"turn_end", "accepted s1 next_step receipt=true", "consumed s1", "turn_end", "idle")
+		"accepted s1 next_step receipt=true", "turn_end", "consumed s1", "turn_end", "idle")
 }
 
 // A step answering a message lux did not send reads no steer, however the
@@ -473,14 +473,51 @@ func TestOpenCodeLateHTTPAcceptance(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
 	msgID := b.postedID(t, 0)
 	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
-	sink.wait(t, "turn_end")
+	waitHeld(t, a)
 	close(hold)
 	sink.wait(t, "accepted late")
 	b.events <- b.answer(msgID)
 	sink.wait(t, "consumed late")
 	b.setLoop(false) // and its session.idle is lost
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
-		"turn_end", "accepted late next_step receipt=true", "consumed late", "turn_end", "idle")
+		"accepted late next_step receipt=true", "turn_end", "consumed late", "turn_end", "idle")
+}
+
+// A steer read by the running loop whose prompt_async answers only after
+// the ACP result: that loop is the only one, so the turn ends once, after
+// the steer's acceptance.
+func TestOpenCodeReservedAlreadyReadEndsOnce(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	hold := make(chan struct{})
+	b.mu.Lock()
+	b.hold = hold
+	b.mu.Unlock()
+	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
+	msgID := b.postedID(t, 0)
+	onBus(t, a, b.answer(msgID))
+	b.setLoop(false)
+	w.send(`{"jsonrpc":"2.0","id":` + first + `,` + ocResult + `}`)
+	waitHeld(t, a)
+	close(hold)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted late next_step receipt=true", "consumed late", "turn_end", "idle")
+}
+
+// waitHeld waits until the adapter has handled the ACP result of a turn
+// whose steers' prompt_async are still in flight.
+func waitHeld(t *testing.T, a *ACP) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		a.mu.Lock()
+		held := a.busTurn && a.reserved > 0
+		a.mu.Unlock()
+		if held {
+			return
+		}
+		if time.Now().After(end) {
+			t.Fatal("the ACP result was never handled")
+		}
+	}
 }
 
 // The event stream drops across the step that answers the steer: on
