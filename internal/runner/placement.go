@@ -727,6 +727,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image,
 // label; the image is last.
 func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Network) []string {
 	args := hardening(sp)
+	memory := fmt.Sprintf("%d", p.r.mem.limit(int64(sp.Resources.Memory)))
 	args = append(args,
 		"--name", containerName(p.runID),
 		"--label", LabelManaged+"=true",
@@ -741,8 +742,8 @@ func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Net
 		// Service sockets: in memory, never in the image or a snapshot.
 		"--tmpfs", proto.ShimServicesDir+":rw,size=1m,mode=0755,nosuid,nodev,noexec",
 		"--cpus", fmt.Sprintf("%g", sp.Resources.CPUs),
-		"--memory", fmt.Sprintf("%d", p.r.mem.limit(int64(sp.Resources.Memory))),
-		"--memory-swap", fmt.Sprintf("%d", p.r.mem.limit(int64(sp.Resources.Memory))),
+		"--memory", memory,
+		"--memory-swap", memory,
 		"--pids-limit", fmt.Sprintf("%d", sp.Resources.Pids),
 	)
 	if sp.Sandbox.ReadOnlyRoot {
