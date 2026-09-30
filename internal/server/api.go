@@ -893,7 +893,10 @@ func (s *Server) listRunsPage(ctx context.Context, p Principal, pg *paging, wher
 			if c := extra(q, expr); c != "" {
 				cond += " AND " + c
 			}
-			rows, err := tx.Query(ctx, `SELECT r.id AS key_id, `+expr+`::text AS key_value FROM `+src+` WHERE `+cond+` ORDER BY `+order+` LIMIT `+strconv.Itoa(limit), q.list...)
+			if order != "" {
+				cond += " ORDER BY " + order
+			}
+			rows, err := tx.Query(ctx, `SELECT r.id AS key_id, `+expr+`::text AS key_value FROM `+src+` WHERE `+cond+` LIMIT `+strconv.Itoa(limit), q.list...)
 			if err != nil {
 				return nil, err
 			}
@@ -913,7 +916,9 @@ func (s *Server) listRunsPage(ctx context.Context, p Principal, pg *paging, wher
 			if pg.cursor == nil || pg.cursor.ID == "" {
 				return false, nil
 			}
-			ahead, err := keysFor(func(q *sqlArgs, expr string) string { return pg.beforeWhere(expr, "r.id", first, q.arg) }, "r.id", 1)
+			// Existence only: an order here can lead the planner away from
+			// the predicate's own plan.
+			ahead, err := keysFor(func(q *sqlArgs, expr string) string { return pg.beforeWhere(expr, "r.id", first, q.arg) }, "", 1)
 			return len(ahead) > 0, err
 		})
 		if err != nil {
