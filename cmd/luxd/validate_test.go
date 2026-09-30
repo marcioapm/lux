@@ -132,6 +132,7 @@ func badConfigs(dbURL string) []struct {
 	want       string
 } {
 	valid := validConfig(dbURL)
+	previewEnv := []string{"LUX_PREVIEW_DOMAIN=lux.example.com", "LUX_PUBLIC_URL=https://lux.example.com"}
 	return []struct {
 		name, file string
 		env        []string
@@ -145,6 +146,22 @@ func badConfigs(dbURL string) []struct {
 			"database.url (LUX_DATABASE_URL) is not a valid PostgreSQL connection string"},
 		{"listen malformed", valid, []string{"LUX_LISTEN=7070"},
 			`listen (LUX_LISTEN) "7070": want host:port`},
+		{"listen port too large", valid, []string{"LUX_LISTEN=127.0.0.1:99999"},
+			`listen (LUX_LISTEN) "127.0.0.1:99999": want a port number 0-65535, not a service name`},
+		{"listen port name", valid, []string{"LUX_LISTEN=127.0.0.1:not-a-port"},
+			`listen (LUX_LISTEN) "127.0.0.1:not-a-port": want a port number 0-65535, not a service name`},
+		{"listen port 65536", valid, []string{"LUX_LISTEN=:65536"},
+			`listen (LUX_LISTEN) ":65536": want a port number 0-65535, not a service name`},
+		{"listen port negative", valid, []string{"LUX_LISTEN=:-1"},
+			`listen (LUX_LISTEN) ":-1": want a port number 0-65535, not a service name`},
+		{"preview.listen port too large", valid, append(previewEnv, "LUX_PREVIEW_LISTEN=127.0.0.1:99999"),
+			`configuration: preview.listen (LUX_PREVIEW_LISTEN) "127.0.0.1:99999": want a port number 0-65535, not a service name`},
+		{"preview.listen port name", valid, append(previewEnv, "LUX_PREVIEW_LISTEN=127.0.0.1:not-a-port"),
+			`configuration: preview.listen (LUX_PREVIEW_LISTEN) "127.0.0.1:not-a-port": want a port number 0-65535, not a service name`},
+		{"preview.listen port 65536", valid, append(previewEnv, "LUX_PREVIEW_LISTEN=:65536"),
+			`configuration: preview.listen (LUX_PREVIEW_LISTEN) ":65536": want a port number 0-65535, not a service name`},
+		{"preview.listen port negative", valid, append(previewEnv, "LUX_PREVIEW_LISTEN=:-1"),
+			`configuration: preview.listen (LUX_PREVIEW_LISTEN) ":-1": want a port number 0-65535, not a service name`},
 		{"unknown key", "lisen = \"x\"\n" + valid, nil,
 			"%PATH%: unknown keys: lisen"},
 		{"bad duration", valid + "[costs]\nevery = \"soon\"\n", nil,
@@ -173,6 +190,21 @@ func badConfigs(dbURL string) []struct {
 			"s3.access_key and s3.secret_key (LUX_S3_ACCESS_KEY, LUX_S3_SECRET_KEY): set both or neither"},
 		{"s3.secret_key alone", valid, []string{"LUX_S3_SECRET_KEY=s3-secret-value"},
 			"s3.access_key and s3.secret_key (LUX_S3_ACCESS_KEY, LUX_S3_SECRET_KEY): set both or neither"},
+	}
+}
+
+// An empty host, port 0 and a bracketed IPv6 host are valid listen addresses.
+func TestValidateAcceptsListenPorts(t *testing.T) {
+	pg := newFakePostgres(t)
+	path := writeConfig(t, 0o600, validConfig(pg.url()))
+	for _, addr := range []string{":0", ":8080", "[::1]:8080"} {
+		env := []string{"LUX_LISTEN=" + addr}
+		preview := []string{"LUX_PREVIEW_DOMAIN=lux.example.com", "LUX_PUBLIC_URL=https://lux.example.com", "LUX_PREVIEW_LISTEN=" + addr}
+		for _, env := range [][]string{env, preview} {
+			if r := runLuxd(t, env, "--config", path, "validate"); r.code != 0 {
+				t.Fatalf("%q: %+v", env, r)
+			}
+		}
 	}
 }
 

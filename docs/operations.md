@@ -90,7 +90,9 @@ nothing and writes nothing: the file and the environment are loaded
 the database URL must parse, `s3.endpoint` and `s3.public_endpoint` (when
 set) must be absolute http(s) URLs, `s3.region` must not be empty,
 `s3.access_key` and `s3.secret_key` must be set together or not at all,
-`listen` must be `host:port`, and the console,
+`listen` (and `preview.listen` when previews are on) must be `host:port`
+with a numeric port 0–65535 or none (service names are refused; the host
+is not resolved), and the console,
 preview, cost-plugin, defaults, history and cost settings must be
 consistent. It prints `ok: FILE` (or `ok: no file`) and exits 0; warnings
 (a readable file, a retired key) go to stderr, naming the key, never a
