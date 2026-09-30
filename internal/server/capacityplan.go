@@ -194,10 +194,11 @@ const expectationWindow = 8
 // which bounds probe launches (see planCapacity).
 func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*hostExpectation, time.Time, error) {
 	var latest time.Time
-	// id only breaks registered_at ties; the top-N sort never orders the
-	// pool's whole history.
+	// hosts_pool_registered serves the order, id only breaking ties. The
+	// tenant test is spelled out: IS NOT DISTINCT FROM is estimated at one
+	// row, and the planner then reads the pool's whole history instead.
 	rows, err := tx.Query(ctx, `SELECT capacity, labels, registered_at FROM hosts
-		WHERE pool_id = $1 AND tenant_id IS NOT DISTINCT FROM $2::text
+		WHERE pool_id = $1 AND (tenant_id = $2::text OR tenant_id IS NULL AND $2::text IS NULL)
 		  AND provision_requested_at IS NOT NULL AND registered_at IS NOT NULL
 		  AND launch_template = $3::jsonb ORDER BY registered_at DESC, id DESC LIMIT $4`,
 		pl.ID, pl.TenantID, pl.Template, expectationWindow)
@@ -251,7 +252,8 @@ func poolHostSizes(ctx context.Context, tx pgx.Tx, poolIDs []string) (map[string
 	rows, err := tx.Query(ctx, `SELECT p.id, h.capacity, coalesce(h.instance_type, ''),
 			EXISTS (SELECT 1 FROM hosts l WHERE l.pool_id = p.id AND l.state IN ('ready', 'draining'))
 		FROM pools p CROSS JOIN LATERAL (SELECT capacity, instance_type, registered_at, id FROM hosts
-			WHERE pool_id = p.id AND tenant_id IS NOT DISTINCT FROM p.tenant_id AND registered_at IS NOT NULL
+			WHERE pool_id = p.id AND (tenant_id = p.tenant_id OR tenant_id IS NULL AND p.tenant_id IS NULL)
+			  AND registered_at IS NOT NULL
 			  AND (p.provider = 'static' OR provision_requested_at IS NOT NULL AND launch_template = p.template)
 			ORDER BY registered_at DESC, id DESC LIMIT $2) h
 		WHERE p.id = ANY($1) ORDER BY p.id, h.registered_at DESC, h.id DESC`, poolIDs, expectationWindow)
