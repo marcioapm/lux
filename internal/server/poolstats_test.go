@@ -84,7 +84,8 @@ func poolFixture(t *testing.T, s *Server, ctx context.Context) map[string]string
 // from wrong: a tenant b host on the shared pool (tenant a must not count
 // it), two launch failures on p-a (one in range, one 3 days old) and one on
 // the shared platform pool whose error names an account, a retired pool, a
-// plugin-family cost line with no pool_id (it goes by ra's pool), 11 more
+// plugin-family cost line with no pool_id (it goes by ra's pool), a
+// tenant b launch failure on the shared pool (the newest), 11 more
 // Runs on the shared pool with cost, and a second queued Run.
 func poolFixtureMore(t *testing.T, s *Server, ctx context.Context) {
 	t.Helper()
@@ -95,7 +96,8 @@ func poolFixtureMore(t *testing.T, s *Server, ctx context.Context) {
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, launch_outcome, launch_finished_at, launch_error, terminated_at) VALUES
 		('fa-new', 'ta', 'fa-new', 'p-a', 'terminated', now() - interval '10 minutes', 'failed', now() - interval '10 minutes', 'InsufficientInstanceCapacity', now() - interval '10 minutes'),
 		('fa-old', 'ta', 'fa-old', 'p-a', 'terminated', now() - interval '3 days', 'failed', now() - interval '3 days', 'old error', now() - interval '3 days'),
-		('fp', NULL, 'fp', 'p-shared', 'terminated', now() - interval '5 minutes', 'failed', now() - interval '5 minutes', 'UnauthorizedOperation arn:aws:iam::123456789012:role/x', now() - interval '5 minutes')`)
+		('fp', NULL, 'fp', 'p-shared', 'terminated', now() - interval '5 minutes', 'failed', now() - interval '5 minutes', 'UnauthorizedOperation arn:aws:iam::123456789012:role/x', now() - interval '5 minutes'),
+		('fb', 'tb', 'fb', 'p-shared', 'terminated', now() - interval '1 minute', 'failed', now() - interval '1 minute', 'b error', now() - interval '1 minute')`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, pool_id, current_epoch, created_at, needs_host_since, name) VALUES
 		('rb3', 'tb', '{}', 'submitted', 'p-shared', 0, now() - interval '20 minutes', now() - interval '20 minutes', 'run-b3')`)
 	execSQL(t, s, ctx, `UPDATE runs SET needs_host_since = now() - interval '5 minutes' WHERE id = 'rb2'`)
@@ -160,7 +162,7 @@ func TestPoolFigures(t *testing.T) {
 	if c := money(a["p-shared"].Cost); c["USD"] != "0.12" || c["EUR"] != "0.66" {
 		t.Errorf("a's shared cost %v, want USD 0.12, EUR 0.66", c)
 	}
-	if op := stats("op", "?since=2h")["p-shared"]; op.Hosts["ready"] != 2 || op.CapacityCPUs != 24 || op.LaunchFailures != 1 {
+	if op := stats("op", "?since=2h")["p-shared"]; op.Hosts["ready"] != 2 || op.CapacityCPUs != 24 || op.LaunchFailures != 2 {
 		t.Errorf("operator's shared pool: %+v", op)
 	}
 
@@ -181,7 +183,7 @@ func TestPoolFigures(t *testing.T) {
 	}
 	var mo metricsBody
 	get("op", "/v1/pools/shared/metrics?owner=platform&since=1h", &mo)
-	if mo.Now.LastLaunchError != "UnauthorizedOperation arn:aws:iam::123456789012:role/x" || mo.Now.LaunchFailures != 1 {
+	if mo.Now.LastLaunchError != "b error" || mo.Now.LaunchFailures != 2 {
 		t.Errorf("operator's shared metrics: %+v", mo.Now)
 	}
 	mo = metricsBody{}
@@ -208,7 +210,7 @@ func TestPoolFigures(t *testing.T) {
 	}
 	for who, want := range map[string]map[string]string{
 		"a":  {"fa-new": "InsufficientInstanceCapacity", "fa-old": "old error", "fp": ""},
-		"op": {"fa-new": "InsufficientInstanceCapacity", "fa-old": "old error", "fp": "UnauthorizedOperation arn:aws:iam::123456789012:role/x"},
+		"op": {"fa-new": "InsufficientInstanceCapacity", "fa-old": "old error", "fb": "b error", "fp": "UnauthorizedOperation arn:aws:iam::123456789012:role/x"},
 	} {
 		for _, path := range []string{"/v1/hosts?state=launch_failed", "/v1/hosts?state=launch_failed&sort=name"} {
 			hl.Hosts = nil

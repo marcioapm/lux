@@ -193,9 +193,9 @@ func TestRollupAcrossKeys(t *testing.T) {
 	if err := s.rollupHistory(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// A sample of pb committed late, in pa's newest rolled-up minute: the
-	// table-wide bound is that minute's start, so it is still read.
-	insert("pb", m(h0, 2, 30), 40)
+	// A sample of pb committed late, at the start of pa's newest rolled-up
+	// minute: the table-wide bound is that instant, inclusive, so it is read.
+	insert("pb", m(h0, 2, 0), 40)
 	// Next hour pb has more minutes than pa.
 	insert("pa", m(h1, 0, 0), 1,
 		"pb", m(h1, 0, 0), 20, "pb", m(h1, 1, 0), 30)
