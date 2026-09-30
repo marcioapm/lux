@@ -599,6 +599,8 @@ def test_pools_page_makes_a_pool_the_default(page, lux):
         old_row = page.get_by_role("row").filter(has_text=old)
         new_row = page.get_by_role("row").filter(has_text=new)
         expect(old_row.get_by_text("Default", exact=True)).to_be_visible(timeout=15_000)
+        # Settings carries the provider (there is no Provider column).
+        expect(old_row.get_by_text("static hosts", exact=True)).to_have_count(1)
         assert old_row.get_by_role("button", name="Make default").count() == 0
         new_row.get_by_role("button", name="Make default").click()
         dialog = page.get_by_role("dialog")
@@ -713,8 +715,6 @@ def test_pool_events_pages_stay_put_as_new_events_arrive(page, env, tenant_facto
     name = f"busy-{a.tenant_id[-6:]}"
     a.run("pools", "set", name, "--provider", "static")
     _add_pool_events(env, a.tenant_id, name, 120, "old")
-    requests: list[str] = []
-    page.on("request", lambda r: f"/pools/{name}/events" in r.url and requests.append(r.url))
     page.sign_in(a.api_key, f"/pools/{name}?tab=events")
     card = page.locator(".card", has=page.get_by_role("heading", name="Events", exact=True))
     pager = card.get_by_role("navigation", name="Pages")
@@ -729,10 +729,11 @@ def test_pool_events_pages_stay_put_as_new_events_arrive(page, env, tenant_facto
     assert _event_tags(card) == page2
     _add_pool_events(env, a.tenant_id, name, 30, "new")
     # One poll (15s) re-reads page 2 in place, from its own cursor.
-    n = len(requests)
-    wait_until(lambda: (page.wait_for_timeout(250), len(requests) > n and "at=" in requests[-1])[1], 25, 0, "no refresh of page 2")
-    page.wait_for_timeout(500)
+    with page.expect_response(lambda r: f"/pools/{name}/events" in r.url and "at=" in r.url, timeout=25_000):
+        pass
     expect(pager).to_contain_text("Page 2 · events 51–100")
+    expect(card.locator("tbody tr").first).to_contain_text("old-70 epoch")
+    expect(card.locator("tbody tr").last).to_contain_text("old-21 epoch")
     assert _event_tags(card) == page2
     # Previous from page 3 reads the same page 2 back.
     pager.get_by_role("button", name="Next ›").click()
@@ -751,7 +752,6 @@ def test_pool_events_pages_stay_put_as_new_events_arrive(page, env, tenant_facto
                 before = _event_tags(card)
                 pager.get_by_role("button", name=button).click()
                 wait_until(lambda: _event_tags(card) != before, 15, 0.1, f"{button} did not change the page")
-                page.wait_for_timeout(200)
             pages.append(_event_tags(card))
         return pages
     # From the top (the new events lead it), Next to the end and Previous
