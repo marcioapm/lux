@@ -202,6 +202,20 @@ test("counted: a numbered page reads its offset, keeps its number, and refreshes
   }
 });
 
+test("counted: a numbered page that comes back empty (the list shrank) starts over at the top", async () => {
+  const m = await mount(() => "v");
+  try {
+    await act(async () => m.last().resolve({ rows: ["a", "b"], total: 10, offset: 0, page: "p1" }));
+    await act(async () => m.get().goto(5));
+    expect(m.last().req.offset).toBe(8);
+    await act(async () => m.last().resolve({ rows: [], total: 3, offset: 8 }));
+    expect(cursorOf(m.last().req)).toEqual(NONE);
+    expect(m.get().page).toBe(1);
+  } finally {
+    await m.unmount();
+  }
+});
+
 test("a page past 1 that comes back empty, or without a previous page, starts over at the top", async () => {
   const m = await mount(() => "v");
   try {
