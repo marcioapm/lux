@@ -762,24 +762,25 @@ func TestPlacementTime(t *testing.T) {
 }
 
 // A pool's events page by time (many sharing one instant), by type, and by
-// detail: type, then data, in byte order.
+// detail: type, then data, in byte order, on a database whose default
+// collation is linguistic (as glibc's en_US is; musl's compares bytes).
 func TestPoolEventsPagedSort(t *testing.T) {
-	s := testServer(t)
+	s := testServerWith(t, `TEMPLATE template0 LOCALE_PROVIDER icu ICU_LOCALE 'en-US'`)
 	ctx := context.Background()
 	key := operatorKey(t, s, ctx)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	// One type a prefix of another, the next character '_' against the
-	// separator; data that differs by number text and by letter case (a
-	// linguistic collation puts "a" before "B", bytes the reverse). Each
-	// data is as jsonb prints it.
-	types := []string{"pool.scale", "pool.scale_up", "pool.launch_failed"}
+	// Types where one prefixes others, the next character '_' or a space
+	// (the separator must sort below both); data that differs by number
+	// text and by letter case (a linguistic collation puts "a" before "B",
+	// bytes the reverse). Each data is as jsonb prints it.
+	types := []string{"pool.scale", "pool.scale_up", "pool.launch_failed", "pool.scale x"}
 	datas := []string{`{}`, `{"n": 1}`, `{"n": 10}`, `{"n": 2}`, `{"host": "B"}`, `{"host": "a"}`}
 	detailOf := map[int64]string{}
 	for i := range 31 {
-		typ, data := types[i%3], datas[(i/3)%len(datas)]
+		typ, data := types[i%4], datas[(i/4)%len(datas)]
 		id := queryOne[int64](t, s, `INSERT INTO pool_events (pool_id, type, data, created_at) VALUES ('pool1', $1, $2::jsonb, $3) RETURNING id`,
-			typ, data, at.Add(time.Duration(i%4)*time.Second))
+			typ, data, at.Add(time.Duration(i%3)*time.Second))
 		detailOf[id] = typ + "\x01" + data
 	}
 	type ev struct {

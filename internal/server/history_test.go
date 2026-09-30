@@ -20,6 +20,13 @@ import (
 // the store tests do; skipped otherwise.
 func testServer(t *testing.T) *Server {
 	t.Helper()
+	return testServerWith(t, "")
+}
+
+// testServerWith is testServer on a database created with opts (CREATE
+// DATABASE's clauses, e.g. a collation).
+func testServerWith(t *testing.T, opts string) *Server {
+	t.Helper()
 	admin := os.Getenv("LUX_TEST_PG")
 	if admin == "" {
 		t.Skip("LUX_TEST_PG not set")
@@ -30,7 +37,7 @@ func testServer(t *testing.T) *Server {
 		t.Skipf("postgres unreachable: %v", err)
 	}
 	name := "lux_unit_" + ids.New("")[1:]
-	if _, err := conn.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+	if _, err := conn.Exec(ctx, "CREATE DATABASE "+name+" "+opts); err != nil {
 		t.Fatal(err)
 	}
 	cfg := conn.Config()
