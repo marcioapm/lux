@@ -365,6 +365,73 @@ func TestPoolCostTopRunsTiesAndCut(t *testing.T) {
 	}
 }
 
+// GET /v1/hosts/summary: the live hosts each caller's unfiltered host list
+// shows, and the capacity and allocation of its ready and draining ones,
+// exactly, and equal to the sums over that list's rows. A tenant counts
+// platform hosts of shared pools but only its own placements on them.
+func TestHostSummary(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	keys := poolFixture(t, s, ctx)
+	poolFixtureMore(t, s, ctx)
+	// A draining host of a's with one of a's Runs; a provisioning platform
+	// host (not counted in capacity or allocation, though a placement names
+	// it); an ended placement on hp (not live).
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, capacity) VALUES
+		('hd', 'ta', 'hd', 'p-a', 'draining', '{"cpus": 4, "memory": 400}'),
+		('hprov', NULL, 'hprov', 'p-shared', 'provisioning', '{"cpus": 32, "memory": 3200}')`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources) VALUES
+		('pd', 'ta', 'ra-own', 'hd', 2, 'running', '{"cpus": 1, "memory": 50}'),
+		('pprov', 'ta', 'ra', 'hprov', 2, 'assigned', '{"cpus": 5, "memory": 500}'),
+		('pend', 'tb', 'rb', 'hp', 3, 'exited', '{"cpus": 7, "memory": 700}')`)
+	type sum struct {
+		Live                int
+		Capacity, Allocated HostResources
+	}
+	for who, want := range map[string]sum{
+		"a":           {4, HostResources{14, 1500}, HostResources{3, 60}},
+		"op?tenant=a": {4, HostResources{14, 1500}, HostResources{3, 60}},
+		"b":           {4, HostResources{28, 2200}, HostResources{5, 30}},
+		"op":          {6, HostResources{34, 2700}, HostResources{8, 90}},
+	} {
+		key, narrow, _ := strings.Cut(who, "?")
+		q := ""
+		if narrow != "" {
+			q = "?" + narrow
+		}
+		var got sum
+		if code := getJSON(t, s, keys[key], "/v1/hosts/summary"+q, &got); code != http.StatusOK {
+			t.Fatalf("%s: GET /v1/hosts/summary: %d", who, code)
+		}
+		if got != want {
+			t.Errorf("%s: summary %+v, want %+v", who, got, want)
+		}
+		var list struct{ Hosts []Host }
+		if code := getJSON(t, s, keys[key], "/v1/hosts"+q, &list); code != http.StatusOK {
+			t.Fatalf("%s: GET /v1/hosts: %d", who, code)
+		}
+		var rows sum
+		for _, h := range list.Hosts {
+			rows.Live++
+			if h.State == "ready" || h.State == "draining" {
+				rows.Capacity.CPUs += h.Capacity.CPUs
+				rows.Capacity.Memory += int64(h.Capacity.Memory)
+				rows.Allocated.CPUs += h.Allocated.CPUs
+				rows.Allocated.Memory += int64(h.Allocated.Memory)
+			}
+		}
+		if rows != got {
+			t.Errorf("%s: summary %+v, the list's rows sum to %+v", who, got, rows)
+		}
+	}
+	// A host named summary is still read by its id.
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state) VALUES ('hs', 'ta', 'summary', 'p-a', 'ready')`)
+	var h Host
+	if code := getJSON(t, s, keys["a"], "/v1/hosts/hs", &h); code != http.StatusOK || h.Name != "summary" {
+		t.Errorf("GET /v1/hosts/hs: %d %q", code, h.Name)
+	}
+}
+
 func money(ms []MoneyAmount) map[string]string {
 	out := map[string]string{}
 	for _, m := range ms {

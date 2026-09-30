@@ -1,6 +1,6 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
+import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, HostSummary, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
@@ -52,6 +52,7 @@ export const api = {
       signal,
     }).then((r) => toPage(r.hosts, r)),
   host: (id: string, signal?: Sig) => request<Host>(`/hosts/${enc(id)}`, { signal }),
+  hostSummary: (tenant: Scope, signal?: Sig) => request<HostSummary>("/hosts/summary", { tenant, signal }),
   hostHistory: (id: string, since: string, signal?: Sig) => request<History>(`/hosts/${enc(id)}/history`, { query: { since }, signal }),
   hostCost: (id: string, since: string, signal?: Sig) => request<HostCost>(`/hosts/${enc(id)}/cost`, { query: { since }, signal }),
   drainHost: (id: string, forceEvict = false) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST", body: { forceEvict } }),

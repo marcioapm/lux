@@ -227,6 +227,10 @@ def test_hosts_live_runs_shows_the_count_and_the_cap_only_near_it(page, lux, run
                                        if h["name"] == hosts[0].name and h["state"] == "ready"), None),
                          30, 1, "the host never registered")
     page.sign_in(lux.api_key, "/hosts")
+    # The header's live summary, from GET /v1/hosts/summary (the same figures).
+    summary = lux.api("/v1/hosts/summary").json()
+    assert summary["live"] >= 1 and summary["capacity"]["cpus"] > 0, summary
+    expect(page.get_by_text(re.compile(rf"\b{summary['live']} live · ready and draining: .+ CPU, .+ memory allocated"))).to_be_visible(timeout=15_000)
     row = page.get_by_role("row").filter(has=page.locator(f'a[href^="/hosts/{host_id}"]'))
     link = row.locator(f'a[href^="/runs?host={host_id}"]')
     cell = row.locator("td", has=page.locator(f'a[href^="/runs?host={host_id}"]'))
