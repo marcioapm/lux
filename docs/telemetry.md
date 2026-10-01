@@ -139,8 +139,8 @@ first); for Runs and events `limit` alone does not, and keeps its unpaged
 meaning (Runs: 1 to 1000, out of range ignored; paged: 1 to 200, out of
 range a 400). The unpaged-only parameters (`before`, events' `after`), and
 `offset` with a cursor, are 400s in a paged request. Events sort by `time`,
-`id`, `type`, or `detail`: type, then the event's data as JSON text (not
-the summary a console shows).
+`id` or `type`, each from an index, so a page costs the same however many
+events there are; there is no sort by an event's data.
 
 **Host totals.** `GET /v1/hosts/summary` is the unfiltered host list's
 totals in one read: the live hosts, and the capacity of the ready and

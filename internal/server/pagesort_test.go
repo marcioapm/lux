@@ -873,27 +873,21 @@ func TestPlacementTime(t *testing.T) {
 	}
 }
 
-// A pool's events page by time (many sharing one instant), by type, and by
-// detail: type, then data, in byte order, on a database whose default
-// collation is linguistic (as glibc's en_US is; musl's compares bytes).
+// A pool's events page by time (many sharing one instant) and by type, on a
+// database whose default collation is linguistic (as glibc's en_US is;
+// musl's compares bytes).
 func TestPoolEventsPagedSort(t *testing.T) {
 	s := testServerWith(t, `TEMPLATE template0 LOCALE_PROVIDER icu ICU_LOCALE 'en-US'`)
 	ctx := context.Background()
 	key := operatorKey(t, s, ctx)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	// Types where one prefixes others, the next character '_' or a space
-	// (the separator must sort below both); data that differs by number
-	// text and by letter case (a linguistic collation puts "a" before "B",
-	// bytes the reverse). Each data is as jsonb prints it.
+	// Types where one prefixes others, the next character '_' or a space,
+	// which a linguistic collation and bytes order differently.
 	types := []string{"pool.scale", "pool.scale_up", "pool.launch_failed", "pool.scale x"}
-	datas := []string{`{}`, `{"n": 1}`, `{"n": 10}`, `{"n": 2}`, `{"host": "B"}`, `{"host": "a"}`}
-	detailOf := map[int64]string{}
 	for i := range 31 {
-		typ, data := types[i%4], datas[(i/4)%len(datas)]
-		id := queryOne[int64](t, s, `INSERT INTO pool_events (pool_id, type, data, created_at) VALUES ('pool1', $1, $2::jsonb, $3) RETURNING id`,
-			typ, data, at.Add(time.Duration(i%3)*time.Second))
-		detailOf[id] = typ + "\x01" + data
+		execSQL(t, s, ctx, `INSERT INTO pool_events (pool_id, type, data, created_at) VALUES ('pool1', $1, '{}', $2)`,
+			types[i%4], at.Add(time.Duration(i%3)*time.Second))
 	}
 	type ev struct {
 		ID   int64
@@ -927,16 +921,6 @@ func TestPoolEventsPagedSort(t *testing.T) {
 		want = sorted(pad(ids), func(id string) *string { v := byID[fmt.Sprint(mustAtoi(id))].Type; return &v }, dir)
 		if !slices.Equal(pad(got), want) {
 			t.Errorf("sort=type dir=%s:\n got %v\nwant %v", dir, pad(got), want)
-		}
-		// detail: the key built here, compared as Go strings (bytes).
-		detail := map[string]string{}
-		for _, id := range ids {
-			detail[fmt.Sprintf("%06s", id)] = detailOf[int64(mustAtoi(id))]
-		}
-		got = walkPages(t, s, key, "/v1/pools/burst/events?owner=platform&limit=4&sort=detail&dir="+dir, "events", nil)
-		want = sorted(pad(ids), func(id string) *string { v := detail[id]; return &v }, dir)
-		if !slices.Equal(pad(got), want) {
-			t.Errorf("sort=detail dir=%s:\n got %v\nwant %v", dir, pad(got), want)
 		}
 	}
 }
@@ -1080,6 +1064,7 @@ func TestPagingRejects(t *testing.T) {
 		{"/v1/pools/burst/events?owner=platform&next=" + cur(pageCursor{Sort: "time", Dir: "desc", V: v("x"), ID: "1"}), "next: not a cursor"},
 		{"/v1/pools/burst/events?owner=platform&next=" + cur(pageCursor{Sort: "time", Dir: "desc", V: v("2026-09-01 12:00:00+00"), ID: "one"}), "next: not a cursor"},
 		{"/v1/pools/burst/events?owner=platform&sort=time&before=5", "before and after (event ids) do not go with sort and cursors"},
+		{"/v1/pools/burst/events?owner=platform&sort=detail", "sort: one of id, time, type"},
 	}
 	for _, c := range cases {
 		if code, msg := getError(t, s, key, c.path); code != http.StatusBadRequest || msg != c.want {

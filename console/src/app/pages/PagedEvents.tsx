@@ -14,8 +14,6 @@ const eventData = (e: LifecycleEvent) => <JsonBlock value={e.data} />;
  */
 export function PagedEvents({ prefix, view, fetch, interval, subtitle }: { prefix: string; view: string; fetch: (req: PagedRequest, signal: AbortSignal) => Promise<Page<LifecycleEvent>>; interval: number; subtitle: string }) {
   const q = usePaged(prefix, view, fetch, { defaultSort: { key: "time", dir: "desc" }, defaultSize: 50, interval });
-  // The server's key for the Details column is detail.
-  const shown = q.sort.key === "detail" ? { key: "summary", dir: q.sort.dir } : q.sort;
   return (
     <Card flush title="Events" subtitle={`${subtitle} · click a row to expand`}>
       <ErrorStrip error={q.error} />
@@ -25,11 +23,11 @@ export function PagedEvents({ prefix, view, fetch, interval, subtitle }: { prefi
         detail={eventData}
         loading={q.loading}
         empty="Nothing has happened yet."
-        sort={shown}
-        onSortChange={(s) => q.setSort(s.key === "summary" ? { key: "detail", dir: s.dir } : s)}
+        sort={q.sort}
+        onSortChange={q.setSort}
         footer={
           q.rows.length > 0 || q.page > 1 ? (
-            <Pagination mode="cursor" page={q.page} count={q.rows.length} pageSize={q.size} pageSizes={[50, 100, 200]} onPageSize={q.setSize} hasPrev={q.hasPrev} hasNext={q.hasNext} onFirst={q.first} onPrev={q.prev} onNext={q.next} noun="events" sortLabel={eventSortInWords(shown)} />
+            <Pagination mode="cursor" page={q.page} count={q.rows.length} pageSize={q.size} pageSizes={[50, 100, 200]} onPageSize={q.setSize} hasPrev={q.hasPrev} hasNext={q.hasNext} onFirst={q.first} onPrev={q.prev} onNext={q.next} noun="events" sortLabel={eventSortInWords(q.sort)} />
           ) : undefined
         }
       />
