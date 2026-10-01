@@ -326,8 +326,9 @@ func (s *Server) loadTenantServer(ctx context.Context, tenantID, id string) (Ten
 // ---- attach / detach ----------------------------------------------------------
 
 // attachTx attaches server id (unattached, tenant p's) to runID, locked
-// (state, epoch): started now if the Run runs and it has a command, else
-// at the Run's next placement.
+// (state, epoch): started now if the Run has a placement on a host
+// (scheduled, starting or running: the shim starts it once init is done)
+// and it has a command, else at the Run's next placement.
 func attachTx(ctx context.Context, tx pgx.Tx, p Principal, id, runID, state string, epoch int) error {
 	v, err := lockServer(ctx, tx, p.TenantID, id)
 	if err != nil {
@@ -357,7 +358,8 @@ func attachTx(ctx context.Context, tx pgx.Tx, p Principal, id, runID, state stri
 	if err := serverEvent(ctx, tx, p.TenantID, &runID, id, 0, "server.attached", v.ref(), map[string]any{"by": p.Actor(), "runState": state}); err != nil {
 		return err
 	}
-	if state == StateRunning && len(v.Command) > 0 && !v.down() {
+	placed := state == StateScheduled || state == StateStarting || state == StateRunning
+	if placed && len(v.Command) > 0 && !v.down() {
 		return setServerState(ctx, tx, stateChange{tenantID: p.TenantID, runID: runID, epoch: epoch, state: ServerStarting}, `rs.id = $6`, id)
 	}
 	return nil
