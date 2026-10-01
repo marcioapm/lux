@@ -103,6 +103,8 @@ func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
 	}
 	p.mu.Unlock()
 	done := map[string]any{"requestId": req.RequestID, "changed": false}
+	// Reported with ctx, never a context cancelled meanwhile: a write
+	// cancelled half-way closes the connection to luxd.
 	defer func() { _ = p.reportRetrying(ctx, proto.RunEvent{Type: proto.EvSyncDone, Data: done}) }()
 	if !running || user == "" {
 		for _, r := range req.Repos {
@@ -114,9 +116,9 @@ func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
 	if args == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	out, err := p.r.pm.Run(ctx, "exec", "--user", user, "--workdir", "/", containerName(p.runID),
+	out, err := p.r.pm.Run(execCtx, "exec", "--user", user, "--workdir", "/", containerName(p.runID),
 		proto.ShimBinary, "sync", string(proto.Marshal(args)))
 	var results []proto.SyncResult
 	if err == nil {

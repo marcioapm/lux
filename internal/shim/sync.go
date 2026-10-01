@@ -58,7 +58,9 @@ func SyncRepos(ctx context.Context, a proto.SyncArgs) []proto.SyncResult {
 
 // gitIn runs git in a checkout: no hooks, no prompts.
 func gitIn(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.hooksPath=/dev/null", "-c", "advice.detachedHead=false"}, args...)...)
+	// An identity for the stash commit of tracked changes (refs/lux/pre-sync).
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.hooksPath=/dev/null", "-c", "advice.detachedHead=false",
+		"-c", "user.name=lux", "-c", "user.email=lux@lux.invalid"}, args...)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	b, err := cmd.CombinedOutput()
@@ -152,11 +154,12 @@ func (s *Shim) syncBeforeInit(env []string) {
 	exited, err := s.startTracked(cmd.Start, &cmd.Process)
 	var results []proto.SyncResult
 	if err == nil {
-		if ws := <-exited; ws.ExitStatus() != 0 {
+		ws := <-exited
+		// The reaper reaped it; Wait only waits for its output to be copied.
+		_ = cmd.Wait()
+		if ws.ExitStatus() != 0 {
 			err = fmt.Errorf("exit %d: %s", exitCode(ws), strings.TrimSpace(errOut.String()))
 		} else {
-			// Its pipes are drained once both copiers are done.
-			_ = cmd.Wait()
 			err = json.Unmarshal(out.Bytes(), &results)
 		}
 	}
