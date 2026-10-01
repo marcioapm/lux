@@ -124,9 +124,24 @@ type agent struct {
 	shell func(call shellCall)
 }
 
-// prompt is a user message and the client's id for it.
+// prompt is a user message and the client's id for it; images describes
+// its images (textBlocks.images).
 type prompt struct {
 	text, id string
+	images   []string
+}
+
+// promptOf is a message's content as a prompt.
+func promptOf(content textBlocks, id string) prompt {
+	return prompt{text: content.String(), id: id, images: content.images()}
+}
+
+// see replies with each image the prompt carried, before its script runs:
+// what the agent got, for tests to assert.
+func (a *agent) see(p prompt) {
+	for _, im := range p.images {
+		a.say(im)
+	}
 }
 
 func newAgent() *agent {
@@ -262,6 +277,7 @@ func (a *agent) takeSteers() []prompt {
 func (a *agent) runTurn(first prompt, c chan struct{}) (cancelled bool) {
 	a.read(first)
 	a.record("user", first.text)
+	a.see(first)
 	cancelled = a.runScript(first.text, c)
 	for !cancelled {
 		a.mu.Lock()
@@ -298,6 +314,7 @@ func (a *agent) runSteers(c chan struct{}) bool {
 			a.read(p)
 		}
 		a.record("user", p.text)
+		a.see(p)
 		if a.runScript(p.text, c) {
 			return true
 		}
@@ -463,15 +480,16 @@ func scanner() *bufio.Scanner {
 	return sc
 }
 
-// textBlocks is the [{"type":"text","text":…}] list all three protocols use.
-type textBlocks []struct {
-	Text string `json:"text"`
-}
+// textBlocks is the content list all three protocols use: text blocks,
+// and image blocks each in its protocol's shape (see images.go).
+type textBlocks []contentBlock
 
 func (t textBlocks) String() string {
 	var b strings.Builder
 	for _, x := range t {
-		b.WriteString(x.Text)
+		if x.Type == "" || x.Type == "text" {
+			b.WriteString(x.Text)
+		}
 	}
 	return b.String()
 }
@@ -626,7 +644,8 @@ func acp() {
 		switch m.Method {
 		case "initialize":
 			reply(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{"loadSession": true,
-				"mcpCapabilities": map[string]bool{"http": !slices.Contains(os.Args, "--no-mcp-http"), "sse": false}},
+				"mcpCapabilities":    map[string]bool{"http": !slices.Contains(os.Args, "--no-mcp-http"), "sse": false},
+				"promptCapabilities": map[string]bool{"image": !slices.Contains(os.Args, "--no-images"), "audio": false, "embeddedContext": false}},
 				"agentInfo": map[string]string{"name": "lux-fake", "version": "1"}})
 		case "session/new":
 			a.cwd = p.Cwd
@@ -649,7 +668,7 @@ func acp() {
 			}
 			reply(m.ID, map[string]any{})
 		case "session/prompt":
-			pr := prompt{text: p.Prompt.String(), id: oc.messageID()}
+			pr := promptOf(p.Prompt, oc.messageID())
 			oc.stored(pr)
 			if a.join(pr, func() { waiters = append(waiters, m.ID) }) {
 				continue
@@ -815,7 +834,7 @@ func streamJSON() {
 		}
 		switch m.Type {
 		case "user":
-			p := prompt{text: m.Message.Content.String(), id: m.UUID}
+			p := promptOf(m.Message.Content, m.UUID)
 			lifecycle(p, "queued")
 			if !a.addSteer(p) {
 				turns <- p
@@ -984,7 +1003,7 @@ func appServer() {
 						"modelContextWindow": 200000}}})
 				a.send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": a.session,
 					"turn": map[string]any{"id": id, "status": status}}})
-			}(prompt{p.Input.String(), p.ClientUserMessageID})
+			}(promptOf(p.Input, p.ClientUserMessageID))
 		case "turn/steer":
 			// The real server's errors (codex 0.155.1).
 			if current == "" {
@@ -995,7 +1014,7 @@ func appServer() {
 				fail(m.ID, fmt.Errorf("expected active turn id `%s` but found `%s`", p.ExpectedTurnID, current))
 				continue
 			}
-			if !a.addSteer(prompt{p.Input.String(), p.ClientUserMessageID}) {
+			if !a.addSteer(promptOf(p.Input, p.ClientUserMessageID)) {
 				fail(m.ID, errors.New("no active turn to steer"))
 				continue
 			}
