@@ -902,3 +902,51 @@ func TestOwnerServerEndsStoppedWithItsRun(t *testing.T) {
 		})
 	}
 }
+
+// An operator acts on any tenant's server by its id (the server names its
+// tenant), signs in to its preview with a ticket it mints, and must name a
+// tenant to create one.
+func TestOperatorServers(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	op := operatorKey(t, s, ctx)
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "hostname": "web.op.lux.example.com"})
+	if w := apiCall(t, s, op, http.MethodPost, "/v1/servers", map[string]any{"name": "x", "port": 1}); w.Code != http.StatusBadRequest ||
+		!strings.Contains(w.Body.String(), `"tenant_required"`) {
+		t.Fatalf("create without a tenant: %d %s", w.Code, w.Body)
+	}
+	if w := apiCall(t, s, op, http.MethodPost, "/v1/servers?tenant=t2", map[string]any{"name": "x", "port": 1}); w.Code != http.StatusCreated ||
+		!strings.Contains(w.Body.String(), `"name":"x"`) {
+		t.Fatalf("create for t2: %d %s", w.Code, w.Body)
+	}
+	if got := getSrv(t, s, op, sv.ID); got.ID != sv.ID {
+		t.Fatalf("get: %+v", got)
+	}
+	if w := apiCall(t, s, op, http.MethodPatch, "/v1/servers/"+sv.ID, map[string]any{"labels": map[string]string{"by": "op"}}); w.Code != http.StatusOK {
+		t.Fatalf("patch: %d %s", w.Code, w.Body)
+	}
+	if w := apiCall(t, s, op, http.MethodPost, "/v1/servers/"+sv.ID+"/attach", map[string]any{"runId": r1}); w.Code != http.StatusOK {
+		t.Fatalf("attach: %d %s", w.Code, w.Body)
+	}
+	w := apiCall(t, s, op, http.MethodPost, "/v1/servers/"+sv.ID+"/tickets", nil)
+	var tk struct{ Ticket string }
+	_ = json.Unmarshal(w.Body.Bytes(), &tk)
+	if w.Code != http.StatusCreated || tk.Ticket == "" {
+		t.Fatalf("ticket: %d %s", w.Code, w.Body)
+	}
+	w = previewGet(s, "web.op.lux.example.com", "/.lux/auth?ticket="+tk.Ticket+"&to=/x", "")
+	var cookie string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == previewCookie {
+			cookie = c.Value
+		}
+	}
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "/x" || cookie == "" {
+		t.Fatalf("sign in: %d %v", w.Code, w.Header())
+	}
+	if u, ok := s.preview.verify(cookie, time.Now()); !ok || u.ServerID != sv.ID || u.TenantID != "t1" {
+		t.Fatalf("cookie: %+v %v", u, ok)
+	}
+	if w := apiCall(t, s, op, http.MethodDelete, "/v1/servers/"+sv.ID, nil); w.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", w.Code, w.Body)
+	}
+}

@@ -881,8 +881,8 @@ func (s *Server) serverRoutes(api huma.API) {
 			"detach it, and it outlives them (lifetime owner). With wake request, a signed-in request while no running Run serves it " +
 			"emits server.wake_requested on GET /v1/events for its owner, once per wake; lux never starts a Run itself.",
 		DefaultStatus: http.StatusCreated,
-		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
-	}, "run", s.createServer)
+		Errors:        []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "run", forTenant(s.createServer))
 	register(s, api, huma.Operation{
 		OperationID: "listTenantServers", Method: http.MethodGet, Path: "/v1/servers", Tags: []string{"servers"},
 		Summary: "List the tenant's servers", Description: "Newest first, with their derived state.",
