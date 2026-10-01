@@ -232,7 +232,8 @@ type SyncRepo struct {
 // Status: up-to-date, fast-forward, reset (tracked files changed or the
 // histories diverged: tracked files are the ref's now, untracked and
 // ignored ones kept, what was there saved as refs/lux/pre-sync), failed
-// (the checkout as it was). MissingBase: failed because the checkout
+// (the checkout as it was, or where git stopped in a reset, with
+// refs/lux/pre-sync holding what was there). MissingBase: failed because the checkout
 // lacks the bundle's Base (the runner retries once with the whole
 // history); FullBundle: this result is that retry's.
 type SyncResult struct {

@@ -1845,7 +1845,7 @@ components:
             - array
             - "null"
         sync:
-          description: "Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; a failed one leaves its checkout as it was and the Run goes on."
+          description: "Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."
           items:
             $ref: "#/components/schemas/SyncRef"
           type:

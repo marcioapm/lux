@@ -1322,7 +1322,7 @@ type resumeRequest struct {
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost)."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
 	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over)."`
-	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; a failed one leaves its checkout as it was and the Run goes on."`
+	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
 }
 
 type resumeGit struct {
