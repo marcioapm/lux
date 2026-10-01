@@ -66,6 +66,16 @@ func TestSync(t *testing.T) {
 	if res := sync("main"); res.Status != "up-to-date" || res.From != base || res.To != base {
 		t.Fatalf("up to date: %+v", res)
 	}
+	// A tracked file changed, at the commit already: reset, the change
+	// saved in refs/lux/pre-sync.
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("edit\n"), 0o644)
+	if res := sync("main"); res.Status != "reset" || !res.Dirty || res.Diverged || res.From != base || res.To != base ||
+		res.Saved != "refs/lux/pre-sync" {
+		t.Fatalf("dirty at the commit: %+v", res)
+	}
+	if saved := gitRun(t, dir, "show", "refs/lux/pre-sync:a.txt"); saved != "edit" || read("a.txt") != "one\n" {
+		t.Fatalf("dirty at the commit: saved %q, now %q", saved, read("a.txt"))
+	}
 	// A new commit, a clean checkout with untracked and ignored files:
 	// fast-forward, the files kept.
 	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("data/\n"), 0o644)
