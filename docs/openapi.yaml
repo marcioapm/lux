@@ -1064,6 +1064,9 @@ components:
         pool:
           description: "The pool to run in. Empty: the tenant's default pool, else the platform's, else the pool named default; resolved at submit and stored."
           type: string
+        poolId:
+          description: "The pool to run in, by its id (pool_…), which a rename keeps: the tenant's pool with that id, else the platform's. An id no such pool has is refused at submit (422 unknown_pool). Not with pool; at submit, pool is set to that pool's name."
+          type: string
         prefers:
           additionalProperties:
             type: string
