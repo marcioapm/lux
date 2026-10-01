@@ -76,6 +76,8 @@ type placement struct {
 	srvSet *proto.Servers
 	// diffing: a live diff is under way (diff.go).
 	diffing bool
+	// sync: the checkouts the shim moves before init (sync.go).
+	sync *proto.SyncArgs
 }
 
 func newPlacement(r *Runner, a proto.Assign) *placement {
@@ -315,6 +317,8 @@ func (p *placement) run(ctx context.Context) {
 		fail("git", err)
 		return
 	}
+	// A resume's sync: fetched now, applied by the shim before init.
+	p.sync = p.prepareSync(startCtx, sp, a.Sync, "")
 
 	if p.pendingStop() != "" {
 		fail("stop", nil)
@@ -787,6 +791,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec) error 
 	if sp.Init != nil {
 		cfg.Init = sp.Init.Script
 	}
+	cfg.Sync = p.sync
 	if b := sp.Workload.BeforeStop; b != nil {
 		cfg.BeforeStop = b.Command
 		cfg.BeforeStopTimeoutSec = b.Timeout.Seconds()
@@ -1011,6 +1016,8 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 			ae = &proto.AdapterEvent{Activity: d.Activity}
 		case proto.EvInputAck:
 			ae = &proto.AdapterEvent{InputAck: d.RequestID, InputError: d.Error, InputText: d.Text, InputTruncated: d.Truncated}
+		case proto.EvSync:
+			p.onSyncRecord(ctx, ev.Data)
 		case proto.EvWorkload:
 			if d.Phase == "start" {
 				p.mark("workloadStarted")

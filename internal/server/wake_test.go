@@ -515,3 +515,79 @@ func TestFeedServerEvents(t *testing.T) {
 }
 
 func itoa(n int64) string { b, _ := json.Marshal(n); return string(b) }
+
+// A resume's sync is validated, kept for the next placement, sent in its
+// assignment (servers with afterSync run it first); a running Run's sync is
+// sent to its placement, and sync.done with a moved checkout restarts the
+// servers with afterSync only.
+func TestSyncRequests(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"workload": {"workdir": "/w"}, "git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}]}}'`)
+	hot := createSrv(t, s, key, map[string]any{"name": "hot", "port": 3000, "command": []string{"serve"}, "runId": r1})
+	cold := createSrv(t, s, key, map[string]any{"name": "cold", "port": 3001, "command": []string{"serve"}, "afterSync": []string{"npm", "ci"}, "runId": r1})
+	// A running Run: bad requests refused; a good one sent to its host.
+	for _, c := range []struct {
+		body map[string]any
+		want int
+	}{
+		{map[string]any{"sync": []map[string]string{{"repo": "nope", "ref": "main"}}}, http.StatusUnprocessableEntity},
+		{map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "-x"}}}, http.StatusUnprocessableEntity},
+		{map[string]any{"sync": []map[string]string{}}, http.StatusUnprocessableEntity},
+		{map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "feat/x"}}, "requestId": "s1"}, http.StatusAccepted},
+	} {
+		if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", c.body); w.Code != c.want {
+			t.Fatalf("sync %v: %d %s", c.body, w.Code, w.Body)
+		}
+	}
+	var msg proto.Sync
+	systemScan(t, s, `SELECT payload FROM host_messages WHERE type = 'sync' ORDER BY id DESC LIMIT 1`, nil, &msg)
+	if msg.RequestID != "s1" || len(msg.Repos) != 1 || msg.Repos[0].Ref != "feat/x" {
+		t.Fatalf("sync message: %+v", msg)
+	}
+	gens := func() (int64, int64) { return serverGen(t, s, ctx, "hot"), serverGen(t, s, ctx, "cold") }
+	hot0, cold0 := gens()
+	report := func(changed bool) {
+		f := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgRunEvent, ID: 9, RunID: r1, Epoch: 1,
+			Data: proto.Marshal(proto.RunEvent{Type: proto.EvSyncDone, Data: map[string]any{"requestId": "s1", "changed": changed}})})
+		if f.Type != proto.MsgAck {
+			t.Fatalf("sync.done: %s", f.Data)
+		}
+	}
+	report(false)
+	if h, c := gens(); h != hot0 || c != cold0 {
+		t.Fatal("restarted though nothing moved")
+	}
+	report(true)
+	h1, c1 := gens()
+	if h1 != hot0 || c1 == cold0 {
+		t.Fatalf("after a moved checkout: hot %d→%d, cold %d→%d", hot0, h1, cold0, c1)
+	}
+	sets := pendingServers(t, s, ctx)
+	for _, sv := range sets[len(sets)-1].Servers {
+		if sv.Name == "cold" && (sv.Command[0] != "/bin/sh" || !strings.Contains(sv.Command[2], "'npm' 'ci' && exec 'serve'")) {
+			t.Fatalf("cold's command: %v", sv.Command)
+		}
+		if sv.Name == "hot" && sv.Command[0] != "serve" {
+			t.Fatalf("hot's command: %v", sv.Command)
+		}
+	}
+	_ = hot
+	_ = cold
+	// Not running: 409; resume with sync instead.
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited'`)
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main"}}}); w.Code != http.StatusConflict {
+		t.Fatalf("sync stopped: %d", w.Code)
+	}
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/resume", map[string]any{"sync": []map[string]string{{"repo": "zzz", "ref": "main"}}}); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("resume with a bad sync: %d %s", w.Code, w.Body)
+	}
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/resume", map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "abc123"}}}); w.Code != http.StatusAccepted {
+		t.Fatalf("resume with sync: %d %s", w.Code, w.Body)
+	}
+	var pending []proto.SyncRef
+	systemScan(t, s, `SELECT pending_sync FROM runs WHERE id = $1`, []any{r1}, &pending)
+	if len(pending) != 1 || pending[0].Ref != "abc123" {
+		t.Fatalf("pending sync: %+v", pending)
+	}
+}

@@ -138,6 +138,14 @@ func (s *Server) routes(api huma.API) {
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.pushRun)
 	register(s, api, huma.Operation{
+		OperationID: "syncRun", Method: http.MethodPost, Path: "/v1/runs/{id}/sync", Tags: []string{"runs"},
+		Summary: "Move a running Run's checkouts to new commits",
+		Description: "The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume): " +
+			"each repository is a git.sync event, then sync.done. Servers with afterSync run it and restart once a checkout moved; the others keep running.",
+		DefaultStatus: http.StatusAccepted,
+		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "run", s.syncRun)
+	register(s, api, huma.Operation{
 		OperationID: "runDiff", Method: http.MethodGet, Path: "/v1/runs/{id}/diff", Tags: []string{"runs"},
 		Summary: "What a running Run changed in its repositories",
 		Description: "Per repository, from its base to its working tree: committed, staged, unstaged and untracked (not ignored) changes, " +
@@ -1303,6 +1311,7 @@ type resumeRequest struct {
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost)."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
 	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over)."`
+	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; a failed one leaves its checkout as it was and the Run goes on."`
 }
 
 type resumeGit struct {
@@ -1437,6 +1446,14 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			id, newRefs, placeOn); err != nil {
 			return err
 		}
+		if err := checkSync(sp, req.Sync); err != nil {
+			return err
+		}
+		if len(req.Sync) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET pending_sync = $2 WHERE id = $1`, id, req.Sync); err != nil {
+				return err
+			}
+		}
 		if r := req.Resources; r != nil && r.Disk != 0 {
 			if r.Disk < 0 {
 				return errf(http.StatusUnprocessableEntity, "invalid_request", "resources.disk must not be negative")
@@ -1477,8 +1494,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		for _, r := range adding {
 			names = append(names, r.Name)
 		}
-		if err := addEvent(ctx, tx, p.TenantID, id, 0, "resume.requested", map[string]any{
-			"requestId": req.RequestID, "by": p.Actor(), "addedRepositories": names}); err != nil {
+		ev := map[string]any{"requestId": req.RequestID, "by": p.Actor(), "addedRepositories": names}
+		if len(req.Sync) > 0 {
+			ev["sync"] = req.Sync
+		}
+		if err := addEvent(ctx, tx, p.TenantID, id, 0, "resume.requested", ev); err != nil {
 			return err
 		}
 		return s.requestResume(ctx, tx, p.TenantID, id, in, why)
@@ -1585,6 +1605,71 @@ func (s *Server) pushRun(ctx context.Context, in *pushRunInput) (*requestIDOutpu
 		return nil, err
 	}
 	if err := s.systemEnqueue(ctx, hostID, id, epoch, proto.MsgPush, msg); err != nil {
+		return nil, err
+	}
+	s.hub.Notify(hostID)
+	return accepted(msg.RequestID), nil
+}
+
+// checkSync: every repo a spec's repository, every ref given, each repo
+// once.
+func checkSync(sp spec.RunSpec, refs []proto.SyncRef) error {
+	seen := map[string]bool{}
+	for _, r := range refs {
+		known := sp.Git != nil && slices.ContainsFunc(sp.Git.Repositories, func(x spec.Repository) bool { return x.Name == r.Repo })
+		switch {
+		case !known:
+			return errf(http.StatusUnprocessableEntity, "invalid_request", "sync: the run has no repository %q", r.Repo)
+		case r.Ref == "" || strings.HasPrefix(r.Ref, "-") || strings.ContainsAny(r.Ref, " \x00\n"):
+			return errf(http.StatusUnprocessableEntity, "invalid_request", "sync[%s]: a branch, tag or sha", r.Repo)
+		case seen[r.Repo]:
+			return errf(http.StatusUnprocessableEntity, "invalid_request", "sync: %q twice", r.Repo)
+		}
+		seen[r.Repo] = true
+	}
+	return nil
+}
+
+type syncRunInput struct {
+	RunPath
+	Body struct {
+		RequestID string          `json:"requestId,omitempty"`
+		Sync      []proto.SyncRef `json:"sync" doc:"Repositories to move: repo (the spec's name) and ref (branch, tag or sha)."`
+	}
+}
+
+// syncRun is POST /v1/runs/{id}/sync: a running Run's checkouts move to
+// new commits, as on a resume's sync. Once one has moved, its servers
+// with afterSync run it and restart; the others keep running.
+func (s *Server) syncRun(ctx context.Context, in *syncRunInput) (*requestIDOutput, error) {
+	p := principal(ctx)
+	msg := proto.Sync{RequestID: cmp.Or(in.Body.RequestID, ids.New("sync")), Repos: in.Body.Sync}
+	if len(msg.Repos) == 0 {
+		return nil, errf(http.StatusUnprocessableEntity, "invalid_request", "sync: at least one {repo, ref}")
+	}
+	var hostID string
+	var epoch int
+	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		var state string
+		var sp spec.RunSpec
+		if err := tx.QueryRow(ctx, `SELECT state, current_epoch, spec FROM runs WHERE id = $1`, in.ID).Scan(&state, &epoch, &sp); err != nil {
+			return err
+		}
+		if err := checkSync(sp, msg.Repos); err != nil {
+			return err
+		}
+		if state != StateRunning {
+			return errf(http.StatusConflict, "not_running", "run is %s: sync a running Run, or resume it with sync", state)
+		}
+		if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, in.ID, epoch).Scan(&hostID); err != nil {
+			return err
+		}
+		return addEvent(ctx, tx, p.TenantID, in.ID, epoch, "sync.requested", map[string]any{"requestId": msg.RequestID, "by": p.Actor(), "sync": msg.Repos})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := s.systemEnqueue(ctx, hostID, in.ID, epoch, proto.MsgSync, msg); err != nil {
 		return nil, err
 	}
 	s.hub.Notify(hostID)

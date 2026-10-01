@@ -74,6 +74,8 @@ type ShimConfig struct {
 	// Services the shim proxies (header values are secret names); their
 	// values stay in the shim's memory.
 	Services []spec.Service `json:"services,omitempty"`
+	// Sync: checkouts to move before init (a resume's sync).
+	Sync *SyncArgs `json:"sync,omitempty"`
 }
 
 // ShimServicesDir holds each service's socket (a tmpfs of its own).
@@ -157,6 +159,7 @@ const (
 	EvActivity   = "lux.activity"   // {"activity": "idle" | "busy"}
 	EvInputAck   = "lux.input"      // {"requestId", "text"?, "truncated"?, "error"?}; the first prompt's id is "prompt"
 	EvInit       = "lux.init"       // {"phase": "start" | "done", "exitCode"?}
+	EvSync       = "lux.sync"       // {"results": [SyncResult]}: the checkouts moved before init
 	EvWorkload   = "lux.workload"   // {"phase": "start", "pid"}
 	EvStop       = "lux.stop"       // {"reason"}
 	EvBeforeStop = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
@@ -176,4 +179,37 @@ type ExitInfo struct {
 	Reason  string `json:"reason"`
 	Message string `json:"message,omitempty"`
 	LastSeq int64  `json:"lastSeq"`
+}
+
+// SyncArgs is `lux-shim sync`'s argument: checkouts to move, each to a
+// commit in a bundle the runner fetched (git.sync, docs/runspec.md#git).
+type SyncArgs struct {
+	Repos []SyncRepo `json:"repos"`
+}
+
+// SyncRepo is one checkout to move.
+type SyncRepo struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Ref    string `json:"ref"`
+	Commit string `json:"commit"`
+	Branch string `json:"branch,omitempty"`
+	Bundle string `json:"bundle"`
+}
+
+// SyncResult is one checkout's sync, as its git.sync event reports it.
+// Status: up-to-date, fast-forward, reset (tracked files changed or the
+// histories diverged: tracked files are the ref's now, untracked and
+// ignored ones kept, what was there saved as refs/lux/pre-sync), failed
+// (the checkout as it was).
+type SyncResult struct {
+	Repo     string `json:"repo"`
+	Ref      string `json:"ref"`
+	From     string `json:"from,omitempty"`
+	To       string `json:"to,omitempty"`
+	Status   string `json:"status"`
+	Dirty    bool   `json:"dirty,omitempty"`
+	Diverged bool   `json:"diverged,omitempty"`
+	Saved    string `json:"saved,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
