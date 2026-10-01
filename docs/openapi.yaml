@@ -7749,7 +7749,7 @@ paths:
   /v1/servers/{id}/events:
     get:
       description: |-
-        server.* events, oldest first; the feed (GET /v1/events) carries them too.
+        server.* events, oldest first; the feed (GET /v1/events) carries them too. A deleted server's events are kept and listed here (ending with server.deleted or server.expired); an id with no events of this tenant's is an empty list, not 404.
 
         Needs the `read` scope.
       operationId: serverEvents
