@@ -106,8 +106,8 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 	c.mu.Unlock()
 
 	go pump(p.Stderr, sink.Stderr)
-	if !cfg.Resume && cfg.Prompt != "" {
-		c.send(proto.Input{RequestID: "prompt", Text: cfg.Prompt})
+	if !cfg.Resume && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
+		c.send(proto.Input{RequestID: "prompt", Text: cfg.Prompt, Attachments: cfg.PromptAttachments})
 	}
 	for _, in := range queued {
 		c.Deliver(in)
@@ -231,7 +231,7 @@ func (c *Claude) send(in proto.Input) {
 		c.sent[uuid] = in
 	}
 	c.mu.Unlock()
-	err := c.writeLine(uuid, in.Text)
+	err := c.writeLine(uuid, in)
 	c.mu.Lock()
 	if err != nil {
 		delete(c.sent, uuid)
@@ -282,6 +282,10 @@ func (c *Claude) lifecycleFrame(uuid, state string) {
 	switch state {
 	case "started":
 		c.running = true
+		// Read: never written again, so its payload goes.
+		if ok {
+			c.sent[uuid] = proto.Input{RequestID: in.RequestID}
+		}
 	case "completed", "cancelled", "discarded", "refused":
 		delete(c.sent, uuid)
 	}
@@ -338,7 +342,7 @@ func (c *Claude) resend(in proto.Input) bool {
 	c.mu.Lock()
 	c.sent[uuid] = in
 	c.mu.Unlock()
-	if err := c.writeLine(uuid, in.Text); err != nil {
+	if err := c.writeLine(uuid, in); err != nil {
 		c.mu.Lock()
 		delete(c.sent, uuid)
 		c.mu.Unlock()
@@ -347,13 +351,13 @@ func (c *Claude) resend(in proto.Input) bool {
 	return true
 }
 
-// writeLine writes a user line. Never "priority": "now" aborts the running
-// turn at its next tool boundary, "later" holds the line until the turn
-// ends.
-func (c *Claude) writeLine(uuid, text string) error {
+// writeLine writes a user line: the input's images, then its text. Never
+// "priority": "now" aborts the running turn at its next tool boundary,
+// "later" holds the line until the turn ends.
+func (c *Claude) writeLine(uuid string, in proto.Input) error {
 	return c.lw.send(map[string]any{
 		"type":               "user",
-		"message":            map[string]any{"role": "user", "content": textInput(text)},
+		"message":            map[string]any{"role": "user", "content": inputContent(dialectClaude, in)},
 		"parent_tool_use_id": nil,
 		"uuid":               uuid,
 	})
@@ -389,7 +393,7 @@ func (c *Claude) Deliver(in proto.Input) {
 	if in.Interrupt && busy {
 		_ = c.Interrupt()
 	}
-	if in.Text != "" {
+	if in.HasContent() {
 		c.send(in)
 	} else if in.RequestID != "" {
 		// An interrupt alone: nothing for the agent to read.
