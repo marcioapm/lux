@@ -89,6 +89,10 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 	}
 	res.From = from
 	if _, err := gitIn(ctx, r.Path, "fetch", "--quiet", "--no-tags", r.Bundle, "+refs/lux/sync:refs/lux/sync"); err != nil {
+		if r.Base != "" {
+			_, lacks := gitIn(ctx, r.Path, "cat-file", "-e", r.Base+"^{commit}")
+			res.MissingBase = lacks != nil || strings.Contains(err.Error(), "prerequisite")
+		}
 		return fail(err)
 	}
 	if got, err := gitIn(ctx, r.Path, "rev-parse", "refs/lux/sync"); err != nil || got != r.Commit {
@@ -144,9 +148,48 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 // syncBeforeInit moves the checkouts a resume asked for, as the workload
 // user (this binary's `sync`, through command), and records the results as
 // a lux.sync event: the runner reports them. A failure is a result, never
-// the placement's.
+// the placement's. A checkout that lacks its bundle's base is retried once
+// with the whole history, which only the runner can bundle: the shim asks
+// for it (lux.sync.fallback) and waits for ShimSync.
 func (s *Shim) syncBeforeInit(env []string) {
-	cmd := s.command([]string{proto.ShimBinary, "sync", string(proto.Marshal(s.cfg.Sync))}, env)
+	results := s.runSync(*s.cfg.Sync, env)
+	if missing := proto.MissingBase(results); len(missing) > 0 {
+		s.out.Event(proto.EvSyncFallback, map[string]any{"repos": missing})
+		if retry := s.awaitSyncRetry(syncRetryWait); retry != nil && len(retry.Repos) > 0 {
+			results = proto.MergeSyncRetry(results, s.runSync(*retry, env))
+		}
+	}
+	s.out.Event(proto.EvSync, map[string]any{"results": results})
+}
+
+// syncRetryWait bounds the wait for the runner's whole-history bundles:
+// SyncBundle's own limit.
+const syncRetryWait = 10 * time.Minute
+
+// awaitSyncRetry is the runner's answer to lux.sync.fallback; nil when
+// none came within wait, or the Run is stopping.
+func (s *Shim) awaitSyncRetry(wait time.Duration) *proto.SyncArgs {
+	deadline := time.After(wait)
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case a := <-s.syncCh:
+			return a
+		case <-deadline:
+			return nil
+		case <-tick.C:
+			if s.isStopping() {
+				return nil
+			}
+		}
+	}
+}
+
+// runSync runs `lux-shim sync` as the workload user; every repository
+// failed when it cannot.
+func (s *Shim) runSync(a proto.SyncArgs, env []string) []proto.SyncResult {
+	cmd := s.command([]string{proto.ShimBinary, "sync", string(proto.Marshal(a))}, env)
 	cmd.Dir = "/"
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
@@ -165,9 +208,9 @@ func (s *Shim) syncBeforeInit(env []string) {
 	}
 	if err != nil {
 		results = results[:0]
-		for _, r := range s.cfg.Sync.Repos {
+		for _, r := range a.Repos {
 			results = append(results, proto.SyncResult{Repo: r.Name, Ref: r.Ref, To: r.Commit, Status: "failed", Error: "lux-shim sync: " + err.Error()})
 		}
 	}
-	s.out.Event(proto.EvSync, map[string]any{"results": results})
+	return results
 }

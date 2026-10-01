@@ -332,6 +332,48 @@ def test_sync_running_with_after_sync_and_the_dirty_rule(lux, runners, hosts, fa
     lux.run("cancel", run_id)
 
 
+# Drops every commit of the checkout's but a new root one, so it no longer
+# has the commit lux knows it at (its clone or its last sync).
+FORGET_HISTORY = ("cd /workspace/app && b=forget$(date +%s%N) && git checkout -q --orphan $b"
+                  " && git -c user.name=t -c user.email=t@t commit -qm fresh"
+                  " && git for-each-ref --format='%(refname)' refs/heads refs/remotes refs/lux | grep -vx refs/heads/$b"
+                  " | xargs -r -n1 git update-ref -d && git reflog expire --expire=now --all && git gc -q --prune=now")
+
+
+def test_sync_bundles_only_new_history_and_falls_back(lux, runners, hosts, fake_image, git_server):
+    """A sync bundles only what the checkout lacks; a checkout without its
+    known base gets the whole history on one retry, running or before init.
+    No bundle stays on the runtime volume."""
+    git_server.create("app", {"message.txt": "one\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(preview_spec(fake_image, git_server))
+    lux.wait_state(run_id, "running")
+    no_bundles = "test -z \"$(ls -A /.lux/run/sync 2>/dev/null)\" && echo none"
+    two = git_server.commit_on("app", "main", "message.txt", "two\n")
+    out = lux.json("sync", run_id, "app=main", "--wait", timeout=120)
+    assert out[0]["status"] == "fast-forward" and out[0]["to"] == two and not out[0].get("fullBundle"), out
+    assert lux.run("exec", run_id, "-T", "--", "sh", "-c", no_bundles, input="").stdout.strip() == "none"
+    # Running: the checkout lost its base; the incremental bundle cannot be
+    # fetched, the whole history is.
+    lux.run("exec", run_id, "-T", "--", "sh", "-c", FORGET_HISTORY, input="")
+    three = git_server.commit_on("app", "main", "message.txt", "three\n")
+    out = lux.json("sync", run_id, "app=main", "--wait", timeout=120)
+    assert out[0]["status"] == "reset" and out[0]["to"] == three and out[0]["diverged"] and out[0]["fullBundle"], out
+    assert lux.run("exec", run_id, "-T", "--", "cat", "/workspace/app/message.txt", input="").stdout == "three\n"
+    assert lux.run("exec", run_id, "-T", "--", "sh", "-c", no_bundles, input="").stdout.strip() == "none"
+    # Before init on a resume: the same retry, through the runner.
+    lux.run("exec", run_id, "-T", "--", "sh", "-c", FORGET_HISTORY, input="")
+    lux.run("stop", run_id, "--wait", timeout=120)
+    four = git_server.commit_on("app", "main", "message.txt", "four\n")
+    lux.run("resume", run_id, "--sync", "app=main", "--secret", f"GIT_TOKEN={git_server.token}", "--wait", timeout=180)
+    res = wait_until(lambda: (e := lux.events(run_id, "git.sync")) and e[-1]["data"].get("to") == four and e[-1]["data"], 60, 1,
+                     "no git.sync for the resume")
+    assert res["status"] == "reset" and res["fullBundle"], res
+    assert lux.run("exec", run_id, "-T", "--", "cat", "/workspace/app/message.txt", input="").stdout == "four\n"
+    assert lux.run("exec", run_id, "-T", "--", "sh", "-c", no_bundles, input="").stdout.strip() == "none"
+    lux.run("cancel", run_id)
+
+
 def test_hostnames_and_tenant_isolation(lux, tenant_factory, runners, hosts, fake_image):
     sv = create(lux, name="web", port=8080, hostname=f"web.iso.{PREVIEW_DOMAIN}")
     other = tenant_factory()

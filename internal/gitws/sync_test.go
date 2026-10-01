@@ -2,6 +2,7 @@ package gitws
 
 import (
 	"context"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,7 +53,7 @@ func TestSync(t *testing.T) {
 		t.Helper()
 		r.Ref = ref
 		bundle := filepath.Join(t.TempDir(), "r.bundle")
-		tg, err := m.SyncBundle(ctx, r, bundle)
+		tg, err := m.SyncBundle(ctx, r, "", bundle)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,14 +115,14 @@ func TestSync(t *testing.T) {
 	}
 	// An unknown ref: the runner's bundle fails; nothing changes.
 	r.Ref = "nope"
-	if _, err := m.SyncBundle(ctx, r, filepath.Join(t.TempDir(), "x.bundle")); err == nil || !strings.Contains(err.Error(), `ref "nope" not found`) {
+	if _, err := m.SyncBundle(ctx, r, "", filepath.Join(t.TempDir(), "x.bundle")); err == nil || !strings.Contains(err.Error(), `ref "nope" not found`) {
 		t.Fatalf("unknown ref: %v", err)
 	}
 	// A bundle of another commit than announced, or no checkout: failed,
 	// the checkout as it was.
 	r.Ref = "main"
 	bundle := filepath.Join(t.TempDir(), "r.bundle")
-	if _, err := m.SyncBundle(ctx, r, bundle); err != nil {
+	if _, err := m.SyncBundle(ctx, r, "", bundle); err != nil {
 		t.Fatal(err)
 	}
 	head := gitRun(t, dir, "rev-parse", "HEAD")
@@ -132,5 +133,135 @@ func TestSync(t *testing.T) {
 	if got[0].Status != "failed" || !strings.Contains(got[0].Error, "the bundle has") || got[1].Status != "failed" ||
 		!strings.Contains(got[1].Error, "has no checkout") || gitRun(t, dir, "rev-parse", "HEAD") != head {
 		t.Fatalf("failures: %+v", got)
+	}
+}
+
+// dirSize is the bytes of the regular files under dir.
+func dirSize(t *testing.T, dir string) int64 {
+	t.Helper()
+	var n int64
+	err := filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error {
+		if err == nil && fi.Mode().IsRegular() {
+			n += fi.Size()
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// A checkout behind by a few commits gets a bundle of those commits only,
+// with its base as the prerequisite; its .git grows by them, not by the
+// repository. A checkout without the base fails the fetch as MissingBase,
+// and the whole-history bundle then moves it.
+func TestSyncBundleIsIncremental(t *testing.T) {
+	bare, _ := remote(t)
+	// History the checkout has: 2 MiB that does not compress.
+	big := make([]byte, 2<<20)
+	rng := rand.New(rand.NewPCG(1, 2))
+	for i := range big {
+		big[i] = byte(rng.Uint32())
+	}
+	base := pushCommit(t, bare, "big.bin", string(big))
+	m := New(t.TempDir())
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "repos", "r")
+	r := Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}
+	res, err := m.Materialize(ctx, r, dir)
+	if err != nil || res.Base != base {
+		t.Fatalf("materialize: %+v %v", res, err)
+	}
+	var head string
+	for i := range 5 {
+		head = pushCommit(t, bare, "n.txt", strings.Repeat("x", i+1)+"\n")
+	}
+	bundleDir := t.TempDir()
+	full, err := m.SyncBundle(ctx, r, "", filepath.Join(bundleDir, "full.bundle"))
+	if err != nil || full.Base != "" {
+		t.Fatalf("full: %+v %v", full, err)
+	}
+	inc, err := m.SyncBundle(ctx, r, base, filepath.Join(bundleDir, "inc.bundle"))
+	if err != nil || inc.Base != base || inc.Commit != head {
+		t.Fatalf("incremental: %+v %v", inc, err)
+	}
+	fullSize, incSize := dirSize(t, full.Bundle), dirSize(t, inc.Bundle)
+	t.Logf("bundle bytes: full %d, incremental %d", fullSize, incSize)
+	if fullSize < 2<<20 || incSize > 64<<10 {
+		t.Fatalf("bundle sizes: full %d, incremental %d", fullSize, incSize)
+	}
+	if got := gitRun(t, bundleDir, "bundle", "list-heads", inc.Bundle); got != head+" refs/lux/sync" {
+		t.Fatalf("heads: %q", got)
+	}
+	// verify, in a repository without the base, names it as missing: the
+	// bundle's one prerequisite.
+	empty := filepath.Join(t.TempDir(), "e")
+	gitRun(t, filepath.Dir(empty), "init", "-q", empty)
+	cmd := exec.Command("git", "bundle", "verify", inc.Bundle)
+	cmd.Dir = empty
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "lacks these prerequisite commits") || !strings.Contains(string(out), base) {
+		t.Fatalf("verify: %s", out)
+	}
+
+	before := dirSize(t, filepath.Join(dir, ".git"))
+	got := shim.SyncRepos(ctx, proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: dir, Ref: "main", Commit: inc.Commit,
+		Branch: inc.Branch, Bundle: inc.Bundle, Base: inc.Base}}})
+	if got[0].Status != "fast-forward" || got[0].To != head {
+		t.Fatalf("incremental sync: %+v", got[0])
+	}
+	grew := dirSize(t, filepath.Join(dir, ".git")) - before
+	t.Logf(".git grew by %d bytes", grew)
+	if grew > 256<<10 {
+		t.Fatalf(".git grew by %d bytes", grew)
+	}
+
+	// Already at the commit: a bundle of the commit alone, still valid.
+	same, err := m.SyncBundle(ctx, r, head, filepath.Join(bundleDir, "same.bundle"))
+	if err != nil || same.Base != head {
+		t.Fatalf("same: %+v %v", same, err)
+	}
+	got = shim.SyncRepos(ctx, proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: dir, Ref: "main", Commit: same.Commit,
+		Branch: same.Branch, Bundle: same.Bundle, Base: same.Base}}})
+	if got[0].Status != "up-to-date" {
+		t.Fatalf("same commit: %+v", got[0])
+	}
+
+	// A base the mirror does not have: the whole history.
+	unknown, err := m.SyncBundle(ctx, r, strings.Repeat("ab", 20), filepath.Join(bundleDir, "unknown.bundle"))
+	if err != nil || unknown.Base != "" || dirSize(t, unknown.Bundle) < 2<<20 {
+		t.Fatalf("unknown base: %+v %v", unknown, err)
+	}
+
+	// A checkout that lacks the base (a clone of the older history only):
+	// failed, MissingBase, HEAD unchanged; the full bundle then moves it.
+	other := filepath.Join(t.TempDir(), "other")
+	gitRun(t, filepath.Dir(other), "clone", "-q", "--no-local", bare, other)
+	gitRun(t, other, "reset", "-q", "--hard", base+"~1")
+	gitRun(t, other, "reflog", "expire", "--expire=now", "--all")
+	gitRun(t, other, "update-ref", "-d", "refs/remotes/origin/main")
+	gitRun(t, other, "gc", "-q", "--prune=now")
+	old := gitRun(t, other, "rev-parse", "HEAD")
+	got = shim.SyncRepos(ctx, proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: other, Ref: "main", Commit: inc.Commit,
+		Branch: inc.Branch, Bundle: inc.Bundle, Base: inc.Base}}})
+	if got[0].Status != "failed" || !got[0].MissingBase || gitRun(t, other, "rev-parse", "HEAD") != old {
+		t.Fatalf("missing base: %+v", got[0])
+	}
+	if names := proto.MissingBase(got); len(names) != 1 || names[0] != "r" {
+		t.Fatalf("MissingBase: %v", names)
+	}
+	retry := shim.SyncRepos(ctx, proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: other, Ref: "main", Commit: full.Commit,
+		Branch: full.Branch, Bundle: full.Bundle}}})
+	merged := proto.MergeSyncRetry(got, retry)
+	if len(merged) != 1 || merged[0].Status != "fast-forward" || !merged[0].FullBundle || merged[0].To != head ||
+		gitRun(t, other, "rev-parse", "HEAD") != head {
+		t.Fatalf("full retry: %+v", merged)
+	}
+	// Any other fetch failure is not MissingBase: no retry.
+	got = shim.SyncRepos(ctx, proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: dir, Ref: "main", Commit: head,
+		Bundle: filepath.Join(bundleDir, "none.bundle"), Base: head}}})
+	if got[0].Status != "failed" || got[0].MissingBase {
+		t.Fatalf("no bundle: %+v", got[0])
 	}
 }
