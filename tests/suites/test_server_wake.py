@@ -67,6 +67,16 @@ def wait_state(lux, sid: str, *states: str, timeout: float = 90) -> dict:
                       f"server {sid} never {states}")
 
 
+def exec_in(lux, run_id: str, *argv: str, check: bool = True):
+    return lux.run("exec", run_id, "-T", "--", *argv, input="", check=check)
+
+
+def resume_sync(lux, run_id: str, to: str) -> dict:
+    """The data of the Run's last git.sync, once it moved the checkout to `to`."""
+    return wait_until(lambda: (e := lux.events(run_id, "git.sync")) and e[-1]["data"].get("to") == to and e[-1]["data"],
+                      60, 1, "no git.sync for the resume")
+
+
 class Browser:
     """A signed-in browser at a server's hostname (Host header, no DNS)."""
 
@@ -309,17 +319,16 @@ def test_sync_running_with_after_sync_and_the_dirty_rule(lux, runners, hosts, fa
     hot_epoch_gen = get(lux, hot["id"])["since"]
     # Tracked change in the checkout plus an untracked file: reset to the
     # ref, the change saved, the untracked file kept.
-    lux.run("exec", run_id, "-T", "--", "sh", "-c",
-            "echo local > /workspace/app/message.txt && echo keep > /workspace/app/untracked.txt", input="")
+    exec_in(lux, run_id, "sh", "-c",
+            "echo local > /workspace/app/message.txt && echo keep > /workspace/app/untracked.txt")
     two = git_server.commit_on("app", "main", "message.txt", "two\n")
     out = lux.json("sync", run_id, "app=main", "--wait", timeout=120)
     assert out[0]["status"] == "reset" and out[0]["dirty"] and out[0]["to"] == two and out[0]["saved"] == "refs/lux/pre-sync", out
-    files = lux.run("exec", run_id, "-T", "--", "sh", "-c",
-                    "cat /workspace/app/message.txt /workspace/app/untracked.txt; git -C /workspace/app show refs/lux/pre-sync:message.txt",
-                    input="").stdout
+    files = exec_in(lux, run_id, "sh", "-c",
+                    "cat /workspace/app/message.txt /workspace/app/untracked.txt; git -C /workspace/app show refs/lux/pre-sync:message.txt").stdout
     assert files.split() == ["two", "keep", "local"], files
     # The server with afterSync ran it and restarted; the other kept running.
-    wait_until(lambda: "after-sync ran" in lux.run("exec", run_id, "-T", "--", "cat", "/workspace/after-sync", input="", check=False).stdout,
+    wait_until(lambda: "after-sync ran" in exec_in(lux, run_id, "cat", "/workspace/after-sync", check=False).stdout,
                60, 1, "afterSync never ran")
     wait_state(lux, cold["id"], "ready")
     assert get(lux, hot["id"])["since"] == hot_epoch_gen
@@ -361,25 +370,24 @@ def test_sync_bundles_only_new_history_and_falls_back(lux, runners, hosts, fake_
     two = git_server.commit_on("app", "main", "message.txt", "two\n")
     out = lux.json("sync", run_id, "app=main", "--wait", timeout=120)
     assert out[0]["status"] == "fast-forward" and out[0]["to"] == two and not out[0].get("fullBundle"), out
-    assert lux.run("exec", run_id, "-T", "--", "sh", "-c", no_bundles, input="").stdout.strip() == "none"
+    assert exec_in(lux, run_id, "sh", "-c", no_bundles).stdout.strip() == "none"
     # Running: the checkout lost its base; the incremental bundle cannot be
     # fetched, the whole history is.
-    lux.run("exec", run_id, "-T", "--", "sh", "-c", FORGET_HISTORY, input="")
+    exec_in(lux, run_id, "sh", "-c", FORGET_HISTORY)
     three = git_server.commit_on("app", "main", "message.txt", "three\n")
     out = lux.json("sync", run_id, "app=main", "--wait", timeout=120)
     assert out[0]["status"] == "reset" and out[0]["to"] == three and out[0]["diverged"] and out[0]["fullBundle"], out
-    assert lux.run("exec", run_id, "-T", "--", "cat", "/workspace/app/message.txt", input="").stdout == "three\n"
-    assert lux.run("exec", run_id, "-T", "--", "sh", "-c", no_bundles, input="").stdout.strip() == "none"
+    assert exec_in(lux, run_id, "cat", "/workspace/app/message.txt").stdout == "three\n"
+    assert exec_in(lux, run_id, "sh", "-c", no_bundles).stdout.strip() == "none"
     # Before init on a resume: the same retry, through the runner.
-    lux.run("exec", run_id, "-T", "--", "sh", "-c", FORGET_HISTORY, input="")
+    exec_in(lux, run_id, "sh", "-c", FORGET_HISTORY)
     lux.run("stop", run_id, "--wait", timeout=120)
     four = git_server.commit_on("app", "main", "message.txt", "four\n")
     lux.run("resume", run_id, "--sync", "app=main", "--secret", f"GIT_TOKEN={git_server.token}", "--wait", timeout=180)
-    res = wait_until(lambda: (e := lux.events(run_id, "git.sync")) and e[-1]["data"].get("to") == four and e[-1]["data"], 60, 1,
-                     "no git.sync for the resume")
+    res = resume_sync(lux, run_id, four)
     assert res["status"] == "reset" and res["fullBundle"], res
-    assert lux.run("exec", run_id, "-T", "--", "cat", "/workspace/app/message.txt", input="").stdout == "four\n"
-    assert lux.run("exec", run_id, "-T", "--", "sh", "-c", no_bundles, input="").stdout.strip() == "none"
+    assert exec_in(lux, run_id, "cat", "/workspace/app/message.txt").stdout == "four\n"
+    assert exec_in(lux, run_id, "sh", "-c", no_bundles).stdout.strip() == "none"
     lux.run("cancel", run_id)
 
 
@@ -408,17 +416,16 @@ def test_a_synced_checkout_is_the_base_after_a_resume(lux, runners, hosts, fake_
     assert d["base"] == b and d["head"] == b and d["files"] == 0 and not d.get("patch"), d
     # The checkout keeps b and drops a, its clone commit: a bundle after a
     # would need a whole-history retry, one after b does not.
-    lux.run("exec", run_id, "-T", "--", "sh", "-c", SHALLOW_AT_HEAD, input="")
-    lacks = lux.run("exec", run_id, "-T", "--", "git", "-C", "/workspace/app", "cat-file", "-e", a + "^{commit}", input="", check=False)
+    exec_in(lux, run_id, "sh", "-c", SHALLOW_AT_HEAD)
+    lacks = exec_in(lux, run_id, "git", "-C", "/workspace/app", "cat-file", "-e", a + "^{commit}", check=False)
     assert lacks.returncode != 0, "the checkout still has its clone commit"
     # Resumed with a sync: the bundle's base is b, so no whole-history retry.
     lux.run("stop", run_id, "--wait", timeout=120)
     c = git_server.commit_on("app", "main", "message.txt", "three\n")
     lux.run("resume", run_id, "--sync", "app=main", "--secret", f"GIT_TOKEN={git_server.token}", "--wait", timeout=180)
-    res = wait_until(lambda: (e := lux.events(run_id, "git.sync")) and e[-1]["data"].get("to") == c and e[-1]["data"], 60, 1,
-                     "no git.sync for the resume")
+    res = resume_sync(lux, run_id, c)
     assert res["status"] == "fast-forward" and res["from"] == b and not res.get("fullBundle") and not res.get("missingBase"), res
-    assert lux.run("exec", run_id, "-T", "--", "cat", "/workspace/app/message.txt", input="").stdout == "three\n"
+    assert exec_in(lux, run_id, "cat", "/workspace/app/message.txt").stdout == "three\n"
     lux.run("cancel", run_id)
 
 
