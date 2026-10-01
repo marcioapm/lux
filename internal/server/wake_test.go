@@ -856,3 +856,49 @@ func TestPreviewPagesNameNoOrchestrator(t *testing.T) {
 		check(c.name, w.Body.String())
 	}
 }
+
+// A Run that succeeds or is cancelled while its owner server serves: the
+// server stops with the placement and is detached, its events say so, and
+// it is never detached with a live process.
+func TestOwnerServerEndsStoppedWithItsRun(t *testing.T) {
+	for _, c := range []struct{ name, stopReason, outcome string }{
+		{"exit 0", "", StateSucceeded},
+		{"cancelled", "cancel", StateCancelled},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx, key, _ := wakeFixture(t)
+			sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "runId": r1,
+				"lifetime": "owner", "hostname": "web.own.lux.example.com"})
+			serverReport(t, s, ctx, 1, map[string]any{"name": "web", "gen": serverGen(t, s, ctx, "web"), "state": "ready"})
+			if got := getSrv(t, s, key, sv.ID); got.Process != ServerReady {
+				t.Fatalf("not ready: %+v", got)
+			}
+			if c.stopReason != "" {
+				execSQL(t, s, ctx, `UPDATE placements SET stop_reason = $1, state = 'stopping'`, c.stopReason)
+			}
+			code := 0
+			if f := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: r1, Epoch: 1,
+				Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "exited"})}); f.Type != proto.MsgAck {
+				t.Fatalf("exit: %s", f.Data)
+			}
+			var runState string
+			systemScan(t, s, `SELECT state FROM runs WHERE id = $1`, []any{r1}, &runState)
+			if runState != c.outcome {
+				t.Fatalf("run: %s", runState)
+			}
+			got := getSrv(t, s, key, sv.ID)
+			if got.RunID != nil || got.Process != ServerStopped || got.StopReason == nil || *got.StopReason != "detached" || got.Epoch != nil {
+				t.Fatalf("after the Run ended: %+v", got)
+			}
+			var tail string
+			systemScan(t, s, `SELECT string_agg(type || coalesce(':' || (data->>'state'), ''), ' ' ORDER BY id) FROM
+				(SELECT * FROM run_events WHERE server_id = $1 ORDER BY id DESC LIMIT 2) e`, []any{sv.ID}, &tail)
+			if tail != "server.state:stopped server.detached" {
+				t.Fatalf("last events: %s", tail)
+			}
+			if d := serverEventsOf(t, s, ctx, sv.ID, "server.detached"); len(d) != 1 || d[0]["reason"] != "run "+c.outcome || d[0]["from"] != r1 {
+				t.Fatalf("detached: %+v", d)
+			}
+		})
+	}
+}

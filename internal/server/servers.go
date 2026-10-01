@@ -473,10 +473,9 @@ func endServers(ctx context.Context, tx pgx.Tx, tenantID, runID, state string) e
 			}
 			continue
 		}
-		if _, err := tx.Exec(ctx, `UPDATE run_servers SET run_id = NULL, wake_requested_at = NULL, updated_at = now() WHERE id = $1`, v.ID); err != nil {
-			return err
-		}
-		if err := serverEvent(ctx, tx, tenantID, nil, v.ID, 0, "server.detached", v.ref(), map[string]any{"reason": "run " + state, "from": runID}); err != nil {
+		// Stopped first (its process ends with the placement), then
+		// detached: never a detached server with a live process state.
+		if err := detachTx(ctx, tx, tenantID, v, "run "+state, "lux"); err != nil {
 			return err
 		}
 	}
