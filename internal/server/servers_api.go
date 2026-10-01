@@ -586,6 +586,11 @@ func (s *Server) listTenantServers(ctx context.Context, in *listTenantServersInp
 		args = append(args, v)
 		return "$" + strconv.Itoa(len(args))
 	}
+	// RLS enforces the tenant too, but its OR with lux_system() is no index
+	// condition: this lets run_servers_tenant and PK joins serve the list.
+	if p.TenantID != "" {
+		where = append(where, "sv.tenant_id = "+arg(p.TenantID))
+	}
 	for _, l := range in.Label {
 		k, v, _ := strings.Cut(l, "=")
 		where = append(where, "sv.labels @> "+arg(map[string]string{k: v}))

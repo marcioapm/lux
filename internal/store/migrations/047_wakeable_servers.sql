@@ -58,7 +58,6 @@ ALTER TABLE run_servers
   ADD COLUMN idle_notified_at timestamptz,
   ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX run_servers_tenant ON run_servers (tenant_id, created_at);
-CREATE INDEX run_servers_expiring ON run_servers (id) WHERE lifetime = 'owner' AND expire_after_s IS NOT NULL;
 CREATE INDEX run_servers_ready ON run_servers (run_id) WHERE state = 'ready';
 
 -- Server events are events of the feed like a Run's: server_id names the
@@ -67,10 +66,16 @@ ALTER TABLE run_events ALTER COLUMN run_id DROP NOT NULL;
 ALTER TABLE run_events ADD COLUMN server_id text;
 ALTER TABLE run_events ADD CONSTRAINT run_events_subject CHECK (run_id IS NOT NULL OR server_id IS NOT NULL);
 CREATE INDEX run_events_server ON run_events (server_id, id) WHERE server_id IS NOT NULL;
+-- The waking page's per-poll check of the current placement's sync: only
+-- sync events are in it.
+CREATE INDEX run_events_sync ON run_events (run_id, epoch, type) WHERE type IN ('git.sync', 'sync.requested');
 
+-- An event of a server with no Run notifies 'srv:<id>': no Run's
+-- followers match it, only those of every event (the feed). '' stays the
+-- listener's own "wake everyone".
 CREATE OR REPLACE FUNCTION lux_event_notify() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  PERFORM pg_notify('lux_events', coalesce(NEW.run_id, ''));
+  PERFORM pg_notify('lux_events', coalesce(NEW.run_id, 'srv:' || NEW.server_id));
   RETURN NULL;
 END $$;
 
