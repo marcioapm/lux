@@ -10,8 +10,6 @@ import (
 	"github.com/marcioapm/lux/internal/spec"
 )
 
-// submitPoolID submits a Run as tenant whose placement names pool and
-// poolID (either may be "").
 func submitPoolID(s *Server, tenant, pool, poolID string) (*submitRunOutput, error) {
 	return s.submitRun(tenantCtx(tenant), &submitRunInput{Body: spec.RunSpec{
 		Image:     spec.Image{Ref: "alpine"},
@@ -22,7 +20,7 @@ func submitPoolID(s *Server, tenant, pool, poolID string) (*submitRunOutput, err
 
 func wantRefused(t *testing.T, err error, code string) *HTTPError {
 	t.Helper()
-	he := (*HTTPError)(nil)
+	var he *HTTPError
 	if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity || he.Code != code {
 		t.Fatalf("got %v, want 422 %s", err, code)
 	}
@@ -59,9 +57,9 @@ func TestPoolByID(t *testing.T) {
 		t.Fatalf("returned Run pool %s, spec pool %q", out.Body.PoolID, out.Body.Spec.Placement.Pool)
 	}
 
-	if _, err := s.renamePool(tenantCtx("t1"), &renamePoolInput{Name: "gpu", Body: struct {
-		Name string `json:"name" doc:"The new name."`
-	}{Name: "gpu2"}}); err != nil {
+	rename := &renamePoolInput{Name: "gpu"}
+	rename.Body.Name = "gpu2"
+	if _, err := s.renamePool(tenantCtx("t1"), rename); err != nil {
 		t.Fatal(err)
 	}
 	schedule(t, s)
