@@ -668,3 +668,52 @@ func TestAttachToAPlacedRun(t *testing.T) {
 		t.Fatalf("attached to a starting run: %+v %+v", got, sets)
 	}
 }
+
+// An event of a server with no Run wakes the feed's followers, never a
+// Run's (an output stream, a held preview request); a Run's event wakes
+// that Run's.
+func TestDetachedServerEventsWakeNoRunFollower(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	lctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); s.listenLoop(lctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var n int
+		systemScan(t, s, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND query = 'LISTEN lux_events' AND state = 'idle'`, nil, &n)
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("not listening within 10s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The listener's own wake-everyone on connect may still be on its way.
+	time.Sleep(200 * time.Millisecond)
+	waitClosed := func(ch <-chan struct{}) bool {
+		select {
+		case <-ch:
+			return true
+		case <-time.After(2 * time.Second):
+			return false
+		}
+	}
+	all, run := s.wakeups.next(""), s.wakeups.next(r1)
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "wake": "request"})
+	if !waitClosed(all) {
+		t.Fatal("server.created did not wake the feed")
+	}
+	if closed(run) {
+		t.Fatal("an event of a server with no Run woke a Run's followers")
+	}
+	// Attached, its events are its Run's.
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/servers/"+sv.ID+"/attach", map[string]any{"runId": r1}); w.Code != http.StatusOK {
+		t.Fatalf("attach: %d %s", w.Code, w.Body)
+	}
+	if !waitClosed(run) {
+		t.Fatal("an event of the Run did not wake its followers")
+	}
+}
