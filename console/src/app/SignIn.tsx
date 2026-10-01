@@ -28,12 +28,9 @@ export interface SignInProps {
 }
 
 /**
- * Asks for an API key. Shown when there is none, or after a 401.
- *
- * A key that whoami accepts is kept and the page reloads: the console starts
- * in a new document, so whatever a password manager attached to this form
- * (Bitwarden's inline menu) goes with it. Swapping the form for the console
- * in place left that behind.
+ * Asks for an API key. Shown when there is none, or after a 401. A key is
+ * kept only once whoami accepts it, then the page reloads: a new document
+ * drops whatever a password manager attached to the form.
  */
 export function SignIn({ reason, next, access }: SignInProps) {
   const [key, setKey] = useState("");
