@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -23,7 +25,7 @@ import (
 // git in the checkout, and no credential enters the container. Each
 // repository's outcome is a git.sync event.
 
-const syncDir = "sync" // on the runtime volume: /.lux/run/sync
+const syncDir = "sync" // on the runtime volume: /.lux/run/sync/<syncSubdir>
 
 // prepareSync fetches and bundles each ref, and returns what the shim is
 // to do. A repository that cannot be prepared is reported failed here and
@@ -35,10 +37,13 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 		return nil
 	}
 	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
+	sub := syncSubdir(requestID)
 	if err == nil {
-		dir := filepath.Join(rt, syncDir)
+		dir := filepath.Join(rt, syncDir, sub)
 		os.RemoveAll(dir)
-		err = os.Mkdir(dir, 0o755)
+		if err = os.MkdirAll(filepath.Dir(dir), 0o755); err == nil {
+			err = os.Mkdir(dir, 0o755)
+		}
 	}
 	bases := map[string]string{}
 	if !full {
@@ -68,10 +73,10 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 			r := p.gitRepo(*repo)
 			r.Ref = ref.Ref
 			name := ref.Repo + ".bundle"
-			t, berr := p.r.git.SyncBundle(ctx, r, bases[ref.Repo], filepath.Join(rt, syncDir, name))
+			t, berr := p.r.git.SyncBundle(ctx, r, bases[ref.Repo], filepath.Join(rt, syncDir, sub, name))
 			if berr == nil {
 				args.Repos = append(args.Repos, proto.SyncRepo{Name: ref.Repo, Path: repo.Path, Ref: ref.Ref, Commit: t.Commit,
-					Branch: t.Branch, Bundle: proto.ShimRunDir + "/" + syncDir + "/" + name, Base: t.Base})
+					Branch: t.Branch, Bundle: proto.ShimRunDir + "/" + syncDir + "/" + sub + "/" + name, Base: t.Base})
 				continue
 			}
 			res.Error = strings.ReplaceAll(berr.Error(), repo.URL, gitws.Scrub(repo.URL))
@@ -98,11 +103,22 @@ func retryRefs(args *proto.SyncArgs, results []proto.SyncResult) []proto.SyncRef
 	return refs
 }
 
-// removeSyncBundles deletes the bundles once the shim has fetched them:
-// the runtime volume keeps none.
-func (p *placement) removeSyncBundles(ctx context.Context) {
+// syncSubdir is a sync's own directory of bundles: per request id (two
+// syncs of a Run at once keep their bundles apart), "resume" for a
+// resume's. The id is the caller's: hashed, never a path.
+func syncSubdir(requestID string) string {
+	if requestID == "" {
+		return "resume"
+	}
+	h := sha256.Sum256([]byte(requestID))
+	return "r-" + hex.EncodeToString(h[:8])
+}
+
+// removeSyncBundles deletes a sync's bundles once the shim has fetched
+// them: the runtime volume keeps none.
+func (p *placement) removeSyncBundles(ctx context.Context, requestID string) {
 	if rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID)); err == nil {
-		_ = os.RemoveAll(filepath.Join(rt, syncDir))
+		_ = os.RemoveAll(filepath.Join(rt, syncDir, syncSubdir(requestID)))
 	}
 }
 
@@ -145,7 +161,7 @@ func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
 		}
 		return
 	}
-	defer p.removeSyncBundles(ctx)
+	defer p.removeSyncBundles(ctx, req.RequestID)
 	args := p.prepareSync(ctx, sp, req.Repos, req.RequestID, false)
 	if args == nil {
 		return
@@ -229,7 +245,7 @@ func (p *placement) onSyncRecord(ctx context.Context, data json.RawMessage) {
 	if json.Unmarshal(data, &d) != nil {
 		return
 	}
-	p.removeSyncBundles(ctx)
+	p.removeSyncBundles(ctx, "")
 	for _, res := range d.Results {
 		p.reportSync(ctx, res, "")
 	}
