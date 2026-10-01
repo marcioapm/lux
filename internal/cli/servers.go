@@ -74,6 +74,15 @@ func tenantServerPath(id string, rest ...string) string {
 	return p
 }
 
+// doTenantServer sends a request whose answer is a server, and prints it.
+func (a *app) doTenantServer(ctx context.Context, method, path string, body any) error {
+	var sv server.TenantServer
+	if err := a.c.Do(ctx, method, path, body, &sv); err != nil {
+		return err
+	}
+	return a.printTenantServer(sv)
+}
+
 func (a *app) printTenantServer(sv server.TenantServer) error {
 	if a.output == "json" {
 		return a.json(sv)
@@ -164,11 +173,7 @@ func (a *app) serverCreateCmd() *cobra.Command {
 			if len(args) > 2 {
 				in.Command = args[2:]
 			}
-			var sv server.TenantServer
-			if err := a.c.Do(ctxOf(cmd), "POST", "/v1/servers", in, &sv); err != nil {
-				return err
-			}
-			return a.printTenantServer(sv)
+			return a.doTenantServer(ctxOf(cmd), "POST", "/v1/servers", in)
 		},
 	}
 	f.add(cmd, true)
@@ -214,11 +219,7 @@ func (a *app) serverUpdateCmd() *cobra.Command {
 			} else if labels != nil {
 				in.Labels = &labels
 			}
-			var sv server.TenantServer
-			if err := a.c.Do(ctxOf(cmd), "PATCH", tenantServerPath(args[0]), in, &sv); err != nil {
-				return err
-			}
-			return a.printTenantServer(sv)
+			return a.doTenantServer(ctxOf(cmd), "PATCH", tenantServerPath(args[0]), in)
 		},
 	}
 	f.add(cmd, false)
@@ -293,11 +294,7 @@ func (a *app) serverAttachCmd() *cobra.Command {
 		Short: "Attach a server to a Run (a running one starts its command now; a stopped one at its next placement)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var sv server.TenantServer
-			if err := a.c.Do(ctxOf(cmd), "POST", tenantServerPath(args[0], "attach"), map[string]string{"runId": args[1]}, &sv); err != nil {
-				return err
-			}
-			return a.printTenantServer(sv)
+			return a.doTenantServer(ctxOf(cmd), "POST", tenantServerPath(args[0], "attach"), map[string]string{"runId": args[1]})
 		},
 	}
 }
@@ -308,11 +305,7 @@ func (a *app) serverDetachCmd() *cobra.Command {
 		Short: "Detach a server from its Run (its command stops; the Run is untouched)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var sv server.TenantServer
-			if err := a.c.Do(ctxOf(cmd), "POST", tenantServerPath(args[0], "detach"), nil, &sv); err != nil {
-				return err
-			}
-			return a.printTenantServer(sv)
+			return a.doTenantServer(ctxOf(cmd), "POST", tenantServerPath(args[0], "detach"), nil)
 		},
 	}
 }
@@ -516,11 +509,7 @@ func (a *app) serverActionCmd(action, short string) *cobra.Command {
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
-				var sv server.TenantServer
-				if err := a.c.Do(ctxOf(cmd), "POST", tenantServerPath(args[0], action), nil, &sv); err != nil {
-					return err
-				}
-				return a.printTenantServer(sv)
+				return a.doTenantServer(ctxOf(cmd), "POST", tenantServerPath(args[0], action), nil)
 			}
 			var sv server.RunServer
 			if err := a.c.Do(ctxOf(cmd), "POST", serverPath(args[0], args[1], action), nil, &sv); err != nil {
