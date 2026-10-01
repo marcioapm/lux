@@ -57,7 +57,7 @@ def test_a_server_runs_and_is_reachable(lux, runners, hosts, fake_image):
     sv = add(lux, run_id, "web", 8080, "--env", "GREETING=hi", "--", "sh", "-c",
              "echo $GREETING from $(id -un); exec lux-fake serve 8080 hello-web")
     assert sv["state"] == "starting" and sv["port"] == 8080 and sv["command"][0] == "sh", sv
-    # Its URL is its own (<name>-<8 of its id>), never the Run's id.
+    # Its URL is built from its own id: <name>-<8 of its id>.
     assert sv["id"].startswith("srv_") and sv["url"] == f"https://web-{sv['id'][4:12]}.{PREVIEW_DOMAIN}", sv
     assert sv["lifetime"] == "run" and sv["wake"] == "never", sv
     sv = wait_server(lux, run_id, "web", "ready")
