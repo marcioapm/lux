@@ -71,12 +71,10 @@ func (s *Server) tenantServer(v serverRow, now time.Time) TenantServer {
 		AfterSync: v.AfterSync, Labels: v.Labels, Wake: v.Wake, IdleAfter: secs(v.IdleAfterS), WakeTimeout: secs(v.WakeTimeoutS),
 		Lifetime: v.Lifetime, Owner: v.Owner, RunID: v.RunID, RunName: v.RunName, RunState: v.RunState, FromSpec: v.FromSpec,
 		ExitCode: v.ExitCode, Error: v.Error, Since: v.Since, ReadySince: v.ReadySince, StopReason: v.StopReason, Epoch: v.Epoch,
-		LastRequestAt: v.LastRequestAt, IdleAt: v.idleAt(), Wakes: v.Wakes, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt}
+		LastRequestAt: v.LastRequestAt, IdleAt: v.idleAt(), WakeRequested: v.WakeRequestedAt, Wakes: v.Wakes, CreatedAt: v.CreatedAt,
+		UpdatedAt: v.UpdatedAt}
 	if v.down() {
 		t.Desired = "down"
-	}
-	if v.WakeRequestedAt != nil {
-		t.WakeRequested = v.WakeRequestedAt
 	}
 	if v.ExpireAfterS != nil && v.Lifetime == LifetimeOwner {
 		d := secs(*v.ExpireAfterS)
@@ -128,6 +126,28 @@ func (s *Server) checkHostname(hostname string) (string, error) {
 	return rel, nil
 }
 
+// The bounds of a server's durations.
+const (
+	maxIdleAfter   = 30 * 24 * time.Hour
+	minWakeTimeout = time.Second
+	maxWakeTimeout = 24 * time.Hour
+	maxExpireAfter = 10 * 365 * 24 * time.Hour
+)
+
+func checkWake(wake string) error {
+	if wake != WakeNever && wake != WakeRequest {
+		return errf(http.StatusUnprocessableEntity, "invalid_server", "wake: want request or never")
+	}
+	return nil
+}
+
+func checkLifetime(lifetime string) error {
+	if lifetime != LifetimeOwner && lifetime != LifetimeRun {
+		return errf(http.StatusUnprocessableEntity, "invalid_server", "lifetime: want run or owner")
+	}
+	return nil
+}
+
 // durationOr is d in whole seconds, def when unset; bounds checked.
 func durationOr(name string, d *spec.Duration, def time.Duration, min, max time.Duration) (int, error) {
 	v := def
@@ -173,8 +193,8 @@ func (s *Server) createServer(ctx context.Context, in *createServerInput) (*tena
 	p := principal(ctx)
 	b := in.Body
 	wake := cmp.Or(b.Wake, WakeNever)
-	if wake != WakeNever && wake != WakeRequest {
-		return nil, errf(http.StatusUnprocessableEntity, "invalid_server", "wake: want request or never")
+	if err := checkWake(wake); err != nil {
+		return nil, err
 	}
 	lifetime := b.Lifetime
 	if lifetime == "" {
@@ -183,8 +203,8 @@ func (s *Server) createServer(ctx context.Context, in *createServerInput) (*tena
 			lifetime = LifetimeRun
 		}
 	}
-	if lifetime != LifetimeOwner && lifetime != LifetimeRun {
-		return nil, errf(http.StatusUnprocessableEntity, "invalid_server", "lifetime: want run or owner")
+	if err := checkLifetime(lifetime); err != nil {
+		return nil, err
 	}
 	if wake == WakeRequest && lifetime != LifetimeOwner {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_server", "a server that wakes on request has lifetime owner: it outlives the Runs that serve it")
@@ -193,24 +213,23 @@ func (s *Server) createServer(ctx context.Context, in *createServerInput) (*tena
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_server", "lifetime run needs a runId")
 	}
 	sv := spec.Server{Name: b.Name, Port: b.Port, Command: b.Command, Workdir: b.Workdir, Env: b.Env, AfterSync: b.AfterSync}
-	var empty spec.RunSpec
-	if err := checkServer(empty, sv); err != nil {
+	if err := checkServer(spec.RunSpec{}, sv); err != nil {
 		return nil, err
 	}
 	if err := checkLabels(b.Labels); err != nil {
 		return nil, err
 	}
-	idle, err := durationOr("idleAfter", b.IdleAfter, DefaultIdleAfter, 0, 30*24*time.Hour)
+	idle, err := durationOr("idleAfter", b.IdleAfter, DefaultIdleAfter, 0, maxIdleAfter)
 	if err != nil {
 		return nil, err
 	}
-	timeout, err := durationOr("wakeTimeout", b.WakeTimeout, DefaultWakeTimeout, time.Second, 24*time.Hour)
+	timeout, err := durationOr("wakeTimeout", b.WakeTimeout, DefaultWakeTimeout, minWakeTimeout, maxWakeTimeout)
 	if err != nil {
 		return nil, err
 	}
 	var expire *int
 	if lifetime == LifetimeOwner {
-		e, err := durationOr("expireAfter", b.ExpireAfter, DefaultExpireAfter, 0, 10*365*24*time.Hour)
+		e, err := durationOr("expireAfter", b.ExpireAfter, DefaultExpireAfter, 0, maxExpireAfter)
 		if err != nil {
 			return nil, err
 		}
@@ -228,41 +247,25 @@ func (s *Server) createServer(ctx context.Context, in *createServerInput) (*tena
 	}
 	id := ids.New(ids.Server)
 	var out TenantServer
-	insert := func(tx pgx.Tx, runID *string) error {
-		// A savepoint: a taken hostname is a 409, not an aborted transaction.
-		sp, err := tx.Begin(ctx)
-		if err != nil {
-			return err
-		}
-		_, err = sp.Exec(ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, host, port, command, workdir, env, after_sync, labels,
+	// Created unattached; with a runId, attached in the same transaction.
+	insert := func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, host, port, command, workdir, env, after_sync, labels,
 				wake, idle_after_s, wake_timeout_s, expire_after_s, lifetime, owner)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
-			id, p.TenantID, runID, b.Name, host, b.Port, nilIfEmpty(b.Command), b.Workdir, nonNilMap(b.Env), nilIfEmpty(b.AfterSync),
+			VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+			id, p.TenantID, b.Name, host, b.Port, nilIfEmpty(b.Command), b.Workdir, nonNilMap(b.Env), nilIfEmpty(b.AfterSync),
 			nonNilMap(b.Labels), wake, idle, timeout, expire, lifetime, p.Actor())
 		if err := uniqueViolation(err); err != nil {
-			_ = sp.Rollback(ctx)
 			return err
 		}
-		return sp.Commit(ctx)
-	}
-	created := func(tx pgx.Tx) error {
 		v, err := serverByID(ctx, tx, id)
 		if err != nil {
 			return err
 		}
-		if err := serverEvent(ctx, tx, p.TenantID, v.RunID, id, 0, "server.created", v.ref(), map[string]any{"by": p.Actor(),
-			"wake": wake, "lifetime": lifetime}); err != nil {
-			return err
-		}
-		return nil
+		return serverEvent(ctx, tx, p.TenantID, v.RunID, id, 0, "server.created", v.ref(), map[string]any{"by": p.Actor(),
+			"wake": wake, "lifetime": lifetime})
 	}
 	if b.RunID == "" {
-		err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-			if err := insert(tx, nil); err != nil {
-				return err
-			}
-			return created(tx)
-		})
+		err = s.db.Tx(ctx, store.Tenant(p.TenantID), insert)
 	} else {
 		err = s.changeServers(ctx, p.TenantID, b.RunID, func(tx pgx.Tx) error {
 			state, epoch, sp, err := serverRun(ctx, tx, b.RunID)
@@ -272,10 +275,7 @@ func (s *Server) createServer(ctx context.Context, in *createServerInput) (*tena
 			if err := checkServer(sp, sv); err != nil {
 				return err
 			}
-			if err := insert(tx, nil); err != nil {
-				return err
-			}
-			if err := created(tx); err != nil {
+			if err := insert(tx); err != nil {
 				return err
 			}
 			return attachTx(ctx, tx, p, id, b.RunID, state, epoch)
@@ -306,10 +306,15 @@ func uniqueViolation(err error) error {
 	return err
 }
 
+// errNoServerID is the not_found of a server id the tenant does not have.
+func errNoServerID(id string) error {
+	return errf(http.StatusNotFound, "not_found", "no server %s", id)
+}
+
 func serverByID(ctx context.Context, tx pgx.Tx, id string) (serverRow, error) {
 	v, err := scanServerRow(tx.QueryRow(ctx, serverSelect+`WHERE sv.id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return v, errf(http.StatusNotFound, "not_found", "no server %s", id)
+		return v, errNoServerID(id)
 	}
 	return v, err
 }
@@ -343,19 +348,11 @@ func attachTx(ctx context.Context, tx pgx.Tx, p Principal, id, runID, state stri
 		}
 		return errf(http.StatusConflict, "attached", "server %s is attached to %s: detach it there first", id, *v.RunID)
 	}
-	sp, err := tx.Begin(ctx)
-	if err != nil {
-		return err
-	}
 	// A new gen: the process state is this Run's from now on.
-	_, err = sp.Exec(ctx, `UPDATE run_servers SET run_id = $2, state = 'stopped', stop_reason = NULL, stopped_epoch = NULL, epoch = NULL,
+	_, err = tx.Exec(ctx, `UPDATE run_servers SET run_id = $2, state = 'stopped', stop_reason = NULL, stopped_epoch = NULL, epoch = NULL,
 			active = NULL, exit_code = NULL, error = NULL, ready_since = NULL, since = now(), gen = nextval('run_servers_gen'), updated_at = now()
 		WHERE id = $1`, id, runID)
 	if err := uniqueViolation(err); err != nil {
-		_ = sp.Rollback(ctx)
-		return err
-	}
-	if err := sp.Commit(ctx); err != nil {
 		return err
 	}
 	if err := serverEvent(ctx, tx, p.TenantID, &runID, id, 0, "server.attached", v.ref(), map[string]any{"by": p.Actor(), "runState": state}); err != nil {
@@ -373,7 +370,7 @@ func attachTx(ctx context.Context, tx pgx.Tx, p Principal, id, runID, state stri
 func lockServer(ctx context.Context, tx pgx.Tx, tenantID, id string) (serverRow, error) {
 	v, err := scanServerRow(tx.QueryRow(ctx, serverSelect+`WHERE sv.id = $1 AND sv.tenant_id = $2 FOR UPDATE OF sv`, id, tenantID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return v, errf(http.StatusNotFound, "not_found", "no server %s", id)
+		return v, errNoServerID(id)
 	}
 	return v, err
 }
@@ -453,7 +450,7 @@ func (s *Server) changeServer(ctx context.Context, tenantID, id string, fn func(
 			var before *string
 			if err := tx.QueryRow(ctx, `SELECT run_id FROM run_servers WHERE id = $1 AND tenant_id = $2`, id, tenantID).Scan(&before); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
-					return errf(http.StatusNotFound, "not_found", "no server %s", id)
+					return errNoServerID(id)
 				}
 				return err
 			}
@@ -469,9 +466,8 @@ func (s *Server) changeServer(ctx context.Context, tenantID, id string, fn func(
 			if strOf(v.RunID) != strOf(before) {
 				return errServerMoved
 			}
-			var err2 error
-			hosts, err2 = changeLockedServer(ctx, tx, id, v, fn)
-			return err2
+			hosts, err = changeLockedServer(ctx, tx, v, fn)
+			return err
 		})
 		if !errors.Is(err, errServerMoved) {
 			break
@@ -491,23 +487,29 @@ var errServerMoved = errors.New("server attached or detached meanwhile")
 
 // changeLockedServer runs fn on a server locked with its Run, and returns
 // the hosts to notify of the new sets.
-func changeLockedServer(ctx context.Context, tx pgx.Tx, id string, v serverRow, fn func(pgx.Tx, serverRow) error) ([]string, error) {
-	var hosts []string
+func changeLockedServer(ctx context.Context, tx pgx.Tx, v serverRow, fn func(pgx.Tx, serverRow) error) ([]string, error) {
 	if err := fn(tx, v); err != nil {
 		return nil, err
 	}
-	runs := []string{}
+	var runs []string
 	if v.RunID != nil {
 		runs = append(runs, *v.RunID)
 	}
 	var now *string
-	if err := tx.QueryRow(ctx, `SELECT run_id FROM run_servers WHERE id = $1`, id).Scan(&now); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT run_id FROM run_servers WHERE id = $1`, v.ID).Scan(&now); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
 	if now != nil && !slices.Contains(runs, *now) {
 		runs = append(runs, *now)
 	}
-	for _, r := range runs {
+	return syncServerSets(ctx, tx, runs...)
+}
+
+// syncServerSets sends each Run's placement its server set, and returns
+// the hosts to notify.
+func syncServerSets(ctx context.Context, tx pgx.Tx, runIDs ...string) ([]string, error) {
+	var hosts []string
+	for _, r := range runIDs {
 		h, err := syncServersTx(ctx, tx, r)
 		if err != nil {
 			return nil, err
@@ -726,14 +728,14 @@ func (s *Server) patchServer(ctx context.Context, in *patchServerInput) (*tenant
 			labels, changed = *b.Labels, append(changed, "labels")
 		}
 		if b.Wake != nil {
-			if *b.Wake != WakeNever && *b.Wake != WakeRequest {
-				return errf(http.StatusUnprocessableEntity, "invalid_server", "wake: want request or never")
+			if err := checkWake(*b.Wake); err != nil {
+				return err
 			}
 			wake, changed = *b.Wake, append(changed, "wake")
 		}
 		if b.Lifetime != nil {
-			if *b.Lifetime != LifetimeOwner && *b.Lifetime != LifetimeRun {
-				return errf(http.StatusUnprocessableEntity, "invalid_server", "lifetime: want run or owner")
+			if err := checkLifetime(*b.Lifetime); err != nil {
+				return err
 			}
 			lifetime, changed = *b.Lifetime, append(changed, "lifetime")
 		}
@@ -745,19 +747,19 @@ func (s *Server) patchServer(ctx context.Context, in *patchServerInput) (*tenant
 		}
 		var err error
 		if b.IdleAfter != nil {
-			if idle, err = durationOr("idleAfter", b.IdleAfter, 0, 0, 30*24*time.Hour); err != nil {
+			if idle, err = durationOr("idleAfter", b.IdleAfter, 0, 0, maxIdleAfter); err != nil {
 				return err
 			}
 			changed = append(changed, "idleAfter")
 		}
 		if b.WakeTimeout != nil {
-			if timeout, err = durationOr("wakeTimeout", b.WakeTimeout, 0, time.Second, 24*time.Hour); err != nil {
+			if timeout, err = durationOr("wakeTimeout", b.WakeTimeout, 0, minWakeTimeout, maxWakeTimeout); err != nil {
 				return err
 			}
 			changed = append(changed, "wakeTimeout")
 		}
 		if b.ExpireAfter != nil {
-			e, err := durationOr("expireAfter", b.ExpireAfter, 0, 0, 10*365*24*time.Hour)
+			e, err := durationOr("expireAfter", b.ExpireAfter, 0, 0, maxExpireAfter)
 			if err != nil {
 				return err
 			}
@@ -855,11 +857,6 @@ type tenantServerLogInput struct {
 
 func (s *Server) tenantServerLog(ctx context.Context, in *tenantServerLogInput) (*serverLogOutput, error) {
 	p := principal(ctx)
-	tail := in.Tail
-	if tail <= 0 {
-		tail = 200
-	}
-	tail = min(tail, 5000)
 	v, err := s.loadTenantServer(ctx, p.TenantID, in.ID)
 	if err != nil {
 		return nil, err
@@ -869,7 +866,7 @@ func (s *Server) tenantServerLog(ctx context.Context, in *tenantServerLogInput) 
 		out.Body.Lines = []ServerLogLine{}
 		return out, nil
 	}
-	return s.serverLogOf(ctx, p.TenantID, *v.RunID, v.Name, tail)
+	return s.serverLogOf(ctx, p.TenantID, *v.RunID, v.Name, in.Tail)
 }
 
 // ---- routes ------------------------------------------------------------------------

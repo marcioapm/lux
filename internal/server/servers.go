@@ -199,7 +199,7 @@ func (v serverRow) derive(now time.Time) string {
 		return SrvWaking
 	case running:
 		return SrvStopped
-	case v.Wake == WakeRequest && v.WakeRequestedAt != nil && v.wakeOpen(now):
+	case v.Wake == WakeRequest && v.wakeOpen(now):
 		return SrvWaking
 	case v.Wake == WakeRequest && v.WakeRequestedAt != nil:
 		return SrvNoAnswer
@@ -223,7 +223,7 @@ func (v serverRow) idleAt() *time.Time {
 	return &t
 }
 
-// hostname is a server's full preview host name ("" without previews).
+// previewHostname is a server's full preview host name ("" without previews).
 func (s *Server) previewHostname(host string) string {
 	if s.cfg.Preview.Domain == "" {
 		return ""
@@ -345,7 +345,7 @@ func (s *Server) eventDetail(e *Event) {
 	if host != "" {
 		if h := s.previewHostname(host); h != "" {
 			e.Data["hostname"] = h
-			e.Data["url"] = *s.previewURL(host)
+			e.Data["url"] = s.previewOrigin(h)
 		}
 	}
 }
@@ -971,11 +971,6 @@ type serverLogOutput struct {
 // uploaded yet from a host that is not connected) is skipped.
 func (s *Server) serverLog(ctx context.Context, in *serverLogInput) (*serverLogOutput, error) {
 	p := principal(ctx)
-	tail := in.Tail
-	if tail <= 0 {
-		tail = 200
-	}
-	tail = min(tail, 5000)
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		_, err := s.getServerTx(ctx, tx, in.ID, in.Name)
 		return err
@@ -983,11 +978,16 @@ func (s *Server) serverLog(ctx context.Context, in *serverLogInput) (*serverLogO
 	if err != nil {
 		return nil, err
 	}
-	return s.serverLogOf(ctx, p.TenantID, in.ID, in.Name, tail)
+	return s.serverLogOf(ctx, p.TenantID, in.ID, in.Name, in.Tail)
 }
 
-// serverLogOf is the last tail lines of a server's output in a Run.
+// serverLogOf is the last tail lines (1 to 5000, 200 when 0 or less) of a
+// server's output in a Run.
 func (s *Server) serverLogOf(ctx context.Context, tenantID, runID, name string, tail int) (*serverLogOutput, error) {
+	if tail <= 0 {
+		tail = 200
+	}
+	tail = min(tail, 5000)
 	placements, _, err := s.placementsFrom(ctx, tenantID, runID, 0)
 	if err != nil {
 		return nil, err
