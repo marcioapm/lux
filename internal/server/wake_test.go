@@ -241,6 +241,13 @@ func TestWakeOncePerWake(t *testing.T) {
 	if n := len(serverEventsOf(t, s, ctx, sv.ID, "server.wake_requested")); n != 1 {
 		t.Fatalf("a poll asked again: %d", n)
 	}
+	// Ask again is a POST: a GET (a link prefetcher) only goes to the page.
+	if w := previewGet(s, host, "/.lux/wake?to=/goals", cookie); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/.lux/wait?to=%2Fgoals" {
+		t.Fatalf("GET wake: %d %v", w.Code, w.Header())
+	}
+	if n := len(serverEventsOf(t, s, ctx, sv.ID, "server.wake_requested")); n != 1 {
+		t.Fatalf("a GET asked again: %d", n)
+	}
 	req := httptest.NewRequest(http.MethodPost, "https://"+host+"/.lux/wake", strings.NewReader("to=%2Fgoals"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Cookie", previewCookie+"="+cookie)
@@ -285,10 +292,14 @@ func TestIdleOnce(t *testing.T) {
 	execSQL(t, s, ctx, `UPDATE run_servers SET state = 'ready', ready_since = now() - interval '5 minutes',
 		last_request_at = now() - interval '2 minutes' WHERE id = $1`, sv.ID)
 	idles := func() int { return len(serverEventsOf(t, s, ctx, sv.ID, "server.idle")) }
-	for range 3 {
+	idleCheck := func() {
+		t.Helper()
 		if err := s.checkIdle(ctx); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for range 3 {
+		idleCheck()
 	}
 	if idles() != 1 {
 		t.Fatalf("idle events: %d", idles())
@@ -301,7 +312,7 @@ func TestIdleOnce(t *testing.T) {
 	// without one, then idle again, once.
 	s.preview.touch(sv.ID)
 	s.preview.flush(ctx, true)
-	_ = s.checkIdle(ctx)
+	idleCheck()
 	if idles() != 1 {
 		t.Fatalf("idle right after a request: %d", idles())
 	}
@@ -311,17 +322,17 @@ func TestIdleOnce(t *testing.T) {
 	// A minute on: the request, and the last idle before it, as long ago.
 	execSQL(t, s, ctx, `UPDATE run_servers SET last_request_at = last_request_at - interval '61 seconds',
 		idle_notified_at = idle_notified_at - interval '61 seconds' WHERE id = $1`, sv.ID)
-	_ = s.checkIdle(ctx)
-	_ = s.checkIdle(ctx)
+	idleCheck()
+	idleCheck()
 	if idles() != 2 {
 		t.Fatalf("second idle period: %d", idles())
 	}
 	// Not ready, or its Run not running: never idle.
 	execSQL(t, s, ctx, `UPDATE run_servers SET last_request_at = now() - interval '1 hour', idle_notified_at = NULL, state = 'starting' WHERE id = $1`, sv.ID)
-	_ = s.checkIdle(ctx)
+	idleCheck()
 	execSQL(t, s, ctx, `UPDATE run_servers SET state = 'ready' WHERE id = $1`, sv.ID)
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopping'`)
-	_ = s.checkIdle(ctx)
+	idleCheck()
 	if idles() != 2 {
 		t.Fatalf("idle while not serving: %d", idles())
 	}
@@ -362,6 +373,15 @@ func TestAttachDetachAndEveryPlacement(t *testing.T) {
 	systemScan(t, s, `SELECT state FROM runs WHERE id = $1`, []any{r1}, &runState)
 	if runState != StateRunning {
 		t.Fatalf("detach touched the run: %s", runState)
+	}
+	// A lifetime-run server is its Run's: it cannot be detached.
+	runOnly := createSrv(t, s, key, map[string]any{"name": "own", "port": 3001, "runId": r1})
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/servers/"+runOnly.ID+"/detach", nil); w.Code != http.StatusConflict ||
+		!strings.Contains(w.Body.String(), `"lifetime_run"`) {
+		t.Fatalf("detach a lifetime-run server: %d %s", w.Code, w.Body)
+	}
+	if got := getSrv(t, s, key, runOnly.ID); got.RunID == nil || *got.RunID != r1 {
+		t.Fatalf("after a refused detach: %+v", got.RunID)
 	}
 	// Attach to the stopped Run: nothing starts; at its next placement it
 	// does, with afterSync when that placement syncs.
@@ -460,7 +480,10 @@ func TestServerLifetimes(t *testing.T) {
 	// Expiry.
 	exp := createSrv(t, s, key, map[string]any{"name": "c", "port": 1, "expireAfter": "1h"})
 	never := createSrv(t, s, key, map[string]any{"name": "d", "port": 1, "expireAfter": "0s"})
-	execSQL(t, s, ctx, `UPDATE run_servers SET created_at = now() - interval '2 hours' WHERE id IN ($1, $2)`, exp.ID, never.ID)
+	visited := createSrv(t, s, key, map[string]any{"name": "e", "port": 1, "expireAfter": "1h"})
+	execSQL(t, s, ctx, `UPDATE run_servers SET created_at = now() - interval '2 hours' WHERE id IN ($1, $2, $3)`, exp.ID, never.ID, visited.ID)
+	// Created two hours ago, requested ten minutes ago: an hour from that request.
+	execSQL(t, s, ctx, `UPDATE run_servers SET last_request_at = now() - interval '10 minutes' WHERE id = $1`, visited.ID)
 	if err := s.expireServers(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -468,6 +491,10 @@ func TestServerLifetimes(t *testing.T) {
 		t.Fatalf("expired: %d", w.Code)
 	}
 	getSrv(t, s, key, never.ID)
+	if got := getSrv(t, s, key, visited.ID); got.ExpiresAt == nil || got.LastRequestAt == nil ||
+		!got.ExpiresAt.Equal(got.LastRequestAt.Add(time.Hour)) {
+		t.Fatalf("expiry from the last request: %+v %+v", got.ExpiresAt, got.LastRequestAt)
+	}
 	if ev := serverEventsOf(t, s, ctx, exp.ID, "server.expired"); len(ev) != 1 {
 		t.Fatalf("expired event: %+v", ev)
 	}
@@ -715,5 +742,54 @@ func TestDetachedServerEventsWakeNoRunFollower(t *testing.T) {
 	}
 	if !waitClosed(run) {
 		t.Fatal("an event of the Run did not wake its followers")
+	}
+}
+
+// A wakeable server whose Run is already on its way up or moving shows the
+// waking page and asks no one: the Run is coming without a wake.
+func TestNoWakeWhileTheRunComes(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "wake": "request",
+		"hostname": "web.pr1.lux.example.com", "runId": r1})
+	cookie := cookieFor(s, sv.ID)
+	for _, c := range []struct{ run, placement, stopReason, title string }{
+		{StateStarting, "starting", "", "Its Run is starting"},
+		{StateResuming, "exited", "", "Its Run is starting"},
+		{StateScheduled, "starting", "", "Its Run is starting"},
+		{StateStopping, "stopping", "migrate", pageWakingMoving.Title},
+	} {
+		execSQL(t, s, ctx, `UPDATE runs SET state = $1`, c.run)
+		execSQL(t, s, ctx, `UPDATE placements SET state = $1, stop_reason = $2`, c.placement, c.stopReason)
+		execSQL(t, s, ctx, `UPDATE run_servers SET state = 'starting' WHERE id = $1`, sv.ID)
+		w := previewGet(s, "web.pr1.lux.example.com", "/", cookie)
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), c.title) {
+			t.Fatalf("%s/%s: %d %s", c.run, c.stopReason, w.Code, w.Body)
+		}
+		if n := len(serverEventsOf(t, s, ctx, sv.ID, "server.wake_requested")); n != 0 {
+			t.Fatalf("%s/%s: woke it: %d", c.run, c.stopReason, n)
+		}
+	}
+}
+
+// A wakeable server stopped by request stays down: its page says so, and
+// nothing is asked of its owner.
+func TestStoppedServerDoesNotWake(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited'`)
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "wake": "request",
+		"hostname": "web.pr1.lux.example.com", "runId": r1})
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/servers/"+sv.ID+"/stop", nil); w.Code != http.StatusOK {
+		t.Fatalf("stop: %d %s", w.Code, w.Body)
+	}
+	cookie := cookieFor(s, sv.ID)
+	for _, path := range []string{"/", "/.lux/wait?to=/"} {
+		w := previewGet(s, "web.pr1.lux.example.com", path, cookie)
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), pageStopped.Title) {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body)
+		}
+	}
+	if n := len(serverEventsOf(t, s, ctx, sv.ID, "server.wake_requested")); n != 0 {
+		t.Fatalf("a server stopped by request woke: %d", n)
 	}
 }
