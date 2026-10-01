@@ -99,3 +99,56 @@ func TestServerChangesLockTheRunFirst(t *testing.T) {
 		})
 	}
 }
+
+// The idle check and a wake write a server's row and an event of its Run
+// while its Run's end is being recorded: they take the Run (KEY SHARE, as
+// the event's foreign key does) before the server, so neither deadlocks
+// with the report, and each still writes its one event.
+func TestIdleAndWakeLockTheRunFirst(t *testing.T) {
+	for _, c := range []struct {
+		name, event string
+		setup       string
+		write       func(s *Server, id string) error
+	}{
+		{"idle", "server.idle",
+			`UPDATE run_servers SET state = 'ready', ready_since = now() - interval '5 minutes', last_request_at = now() - interval '2 minutes' WHERE id = $1`,
+			func(s *Server, _ string) error { return s.checkIdle(context.Background()) }},
+		{"wake", "server.wake_requested", `SELECT $1::text`,
+			func(s *Server, id string) error {
+				asked, err := s.requestWake(context.Background(), id, "ada@example.com", "/")
+				if err == nil && !asked {
+					err = errors.New("did not ask")
+				}
+				return err
+			}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx, key, _ := wakeFixture(t)
+			sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "runId": r1,
+				"wake": "request", "idleAfter": "1m"})
+			execSQL(t, s, ctx, c.setup, sv.ID)
+			locked, release := make(chan struct{}), make(chan struct{})
+			released := false
+			t.Cleanup(func() {
+				if !released {
+					close(release)
+				}
+			})
+			report := make(chan error, 1)
+			go func() { report <- runThenServers(t, s, ctx, r1, locked, release) }()
+			<-locked
+			wrote := make(chan error, 1)
+			go func() { wrote <- c.write(s, sv.ID) }()
+			waitBlocked(t, s)
+			close(release)
+			released = true
+			rerr, werr := <-report, <-wrote
+			if rerr != nil || werr != nil {
+				t.Fatalf("report: %v; %s: %v", rerr, c.name, werr)
+			}
+			if n := len(serverEventsOf(t, s, ctx, sv.ID, c.event)); n != 1 {
+				t.Fatalf("%s events: %d", c.event, n)
+			}
+		})
+	}
+}
