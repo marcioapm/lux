@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/marcioapm/lux/internal/store"
 )
@@ -50,9 +50,22 @@ func waitBlocked(t *testing.T, s *Server) {
 	}
 }
 
-func isDeadlock(err error) bool {
-	var pe *pgconn.PgError
-	return errors.As(err, &pe) && pe.Code == "40P01"
+// holdRunEnd starts runThenServers on runID and returns once it holds the
+// Run; finishReport lets it take the servers and commit, and returns its
+// error. A hold not finished is let go when the test ends.
+func holdRunEnd(t *testing.T, s *Server, ctx context.Context, runID string) (finishReport func() error) {
+	t.Helper()
+	locked, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	let := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(let)
+	report := make(chan error, 1)
+	go func() { report <- runThenServers(t, s, ctx, runID, locked, release) }()
+	<-locked
+	return func() error {
+		let()
+		return <-report
+	}
 }
 
 // Deleting a server while its Run's end is being recorded: both take the
@@ -76,23 +89,13 @@ func TestServerChangesLockTheRunFirst(t *testing.T) {
 			sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "runId": r1,
 				"lifetime": "owner", "expireAfter": "1h", "hostname": "web.lock.lux.example.com"})
 			execSQL(t, s, ctx, `UPDATE run_servers SET created_at = now() - interval '2 hours' WHERE id = $1`, sv.ID)
-			locked, release := make(chan struct{}), make(chan struct{})
-			released := false
-			t.Cleanup(func() {
-				if !released {
-					close(release)
-				}
-			})
-			report := make(chan error, 1)
-			go func() { report <- runThenServers(t, s, ctx, r1, locked, release) }()
-			<-locked
+			finishReport := holdRunEnd(t, s, ctx, r1)
 			change := make(chan error, 1)
 			go func() { change <- c.change(t, s, ctx, key, sv.ID) }()
 			waitBlocked(t, s)
-			close(release)
-			released = true
-			rerr, cerr := <-report, <-change
-			if isDeadlock(rerr) || isDeadlock(cerr) || rerr != nil || cerr != nil {
+			rerr := finishReport()
+			cerr := <-change
+			if rerr != nil || cerr != nil {
 				t.Fatalf("report: %v; %s: %v", rerr, c.name, cerr)
 			}
 			if w := apiCall(t, s, key, http.MethodGet, "/v1/servers/"+sv.ID, nil); w.Code != http.StatusNotFound {
@@ -119,23 +122,12 @@ func TestExpiryRechecksUnderLock(t *testing.T) {
 			sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "runId": r1,
 				"lifetime": "owner", "expireAfter": "1h", "hostname": "web.race.lux.example.com"})
 			execSQL(t, s, ctx, `UPDATE run_servers SET created_at = now() - interval '2 hours' WHERE id = $1`, sv.ID)
-			locked, release := make(chan struct{}), make(chan struct{})
-			released := false
-			t.Cleanup(func() {
-				if !released {
-					close(release)
-				}
-			})
-			report := make(chan error, 1)
-			go func() { report <- runThenServers(t, s, ctx, r1, locked, release) }()
-			<-locked
+			finishReport := holdRunEnd(t, s, ctx, r1)
 			expired := make(chan error, 1)
 			go func() { expired <- s.expireServers(context.Background()) }()
 			waitBlocked(t, s)
 			execSQL(t, s, ctx, c.meanwhile, sv.ID)
-			close(release)
-			released = true
-			if err := <-report; err != nil {
+			if err := finishReport(); err != nil {
 				t.Fatal(err)
 			}
 			if err := <-expired; err != nil {
@@ -184,22 +176,12 @@ func TestIdleAndWakeLockTheRunFirst(t *testing.T) {
 			sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "runId": r1,
 				"wake": "request", "idleAfter": "1m"})
 			execSQL(t, s, ctx, c.setup, sv.ID)
-			locked, release := make(chan struct{}), make(chan struct{})
-			released := false
-			t.Cleanup(func() {
-				if !released {
-					close(release)
-				}
-			})
-			report := make(chan error, 1)
-			go func() { report <- runThenServers(t, s, ctx, r1, locked, release) }()
-			<-locked
+			finishReport := holdRunEnd(t, s, ctx, r1)
 			wrote := make(chan error, 1)
 			go func() { wrote <- c.write(s, sv.ID) }()
 			waitBlocked(t, s)
-			close(release)
-			released = true
-			rerr, werr := <-report, <-wrote
+			rerr := finishReport()
+			werr := <-wrote
 			if rerr != nil || werr != nil {
 				t.Fatalf("report: %v; %s: %v", rerr, c.name, werr)
 			}
@@ -218,23 +200,12 @@ func TestIdleRechecksUnderLock(t *testing.T) {
 	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "runId": r1,
 		"wake": "request", "idleAfter": "1m"})
 	execSQL(t, s, ctx, `UPDATE run_servers SET state = 'ready', ready_since = now() - interval '5 minutes', last_request_at = now() - interval '2 minutes' WHERE id = $1`, sv.ID)
-	locked, release := make(chan struct{}), make(chan struct{})
-	released := false
-	t.Cleanup(func() {
-		if !released {
-			close(release)
-		}
-	})
-	report := make(chan error, 1)
-	go func() { report <- runThenServers(t, s, ctx, r1, locked, release) }()
-	<-locked
+	finishReport := holdRunEnd(t, s, ctx, r1)
 	idle := make(chan error, 1)
 	go func() { idle <- s.checkIdle(context.Background()) }()
 	waitBlocked(t, s)
 	execSQL(t, s, ctx, `UPDATE run_servers SET last_request_at = now() WHERE id = $1`, sv.ID)
-	close(release)
-	released = true
-	if err := <-report; err != nil {
+	if err := finishReport(); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-idle; err != nil {
