@@ -116,7 +116,7 @@ lux diff <run> [--base clone|head] [--stat]   # what a running Run changed, per 
 `lux diff` computes each repository's diff now, inside the Run's container,
 as its workload user, without writing anything in the checkout: committed,
 staged, unstaged and untracked (not ignored) changes, from the commit it was
-cloned at (`--base clone`, kept across resumes) or from its `HEAD`
+cloned at or last synced to (`--base clone`, kept across resumes) or from its `HEAD`
 (`--base head`). Each repository's patch is headed by
 `# repo <name>: <base12>..<head12>`, a line `git apply` skips; `--stat`
 prints git-style stat lines instead, and `-o json` the whole result

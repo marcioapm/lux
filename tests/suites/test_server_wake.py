@@ -383,6 +383,45 @@ def test_sync_bundles_only_new_history_and_falls_back(lux, runners, hosts, fake_
     lux.run("cancel", run_id)
 
 
+# Makes the checkout shallow at its HEAD: every commit before it (the clone
+# commit among them), other refs and reflogs go.
+SHALLOW_AT_HEAD = ("cd /workspace/app && b=$(git symbolic-ref --short HEAD) && git rev-parse HEAD > .git/shallow"
+                   " && git for-each-ref --format='%(refname)' | grep -vx refs/heads/$b"
+                   " | xargs -r -n1 git update-ref -d && git reflog expire --expire=now --all && git gc -q --prune=now")
+
+
+def test_a_synced_checkout_is_the_base_after_a_resume(lux, runners, hosts, fake_image, git_server):
+    """A sync's commit outlives its placement: after a resume, lux diff
+    diffs from it (upstream changes are not the workload's), and the next
+    sync bundles only what came after it."""
+    a = git_server.create("app", {"message.txt": "one\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(preview_spec(fake_image, git_server))
+    lux.wait_state(run_id, "running")
+    b = git_server.commit_on("app", "main", "message.txt", "two\n")
+    out = lux.json("sync", run_id, "app=main", "--wait", timeout=120)
+    assert out[0]["status"] == "fast-forward" and out[0]["to"] == b, out
+    # A resume without a sync: the diff is from b, and empty.
+    lux.run("stop", run_id, "--wait", timeout=120)
+    lux.run("resume", run_id, "--secret", f"GIT_TOKEN={git_server.token}", "--wait", timeout=180)
+    d = lux.json("diff", run_id)["repos"][0]
+    assert d["base"] == b and d["head"] == b and d["files"] == 0 and not d.get("patch"), d
+    # The checkout keeps b and drops a, its clone commit: a bundle after a
+    # would need a whole-history retry, one after b does not.
+    lux.run("exec", run_id, "-T", "--", "sh", "-c", SHALLOW_AT_HEAD, input="")
+    lacks = lux.run("exec", run_id, "-T", "--", "git", "-C", "/workspace/app", "cat-file", "-e", a + "^{commit}", input="", check=False)
+    assert lacks.returncode != 0, "the checkout still has its clone commit"
+    # Resumed with a sync: the bundle's base is b, so no whole-history retry.
+    lux.run("stop", run_id, "--wait", timeout=120)
+    c = git_server.commit_on("app", "main", "message.txt", "three\n")
+    lux.run("resume", run_id, "--sync", "app=main", "--secret", f"GIT_TOKEN={git_server.token}", "--wait", timeout=180)
+    res = wait_until(lambda: (e := lux.events(run_id, "git.sync")) and e[-1]["data"].get("to") == c and e[-1]["data"], 60, 1,
+                     "no git.sync for the resume")
+    assert res["status"] == "fast-forward" and res["from"] == b and not res.get("fullBundle") and not res.get("missingBase"), res
+    assert lux.run("exec", run_id, "-T", "--", "cat", "/workspace/app/message.txt", input="").stdout == "three\n"
+    lux.run("cancel", run_id)
+
+
 def test_hostnames_and_tenant_isolation(lux, tenant_factory, runners, hosts, fake_image):
     sv = create(lux, name="web", port=8080, hostname=f"web.iso.{PREVIEW_DOMAIN}")
     other = tenant_factory()

@@ -77,9 +77,10 @@ ALTER TABLE run_events ADD COLUMN server_id text;
 -- run_events under an ACCESS EXCLUSIVE lock; new rows are checked.
 ALTER TABLE run_events ADD CONSTRAINT run_events_subject CHECK (run_id IS NOT NULL OR server_id IS NOT NULL) NOT VALID;
 CREATE INDEX run_events_server ON run_events (server_id, id) WHERE server_id IS NOT NULL;
--- The waking page's per-poll check of the current placement's sync: only
--- sync events are in it.
-CREATE INDEX run_events_sync ON run_events (run_id, epoch, type) WHERE type IN ('git.sync', 'sync.requested');
+-- The waking page's per-poll check of the current placement's sync, and
+-- each placement's checkout bases (gitBases): only clone and sync events
+-- are in it.
+CREATE INDEX run_events_sync ON run_events (run_id, epoch, type) WHERE type IN ('git.clone', 'git.sync', 'sync.requested');
 
 -- An event of a server with no Run notifies 'srv:<id>': no Run's
 -- followers match it, only those of every event (the feed). '' stays the
