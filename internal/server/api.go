@@ -601,6 +601,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
 		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing)
 	r.PlacementSeconds = r.PlacementWaitSeconds + r.PlacementStartSeconds
+	r.Spec = withoutAttachmentData(r.Spec)
 	if info, ok := spec.Adapters[r.Spec.Workload.Adapter]; ok && info.Steer.Lands != "" {
 		st := info.Steer
 		r.Steer = &st
@@ -634,6 +635,16 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		// Checked here, not in Normalize: the stored spec carries both.
 		return nil, invalidSpec(&spec.ValidationError{Problems: []string{
 			"placement: name the pool by pool or poolId, not both"}})
+	}
+	// Refused with the codes /input uses, before Normalize (which defaults
+	// the adapter to generic).
+	if len(sp.Workload.Attachments) > 0 {
+		if err := checkAttachments("workload.attachments", sp.Workload.Attachments); err != nil {
+			return nil, err
+		}
+		if !takesAttachments(sp.Workload.Adapter) {
+			return nil, errAttachmentsUnsupported(cmp.Or(sp.Workload.Adapter, "generic"))
+		}
 	}
 	if err := sp.Normalize(s.cfg.Defaults); err != nil {
 		return nil, invalidSpec(err)
@@ -1157,10 +1168,11 @@ func (s *Server) events(ctx context.Context, tenantID, runID string, after int64
 }
 
 type inputRequest struct {
-	Text      string `json:"text,omitempty" doc:"A message: agents get it as a prompt, generic workloads on stdin."`
-	Raw       []byte `json:"raw,omitempty" doc:"Raw bytes for a generic workload's stdin."`
-	Interrupt bool   `json:"interrupt,omitempty" doc:"Stop the current turn first."`
-	RequestID string `json:"requestId,omitempty" doc:"Makes retries safe: the runner delivers each id once. Generated if absent."`
+	Text        string            `json:"text,omitempty" doc:"A message: agents get it as a prompt, generic workloads on stdin. May be empty when attachments are given."`
+	Raw         []byte            `json:"raw,omitempty" doc:"Raw bytes for a generic workload's stdin."`
+	Attachments []spec.Attachment `json:"attachments,omitempty" doc:"Images, one message with text (before it): at most 10, each at most 5 MiB decoded; the whole body stays under 8 MiB. Each is also written to $LUX_INPUTS/<requestId>/ in the container. Agent adapters only (400 attachments_unsupported for generic); a bad one is 400 invalid_attachment."`
+	Interrupt   bool              `json:"interrupt,omitempty" doc:"Stop the current turn first."`
+	RequestID   string            `json:"requestId,omitempty" doc:"Makes retries safe: the runner delivers each id once. Generated if absent."`
 }
 
 type postInputInput struct {
@@ -1187,8 +1199,11 @@ func accepted(requestID string) *requestIDOutput {
 func (s *Server) postInput(ctx context.Context, req *postInputInput) (*requestIDOutput, error) {
 	p := principal(ctx)
 	in := req.Body
-	if in.Text == "" && len(in.Raw) == 0 && !in.Interrupt {
-		return nil, errf(http.StatusBadRequest, "bad_request", "text, raw or interrupt is required")
+	if in.Text == "" && len(in.Raw) == 0 && !in.Interrupt && len(in.Attachments) == 0 {
+		return nil, errf(http.StatusBadRequest, "bad_request", "text, raw, attachments or interrupt is required")
+	}
+	if err := checkAttachments("attachments", in.Attachments); err != nil {
+		return nil, err
 	}
 	if in.RequestID == "" {
 		in.RequestID = ids.New("in")
@@ -1196,10 +1211,13 @@ func (s *Server) postInput(ctx context.Context, req *postInputInput) (*requestID
 	id := req.ID
 	var hostID string
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		var state string
+		var state, adapter string
 		var epoch int
-		if err := tx.QueryRow(ctx, `SELECT state, current_epoch FROM runs WHERE id = $1 FOR UPDATE`, id).Scan(&state, &epoch); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT state, current_epoch, coalesce(spec->'workload'->>'adapter', '') FROM runs WHERE id = $1 FOR UPDATE`, id).Scan(&state, &epoch, &adapter); err != nil {
 			return err
+		}
+		if len(in.Attachments) > 0 && !takesAttachments(adapter) {
+			return errAttachmentsUnsupported(adapter)
 		}
 		switch {
 		case state == StateStopped || state == StateLost:
@@ -1212,16 +1230,19 @@ func (s *Server) postInput(ctx context.Context, req *postInputInput) (*requestID
 		if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, id, epoch).Scan(&hostID); err != nil {
 			return err
 		}
-		msg := proto.Input{RequestID: in.RequestID, Text: in.Text, Raw: in.Raw, Interrupt: in.Interrupt}
+		msg := proto.Input{RequestID: in.RequestID, Text: in.Text, Raw: in.Raw, Interrupt: in.Interrupt, Attachments: in.Attachments}
 		typ := proto.MsgInput
-		if in.Interrupt && in.Text == "" && len(in.Raw) == 0 {
+		if in.Interrupt && in.Text == "" && len(in.Raw) == 0 && len(in.Attachments) == 0 {
 			typ = proto.MsgInterrupt
 		}
 		if err := s.systemEnqueue(ctx, hostID, id, epoch, typ, msg); err != nil {
 			return err
 		}
-		return addEvent(ctx, tx, p.TenantID, id, epoch, "input", map[string]any{
-			"requestId": in.RequestID, "interrupt": in.Interrupt, "text": in.Text, "rawBytes": len(in.Raw)})
+		ev := map[string]any{"requestId": in.RequestID, "interrupt": in.Interrupt, "text": in.Text, "rawBytes": len(in.Raw)}
+		if meta := spec.AttachmentsMeta(in.Attachments); meta != nil {
+			ev["attachments"] = meta
+		}
+		return addEvent(ctx, tx, p.TenantID, id, epoch, "input", ev)
 	})
 	if err != nil {
 		return nil, err
