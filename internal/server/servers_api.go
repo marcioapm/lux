@@ -313,9 +313,11 @@ func serverByID(ctx context.Context, tx pgx.Tx, id string) (serverRow, error) {
 	return v, err
 }
 
+// loadTenantServer reads a server as tenantID sees it ("": an operator,
+// every tenant's).
 func (s *Server) loadTenantServer(ctx context.Context, tenantID, id string) (TenantServer, error) {
 	var out TenantServer
-	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
+	err := s.db.Tx(ctx, Principal{TenantID: tenantID}.scope(), func(tx pgx.Tx) error {
 		v, err := serverByID(ctx, tx, id)
 		out = s.tenantServer(v, time.Now())
 		return err
@@ -553,6 +555,7 @@ func (s *Server) getTenantServer(ctx context.Context, in *getTenantServerInput) 
 }
 
 type listTenantServersInput struct {
+	TenantQuery
 	State    string   `query:"state" doc:"Only servers in these states (comma-separated): ready, waking, asleep, stopped, unreachable, exited, no answer."`
 	Label    []string `query:"label,explode" doc:"Only servers with this label (key=value); repeat to require several."`
 	Wake     string   `query:"wake" enum:"request,never," doc:"Only servers that wake so."`
@@ -611,7 +614,7 @@ func (s *Server) listTenantServers(ctx context.Context, in *listTenantServersInp
 	out := &tenantServerListOutput{}
 	out.Body.Servers = []TenantServer{}
 	out.Body.Counts = map[string]int{}
-	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
 		rows, err := collectServerRows(tx.Query(ctx, serverSelect+`WHERE `+strings.Join(where, " AND ")+
 			` ORDER BY sv.created_at DESC, sv.id LIMIT `+arg(limit), args...))
 		if err != nil {
@@ -785,7 +788,7 @@ func (s *Server) serverEvents(ctx context.Context, in *serverEventsInput) (*list
 	after, _ := strconv.ParseInt(in.After, 10, 64)
 	out := &listEventsOutput{}
 	out.Body.Events = []Event{}
-	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, coalesce(server_id, ''), epoch, type, data, created_at FROM run_events
 			WHERE server_id = $1 AND id > $2 ORDER BY id LIMIT 1000`, in.ID, after)
 		if err != nil {
