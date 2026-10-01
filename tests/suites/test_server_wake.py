@@ -19,6 +19,11 @@ from env import PREVIEW_DOMAIN, wait_until
 
 VOLUMES = [{"name": "workspace", "path": "/workspace", "kind": "state"}]
 
+# The harness's LUX_PREVIEW_IDLE_CHECK, in seconds; a negative idle check
+# waits three of them.
+IDLE_CHECK = 1
+IDLE_SETTLE = 3 * IDLE_CHECK
+
 
 def preview_spec(image: str, git_server=None, **extra) -> dict:
     """A servers-only Run: nothing but its servers runs (a generic
@@ -116,7 +121,7 @@ def test_wake_end_to_end_with_sync_and_state(lux, runners, hosts, fake_image, gi
     assert page.status_code == 200 and a[:7] in page.text and '<b id="visits">1</b>' in page.text, page.text
     # Idle once, after 4s with no request.
     wait_until(lambda: events(lux, sv["id"], "server.idle"), 30, 1, "never idle")
-    time.sleep(3)
+    time.sleep(IDLE_SETTLE)
     assert len(events(lux, sv["id"], "server.idle")) == 1
     # The owner stops it; asleep.
     lux.run("stop", run_id, "--wait", timeout=120)
@@ -183,11 +188,15 @@ def test_idle_is_reset_by_requests_not_websockets(lux, runners, hosts, fake_imag
         time.sleep(2)
     assert events(lux, sv["id"], "server.idle") == []
     # A server-sent event stream held open is one request: it does not keep
-    # the server busy (as an open WebSocket does not).
-    r = b.get("/events", stream=True, headers={"Accept": "text/event-stream"})
+    # the server busy (as an open WebSocket does not). The stream outlasts
+    # idleAfter, and is still open when server.idle comes.
+    r = b.get("/events?n=60", stream=True, headers={"Accept": "text/event-stream"})
+    ticks = r.iter_lines()
+    assert next(l for l in ticks if l) == b"data: tick 0"
     wait_until(lambda: events(lux, sv["id"], "server.idle"), 30, 1, "never idle")
+    assert next(l for l in ticks if l).startswith(b"data: tick "), "the stream closed before server.idle"
     r.close()
-    time.sleep(3)
+    time.sleep(IDLE_SETTLE)
     assert len(events(lux, sv["id"], "server.idle")) == 1
     # A request resets it: idle again later, once more.
     b.get("/")
