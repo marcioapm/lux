@@ -923,6 +923,10 @@ func (s *Server) removeServer(ctx context.Context, in *ServerPath) (*noContent, 
 		if err != nil {
 			return err
 		}
+		if v.Lifetime == LifetimeOwner {
+			return errf(http.StatusConflict, "lifetime_owner", "server %s (%s) is its owner's, not the Run's: detach it (POST /v1/servers/%s/detach) or delete it (DELETE /v1/servers/%s)",
+				in.Name, v.ID, v.ID, v.ID)
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM run_servers WHERE id = $1`, v.ID); err != nil {
 			return err
 		}

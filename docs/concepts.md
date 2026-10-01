@@ -213,7 +213,10 @@ lux server start|stop|restart|rm srv_…  (or <run> <name>)
   gone".
 - **Changes:** adding, editing (`PUT` on the Run's, `PATCH` on
   `/v1/servers/{id}`) and removing work in any state of the Run but
-  finished. An edit applies at the server's next start.
+  finished. An edit applies at the server's next start. The Run API
+  removes only the Run's own servers: `DELETE /v1/runs/{id}/servers/{name}`
+  on an owner server is 409 `lifetime_owner`; detach or delete it through
+  `/v1/servers/{id}`.
 - **Events** go on the Run's events (when attached) and on the tenant's
   feed, `GET /v1/events` (see [Output](#output)): `server.created`,
   `updated`, `deleted`, `attached`, `detached`, `state`,
