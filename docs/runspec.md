@@ -577,8 +577,11 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
     files become the commit's.
     **Untracked and ignored files are kept** (a database file, `node_modules`,
     a build cache); an untracked file the commit now tracks is replaced;
-  - anything that fails: `failed` with git's message; the checkout is left
-    as it was, and **the Run goes on** (a resume still starts).
+  - anything that fails: `failed` with git's message, and **the Run goes
+    on** (a resume still starts). A failure before the move (the fetch, a
+    missing checkout) leaves the checkout as it was; one during a reset
+    leaves it where git stopped, with `refs/lux/pre-sync` holding what was
+    there.
 - Each repository's outcome is a `git.sync` event: `{repo, ref, from, to,
   status, dirty?, diverged?, saved?, error?, missingBase?, fullBundle?}` (and `requestId` for a
   running Run's sync, which ends with `sync.done {requestId, changed}`).
