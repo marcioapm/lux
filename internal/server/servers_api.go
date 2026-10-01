@@ -874,6 +874,9 @@ func (s *Server) tenantServerLog(ctx context.Context, in *tenantServerLogInput) 
 
 // ---- routes ------------------------------------------------------------------------
 
+// movedConflict documents changeServer's errServerMoved answer.
+const movedConflict = "409 conflict when the server was attached or detached twice while this ran: retry."
+
 func (s *Server) serverRoutes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "createServer", Method: http.MethodPost, Path: "/v1/servers", Tags: []string{"servers"},
@@ -894,13 +897,13 @@ func (s *Server) serverRoutes(api huma.API) {
 	}, "read", s.getTenantServer)
 	register(s, api, huma.Operation{
 		OperationID: "patchServer", Method: http.MethodPatch, Path: "/v1/servers/{id}", Tags: []string{"servers"},
-		Summary: "Change a server", Description: "What is given. Command, port, workdir, env and afterSync apply at its next start.",
+		Summary: "Change a server", Description: "What is given. Command, port, workdir, env and afterSync apply at its next start. " + movedConflict,
 		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.patchServer)
 	register(s, api, huma.Operation{
 		OperationID: "deleteServer", Method: http.MethodDelete, Path: "/v1/servers/{id}", Tags: []string{"servers"},
-		Summary: "Delete a server", Description: "Detaches it first (its command stops; its Run is untouched). Its hostname is gone from then on.",
-		DefaultStatus: http.StatusNoContent, Errors: []int{http.StatusNotFound},
+		Summary: "Delete a server", Description: "Detaches it first (its command stops; its Run is untouched). Its hostname is gone from then on. " + movedConflict,
+		DefaultStatus: http.StatusNoContent, Errors: []int{http.StatusNotFound, http.StatusConflict},
 	}, "run", s.deleteServer)
 	register(s, api, huma.Operation{
 		OperationID: "attachServer", Method: http.MethodPost, Path: "/v1/servers/{id}/attach", Tags: []string{"servers"},
@@ -911,7 +914,7 @@ func (s *Server) serverRoutes(api huma.API) {
 	}, "run", s.attachServer)
 	register(s, api, huma.Operation{
 		OperationID: "detachServer", Method: http.MethodPost, Path: "/v1/servers/{id}/detach", Tags: []string{"servers"},
-		Summary: "Detach a server from its Run", Description: "Its command stops; the Run is untouched. 409 lifetime_run for a server that ends with its Run.",
+		Summary: "Detach a server from its Run", Description: "Its command stops; the Run is untouched. 409 lifetime_run for a server that ends with its Run. " + movedConflict,
 		Errors: []int{http.StatusNotFound, http.StatusConflict},
 	}, "run", s.detachServer)
 	for _, a := range []struct{ action, summary, doc string }{
@@ -921,7 +924,7 @@ func (s *Server) serverRoutes(api huma.API) {
 	} {
 		register(s, api, huma.Operation{
 			OperationID: a.action + "TenantServer", Method: http.MethodPost, Path: "/v1/servers/{id}/" + a.action, Tags: []string{"servers"},
-			Summary: a.summary, Description: a.doc,
+			Summary: a.summary, Description: a.doc + " " + movedConflict,
 			Errors: []int{http.StatusNotFound, http.StatusConflict},
 		}, "run", s.tenantServerAction(a.action))
 	}
