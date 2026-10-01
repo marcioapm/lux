@@ -122,17 +122,48 @@ func (s *Server) checkIdle(ctx context.Context) error {
 
 // expireServers deletes owner servers that went expireAfter without a
 // request (since their creation, if never requested): detached first, then
-// gone, with server.expired.
+// gone, with server.expired. The candidates are read unlocked; each is then
+// locked as every change of a server is, its Run first, and checked again.
 func (s *Server) expireServers(ctx context.Context) error {
-	var hosts []string
+	const due = `sv.lifetime = 'owner' AND sv.expire_after_s IS NOT NULL
+		AND coalesce(sv.last_request_at, sv.created_at) + make_interval(secs => sv.expire_after_s) <= now()`
+	var ids []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := collectServerRows(tx.Query(ctx, serverSelect+`WHERE sv.lifetime = 'owner' AND sv.expire_after_s IS NOT NULL
-			AND coalesce(sv.last_request_at, sv.created_at) + make_interval(secs => sv.expire_after_s) <= now()
-			ORDER BY sv.id LIMIT 100 FOR UPDATE OF sv SKIP LOCKED`))
+		rows, err := tx.Query(ctx, `SELECT sv.id FROM run_servers sv WHERE `+due+` ORDER BY sv.id LIMIT 100`)
 		if err != nil {
 			return err
 		}
-		for _, v := range rows {
+		ids, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		var hosts []string
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			var runID *string
+			if err := tx.QueryRow(ctx, `SELECT run_id FROM run_servers WHERE id = $1`, id).Scan(&runID); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil
+				}
+				return err
+			}
+			if runID != nil {
+				if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = $1 FOR UPDATE`, *runID); err != nil {
+					return err
+				}
+			}
+			v, err := scanServerRow(tx.QueryRow(ctx, serverSelect+`WHERE sv.id = $1 AND `+due+` FOR UPDATE OF sv`, id))
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // requested, or deleted, meanwhile
+			}
+			if err != nil {
+				return err
+			}
+			if strOf(v.RunID) != strOf(runID) {
+				return nil // attached or detached meanwhile: the next pass
+			}
 			if err := deleteServerTx(ctx, tx, v.TenantID, v, "expired", "lux", "server.expired"); err != nil {
 				return err
 			}
@@ -145,13 +176,16 @@ func (s *Server) expireServers(ctx context.Context) error {
 					hosts = append(hosts, h)
 				}
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	})
-	for _, h := range hosts {
-		s.hub.Notify(h)
+		for _, h := range hosts {
+			s.hub.Notify(h)
+		}
 	}
-	return err
+	return nil
 }
 
 // ---- the waking page --------------------------------------------------------
