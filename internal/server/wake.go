@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -43,7 +44,7 @@ func (s *Server) requestWake(ctx context.Context, id, by, path string) (asked bo
 			  AND (wake_requested_at IS NULL OR wake_requested_at + make_interval(secs => wake_timeout_s) <= now())
 			RETURNING tenant_id, run_id, wakes, name, host, labels`, id, by, truncate(path, 1000)).
 			Scan(&tenantID, &runID, &wakes, &ref.name, &ref.host, &ref.labels)
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
@@ -190,12 +191,12 @@ func (p *previews) wakingPage(ctx context.Context, w http.ResponseWriter, id, to
 					OR r.pending_sync IS NOT NULL
 			FROM runs r JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch LEFT JOIN hosts h ON h.id = p.host_id
 			WHERE r.id = $1`, *v.RunID).Scan(&pl.created, &pl.restored, &pl.started, &pl.workload, &pl.hostname, &pl.synced, &pl.syncFailed, &pl.syncWanted)
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		return err
 	})
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		p.page(w, http.StatusNotFound, pageGone, nil)
 		return nil
 	}

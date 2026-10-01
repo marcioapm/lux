@@ -360,9 +360,9 @@ func stripPort(host string) string {
 	return host
 }
 
-// signIn is /.lux/auth?ticket=…&to=/path: a preview ticket for this server
-// (or, as before servers were their own, for the Run it is attached to)
-// becomes the cookie, and the browser goes on to the path.
+// signIn is /.lux/auth?ticket=…&to=/path: a preview ticket for this server,
+// or for the Run it is attached to (POST /v1/runs/{id}/tickets), becomes
+// the cookie, and the browser goes on to the path.
 func (p *previews) signIn(w http.ResponseWriter, r *http.Request, v serverRow) {
 	to := r.URL.Query().Get("to")
 	if to == "" {
