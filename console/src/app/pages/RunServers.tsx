@@ -292,7 +292,7 @@ function AttachServerDialog({ run, onDone, onCancel }: { run: Run; onDone: (name
       {free.length === 0 && !q.loading ? (
         <EmptyState compact title="No unattached servers" description="A server is attached to at most one run. Detach one from its run first, or create one (lux server create)." />
       ) : (
-        <div className="stack-tight">
+        <div className="stack stack-tight">
           {free.map((s) => (
             <label key={s.id} className="check">
               <input type="radio" name="attach" checked={pick === s.id} onChange={() => setPick(s.id)} />
