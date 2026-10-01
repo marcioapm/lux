@@ -7189,6 +7189,13 @@ paths:
         Needs the `read` scope.
       operationId: listTenantServers
       parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
         - description: "Only servers in these states (comma-separated): ready, waking, asleep, stopped, unreachable, exited, no answer."
           explode: false
           in: query
