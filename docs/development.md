@@ -221,7 +221,9 @@ orchestrator to start it", then the Run being placed, restored, updated
 and started, and drops into the app: commit A, visit 1. Leave it for
 `DEMO_IDLE` (default `1m`): the orchestrator stops the Run. Run
 `push "hello from commit B"`, reload the page: it wakes again, on commit
-B, and the visit counter carries on (2). A host name nothing serves
+B, and the visit counter carries on (2). Pushed while the preview is up,
+`push` also syncs its Run (`lux sync`, what an owner does on a forge
+webhook), and a reload shows the new commit without a wake. A host name nothing serves
 (`http://gone.lux.localhost:8090/`) says "This preview is gone".
 
 `DEMO_PREVIEW_PORT` changes the port (8090), `DEMO_IDLE` the idle time.
