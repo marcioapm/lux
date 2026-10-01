@@ -102,6 +102,8 @@ export interface Run {
   state: string;
   stateReason?: string;
   activity?: string;
+  /** What the adapter does with input sent while the agent works. */
+  steer?: { lands: "next_step" | "next_turn"; receipt: boolean };
   exitCode?: number;
   epoch: number;
   sessionId?: string;
@@ -732,6 +734,13 @@ export interface RunListParams extends PageParams {
   label?: string;
   before?: string;
   limit?: number;
+}
+
+/** GET /hosts/summary: the live hosts of the caller's unfiltered host list; capacity and allocation of the ready and draining ones. */
+export interface HostSummary {
+  live: number;
+  capacity: { cpus: number; memory: number };
+  allocated: { cpus: number; memory: number };
 }
 
 export interface HostListParams extends PageParams {
