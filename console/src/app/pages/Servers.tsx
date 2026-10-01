@@ -32,8 +32,8 @@ export function Servers() {
   const n = (...st: TenantServerState[]) => st.reduce((a, s) => a + (counts[s] ?? 0), 0);
   const longestWake = all.filter((s) => s.state === "waking" && s.wakeRequestedAt).reduce((m, s) => Math.max(m, now - Date.parse(s.wakeRequestedAt!)), 0);
 
-  const cols = useMemo<Column<TenantServer>[]>(() => {
-    const c: Column<TenantServer>[] = [
+  const cols = useMemo<Column<TenantServer>[]>(
+    () => [
       {
         key: "name",
         header: "Server",
@@ -57,9 +57,9 @@ export function Servers() {
       { key: "idle", header: "Idle", cell: (s) => idleText(s, now) ?? DASH, sortValue: (s) => (s.idleAt ? Date.parse(s.idleAt) : null), width: 100, mono: true },
       { key: "wakes", header: "Wakes", cell: (s) => s.wakes, sortValue: (s) => s.wakes, align: "right", mono: true, width: 80, optional: true },
       { key: "created", header: "Created", cell: (s) => <RelativeTime at={s.createdAt} />, sortValue: (s) => Date.parse(s.createdAt), sortKind: "time", width: 120, optional: true },
-    ];
-    return c;
-  }, [now]);
+    ],
+    [now],
+  );
 
   return (
     <div className="page page-list">

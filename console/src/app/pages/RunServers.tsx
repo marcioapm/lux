@@ -20,7 +20,7 @@ export function RunServers({ run, refetch, fetching, error }: { run: Run; refetc
   const [removing, setRemoving] = useState<Server | null>(null);
   const refresh = () => invalidate(`run:${run.id}`);
 
-  const act = async (label: string, s: ServerInfo, fn: () => Promise<Server | void>) => {
+  const act = async (label: string, s: ServerInfo, fn: () => Promise<unknown>) => {
     setBusy((b) => [...b, s.name]);
     try {
       await fn();
@@ -70,7 +70,7 @@ export function RunServers({ run, refetch, fetching, error }: { run: Run; refetc
           onStop={(s) => void act("Stopped", s, () => api.stopServer(run.id, s.name))}
           onRestart={(s) => void act("Restarted", s, () => api.restartServer(run.id, s.name))}
           onRemove={(s) => setRemoving(servers.find((x) => x.name === s.name) ?? null)}
-          onDetach={(s) => s.id && void act("Detached", s, () => api.detachServer(s.id!).then(() => undefined))}
+          onDetach={(s) => s.id && void act("Detached", s, () => api.detachServer(s.id!))}
           hrefFor={(s) => (s.id ? serverPath(s.id) : undefined)}
           renderLog={(s) => <ServerLog runId={run.id} server={s} />}
           note={note}
