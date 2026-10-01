@@ -33,7 +33,7 @@ export function wakeText(s: Pick<TenantServer, "wake">): string {
 }
 
 /** What its Lifetime setting means, in a line. */
-export function lifetimeText(s: Pick<TenantServer, "lifetime" | "expireAfter" | "expiresAt">): string {
+export function lifetimeText(s: Pick<TenantServer, "lifetime" | "expireAfter">): string {
   if (s.lifetime === "run") return "Ends with its run (succeeded or cancelled)";
   const exp = durationWords(s.expireAfter);
   return exp === "never" ? "Until its owner deletes it" : `Until its owner deletes it, or ${exp} without a request`;

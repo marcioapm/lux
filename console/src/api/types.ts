@@ -1,5 +1,6 @@
 // Mirrors of the luxd JSON types (internal/server/*.go). Times are RFC 3339
 // strings; optional fields are omitted by the server when empty.
+import type { ServedState } from "@lux/design-system";
 
 export interface ApiErrorBody {
   error: { code: string; message: string; details?: unknown };
@@ -183,7 +184,7 @@ export type WakeMode = "request" | "never";
 export type Lifetime = "run" | "owner";
 
 /** A server's state on /v1/servers, derived from its process and its Run. */
-export type TenantServerState = "ready" | "waking" | "asleep" | "stopped" | "unreachable" | "exited" | "no answer";
+export type TenantServerState = ServedState;
 
 /** GET /v1/servers/{id}: a server of the tenant (TenantServer in internal/server/servers_api.go). */
 export interface TenantServer {
@@ -234,24 +235,6 @@ export interface TenantServerList {
   servers: TenantServer[];
   /** How many of the listed (before the state filter) are in each state. */
   counts: Partial<Record<TenantServerState, number>>;
-}
-
-/** POST /v1/servers. */
-export interface CreateServerInput {
-  name: string;
-  port: number;
-  command?: string[];
-  workdir?: string;
-  env?: Record<string, string>;
-  afterSync?: string[];
-  labels?: Record<string, string>;
-  hostname?: string;
-  wake?: WakeMode;
-  idleAfter?: string;
-  wakeTimeout?: string;
-  lifetime?: Lifetime;
-  expireAfter?: string;
-  runId?: string;
 }
 
 /** POST /v1/runs/{id}/servers; PUT takes the same minus name, lifetime and labels. */
