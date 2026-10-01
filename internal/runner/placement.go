@@ -318,7 +318,7 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	// A resume's sync: fetched now, applied by the shim before init.
-	p.sync = p.prepareSync(startCtx, sp, a.Sync, "")
+	p.sync = p.prepareSync(startCtx, sp, a.Sync, "", false)
 
 	if p.pendingStop() != "" {
 		fail("stop", nil)
@@ -1025,6 +1025,9 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 			ae = &proto.AdapterEvent{InputProgress: &proto.InputProgress{RequestID: d.RequestID, Phase: proto.InputFailed, Error: d.Error}}
 		case proto.EvSync:
 			p.onSyncRecord(ctx, ev.Data)
+		case proto.EvSyncFallback:
+			// Off the tailer: bundling takes long, and records keep coming.
+			go p.onSyncFallback(ctx, ev.Data)
 		case proto.EvWorkload:
 			if d.Phase == "start" {
 				p.mark("workloadStarted")

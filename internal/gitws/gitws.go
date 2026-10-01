@@ -341,15 +341,22 @@ type Target struct {
 	// Branch: the ref is this branch (checked out as it); "" for a tag or
 	// sha (checked out detached).
 	Branch string
-	// Bundle holds Commit and its history as refs/lux/sync.
+	// Bundle holds Commit as refs/lux/sync, with its history down to Base.
 	Bundle string
+	// Base: the commit the bundle's history stops at (its prerequisite,
+	// which the checkout must have); "" for a bundle of the whole history.
+	Base string
 }
 
 // SyncBundle fetches r.Ref through the host's mirror (with the runner's
 // credential) and writes a bundle of it to bundle. The bundle carries no
 // credential and no remote: the workload's user fetches from it inside
 // its container, so the runner never runs git in the checkout.
-func (m *Manager) SyncBundle(ctx context.Context, r Repo, bundle string) (Target, error) {
+//
+// base is a commit the checkout is known to have (its clone or last sync);
+// the bundle then holds only what is not in base's history. With base ""
+// or unknown to the mirror, the bundle holds the whole history.
+func (m *Manager) SyncBundle(ctx context.Context, r Repo, base, bundle string) (Target, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	var t Target
@@ -382,9 +389,38 @@ func (m *Manager) SyncBundle(ctx context.Context, r Repo, bundle string) (Target
 	if _, err := git(ctx, work, "", "update-ref", "refs/lux/sync", t.Commit); err != nil {
 		return t, err
 	}
-	if _, err := git(ctx, work, "", "bundle", "create", "--quiet", bundle, "refs/lux/sync"); err != nil {
+	create := []string{"bundle", "create", "--quiet", bundle, "refs/lux/sync"}
+	if exclude := m.syncPrerequisites(ctx, work, base, t.Commit); len(exclude) > 0 {
+		t.Base = base
+		for _, c := range exclude {
+			create = append(create, "^"+c)
+		}
+	}
+	if _, err := git(ctx, work, "", create...); err != nil {
 		return t, err
 	}
 	t.Bundle = bundle
 	return t, os.Chmod(bundle, 0o644)
+}
+
+// syncPrerequisites is what a bundle of commit leaves out, given that the
+// checkout has base: base itself, or, when commit is already in base's
+// history (an empty bundle git refuses to write), commit's parents. nil
+// means the whole history: no base, base not in the mirror, or a root
+// commit.
+func (m *Manager) syncPrerequisites(ctx context.Context, work, base, commit string) []string {
+	if !shaRe.MatchString(base) {
+		return nil
+	}
+	if _, err := git(ctx, work, "", "cat-file", "-e", base+"^{commit}"); err != nil {
+		return nil
+	}
+	if _, err := git(ctx, work, "", "merge-base", "--is-ancestor", commit, base); err != nil {
+		return []string{base}
+	}
+	parents, err := git(ctx, work, "", "rev-parse", commit+"^@")
+	if err != nil || parents == "" {
+		return nil
+	}
+	return strings.Fields(parents)
 }

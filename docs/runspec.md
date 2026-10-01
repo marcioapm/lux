@@ -554,7 +554,11 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
 
 - **Credentials stay out.** The runner fetches the ref through the host's
   mirror with the repository's credential and writes a bundle of the
-  commit (no credential, no remote) on the Run's runtime volume. The
+  commit (no credential, no remote) on the Run's runtime volume, removed
+  once the checkout has fetched it. The bundle holds only the history
+  after the commit lux last knew the checkout at (its clone or its last
+  sync); a checkout that no longer has that commit is retried once with
+  the whole history (`fullBundle: true` on its event). The
   checkout is moved by `lux-shim sync`, as the workload's user inside the
   container: the runner never runs git in a checkout the workload
   controls (its hooks and config would run as root on the host).
@@ -576,7 +580,7 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
   - anything that fails: `failed` with git's message; the checkout is left
     as it was, and **the Run goes on** (a resume still starts).
 - Each repository's outcome is a `git.sync` event: `{repo, ref, from, to,
-  status, dirty?, diverged?, saved?, error?}` (and `requestId` for a
+  status, dirty?, diverged?, saved?, error?, missingBase?, fullBundle?}` (and `requestId` for a
   running Run's sync, which ends with `sync.done {requestId, changed}`).
   A moved checkout is the base of `lux diff` from then on.
 - After a running Run's sync that moved a checkout, servers with
