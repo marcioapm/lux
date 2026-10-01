@@ -650,3 +650,21 @@ func TestWebSocketIsNotActivity(t *testing.T) {
 		t.Fatalf("idle events with a busy WebSocket open: %d", n)
 	}
 }
+
+// Attached while its Run is already on a host but not yet running (an
+// owner that submits a Run and then attaches): it starts in that
+// placement, not the next.
+func TestAttachToAPlacedRun(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'starting'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'starting'`)
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "wake": "request"})
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/servers/"+sv.ID+"/attach", map[string]any{"runId": r1}); w.Code != http.StatusOK {
+		t.Fatalf("attach: %d %s", w.Code, w.Body)
+	}
+	got := getSrv(t, s, key, sv.ID)
+	sets := pendingServers(t, s, ctx)
+	if got.Process != ServerStarting || got.State != SrvWaking || len(sets) == 0 || len(sets[len(sets)-1].Servers) != 1 {
+		t.Fatalf("attached to a starting run: %+v %+v", got, sets)
+	}
+}
