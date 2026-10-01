@@ -70,6 +70,8 @@ Agents get the text as a message. Generic workloads get it on stdin. See
 lux stop <run> [--wait]         # graceful; snapshot; resumable
 lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--from-snapshot ID] [--disk SIZE] [--to HOST]
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
+           [--sync repo=ref]...  # move restored checkouts to ref before init
+lux sync <run> repo=ref... [--wait] [--request-id ID]   # a running Run's checkouts
 lux cancel <run> [--wait]       # final (a snapshot is still taken)
 lux snapshots <run>             # where each snapshot lives
 ```
@@ -95,6 +97,14 @@ lux resume run_x --add-repo docs=git@github.com:o/docs.git,ref=v2,push=false --r
   added repository (409).
 - The request id, from `--request-id` or generated, is printed on stderr
   as `request <id>`. The repository's `git.clone` event carries it.
+
+`--sync repo=ref` (repeatable) moves a repository's restored checkout to
+`ref` before init; `lux sync` does it for a running Run, after which
+servers with `afterSync` restart. Tracked files become the ref's,
+untracked and ignored ones stay; see [syncing
+checkouts](runspec.md#syncing-checkouts). `lux sync --wait` prints each
+repository's outcome (`up-to-date`, `fast-forward`, `reset`, `failed`)
+and exits 1 if one failed.
 
 ## Git
 
@@ -299,10 +309,24 @@ lux port-forward <run> <port-name> <local-port> [--address 127.0.0.1]
 
 ## Servers
 
-A Run's named ports, optionally with commands lux runs in its container
-(see [concepts](concepts.md#servers)).
+Named URLs that reach a port in a Run, optionally with commands lux runs
+in its container (see [concepts](concepts.md#servers)). A server is named
+by its id (`srv_…`) or, for a Run's, by the Run and its name.
 
 ```bash
+# The tenant's servers
+lux server create <name> <port> [--hostname H] [--wake request|never] [--idle-after 10m] [--wake-timeout 5m]
+           [--lifetime owner|run] [--expire-after 720h] [--run RUN] [-l K=V]... [--env K=V]... [--workdir DIR]
+           [--after-sync WORD]... [-- command...]
+lux server ls [--state asleep,waking] [--wake request] [-l K=V]   # id, state, run, last request, idle in, URL
+lux server show <srv_id | hostname>
+lux server update <srv_id> [--port N] [--wake ...] [--idle-after ...] [-l K=V]... [-- command...]
+lux server attach <srv_id> <run>               # a Run on a host starts it now; a stopped one at its next placement
+lux server detach <srv_id>                     # its command stops; the Run is untouched
+lux server start|stop|restart <srv_id>
+lux server rm <srv_id>                         # detaches it first; its URL is gone
+
+# A Run's servers
 lux server add <run> <name> <port> [--workdir DIR] [--env K=V]... [--no-start] [-- command...]
 lux server ls <run> [name]                     # state, since, preview URL, command
 lux server start|stop|restart <run> <name>
@@ -312,6 +336,9 @@ lux server wait <run> <name> [--state ready] [--timeout 2m]
 ```
 
 `add` starts a server with a command at once (the Run must be running)
-unless `--no-start`; one without a command is only its port. `lux get`
-lists the Run's servers too. Every command takes `-o json` (the API's
-Server object, or a list of them).
+unless `--no-start`; one without a command is only its port; it ends with
+its Run (lifetime `run`). `create` makes one of the tenant's: a server
+that wakes on request is lifetime `owner`. `lux get` lists the Run's
+servers too. Every command takes `-o json` (the API's object, or a list
+of them). `lux events --all` prints server events as what happened to
+which URL: `server.wake_requested srv_… web.pr9.<domain>  by ada@… at /goals`.

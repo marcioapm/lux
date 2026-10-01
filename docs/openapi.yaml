@@ -3046,7 +3046,7 @@ components:
         resume:
           $ref: "#/components/schemas/Resume"
         servers:
-          description: "Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration). More can be added while it runs (POST /v1/runs/{id}/servers)."
+          description: "Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration), like every server attached to it; deleted when it succeeds or is cancelled. More can be added while it runs (POST /v1/runs/{id}/servers) or attached (POST /v1/servers/{id}/attach)."
           items:
             $ref: "#/components/schemas/Server"
           type:
