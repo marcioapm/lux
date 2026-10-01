@@ -44,3 +44,30 @@ func TestAttachmentMeta(t *testing.T) {
 		t.Fatalf("%+v", m)
 	}
 }
+
+func TestInputsDir(t *testing.T) {
+	home := Volume{Name: "home", Path: "/home/agent", Kind: "state"}
+	ws := Volume{Name: "workspace", Path: "/workspace", Kind: "state"}
+	cache := Volume{Name: "cache", Path: "/cache", Kind: "ephemeral"}
+	codexVol := Volume{Name: "codex", Path: "/home/agent/.codex", Kind: "state"}
+	repoAtHome := &Git{Repositories: []Repository{{Name: "dots", Path: "/home/agent"}}}
+	for _, c := range []struct {
+		name, adapter string
+		vols          []Volume
+		git           *Git
+		dir, root     string
+	}{
+		{"agent home volume", "claude-code", []Volume{ws, home}, nil, "/home/agent/.lux-inputs", "/home/agent"},
+		{"session volume of its own", "codex", []Volume{ws, home, codexVol}, nil, "/home/agent/.codex/.lux-inputs", "/home/agent/.codex"},
+		{"acp: the home's", "acp", []Volume{ws, home}, nil, "/home/agent/.lux-inputs", "/home/agent"},
+		{"acp: the first state volume", "acp", []Volume{cache, ws}, nil, "/workspace/.lux-inputs", "/workspace"},
+		{"checkout over the home", "claude-code", []Volume{home, ws}, repoAtHome, "/workspace/.lux-inputs", "/workspace"},
+		{"checkout over every state volume", "claude-code", []Volume{home}, repoAtHome, RuntimeInputsDir, "/.lux/run"},
+		{"no state volume", "acp", []Volume{cache}, nil, RuntimeInputsDir, "/.lux/run"},
+	} {
+		s := RunSpec{Workload: Workload{Adapter: c.adapter}, Volumes: c.vols, Git: c.git}
+		if dir, root := s.InputsDir("/home/agent"); dir != c.dir || root != c.root {
+			t.Errorf("%s: %s on %s, want %s on %s", c.name, dir, root, c.dir, c.root)
+		}
+	}
+}
