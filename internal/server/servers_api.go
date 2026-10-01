@@ -442,46 +442,80 @@ func (s *Server) attachServer(ctx context.Context, in *attachInput) (*tenantServ
 // and sends its Run's placement (before and after: a detach) the new set.
 func (s *Server) changeServer(ctx context.Context, tenantID, id string, fn func(pgx.Tx, serverRow) error) error {
 	var hosts []string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		v, err := lockServer(ctx, tx, tenantID, id)
-		if err != nil {
-			return err
-		}
-		if v.RunID != nil {
-			// The Run first, as every change of a Run's servers locks it.
-			if _, _, _, err := serverRunAny(ctx, tx, *v.RunID); err != nil {
+	// Locks go Run first, then server, as a runner's report takes them; the
+	// Run is read before either is locked, so a server attached or detached
+	// in between is tried once more, then refused.
+	var err error
+	for try := 0; try < 2; try++ {
+		hosts = nil
+		err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			var before *string
+			if err := tx.QueryRow(ctx, `SELECT run_id FROM run_servers WHERE id = $1 AND tenant_id = $2`, id, tenantID).Scan(&before); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return errf(http.StatusNotFound, "not_found", "no server %s", id)
+				}
 				return err
 			}
-		}
-		if err := fn(tx, v); err != nil {
-			return err
-		}
-		runs := []string{}
-		if v.RunID != nil {
-			runs = append(runs, *v.RunID)
-		}
-		var now *string
-		if err := tx.QueryRow(ctx, `SELECT run_id FROM run_servers WHERE id = $1`, id).Scan(&now); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		if now != nil && !slices.Contains(runs, *now) {
-			runs = append(runs, *now)
-		}
-		for _, r := range runs {
-			h, err := syncServersTx(ctx, tx, r)
+			if before != nil {
+				if _, _, _, err := serverRunAny(ctx, tx, *before); err != nil {
+					return err
+				}
+			}
+			v, err := lockServer(ctx, tx, tenantID, id)
 			if err != nil {
 				return err
 			}
-			if h != "" {
-				hosts = append(hosts, h)
+			if strOf(v.RunID) != strOf(before) {
+				return errServerMoved
 			}
+			var err2 error
+			hosts, err2 = changeLockedServer(ctx, tx, id, v, fn)
+			return err2
+		})
+		if !errors.Is(err, errServerMoved) {
+			break
 		}
-		return nil
-	})
+	}
+	if errors.Is(err, errServerMoved) {
+		err = errf(http.StatusConflict, "conflict", "server %s was attached or detached meanwhile: try again", id)
+	}
 	for _, h := range hosts {
 		s.hub.Notify(h)
 	}
 	return err
+}
+
+// errServerMoved: the server's Run changed between reading it and locking.
+var errServerMoved = errors.New("server attached or detached meanwhile")
+
+// changeLockedServer runs fn on a server locked with its Run, and returns
+// the hosts to notify of the new sets.
+func changeLockedServer(ctx context.Context, tx pgx.Tx, id string, v serverRow, fn func(pgx.Tx, serverRow) error) ([]string, error) {
+	var hosts []string
+	if err := fn(tx, v); err != nil {
+		return nil, err
+	}
+	runs := []string{}
+	if v.RunID != nil {
+		runs = append(runs, *v.RunID)
+	}
+	var now *string
+	if err := tx.QueryRow(ctx, `SELECT run_id FROM run_servers WHERE id = $1`, id).Scan(&now); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	if now != nil && !slices.Contains(runs, *now) {
+		runs = append(runs, *now)
+	}
+	for _, r := range runs {
+		h, err := syncServersTx(ctx, tx, r)
+		if err != nil {
+			return nil, err
+		}
+		if h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts, nil
 }
 
 // serverRunAny locks a Run, finished or not.
