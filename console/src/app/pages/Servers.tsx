@@ -39,7 +39,7 @@ export function Servers() {
         header: "Server",
         lead: true,
         cell: (s) => (
-          <span className="stack-tight">
+          <span className="stack stack-tight">
             <Link to={serverPath(s.id)} className="mono">
               {s.name}
             </Link>

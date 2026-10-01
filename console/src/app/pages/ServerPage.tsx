@@ -141,7 +141,7 @@ function ServedBy({ sv, now }: { sv: TenantServer; now: number }) {
   return (
     <Card className="served-by">
       <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 24 }}>
-        <div className="stack-tight">
+        <div className="stack stack-tight">
           <span className="muted">Served by</span>
           {sv.runId ? (
             <span>
