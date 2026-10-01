@@ -204,8 +204,9 @@ type Assign struct {
 	// Image build resolution from an earlier placement, so rebuilds use the
 	// same pinned FROMs.
 	ImageResolved *ImageResolution `json:"imageResolved,omitempty"`
-	// GitBases: per repository, the commit an earlier placement cloned it
-	// at, for repositories this one restores rather than clones.
+	// GitBases: per repository, the commit an earlier placement cloned or
+	// last synced it to, for repositories this one restores rather than
+	// clones.
 	GitBases map[string]string `json:"gitBases,omitempty"`
 	// Sync: repositories whose restored checkout moves to a ref before init.
 	Sync []SyncRef `json:"sync,omitempty"`

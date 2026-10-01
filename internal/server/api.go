@@ -149,7 +149,7 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "runDiff", Method: http.MethodGet, Path: "/v1/runs/{id}/diff", Tags: []string{"runs"},
 		Summary: "What a running Run changed in its repositories",
 		Description: "Per repository, from its base to its working tree: committed, staged, unstaged and untracked (not ignored) changes, " +
-			"computed now in the Run's container. `base=clone` (default) diffs from the commit the repository was cloned at, `base=head` from its HEAD. " +
+			"computed now in the Run's container. `base=clone` (default) diffs from the commit the repository was cloned at, or last synced to (`lux sync`, a resume's sync), `base=head` from its HEAD. " +
 			"Untracked files are cut at 32 KiB each, or 8 KiB each if the whole diff would pass 1 MiB, and binary ones are named only: " +
 			"such a patch is `truncated` and does not apply as it is. A diff over 16 MiB is refused (502 `diff_failed`).\n\n" +
 			"Only while the Run is running: otherwise 409 `run_not_running`. 404 `no_diff` when the Run has no repositories. " +

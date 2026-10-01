@@ -470,7 +470,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	}
 	// The placement is on the Run, its host and its host's pool alike.
 	// snapshotId: what its volumes start from (null: empty), the lineage
-	// its repositories' clone commits follow (gitBases).
+	// its repositories' bases follow (gitBases).
 	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool, "poolId": h.PoolID, "snapshotId": r.SnapshotID}); err != nil {
 		return err
 	}
