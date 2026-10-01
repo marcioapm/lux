@@ -178,15 +178,9 @@ func (s *Server) expireServers(ctx context.Context) error {
 				return err
 			}
 			if v.RunID != nil {
-				h, err := syncServersTx(ctx, tx, *v.RunID)
-				if err != nil {
-					return err
-				}
-				if h != "" {
-					hosts = append(hosts, h)
-				}
+				hosts, err = syncServerSets(ctx, tx, *v.RunID)
 			}
-			return nil
+			return err
 		})
 		if err != nil {
 			return err
@@ -214,11 +208,9 @@ type wakeStep struct {
 func (p *previews) wakingPage(ctx context.Context, w http.ResponseWriter, id, to string) error {
 	var v serverRow
 	var pl struct {
-		created, restored, started, workload *time.Time
-		synced                               *time.Time
-		syncFailed                           bool
-		syncWanted                           bool
-		hostname                             string
+		created, restored, started, synced *time.Time
+		syncFailed, syncWanted             bool
+		hostname                           string
 	}
 	err := p.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var err error
@@ -228,13 +220,13 @@ func (p *previews) wakingPage(ctx context.Context, w http.ResponseWriter, id, to
 		if v.RunID == nil {
 			return nil
 		}
-		err = tx.QueryRow(ctx, `SELECT p.created_at, p.volumes_restored_at, p.container_started_at, p.workload_started_at, coalesce(h.name, ''),
+		err = tx.QueryRow(ctx, `SELECT p.created_at, p.volumes_restored_at, p.container_started_at, coalesce(h.name, ''),
 				(SELECT max(e.created_at) FROM run_events e WHERE e.run_id = r.id AND e.epoch = r.current_epoch AND e.type = 'git.sync'),
 				coalesce((SELECT bool_or(e.data->>'status' = 'failed') FROM run_events e WHERE e.run_id = r.id AND e.epoch = r.current_epoch AND e.type = 'git.sync'), false),
 				EXISTS (SELECT 1 FROM run_events e WHERE e.run_id = r.id AND e.epoch = r.current_epoch AND e.type = 'sync.requested')
 					OR r.pending_sync IS NOT NULL
 			FROM runs r JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch LEFT JOIN hosts h ON h.id = p.host_id
-			WHERE r.id = $1`, *v.RunID).Scan(&pl.created, &pl.restored, &pl.started, &pl.workload, &pl.hostname, &pl.synced, &pl.syncFailed, &pl.syncWanted)
+			WHERE r.id = $1`, *v.RunID).Scan(&pl.created, &pl.restored, &pl.started, &pl.hostname, &pl.synced, &pl.syncFailed, &pl.syncWanted)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -256,11 +248,7 @@ func (p *previews) wakingPage(ctx context.Context, w http.ResponseWriter, id, to
 		// Ready since the page was asked for: straight in.
 		w.Header().Set("Refresh", "0;url="+previewWaitPath+"?to="+url.QueryEscape(to))
 	case state == SrvExited && v.RunState == StateRunning:
-		code := -1
-		if v.ExitCode != nil {
-			code = *v.ExitCode
-		}
-		data["Code"] = fmt.Sprint(code)
+		data["Code"] = exitCodeText(v.ExitCode)
 		data["Error"] = strOf(v.Error)
 		data["LogURL"] = p.consoleServerURL(v.ID)
 		p.page(w, http.StatusServiceUnavailable, pageDidNotStart, data)

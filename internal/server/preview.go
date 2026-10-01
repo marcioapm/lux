@@ -29,8 +29,8 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// The preview listener: https://<server>-<run suffix>.<domain> reaches a
-// Run's server, wherever the Run is now. It has its own address and only
+// The preview listener: https://<server host>.<domain> reaches a server,
+// wherever its Run is now. It has its own address and only
 // ever proxies: nothing of luxd's own (/v1, /runner, the console) is
 // served on it.
 //
@@ -135,10 +135,7 @@ func (s *Server) luxdKey(ctx context.Context, name string) ([]byte, error) {
 // parsePreviewHost is the server host a request's Host names: the part
 // before .<domain>, one or more DNS labels.
 func parsePreviewHost(host, domain string) (string, bool) {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	host = strings.ToLower(strings.TrimSuffix(stripPort(host), "."))
 	rel, found := strings.CutSuffix(host, "."+strings.ToLower(domain))
 	if !found || rel == "" || len(host) > 253 {
 		return "", false
@@ -372,11 +369,7 @@ func (p *previews) signIn(w http.ResponseWriter, r *http.Request, v serverRow) {
 		http.Error(w, "to must be a path", http.StatusBadRequest)
 		return
 	}
-	runID := ""
-	if v.RunID != nil {
-		runID = *v.RunID
-	}
-	pr, err := p.s.redeemTicket(r.Context(), r.URL.Query().Get("ticket"), ticketFor{runID: runID, serverID: v.ID}, TicketPreview)
+	pr, err := p.s.redeemTicket(r.Context(), r.URL.Query().Get("ticket"), ticketFor{runID: strOf(v.RunID), serverID: v.ID}, TicketPreview)
 	if err != nil || !pr.Can("read") || (!pr.Operator && pr.TenantID != v.TenantID) {
 		p.page(w, http.StatusUnauthorized, pageSignIn, nil)
 		return
@@ -467,6 +460,14 @@ func (p *previews) route(ctx context.Context, w http.ResponseWriter, r *http.Req
 	}
 }
 
+// exitCodeText is an exit code for a page, -1 when there is none.
+func exitCodeText(code *int) string {
+	if code == nil {
+		return "-1"
+	}
+	return strconv.Itoa(*code)
+}
+
 func strOf(s *string) string {
 	if s == nil {
 		return ""
@@ -509,11 +510,7 @@ func (p *previews) statusPage(w http.ResponseWriter, v serverRow) {
 	case v.State == ServerStopped:
 		p.page(w, http.StatusServiceUnavailable, pageStopped, map[string]any{"Reason": strOf(v.StopReason)})
 	case v.State == ServerExited:
-		code := -1
-		if v.ExitCode != nil {
-			code = *v.ExitCode
-		}
-		p.page(w, http.StatusServiceUnavailable, pageExited, map[string]any{"Code": strconv.Itoa(code), "Error": strOf(v.Error),
+		p.page(w, http.StatusServiceUnavailable, pageExited, map[string]any{"Code": exitCodeText(v.ExitCode), "Error": strOf(v.Error),
 			"LogURL": p.consoleServerURL(v.ID)})
 	case v.State == ServerUnreachable:
 		p.page(w, http.StatusBadGateway, pageUnreachable, nil)
