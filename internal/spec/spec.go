@@ -80,11 +80,12 @@ type Workload struct {
 // Server is a named port of a Run, with an optional command that serves
 // it. Its output is the Run's, as records with ch "server".
 type Server struct {
-	Name    string            `json:"name" yaml:"name" doc:"Unique: 1-30 lowercase letters, digits and -, starting with a letter, not ending in -. Its preview URL is <name>-<run suffix>.<preview domain>."`
-	Port    int               `json:"port" yaml:"port" doc:"The TCP port it listens on in the container, 1-65535 (not a service's loopback port)."`
-	Command []string          `json:"command,omitempty" yaml:"command,omitempty" doc:"argv, run with the workload's PATH, user and environment. None: only the port is exposed (something else starts the server)."`
-	Workdir string            `json:"workdir,omitempty" yaml:"workdir,omitempty" doc:"Where the command runs; a relative path is against the workload's workdir (default: the workload's workdir)."`
-	Env     map[string]string `json:"env,omitempty" yaml:"env,omitempty" doc:"More environment for the command (not secret: it is stored with the Run)."`
+	Name      string            `json:"name" yaml:"name" doc:"Unique: 1-30 lowercase letters, digits and -, starting with a letter, not ending in -. Its preview URL is <name>-<8 characters of its id>.<preview domain>."`
+	Port      int               `json:"port" yaml:"port" doc:"The TCP port it listens on in the container, 1-65535 (not a service's loopback port)."`
+	Command   []string          `json:"command,omitempty" yaml:"command,omitempty" doc:"argv, run with the workload's PATH, user and environment. None: only the port is exposed (something else starts the server)."`
+	Workdir   string            `json:"workdir,omitempty" yaml:"workdir,omitempty" doc:"Where the command runs; a relative path is against the workload's workdir (default: the workload's workdir)."`
+	Env       map[string]string `json:"env,omitempty" yaml:"env,omitempty" doc:"More environment for the command (not secret: it is stored with the Run)."`
+	AfterSync []string          `json:"afterSync,omitempty" yaml:"afterSync,omitempty" doc:"argv run before the command whenever it starts after a repository sync (a resume with sync, POST /v1/runs/{id}/sync), e.g. an install. Without it a sync of a running Run leaves the server running (hot reload)."`
 }
 
 // serverNameRe: a DNS label's worth of a preview host name, which also
@@ -112,6 +113,12 @@ func (s *RunSpec) ValidateServer(at string, sv Server) []string {
 	}
 	if sv.Command != nil && (len(sv.Command) == 0 || sv.Command[0] == "") {
 		errs = append(errs, fmt.Sprintf("%s.command: an empty command (leave it out for a port only)", at))
+	}
+	if sv.AfterSync != nil && (len(sv.AfterSync) == 0 || sv.AfterSync[0] == "") {
+		errs = append(errs, fmt.Sprintf("%s.afterSync: an empty command (leave it out for none)", at))
+	}
+	if len(sv.AfterSync) > 0 && len(sv.Command) == 0 {
+		errs = append(errs, fmt.Sprintf("%s.afterSync: needs a command to run before", at))
 	}
 	if strings.ContainsRune(sv.Workdir, 0) || slices.Contains(strings.Split(sv.Workdir, "/"), "..") {
 		errs = append(errs, fmt.Sprintf("%s.workdir: no .. and no NUL", at))
