@@ -293,7 +293,7 @@ func insertSpecServers(ctx context.Context, tx pgx.Tx, tenantID, runID, owner st
 		if _, err := tx.Exec(ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, port, command, workdir, env, from_spec, owner, after_sync)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $10)`, ids.New(ids.Server), tenantID, runID, sv.Name, sv.Port,
 			nilIfEmpty(sv.Command), sv.Workdir, nonNilMap(sv.Env), owner, nilIfEmpty(sv.AfterSync)); err != nil {
-			return err
+			return uniqueViolation(err)
 		}
 	}
 	return nil
@@ -768,7 +768,7 @@ func (s *Server) addServer(ctx context.Context, in *addServerInput) (*serverOutp
 			id, p.TenantID, in.ID, sv.Name, sv.Port, nilIfEmpty(sv.Command), sv.Workdir, nonNilMap(sv.Env), nilIfEmpty(sv.AfterSync),
 			lifetime, nonNilMap(b.Labels), p.Actor())
 		if err != nil {
-			return err
+			return uniqueViolation(err)
 		}
 		if tag.RowsAffected() == 0 {
 			return errf(http.StatusConflict, "name_taken", "the Run already has a server %q", sv.Name)

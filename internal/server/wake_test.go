@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -980,5 +983,49 @@ func TestPreviewHTTPCookiesStayOut(t *testing.T) {
 	}
 	if h.Get("X-Forwarded-Proto") != "http" || h.Get("X-Forwarded-Host") != "web.demo.lux.example.com" {
 		t.Fatalf("forwarded: proto %q host %q", h.Get("X-Forwarded-Proto"), h.Get("X-Forwarded-Host"))
+	}
+}
+
+// A generated host that is already someone's (an owner chose name-xxxxxxxx)
+// is a 409 hostname_taken, from every way a server is made, never a 500.
+func TestGeneratedHostClashIsAConflict(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	// Every server named clash gets host "taken", as if its generated
+	// suffix had come out so: a trigger after lux's own, as the owner.
+	var dbName string
+	systemScan(t, s, `SELECT current_database()`, nil, &dbName)
+	cfg, err := pgx.ParseConfig(os.Getenv("LUX_TEST_PG"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Database = dbName
+	admin, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close(ctx)
+	if _, err := admin.Exec(ctx, `CREATE FUNCTION test_clash() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.name = 'clash' THEN NEW.host := 'taken'; END IF; RETURN NEW; END $$;
+		CREATE TRIGGER zz_test_clash BEFORE INSERT ON run_servers FOR EACH ROW EXECUTE FUNCTION test_clash()`); err != nil {
+		t.Fatal(err)
+	}
+	createSrv(t, s, key, map[string]any{"name": "owner", "port": 1, "hostname": "taken.lux.example.com"})
+	// POST /v1/runs/{id}/servers.
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/servers", map[string]any{"name": "clash", "port": 1, "start": false}); w.Code != http.StatusConflict ||
+		!strings.Contains(w.Body.String(), `"hostname_taken"`) {
+		t.Fatalf("run server: %d %s", w.Code, w.Body)
+	}
+	// A submitted spec's servers.
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return insertSpecServers(ctx, tx, "t1", r1, "k1", spec.RunSpec{Workload: spec.Workload{Servers: []spec.Server{{Name: "clash", Port: 1}}}})
+	})
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "hostname_taken" {
+		t.Fatalf("spec server: %v", err)
+	}
+	// POST /v1/servers.
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/servers", map[string]any{"name": "clash", "port": 1}); w.Code != http.StatusConflict ||
+		!strings.Contains(w.Body.String(), `"hostname_taken"`) {
+		t.Fatalf("server: %d %s", w.Code, w.Body)
 	}
 }

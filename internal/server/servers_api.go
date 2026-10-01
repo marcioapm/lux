@@ -13,6 +13,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/spec"
@@ -292,14 +293,14 @@ func (s *Server) createServer(ctx context.Context, in *createServerInput) (*tena
 
 // uniqueViolation turns a unique violation of run_servers into its 409.
 func uniqueViolation(err error) error {
-	if err == nil {
-		return nil
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) || pe.Code != "23505" {
+		return err
 	}
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "run_servers_host"):
+	switch pe.ConstraintName {
+	case "run_servers_host":
 		return errf(http.StatusConflict, "hostname_taken", "that hostname is taken")
-	case strings.Contains(msg, "run_servers_run_name"):
+	case "run_servers_run_name":
 		return errf(http.StatusConflict, "name_taken", "the Run already has a server of that name")
 	}
 	return err
