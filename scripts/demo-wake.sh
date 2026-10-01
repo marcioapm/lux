@@ -6,7 +6,7 @@
 #
 #   scripts/demo-wake.sh up        # bring it all up (detached), print the URL
 #   scripts/demo-wake.sh open      # a fresh sign-in link for the preview (60s, single use)
-#   scripts/demo-wake.sh push "hello from B"   # a new commit on main: shown on the next wake
+#   scripts/demo-wake.sh push "hello from B"   # a new commit on main: synced into a running preview, else shown on the next wake
 #   scripts/demo-wake.sh status    # the server and its Run
 #   scripts/demo-wake.sh logs      # the orchestrator's log
 #   scripts/demo-wake.sh down      # take it all down
@@ -88,6 +88,16 @@ push)
 	msg=${2:-hello from a new commit}
 	docker exec "$(git_container)" sh -c "set -e; cd /tmp/w && echo '$msg' > message.txt && git commit -qam '$msg' &&
 		git push -q /repos/app.git HEAD:main && git rev-parse --short HEAD"
+	# What a forge webhook would make the owner do: a Run serving the
+	# preview now moves its checkout to the new commit (lux sync); the
+	# app shows it on the next reload. Asleep, nothing to do: the next
+	# wake resumes on main's latest commit.
+	run=$(lux server show "$HOSTNAME_" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["runId"] or "")')
+	if [[ -n $run ]] && lux sync "$run" app=main --wait >/dev/null 2>&1; then
+		echo "synced the running preview ($run): reload the page" >&2
+	else
+		echo "the preview is not running: the next visit wakes it on this commit" >&2
+	fi
 	;;
 status)
 	lux server show "$HOSTNAME_"
