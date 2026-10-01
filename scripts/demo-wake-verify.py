@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -34,10 +34,7 @@ def demo(*args: str) -> str:
 
 
 def server() -> dict:
-    env = json.loads(Path(open(Path(os.environ.get("LUX_TEST_LOG_ROOT", "/tmp")) / "lux-dev-env.json").read().strip()).read_text())
-    out = subprocess.run([str(ROOT / "bin" / "lux"), "server", "show", "web.pr1.lux.localhost", "-o", "json"], check=True,
-                         capture_output=True, text=True, env={**os.environ, "LUX_URL": env["luxd_url"], "LUX_API_KEY": env["api_key"]})
-    return json.loads(out.stdout)
+    return lux_json("server", "show", "web.pr1.lux.localhost")
 
 
 def wait(fn, timeout: float, what: str):
@@ -108,7 +105,9 @@ def main() -> None:
 
 
 def env() -> dict:
-    return json.loads(Path(open(Path(os.environ.get("LUX_TEST_LOG_ROOT", "/tmp")) / "lux-dev-env.json").read().strip()).read_text())
+    # lux-dev-env.json under the log root holds the path of the dev env's JSON.
+    pointer = Path(os.environ.get("LUX_TEST_LOG_ROOT", "/tmp")) / "lux-dev-env.json"
+    return json.loads(Path(pointer.read_text().strip()).read_text())
 
 
 def lux_json(*args: str) -> dict:
@@ -119,11 +118,11 @@ def lux_json(*args: str) -> dict:
 
 
 def ticket_link(sid: str, url: str) -> str:
-    import urllib.request
     e = env()
     req = urllib.request.Request(f"{e['luxd_url']}/v1/servers/{sid}/tickets", method="POST",
                                  headers={"Authorization": f"Bearer {e['api_key']}"})
-    t = json.load(urllib.request.urlopen(req))["ticket"]
+    with urllib.request.urlopen(req) as resp:
+        t = json.load(resp)["ticket"]
     return f"{url}/.lux/auth?ticket={t}&to=/"
 
 
