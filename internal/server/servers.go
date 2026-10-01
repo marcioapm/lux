@@ -1043,3 +1043,25 @@ func serverPort(ctx context.Context, tx pgx.Tx, runID, name string) (int, bool, 
 	}
 	return port, true, nil
 }
+
+// restartAfterSync is a running Run's sync.done: when a checkout moved,
+// its servers with afterSync restart, running it first; the others keep
+// running (a dev server reloads by itself). Returns the host to notify.
+func restartAfterSync(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, data map[string]any) (string, error) {
+	if changed, _ := data["changed"].(bool); !changed {
+		return "", nil
+	}
+	var current int
+	var state string
+	if err := tx.QueryRow(ctx, `SELECT state, current_epoch FROM runs WHERE id = $1`, runID).Scan(&state, &current); err != nil {
+		return "", err
+	}
+	if current != epoch || state != StateRunning {
+		return "", nil
+	}
+	if err := setServerState(ctx, tx, stateChange{tenantID: tenantID, runID: runID, epoch: epoch, state: ServerStarting, afterSync: true},
+		upWithCommand+` AND rs.after_sync IS NOT NULL`); err != nil {
+		return "", err
+	}
+	return syncServersTx(ctx, tx, runID)
+}

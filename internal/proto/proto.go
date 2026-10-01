@@ -356,6 +356,14 @@ const EvDiskExceeded = "disk.exceeded"
 // the resume that added it).
 const EvGitClone = "git.clone"
 
+// EvGitSync is a repository's sync (proto.SyncResult, and requestId for a
+// sync of a running Run).
+const EvGitSync = "git.sync"
+
+// EvSyncDone ends a running Run's sync: {requestId, changed}. luxd
+// restarts the servers with afterSync when a checkout moved.
+const EvSyncDone = "sync.done"
+
 // RunEvent is a runner-side lifecycle note (image built, volumes restored,
 // rebuild differed, DNS lookup…) stored with the Run's events.
 type RunEvent struct {

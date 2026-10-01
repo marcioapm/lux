@@ -333,3 +333,58 @@ func Scrub(u string) string {
 	p.User = nil
 	return p.String()
 }
+
+// Target is a commit a sync moves a checkout to, in a bundle the
+// workload's user can read.
+type Target struct {
+	Commit string
+	// Branch: the ref is this branch (checked out as it); "" for a tag or
+	// sha (checked out detached).
+	Branch string
+	// Bundle holds Commit and its history as refs/lux/sync.
+	Bundle string
+}
+
+// SyncBundle fetches r.Ref through the host's mirror (with the runner's
+// credential) and writes a bundle of it to bundle. The bundle carries no
+// credential and no remote: the workload's user fetches from it inside
+// its container, so the runner never runs git in the checkout.
+func (m *Manager) SyncBundle(ctx context.Context, r Repo, bundle string) (Target, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	var t Target
+	if r.Ref == "" {
+		return t, fmt.Errorf("repository %s: no ref to sync to", r.Name)
+	}
+	mirror, err := m.mirror(ctx, r)
+	if err != nil {
+		return t, err
+	}
+	if _, err := git(ctx, mirror, "", "rev-parse", "--verify", "-q", "refs/heads/"+r.Ref); err == nil {
+		t.Branch = r.Ref
+	}
+	if t.Commit, err = git(ctx, mirror, "", "rev-parse", "--verify", "-q", r.Ref+"^{commit}"); err != nil {
+		return t, fmt.Errorf("ref %q not found in %s", r.Ref, Scrub(r.URL))
+	}
+	// A scratch repository sharing the mirror's objects, so the shared
+	// mirror gets no ref of a Run's.
+	work, err := os.MkdirTemp(m.mirrors, "sync-")
+	if err != nil {
+		return t, err
+	}
+	defer os.RemoveAll(work)
+	if _, err := git(ctx, work, "", "init", "--quiet", "--bare"); err != nil {
+		return t, err
+	}
+	if err := os.WriteFile(filepath.Join(work, "objects", "info", "alternates"), []byte(filepath.Join(mirror, "objects")+"\n"), 0o600); err != nil {
+		return t, err
+	}
+	if _, err := git(ctx, work, "", "update-ref", "refs/lux/sync", t.Commit); err != nil {
+		return t, err
+	}
+	if _, err := git(ctx, work, "", "bundle", "create", "--quiet", bundle, "refs/lux/sync"); err != nil {
+		return t, err
+	}
+	t.Bundle = bundle
+	return t, os.Chmod(bundle, 0o644)
+}

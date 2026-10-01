@@ -177,6 +177,9 @@ func (s *Shim) run() int {
 		return s.fail("start-failed", "secrets: "+err.Error())
 	}
 
+	if s.cfg.Sync != nil {
+		s.syncBeforeInit(env)
+	}
 	if strings.TrimSpace(s.cfg.Init) != "" {
 		code, err := s.runInit(env)
 		if err != nil || code != 0 {
