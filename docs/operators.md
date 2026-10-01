@@ -200,11 +200,11 @@ Other ways to sign in can be added as further `console.auth` values.
 ### Previews
 
 luxd can serve servers ([concepts](concepts.md#servers)) at
-`https://<hostname>`, a name under its preview domain: one their owner
-chose (`web.t123.p9.lux.example.com`, any number of labels, unique across
-luxd), or `<name>-<8 characters of the server's id>.<domain>`
-(`web-k3x9ab2c.lux.example.com`). It reaches the server wherever its Run is
-now, through a listener of luxd's own that only ever proxies:
+`https://<hostname>`, a name under its preview domain
+(`web-k3x9ab2c.lux.example.com`, or one their owner chose:
+`web.t123.p9.lux.example.com`; [concepts](concepts.md#servers) has the
+rules). It reaches the server wherever its Run is now, through a listener
+of luxd's own that only ever proxies:
 
 ```toml
 [preview]
@@ -256,16 +256,15 @@ tickets are per server: a browser signs in once per server.
 - **Routing:** a ready server of a running Run is proxied, over a tunnel
   stream to its current placement: HTTP, WebSockets and server-sent
   events. A server that **wakes on request** with no Run serving it gets
-  the waking page at once (and its owner a `server.wake_requested`, once
-  per wake); the page polls `/.lux/wait` every 3 seconds and drops into
-  the app once it is ready; nothing is held open. Its variants: waiting
-  for a host, moving, no answer (with "Ask again", a form posting to
-  `/.lux/wake`), did not start (its exit code, last stderr line, a link to
-  its log in the console), gone (404). A server that does not wake: a
-  request to it starting, or to its Run on its way to running, waits up
-  to `hold_for`; otherwise a small status page says why (not running,
-  stopped, exited, moving, starting). `/.lux/…` paths are luxd's on every
-  preview host, never the server's.
+  the waking page at once ([waking on
+  request](concepts.md#waking-on-request)); the page polls `/.lux/wait`.
+  Its variants: waiting for a host, moving, no answer (with "Ask again", a
+  form posting to `/.lux/wake`), did not start (its exit code, last stderr
+  line, a link to its log in the console), gone (404). A server that does
+  not wake: a request to it starting, or to its Run on its way to running,
+  waits up to `hold_for`; otherwise a small status page says why (not
+  running, stopped, exited, moving, starting). `/.lux/…` paths are luxd's
+  on every preview host, never the server's.
 - **Previews on this machine** (a demo): `scheme = "http"` with a domain
   under `localhost` (`lux.localhost`), which browsers resolve to this
   machine without DNS, and `public_port` the listener's port. The cookie

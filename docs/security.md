@@ -90,13 +90,13 @@ domain ([Operators](operators.md#previews)). What protects that:
   ticket is minted, so it cannot leak one.
 - **Only people signed in wake a server.** An unauthenticated request (a
   chat app unfurling a link, a crawler) is sent to sign in or gets 401; it
-  never emits `server.wake_requested`. A wake is asked for once per wake,
-  however many requests arrive.
+  never emits `server.wake_requested` ([waking on
+  request](concepts.md#waking-on-request)).
 - **Hostnames are first come, first served** across tenants: a tenant can
   take a name another would want (`web.<domain>`), never one in use.
   Names are lower case DNS labels under the preview domain only.
-- **Over http** (`preview.scheme = "http"`, allowed only for a domain
-  under `localhost`, for a local demo): the cookie cannot be `Secure` or
+- **Over http** (allowed only under `localhost`, for a local demo:
+  [operators](operators.md#previews)): the cookie cannot be `Secure` or
   `__Host-`; it stays host-only and `HttpOnly`, and never leaves the
   machine.
 - **A listener of its own** (`preview.listen`) that only proxies: it never

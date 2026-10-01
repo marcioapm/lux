@@ -396,16 +396,12 @@ A **server** is a named URL that reaches a port in a Run, optionally with a
 command lux runs in its container. `workload.servers` declares servers the
 Run owns (lifetime `run`: they go when it succeeds or is cancelled). More
 can be added while it runs, and servers of the tenant's own attached to it
-(`lux server`, the API: see [concepts](concepts.md#servers)). **Every**
-attached server with a command starts on every start of the Run: the
-first, a resume, a migration, a resume after `lost`, unless someone
-stopped it.
+(`lux server`, the API: see [concepts](concepts.md#servers), which also
+says when they start).
 
 - `name`: 1-30 of `a-z`, `0-9` and `-`, a letter first, not ending in `-`,
-  unique in the Run. Its preview URL is
-  `https://<name>-<8 characters of its id>.<preview domain>` when luxd
-  serves previews (a server created with `POST /v1/servers` can choose its
-  hostname).
+  unique in the Run. It names the server's default preview hostname
+  ([concepts](concepts.md#servers)).
 - `port`: the TCP port it listens on in the container, 1-65535, not a
   service's loopback port. It must listen on the container's address
   (`0.0.0.0`), not only on `127.0.0.1`: that is where lux reaches it.
@@ -420,9 +416,7 @@ stopped it.
 - `afterSync` (optional, needs `command`): argv run before the command
   whenever the server starts after a [sync](#syncing-checkouts) (an
   install when the lockfile changed, a migration); the command runs only if
-  it succeeds. After a sync of a running Run, servers with `afterSync`
-  restart through it; the others keep running (a dev server reloads by
-  itself).
+  it succeeds.
 
 The command runs once `init` is done, beside the workload and detached
 from it, in its own process group, as the workload's user. There is no
@@ -587,7 +581,8 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
   running Run's sync, which ends with `sync.done {requestId, changed}`).
   A moved checkout is the base of `lux diff` from then on.
 - After a running Run's sync that moved a checkout, servers with
-  `afterSync` run it and restart; the others keep running.
+  `afterSync` run it and restart; the others keep running (a dev server
+  reloads by itself).
 
 `lux push <run> [--wait]` pushes each repository's current commit to
 `git.push.branch`, again with the runner's credential:
