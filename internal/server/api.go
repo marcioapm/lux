@@ -245,7 +245,7 @@ func (s *Server) routes(api huma.API) {
 	}
 	register(s, api, huma.Operation{
 		OperationID: "removeServer", Method: http.MethodDelete, Path: "/v1/runs/{id}/servers/{name}", Tags: []string{"servers"},
-		Summary: "Remove a server", Description: "Stops it first.",
+		Summary: "Remove a server", Description: "Stops it first. A server of lifetime owner is not the Run's to remove: 409 lifetime_owner (detach or delete it through /v1/servers/{id}).",
 		DefaultStatus: http.StatusNoContent,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict},
 	}, "run", s.removeServer)

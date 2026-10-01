@@ -6609,7 +6609,7 @@ paths:
   /v1/runs/{id}/servers/{name}:
     delete:
       description: |-
-        Stops it first.
+        Stops it first. A server of lifetime owner is not the Run's to remove: 409 lifetime_owner (detach or delete it through /v1/servers/{id}).
 
         Needs the `run` scope.
       operationId: removeServer

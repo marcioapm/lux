@@ -1029,3 +1029,25 @@ func TestGeneratedHostClashIsAConflict(t *testing.T) {
 		t.Fatalf("server: %d %s", w.Code, w.Body)
 	}
 }
+
+// The Run API removes the Run's own servers only: an owner server attached
+// to it is refused, and stays.
+func TestRunAPIDoesNotRemoveOwnerServers(t *testing.T) {
+	s, _, key, _ := wakeFixture(t)
+	own := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "runId": r1, "lifetime": "owner"})
+	runs := createSrv(t, s, key, map[string]any{"name": "api", "port": 3001, "runId": r1})
+	w := apiCall(t, s, key, http.MethodDelete, "/v1/runs/"+r1+"/servers/web", nil)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"lifetime_owner"`) ||
+		!strings.Contains(w.Body.String(), "DELETE /v1/servers/"+own.ID) {
+		t.Fatalf("remove an owner server: %d %s", w.Code, w.Body)
+	}
+	if got := getSrv(t, s, key, own.ID); got.RunID == nil || *got.RunID != r1 {
+		t.Fatalf("after the refusal: %+v", got.RunID)
+	}
+	if w := apiCall(t, s, key, http.MethodDelete, "/v1/runs/"+r1+"/servers/api", nil); w.Code != http.StatusNoContent {
+		t.Fatalf("remove the Run's server: %d %s", w.Code, w.Body)
+	}
+	if w := apiCall(t, s, key, http.MethodGet, "/v1/servers/"+runs.ID, nil); w.Code != http.StatusNotFound {
+		t.Fatalf("the Run's server after removal: %d", w.Code)
+	}
+}
