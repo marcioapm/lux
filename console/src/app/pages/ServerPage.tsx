@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Button, Card, ConfirmDialog, EmptyState, EventTable, IdleCountdown, IconButton, KeyValue, LogView, PageHeader, ServedStateMark, Tabs, useCopy, useNow, useToast, type LogLine } from "@lux/design-system";
+import { Button, Card, ConfirmDialog, EmptyState, EventTable, IdleCountdown, IconButton, isServerUp, KeyValue, LogView, PageHeader, ServedStateMark, Tabs, useCopy, useNow, useToast, type LogLine } from "@lux/design-system";
 import { IconCheck, IconCopy, IconExternal, IconRefresh, IconStop, IconTrash } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type TenantServer } from "../../api/index.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
@@ -48,7 +48,7 @@ export function ServerPage({ id }: { id: string }) {
       setBusy(false);
     }
   };
-  const up = sv.process === "starting" || sv.process === "ready" || sv.process === "unreachable";
+  const up = isServerUp(sv.process);
 
   return (
     <div className="page">
