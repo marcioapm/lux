@@ -1072,3 +1072,32 @@ func TestPortOnlyServerWaitsForItsPort(t *testing.T) {
 		t.Fatalf("port only, stopped by request: %s", got.State)
 	}
 }
+
+// A deleted server's events stay readable by its id, ending with its
+// deletion; an id with no events is an empty list.
+func TestDeletedServerEventsStayListed(t *testing.T) {
+	s, _, key, key2 := wakeFixture(t)
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000})
+	if w := apiCall(t, s, key, http.MethodDelete, "/v1/servers/"+sv.ID, nil); w.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", w.Code, w.Body)
+	}
+	list := func(k, id string) (int, []string) {
+		w := apiCall(t, s, k, http.MethodGet, "/v1/servers/"+id+"/events", nil)
+		var out struct{ Events []struct{ Type string } }
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		types := []string{}
+		for _, e := range out.Events {
+			types = append(types, e.Type)
+		}
+		return w.Code, types
+	}
+	if code, types := list(key, sv.ID); code != http.StatusOK || strings.Join(types, " ") != "server.created server.deleted" {
+		t.Fatalf("deleted server's events: %d %v", code, types)
+	}
+	if code, types := list(key2, sv.ID); code != http.StatusOK || len(types) != 0 {
+		t.Fatalf("another tenant: %d %v", code, types)
+	}
+	if code, types := list(key, "srv_nonenonenonenone"); code != http.StatusOK || len(types) != 0 {
+		t.Fatalf("no such server: %d %v", code, types)
+	}
+}

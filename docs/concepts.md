@@ -223,7 +223,9 @@ lux server start|stop|restart|rm srv_…  (or <run> <name>)
   `wake_requested`, `idle`, `expired` (and the Run API's `server.added`,
   `server.removed`). Each carries `serverId`, and in `data` the server's
   `serverId`, `name`, `host`, `hostname`, `url`, `labels` and `runId`
-  (null when attached to none).
+  (null when attached to none). `GET /v1/servers/{id}/events` lists one
+  server's, a deleted server's included (its last is `server.deleted` or
+  `server.expired`); an id with none is an empty list, never 404.
 - **Ports:** `lux port-forward <run> web <local-port>` reaches a server by
   its name, as it reaches `network.ports`.
 - **Previews:** with previews configured, each server has a URL,

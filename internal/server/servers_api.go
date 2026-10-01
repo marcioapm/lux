@@ -935,7 +935,8 @@ func (s *Server) serverRoutes(api huma.API) {
 	}, "read", s.mintServerTicket)
 	register(s, api, huma.Operation{
 		OperationID: "serverEvents", Method: http.MethodGet, Path: "/v1/servers/{id}/events", Tags: []string{"servers"},
-		Summary: "A server's events", Description: "server.* events, oldest first; the feed (GET /v1/events) carries them too.",
+		Summary: "A server's events", Description: "server.* events, oldest first; the feed (GET /v1/events) carries them too. " +
+			"A deleted server's events are kept and listed here (ending with server.deleted or server.expired); an id with no events of this tenant's is an empty list, not 404.",
 	}, "read", s.serverEvents)
 	register(s, api, huma.Operation{
 		OperationID: "tenantServerLog", Method: http.MethodGet, Path: "/v1/servers/{id}/log", Tags: []string{"servers"},
