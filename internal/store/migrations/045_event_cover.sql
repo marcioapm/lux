@@ -1,4 +1,4 @@
--- 043_event_cover.sql — a pool's and a host's event lists read their keys
+-- 045_event_cover.sql — a pool's and a host's event lists read their keys
 -- from the index alone.
 --
 -- Under row-level security the planner guesses about 0.5% of an owner's

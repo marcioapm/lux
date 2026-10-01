@@ -42,7 +42,7 @@ arrive, a few seconds late.
    message; the running luxd is untouched.
 2. Run `luxd migrate` with the owner's DSN. It applies what is new and is
    safe to run again; running luxds keep working meanwhile, except while a
-   migration builds an index. 043 and 044 index the pool and host events
+   migration builds an index. 045 and 046 index the pool and host events
    tables in their migration's transaction: until each commits, anything
    luxd does that records an event (heartbeats, registration, placements,
    drains) waits — about 3–4 s per million events for the two together.
