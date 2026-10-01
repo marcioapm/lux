@@ -495,7 +495,7 @@ type lifecycleEventsOutput struct {
 }
 
 // eventSortKeys: the sort keys of a pool's or host's events, each served
-// by an index on (owner, key, id) that includes tenant_id (043, 044), so a
+// by an index on (owner, key, id) that includes tenant_id (045, 046), so a
 // page stops at its end however many events the owner has. time is when it
 // (first) happened. There is no sort by data: no index can serve one under
 // row-level security (an index on the data breaks inserts past a btree
@@ -680,7 +680,7 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 // eventKeys is the SQL of a page's keys: id, and v (the sort value expr,
 // when not empty), of an owner's events matching where, in order (any
 // order when order is empty: an existence probe). Reading only these, an
-// index on the keys that includes tenant_id (043, 044) serves the page and
+// index on the keys that includes tenant_id (045, 046) serves the page and
 // row-level security alone and stops at the page's end; the caller then
 // reads the page's rows by id. Reading every column instead, the planner's
 // low estimate of the rows the policy passes makes it sort all of the
