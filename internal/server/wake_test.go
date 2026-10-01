@@ -235,7 +235,7 @@ func TestWakeOncePerWake(t *testing.T) {
 		t.Fatalf("after the timeout: %s", got.State)
 	}
 	if w := previewGet(s, host, "/.lux/wait?to=/", cookie); !strings.Contains(w.Body.String(), "No answer from its owner") ||
-		!strings.Contains(w.Body.String(), "Ask again") || strings.Contains(strings.ToLower(w.Body.String()), "dude") {
+		!strings.Contains(w.Body.String(), "Ask again") {
 		t.Fatalf("no answer page: %s", w.Body)
 	}
 	if n := len(serverEventsOf(t, s, ctx, sv.ID, "server.wake_requested")); n != 1 {
@@ -434,8 +434,14 @@ func TestAttachDetachAndEveryPlacement(t *testing.T) {
 	if len(set.Servers) != 1 || set.Servers[0].Name != "web" || set.Servers[0].Command[0] != "serve" {
 		t.Fatalf("placement 3: %+v", set)
 	}
-	if ev := serverEventsOf(t, s, ctx, sv.ID, ""); len(ev) < 5 {
-		t.Fatalf("events: %+v", ev)
+	// Attached to the running Run, detached, attached to the stopped one,
+	// started at placement 2, stopped by the move, started at placement 3.
+	var types string
+	systemScan(t, s, `SELECT string_agg(type || coalesce(':' || (data->>'state'), ''), ' ' ORDER BY id) FROM run_events WHERE server_id = $1`,
+		[]any{sv.ID}, &types)
+	if want := "server.created server.attached server.state:starting server.state:stopped server.detached " +
+		"server.attached server.state:starting server.state:stopped server.state:starting"; types != want {
+		t.Fatalf("events:\n got %s\nwant %s", types, want)
 	}
 }
 
@@ -572,7 +578,12 @@ func TestSyncRequests(t *testing.T) {
 	if msg.RequestID != "s1" || len(msg.Repos) != 1 || msg.Repos[0].Ref != "feat/x" {
 		t.Fatalf("sync message: %+v", msg)
 	}
-	gens := func() (int64, int64) { return serverGen(t, s, ctx, "hot"), serverGen(t, s, ctx, "cold") }
+	gens := func() (int64, int64) {
+		var h, c int64
+		systemScan(t, s, `SELECT gen FROM run_servers WHERE id = $1`, []any{hot.ID}, &h)
+		systemScan(t, s, `SELECT gen FROM run_servers WHERE id = $1`, []any{cold.ID}, &c)
+		return h, c
+	}
 	hot0, cold0 := gens()
 	report := func(changed bool) {
 		f := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgRunEvent, ID: 9, RunID: r1, Epoch: 1,
@@ -599,8 +610,6 @@ func TestSyncRequests(t *testing.T) {
 			t.Fatalf("hot's command: %v", sv.Command)
 		}
 	}
-	_ = hot
-	_ = cold
 	// Not running: 409; resume with sync instead.
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped'`)
 	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited'`)
@@ -791,5 +800,59 @@ func TestStoppedServerDoesNotWake(t *testing.T) {
 	}
 	if n := len(serverEventsOf(t, s, ctx, sv.ID, "server.wake_requested")); n != 0 {
 		t.Fatalf("a server stopped by request woke: %d", n)
+	}
+}
+
+// orchestratorNames are products that orchestrate lux; its pages say "the
+// orchestrator" or "its owner", never one of these.
+var orchestratorNames = []string{"dude"}
+
+// Every preview page, and every waking-page step, is worded without naming
+// an orchestrator product.
+func TestPreviewPagesNameNoOrchestrator(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	check := func(what, body string) {
+		t.Helper()
+		for _, n := range orchestratorNames {
+			if strings.Contains(strings.ToLower(body), n) {
+				t.Errorf("%s names %q: %s", what, n, body)
+			}
+		}
+	}
+	all := map[string]any{"Name": "web", "To": "/x", "WaitURL": "/.lux/wait?to=%2Fx", "What": "w", "State": "stopped",
+		"Reason": "stopped", "Code": "3", "Error": "e", "LogURL": "https://luxd.example.com/servers/x", "Host": "h1",
+		"Asked": "5m ago", "AskAgain": previewWakePath, "ConsoleURL": "https://luxd.example.com/servers/x",
+		"Steps": []wakeStep{{Label: "step", State: "done", Elapsed: "1s"}}}
+	for name, pg := range map[string]previewPage{
+		"unknown": pageUnknown, "gone": pageGone, "signIn": pageSignIn, "error": pageError, "starting": pageStarting,
+		"moving": pageMoving, "runStopped": pageRunStopped, "detached": pageDetached, "stopped": pageStopped,
+		"exited": pageExited, "unreachable": pageUnreachable, "waking": pageWaking, "wakingHost": pageWakingHost,
+		"wakingMoving": pageWakingMoving, "noAnswer": pageNoAnswer, "didNotStart": pageDidNotStart,
+	} {
+		w := httptest.NewRecorder()
+		s.preview.page(w, http.StatusOK, pg, all)
+		if w.Body.Len() == 0 || !strings.Contains(w.Body.String(), pg.Title) {
+			t.Fatalf("%s: not rendered: %s", name, w.Body)
+		}
+		check(name, w.Body.String())
+	}
+	// The waking page's own steps, in each phase of a wake.
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "wake": "request",
+		"hostname": "web.pr1.lux.example.com", "runId": r1})
+	cookie := cookieFor(s, sv.ID)
+	for _, c := range []struct{ name, sql string }{
+		{"asleep", `UPDATE runs SET state = 'stopped'`},
+		{"asked", `UPDATE run_servers SET wake_requested_at = now()`},
+		{"resuming", `UPDATE runs SET state = 'resuming'`},
+		{"starting", `UPDATE runs SET state = 'starting'`},
+		{"restored", `UPDATE placements SET created_at = now(), volumes_restored_at = now()`},
+		{"no answer", `UPDATE runs SET state = 'stopped'; UPDATE run_servers SET wake_requested_at = now() - interval '1 hour'`},
+	} {
+		execSQL(t, s, ctx, c.sql)
+		w := previewGet(s, "web.pr1.lux.example.com", "/.lux/wait?to=/", cookie)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s: %d %s", c.name, w.Code, w.Body)
+		}
+		check(c.name, w.Body.String())
 	}
 }
