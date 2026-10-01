@@ -13,7 +13,10 @@
 #
 # DEMO_IDLE (default 1m): how long without a request before the
 # orchestrator stops the Run. DEMO_PREVIEW_PORT (default 8090): the
-# preview listener's port on 127.0.0.1.
+# preview listener's port on 127.0.0.1. LUX_TEST_PG_PORT and
+# LUX_TEST_S3_PORT (the shared Postgres and S3, tests/env.py) are kept at
+# up and used again by down, which drops the demo's database and bucket
+# there.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -29,6 +32,7 @@ env_file() {
 field() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$(env_file)" "$1"; }
 lux() { LUX_URL=$(field luxd_url) LUX_API_KEY=$(field api_key) "$ROOT/bin/lux" "$@"; }
 git_container() { echo "lux-e2e-$(field run_id)-git"; }
+ports_file() { echo "$(field log_dir)/demo-ports"; }
 
 case ${1:-} in
 up)
@@ -38,6 +42,8 @@ up)
 	run_id=$(field run_id)
 	network=$(field network)
 	log_dir=$(field log_dir)
+	[[ -f $(ports_file) ]] ||
+		printf 'export LUX_TEST_PG_PORT=%q LUX_TEST_S3_PORT=%q\n' "${LUX_TEST_PG_PORT:-}" "${LUX_TEST_S3_PORT:-}" >"$(ports_file)"
 	# The git server: the e2e suite's (smart HTTP, a token as password), on
 	# the environment's network, removed with it.
 	docker build -q -t localhost/lux-gitserver:test -f "$ROOT/tests/images/gitserver/Containerfile" "$ROOT/tests/images/gitserver" >/dev/null
@@ -94,6 +100,13 @@ logs)
 down)
 	log_dir=$(field log_dir)
 	[[ -f $log_dir/orchestrator.pid ]] && kill "$(cat "$log_dir/orchestrator.pid")" 2>/dev/null || true
+	# The ports up ran with: teardown reaches the same Postgres and S3.
+	if [[ -f $(ports_file) ]]; then
+		# shellcheck disable=SC1090
+		. "$(ports_file)"
+		[[ -n $LUX_TEST_PG_PORT ]] || unset LUX_TEST_PG_PORT
+		[[ -n $LUX_TEST_S3_PORT ]] || unset LUX_TEST_S3_PORT
+	fi
 	(cd "$ROOT/tests" && uv run python run_tests.py --down)
 	;;
 *)
