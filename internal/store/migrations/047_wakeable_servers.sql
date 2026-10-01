@@ -1,4 +1,4 @@
--- 043_wakeable_servers.sql — servers become a tenant's own resource: an id,
+-- 047_wakeable_servers.sql — servers become a tenant's own resource: an id,
 -- a stable preview host, and at most one attached Run (run_id, now
 -- nullable). A server of a Run from before keeps its name, its Run and its
 -- process state, gets an id and a host (<name>-<8 of its id>), and is

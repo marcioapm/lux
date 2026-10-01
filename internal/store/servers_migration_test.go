@@ -10,7 +10,7 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// A Run's servers from before 043 become servers of their own: an id, a
+// A Run's servers from before 047 become servers of their own: an id, a
 // host <name>-<8 of the id>, attached to their Run, lifetime run, waking
 // never; their process state as it was. Existing events stay the Run's.
 func TestWakeableServersMigration(t *testing.T) {
