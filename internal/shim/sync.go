@@ -207,10 +207,7 @@ func (s *Shim) runSync(a proto.SyncArgs, env []string) []proto.SyncResult {
 		}
 	}
 	if err != nil {
-		results = results[:0]
-		for _, r := range a.Repos {
-			results = append(results, proto.SyncResult{Repo: r.Name, Ref: r.Ref, To: r.Commit, Status: "failed", Error: "lux-shim sync: " + err.Error()})
-		}
+		return a.Failed("lux-shim sync: " + err.Error())
 	}
 	return results
 }

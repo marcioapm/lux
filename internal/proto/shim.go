@@ -216,6 +216,15 @@ type SyncArgs struct {
 	Repos []SyncRepo `json:"repos"`
 }
 
+// Failed is every repository's sync failed with msg.
+func (a SyncArgs) Failed(msg string) []SyncResult {
+	var out []SyncResult
+	for _, r := range a.Repos {
+		out = append(out, SyncResult{Repo: r.Name, Ref: r.Ref, To: r.Commit, Status: "failed", Error: msg})
+	}
+	return out
+}
+
 // SyncRepo is one checkout to move. Base, when set, is the bundle's
 // prerequisite: the bundle holds only the history after it.
 type SyncRepo struct {
@@ -233,9 +242,9 @@ type SyncRepo struct {
 // histories diverged: tracked files are the ref's now, untracked and
 // ignored ones kept, what was there saved as refs/lux/pre-sync), failed
 // (the checkout as it was, or where git stopped in a reset, with
-// refs/lux/pre-sync holding what was there). MissingBase: failed because the checkout
-// lacks the bundle's Base (the runner retries once with the whole
-// history); FullBundle: this result is that retry's.
+// refs/lux/pre-sync holding what was there). MissingBase: failed because
+// the checkout lacks the bundle's Base (the runner retries once with the
+// whole history); FullBundle: this result is that retry's.
 type SyncResult struct {
 	Repo        string `json:"repo"`
 	Ref         string `json:"ref"`
