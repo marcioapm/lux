@@ -97,8 +97,7 @@ on every start, so it must be idempotent.
   --sync app=main`): their restored checkouts move to the ref's commit
   before init ([the RunSpec](runspec.md#syncing-checkouts)). A running Run
   syncs with `POST /v1/runs/{id}/sync` (`lux sync`).
-- Every placement starts every attached server again, unless someone
-  stopped it ([Servers](#servers)).
+- Attached servers start again ([Servers](#servers)).
 
 ## Secrets
 
@@ -132,9 +131,8 @@ stores them:
 
 The tenant's **event feed**, `GET /v1/events` (`lux events --all`), is
 every event of its Runs and servers as server-sent events, each with its
-id: a client resumes after a disconnect with `Last-Event-ID`. A server's
-event carries `serverId`; its `runId` is the server's attached Run, and is
-null only for a server attached to none (Run events always have one).
+id: a client resumes after a disconnect with `Last-Event-ID`. Server
+events are listed under [Servers](#servers).
 
 A placement's stdout, stderr and structured events are written by the shim
 to a file on the host. Every record has a sequence number and secrets are
@@ -163,8 +161,9 @@ has the fields). It is the tenant's own resource (`srv_…`), independent of
 Runs: it is **attached** to at most one Run at a time, and outlives Runs if
 its lifetime says so. Its process does not outlive a placement: a
 placement's end (a stop, a migration, a lost host) stops it, and **every
-new placement** of its Run (a resume, a migration, a resume after `lost`)
-starts it again, unless someone stopped it.
+placement** of its Run (the first, a resume, a migration, a resume after
+`lost`) starts every attached server with a command, unless someone
+stopped it (its desired state, below).
 
 ```
 lux server add <run> web 3000 -- npm run dev -- --host 0.0.0.0 --port 3000   # a Run's (lifetime run)
@@ -189,8 +188,7 @@ lux server start|stop|restart|rm srv_…  (or <run> <name>)
   someone), `unreachable`, `exited`, `no answer` (a wake asked for longer
   than `wakeTimeout` ago and no Run came up; the next request asks again).
 - **Desired state** is `down` once someone stops it (`stopReason:
-  stopped`): later placements leave it stopped until it is started again.
-  Otherwise `up`.
+  stopped`) until it is started again. Otherwise `up`.
 - **Without a command**, only the port is exposed, and lux watches it
   whenever the Run runs: `waking` until it accepts connections, then
   `ready`, whatever it was. There is nothing to start (409 `no_command`);
@@ -222,20 +220,23 @@ lux server start|stop|restart|rm srv_…  (or <run> <name>)
   feed, `GET /v1/events` (see [Output](#output)): `server.created`,
   `updated`, `deleted`, `attached`, `detached`, `state`,
   `wake_requested`, `idle`, `expired` (and the Run API's `server.added`,
-  `server.removed`). Each carries `serverId`, and in `data` the server's
-  `serverId`, `name`, `host`, `hostname`, `url`, `labels` and `runId`
-  (null when attached to none). `GET /v1/servers/{id}/events` lists one
+  `server.removed`). Each carries `serverId` and `runId`, its attached Run
+  (null only when attached to none; a Run's own events always have one),
+  and in `data` the server's `serverId`, `name`, `host`, `hostname`, `url`,
+  `labels` and `runId`. `GET /v1/servers/{id}/events` lists one
   server's, a deleted server's included (its last is `server.deleted` or
   `server.expired`); an id with none is an empty list, never 404.
 - **Ports:** `lux port-forward <run> web <local-port>` reaches a server by
   its name, as it reaches `network.ports`.
 - **Previews:** with previews configured, each server has a URL,
   `https://<hostname>`, that reaches it from a browser wherever its Run is
-  now ([operators](operators.md#previews)). The hostname is its owner's
-  choice, any name under the preview domain that no other server has
-  (`web.t123.p9.<domain>`), or `<name>-<8 characters of its id>.<domain>`.
-  It is stable for the server's life and never names a Run.
-  `lastRequestAt` is when it was last requested.
+  now ([operators](operators.md#previews)). The hostname is the default,
+  `<name>-<8 characters of its id>.<domain>` (`web-k3x9ab2c.<domain>`), or,
+  for a server created with `POST /v1/servers` (`lux server create
+  --hostname`), its owner's choice: any name under the preview domain (any
+  number of labels) that no other server of any tenant has
+  (`web.t123.p9.<domain>`). It is stable for the server's life and never
+  names a Run.
 
 ### Waking on request
 
@@ -263,9 +264,10 @@ feed) and the owner acts.
    long it stays open. The owner stops the Run; its state is snapshotted,
    as on every stop.
 
-`lastRequestAt` is written at most every `preview.activity_every` (30s by
-default), so idleness is that precise. A `wake: never` server whose Run is
-not running shows "not running", and nothing is emitted. See
+`lastRequestAt`, when the server was last requested, is written at most
+every `preview.activity_every` (30s by default), so idleness is that
+precise. A `wake: never` server whose Run is not running shows "not
+running", and nothing is emitted. See
 `examples/preview-orchestrator` for an owner in 300 lines, and
 [development](development.md#try-branch-previews-locally) to try it.
 

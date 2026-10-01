@@ -100,11 +100,10 @@ lux resume run_x --add-repo docs=git@github.com:o/docs.git,ref=v2,push=false --r
 
 `--sync repo=ref` (repeatable) moves a repository's restored checkout to
 `ref` before init; `lux sync` does it for a running Run, after which
-servers with `afterSync` restart. Tracked files become the ref's,
-untracked and ignored ones stay; see [syncing
-checkouts](runspec.md#syncing-checkouts). `lux sync --wait` prints each
-repository's outcome (`up-to-date`, `fast-forward`, `reset`, `failed`)
-and exits 1 if one failed.
+servers with `afterSync` restart ([syncing
+checkouts](runspec.md#syncing-checkouts) has the rule). `lux sync --wait`
+prints each repository's outcome (`up-to-date`, `fast-forward`, `reset`,
+`failed`) and exits 1 if one failed.
 
 ## Git
 

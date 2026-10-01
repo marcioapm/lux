@@ -203,8 +203,8 @@ What it brings up:
 
 - `run_tests.py --serve --detach --preview-local 8090`: the dev
   environment, with previews at `http://<host>.lux.localhost:8090`
-  (`preview.scheme = "http"`, allowed only under `localhost`; the listener
-  on `127.0.0.1:8090`).
+  ([previews on this machine](operators.md#previews); the listener on
+  `127.0.0.1:8090`).
 - The e2e suite's git server with a repository `app` (`message.txt`:
   "hello from commit A").
 - `examples/preview-orchestrator`, a reference owner: it creates the
