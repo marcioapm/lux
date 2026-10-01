@@ -35,6 +35,11 @@ import (
 // open already. asked: this request asked (wrote the event).
 func (s *Server) requestWake(ctx context.Context, id, by, path string) (asked bool, err error) {
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// The Run first (KEY SHARE: what the event's foreign key takes),
+		// then the server, as every change of a server locks them.
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = (SELECT run_id FROM run_servers WHERE id = $1) FOR KEY SHARE`, id); err != nil {
+			return err
+		}
 		var tenantID string
 		var runID *string
 		var wakes int
@@ -79,14 +84,19 @@ func (s *Server) idleLoop(ctx context.Context) {
 }
 
 // checkIdle emits server.idle for every ready server of a running Run
-// with no request for its idleAfter, once per idle period.
+// with no request for its idleAfter, once per idle period. The due rows'
+// Runs are locked (KEY SHARE) before their servers; the UPDATE repeats the
+// conditions on the rows it then locks.
 func (s *Server) checkIdle(ctx context.Context) error {
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `UPDATE run_servers sv SET idle_notified_at = now()
-			FROM runs r
-			WHERE r.id = sv.run_id AND r.state = 'running' AND sv.state = 'ready' AND sv.idle_after_s > 0
+		const due = `r.id = sv.run_id AND r.state = 'running' AND sv.state = 'ready' AND sv.idle_after_s > 0
 			  AND greatest(sv.last_request_at, sv.ready_since) + make_interval(secs => sv.idle_after_s) <= now()
-			  AND (sv.idle_notified_at IS NULL OR sv.idle_notified_at < greatest(sv.last_request_at, sv.ready_since))
+			  AND (sv.idle_notified_at IS NULL OR sv.idle_notified_at < greatest(sv.last_request_at, sv.ready_since))`
+		rows, err := tx.Query(ctx, `WITH locked AS (
+				SELECT sv.id FROM run_servers sv JOIN runs r ON `+due+` FOR KEY SHARE OF r)
+			UPDATE run_servers sv SET idle_notified_at = now()
+			FROM runs r
+			WHERE sv.id IN (SELECT id FROM locked) AND `+due+`
 			RETURNING sv.id, sv.tenant_id, sv.run_id, sv.name, sv.host, sv.labels, sv.last_request_at, sv.idle_after_s, r.current_epoch`)
 		if err != nil {
 			return err
