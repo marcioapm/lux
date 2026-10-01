@@ -494,16 +494,17 @@ type lifecycleEventsOutput struct {
 	} `nameHint:"LifecycleEventList"`
 }
 
-// eventSortKeys: the sort keys of a pool's or host's events. time is when
-// it (first) happened; detail is its type, then its data as JSON text (a
-// grouping by kind, not the order of a console's summary). It is one text
-// value for the keyset, in byte order: chr(1) sorts below every character
-// of a type, so it orders as (type, data::text).
+// eventSortKeys: the sort keys of a pool's or host's events, each served
+// by an index on (owner, key, id) that includes tenant_id (043, 044), so a
+// page stops at its end however many events the owner has. time is when it
+// (first) happened. There is no sort by data: no index can serve one under
+// row-level security (an index on the data breaks inserts past a btree
+// entry's size, and the expressions that would shorten it are not
+// leakproof), so it would read all of the owner's events.
 var eventSortKeys = map[string]sortKey{
-	"time":   {expr: `created_at`, cast: "timestamptz", first: "desc", notNull: true},
-	"id":     {expr: `id`, cast: "bigint", first: "desc", notNull: true},
-	"type":   {expr: `type`, cast: "text", first: "asc", notNull: true},
-	"detail": {expr: `(type || chr(1) || data::text) COLLATE "C"`, cast: "text", first: "asc", notNull: true},
+	"time": {expr: `created_at`, cast: "timestamptz", first: "desc", notNull: true},
+	"id":   {expr: `id`, cast: "bigint", first: "desc", notNull: true},
+	"type": {expr: `type`, cast: "text", first: "asc", notNull: true},
 }
 
 type listPoolEventsInput struct {

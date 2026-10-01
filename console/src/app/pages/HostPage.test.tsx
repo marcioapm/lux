@@ -185,19 +185,20 @@ test("an operator narrowed to a tenant reads the host's events as that tenant; a
   }
 });
 
-test("sorting by the Details column asks the server for its detail key", async () => {
+test("Details does not sort (the server has no index for it); Type asks the server for its key", async () => {
   const p = await render(registered());
   try {
-    const th = [...p.eventsCard()!.querySelectorAll("th")].find((t) => t.textContent?.startsWith("Details")) as HTMLElement;
-    expect(th.getAttribute("aria-sort")).toBe("none");
-    await act(async () => th.click());
+    const header = (name: string) => [...p.eventsCard()!.querySelectorAll("th")].find((t) => t.textContent?.startsWith(name)) as HTMLElement;
+    const details = header("Details");
+    expect(details.hasAttribute("aria-sort")).toBe(false);
+    const before = p.eventCalls().length;
+    await act(async () => details.click());
     await sleep(50);
-    const q = query(p.eventCalls().at(-1)!);
-    expect(q).toEqual({ sort: "detail", dir: q.dir!, limit: "50" });
-    expect(["asc", "desc"]).toContain(q.dir!);
-    // The column the server sorts by is the one shown sorted.
-    const shown = [...p.eventsCard()!.querySelectorAll("th")].find((t) => t.textContent?.startsWith("Details"))!;
-    expect(shown.getAttribute("aria-sort")).toBe(q.dir === "asc" ? "ascending" : "descending");
+    expect(p.eventCalls().slice(before).map(query).filter((q) => q.sort !== "time")).toEqual([]);
+    await act(async () => header("Type").click());
+    await sleep(50);
+    expect(query(p.eventCalls().at(-1)!)).toEqual({ sort: "type", dir: "asc", limit: "50" });
+    expect(header("Type").getAttribute("aria-sort")).toBe("ascending");
   } finally {
     await p.done();
   }

@@ -1041,7 +1041,7 @@ func TestLifecycleEventsReadOnlyTheScopesRows(t *testing.T) {
 			}
 			mid := fmt.Sprint(all[len(all)/2].ID)
 			check("before/after", read(c.p, tbl, owner, EventPage{Before: mid, After: fmt.Sprint(all[len(all)-1].ID - 1)}, PageQuery{}).Body.Events)
-			for _, sort := range []string{"time", "id", "type", "detail"} {
+			for _, sort := range []string{"time", "id", "type"} {
 				for _, dir := range []string{"asc", "desc"} {
 					shape := sort + " " + dir
 					pq := PageQuery{Sort: sort, Dir: dir}
