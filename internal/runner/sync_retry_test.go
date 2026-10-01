@@ -22,7 +22,7 @@ import (
 
 // syncFixture is a running placement of run_x with repository app (a bare
 // repository at bare), whose podman is script (given podman's arguments),
-// and whose reports to luxd are acked; events are the git.sync events
+// and whose reports to luxd are acked; syncs are the git.sync events
 // reported so far. The script sees the bare repository as $BARE.
 type syncFixture struct {
 	p     *placement
@@ -123,8 +123,7 @@ func TestFailedSyncRetryReportsARepositoryOnce(t *testing.T) {
 	}{
 		// The retry's bundle cannot be made: the repository is gone from
 		// where the runner fetches it.
-		{"retry bundle fails", `n=$(cat "$0.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$0.n"
-rm -rf "$BARE"
+		{"retry bundle fails", `rm -rf "$BARE"
 echo '[{"repo":"app","ref":"main","status":"failed","error":"no base","missingBase":true}]'`, "app.git"},
 		// The retry's lux-shim sync cannot run.
 		{"retry exec fails", missingBaseOnce(`echo "container gone" >&2; exit 125`), "lux-shim sync"},
