@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"path"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -153,4 +154,54 @@ func AttachmentsMeta(list []Attachment) []AttachmentMeta {
 		out[i] = a.Meta()
 	}
 	return out
+}
+
+// RuntimeInputsDir is $LUX_INPUTS for a Run with no state volume: on the
+// runtime volume, which a stop on the same host keeps and a move does not.
+const RuntimeInputsDir = "/.lux/run/inputs"
+
+// InputsDir is where the shim writes input images ($LUX_INPUTS) for a
+// workload whose user's home is home, and the volume mount it is on (root).
+// It is on a state volume, so a snapshot carries it through stop, resume
+// and migration: the one holding the adapter's session (beside the
+// transcript that names the images), else the one holding home, else the
+// first. It is never inside a git checkout; $LUX_ARTIFACTS is on the
+// runtime volume, never a state volume. With no state volume it is
+// RuntimeInputsDir.
+func (s *RunSpec) InputsDir(home string) (dir, root string) {
+	var cands []string
+	for _, p := range Adapters[s.Workload.Adapter].StatePaths {
+		cands = append(cands, path.Clean(strings.ReplaceAll(p, "$HOME", home)))
+	}
+	cands = append(cands, path.Clean(home))
+	for _, v := range s.Volumes {
+		if v.Kind == "state" {
+			cands = append(cands, v.Path)
+		}
+	}
+	inCheckout := func(p string) bool {
+		if s.Git == nil {
+			return false
+		}
+		for _, r := range s.Git.Repositories {
+			if Under(p, r.Path) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range cands {
+		v := s.stateVolumeFor(c)
+		if v == nil {
+			continue
+		}
+		// The volume's root, unless a checkout is in or above it: then
+		// beside the path that led here (the session's own directory).
+		for _, d := range []string{path.Join(v.Path, ".lux-inputs"), path.Join(c, ".lux-inputs")} {
+			if !inCheckout(d) {
+				return d, v.Path
+			}
+		}
+	}
+	return RuntimeInputsDir, path.Dir(RuntimeInputsDir)
 }
