@@ -1,9 +1,9 @@
 -- 047_wakeable_servers.sql — servers become a tenant's own resource: an id,
 -- a stable preview host, and at most one attached Run (run_id, now
 -- nullable). A server of a Run from before keeps its name, its Run and its
--- process state, gets an id and a host (<name>-<8 of its id>), and is
--- lifetime 'run': it goes when its Run finishes for good, so those of Runs
--- that already succeeded or were cancelled go now.
+-- process state, gets an id and a host (<name>-<8 hex of md5(run_id/name)>),
+-- and is lifetime 'run': it goes when its Run finishes for good, so those of
+-- Runs that already succeeded or were cancelled go now.
 --
 -- wake: 'request' asks the owner (an event on the feed) to bring a Run up
 -- when someone opens the preview and nothing serves it; 'never' does not.
@@ -17,13 +17,12 @@
 
 DELETE FROM run_servers rs USING runs r WHERE r.id = rs.run_id AND r.state IN ('succeeded', 'cancelled');
 
--- 16 characters of lower-case base32 (ids.New's alphabet): md5's hex
--- digits with 0, 1, 8, 9 mapped to letters.
-CREATE FUNCTION lux_server_suffix() RETURNS text LANGUAGE sql VOLATILE AS $$
-  SELECT translate(substr(md5(random()::text || clock_timestamp()::text), 1, 16), '0189', 'wxyz')
-$$;
-
-ALTER TABLE run_servers ADD COLUMN id text NOT NULL DEFAULT 'srv_' || lux_server_suffix();
+-- Ids of the rows from before: 16 characters of lower-case base32 (ids.New's
+-- alphabet), md5's hex digits with 0, 1, 8, 9 mapped to letters. New rows
+-- get theirs from luxd (ids.New): no default once these are set.
+ALTER TABLE run_servers ADD COLUMN id text NOT NULL
+  DEFAULT 'srv_' || translate(substr(md5(random()::text || clock_timestamp()::text), 1, 16), '0189', 'wxyz');
+ALTER TABLE run_servers ALTER COLUMN id DROP DEFAULT;
 ALTER TABLE run_servers DROP CONSTRAINT run_servers_pkey;
 ALTER TABLE run_servers ADD PRIMARY KEY (id);
 ALTER TABLE run_servers ALTER COLUMN run_id DROP NOT NULL;
@@ -32,8 +31,15 @@ CREATE UNIQUE INDEX run_servers_run_name ON run_servers (run_id, name);
 -- The preview host, relative to the preview domain (web-k3x9ab2c, or an
 -- owner's web.t123.p9): unique across luxd, lower case. Left out, it is
 -- <name>-<8 characters of the id>.
+-- The backfill's suffix comes from the row's unique (run_id, name), so it is
+-- the same on every attempt; the rare rows it gives a host already given
+-- get -2, -3, ... after it (a suffix of 1-2 characters, never 8 hex like
+-- every other host's, so these cannot clash in turn).
 ALTER TABLE run_servers ADD COLUMN host text;
-UPDATE run_servers SET host = name || '-' || substr(id, 5, 8);
+UPDATE run_servers rs SET host = b.host || CASE WHEN b.n > 1 THEN '-' || b.n ELSE '' END
+  FROM (SELECT run_id, name, h AS host, row_number() OVER (PARTITION BY h ORDER BY run_id) AS n
+        FROM (SELECT run_id, name, name || '-' || substr(md5(run_id || '/' || name), 1, 8) AS h FROM run_servers) x) b
+  WHERE b.run_id = rs.run_id AND b.name = rs.name;
 ALTER TABLE run_servers ALTER COLUMN host SET NOT NULL;
 CREATE UNIQUE INDEX run_servers_host ON run_servers (host);
 CREATE FUNCTION lux_server_host() RETURNS trigger LANGUAGE plpgsql AS $$
