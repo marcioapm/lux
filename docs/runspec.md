@@ -560,6 +560,8 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
   controls (its hooks and config would run as root on the host).
 - **When:** on a resume, after the volumes are restored and before
   `init`; on a running Run, at once.
+- **The image needs `git`** (the checkout moves inside the container); an
+  image without it reports every sync `failed` and the Run goes on.
 - **The rule**, per repository:
   - already at the commit, nothing changed: `up-to-date`;
   - no tracked file changed, and the checkout's `HEAD` is an ancestor of
@@ -567,7 +569,8 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
     commit; a tag or sha detached);
   - tracked files changed, or the histories diverged: `reset`. What was
     there is saved first as `refs/lux/pre-sync` (a stash commit of the
-    changes, or the old `HEAD`), then tracked files become the commit's.
+    changes, or the old `HEAD`; the next reset replaces it), then tracked
+    files become the commit's.
     **Untracked and ignored files are kept** (a database file, `node_modules`,
     a build cache); an untracked file the commit now tracks is replaced;
   - anything that fails: `failed` with git's message; the checkout is left
