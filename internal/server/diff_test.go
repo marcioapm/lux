@@ -159,21 +159,25 @@ func TestDiffNonUTF8Patch(t *testing.T) {
 	}
 }
 
+func gitBasesOf(t *testing.T, s *Server, runID string, epoch int) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	var m map[string]string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
+		m, err = gitBases(ctx, tx, runID, epoch)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
 // Clone bases follow the snapshot a placement restored; a placement with
 // no recorded lineage has only its own clones.
 func TestGitBases(t *testing.T) {
 	s, _ := diffFixture(t)
 	ctx := context.Background()
-	bases := func(epoch int) map[string]string {
-		var m map[string]string
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
-			m, err = gitBases(ctx, tx, "r1", epoch)
-			return err
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return m
-	}
+	bases := func(epoch int) map[string]string { return gitBasesOf(t, s, "r1", epoch) }
 	if m := bases(2); m["app"] != "base-app" || len(m) != 1 {
 		t.Fatalf("epoch 2: %v", m)
 	}
@@ -200,16 +204,7 @@ func TestGitBases(t *testing.T) {
 func TestGitBasesFollowSyncs(t *testing.T) {
 	s, _ := diffFixture(t)
 	ctx := context.Background()
-	bases := func(epoch int) map[string]string {
-		var m map[string]string
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
-			m, err = gitBases(ctx, tx, "r1", epoch)
-			return err
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return m
-	}
+	bases := func(epoch int) map[string]string { return gitBasesOf(t, s, "r1", epoch) }
 	// Epoch 1: cloned at base-app, synced to sync-b (fast-forward), then
 	// syncs that did not move it.
 	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES

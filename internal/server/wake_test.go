@@ -100,8 +100,7 @@ func cookieFor(s *Server, id string) string {
 // luxd, validated; a generated one otherwise, stable and without a run id;
 // other tenants see none of it.
 func TestServerHostnames(t *testing.T) {
-	s, ctx, key, key2 := wakeFixture(t)
-	_ = ctx
+	s, _, key, key2 := wakeFixture(t)
 	a := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "wake": "request",
 		"hostname": "web.t123.p9.lux.example.com", "labels": map[string]string{"pr": "9"}})
 	if a.Hostname == nil || *a.Hostname != "web.t123.p9.lux.example.com" || *a.URL != "https://web.t123.p9.lux.example.com" ||
