@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/marcioapm/lux/internal/gitws"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
@@ -81,7 +80,7 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 					Branch: t.Branch, Bundle: proto.ShimRunDir + "/" + syncDir + "/" + sub + "/" + name, Base: t.Base})
 				continue
 			}
-			res.Error = strings.ReplaceAll(berr.Error(), repo.URL, gitws.Scrub(repo.URL))
+			res.Error = scrubURL(berr, repo.URL)
 		}
 		failed = append(failed, res)
 	}
@@ -91,11 +90,11 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 	return args, failed
 }
 
-// retryRefs are the refs to bundle again with the whole history: those
-// whose checkout lacked its bundle's base.
-func retryRefs(args *proto.SyncArgs, results []proto.SyncResult) []proto.SyncRef {
+// retryRefs are the refs of args to bundle again with the whole history:
+// those of the named repositories, whose checkout lacked its bundle's base.
+func retryRefs(args *proto.SyncArgs, names []string) []proto.SyncRef {
 	var refs []proto.SyncRef
-	for _, name := range proto.MissingBase(results) {
+	for _, name := range names {
 		for _, r := range args.Repos {
 			if r.Name == name {
 				refs = append(refs, proto.SyncRef{Repo: r.Name, Ref: r.Ref})
@@ -124,10 +123,15 @@ func (p *placement) removeSyncBundles(ctx context.Context, requestID string) {
 	}
 }
 
+// moved: the sync changed the checkout.
+func moved(res proto.SyncResult) bool {
+	return res.Status == "fast-forward" || res.Status == "reset"
+}
+
 // reportSync sends a repository's git.sync event, and keeps a moved
 // checkout's commit as the base of its live diffs.
 func (p *placement) reportSync(ctx context.Context, res proto.SyncResult, requestID string) {
-	if (res.Status == "fast-forward" || res.Status == "reset") && res.To != "" {
+	if moved(res) && res.To != "" {
 		p.setGitBase(res.Repo, res.To)
 	}
 	var d map[string]any
@@ -174,7 +178,7 @@ func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
 	results := p.execSync(ctx, user, args)
 	// A repository retried with the whole history is reported once: the
 	// retry's outcome (moved, or why it failed) replaces its missingBase.
-	if refs := retryRefs(args, results); len(refs) > 0 {
+	if refs := retryRefs(args, proto.MissingBase(results)); len(refs) > 0 {
 		retry, again := p.prepareSync(ctx, sp, refs, req.RequestID, true)
 		if retry != nil {
 			again = append(again, p.execSync(ctx, user, retry)...)
@@ -183,7 +187,7 @@ func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
 	}
 	for _, res := range results {
 		p.reportSync(ctx, res, req.RequestID)
-		if res.Status == "fast-forward" || res.Status == "reset" {
+		if moved(res) {
 			done["changed"] = true
 		}
 	}
@@ -194,17 +198,12 @@ func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
 func (p *placement) execSync(ctx context.Context, user string, args *proto.SyncArgs) (results []proto.SyncResult) {
 	execCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	out, err := p.r.pm.Run(execCtx, "exec", "--user", user, "--workdir", "/", containerName(p.runID),
-		proto.ShimBinary, "sync", string(proto.Marshal(args)))
+	out, err := p.r.execShim(execCtx, p.runID, user, "sync", args)
 	if err == nil {
 		err = json.Unmarshal(out, &results)
 	}
 	if err != nil {
-		results = nil
-		for _, r := range args.Repos {
-			results = append(results, proto.SyncResult{Repo: r.Name, Ref: r.Ref, To: r.Commit, Status: "failed",
-				Error: fmt.Sprintf("lux-shim sync: %v %s", err, strings.TrimSpace(string(out[:min(len(out), 300)])))})
-		}
+		return args.Failed(fmt.Sprintf("lux-shim sync: %v %s", err, strings.TrimSpace(string(out[:min(len(out), 300)]))))
 	}
 	return results
 }
@@ -226,12 +225,8 @@ func (p *placement) onSyncFallback(ctx context.Context, data json.RawMessage) {
 	p.mu.Unlock()
 	var retry *proto.SyncArgs
 	if first != nil {
-		results := make([]proto.SyncResult, 0, len(d.Repos))
-		for _, name := range d.Repos {
-			results = append(results, proto.SyncResult{Repo: name, Status: "failed", MissingBase: true})
-		}
 		var failed []proto.SyncResult
-		retry, failed = p.prepareSync(ctx, sp, retryRefs(first, results), "", true)
+		retry, failed = p.prepareSync(ctx, sp, retryRefs(first, d.Repos), "", true)
 		// Reported with the shim's results (onSyncRecord), in place of
 		// their missingBase.
 		p.mu.Lock()
