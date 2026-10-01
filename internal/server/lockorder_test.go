@@ -100,6 +100,61 @@ func TestServerChangesLockTheRunFirst(t *testing.T) {
 	}
 }
 
+// An expiry pass waiting for the Run's lock acts on the server as it is
+// once it has the lock: one requested meanwhile is no longer due and
+// stays; one detached meanwhile is left for the next pass, which expires
+// it.
+func TestExpiryRechecksUnderLock(t *testing.T) {
+	for _, c := range []struct {
+		name, meanwhile string
+		nextPass        int
+	}{
+		{"requested meanwhile", `UPDATE run_servers SET last_request_at = now() WHERE id = $1`, http.StatusOK},
+		{"detached meanwhile", `UPDATE run_servers SET run_id = NULL WHERE id = $1`, http.StatusNotFound},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx, key, _ := wakeFixture(t)
+			sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "runId": r1,
+				"lifetime": "owner", "expireAfter": "1h", "hostname": "web.race.lux.example.com"})
+			execSQL(t, s, ctx, `UPDATE run_servers SET created_at = now() - interval '2 hours' WHERE id = $1`, sv.ID)
+			locked, release := make(chan struct{}), make(chan struct{})
+			released := false
+			t.Cleanup(func() {
+				if !released {
+					close(release)
+				}
+			})
+			report := make(chan error, 1)
+			go func() { report <- runThenServers(t, s, ctx, r1, locked, release) }()
+			<-locked
+			expired := make(chan error, 1)
+			go func() { expired <- s.expireServers(context.Background()) }()
+			waitBlocked(t, s)
+			execSQL(t, s, ctx, c.meanwhile, sv.ID)
+			close(release)
+			released = true
+			if err := <-report; err != nil {
+				t.Fatal(err)
+			}
+			if err := <-expired; err != nil {
+				t.Fatal(err)
+			}
+			if w := apiCall(t, s, key, http.MethodGet, "/v1/servers/"+sv.ID, nil); w.Code != http.StatusOK {
+				t.Fatalf("%s, yet expired: %d %s", c.name, w.Code, w.Body)
+			}
+			if n := len(serverEventsOf(t, s, ctx, sv.ID, "server.expired")); n != 0 {
+				t.Fatalf("server.expired events: %d", n)
+			}
+			if err := s.expireServers(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if w := apiCall(t, s, key, http.MethodGet, "/v1/servers/"+sv.ID, nil); w.Code != c.nextPass {
+				t.Fatalf("after the next pass: %d, want %d", w.Code, c.nextPass)
+			}
+		})
+	}
+}
+
 // The idle check and a wake write a server's row and an event of its Run
 // while its Run's end is being recorded: they take the Run (KEY SHARE, as
 // the event's foreign key does) before the server, so neither deadlocks
