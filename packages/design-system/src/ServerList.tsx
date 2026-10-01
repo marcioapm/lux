@@ -30,7 +30,6 @@ export interface ServerInfo {
   wake?: string;
   /** run: it ends with the Run; owner: kept until its owner deletes it. */
   lifetime?: string;
-  lastRequestAt?: string | null;
 }
 
 export interface ServerRowProps {
