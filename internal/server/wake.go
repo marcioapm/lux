@@ -233,7 +233,7 @@ func (p *previews) wakingPage(ctx context.Context, w http.ResponseWriter, id, to
 	// The steps, timed from the wake (or, without one, from its Run's
 	// current placement).
 	base := v.WakeRequestedAt
-	if base == nil || (pl.created != nil && pl.created.Before(*base)) {
+	if base == nil {
 		base = pl.created
 	}
 	since := func(t *time.Time) string {
