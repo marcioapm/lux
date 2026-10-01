@@ -549,7 +549,7 @@ func (p *previews) rewrite(pr *httputil.ProxyRequest) {
 	pr.SetXForwarded()
 	cleanPreviewHeaders(pr.Out.Header)
 	pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
-	pr.Out.Header.Set("X-Forwarded-Proto", "https")
+	pr.Out.Header.Set("X-Forwarded-Proto", cmp.Or(p.s.cfg.Preview.Scheme, "https"))
 	pr.Out.Header.Set("X-Lux-User", pt.user)
 }
 
@@ -568,7 +568,7 @@ func cleanPreviewHeaders(h http.Header) {
 			for _, c := range strings.Split(line, ";") {
 				c = strings.TrimSpace(c)
 				n, _, _ := strings.Cut(c, "=")
-				if c == "" || n == previewCookie || n == "CF_Authorization" {
+				if c == "" || n == previewCookie || n == previewCookieHTTP || n == "CF_Authorization" {
 					continue
 				}
 				keep = append(keep, c)

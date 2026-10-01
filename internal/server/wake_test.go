@@ -950,3 +950,35 @@ func TestOperatorServers(t *testing.T) {
 		t.Fatalf("delete: %d %s", w.Code, w.Body)
 	}
 }
+
+// Over http (a local demo), the container sees neither of lux's preview
+// cookies, its own cookies as sent, and the scheme the browser used.
+func TestPreviewHTTPCookiesStayOut(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	s.cfg.Preview.Scheme = "http"
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "runId": r1,
+		"hostname": "web.demo.lux.example.com"})
+	execSQL(t, s, ctx, `UPDATE run_servers SET state = 'ready', ready_since = now() WHERE id = $1`, sv.ID)
+	seen := make(chan http.Header, 1)
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer app.Close()
+	fakeRunner(t, s, strings.TrimPrefix(app.URL, "http://"))
+	signed := cookieFor(s, sv.ID)
+	req := httptest.NewRequest(http.MethodGet, "http://web.demo.lux.example.com/", nil)
+	req.Header.Set("Cookie", previewCookieHTTP+"="+signed+"; app=1; "+previewCookie+"="+signed)
+	w := httptest.NewRecorder()
+	s.preview.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || w.Body.String() != "ok" {
+		t.Fatalf("proxied: %d %s", w.Code, w.Body)
+	}
+	h := <-seen
+	if got := h.Values("Cookie"); len(got) != 1 || got[0] != "app=1" {
+		t.Fatalf("cookies the container saw: %q", got)
+	}
+	if h.Get("X-Forwarded-Proto") != "http" || h.Get("X-Forwarded-Host") != "web.demo.lux.example.com" {
+		t.Fatalf("forwarded: proto %q host %q", h.Get("X-Forwarded-Proto"), h.Get("X-Forwarded-Host"))
+	}
+}
