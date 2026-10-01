@@ -2,7 +2,8 @@
 -- a stable preview host, and at most one attached Run (run_id, now
 -- nullable). A server of a Run from before keeps its name, its Run and its
 -- process state, gets an id and a host (<name>-<8 of its id>), and is
--- lifetime 'run': it goes when its Run finishes for good.
+-- lifetime 'run': it goes when its Run finishes for good, so those of Runs
+-- that already succeeded or were cancelled go now.
 --
 -- wake: 'request' asks the owner (an event on the feed) to bring a Run up
 -- when someone opens the preview and nothing serves it; 'never' does not.
@@ -13,6 +14,8 @@
 --
 -- Desired state is not a column: a server is down when it was stopped by
 -- request (state 'stopped', stop_reason 'stopped'), up otherwise.
+
+DELETE FROM run_servers rs USING runs r WHERE r.id = rs.run_id AND r.state IN ('succeeded', 'cancelled');
 
 -- 16 characters of lower-case base32 (ids.New's alphabet): md5's hex
 -- digits with 0, 1, 8, 9 mapped to letters.

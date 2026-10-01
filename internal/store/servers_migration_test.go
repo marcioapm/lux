@@ -26,10 +26,14 @@ func TestWakeableServersMigration(t *testing.T) {
 	defer conn.Close(ctx)
 	for _, q := range []string{
 		`INSERT INTO tenants (id, name) VALUES ('t1', 't1')`,
-		`INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('run_a', 't1', '{}', 'running', 1), ('run_b', 't1', '{}', 'stopped', 1)`,
+		`INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('run_a', 't1', '{}', 'running', 1), ('run_b', 't1', '{}', 'stopped', 1),
+			('run_done', 't1', '{}', 'succeeded', 1), ('run_gone', 't1', '{}', 'cancelled', 1), ('run_bad', 't1', '{}', 'failed', 1)`,
 		`INSERT INTO run_servers (tenant_id, run_id, name, port, command, from_spec, state, stop_reason) VALUES
 			('t1', 'run_a', 'web', 3000, '["serve"]', true, 'ready', NULL),
-			('t1', 'run_b', 'web', 3000, NULL, false, 'stopped', 'stopped')`,
+			('t1', 'run_b', 'web', 3000, NULL, false, 'stopped', 'stopped'),
+			('t1', 'run_done', 'web', 3000, NULL, true, 'stopped', NULL),
+			('t1', 'run_gone', 'web', 3000, NULL, true, 'stopped', NULL),
+			('t1', 'run_bad', 'web', 3000, NULL, true, 'stopped', NULL)`,
 		`INSERT INTO run_events (tenant_id, run_id, type, data) VALUES ('t1', 'run_a', 'server.state', '{"name": "web"}')`,
 	} {
 		if _, err := conn.Exec(ctx, q); err != nil {
@@ -39,7 +43,17 @@ func TestWakeableServersMigration(t *testing.T) {
 	if _, err := store.Migrate(ctx, owner, "lux_app"); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := conn.Query(ctx, `SELECT id, host, run_id, lifetime, wake, state, coalesce(stop_reason, ''), from_spec FROM run_servers ORDER BY run_id`)
+	// Those of succeeded and cancelled Runs are gone; a failed Run's stays.
+	var failed, finished int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FILTER (WHERE run_id = 'run_bad'),
+		count(*) FILTER (WHERE run_id IN ('run_done', 'run_gone')) FROM run_servers`).Scan(&failed, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if failed != 1 || finished != 0 {
+		t.Fatalf("kept: %d of the failed Run, %d of the finished ones", failed, finished)
+	}
+	rows, err := conn.Query(ctx, `SELECT id, host, run_id, lifetime, wake, state, coalesce(stop_reason, ''), from_spec FROM run_servers
+		WHERE run_id IN ('run_a', 'run_b') ORDER BY run_id`)
 	if err != nil {
 		t.Fatal(err)
 	}
