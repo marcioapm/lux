@@ -22,6 +22,16 @@ afterAll(async () => {
 
 const sleep = (ms: number) => act(() => new Promise<void>((r) => setTimeout(r, ms)));
 
+/** Polls (10 ms steps, inside act) until ok() holds; fails after 5 s. */
+async function until(ok: () => boolean, what: string) {
+  for (const end = Date.now() + 5000; !ok(); ) {
+    if (Date.now() > end) throw new Error(`never: ${what}`);
+    await sleep(10);
+  }
+}
+
+const REFUSED = "No server of yours answers to web.pr1.lux.example.com: it was deleted, or belongs to another tenant.";
+
 const TO = "https://web.pr1.lux.example.com/goals?tab=a";
 const WHOAMI = { tenantId: "t1", scopes: ["run"], previewDomain: "lux.example.com", previewScheme: "https" };
 
@@ -47,7 +57,6 @@ async function render(servers: { id: string }[]) {
   document.body.appendChild(el);
   const root = createRoot(el);
   await act(async () => root.render(<PreviewAuth />));
-  await sleep(50);
   return {
     fake,
     replaced,
@@ -66,10 +75,11 @@ async function render(servers: { id: string }[]) {
 test("a hostname with no server of this session's is refused, and no ticket is minted", async () => {
   const p = await render([]);
   try {
+    // The refusal is the page's last step: once it shows, no call is pending.
+    await until(() => p.text().includes(REFUSED), "the refusal");
+    await sleep(50);
     expect(p.fake.calls).toContain("/v1/servers?hostname=web.pr1.lux.example.com");
-    expect(p.text()).toContain(
-      "No server of yours answers to web.pr1.lux.example.com: it was deleted, or belongs to another tenant.",
-    );
+    expect(p.text()).toContain(REFUSED);
     expect(p.tickets()).toEqual([]);
     expect(p.replaced).toEqual([]);
   } finally {
@@ -80,6 +90,7 @@ test("a hostname with no server of this session's is refused, and no ticket is m
 test("a found server gets a ticket, and the browser goes to /.lux/auth on the preview host", async () => {
   const p = await render([{ id: "srv_abc" }]);
   try {
+    await until(() => p.replaced.length === 1, "the redirect");
     expect(p.tickets()).toEqual(["/v1/servers/srv_abc/tickets"]);
     const want = previewAuthUrl({ url: new URL(TO), hostname: "web.pr1.lux.example.com" }, "tkt_1");
     expect(want).toBe("https://web.pr1.lux.example.com/.lux/auth?ticket=tkt_1&to=%2Fgoals%3Ftab%3Da");
