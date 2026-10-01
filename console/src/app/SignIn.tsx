@@ -27,11 +27,7 @@ export interface SignInProps {
   access?: boolean;
 }
 
-/**
- * Asks for an API key. Shown when there is none, or after a 401. A key is
- * kept only once whoami accepts it, then the page reloads: a new document
- * drops whatever a password manager attached to the form.
- */
+/** Asks for an API key. Shown when there is none, or after a 401. */
 export function SignIn({ reason, next, access }: SignInProps) {
   const [key, setKey] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +43,7 @@ export function SignIn({ reason, next, access }: SignInProps) {
     try {
       await api.whoamiAs(k);
       if (!storeKey(k)) throw new Error("This browser would not keep the key for this tab.");
+      // A new document drops password-manager UI attached to the form.
       window.location.reload();
     } catch (err) {
       setError(isApiError(err) && (err.status === 401 || err.status === 403) ? "That key was not accepted. It may be mistyped, or revoked." : `Could not check that key: ${errorText(err)}. Try again.`);
@@ -55,7 +52,7 @@ export function SignIn({ reason, next, access }: SignInProps) {
     }
   };
   return (
-    <AuthScreen as="form" onSubmit={(e) => void submit(e)}>
+    <AuthScreen as="form" onSubmit={submit}>
       <p className="secondary">Sign in with an API key. Operator keys see every tenant; tenant keys see their own.</p>
       {next && (
         <div className="signin-next">
