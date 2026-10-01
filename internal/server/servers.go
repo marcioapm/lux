@@ -194,6 +194,9 @@ func (v serverRow) derive(now time.Time) string {
 		return SrvWaking
 	case v.RunID != nil && (slices.Contains(startingRunStates, v.RunState) || v.Moving):
 		return SrvWaking
+	case running && v.State == ServerStopped && v.Command == nil:
+		// Port only: nothing to start; lux watches the port while the Run runs.
+		return SrvWaking
 	case running:
 		return SrvStopped
 	case v.Wake == WakeRequest && v.WakeRequestedAt != nil && v.wakeOpen(now):
