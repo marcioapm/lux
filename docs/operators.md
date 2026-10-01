@@ -222,7 +222,7 @@ aud = ""                         # LUX_PREVIEW_CF_ACCESS_AUD (team: console.clou
 
 **Preview URLs changed once.** Before servers were their own resources, a
 server's URL was `<name>-<run suffix>.<domain>`, and changed whenever its
-Run did. Since migration 047 it is the server's own, stable for its life;
+Run did. Since migration 049 it is the server's own, stable for its life;
 an existing server's URL changed once, to `<name>-<8 of its id>.<domain>`,
 and the old one answers "This preview is gone". Preview cookies and
 tickets are per server: a browser signs in once per server.

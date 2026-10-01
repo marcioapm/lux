@@ -80,6 +80,9 @@ type placement struct {
 	// syncRetryFailed: those its whole-history retry could not bundle.
 	sync            *proto.SyncArgs
 	syncRetryFailed []proto.SyncResult
+	// memoryLimit: the container's memory limit, once this placement
+	// started it (0 when re-adopted).
+	memoryLimit int64
 }
 
 func newPlacement(r *Runner, a proto.Assign) *placement {
@@ -94,6 +97,13 @@ func containerName(runID string) string    { return "lux-" + runID }
 func volumeName(runID, name string) string { return "lux-" + runID + "-" + name }
 func runtimeVolume(runID string) string    { return "lux-" + runID + "--rt" }
 func networkName(runID string) string      { return "lux-" + runID }
+
+func (p *placement) runningStatus() proto.Status {
+	p.mu.Lock()
+	limit := p.memoryLimit
+	p.mu.Unlock()
+	return proto.Status{State: "running", Times: p.times(), MemoryLimit: limit}
+}
 
 // liveState is the state reported in heartbeats; "" when not live.
 func (p *placement) liveState() string {
@@ -344,6 +354,9 @@ func (p *placement) run(ctx context.Context) {
 	p.mark("containerStarted")
 	p.state.Phase = "started"
 	_ = writeRunState(p.dir, p.state)
+	p.mu.Lock()
+	p.memoryLimit = p.r.mem.limit(int64(sp.Resources.Memory))
+	p.mu.Unlock()
 	if st, err := p.r.pm.Inspect(ctx, containerName(p.runID)); err == nil {
 		p.mu.Lock()
 		p.cgroup = st.CgroupPath
@@ -355,7 +368,7 @@ func (p *placement) run(ctx context.Context) {
 		_ = p.r.pm.Kill(ctx, containerName(p.runID), "KILL")
 	} else {
 		p.setPhase("running")
-		go p.report(ctx, proto.MsgStatus, proto.Status{State: "running", Times: p.times()})
+		go p.report(ctx, proto.MsgStatus, p.runningStatus())
 	}
 	// A stop that arrived while starting.
 	if why := p.pendingStop(); why != "" {
@@ -724,6 +737,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image,
 // label; the image is last.
 func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Network) []string {
 	args := hardening(sp)
+	memory := fmt.Sprintf("%d", p.r.mem.limit(int64(sp.Resources.Memory)))
 	args = append(args,
 		"--name", containerName(p.runID),
 		"--label", LabelManaged+"=true",
@@ -738,8 +752,8 @@ func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Net
 		// Service sockets: in memory, never in the image or a snapshot.
 		"--tmpfs", proto.ShimServicesDir+":rw,size=1m,mode=0755,nosuid,nodev,noexec",
 		"--cpus", fmt.Sprintf("%g", sp.Resources.CPUs),
-		"--memory", fmt.Sprintf("%d", int64(sp.Resources.Memory)),
-		"--memory-swap", fmt.Sprintf("%d", int64(sp.Resources.Memory)),
+		"--memory", memory,
+		"--memory-swap", memory,
 		"--pids-limit", fmt.Sprintf("%d", sp.Resources.Pids),
 	)
 	if sp.Sandbox.ReadOnlyRoot {
@@ -1037,7 +1051,7 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 		case proto.EvWorkload:
 			if d.Phase == "start" {
 				p.mark("workloadStarted")
-				go p.report(ctx, proto.MsgStatus, proto.Status{State: "running", Times: p.times()})
+				go p.report(ctx, proto.MsgStatus, p.runningStatus())
 			}
 		}
 		if ae != nil {
