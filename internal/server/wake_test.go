@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/ids"
@@ -589,5 +590,63 @@ func TestSyncRequests(t *testing.T) {
 	systemScan(t, s, `SELECT pending_sync FROM runs WHERE id = $1`, []any{r1}, &pending)
 	if len(pending) != 1 || pending[0].Ref != "abc123" {
 		t.Fatalf("pending sync: %+v", pending)
+	}
+}
+
+// Activity is requests, not open connections: a WebSocket (a dev
+// server's hot reload) kept open and busy past idleAfter leaves the
+// server idle.
+func TestWebSocketIsNotActivity(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	s.cfg.Preview.ActivityEvery = 100 * time.Millisecond
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "wake": "request",
+		"idleAfter": "1s", "runId": r1, "hostname": "hmr.lux.example.com"})
+	execSQL(t, s, ctx, `UPDATE run_servers SET state = 'ready', ready_since = now() - interval '1 minute' WHERE id = $1`, sv.ID)
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		for {
+			typ, b, err := c.Read(r.Context())
+			if err != nil {
+				return
+			}
+			if err := c.Write(r.Context(), typ, b); err != nil {
+				return
+			}
+		}
+	}))
+	defer app.Close()
+	fakeRunner(t, s, strings.TrimPrefix(app.URL, "http://"))
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Host = "hmr.lux.example.com"
+		s.preview.ServeHTTP(w, r)
+	}))
+	defer front.Close()
+	wctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(wctx, "ws"+strings.TrimPrefix(front.URL, "http")+"/hmr", &websocket.DialOptions{
+		HTTPHeader: http.Header{"Cookie": {previewCookie + "=" + cookieFor(s, sv.ID)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	// Busy for 2.5s (past idleAfter) on the one connection.
+	for end := time.Now().Add(2500 * time.Millisecond); time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+		if err := c.Write(wctx, websocket.MessageText, []byte("ping")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := c.Read(wctx); err != nil {
+			t.Fatal(err)
+		}
+		s.preview.flush(ctx, true)
+	}
+	if err := s.checkIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(serverEventsOf(t, s, ctx, sv.ID, "server.idle")); n != 1 {
+		t.Fatalf("idle events with a busy WebSocket open: %d", n)
 	}
 }
