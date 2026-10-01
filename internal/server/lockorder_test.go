@@ -210,6 +210,41 @@ func TestIdleAndWakeLockTheRunFirst(t *testing.T) {
 	}
 }
 
+// An idle pass waiting for the Run's lock acts on the server as it is once
+// it has the lock: one requested meanwhile is no longer due and is not
+// reported idle.
+func TestIdleRechecksUnderLock(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "command": []string{"serve"}, "runId": r1,
+		"wake": "request", "idleAfter": "1m"})
+	execSQL(t, s, ctx, `UPDATE run_servers SET state = 'ready', ready_since = now() - interval '5 minutes', last_request_at = now() - interval '2 minutes' WHERE id = $1`, sv.ID)
+	locked, release := make(chan struct{}), make(chan struct{})
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+	})
+	report := make(chan error, 1)
+	go func() { report <- runThenServers(t, s, ctx, r1, locked, release) }()
+	<-locked
+	idle := make(chan error, 1)
+	go func() { idle <- s.checkIdle(context.Background()) }()
+	waitBlocked(t, s)
+	execSQL(t, s, ctx, `UPDATE run_servers SET last_request_at = now() WHERE id = $1`, sv.ID)
+	close(release)
+	released = true
+	if err := <-report; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-idle; err != nil {
+		t.Fatal(err)
+	}
+	if n := len(serverEventsOf(t, s, ctx, sv.ID, "server.idle")); n != 0 {
+		t.Fatalf("requested meanwhile, yet idle: %d", n)
+	}
+}
+
 // hold is holdTx, released (if it is not yet) when the test ends, so a
 // failure leaves no transaction waiting.
 func hold(t *testing.T, ctx context.Context, s *Server, write func(pgx.Tx) error) *heldTx {
