@@ -1051,3 +1051,24 @@ func TestRunAPIDoesNotRemoveOwnerServers(t *testing.T) {
 		t.Fatalf("the Run's server after removal: %d", w.Code)
 	}
 }
+
+// A port-only server (no command) of a running Run whose port is not open
+// yet is waking, not stopped: there is nothing to start, and lux watches
+// the port. Stopped by request, it is stopped.
+func TestPortOnlyServerWaitsForItsPort(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "wake": "request", "runId": r1,
+		"hostname": "web.port.lux.example.com"})
+	execSQL(t, s, ctx, `UPDATE run_servers SET state = 'stopped', stop_reason = NULL WHERE id = $1`, sv.ID)
+	if got := getSrv(t, s, key, sv.ID); got.State != SrvWaking {
+		t.Fatalf("port only, not open yet: %s", got.State)
+	}
+	w := previewGet(s, "web.port.lux.example.com", "/", cookieFor(s, sv.ID))
+	if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), pageStopped.Title) {
+		t.Fatalf("its page: %d %s", w.Code, w.Body)
+	}
+	execSQL(t, s, ctx, `UPDATE run_servers SET stop_reason = 'stopped' WHERE id = $1`, sv.ID)
+	if got := getSrv(t, s, key, sv.ID); got.State != SrvStopped {
+		t.Fatalf("port only, stopped by request: %s", got.State)
+	}
+}

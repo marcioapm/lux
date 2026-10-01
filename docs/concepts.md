@@ -192,7 +192,7 @@ lux server start|stop|restart|rm srv_…  (or <run> <name>)
   stopped`): later placements leave it stopped until it is started again.
   Otherwise `up`.
 - **Without a command**, only the port is exposed, and lux watches it
-  whenever the Run runs: once it accepts connections the server is
+  whenever the Run runs: `waking` until it accepts connections, then
   `ready`, whatever it was. There is nothing to start (409 `no_command`);
   stopping one stops the watching until the Run's next placement.
 - **`stopReason`** says why one is `stopped`: `stopped` (asked for),
