@@ -188,27 +188,28 @@ func TestSyncBundleIsIncremental(t *testing.T) {
 		head = pushCommit(t, bare, "n.txt", strings.Repeat("x", i+1)+"\n")
 	}
 	bundleDir := t.TempDir()
-	full, err := m.SyncBundle(ctx, r, "", filepath.Join(bundleDir, "full.bundle"))
+	fullBundle, incBundle := filepath.Join(bundleDir, "full.bundle"), filepath.Join(bundleDir, "inc.bundle")
+	full, err := m.SyncBundle(ctx, r, "", fullBundle)
 	if err != nil || full.Base != "" {
 		t.Fatalf("full: %+v %v", full, err)
 	}
-	inc, err := m.SyncBundle(ctx, r, base, filepath.Join(bundleDir, "inc.bundle"))
+	inc, err := m.SyncBundle(ctx, r, base, incBundle)
 	if err != nil || inc.Base != base || inc.Commit != head {
 		t.Fatalf("incremental: %+v %v", inc, err)
 	}
-	fullSize, incSize := dirSize(t, full.Bundle), dirSize(t, inc.Bundle)
+	fullSize, incSize := dirSize(t, fullBundle), dirSize(t, incBundle)
 	t.Logf("bundle bytes: full %d, incremental %d", fullSize, incSize)
 	if fullSize < 2<<20 || incSize > 64<<10 {
 		t.Fatalf("bundle sizes: full %d, incremental %d", fullSize, incSize)
 	}
-	if got := gitRun(t, bundleDir, "bundle", "list-heads", inc.Bundle); got != head+" refs/lux/sync" {
+	if got := gitRun(t, bundleDir, "bundle", "list-heads", incBundle); got != head+" refs/lux/sync" {
 		t.Fatalf("heads: %q", got)
 	}
 	// verify, in a repository without the base, names it as missing: the
 	// bundle's one prerequisite.
 	empty := filepath.Join(t.TempDir(), "e")
 	gitRun(t, filepath.Dir(empty), "init", "-q", empty)
-	cmd := exec.Command("git", "bundle", "verify", inc.Bundle)
+	cmd := exec.Command("git", "bundle", "verify", incBundle)
 	cmd.Dir = empty
 	out, _ := cmd.CombinedOutput()
 	if !strings.Contains(string(out), "lacks these prerequisite commits") || !strings.Contains(string(out), base) {
@@ -217,7 +218,7 @@ func TestSyncBundleIsIncremental(t *testing.T) {
 
 	before := dirSize(t, filepath.Join(dir, ".git"))
 	got := shim.SyncRepos(ctx, proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: dir, Ref: "main", Commit: inc.Commit,
-		Branch: inc.Branch, Bundle: inc.Bundle, Base: inc.Base}}})
+		Branch: inc.Branch, Bundle: incBundle, Base: inc.Base}}})
 	if got[0].Status != "fast-forward" || got[0].To != head {
 		t.Fatalf("incremental sync: %+v", got[0])
 	}
@@ -228,19 +229,21 @@ func TestSyncBundleIsIncremental(t *testing.T) {
 	}
 
 	// Already at the commit: a bundle of the commit alone, still valid.
-	same, err := m.SyncBundle(ctx, r, head, filepath.Join(bundleDir, "same.bundle"))
+	sameBundle := filepath.Join(bundleDir, "same.bundle")
+	same, err := m.SyncBundle(ctx, r, head, sameBundle)
 	if err != nil || same.Base != head {
 		t.Fatalf("same: %+v %v", same, err)
 	}
 	got = shim.SyncRepos(ctx, proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: dir, Ref: "main", Commit: same.Commit,
-		Branch: same.Branch, Bundle: same.Bundle, Base: same.Base}}})
+		Branch: same.Branch, Bundle: sameBundle, Base: same.Base}}})
 	if got[0].Status != "up-to-date" {
 		t.Fatalf("same commit: %+v", got[0])
 	}
 
 	// A base the mirror does not have: the whole history.
-	unknown, err := m.SyncBundle(ctx, r, strings.Repeat("ab", 20), filepath.Join(bundleDir, "unknown.bundle"))
-	if err != nil || unknown.Base != "" || dirSize(t, unknown.Bundle) < 2<<20 {
+	unknownBundle := filepath.Join(bundleDir, "unknown.bundle")
+	unknown, err := m.SyncBundle(ctx, r, strings.Repeat("ab", 20), unknownBundle)
+	if err != nil || unknown.Base != "" || dirSize(t, unknownBundle) < 2<<20 {
 		t.Fatalf("unknown base: %+v %v", unknown, err)
 	}
 
@@ -254,7 +257,7 @@ func TestSyncBundleIsIncremental(t *testing.T) {
 	gitRun(t, other, "gc", "-q", "--prune=now")
 	old := gitRun(t, other, "rev-parse", "HEAD")
 	got = shim.SyncRepos(ctx, proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: other, Ref: "main", Commit: inc.Commit,
-		Branch: inc.Branch, Bundle: inc.Bundle, Base: inc.Base}}})
+		Branch: inc.Branch, Bundle: incBundle, Base: inc.Base}}})
 	if got[0].Status != "failed" || !got[0].MissingBase || gitRun(t, other, "rev-parse", "HEAD") != old {
 		t.Fatalf("missing base: %+v", got[0])
 	}
@@ -262,7 +265,7 @@ func TestSyncBundleIsIncremental(t *testing.T) {
 		t.Fatalf("MissingBase: %v", names)
 	}
 	retry := shim.SyncRepos(ctx, proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: other, Ref: "main", Commit: full.Commit,
-		Branch: full.Branch, Bundle: full.Bundle}}})
+		Branch: full.Branch, Bundle: fullBundle}}})
 	merged := proto.MergeSyncRetry(got, retry)
 	if len(merged) != 1 || merged[0].Status != "fast-forward" || !merged[0].FullBundle || merged[0].To != head ||
 		gitRun(t, other, "rev-parse", "HEAD") != head {

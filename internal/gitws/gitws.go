@@ -265,23 +265,14 @@ func (m *Manager) Push(ctx context.Context, r Repo, bundle, branch, lease string
 		res.Error = err.Error()
 		return res
 	}
-	// A private scratch repository sharing the mirror's objects: the
-	// bundle's commits land here, never in the shared mirror.
-	work, err := os.MkdirTemp(m.mirrors, "push-")
+	// The bundle's commits land in a scratch repository, never in the
+	// shared mirror.
+	work, err := m.scratch(ctx, mirror, "push-")
 	if err != nil {
 		res.Error = err.Error()
 		return res
 	}
 	defer os.RemoveAll(work)
-	if _, err := git(ctx, work, "", "init", "--quiet", "--bare"); err != nil {
-		res.Error = err.Error()
-		return res
-	}
-	alt := filepath.Join(work, "objects", "info", "alternates")
-	if err := os.WriteFile(alt, []byte(filepath.Join(mirror, "objects")+"\n"), 0o600); err != nil {
-		res.Error = err.Error()
-		return res
-	}
 	if _, err := git(ctx, work, "", "fetch", "--quiet", bundle, "+HEAD:refs/lux/push"); err != nil {
 		res.Error = "the workload's commit could not be read: " + err.Error()
 		return res
@@ -324,6 +315,25 @@ func pushUpToDate(out string) bool {
 	return false
 }
 
+// scratch makes a private bare repository under the mirrors, sharing
+// mirror's objects (alternates); the caller removes it.
+func (m *Manager) scratch(ctx context.Context, mirror, prefix string) (string, error) {
+	work, err := os.MkdirTemp(m.mirrors, prefix)
+	if err != nil {
+		return "", err
+	}
+	if _, err := git(ctx, work, "", "init", "--quiet", "--bare"); err != nil {
+		os.RemoveAll(work)
+		return "", err
+	}
+	alt := filepath.Join(work, "objects", "info", "alternates")
+	if err := os.WriteFile(alt, []byte(filepath.Join(mirror, "objects")+"\n"), 0o600); err != nil {
+		os.RemoveAll(work)
+		return "", err
+	}
+	return work, nil
+}
+
 // Scrub removes anything credential-like a URL might carry, for display.
 func Scrub(u string) string {
 	p, err := url.Parse(u)
@@ -335,14 +345,13 @@ func Scrub(u string) string {
 }
 
 // Target is a commit a sync moves a checkout to, in a bundle the
-// workload's user can read.
+// workload's user can read: Commit as refs/lux/sync, with its history
+// down to Base.
 type Target struct {
 	Commit string
 	// Branch: the ref is this branch (checked out as it); "" for a tag or
 	// sha (checked out detached).
 	Branch string
-	// Bundle holds Commit as refs/lux/sync, with its history down to Base.
-	Bundle string
 	// Base: the commit the bundle's history stops at (its prerequisite,
 	// which the checkout must have); "" for a bundle of the whole history.
 	Base string
@@ -373,24 +382,17 @@ func (m *Manager) SyncBundle(ctx context.Context, r Repo, base, bundle string) (
 	if t.Commit, err = git(ctx, mirror, "", "rev-parse", "--verify", "-q", r.Ref+"^{commit}"); err != nil {
 		return t, fmt.Errorf("ref %q not found in %s", r.Ref, Scrub(r.URL))
 	}
-	// A scratch repository sharing the mirror's objects, so the shared
-	// mirror gets no ref of a Run's.
-	work, err := os.MkdirTemp(m.mirrors, "sync-")
+	// A scratch repository, so the shared mirror gets no ref of a Run's.
+	work, err := m.scratch(ctx, mirror, "sync-")
 	if err != nil {
 		return t, err
 	}
 	defer os.RemoveAll(work)
-	if _, err := git(ctx, work, "", "init", "--quiet", "--bare"); err != nil {
-		return t, err
-	}
-	if err := os.WriteFile(filepath.Join(work, "objects", "info", "alternates"), []byte(filepath.Join(mirror, "objects")+"\n"), 0o600); err != nil {
-		return t, err
-	}
 	if _, err := git(ctx, work, "", "update-ref", "refs/lux/sync", t.Commit); err != nil {
 		return t, err
 	}
 	create := []string{"bundle", "create", "--quiet", bundle, "refs/lux/sync"}
-	if exclude := m.syncPrerequisites(ctx, work, base, t.Commit); len(exclude) > 0 {
+	if exclude := syncPrerequisites(ctx, work, base, t.Commit); len(exclude) > 0 {
 		t.Base = base
 		for _, c := range exclude {
 			create = append(create, "^"+c)
@@ -399,7 +401,6 @@ func (m *Manager) SyncBundle(ctx context.Context, r Repo, base, bundle string) (
 	if _, err := git(ctx, work, "", create...); err != nil {
 		return t, err
 	}
-	t.Bundle = bundle
 	return t, os.Chmod(bundle, 0o644)
 }
 
@@ -408,7 +409,7 @@ func (m *Manager) SyncBundle(ctx context.Context, r Repo, base, bundle string) (
 // history (an empty bundle git refuses to write), commit's parents. nil
 // means the whole history: no base, base not in the mirror, or a root
 // commit.
-func (m *Manager) syncPrerequisites(ctx context.Context, work, base, commit string) []string {
+func syncPrerequisites(ctx context.Context, work, base, commit string) []string {
 	if !shaRe.MatchString(base) {
 		return nil
 	}
