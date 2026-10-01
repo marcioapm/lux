@@ -7443,7 +7443,7 @@ paths:
   /v1/servers/{id}:
     delete:
       description: |-
-        Detaches it first (its command stops; its Run is untouched). Its hostname is gone from then on.
+        Detaches it first (its command stops; its Run is untouched). Its hostname is gone from then on. 409 conflict when the server was attached or detached twice while this ran: retry.
 
         Needs the `run` scope.
       operationId: deleteServer
@@ -7476,6 +7476,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
           description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
         "422":
           content:
             application/json:
@@ -7548,7 +7554,7 @@ paths:
         - servers
     patch:
       description: |-
-        What is given. Command, port, workdir, env and afterSync apply at its next start.
+        What is given. Command, port, workdir, env and afterSync apply at its next start. 409 conflict when the server was attached or detached twice while this ran: retry.
 
         Needs the `run` scope.
       operationId: patchServer
@@ -7686,7 +7692,7 @@ paths:
   /v1/servers/{id}/detach:
     post:
       description: |-
-        Its command stops; the Run is untouched. 409 lifetime_run for a server that ends with its Run.
+        Its command stops; the Run is untouched. 409 lifetime_run for a server that ends with its Run. 409 conflict when the server was attached or detached twice while this ran: retry.
 
         Needs the `run` scope.
       operationId: detachServer
@@ -7872,7 +7878,7 @@ paths:
   /v1/servers/{id}/restart:
     post:
       description: |-
-        As it is defined now. Not running: as start.
+        As it is defined now. Not running: as start. 409 conflict when the server was attached or detached twice while this ran: retry.
 
         Needs the `run` scope.
       operationId: restartTenantServer
@@ -7935,7 +7941,7 @@ paths:
   /v1/servers/{id}/start:
     post:
       description: |-
-        Up: started now if its Run runs, else at its next placement. 409 not_attached, no_command.
+        Up: started now if its Run runs, else at its next placement. 409 not_attached, no_command. 409 conflict when the server was attached or detached twice while this ran: retry.
 
         Needs the `run` scope.
       operationId: startTenantServer
@@ -7998,7 +8004,7 @@ paths:
   /v1/servers/{id}/stop:
     post:
       description: |-
-        Down: its command stops, and new placements leave it stopped until it is started again.
+        Down: its command stops, and new placements leave it stopped until it is started again. 409 conflict when the server was attached or detached twice while this ran: retry.
 
         Needs the `run` scope.
       operationId: stopTenantServer
