@@ -60,8 +60,8 @@ type Shim struct {
 	// inputMeta: each input's attachments, for its records, until its
 	// last record is written.
 	inputMeta map[string][]spec.AttachmentMeta
-	stopping    bool
-	stopWhy     string
+	stopping  bool
+	stopWhy   string
 	// hookPgid is a running beforeStop's process group; hookBy is its
 	// deadline, set before the hook starts and only moved earlier by a
 	// shorter stop. hookDone closes when it has ended.

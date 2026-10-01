@@ -43,7 +43,9 @@ type ACP struct {
 	// loading: session/load replays the conversation as updates; they are
 	// events, not new output.
 	loading bool
-	inputs  inputLedger
+	// images: the agent advertised promptCapabilities.image.
+	images bool
+	inputs inputLedger
 
 	// OpenCode only.
 	opencode bool
@@ -219,9 +221,15 @@ func (a *ACP) handshake(cfg proto.ShimConfig) error {
 			MCPCapabilities struct {
 				HTTP bool `json:"http"`
 			} `json:"mcpCapabilities"`
+			PromptCapabilities struct {
+				Image bool `json:"image"`
+			} `json:"promptCapabilities"`
 		} `json:"agentCapabilities"`
 	}
 	_ = json.Unmarshal(res, &init)
+	a.mu.Lock()
+	a.images = init.AgentCapabilities.PromptCapabilities.Image
+	a.mu.Unlock()
 	cwd := workdir(cfg)
 	mcp := acpMCPServers(cfg.MCP)
 	if len(mcp) > 0 && !init.AgentCapabilities.MCPCapabilities.HTTP {
@@ -250,9 +258,9 @@ func (a *ACP) handshake(cfg proto.ShimConfig) error {
 		return fmt.Errorf("session/new returned no sessionId")
 	}
 	a.setSession(ns.SessionID)
-	if !cfg.Resume && cfg.Prompt != "" {
+	if !cfg.Resume && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
 		a.mu.Lock()
-		a.queue = append([]proto.Input{{RequestID: "prompt", Text: cfg.Prompt}}, a.queue...)
+		a.queue = append([]proto.Input{{RequestID: "prompt", Text: cfg.Prompt, Attachments: cfg.PromptAttachments}}, a.queue...)
 		a.mu.Unlock()
 	}
 	return nil
@@ -300,12 +308,19 @@ func (a *ACP) drain() {
 	}
 	in := a.queue[0]
 	a.queue = a.queue[1:]
+	if len(in.Attachments) > 0 && !a.images {
+		// Known only since initialize: the input fails, the next is sent.
+		a.mu.Unlock()
+		a.inputs.fail(a.sink, in, errNoImages)
+		a.drain()
+		return
+	}
 	a.busy, a.inflight, a.turnEnd = true, 1, nil
 	session := a.session
 	a.mu.Unlock()
 
 	a.sink.Activity(false)
-	wait, err := a.rpc.start("session/prompt", map[string]any{"sessionId": session, "prompt": textInput(in.Text)})
+	wait, err := a.rpc.start("session/prompt", map[string]any{"sessionId": session, "prompt": inputContent(dialectACP, in)})
 	if err != nil {
 		a.inputs.fail(a.sink, in, err)
 		a.promptDone(nil, err, true)
@@ -693,7 +708,7 @@ func (a *ACP) carry(ctx context.Context, session string, in proto.Input) bool {
 	// one seen before prompt_async returns.
 	a.admittedLate[msgID] = true
 	a.mu.Unlock()
-	if err := a.bus.promptAsync(ctx, session, msgID, in.Text); err != nil {
+	if err := a.bus.promptAsync(ctx, session, msgID, in); err != nil {
 		// Refused or undialled, nothing ran: no loop of its own.
 		a.bus.untrack(msgID)
 		a.mu.Lock()
@@ -739,7 +754,7 @@ func (a *ACP) steerLoop(ctx context.Context) {
 			// Clear the slot: the backing array outlives the steer.
 			a.steers[0] = proto.Input{}
 			a.steers = a.steers[1:]
-			a.steerBytes -= len(in.Text)
+			a.steerBytes -= inputSize(in)
 			if len(a.steers) == 0 {
 				a.steers = nil
 			}
@@ -801,7 +816,7 @@ func (a *ACP) steerHTTP(ctx context.Context, session string, in proto.Input) {
 	a.reserved++
 	a.bus.track(msgID, in.RequestID, a.cancelGen)
 	a.mu.Unlock()
-	err := a.bus.promptAsync(ctx, session, msgID, in.Text)
+	err := a.bus.promptAsync(ctx, session, msgID, in)
 	if err == nil {
 		// Already answered (untracked): the ACP turn's own loop read it.
 		tracked, _ := a.bus.messageOf(in.RequestID)
@@ -848,9 +863,14 @@ func (a *ACP) steerACP(session string, in proto.Input) {
 		a.queueInput(in)
 		return
 	}
+	if len(in.Attachments) > 0 && !a.images {
+		a.mu.Unlock()
+		a.inputs.fail(a.sink, in, errNoImages)
+		return
+	}
 	a.inflight++
 	a.mu.Unlock()
-	wait, err := a.rpc.start("session/prompt", map[string]any{"sessionId": session, "prompt": textInput(in.Text)})
+	wait, err := a.rpc.start("session/prompt", map[string]any{"sessionId": session, "prompt": inputContent(dialectACP, in)})
 	if err != nil {
 		a.inputs.fail(a.sink, in, err)
 		a.promptDone(nil, err, false)
@@ -965,14 +985,14 @@ func (a *ACP) Deliver(in proto.Input) {
 		// Put it first, then cancel the running turn; drain sends it when
 		// the cancelled prompt returns. An interrupt alone sends nothing:
 		// steers the turn left unread start the next one (settle).
-		if in.Text != "" {
+		if in.HasContent() {
 			a.queue = append([]proto.Input{in}, a.queue...)
 		}
 		session := a.session
 		a.cancelGen++
 		a.mu.Unlock()
 		err := a.rpc.notify("session/cancel", map[string]any{"sessionId": session})
-		if in.Text == "" {
+		if !in.HasContent() {
 			if err != nil {
 				a.inputs.fail(a.sink, in, err)
 			} else {
@@ -981,14 +1001,14 @@ func (a *ACP) Deliver(in proto.Input) {
 		}
 		return
 	}
-	if a.opencode && a.busy && !a.busTurn && !a.stopped && !a.closed && !in.Interrupt && in.Text != "" {
-		if len(a.steers) >= maxPendingSteers || a.steerBytes+len(in.Text) > maxPendingSteerBytes {
+	if a.opencode && a.busy && !a.busTurn && !a.stopped && !a.closed && !in.Interrupt && in.HasContent() {
+		if len(a.steers) >= maxPendingSteers || a.steerBytes+inputSize(in) > maxPendingSteerBytes {
 			a.mu.Unlock()
 			a.inputs.fail(a.sink, in, errors.New(errPendingSteersLimit))
 			return
 		}
 		a.steers = append(a.steers, in)
-		a.steerBytes += len(in.Text)
+		a.steerBytes += inputSize(in)
 		a.mu.Unlock()
 		select {
 		case a.steerKick <- struct{}{}:
