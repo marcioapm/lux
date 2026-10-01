@@ -1,6 +1,6 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, HostSummary, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, TenantServer, TenantServerList, CreateServerInput, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
+import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, HostSummary, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, TenantServer, TenantServerList, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
@@ -45,8 +45,6 @@ export const api = {
   servers: (tenant: Scope, params: { state?: string; label?: string[]; wake?: string; run?: string; hostname?: string } = {}, signal?: Sig) =>
     request<TenantServerList>(`/servers`, { tenant, query: params, signal }),
   server: (id: string, signal?: Sig) => request<TenantServer>(`/servers/${enc(id)}`, { signal }),
-  createServer: (body: CreateServerInput) => request<TenantServer>(`/servers`, { method: "POST", body }),
-  patchServer: (id: string, body: Partial<CreateServerInput>) => request<TenantServer>(`/servers/${enc(id)}`, { method: "PATCH", body }),
   deleteServer: (id: string) => request<void>(`/servers/${enc(id)}`, { method: "DELETE" }),
   attachServer: (id: string, runId: string) => request<TenantServer>(`/servers/${enc(id)}/attach`, { method: "POST", body: { runId } }),
   detachServer: (id: string) => request<TenantServer>(`/servers/${enc(id)}/detach`, { method: "POST" }),
