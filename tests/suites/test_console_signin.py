@@ -1,8 +1,6 @@
-"""Signing in to the console with a typed API key. The key is checked first,
-and a good one opens the console in a new document: whatever a password
-manager attached to the form (Bitwarden's inline menu) goes with the old
-one. Its own page, without test_console.py's key-on-every-document script,
-since that script is what a manual sign-in replaces."""
+"""Typed keys are checked before storage; acceptance opens a new document
+to drop password-manager UI. Uses a separate page without test_console.py's
+key-on-every-document script, so tests exercise manual sign-in."""
 
 from __future__ import annotations
 
