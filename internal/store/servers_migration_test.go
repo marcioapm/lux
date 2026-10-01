@@ -60,8 +60,8 @@ func TestWakeableServersMigration(t *testing.T) {
 	if many != 20000 || failed != 1 || finished != 0 {
 		t.Fatalf("kept: %d of the many, %d of the failed Run, %d of the finished ones", many, failed, finished)
 	}
-	// The hosts come from (run_id, name), not from chance: the same on a
-	// second migration of the same rows.
+	// The hosts come from (run_id, name), not from chance: run_m7's is
+	// web- and the first 8 hex digits of md5('run_m7/web').
 	var want string
 	if err := conn.QueryRow(ctx, `SELECT 'web-' || substr(md5('run_m7/web'), 1, 8)`).Scan(&want); err != nil {
 		t.Fatal(err)
