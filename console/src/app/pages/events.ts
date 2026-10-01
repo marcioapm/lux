@@ -65,6 +65,30 @@ export function eventSummary(e: Event): string {
       const added = Array.isArray(d.addedRepositories) && d.addedRepositories.length > 0 ? ` · adding ${d.addedRepositories.join(", ")}` : "";
       return `by ${str(d.by) ?? "?"}${added}`;
     }
+    case "server.wake_requested":
+      return `${str(d.name) ?? "server"}: wake asked of its owner by ${str(d.by) ?? "?"} at ${str(d.path) ?? "/"}`;
+    case "server.idle":
+      return `${str(d.name) ?? "server"}: idle, no request for ${str(d.idleAfter) ?? "?"}`;
+    case "server.state": {
+      const code = typeof d.exitCode === "number" ? ` (exit ${d.exitCode}${str(d.error) ? `: ${str(d.error)}` : ""})` : "";
+      return `${str(d.name) ?? "server"} ${str(d.state) ?? "?"}${str(d.stopReason) ? ` · ${str(d.stopReason)}` : ""}${code}`;
+    }
+    case "server.created":
+    case "server.added":
+    case "server.updated":
+      return `${str(d.name) ?? "server"} by ${str(d.by) ?? "?"}`;
+    case "server.attached":
+      return `${str(d.name) ?? "server"} attached to ${str(d.runId) ?? "?"}`;
+    case "server.detached":
+      return `${str(d.name) ?? "server"} detached from ${str(d.from) ?? "?"} (${str(d.reason) ?? "?"})`;
+    case "server.deleted":
+    case "server.removed":
+    case "server.expired":
+      return `${str(d.name) ?? "server"} ${e.type.slice(7)}${str(d.reason) ? ` (${str(d.reason)})` : ""}`;
+    case "git.sync":
+      return d.status === "failed"
+        ? `${str(d.repo) ?? "?"} not synced to ${str(d.ref) ?? "?"}: ${str(d.error) ?? "?"}`
+        : `${str(d.repo) ?? "?"} ${str(d.status) ?? "?"} ${(str(d.from) ?? "").slice(0, 7)} → ${(str(d.to) ?? "").slice(0, 7)}${d.dirty === true ? " (tracked changes saved as refs/lux/pre-sync)" : ""}`;
     case "git.clone":
       return d.status === "failed"
         ? `${str(d.repo) ?? "?"} not cloned: ${str(d.error) ?? "?"}`
