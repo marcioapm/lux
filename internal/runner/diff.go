@@ -80,7 +80,8 @@ func (r *Runner) diff(ctx context.Context, runID string, epoch int, base string)
 }
 
 // setGitBase records the commit a repository was cloned or synced to, the
-// base of its live diffs and of its next sync's bundle, in the run state a restarted runner reads.
+// base of its live diffs and of its next sync's bundle, in the run state a
+// restarted runner reads.
 func (p *placement) setGitBase(repo, commit string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
