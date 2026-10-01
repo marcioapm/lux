@@ -73,7 +73,9 @@ CREATE INDEX run_servers_ready ON run_servers (run_id) WHERE state = 'ready';
 -- server, run_id its attached Run (NULL while it has none).
 ALTER TABLE run_events ALTER COLUMN run_id DROP NOT NULL;
 ALTER TABLE run_events ADD COLUMN server_id text;
-ALTER TABLE run_events ADD CONSTRAINT run_events_subject CHECK (run_id IS NOT NULL OR server_id IS NOT NULL);
+-- NOT VALID: every row from before has a run_id, and validating would scan
+-- run_events under an ACCESS EXCLUSIVE lock; new rows are checked.
+ALTER TABLE run_events ADD CONSTRAINT run_events_subject CHECK (run_id IS NOT NULL OR server_id IS NOT NULL) NOT VALID;
 CREATE INDEX run_events_server ON run_events (server_id, id) WHERE server_id IS NOT NULL;
 -- The waking page's per-poll check of the current placement's sync: only
 -- sync events are in it.
