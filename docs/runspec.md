@@ -74,6 +74,7 @@ timeout: 4h                     # running time, over all placements; unset: no l
 
 placement:
   pool: default                 # omitted: the tenant's default pool (see Rules)
+  # poolId: pool_…              # or the pool by id, which a rename keeps; not with pool
   requires: { arch: amd64 }     # host labels that must match
   prefers: { region: eu-west-1 }
 
@@ -142,6 +143,13 @@ artifacts:
   `platform`, absent when no pool has the name). A named pool, `default`
   included, is used as it is: the tenant's pool of that name if it has
   one, else the platform's.
+- `placement.poolId` names the pool by its id (`pool_…`, the `id` of
+  `GET /v1/pools`), which a rename does not change: the tenant's pool with
+  that id, else the platform's. luxd writes that pool's current name into
+  `placement.pool` of the stored spec (`poolFrom` `spec`). An id that no
+  such pool has (none, another tenant's, a removed pool) is refused at
+  submit with 422 `unknown_pool`; the Run is not created. A spec that sets
+  both `pool` and `poolId` is refused with 422 `invalid_spec`.
 
 ## Images
 

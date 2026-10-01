@@ -608,6 +608,11 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			}
 		}
 	}
+	if sp.Placement.Pool != "" && sp.Placement.PoolID != "" {
+		// Checked here, not in Normalize: the stored spec carries both.
+		return nil, invalidSpec(&spec.ValidationError{Problems: []string{
+			"placement: name the pool by pool or poolId, not both"}})
+	}
 	if err := sp.Normalize(s.cfg.Defaults); err != nil {
 		return nil, invalidSpec(err)
 	}
@@ -644,7 +649,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		// The Run is bound to its pool's id: every later placement stays
 		// in that pool whatever the default becomes or the pool is called.
 		// The spec keeps the name as resolved now.
-		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool)
+		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool, stored.Placement.PoolID)
 		if err != nil {
 			return err
 		}
@@ -2544,9 +2549,20 @@ func (rp resolvedPool) ownerLabel() string {
 // the submitting tenant's scope: the named one, else the tenant's default,
 // else the platform's, else "default". A default is that pool row; a name
 // is the tenant's pool of that name, else the platform's, as hosts and
-// provisioning have always preferred.
-func resolvePool(ctx context.Context, tx pgx.Tx, tenantID, pool string) (resolvedPool, error) {
+// provisioning have always preferred. A poolID is the tenant's active pool
+// with that id, else the platform's; none is a 422 unknown_pool, since a
+// Run bound to no pool would wait for one forever.
+func resolvePool(ctx context.Context, tx pgx.Tx, tenantID, pool, poolID string) (resolvedPool, error) {
 	rp := resolvedPool{Name: pool, From: poolFromSpec}
+	if poolID != "" {
+		err := tx.QueryRow(ctx, `SELECT name, tenant_id IS NULL FROM pools
+			WHERE id = $1 AND NOT retired AND (tenant_id = $2 OR tenant_id IS NULL)`, poolID, tenantID).Scan(&rp.Name, &rp.Platform)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return rp, errf(http.StatusUnprocessableEntity, "unknown_pool", "no pool has id %s", poolID)
+		}
+		rp.ID = &poolID
+		return rp, err
+	}
 	if pool == "" {
 		var id, name, from *string
 		if err := tx.QueryRow(ctx, `SELECT pool_id, pool, pool_from FROM lux_default_pool()`).Scan(&id, &name, &from); err != nil {
