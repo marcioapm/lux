@@ -1,4 +1,4 @@
--- 043_placement_memory_limit.sql — the memory a placement's container got.
+-- 047_placement_memory_limit.sql — the memory a placement's container got.
 --
 -- A Run's resources.memory is in its host's terms (the machine's gross
 -- memory); the runner gives the container that share of what Linux can
