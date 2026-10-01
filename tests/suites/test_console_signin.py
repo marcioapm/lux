@@ -53,11 +53,22 @@ def test_a_refused_key_stays_on_the_form(page, env, operator):
 
     # The right key: one new document, at the page it was headed for.
     _submit(page, operator.api_key)
-    expect(page.locator(".sidebar-user")).to_be_visible(timeout=15_000)
+    expect(page.locator(".sidebar-user")).to_contain_text("Operator key", timeout=15_000)
     assert page.evaluate("window.signInDocument") is None
     assert _stored_key(page) == operator.api_key
     assert page.documents == [env.luxd_url + "/runs"]
     assert page.errors == []
+
+
+def test_a_403_is_a_refusal_too(page, env):
+    _sign_in_screen(page, env.luxd_url + "/")
+    page.route("**/v1/whoami", lambda route: route.fulfill(status=403, content_type="application/json",
+                                                          body='{"error":{"code":"forbidden","message":"no"}}'))
+    _submit(page, "luxk_forbidden")
+    expect(page.get_by_role("alert")).to_contain_text("That key was not accepted")
+    assert _stored_key(page) is None
+    assert page.evaluate("window.signInDocument") == "original"
+    assert page.documents == []
 
 
 def test_a_failed_check_can_be_retried(page, env, operator):
@@ -68,9 +79,23 @@ def test_a_failed_check_can_be_retried(page, env, operator):
     assert _stored_key(page) is None
     assert page.evaluate("window.signInDocument") == "original"
     expect(page.get_by_role("button", name="Sign in")).to_be_enabled()
+    assert page.documents == []
 
+    # Again, held mid-check: the key is on the request but kept nowhere yet.
     page.unroute("**/v1/whoami")
-    page.get_by_role("button", name="Sign in").click()
-    expect(page.locator(".sidebar-user")).to_be_visible(timeout=15_000)
+    held = []
+    page.route("**/v1/whoami", lambda route: held.append(route))
+    with page.expect_request("**/v1/whoami") as checking:
+        page.get_by_role("button", name="Sign in").click()
+    assert checking.value.headers["authorization"] == f"Bearer {operator.api_key}"
+    expect(page.get_by_role("button", name="Checking…")).to_be_disabled()
+    assert _stored_key(page) is None
+    assert page.evaluate("window.signInDocument") == "original"
+    assert page.documents == []
+
+    assert len(held) == 1
+    held[0].continue_()
+    page.unroute("**/v1/whoami")
+    expect(page.locator(".sidebar-user")).to_contain_text("Operator key", timeout=15_000)
     assert page.evaluate("window.signInDocument") is None
     assert page.documents == [env.luxd_url + "/"]
