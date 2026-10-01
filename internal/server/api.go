@@ -205,6 +205,7 @@ func (s *Server) routes(api huma.API) {
 	}, "read", s.mintTicket)
 
 	// Servers.
+	s.serverRoutes(api)
 	register(s, api, huma.Operation{
 		OperationID: "listServers", Method: http.MethodGet, Path: "/v1/runs/{id}/servers", Tags: []string{"servers"},
 		Summary: "List a Run's servers", Errors: []int{http.StatusNotFound},
@@ -335,11 +336,13 @@ func (s *Server) routes(api huma.API) {
 	}, "read", s.systemHistory)
 	register(s, api, huma.Operation{
 		OperationID: "eventFeed", Method: http.MethodGet, Path: "/v1/events", Tags: []string{"runs"},
-		Summary: "Every Run's events, as they happen",
-		Description: "Server-sent events: one `lux` event per Run event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). " +
+		Summary: "Every Run's and server's events, as they happen",
+		Description: "Server-sent events: one `lux` event per Run or server event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). " +
+			"A server's event (server.created, updated, deleted, attached, detached, state, wake_requested, idle, expired) carries `serverId`, and in `data` its id, name, host, hostname, url, labels and runId; " +
+			"`runId` is null only for one of a server attached to no Run. " +
 			"From now, from `after`, or the `last` N; with `follow=false` the stream ends after what is there now.",
 		Responses: map[string]*huma.Response{"200": {Description: "OK", Content: map[string]*huma.MediaType{"text/event-stream": {Schema: sseEvents(
-			sseEvent("lux", "A Run's event.", schemaRef[FeedEvent](api)),
+			sseEvent("lux", "A Run's or a server's event.", schemaRef[FeedEvent](api)),
 			sseEvent("error", "The stream failed.", schemaRef[outputError](api)),
 		)}}}},
 	}, "read", streamed(s, s.serveFeed))
@@ -661,7 +664,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", ev); err != nil {
 			return err
 		}
-		if err := insertSpecServers(ctx, tx, p.TenantID, id, sp); err != nil {
+		if err := insertSpecServers(ctx, tx, p.TenantID, id, p.Actor(), sp); err != nil {
 			return err
 		}
 		created = true
@@ -1072,11 +1075,12 @@ func (s *Server) resumability(ctx context.Context, tenantID string, run *Run) (*
 }
 
 type Event struct {
-	ID    int64          `json:"id"`
-	Epoch *int           `json:"epoch,omitempty"`
-	Type  string         `json:"type"`
-	Data  map[string]any `json:"data"`
-	Time  time.Time      `json:"time"`
+	ID       int64          `json:"id"`
+	ServerID string         `json:"serverId,omitempty" doc:"A server's event: its id (the server.* events)."`
+	Epoch    *int           `json:"epoch,omitempty"`
+	Type     string         `json:"type"`
+	Data     map[string]any `json:"data"`
+	Time     time.Time      `json:"time"`
 }
 
 type listEventsInput struct {
@@ -1108,7 +1112,7 @@ func (s *Server) events(ctx context.Context, tenantID, runID string, after int64
 		if err := requireRun(ctx, tx, runID); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT id, epoch, type, data, created_at FROM run_events
+		rows, err := tx.Query(ctx, `SELECT id, coalesce(server_id, ''), epoch, type, data, created_at FROM run_events
 			WHERE run_id = $1 AND id > $2 ORDER BY id LIMIT 1000`, runID, after)
 		if err != nil {
 			return err
@@ -1116,9 +1120,10 @@ func (s *Server) events(ctx context.Context, tenantID, runID string, after int64
 		defer rows.Close()
 		for rows.Next() {
 			var e Event
-			if err := rows.Scan(&e.ID, &e.Epoch, &e.Type, &e.Data, &e.Time); err != nil {
+			if err := rows.Scan(&e.ID, &e.ServerID, &e.Epoch, &e.Type, &e.Data, &e.Time); err != nil {
 				return err
 			}
+			s.eventDetail(&e)
 			events = append(events, e)
 		}
 		return rows.Err()

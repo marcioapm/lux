@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -597,10 +598,45 @@ func (a *app) feed(ctx context.Context, after int64, follow bool) error {
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
 			return err
 		}
-		d, _ := json.Marshal(e.Data)
-		_, err := fmt.Fprintf(a.stdout, "%s  %-10s %s  %-20s %s\n", e.Time.Local().Format("15:04:05.000"), e.Tenant, e.RunID, e.Type, d)
+		_, err := fmt.Fprintln(a.stdout, feedLine(e))
 		return err
 	})
+}
+
+// feedLine is one feed event as lux events --all prints it. A server's
+// reads as what happened to which URL; a Run's as its type and data.
+func feedLine(e server.FeedEvent) string {
+	at := e.Time.Local().Format("15:04:05.000")
+	run := "-"
+	if e.RunID != nil {
+		run = *e.RunID
+	}
+	if e.ServerID == "" {
+		d, _ := json.Marshal(e.Data)
+		return fmt.Sprintf("%s  %-10s %s  %-20s %s", at, e.Tenant, run, e.Type, d)
+	}
+	str := func(k string) string { v, _ := e.Data[k].(string); return v }
+	where := cmp.Or(str("hostname"), str("name"))
+	detail := ""
+	switch e.Type {
+	case "server.wake_requested":
+		detail = fmt.Sprintf("by %s at %s", str("by"), cmp.Or(str("path"), "/"))
+	case "server.idle":
+		detail = "no request for " + str("idleAfter")
+	case "server.state":
+		detail = str("state")
+		if r := str("stopReason"); r != "" {
+			detail += " (" + r + ")"
+		}
+		if c, ok := e.Data["exitCode"].(float64); ok {
+			detail += fmt.Sprintf(" exit %d", int(c))
+		}
+	case "server.attached", "server.created", "server.updated":
+		detail = "by " + str("by")
+	case "server.detached", "server.deleted", "server.expired", "server.removed":
+		detail = str("reason")
+	}
+	return strings.TrimRight(fmt.Sprintf("%s  %-10s %s  %-22s %s %s  %s", at, e.Tenant, run, e.Type, e.ServerID, where, detail), " ")
 }
 
 func (a *app) migrateCmd() *cobra.Command {
