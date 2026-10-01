@@ -778,8 +778,8 @@ func (s *Server) addServer(ctx context.Context, in *addServerInput) (*serverOutp
 		if err != nil {
 			return err
 		}
-		// server.added, as before servers were their own: the Run's event,
-		// now also the server's.
+		// server.added (the Run API's name for it) is the Run's event and
+		// the server's.
 		if err := serverEvent(ctx, tx, p.TenantID, &in.ID, id, 0, "server.added", v.ref(), map[string]any{"by": p.Actor(), "lifetime": lifetime}); err != nil {
 			return err
 		}
