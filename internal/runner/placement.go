@@ -76,8 +76,10 @@ type placement struct {
 	srvSet *proto.Servers
 	// diffing: a live diff is under way (diff.go).
 	diffing bool
-	// sync: the checkouts the shim moves before init (sync.go).
-	sync *proto.SyncArgs
+	// sync: the checkouts the shim moves before init (sync.go);
+	// syncRetryFailed: those its whole-history retry could not bundle.
+	sync            *proto.SyncArgs
+	syncRetryFailed []proto.SyncResult
 }
 
 func newPlacement(r *Runner, a proto.Assign) *placement {
@@ -318,7 +320,11 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	// A resume's sync: fetched now, applied by the shim before init.
-	p.sync = p.prepareSync(startCtx, sp, a.Sync, "", false)
+	var syncFailed []proto.SyncResult
+	p.sync, syncFailed = p.prepareSync(startCtx, sp, a.Sync, "", false)
+	for _, res := range syncFailed {
+		p.reportSync(startCtx, res, "")
+	}
 
 	if p.pendingStop() != "" {
 		fail("stop", nil)

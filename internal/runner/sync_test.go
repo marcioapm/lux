@@ -44,8 +44,8 @@ func TestConcurrentSyncsKeepTheirBundles(t *testing.T) {
 	refs := []proto.SyncRef{{Repo: "app", Ref: "main"}}
 	ctx := context.Background()
 
-	first := p.prepareSync(ctx, sp, refs, "s1", false)
-	second := p.prepareSync(ctx, sp, refs, "s2", false)
+	first, _ := p.prepareSync(ctx, sp, refs, "s1", false)
+	second, _ := p.prepareSync(ctx, sp, refs, "s2", false)
 	if first == nil || second == nil || first.Repos[0].Bundle == second.Repos[0].Bundle {
 		t.Fatalf("bundles: %+v %+v", first, second)
 	}
