@@ -28,8 +28,8 @@ func TestCheckAttachmentsTypes(t *testing.T) {
 	if len(errs) != 1 || !strings.Contains(errs[0], "a[0]: contentType image/webp does not match its bytes (not an image lux takes)") {
 		t.Fatalf("got %v", errs)
 	}
-	// Unpadded base64 is not standard base64.
-	errs = CheckAttachments("a", []Attachment{{Name: "x", ContentType: "image/png", Data: strings.TrimRight(enc(ok["image/png"]), "=")}})
+	// Unpadded base64 is not standard base64 (13 bytes: padded with ==).
+	errs = CheckAttachments("a", []Attachment{{Name: "x", ContentType: "image/png", Data: strings.TrimRight(enc([]byte("\x89PNG\r\n\x1a\nrest!")), "=")}})
 	if len(errs) != 1 || !strings.Contains(errs[0], "not standard base64") {
 		t.Fatalf("got %v", errs)
 	}
