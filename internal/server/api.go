@@ -1331,7 +1331,7 @@ type resumeRequest struct {
 	// FromSnapshot resumes from an older snapshot (e.g. after lost).
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost)."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
-	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over)."`
+	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over). On a Run already resuming: the same as its resume asked for, 202 with that resume's resize; absent or empty, 202; other values, 409 not_resumable."`
 	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
 }
 
@@ -1343,6 +1343,30 @@ type resumeResources struct {
 	CPUs   *float64    `json:"cpus,omitempty" doc:"A new CPU quota, larger or smaller (0.5 is half a CPU). Absent: unchanged; 0 or less: 422 invalid_spec."`
 	Memory *spec.Bytes `json:"memory,omitempty" doc:"A new memory size, larger or smaller, in its host's terms as at submit. Absent: unchanged; 0 or less: 422 invalid_spec."`
 	Disk   spec.Bytes  `json:"disk,omitempty" doc:"A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if the placement that took the snapshot it resumes from reported its final disk use (it exited, was not lost) and the disk is at least its peak disk use plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."`
+}
+
+// check refuses what submit would (422 invalid_spec) and returns the
+// resources asked for, the others zero.
+func (r resumeResources) check() (spec.Resources, error) {
+	var req spec.Resources
+	var problems []string
+	if r.CPUs != nil {
+		req.CPUs = *r.CPUs
+		if req.CPUs <= 0 {
+			problems = append(problems, "resources.cpus must be greater than 0")
+		}
+	}
+	if r.Memory != nil {
+		req.Memory = *r.Memory
+		if req.Memory <= 0 {
+			problems = append(problems, "resources.memory must be greater than 0")
+		}
+	}
+	req.Disk = r.Disk
+	if problems = append(problems, req.Problems()...); len(problems) > 0 {
+		return req, invalidSpec(&spec.ValidationError{Problems: problems})
+	}
+	return req, nil
 }
 
 // Resize is what a resume asked to change in a Run's resources, and what
@@ -1449,9 +1473,25 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			if len(adding) > 0 {
 				return errf(http.StatusConflict, "not_resumable", "run is resuming already: repositories can only be added to a stopped, lost or failed Run")
 			}
-			if r := req.Resources; r != nil && (r.CPUs != nil && *r.CPUs != sp.Resources.CPUs ||
-				r.Memory != nil && *r.Memory != sp.Resources.Memory || r.Disk > sp.Resources.Disk) {
-				return errf(http.StatusConflict, "not_resumable", "run is resuming already: its resources can only change while it is stopped, lost or failed")
+			if req.Resources != nil {
+				asked, err := req.Resources.check()
+				if err != nil {
+					return err
+				}
+				first, err := pendingResize(ctx, tx, id)
+				if err != nil {
+					return err
+				}
+				var firstAsked spec.Resources
+				if first != nil {
+					firstAsked = first.Requested
+				}
+				if asked != firstAsked && asked != (spec.Resources{}) {
+					return errf(http.StatusConflict, "not_resumable", "run is resuming already with other resources: they can only change while it is stopped, lost or failed")
+				}
+				if asked != (spec.Resources{}) {
+					resize = first
+				}
 			}
 			return nil // idempotent: the first resume's secrets stand
 		case StateCancelled, StateSucceeded:
@@ -1577,6 +1617,22 @@ func diskShrinkFloor(used int64) int64 {
 	return used + max(used/diskShrinkHeadroomDivisor, diskShrinkMinHeadroom)
 }
 
+// pendingResize is the resize of the resume a resuming Run is waiting on:
+// that of the latest resume.requested event since the Run last entered a
+// state other than resuming. nil when that resume asked for none, or lux
+// resumed the Run itself (a move).
+func pendingResize(ctx context.Context, tx pgx.Tx, runID string) (*Resize, error) {
+	var rz *Resize
+	err := tx.QueryRow(ctx, `SELECT data->'resources' FROM run_events
+		WHERE run_id = $1 AND type = 'resume.requested'
+		  AND id > coalesce((SELECT max(id) FROM run_events WHERE run_id = $1 AND type = 'state' AND data->>'state' <> 'resuming'), 0)
+		ORDER BY id DESC LIMIT 1`, runID).Scan(&rz)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return rz, err
+}
+
 // resizeRun writes a resume's resources into the Run's stored spec (cur
 // is what it holds). cpus and memory are applied, larger or smaller; disk
 // when larger, and when smaller only down to diskShrinkFloor of the peak
@@ -1585,28 +1641,19 @@ func diskShrinkFloor(used int64) int64 {
 // measurement, a smaller disk is not applied. A disk kept is no error:
 // Resize.Disk says why. Values are checked as submit checks them.
 func resizeRun(ctx context.Context, tx pgx.Tx, runID string, cur spec.Resources, req resumeResources) (*Resize, error) {
-	rz := &Resize{Applied: cur}
-	var problems []string
+	requested, err := req.check()
+	if err != nil {
+		return nil, err
+	}
+	rz := &Resize{Requested: requested, Applied: cur}
 	if req.CPUs != nil {
-		rz.Requested.CPUs = *req.CPUs
-		if *req.CPUs <= 0 {
-			problems = append(problems, "resources.cpus must be greater than 0")
-		}
 		rz.Applied.CPUs = *req.CPUs
 	}
 	if req.Memory != nil {
-		rz.Requested.Memory = *req.Memory
-		if *req.Memory <= 0 {
-			problems = append(problems, "resources.memory must be greater than 0")
-		}
 		rz.Applied.Memory = *req.Memory
 	}
-	rz.Requested.Disk = req.Disk
 	if req.Disk != 0 {
 		rz.Applied.Disk = req.Disk
-	}
-	if problems = append(problems, rz.Applied.Problems()...); len(problems) > 0 {
-		return nil, invalidSpec(&spec.ValidationError{Problems: problems})
 	}
 	if req.Disk > 0 && req.Disk < cur.Disk {
 		// The runner reports the snapshot before the exit status carrying

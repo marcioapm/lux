@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -461,5 +462,91 @@ func TestResumeDiskShrinkNeedsTheFinalMeasurement(t *testing.T) {
 				t.Errorf("reason %q, want it to say %q", rz.Disk.Reason, c.reason)
 			}
 		})
+	}
+}
+
+// A Run already resuming takes a retry of its resume's request (the same
+// requested resources, or none) and answers it with that resume's resize;
+// any other resources are refused, 409, invalid ones 422. Nothing changes.
+func TestResumeRetryWhileResuming(t *testing.T) {
+	first := &resumeResources{CPUs: f64(1), Memory: bytesPtr(gib), Disk: spec.Bytes(3*gib - 1)} // under the 3 GiB floor: kept
+	for _, c := range []struct {
+		name   string
+		retry  *resumeResources
+		status int // 0: 202
+		resize bool
+	}{
+		{"repeat of the refused shrink", &resumeResources{CPUs: f64(1), Memory: bytesPtr(gib), Disk: spec.Bytes(3*gib - 1)}, 0, true},
+		{"no resources", nil, 0, false},
+		{"empty resources", &resumeResources{}, 0, false},
+		{"the applied disk", &resumeResources{CPUs: f64(1), Memory: bytesPtr(gib), Disk: spec.Bytes(20 * gib)}, http.StatusConflict, false},
+		{"a new feasible shrink", &resumeResources{CPUs: f64(1), Memory: bytesPtr(gib), Disk: spec.Bytes(10 * gib)}, http.StatusConflict, false},
+		{"a new impossible shrink", &resumeResources{CPUs: f64(1), Memory: bytesPtr(gib), Disk: spec.Bytes(gib)}, http.StatusConflict, false},
+		{"the disk alone", &resumeResources{Disk: spec.Bytes(3*gib - 1)}, http.StatusConflict, false},
+		{"other cpus", &resumeResources{CPUs: f64(2), Memory: bytesPtr(gib), Disk: spec.Bytes(3*gib - 1)}, http.StatusConflict, false},
+		{"negative disk", &resumeResources{Disk: -1}, http.StatusUnprocessableEntity, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(2*gib))
+			out1, err := resumeWith(s, id, first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out1.Body.Resize == nil || out1.Body.Resize.Disk == nil {
+				t.Fatalf("first resume's resize %+v, want the disk kept", out1.Body.Resize)
+			}
+			out2, err := resumeWith(s, id, c.retry)
+			if c.status != 0 {
+				var he *HTTPError
+				if !errors.As(err, &he) || he.Status != c.status {
+					t.Fatalf("retry: %v, want %d", err, c.status)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := out2.Body.Resize
+				if c.resize && (got == nil || !reflect.DeepEqual(*got, *out1.Body.Resize)) {
+					t.Errorf("retry's resize %+v, want the first's %+v", got, out1.Body.Resize)
+				}
+				if !c.resize && got != nil {
+					t.Errorf("retry's resize %+v, want none", got)
+				}
+			}
+			want := spec.Resources{CPUs: 1, Memory: spec.Bytes(gib), Disk: spec.Bytes(20 * gib), Pids: 1024}
+			var events int
+			systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'resume.requested'`, []any{id}, &events)
+			if got := storedResources(t, s, id); got != want || events != 1 {
+				t.Errorf("after the retry: %+v and %d resume.requested, want %+v and 1", got, events, want)
+			}
+		})
+	}
+}
+
+// A Run resumed again after a resume that resized it, which ran and
+// stopped, is compared with the new resume, not the old one.
+func TestResumeRetryComparesTheCurrentResume(t *testing.T) {
+	s := testServer(t)
+	id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(gib))
+	if _, err := resumeWith(s, id, &resumeResources{CPUs: f64(1)}); err != nil {
+		t.Fatal(err)
+	}
+	err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
+		return setRunState(context.Background(), tx, "t1", id, StateStopped, "stop", 1)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resumeWith(s, id, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err = resumeWith(s, id, &resumeResources{CPUs: f64(1)})
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != http.StatusConflict {
+		t.Fatalf("retry with the earlier resume's cpus: %v, want 409", err)
+	}
+	if out, err := resumeWith(s, id, nil); err != nil || out.Body.Resize != nil {
+		t.Fatalf("retry without resources: %v, resize %+v", err, out)
 	}
 }

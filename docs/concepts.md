@@ -132,8 +132,16 @@ placement gets it.
   another host of its pool that has room, or, in a provisioned pool, a new
   host is asked for; with no host that could fit it, it waits for
   capacity, saying which resource is short.
-- A Run already resuming takes a retry with the same sizes, and refuses
-  other ones (409 `not_resumable`).
+- A resume of a Run already resuming is a retry of the resume it waits
+  on, and its `resources` are compared with what that resume asked for
+  (its `requested`, not what was applied):
+  - the same `cpus`, `memory` and `disk` (each present or absent alike):
+    202, with that first resume's `resize`, a disk it kept included;
+  - no `resources`, or all of them absent or `disk` 0: 202 without
+    `resize`, whatever the first resume asked;
+  - anything else, including a request where the first had none: 409
+    `not_resumable`. Invalid values (cpus or memory 0 or less, a
+    negative disk) are 422 `invalid_spec` first, as on any resume.
 
 ## Secrets
 
