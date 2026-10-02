@@ -293,3 +293,47 @@ func TestSampleSystem(t *testing.T) {
 		t.Fatalf("second sample: %v", got)
 	}
 }
+
+// sampleSystem records each tenant's and the whole system's bytes in S3 by
+// kind: blobs still on a host or deleted are not counted, and a tenant with
+// no live Run, flow or host but bytes in S3 still gets its row.
+func TestSampleSystemStored(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('ta', 'a'), ('tc', 'c'), ('td', 'd')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, activity) VALUES
+		('ra', 'ta', '{}', 'running', 'busy'), ('rc', 'tc', '{}', 'succeeded', ''), ('rd', 'td', '{}', 'failed', '')`)
+	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, location) VALUES
+		('a1', 'ta', 'ra', 1, 'volume', 'v', 100, 's3'), ('a2', 'ta', 'ra', 1, 'volume', 'w', 20, 's3'),
+		('a3', 'ta', 'ra', 1, 'output', 'o', 7, 's3'), ('a4', 'ta', 'ra', 1, 'volume', 'x', 1000, 'host'),
+		('a5', 'ta', 'ra', 1, 'artifact', 'y', 5000, 'deleted'),
+		('c1', 'tc', 'rc', 1, 'artifact', 'a', 3, 's3'), ('c2', 'tc', 'rc', 1, 'context', 'c', 40, 's3'),
+		('c3', 'tc', 'rc', 1, 'output', 'o', 9, 's3'),
+		('d1', 'td', 'rd', 1, 'volume', 'v', 50, 'deleted')`)
+	if err := s.sampleSystem(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][4]int64{}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, _ := tx.Query(ctx, `SELECT tenant_id, stored_volume, stored_output, stored_artifact, stored_context FROM system_samples`)
+		var id string
+		var v [4]int64
+		_, err := pgx.ForEachRow(rows, []any{&id, &v[0], &v[1], &v[2], &v[3]}, func() error {
+			got[id] = v
+			return nil
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// td has a finished Run and only deleted bytes: no row.
+	want := map[string][4]int64{
+		"":   {120, 16, 3, 40},
+		"ta": {120, 7, 0, 0},
+		"tc": {0, 9, 3, 40},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("stored:\n got %v\nwant %v", got, want)
+	}
+}
