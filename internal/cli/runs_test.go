@@ -102,3 +102,37 @@ func TestResumeWaitKeepsResize(t *testing.T) {
 		t.Fatalf("state %q resize %s, want running with %s", got.State, got.Resize, resize)
 	}
 }
+
+// resume sends --secret for a name the Run lacks (a declaration), drops a
+// --remove-secret name from the secrets it looks up, and sends it in
+// removeSecrets.
+func TestResumeSecretFlags(t *testing.T) {
+	var body map[string]any
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/runs/run_1":
+			_, _ = w.Write([]byte(`{"id":"run_1","state":"stopped","secrets":[{"name":"TOKEN"},{"name":"OLD"}]}`))
+		case r.Method == "POST" && r.URL.Path == "/v1/runs/run_1/resume":
+			b, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(b, &body); err != nil {
+				t.Errorf("POST body %s: %v", b, err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"run_1","state":"resuming"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	t.Setenv("OLD", "from-the-environment")
+	if _, err := runCLI(t, h, "resume", "run_1", "--secret", "TOKEN=t-1", "--secret", "EXTRA=e-1", "--remove-secret", "OLD"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"secrets":       []any{map[string]any{"name": "TOKEN", "value": "t-1"}, map[string]any{"name": "EXTRA", "value": "e-1"}},
+		"removeSecrets": []any{"OLD"},
+	}
+	if !reflect.DeepEqual(body, want) {
+		t.Fatalf("POST %v, want %v", body, want)
+	}
+}
