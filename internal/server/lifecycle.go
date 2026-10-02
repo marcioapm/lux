@@ -97,7 +97,10 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 	// prompt_attachments: a succeeded or cancelled Run is never placed again.
 	// A failed one can be resumed, as a first placement when it has no
 	// session and no snapshot, so it keeps them.
+	// state_changed_at is expiry's clock (reapExpiry): moved only by a
+	// change of state, so a repeated stop does not restart it.
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = $2, state_reason = $3, updated_at = now(),
+			state_changed_at = CASE WHEN state <> $2 THEN now() ELSE state_changed_at END,
 			finished_at = CASE WHEN $2 IN ('succeeded', 'failed', 'cancelled') THEN now() ELSE finished_at END,
 			prompt_attachments = CASE WHEN $2 IN ('succeeded', 'cancelled') THEN NULL ELSE prompt_attachments END,
 			activity = CASE WHEN $2 IN ('running') THEN activity ELSE '' END

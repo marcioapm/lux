@@ -22,7 +22,7 @@ func (s *Server) reaperLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		for _, f := range []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapRetention, s.reapOutdatedStaticHosts} {
+		for _, f := range []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapExpiry, s.reapRetention, s.reapOutdatedStaticHosts} {
 			if err := f(ctx); err != nil && ctx.Err() == nil {
 				s.log.Warn("reaper", "err", err)
 			}
@@ -425,6 +425,53 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 		}
 	}
 	return hostID, nil
+}
+
+// reapExpiry cancels Runs that have rested (stopped, lost or failed) longer
+// than their tenant's expire_after_days (0: never). The clock is
+// state_changed_at, so a resume and a later stop restart it. The Run is
+// locked and its state re-checked by FOR UPDATE (a resume that committed
+// first fails the WHERE on the row's new version); one held by a resume or
+// cancel in progress is skipped and seen on a later pass.
+func (s *Server) reapExpiry(ctx context.Context) error {
+	var expired []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// The first bound is the smallest limit any tenant has: it keeps
+		// the runs_resting scan to Runs that may be due.
+		rows, err := tx.Query(ctx, `SELECT r.id, r.tenant_id, r.state, t.expire_after_days FROM runs r
+			JOIN tenants t ON t.id = r.tenant_id
+			WHERE r.state IN `+resumableRunStates+`
+			  AND r.state_changed_at < now() - make_interval(days => (SELECT min(expire_after_days) FROM tenants WHERE expire_after_days > 0))
+			  AND t.expire_after_days > 0 AND r.state_changed_at < now() - make_interval(days => t.expire_after_days)
+			ORDER BY r.state_changed_at LIMIT 20
+			FOR UPDATE OF r SKIP LOCKED`)
+		if err != nil {
+			return err
+		}
+		type due struct {
+			ID, Tenant, State string
+			Days              int
+		}
+		runs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[due])
+		if err != nil {
+			return err
+		}
+		for _, r := range runs {
+			reason := fmt.Sprintf("expired: %s for %d days", r.State, r.Days)
+			if err := setRunState(ctx, tx, r.Tenant, r.ID, StateCancelled, reason, 0); err != nil {
+				return err
+			}
+			expired = append(expired, r.ID)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, id := range expired {
+		s.secrets.drop(id)
+	}
+	return nil
 }
 
 // reapRetention deletes the blobs of Runs that finished longer ago than
