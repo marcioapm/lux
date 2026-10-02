@@ -147,7 +147,7 @@ def test_resume_cannot_remove_a_git_credential(lux, runners, hosts, git_server):
     lux.wait_state(run_id, "running")
     lux.run("stop", run_id, "--wait")
     with pytest.raises(CLIError) as e:
-        lux.run("resume", run_id, "--secret", f"GIT_TOKEN={git_server.token}", "--remove-secret", "GIT_TOKEN")
+        lux.run("resume", run_id, "--remove-secret", "GIT_TOKEN")
     assert e.value.code == 4 and "GIT_TOKEN" in e.value.stderr and "credential" in e.value.stderr, e.value.stderr
     run = lux.get(run_id)
     assert run["state"] == "stopped" and [s["name"] for s in run["secrets"]] == ["GIT_TOKEN"], run
