@@ -24,7 +24,7 @@ import (
 type fakeOutputHost struct {
 	mu   sync.Mutex
 	held map[int]fakePlacement
-	subs map[int]int // subscriptions received, by epoch
+	subs map[int][]time.Time // when each subscription arrived, by epoch
 }
 
 type fakePlacement struct {
@@ -37,7 +37,7 @@ type fakePlacement struct {
 
 func newFakeOutputHost(t *testing.T, s *Server, hostID string) *fakeOutputHost {
 	t.Helper()
-	h := &fakeOutputHost{held: map[int]fakePlacement{}, subs: map[int]int{}}
+	h := &fakeOutputHost{held: map[int]fakePlacement{}, subs: map[int][]time.Time{}}
 	c := &runnerConn{hostID: hostID, send: make(chan proto.Frame, 256), notify: make(chan struct{}, 1), done: make(chan struct{})}
 	s.hub.mu.Lock()
 	s.hub.conns[hostID] = c
@@ -73,14 +73,21 @@ func (h *fakeOutputHost) holdWhen(epoch int, ready func() bool, data ...string) 
 func (h *fakeOutputHost) subscribed(epoch int) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.subs[epoch]
+	return len(h.subs[epoch])
+}
+
+// subscriptions is when each subscription to the epoch arrived, oldest first.
+func (h *fakeOutputHost) subscriptions(epoch int) []time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]time.Time(nil), h.subs[epoch]...)
 }
 
 func (h *fakeOutputHost) answer(s *Server, f proto.Frame) {
 	var sub proto.OutputSubscribe
 	_ = json.Unmarshal(f.Data, &sub)
 	h.mu.Lock()
-	h.subs[f.Epoch]++
+	h.subs[f.Epoch] = append(h.subs[f.Epoch], time.Now())
 	p, ok := h.held[f.Epoch]
 	h.mu.Unlock()
 	if ok && p.ready != nil && !p.ready() {
@@ -223,21 +230,26 @@ func TestFollowWaitsForAnAssignedPlacement(t *testing.T) {
 // Run events arriving while placement 2 is assigned and its runner does not
 // hold it wake the follower, but do not make it ask again more than once
 // per 500ms.
-func TestFollowAsksForAnAssignedPlacementAtMostTwiceASecondUnderEvents(t *testing.T) {
+func TestFollowAsksForAnAssignedPlacementNoSoonerThan500msUnderEvents(t *testing.T) {
 	s, key, h1 := resumedFixture(t)
 	events := followOutput(t, s, key)
 	expectRecord(t, events, "1.1", "one\n", "first record")
 	waitUntil(t, func() bool { return h1.subscribed(2) >= 1 }, "the follower to ask for placement 2")
-	before, start := h1.subscribed(2), time.Now()
-	for time.Since(start) < 1500*time.Millisecond {
+	// Wake it constantly until it has asked four times: each ask after the
+	// first answer comes no sooner than 500ms after the one before. The fake
+	// answers at once, so the gap between two arrivals is the follower's.
+	for start := time.Now(); h1.subscribed(2) < 4; {
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("asked for placement 2 only %d times in 10s of events", h1.subscribed(2))
+		}
 		s.wakeups.notify("r1")
 		time.Sleep(2 * time.Millisecond)
 	}
-	n, elapsed := h1.subscribed(2)-before, time.Since(start)
-	t.Logf("%d subscriptions in %s", n, elapsed)
-	// One per started 500ms, plus one in flight at either end.
-	if allowed := int(elapsed/(500*time.Millisecond)) + 2; n > allowed {
-		t.Fatalf("asked for the assigned placement %d times in %s under events (at most %d)", n, elapsed, allowed)
+	times := h1.subscriptions(2)
+	for i := 1; i < len(times); i++ {
+		if gap := times[i].Sub(times[i-1]); gap < 500*time.Millisecond {
+			t.Fatalf("asked for the assigned placement again %s after the last time, under events (want at least 500ms)", gap)
+		}
 	}
 	h1.hold(2, false, "two\n")
 	expectRecord(t, events, "2.1", "two\n", "the placement's record once its runner holds it")
