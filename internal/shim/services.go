@@ -125,6 +125,11 @@ func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor)
 				return
 			}
 		}
+		// The upstream may answer before it has read the whole request
+		// body. Without full duplex, writing the response header closes the
+		// request body under the transport still sending it, and the
+		// transport then drops the connection the response comes on.
+		_ = http.NewResponseController(w).EnableFullDuplex()
 		proxy.ServeHTTP(w, r)
 	}), nil
 }

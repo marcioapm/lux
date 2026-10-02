@@ -128,3 +128,50 @@ func TestServiceEnv(t *testing.T) {
 		t.Fatalf("%s=%s", k, v)
 	}
 }
+
+// The response arrives while the request body is still being sent: the
+// proxy must not close the workload's request body when it writes the
+// response's header, or the transport, still sending it upstream, fails
+// and drops the connection the response is being read from (the services
+// e2e flake: a POST answered 200 with no body).
+func TestServiceProxyAnswersBeforeTheBodyIsSent(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Answers at once, then reads the body as it comes.
+		http.NewResponseController(w).EnableFullDuplex()
+		w.Header().Set("Content-Type", "text/plain")
+		io.WriteString(w, "got ")
+		w.(http.Flusher).Flush()
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("upstream read: %v", err)
+		}
+		io.WriteString(w, string(b))
+	}))
+	defer up.Close()
+
+	h, err := newServiceProxy(spec.Service{Name: "tools", URL: up.URL}, nil, NewRedactor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	pr, pw := io.Pipe()
+	req, _ := http.NewRequest("POST", proxy.URL+"/upload", pr)
+	req.ContentLength = int64(len("hello world"))
+	go func() {
+		io.WriteString(pw, "hello")
+		time.Sleep(200 * time.Millisecond)
+		io.WriteString(pw, " world")
+		pw.Close()
+	}()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || string(body) != "got hello world" {
+		t.Fatalf("status %d body %q err %v", resp.StatusCode, body, err)
+	}
+}
