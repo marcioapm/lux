@@ -235,8 +235,9 @@ reach S3 in the background:
      uploaded;
    - a succeeded or cancelled Run's snapshots and output, the tenant's
      `retention_days` after it ended;
-   - nothing of a `failed` Run, which is resumable, until it expires
-     (`expire_after_days`, default 90: cancelled, then retention).
+   - a `failed` Run, which is resumable, is exempt from age-based retention
+     until it expires (`expire_after_days`, default 90: cancelled, then
+     retention); its superseded snapshots are still removed, as above.
 
    Artifacts are deleted only by `DELETE /v1/runs/{id}/artifacts`. Each
    deletion marks the blobs deleted (and the snapshots unavailable) in the
@@ -248,9 +249,12 @@ reach S3 in the background:
    passes, 20 Runs per pass per kind, cancel every Run resting longer than
    90 days (`state_changed_at` is backfilled from each Run's last `state`
    event); delete the volumes of every snapshot but the current one of
-   Runs whose current snapshot is uploaded; and stop deleting failed Runs'
-   blobs and artifacts. Expired Runs lose their snapshots and output 30
-   days later (their retention starts at the expiry).
+   non-terminal Runs (any not succeeded or cancelled) whose current
+   snapshot is uploaded; and stop deleting failed Runs' blobs and
+   artifacts. Superseded deletion leaves existing succeeded and cancelled
+   Runs alone: they stay governed by retention. Expired Runs lose their
+   snapshots and output 30 days later (their retention starts at the
+   expiry).
 
 Keys are `tenants/<tenant>/runs/<run>/<blob>`. Encrypt the bucket at rest
 (SSE-KMS on AWS).
