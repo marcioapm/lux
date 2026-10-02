@@ -193,3 +193,95 @@ func TestServiceProxyAnswersBeforeTheBodyIsSent(t *testing.T) {
 		})
 	}
 }
+
+// postThenGet sends, on one connection, a POST to path of n bytes of which
+// only sent are written before its response is read, then the rest, then a
+// GET. It returns the POST's response and the GET's (nil when the POST's
+// said Connection: close) or the error reading it, and closes the
+// connection, as a client does after Connection: close.
+func postThenGet(t *testing.T, addr, path string, n, sent int) (post, get *http.Response, getErr error) {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprintf(c, "POST %s HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n%s", path, n, strings.Repeat("x", sent))
+	br := bufio.NewReader(c)
+	post, err = http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, post.Body)
+	if post.Close {
+		return post, nil, nil
+	}
+	// The server may stop reading once it has answered; writing in the
+	// background keeps a blocked write from hiding the GET's outcome.
+	go func() {
+		c.Write(make([]byte, n-sent))
+		fmt.Fprintf(c, "GET /next HTTP/1.1\r\nHost: x\r\n\r\n")
+	}()
+	get, getErr = http.ReadResponse(br, nil)
+	if getErr == nil {
+		io.Copy(io.Discard, get.Body)
+	}
+	return post, get, getErr
+}
+
+// A response that keeps the connection alive must be followed by a working
+// next request. When the upstream answers without reading a large upload,
+// the proxy cannot drain the rest, so its response says Connection: close;
+// an upload sent in full keeps the connection.
+func TestServiceProxyEarlyAnswerClosesAnUnreadUpload(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/reject" {
+			http.Error(w, "too big", http.StatusRequestEntityTooLarge)
+			return
+		}
+		io.Copy(io.Discard, r.Body)
+		io.WriteString(w, "ok")
+	}))
+	defer up.Close()
+	h, err := newServiceProxy(spec.Service{Name: "tools", URL: up.URL}, nil, NewRedactor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+	addr := proxy.Listener.Addr().String()
+
+	const n = 1 << 20
+	post, get, err := postThenGet(t, addr, "/reject", n, 5)
+	if post.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("post: status %d", post.StatusCode)
+	}
+	if !post.Close {
+		t.Fatalf("1 MiB upload unread: keep-alive promised, next request: %v %v", get, err)
+	}
+
+	// The whole body reaches the upstream before it answers.
+	post, get, err = postThenGet(t, addr, "/store", n, n)
+	if post.Close || err != nil || get.StatusCode != http.StatusOK {
+		t.Fatalf("upload sent in full: close %v, next request: %v %v", post.Close, get, err)
+	}
+}
+
+// The same when the upstream cannot be reached: the 502 goes out before the
+// transport has read the upload, so it closes the connection.
+func TestServiceProxyUnreachableClosesAnUnreadUpload(t *testing.T) {
+	h, err := newServiceProxy(spec.Service{Name: "gone", URL: "http://127.0.0.1:1"}, nil, NewRedactor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+	post, get, err := postThenGet(t, proxy.Listener.Addr().String(), "/up", 1<<20, 5)
+	if post.StatusCode != http.StatusBadGateway {
+		t.Fatalf("post: status %d", post.StatusCode)
+	}
+	if !post.Close {
+		t.Fatalf("1 MiB upload unread: keep-alive promised, next request: %v %v", get, err)
+	}
+}
