@@ -43,6 +43,14 @@ components:
             - array
             - "null"
       type: object
+    ArtifactsDeleted:
+      additionalProperties: false
+      properties:
+        deleted:
+          description: "How many artifacts this request deleted: 0 when none were left."
+          format: int64
+          type: integer
+      type: object
     AttachInputBody:
       additionalProperties: false
       properties:
@@ -3271,7 +3279,7 @@ paths:
   /v1/artifacts/{aid}:
     get:
       description: |-
-        The file the Run wrote, streamed through luxd. Content-Length and X-Lux-SHA256 let a client tell a whole download from one cut short (the response is aborted, never ended cleanly, on a failure mid-way). 409 not_uploaded (with Retry-After) while it is still on its host; 410 gone once deleted by retention.
+        The file the Run wrote, streamed through luxd. Content-Length and X-Lux-SHA256 let a client tell a whole download from one cut short (the response is aborted, never ended cleanly, on a failure mid-way). 409 not_uploaded (with Retry-After) while it is still on its host; 410 gone once deleted (DELETE /v1/runs/{id}/artifacts).
 
         Needs the `read` scope.
       operationId: downloadArtifact
@@ -5457,6 +5465,68 @@ paths:
       tags:
         - runs
   /v1/runs/{id}/artifacts:
+    delete:
+      description: |-
+        Every artifact of a succeeded or cancelled Run, from storage; retention never deletes artifacts. Their listing stays, available false, and a download answers 410 gone. Works however long ago the Run ended. Idempotent: deleted is 0 once none are left. 409 not_terminal on any other Run (a stopped, lost or failed one can still be resumed).
+
+        Needs the `run` scope.
+      operationId: deleteArtifacts
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactsDeleted"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Delete a Run's artifacts
+      tags:
+        - runs
     get:
       description: Needs the `read` scope.
       operationId: listArtifacts

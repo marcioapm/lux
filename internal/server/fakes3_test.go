@@ -16,11 +16,13 @@ import (
 )
 
 // fakeS3 is an S3 endpoint that records object deletes, answering each
-// with 204, or with 403 for keys under failPrefix.
+// with 204, or with 403 for keys under failPrefix. A PUT is accepted
+// (its body drained) after onPut, if set, returns.
 type fakeS3 struct {
 	mu         sync.Mutex
 	deleted    []string
 	failPrefix string
+	onPut      func(key string)
 }
 
 func (f *fakeS3) Deleted() []string {
@@ -37,6 +39,15 @@ func useFakeS3(t *testing.T, s *Server) *fakeS3 {
 	f := &fakeS3{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(r.URL.Path, "/b/")
+		if r.Method == http.MethodPut {
+			_, _ = io.Copy(io.Discard, r.Body)
+			if f.onPut != nil {
+				f.onPut(key)
+			}
+			w.Header().Set("ETag", `"etag"`)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		if r.Method != http.MethodDelete {
 			w.WriteHeader(http.StatusNotImplemented)
 			return
@@ -86,5 +97,3 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.b.String()
 }
-
-var _ io.Writer = (*syncBuffer)(nil)

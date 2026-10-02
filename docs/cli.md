@@ -158,6 +158,7 @@ prints git-style stat lines instead, and `-o json` the whole result
 
 ```bash
 lux artifacts <run> [--download DIR]
+lux artifacts <run> --delete    # a succeeded or cancelled Run's artifacts, from storage; retention never deletes them
 ```
 
 ## Hosts and pools
