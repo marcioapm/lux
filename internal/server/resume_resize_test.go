@@ -550,3 +550,97 @@ func TestResumeRetryComparesTheCurrentResume(t *testing.T) {
 		t.Fatalf("retry without resources: %v, resize %+v", err, out)
 	}
 }
+
+// Through the HTTP API: request decoding (bytes as numbers or strings,
+// absent fields), validation's 422 and the answer's JSON, then GET.
+func TestResumeResizeHTTP(t *testing.T) {
+	before := map[string]any{"cpus": 2.0, "memory": float64(4 * gib), "disk": float64(20 * gib), "pids": 1024.0}
+	with := func(kv ...any) map[string]any {
+		m := map[string]any{}
+		for k, v := range before {
+			m[k] = v
+		}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i].(string)] = kv[i+1]
+		}
+		return m
+	}
+	for _, c := range []struct {
+		name      string
+		resources map[string]any
+		status    int
+		requested map[string]any // the answer's resize.requested
+		applied   map[string]any // its resize.applied, and GET's spec.resources
+		details   []string       // a 422's error.details
+	}{
+		{name: "memory alone, cpus absent", resources: map[string]any{"memory": "1Gi"}, status: 202,
+			requested: map[string]any{"memory": float64(gib)}, applied: with("memory", float64(gib))},
+		{name: "cpus alone, memory absent", resources: map[string]any{"cpus": 0.5}, status: 202,
+			requested: map[string]any{"cpus": 0.5}, applied: with("cpus", 0.5)},
+		{name: "memory as a number", resources: map[string]any{"memory": 2 * gib}, status: 202,
+			requested: map[string]any{"memory": float64(2 * gib)}, applied: with("memory", float64(2*gib))},
+		{name: "disk as a string, an old client's request", resources: map[string]any{"disk": "40Gi"}, status: 202,
+			requested: map[string]any{"disk": float64(40 * gib)}, applied: with("disk", float64(40*gib))},
+		{name: "disk as a number", resources: map[string]any{"disk": 30 * gib}, status: 202,
+			requested: map[string]any{"disk": float64(30 * gib)}, applied: with("disk", float64(30*gib))},
+		{name: "cpus, memory and disk", resources: map[string]any{"cpus": 4, "memory": "8Gi", "disk": "3Gi"}, status: 202,
+			requested: map[string]any{"cpus": 4.0, "memory": float64(8 * gib), "disk": float64(3 * gib)},
+			applied:   with("cpus", 4.0, "memory", float64(8*gib), "disk", float64(3*gib))},
+		{name: "zero cpus", resources: map[string]any{"cpus": 0}, status: 422,
+			details: []string{"resources.cpus must be greater than 0"}},
+		{name: "zero memory", resources: map[string]any{"memory": 0}, status: 422,
+			details: []string{"resources.memory must be greater than 0"}},
+		{name: "zero cpus and memory", resources: map[string]any{"cpus": 0, "memory": "0"}, status: 422,
+			details: []string{"resources.cpus must be greater than 0", "resources.memory must be greater than 0"}},
+		{name: "negative disk", resources: map[string]any{"disk": -1}, status: 422,
+			details: []string{"resources must not be negative"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(gib))
+			key := apiKey(t, s, new("t1"), "run", "read")
+			w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+id+"/resume", map[string]any{"resources": c.resources})
+			if w.Code != c.status {
+				t.Fatalf("POST: %d %s, want %d", w.Code, w.Body, c.status)
+			}
+			var answer struct {
+				Resize *struct {
+					Requested map[string]any `json:"requested"`
+					Applied   map[string]any `json:"applied"`
+					Disk      map[string]any `json:"disk"`
+				} `json:"resize"`
+				Error struct {
+					Code    string   `json:"code"`
+					Details []string `json:"details"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil {
+				t.Fatalf("answer %s: %v", w.Body, err)
+			}
+			wantState, wantResources := StateResuming, c.applied
+			if c.status == 422 {
+				if answer.Error.Code != "invalid_spec" || !reflect.DeepEqual(answer.Error.Details, c.details) {
+					t.Errorf("422 %s, want invalid_spec with details %q", w.Body, c.details)
+				}
+				wantState, wantResources = StateStopped, before
+			} else if rz := answer.Resize; rz == nil || !reflect.DeepEqual(rz.Requested, c.requested) ||
+				!reflect.DeepEqual(rz.Applied, c.applied) || rz.Disk != nil {
+				t.Errorf("resize %s, want requested %v applied %v", w.Body, c.requested, c.applied)
+			}
+			g := apiCall(t, s, key, http.MethodGet, "/v1/runs/"+id, nil)
+			var run struct {
+				State string `json:"state"`
+				Spec  struct {
+					Resources map[string]any `json:"resources"`
+				} `json:"spec"`
+				Resize any `json:"resize"`
+			}
+			if g.Code != http.StatusOK || json.Unmarshal(g.Body.Bytes(), &run) != nil {
+				t.Fatalf("GET: %d %s", g.Code, g.Body)
+			}
+			if run.State != wantState || !reflect.DeepEqual(run.Spec.Resources, wantResources) || run.Resize != nil {
+				t.Errorf("GET: %s %v resize %v, want %s %v and no resize", run.State, run.Spec.Resources, run.Resize, wantState, wantResources)
+			}
+		})
+	}
+}
