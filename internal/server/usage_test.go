@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"testing"
 
@@ -14,14 +15,14 @@ import (
 // An exit status carrying usage above 2^31-1 (bytes) and fractional CPU
 // seconds ends the placement, and every value is stored exactly.
 func TestExitStatusRecordsLargeUsage(t *testing.T) {
-	const gib = int64(1) << 30
 	usage := proto.Usage{
 		PeakMemoryBytes: 3 * gib,
 		PeakDiskBytes:   5 * gib,
 		PeakPids:        412,
-		CPUSeconds:      1.5,
-		NetRxBytes:      6 * gib,
-		NetTxBytes:      7 * gib,
+		// Not representable in float4 (it rounds to 123456.7890625).
+		CPUSeconds: 123456.789,
+		NetRxBytes: 6 * gib,
+		NetTxBytes: 7 * gib,
 	}
 	for _, c := range []struct {
 		status, runState string
@@ -35,20 +36,7 @@ func TestExitStatusRecordsLargeUsage(t *testing.T) {
 			s := testServer(t)
 			ctx := context.Background()
 			key := serversFixture(t, s, ctx)
-			if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/stop", nil); w.Code/100 != 2 {
-				t.Fatalf("stop: %d %s", w.Code, w.Body)
-			}
-			report := func(st proto.Status) error {
-				return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-					return s.applyStatus(ctx, tx, "t1", r1, 1, st)
-				})
-			}
-			if err := report(proto.Status{State: "stopping"}); err != nil {
-				t.Fatal(err)
-			}
-			if pl, run := usageStates(t, s, ctx); pl != "stopping" || run != StateStopping {
-				t.Fatalf("before the exit: placement %s, run %s", pl, run)
-			}
+			stopUsageRun(t, s, ctx, key)
 
 			code := 137
 			u := usage
@@ -56,22 +44,13 @@ func TestExitStatusRecordsLargeUsage(t *testing.T) {
 			if c.status == "failed" {
 				st.ExitCode, st.Message = nil, "container lost"
 			}
-			if err := report(st); err != nil {
+			if err := reportUsageStatus(s, ctx, st); err != nil {
 				t.Fatalf("exit status: %v", err)
 			}
 			if pl, run := usageStates(t, s, ctx); pl != "exited" || run != c.runState {
 				t.Fatalf("after the exit: placement %s, run %s; want exited, %s", pl, run, c.runState)
 			}
-			var got proto.Usage
-			var outputSeq int64
-			err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-				return tx.QueryRow(ctx, `SELECT peak_memory_bytes, peak_disk_bytes, peak_pids, cpu_seconds, net_rx_bytes, net_tx_bytes, output_seq
-					FROM placements WHERE run_id = $1 AND epoch = 1`, r1).Scan(
-					&got.PeakMemoryBytes, &got.PeakDiskBytes, &got.PeakPids, &got.CPUSeconds, &got.NetRxBytes, &got.NetTxBytes, &outputSeq)
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
+			got, outputSeq := storedUsage(t, s, ctx)
 			if got != usage {
 				t.Fatalf("stored usage %+v, want %+v", got, usage)
 			}
@@ -79,6 +58,47 @@ func TestExitStatusRecordsLargeUsage(t *testing.T) {
 				t.Fatalf("stored output_seq %d, want %d", outputSeq, 3*gib)
 			}
 		})
+	}
+}
+
+// Peaks a heartbeat raised survive an exit status reporting smaller ones:
+// greatest() keeps the heartbeat's values.
+func TestExitStatusKeepsHeartbeatPeaks(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	key := serversFixture(t, s, ctx)
+	peaks := proto.Usage{
+		PeakMemoryBytes: 9 * gib,
+		PeakDiskBytes:   9 * gib,
+		PeakPids:        math.MaxInt32,
+		CPUSeconds:      1e10 + 0.25,
+		NetRxBytes:      11 * gib,
+		NetTxBytes:      13 * gib,
+	}
+	hbUsage := peaks
+	hb := proto.Heartbeat{Leases: []proto.LivePlacement{{RunID: r1, Epoch: 1, State: "running", Usage: &hbUsage}}}
+	if err := s.heartbeat(ctx, "h1", hb); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	stopUsageRun(t, s, ctx, key)
+
+	code := 0
+	smaller := proto.Usage{
+		PeakMemoryBytes: 3 * gib,
+		PeakDiskBytes:   3 * gib,
+		PeakPids:        412,
+		CPUSeconds:      2.5,
+		NetRxBytes:      3 * gib,
+		NetTxBytes:      3 * gib,
+	}
+	if err := reportUsageStatus(s, ctx, proto.Status{State: "exited", ExitCode: &code, Reason: "stopped", Usage: &smaller}); err != nil {
+		t.Fatalf("exit status: %v", err)
+	}
+	if pl, run := usageStates(t, s, ctx); pl != "exited" || run != StateStopped {
+		t.Fatalf("after the exit: placement %s, run %s; want exited, %s", pl, run, StateStopped)
+	}
+	if got, _ := storedUsage(t, s, ctx); got != peaks {
+		t.Fatalf("stored usage %+v, want the heartbeat's %+v", got, peaks)
 	}
 }
 
@@ -97,6 +117,43 @@ func TestSnapshotRecordsLargeOutputSeq(t *testing.T) {
 	if err != nil || got != sd.OutputSeq {
 		t.Fatalf("stored output_seq %d (%v), want %d", got, err, sd.OutputSeq)
 	}
+}
+
+// stopUsageRun requests r1's stop and reports its placement stopping.
+func stopUsageRun(t *testing.T, s *Server, ctx context.Context, key string) {
+	t.Helper()
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/stop", nil); w.Code/100 != 2 {
+		t.Fatalf("stop: %d %s", w.Code, w.Body)
+	}
+	if err := reportUsageStatus(s, ctx, proto.Status{State: "stopping"}); err != nil {
+		t.Fatal(err)
+	}
+	if pl, run := usageStates(t, s, ctx); pl != "stopping" || run != StateStopping {
+		t.Fatalf("before the exit: placement %s, run %s", pl, run)
+	}
+}
+
+func reportUsageStatus(s *Server, ctx context.Context, st proto.Status) error {
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return s.applyStatus(ctx, tx, "t1", r1, 1, st)
+	})
+}
+
+func storedUsage(t *testing.T, s *Server, ctx context.Context) (u proto.Usage, outputSeq int64) {
+	t.Helper()
+	var seq *int64
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT peak_memory_bytes, peak_disk_bytes, peak_pids, cpu_seconds, net_rx_bytes, net_tx_bytes, output_seq
+			FROM placements WHERE run_id = $1 AND epoch = 1`, r1).Scan(
+			&u.PeakMemoryBytes, &u.PeakDiskBytes, &u.PeakPids, &u.CPUSeconds, &u.NetRxBytes, &u.NetTxBytes, &seq)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != nil {
+		outputSeq = *seq
+	}
+	return u, outputSeq
 }
 
 func usageStates(t *testing.T, s *Server, ctx context.Context) (placement, run string) {
