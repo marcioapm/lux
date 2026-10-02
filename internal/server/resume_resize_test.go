@@ -403,16 +403,17 @@ func TestResumeDiskShrinkNeedsTheFinalMeasurement(t *testing.T) {
 	const mib = 1 << 20
 	for _, c := range []struct {
 		name    string
-		saved   int64 // the snapshot's final disk sample
-		final   bool  // the exit status, with that sample, arrived
+		saved   int64  // the snapshot's final disk sample
+		status  string // the exit status, with that sample; "": lost before it
 		disk    int64
 		applied int64
 		reason  string
 	}{
-		{"lost before its exit status", 8 * gib, false, 2 * gib, 20 * gib, "no final measurement"},
-		{"lost before its exit status, a shrink its peak admits", 8 * gib, false, 11 * gib, 20 * gib, "no final measurement"},
-		{"exited, its final usage refuses the shrink", 1800 * mib, true, 2 * gib, 20 * gib, "its saved state used up to"},
-		{"exited, its final usage admits the shrink", 1800 * mib, true, 3 * gib, 3 * gib, ""},
+		{"lost before its exit status", 8 * gib, "", 2 * gib, 20 * gib, "no final measurement"},
+		{"lost before its exit status, a shrink its peak admits", 8 * gib, "", 11 * gib, 20 * gib, "no final measurement"},
+		{"exited, its final usage refuses the shrink", 1800 * mib, "exited", 2 * gib, 20 * gib, "its saved state used up to"},
+		{"exited, its final usage admits the shrink", 1800 * mib, "exited", 3 * gib, 3 * gib, ""},
+		{"failed, its final usage admits the shrink", 1800 * mib, "failed", 3 * gib, 3 * gib, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
@@ -432,9 +433,9 @@ func TestResumeDiskShrinkNeedsTheFinalMeasurement(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-				if c.final {
+				if c.status != "" {
 					code := 0
-					return s.applyStatus(ctx, tx, "t1", id, 1, proto.Status{State: "exited", ExitCode: &code, Reason: "stopped",
+					return s.applyStatus(ctx, tx, "t1", id, 1, proto.Status{State: c.status, ExitCode: &code, Reason: "stopped",
 						Usage: &proto.Usage{PeakDiskBytes: c.saved}})
 				}
 				var later laterEvents
