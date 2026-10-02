@@ -401,7 +401,9 @@ placement only, as the prompt does: a resume does not send them again. The
 shim also writes each to `$LUX_INPUTS/prompt/<n>-<name>`, on a state
 volume, so they are there after any resume ([adapters](adapters.md#images)
 says where, and how each agent gets them). luxd keeps their bytes apart
-from the stored spec, only until the first placement has started; the
+from the stored spec until a placement resumes the Run (it has a session
+or a snapshot) or the Run succeeds or is cancelled; a failed Run keeps
+them, since resuming it without a session or snapshot starts it afresh. The
 spec, and so a Run's views (`GET /v1/runs/{id}`), keep their names and
 types. Steers take
 images the same way (`attachments` on `POST /v1/runs/{id}/input`,

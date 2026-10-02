@@ -94,8 +94,12 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 			return err
 		}
 	}
+	// prompt_attachments: a succeeded or cancelled Run is never placed again.
+	// A failed one can be resumed, as a first placement when it has no
+	// session and no snapshot, so it keeps them.
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = $2, state_reason = $3, updated_at = now(),
 			finished_at = CASE WHEN $2 IN ('succeeded', 'failed', 'cancelled') THEN now() ELSE finished_at END,
+			prompt_attachments = CASE WHEN $2 IN ('succeeded', 'cancelled') THEN NULL ELSE prompt_attachments END,
 			activity = CASE WHEN $2 IN ('running') THEN activity ELSE '' END
 		WHERE id = $1`, runID, state, reason)
 	if err != nil {
@@ -181,9 +185,7 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 			return err
 		}
 		if hostID != "" {
-			// A started placement has its prompt images; no later one is
-			// sent them.
-			if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()), prompt_attachments = NULL WHERE id = $1`, runID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()) WHERE id = $1`, runID); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE hosts SET first_placement_at = coalesce(first_placement_at, now()) WHERE id = $1`, hostID); err != nil {
