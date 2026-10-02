@@ -52,6 +52,28 @@ func TestParseAddRepo(t *testing.T) {
 	}
 }
 
+// tenants ls shows each tenant's expiry: days, or never for 0.
+func TestTenantsLsExpiry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tenants":[{"id":"t_a","name":"a","retentionDays":30,"expireAfterDays":90},
+			{"id":"t_b","name":"b","retentionDays":5,"expireAfterDays":0}]}`))
+	}))
+	defer srv.Close()
+	var out strings.Builder
+	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: io.Discard}
+	root := a.root()
+	root.SetArgs([]string{"--url", srv.URL, "--api-key", "k", "tenants", "ls"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	header, rowA, rowB := strings.Fields(lines[0]), strings.Fields(lines[1]), strings.Fields(lines[2])
+	if header[len(header)-1] != "EXPIRY" || rowA[len(rowA)-1] != "90d" || rowB[len(rowB)-1] != "never" || rowB[len(rowB)-2] != "5d" {
+		t.Fatalf("table:\n%s", out.String())
+	}
+}
+
 // artifacts --delete sends DELETE /v1/runs/<run>/artifacts and says how
 // many went.
 func TestArtifactsDelete(t *testing.T) {

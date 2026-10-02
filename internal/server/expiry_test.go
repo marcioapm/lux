@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
@@ -128,6 +129,27 @@ func TestReapExpiryRacesResume(t *testing.T) {
 	var he *HTTPError
 	if !errors.As(err, &he) || he.Status != http.StatusConflict {
 		t.Fatalf("resume of an expired Run: %v, want 409", err)
+	}
+}
+
+// GET /v1/tenants shows each tenant's expireAfterDays.
+func TestTenantsShowExpiry(t *testing.T) {
+	s, _ := expiryFixture(t)
+	op := apiKey(t, s, nil, "operator")
+	code, body := call(t, s, op, http.MethodGet, "/v1/tenants", nil)
+	if code != http.StatusOK {
+		t.Fatalf("%d %s", code, body)
+	}
+	var resp struct{ Tenants []Tenant }
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, tn := range resp.Tenants {
+		got[tn.ID] = tn.ExpireAfterDays
+	}
+	if got["t1"] != 90 || got["never"] != 0 || got["short"] != 10 || len(got) != 3 {
+		t.Fatalf("expireAfterDays %v", got)
 	}
 }
 

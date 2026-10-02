@@ -2854,6 +2854,10 @@ components:
         createdAt:
           format: date-time
           type: string
+        expireAfterDays:
+          description: "Days a stopped, lost or failed Run may rest before lux cancels it; 0: never."
+          format: int64
+          type: integer
         hosts:
           format: int64
           type: integer
@@ -2871,6 +2875,7 @@ components:
         name:
           type: string
         retentionDays:
+          description: Days a succeeded or cancelled Run keeps its snapshots and output after it ended. Artifacts are kept until deleted.
           format: int64
           type: integer
         runs:
