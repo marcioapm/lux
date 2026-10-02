@@ -2,6 +2,9 @@ package adapter
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -956,7 +959,28 @@ func (a *ACP) handleNotification(m rpcMsg) {
 		streamEvent(a.sink, "acp."+u.Kind, p.SessionID+"\x00", p.Update, [][]string{{"content", "text"}}) {
 		return
 	}
+	if u.Kind == "user_message_chunk" && u.Content.Type == "image" {
+		a.sink.Event("acp."+u.Kind, userImageMeta(p.Update))
+		return
+	}
 	a.sink.Event("acp."+u.Kind, json.RawMessage(p.Update))
+}
+
+// userImageMeta is a user_message_chunk image block (session/load replays
+// the user's turns) as records keep it: its size and sha256 in place of
+// its data, as for an input's images.
+func userImageMeta(update json.RawMessage) map[string]any {
+	var u map[string]any
+	_ = json.Unmarshal(update, &u)
+	if c, ok := u["content"].(map[string]any); ok {
+		if d, ok := c["data"].(string); ok {
+			b, _ := base64.StdEncoding.DecodeString(d)
+			sum := sha256.Sum256(b)
+			c["size"], c["sha256"] = len(b), hex.EncodeToString(sum[:])
+			delete(c, "data")
+		}
+	}
+	return u
 }
 
 // handleRequest answers agent → client requests. Unattended: permission

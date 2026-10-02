@@ -84,6 +84,14 @@ func main() {
 type entry struct {
 	Role string `json:"role"`
 	Text string `json:"text"`
+	// Images: a user turn's ACP image blocks, which session/load replays
+	// as OpenCode does.
+	Images []replayImage `json:"images,omitempty"`
+}
+
+type replayImage struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
 }
 
 // agent is the conversation and its turns. Each protocol front end sets
@@ -129,11 +137,23 @@ type agent struct {
 type prompt struct {
 	text, id string
 	images   []string
+	acpImgs  []replayImage
 }
 
 // promptOf is a message's content as a prompt.
 func promptOf(content textBlocks, id string) prompt {
-	return prompt{text: content.String(), id: id, images: content.images()}
+	p := prompt{text: content.String(), id: id, images: content.images()}
+	for _, b := range content {
+		if b.Type == "image" && b.MimeType != "" {
+			p.acpImgs = append(p.acpImgs, replayImage{b.MimeType, b.Data})
+		}
+	}
+	return p
+}
+
+// recordUser records a user turn with its ACP images.
+func (a *agent) recordUser(p prompt) {
+	a.recordEntry(entry{Role: "user", Text: p.text, Images: p.acpImgs})
 }
 
 // see replies with each image the prompt carried, before its script runs:
@@ -180,14 +200,16 @@ func (a *agent) loadSession(id string) error {
 	return nil
 }
 
-func (a *agent) record(role, text string) {
+func (a *agent) record(role, text string) { a.recordEntry(entry{Role: role, Text: text}) }
+
+func (a *agent) recordEntry(e entry) {
 	_ = os.MkdirAll(transcriptDir(), 0o755)
 	f, err := os.OpenFile(a.transcript(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
-	b, _ := json.Marshal(entry{role, text})
+	b, _ := json.Marshal(e)
 	f.Write(append(b, '\n'))
 }
 
@@ -276,7 +298,7 @@ func (a *agent) takeSteers() []prompt {
 // run in this turn or refused (addSteer false): never lost.
 func (a *agent) runTurn(first prompt, c chan struct{}) (cancelled bool) {
 	a.read(first)
-	a.record("user", first.text)
+	a.recordUser(first)
 	a.see(first)
 	cancelled = a.runScript(first.text, c)
 	for !cancelled {
@@ -313,7 +335,7 @@ func (a *agent) runSteers(c chan struct{}) bool {
 		if a.readAll == nil {
 			a.read(p)
 		}
-		a.record("user", p.text)
+		a.recordUser(p)
 		a.see(p)
 		if a.runScript(p.text, c) {
 			return true
@@ -663,6 +685,10 @@ func acp() {
 				kind := "agent_message_chunk"
 				if e.Role == "user" {
 					kind = "user_message_chunk"
+				}
+				for _, im := range e.Images {
+					rpc(map[string]any{"method": "session/update", "params": map[string]any{"sessionId": a.session,
+						"update": map[string]any{"sessionUpdate": kind, "content": map[string]string{"type": "image", "mimeType": im.MimeType, "data": im.Data}}}})
 				}
 				update(kind, e.Text+"\n")
 			}
