@@ -11,12 +11,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import time
 
 import pytest
 
 from conftest import CLIError, fake_agent, generic, harnesses
 from env import wait_until
-from pngword import square_png
+from pngword import square_png, word_png
 
 # The shape each adapter gives the agent an image in (lux-fake's name).
 SHAPES = {"claude-code": "claude", "codex": "codex-local", "acp": "acp", "opencode": "opencode-file"}
@@ -112,6 +113,41 @@ def test_images_reach_the_agent_and_survive_a_move(lux, runners, hosts, harness,
     wait_until(lambda: "/home/agent/.lux-inputs" in lux.logs(run_id), harness.timeout, 0.3, "LUX_INPUTS not set")
     # The first prompt's images are not given again on resume.
     assert lux.logs(run_id).count(_seen(prompt_img, prompt_shape)) == 1
+    lux.run("cancel", run_id)
+
+
+def test_real_agent_reads_an_image(lux, runners, hosts, harness, tmp_path):
+    """The real CLI sees a steer's image as an image: asked what word is
+    written in it, it answers the word (it is in no text it was given).
+    Sent to the idle agent, and again mid-turn (OpenCode then takes it
+    through prompt_async rather than ACP)."""
+    if not harness.real:
+        pytest.skip("the fake variants are covered above")
+    runners.start(hosts[0])
+    run_id = lux.submit(harness.spec("Reply with just: ready"))
+    lux.wait_activity(run_id, "idle", timeout=harness.timeout)
+    for word, busy in (("MANGO", False), ("TULIP", True)):
+        img = tmp_path / f"{word.lower()}.png"
+        img.write_bytes(word_png(word))
+        since = lux.records(run_id)[-1]["cursor"]
+        if busy:
+            lux.run("steer", run_id, "Run `sleep 15` with your shell tool, in the foreground, then reply: slept")
+            lux.wait_activity(run_id, "busy", timeout=harness.timeout)
+            time.sleep(3)
+        rid = f"real-{word.lower()}"
+        lux.run("steer", run_id, "What word is written in the image? Reply with just the word.",
+                "--image", str(img), "--request-id", rid)
+        try:
+            reply = wait_until(lambda: (out := lux.logs(run_id, "--since", since)) and word in out.upper() and out,
+                               harness.timeout, 1, f"the agent never named {word}")
+        except AssertionError as e:
+            seen = [json.dumps(r.get("event"))[:400] for r in lux.records(run_id, "--events") if r.get("event")]
+            raise AssertionError(f"{e}; output: {lux.logs(run_id)[-1500:]!r}; events: {seen[-30:]}") from None
+        ack = next(r["event"]["data"] for r in lux.records(run_id, "--events")
+                   if r.get("event", {}).get("type") == "lux.input" and r["event"]["data"]["requestId"] == rid)
+        print(f"{harness.id} {'mid-turn' if busy else 'idle'} lands={ack.get('lands')} receipt={ack.get('receipt')} replied: {reply.strip()!r}")
+        assert ack["phase"] == "accepted" and ack["attachments"] == [_meta(img.name, word_png(word))], ack
+        lux.wait_activity(run_id, "idle", timeout=harness.timeout)
     lux.run("cancel", run_id)
 
 
