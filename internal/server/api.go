@@ -1581,7 +1581,8 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			if !ok {
 				return errf(http.StatusConflict, "snapshot_unavailable", "snapshot %s is no longer available", req.FromSnapshot)
 			}
-			if _, err := tx.Exec(ctx, `UPDATE runs SET snapshot_id = $2 WHERE id = $1`, id, req.FromSnapshot); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET snapshot_id = $2,
+					snapshots_superseded = snapshots_superseded OR snapshot_id IS DISTINCT FROM $2 WHERE id = $1`, id, req.FromSnapshot); err != nil {
 				return err
 			}
 		}

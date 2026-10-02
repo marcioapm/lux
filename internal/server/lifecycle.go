@@ -489,13 +489,17 @@ func insertSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, pla
 		}
 	}
 	// Only the current placement's snapshot becomes the Run's: an old host
-	// reporting late must not roll the Run back.
+	// reporting late must not roll the Run back. Either way the Run may now
+	// have a snapshot that is not its current one (reapSuperseded).
 	if epoch == current {
 		if _, err := tx.Exec(ctx, `UPDATE runs SET snapshot_id = $2,
-				session_id = CASE WHEN $3 <> '' THEN $3 ELSE session_id END
+				session_id = CASE WHEN $3 <> '' THEN $3 ELSE session_id END,
+				snapshots_superseded = snapshots_superseded OR snapshot_id IS NOT NULL
 			WHERE id = $1`, runID, sd.Manifest.SnapshotID, sd.Manifest.SessionID); err != nil {
 			return err
 		}
+	} else if _, err := tx.Exec(ctx, `UPDATE runs SET snapshots_superseded = true WHERE id = $1`, runID); err != nil {
+		return err
 	}
 	return addEvent(ctx, tx, tenantID, runID, epoch, "snapshot", map[string]any{"snapshotId": sd.Manifest.SnapshotID, "bytes": total, "volumes": len(sd.Manifest.Volumes)})
 }

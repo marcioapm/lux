@@ -488,14 +488,15 @@ func (s *Server) reapExpiry(ctx context.Context) error {
 // claimed. A snapshot with a volume still on its host waits, available,
 // for a later pass: never deleted from under an upload. A blob the current
 // manifest also names is kept.
+//
+// Runs are found by runs.snapshots_superseded, cleared here once the Run
+// has no other available snapshot left, or has ended (reapRetention's).
 func (s *Server) reapSuperseded(ctx context.Context) error {
 	var keys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT r.id FROM runs r
-			WHERE r.id IN (SELECT o.run_id FROM snapshots o JOIN runs rr ON rr.id = o.run_id
-				WHERE o.available AND o.id <> rr.snapshot_id AND rr.state NOT IN ('succeeded', 'cancelled'))
-			  AND EXISTS (SELECT 1 FROM snapshots cur WHERE cur.id = r.snapshot_id AND cur.uploaded)
-			  AND r.state NOT IN ('succeeded', 'cancelled')
+			WHERE r.snapshots_superseded AND (r.state IN ('succeeded', 'cancelled')
+				OR EXISTS (SELECT 1 FROM snapshots cur WHERE cur.id = r.snapshot_id AND cur.uploaded))
 			ORDER BY r.id LIMIT 20
 			FOR UPDATE OF r SKIP LOCKED`)
 		if err != nil {
@@ -527,7 +528,13 @@ func (s *Server) reapSuperseded(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		keys, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		if keys, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+			return err
+		}
+		// After the claim's statement, so it sees the snapshots it took.
+		_, err = tx.Exec(ctx, `UPDATE runs r SET snapshots_superseded = false
+			WHERE r.id = ANY($1) AND (r.state IN ('succeeded', 'cancelled') OR NOT EXISTS (
+				SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id IS DISTINCT FROM r.snapshot_id))`, runs)
 		return err
 	})
 	if err != nil {
