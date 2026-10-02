@@ -494,9 +494,18 @@ func (s *Server) reapExpiry(ctx context.Context) error {
 func (s *Server) reapSuperseded(ctx context.Context) error {
 	var keys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// Candidates: an ended Run or a stale hint (only its flag to
+		// clear), or a Run with an older snapshot the claim would take
+		// now. One whose older snapshots all wait for an upload is left
+		// out before the LIMIT, so it cannot hold a batch slot pass
+		// after pass.
 		rows, err := tx.Query(ctx, `SELECT r.id FROM runs r
 			WHERE r.snapshots_superseded AND (r.state IN ('succeeded', 'cancelled')
-				OR EXISTS (SELECT 1 FROM snapshots cur WHERE cur.id = r.snapshot_id AND cur.uploaded))
+				OR NOT EXISTS (SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id IS DISTINCT FROM r.snapshot_id)
+				OR (EXISTS (SELECT 1 FROM snapshots cur WHERE cur.id = r.snapshot_id AND cur.uploaded)
+					AND EXISTS (SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id <> r.snapshot_id
+						AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(nullif(o.manifest->'volumes', 'null'), '[]')) v
+							JOIN blobs b ON b.id = v->>'blobId' AND b.run_id = o.run_id WHERE b.location = 'host'))))
 			ORDER BY r.id LIMIT 20
 			FOR UPDATE OF r SKIP LOCKED`)
 		if err != nil {

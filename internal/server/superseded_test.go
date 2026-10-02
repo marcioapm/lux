@@ -137,6 +137,38 @@ func TestReapSupersededSparesHostAndSharedBlobs(t *testing.T) {
 	}
 }
 
+// Runs whose older snapshot still has a volume on its host are not
+// candidates: twenty of them, with lower ids, do not keep a ready Run out
+// of the pass's batch.
+func TestReapSupersededSkipsBlockedRuns(t *testing.T) {
+	s, ctx, f := supersededFixture(t)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, snapshots_superseded)
+		SELECT 'ra' || lpad(i::text, 2, '0'), 't2', '{}', 'stopped', 2, true FROM generate_series(0, 19) i`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state)
+		SELECT r.id || '-p' || e, 't2', r.id, 'hb', e, 'exited' FROM runs r, generate_series(1, 2) e WHERE r.id LIKE 'ra__'`)
+	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, host_id, s3_key)
+		SELECT r.id || '-vol' || e, 't2', r.id, e, 'volume', 'work', CASE e WHEN 1 THEN 'host' ELSE 's3' END, 'hb',
+			CASE e WHEN 2 THEN r.id || '/' || r.id || '-vol2' END
+		FROM runs r, generate_series(1, 2) e WHERE r.id LIKE 'ra__'`)
+	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, host_id, uploaded)
+		SELECT r.id || '-s' || e, 't2', r.id, r.id || '-p' || e, e,
+			jsonb_build_object('volumes', jsonb_build_array(jsonb_build_object('name', 'work', 'blobId', r.id || '-vol' || e))), 'hb', e = 2
+		FROM runs r, generate_series(1, 2) e WHERE r.id LIKE 'ra__'`)
+	execSQL(t, s, ctx, `UPDATE runs SET snapshot_id = id || '-s2' WHERE id LIKE 'ra__'`)
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotAvailable(t, s, "snapB") || !slices.Equal(f.Deleted(), []string{"rb/bB-vol-snapB"}) {
+		t.Fatalf("rb not reaped behind blocked Runs: snapB available %v, S3 deletes %v", snapshotAvailable(t, s, "snapB"), f.Deleted())
+	}
+	var blocked int
+	systemScan(t, s, `SELECT count(*) FROM snapshots WHERE run_id LIKE 'ra__' AND available`, nil, &blocked)
+	if blocked != 40 {
+		t.Fatalf("blocked Runs' available snapshots: %d, want 40", blocked)
+	}
+}
+
 // A resume --from-snapshot of the older snapshot that commits before the
 // reaper's pass makes it the current one: the reaper deletes the formerly
 // current one instead. One the reaper claims first is refused (409
