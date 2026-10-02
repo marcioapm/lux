@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +24,7 @@ import (
 // $0.log. As podman does, `volume rm -f` also removes the container that
 // mounts the volume. The container, while it exists, is inspected as
 // stopped, made from image img1 with the lux.spec label in $0.hash.
+// Each create assigns a new ID; start records the ID it actually starts.
 const podmanWithVolumes = `#!/bin/sh
 echo "$*" >> "$0.log"
 case "$1 $2" in
@@ -35,8 +36,15 @@ case "$1 $2" in
 "volume rm") rm -f "$0.vol.$4" "$0.ctr" ;;
 "volume import") cat > /dev/null ;;
 "rm -f") rm -f "$0.ctr" ;;
-"start "*) [ -e "$0.ctr" ] || { echo "no container $2" >&2; exit 125; } ;;
-*) [ "$1" = create ] && touch "$0.ctr" ;;
+"start "*)
+  [ -e "$0.ctr" ] || { echo "no container $2" >&2; exit 125; }
+  cat "$0.ctr" >> "$0.started" ;;
+*)
+  if [ "$1" = create ]; then
+    id=$(cat "$0.next-id")
+    echo "ctr-$id" > "$0.ctr"
+    echo "$((id+1))" > "$0.next-id"
+  fi ;;
 esac
 `
 
@@ -94,8 +102,13 @@ func newResumeFixture(t *testing.T, epoch int, local string) *resumeFixture {
 	if err := os.MkdirAll(p.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{".ctr", ".vol." + volumeName("run1", "data"), ".vol." + runtimeVolume("run1")} {
+	for _, f := range []string{".vol." + volumeName("run1", "data"), ".vol." + runtimeVolume("run1")} {
 		if err := os.WriteFile(bin+f, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for suffix, value := range map[string]string{".ctr": "ctr-1\n", ".next-id": "2\n"} {
+		if err := os.WriteFile(bin+suffix, []byte(value), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -143,22 +156,31 @@ func (f *resumeFixture) start(ctx context.Context) error {
 	return f.r.pm.Start(ctx, containerName("run1"))
 }
 
-// waitEvent waits for a run event of type typ, and returns every event
-// reported up to then.
-func (f *resumeFixture) waitEvent(t *testing.T, typ string) string {
+func (f *resumeFixture) waitEvent(t *testing.T, typ string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		f.mu.Lock()
-		got := strings.Join(f.events, " ")
+		got := slices.Clone(f.events)
 		f.mu.Unlock()
-		if strings.Contains(got, typ) {
-			return got
+		if slices.Contains(got, typ) {
+			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("events %q: no %s", got, typ)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (f *resumeFixture) assertStartedContainer(t *testing.T, id string) {
+	t.Helper()
+	started, err := os.ReadFile(f.bin + ".started")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(started) != id+"\n" {
+		t.Fatalf("started containers %q, want only %s; podman:\n%s", started, id, f.podmanLog())
 	}
 }
 
@@ -176,12 +198,8 @@ func TestResumeAfterRestoreRemovedTheContainerCreatesOne(t *testing.T) {
 	if err := f.start(context.Background()); err != nil {
 		t.Fatalf("start: %v; podman:\n%s", err, f.podmanLog())
 	}
-	if !strings.Contains(f.podmanLog(), "\ncreate ") {
-		t.Fatalf("no container created; podman:\n%s", f.podmanLog())
-	}
-	if got := f.waitEvent(t, "volumes.restored"); strings.Contains(got, "container.reused") {
-		t.Fatalf("events %q: a removed container was reported reused", got)
-	}
+	f.assertStartedContainer(t, "ctr-2")
+	f.waitEvent(t, "volumes.restored")
 }
 
 // A same-host resume whose volumes are the snapshot's keeps its stopped
@@ -191,8 +209,6 @@ func TestSameHostResumeReusesTheStoppedContainer(t *testing.T) {
 	if err := f.start(context.Background()); err != nil {
 		t.Fatalf("start: %v; podman:\n%s", err, f.podmanLog())
 	}
-	if log := f.podmanLog(); strings.Contains(log, "\ncreate ") || strings.Contains(log, "rm -f -t 0") {
-		t.Fatalf("the stopped container was not reused; podman:\n%s", log)
-	}
+	f.assertStartedContainer(t, "ctr-1")
 	f.waitEvent(t, "container.reused")
 }

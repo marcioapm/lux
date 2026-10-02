@@ -171,11 +171,13 @@ func TestFinishingPlacementKeepsItsLease(t *testing.T) {
 	f.exitedAsSupervised(context.Background())
 	f.waitFile(t, f.bin+".exporting")
 
-	// Heartbeats every second: two after the export started, past what
-	// a 3s lease renewed just before it would have left.
-	_, n := f.heartbeatAfter(t, f.count())
-	time.Sleep(3 * time.Second)
-	leases, _ := f.heartbeatAfter(t, n)
+	// Ignore heartbeats within the lease window, then require a fresh one.
+	leaseEnds := time.Now().Add(time.Duration(f.r.lease.Load()))
+	n := f.count()
+	for time.Now().Before(leaseEnds) {
+		_, n = f.heartbeatAfter(t, n)
+	}
+	leases, _ := f.heartbeatAfter(t, f.count())
 	if len(leases) != 1 || leases[0].RunID != "run1" || leases[0].Epoch != 1 || leases[0].State != "stopping" {
 		t.Fatalf("leases while snapshotting: %+v, want run1 epoch 1 stopping", leases)
 	}
