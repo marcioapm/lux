@@ -101,8 +101,8 @@ Where `$LUX_INPUTS` is: `.lux-inputs` at the root of the state volume that
 holds the adapter's session (`$HOME/.claude`, `$HOME/.codex`,
 `$HOME/.local/share/opencode`); for `acp`, of the one holding the
 workload's home, else the first state volume. Never inside a git checkout
-(a checkout at a volume's root moves it beside the session directory, or
-to the next state volume) nor `$LUX_ARTIFACTS` (the runtime volume). A Run
+(a volume whose root is in a checkout is passed over for the next state
+volume) nor `$LUX_ARTIFACTS` (the runtime volume). A Run
 with no state volume has it at `/.lux/run/inputs` on the runtime volume,
 which a stop and resume on the same host keep and a move to another host
 does not.

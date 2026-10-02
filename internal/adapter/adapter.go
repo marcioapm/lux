@@ -552,7 +552,10 @@ func inputContent(dialect int, in proto.Input) []map[string]any {
 		case dialectClaude:
 			out = append(out, map[string]any{"type": "image", "source": map[string]string{"type": "base64", "media_type": a.ContentType, "data": a.Data}})
 		case dialectCodex:
-			// The file the shim wrote; inline only if it could not.
+			// The file the shim wrote; inline only if it could not. Both are
+			// UserInput variants of the app-server protocol (codex 0.145,
+			// `codex app-server generate-json-schema`): LocalImageUserInput
+			// {type:"localImage", path} and ImageUserInput {type:"image", url}.
 			if a.Path != "" {
 				out = append(out, map[string]any{"type": "localImage", "path": a.Path})
 			} else {
