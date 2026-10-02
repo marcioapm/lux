@@ -109,6 +109,7 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 	if !cfg.Resume && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
 		c.send(proto.Input{RequestID: "prompt", Text: cfg.Prompt, Attachments: cfg.PromptAttachments})
 	}
+	cfg.PromptAttachments = nil // c.sent holds them while they are needed
 	for _, in := range queued {
 		c.Deliver(in)
 	}

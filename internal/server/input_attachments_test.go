@@ -13,9 +13,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // tinyPNG is a 1×1 PNG.
@@ -203,9 +206,106 @@ func TestSubmitAttachments(t *testing.T) {
 	if got := out.Body.Spec.Workload.Attachments; len(got) != 1 || got[0].Data != "" || got[0].Name != "a.png" {
 		t.Fatalf("returned spec attachments %+v", got)
 	}
-	// The runner gets the stored spec, bytes included.
-	stored := queryOne[string](t, s, `SELECT spec->'workload'->'attachments'->0->>'data' FROM runs WHERE id = $1`, out.Body.ID)
-	if stored != b64(tinyPNG) {
-		t.Fatalf("stored data %q", stored)
+}
+
+// A prompt's image bytes are kept beside the spec, not in it: Run views
+// and the stored spec carry names and types; the first placement's Assign
+// carries the bytes outside its spec; the ack drops them from the queued
+// message, and the Run's first start drops them from the Run.
+func TestPromptAttachmentsBesideSpec(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	mustPut(t, s, "t1", Pool{Name: "default", Provider: "static", IsDefault: mark(true)})
+	key := ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('k1', 't1', 'k', $1, ARRAY['run', 'read'])`, ids.Hash(key))
+	data := b64(tinyPNG)
+	out, err := submitWithAttachments(s, "claude-code", []spec.Attachment{{Name: "a.png", ContentType: "image/png", Data: data}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := out.Body.ID
+	wantView := []spec.Attachment{{Name: "a.png", ContentType: "image/png"}}
+
+	if spec := queryOne[string](t, s, `SELECT spec::text FROM runs WHERE id = $1`, id); strings.Contains(spec, data) {
+		t.Fatalf("stored spec holds the bytes: %s", spec)
+	}
+	if got := queryOne[string](t, s, `SELECT prompt_attachments->0->>'data' FROM runs WHERE id = $1`, id); got != data {
+		t.Fatalf("prompt_attachments data %q", got)
+	}
+	var one Run
+	if code := getJSON(t, s, key, "/v1/runs/"+id, &one); code != http.StatusOK {
+		t.Fatalf("get: %d", code)
+	}
+	var list struct {
+		Runs []Run `json:"runs"`
+	}
+	if code := getJSON(t, s, key, "/v1/runs", &list); code != http.StatusOK || len(list.Runs) != 1 {
+		t.Fatalf("list: %d %+v", code, list)
+	}
+	for at, got := range map[string][]spec.Attachment{"get": one.Spec.Workload.Attachments, "list": list.Runs[0].Spec.Workload.Attachments} {
+		if len(got) != 1 || got[0] != wantView[0] {
+			t.Fatalf("%s: attachments %+v, want %+v", at, got, wantView)
+		}
+	}
+
+	readyHost(t, s, "h1", "default", "t1", false)
+	schedule(t, s)
+	var msgID int64
+	var payload []byte
+	systemScan(t, s, `SELECT id, payload FROM host_messages WHERE run_id = $1 AND type = $2`, []any{id, proto.MsgAssign}, &msgID, &payload)
+	var a proto.Assign
+	if err := json.Unmarshal(payload, &a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Resume != nil || len(a.PromptAttachments) != 1 || a.PromptAttachments[0].Data != data || a.PromptAttachments[0].Name != "a.png" {
+		t.Fatalf("assign prompt attachments %+v", a.PromptAttachments)
+	}
+	if got := a.Spec.Workload.Attachments; len(got) != 1 || got[0] != wantView[0] {
+		t.Fatalf("assign spec attachments %+v", got)
+	}
+
+	if err := s.ackMessage(ctx, "h1", msgID); err != nil {
+		t.Fatal(err)
+	}
+	systemScan(t, s, `SELECT payload FROM host_messages WHERE id = $1`, []any{msgID}, &payload)
+	a = proto.Assign{}
+	if err := json.Unmarshal(payload, &a); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), data) || a.RunID != id || a.Spec.Workload.Adapter != "claude-code" {
+		t.Fatalf("acked assign payload %s", payload)
+	}
+
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return s.applyStatus(ctx, tx, "t1", id, a.Epoch, proto.Status{State: "running"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM runs WHERE id = $1 AND prompt_attachments IS NULL`, id); n != 1 {
+		t.Fatal("prompt_attachments kept after the first placement started")
+	}
+}
+
+// An acked input keeps its text and request id, not its images' bytes.
+func TestInputAckDropsAttachments(t *testing.T) {
+	s, key := inputFixture(t)
+	body, _ := json.Marshal(map[string]any{"requestId": "req-img", "text": "see", "attachments": []any{png("shot.png")}})
+	if status, out := postJSON(t, s, key, "/v1/runs/r1/input", body); status != http.StatusAccepted {
+		t.Fatalf("got %d %v", status, out)
+	}
+	var id int64
+	systemScan(t, s, `SELECT id FROM host_messages WHERE run_id = 'r1'`, nil, &id)
+	if err := s.ackMessage(context.Background(), "h1", id); err != nil {
+		t.Fatal(err)
+	}
+	var payload []byte
+	systemScan(t, s, `SELECT payload FROM host_messages WHERE id = $1`, []any{id}, &payload)
+	var in proto.Input
+	if err := json.Unmarshal(payload, &in); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), b64(tinyPNG)) || len(in.Attachments) != 0 || in.Text != "see" || in.RequestID != "req-img" {
+		t.Fatalf("acked input payload %s", payload)
 	}
 }

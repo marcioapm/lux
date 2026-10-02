@@ -128,7 +128,9 @@ func (c *Codex) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink 
 		c.rpc.readLoop(p.Stdout, c.handleRequest, func(m rpcMsg) { c.handleNotification(m, sink) }, sink.Stdout)
 	}()
 
-	if err := c.handshake(cfg, sink); err != nil {
+	err := c.handshake(cfg, sink)
+	cfg.PromptAttachments = nil // the queued prompt holds their paths
+	if err != nil {
 		sink.Event(proto.EvWarning, map[string]any{"message": "codex: " + err.Error()})
 		_ = p.Signal(syscall.SIGTERM)
 	} else {

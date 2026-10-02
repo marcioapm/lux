@@ -30,16 +30,17 @@ func checkAttachments(at string, list []spec.Attachment) error {
 	return he
 }
 
-// withoutAttachmentData is a spec as Run views show it: its attachments'
-// names and types, not their bytes, which went to the agent once.
-func withoutAttachmentData(sp spec.RunSpec) spec.RunSpec {
-	if len(sp.Workload.Attachments) == 0 {
-		return sp
+// splitPromptAttachments is the spec as stored, its attachments' names and
+// types only, and their bytes (runs.prompt_attachments), nil for none.
+func splitPromptAttachments(sp spec.RunSpec) (spec.RunSpec, []spec.Attachment) {
+	full := sp.Workload.Attachments
+	if len(full) == 0 {
+		return sp, nil
 	}
-	list := make([]spec.Attachment, len(sp.Workload.Attachments))
-	for i, a := range sp.Workload.Attachments {
+	list := make([]spec.Attachment, len(full))
+	for i, a := range full {
 		list[i] = spec.Attachment{Name: a.Name, ContentType: a.ContentType}
 	}
 	sp.Workload.Attachments = list
-	return sp
+	return sp, full
 }

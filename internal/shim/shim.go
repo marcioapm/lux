@@ -211,10 +211,8 @@ func (s *Shim) run() int {
 	s.serversReady()
 
 	s.adapter = ad
-	if !s.cfg.Resume && len(s.cfg.PromptAttachments) > 0 {
-		s.cfg.PromptAttachments = s.inputAttachments(proto.Input{RequestID: "prompt", Attachments: s.cfg.PromptAttachments})
-	}
-	argv, err := ad.Command(s.cfg)
+	adCfg := s.adapterConfig()
+	argv, err := ad.Command(adCfg)
 	if err != nil {
 		return s.fail("start-failed", err.Error())
 	}
@@ -225,12 +223,11 @@ func (s *Shim) run() int {
 	s.out.Event(proto.EvWorkload, map[string]any{"phase": "start", "pid": proc.Cmd.Process.Pid, "command": argv})
 
 	adDone := make(chan struct{})
-	go func() {
-		defer close(adDone)
-		if err := ad.Run(context.Background(), proc, s.cfg, &sink{s}); err != nil {
-			s.out.Event(proto.EvWarning, map[string]any{"message": "adapter: " + err.Error()})
-		}
-	}()
+	// The adapter's copy of the config is its argument, not a captured
+	// variable: the prompt's images are released once the adapter is done
+	// with them.
+	go s.runAdapter(ad, proc, adCfg, adDone)
+	adCfg = proto.ShimConfig{}
 	// Inputs that arrived before the workload started, then the resume
 	// input from the start message.
 	s.mu.Lock()
@@ -270,6 +267,27 @@ func (s *Shim) run() int {
 		info.Message = s.stopWhy
 	}
 	return s.finish(info)
+}
+
+// adapterConfig is the config the adapter starts with: on a first
+// placement, the prompt's images written to $LUX_INPUTS/prompt and passed
+// on. The shim's own config keeps none of their bytes.
+func (s *Shim) adapterConfig() proto.ShimConfig {
+	cfg := s.cfg
+	s.cfg.PromptAttachments = nil
+	if cfg.Resume {
+		cfg.PromptAttachments = nil
+	} else if len(cfg.PromptAttachments) > 0 {
+		cfg.PromptAttachments = s.inputAttachments(proto.Input{RequestID: "prompt", Attachments: cfg.PromptAttachments})
+	}
+	return cfg
+}
+
+func (s *Shim) runAdapter(ad adapter.Adapter, proc *adapter.Process, cfg proto.ShimConfig, done chan<- struct{}) {
+	defer close(done)
+	if err := ad.Run(context.Background(), proc, cfg, &sink{s}); err != nil {
+		s.out.Event(proto.EvWarning, map[string]any{"message": "adapter: " + err.Error()})
+	}
 }
 
 func (s *Shim) fail(reason, msg string) int {

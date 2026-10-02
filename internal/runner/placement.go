@@ -225,7 +225,10 @@ func (p *placement) run(ctx context.Context) {
 	defer close(p.done)
 	a := p.assign
 	sp := a.Spec
-
+	// The prompt's images go to this placement's shim config and nowhere
+	// else: not runner memory past it, not state.json.
+	prompt := a.PromptAttachments
+	a.PromptAttachments = nil
 	prev, _ := readRunState(p.dir)
 	st := &runState{RunID: p.runID, TenantID: p.tenantID, Epoch: p.epoch, Phase: "assigned", Times: map[string]int64{}}
 	p.mu.Lock()
@@ -341,7 +344,7 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 
-	err = p.createContainer(ctx, sp, image, info.ID, prevCtr, network, a)
+	err = p.createContainer(ctx, sp, image, info.ID, prevCtr, network, a, prompt)
 	unpin()
 	if err != nil {
 		fail("container", err)
@@ -706,13 +709,13 @@ func hardening(sp spec.RunSpec) []string {
 // earlier placement's, stopped) for a same-host resume made the same way:
 // the same image and the same create arguments, which the lux.spec label
 // hashes. The shim config is rewritten either way.
-func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image, imageID string, prev podman.ContainerState, network podman.Network, a *proto.Assign) error {
+func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image, imageID string, prev podman.ContainerState, network podman.Network, a *proto.Assign, prompt []spec.Attachment) error {
 	name := containerName(p.runID)
 	args := p.createArgs(sp, image, network)
 	hash := argsHash(args)
 	if prev.Exists {
 		if a.Resume != nil && imageID != "" && imageID == prev.ImageID && prev.Labels["lux.spec"] == hash {
-			if err := p.writeShimConfig(ctx, sp); err != nil {
+			if err := p.writeShimConfig(ctx, sp, prompt); err != nil {
 				return err
 			}
 			p.event(ctx, "container.reused", nil)
@@ -722,7 +725,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image,
 			return err
 		}
 	}
-	if err := p.writeShimConfig(ctx, sp); err != nil {
+	if err := p.writeShimConfig(ctx, sp, prompt); err != nil {
 		return err
 	}
 	// The label goes before the image, the last argument.
@@ -782,7 +785,9 @@ func (p *placement) mounts() []volumeRef {
 	return append(slices.Clone(p.state.Volumes), p.state.EngineVolumes...)
 }
 
-func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec) error {
+// writeShimConfig writes config.json for the shim; prompt is the first
+// placement's prompt images (nil on a resume).
+func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt []spec.Attachment) error {
 	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
 	if err != nil {
 		return err
@@ -811,10 +816,10 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec) error 
 	if sp.Init != nil {
 		cfg.Init = sp.Init.Script
 	}
-	// Images go with the prompt only on the first placement, as the
-	// prompt does.
+	// luxd sends images with the prompt only on the first placement, as the
+	// prompt goes.
 	if a.Resume == nil {
-		cfg.PromptAttachments = sp.Workload.Attachments
+		cfg.PromptAttachments = prompt
 	}
 	cfg.InputsDir, cfg.InputsRoot = sp.InputsDir(p.user.Home)
 	cfg.Sync = p.sync

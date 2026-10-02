@@ -201,6 +201,9 @@ type Assign struct {
 	Resume *ResumeInfo `json:"resume,omitempty"`
 	// Input to deliver as the first message (resume with input).
 	Input *Input `json:"input,omitempty"`
+	// PromptAttachments: workload.attachments with their bytes, which
+	// Spec leaves out; only on a first placement (Resume nil).
+	PromptAttachments []spec.Attachment `json:"promptAttachments,omitempty"`
 	// Image build resolution from an earlier placement, so rebuilds use the
 	// same pinned FROMs.
 	ImageResolved *ImageResolution `json:"imageResolved,omitempty"`
