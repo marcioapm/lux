@@ -182,6 +182,12 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 			}
 			var done bool
 			switch {
+			case follow && pl.state == "assigned":
+				// Its host has not taken it up yet, and would answer as
+				// for a placement that never wrote anything: asked now,
+				// it would look finished and its records be skipped.
+				// Wait for it to start (a state change wakes the loop).
+				done = false
 			case pl.blobLoc == "s3":
 				err = s.streamOutputBlob(ctx, pl.blobKey, since, emit)
 				done = true
