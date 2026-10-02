@@ -73,10 +73,11 @@ type Config struct {
 	// is labelled nested=true, and such Runs get what rootless Podman
 	// inside them needs (see nested.go).
 	Nested bool
-	// AssignDelay holds every assignment this long before the runner takes
-	// it up (and acks it). Test-only: it widens the window in which luxd
-	// has a placement the runner does not know yet.
-	AssignDelay time.Duration
+	// AssignHold, if set, names a file: while it exists, the runner holds
+	// each assignment before taking it up (and acking it). Test-only: it
+	// keeps a placement assigned in luxd that the runner does not know yet,
+	// until the test removes the file.
+	AssignHold string
 }
 
 type Runner struct {
@@ -320,6 +321,26 @@ func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
 	}
 }
 
+// holdAssignment waits while the file at path exists, checking every 100ms,
+// or until ctx ends.
+func (r *Runner) holdAssignment(ctx context.Context, path string, a proto.Assign) {
+	logged := false
+	for {
+		if _, err := os.Stat(path); err != nil {
+			return
+		}
+		if !logged {
+			r.log.Warn("holding assignment (test hold)", "run", a.RunID, "epoch", a.Epoch, "file", path)
+			logged = true
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 // handleControl handles one durable message from luxd. Idempotent.
 func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 	switch f.Type {
@@ -329,9 +350,8 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 			r.log.Error("bad assign", "err", err)
 			return
 		}
-		if d := r.cfg.AssignDelay; d > 0 {
-			r.log.Warn("holding assignment (test delay)", "run", a.RunID, "epoch", a.Epoch, "delay", d)
-			time.Sleep(d)
+		if path := r.cfg.AssignHold; path != "" {
+			r.holdAssignment(ctx, path, a)
 		}
 		r.assign(ctx, a)
 	case proto.MsgStop, proto.MsgCancel:
