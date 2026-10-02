@@ -310,12 +310,14 @@ var (
 			round(avg(pids))::int, max(net_rx), max(net_tx)
 		FROM placement_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "placement_samples", "d.run_id = s.run_id AND d.epoch = s.epoch") + `
 		GROUP BY run_id, epoch, tenant_id, 5 ON CONFLICT DO NOTHING`
-	// Runs and hosts by state are the bucket's last sample.
+	// Runs and hosts by state are the bucket's last sample; stored bytes
+	// are levels.
 	rollupSystem = `INSERT INTO system_samples (tenant_id, res, at, runs, busy, idle, queued, started, finished, start_p50, start_p95,
-			hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem)
+			hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem, stored_volume, stored_output, stored_artifact, stored_context)
 		SELECT tenant_id, $2::int, ` + rollupBucket + `, (array_agg(runs ORDER BY at DESC))[1], round(avg(busy))::int, round(avg(idle))::int,
 			round(avg(queued))::int, sum(started)::int, sum(finished)::int, avg(start_p50), max(start_p95),
-			(array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint, avg(alloc_cpus), avg(alloc_mem)::bigint
+			(array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint, avg(alloc_cpus), avg(alloc_mem)::bigint,
+			avg(stored_volume)::bigint, avg(stored_output)::bigint, avg(stored_artifact)::bigint, avg(stored_context)::bigint
 		FROM system_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "system_samples", "d.tenant_id = s.tenant_id") + `
 		GROUP BY tenant_id, 3 ON CONFLICT DO NOTHING`
 	// A pool's levels are averaged, its hosts by state the bucket's last,
