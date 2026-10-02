@@ -162,7 +162,7 @@ def test_follow_across_same_host_resumes(lux, runners, hosts):
     output while it runs, including when it reaches the new placement
     before its runner has taken it up: each cycle holds the assignment in
     the runner (LUX_TEST_ASSIGN_HOLD) until the follower's request is live
-    on it."""
+    on it. In the end it has had every record once."""
     hold = "/tmp/lux-assign-hold"
     host = hosts[0]
     runners.start(host, environ={"LUX_TEST_ASSIGN_HOLD": hold})
@@ -220,6 +220,8 @@ def test_follow_across_same_host_resumes(lux, runners, hosts):
                 except AssertionError:
                     f.check()
                     missed.append(epoch)
+            lux.run("stop", run_id, "--wait")
+            finish(f)
         finally:
             host.exec("rm", "-f", hold, check=False)
             failures = []
@@ -232,5 +234,8 @@ def test_follow_across_same_host_resumes(lux, runners, hosts):
         assert not missed, f"placements {missed}: output never reached the follower that was waiting on them"
         run = lux.get(run_id)
         assert {p["hostName"] for p in run["placements"]} == {host.name}, run["placements"]
+        got = [(r["cursor"], r["data"]) for f in followers for r in f.records() if r["ch"] == "stdout"]
+        want = [(r["cursor"], r["data"]) for r in lux.records(run_id) if r["ch"] == "stdout"]
+        assert got == want
     finally:
         lux.run("cancel", run_id, "--wait", check=False)
