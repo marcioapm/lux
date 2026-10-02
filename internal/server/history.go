@@ -139,23 +139,34 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 				FROM blobs WHERE location = 's3'
 				GROUP BY GROUPING SETS ((tenant_id), ())
 			),
+			-- Non-terminated hosts, read once: by owner (NULL: the platform) and state.
+			host_groups AS (
+				SELECT tenant_id, state, count(*) AS n,
+					coalesce(sum((capacity->>'cpus')::float8) FILTER (WHERE state IN ('ready', 'draining')), 0) AS cpus,
+					coalesce(sum((capacity->>'memory')::int8) FILTER (WHERE state IN ('ready', 'draining')), 0) AS mem
+				FROM hosts WHERE state <> 'terminated'
+				GROUP BY tenant_id, state
+			),
 			-- A tenant with nothing live but bytes in S3 is still sampled.
 			tenants AS (
 				SELECT '' AS id
 				UNION SELECT id FROM runs_by UNION SELECT id FROM flow
-				UNION SELECT tenant_id FROM hosts WHERE tenant_id IS NOT NULL AND state <> 'terminated'
+				UNION SELECT tenant_id FROM host_groups WHERE tenant_id IS NOT NULL
 				UNION SELECT id FROM stored WHERE total > 0
 			),
-			-- Hosts a tenant may use: its own and the platform's; all for ''.
+			-- Hosts a tenant may use: its own groups and the platform's; all
+			-- for ''. Joins on the groups, never a scan of hosts per tenant.
+			host_rows AS (
+				SELECT g.tenant_id AS id, g.state, g.n, g.cpus, g.mem FROM host_groups g JOIN tenants t ON t.id = g.tenant_id
+				UNION ALL
+				SELECT t.id, g.state, g.n, g.cpus, g.mem FROM tenants t CROSS JOIN host_groups g WHERE t.id <> '' AND g.tenant_id IS NULL
+				UNION ALL
+				SELECT '', state, n, cpus, mem FROM host_groups
+			),
 			hosts_by AS (
-				SELECT t.id, jsonb_object_agg(x.state, x.n) AS hosts, sum(x.cpus) AS cpus, sum(x.mem)::bigint AS mem
-				FROM tenants t CROSS JOIN LATERAL (
-					SELECT h.state, count(*) AS n,
-						coalesce(sum((h.capacity->>'cpus')::float8) FILTER (WHERE h.state IN ('ready', 'draining')), 0) AS cpus,
-						coalesce(sum((h.capacity->>'memory')::int8) FILTER (WHERE h.state IN ('ready', 'draining')), 0) AS mem
-					FROM hosts h WHERE h.state <> 'terminated' AND (t.id = '' OR h.tenant_id = t.id OR h.tenant_id IS NULL)
-					GROUP BY h.state) x
-				GROUP BY t.id
+				SELECT id, jsonb_object_agg(state, n) AS hosts, sum(cpus) AS cpus, sum(mem)::bigint AS mem
+				FROM (SELECT id, state, sum(n)::bigint AS n, sum(cpus) AS cpus, sum(mem) AS mem FROM host_rows GROUP BY id, state) x
+				GROUP BY id
 			)
 			INSERT INTO system_samples (tenant_id, res, at, window_end, runs, busy, idle, queued, started, finished, start_p50, start_p95,
 				hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem, stored_volume, stored_output, stored_artifact, stored_context)
