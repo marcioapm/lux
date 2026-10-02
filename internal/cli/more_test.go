@@ -96,6 +96,30 @@ func TestArtifactsDelete(t *testing.T) {
 	}
 }
 
+// artifacts --download with --delete is refused before any request.
+func TestArtifactsDownloadDeleteRefused(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"deleted":3,"artifacts":[]}`))
+	}))
+	defer srv.Close()
+	var out strings.Builder
+	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: io.Discard}
+	root := a.root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"--url", srv.URL, "--api-key", "k", "artifacts", "run_1", "--download", t.TempDir(), "--delete"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "none of the others can be") {
+		t.Fatalf("--download --delete: %v, want refused as mutually exclusive", err)
+	}
+	if len(seen) != 0 || out.String() != "" {
+		t.Fatalf("sent %v, printed %q, want nothing", seen, out.String())
+	}
+}
+
 // pools set --default alone sends a marker-only body, exactly name and
 // isDefault, which luxd refuses to read as anything else; with a setting,
 // the whole pool.

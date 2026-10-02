@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/blob"
@@ -131,5 +132,60 @@ func TestDeleteArtifactsDuringUpload(t *testing.T) {
 	}
 	if got := f.Deleted(); !slices.Equal(got, []string{blob.Key("t1", "ra", "bA-art")}) {
 		t.Fatalf("S3 deletes %v, want the uploaded object", got)
+	}
+}
+
+// An artifact whose upload committed before the delete: the delete claims
+// it and deletes the uploaded object.
+func TestDeleteArtifactsAfterUpload(t *testing.T) {
+	s, ctx, f := retentionFixture(t, StateSucceeded, StateSucceeded, 1, 1)
+	body := []byte("artifact bytes")
+	sum := sha256.Sum256(body)
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL, sha256 = $1 WHERE id = 'bA-art'`, hex.EncodeToString(sum[:]))
+	req := httptest.NewRequest(http.MethodPut, "/runner/v1/blobs/bA-art?host=ha", bytes.NewReader(body))
+	req.SetPathValue("id", "bA-art")
+	req.Header.Set("Authorization", "Bearer host-secret")
+	rec := httptest.NewRecorder()
+	s.wrap(s.serveBlobUpload)(rec, req)
+	if rec.Code/100 != 2 {
+		t.Fatalf("upload: %d %s", rec.Code, rec.Body)
+	}
+	if loc := blobLocations(t, s, "ra")["bA-art"]; loc != "s3" {
+		t.Fatalf("bA-art after upload: %s, want s3", loc)
+	}
+	key := apiKey(t, s, new("t1"), "run")
+	if code, body := callJSON(t, s, key, http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusOK || body["deleted"] != float64(1) {
+		t.Fatalf("delete: %d %v", code, body)
+	}
+	if loc := blobLocations(t, s, "ra")["bA-art"]; loc != "deleted" {
+		t.Fatalf("bA-art: %s, want deleted", loc)
+	}
+	if got := f.Deleted(); !slices.Equal(got, []string{blob.Key("t1", "ra", "bA-art")}) {
+		t.Fatalf("S3 deletes %v, want the uploaded object", got)
+	}
+}
+
+// An S3 delete that fails leaves an orphan, logged with its key; the claim
+// stands: the blob stays deleted and the request succeeds.
+func TestDeleteArtifactsS3Failure(t *testing.T) {
+	s, _, f := retentionFixture(t, StateSucceeded, StateSucceeded, 1, 1)
+	log := captureLog(s)
+	f.failPrefix = "ra/"
+	key := apiKey(t, s, new("t1"), "run")
+	if code, body := callJSON(t, s, key, http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusOK || body["deleted"] != float64(1) {
+		t.Fatalf("delete: %d %v", code, body)
+	}
+	if !strings.Contains(log.String(), "object orphaned") || !strings.Contains(log.String(), "ra/bA-art") {
+		t.Fatalf("no orphan logged: %s", log.String())
+	}
+	if loc := blobLocations(t, s, "ra")["bA-art"]; loc != "deleted" {
+		t.Fatalf("bA-art: %s, want deleted (the claim stands)", loc)
+	}
+	if len(f.Deleted()) != 0 {
+		t.Fatalf("S3 deletes %v", f.Deleted())
+	}
+	code, body := callJSON(t, s, key, http.MethodDelete, "/v1/runs/ra/artifacts")
+	if code != http.StatusOK || body["deleted"] != float64(0) {
+		t.Fatalf("again: %d %v, want 200 deleted 0", code, body)
 	}
 }
