@@ -188,3 +188,22 @@ func TestReapExpiryClockRestartsOnResume(t *testing.T) {
 		t.Fatalf("touched: %s, want cancelled (updated_at is not the clock)", state)
 	}
 }
+
+// Setting a Run's state to the one it is already in (a repeated stop) is
+// not a change of state: the clock keeps running and the Run expires.
+func TestReapExpiryClockKeptOnSameState(t *testing.T) {
+	s, ctx := expiryFixture(t)
+	restingRun(t, s, ctx, "repeated", "t1", StateStopped, 100)
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return setRunState(ctx, tx, "t1", "repeated", StateStopped, "stop", 1)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reapExpiry(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, reason := runState(t, s, "repeated"); state != StateCancelled {
+		t.Fatalf("repeated stop restarted expiry: %s %q, want cancelled", state, reason)
+	}
+}
