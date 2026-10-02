@@ -1526,6 +1526,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			return errf(http.StatusUnprocessableEntity, "secrets_required",
 				"luxd no longer holds this Run's secrets: only the tenant can resume it, supplying them")
 		}
+		specChanged := false
 		if len(adding) > 0 {
 			added, err := addRepositories(&sp, refs, adding, req.RequestID, s.cfg.Defaults)
 			if err != nil {
@@ -1534,6 +1535,16 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			// A new credential's value comes with the resume, like the
 			// others' (held values cover only the secrets the Run had).
 			refs = append(refs, added...)
+			specChanged = true
+		}
+		declared, err := sp.ResumeSecrets(req.Secrets, s.cfg.Defaults)
+		if err != nil {
+			return invalidSpec(err)
+		}
+		for _, n := range declared {
+			refs = append(refs, spec.SecretRef{Name: n})
+		}
+		if specChanged = specChanged || len(declared) > 0; specChanged {
 			stored, _, _ := sp.SplitSecrets()
 			if _, err := tx.Exec(ctx, `UPDATE runs SET spec = $2 WHERE id = $1`, id, stored); err != nil {
 				return err
@@ -1602,6 +1613,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		ev := map[string]any{"requestId": req.RequestID, "by": p.Actor(), "addedRepositories": names}
 		if len(req.Sync) > 0 {
 			ev["sync"] = req.Sync
+		}
+		if len(declared) > 0 {
+			ev["addedSecrets"] = declared
 		}
 		if resize != nil {
 			ev["resources"] = resize
