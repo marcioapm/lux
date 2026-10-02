@@ -962,6 +962,8 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 				if err != nil {
 					return err
 				}
+				// GET has no resize: it is the resume's answer alone.
+				r.Resize = out.Resize
 				out = *r
 			}
 			if a.output == "json" {
