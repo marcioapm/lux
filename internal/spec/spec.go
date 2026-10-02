@@ -767,9 +767,12 @@ func (s *RunSpec) normalizeSecret(at string, sec *Secret) []string {
 // ResumeSecrets applies a resume's secrets to a stored (normalized) spec,
 // after AddRepositories (whose new credentials are then the spec's, not
 // declared here). Each supplied secret whose name the spec lacks is
-// declared, checked as at submit and stored without its value. Returns the
+// declared, checked as at submit and stored without its value; each name
+// in remove leaves the spec. Removing a name the spec lacks, a credential
+// (git, registry or header), a name also supplied, or the credential of a
+// repository in repos (those this resume adds) is refused. Returns the
 // names declared; on any problem, the spec is unchanged.
-func (s *RunSpec) ResumeSecrets(supplied []Secret, d Defaults) ([]string, error) {
+func (s *RunSpec) ResumeSecrets(supplied []Secret, remove []string, repos []Repository, d Defaults) ([]string, error) {
 	has := map[string]bool{}
 	for _, sec := range s.Secrets {
 		has[sec.Name] = true
@@ -791,14 +794,36 @@ func (s *RunSpec) ResumeSecrets(supplied []Secret, d Defaults) ([]string, error)
 		adding = append(adding, n)
 		declared = append(declared, n.Name)
 	}
+	removing := map[string]bool{}
+	for _, name := range remove {
+		at := fmt.Sprintf("removeSecrets: %q", name)
+		switch {
+		case removing[name]:
+			errs = append(errs, fmt.Sprintf("removeSecrets: duplicate %q", name))
+		case slices.ContainsFunc(supplied, func(sec Secret) bool { return sec.Name == name }):
+			errs = append(errs, at+" is also in secrets: supply it or remove it, not both")
+		case slices.ContainsFunc(repos, func(r Repository) bool { return r.Credential == name }):
+			errs = append(errs, at+" is the credential of a repository this resume adds")
+		case !has[name]:
+			errs = append(errs, at+": the Run has no such secret")
+		case s.isGitCredential(name):
+			errs = append(errs, at+" is a git credential: its repository needs it")
+		case s.isRegistryCredential(name):
+			errs = append(errs, at+" is a registry credential: image.registryAuth needs it")
+		case s.onlyCredential(name):
+			errs = append(errs, at+" values an MCP server's or service's header")
+		}
+		removing[name] = true
+	}
 	if len(errs) > 0 {
 		return nil, &ValidationError{Problems: errs}
 	}
-	if len(adding) == 0 {
+	if len(adding) == 0 && len(removing) == 0 {
 		return nil, nil
 	}
 	next := *s
-	next.Secrets = append(slices.Clone(s.Secrets), adding...)
+	next.Secrets = slices.DeleteFunc(slices.Clone(s.Secrets), func(sec Secret) bool { return removing[sec.Name] })
+	next.Secrets = append(next.Secrets, adding...)
 	if err := next.Normalize(d); err != nil {
 		return nil, err
 	}

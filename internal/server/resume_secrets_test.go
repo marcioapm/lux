@@ -196,3 +196,87 @@ func TestResumeAddedRepositoryCredentialIsNotDeclaredAsEnv(t *testing.T) {
 		t.Errorf("addedSecrets %v: a credential is the repository's", ev["addedSecrets"])
 	}
 }
+
+// removeSecrets takes a secret out of the stored spec and runs.secrets:
+// its value is not held for the placement, and the next resume does not
+// need it.
+func TestResumeRemovesSecrets(t *testing.T) {
+	s := testServer(t)
+	id := stoppedWithSecrets(t, s)
+	rest := slices.DeleteFunc(baseValues(), func(sec spec.Secret) bool { return sec.Name == "TOKEN" })
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: rest, RemoveSecrets: []string{"TOKEN"}}); err != nil {
+		t.Fatal(err)
+	}
+	secs, refs := storedSecrets(t, s, id)
+	want := []string{"GIT_TOKEN", "HDR", "REG"}
+	if got := secretNames(secs); !reflect.DeepEqual(got, want) {
+		t.Errorf("spec.secrets %v, want %v", got, want)
+	}
+	if got := refNames(refs); !reflect.DeepEqual(got, want) {
+		t.Errorf("runs.secrets %v, want %v", got, want)
+	}
+	if vals, _ := s.secrets.get(id); len(vals) != 3 || vals["TOKEN"] != "" {
+		t.Errorf("held values %v", vals)
+	}
+	if ev := resumeEvent(t, s, id); !reflect.DeepEqual(ev["removedSecrets"], []any{"TOKEN"}) {
+		t.Errorf("resume.requested removedSecrets %v", ev["removedSecrets"])
+	}
+	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: rest}); err != nil {
+		t.Fatalf("resume without the removed secret: %v", err)
+	}
+
+	// A value supplied with a removal of another name (a rotation) or a
+	// stale value for a removed name the client still sends are both fine:
+	// the latter declares it again.
+	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: with(rest, spec.Secret{Name: "TOKEN", Value: "token-3"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, refs := storedSecrets(t, s, id); !slices.Contains(refNames(refs), "TOKEN") {
+		t.Errorf("TOKEN not declared again: %v", refNames(refs))
+	}
+}
+
+// Every removal that cannot be is a 422 invalid_spec naming it, and the
+// Run is as it was: its spec (repositories too), runs.secrets, its state.
+func TestResumeRefusesRemovals(t *testing.T) {
+	without := func(name string) []spec.Secret {
+		return slices.DeleteFunc(baseValues(), func(sec spec.Secret) bool { return sec.Name == name })
+	}
+	addTwo := &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "NEW_GIT"}}}
+	for _, c := range []struct {
+		name    string
+		req     resumeRequest
+		problem string
+	}{
+		{"unknown", resumeRequest{Secrets: baseValues(), RemoveSecrets: []string{"NOPE"}}, `"NOPE": the Run has no such secret`},
+		{"git credential", resumeRequest{Secrets: without("GIT_TOKEN"), RemoveSecrets: []string{"GIT_TOKEN"}}, `"GIT_TOKEN" is a git credential`},
+		{"registry credential", resumeRequest{Secrets: without("REG"), RemoveSecrets: []string{"REG"}}, `"REG" is a registry credential`},
+		{"header secret", resumeRequest{Secrets: without("HDR"), RemoveSecrets: []string{"HDR"}}, `"HDR" values an MCP server's or service's header`},
+		{"also supplied", resumeRequest{Secrets: baseValues(), RemoveSecrets: []string{"TOKEN"}}, `"TOKEN" is also in secrets`},
+		{"also declared", resumeRequest{Secrets: with(baseValues(), spec.Secret{Name: "NEW", Value: "new-12345"}), RemoveSecrets: []string{"NEW"}}, `"NEW" is also in secrets`},
+		{"an added repository's credential", resumeRequest{Secrets: baseValues(), Git: addTwo, RemoveSecrets: []string{"NEW_GIT"}},
+			`"NEW_GIT" is the credential of a repository this resume adds`},
+		{"twice", resumeRequest{Secrets: without("TOKEN"), RemoveSecrets: []string{"TOKEN", "TOKEN"}}, `removeSecrets: duplicate "TOKEN"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			id := stoppedWithSecrets(t, s)
+			var before []byte
+			systemScan(t, s, `SELECT spec::text FROM runs WHERE id = $1`, []any{id}, &before)
+			_, beforeRefs := storedSecrets(t, s, id)
+			_, err := resumeSecrets(tenantCtx("t1"), s, id, c.req)
+			he := refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "resume")
+			if !strings.Contains(strings.Join(he.Details, "\n"), c.problem) {
+				t.Errorf("details %q, want %q", he.Details, c.problem)
+			}
+			var after []byte
+			systemScan(t, s, `SELECT spec::text FROM runs WHERE id = $1`, []any{id}, &after)
+			_, refs := storedSecrets(t, s, id)
+			if string(after) != string(before) || !reflect.DeepEqual(refs, beforeRefs) || storedState(t, s, id) != StateStopped {
+				t.Errorf("a refused resume changed the Run:\n%s\n%s\n%v", before, after, refs)
+			}
+		})
+	}
+}
