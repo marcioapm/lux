@@ -285,3 +285,57 @@ func TestServiceProxyUnreachableClosesAnUnreadUpload(t *testing.T) {
 		t.Fatalf("1 MiB upload unread: keep-alive promised, next request: %v %v", get, err)
 	}
 }
+
+// A chunked request and response stream both ways at once: the workload
+// sends each line only after it has read the upstream's echo of the
+// previous one.
+func TestServiceProxyStreamsBothWays(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NewResponseController(w).EnableFullDuplex()
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		sc := bufio.NewScanner(r.Body)
+		for sc.Scan() {
+			io.WriteString(w, sc.Text()+"\n")
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer up.Close()
+	h, err := newServiceProxy(spec.Service{Name: "tools", URL: up.URL}, nil, NewRedactor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	// The transport waits for the body before Do fails; end it on timeout.
+	defer context.AfterFunc(ctx, func() { pw.CloseWithError(ctx.Err()) })()
+	req, err := http.NewRequestWithContext(ctx, "POST", proxy.URL+"/chat", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = -1
+	go io.WriteString(pw, "a\n")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	br := bufio.NewReader(resp.Body)
+	for _, next := range []string{"b", "c"} {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("echo before %q: %q %v", next, line, err)
+		}
+		io.WriteString(pw, next+"\n")
+	}
+	pw.Close()
+	rest, err := io.ReadAll(br)
+	if err != nil || string(rest) != "c\n" {
+		t.Fatalf("last echo %q %v", rest, err)
+	}
+}
