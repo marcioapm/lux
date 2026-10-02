@@ -98,6 +98,15 @@ func main() {
 			cfg.Labels[k] = v
 		}
 	}
+	// Test-only (tests/suites): not a flag, so it stays out of --help.
+	if v := os.Getenv("LUX_TEST_ASSIGN_DELAY"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "lux-runner: LUX_TEST_ASSIGN_DELAY=%q: want a duration\n", v)
+			os.Exit(2)
+		}
+		cfg.AssignDelay = d
+	}
 	level := slog.LevelInfo
 	if os.Getenv("LUX_DEBUG") != "" {
 		level = slog.LevelDebug
