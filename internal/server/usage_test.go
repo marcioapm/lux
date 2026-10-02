@@ -18,7 +18,7 @@ func TestExitStatusRecordsLargeUsage(t *testing.T) {
 	usage := proto.Usage{
 		PeakMemoryBytes: 3 * gib,
 		PeakDiskBytes:   5 * gib,
-		PeakPids:        412,
+		PeakPids:        40000, // above int2: pins the int cast, not smallint
 		// Not representable in float4 (it rounds to 123456.7890625).
 		CPUSeconds: 123456.789,
 		NetRxBytes: 6 * gib,
