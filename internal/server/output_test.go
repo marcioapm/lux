@@ -143,6 +143,9 @@ func followOutput(t *testing.T, s *Server, key string) <-chan outputSSE {
 				ev.data = strings.TrimPrefix(line, "data: ")
 			}
 		}
+		if err := sc.Err(); err != nil {
+			events <- outputSSE{"transport", err.Error()}
+		}
 	}()
 	return events
 }
@@ -304,8 +307,13 @@ func TestFollowEndsWhenAnAssignedPlacementIsLost(t *testing.T) {
 	if !ok || ev.name != "end" || end.State != StateLost || end.Cursor != "3.0" {
 		t.Fatalf("after the gap: %+v (ok %v), want end, lost at 3.0", ev, ok)
 	}
-	if ev, ok := nextEvent(events, 5*time.Second); ok {
-		t.Fatalf("after the end: %+v, want EOF", ev)
+	select {
+	case ev, ok := <-events:
+		if ok {
+			t.Fatalf("after the end: %+v, want EOF", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream did not close after its end")
 	}
 }
 
