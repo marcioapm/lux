@@ -547,15 +547,17 @@ func (s *Server) deleteObjects(ctx context.Context, what string, keys []string) 
 	}
 }
 
-// reapRetention deletes the blobs of Runs that finished longer ago than
-// their tenant's retention.
+// reapRetention deletes the blobs of Runs that succeeded or were cancelled
+// longer ago than their tenant's retention: snapshot volumes and output.
+// Artifacts are kept until their owner deletes them (deleteArtifacts). A
+// failed Run is resumable, so it keeps everything until it expires
+// (reapExpiry) and its retention counts from then.
 //
-// The database is the claim: blobs are marked deleted, and the snapshots
-// they belong to unavailable, in one transaction that locks each Run and
-// checks it is still finished, so a concurrent resume either sees the Run
-// finished (and is refused a snapshot that is going) or clears finished_at
-// first (and keeps everything). S3 objects are deleted after the claim; one
-// that fails to delete is an orphan in S3, never a Run pointing at nothing.
+// The database is the claim: blobs are marked deleted, and the Run's
+// snapshots unavailable, in one transaction that locks each Run and checks
+// it is still terminal, so a Run cannot be resumed from a snapshot that is
+// going. S3 objects are deleted after the claim; one that fails to delete
+// is an orphan in S3, never a Run pointing at nothing.
 func (s *Server) reapRetention(ctx context.Context) error {
 	var keys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -563,16 +565,17 @@ func (s *Server) reapRetention(ctx context.Context) error {
 			WITH due AS (
 				SELECT r.id FROM runs r JOIN tenants t ON t.id = r.tenant_id
 				WHERE r.finished_at IS NOT NULL AND r.finished_at < now() - make_interval(days => t.retention_days)
-				  AND EXISTS (SELECT 1 FROM blobs bl WHERE bl.run_id = r.id AND bl.location = 's3')
+				  AND r.state IN ('succeeded', 'cancelled')
+				  AND EXISTS (SELECT 1 FROM blobs bl WHERE bl.run_id = r.id AND bl.location = 's3' AND bl.kind <> 'artifact')
 				ORDER BY r.finished_at LIMIT 20
 				FOR UPDATE OF r SKIP LOCKED
 			), gone AS (
-				UPDATE snapshots SET available = false WHERE run_id IN (SELECT id FROM due)
+				UPDATE snapshots SET available = false WHERE run_id IN (SELECT id FROM due) AND available
 			)
 			-- Only blobs in S3: one still on its host is mid-upload; it is
 			-- claimed on a later pass, once it has arrived.
 			UPDATE blobs SET location = 'deleted', deleted_at = now()
-			WHERE run_id IN (SELECT id FROM due) AND location = 's3'
+			WHERE run_id IN (SELECT id FROM due) AND location = 's3' AND kind <> 'artifact'
 			RETURNING s3_key`)
 		if err != nil {
 			return err
@@ -583,10 +586,6 @@ func (s *Server) reapRetention(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, k := range keys {
-		if err := s.blobs.Delete(ctx, k); err != nil {
-			s.log.Warn("retention: S3 delete failed; object orphaned", "key", k, "err", err)
-		}
-	}
+	s.deleteObjects(ctx, "retention", keys)
 	return nil
 }
