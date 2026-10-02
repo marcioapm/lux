@@ -23,6 +23,21 @@ afterAll(async () => {
 
 const sleep = (ms: number) => act(() => new Promise<void>((r) => setTimeout(r, ms)));
 
+/** Polls (10 ms steps, inside act) until ok() holds; fails after 5 s. */
+async function until(ok: () => boolean, what: string) {
+  for (const end = Date.now() + 5000; !ok(); ) {
+    if (Date.now() > end) throw new Error(`never: ${what}`);
+    await sleep(10);
+  }
+}
+
+/** n's text as a reader gets it: without aria-hidden decoration (a sort arrow). */
+function visibleText(n: Element): string {
+  const c = n.cloneNode(true) as Element;
+  for (const hidden of c.querySelectorAll('[aria-hidden="true"]')) hidden.remove();
+  return c.textContent?.trim() ?? "";
+}
+
 const tenant = (id: string, expireAfterDays: number): Tenant => ({
   id,
   name: id,
@@ -51,28 +66,38 @@ async function render(tenants: Tenant[]) {
       </ScopeProvider>,
     ),
   );
-  await sleep(50);
-  const headers = () => [...el.querySelectorAll("thead th")].map((th) => th.querySelector(".th-inner")?.firstChild?.textContent ?? "");
+  const table = () => el.querySelector("table");
+  // Column headers and body rows by the elements carrying those table roles
+  // (th: columnheader, tbody tr: row, td: cell), never the design system's
+  // wrapper classes.
+  const headerCells = () => [...(table()?.querySelectorAll("thead th") ?? [])];
+  const headers = () => headerCells().map(visibleText);
+  const bodyRows = () => [...(table()?.querySelectorAll("tbody tr") ?? [])];
+  const cellTexts = () => bodyRows().map((tr) => [...tr.querySelectorAll("td")].map((td) => visibleText(td)));
+  const done = async () => {
+    await act(async () => root.unmount());
+    el.remove();
+    fake.restore();
+    api.signOut();
+  };
+  try {
+    await until(() => cellTexts().some((cells) => cells.includes(tenants[0]!.name)), `a row for ${tenants[0]!.name}`);
+  } catch (e) {
+    await done();
+    throw e;
+  }
   return {
     // Each row's tenant name and Expiry cell, in the order shown.
     expiries: () => {
       const name = headers().indexOf("Tenant");
       const exp = headers().indexOf("Expiry");
-      return [...el.querySelectorAll("tbody tr")].map((tr) => {
-        const tds = tr.querySelectorAll("td");
-        return [tds[name]?.textContent, tds[exp]?.textContent];
-      });
+      return cellTexts().map((cells) => [cells[name], cells[exp]]);
     },
     sortByExpiry: async () => {
-      const th = [...el.querySelectorAll("thead th")][headers().indexOf("Expiry")] as HTMLElement;
+      const th = headerCells().find((h) => visibleText(h) === "Expiry") as HTMLElement;
       await act(async () => th.click());
     },
-    done: async () => {
-      await act(async () => root.unmount());
-      el.remove();
-      fake.restore();
-      api.signOut();
-    },
+    done,
   };
 }
 
