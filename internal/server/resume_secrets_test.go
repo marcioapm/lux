@@ -36,10 +36,16 @@ func baseValues() []spec.Secret {
 // stoppedRun does: a snapshot on host ha, uploaded.
 func stoppedWithSecrets(t *testing.T, s *Server) string {
 	t.Helper()
+	return stoppedWith(t, s, secretsSpec())
+}
+
+// stoppedWith submits sp as tenant t1 and stops it as stoppedWithSecrets.
+func stoppedWith(t *testing.T, s *Server, sp spec.RunSpec) string {
+	t.Helper()
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1') ON CONFLICT DO NOTHING`)
 	namedPools(t, s, "default")
-	out, err := s.submitRun(tenantCtx("t1"), &submitRunInput{Body: secretsSpec()})
+	out, err := s.submitRun(tenantCtx("t1"), &submitRunInput{Body: sp})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,5 +497,61 @@ func TestResumeRefusesRemovals(t *testing.T) {
 				t.Errorf("a refused resume changed the Run:\n%s\n%s\n%v", before, after, refs)
 			}
 		})
+	}
+}
+
+// A resume declares an as: none secret, whose name need not be an env
+// name; a later resume removes it and no longer needs it.
+func TestResumeDeclaresAndRemovesNoneSecret(t *testing.T) {
+	s := testServer(t)
+	id := stoppedWithSecrets(t, s)
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: with(baseValues(), spec.Secret{Name: "a.b", Value: "ab-1", As: "none"})}); err != nil {
+		t.Fatal(err)
+	}
+	secs, refs := storedSecrets(t, s, id)
+	i := slices.IndexFunc(secs, func(sec spec.Secret) bool { return sec.Name == "a.b" })
+	if i < 0 || secs[i].As != "none" || secs[i].Value != "" {
+		t.Fatalf("a.b stored as %+v", secs)
+	}
+	if !slices.Contains(refNames(refs), "a.b") {
+		t.Fatalf("runs.secrets %v", refNames(refs))
+	}
+	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: baseValues(), RemoveSecrets: []string{"a.b"}}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"GIT_TOKEN", "HDR", "REG", "TOKEN"}
+	if secs, refs := storedSecrets(t, s, id); !reflect.DeepEqual(secretNames(secs), want) || !reflect.DeepEqual(refNames(refs), want) {
+		t.Fatalf("secrets %v / %v, want %v", secretNames(secs), refNames(refs), want)
+	}
+	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: baseValues()}); err != nil {
+		t.Fatalf("resume without a.b: %v", err)
+	}
+}
+
+// Removing a Run's only secret leaves it with none: that resume needs no
+// values, nor does the next.
+func TestResumeRemovesLastSecret(t *testing.T) {
+	s := testServer(t)
+	sp := secretsSpec()
+	sp.Image.RegistryAuth = nil
+	sp.Workload.Services = nil
+	sp.Git = nil
+	sp.Secrets = []spec.Secret{{Name: "TOKEN", Value: "token-1"}}
+	id := stoppedWith(t, s, sp)
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RemoveSecrets: []string{"TOKEN"}}); err != nil {
+		t.Fatal(err)
+	}
+	if secs, refs := storedSecrets(t, s, id); len(secs) != 0 || len(refs) != 0 {
+		t.Fatalf("secrets %v / %v, want none", secretNames(secs), refNames(refs))
+	}
+	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
+	out, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{})
+	if err != nil {
+		t.Fatalf("resume of a Run without secrets: %v", err)
+	}
+	if out.Body.State != StateResuming {
+		t.Fatalf("state %s", out.Body.State)
 	}
 }
