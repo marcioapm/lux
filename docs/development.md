@@ -160,6 +160,22 @@ The store unit tests create throwaway databases in the harness's Postgres:
 LUX_TEST_PG='postgres://lux:lux@127.0.0.1:55432/postgres?sslmode=disable' go test ./internal/store
 ```
 
+`LUX_TEST_ASSIGN_HOLD` is a fault-injection hook read by `lux-runner`
+only, from its own environment: setting it for `run_tests.py` does not
+reach the runner. It names a file inside the host. While that file exists,
+the runner holds each assignment it receives before taking it up and
+acking it, checking every 100 ms, so luxd has a placement `assigned` that
+its runner does not know yet; removing the file releases it. Unset, it does
+nothing. A test passes it when it starts the runner, and creates and
+removes the file with `Host.exec`:
+
+```python
+runners.start(hosts[0], environ={"LUX_TEST_ASSIGN_HOLD": "/tmp/lux-hold"})
+hosts[0].exec("touch", "/tmp/lux-hold")
+# ... the next assignment is held ...
+hosts[0].exec("rm", "-f", "/tmp/lux-hold")
+```
+
 ### A lux to develop against
 
 `--serve` brings the same environment up and leaves it running, with a

@@ -7,6 +7,8 @@ import json
 import threading
 import time
 
+import requests
+
 from conftest import generic
 from env import ALPINE_IMAGE, wait_until
 
@@ -83,51 +85,102 @@ def test_follow_across_a_restart_of_the_runner(lux, runners, hosts):
     assert out.split() == [f"tick-{i}" for i in range(1, 13)], out
 
 
+class OutputFollower:
+    """One raw `GET /v1/runs/{id}/output?follow=true&events=true` stream,
+    read on a thread. Its SSE events go to `events` as (name, data)."""
+
+    def __init__(self, lux, run_id: str, since: str):
+        self.events: list[tuple[str, dict]] = []
+        self.ended = threading.Event()
+        self.resp = requests.get(f"{lux.env.luxd_url}/v1/runs/{run_id}/output", stream=True, timeout=(10, 120),
+                                 params={"follow": "true", "events": "true", "since": since},
+                                 headers={"Authorization": f"Bearer {lux.api_key}"})
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        try:
+            name = ""
+            for line in self.resp.iter_lines(decode_unicode=True):
+                if line.startswith("event: "):
+                    name = line[len("event: "):]
+                elif line.startswith("data: "):
+                    self.events.append((name, json.loads(line[len("data: "):])))
+        finally:
+            self.ended.set()
+
+    def records(self, epoch: int | None = None) -> list[dict]:
+        return [d for n, d in list(self.events) if n == "record" and (epoch is None or d["epoch"] == epoch)]
+
+    def end(self) -> dict | None:
+        return next((d for n, d in list(self.events) if n == "end"), None)
+
+    def saw_state(self, epoch: int, state: str) -> bool:
+        return any(n == "lux" and d.get("type") == "state" and d.get("epoch") == epoch
+                   and d.get("data", {}).get("state") == state for n, d in list(self.events))
+
+    def close(self):
+        self.resp.close()
+
+
 def test_follow_across_same_host_resumes(lux, runners, hosts):
     """A follower that reconnects from its cursor whenever its stream ends
     (at each stop, as `lux logs -f` does) gets every resumed placement's
-    output while it runs, including when it reaches a new placement before
-    the runner has taken it up. The runner holds each assignment for 3s, so
-    the follower always finds the new placement still assigned."""
-    runners.start(hosts[0], environ={"LUX_TEST_ASSIGN_DELAY": "3s"})
+    output while it runs, including when it reaches the new placement
+    before its runner has taken it up: each cycle holds the assignment in
+    the runner (LUX_TEST_ASSIGN_HOLD) until the follower's request is live
+    on it."""
+    hold = "/tmp/lux-assign-hold"
+    host = hosts[0]
+    runners.start(host, environ={"LUX_TEST_ASSIGN_HOLD": hold})
     spec = generic(ALPINE_IMAGE, "sh", "-c", 'i=0; while :; do i=$((i+1)); echo "e$LUX_EPOCH-$i"; sleep 0.3; done',
                    volumes=[{"name": "data", "path": "/data", "kind": "state"}])
     run_id = lux.submit(spec)
-    lux.wait_output(run_id, "e1-2")
-    recs: list[dict] = []
-    stop = threading.Event()
+    followers: list[OutputFollower] = []
 
-    def follow():
-        cur = ""
-        while not stop.is_set():
-            p = lux.popen("logs", run_id, "-f", "-o", "json", *(["--since", cur] if cur else []))
-            for line in p.stdout:
-                if line.strip():
-                    r = json.loads(line)
-                    recs.append(r)
-                    cur = r["cursor"]
-                if stop.is_set():
-                    p.kill()
-                    break
-            p.wait()
-            time.sleep(0.2)
+    def finish(f: OutputFollower) -> str:
+        """Wait for the stream's end (the Run stopped), close it and return
+        the cursor to resume from."""
+        end = wait_until(f.end, 60, 0.2, "the follower's stream never ended at the stop")
+        f.close()
+        return end["cursor"]
 
-    follower = threading.Thread(target=follow, daemon=True)
-    follower.start()
+    def placement(epoch: int) -> dict | None:
+        return next((p for p in lux.get(run_id)["placements"] if p["epoch"] == epoch), None)
+
+    missed: list[int] = []
     try:
-        epochs = lambda: {r["epoch"] for r in recs if r["ch"] == "stdout"}
-        wait_until(lambda: 1 in epochs(), 60, 0.3, "the first placement's output never reached the follower")
+        lux.wait_output(run_id, "e1-2")
+        f = OutputFollower(lux, run_id, "")
+        followers.append(f)
+        wait_until(lambda: f.records(1), 30, 0.2, "the first placement's output never reached the follower")
         for epoch in range(2, 5):
+            host.exec("touch", hold)
             lux.run("stop", run_id, "--wait")
-            lux.run("resume", run_id, "--wait")
-            wait_until(lambda: epoch in epochs(), 30, 0.3,
-                       f"placement {epoch}'s output never reached the follower (it has epochs {sorted(epochs())})")
+            cursor = finish(f)
+            lux.run("resume", run_id)
+            wait_until(lambda: (placement(epoch) or {}).get("state") == "assigned", 30, 0.2,
+                       f"placement {epoch} never became assigned")
+            f = OutputFollower(lux, run_id, cursor)
+            followers.append(f)
+            # The request is live: it has sent this epoch's scheduled
+            # event, and the runner still holds the assignment.
+            wait_until(lambda: f.saw_state(epoch, "scheduled"), 30, 0.2,
+                       f"the follower from {cursor} never sent placement {epoch}'s scheduled event")
+            held = placement(epoch)
+            assert held is not None and held["state"] == "assigned", held
+            host.exec("rm", "-f", hold)
+            # A miss is noted and the next cycle still runs, so a
+            # regression shows on every cycle, not only the first.
+            try:
+                wait_until(lambda: f.records(epoch), 20, 0.2)
+            except AssertionError:
+                missed.append(epoch)
+        assert not missed, f"placements {missed}: output never reached the follower that was waiting on them"
         run = lux.get(run_id)
-        assert {p["hostName"] for p in run["placements"]} == {hosts[0].name}, run["placements"]
-        for r in recs:
-            if r["ch"] == "stdout":
-                assert r["data"].startswith(f"e{r['epoch']}-"), r
+        assert {p["hostName"] for p in run["placements"]} == {host.name}, run["placements"]
     finally:
-        stop.set()
+        host.exec("rm", "-f", hold, check=False)
+        for f in followers:
+            f.close()
         lux.run("cancel", run_id, "--wait", check=False)
-        follower.join(timeout=30)
