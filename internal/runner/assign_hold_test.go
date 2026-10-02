@@ -54,50 +54,52 @@ func assignFrame(id int64) proto.Frame {
 		Data: proto.Marshal(proto.Assign{RunID: "run_x", TenantID: "t1", Epoch: 2})}
 }
 
+func pollAcks(r *Runner) []int64 {
+	r.conn.mu.Lock()
+	defer r.conn.mu.Unlock()
+	return append([]int64(nil), r.conn.pollAcks...)
+}
+
 // The connection ends while an assignment is held: the runner neither
 // takes it up nor acks it, so luxd redelivers it to a hold on the next
 // connection.
 func TestACancelledAssignHoldTakesNothingUp(t *testing.T) {
 	for _, c := range []struct {
-		name string
-		run  func(t *testing.T, r *Runner, hold string)
+		name            string
+		released        bool // the hold file is gone before the dispatch
+		cancelWhileHeld bool // else the context is cancelled before the dispatch
 	}{
-		{"cancelled while held", func(t *testing.T, r *Runner, hold string) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			dispatchAndDrain(t, r, ctx, assignFrame(7), func() {
-				time.Sleep(300 * time.Millisecond)
-				cancel()
-			})
-		}},
-		{"cancelled before the hold", func(t *testing.T, r *Runner, hold string) {
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			dispatchAndDrain(t, r, ctx, assignFrame(7), nil)
-		}},
-		// The file is gone too: cancellation still wins over the release.
-		{"cancelled and released", func(t *testing.T, r *Runner, hold string) {
-			if err := os.Remove(hold); err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			dispatchAndDrain(t, r, ctx, assignFrame(7), nil)
-		}},
+		{"cancelled while held", false, true},
+		{"cancelled before the hold", false, false},
+		// Cancellation still wins over the release.
+		{"cancelled and released", true, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r, hold := holdRunner(t)
-			c.run(t, r, hold)
+			if c.released {
+				if err := os.Remove(hold); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var during func()
+			if c.cancelWhileHeld {
+				during = func() {
+					time.Sleep(300 * time.Millisecond)
+					cancel()
+				}
+			} else {
+				cancel()
+			}
+			dispatchAndDrain(t, r, ctx, assignFrame(7), during)
 			r.mu.Lock()
 			p := r.placements["run_x"]
 			r.mu.Unlock()
 			if p != nil {
 				t.Fatalf("placement %d taken up after its hold was cancelled", p.epoch)
 			}
-			r.conn.mu.Lock()
-			acks := r.conn.pollAcks
-			r.conn.mu.Unlock()
-			if len(acks) != 0 {
+			if acks := pollAcks(r); len(acks) != 0 {
 				t.Fatalf("acked %v after the hold was cancelled", acks)
 			}
 		})
@@ -112,20 +114,14 @@ func TestAReleasedAssignHoldIsAcked(t *testing.T) {
 	r.placements["run_x"] = held
 	dispatchAndDrain(t, r, context.Background(), assignFrame(7), func() {
 		time.Sleep(300 * time.Millisecond)
-		r.conn.mu.Lock()
-		acks := len(r.conn.pollAcks)
-		r.conn.mu.Unlock()
-		if acks != 0 {
+		if len(pollAcks(r)) != 0 {
 			t.Errorf("acked while the hold file exists")
 		}
 		if err := os.Remove(hold); err != nil {
 			t.Fatal(err)
 		}
 	})
-	r.conn.mu.Lock()
-	acks := r.conn.pollAcks
-	r.conn.mu.Unlock()
-	if len(acks) != 1 || acks[0] != 7 {
+	if acks := pollAcks(r); len(acks) != 1 || acks[0] != 7 {
 		t.Fatalf("acks %v, want [7]", acks)
 	}
 	if r.placements["run_x"] != held {
