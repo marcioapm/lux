@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -226,7 +227,7 @@ func TestSubmitAttachments(t *testing.T) {
 // A prompt's image bytes are kept beside the spec, not in it: Run views
 // and the stored spec carry names and types; the first placement's Assign
 // carries the bytes outside its spec; the ack drops them from the queued
-// message, and the Run's first start drops them from the Run.
+// message; the Run keeps them past its first start.
 func TestPromptAttachmentsBesideSpec(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -297,8 +298,109 @@ func TestPromptAttachmentsBesideSpec(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Running alone is not a resume point: with no session and no snapshot
+	// the next placement starts afresh and is sent them again.
+	if got := queryOne[string](t, s, `SELECT coalesce(prompt_attachments->0->>'data', '') FROM runs WHERE id = $1`, id); got != data {
+		t.Fatal("prompt_attachments dropped when the first placement started")
+	}
+}
+
+// promptRun submits a claude-code Run with one image, places it and reports
+// its placement running; it returns the Run's id and the image's base64.
+func promptRun(t *testing.T) (*Server, string, string) {
+	t.Helper()
+	s := testServer(t)
+	s.cfg.LeaseDuration = time.Minute
+	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	mustPut(t, s, "t1", Pool{Name: "default", Provider: "static", IsDefault: mark(true)})
+	data := b64(tinyPNG)
+	out, err := submitWithAttachments(s, "claude-code", []spec.Attachment{{Name: "a.png", ContentType: "image/png", Data: data}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyHost(t, s, "h1", "default", "t1", false)
+	schedule(t, s)
+	applyRunStatus(t, s, out.Body.ID, 1, proto.Status{State: "running"})
+	return s, out.Body.ID, data
+}
+
+func applyRunStatus(t *testing.T, s *Server, id string, epoch int, st proto.Status) {
+	t.Helper()
+	if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
+		return s.applyStatus(context.Background(), tx, "t1", id, epoch, st)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// failResumeAssign exits epoch 1 with code 1, resumes the Run, schedules
+// it and returns the epoch-2 Assign.
+func failResumeAssign(t *testing.T, s *Server, id string) proto.Assign {
+	t.Helper()
+	code := 1
+	applyRunStatus(t, s, id, 1, proto.Status{State: "exited", ExitCode: &code})
+	if st := queryOne[string](t, s, `SELECT state FROM runs WHERE id = $1`, id); st != StateFailed {
+		t.Fatalf("state %s after exit code 1, want failed", st)
+	}
+	if _, err := s.resumeRun(tenantCtx("t1"), &resumeRunInput{RunPath: RunPath{ID: id}}); err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, s)
+	var payload []byte
+	systemScan(t, s, `SELECT payload FROM host_messages WHERE run_id = $1 AND type = $2 AND epoch = 2`, []any{id, proto.MsgAssign}, &payload)
+	var a proto.Assign
+	if err := json.Unmarshal(payload, &a); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// A Run that started but failed before it had a session or a snapshot is
+// resumed as a first placement: the prompt goes again, with its images.
+func TestPromptAttachmentsResentAfterSessionlessFailure(t *testing.T) {
+	s, id, data := promptRun(t)
+	a := failResumeAssign(t, s, id)
+	if a.Resume != nil || len(a.PromptAttachments) != 1 || a.PromptAttachments[0].Data != data {
+		t.Fatalf("epoch-2 assign resume %+v prompt attachments %+v", a.Resume, a.PromptAttachments)
+	}
+}
+
+// Once a Run has a session, its next placement resumes it: no images are
+// sent, and the Run drops them.
+func TestPromptAttachmentsDroppedOnResume(t *testing.T) {
+	s, id, _ := promptRun(t)
+	if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
+		return s.applyAdapterEvent(context.Background(), tx, "t1", id, 1, proto.AdapterEvent{SessionID: "sess-1"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := failResumeAssign(t, s, id)
+	if a.Resume == nil || a.Resume.SessionID != "sess-1" || len(a.PromptAttachments) != 0 {
+		t.Fatalf("epoch-2 assign resume %+v prompt attachments %+v", a.Resume, a.PromptAttachments)
+	}
 	if n := queryOne[int](t, s, `SELECT count(*) FROM runs WHERE id = $1 AND prompt_attachments IS NULL`, id); n != 1 {
-		t.Fatal("prompt_attachments kept after the first placement started")
+		t.Fatal("prompt_attachments kept after a resuming placement was assigned")
+	}
+}
+
+// A Run cancelled before it was ever placed keeps no image bytes.
+func TestPromptAttachmentsDroppedOnCancel(t *testing.T) {
+	s := testServer(t)
+	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	mustPut(t, s, "t1", Pool{Name: "default", Provider: "static", IsDefault: mark(true)})
+	out, err := submitWithAttachments(s, "claude-code", []spec.Attachment{{Name: "a.png", ContentType: "image/png", Data: b64(tinyPNG)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := out.Body.ID
+	if _, err := s.cancelRun(tenantCtx("t1"), &RunPath{ID: id}); err != nil {
+		t.Fatal(err)
+	}
+	if st := queryOne[string](t, s, `SELECT state FROM runs WHERE id = $1`, id); st != StateCancelled {
+		t.Fatalf("state %s, want cancelled", st)
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM runs WHERE id = $1 AND prompt_attachments IS NULL`, id); n != 1 {
+		t.Fatal("prompt_attachments kept by a cancelled Run")
 	}
 }
 
