@@ -142,6 +142,10 @@ placement gets it.
   - anything else, including a request where the first had none: 409
     `not_resumable`. Invalid values (cpus or memory 0 or less, a
     negative disk) are 422 `invalid_spec` first, as on any resume.
+  - A Run lux resumed itself, after a `drain`, `preempt` or `migrate`
+    move, counts as a resume that asked for no resources, even when an
+    earlier resume of yours resized it. While it is resuming, a resume
+    with `resources` gets 409; one without gets 202.
 
 ## Secrets
 
