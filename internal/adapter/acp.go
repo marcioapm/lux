@@ -38,8 +38,11 @@ type ACP struct {
 	session string
 	busy    bool
 	stopped bool
-	queue   []proto.Input
-	ready   chan struct{}
+	// queue: inputs for the next turns; queueBytes their inputSize, held
+	// under maxPendingSteerBytes.
+	queue      []proto.Input
+	queueBytes int
+	ready      chan struct{}
 	// loading: session/load replays the conversation as updates; they are
 	// events, not new output.
 	loading bool
@@ -77,8 +80,9 @@ type ACP struct {
 	// cancelGen counts the session/cancels sent.
 	cancelGen int
 	// steers: inputs for the running turn, in the order they came, which
-	// steerLoop delivers; steerKick wakes it. steerBytes: their text's
-	// size, bounded with their count (maxPendingSteers).
+	// steerLoop delivers; steerKick wakes it. steerBytes: their size (text
+	// and image data, inputSize), bounded with their count
+	// (maxPendingSteers).
 	steers     []proto.Input
 	steerBytes int
 	steerKick  chan struct{}
@@ -262,6 +266,7 @@ func (a *ACP) handshake(cfg proto.ShimConfig) error {
 	if !cfg.Resume && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
 		a.mu.Lock()
 		a.queue = append([]proto.Input{{RequestID: "prompt", Text: cfg.Prompt, Attachments: cfg.PromptAttachments}}, a.queue...)
+		a.queueBytes += inputSize(a.queue[0])
 		a.mu.Unlock()
 	}
 	return nil
@@ -308,7 +313,9 @@ func (a *ACP) drain() {
 		return
 	}
 	in := a.queue[0]
+	a.queue[0] = proto.Input{}
 	a.queue = a.queue[1:]
+	a.queueBytes -= inputSize(in)
 	if len(in.Attachments) > 0 && !a.images {
 		// Known only since initialize: the input fails, the next is sent.
 		a.mu.Unlock()
@@ -889,6 +896,7 @@ func (a *ACP) queueInput(in proto.Input) {
 	a.inputs.forget(in.RequestID)
 	a.mu.Lock()
 	a.queue = append(a.queue, in)
+	a.queueBytes += inputSize(in)
 	a.mu.Unlock()
 	a.drain()
 }
@@ -982,12 +990,29 @@ func (a *ACP) handleRequest(m rpcMsg) {
 
 func (a *ACP) Deliver(in proto.Input) {
 	a.mu.Lock()
+	steerHTTPPath := a.opencode && a.busy && !a.busTurn && !a.stopped && !a.closed && !in.Interrupt && in.HasContent()
+	// An input bound for session/prompt is refused before anything is
+	// queued or cancelled: an interrupt carrying images the agent cannot
+	// take must not end the running turn. (A steer to OpenCode may still go
+	// as prompt_async file parts; steerACP checks it if it falls back.)
+	if len(in.Attachments) > 0 && !a.images && a.handshakeDone() && !steerHTTPPath {
+		a.mu.Unlock()
+		a.inputs.fail(a.sink, in, errNoImages)
+		return
+	}
+	queueFull := in.HasContent() && a.queueBytes+inputSize(in) > maxPendingSteerBytes
 	if in.Interrupt && a.busy {
+		if queueFull {
+			a.mu.Unlock()
+			a.inputs.fail(a.sink, in, errors.New(errPendingSteersLimit))
+			return
+		}
 		// Put it first, then cancel the running turn; drain sends it when
 		// the cancelled prompt returns. An interrupt alone sends nothing:
 		// steers the turn left unread start the next one (settle).
 		if in.HasContent() {
 			a.queue = append([]proto.Input{in}, a.queue...)
+			a.queueBytes += inputSize(in)
 		}
 		session := a.session
 		a.cancelGen++
@@ -1002,7 +1027,7 @@ func (a *ACP) Deliver(in proto.Input) {
 		}
 		return
 	}
-	if a.opencode && a.busy && !a.busTurn && !a.stopped && !a.closed && !in.Interrupt && in.HasContent() {
+	if steerHTTPPath {
 		if len(a.steers) >= maxPendingSteers || a.steerBytes+inputSize(in) > maxPendingSteerBytes {
 			a.mu.Unlock()
 			a.inputs.fail(a.sink, in, errors.New(errPendingSteersLimit))
@@ -1017,9 +1042,25 @@ func (a *ACP) Deliver(in proto.Input) {
 		}
 		return
 	}
+	if queueFull {
+		a.mu.Unlock()
+		a.inputs.fail(a.sink, in, errors.New(errPendingSteersLimit))
+		return
+	}
 	a.queue = append(a.queue, in)
+	a.queueBytes += inputSize(in)
 	a.mu.Unlock()
 	a.drain()
+}
+
+// handshakeDone: initialize has answered (a.images is known). Under a.mu.
+func (a *ACP) handshakeDone() bool {
+	select {
+	case <-a.ready:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *ACP) Interrupt() error {
