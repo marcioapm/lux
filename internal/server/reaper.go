@@ -513,8 +513,15 @@ const supersededWindow = 200
 func (s *Server) reapSuperseded(ctx context.Context) error {
 	var keys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id FROM runs WHERE snapshots_superseded AND id > $1
-			ORDER BY id LIMIT $2`, s.supersededCursor, supersededWindow)
+		// One index probe per id: under RLS the planner estimates few
+		// flagged rows survive and would seq-scan and sort all of runs for
+		// a plain ORDER BY id LIMIT.
+		rows, err := tx.Query(ctx, `WITH RECURSIVE w(id, n) AS (
+				SELECT (SELECT min(id) FROM runs WHERE snapshots_superseded AND id > $1), 1
+				UNION ALL
+				SELECT (SELECT min(id) FROM runs WHERE snapshots_superseded AND id > w.id), w.n + 1
+				FROM w WHERE w.id IS NOT NULL AND w.n < $2
+			) SELECT id FROM w WHERE id IS NOT NULL ORDER BY id`, s.supersededCursor, supersededWindow)
 		if err != nil {
 			return err
 		}
