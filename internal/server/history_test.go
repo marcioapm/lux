@@ -402,3 +402,55 @@ func TestSampleSystemStored(t *testing.T) {
 		t.Fatalf("stored:\n got %v\nwant %v", got, want)
 	}
 }
+
+// sampleSystem's hosts and capacity: a tenant counts its own non-terminated
+// hosts and the platform's, never another tenant's; the whole system (the
+// empty tenant id) counts all.
+// Capacity is the ready and draining hosts' cpus and memory. A tenant with
+// only bytes in S3 gets the platform's.
+func TestSampleSystemHosts(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('ta', 'a'), ('ts', 's'), ('tz', 'z')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state, tenant_id, capacity) VALUES
+		('ha1', 'ha1', 'ready', 'ta', '{"cpus": 4, "memory": 1000}'),
+		('ha2', 'ha2', 'lost', 'ta', '{"cpus": 16, "memory": 9}'),
+		('ha3', 'ha3', 'terminated', 'ta', '{"cpus": 128, "memory": 3}'),
+		('hz', 'hz', 'ready', 'tz', '{"cpus": 64, "memory": 64000}'),
+		('hp1', 'hp1', 'ready', NULL, '{"cpus": 8, "memory": 4000}'),
+		('hp2', 'hp2', 'draining', NULL, '{"cpus": 1, "memory": 100}'),
+		('hp3', 'hp3', 'lost', NULL, '{"cpus": 32, "memory": 7}'),
+		('hp4', 'hp4', 'terminated', NULL, '{"cpus": 256, "memory": 5}')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('rs', 'ts', '{}', 'succeeded')`)
+	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, location) VALUES
+		('s1', 'ts', 'rs', 1, 'output', 'o', 11, 's3')`)
+	if err := s.sampleSystem(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, _ := tx.Query(ctx, `SELECT tenant_id, hosts, cap_cpus, cap_mem FROM system_samples`)
+		var id string
+		var hosts map[string]int
+		var cpus float64
+		var mem int64
+		_, err := pgx.ForEachRow(rows, []any{&id, &hosts, &cpus, &mem}, func() error {
+			got[id] = fmt.Sprint(hosts, cpus, mem)
+			hosts = nil
+			return nil
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"":   fmt.Sprint(map[string]int{"ready": 3, "draining": 1, "lost": 2}, 77.0, int64(69100)),
+		"ta": fmt.Sprint(map[string]int{"ready": 2, "draining": 1, "lost": 2}, 13.0, int64(5100)),
+		"ts": fmt.Sprint(map[string]int{"ready": 1, "draining": 1, "lost": 1}, 9.0, int64(4100)),
+		"tz": fmt.Sprint(map[string]int{"ready": 2, "draining": 1, "lost": 1}, 73.0, int64(68100)),
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("hosts, cpus, memory:\n got %v\nwant %v", got, want)
+	}
+}
