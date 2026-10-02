@@ -228,7 +228,7 @@ func (c *Claude) send(in proto.Input) {
 	uuid := claudeUUID(in.RequestID)
 	c.mu.Lock()
 	keep := !c.known || c.lifecycle
-	if keep && c.sentBytes()+inputSize(in) > maxPendingSteerBytes {
+	if keep && c.sentSize+inputSize(in) > maxPendingSteerBytes {
 		sink := c.sink
 		c.mu.Unlock()
 		c.inputs.fail(sink, in, errors.New(errPendingSteersLimit))
@@ -261,10 +261,6 @@ func (c *Claude) send(in proto.Input) {
 		c.inputs.accept(sink, in, Delivery{Lands: LandsNextStep}, "")
 	}
 }
-
-// sentBytes is what c.sent holds of payload: lines written and not yet
-// started (a started one keeps no payload). Under c.mu.
-func (c *Claude) sentBytes() int { return c.sentSize }
 
 // putSent and dropSent change c.sent and keep sentSize with it. Under c.mu.
 func (c *Claude) putSent(uuid string, in proto.Input) {

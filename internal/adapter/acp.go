@@ -2,9 +2,7 @@ package adapter
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +14,7 @@ import (
 	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // ACP speaks the Agent Client Protocol: JSON-RPC 2.0, newline-delimited, on
@@ -975,8 +974,8 @@ func userImageMeta(update json.RawMessage) map[string]any {
 	if c, ok := u["content"].(map[string]any); ok {
 		if d, ok := c["data"].(string); ok {
 			b, _ := base64.StdEncoding.DecodeString(d)
-			sum := sha256.Sum256(b)
-			c["size"], c["sha256"] = len(b), hex.EncodeToString(sum[:])
+			m := spec.MetaOf(spec.Attachment{}, b)
+			c["size"], c["sha256"] = m.Size, m.SHA256
 			delete(c, "data")
 		}
 	}
@@ -1024,13 +1023,13 @@ func (a *ACP) Deliver(in proto.Input) {
 		a.inputs.fail(a.sink, in, errNoImages)
 		return
 	}
-	queueFull := in.HasContent() && a.queueBytes+inputSize(in) > maxPendingSteerBytes
+	// Past the queue's budget: refused before an interrupt cancels anything.
+	if !steerHTTPPath && in.HasContent() && a.queueBytes+inputSize(in) > maxPendingSteerBytes {
+		a.mu.Unlock()
+		a.inputs.fail(a.sink, in, errors.New(errPendingSteersLimit))
+		return
+	}
 	if in.Interrupt && a.busy {
-		if queueFull {
-			a.mu.Unlock()
-			a.inputs.fail(a.sink, in, errors.New(errPendingSteersLimit))
-			return
-		}
 		// Put it first, then cancel the running turn; drain sends it when
 		// the cancelled prompt returns. An interrupt alone sends nothing:
 		// steers the turn left unread start the next one (settle).
@@ -1064,11 +1063,6 @@ func (a *ACP) Deliver(in proto.Input) {
 		case a.steerKick <- struct{}{}:
 		default:
 		}
-		return
-	}
-	if queueFull {
-		a.mu.Unlock()
-		a.inputs.fail(a.sink, in, errors.New(errPendingSteersLimit))
 		return
 	}
 	a.queue = append(a.queue, in)
