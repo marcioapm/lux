@@ -3,6 +3,7 @@ package adapter
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -225,6 +226,101 @@ func TestACPWithoutImagesFails(t *testing.T) {
 		t.Fatalf("next prompt %s", got)
 	}
 	if sink.has("accepted img") {
+		t.Fatalf("%q", sink.lines())
+	}
+}
+
+// An interrupting input with images, to an ACP agent without image
+// support, fails before anything reaches the agent: the running turn is
+// not cancelled.
+func TestACPWithoutImagesInterruptKeepsTurn(t *testing.T) {
+	a := NewACP()
+	w, sink := acpStarted(t, a, false, proto.ShimConfig{Prompt: "go"})
+	first, _ := w.next("session/prompt")
+	sink.wait(t, "accepted prompt")
+	in := withImage("s", "and?")
+	in.Interrupt = true
+	a.Deliver(in)
+	sink.wait(t, "failed s: the agent does not take images")
+	w.none()
+	w.resolve(first, ocResult)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_turn receipt=false",
+		"failed s: the agent does not take images", "turn_end", "idle")
+}
+
+// OpenCode without image support, steered over ACP while busy (no HTTP
+// server): a steer with images fails; no second session/prompt is sent.
+func TestOpenCodeSteerACPWithoutImagesFails(t *testing.T) {
+	a := NewOpenCode()
+	w, sink, first := ocStarted(t, a)
+	a.Deliver(withImage("img2", "x"))
+	sink.wait(t, "failed img2: the agent does not take images")
+	w.none()
+	w.resolve(first, ocResult)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"failed img2: the agent does not take images", "turn_end", "idle")
+}
+
+// bigImage is an input whose image data is n bytes (the adapter does not
+// decode it).
+func bigImage(id string, n int) proto.Input {
+	return proto.Input{RequestID: id, Text: "x", Attachments: []spec.Attachment{{Name: "big.png", ContentType: "image/png", Data: strings.Repeat("A", n)}}}
+}
+
+// ACP: inputs waiting for the next turn are held under the pending-input
+// byte budget, image data included; one past it fails at once, and an
+// interrupt past it cancels nothing.
+func TestACPQueueBytesAreBounded(t *testing.T) {
+	a := NewACP()
+	w, sink := acpStarted(t, a, true, proto.ShimConfig{Prompt: "go"})
+	first, _ := w.next("session/prompt")
+	sink.wait(t, "accepted prompt")
+	const size = 7 << 20 // a 5 MiB image's base64
+	for i := range 5 {
+		a.Deliver(bigImage(fmt.Sprintf("q%d", i), size))
+	}
+	sink.wait(t, "failed q4: "+errPendingSteersLimit)
+	over := bigImage("int", size)
+	over.Interrupt = true
+	a.Deliver(over)
+	sink.wait(t, "failed int: "+errPendingSteersLimit)
+	w.none()
+	for i := range 4 {
+		if sink.has(fmt.Sprintf("failed q%d", i)) {
+			t.Fatalf("q%d failed within the budget: %q", i, sink.lines())
+		}
+	}
+	w.resolve(first, ocResult)
+	_, p := w.next("session/prompt")
+	if !strings.Contains(string(p["prompt"]), `"type":"image"`) {
+		t.Fatal("q0 not sent with its image")
+	}
+	sink.wait(t, "accepted q0")
+}
+
+// Claude Code: lines written and not yet started are held under the same
+// budget; once one is read its bytes no longer count.
+func TestClaudeSentBytesAreBounded(t *testing.T) {
+	c := NewClaude()
+	w, sink := startWire(t, c, proto.ShimConfig{})
+	w.send(`{"type":"system","subtype":"init","session_id":"s","capabilities":["msg_lifecycle_v1"]}`)
+	const size = 7 << 20
+	var uuids []string
+	for i := range 5 {
+		c.Deliver(bigImage(fmt.Sprintf("q%d", i), size))
+		if i < 4 {
+			u, _ := claudeContent(t, w)
+			uuids = append(uuids, u)
+		}
+	}
+	sink.wait(t, "failed q4: "+errPendingSteersLimit)
+	w.send(clLifecycle(uuids[0], "started"))
+	sink.wait(t, "consumed q0")
+	c.Deliver(bigImage("q5", size))
+	if u, _ := claudeContent(t, w); u != claudeUUID("q5") {
+		t.Fatalf("wrote %s, want q5's line", u)
+	}
+	if sink.has("failed q5") {
 		t.Fatalf("%q", sink.lines())
 	}
 }
