@@ -321,13 +321,14 @@ func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
 	}
 }
 
-// holdAssignment waits while the file at path exists, checking every 100ms,
-// or until ctx ends.
-func (r *Runner) holdAssignment(ctx context.Context, path string, a proto.Assign) {
+// holdAssignment waits while the file at path exists, checking every 100ms.
+// It returns ctx's error if ctx ends first, even if the file is gone by then:
+// a cancelled hold must not take the placement up.
+func (r *Runner) holdAssignment(ctx context.Context, path string, a proto.Assign) error {
 	logged := false
 	for {
 		if _, err := os.Stat(path); err != nil {
-			return
+			return ctx.Err()
 		}
 		if !logged {
 			r.log.Warn("holding assignment (test hold)", "run", a.RunID, "epoch", a.Epoch, "file", path)
@@ -335,23 +336,27 @@ func (r *Runner) holdAssignment(ctx context.Context, path string, a proto.Assign
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
 }
 
-// handleControl handles one durable message from luxd. Idempotent.
-func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
+// handleControl handles one durable message from luxd. Idempotent. It
+// returns false for a message to leave unacked, so that luxd redelivers it.
+func (r *Runner) handleControl(ctx context.Context, f proto.Frame) bool {
 	switch f.Type {
 	case proto.MsgAssign:
 		var a proto.Assign
 		if err := json.Unmarshal(f.Data, &a); err != nil {
 			r.log.Error("bad assign", "err", err)
-			return
+			return true
 		}
 		if path := r.cfg.AssignHold; path != "" {
-			r.holdAssignment(ctx, path, a)
+			if err := r.holdAssignment(ctx, path, a); err != nil {
+				r.log.Warn("held assignment abandoned", "run", a.RunID, "epoch", a.Epoch, "err", err)
+				return false
+			}
 		}
 		r.assign(ctx, a)
 	case proto.MsgStop, proto.MsgCancel:
@@ -374,7 +379,7 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 		var sv proto.Servers
 		if err := json.Unmarshal(f.Data, &sv); err != nil {
 			r.log.Error("bad servers", "err", err)
-			return
+			return true
 		}
 		if p := r.placement(f.RunID, f.Epoch); p != nil {
 			p.setServers(ctx, sv)
@@ -407,7 +412,7 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 		var e proto.ExitHost
 		_ = json.Unmarshal(f.Data, &e)
 		if !r.shouldExit(ctx, e) {
-			return
+			return true
 		}
 		r.log.Warn("luxd asked this host to exit", "reason", e.Reason, "code", e.Code)
 		// Exit after the ack for this message has gone out (handleControl
@@ -421,6 +426,7 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 	default:
 		r.log.Warn("unknown control message", "type", f.Type)
 	}
+	return true
 }
 
 func (r *Runner) placement(runID string, epoch int) *placement {
