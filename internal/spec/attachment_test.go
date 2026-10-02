@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -17,21 +18,61 @@ func TestCheckAttachmentsTypes(t *testing.T) {
 		"image/webp": []byte("RIFF\x10\x00\x00\x00WEBPVP8 "),
 	}
 	for typ, b := range ok {
-		if errs := CheckAttachments("a", []Attachment{{Name: "x", ContentType: typ, Data: enc(b)}}); errs != nil {
+		meta, errs := CheckAttachments("a", []Attachment{{Name: "x", ContentType: typ, Data: enc(b)}})
+		if errs != nil {
 			t.Errorf("%s refused: %v", typ, errs)
+		}
+		sum := sha256.Sum256(b)
+		if want := (AttachmentMeta{Name: "x", ContentType: typ, Size: len(b), SHA256: hex.EncodeToString(sum[:])}); len(meta) != 1 || meta[0] != want {
+			t.Errorf("%s meta %+v, want %+v", typ, meta, want)
 		}
 		if got := SniffImage(b); got != typ {
 			t.Errorf("SniffImage %s = %q", typ, got)
 		}
 	}
-	errs := CheckAttachments("a", []Attachment{{Name: "x", ContentType: "image/webp", Data: enc([]byte("RIFF\x10\x00\x00\x00WAVE"))}})
-	if len(errs) != 1 || !strings.Contains(errs[0], "a[0]: contentType image/webp does not match its bytes (not an image lux takes)") {
+	meta, errs := CheckAttachments("a", []Attachment{{Name: "x", ContentType: "image/webp", Data: enc([]byte("RIFF\x10\x00\x00\x00WAVE"))}})
+	if len(errs) != 1 || meta != nil || !strings.Contains(errs[0], "a[0]: contentType image/webp does not match its bytes (not an image lux takes)") {
+		t.Fatalf("got %v %v", meta, errs)
+	}
+	_, errs = CheckAttachments("a", []Attachment{{Name: "x", ContentType: "image/svg+xml", Data: enc([]byte("<svg/>"))}})
+	if len(errs) != 1 || !strings.HasSuffix(errs[0], `contentType "image/svg+xml": need image/png, image/jpeg, image/gif or image/webp`) {
 		t.Fatalf("got %v", errs)
 	}
 	// Unpadded base64 is not standard base64 (13 bytes: padded with ==).
-	errs = CheckAttachments("a", []Attachment{{Name: "x", ContentType: "image/png", Data: strings.TrimRight(enc([]byte("\x89PNG\r\n\x1a\nrest!")), "=")}})
+	_, errs = CheckAttachments("a", []Attachment{{Name: "x", ContentType: "image/png", Data: strings.TrimRight(enc([]byte("\x89PNG\r\n\x1a\nrest!")), "=")}})
 	if len(errs) != 1 || !strings.Contains(errs[0], "not standard base64") {
 		t.Fatalf("got %v", errs)
+	}
+}
+
+// Every limit at its boundary: the largest accepted, the smallest refused.
+func TestCheckAttachmentsLimits(t *testing.T) {
+	png := func(n int) Attachment {
+		b := make([]byte, n)
+		copy(b, "\x89PNG\r\n\x1a\n")
+		return Attachment{Name: "a.png", ContentType: "image/png", Data: base64.StdEncoding.EncodeToString(b)}
+	}
+	named := func(n int) Attachment { a := png(16); a.Name = strings.Repeat("n", n); return a }
+	for _, c := range []struct {
+		name string
+		list []Attachment
+		want string // "" accepted, else a refusal containing it
+	}{
+		{"5 MiB exactly", []Attachment{png(MaxAttachmentBytes)}, ""},
+		{"5 MiB + 1", []Attachment{png(MaxAttachmentBytes + 1)}, "a[0]: too big: 5242881 bytes decoded, at most 5242880"},
+		{"5 MiB + 3: refused before decoding", []Attachment{png(MaxAttachmentBytes + 3)}, "a[0]: too big: more than 5242880 bytes decoded"},
+		{"10", slices.Repeat([]Attachment{png(16)}, 10), ""},
+		{"11", slices.Repeat([]Attachment{png(16)}, 11), "a: 11 attachments, at most 10"},
+		{"255-byte name", []Attachment{named(255)}, ""},
+		{"256-byte name", []Attachment{named(256)}, "a[0]: name is 256 bytes, at most 255"},
+	} {
+		meta, errs := CheckAttachments("a", c.list)
+		switch {
+		case c.want == "" && (errs != nil || len(meta) != len(c.list)):
+			t.Errorf("%s: refused %v", c.name, errs)
+		case c.want != "" && (len(errs) != 1 || errs[0] != c.want || meta != nil):
+			t.Errorf("%s: got %v, want %q", c.name, errs, c.want)
+		}
 	}
 }
 

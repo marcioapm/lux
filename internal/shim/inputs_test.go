@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -45,9 +46,12 @@ func TestWriteInputs(t *testing.T) {
 	if err := s.prepareInputs(); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.writeInputs("in_1", []spec.Attachment{pngAttachment("shot.png"), pngAttachment("..")})
+	got, meta, err := s.writeInputs("in_1", []spec.Attachment{pngAttachment("shot.png"), pngAttachment("..")})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if want := spec.AttachmentsMeta([]spec.Attachment{pngAttachment("shot.png"), pngAttachment("..")}); !slices.Equal(meta, want) {
+		t.Fatalf("meta %+v, want %+v", meta, want)
 	}
 	dir := filepath.Join(home, ".lux-inputs", "in_1")
 	want := []string{filepath.Join(dir, "1-shot.png"), filepath.Join(dir, "2-..-")}
@@ -85,7 +89,7 @@ func TestWriteInputsLinks(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "1-a.png")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.writeInputs("r1", []spec.Attachment{pngAttachment("a.png")}); err != nil {
+	if _, _, err := s.writeInputs("r1", []spec.Attachment{pngAttachment("a.png")}); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(outside); string(b) != "keep" {
@@ -95,7 +99,7 @@ func TestWriteInputsLinks(t *testing.T) {
 	if err := os.Symlink(filepath.Dir(outside), filepath.Join(home, ".lux-inputs", "r2")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.writeInputs("r2", []spec.Attachment{pngAttachment("victim")}); err == nil {
+	if _, _, err := s.writeInputs("r2", []spec.Attachment{pngAttachment("victim")}); err == nil {
 		t.Fatal("wrote through a link out of the volume")
 	}
 	if b, _ := os.ReadFile(outside); string(b) != "keep" {
@@ -110,11 +114,11 @@ func TestInputRecordsAttachments(t *testing.T) {
 	s, _, path := inputsShim(t)
 	k := &sink{s: s}
 	in := proto.Input{RequestID: "img", Text: "look", Attachments: []spec.Attachment{pngAttachment("shot.png")}}
-	s.rememberAttachments(in)
+	s.rememberAttachments(in.RequestID, spec.AttachmentsMeta(in.Attachments))
 	k.InputAccepted(proto.Input{RequestID: "img"}, adapter.Delivery{Lands: adapter.LandsNextStep, Receipt: true})
 	k.InputFailed(proto.Input{RequestID: "img"}, errors.New("the Run stopped before the agent read it"))
 	failed := proto.Input{RequestID: "bad", Attachments: []spec.Attachment{pngAttachment("x.png")}}
-	s.rememberAttachments(failed)
+	s.rememberAttachments(failed.RequestID, spec.AttachmentsMeta(failed.Attachments))
 	k.InputFailed(failed, errors.New("the agent does not take images"))
 	plain := proto.Input{RequestID: "plain", Text: "hi"}
 	k.InputAccepted(plain, adapter.Delivery{Lands: adapter.LandsNextStep})
@@ -159,9 +163,17 @@ func TestInputRecordsAttachments(t *testing.T) {
 }
 
 func TestSafeComponent(t *testing.T) {
-	for in, want := range map[string]string{"shot.png": "shot.png", "in_01J": "in_01J", "a b.png": "a_b.png-", "é.png": "_.png-"} {
-		if got := safeComponent(in); !strings.HasPrefix(got, want) || (got != want && len(got) != len(want)+8) {
-			t.Errorf("%q: %q", in, got)
+	for in, want := range map[string]string{
+		"shot.png": "shot.png", "in_01J": "in_01J", "a b.png": "a_b-*.png", "é.png": "_-*.png",
+		"..": "..-*", ".": ".-*", "a b": "a_b-*", ".bash rc": ".bash_rc-*",
+	} {
+		got := safeComponent(in)
+		if pre, post, ok := strings.Cut(want, "*"); ok {
+			if !strings.HasPrefix(got, pre) || !strings.HasSuffix(got, post) || len(got) != len(pre)+8+len(post) {
+				t.Errorf("%q: %q, want %s<8 hex>%s", in, got, pre, post)
+			}
+		} else if got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
 		}
 	}
 	if safeComponent("a b") == safeComponent("a_b") {

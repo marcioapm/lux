@@ -503,12 +503,13 @@ func (s *Shim) inputAttachments(in proto.Input) []spec.Attachment {
 	if len(in.Attachments) == 0 {
 		return in.Attachments
 	}
-	s.rememberAttachments(in)
-	written, err := s.writeInputs(in.RequestID, in.Attachments)
+	written, meta, err := s.writeInputs(in.RequestID, in.Attachments)
 	if err != nil {
+		s.rememberAttachments(in.RequestID, spec.AttachmentsMeta(in.Attachments))
 		s.out.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf("input %s: writing its images to $LUX_INPUTS: %v", in.RequestID, err)})
 		return in.Attachments
 	}
+	s.rememberAttachments(in.RequestID, meta)
 	return written
 }
 

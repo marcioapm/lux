@@ -758,7 +758,7 @@ func readImages(paths []string) ([]spec.Attachment, error) {
 		}
 		typ := spec.SniffImage(b)
 		if typ == "" {
-			return nil, fmt.Errorf("%s: not a PNG, JPEG, WebP or GIF image", p)
+			return nil, fmt.Errorf("%s: not an image lux takes (%s)", p, spec.ImageTypes())
 		}
 		out = append(out, spec.Attachment{Name: filepath.Base(p), ContentType: typ, Data: base64.StdEncoding.EncodeToString(b)})
 	}

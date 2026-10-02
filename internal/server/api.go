@@ -638,7 +638,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	// Refused with the codes /input uses, before Normalize (which defaults
 	// the adapter to generic).
 	if len(sp.Workload.Attachments) > 0 {
-		if err := checkAttachments("workload.attachments", sp.Workload.Attachments); err != nil {
+		if _, err := checkAttachments("workload.attachments", sp.Workload.Attachments); err != nil {
 			return nil, err
 		}
 		if !takesAttachments(sp.Workload.Adapter) {
@@ -1203,7 +1203,8 @@ func (s *Server) postInput(ctx context.Context, req *postInputInput) (*requestID
 	if in.Text == "" && len(in.Raw) == 0 && !in.Interrupt && len(in.Attachments) == 0 {
 		return nil, errf(http.StatusBadRequest, "bad_request", "text, raw, attachments or interrupt is required")
 	}
-	if err := checkAttachments("attachments", in.Attachments); err != nil {
+	meta, err := checkAttachments("attachments", in.Attachments)
+	if err != nil {
 		return nil, err
 	}
 	if in.RequestID == "" {
@@ -1211,7 +1212,7 @@ func (s *Server) postInput(ctx context.Context, req *postInputInput) (*requestID
 	}
 	id := req.ID
 	var hostID string
-	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		var state, adapter string
 		var epoch int
 		if err := tx.QueryRow(ctx, `SELECT state, current_epoch, coalesce(spec->'workload'->>'adapter', '') FROM runs WHERE id = $1 FOR UPDATE`, id).Scan(&state, &epoch, &adapter); err != nil {
@@ -1240,7 +1241,7 @@ func (s *Server) postInput(ctx context.Context, req *postInputInput) (*requestID
 			return err
 		}
 		ev := map[string]any{"requestId": in.RequestID, "interrupt": in.Interrupt, "text": in.Text, "rawBytes": len(in.Raw)}
-		if meta := spec.AttachmentsMeta(in.Attachments); meta != nil {
+		if meta != nil {
 			ev["attachments"] = meta
 		}
 		return addEvent(ctx, tx, p.TenantID, id, epoch, "input", ev)
