@@ -190,7 +190,7 @@ func TestReapSupersededSkipsBlockedRuns(t *testing.T) {
 }
 
 // A pass over a blocked backlog longer than the window inspects one window
-// and moves on: the next window starts after it.
+// and moves on: the next pass inspects the window after it, not the first.
 func TestReapSupersededWindowAdvances(t *testing.T) {
 	s, ctx, f := supersededFixture(t)
 	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
@@ -198,14 +198,27 @@ func TestReapSupersededWindowAdvances(t *testing.T) {
 	if err := s.reapSuperseded(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if want := fmt.Sprintf("ra%04d", supersededWindow-1); s.supersededCursor != want {
-		t.Fatalf("cursor after one pass: %q, want %q", s.supersededCursor, want)
-	}
 	if !snapshotAvailable(t, s, "snapB") || len(f.Deleted()) != 0 {
 		t.Fatalf("rb, beyond the window, reaped: snapB available %v, deleted %v", snapshotAvailable(t, s, "snapB"), f.Deleted())
 	}
 	if n := blockedAvailable(t, s); n != 2*(supersededWindow+50) {
 		t.Fatalf("blocked Runs' available snapshots: %d, want %d", n, 2*(supersededWindow+50))
+	}
+	// Ready now: one Run in the first window, one in the second. The next
+	// pass inspects the second window only.
+	first, second := "ra0005", fmt.Sprintf("ra%04d", supersededWindow+10)
+	unblock(t, s, ctx, first)
+	unblock(t, s, ctx, second)
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{second + "/" + second + "-vol1", "rb/bB-vol-snapB"}
+	if got := f.Deleted(); !slices.Equal(got, want) {
+		t.Fatalf("second pass: S3 deletes %v, want %v", got, want)
+	}
+	if !snapshotAvailable(t, s, first+"-s1") || snapshotAvailable(t, s, second+"-s1") || !snapshotAvailable(t, s, second+"-s2") {
+		t.Fatalf("second pass: %s-s1 available %v, %s-s1 %v, %s-s2 %v; want true false true", first,
+			snapshotAvailable(t, s, first+"-s1"), second, snapshotAvailable(t, s, second+"-s1"), second, snapshotAvailable(t, s, second+"-s2"))
 	}
 }
 
@@ -243,9 +256,9 @@ func TestReapSupersededWindowWraps(t *testing.T) {
 	if err := s.reapSuperseded(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if s.supersededCursor != "" || !snapshotAvailable(t, s, "ra0005-s1") || !slices.Equal(f.Deleted(), []string{"rb/bB-vol-snapB"}) {
-		t.Fatalf("after the last window: cursor %q, ra0005-s1 available %v, S3 deletes %v; want start over, ra0005 not yet, rb reaped",
-			s.supersededCursor, snapshotAvailable(t, s, "ra0005-s1"), f.Deleted())
+	if !snapshotAvailable(t, s, "ra0005-s1") || !slices.Equal(f.Deleted(), []string{"rb/bB-vol-snapB"}) {
+		t.Fatalf("last window: ra0005-s1 available %v, S3 deletes %v; want ra0005 not yet, rb reaped",
+			snapshotAvailable(t, s, "ra0005-s1"), f.Deleted())
 	}
 	if err := s.reapSuperseded(ctx); err != nil {
 		t.Fatal(err)
