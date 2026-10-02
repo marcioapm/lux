@@ -258,6 +258,35 @@ func TestReapSupersededWindowWraps(t *testing.T) {
 	}
 }
 
+// A full batch of ready Runs leaves the rest of its window for the next
+// pass, which continues with the next twenty in id order.
+func TestReapSupersededFullBatchContinues(t *testing.T) {
+	s, ctx, f := supersededFixture(t)
+	blockedRuns(t, s, ctx, supersededWindow+1)
+	for i := 0; i <= supersededWindow; i++ {
+		unblock(t, s, ctx, fmt.Sprintf("ra%04d", i))
+	}
+	for pass := 1; pass <= 2; pass++ {
+		if err := s.reapSuperseded(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var want []string
+		for i := 0; i < pass*20; i++ {
+			want = append(want, fmt.Sprintf("ra%04d/ra%04d-vol1", i, i))
+		}
+		if got := f.Deleted(); !slices.Equal(got, want) {
+			t.Fatalf("pass %d: S3 deletes %v, want %v", pass, got, want)
+		}
+		for i := 0; i <= supersededWindow; i++ {
+			old, current := fmt.Sprintf("ra%04d-s1", i), fmt.Sprintf("ra%04d-s2", i)
+			if snapshotAvailable(t, s, old) != (i >= pass*20) || !snapshotAvailable(t, s, current) {
+				t.Fatalf("pass %d: %s available %v, %s available %v; want %v true", pass,
+					old, snapshotAvailable(t, s, old), current, snapshotAvailable(t, s, current), i >= pass*20)
+			}
+		}
+	}
+}
+
 // A resume --from-snapshot of the older snapshot that commits before the
 // reaper's pass makes it the current one: the reaper deletes the formerly
 // current one instead. One the reaper claims first is refused (409
