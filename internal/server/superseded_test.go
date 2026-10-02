@@ -265,28 +265,48 @@ func restoreManifestOf(t *testing.T, s *Server, run string) (string, error) {
 	return id, err
 }
 
-// A new snapshot report while the reaper holds the Run: it lands after the
-// claim, and is not uploaded, so the snapshot that was current stays.
+// A new snapshot report while the reaper's claim holds the Run waits for
+// it, then lands: the claim took only the snapshot older than the one
+// current when it locked, and the new one, not uploaded, keeps that one.
+// The claim is held mid-statement by a transaction holding the volume row
+// it updates, so the report is seen waiting on the reaper itself.
 func TestReapSupersededRacesNewSnapshot(t *testing.T) {
 	s, ctx, f := supersededFixture(t)
 	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('pb3', 't2', 'rb', 'hb', 3, 'stopping')`)
 	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 3, state = 'stopping' WHERE id = 'rb'`)
-	if err := s.reapSuperseded(ctx); err != nil {
+	blob := hold(t, ctx, s, lockRow("blobs", "bB-vol-snapB", "FOR UPDATE"))
+	blobXID := xidOf(t, ctx, s, blob)
+	reaped := make(chan error, 1)
+	go func() { reaped <- s.reapSuperseded(ctx) }()
+	waitWaitingOn(t, s, blobXID)
+	var reaperXID int64
+	systemScan(t, s, `SELECT a.backend_xid::text::bigint FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+		WHERE l.locktype = 'transactionid' AND NOT l.granted AND l.transactionid::text::bigint = $1`, []any{blobXID}, &reaperXID)
+	reported := make(chan proto.Frame, 1)
+	go func() { reported <- reportSnapshot(t, s, "hb", "rb", 3, snapshotB("snapB3", 3)) }()
+	waitWaitingOn(t, s, reaperXID)
+	release(t, blob, nil)
+	if err := <-reaped; err != nil {
 		t.Fatal(err)
 	}
-	if fr := reportSnapshot(t, s, "hb", "rb", 3, snapshotB("snapB3", 3)); fr.Type != proto.MsgAck {
+	if fr := <-reported; fr.Type != proto.MsgAck {
 		t.Fatalf("rb's report: %s %s", fr.Type, fr.Data)
 	}
+	if got := f.Deleted(); !slices.Equal(got, []string{"rb/bB-vol-snapB"}) {
+		t.Fatalf("S3 deletes %v, want rb/bB-vol-snapB", got)
+	}
 	if err := s.reapSuperseded(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !snapshotAvailable(t, s, "snapB2") || !snapshotAvailable(t, s, "snapB3") || snapshotAvailable(t, s, "snapB") {
-		t.Fatalf("available: snapB %v snapB2 %v snapB3 %v, want false true true",
+	var cur string
+	systemScan(t, s, `SELECT snapshot_id FROM runs WHERE id = 'rb'`, nil, &cur)
+	if cur != "snapB3" || !snapshotAvailable(t, s, "snapB2") || !snapshotAvailable(t, s, "snapB3") || snapshotAvailable(t, s, "snapB") {
+		t.Fatalf("current %s; available: snapB %v snapB2 %v snapB3 %v, want snapB3; false true true", cur,
 			snapshotAvailable(t, s, "snapB"), snapshotAvailable(t, s, "snapB2"), snapshotAvailable(t, s, "snapB3"))
 	}
 	if got := f.Deleted(); !slices.Equal(got, []string{"rb/bB-vol-snapB"}) {
-		t.Fatalf("S3 deletes %v", got)
+		t.Fatalf("S3 deletes %v after the next pass, want only rb/bB-vol-snapB", got)
 	}
 }
 
