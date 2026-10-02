@@ -137,12 +137,12 @@ func newResizeFixture(t *testing.T, old, now spec.Resources, local string) *resi
 func (f *resizeFixture) start(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	prev, err := f.p.stopPrevious(ctx)
+	err := f.p.stopPrevious(ctx)
 	if err == nil {
 		err = f.p.prepareVolumes(ctx, f.a.Spec, nil, f.a.Resume)
 	}
 	if err == nil {
-		err = f.p.createContainer(ctx, f.a.Spec, "img", "img1", prev, podman.Network{}, f.a)
+		err = f.p.createContainer(ctx, f.a.Spec, "img", "img1", podman.Network{}, f.a)
 	}
 	if err == nil {
 		err = f.r.pm.Start(ctx, containerName("run1"))
