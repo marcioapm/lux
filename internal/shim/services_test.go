@@ -2,6 +2,7 @@ package shim
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -129,11 +130,12 @@ func TestServiceEnv(t *testing.T) {
 	}
 }
 
-// The response arrives while the request body is still being sent: the
-// proxy must not close the workload's request body when it writes the
-// response's header, or the transport, still sending it upstream, fails
-// and drops the connection the response is being read from (the services
-// e2e flake: a POST answered 200 with no body).
+// The workload sends the rest of its body only after it sees the response
+// header. The proxy must pass the header on without first draining or
+// closing the request body: draining waits for bytes the workload holds
+// back until the header arrives, and closing fails the transport still
+// sending the body upstream (the services e2e flake: a POST answered 200
+// with no body). Covers Content-Length and chunked framing.
 func TestServiceProxyAnswersBeforeTheBodyIsSent(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Answers at once, then reads the body as it comes.
@@ -156,22 +158,38 @@ func TestServiceProxyAnswersBeforeTheBodyIsSent(t *testing.T) {
 	proxy := httptest.NewServer(h)
 	defer proxy.Close()
 
-	pr, pw := io.Pipe()
-	req, _ := http.NewRequest("POST", proxy.URL+"/upload", pr)
-	req.ContentLength = int64(len("hello world"))
-	go func() {
-		io.WriteString(pw, "hello")
-		time.Sleep(200 * time.Millisecond)
-		io.WriteString(pw, " world")
-		pw.Close()
-	}()
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil || string(body) != "got hello world" {
-		t.Fatalf("status %d body %q err %v", resp.StatusCode, body, err)
+	for _, size := range []int64{int64(len("hello world")), -1} {
+		t.Run(fmt.Sprintf("content-length %d", size), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			pr, pw := io.Pipe()
+			// Unblocks the writer below whichever way the test ends.
+			defer pr.Close()
+			req, err := http.NewRequestWithContext(ctx, "POST", proxy.URL+"/upload", pr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.ContentLength = size
+			gotHeader := make(chan struct{})
+			go func() {
+				io.WriteString(pw, "hello")
+				select {
+				case <-gotHeader:
+				case <-ctx.Done():
+				}
+				io.WriteString(pw, " world")
+				pw.Close()
+			}()
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			close(gotHeader)
+			body, err := io.ReadAll(resp.Body)
+			if err != nil || string(body) != "got hello world" {
+				t.Fatalf("status %d body %q err %v", resp.StatusCode, body, err)
+			}
+		})
 	}
 }
