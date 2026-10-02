@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"reflect"
 	"slices"
@@ -194,6 +195,144 @@ func TestResumeAddedRepositoryCredentialIsNotDeclaredAsEnv(t *testing.T) {
 	}
 	if ev := resumeEvent(t, s, id); ev["addedSecrets"] != nil {
 		t.Errorf("addedSecrets %v: a credential is the repository's", ev["addedSecrets"])
+	}
+}
+
+// A retry of a resume on a Run already resuming changes nothing: the first
+// resume's secrets stand, a declaration or removal in the retry included,
+// and it is answered 202 without a second resume.requested.
+func TestResumeSecretsRetryWhileResuming(t *testing.T) {
+	extra := spec.Secret{Name: "EXTRA", Value: "extra-1"}
+	for _, c := range []struct {
+		name  string
+		retry resumeRequest
+	}{
+		{"identical", resumeRequest{Secrets: with(baseValues(), extra)}},
+		{"another new secret", resumeRequest{Secrets: with(baseValues(), extra, spec.Secret{Name: "MORE", Value: "more-1"})}},
+		{"a removal", resumeRequest{Secrets: baseValues(), RemoveSecrets: []string{"EXTRA"}}},
+		{"an invalid removal", resumeRequest{Secrets: baseValues(), RemoveSecrets: []string{"GIT_TOKEN"}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			id := stoppedWithSecrets(t, s)
+			if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: with(baseValues(), extra)}); err != nil {
+				t.Fatal(err)
+			}
+			secs, refs := storedSecrets(t, s, id)
+			out, err := resumeSecrets(tenantCtx("t1"), s, id, c.retry)
+			if err != nil || out.Status != http.StatusAccepted {
+				t.Fatalf("retry: %v", err)
+			}
+			secs2, refs2 := storedSecrets(t, s, id)
+			if !reflect.DeepEqual(secs2, secs) || !reflect.DeepEqual(refs2, refs) {
+				t.Errorf("the retry changed the secrets: %v %v", secretNames(secs2), refNames(refs2))
+			}
+			var events int
+			systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'resume.requested'`, []any{id}, &events)
+			if events != 1 {
+				t.Errorf("%d resume.requested, want 1", events)
+			}
+			if vals, _ := s.secrets.get(id); vals["EXTRA"] != "extra-1" || vals["MORE"] != "" {
+				t.Errorf("held values %v, want the first resume's", vals)
+			}
+		})
+	}
+}
+
+// An operator's resume without values uses those this luxd still holds:
+// it works with nothing new declared, and may remove secrets. Without held
+// values it is refused, unless no secret would be left needing one.
+// Declaring needs values, which the cache cannot give.
+func TestOperatorResumeSecrets(t *testing.T) {
+	op := context.WithValue(context.Background(), principalKey, Principal{Operator: true, TenantID: "t1", Scopes: []string{"admin", "operator"}})
+	stopped := func(t *testing.T, s *Server, id string) {
+		execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
+	}
+	t.Run("from held values", func(t *testing.T) {
+		s := testServer(t)
+		id := stoppedWithSecrets(t, s)
+		if _, err := resumeSecrets(op, s, id, resumeRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, refs := storedSecrets(t, s, id); len(refs) != 4 {
+			t.Errorf("runs.secrets %v", refNames(refs))
+		}
+	})
+	t.Run("removing, from held values", func(t *testing.T) {
+		s := testServer(t)
+		id := stoppedWithSecrets(t, s)
+		if _, err := resumeSecrets(op, s, id, resumeRequest{RemoveSecrets: []string{"TOKEN"}}); err != nil {
+			t.Fatal(err)
+		}
+		secs, refs := storedSecrets(t, s, id)
+		if want := []string{"GIT_TOKEN", "HDR", "REG"}; !reflect.DeepEqual(secretNames(secs), want) || !reflect.DeepEqual(refNames(refs), want) {
+			t.Errorf("secrets %v / %v, want %v", secretNames(secs), refNames(refs), want)
+		}
+		if vals, _ := s.secrets.get(id); len(vals) != 3 || vals["TOKEN"] != "" {
+			t.Errorf("held values %v", vals)
+		}
+	})
+	t.Run("without held values", func(t *testing.T) {
+		s := testServer(t)
+		id := stoppedWithSecrets(t, s)
+		s.secrets.drop(id)
+		_, err := resumeSecrets(op, s, id, resumeRequest{RemoveSecrets: []string{"TOKEN"}})
+		if he := refused(t, err, http.StatusUnprocessableEntity, "secrets_required", "operator resume"); !strings.Contains(he.Message, "no longer holds") {
+			t.Errorf("message %q", he.Message)
+		}
+		if _, refs := storedSecrets(t, s, id); len(refs) != 4 {
+			t.Errorf("a refused resume changed runs.secrets: %v", refNames(refs))
+		}
+	})
+	t.Run("declaring needs every value", func(t *testing.T) {
+		s := testServer(t)
+		id := stoppedWithSecrets(t, s)
+		_, err := resumeSecrets(op, s, id, resumeRequest{Secrets: []spec.Secret{{Name: "EXTRA", Value: "extra-1"}}})
+		he := refused(t, err, http.StatusUnprocessableEntity, "secrets_required", "operator resume with only a new secret")
+		if !reflect.DeepEqual(he.Details, []string{"GIT_TOKEN", "HDR", "REG", "TOKEN"}) {
+			t.Errorf("missing %v", he.Details)
+		}
+		if _, refs := storedSecrets(t, s, id); len(refs) != 4 {
+			t.Errorf("a refused resume declared: %v", refNames(refs))
+		}
+		stopped(t, s, id)
+		if _, err := resumeSecrets(op, s, id, resumeRequest{Secrets: with(baseValues(), spec.Secret{Name: "EXTRA", Value: "extra-1"})}); err != nil {
+			t.Fatal(err)
+		}
+		if _, refs := storedSecrets(t, s, id); !slices.Contains(refNames(refs), "EXTRA") {
+			t.Errorf("runs.secrets %v", refNames(refs))
+		}
+	})
+}
+
+// removeSecrets through the HTTP API: decoded, and a refusal is the
+// 422 invalid_spec body with the problem in its details.
+func TestResumeSecretsHTTP(t *testing.T) {
+	s := testServer(t)
+	id := stoppedWithSecrets(t, s)
+	key := apiKey(t, s, new("t1"), "run", "read")
+	vals := []map[string]string{}
+	for _, sec := range baseValues() {
+		vals = append(vals, map[string]string{"name": sec.Name, "value": sec.Value})
+	}
+	w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+id+"/resume", map[string]any{"secrets": vals[:1], "removeSecrets": []string{"GIT_TOKEN"}})
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), `\"GIT_TOKEN\" is a git credential`) {
+		t.Fatalf("remove a git credential: %d %s", w.Code, w.Body)
+	}
+	vals = append(vals, map[string]string{"name": "EXTRA", "value": "extra-1"})
+	w = apiCall(t, s, key, http.MethodPost, "/v1/runs/"+id+"/resume", map[string]any{"secrets": vals[1:], "removeSecrets": []string{"TOKEN"}})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("resume: %d %s", w.Code, w.Body)
+	}
+	g := apiCall(t, s, key, http.MethodGet, "/v1/runs/"+id, nil)
+	var run struct {
+		Secrets []spec.SecretRef `json:"secrets"`
+	}
+	if err := json.Unmarshal(g.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+	if got := refNames(run.Secrets); !reflect.DeepEqual(got, []string{"EXTRA", "GIT_TOKEN", "HDR", "REG"}) {
+		t.Errorf("GET secrets %v", got)
 	}
 }
 

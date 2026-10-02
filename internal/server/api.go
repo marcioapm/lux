@@ -1347,12 +1347,11 @@ func (s *Server) stopOrCancel(ctx context.Context, id, reason string) (*accepted
 }
 
 type resumeRequest struct {
-	RequestID string        `json:"requestId,omitempty" doc:"Names this resume: in its resume.requested event, in the addedBy of the repositories it adds and in their git.clone events. Generated if absent."`
-	Secrets   []spec.Secret `json:"secrets,omitempty" doc:"A value for every one of the Run's secrets (a new value rotates it), and for the credentials of repositories it adds: luxd never keeps them. A name the Run does not have, and no added repository's credential, declares a new secret, checked as a submit's (as: env, file or none; env by default): the Run has it from this resume on, and every later resume must supply it. On a Run already resuming, the first resume's secrets stand."`
-	// RemoveSecrets leaves the Run's spec and runs.secrets with this resume.
-	RemoveSecrets []string   `json:"removeSecrets,omitempty" doc:"Names of the Run's secrets to remove: from this resume on the workload no longer has them and resumes no longer need them. Refused (422 invalid_spec, nothing changed): a name the Run does not have, a git or registry credential, an MCP server's or service's header secret, or a name also in secrets or the credential of a repository this resume adds."`
-	Git           *resumeGit `json:"git,omitempty" doc:"Repositories to add. The runner clones them before the Run starts again; one whose clone fails is dropped and the Run goes on without it (a git.clone event says so)."`
-	Input     *resumeInput  `json:"input,omitempty" doc:"A message for the workload once it is back."`
+	RequestID     string        `json:"requestId,omitempty" doc:"Names this resume: in its resume.requested event, in the addedBy of the repositories it adds and in their git.clone events. Generated if absent."`
+	Secrets       []spec.Secret `json:"secrets,omitempty" doc:"A value for every one of the Run's secrets (a new value rotates it), and for the credentials of repositories it adds: luxd never keeps them. A name the Run does not have, and no added repository's credential, declares a new secret, checked as a submit's (as: env, file or none; env by default): the Run has it from this resume on, and every later resume must supply it. On a Run already resuming, the first resume's secrets stand."`
+	RemoveSecrets []string      `json:"removeSecrets,omitempty" doc:"Names of the Run's secrets to remove: from this resume on the workload no longer has them and resumes no longer need them. Refused (422 invalid_spec, nothing changed): a name the Run does not have, a git or registry credential, an MCP server's or service's header secret, or a name also in secrets or the credential of a repository this resume adds."`
+	Git           *resumeGit    `json:"git,omitempty" doc:"Repositories to add. The runner clones them before the Run starts again; one whose clone fails is dropped and the Run goes on without it (a git.clone event says so)."`
+	Input         *resumeInput  `json:"input,omitempty" doc:"A message for the workload once it is back."`
 	// FromSnapshot resumes from an older snapshot (e.g. after lost).
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost)."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
