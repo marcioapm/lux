@@ -1478,18 +1478,18 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 				if err != nil {
 					return err
 				}
-				first, err := pendingResize(ctx, tx, id)
-				if err != nil {
-					return err
-				}
-				var firstAsked spec.Resources
-				if first != nil {
-					firstAsked = first.Requested
-				}
-				if asked != firstAsked && asked != (spec.Resources{}) {
-					return errf(http.StatusConflict, "not_resumable", "run is resuming already with other resources: they can only change while it is stopped, lost or failed")
-				}
 				if asked != (spec.Resources{}) {
+					first, err := pendingResize(ctx, tx, id)
+					if err != nil {
+						return err
+					}
+					var firstAsked spec.Resources
+					if first != nil {
+						firstAsked = first.Requested
+					}
+					if asked != firstAsked {
+						return errf(http.StatusConflict, "not_resumable", "run is resuming already with other resources: they can only change while it is stopped, lost or failed")
+					}
 					resize = first
 				}
 			}
@@ -1669,21 +1669,19 @@ func resizeRun(ctx context.Context, tx pgx.Tx, runID string, cur spec.Resources,
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, err
 		}
+		kept := DiskKept{Requested: req.Disk, Kept: cur.Disk}
 		switch {
 		case err == nil && !final:
-			rz.Disk = &DiskKept{Requested: req.Disk, Kept: cur.Disk,
-				Reason: "no final measurement: the placement that took the snapshot it resumes from ended without reporting its final disk use, so a smaller disk is not applied"}
+			kept.Reason = "no final measurement: the placement that took the snapshot it resumes from ended without reporting its final disk use, so a smaller disk is not applied"
 		case peak == nil:
-			rz.Disk = &DiskKept{Requested: req.Disk, Kept: cur.Disk,
-				Reason: "no disk use is recorded for the snapshot it resumes from: a smaller disk is not applied"}
+			kept.Reason = "no disk use is recorded for the snapshot it resumes from: a smaller disk is not applied"
 		case int64(req.Disk) < diskShrinkFloor(*peak):
-			need := diskShrinkFloor(*peak)
-			rz.Disk = &DiskKept{Requested: req.Disk, Kept: cur.Disk, Measured: peak, Needed: need,
-				Reason: fmt.Sprintf("its saved state used up to %s; a smaller disk must be at least %s (that plus max(25%%, 1 GiB))",
-					bytesText(*peak), bytesText(need))}
+			kept.Measured, kept.Needed = peak, diskShrinkFloor(*peak)
+			kept.Reason = fmt.Sprintf("its saved state used up to %s; a smaller disk must be at least %s (that plus max(25%%, 1 GiB))",
+				bytesText(*peak), bytesText(kept.Needed))
 		}
-		if rz.Disk != nil {
-			rz.Applied.Disk = cur.Disk
+		if kept.Reason != "" {
+			rz.Disk, rz.Applied.Disk = &kept, cur.Disk
 		}
 	}
 	if rz.Applied != cur {
