@@ -99,6 +99,39 @@ on every start, so it must be idempotent.
   syncs with `POST /v1/runs/{id}/sync` (`lux sync`).
 - Attached servers start again ([Servers](#servers)).
 
+### Resizing on resume
+
+A resume can change what a stopped, lost or failed Run gets from then on
+(`resources: {cpus, memory, disk}` in the request; `lux resume --cpus
+--memory --disk`). A running Run's limits never change: stop it first.
+What a resume applies is written into the Run's spec, so `GET
+/v1/runs/{id}` shows it, the scheduler reserves it, and every later
+placement gets it.
+
+- **cpus and memory** apply, larger or smaller. They must be greater than
+  0 (422 `invalid_spec` otherwise, as at submit). They shape only the
+  container's limits and the reservation, so the runner makes a new
+  container with them (a stopped one is reused only when made the same
+  way), on the same state volumes.
+- **disk** larger applies. Smaller applies only if it is at least the
+  Run's saved state plus headroom: the peak disk use (writable layer plus
+  state volumes) of the placement that took the snapshot it resumes from,
+  plus a quarter of that and at least 1 GiB. Less than that, or with no
+  use recorded for that placement, the Run keeps its disk and resumes
+  anyway: a smaller limit it is already over would only stop it again
+  ([disk is measured](runspec.md#rules)).
+- The answer's `resize` and the `resume.requested` event's `resources`
+  say what was asked (`requested`), what the Run has now (`applied`),
+  and, when a disk was kept, `disk: {requested, kept, reason,
+  measuredBytes, neededBytes}`.
+- A new size is placed like a submit of that size. The snapshot's host is
+  only preferred: if the new size does not fit there, the Run goes to
+  another host of its pool that has room, or, in a provisioned pool, a new
+  host is asked for; with no host that could fit it, it waits for
+  capacity, saying which resource is short.
+- A Run already resuming takes a retry with the same sizes, and refuses
+  other ones (409 `not_resumable`).
+
 ## Secrets
 
 The caller passes secret values with each submit and resume. lux never
