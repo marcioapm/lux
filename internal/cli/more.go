@@ -480,14 +480,22 @@ func (a *app) tenantsCmd() *cobra.Command {
 					stored += "/" + bytesHuman(*t.MaxStorageBytes)
 				}
 				rows = append(rows, []string{t.Name, t.ID, fmt.Sprintf("%d/%s", t.ActiveRuns, limit(t.MaxConcurrentRuns)), fmt.Sprint(t.Runs),
-					fmt.Sprintf("%d/%s", t.Hosts, limit(t.MaxHosts)), stored, fmt.Sprintf("%dd", t.RetentionDays)})
+					fmt.Sprintf("%d/%s", t.Hosts, limit(t.MaxHosts)), stored, fmt.Sprintf("%dd", t.RetentionDays), expiry(t.ExpireAfterDays)})
 			}
-			a.table("NAME\tID\tACTIVE\tRUNS\tHOSTS\tSTORED\tRETENTION", rows)
+			a.table("NAME\tID\tACTIVE\tRUNS\tHOSTS\tSTORED\tRETENTION\tEXPIRY", rows)
 			return nil
 		},
 	}
 	cmd.AddCommand(ls)
 	return cmd
+}
+
+// expiry is a tenant's expireAfterDays for a table: 0 is never.
+func expiry(days int) string {
+	if days == 0 {
+		return "never"
+	}
+	return fmt.Sprintf("%dd", days)
 }
 
 func (a *app) statusCmd() *cobra.Command {
