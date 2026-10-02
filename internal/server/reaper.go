@@ -436,14 +436,25 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 func (s *Server) reapExpiry(ctx context.Context) error {
 	var expired []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		// The first bound is the smallest limit any tenant has: it keeps
-		// the runs_resting scan to Runs that may be due.
-		rows, err := tx.Query(ctx, `SELECT r.id, r.tenant_id, r.state, t.expire_after_days FROM runs r
+		// due: each expiring tenant's oldest due Runs, read from
+		// runs_resting below that tenant's own cutoff, so a tenant with a
+		// short limit does not make the pass read other tenants' resting
+		// Runs that are not due; then the oldest 20 of those. The outer
+		// query locks them and repeats the conditions.
+		rows, err := tx.Query(ctx, `WITH due AS (
+				SELECT d.id FROM tenants dt CROSS JOIN LATERAL (
+					SELECT dr.id, dr.state_changed_at FROM runs dr
+					WHERE dr.tenant_id = dt.id AND dr.state IN `+resumableRunStates+`
+					  AND dr.state_changed_at < now() - make_interval(days => dt.expire_after_days)
+					ORDER BY dr.state_changed_at LIMIT 20) d
+				WHERE dt.expire_after_days > 0
+				ORDER BY d.state_changed_at LIMIT 20
+			)
+			SELECT r.id, r.tenant_id, r.state, t.expire_after_days FROM runs r
 			JOIN tenants t ON t.id = r.tenant_id
-			WHERE r.state IN `+resumableRunStates+`
-			  AND r.state_changed_at < now() - make_interval(days => (SELECT min(expire_after_days) FROM tenants WHERE expire_after_days > 0))
+			WHERE r.id IN (SELECT id FROM due) AND r.state IN `+resumableRunStates+`
 			  AND t.expire_after_days > 0 AND r.state_changed_at < now() - make_interval(days => t.expire_after_days)
-			ORDER BY r.state_changed_at LIMIT 20
+			ORDER BY r.state_changed_at
 			FOR UPDATE OF r SKIP LOCKED`)
 		if err != nil {
 			return err

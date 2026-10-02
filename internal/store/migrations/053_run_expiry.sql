@@ -19,5 +19,5 @@ ALTER TABLE runs ALTER COLUMN state_changed_at SET DEFAULT now(),
 ALTER TABLE tenants ADD COLUMN expire_after_days int NOT NULL DEFAULT 90
 	CHECK (expire_after_days >= 0);
 
--- reapExpiry's scan: only resting Runs, oldest first.
-CREATE INDEX runs_resting ON runs (state_changed_at) WHERE state IN ('stopped', 'lost', 'failed');
+-- reapExpiry's scan: each tenant's resting Runs, oldest first.
+CREATE INDEX runs_resting ON runs (tenant_id, state_changed_at) WHERE state IN ('stopped', 'lost', 'failed');
