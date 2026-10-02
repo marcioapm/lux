@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -17,11 +18,18 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// stoppedRun submits a Run of tenant t1 with res to pool "default", then
-// stops it as a placement on host "ha" that reported snapshot "snap1"
-// would: placement 1 exited with peakDisk (nil: no usage recorded), the
-// snapshot on ha, uploaded. Returns its id.
-func stoppedRun(t *testing.T, s *Server, res spec.Resources, peakDisk *int64) string {
+// resizeBase is what the resize tests submit; submit adds pids 1024.
+var resizeBase = spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}
+
+// withPids is r as submit stores it: with the default pids.
+func withPids(r spec.Resources) spec.Resources {
+	r.Pids = 1024
+	return r
+}
+
+// submitOnHA submits a Run of tenant t1 with res and a state volume to pool
+// "default", which has the ready host "ha". Returns its id.
+func submitOnHA(t *testing.T, s *Server, res spec.Resources) string {
 	t.Helper()
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1') ON CONFLICT DO NOTHING`)
@@ -36,9 +44,19 @@ func stoppedRun(t *testing.T, s *Server, res spec.Resources, peakDisk *int64) st
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := out.Body.ID
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, capacity, last_heartbeat)
 		VALUES ('ha', 'ha', 'default', 'ready', '{"cpus":4,"memory":8589934592}', now()) ON CONFLICT DO NOTHING`)
+	return out.Body.ID
+}
+
+// stoppedRun submits a Run with res (submitOnHA), then stops it as a
+// placement on host "ha" that reported a snapshot would: placement 1
+// exited with peakDisk (nil: no usage recorded), the snapshot on ha,
+// uploaded. Returns its id.
+func stoppedRun(t *testing.T, s *Server, res spec.Resources, peakDisk *int64) string {
+	t.Helper()
+	ctx := context.Background()
+	id := submitOnHA(t, s, res)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, peak_disk_bytes)
 		VALUES ('p-'||$1, 't1', $1, 'ha', 1, 'exited', '{}', $2)`, id, peakDisk)
 	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, host_id, uploaded)
@@ -57,6 +75,24 @@ func storedResources(t *testing.T, s *Server, id string) spec.Resources {
 	var r spec.Resources
 	systemScan(t, s, `SELECT spec->'resources' FROM runs WHERE id = $1`, []any{id}, &r)
 	return r
+}
+
+func storedState(t *testing.T, s *Server, id string) string {
+	t.Helper()
+	var state string
+	systemScan(t, s, `SELECT state FROM runs WHERE id = $1`, []any{id}, &state)
+	return state
+}
+
+// refused fails t unless err is an HTTPError with status and, when code is
+// not empty, that code.
+func refused(t *testing.T, err error, status int, code, what string) *HTTPError {
+	t.Helper()
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != status || (code != "" && he.Code != code) {
+		t.Fatalf("%s: %v, want %d %s", what, err, status, code)
+	}
+	return he
 }
 
 // resumeEvent is the data of the Run's latest resume.requested event.
@@ -94,7 +130,7 @@ func TestResumeResizesCPUsAndMemory(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
-			id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(gib))
+			id := stoppedRun(t, s, resizeBase, i64(gib))
 			out, err := resumeWith(s, id, &resumeResources{CPUs: f64(c.cpus), Memory: bytesPtr(c.memory)})
 			if err != nil {
 				t.Fatal(err)
@@ -141,18 +177,13 @@ func TestResumeRefusesInvalidResources(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
-			before := spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}
-			id := stoppedRun(t, s, before, i64(gib))
+			id := stoppedRun(t, s, resizeBase, i64(gib))
 			_, err := resumeWith(s, id, &c.r)
-			var he *HTTPError
-			if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity || he.Code != "invalid_spec" || len(he.Details) == 0 {
+			if he := refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "resume"); len(he.Details) == 0 {
 				t.Fatalf("resume: %v, want 422 invalid_spec with details", err)
 			}
-			before.Pids = 1024
-			var state string
-			systemScan(t, s, `SELECT state FROM runs WHERE id = $1`, []any{id}, &state)
-			if got := storedResources(t, s, id); got != before || state != StateStopped {
-				t.Errorf("after refusal: %s %+v, want stopped %+v", state, got, before)
+			if got, state := storedResources(t, s, id), storedState(t, s, id); got != withPids(resizeBase) || state != StateStopped {
+				t.Errorf("after refusal: %s %+v, want stopped %+v", state, got, withPids(resizeBase))
 			}
 		})
 	}
@@ -161,10 +192,7 @@ func TestResumeRefusesInvalidResources(t *testing.T) {
 	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	_, err := s.submitRun(tenantCtx("t1"), &submitRunInput{Body: spec.RunSpec{Image: spec.Image{Ref: "alpine"},
 		Workload: spec.Workload{Adapter: "generic", Command: []string{"true"}}, Resources: spec.Resources{CPUs: -1}}})
-	var he *HTTPError
-	if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity || he.Code != "invalid_spec" {
-		t.Fatalf("submit: %v", err)
-	}
+	refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "submit")
 }
 
 // Disk: larger is applied; smaller is applied down to the snapshot's
@@ -187,14 +215,12 @@ func TestResumeDisk(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
-			id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, c.peak)
+			id := stoppedRun(t, s, resizeBase, c.peak)
 			out, err := resumeWith(s, id, &resumeResources{Disk: spec.Bytes(c.requested)})
 			if err != nil {
 				t.Fatal(err)
 			}
-			var state string
-			systemScan(t, s, `SELECT state FROM runs WHERE id = $1`, []any{id}, &state)
-			if got := storedResources(t, s, id).Disk; int64(got) != c.applied || state != StateResuming {
+			if got, state := storedResources(t, s, id).Disk, storedState(t, s, id); int64(got) != c.applied || state != StateResuming {
 				t.Errorf("%s with disk %d, want resuming with %d", state, got, c.applied)
 			}
 			if got := out.Body.Spec.Resources.Disk; int64(got) != c.applied {
@@ -229,7 +255,7 @@ func TestResumeDisk(t *testing.T) {
 func TestResumeDiskShrinkMeasuresFromSnapshot(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
-	id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(gib))
+	id := stoppedRun(t, s, resizeBase, i64(gib))
 	// A later placement used 15 GiB and took the latest snapshot.
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, peak_disk_bytes)
 		VALUES ('p2', 't1', $1, 'ha', 2, 'exited', $2)`, id, 15*gib)
@@ -259,7 +285,7 @@ func TestResumeDiskShrinkMeasuresFromSnapshot(t *testing.T) {
 func TestResumeResizeOfANonResumableRun(t *testing.T) {
 	t.Run("resuming", func(t *testing.T) {
 		s := testServer(t)
-		id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, nil)
+		id := stoppedRun(t, s, resizeBase, nil)
 		r := &resumeResources{CPUs: f64(1), Memory: bytesPtr(gib), Disk: spec.Bytes(10 * gib)}
 		for i := range 2 {
 			if _, err := resumeWith(s, id, r); err != nil {
@@ -268,10 +294,7 @@ func TestResumeResizeOfANonResumableRun(t *testing.T) {
 		}
 		for _, other := range []*resumeResources{{CPUs: f64(2)}, {Memory: bytesPtr(2 * gib)}, {Disk: spec.Bytes(40 * gib)}} {
 			_, err := resumeWith(s, id, other)
-			var he *HTTPError
-			if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "not_resumable" {
-				t.Fatalf("resume with %+v while resuming: %v, want 409 not_resumable", other, err)
-			}
+			refused(t, err, http.StatusConflict, "not_resumable", fmt.Sprintf("resume with %+v while resuming", other))
 		}
 		want := spec.Resources{CPUs: 1, Memory: spec.Bytes(gib), Disk: spec.Bytes(20 * gib), Pids: 1024}
 		if got := storedResources(t, s, id); got != want {
@@ -281,17 +304,12 @@ func TestResumeResizeOfANonResumableRun(t *testing.T) {
 	for _, state := range []string{StateRunning, StateSucceeded, StateCancelled} {
 		t.Run(state, func(t *testing.T) {
 			s := testServer(t)
-			before := spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}
-			id := stoppedRun(t, s, before, i64(gib))
+			id := stoppedRun(t, s, resizeBase, i64(gib))
 			execSQL(t, s, context.Background(), `UPDATE runs SET state = $2 WHERE id = $1`, id, state)
 			_, err := resumeWith(s, id, &resumeResources{CPUs: f64(1), Memory: bytesPtr(gib)})
-			var he *HTTPError
-			if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "not_resumable" {
-				t.Fatalf("resume: %v, want 409 not_resumable", err)
-			}
-			before.Pids = 1024
-			if got := storedResources(t, s, id); got != before {
-				t.Errorf("spec %+v, want %+v", got, before)
+			refused(t, err, http.StatusConflict, "not_resumable", "resume")
+			if got := storedResources(t, s, id); got != withPids(resizeBase) {
+				t.Errorf("spec %+v, want %+v", got, withPids(resizeBase))
 			}
 		})
 	}
@@ -305,7 +323,7 @@ func TestResumeResizedPlacement(t *testing.T) {
 	setup := func(t *testing.T) (*Server, string) {
 		s := testServer(t)
 		s.cfg.LeaseDuration = time.Minute
-		id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(gib))
+		id := stoppedRun(t, s, resizeBase, i64(gib))
 		s.hub.polled("ha")
 		return s, id
 	}
@@ -365,27 +383,13 @@ func TestResumeResizedPlacement(t *testing.T) {
 	})
 }
 
-// stoppingRun is a Run of tenant t1 (20 GiB disk) whose placement 1 on
-// host ha is stopping, as stop leaves it: the Run is running, the
+// stoppingRun is a Run with resizeBase (submitOnHA) whose placement 1 on
+// host ha is stopping, as stop leaves it: the Run is stopping, the
 // placement asked to stop. Returns its id.
 func stoppingRun(t *testing.T, s *Server) string {
 	t.Helper()
 	ctx := context.Background()
-	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1') ON CONFLICT DO NOTHING`)
-	namedPools(t, s, "default")
-	out, err := s.submitRun(tenantCtx("t1"), &submitRunInput{Body: spec.RunSpec{
-		Image:     spec.Image{Ref: "alpine"},
-		Workload:  spec.Workload{Adapter: "generic", Command: []string{"true"}},
-		Volumes:   []spec.Volume{{Name: "data", Path: "/data", Kind: "state"}},
-		Resources: spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)},
-		Placement: spec.Placement{Pool: "default"},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := out.Body.ID
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, capacity, last_heartbeat)
-		VALUES ('ha', 'ha', 'default', 'ready', '{"cpus":4,"memory":8589934592}', now()) ON CONFLICT DO NOTHING`)
+	id := submitOnHA(t, s, resizeBase)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, stop_reason, lease_expires_at)
 		VALUES ('p-'||$1, 't1', $1, 'ha', 1, 'stopping', '{}', 'stop', now() + interval '1 minute')`, id)
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopping', current_epoch = 1, pool_id = 'default' WHERE id = $1`, id)
@@ -477,7 +481,7 @@ func TestResumeRetryWhileResuming(t *testing.T) {
 		status int // 0: 202
 		resize bool
 	}{
-		{"repeat of the refused shrink", &resumeResources{CPUs: f64(1), Memory: bytesPtr(gib), Disk: spec.Bytes(3*gib - 1)}, 0, true},
+		{"repeat of the refused shrink", first, 0, true},
 		{"no resources", nil, 0, false},
 		{"empty resources", &resumeResources{}, 0, false},
 		{"the applied disk", &resumeResources{CPUs: f64(1), Memory: bytesPtr(gib), Disk: spec.Bytes(20 * gib)}, http.StatusConflict, false},
@@ -489,7 +493,7 @@ func TestResumeRetryWhileResuming(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
-			id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(2*gib))
+			id := stoppedRun(t, s, resizeBase, i64(2*gib))
 			out1, err := resumeWith(s, id, first)
 			if err != nil {
 				t.Fatal(err)
@@ -499,10 +503,7 @@ func TestResumeRetryWhileResuming(t *testing.T) {
 			}
 			out2, err := resumeWith(s, id, c.retry)
 			if c.status != 0 {
-				var he *HTTPError
-				if !errors.As(err, &he) || he.Status != c.status {
-					t.Fatalf("retry: %v, want %d", err, c.status)
-				}
+				refused(t, err, c.status, "", "retry")
 			} else {
 				if err != nil {
 					t.Fatal(err)
@@ -540,7 +541,7 @@ func TestResumeRetryComparesTheCurrentResume(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
 			ctx := context.Background()
-			id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(gib))
+			id := stoppedRun(t, s, resizeBase, i64(gib))
 			if _, err := resumeWith(s, id, &resumeResources{CPUs: f64(1)}); err != nil {
 				t.Fatal(err)
 			}
@@ -622,7 +623,7 @@ func TestResumeResizeHTTP(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
-			id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(gib))
+			id := stoppedRun(t, s, resizeBase, i64(gib))
 			key := apiKey(t, s, new("t1"), "run", "read")
 			w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+id+"/resume", map[string]any{"resources": c.resources})
 			if w.Code != c.status {
