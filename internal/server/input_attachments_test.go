@@ -180,6 +180,15 @@ func TestInputAttachmentsFiveMiBAccepted(t *testing.T) {
 	}
 }
 
+// promptServer: tenant t1 with a default static pool.
+func promptServer(t *testing.T) *Server {
+	t.Helper()
+	s := testServer(t)
+	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	mustPut(t, s, "t1", Pool{Name: "default", Provider: "static", IsDefault: mark(true)})
+	return s
+}
+
 func submitWithAttachments(s *Server, adapter string, atts []spec.Attachment) (*submitRunOutput, error) {
 	w := spec.Workload{Adapter: adapter, Command: []string{"agent"}, Prompt: "look", Attachments: atts}
 	sp := spec.RunSpec{Image: spec.Image{Ref: "alpine"}, Workload: w}
@@ -192,9 +201,7 @@ func submitWithAttachments(s *Server, adapter string, atts []spec.Attachment) (*
 // workload.attachments is checked at submit with /input's rules and codes;
 // an accepted Run's views show their names and types, not their bytes.
 func TestSubmitAttachments(t *testing.T) {
-	s := testServer(t)
-	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	mustPut(t, s, "t1", Pool{Name: "default", Provider: "static", IsDefault: mark(true)})
+	s := promptServer(t)
 	ok := spec.Attachment{Name: "a.png", ContentType: "image/png", Data: b64(tinyPNG)}
 	for _, c := range []struct {
 		adapter string
@@ -229,10 +236,8 @@ func TestSubmitAttachments(t *testing.T) {
 // carries the bytes outside its spec; the ack drops them from the queued
 // message; the Run keeps them past its first start.
 func TestPromptAttachmentsBesideSpec(t *testing.T) {
-	s := testServer(t)
+	s := promptServer(t)
 	ctx := context.Background()
-	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	mustPut(t, s, "t1", Pool{Name: "default", Provider: "static", IsDefault: mark(true)})
 	key := ids.Secret("luxk")
 	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('k1', 't1', 'k', $1, ARRAY['run', 'read'])`, ids.Hash(key))
 	data := b64(tinyPNG)
@@ -293,11 +298,7 @@ func TestPromptAttachmentsBesideSpec(t *testing.T) {
 		t.Fatalf("acked assign payload %s", payload)
 	}
 
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return s.applyStatus(ctx, tx, "t1", id, a.Epoch, proto.Status{State: "running"})
-	}); err != nil {
-		t.Fatal(err)
-	}
+	applyRunStatus(t, s, id, a.Epoch, proto.Status{State: "running"})
 	// Running alone is not a resume point: with no session and no snapshot
 	// the next placement starts afresh and is sent them again.
 	if got := queryOne[string](t, s, `SELECT coalesce(prompt_attachments->0->>'data', '') FROM runs WHERE id = $1`, id); got != data {
@@ -309,10 +310,8 @@ func TestPromptAttachmentsBesideSpec(t *testing.T) {
 // its placement running; it returns the Run's id and the image's base64.
 func promptRun(t *testing.T) (*Server, string, string) {
 	t.Helper()
-	s := testServer(t)
+	s := promptServer(t)
 	s.cfg.LeaseDuration = time.Minute
-	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	mustPut(t, s, "t1", Pool{Name: "default", Provider: "static", IsDefault: mark(true)})
 	data := b64(tinyPNG)
 	out, err := submitWithAttachments(s, "claude-code", []spec.Attachment{{Name: "a.png", ContentType: "image/png", Data: data}})
 	if err != nil {
@@ -385,9 +384,7 @@ func TestPromptAttachmentsDroppedOnResume(t *testing.T) {
 
 // A Run cancelled before it was ever placed keeps no image bytes.
 func TestPromptAttachmentsDroppedOnCancel(t *testing.T) {
-	s := testServer(t)
-	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	mustPut(t, s, "t1", Pool{Name: "default", Provider: "static", IsDefault: mark(true)})
+	s := promptServer(t)
 	out, err := submitWithAttachments(s, "claude-code", []spec.Attachment{{Name: "a.png", ContentType: "image/png", Data: b64(tinyPNG)}})
 	if err != nil {
 		t.Fatal(err)
