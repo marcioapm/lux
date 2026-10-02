@@ -3,6 +3,7 @@ package spec
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -391,6 +392,41 @@ func TestResumeSecrets(t *testing.T) {
 		if !reflect.DeepEqual(s, before) {
 			t.Errorf("%s: a refused change changed the spec: %+v", name, s.Secrets)
 		}
+	}
+}
+
+// A direct MCP server's header secret cannot be removed; a declared as: none
+// secret, whose name need not be an env name, can be later.
+func TestResumeSecretsMCPHeaderAndNone(t *testing.T) {
+	s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"},
+		MCPServers: []MCPServer{{Name: "a", URL: "https://m.example/", Headers: []MCPHeader{{Name: "Authorization", Secret: "MCP"}}}}},
+		Secrets: []Secret{{Name: "MCP", Value: "v"}}, Network: Network{Unrestricted: true},
+		Volumes: []Volume{{Name: "workspace", Path: "/workspace"}}}
+	if err := s.Normalize(BuiltinDefaults); err != nil {
+		t.Fatal(err)
+	}
+	s, _, _ = s.SplitSecrets()
+	before := s
+	before.Secrets = slices.Clone(s.Secrets)
+	if _, err := s.ResumeSecrets(nil, []string{"MCP"}, nil, BuiltinDefaults); err == nil || !strings.Contains(err.Error(), `"MCP" values an MCP server's or service's header`) {
+		t.Fatalf("remove a direct MCP header's secret: %v", err)
+	}
+	if !reflect.DeepEqual(s, before) {
+		t.Fatalf("a refused removal changed the spec: %+v", s.Secrets)
+	}
+
+	declared, err := s.ResumeSecrets([]Secret{{Name: "MCP", Value: "v"}, {Name: "a.b", Value: "n-1", As: "none"}}, nil, nil, BuiltinDefaults)
+	if err != nil || !reflect.DeepEqual(declared, []string{"a.b"}) {
+		t.Fatalf("declare a.b as none: %v %v", declared, err)
+	}
+	if i := slices.IndexFunc(s.Secrets, func(sec Secret) bool { return sec.Name == "a.b" }); i < 0 || s.Secrets[i].As != "none" || s.Secrets[i].Value != "" {
+		t.Fatalf("a.b stored as %+v", s.Secrets)
+	}
+	if _, err := s.ResumeSecrets([]Secret{{Name: "MCP", Value: "v"}}, []string{"a.b"}, nil, BuiltinDefaults); err != nil {
+		t.Fatalf("remove a.b: %v", err)
+	}
+	if !reflect.DeepEqual(s.Secrets, before.Secrets) {
+		t.Fatalf("after removing a.b %+v, want %+v", s.Secrets, before.Secrets)
 	}
 }
 
