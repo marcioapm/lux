@@ -911,6 +911,11 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
+			for _, kv := range secretArgs {
+				if k, _, _ := strings.Cut(kv, "="); slices.Contains(removeSecrets, k) {
+					return fmt.Errorf("secret %q is both supplied and removed", k)
+				}
+			}
 			var repos []spec.Repository
 			for _, v := range addRepos {
 				r, err := parseAddRepo(v)
