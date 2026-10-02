@@ -105,7 +105,10 @@ func checkLabels(labels map[string]string) error {
 
 var hostLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// checkHostname validates a preview hostname and returns the part stored without the domain.
+// checkHostname turns an owner's hostname into the host stored: the part
+// before the preview domain. A single label is relative (the domain is
+// appended); a dotted name must already be under the domain. 253 bytes at
+// most in all.
 func (s *Server) checkHostname(hostname string) (string, error) {
 	domain := strings.ToLower(strings.TrimSuffix(s.cfg.Preview.Domain, "."))
 	if domain == "" {
