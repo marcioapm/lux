@@ -73,6 +73,10 @@ type Config struct {
 	// is labelled nested=true, and such Runs get what rootless Podman
 	// inside them needs (see nested.go).
 	Nested bool
+	// AssignDelay holds every assignment this long before the runner takes
+	// it up (and acks it). Test-only: it widens the window in which luxd
+	// has a placement the runner does not know yet.
+	AssignDelay time.Duration
 }
 
 type Runner struct {
@@ -324,6 +328,10 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 		if err := json.Unmarshal(f.Data, &a); err != nil {
 			r.log.Error("bad assign", "err", err)
 			return
+		}
+		if d := r.cfg.AssignDelay; d > 0 {
+			r.log.Warn("holding assignment (test delay)", "run", a.RunID, "epoch", a.Epoch, "delay", d)
+			time.Sleep(d)
 		}
 		r.assign(ctx, a)
 	case proto.MsgStop, proto.MsgCancel:
