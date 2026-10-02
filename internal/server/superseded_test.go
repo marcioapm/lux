@@ -258,6 +258,74 @@ func TestReapSupersededRacesNewSnapshot(t *testing.T) {
 	}
 }
 
+// A Run is looked at again only once it may have a superseded snapshot:
+// the pass that leaves it none clears its flag, a resume --from-snapshot
+// sets it, and the formerly current snapshot is then deleted.
+func TestReapSupersededFlag(t *testing.T) {
+	s, ctx, f := supersededFixture(t)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+	flag := func() bool {
+		var b bool
+		systemScan(t, s, `SELECT snapshots_superseded FROM runs WHERE id = 'rb'`, nil, &b)
+		return b
+	}
+	if !flag() {
+		t.Fatal("a second snapshot did not flag rb")
+	}
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if flag() {
+		t.Fatal("flag kept with nothing left to delete")
+	}
+	// A stale flag-less Run is not looked at: nothing more is deleted.
+	execSQL(t, s, ctx, `UPDATE snapshots SET available = true WHERE id = 'snapB'`)
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Deleted()) != 1 {
+		t.Fatalf("deleted %v without the flag", f.Deleted())
+	}
+	s.secrets.put("rb", map[string]string{})
+	if _, err := s.resumeRun(asTenant(ctx, "t2"), &resumeRunInput{RunPath: RunPath{ID: "rb"}, Body: &resumeRequest{FromSnapshot: "snapB"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !flag() {
+		t.Fatal("resume --from-snapshot did not flag rb")
+	}
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !snapshotAvailable(t, s, "snapB") || snapshotAvailable(t, s, "snapB2") {
+		t.Fatalf("after resume from snapB: snapB %v snapB2 %v", snapshotAvailable(t, s, "snapB"), snapshotAvailable(t, s, "snapB2"))
+	}
+}
+
+// A late report from an older placement (its host back after the Run moved
+// on) is not the Run's snapshot: once the current one is uploaded, it goes.
+func TestReapSupersededLateReport(t *testing.T) {
+	s, ctx, f := supersededFixture(t)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('pb3', 't2', 'rb', 'hb', 3, 'exited')`)
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 4 WHERE id = 'rb'`)
+	if fr := reportSnapshot(t, s, "hb", "rb", 3, snapshotB("snapLate", 3)); fr.Type != proto.MsgAck {
+		t.Fatalf("late report: %s %s", fr.Type, fr.Data)
+	}
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 's3', s3_key = run_id || '/' || id WHERE id = 'bB-vol-snapLate'`)
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotAvailable(t, s, "snapLate") || !snapshotAvailable(t, s, "snapB2") {
+		t.Fatalf("snapLate %v snapB2 %v, want false true", snapshotAvailable(t, s, "snapLate"), snapshotAvailable(t, s, "snapB2"))
+	}
+	if got := f.Deleted(); !slices.Contains(got, "rb/bB-vol-snapLate") {
+		t.Fatalf("S3 deletes %v", got)
+	}
+}
+
 // An S3 delete that fails leaves an orphan, logged; the claim stands and
 // the Run still has its current snapshot.
 func TestReapSupersededS3Failure(t *testing.T) {
