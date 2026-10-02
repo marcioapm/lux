@@ -137,6 +137,45 @@ func TestRollupHistory(t *testing.T) {
 	}
 }
 
+// The rollups average stored bytes per bucket, each kind and tenant apart.
+func TestRollupStored(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	for i, off := range []time.Duration{0, 30 * time.Second, time.Minute, 90 * time.Second} {
+		v := int64(100 * (i + 1))
+		execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, stored_volume, stored_output, stored_artifact, stored_context)
+			VALUES ('', 0, $1, $2::bigint, $2::bigint + 1, $2::bigint + 2, $2::bigint + 3), ('ta', 0, $1, $2::bigint * 2, 0, 0, 10)`, hour.Add(off), v)
+	}
+	if err := s.rollupHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]int64{}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, _ := tx.Query(ctx, `SELECT tenant_id || '/' || res, stored_volume, stored_output, stored_artifact, stored_context
+			FROM system_samples WHERE res > 0 ORDER BY tenant_id, res, at`)
+		var key string
+		var v [4]int64
+		_, err := pgx.ForEachRow(rows, []any{&key, &v[0], &v[1], &v[2], &v[3]}, func() error {
+			got[key] = append(got[key], v[:]...)
+			return nil
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]int64{
+		"/60":     {150, 151, 152, 153, 350, 351, 352, 353},
+		"/3600":   {250, 251, 252, 253},
+		"ta/60":   {300, 0, 0, 10, 700, 0, 0, 10},
+		"ta/3600": {500, 0, 0, 10},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("rollups:\n got %v\nwant %v", got, want)
+	}
+}
+
 // The rollup's table-wide lower bound skips nothing: a key whose newest
 // bucket lags another key's is still rolled up, in the rollup that follows
 // and in the next hour's; a sample committed late into the newest rolled-up
