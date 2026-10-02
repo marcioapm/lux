@@ -181,7 +181,9 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 			return err
 		}
 		if hostID != "" {
-			if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()) WHERE id = $1`, runID); err != nil {
+			// A started placement has its prompt images; no later one is
+			// sent them.
+			if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()), prompt_attachments = NULL WHERE id = $1`, runID); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE hosts SET first_placement_at = coalesce(first_placement_at, now()) WHERE id = $1`, hostID); err != nil {

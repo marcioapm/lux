@@ -400,8 +400,10 @@ a `generic` Run with 400 `attachments_unsupported`. They go with the first
 placement only, as the prompt does: a resume does not send them again. The
 shim also writes each to `$LUX_INPUTS/prompt/<n>-<name>`, on a state
 volume, so they are there after any resume ([adapters](adapters.md#images)
-says where, and how each agent gets them). A Run's views (`GET
-/v1/runs/{id}`) show their names and types, not their bytes. Steers take
+says where, and how each agent gets them). luxd keeps their bytes apart
+from the stored spec, only until the first placement has started; the
+spec, and so a Run's views (`GET /v1/runs/{id}`), keep their names and
+types. Steers take
 images the same way (`attachments` on `POST /v1/runs/{id}/input`,
 `lux steer --image`).
 

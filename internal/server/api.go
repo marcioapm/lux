@@ -601,7 +601,6 @@ func scanRun(row pgx.Row) (*Run, error) {
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
 		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing)
 	r.PlacementSeconds = r.PlacementWaitSeconds + r.PlacementStartSeconds
-	r.Spec = withoutAttachmentData(r.Spec)
 	if info, ok := spec.Adapters[r.Spec.Workload.Adapter]; ok && info.Steer.Lands != "" {
 		st := info.Steer
 		r.Steer = &st
@@ -687,9 +686,11 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			return err
 		}
 		stored.Placement.Pool = rp.Name
-		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since)
-			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now())`,
-			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID)
+		var prompt []spec.Attachment
+		stored, prompt = splitPromptAttachments(stored)
+		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since, prompt_attachments)
+			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9)`,
+			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt)
 		if err != nil {
 			return err
 		}

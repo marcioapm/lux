@@ -193,6 +193,7 @@ func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Si
 		}()
 	}
 	err := a.handshake(cfg)
+	cfg.PromptAttachments = nil // a.queue holds them while they are needed
 	if err != nil {
 		sink.Event(proto.EvWarning, map[string]any{"message": "acp: " + err.Error()})
 		_ = p.Signal(syscall.SIGTERM)

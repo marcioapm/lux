@@ -491,6 +491,12 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if r.SnapshotID != nil || r.SessionID != "" {
 		a.Resume = &proto.ResumeInfo{SessionID: r.SessionID, Snapshot: snap}
 	}
+	if a.Resume == nil {
+		// Read here only: no other path that loads a queued Run needs them.
+		if err := tx.QueryRow(ctx, `SELECT prompt_attachments FROM runs WHERE id = $1`, r.ID).Scan(&a.PromptAttachments); err != nil {
+			return err
+		}
+	}
 	if len(r.PendingInput) > 0 {
 		var in proto.Input
 		if err := json.Unmarshal(r.PendingInput, &in); err == nil {
