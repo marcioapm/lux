@@ -137,6 +137,32 @@ func TestRollupHistory(t *testing.T) {
 	}
 }
 
+// GET /v1/history carries the stored bytes: a tenant key its own, an
+// operator the whole system's; zero bytes are sent, not left out.
+func TestSystemHistoryStored(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 'acme')`)
+	tenantKey, opKey := ids.Secret("luxk"), ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('kt', 't1', 'k', $1, ARRAY['read'])`, ids.Hash(tenantKey))
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(opKey))
+	execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, stored_volume, stored_output, stored_artifact, stored_context) VALUES
+		('', 0, now() - interval '1 minute', 10, 20, 30, 40), ('t1', 0, now() - interval '1 minute', 1, 0, 3, 0)`)
+	for key, want := range map[string]string{tenantKey: "1 0 3 0", opKey: "10 20 30 40"} {
+		h := historyRequest(t, s, key, "/v1/history?res=0&since=1h")
+		if len(h.Samples) != 1 {
+			t.Fatalf("samples: %+v", h.Samples)
+		}
+		sm := h.Samples[0]
+		if sm.StoredVolume == nil || sm.StoredOutput == nil || sm.StoredArtifact == nil || sm.StoredContext == nil {
+			t.Fatalf("missing stored bytes: %+v", sm)
+		}
+		if got := fmt.Sprint(*sm.StoredVolume, *sm.StoredOutput, *sm.StoredArtifact, *sm.StoredContext); got != want {
+			t.Errorf("stored %s, want %s", got, want)
+		}
+	}
+}
+
 // The rollups average stored bytes per bucket, each kind and tenant apart.
 func TestRollupStored(t *testing.T) {
 	s := testServer(t)

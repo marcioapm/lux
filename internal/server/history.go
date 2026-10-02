@@ -378,6 +378,11 @@ type Sample struct {
 	CapMem    *int64         `json:"capacityMemory,omitempty"`
 	SysAllocC *float64       `json:"allocatedCpus,omitempty"`
 	SysAllocM *int64         `json:"allocatedMemory,omitempty"`
+	// The system: bytes in S3 by blob kind.
+	StoredVolume   *int64 `json:"storedVolume,omitempty" doc:"Bytes of volume snapshots in S3 (compressed: what S3 holds), at this point; a rollup's mean."`
+	StoredOutput   *int64 `json:"storedOutput,omitempty" doc:"Bytes of Run output in S3 (compressed), at this point; a rollup's mean."`
+	StoredArtifact *int64 `json:"storedArtifact,omitempty" doc:"Bytes of artifacts in S3 (compressed), at this point; a rollup's mean."`
+	StoredContext  *int64 `json:"storedContext,omitempty" doc:"Bytes of image build contexts in S3 (compressed), at this point; a rollup's mean."`
 }
 
 // ProcessSample is one of lux's own processes: a host's runner, or luxd.
@@ -722,7 +727,7 @@ func (s *Server) systemHistory(ctx context.Context, in *HistoryQuery) (*historyO
 	h := History{From: from, To: to, Resolution: res, Samples: []Sample{}}
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT at, runs, busy, idle, queued, started, finished, start_p50, start_p95,
-				hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem
+				hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem, stored_volume, stored_output, stored_artifact, stored_context
 			FROM system_samples WHERE tenant_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY at`, p.TenantID, res, from, to)
 		if err != nil {
 			return err
@@ -730,7 +735,7 @@ func (s *Server) systemHistory(ctx context.Context, in *HistoryQuery) (*historyO
 		h.Samples, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Sample, error) {
 			var sm Sample
 			err := row.Scan(&sm.At, &sm.Runs, &sm.Busy, &sm.Idle, &sm.Queued, &sm.Started, &sm.Finished, &sm.StartP50, &sm.StartP95,
-				&sm.Hosts, &sm.CapCPUs, &sm.CapMem, &sm.SysAllocC, &sm.SysAllocM)
+				&sm.Hosts, &sm.CapCPUs, &sm.CapMem, &sm.SysAllocC, &sm.SysAllocM, &sm.StoredVolume, &sm.StoredOutput, &sm.StoredArtifact, &sm.StoredContext)
 			return sm, err
 		})
 		if err != nil || !controlVisible(p) {
