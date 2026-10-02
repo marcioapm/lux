@@ -170,11 +170,19 @@ func (s *Server) routes(api huma.API) {
 		Errors:  []int{http.StatusNotFound},
 	}, "read", s.listArtifacts)
 	register(s, api, huma.Operation{
+		OperationID: "deleteArtifacts", Method: http.MethodDelete, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
+		Summary: "Delete a Run's artifacts",
+		Description: "Every artifact of a succeeded or cancelled Run, from storage; retention never deletes artifacts. Their listing stays, " +
+			"available false, and a download answers 410 gone. Works however long ago the Run ended. Idempotent: deleted is 0 once none are left. " +
+			"409 not_terminal on any other Run (a stopped, lost or failed one can still be resumed).",
+		Errors: []int{http.StatusNotFound, http.StatusConflict},
+	}, "run", s.deleteArtifacts)
+	register(s, api, huma.Operation{
 		OperationID: "downloadArtifact", Method: http.MethodGet, Path: "/v1/artifacts/{aid}", Tags: []string{"runs"},
 		Summary: "Download an artifact",
 		Description: "The file the Run wrote, streamed through luxd. Content-Length and X-Lux-SHA256 let a client tell a whole download " +
 			"from one cut short (the response is aborted, never ended cleanly, on a failure mid-way). " +
-			"409 not_uploaded (with Retry-After) while it is still on its host; 410 gone once deleted by retention.",
+			"409 not_uploaded (with Retry-After) while it is still on its host; 410 gone once deleted (DELETE /v1/runs/{id}/artifacts).",
 		Responses: map[string]*huma.Response{"200": {
 			Description: "The file.",
 			Content:     map[string]*huma.MediaType{"application/octet-stream": {Schema: &huma.Schema{Type: huma.TypeString, Format: "binary"}}},
