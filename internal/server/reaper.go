@@ -22,7 +22,7 @@ func (s *Server) reaperLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		for _, f := range []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapExpiry, s.reapRetention, s.reapOutdatedStaticHosts} {
+		for _, f := range []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapExpiry, s.reapSuperseded, s.reapRetention, s.reapOutdatedStaticHosts} {
 			if err := f(ctx); err != nil && ctx.Err() == nil {
 				s.log.Warn("reaper", "err", err)
 			}
@@ -472,6 +472,79 @@ func (s *Server) reapExpiry(ctx context.Context) error {
 		s.secrets.drop(id)
 	}
 	return nil
+}
+
+// reapSuperseded deletes the volumes of a Run's snapshots other than its
+// current one (runs.snapshot_id), once the current one is uploaded: until
+// then an older snapshot is the only copy that survives losing the host.
+// Only Runs not succeeded or cancelled (reapRetention has those).
+//
+// The claim is reapRetention's: the Run is locked first, in a statement of
+// its own, so the claim's statement reads its snapshot_id after any resume
+// --from-snapshot or new snapshot report that committed before the lock,
+// and none can commit during it. The snapshot a queued or starting Run
+// restores is its snapshot_id (assign reads it under the same lock, and
+// neither path moves it while the Run is queued or placed), so it is never
+// claimed. A snapshot with a volume still on its host waits, available,
+// for a later pass: never deleted from under an upload. A blob the current
+// manifest also names is kept.
+func (s *Server) reapSuperseded(ctx context.Context) error {
+	var keys []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT r.id FROM runs r
+			WHERE r.id IN (SELECT o.run_id FROM snapshots o JOIN runs rr ON rr.id = o.run_id
+				WHERE o.available AND o.id <> rr.snapshot_id AND rr.state NOT IN ('succeeded', 'cancelled'))
+			  AND EXISTS (SELECT 1 FROM snapshots cur WHERE cur.id = r.snapshot_id AND cur.uploaded)
+			  AND r.state NOT IN ('succeeded', 'cancelled')
+			ORDER BY r.id LIMIT 20
+			FOR UPDATE OF r SKIP LOCKED`)
+		if err != nil {
+			return err
+		}
+		runs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil || len(runs) == 0 {
+			return err
+		}
+		// A new statement: it sees whatever committed before the locks.
+		rows, err = tx.Query(ctx, `
+			WITH cur AS (
+				SELECT r.id AS run_id, r.snapshot_id, c.manifest FROM runs r JOIN snapshots c ON c.id = r.snapshot_id
+				WHERE r.id = ANY($1) AND c.uploaded AND r.state NOT IN ('succeeded', 'cancelled')
+			), old AS (
+				SELECT o.id, o.run_id, o.manifest, cur.manifest AS keep FROM snapshots o JOIN cur ON cur.run_id = o.run_id
+				WHERE o.available AND o.id <> cur.snapshot_id
+				  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(nullif(o.manifest->'volumes', 'null'), '[]')) v
+					JOIN blobs b ON b.id = v->>'blobId' AND b.run_id = o.run_id WHERE b.location = 'host')
+			), gone AS (
+				UPDATE snapshots SET available = false WHERE id IN (SELECT id FROM old)
+			)
+			UPDATE blobs b SET location = 'deleted', deleted_at = now()
+			FROM old, jsonb_array_elements(coalesce(nullif(old.manifest->'volumes', 'null'), '[]')) v
+			WHERE b.id = v->>'blobId' AND b.run_id = old.run_id AND b.kind = 'volume' AND b.location = 's3'
+			  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(nullif(old.keep->'volumes', 'null'), '[]')) k
+				WHERE k->>'blobId' = b.id)
+			RETURNING b.s3_key`, runs)
+		if err != nil {
+			return err
+		}
+		keys, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	s.deleteObjects(ctx, "superseded snapshot", keys)
+	return nil
+}
+
+// deleteObjects deletes claimed S3 objects, after the claim committed. One
+// that fails to delete is an orphan in S3, logged, never retried.
+func (s *Server) deleteObjects(ctx context.Context, what string, keys []string) {
+	for _, k := range keys {
+		if err := s.blobs.Delete(ctx, k); err != nil {
+			s.log.Warn(what+": S3 delete failed; object orphaned", "key", k, "err", err)
+		}
+	}
 }
 
 // reapRetention deletes the blobs of Runs that finished longer ago than
