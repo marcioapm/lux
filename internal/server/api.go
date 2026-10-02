@@ -470,6 +470,7 @@ type Run struct {
 	// Servers: on GET /v1/runs/{id}, its servers.
 	Servers []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
 	Cost    *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
+	Resize  *Resize       `json:"resize,omitempty" doc:"In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."`
 }
 
 // Resumability says whether a Run can be resumed now, and from what.
@@ -1336,7 +1337,26 @@ type resumeGit struct {
 }
 
 type resumeResources struct {
-	Disk spec.Bytes `json:"disk,omitempty" doc:"A new disk limit: its writable layer plus state volumes."`
+	CPUs   *float64    `json:"cpus,omitempty" doc:"A new CPU quota, larger or smaller (0.5 is half a CPU). Absent: unchanged; 0 or less: 422 invalid_spec."`
+	Memory *spec.Bytes `json:"memory,omitempty" doc:"A new memory size, larger or smaller, in its host's terms as at submit. Absent: unchanged; 0 or less: 422 invalid_spec."`
+	Disk   spec.Bytes  `json:"disk,omitempty" doc:"A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if at least the peak disk use of the placement that took the snapshot it resumes from, plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."`
+}
+
+// Resize is what a resume asked to change in a Run's resources, and what
+// its spec holds after it.
+type Resize struct {
+	Requested spec.Resources `json:"requested" doc:"The resources the resume asked for; the others are absent."`
+	Applied   spec.Resources `json:"applied" doc:"The Run's resources from this resume on: what the scheduler reserves and its container gets."`
+	Disk      *DiskKept      `json:"disk,omitempty" doc:"Present when a smaller disk was refused and the current one kept."`
+}
+
+// DiskKept says why a resume kept a Run's disk limit instead of shrinking it.
+type DiskKept struct {
+	Requested spec.Bytes `json:"requested" doc:"Bytes: the disk limit asked for."`
+	Kept      spec.Bytes `json:"kept" doc:"Bytes: the disk limit the Run keeps."`
+	Reason    string     `json:"reason" doc:"Why, in words."`
+	Measured  *int64     `json:"measuredBytes,omitempty" doc:"Bytes: the peak disk use of the placement that took the snapshot it resumes from; absent when none was recorded."`
+	Needed    int64      `json:"neededBytes,omitempty" doc:"Bytes: the smallest disk limit a shrink may set (measured plus headroom); absent without a measurement."`
 }
 
 type resumeInput struct {
@@ -1406,6 +1426,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		return nil, err
 	}
 	resumed := false
+	var resize *Resize
 	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		var state string
 		var refs []spec.SecretRef
@@ -1424,6 +1445,10 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		case StateResuming:
 			if len(adding) > 0 {
 				return errf(http.StatusConflict, "not_resumable", "run is resuming already: repositories can only be added to a stopped, lost or failed Run")
+			}
+			if r := req.Resources; r != nil && (r.CPUs != nil && *r.CPUs != sp.Resources.CPUs ||
+				r.Memory != nil && *r.Memory != sp.Resources.Memory || r.Disk > sp.Resources.Disk) {
+				return errf(http.StatusConflict, "not_resumable", "run is resuming already: its resources can only change while it is stopped, lost or failed")
 			}
 			return nil // idempotent: the first resume's secrets stand
 		case StateCancelled, StateSucceeded:
@@ -1471,15 +1496,6 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 				return err
 			}
 		}
-		if r := req.Resources; r != nil && r.Disk != 0 {
-			if r.Disk < 0 {
-				return errf(http.StatusUnprocessableEntity, "invalid_request", "resources.disk must not be negative")
-			}
-			if _, err := tx.Exec(ctx, `UPDATE runs SET spec = jsonb_set(spec, '{resources,disk}', to_jsonb($2::bigint)) WHERE id = $1`,
-				id, int64(r.Disk)); err != nil {
-				return err
-			}
-		}
 		if req.FromSnapshot != "" {
 			var ok bool
 			if err := tx.QueryRow(ctx, `SELECT available FROM snapshots WHERE id = $1 AND run_id = $2`, req.FromSnapshot, id).Scan(&ok); err != nil {
@@ -1489,6 +1505,12 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 				return errf(http.StatusConflict, "snapshot_unavailable", "snapshot %s is no longer available", req.FromSnapshot)
 			}
 			if _, err := tx.Exec(ctx, `UPDATE runs SET snapshot_id = $2 WHERE id = $1`, id, req.FromSnapshot); err != nil {
+				return err
+			}
+		}
+		if req.Resources != nil {
+			var err error
+			if resize, err = resizeRun(ctx, tx, id, sp.Resources, *req.Resources); err != nil {
 				return err
 			}
 		}
@@ -1515,6 +1537,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		if len(req.Sync) > 0 {
 			ev["sync"] = req.Sync
 		}
+		if resize != nil {
+			ev["resources"] = resize
+		}
 		if err := addEvent(ctx, tx, p.TenantID, id, 0, "resume.requested", ev); err != nil {
 			return err
 		}
@@ -1531,7 +1556,85 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 	if err != nil {
 		return nil, err
 	}
+	run.Resize = resize
 	return &resumeOutput{http.StatusAccepted, req.RequestID, run}, nil
+}
+
+// Disk headroom a shrink must leave above the measured use: a quarter of
+// it, and at least 1 GiB, so a Run is not stopped for its disk (checkDisk
+// in the runner) by the writes of its first minutes back.
+const (
+	diskShrinkHeadroomDivisor       = 4
+	diskShrinkMinHeadroom     int64 = 1 << 30
+)
+
+// diskShrinkFloor is the smallest disk limit a Run measured at used bytes
+// may be given.
+func diskShrinkFloor(used int64) int64 {
+	return used + max(used/diskShrinkHeadroomDivisor, diskShrinkMinHeadroom)
+}
+
+// resizeRun writes a resume's resources into the Run's stored spec (cur
+// is what it holds). cpus and memory are applied, larger or smaller; disk
+// when larger, and when smaller only down to diskShrinkFloor of the peak
+// disk use of the placement that took the snapshot the Run resumes from
+// (runs.snapshot_id, already moved to fromSnapshot). Without that
+// measurement, a smaller disk is not applied. A disk kept is no error:
+// Resize.Disk says why. Values are checked as submit checks them.
+func resizeRun(ctx context.Context, tx pgx.Tx, runID string, cur spec.Resources, req resumeResources) (*Resize, error) {
+	rz := &Resize{Applied: cur}
+	var problems []string
+	if req.CPUs != nil {
+		rz.Requested.CPUs = *req.CPUs
+		if *req.CPUs <= 0 {
+			problems = append(problems, "resources.cpus must be greater than 0")
+		}
+		rz.Applied.CPUs = *req.CPUs
+	}
+	if req.Memory != nil {
+		rz.Requested.Memory = *req.Memory
+		if *req.Memory <= 0 {
+			problems = append(problems, "resources.memory must be greater than 0")
+		}
+		rz.Applied.Memory = *req.Memory
+	}
+	rz.Requested.Disk = req.Disk
+	if req.Disk != 0 {
+		rz.Applied.Disk = req.Disk
+	}
+	if problems = append(problems, rz.Applied.Problems()...); len(problems) > 0 {
+		return nil, invalidSpec(&spec.ValidationError{Problems: problems})
+	}
+	if req.Disk > 0 && req.Disk < cur.Disk {
+		var peak *int64
+		err := tx.QueryRow(ctx, `SELECT p.peak_disk_bytes FROM runs r
+			JOIN snapshots sn ON sn.id = r.snapshot_id AND sn.run_id = r.id
+			JOIN placements p ON p.id = sn.placement_id
+			WHERE r.id = $1`, runID).Scan(&peak)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		switch {
+		case peak == nil:
+			rz.Disk = &DiskKept{Requested: req.Disk, Kept: cur.Disk,
+				Reason: "no disk use is recorded for the snapshot it resumes from: a smaller disk is not applied"}
+		case int64(req.Disk) < diskShrinkFloor(*peak):
+			need := diskShrinkFloor(*peak)
+			rz.Disk = &DiskKept{Requested: req.Disk, Kept: cur.Disk, Measured: peak, Needed: need,
+				Reason: fmt.Sprintf("its saved state used up to %s; a smaller disk must be at least %s (that plus max(25%%, 1 GiB))",
+					bytesText(*peak), bytesText(need))}
+		}
+		if rz.Disk != nil {
+			rz.Applied.Disk = cur.Disk
+		}
+	}
+	if rz.Applied != cur {
+		if _, err := tx.Exec(ctx, `UPDATE runs SET spec = jsonb_set(spec, '{resources}', coalesce(spec->'resources', '{}') || $2::jsonb) WHERE id = $1`,
+			runID, map[string]any{"cpus": rz.Applied.CPUs, "memory": rz.Applied.Memory, "disk": rz.Applied.Disk}); err != nil {
+			return nil, err
+		}
+	}
+	return rz, nil
 }
 
 // addRepositories merges repositories added on resume into a Run's stored
