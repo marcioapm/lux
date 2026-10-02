@@ -1342,7 +1342,7 @@ type resumeGit struct {
 type resumeResources struct {
 	CPUs   *float64    `json:"cpus,omitempty" doc:"A new CPU quota, larger or smaller (0.5 is half a CPU). Absent: unchanged; 0 or less: 422 invalid_spec."`
 	Memory *spec.Bytes `json:"memory,omitempty" doc:"A new memory size, larger or smaller, in its host's terms as at submit. Absent: unchanged; 0 or less: 422 invalid_spec."`
-	Disk   spec.Bytes  `json:"disk,omitempty" doc:"A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if at least the peak disk use of the placement that took the snapshot it resumes from, plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."`
+	Disk   spec.Bytes  `json:"disk,omitempty" doc:"A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if the placement that took the snapshot it resumes from reported its final disk use (it exited, was not lost) and the disk is at least its peak disk use plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."`
 }
 
 // Resize is what a resume asked to change in a Run's resources, and what
@@ -1609,15 +1609,23 @@ func resizeRun(ctx context.Context, tx pgx.Tx, runID string, cur spec.Resources,
 		return nil, invalidSpec(&spec.ValidationError{Problems: problems})
 	}
 	if req.Disk > 0 && req.Disk < cur.Disk {
+		// The runner reports the snapshot before the exit status carrying
+		// its final disk sample, and only that status makes a placement
+		// 'exited'. In any other state (lost between the two) the peak may
+		// predate data the snapshot holds.
 		var peak *int64
-		err := tx.QueryRow(ctx, `SELECT p.peak_disk_bytes FROM runs r
+		var final bool
+		err := tx.QueryRow(ctx, `SELECT p.peak_disk_bytes, p.state = 'exited' FROM runs r
 			JOIN snapshots sn ON sn.id = r.snapshot_id AND sn.run_id = r.id
 			JOIN placements p ON p.id = sn.placement_id
-			WHERE r.id = $1`, runID).Scan(&peak)
+			WHERE r.id = $1`, runID).Scan(&peak, &final)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, err
 		}
 		switch {
+		case err == nil && !final:
+			rz.Disk = &DiskKept{Requested: req.Disk, Kept: cur.Disk,
+				Reason: "no final measurement: the placement that took the snapshot it resumes from ended without reporting its final disk use, so a smaller disk is not applied"}
 		case peak == nil:
 			rz.Disk = &DiskKept{Requested: req.Disk, Kept: cur.Disk,
 				Reason: "no disk use is recorded for the snapshot it resumes from: a smaller disk is not applied"}

@@ -116,9 +116,12 @@ placement gets it.
 - **disk** larger applies. Smaller applies only if it is at least the
   Run's saved state plus headroom: the peak disk use (writable layer plus
   state volumes) of the placement that took the snapshot it resumes from,
-  plus a quarter of that and at least 1 GiB. Less than that, or with no
-  use recorded for that placement, the Run keeps its disk and resumes
-  anyway: a smaller limit it is already over would only stop it again
+  plus a quarter of that and at least 1 GiB. That peak counts only once
+  the placement has reported its exit, whose final sample is taken after
+  the snapshot: a placement lost before then (its Run lost) has no final
+  measurement. Less than that floor, or with no final measurement, the
+  Run keeps its disk and resumes anyway, cpus and memory still applied: a
+  smaller limit it is already over would only stop it again
   ([disk is measured](runspec.md#rules)).
 - The answer's `resize` and the `resume.requested` event's `resources`
   say what was asked (`requested`), what the Run has now (`applied`),
