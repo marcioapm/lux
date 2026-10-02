@@ -1943,7 +1943,7 @@ components:
           format: double
           type: number
         disk:
-          description: "A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if at least the peak disk use of the placement that took the snapshot it resumes from, plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."
+          description: "A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if the placement that took the snapshot it resumes from reported its final disk use (it exited, was not lost) and the disk is at least its peak disk use plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."
           oneOf:
             - format: int64
               type: integer

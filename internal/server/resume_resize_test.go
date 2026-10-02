@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // stoppedRun submits a Run of tenant t1 with res to pool "default", then
@@ -357,4 +362,104 @@ func TestResumeResizedPlacement(t *testing.T) {
 			t.Fatalf("a submit of 8 cpus waits with %q, want %q", r, want)
 		}
 	})
+}
+
+// stoppingRun is a Run of tenant t1 (20 GiB disk) whose placement 1 on
+// host ha is stopping, as stop leaves it: the Run is running, the
+// placement asked to stop. Returns its id.
+func stoppingRun(t *testing.T, s *Server) string {
+	t.Helper()
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1') ON CONFLICT DO NOTHING`)
+	namedPools(t, s, "default")
+	out, err := s.submitRun(tenantCtx("t1"), &submitRunInput{Body: spec.RunSpec{
+		Image:     spec.Image{Ref: "alpine"},
+		Workload:  spec.Workload{Adapter: "generic", Command: []string{"true"}},
+		Volumes:   []spec.Volume{{Name: "data", Path: "/data", Kind: "state"}},
+		Resources: spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)},
+		Placement: spec.Placement{Pool: "default"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := out.Body.ID
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, capacity, last_heartbeat)
+		VALUES ('ha', 'ha', 'default', 'ready', '{"cpus":4,"memory":8589934592}', now()) ON CONFLICT DO NOTHING`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, stop_reason, lease_expires_at)
+		VALUES ('p-'||$1, 't1', $1, 'ha', 1, 'stopping', '{}', 'stop', now() + interval '1 minute')`, id)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopping', current_epoch = 1, pool_id = 'default' WHERE id = $1`, id)
+	return id
+}
+
+// A placement's peak disk is only a measurement of its snapshot once its
+// exit status (which carries the final sample, taken after the snapshot
+// was reported) has arrived. Lost between the two, a heartbeat's older,
+// smaller peak does not admit a shrink: the disk is kept, saying why, and
+// the Run resumes with its cpus and memory changed.
+func TestResumeDiskShrinkNeedsTheFinalMeasurement(t *testing.T) {
+	// The exit status cases stay under 2 GiB: recordUsage cannot store a
+	// larger value (its nullif parameters are typed int4).
+	const mib = 1 << 20
+	for _, c := range []struct {
+		name    string
+		saved   int64 // the snapshot's final disk sample
+		final   bool  // the exit status, with that sample, arrived
+		disk    int64
+		applied int64
+		reason  string
+	}{
+		{"lost before its exit status", 8 * gib, false, 2 * gib, 20 * gib, "no final measurement"},
+		{"lost before its exit status, a shrink its peak admits", 8 * gib, false, 11 * gib, 20 * gib, "no final measurement"},
+		{"exited, its final usage refuses the shrink", 1800 * mib, true, 2 * gib, 20 * gib, "its saved state used up to"},
+		{"exited, its final usage admits the shrink", 1800 * mib, true, 3 * gib, 3 * gib, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			ctx := context.Background()
+			id := stoppingRun(t, s)
+			if err := s.heartbeat(ctx, "ha", proto.Heartbeat{Leases: []proto.LivePlacement{
+				{RunID: id, Epoch: 1, State: "running", Usage: &proto.Usage{PeakDiskBytes: 100 * mib}}}}); err != nil {
+				t.Fatal(err)
+			}
+			err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				_, err := s.applySnapshotDone(ctx, tx, "t1", "ha", id, 1, 1, proto.SnapshotDone{Manifest: proto.Manifest{
+					SnapshotID: "snap-" + id, RunID: id, Epoch: 1,
+					Volumes: []proto.VolumeSnapshot{{Name: "data", Path: "/data", BlobID: "blob-" + id, Size: c.saved, SHA256: "x"}}}})
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				if c.final {
+					code := 0
+					return s.applyStatus(ctx, tx, "t1", id, 1, proto.Status{State: "exited", ExitCode: &code, Reason: "stopped",
+						Usage: &proto.Usage{PeakDiskBytes: c.saved}})
+				}
+				var later laterEvents
+				if err := s.placementLost(ctx, tx, id, 1, "host lost: missed heartbeats", &later); err != nil {
+					return err
+				}
+				return later.write()
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := resumeWith(s, id, &resumeResources{CPUs: f64(1), Memory: bytesPtr(gib), Disk: spec.Bytes(c.disk)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := spec.Resources{CPUs: 1, Memory: spec.Bytes(gib), Disk: spec.Bytes(c.applied), Pids: 1024}
+			if got := storedResources(t, s, id); got != want || out.Body.State != StateResuming {
+				t.Errorf("%s with %+v, want resuming with %+v", out.Body.State, got, want)
+			}
+			rz := out.Body.Resize
+			if rz == nil || rz.Applied != want || (rz.Disk != nil) != (c.reason != "") {
+				t.Fatalf("answer's resize %+v", rz)
+			}
+			if c.reason != "" && !strings.Contains(rz.Disk.Reason, c.reason) {
+				t.Errorf("reason %q, want it to say %q", rz.Disk.Reason, c.reason)
+			}
+		})
+	}
 }
