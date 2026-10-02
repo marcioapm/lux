@@ -26,8 +26,9 @@ func TestStoredBytesBackfill(t *testing.T) {
 	}
 	defer conn.Close(ctx)
 	// t1: a volume uploaded at 10:00 and deleted at 12:00, an output
-	// uploaded at 11:00; t2: a context uploaded at 11:30, an artifact never
-	// uploaded (still on its host) and a volume deleted from the host.
+	// uploaded at 11:00; t2: a context uploaded at 11:30, an artifact
+	// uploaded at 11:00 and deleted at 12:00, an artifact never uploaded
+	// (still on its host) and a volume deleted from the host.
 	if _, err := conn.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1'), ('t2', 't2');
 		INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{}', 'succeeded'), ('r2', 't2', '{}', 'stopped');
 		INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, location, created_at, uploaded_at, deleted_at) VALUES
@@ -35,6 +36,7 @@ func TestStoredBytesBackfill(t *testing.T) {
 			('o1', 't1', 'r1', 1, 'output', 'o', 7, 's3', '2026-01-01 10:59Z', '2026-01-01 11:00Z', NULL),
 			('c2', 't2', 'r2', 1, 'context', 'c', 40, 's3', '2026-01-01 11:29Z', '2026-01-01 11:30Z', NULL),
 			('a2', 't2', 'r2', 1, 'artifact', 'a', 5000, 'host', '2026-01-01 09:00Z', NULL, NULL),
+			('a3', 't2', 'r2', 1, 'artifact', 'b', 13, 'deleted', '2026-01-01 10:59Z', '2026-01-01 11:00Z', '2026-01-01 12:00Z'),
 			('v2', 't2', 'r2', 1, 'volume', 'v', 3000, 'deleted', '2026-01-01 09:00Z', NULL, '2026-01-01 11:00Z');
 		INSERT INTO system_samples (tenant_id, res, at)
 			SELECT id, res, at FROM (VALUES (''), ('t1'), ('t2')) k(id),
@@ -68,9 +70,9 @@ func TestStoredBytesBackfill(t *testing.T) {
 		for at, w := range map[string][3]string{
 			"09:59:59": {"[0 0 0 0]", "[0 0 0 0]", "[0 0 0 0]"},
 			"10:00:00": {"[100 0 0 0]", "[100 0 0 0]", "[0 0 0 0]"},
-			"11:00:00": {"[100 7 0 0]", "[100 7 0 0]", "[0 0 0 0]"},
-			"11:45:00": {"[100 7 0 40]", "[100 7 0 0]", "[0 0 0 40]"},
-			"11:59:59": {"[100 7 0 40]", "[100 7 0 0]", "[0 0 0 40]"},
+			"11:00:00": {"[100 7 13 0]", "[100 7 0 0]", "[0 0 13 0]"},
+			"11:45:00": {"[100 7 13 40]", "[100 7 0 0]", "[0 0 13 40]"},
+			"11:59:59": {"[100 7 13 40]", "[100 7 0 0]", "[0 0 13 40]"},
 			"12:00:00": {"[0 7 0 40]", "[0 7 0 0]", "[0 0 0 40]"},
 		} {
 			want[fmt.Sprintf("/%d/%s", res, at)] = w[0]
