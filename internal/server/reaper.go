@@ -577,7 +577,7 @@ func (s *Server) deleteObjects(ctx context.Context, what string, keys []string) 
 // reapRetention deletes the blobs of Runs that succeeded or were cancelled
 // longer ago than their tenant's retention: snapshot volumes and output.
 // Artifacts are kept until their owner deletes them (deleteArtifacts). A
-// failed Run is resumable, so it keeps everything until it expires
+// failed Run is resumable, so it is exempt from retention until it expires
 // (reapExpiry) and its retention counts from then.
 //
 // The database is the claim: blobs are marked deleted, and the Run's
