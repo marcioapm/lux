@@ -162,7 +162,8 @@ def test_follow_across_same_host_resumes(lux, runners, hosts):
     output while it runs, including when it reaches the new placement
     before its runner has taken it up: each cycle holds the assignment in
     the runner (LUX_TEST_ASSIGN_HOLD) until the follower's request is live
-    on it. In the end it has had every record once."""
+    on it and the runner has answered it as an epoch it does not hold. In
+    the end it has had every record once."""
     hold = "/tmp/lux-assign-hold"
     host = hosts[0]
     runners.start(host, environ={"LUX_TEST_ASSIGN_HOLD": hold})
@@ -190,6 +191,11 @@ def test_follow_across_same_host_resumes(lux, runners, hosts):
     def placement(epoch: int) -> dict | None:
         return next((p for p in lux.get(run_id)["placements"] if p["epoch"] == epoch), None)
 
+    def unknown_epoch_answered(epoch: int) -> bool:
+        """The runner's <hold>.unknown has a line for this Run and epoch."""
+        out = host.exec("cat", hold + ".unknown", check=False)
+        return any(l.split()[:2] == [run_id, str(epoch)] for l in out.splitlines())
+
     try:
         missed: list[int] = []
         try:
@@ -210,6 +216,12 @@ def test_follow_across_same_host_resumes(lux, runners, hosts):
                 # event, and the runner still holds the assignment.
                 wait_for(f, lambda: f.saw_state(epoch, "scheduled"), 30,
                          f"the follower from {cursor} never sent placement {epoch}'s scheduled event")
+                held = placement(epoch)
+                assert held is not None and held["state"] == "assigned", held
+                # And the runner has answered a subscription to it with
+                # "not mine": the case the follower must not take as the end.
+                wait_until(lambda: unknown_epoch_answered(epoch), 30, 0.2,
+                           f"the runner never ended a subscription to placement {epoch} as unknown")
                 held = placement(epoch)
                 assert held is not None and held["state"] == "assigned", held
                 host.exec("rm", "-f", hold)

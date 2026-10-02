@@ -176,6 +176,16 @@ hosts[0].exec("touch", "/tmp/lux-hold")
 hosts[0].exec("rm", "-f", "/tmp/lux-hold")
 ```
 
+With the hook set, the runner also appends a line `<runID> <epoch> <subID>`
+to `<hold>.unknown` (here `/tmp/lux-hold.unknown`) each time it ends an
+output subscription, with no error, for an epoch it does not hold. A test
+waits for that line to know the runner has answered "not mine" for a held
+assignment before it removes the hold:
+
+```python
+hosts[0].exec("cat", "/tmp/lux-hold.unknown", check=False)  # "run_… 2 sub_…"
+```
+
 ### A lux to develop against
 
 `--serve` brings the same environment up and leaves it running, with a
