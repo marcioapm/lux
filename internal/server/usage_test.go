@@ -24,15 +24,10 @@ func TestExitStatusRecordsLargeUsage(t *testing.T) {
 		NetRxBytes: 6 * gib,
 		NetTxBytes: 7 * gib,
 	}
-	for _, c := range []struct {
-		status, runState string
-	}{
-		{"exited", StateStopped},
-		// A runner that could not finish the placement cleanly: still a
-		// requested stop, so the Run is stopped, and its usage is kept.
-		{"failed", StateStopped},
-	} {
-		t.Run(c.status, func(t *testing.T) {
+	// "failed" is a runner that could not finish the placement cleanly: still
+	// a requested stop, so the Run is stopped, and its usage is kept.
+	for _, status := range []string{"exited", "failed"} {
+		t.Run(status, func(t *testing.T) {
 			s := testServer(t)
 			ctx := context.Background()
 			key := serversFixture(t, s, ctx)
@@ -40,16 +35,14 @@ func TestExitStatusRecordsLargeUsage(t *testing.T) {
 
 			code := 137
 			u := usage
-			st := proto.Status{State: c.status, ExitCode: &code, Reason: "stopped", Usage: &u, OutputSeq: 3 * gib}
-			if c.status == "failed" {
+			st := proto.Status{State: status, ExitCode: &code, Reason: "stopped", Usage: &u, OutputSeq: 3 * gib}
+			if status == "failed" {
 				st.ExitCode, st.Message = nil, "container lost"
 			}
 			if err := reportUsageStatus(s, ctx, st); err != nil {
 				t.Fatalf("exit status: %v", err)
 			}
-			if pl, run := usageStates(t, s, ctx); pl != "exited" || run != c.runState {
-				t.Fatalf("after the exit: placement %s, run %s; want exited, %s", pl, run, c.runState)
-			}
+			wantUsageStates(t, s, ctx, "after the exit", "exited", StateStopped)
 			got, outputSeq := storedUsage(t, s, ctx)
 			if got != usage {
 				t.Fatalf("stored usage %+v, want %+v", got, usage)
@@ -67,6 +60,9 @@ func TestExitStatusKeepsHeartbeatPeaks(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	key := serversFixture(t, s, ctx)
+	// Each peak is rejected or rounded by a narrower cast: bytes above int4,
+	// pids at int4's maximum (above int2), and cpu whose .25 float4 cannot
+	// hold at 1e10.
 	peaks := proto.Usage{
 		PeakMemoryBytes: 9 * gib,
 		PeakDiskBytes:   9 * gib,
@@ -94,9 +90,7 @@ func TestExitStatusKeepsHeartbeatPeaks(t *testing.T) {
 	if err := reportUsageStatus(s, ctx, proto.Status{State: "exited", ExitCode: &code, Reason: "stopped", Usage: &smaller}); err != nil {
 		t.Fatalf("exit status: %v", err)
 	}
-	if pl, run := usageStates(t, s, ctx); pl != "exited" || run != StateStopped {
-		t.Fatalf("after the exit: placement %s, run %s; want exited, %s", pl, run, StateStopped)
-	}
+	wantUsageStates(t, s, ctx, "after the exit", "exited", StateStopped)
 	if got, _ := storedUsage(t, s, ctx); got != peaks {
 		t.Fatalf("stored usage %+v, want the heartbeat's %+v", got, peaks)
 	}
@@ -106,7 +100,7 @@ func TestExitStatusKeepsHeartbeatPeaks(t *testing.T) {
 func TestSnapshotRecordsLargeOutputSeq(t *testing.T) {
 	s, ctx := reportFixture(t)
 	sd := snapshotB("snapB", 1)
-	sd.OutputSeq = 3 << 30
+	sd.OutputSeq = 3 * gib
 	if f := reportSnapshot(t, s, "hb", "rb", 1, sd); f.Type != proto.MsgAck || ackRefused(t, f) {
 		t.Fatalf("report: %s %s", f.Type, f.Data)
 	}
@@ -128,9 +122,7 @@ func stopUsageRun(t *testing.T, s *Server, ctx context.Context, key string) {
 	if err := reportUsageStatus(s, ctx, proto.Status{State: "stopping"}); err != nil {
 		t.Fatal(err)
 	}
-	if pl, run := usageStates(t, s, ctx); pl != "stopping" || run != StateStopping {
-		t.Fatalf("before the exit: placement %s, run %s", pl, run)
-	}
+	wantUsageStates(t, s, ctx, "before the exit", "stopping", StateStopping)
 }
 
 func reportUsageStatus(s *Server, ctx context.Context, st proto.Status) error {
@@ -156,8 +148,11 @@ func storedUsage(t *testing.T, s *Server, ctx context.Context) (u proto.Usage, o
 	return u, outputSeq
 }
 
-func usageStates(t *testing.T, s *Server, ctx context.Context) (placement, run string) {
+// wantUsageStates fails unless r1's epoch-1 placement and the Run are in
+// the given states.
+func wantUsageStates(t *testing.T, s *Server, ctx context.Context, when, wantPlacement, wantRun string) {
 	t.Helper()
+	var placement, run string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT p.state, r.state FROM placements p JOIN runs r ON r.id = p.run_id
 			WHERE p.run_id = $1 AND p.epoch = 1`, r1).Scan(&placement, &run)
@@ -165,5 +160,7 @@ func usageStates(t *testing.T, s *Server, ctx context.Context) (placement, run s
 	if err != nil {
 		t.Fatal(err)
 	}
-	return placement, run
+	if placement != wantPlacement || run != wantRun {
+		t.Fatalf("%s: placement %s, run %s; want %s, %s", when, placement, run, wantPlacement, wantRun)
+	}
 }
