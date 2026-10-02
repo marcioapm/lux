@@ -76,7 +76,9 @@ type Config struct {
 	// AssignHold, if set, names a file: while it exists, the runner holds
 	// each assignment before taking it up (and acking it). Test-only: it
 	// keeps a placement assigned in luxd that the runner does not know yet,
-	// until the test removes the file.
+	// until the test removes the file. With it set, the runner also notes
+	// each output subscription it ended for an epoch it does not hold in
+	// <AssignHold>.unknown (noteUnknownEpoch).
 	AssignHold string
 }
 
@@ -342,6 +344,22 @@ func (r *Runner) holdAssignment(ctx context.Context, path string, a proto.Assign
 	}
 }
 
+// noteUnknownEpoch appends "<runID> <epoch> <subID>" to <AssignHold>.unknown
+// once an output subscription for an epoch this runner does not hold has
+// been ended with no error. Test-only, with AssignHold: a test waits for
+// the line before releasing the hold.
+func (r *Runner) noteUnknownEpoch(runID string, epoch int, subID string) {
+	f, err := os.OpenFile(r.cfg.AssignHold+".unknown", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		r.log.Warn("test hold: unknown-epoch marker", "err", err)
+		return
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "%s %d %s\n", runID, epoch, subID); err != nil {
+		r.log.Warn("test hold: unknown-epoch marker", "err", err)
+	}
+}
+
 // handleControl handles one durable message from luxd. Idempotent. It
 // returns false for a message to leave unacked, so that luxd redelivers it.
 func (r *Runner) handleControl(ctx context.Context, f proto.Frame) bool {
@@ -490,7 +508,10 @@ func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 			end.Error = err.Error()
 		}
 		if sctx.Err() == nil {
-			_ = r.conn.Send(ctx, proto.Frame{Type: proto.MsgOutputEnd, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(end)})
+			sendErr := r.conn.Send(ctx, proto.Frame{Type: proto.MsgOutputEnd, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(end)})
+			if r.cfg.AssignHold != "" && err == nil && sendErr == nil && r.placement(f.RunID, f.Epoch) == nil {
+				r.noteUnknownEpoch(f.RunID, f.Epoch, s.SubID)
+			}
 		}
 	case proto.MsgOutputCancel:
 		var s proto.OutputSubscribe
