@@ -105,20 +105,17 @@ func checkLabels(labels map[string]string) error {
 
 var hostLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// checkHostname turns an owner's hostname into the host stored: the part
-// before the preview domain. A single label is relative; a dotted name must
-// be under the domain. Each label is a DNS label, 253 bytes at most in all.
+// checkHostname validates a preview hostname and returns the part stored without the domain.
 func (s *Server) checkHostname(hostname string) (string, error) {
 	domain := strings.ToLower(strings.TrimSuffix(s.cfg.Preview.Domain, "."))
 	if domain == "" {
 		return "", errf(http.StatusUnprocessableEntity, "invalid_server", "hostname: previews are not configured on this lux (preview.domain)")
 	}
 	h := strings.ToLower(strings.TrimSuffix(hostname, "."))
-	rel, ok := strings.CutSuffix(h, "."+domain)
 	if !strings.Contains(hostname, ".") {
-		rel, ok = h, true
 		h += "." + domain
 	}
+	rel, ok := strings.CutSuffix(h, "."+domain)
 	if !ok || rel == "" || len(h) > 253 {
 		return "", errf(http.StatusUnprocessableEntity, "invalid_server", "hostname: %q is not under the preview domain %s", hostname, domain)
 	}
