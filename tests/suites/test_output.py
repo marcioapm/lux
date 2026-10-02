@@ -4,6 +4,7 @@ one cursor across placements."""
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 
@@ -87,14 +88,24 @@ def test_follow_across_a_restart_of_the_runner(lux, runners, hosts):
 
 class OutputFollower:
     """One raw `GET /v1/runs/{id}/output?follow=true&events=true` stream,
-    read on a thread. Its SSE events go to `events` as (name, data)."""
+    read on a thread. The caller owns the response: close() ends it even
+    if the reader is blocked. Its SSE events go to `events` as (name, data);
+    an exception or a non-200 answer goes to `errors`, which check()
+    raises."""
 
     def __init__(self, lux, run_id: str, since: str):
         self.events: list[tuple[str, dict]] = []
+        self.errors: list[str] = []
         self.ended = threading.Event()
+        self.closing = False
+        self.thread: threading.Thread | None = None
         self.resp = requests.get(f"{lux.env.luxd_url}/v1/runs/{run_id}/output", stream=True, timeout=(10, 120),
                                  params={"follow": "true", "events": "true", "since": since},
                                  headers={"Authorization": f"Bearer {lux.api_key}"})
+        if self.resp.status_code != 200:
+            self.errors.append(f"output: HTTP {self.resp.status_code}: {self.resp.text[:500]}")
+            self.ended.set()
+            return
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
 
@@ -106,8 +117,17 @@ class OutputFollower:
                     name = line[len("event: "):]
                 elif line.startswith("data: "):
                     self.events.append((name, json.loads(line[len("data: "):])))
+                    if name == "error":
+                        self.errors.append(f"output error event: {self.events[-1][1]}")
+        except Exception as e:  # noqa: BLE001: any failure of the reader fails the test
+            if not self.closing:
+                self.errors.append(f"output reader: {e!r}")
         finally:
             self.ended.set()
+
+    def check(self):
+        if self.errors:
+            raise AssertionError("; ".join(self.errors))
 
     def records(self, epoch: int | None = None) -> list[dict]:
         return [d for n, d in list(self.events) if n == "record" and (epoch is None or d["epoch"] == epoch)]
@@ -120,7 +140,20 @@ class OutputFollower:
                    and d.get("data", {}).get("state") == state for n, d in list(self.events))
 
     def close(self):
+        """End the stream, from this thread, and wait for its reader."""
+        self.closing = True
+        conn = getattr(self.resp.raw, "connection", None)
+        sock = getattr(conn, "sock", None)
+        if sock is not None:
+            # Wakes a reader blocked in recv(); close() alone may not.
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         self.resp.close()
+        if self.thread is not None:
+            self.thread.join(timeout=10)
+            assert not self.thread.is_alive(), "the output reader did not stop"
 
 
 def test_follow_across_same_host_resumes(lux, runners, hosts):
@@ -138,49 +171,66 @@ def test_follow_across_same_host_resumes(lux, runners, hosts):
     run_id = lux.submit(spec)
     followers: list[OutputFollower] = []
 
+    def wait_for(f: OutputFollower, cond, timeout: float, message: str):
+        def check():
+            f.check()
+            return cond()
+        return wait_until(check, timeout, 0.2, message)
+
     def finish(f: OutputFollower) -> str:
         """Wait for the stream's end (the Run stopped), close it and return
         the cursor to resume from."""
-        end = wait_until(f.end, 60, 0.2, "the follower's stream never ended at the stop")
+        wait_for(f, lambda: f.ended.is_set() or f.end(), 60, "the follower's stream never ended at the stop")
         f.close()
+        f.check()
+        end = f.end()
+        assert end is not None, f"the stream closed without an end event: {f.events[-3:]}"
         return end["cursor"]
 
     def placement(epoch: int) -> dict | None:
         return next((p for p in lux.get(run_id)["placements"] if p["epoch"] == epoch), None)
 
-    missed: list[int] = []
     try:
-        lux.wait_output(run_id, "e1-2")
-        f = OutputFollower(lux, run_id, "")
-        followers.append(f)
-        wait_until(lambda: f.records(1), 30, 0.2, "the first placement's output never reached the follower")
-        for epoch in range(2, 5):
-            host.exec("touch", hold)
-            lux.run("stop", run_id, "--wait")
-            cursor = finish(f)
-            lux.run("resume", run_id)
-            wait_until(lambda: (placement(epoch) or {}).get("state") == "assigned", 30, 0.2,
-                       f"placement {epoch} never became assigned")
-            f = OutputFollower(lux, run_id, cursor)
+        missed: list[int] = []
+        try:
+            lux.wait_output(run_id, "e1-2")
+            f = OutputFollower(lux, run_id, "")
             followers.append(f)
-            # The request is live: it has sent this epoch's scheduled
-            # event, and the runner still holds the assignment.
-            wait_until(lambda: f.saw_state(epoch, "scheduled"), 30, 0.2,
-                       f"the follower from {cursor} never sent placement {epoch}'s scheduled event")
-            held = placement(epoch)
-            assert held is not None and held["state"] == "assigned", held
-            host.exec("rm", "-f", hold)
-            # A miss is noted and the next cycle still runs, so a
-            # regression shows on every cycle, not only the first.
-            try:
-                wait_until(lambda: f.records(epoch), 20, 0.2)
-            except AssertionError:
-                missed.append(epoch)
+            wait_for(f, lambda: f.records(1), 30, "the first placement's output never reached the follower")
+            for epoch in range(2, 5):
+                host.exec("touch", hold)
+                lux.run("stop", run_id, "--wait")
+                cursor = finish(f)
+                lux.run("resume", run_id)
+                wait_until(lambda: (placement(epoch) or {}).get("state") == "assigned", 30, 0.2,
+                           f"placement {epoch} never became assigned")
+                f = OutputFollower(lux, run_id, cursor)
+                followers.append(f)
+                # The request is live: it has sent this epoch's scheduled
+                # event, and the runner still holds the assignment.
+                wait_for(f, lambda: f.saw_state(epoch, "scheduled"), 30,
+                         f"the follower from {cursor} never sent placement {epoch}'s scheduled event")
+                held = placement(epoch)
+                assert held is not None and held["state"] == "assigned", held
+                host.exec("rm", "-f", hold)
+                # A miss is noted and the next cycle still runs, so a
+                # regression shows on every cycle, not only the first.
+                try:
+                    wait_for(f, lambda: f.records(epoch), 20, "")
+                except AssertionError:
+                    f.check()
+                    missed.append(epoch)
+        finally:
+            host.exec("rm", "-f", hold, check=False)
+            failures = []
+            for f in followers:
+                try:
+                    f.close()
+                except AssertionError as e:
+                    failures.append(str(e))
+            assert not failures, failures
         assert not missed, f"placements {missed}: output never reached the follower that was waiting on them"
         run = lux.get(run_id)
         assert {p["hostName"] for p in run["placements"]} == {host.name}, run["placements"]
     finally:
-        host.exec("rm", "-f", hold, check=False)
-        for f in followers:
-            f.close()
         lux.run("cancel", run_id, "--wait", check=False)
