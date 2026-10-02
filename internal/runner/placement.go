@@ -105,7 +105,9 @@ func (p *placement) runningStatus() proto.Status {
 	return proto.Status{State: "running", Times: p.times(), MemoryLimit: limit}
 }
 
-// liveState is the state reported in heartbeats; "" when not live.
+// liveState is the state reported in heartbeats; "" when not live. An
+// exited placement is still live until finish has reported it: luxd counts
+// it live until then, and reaps its lease if the snapshot outlasts it.
 func (p *placement) liveState() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -117,8 +119,18 @@ func (p *placement) liveState() string {
 		return "starting"
 	case "running", "stopping":
 		return p.phase
+	case "exited":
+		return "stopping"
 	}
 	return ""
+}
+
+// finishing: the workload has ended and the placement is snapshotting or
+// reporting it.
+func (p *placement) finishing() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.phase == "exited"
 }
 
 func (p *placement) markStale() {
