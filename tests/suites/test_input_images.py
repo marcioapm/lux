@@ -33,6 +33,13 @@ def _meta(name: str, data: bytes) -> dict:
     return {"name": name, "contentType": "image/png", "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
+def _no_image_errors(out: str) -> None:
+    """lux-fake says "image <shape> error: …" for a block it could not
+    read, a type its bytes are not, or a block type no protocol has."""
+    bad = [l for l in out.splitlines() if l.startswith("image ") and " error: " in l]
+    assert not bad, bad
+
+
 def _inputs_file(host, run_id: str, rel: str) -> str:
     """sha256 of a file under the home volume's $LUX_INPUTS, read on the
     host ("" if it is not there)."""
@@ -93,6 +100,7 @@ def test_images_reach_the_agent_and_survive_a_move(lux, runners, hosts, harness,
     everything = lux.run("logs", run_id, "-o", "json", "--events").stdout + json.dumps(lux.json("events", run_id))
     for data in (prompt_img, steer_img, steer_img2):
         assert base64.b64encode(data).decode() not in everything, "an image's bytes are in a record or event"
+    _no_image_errors(lux.logs(run_id))
 
     # $LUX_INPUTS has the bytes, and keeps them through a stop and a
     # resume on another host.
@@ -100,7 +108,8 @@ def test_images_reach_the_agent_and_survive_a_move(lux, runners, hosts, harness,
     for rel, data in want.items():
         assert _inputs_file(a, run_id, rel) == hashlib.sha256(data).hexdigest(), rel
     second = a.exec("sh", "-c", f"ls $(podman volume inspect --format '{{{{.Mountpoint}}}}' lux-{run_id}-home)/.lux-inputs/img-1").split()
-    assert len(second) == 2 and second[0] == "1-a.png" and second[1].startswith("2-b_b.png-"), second
+    # A sanitised name keeps its extension after the hash.
+    assert len(second) == 2 and second[0] == "1-a.png" and second[1].startswith("2-b_b-") and second[1].endswith(".png"), second
     lux.run("stop", run_id, "--wait")
     lux.wait_uploaded(run_id)
     runners.stop(a)
@@ -113,6 +122,43 @@ def test_images_reach_the_agent_and_survive_a_move(lux, runners, hosts, harness,
     wait_until(lambda: "/home/agent/.lux-inputs" in lux.logs(run_id), harness.timeout, 0.3, "LUX_INPUTS not set")
     # The first prompt's images are not given again on resume.
     assert lux.logs(run_id).count(_seen(prompt_img, prompt_shape)) == 1
+    lux.run("cancel", run_id)
+
+
+@harnesses(lambda h: h.adapter in SHAPES)
+def test_interrupt_resends_images(lux, runners, hosts, harness, tmp_path):
+    """An input with an image that interrupts a running turn reaches the
+    agent once, image and text together, after the interrupt: Claude Code's
+    line written again, Codex's carried turn/start, OpenCode's ACP prompt
+    queued first, ACP's queued prompt."""
+    if harness.real:
+        pytest.skip("scripted timing")
+    runners.start(hosts[0])
+    shape = SHAPES[harness.harness.adapter]
+    run_id = lux.submit(harness.spec("echo ready"))
+    lux.wait_activity(run_id, "idle", timeout=harness.timeout)
+    img = square_png(77)
+    (tmp_path / "a.png").write_bytes(img)
+    lux.run("steer", run_id, "sleep 5\necho slept")
+    lux.wait_activity(run_id, "busy", timeout=harness.timeout)
+    time.sleep(1)
+    lux.run("steer", run_id, "echo after", "--interrupt", "--image", str(tmp_path / "a.png"), "--request-id", "int-img")
+    wait_until(lambda: "after" in lux.logs(run_id), harness.timeout, 0.3, "the interrupting input never ran")
+    lux.wait_activity(run_id, "idle", timeout=harness.timeout)
+    out = lux.logs(run_id)
+    # The interrupting input starts a turn of its own: on OpenCode that is
+    # an ACP prompt (not prompt_async).
+    seen_shape = "acp" if shape == "opencode-file" else shape
+    seen = [s for s in (_seen(img, shape), _seen(img, seen_shape)) if s in out]
+    assert seen and out.count(seen[0]) == 1 and out.find(seen[0]) < out.find("after"), out
+    _no_image_errors(out)
+    records = lux.records(run_id, "--events")
+    ack = next(r["event"]["data"] for r in records
+               if r.get("event", {}).get("type") == "lux.input" and r["event"]["data"]["requestId"] == "int-img")
+    assert ack["phase"] == "accepted" and ack["attachments"] == [_meta("a.png", img)], ack
+    if ack.get("receipt"):
+        wait_until(lambda: any(r.get("event", {}).get("type") == "lux.input.consumed" and r["event"]["data"]["requestId"] == "int-img"
+                               for r in lux.records(run_id, "--events")), 20, 0.3, "no lux.input.consumed")
     lux.run("cancel", run_id)
 
 

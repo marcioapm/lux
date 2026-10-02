@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // contentBlock is one block of a message's content, in any of the shapes
@@ -35,7 +37,9 @@ type contentBlock struct {
 
 // images describes each image in the content as the agent got it, for its
 // reply: "image <shape> <type> <bytes> sha256=<hex>[ <where>]". An image
-// it cannot read is described with the error.
+// it cannot read, one whose declared type is not its bytes', and a block
+// of a type no protocol gives (real agents refuse those) are described
+// with "image <shape> error: …", which the e2e tests never expect.
 func (t textBlocks) images() []string {
 	var out []string
 	for _, b := range t {
@@ -43,6 +47,8 @@ func (t textBlocks) images() []string {
 		var data []byte
 		var err error
 		switch {
+		case b.Type == "" || b.Type == "text":
+			continue
 		case b.Type == "image" && b.Source.Type == "base64":
 			shape, typ = "claude", b.Source.MediaType
 			data, err = base64.StdEncoding.DecodeString(b.Source.Data)
@@ -65,7 +71,13 @@ func (t textBlocks) images() []string {
 				err = fmt.Errorf("mime %s, data URL %s", b.Mime, urlType)
 			}
 		default:
+			out = append(out, fmt.Sprintf("image unknown-block error: type %q", b.Type))
 			continue
+		}
+		if err == nil && typ != "file" {
+			if got := spec.SniffImage(data); got != typ {
+				err = fmt.Errorf("declared %s, bytes are %q", typ, got)
+			}
 		}
 		if err != nil {
 			out = append(out, fmt.Sprintf("image %s error: %v", shape, err))
