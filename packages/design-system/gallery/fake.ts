@@ -156,11 +156,7 @@ export function fakeSeries(points = 24 * 60, stepSec = 60): { x: number[]; runni
   return { x, running, idle, queued, cpu, mem, hosts };
 }
 
-/**
- * 30 days of hourly bytes in S3 by blob kind (StorageKind): snapshots grow
- * and are swept back nightly, output and artifacts climb, build contexts
- * stay small.
- */
+// Snapshots are swept nightly; output and artifacts accumulate.
 export function fakeStoredSeries(hours = 30 * 24): { x: number[]; volume: number[]; output: number[]; artifact: number[]; context: number[] } {
   const r = rng(51);
   const x: number[] = [];
