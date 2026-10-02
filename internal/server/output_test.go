@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,9 +72,7 @@ func (h *fakeOutputHost) holdWhen(epoch int, ready func() bool, data ...string) 
 }
 
 func (h *fakeOutputHost) subscribed(epoch int) int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.subs[epoch])
+	return len(h.subscriptions(epoch))
 }
 
 // subscriptions is when each subscription to the epoch arrived, oldest first.
@@ -168,15 +167,22 @@ func nextEvent(events <-chan outputSSE, within time.Duration) (ev outputSSE, ok 
 	}
 }
 
+// nextAs waits up to 5s for the stream's next event; ok is whether it came
+// and is named name, in which case v is its data.
+func nextAs[T any](events <-chan outputSSE, name string) (v T, ev outputSSE, ok bool) {
+	ev, ok = nextEvent(events, 5*time.Second)
+	if !ok || ev.name != name {
+		return v, ev, false
+	}
+	_ = json.Unmarshal([]byte(ev.data), &v)
+	return v, ev, true
+}
+
 func expectRecord(t *testing.T, events <-chan outputSSE, cursor, data, what string) {
 	t.Helper()
-	ev, ok := nextEvent(events, 5*time.Second)
-	var r OutputRecord
-	if ok && ev.name == "record" {
-		_ = json.Unmarshal([]byte(ev.data), &r)
-	}
-	if !ok || ev.name != "record" || r.Cursor != cursor || r.Data != data {
-		t.Fatalf("%s: got %+v (ok %v), want record %s %q", what, ev, ok, cursor, data)
+	r, ev, ok := nextAs[OutputRecord](events, "record")
+	if !ok || r.Cursor != cursor || r.Data != data {
+		t.Fatalf("%s: got %+v, want record %s %q", what, ev, cursor, data)
 	}
 }
 
@@ -191,26 +197,47 @@ func waitUntil(t *testing.T, cond func() bool, what string) {
 	}
 }
 
+// followFixture has r1 scheduled with placement pN of epoch N on hostIDs[N-1],
+// in states[N-1], and a fake runner for each host. It returns t1's key.
+func followFixture(t *testing.T, hostIDs, states []string) (*Server, string, map[string]*fakeOutputHost) {
+	t.Helper()
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'scheduled', current_epoch = $1 WHERE id = 'r1'`, len(states))
+	hosts := map[string]*fakeOutputHost{}
+	for i, state := range states {
+		hostID := hostIDs[i]
+		if hosts[hostID] == nil {
+			execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ($1, $1, 'ready')`, hostID)
+			hosts[hostID] = newFakeOutputHost(t, s, hostID)
+		}
+		execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ($1, 't1', 'r1', $2, $3, $4)`,
+			fmt.Sprintf("p%d", i+1), hostID, i+1, state)
+	}
+	return s, keys["t1"], hosts
+}
+
 // resumedFixture: r1 resumed on h1, its exited placement 1 having written
 // "one\n" and its placement 2 assigned.
 func resumedFixture(t *testing.T) (*Server, string, *fakeOutputHost) {
 	t.Helper()
-	s, keys := costFixture(t)
+	s, key, hosts := followFixture(t, []string{"h1", "h1"}, []string{"exited", "assigned"})
+	hosts["h1"].hold(1, true, "one\n")
+	return s, key, hosts["h1"]
+}
+
+// startRunning marks placement id, and r1, running: its runner took it up.
+func startRunning(t *testing.T, s *Server, id string) {
+	t.Helper()
 	ctx := context.Background()
-	execSQL(t, s, ctx, `UPDATE runs SET state = 'scheduled', current_epoch = 2 WHERE id = 'r1'`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h1', 'h1', 'ready')`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES
-		('p1', 't1', 'r1', 'h1', 1, 'exited'), ('p2', 't1', 'r1', 'h1', 2, 'assigned')`)
-	h1 := newFakeOutputHost(t, s, "h1")
-	h1.hold(1, true, "one\n")
-	return s, keys["t1"], h1
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE id = $1`, id)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'r1'`)
 }
 
 // A follower that reaches a resumed Run's new placement before its runner
 // has taken it up waits for it, and gets its records once it runs.
 func TestFollowWaitsForAnAssignedPlacement(t *testing.T) {
 	s, key, h1 := resumedFixture(t)
-	ctx := context.Background()
 	events := followOutput(t, s, key)
 	expectRecord(t, events, "1.1", "one\n", "first record")
 	// Asked, and answered "nothing", more than once while assigned; but
@@ -222,8 +249,7 @@ func TestFollowWaitsForAnAssignedPlacement(t *testing.T) {
 		t.Fatalf("asked for the assigned placement %d times in a second", n)
 	}
 	h1.hold(2, false, "two\n")
-	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE id = 'p2'`)
-	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'r1'`)
+	startRunning(t, s, "p2")
 	expectRecord(t, events, "2.1", "two\n", "the new placement's record")
 }
 
@@ -303,21 +329,11 @@ func TestFollowEndsWhenAnAssignedPlacementIsLost(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ev, ok := nextEvent(events, 5*time.Second)
-	var gap outputGap
-	if ok && ev.name == "gap" {
-		_ = json.Unmarshal([]byte(ev.data), &gap)
+	if gap, ev, ok := nextAs[outputGap](events, "gap"); !ok || gap.Epoch != 2 {
+		t.Fatalf("after the lease expired: %+v, want a gap for epoch 2", ev)
 	}
-	if !ok || ev.name != "gap" || gap.Epoch != 2 {
-		t.Fatalf("after the lease expired: %+v (ok %v), want a gap for epoch 2", ev, ok)
-	}
-	ev, ok = nextEvent(events, 5*time.Second)
-	var end outputEnd
-	if ok && ev.name == "end" {
-		_ = json.Unmarshal([]byte(ev.data), &end)
-	}
-	if !ok || ev.name != "end" || end.State != StateLost || end.Cursor != "3.0" {
-		t.Fatalf("after the gap: %+v (ok %v), want end, lost at 3.0", ev, ok)
+	if end, ev, ok := nextAs[outputEnd](events, "end"); !ok || end.State != StateLost || end.Cursor != "3.0" {
+		t.Fatalf("after the gap: %+v, want end, lost at 3.0", ev)
 	}
 	select {
 	case ev, ok := <-events:
@@ -332,39 +348,27 @@ func TestFollowEndsWhenAnAssignedPlacementIsLost(t *testing.T) {
 // Followed from submit: the first placement is assigned and its runner
 // does not hold it yet; its records still reach the follower.
 func TestFollowAFirstPlacementFromSubmit(t *testing.T) {
-	s, keys := costFixture(t)
-	ctx := context.Background()
-	execSQL(t, s, ctx, `UPDATE runs SET state = 'scheduled', current_epoch = 1 WHERE id = 'r1'`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h1', 'h1', 'ready')`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'assigned')`)
-	h1 := newFakeOutputHost(t, s, "h1")
-	events := followOutput(t, s, keys["t1"])
+	s, key, hosts := followFixture(t, []string{"h1"}, []string{"assigned"})
+	h1 := hosts["h1"]
+	events := followOutput(t, s, key)
 	waitUntil(t, func() bool { return h1.subscribed(1) >= 1 }, "the follower to ask for placement 1")
 	h1.hold(1, false, "one\n")
-	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE id = 'p1'`)
-	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'r1'`)
+	startRunning(t, s, "p1")
 	expectRecord(t, events, "1.1", "one\n", "the first placement's record")
 }
 
 // Resumed on another host: h1 has the exited placement 1, h2 is assigned
 // placement 2 and takes it up later.
 func TestFollowAcrossAMove(t *testing.T) {
-	s, keys := costFixture(t)
-	ctx := context.Background()
-	execSQL(t, s, ctx, `UPDATE runs SET state = 'scheduled', current_epoch = 2 WHERE id = 'r1'`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h1', 'h1', 'ready'), ('h2', 'h2', 'ready')`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES
-		('p1', 't1', 'r1', 'h1', 1, 'exited'), ('p2', 't1', 'r1', 'h2', 2, 'assigned')`)
-	h1 := newFakeOutputHost(t, s, "h1")
+	s, key, hosts := followFixture(t, []string{"h1", "h2"}, []string{"exited", "assigned"})
+	h1, h2 := hosts["h1"], hosts["h2"]
 	h1.hold(1, true, "one\n", "uno\n")
-	h2 := newFakeOutputHost(t, s, "h2")
-	events := followOutput(t, s, keys["t1"])
+	events := followOutput(t, s, key)
 	expectRecord(t, events, "1.1", "one\n", "placement 1, record 1")
 	expectRecord(t, events, "1.2", "uno\n", "placement 1, record 2")
 	waitUntil(t, func() bool { return h2.subscribed(2) >= 1 }, "the follower to ask h2 for placement 2")
 	h2.hold(2, false, "two\n", "dos\n")
-	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE id = 'p2'`)
-	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'r1'`)
+	startRunning(t, s, "p2")
 	expectRecord(t, events, "2.1", "two\n", "placement 2, record 1")
 	expectRecord(t, events, "2.2", "dos\n", "placement 2, record 2")
 	if n := h1.subscribed(2); n != 0 {

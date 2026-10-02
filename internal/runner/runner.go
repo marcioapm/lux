@@ -73,12 +73,9 @@ type Config struct {
 	// is labelled nested=true, and such Runs get what rootless Podman
 	// inside them needs (see nested.go).
 	Nested bool
-	// AssignHold, if set, names a file: while it exists, the runner holds
-	// each assignment before taking it up (and acking it). Test-only: it
-	// keeps a placement assigned in luxd that the runner does not know yet,
-	// until the test removes the file. With it set, the runner also notes
-	// each output subscription it ended for an epoch it does not hold in
-	// <AssignHold>.unknown (noteUnknownEpoch).
+	// AssignHold is test-only (LUX_TEST_ASSIGN_HOLD): while the file it
+	// names exists, each assignment is held before it is taken up and
+	// acked. See holdAssignment and noteUnknownEpoch.
 	AssignHold string
 }
 
