@@ -2,6 +2,7 @@ package shim
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
@@ -105,7 +107,16 @@ func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor)
 		},
 		Transport:     transport,
 		FlushInterval: -1, // SSE and chunked responses as they come
+		ModifyResponse: func(res *http.Response) error {
+			if bodyUnread(res.Request) {
+				res.Header.Set("Connection", "close")
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if bodyUnread(r) {
+				w.Header().Set("Connection", "close")
+			}
 			reason := err.Error()
 			if cerr := r.Context().Err(); cerr != nil {
 				reason = cerr.Error()
@@ -130,6 +141,34 @@ func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor)
 		// request body under the transport still sending it, and the
 		// transport then drops the connection the response comes on.
 		_ = http.NewResponseController(w).EnableFullDuplex()
+		if r.ContentLength != 0 {
+			r.Body = &eofBody{ReadCloser: r.Body}
+		}
 		proxy.ServeHTTP(w, r)
 	}), nil
+}
+
+// eofBody records whether the request body was read to EOF. In full
+// duplex, net/http decides to drop the connection only after the response
+// has gone out (it cannot drain more than 256 KiB of unread body), so a
+// response sent before the body was consumed must say Connection: close
+// itself, or the workload reuses a connection the shim then closes.
+type eofBody struct {
+	io.ReadCloser
+	eof atomic.Bool
+}
+
+func (b *eofBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		b.eof.Store(true)
+	}
+	return n, err
+}
+
+// bodyUnread reports whether r, as passed to ModifyResponse or
+// ErrorHandler, has a body not yet read to EOF.
+func bodyUnread(r *http.Request) bool {
+	b, ok := r.Body.(*eofBody)
+	return ok && !b.eof.Load()
 }
