@@ -167,7 +167,7 @@ func serversFixture(t *testing.T, s *Server, ctx context.Context) (key string) {
 const r1 = "run_aaaaaaaaaaaaaaaa"
 
 func TestServerHostnameForms(t *testing.T) {
-	for _, hostname := range []string{"web", "WEB.Lux.Example.com."} {
+	for _, hostname := range []string{"web", "WEB", "WEB.Lux.Example.com."} {
 		t.Run(hostname, func(t *testing.T) {
 			s, ctx, key, _ := wakeFixture(t)
 			sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "hostname": hostname})
@@ -205,7 +205,7 @@ func TestServerHostnameTakenAcrossForms(t *testing.T) {
 func TestServerHostnameFilterForms(t *testing.T) {
 	s, _, key, _ := wakeFixture(t)
 	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "hostname": "web.lux.example.com"})
-	for _, hostname := range []string{"web", "web.lux.example.com", "WEB.Lux.Example.com.", "a.b", "-x", "web."} {
+	for _, hostname := range []string{"web", "WEB", "web.lux.example.com", "WEB.Lux.Example.com.", "a.b", "-x", "web."} {
 		t.Run(hostname, func(t *testing.T) {
 			w := apiCall(t, s, key, http.MethodGet, "/v1/servers?hostname="+url.QueryEscape(hostname), nil)
 			var out struct{ Servers []TenantServer }
@@ -220,6 +220,22 @@ func TestServerHostnameFilterForms(t *testing.T) {
 				t.Fatalf("filter: %+v", out.Servers)
 			}
 		})
+	}
+}
+
+// A relative label's full name is bounded too: under a 191-byte domain, a
+// 61-byte label makes 253 bytes and a 62-byte one 254.
+func TestCheckHostnameRelativeLength(t *testing.T) {
+	s := &Server{}
+	s.cfg.Preview.Domain = strings.Repeat("d", 63) + "." + strings.Repeat("e", 63) + "." + strings.Repeat("f", 63)
+	if got, err := s.checkHostname(strings.Repeat("x", 61)); err != nil || got != strings.Repeat("x", 61) {
+		t.Fatalf("253 bytes: %q, %v", got, err)
+	}
+	if _, err := s.checkHostname(strings.Repeat("x", 62)); err == nil || !strings.Contains(err.Error(), "not under the preview domain") {
+		t.Fatalf("254 bytes: %v", err)
+	}
+	if got, err := s.checkHostname("lux"); err != nil || got != "lux" {
+		t.Fatalf("the domain's own first label: %q, %v", got, err)
 	}
 }
 
@@ -592,6 +608,9 @@ func TestTickets(t *testing.T) {
 	s.preview = newPreviews(s)
 	if d := whoami()["previewDomain"]; d != "lux.example.com" {
 		t.Fatalf("previewDomain: %v", d)
+	}
+	if previews, ok := whoami()["previews"]; !ok || previews != true {
+		t.Fatalf("previews, ticket previews: %v %v", previews, ok)
 	}
 	if w := apiCall(t, s, readKey, http.MethodPost, "/v1/runs/"+r1+"/tickets", map[string]any{"kind": "preview"}); w.Code != http.StatusCreated {
 		t.Fatalf("read key, preview ticket: %d %s", w.Code, w.Body)
