@@ -336,6 +336,80 @@ func TestResumeSecretsHTTP(t *testing.T) {
 	}
 }
 
+// A resume that adds a repository with a new credential, declares a secret
+// and removes one, but lacks a required value, is a 422 secrets_required
+// naming only that value; the spec, secrets and state stay as they were and
+// no resume.requested is recorded.
+func TestResumeMissingValueRollsBackSecretChanges(t *testing.T) {
+	s := testServer(t)
+	id := stoppedWithSecrets(t, s)
+	key := apiKey(t, s, new("t1"), "run", "read")
+	type runView struct {
+		State   string           `json:"state"`
+		Spec    json.RawMessage  `json:"spec"`
+		Secrets []spec.SecretRef `json:"secrets"`
+	}
+	view := func() runView {
+		t.Helper()
+		var r runView
+		if code := getJSON(t, s, key, "/v1/runs/"+id, &r); code != http.StatusOK {
+			t.Fatalf("GET %d", code)
+		}
+		return r
+	}
+	before := view()
+
+	vals := []map[string]string{
+		{"name": "GIT_TOKEN", "value": "git-2"}, {"name": "HDR", "value": "hdr-2"},
+		{"name": "NEW_GIT", "value": "new-git-1"}, {"name": "EXTRA", "value": "extra-1"},
+	}
+	w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+id+"/resume", map[string]any{
+		"secrets":       vals,
+		"removeSecrets": []string{"TOKEN"},
+		"git":           map[string]any{"repositories": []map[string]any{{"name": "two", "url": "https://git.example.com/two.git", "credential": "NEW_GIT"}}},
+	})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("resume: %d %s, want 422", w.Code, w.Body)
+	}
+	var problem struct {
+		Error struct {
+			Code    string   `json:"code"`
+			Details []string `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &problem); err != nil {
+		t.Fatal(err)
+	}
+	if problem.Error.Code != "secrets_required" || !reflect.DeepEqual(problem.Error.Details, []string{"REG"}) {
+		t.Fatalf("refusal %s, want secrets_required naming only REG", w.Body)
+	}
+
+	after := view()
+	if after.State != StateStopped || before.State != StateStopped {
+		t.Errorf("state %s -> %s, want stopped", before.State, after.State)
+	}
+	if string(after.Spec) != string(before.Spec) {
+		t.Errorf("spec changed:\n%s\n%s", before.Spec, after.Spec)
+	}
+	if !reflect.DeepEqual(after.Secrets, before.Secrets) {
+		t.Errorf("secrets %+v, want %+v", after.Secrets, before.Secrets)
+	}
+	var events struct {
+		Events []Event `json:"events"`
+	}
+	if code := getJSON(t, s, key, "/v1/runs/"+id+"/events", &events); code != http.StatusOK {
+		t.Fatalf("GET events %d", code)
+	}
+	if len(events.Events) == 0 {
+		t.Fatal("GET events listed none, not even the submit's")
+	}
+	for _, ev := range events.Events {
+		if ev.Type == "resume.requested" {
+			t.Errorf("resume.requested recorded: %v", ev.Data)
+		}
+	}
+}
+
 // removeSecrets takes a secret out of the stored spec and runs.secrets:
 // its value is not held for the placement, and the next resume does not
 // need it.
