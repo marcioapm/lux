@@ -166,6 +166,90 @@ func serversFixture(t *testing.T, s *Server, ctx context.Context) (key string) {
 
 const r1 = "run_aaaaaaaaaaaaaaaa"
 
+func TestServerHostnameForms(t *testing.T) {
+	for _, hostname := range []string{"web", "WEB.Lux.Example.com."} {
+		t.Run(hostname, func(t *testing.T) {
+			s, ctx, key, _ := wakeFixture(t)
+			sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "hostname": hostname})
+			if sv.Hostname == nil || *sv.Hostname != "web.lux.example.com" || sv.URL == nil || *sv.URL != "https://web.lux.example.com" {
+				t.Fatalf("created: %+v", sv)
+			}
+			var host string
+			err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `SELECT host FROM run_servers WHERE id = $1`, sv.ID).Scan(&host)
+			})
+			if err != nil || host != "web" {
+				t.Fatalf("stored host: %q, %v", host, err)
+			}
+		})
+	}
+}
+
+func TestServerHostnameTakenAcrossForms(t *testing.T) {
+	for _, relativeFirst := range []bool{false, true} {
+		t.Run(fmt.Sprint(relativeFirst), func(t *testing.T) {
+			s, _, key, _ := wakeFixture(t)
+			first, second := "web.lux.example.com", "web"
+			if relativeFirst {
+				first, second = second, first
+			}
+			createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "hostname": first})
+			w := apiCall(t, s, key, http.MethodPost, "/v1/servers", map[string]any{"name": "other", "port": 3000, "hostname": second})
+			if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "hostname_taken") {
+				t.Fatalf("duplicate %q: %d %s", second, w.Code, w.Body)
+			}
+		})
+	}
+}
+
+func TestServerHostnameFilterForms(t *testing.T) {
+	s, _, key, _ := wakeFixture(t)
+	sv := createSrv(t, s, key, map[string]any{"name": "web", "port": 3000, "hostname": "web.lux.example.com"})
+	for _, hostname := range []string{"web", "web.lux.example.com", "WEB.Lux.Example.com.", "a.b", "-x", "web."} {
+		t.Run(hostname, func(t *testing.T) {
+			w := apiCall(t, s, key, http.MethodGet, "/v1/servers?hostname="+url.QueryEscape(hostname), nil)
+			var out struct{ Servers []TenantServer }
+			if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || w.Code != http.StatusOK {
+				t.Fatalf("list: %d %s", w.Code, w.Body)
+			}
+			if hostname == "a.b" || hostname == "-x" {
+				if len(out.Servers) != 0 {
+					t.Fatalf("invalid filter matched: %+v", out.Servers)
+				}
+			} else if len(out.Servers) != 1 || out.Servers[0].ID != sv.ID {
+				t.Fatalf("filter: %+v", out.Servers)
+			}
+		})
+	}
+}
+
+func TestServerHostnameValidation(t *testing.T) {
+	s, _, key, _ := wakeFixture(t)
+	for _, c := range []struct{ hostname, message string }{
+		{"a.b", "not under the preview domain"},
+		{"web.example.com", "not under the preview domain"},
+		{"web.", "not under the preview domain"},
+		{"-x", "not a DNS label"},
+		{"x-", "not a DNS label"},
+		{"we_b", "not a DNS label"},
+		{strings.Repeat("x", 64), "not a DNS label"},
+	} {
+		t.Run(c.hostname, func(t *testing.T) {
+			w := apiCall(t, s, key, http.MethodPost, "/v1/servers", map[string]any{"name": "web", "port": 3000, "hostname": c.hostname})
+			if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "invalid_server") || !strings.Contains(w.Body.String(), c.message) {
+				t.Fatalf("invalid hostname: %d %s", w.Code, w.Body)
+			}
+		})
+	}
+	s.cfg.Preview.Domain = ""
+	for _, hostname := range []string{"web", "web.lux.example.com"} {
+		w := apiCall(t, s, key, http.MethodPost, "/v1/servers", map[string]any{"name": "web", "port": 3000, "hostname": hostname})
+		if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "invalid_server") || !strings.Contains(w.Body.String(), "previews are not configured") {
+			t.Fatalf("previews off: %d %s", w.Code, w.Body)
+		}
+	}
+}
+
 func apiCall(t *testing.T, s *Server, key, method, target string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var rd io.Reader
@@ -485,12 +569,22 @@ func TestTickets(t *testing.T) {
 	if d, ok := whoami()["previewDomain"]; !ok || d != nil {
 		t.Fatalf("previewDomain, previews off: %v %v", d, ok)
 	}
+	t.Run("previews off capability", func(t *testing.T) {
+		if previews, ok := whoami()["previews"]; !ok || previews != false {
+			t.Fatalf("previews, previews off: %v %v", previews, ok)
+		}
+	})
 	// Previews through Cloudflare Access: no tickets, no domain to sign in to.
 	s.cfg.Preview.Domain, s.cfg.Preview.Auth = "lux.example.com", "cloudflare-access"
 	s.preview = newPreviews(s)
 	if d := whoami()["previewDomain"]; d != nil {
 		t.Fatalf("previewDomain, Access previews: %v", d)
 	}
+	t.Run("Access previews capability", func(t *testing.T) {
+		if previews, ok := whoami()["previews"]; !ok || previews != true {
+			t.Fatalf("previews, Access previews: %v %v", previews, ok)
+		}
+	})
 	if w := apiCall(t, s, readKey, http.MethodPost, "/v1/runs/"+r1+"/tickets", map[string]any{"kind": "preview"}); w.Code != http.StatusConflict {
 		t.Fatalf("preview ticket, Access previews: %d %s", w.Code, w.Body)
 	}
