@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -27,49 +26,53 @@ func (s *Shim) prepareInputs() error {
 }
 
 // writeInputs writes an input's images to $LUX_INPUTS/<request id>/ as
-// <n>-<name> (n from 1), and returns them with Path set. The directories
-// are 0700 and the files 0600, the workload user's. Everything is opened
-// under the volume's root (InputsRoot): a link the workload put on its
-// volume cannot lead the shim's writes out of it.
-func (s *Shim) writeInputs(requestID string, list []spec.Attachment) ([]spec.Attachment, error) {
+// <n>-<name> (n from 1), and returns them with Path set and the metadata
+// of what it wrote. The directories are 0700 and the files 0600, the
+// workload user's. Everything is opened under the volume's root
+// (InputsRoot): a link the workload put on its volume cannot lead the
+// shim's writes out of it.
+func (s *Shim) writeInputs(requestID string, list []spec.Attachment) ([]spec.Attachment, []spec.AttachmentMeta, error) {
 	if len(list) == 0 {
-		return list, nil
+		return list, nil, nil
 	}
 	if s.cfg.InputsDir == "" {
-		return nil, errors.New("no $LUX_INPUTS")
+		return nil, nil, errors.New("no $LUX_INPUTS")
 	}
 	dir := filepath.Join(s.cfg.InputsDir, safeComponent(cmp.Or(requestID, "input")))
 	root, err := s.inputsMkdir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer root.Close()
 	rel, _ := filepath.Rel(s.cfg.InputsRoot, dir)
 	out := make([]spec.Attachment, len(list))
+	meta := make([]spec.AttachmentMeta, len(list))
 	for i, a := range list {
 		name := strconv.Itoa(i+1) + "-" + safeComponent(a.Name)
 		p := filepath.Join(rel, name)
 		// Replaced, never written through: what is there may be the
 		// workload's link.
 		if err := root.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, err
+			return nil, nil, err
 		}
 		f, err := root.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		_, werr := f.Write(a.Decoded())
+		b := a.Decoded()
+		_, werr := f.Write(b)
 		if cerr := f.Close(); werr == nil {
 			werr = cerr
 		}
 		if werr != nil {
-			return nil, werr
+			return nil, nil, werr
 		}
 		_ = root.Lchown(p, s.user.uid, s.user.gid)
+		meta[i] = spec.MetaOf(a, b)
 		a.Path = filepath.Join(dir, name)
 		out[i] = a
 	}
-	return out, nil
+	return out, meta, nil
 }
 
 // inputsMkdir makes dir (under InputsRoot) and its missing parents, each
@@ -100,7 +103,8 @@ func (s *Shim) inputsMkdir(dir string) (*os.Root, error) {
 
 // safeComponent is s as one file name: bytes other than letters, digits,
 // '.', '_' and '-' become '_', at most 100 bytes; a name it changed (or
-// "." or "..") gets 8 hex digits of s's sha256, so two names stay two.
+// "." or "..") gets 8 hex digits of s's sha256 before its extension, so
+// two names stay two and an image keeps its type's suffix.
 func safeComponent(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -119,20 +123,25 @@ func safeComponent(s string) string {
 		return out
 	}
 	sum := sha256.Sum256([]byte(s))
-	return out + "-" + hex.EncodeToString(sum[:4])
+	ext := filepath.Ext(out)
+	if ext == out || out == ".." || len(ext) > 10 {
+		// "." and "..", a dotfile, or a long tail that is no extension.
+		ext = ""
+	}
+	return strings.TrimSuffix(out, ext) + "-" + hex.EncodeToString(sum[:4]) + ext
 }
 
 // rememberAttachments keeps an input's attachment metadata for its
 // records (the adapter may report the input without its payload).
-func (s *Shim) rememberAttachments(in proto.Input) {
-	if in.RequestID == "" || len(in.Attachments) == 0 {
+func (s *Shim) rememberAttachments(requestID string, meta []spec.AttachmentMeta) {
+	if requestID == "" || len(meta) == 0 {
 		return
 	}
 	s.mu.Lock()
 	if s.inputMeta == nil {
 		s.inputMeta = map[string][]spec.AttachmentMeta{}
 	}
-	s.inputMeta[in.RequestID] = spec.AttachmentsMeta(in.Attachments)
+	s.inputMeta[requestID] = meta
 	s.mu.Unlock()
 }
 

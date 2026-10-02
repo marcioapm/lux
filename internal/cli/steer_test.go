@@ -48,7 +48,7 @@ func TestSteerImages(t *testing.T) {
 	}
 	body = nil
 	_, err := runCLI(t, h, "steer", "run_1", "x", "--image", filepath.Join(dir, "notes.txt"))
-	if err == nil || !strings.Contains(err.Error(), "not a PNG, JPEG, WebP or GIF image") || body != nil {
+	if err == nil || !strings.Contains(err.Error(), "not an image lux takes (image/png, image/jpeg, image/gif or image/webp)") || body != nil {
 		t.Fatalf("a text file: %v, sent %v", err, body)
 	}
 	if _, err := runCLI(t, h, "steer", "run_1"); err == nil {

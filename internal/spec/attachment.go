@@ -40,75 +40,104 @@ const (
 	maxAttachmentName  = 255
 )
 
-// attachmentMagic: the content types lux takes, each with a check of the
-// decoded bytes' magic number.
-var attachmentMagic = map[string]func([]byte) bool{
-	"image/png":  func(b []byte) bool { return bytes.HasPrefix(b, []byte("\x89PNG\r\n\x1a\n")) },
-	"image/jpeg": func(b []byte) bool { return bytes.HasPrefix(b, []byte{0xff, 0xd8, 0xff}) },
-	"image/gif": func(b []byte) bool {
+// imageTypes are the content types lux takes, in the order SniffImage
+// tries them, each with a check of the decoded bytes' magic number.
+var imageTypes = []struct {
+	typ   string
+	magic func([]byte) bool
+}{
+	{"image/png", func(b []byte) bool { return bytes.HasPrefix(b, []byte("\x89PNG\r\n\x1a\n")) }},
+	{"image/jpeg", func(b []byte) bool { return bytes.HasPrefix(b, []byte{0xff, 0xd8, 0xff}) }},
+	{"image/gif", func(b []byte) bool {
 		return bytes.HasPrefix(b, []byte("GIF87a")) || bytes.HasPrefix(b, []byte("GIF89a"))
-	},
-	"image/webp": func(b []byte) bool {
+	}},
+	{"image/webp", func(b []byte) bool {
 		return len(b) >= 12 && string(b[:4]) == "RIFF" && string(b[8:12]) == "WEBP"
-	},
+	}},
+}
+
+// ImageTypes is the content types lux takes, for messages: "image/png,
+// image/jpeg, image/gif or image/webp".
+func ImageTypes() string {
+	names := make([]string, len(imageTypes))
+	for i, t := range imageTypes {
+		names[i] = t.typ
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}
+
+func imageMagic(typ string) func([]byte) bool {
+	for _, t := range imageTypes {
+		if t.typ == typ {
+			return t.magic
+		}
+	}
+	return nil
 }
 
 // SniffImage is the content type of an image lux takes, from its magic
 // number; "" if it is none of them.
 func SniffImage(b []byte) string {
-	for _, t := range []string{"image/png", "image/jpeg", "image/gif", "image/webp"} {
-		if attachmentMagic[t](b) {
-			return t
+	for _, t := range imageTypes {
+		if t.magic(b) {
+			return t.typ
 		}
 	}
 	return ""
 }
 
-// CheckAttachments lists what is wrong with a list of attachments; at
-// names the list in the messages (e.g. "attachments").
-func CheckAttachments(at string, list []Attachment) []string {
+// CheckAttachments checks a list of attachments, decoding each once: the
+// metadata of each when all are good, else what is wrong (at names the
+// list in the messages, e.g. "attachments").
+func CheckAttachments(at string, list []Attachment) ([]AttachmentMeta, []string) {
 	var errs []string
 	if len(list) > MaxAttachments {
 		errs = append(errs, fmt.Sprintf("%s: %d attachments, at most %d", at, len(list), MaxAttachments))
 	}
+	meta := make([]AttachmentMeta, len(list))
 	for i, a := range list {
-		if err := checkAttachment(a); err != "" {
+		m, err := checkAttachment(a)
+		if err != "" {
 			errs = append(errs, fmt.Sprintf("%s[%d]: %s", at, i, err))
 		}
+		meta[i] = m
 	}
-	return errs
+	if len(errs) > 0 || len(list) == 0 {
+		return nil, errs
+	}
+	return meta, nil
 }
 
-func checkAttachment(a Attachment) string {
+func checkAttachment(a Attachment) (AttachmentMeta, string) {
 	if msg := checkAttachmentName(a.Name); msg != "" {
-		return msg
+		return AttachmentMeta{}, msg
 	}
-	magic, ok := attachmentMagic[a.ContentType]
-	if !ok {
-		return fmt.Sprintf("contentType %q: need image/png, image/jpeg, image/webp or image/gif", a.ContentType)
+	magic := imageMagic(a.ContentType)
+	if magic == nil {
+		return AttachmentMeta{}, fmt.Sprintf("contentType %q: need %s", a.ContentType, ImageTypes())
 	}
 	// Refused before decoding: base64 is 4 characters per 3 bytes.
 	if a.Data == "" {
-		return "data is required"
+		return AttachmentMeta{}, "data is required"
 	}
 	if base64.StdEncoding.DecodedLen(len(a.Data)) > MaxAttachmentBytes+2 {
-		return fmt.Sprintf("too big: more than %d bytes decoded", MaxAttachmentBytes)
+		return AttachmentMeta{}, fmt.Sprintf("too big: more than %d bytes decoded", MaxAttachmentBytes)
 	}
 	b, err := base64.StdEncoding.Strict().DecodeString(a.Data)
 	if err != nil {
-		return "data is not standard base64: " + err.Error()
+		return AttachmentMeta{}, "data is not standard base64: " + err.Error()
 	}
 	if len(b) > MaxAttachmentBytes {
-		return fmt.Sprintf("too big: %d bytes decoded, at most %d", len(b), MaxAttachmentBytes)
+		return AttachmentMeta{}, fmt.Sprintf("too big: %d bytes decoded, at most %d", len(b), MaxAttachmentBytes)
 	}
 	if !magic(b) {
 		got := SniffImage(b)
 		if got == "" {
 			got = "not an image lux takes"
 		}
-		return fmt.Sprintf("contentType %s does not match its bytes (%s)", a.ContentType, got)
+		return AttachmentMeta{}, fmt.Sprintf("contentType %s does not match its bytes (%s)", a.ContentType, got)
 	}
-	return ""
+	return MetaOf(a, b), ""
 }
 
 func checkAttachmentName(name string) string {
@@ -138,8 +167,10 @@ func (a Attachment) Decoded() []byte {
 }
 
 // Meta is what records say of the attachment.
-func (a Attachment) Meta() AttachmentMeta {
-	b := a.Decoded()
+func (a Attachment) Meta() AttachmentMeta { return MetaOf(a, a.Decoded()) }
+
+// MetaOf is a's metadata from its decoded bytes b.
+func MetaOf(a Attachment, b []byte) AttachmentMeta {
 	sum := sha256.Sum256(b)
 	return AttachmentMeta{Name: a.Name, ContentType: a.ContentType, Size: len(b), SHA256: hex.EncodeToString(sum[:])}
 }
@@ -162,12 +193,12 @@ const RuntimeInputsDir = "/.lux/run/inputs"
 
 // InputsDir is where the shim writes input images ($LUX_INPUTS) for a
 // workload whose user's home is home, and the volume mount it is on (root).
-// It is on a state volume, so a snapshot carries it through stop, resume
-// and migration: the one holding the adapter's session (beside the
-// transcript that names the images), else the one holding home, else the
-// first. It is never inside a git checkout; $LUX_ARTIFACTS is on the
-// runtime volume, never a state volume. With no state volume it is
-// RuntimeInputsDir.
+// It is .lux-inputs at the root of a state volume, so a snapshot carries
+// it through stop, resume and migration: the one holding the adapter's
+// session, else the one holding home, else the first; a volume whose root
+// is inside a git checkout is skipped for the next. $LUX_ARTIFACTS is on
+// the runtime volume, never a state volume. With no state volume left it
+// is RuntimeInputsDir.
 func (s *RunSpec) InputsDir(home string) (dir, root string) {
 	var cands []string
 	for _, p := range Adapters[s.Workload.Adapter].StatePaths {
@@ -195,12 +226,8 @@ func (s *RunSpec) InputsDir(home string) (dir, root string) {
 		if v == nil {
 			continue
 		}
-		// The volume's root, unless a checkout is in or above it: then
-		// beside the path that led here (the session's own directory).
-		for _, d := range []string{path.Join(v.Path, ".lux-inputs"), path.Join(c, ".lux-inputs")} {
-			if !inCheckout(d) {
-				return d, v.Path
-			}
+		if d := path.Join(v.Path, ".lux-inputs"); !inCheckout(d) {
+			return d, v.Path
 		}
 	}
 	return RuntimeInputsDir, path.Dir(RuntimeInputsDir)

@@ -18,16 +18,16 @@ func errAttachmentsUnsupported(adapter string) error {
 		"the Run's adapter is %s: a plain process has nowhere to put an image", adapter)
 }
 
-// checkAttachments is a 400 invalid_attachment naming every problem (by
-// index), or nil.
-func checkAttachments(at string, list []spec.Attachment) error {
-	problems := spec.CheckAttachments(at, list)
+// checkAttachments is the attachments' metadata (nil for none), or a 400
+// invalid_attachment naming every problem (by index).
+func checkAttachments(at string, list []spec.Attachment) ([]spec.AttachmentMeta, error) {
+	meta, problems := spec.CheckAttachments(at, list)
 	if len(problems) == 0 {
-		return nil
+		return meta, nil
 	}
 	he := errf(http.StatusBadRequest, "invalid_attachment", "%s", strings.Join(problems, "; "))
 	he.Details = problems
-	return he
+	return nil, he
 }
 
 // splitPromptAttachments is the spec as stored, its attachments' names and
