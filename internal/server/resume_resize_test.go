@@ -526,29 +526,53 @@ func TestResumeRetryWhileResuming(t *testing.T) {
 }
 
 // A Run resumed again after a resume that resized it, which ran and
-// stopped, is compared with the new resume, not the old one.
+// stopped, is compared with the new resume, not the old one. lux's own
+// resume after a move writes no resume.requested, so it counts as a
+// resume that requested no resources.
 func TestResumeRetryComparesTheCurrentResume(t *testing.T) {
-	s := testServer(t)
-	id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(gib))
-	if _, err := resumeWith(s, id, &resumeResources{CPUs: f64(1)}); err != nil {
-		t.Fatal(err)
-	}
-	err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
-		return setRunState(context.Background(), tx, "t1", id, StateStopped, "stop", 1)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := resumeWith(s, id, nil); err != nil {
-		t.Fatal(err)
-	}
-	_, err = resumeWith(s, id, &resumeResources{CPUs: f64(1)})
-	var he *HTTPError
-	if !errors.As(err, &he) || he.Status != http.StatusConflict {
-		t.Fatalf("retry with the earlier resume's cpus: %v, want 409", err)
-	}
-	if out, err := resumeWith(s, id, nil); err != nil || out.Body.Resize != nil {
-		t.Fatalf("retry without resources: %v, resize %+v", err, out)
+	for _, c := range []struct {
+		name  string
+		byLux bool
+	}{
+		{"resumed by the user", false},
+		{"resumed by lux after a move", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			ctx := context.Background()
+			id := stoppedRun(t, s, spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}, i64(gib))
+			if _, err := resumeWith(s, id, &resumeResources{CPUs: f64(1)}); err != nil {
+				t.Fatal(err)
+			}
+			err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				if !c.byLux {
+					return setRunState(ctx, tx, "t1", id, StateStopped, "stop", 1)
+				}
+				if err := setRunState(ctx, tx, "t1", id, StateStopped, "migrate", 1); err != nil {
+					return err
+				}
+				return s.requestResume(ctx, tx, "t1", id, nil, "auto-resume after migrate")
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !c.byLux {
+				if _, err := resumeWith(s, id, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := resumeWith(s, id, &resumeResources{CPUs: f64(1)})
+			var he *HTTPError
+			if !errors.As(err, &he) || he.Status != http.StatusConflict {
+				if err == nil {
+					t.Fatalf("retry with the earlier resume's cpus: 202 with resize %+v, want 409", out.Body.Resize)
+				}
+				t.Fatalf("retry with the earlier resume's cpus: %v, want 409", err)
+			}
+			if out, err := resumeWith(s, id, nil); err != nil || out.Body.Resize != nil {
+				t.Fatalf("retry without resources: %v, resize %+v", err, out)
+			}
+		})
 	}
 }
 
