@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -205,5 +206,79 @@ func TestReapExpiryClockKeptOnSameState(t *testing.T) {
 	}
 	if state, reason := runState(t, s, "repeated"); state != StateCancelled {
 		t.Fatalf("repeated stop restarted expiry: %s %q, want cancelled", state, reason)
+	}
+}
+
+// A pass cancels the oldest 20 due Runs across tenants: of t1's 21 (rested
+// 100..120 days) and short's one (110.5 days), t1's two youngest wait for
+// the next pass.
+func TestReapExpiryGlobalBatch(t *testing.T) {
+	s, ctx := expiryFixture(t)
+	for i := 0; i < 21; i++ {
+		restingRun(t, s, ctx, fmt.Sprintf("r%02d", i), "t1", StateStopped, float64(100+i))
+	}
+	restingRun(t, s, ctx, "short-due", "short", StateStopped, 110.5)
+	if err := s.reapExpiry(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 21; i++ {
+		id := fmt.Sprintf("r%02d", i)
+		want := StateCancelled
+		if i < 2 {
+			want = StateStopped
+		}
+		if got, _ := runState(t, s, id); got != want {
+			t.Errorf("%s: %s, want %s", id, got, want)
+		}
+	}
+	if got, _ := runState(t, s, "short-due"); got != StateCancelled {
+		t.Fatalf("short-due: %s, want cancelled", got)
+	}
+	if err := s.reapExpiry(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"r00", "r01"} {
+		if got, _ := runState(t, s, id); got != StateCancelled {
+			t.Errorf("next pass %s: %s, want cancelled", id, got)
+		}
+	}
+}
+
+// The oldest due Run held by another transaction (a resume or cancel in
+// progress, here one that only holds the row) keeps its batch slot: the
+// pass does not wait for it and cancels the other 19 of the oldest 20,
+// leaving it and the youngest. Once released, the next pass cancels both.
+func TestReapExpiryLockedOldest(t *testing.T) {
+	s, ctx := expiryFixture(t)
+	for i := 0; i < 21; i++ {
+		restingRun(t, s, ctx, fmt.Sprintf("r%02d", i), "t1", StateStopped, float64(100+i))
+	}
+	held := hold(t, ctx, s, lockRow("runs", "r20", "FOR UPDATE"))
+	if !held.settle(t, ctx, s) {
+		t.Fatal("the holder is blocked")
+	}
+	bounded, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := s.reapExpiry(bounded); err != nil {
+		t.Fatalf("pass with the oldest held: %v", err)
+	}
+	for i := 0; i < 21; i++ {
+		id := fmt.Sprintf("r%02d", i)
+		want := StateCancelled
+		if i == 0 || i == 20 {
+			want = StateStopped
+		}
+		if got, _ := runState(t, s, id); got != want {
+			t.Errorf("%s: %s, want %s", id, got, want)
+		}
+	}
+	release(t, held, nil)
+	if err := s.reapExpiry(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"r00", "r20"} {
+		if got, _ := runState(t, s, id); got != StateCancelled {
+			t.Errorf("next pass %s: %s, want cancelled", id, got)
+		}
 	}
 }
