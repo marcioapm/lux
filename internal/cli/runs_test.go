@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -134,5 +135,31 @@ func TestResumeSecretFlags(t *testing.T) {
 	}
 	if !reflect.DeepEqual(body, want) {
 		t.Fatalf("POST %v, want %v", body, want)
+	}
+}
+
+// A name given both as --secret and --remove-secret is refused before any
+// resume is POSTed.
+func TestResumeSecretSuppliedAndRemoved(t *testing.T) {
+	posted := false
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/runs/run_1":
+			_, _ = w.Write([]byte(`{"id":"run_1","state":"stopped","secrets":[{"name":"TOKEN"}]}`))
+		case r.Method == "POST":
+			posted = true
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"run_1","state":"resuming"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	_, err := runCLI(t, h, "resume", "run_1", "--secret", "TOKEN=t-1", "--remove-secret", "TOKEN")
+	if err == nil || !strings.Contains(err.Error(), `secret "TOKEN" is both supplied and removed`) {
+		t.Fatalf("err = %v, want TOKEN both supplied and removed", err)
+	}
+	if posted {
+		t.Fatal("a request was POSTed despite the conflict")
 	}
 }
