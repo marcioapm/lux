@@ -164,6 +164,21 @@ func TestInputAttachmentsAccepted(t *testing.T) {
 	}
 }
 
+// An image of exactly 5 MiB decoded is accepted (its body is under 8 MiB).
+func TestInputAttachmentsFiveMiBAccepted(t *testing.T) {
+	s, key := inputFixture(t)
+	img := make([]byte, 5<<20)
+	copy(img, tinyPNG)
+	body, _ := json.Marshal(map[string]any{"requestId": "req-big", "attachments": []any{
+		map[string]any{"name": "big.png", "contentType": "image/png", "data": b64(img)}}})
+	if status, out := postJSON(t, s, key, "/v1/runs/r1/input", body); status != http.StatusAccepted {
+		t.Fatalf("got %d %v", status, out)
+	}
+	if n := queryOne[int](t, s, `SELECT (payload->'attachments'->0->>'data' = $1)::int FROM host_messages WHERE run_id = 'r1'`, b64(img)); n != 1 {
+		t.Fatal("queued input without the image")
+	}
+}
+
 func submitWithAttachments(s *Server, adapter string, atts []spec.Attachment) (*submitRunOutput, error) {
 	w := spec.Workload{Adapter: adapter, Command: []string{"agent"}, Prompt: "look", Attachments: atts}
 	sp := spec.RunSpec{Image: spec.Image{Ref: "alpine"}, Workload: w}
