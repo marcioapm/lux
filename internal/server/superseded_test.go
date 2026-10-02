@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -137,35 +138,123 @@ func TestReapSupersededSparesHostAndSharedBlobs(t *testing.T) {
 	}
 }
 
+// blockedRuns adds n stopped flagged Runs ra0000.. (t2), each with an
+// uploaded current snapshot and an older one whose volume is still on its
+// host: none is ready for the claim.
+func blockedRuns(t *testing.T, s *Server, ctx context.Context, n int) {
+	t.Helper()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, snapshots_superseded)
+		SELECT 'ra' || lpad(i::text, 4, '0'), 't2', '{}', 'stopped', 2, true FROM generate_series(0, $1 - 1) i`, n)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state)
+		SELECT r.id || '-p' || e, 't2', r.id, 'hb', e, 'exited' FROM runs r, generate_series(1, 2) e WHERE r.id LIKE 'ra____'`)
+	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, host_id, s3_key)
+		SELECT r.id || '-vol' || e, 't2', r.id, e, 'volume', 'work', CASE e WHEN 1 THEN 'host' ELSE 's3' END, 'hb',
+			CASE e WHEN 2 THEN r.id || '/' || r.id || '-vol2' END
+		FROM runs r, generate_series(1, 2) e WHERE r.id LIKE 'ra____'`)
+	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, host_id, uploaded)
+		SELECT r.id || '-s' || e, 't2', r.id, r.id || '-p' || e, e,
+			jsonb_build_object('volumes', jsonb_build_array(jsonb_build_object('name', 'work', 'blobId', r.id || '-vol' || e))), 'hb', e = 2
+		FROM runs r, generate_series(1, 2) e WHERE r.id LIKE 'ra____'`)
+	execSQL(t, s, ctx, `UPDATE runs SET snapshot_id = id || '-s2' WHERE id LIKE 'ra____'`)
+}
+
+// unblock uploads the older volume of a blocked Run.
+func unblock(t *testing.T, s *Server, ctx context.Context, run string) {
+	t.Helper()
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 's3', s3_key = run_id || '/' || id WHERE id = $1`, run+"-vol1")
+}
+
+func blockedAvailable(t *testing.T, s *Server) int {
+	t.Helper()
+	var n int
+	systemScan(t, s, `SELECT count(*) FROM snapshots WHERE run_id LIKE 'ra____' AND available`, nil, &n)
+	return n
+}
+
 // Runs whose older snapshot still has a volume on its host are not
 // candidates: twenty of them, with lower ids, do not keep a ready Run out
 // of the pass's batch.
 func TestReapSupersededSkipsBlockedRuns(t *testing.T) {
 	s, ctx, f := supersededFixture(t)
 	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
-	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, snapshots_superseded)
-		SELECT 'ra' || lpad(i::text, 2, '0'), 't2', '{}', 'stopped', 2, true FROM generate_series(0, 19) i`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state)
-		SELECT r.id || '-p' || e, 't2', r.id, 'hb', e, 'exited' FROM runs r, generate_series(1, 2) e WHERE r.id LIKE 'ra__'`)
-	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, host_id, s3_key)
-		SELECT r.id || '-vol' || e, 't2', r.id, e, 'volume', 'work', CASE e WHEN 1 THEN 'host' ELSE 's3' END, 'hb',
-			CASE e WHEN 2 THEN r.id || '/' || r.id || '-vol2' END
-		FROM runs r, generate_series(1, 2) e WHERE r.id LIKE 'ra__'`)
-	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, host_id, uploaded)
-		SELECT r.id || '-s' || e, 't2', r.id, r.id || '-p' || e, e,
-			jsonb_build_object('volumes', jsonb_build_array(jsonb_build_object('name', 'work', 'blobId', r.id || '-vol' || e))), 'hb', e = 2
-		FROM runs r, generate_series(1, 2) e WHERE r.id LIKE 'ra__'`)
-	execSQL(t, s, ctx, `UPDATE runs SET snapshot_id = id || '-s2' WHERE id LIKE 'ra__'`)
+	blockedRuns(t, s, ctx, 20)
 	if err := s.reapSuperseded(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if snapshotAvailable(t, s, "snapB") || !slices.Equal(f.Deleted(), []string{"rb/bB-vol-snapB"}) {
 		t.Fatalf("rb not reaped behind blocked Runs: snapB available %v, S3 deletes %v", snapshotAvailable(t, s, "snapB"), f.Deleted())
 	}
-	var blocked int
-	systemScan(t, s, `SELECT count(*) FROM snapshots WHERE run_id LIKE 'ra__' AND available`, nil, &blocked)
-	if blocked != 40 {
-		t.Fatalf("blocked Runs' available snapshots: %d, want 40", blocked)
+	if n := blockedAvailable(t, s); n != 40 {
+		t.Fatalf("blocked Runs' available snapshots: %d, want 40", n)
+	}
+}
+
+// A pass over a blocked backlog longer than the window inspects one window
+// and moves on: the next window starts after it.
+func TestReapSupersededWindowAdvances(t *testing.T) {
+	s, ctx, f := supersededFixture(t)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+	blockedRuns(t, s, ctx, supersededWindow+50)
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("ra%04d", supersededWindow-1); s.supersededCursor != want {
+		t.Fatalf("cursor after one pass: %q, want %q", s.supersededCursor, want)
+	}
+	if !snapshotAvailable(t, s, "snapB") || len(f.Deleted()) != 0 {
+		t.Fatalf("rb, beyond the window, reaped: snapB available %v, deleted %v", snapshotAvailable(t, s, "snapB"), f.Deleted())
+	}
+	if n := blockedAvailable(t, s); n != 2*(supersededWindow+50) {
+		t.Fatalf("blocked Runs' available snapshots: %d, want %d", n, 2*(supersededWindow+50))
+	}
+}
+
+// A ready Run behind more blocked Runs than one window is reached within
+// ceil(backlog/window)+1 passes.
+func TestReapSupersededReachesReadyBehindBacklog(t *testing.T) {
+	s, ctx, f := supersededFixture(t)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+	backlog := 2*supersededWindow + 50
+	blockedRuns(t, s, ctx, backlog)
+	passes := (backlog+supersededWindow-1)/supersededWindow + 1
+	for i := 0; i < passes && snapshotAvailable(t, s, "snapB"); i++ {
+		if err := s.reapSuperseded(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if snapshotAvailable(t, s, "snapB") || !slices.Equal(f.Deleted(), []string{"rb/bB-vol-snapB"}) {
+		t.Fatalf("rb not reaped in %d passes: snapB available %v, S3 deletes %v", passes, snapshotAvailable(t, s, "snapB"), f.Deleted())
+	}
+	if n := blockedAvailable(t, s); n != 2*backlog {
+		t.Fatalf("blocked Runs' available snapshots: %d, want %d", n, 2*backlog)
+	}
+}
+
+// After the last window the cursor starts over: a Run before where it had
+// been, ready since, is reaped on the next rotation.
+func TestReapSupersededWindowWraps(t *testing.T) {
+	s, ctx, f := supersededFixture(t)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+	blockedRuns(t, s, ctx, supersededWindow+50)
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	unblock(t, s, ctx, "ra0005")
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if s.supersededCursor != "" || !snapshotAvailable(t, s, "ra0005-s1") || !slices.Equal(f.Deleted(), []string{"rb/bB-vol-snapB"}) {
+		t.Fatalf("after the last window: cursor %q, ra0005-s1 available %v, S3 deletes %v; want start over, ra0005 not yet, rb reaped",
+			s.supersededCursor, snapshotAvailable(t, s, "ra0005-s1"), f.Deleted())
+	}
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotAvailable(t, s, "ra0005-s1") || !snapshotAvailable(t, s, "ra0005-s2") {
+		t.Fatalf("ra0005: s1 available %v s2 %v, want false true", snapshotAvailable(t, s, "ra0005-s1"), snapshotAvailable(t, s, "ra0005-s2"))
+	}
+	if got := f.Deleted(); !slices.Equal(got, []string{"ra0005/ra0005-vol1", "rb/bB-vol-snapB"}) {
+		t.Fatalf("S3 deletes %v, want rb's and ra0005's older volumes", got)
 	}
 }
 
