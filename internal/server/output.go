@@ -182,12 +182,6 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 			}
 			var done bool
 			switch {
-			case follow && pl.state == "assigned":
-				// Its host has not taken it up yet, and would answer as
-				// for a placement that never wrote anything: asked now,
-				// it would look finished and its records be skipped.
-				// Wait for it to start (a state change wakes the loop).
-				done = false
 			case pl.blobLoc == "s3":
 				err = s.streamOutputBlob(ctx, pl.blobKey, since, emit)
 				done = true
@@ -219,6 +213,14 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 					_ = send("gap", outputGap{pl.epoch, err.Error()})
 					done = true
 				}
+			}
+			if follow && pl.state == "assigned" {
+				// A host that has not taken it up yet ends the subscription
+				// at once, as for a placement that wrote nothing; one that
+				// has (its starting report may be late or lost) relays its
+				// records. Either way it is not finished: keep the cursor
+				// where the relay left it and ask again.
+				done = false
 			}
 			if !done {
 				break
