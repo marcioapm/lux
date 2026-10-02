@@ -12,8 +12,8 @@ import (
 
 // 052 fills the stored bytes of samples written before 051 from the blobs'
 // upload and deletion times: per tenant and kind, and for the whole system
-// (”); a blob counts from its upload (inclusive) to its deletion
-// (exclusive), and one never uploaded not at all.
+// (the empty tenant id); a blob counts from its upload (inclusive) to its
+// deletion (exclusive), and one never uploaded not at all.
 func TestStoredBytesBackfill(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
