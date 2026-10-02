@@ -217,6 +217,29 @@ func TestFollowWaitsForAnAssignedPlacement(t *testing.T) {
 	expectRecord(t, events, "2.1", "two\n", "the new placement's record")
 }
 
+// Run events arriving while placement 2 is assigned and its runner does not
+// hold it wake the follower, but do not make it ask again more than once
+// per 500ms.
+func TestFollowAsksForAnAssignedPlacementAtMostTwiceASecondUnderEvents(t *testing.T) {
+	s, key, h1 := resumedFixture(t)
+	events := followOutput(t, s, key)
+	expectRecord(t, events, "1.1", "one\n", "first record")
+	waitUntil(t, func() bool { return h1.subscribed(2) >= 1 }, "the follower to ask for placement 2")
+	before, start := h1.subscribed(2), time.Now()
+	for time.Since(start) < 1500*time.Millisecond {
+		s.wakeups.notify("r1")
+		time.Sleep(2 * time.Millisecond)
+	}
+	n, elapsed := h1.subscribed(2)-before, time.Since(start)
+	t.Logf("%d subscriptions in %s", n, elapsed)
+	// One per started 500ms, plus one in flight at either end.
+	if allowed := int(elapsed/(500*time.Millisecond)) + 2; n > allowed {
+		t.Fatalf("asked for the assigned placement %d times in %s under events (at most %d)", n, elapsed, allowed)
+	}
+	h1.hold(2, false, "two\n")
+	expectRecord(t, events, "2.1", "two\n", "the placement's record once its runner holds it")
+}
+
 // The runner holds placement 2 and writes its output, but luxd still has it
 // assigned (its starting report was refused, say): the output flows.
 func TestFollowReadsAnAssignedPlacementItsRunnerHolds(t *testing.T) {
