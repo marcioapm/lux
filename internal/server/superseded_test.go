@@ -44,7 +44,6 @@ func snapshotAvailable(t *testing.T, s *Server, id string) bool {
 	return ok
 }
 
-// blobLocations maps each of run's blobs to its location.
 func blobLocations(t *testing.T, s *Server, run string) map[string]string {
 	t.Helper()
 	ctx := context.Background()
@@ -54,14 +53,12 @@ func blobLocations(t *testing.T, s *Server, run string) map[string]string {
 		if err != nil {
 			return err
 		}
-		for rows.Next() {
-			var id, loc string
-			if err := rows.Scan(&id, &loc); err != nil {
-				return err
-			}
+		var id, loc string
+		_, err = pgx.ForEachRow(rows, []any{&id, &loc}, func() error {
 			out[id] = loc
-		}
-		return rows.Err()
+			return nil
+		})
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
