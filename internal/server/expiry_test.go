@@ -1,0 +1,168 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
+)
+
+// expiryFixture: tenants t1 (default 90 days), never (0) and short (10),
+// and no Runs.
+func expiryFixture(t *testing.T) (*Server, context.Context) {
+	t.Helper()
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name, expire_after_days) VALUES ('never', 'never', 0), ('short', 'short', 10)`)
+	return s, ctx
+}
+
+// restingRun adds a Run in state that entered it days ago.
+func restingRun(t *testing.T, s *Server, ctx context.Context, id, tenant, state string, days float64) {
+	t.Helper()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, state_changed_at, finished_at)
+		VALUES ($1, $2, '{}', $3, 1, now() - make_interval(secs => $4 * 86400), CASE WHEN $3 = 'failed' THEN now() - interval '200 days' END)`,
+		id, tenant, state, days)
+}
+
+func runState(t *testing.T, s *Server, id string) (state, reason string) {
+	t.Helper()
+	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = $1`, []any{id}, &state, &reason)
+	return state, reason
+}
+
+// A Run resting longer than its tenant's limit is cancelled, saying why,
+// with a state event and finished_at; one just under it, a live one, and
+// one of a tenant whose Runs never expire are not.
+func TestReapExpiry(t *testing.T) {
+	s, ctx := expiryFixture(t)
+	restingRun(t, s, ctx, "stopped-old", "t1", StateStopped, 90.01)
+	restingRun(t, s, ctx, "lost-old", "t1", StateLost, 91)
+	restingRun(t, s, ctx, "failed-old", "t1", StateFailed, 120)
+	restingRun(t, s, ctx, "stopped-young", "t1", StateStopped, 89.99)
+	restingRun(t, s, ctx, "running-old", "t1", StateRunning, 200)
+	restingRun(t, s, ctx, "never-old", "never", StateStopped, 1000)
+	restingRun(t, s, ctx, "short-old", "short", StateLost, 10.01)
+	restingRun(t, s, ctx, "short-young", "short", StateStopped, 9.99)
+	if err := s.reapExpiry(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{
+		"stopped-old": "expired: stopped for 90 days",
+		"lost-old":    "expired: lost for 90 days",
+		"failed-old":  "expired: failed for 90 days",
+		"short-old":   "expired: lost for 10 days",
+	} {
+		state, reason := runState(t, s, id)
+		if state != StateCancelled || reason != want {
+			t.Errorf("%s: %s %q, want cancelled %q", id, state, reason, want)
+		}
+		var events int
+		var finished bool
+		systemScan(t, s, `SELECT (SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'state'
+				AND data->>'state' = 'cancelled' AND data->>'reason' = $2),
+			finished_at > now() - interval '1 minute' FROM runs WHERE id = $1`, []any{id, want}, &events, &finished)
+		if events != 1 || !finished {
+			t.Errorf("%s: %d cancelled state events, finished now %v", id, events, finished)
+		}
+	}
+	for id, want := range map[string]string{"stopped-young": StateStopped, "running-old": StateRunning, "never-old": StateStopped, "short-young": StateStopped} {
+		if state, _ := runState(t, s, id); state != want {
+			t.Errorf("%s: %s, want %s", id, state, want)
+		}
+	}
+}
+
+// A resume holding the Run when the reaper looks: the Run is skipped and,
+// once the resume commits, no longer resting, so it is never cancelled.
+// The other way round, a resume after the expiry is refused.
+func TestReapExpiryRacesResume(t *testing.T) {
+	s, ctx := expiryFixture(t)
+	restingRun(t, s, ctx, "r", "t1", StateStopped, 100)
+	locked, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = 'r' FOR UPDATE`); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return s.requestResume(ctx, tx, "t1", "r", nil, "resume requested")
+		})
+	}()
+	<-locked
+	// The reaper may skip the Run or wait for it; either way the resume
+	// commits first.
+	reaped := make(chan error, 1)
+	go func() { reaped <- s.reapExpiry(ctx) }()
+	select {
+	case err := <-reaped:
+		reaped <- err
+	case <-time.After(time.Second):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reaped; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reapExpiry(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, reason := runState(t, s, "r"); state != StateResuming {
+		t.Fatalf("resumed while the reaper looked: %s %q, want resuming", state, reason)
+	}
+
+	restingRun(t, s, ctx, "late", "t1", StateStopped, 100)
+	if err := s.reapExpiry(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.resumeRun(asTenant(ctx, "t1"), &resumeRunInput{RunPath: RunPath{ID: "late"}})
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != http.StatusConflict {
+		t.Fatalf("resume of an expired Run: %v, want 409", err)
+	}
+}
+
+// The clock is the time in the resting state: a Run stopped long ago, then
+// resumed and stopped again, has rested only since the second stop. A
+// write that is not a state change (updated_at) does not restart it.
+func TestReapExpiryClockRestartsOnResume(t *testing.T) {
+	s, ctx := expiryFixture(t)
+	restingRun(t, s, ctx, "r", "t1", StateStopped, 100)
+	restingRun(t, s, ctx, "touched", "t1", StateStopped, 100)
+	execSQL(t, s, ctx, `UPDATE runs SET updated_at = now() WHERE id = 'touched'`)
+	// Running for 100 days, stopped now: it has rested no time.
+	restingRun(t, s, ctx, "ran-long", "t1", StateRunning, 100)
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if err := s.requestResume(ctx, tx, "t1", "r", nil, "resume requested"); err != nil {
+			return err
+		}
+		if err := setRunState(ctx, tx, "t1", "r", StateStopped, "stop", 1); err != nil {
+			return err
+		}
+		return setRunState(ctx, tx, "t1", "ran-long", StateStopped, "stop", 1)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reapExpiry(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, reason := runState(t, s, "r"); state != StateStopped {
+		t.Fatalf("resumed and stopped again: %s %q, want stopped", state, reason)
+	}
+	if state, _ := runState(t, s, "ran-long"); state != StateStopped {
+		t.Fatalf("ran-long: %s, want stopped (the clock is the stop, not the start)", state)
+	}
+	if state, _ := runState(t, s, "touched"); state != StateCancelled {
+		t.Fatalf("touched: %s, want cancelled (updated_at is not the clock)", state)
+	}
+}
