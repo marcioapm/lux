@@ -376,10 +376,9 @@ func TestCodexSteerCarriedPastInterrupt(t *testing.T) {
 	if str(p, "clientUserMessageId") != "s1" {
 		t.Fatalf("turn/start %v", p)
 	}
-	const next = "01a0f2bb-dd3b-71c3-8d08-f3a1cb53a3e9"
-	w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + next + `","status":"inProgress"}}}`)
-	w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u2","clientId":"s1","content":[]},"threadId":"` + cxThread + `","turnId":"` + next + `"}}`)
-	w.send(`{"method":"turn/completed","params":{"threadId":"` + cxThread + `","turn":{"id":"` + next + `","status":"completed"}}}`)
+	w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + cxNextTurn + `","status":"inProgress"}}}`)
+	w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u2","clientId":"s1","content":[]},"threadId":"` + cxThread + `","turnId":"` + cxNextTurn + `"}}`)
+	w.send(`{"method":"turn/completed","params":{"threadId":"` + cxThread + `","turn":{"id":"` + cxNextTurn + `","status":"completed"}}}`)
 	sink.wait(t, "accepted int-1 next_step receipt=false")
 	checkCarried(t, w, sink, "s1")
 }
@@ -438,17 +437,16 @@ func TestCodexCarriesEachSteerOnce(t *testing.T) {
 	close(release)
 	<-done
 	<-done
-	const next = "01a0f2bb-dd3b-71c3-8d08-f3a1cb53a3e9"
-	w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + next + `","status":"inProgress"}}}`)
+	w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + cxNextTurn + `","status":"inProgress"}}}`)
 	id, p = w.next("turn/steer")
 	sent["turn/steer "+str(p, "clientUserMessageId")]++
-	w.send(`{"id":` + id + `,"result":{"turnId":"` + next + `"}}`)
+	w.send(`{"id":` + id + `,"result":{"turnId":"` + cxNextTurn + `"}}`)
 	<-accepted
 	<-done
 	for _, s := range []string{"s1", "s2"} {
-		w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u-` + s + `","clientId":"` + s + `","content":[]},"threadId":"` + cxThread + `","turnId":"` + next + `"}}`)
+		w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u-` + s + `","clientId":"` + s + `","content":[]},"threadId":"` + cxThread + `","turnId":"` + cxNextTurn + `"}}`)
 	}
-	w.send(`{"method":"turn/completed","params":{"threadId":"` + cxThread + `","turn":{"id":"` + next + `","status":"completed"}}}`)
+	w.send(`{"method":"turn/completed","params":{"threadId":"` + cxThread + `","turn":{"id":"` + cxNextTurn + `","status":"completed"}}}`)
 	sink.waitLast(t, "idle")
 	w.none()
 	w.exit()
