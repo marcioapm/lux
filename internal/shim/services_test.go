@@ -340,6 +340,9 @@ func TestServiceProxyUpgradeWithAnUnreadBody(t *testing.T) {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 200))
 		t.Fatalf("status %d %q", res.StatusCode, b)
 	}
+	if res.Header.Get("Connection") != "Upgrade" || res.Header.Get("Upgrade") != "foo" {
+		t.Fatalf("upgrade headers %v", res.Header)
+	}
 }
 
 // An unreachable upstream also answers before the upload is read.
