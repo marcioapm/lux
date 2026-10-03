@@ -145,10 +145,10 @@ func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor)
 				return
 			}
 		}
-		// The upstream may answer before it has read the whole request
-		// body. Without full duplex, writing the response header closes the
-		// request body under the transport still sending it, and the
-		// transport then drops the connection the response comes on.
+		// The transport may still be sending the body after the upstream's
+		// header goes out, which net/http supports only in full duplex. An
+		// unread body is not drained because the response says
+		// Connection: close (eofBody); full duplex covers any that do not.
 		_ = http.NewResponseController(w).EnableFullDuplex()
 		if r.ContentLength != 0 {
 			b := &eofBody{ReadCloser: r.Body}
