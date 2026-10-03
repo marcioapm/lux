@@ -460,3 +460,22 @@ func TestCodexCarriesEachSteerOnce(t *testing.T) {
 		}
 	}
 }
+
+// Codex may report the interrupted turn's end before it answers
+// turn/interrupt. An interrupting input with content still starts the next
+// turn: it must not wait in the queue for a turn/completed that has
+// already come.
+func TestCodexInterruptAnsweredAfterTheTurnEnded(t *testing.T) {
+	c, w, sink := codexStarted(t, "lux/0.155.1")
+	go c.Deliver(proto.Input{RequestID: "int-1", Text: "after", Interrupt: true})
+	id, _ := w.next("turn/interrupt")
+	w.send(cxCompleted("interrupted"))
+	sink.wait(t, "idle")
+	w.send(`{"id":` + id + `,"result":{}}`)
+	id, p := w.next("turn/start")
+	if str(p, "clientUserMessageId") != "int-1" {
+		t.Fatalf("turn/start %v", p)
+	}
+	w.send(`{"id":` + id + `,"result":{"turn":{"id":"01a0f2bb-dd3b-71c3-8d08-f3a1cb53a3e9","status":"inProgress"}}}`)
+	sink.wait(t, "accepted int-1")
+}

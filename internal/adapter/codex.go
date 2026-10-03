@@ -452,6 +452,9 @@ func (c *Codex) Deliver(in proto.Input) {
 		c.mu.Lock()
 		c.queue = append([]proto.Input{in}, c.queue...)
 		c.mu.Unlock()
+		// The turn may have ended before turn/interrupt was answered; its
+		// turn/completed then found nothing queued and started nothing.
+		c.drain()
 		return
 	}
 	// Tracked on arrival: carried inputs keep the order they came in.
