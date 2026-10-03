@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -479,9 +480,7 @@ func TestCodexInterruptingInputStartsTheNextTurn(t *testing.T) {
 				w.send(result)
 			}
 			id, p := w.next("turn/start")
-			if str(p, "clientUserMessageId") != "int-1" {
-				t.Fatalf("turn/start %v", p)
-			}
+			startsWith(t, p, "int-1", "after")
 			w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + cxNextTurn + `","status":"inProgress"}}}`)
 			sink.wait(t, "accepted int-1")
 			w.none()
@@ -514,7 +513,43 @@ func TestCodexCarriedSteerStartsBeforeTheInterruptingInput(t *testing.T) {
 	w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u-s1","clientId":"s1","content":[]},"threadId":"` + cxThread + `","turnId":"` + cxNextTurn + `"}}`)
 	w.send(`{"method":"turn/completed","params":{"threadId":"` + cxThread + `","turn":{"id":"` + cxNextTurn + `","status":"completed"}}}`)
 	_, p = w.next("turn/start")
-	if str(p, "clientUserMessageId") != "int-1" {
-		t.Fatalf("turn/start %v", p)
+	startsWith(t, p, "int-1", "after")
+}
+
+// A refused turn/interrupt leaves the turn running: the interrupting
+// input, queued already, starts the turn after it, once.
+func TestCodexInterruptRefusedStartsTheInputAfterTheTurn(t *testing.T) {
+	c, w, sink := codexStarted(t, "lux/0.155.1")
+	delivered := make(chan struct{})
+	go func() {
+		defer close(delivered)
+		c.Deliver(proto.Input{RequestID: "int-1", Text: "after", Interrupt: true})
+	}()
+	id, _ := w.next("turn/interrupt")
+	w.send(`{"id":` + id + `,"error":{"code":-32600,"message":"cannot interrupt this turn"}}`)
+	select {
+	case <-delivered:
+	case <-waitTimeout():
+		t.Fatal("Deliver did not return after the refused interrupt")
+	}
+	w.none()
+	w.send(cxCompleted("completed"))
+	id, p := w.next("turn/start")
+	startsWith(t, p, "int-1", "after")
+	w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + cxNextTurn + `","status":"inProgress"}}}`)
+	sink.wait(t, "accepted int-1")
+	w.none()
+}
+
+// startsWith fails unless p, a turn/start's params, starts input id with
+// the text it was given.
+func startsWith(t *testing.T, p map[string]json.RawMessage, id, text string) {
+	t.Helper()
+	var content []map[string]any
+	if err := json.Unmarshal(p["input"], &content); err != nil {
+		t.Fatal(err)
+	}
+	if str(p, "clientUserMessageId") != id || !reflect.DeepEqual(content, []map[string]any{{"type": "text", "text": text}}) {
+		t.Fatalf("turn/start %v, want %s with %q", p, id, text)
 	}
 }
