@@ -3,6 +3,7 @@ package shim
 import (
 	"bufio"
 	"context"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -258,6 +259,34 @@ func TestServiceProxyEarlyAnswerClosesAnUnreadUpload(t *testing.T) {
 	post, get, err = postThenGet(t, addr, "/store", n, n)
 	if post.Close || err != nil || get.StatusCode != http.StatusOK {
 		t.Fatalf("upload sent in full: close %v, next request: %v %v", post.Close, get, err)
+	}
+}
+
+// Over HTTP/2 the transport reuses one upstream connection, and from the
+// second request on it hands ModifyResponse a copy of the request.
+func TestServiceProxyEarlyAnswerClosesAnUnreadUploadOverHTTP2(t *testing.T) {
+	up := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Proto", r.Proto)
+		http.Error(w, "too big", http.StatusRequestEntityTooLarge)
+	}))
+	up.EnableHTTP2 = true
+	up.StartTLS()
+	defer up.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(up.Certificate())
+	serviceRootCAs = roots
+	defer func() { serviceRootCAs = nil }()
+	proxy := newTestServiceProxy(t, spec.Service{Name: "tools", URL: up.URL})
+	defer proxy.Close()
+
+	for i := range 3 {
+		post, get, err := postThenGet(t, proxy.Listener.Addr().String(), "/reject", 1<<20, 5)
+		if post.StatusCode != http.StatusRequestEntityTooLarge || post.Header.Get("X-Proto") != "HTTP/2.0" {
+			t.Fatalf("post %d: status %d over %q", i, post.StatusCode, post.Header.Get("X-Proto"))
+		}
+		if !post.Close {
+			t.Fatalf("post %d: 1 MiB upload unread: keep-alive promised, next request: %v %v", i, get, err)
+		}
 	}
 }
 

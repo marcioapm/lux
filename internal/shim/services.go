@@ -1,6 +1,9 @@
 package shim
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -75,6 +78,10 @@ func ServiceAddr(i int) string {
 	return fmt.Sprintf("127.0.0.1:%d", spec.ServiceBasePort+i)
 }
 
+// serviceRootCAs verifies service upstreams; nil means the system roots.
+// Tests set it to trust an httptest TLS server.
+var serviceRootCAs *x509.CertPool
+
 // newServiceProxy forwards every request to svc.URL (its path joined with
 // the request's), with svc's headers set over the workload's own.
 func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor) (http.Handler, error) {
@@ -96,6 +103,7 @@ func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor)
 		MaxIdleConns:          16,
 		IdleConnTimeout:       90 * time.Second,
 		ForceAttemptHTTP2:     true,
+		TLSClientConfig:       &tls.Config{RootCAs: serviceRootCAs},
 	}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -142,7 +150,9 @@ func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor)
 		// transport then drops the connection the response comes on.
 		_ = http.NewResponseController(w).EnableFullDuplex()
 		if r.ContentLength != 0 {
-			r.Body = &eofBody{ReadCloser: r.Body}
+			b := &eofBody{ReadCloser: r.Body}
+			r.Body = b
+			r = r.WithContext(context.WithValue(r.Context(), eofBodyKey{}, b))
 		}
 		proxy.ServeHTTP(w, r)
 	}), nil
@@ -152,11 +162,15 @@ func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor)
 // duplex, net/http decides to drop the connection only after the response
 // has gone out (it cannot drain more than 256 KiB of unread body), so a
 // response sent before the body was consumed must say Connection: close
-// itself, or the workload reuses a connection the shim then closes.
+// itself, or the workload reuses a connection the shim then closes. It is
+// found through the request context (eofBodyKey): the transport may hand
+// back a copy of the request with another Body, as HTTP/2 does.
 type eofBody struct {
 	io.ReadCloser
 	eof atomic.Bool
 }
+
+type eofBodyKey struct{}
 
 func (b *eofBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
@@ -166,9 +180,9 @@ func (b *eofBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// bodyUnread reports whether r, as passed to ModifyResponse or
-// ErrorHandler, has a body not yet read to EOF.
+// bodyUnread reports whether the inbound request r derives from has a body
+// not yet read to EOF.
 func bodyUnread(r *http.Request) bool {
-	b, ok := r.Body.(*eofBody)
+	b, ok := r.Context().Value(eofBodyKey{}).(*eofBody)
 	return ok && !b.eof.Load()
 }
