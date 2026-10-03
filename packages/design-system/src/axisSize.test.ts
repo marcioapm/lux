@@ -4,12 +4,13 @@ import { AXIS_MIN_SIZE, axisSize, measuredAxisSize } from "./axisSize.ts";
 // About 6.5px per character, close to 11px Inter's digits.
 const measure = (text: string) => text.length * 6.5;
 
-test("axisSize widens the axis to fit long labels", () => {
-  const labels = ["0 B", "100 GiB", "186.3 GiB", "200 GiB"];
-  const size = axisSize(labels, measure);
-  expect(size).toBeGreaterThan(AXIS_MIN_SIZE);
-  expect(size).toBeGreaterThanOrEqual(Math.max(...labels.map(measure)) + 5);
-  expect(axisSize(["453.7 MiB", "$12,345.50"], measure)).toBeGreaterThanOrEqual(measure("$12,345.50") + 5);
+test("axisSize is the widest label rounded up, plus gap and inset", () => {
+  // "186.3 GiB": 9 * 6.5 = 58.5 → 59 + 5 + 4.
+  expect(axisSize(["0 B", "100 GiB", "186.3 GiB", "200 GiB"], measure)).toBe(68);
+  // "$12,345.50": 10 * 6.5 = 65 + 5 + 4.
+  expect(axisSize(["453.7 MiB", "$12,345.50"], measure)).toBe(74);
+  expect(axisSize(["fractional"], () => 47.1)).toBe(57);
+  expect(axisSize(["fractional"], () => 47.1, 80)).toBe(80);
 });
 
 test("axisSize keeps the 56px floor for short labels", () => {
