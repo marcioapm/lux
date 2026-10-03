@@ -130,15 +130,20 @@ func TestServiceEnv(t *testing.T) {
 	}
 }
 
-// The workload sends the rest of its body only after it sees the response
-// header. The proxy must pass the header on without first draining or
-// closing the request body: draining waits for bytes the workload holds
-// back until the header arrives, and closing fails the transport still
-// sending the body upstream (the services e2e flake: a POST answered 200
-// with no body). Covers Content-Length and chunked framing.
+func newTestServiceProxy(t *testing.T, svc spec.Service) *httptest.Server {
+	t.Helper()
+	h, err := newServiceProxy(svc, nil, NewRedactor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return httptest.NewServer(h)
+}
+
+// The workload holds back the rest of its body until the response header.
+// Draining would deadlock; closing would interrupt the upstream upload.
+// Covers Content-Length and chunked framing.
 func TestServiceProxyAnswersBeforeTheBodyIsSent(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Answers at once, then reads the body as it comes.
 		http.NewResponseController(w).EnableFullDuplex()
 		w.Header().Set("Content-Type", "text/plain")
 		io.WriteString(w, "got ")
@@ -151,11 +156,7 @@ func TestServiceProxyAnswersBeforeTheBodyIsSent(t *testing.T) {
 	}))
 	defer up.Close()
 
-	h, err := newServiceProxy(spec.Service{Name: "tools", URL: up.URL}, nil, NewRedactor(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxy := httptest.NewServer(h)
+	proxy := newTestServiceProxy(t, spec.Service{Name: "tools", URL: up.URL})
 	defer proxy.Close()
 
 	for _, size := range []int64{int64(len("hello world")), -1} {
@@ -194,11 +195,9 @@ func TestServiceProxyAnswersBeforeTheBodyIsSent(t *testing.T) {
 	}
 }
 
-// postThenGet sends, on one connection, a POST to path of n bytes of which
-// only sent are written before its response is read, then the rest, then a
-// GET. It returns the POST's response and the GET's (nil when the POST's
-// said Connection: close) or the error reading it, and closes the
-// connection, as a client does after Connection: close.
+// postThenGet sends sent of n POST bytes before reading the response, then
+// sends the rest and a GET on the same connection unless the POST says close.
+// A close response returns nil for the GET; the connection is closed on return.
 func postThenGet(t *testing.T, addr, path string, n, sent int) (post, get *http.Response, getErr error) {
 	t.Helper()
 	c, err := net.Dial("tcp", addr)
@@ -230,10 +229,8 @@ func postThenGet(t *testing.T, addr, path string, n, sent int) (post, get *http.
 	return post, get, getErr
 }
 
-// A response that keeps the connection alive must be followed by a working
-// next request. When the upstream answers without reading a large upload,
-// the proxy cannot drain the rest, so its response says Connection: close;
-// an upload sent in full keeps the connection.
+// An unread upload must close the connection; a fully read upload must
+// keep it usable for the next request.
 func TestServiceProxyEarlyAnswerClosesAnUnreadUpload(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/reject" {
@@ -244,11 +241,7 @@ func TestServiceProxyEarlyAnswerClosesAnUnreadUpload(t *testing.T) {
 		io.WriteString(w, "ok")
 	}))
 	defer up.Close()
-	h, err := newServiceProxy(spec.Service{Name: "tools", URL: up.URL}, nil, NewRedactor(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxy := httptest.NewServer(h)
+	proxy := newTestServiceProxy(t, spec.Service{Name: "tools", URL: up.URL})
 	defer proxy.Close()
 	addr := proxy.Listener.Addr().String()
 
@@ -268,14 +261,9 @@ func TestServiceProxyEarlyAnswerClosesAnUnreadUpload(t *testing.T) {
 	}
 }
 
-// The same when the upstream cannot be reached: the 502 goes out before the
-// transport has read the upload, so it closes the connection.
+// An unreachable upstream also answers before the upload is read.
 func TestServiceProxyUnreachableClosesAnUnreadUpload(t *testing.T) {
-	h, err := newServiceProxy(spec.Service{Name: "gone", URL: "http://127.0.0.1:1"}, nil, NewRedactor(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxy := httptest.NewServer(h)
+	proxy := newTestServiceProxy(t, spec.Service{Name: "gone", URL: "http://127.0.0.1:1"})
 	defer proxy.Close()
 	post, get, err := postThenGet(t, proxy.Listener.Addr().String(), "/up", 1<<20, 5)
 	if post.StatusCode != http.StatusBadGateway {
@@ -286,9 +274,7 @@ func TestServiceProxyUnreachableClosesAnUnreadUpload(t *testing.T) {
 	}
 }
 
-// A chunked request and response stream both ways at once: the workload
-// sends each line only after it has read the upstream's echo of the
-// previous one.
+// The workload sends each chunked line only after reading the previous echo.
 func TestServiceProxyStreamsBothWays(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NewResponseController(w).EnableFullDuplex()
@@ -301,11 +287,7 @@ func TestServiceProxyStreamsBothWays(t *testing.T) {
 		}
 	}))
 	defer up.Close()
-	h, err := newServiceProxy(spec.Service{Name: "tools", URL: up.URL}, nil, NewRedactor(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxy := httptest.NewServer(h)
+	proxy := newTestServiceProxy(t, spec.Service{Name: "tools", URL: up.URL})
 	defer proxy.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
