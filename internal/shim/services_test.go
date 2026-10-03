@@ -196,9 +196,10 @@ func TestServiceProxyAnswersBeforeTheBodyIsSent(t *testing.T) {
 	}
 }
 
-// postThenGet sends sent of n POST bytes before reading the response, then
-// sends the rest and a GET on the same connection unless the POST says close.
-// A close response returns nil for the GET; the connection is closed on return.
+// postThenGet sends a POST declaring n body bytes (or chunked, of unknown
+// length) and only its first sent bytes, then reads the response. Unless that
+// says close, it sends the rest of the body and a GET on the same connection
+// and returns the GET's response; the connection is closed on return.
 func postThenGet(t *testing.T, addr, path string, n, sent int, chunked bool) (post, get *http.Response, getErr error) {
 	t.Helper()
 	c, err := net.Dial("tcp", addr)
