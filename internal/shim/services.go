@@ -116,7 +116,8 @@ func newServiceProxy(svc spec.Service, secrets map[string]string, red *Redactor)
 		Transport:     transport,
 		FlushInterval: -1, // SSE and chunked responses as they come
 		ModifyResponse: func(res *http.Response) error {
-			if bodyUnread(res.Request) {
+			// A 101 hands the connection over; its Connection: Upgrade must stay.
+			if res.StatusCode != http.StatusSwitchingProtocols && bodyUnread(res.Request) {
 				res.Header.Set("Connection", "close")
 			}
 			return nil
