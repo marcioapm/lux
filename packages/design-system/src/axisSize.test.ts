@@ -2,7 +2,9 @@ import { expect, test } from "bun:test";
 import { AXIS_MIN_SIZE, axisSize, measuredAxisSize } from "./axisSize.ts";
 
 // About 6.5px per character, close to 11px Inter's digits.
-const measure = (text: string) => text.length * 6.5;
+function measure(text: string): number {
+  return text.length * 6.5;
+}
 
 test("axisSize is the widest label rounded up, plus gap and inset", () => {
   // "186.3 GiB": 9 * 6.5 = 58.5 → 59 + 5 + 4.
@@ -32,7 +34,7 @@ test("measuredAxisSize falls back to the floor without a DOM", () => {
 });
 
 // A canvas double measuring each character as half the font's px size, so widths depend on text and font.
-function withCanvas(context: "2d" | null, run: () => void) {
+function withCanvas(context: "2d" | null, run: () => void): void {
   const g = globalThis as { document?: unknown };
   const had = "document" in g;
   const original = g.document;
