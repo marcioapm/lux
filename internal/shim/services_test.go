@@ -290,6 +290,43 @@ func TestServiceProxyEarlyAnswerClosesAnUnreadUploadOverHTTP2(t *testing.T) {
 	}
 }
 
+// An upstream may switch protocols before it has read the request body.
+func TestServiceProxyUpgradeWithAnUnreadBody(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, brw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer c.Close()
+		brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: foo\r\n\r\n")
+		brw.Flush()
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		io.Copy(io.Discard, brw)
+	}))
+	defer up.Close()
+	proxy := newTestServiceProxy(t, spec.Service{Name: "tools", URL: up.URL})
+	defer proxy.Close()
+
+	c, err := net.Dial("tcp", proxy.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprintf(c, "POST /u HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: foo\r\nContent-Length: 1000\r\n\r\nhello")
+	// A failed upgrade is only flushed once the body ends; the 101 comes first.
+	defer time.AfterFunc(time.Second, func() { c.Write(make([]byte, 995)) }).Stop()
+	res, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusSwitchingProtocols {
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 200))
+		t.Fatalf("status %d %q", res.StatusCode, b)
+	}
+}
+
 // An unreachable upstream also answers before the upload is read.
 func TestServiceProxyUnreachableClosesAnUnreadUpload(t *testing.T) {
 	proxy := newTestServiceProxy(t, spec.Service{Name: "gone", URL: "http://127.0.0.1:1"})
