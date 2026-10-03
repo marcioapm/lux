@@ -216,8 +216,9 @@ func str(m map[string]json.RawMessage, k string) string {
 }
 
 const (
-	cxThread = "01a0f274-d88c-71b0-942c-1bfdf6e19884"
-	cxTurn   = "01a0f274-d9bc-7a52-a1a0-0854785aabb4"
+	cxThread   = "01a0f274-d88c-71b0-942c-1bfdf6e19884"
+	cxTurn     = "01a0f274-d9bc-7a52-a1a0-0854785aabb4"
+	cxNextTurn = "01a0f2bb-dd3b-71c3-8d08-f3a1cb53a3e9"
 )
 
 // codexStarted drives a Codex adapter through initialize (reporting
@@ -461,21 +462,61 @@ func TestCodexCarriesEachSteerOnce(t *testing.T) {
 	}
 }
 
-// Codex may report the interrupted turn's end before it answers
-// turn/interrupt. An interrupting input with content still starts the next
-// turn: it must not wait in the queue for a turn/completed that has
-// already come.
-func TestCodexInterruptAnsweredAfterTheTurnEnded(t *testing.T) {
+// An interrupting input with content starts the next turn, exactly once,
+// whichever Codex sends first: turn/interrupt's result (its documented
+// order) or the interrupted turn's turn/completed (lux-fake's). The Run is
+// not reported idle between the two turns.
+func TestCodexInterruptingInputStartsTheNextTurn(t *testing.T) {
+	for _, resultFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("result first %v", resultFirst), func(t *testing.T) {
+			c, w, sink := codexStarted(t, "lux/0.155.1")
+			go c.Deliver(proto.Input{RequestID: "int-1", Text: "after", Interrupt: true})
+			id, _ := w.next("turn/interrupt")
+			result := `{"id":` + id + `,"result":{}}`
+			if resultFirst {
+				w.send(result)
+				w.send(cxCompleted("interrupted"))
+			} else {
+				w.send(cxCompleted("interrupted"))
+				w.send(result)
+			}
+			id, p := w.next("turn/start")
+			if str(p, "clientUserMessageId") != "int-1" {
+				t.Fatalf("turn/start %v", p)
+			}
+			w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + cxNextTurn + `","status":"inProgress"}}}`)
+			sink.wait(t, "accepted int-1")
+			w.none()
+			l := sink.lines()
+			if i := slices.Index(l, "turn_end"); i < 0 || slices.Contains(l[i:], "idle") {
+				t.Fatalf("idle between the two turns: %q", l)
+			}
+		})
+	}
+}
+
+// A steer left unread by the interrupted turn came before the interrupting
+// input: it starts the next turn, and the interrupting input the one after.
+func TestCodexCarriedSteerStartsBeforeTheInterruptingInput(t *testing.T) {
 	c, w, sink := codexStarted(t, "lux/0.155.1")
+	c.Deliver(proto.Input{RequestID: "s1", Text: "y"})
+	id, _ := w.next("turn/steer")
+	w.send(`{"id":` + id + `,"result":{"turnId":"` + cxTurn + `"}}`)
+	sink.wait(t, "accepted s1")
 	go c.Deliver(proto.Input{RequestID: "int-1", Text: "after", Interrupt: true})
-	id, _ := w.next("turn/interrupt")
-	w.send(cxCompleted("interrupted"))
-	sink.wait(t, "idle")
+	id, _ = w.next("turn/interrupt")
 	w.send(`{"id":` + id + `,"result":{}}`)
+	w.send(cxCompleted("interrupted"))
 	id, p := w.next("turn/start")
+	if str(p, "clientUserMessageId") != "s1" {
+		t.Fatalf("the next turn starts with %s, not the carried s1", str(p, "clientUserMessageId"))
+	}
+	w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + cxNextTurn + `","status":"inProgress"}}}`)
+	w.none()
+	w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u-s1","clientId":"s1","content":[]},"threadId":"` + cxThread + `","turnId":"` + cxNextTurn + `"}}`)
+	w.send(`{"method":"turn/completed","params":{"threadId":"` + cxThread + `","turn":{"id":"` + cxNextTurn + `","status":"completed"}}}`)
+	_, p = w.next("turn/start")
 	if str(p, "clientUserMessageId") != "int-1" {
 		t.Fatalf("turn/start %v", p)
 	}
-	w.send(`{"id":` + id + `,"result":{"turn":{"id":"01a0f2bb-dd3b-71c3-8d08-f3a1cb53a3e9","status":"inProgress"}}}`)
-	sink.wait(t, "accepted int-1")
 }
