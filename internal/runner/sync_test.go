@@ -159,6 +159,35 @@ func TestShimKnowsSyncModes(t *testing.T) {
 	}
 }
 
+// A lux-shim that never answers, its child holding the output open past
+// its own death, is no sync modes, within the probe's deadline: runner
+// startup waits for it.
+func TestShimProbeHangs(t *testing.T) {
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "lux-shim")
+	pidFile := filepath.Join(dir, "child")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nsleep 25 &\necho $! > '"+pidFile+"'\nwait\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	ok := shimKnowsSyncModes(shim)
+	took := time.Since(start)
+	b, _ := os.ReadFile(pidFile)
+	pid := strings.TrimSpace(string(b))
+	if pid != "" {
+		t.Cleanup(func() { _ = exec.Command("kill", "-9", pid).Run() })
+	}
+	if ok || took > 12*time.Second {
+		t.Fatalf("a hanging lux-shim: sync modes %v, after %s", ok, took)
+	}
+	// Its process group went with it: the child too (a zombie until init
+	// reaps it, so its state, not its existence).
+	stat, err := os.ReadFile("/proc/" + pid + "/stat")
+	if pid == "" || err == nil && !strings.Contains(string(stat), ") Z ") {
+		t.Fatalf("the hanging lux-shim's child %q outlived the probe: %s", pid, stat)
+	}
+}
+
 // A sync that fetched a commit into the checkout, moved or not, is the
 // next bundle's prerequisite: two fetch syncs of one target in a row
 // bundle its history once. A failed one is not, and the live diff's base
