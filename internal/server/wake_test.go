@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -269,7 +270,7 @@ func TestWakeOncePerWake(t *testing.T) {
 	// resolved, and the page drops into the app.
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'running', current_epoch = 2`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p2', 't1', $1, 'h1', 2, 'running')`, r1)
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.startAttachedServers(ctx, tx, "t1", r1, 2, false) })
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.startAttachedServers(ctx, tx, "t1", r1, 2, afterSyncNever) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,6 +629,103 @@ func TestSyncRequests(t *testing.T) {
 	systemScan(t, s, `SELECT pending_sync FROM runs WHERE id = $1`, []any{r1}, &pending)
 	if len(pending) != 1 || pending[0].Ref != "abc123" {
 		t.Fatalf("pending sync: %+v", pending)
+	}
+}
+
+// A sync's mode, on POST /sync and a resume's sync: a known one is
+// carried to the runner (the sync message, the next assignment); an
+// unknown one is refused, named. On the assignment, servers run afterSync
+// first for a move, only if a checkout moved for a fast-forward (the shim
+// decides: UnmovedCommand), and never for a fetch.
+func TestSyncModes(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"workload": {"workdir": "/w"}, "git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}, {"name": "lib", "url": "https://x/lib.git", "path": "/w/lib"}]}}'`)
+	createSrv(t, s, key, map[string]any{"name": "cold", "port": 3001, "command": []string{"serve"}, "afterSync": []string{"npm", "ci"}, "runId": r1})
+	bad := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main", "mode": "rebase"}}}
+	w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", bad)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), `unknown mode \"rebase\"`) {
+		t.Fatalf("unknown mode: %d %s", w.Code, w.Body)
+	}
+	for i, mode := range []string{"", "move", "fast-forward", "fetch"} {
+		id := "m" + strconv.Itoa(i)
+		body := map[string]any{"requestId": id, "sync": []map[string]string{{"repo": "app", "ref": "main", "mode": mode}}}
+		if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body); w.Code != http.StatusAccepted {
+			t.Fatalf("mode %q: %d %s", mode, w.Code, w.Body)
+		}
+		var msg proto.Sync
+		systemScan(t, s, `SELECT payload FROM host_messages WHERE type = 'sync' ORDER BY id DESC LIMIT 1`, nil, &msg)
+		if msg.RequestID != id || len(msg.Repos) != 1 || msg.Repos[0].Mode != mode {
+			t.Fatalf("sync message for mode %q: %+v", mode, msg)
+		}
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited'`)
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/resume", bad); w.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(w.Body.String(), `unknown mode \"rebase\"`) {
+		t.Fatalf("resume with an unknown mode: %d %s", w.Code, w.Body)
+	}
+	var pending []proto.SyncRef
+	systemScan(t, s, `SELECT pending_sync FROM runs WHERE id = $1`, []any{r1}, &pending)
+	if len(pending) != 0 {
+		t.Fatalf("a refused resume kept its sync: %+v", pending)
+	}
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/resume", map[string]any{"sync": []map[string]string{
+		{"repo": "app", "ref": "main", "mode": "fast-forward"}, {"repo": "lib", "ref": "v1", "mode": "fetch"}}}); w.Code != http.StatusAccepted {
+		t.Fatalf("resume with modes: %d %s", w.Code, w.Body)
+	}
+	systemScan(t, s, `SELECT pending_sync FROM runs WHERE id = $1`, []any{r1}, &pending)
+	if len(pending) != 2 || pending[0].Mode != "fast-forward" || pending[1].Mode != "fetch" {
+		t.Fatalf("pending sync: %+v", pending)
+	}
+
+	epoch := 1
+	assign := func(refs []proto.SyncRef) (proto.Assign, proto.ServerSpec) {
+		t.Helper()
+		epoch++
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return s.assign(ctx, tx, pendingRun{ID: r1, TenantID: "t1", Epoch: epoch - 1, PendingSync: refs}, &candidateHost{ID: "h1"})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var a proto.Assign
+		systemScan(t, s, `SELECT payload FROM host_messages WHERE type = 'assign' ORDER BY id DESC LIMIT 1`, nil, &a)
+		sets := pendingServers(t, s, ctx)
+		execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE run_id = $1`, r1)
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return stopServersAtEnd(ctx, tx, "t1", r1, epoch, "run stopped")
+		}); err != nil {
+			t.Fatal(err)
+		}
+		set := sets[len(sets)-1]
+		if len(set.Servers) != 1 {
+			t.Fatalf("servers: %+v", set)
+		}
+		return a, set.Servers[0]
+	}
+	withAfter := func(cmd []string) bool { return len(cmd) == 3 && strings.Contains(cmd[2], "'npm' 'ci' && exec 'serve'") }
+	plain := func(cmd []string) bool { return len(cmd) == 1 && cmd[0] == "serve" }
+	for _, c := range []struct {
+		name     string
+		refs     []proto.SyncRef
+		command  func([]string) bool
+		unmoved  func([]string) bool
+		wantMode string
+	}{
+		{"no sync", nil, plain, func(c []string) bool { return c == nil }, ""},
+		{"move", []proto.SyncRef{{Repo: "app", Ref: "main"}}, withAfter, func(c []string) bool { return c == nil }, ""},
+		{"fast-forward", []proto.SyncRef{{Repo: "app", Ref: "main", Mode: "fast-forward"}}, withAfter, plain, "fast-forward"},
+		{"fetch", []proto.SyncRef{{Repo: "app", Ref: "main", Mode: "fetch"}}, plain, func(c []string) bool { return c == nil }, "fetch"},
+		{"move and fetch", []proto.SyncRef{{Repo: "app", Ref: "main", Mode: "fetch"}, {Repo: "lib", Ref: "main", Mode: "move"}}, withAfter,
+			func(c []string) bool { return c == nil }, "fetch"},
+	} {
+		a, sv := assign(c.refs)
+		if len(a.Sync) != len(c.refs) || (len(c.refs) > 0 && a.Sync[0].Mode != c.wantMode) {
+			t.Fatalf("%s: assignment's sync %+v", c.name, a.Sync)
+		}
+		if !c.command(sv.Command) || !c.unmoved(sv.UnmovedCommand) {
+			t.Fatalf("%s: command %q, unmovedCommand %q", c.name, sv.Command, sv.UnmovedCommand)
+		}
 	}
 }
 
