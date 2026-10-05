@@ -187,28 +187,79 @@ func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, ch
 		// carry them over or refuse; neither is asked for.
 		res.Status = "kept"
 	case ahead == 0:
-		// checkout -B resets the branch: when HEAD is on another branch,
-		// the branch's own commits would go with it.
-		if r.Branch != "" {
-			if tip, err := gitIn(ctx, r.Path, "rev-parse", "--verify", "-q", "refs/heads/"+r.Branch); err == nil {
-				if _, notAncestor := gitIn(ctx, r.Path, "merge-base", "--is-ancestor", tip, r.Commit); notAncestor != nil {
-					res.Status = "kept"
-					return res
-				}
-			}
-		}
-		// An ignored file the commit tracks is local bytes too.
-		keep := append([]string{checkout[0], checkout[1], "--no-overwrite-ignore"}, checkout[2:]...)
-		if _, err := gitIn(ctx, r.Path, keep...); err != nil {
-			return fail(err)
-		}
-		res.Status = "fast-forward"
+		return fastForward(ctx, r, res, fail)
 	case behind == 0:
 		res.Status = "ahead"
 	default:
 		res.Status = "kept"
 	}
 	return res
+}
+
+// fastForward moves a clean checkout whose HEAD was an ancestor of
+// r.Commit to it. The workload writes beside it, so no branch or HEAD is
+// reset: each move takes effect only from the commit it was checked
+// against, and a commit made in the meantime makes it fail or keep.
+// No checkout overwrites an ignored file the commit tracks.
+func fastForward(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, fail func(error) proto.SyncResult) proto.SyncResult {
+	head, _ := gitIn(ctx, r.Path, "symbolic-ref", "-q", "HEAD")
+	var err error
+	switch {
+	case r.Branch == "" && head != "":
+		// Detaching leaves the branch where it is, with any commit made on it.
+		_, err = gitIn(ctx, r.Path, "checkout", "--quiet", "--no-overwrite-ignore", "--detach", r.Commit)
+	case r.Branch == "" || head == "refs/heads/"+r.Branch:
+		// merge updates HEAD from the commit it read, and refuses a tip
+		// that is no longer an ancestor.
+		_, err = gitIn(ctx, r.Path, "-c", "merge.autoStash=false", "merge", "--quiet", "--ff-only", "--no-overwrite-ignore", r.Commit)
+	case head == "":
+		// Attaching a detached HEAD to the branch has no guard: a commit
+		// made on the detached HEAD meanwhile would be left on no branch.
+		res.Status = "kept"
+		return res
+	default:
+		var moved bool
+		if moved, err = switchBranch(ctx, r); err == nil && !moved {
+			res.Status = "kept"
+			return res
+		}
+	}
+	if err != nil {
+		return fail(err)
+	}
+	res.Status = "fast-forward"
+	return res
+}
+
+// switchBranch moves r.Branch, not checked out, to r.Commit when its tip is
+// an ancestor (or it does not exist), and checks it out. The ref moves by
+// compare-and-swap from the tip checked; a failed checkout moves it back.
+// false when the branch has commits of its own.
+func switchBranch(ctx context.Context, r proto.SyncRepo) (bool, error) {
+	ref := "refs/heads/" + r.Branch
+	tip, err := gitIn(ctx, r.Path, "rev-parse", "--verify", "-q", ref)
+	if err != nil {
+		tip = ""
+	}
+	old := tip
+	if tip == "" {
+		// The all-zero id: the ref must not exist.
+		old = strings.Repeat("0", len(r.Commit))
+	} else if _, notAncestor := gitIn(ctx, r.Path, "merge-base", "--is-ancestor", tip, r.Commit); notAncestor != nil {
+		return false, nil
+	}
+	if _, err := gitIn(ctx, r.Path, "update-ref", "-m", "lux sync: fast-forward", ref, r.Commit, old); err != nil {
+		return false, err
+	}
+	if _, err := gitIn(ctx, r.Path, "checkout", "--quiet", "--no-overwrite-ignore", r.Branch, "--"); err != nil {
+		if tip == "" {
+			_, _ = gitIn(ctx, r.Path, "update-ref", "-d", ref, r.Commit)
+		} else {
+			_, _ = gitIn(ctx, r.Path, "update-ref", ref, tip, r.Commit)
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // syncBeforeInit moves the checkouts a resume asked for, as the workload
