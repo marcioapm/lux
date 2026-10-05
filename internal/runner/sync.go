@@ -161,14 +161,11 @@ func (p *placement) removeSyncBundles(ctx context.Context, requestID string) {
 	}
 }
 
-// moved: the sync changed the checkout.
-func moved(res proto.SyncResult) bool { return res.Moved() }
-
 // reportSync sends a repository's git.sync event, keeps a moved
 // checkout's commit as the base of its live diffs, and any fetched one
 // (a sync that did not fail) as its next bundle's prerequisite.
 func (p *placement) reportSync(ctx context.Context, res proto.SyncResult, requestID string) {
-	if moved(res) && res.To != "" {
+	if res.Moved() && res.To != "" {
 		p.setGitBase(res.Repo, res.To)
 	}
 	if res.Status != "failed" && res.To != "" {
@@ -227,7 +224,7 @@ func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
 	}
 	for _, res := range results {
 		p.reportSync(ctx, res, req.RequestID)
-		if moved(res) {
+		if res.Moved() {
 			done["changed"] = true
 		}
 	}
