@@ -338,18 +338,42 @@ func TestSyncFetch(t *testing.T) {
 	}
 }
 
-// A detached target (a tag or sha: no Branch) sets no remote-tracking ref.
+// A detached target (a tag or sha: no Branch) sets no remote-tracking ref,
+// and keeps local commits as a branch target does.
 func TestSyncFastForwardDetached(t *testing.T) {
-	m := newModeRepo(t)
-	c2 := m.push("a.txt", "two\n")
-	gitT(t, m.upstream, "update-ref", "refs/lux/sync", c2)
-	bundle := filepath.Join(t.TempDir(), "r.bundle")
-	gitT(t, m.upstream, "bundle", "create", "-q", bundle, "refs/lux/sync")
-	got := SyncRepos(context.Background(), proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: m.dir, Ref: c2, Mode: proto.SyncFastForward,
-		Commit: c2, Bundle: bundle}}})
-	if got[0].Status != "fast-forward" || m.head() != c2 || m.ref("refs/remotes/lux/main") != "" ||
-		gitT(t, m.dir, "rev-parse", "--abbrev-ref", "HEAD") != "HEAD" {
-		t.Fatalf("%+v", got[0])
+	for _, c := range []struct {
+		name          string
+		prep          func(m *modeRepo)
+		status        string
+		ahead, behind int
+		moves         bool
+	}{
+		{"clean behind", func(m *modeRepo) { m.push("a.txt", "two\n") }, "fast-forward", 0, 1, true},
+		{"local ahead", func(m *modeRepo) { m.commitLocal("local.txt", "mine\n") }, "ahead", 1, 0, false},
+		{"diverged", func(m *modeRepo) { m.commitLocal("local.txt", "mine\n"); m.push("a.txt", "two\n") }, "kept", 1, 1, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := newModeRepo(t)
+			m.write("untracked.txt", "u\n")
+			c.prep(m)
+			before := m.snap()
+			res := m.syncAs(proto.SyncFastForward, "")
+			tip := gitT(t, m.upstream, "rev-parse", "main")
+			if a, b := counts(res); res.Status != c.status || res.To != tip || a != c.ahead || b != c.behind ||
+				res.Diverged != (c.ahead > 0 && c.behind > 0) || res.Dirty {
+				t.Fatalf("%+v (ahead %d behind %d)", res, a, b)
+			}
+			if m.ref("refs/remotes/lux/main") != "" || m.ref("refs/lux/sync") != tip {
+				t.Fatalf("refs: lux/main %q, sync %q", m.ref("refs/remotes/lux/main"), m.ref("refs/lux/sync"))
+			}
+			if !c.moves {
+				m.unchanged(before)
+				return
+			}
+			if m.head() != tip || gitT(t, m.dir, "rev-parse", "--abbrev-ref", "HEAD") != "HEAD" || m.read("untracked.txt") != "u\n" {
+				t.Fatalf("after: head %s", m.head())
+			}
+		})
 	}
 }
 
