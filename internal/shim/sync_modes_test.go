@@ -248,6 +248,21 @@ func TestSyncFastForward(t *testing.T) {
 			t.Fatal("refs/remotes/lux/main not set")
 		}
 	})
+	t.Run("ignored file the commit adds: failed, its bytes kept", func(t *testing.T) {
+		m := newModeRepo(t)
+		m.write(".git/info/exclude", "ignored.db\n")
+		m.write("ignored.db", "LOCAL WORK\n")
+		before := m.snap()
+		c2 := m.push("ignored.db", "UPSTREAM\n")
+		res := m.sync(proto.SyncFastForward)
+		if res.Status != "failed" && res.Status != "kept" {
+			t.Fatalf("%+v", res)
+		}
+		m.unchanged(before)
+		if m.read("ignored.db") != "LOCAL WORK\n" || m.ref("refs/heads/main") != before.head || m.ref("refs/remotes/lux/main") != c2 {
+			t.Fatalf("ignored.db %q, main %s", m.read("ignored.db"), m.ref("refs/heads/main"))
+		}
+	})
 	t.Run("HEAD on another branch: main's own commits kept", func(t *testing.T) {
 		m := newModeRepo(t)
 		base := m.head()
