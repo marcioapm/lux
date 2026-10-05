@@ -720,11 +720,24 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   The checkout's hooks and config never run as the runner and never see the
   token.
 - Pushing with nothing new reports `up-to-date`.
+- A checkout with a merge, rebase, cherry-pick, revert or sequencer in
+  progress is not pushed: its `HEAD` is a half-done result (mid-rebase,
+  the commit rebased onto plus whatever was replayed so far). It is
+  reported `refused`, with `operation` naming it and `error` saying so
+  (`a rebase is in progress in the checkout: finish or abort it, then
+  push`); the other repositories push as normal. The check runs where the
+  bundle is made, as the workload's user, with the container's `sh` and
+  `git` (the same `git rev-parse --git-path` lookup as a sync's), so it
+  holds whichever lux-shim the container started with. If it cannot run
+  (no `sh` in the image, the container gone, not a checkout), the
+  repository is `failed` and nothing is pushed.
 - A repository with `push: false` is never pushed: it is reported
   `skipped`, and `expect` may not name it. Use it for repositories cloned
   for context; their credential may be read-only. The workload can still
   commit in such a checkout; lux just never pushes it.
-- Each repository's outcome is a `git.push` event. `--wait` prints the
+- Each repository's outcome is a `git.push` event: `{repo, branch,
+  commit?, status, operation?, error?}`, status one of `pushed`,
+  `up-to-date`, `rejected`, `refused`, `failed`, `skipped`. `--wait` prints the
   outcomes and exits non-zero unless every repository was pushed or already
   up to date.
 

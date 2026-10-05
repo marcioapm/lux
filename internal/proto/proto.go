@@ -554,12 +554,15 @@ type Push struct {
 }
 
 // PushResult is one repository's outcome, reported in a git.push event.
+// Refused: the checkout has Operation in progress (OperationOf); nothing
+// was bundled or pushed.
 type PushResult struct {
-	Repo   string `json:"repo"`
-	Branch string `json:"branch"`
-	Commit string `json:"commit,omitempty"`
-	Status string `json:"status"` // pushed | up-to-date | rejected | failed
-	Error  string `json:"error,omitempty"`
+	Repo      string `json:"repo"`
+	Branch    string `json:"branch"`
+	Commit    string `json:"commit,omitempty"`
+	Status    string `json:"status"` // pushed | up-to-date | rejected | refused | failed | skipped
+	Operation string `json:"operation,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // Ack is the data of an ack, when there is any.
