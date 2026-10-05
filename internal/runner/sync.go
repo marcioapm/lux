@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
@@ -30,12 +31,19 @@ const syncDir = "sync" // on the runtime volume: /.lux/run/sync/<syncSubdir>
 // shimKnowsSyncModes asks the lux-shim at path whether it applies a sync's
 // mode: it syncs a checkout that does not exist in mode SyncModeProbe. One
 // that knows modes fails it naming that mode; an older one names none.
-// Nothing is touched either way.
+// Nothing is touched either way. A shim that does not answer within the
+// deadline does not know them: it runs in its own process group, killed
+// whole at the deadline, and its output is waited for no longer than
+// WaitDelay after (a descendant that escaped the group cannot hold it open).
 func shimKnowsSyncModes(path string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	args := proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "probe", Path: "/nonexistent/lux-sync-probe", Mode: proto.SyncModeProbe}}}
-	out, err := exec.CommandContext(ctx, path, "sync", string(proto.Marshal(args))).Output()
+	cmd := exec.CommandContext(ctx, path, "sync", string(proto.Marshal(args)))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.Output()
 	var res []proto.SyncResult
 	if err != nil || json.Unmarshal(out, &res) != nil {
 		return false
