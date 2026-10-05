@@ -187,11 +187,24 @@ func TestShimProbeHangs(t *testing.T) {
 	}
 	t.Run("its child in its process group", func(t *testing.T) {
 		pid := probe(t, "")
-		// Its process group went with it: the child too (a zombie until
-		// init reaps it, so its state, not its existence).
-		stat, err := os.ReadFile("/proc/" + pid + "/stat")
-		if pid == "" || err == nil && !strings.Contains(string(stat), ") Z ") {
-			t.Fatalf("the hanging lux-shim's child %q outlived the probe: %s", pid, stat)
+		if pid == "" {
+			t.Fatal("the hanging lux-shim started no child")
+		}
+		// Its process group was killed with it: the child too. SIGKILL is
+		// delivered when the child is next scheduled, so on a loaded host
+		// it can still be runnable just after the probe returns: wait for
+		// it to die (gone, or a zombie until init reaps it), well short of
+		// its own 25s sleep.
+		var stat []byte
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+			var err error
+			if stat, err = os.ReadFile("/proc/" + pid + "/stat"); err != nil ||
+				strings.Contains(string(stat), ") Z ") || strings.Contains(string(stat), ") X ") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the hanging lux-shim's child %q outlived the probe: %s", pid, stat)
+			}
 		}
 	})
 	t.Run("its child escaped the process group", func(t *testing.T) {
