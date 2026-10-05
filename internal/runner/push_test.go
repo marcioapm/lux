@@ -106,12 +106,26 @@ func (pf *pushFixture) pushed(t *testing.T) map[string]map[string]any {
 	return nil
 }
 
+// gitEnv is a git with an identity and no global config, as on a CI host
+// whose hostname git cannot make an email of (git am and rebase then fail
+// before they start, rather than stopping on a conflict).
+func gitEnv() []string {
+	return append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_EDITOR=true",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+}
+
+// gitAs is git in dir with gitEnv, for a command expected to stop.
+func gitAs(dir string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = gitEnv()
+	return cmd
+}
+
 func run(t *testing.T, dir string, name string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_EDITOR=true",
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	cmd.Env = gitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s %v: %v: %s", name, args, err, out)
@@ -132,8 +146,11 @@ func TestPushRefusesAnOperationInProgress(t *testing.T) {
 	os.WriteFile(filepath.Join(app, "a.txt"), []byte("theirs\n"), 0o644)
 	run(t, app, "git", "commit", "-qam", "theirs")
 	run(t, app, "git", "checkout", "-q", "mine")
-	if out, err := exec.Command("git", "-C", app, "rebase", "main").CombinedOutput(); err == nil {
+	if out, err := gitAs(app, "rebase", "main").CombinedOutput(); err == nil {
 		t.Fatalf("the rebase did not stop: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(app, ".git", "rebase-merge")); err != nil {
+		t.Fatalf("the rebase stopped without a rebase in progress: %v", err)
 	}
 	os.WriteFile(filepath.Join(lib, "l.txt"), []byte("lib\n"), 0o644)
 	run(t, lib, "git", "add", "l.txt")
@@ -278,8 +295,11 @@ func TestPushRefusesAnAmSession(t *testing.T) {
 	os.WriteFile(filepath.Join(app, "a.txt"), []byte("main\n"), 0o644)
 	run(t, app, "git", "add", "a.txt")
 	run(t, app, "git", "commit", "-qm", "main")
-	if out, err := exec.Command("git", "-C", app, "am", patch).CombinedOutput(); err == nil {
+	if out, err := gitAs(app, "am", patch).CombinedOutput(); err == nil {
 		t.Fatalf("git am did not stop: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(app, ".git", "rebase-apply", "applying")); err != nil {
+		t.Fatalf("git am stopped without an am session: %v", err)
 	}
 	a := pf.pushed(t)["app"]
 	if a["status"] != "refused" || a["operation"] != "am" ||
