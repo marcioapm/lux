@@ -78,23 +78,19 @@ func (r *Runner) diff(ctx context.Context, runID string, epoch int, base string)
 	return res
 }
 
-// setGitBase records the commit a repository was cloned or synced to, the
-// base of its live diffs, in the run state a restarted runner reads.
-func (p *placement) setGitBase(repo, commit string) {
+// setBases records, in the run state a restarted runner reads, the last
+// commit fetched into a repository's checkout (the prerequisite of its
+// next sync's bundle) and, when moved (cloned, or synced to it), the base
+// of its live diffs.
+func (p *placement) setBases(repo, commit string, moved bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.state.GitBases == nil {
-		p.state.GitBases = map[string]string{}
+	if moved {
+		if p.state.GitBases == nil {
+			p.state.GitBases = map[string]string{}
+		}
+		p.state.GitBases[repo] = commit
 	}
-	p.state.GitBases[repo] = commit
-	_ = writeRunState(p.dir, p.state)
-}
-
-// setSyncBase records the last commit fetched into a repository's
-// checkout: the prerequisite of its next sync's bundle.
-func (p *placement) setSyncBase(repo, commit string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.state.SyncBases == nil {
 		p.state.SyncBases = map[string]string{}
 	}

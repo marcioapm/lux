@@ -165,11 +165,8 @@ func (p *placement) removeSyncBundles(ctx context.Context, requestID string) {
 // checkout's commit as the base of its live diffs, and any fetched one
 // (a sync that did not fail) as its next bundle's prerequisite.
 func (p *placement) reportSync(ctx context.Context, res proto.SyncResult, requestID string) {
-	if res.Moved() && res.To != "" {
-		p.setGitBase(res.Repo, res.To)
-	}
 	if res.Status != "failed" && res.To != "" {
-		p.setSyncBase(res.Repo, res.To)
+		p.setBases(res.Repo, res.To, res.Moved())
 	}
 	var d map[string]any
 	b, _ := json.Marshal(res)
