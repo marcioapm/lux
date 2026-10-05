@@ -59,8 +59,8 @@ const oldShim = "this Run's lux-shim predates sync modes; resume it to update"
 // to do (nil: nothing), and a failed result for each repository that
 // cannot be prepared: the caller reports those, and the Run goes on. Each
 // bundle holds only the history after the checkout's known base
-// (GitBases); full: the whole history, the retry for a checkout that lacks
-// its base.
+// (SyncBases, else GitBases); full: the whole history, the retry for a
+// checkout that lacks its base.
 func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []proto.SyncRef, requestID string, full bool) (*proto.SyncArgs, []proto.SyncResult) {
 	if len(refs) == 0 {
 		return nil, nil
@@ -80,11 +80,7 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 	if p.state != nil {
 		shimModes = p.state.ShimSyncModes
 		if !full {
-			// The last fetch's commit, else the clone's or last move's.
-			bases = maps.Clone(p.state.GitBases)
-			if bases == nil {
-				bases = map[string]string{}
-			}
+			maps.Copy(bases, p.state.GitBases)
 			maps.Copy(bases, p.state.SyncBases)
 		}
 	}
