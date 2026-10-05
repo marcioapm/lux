@@ -1128,7 +1128,8 @@ print each repository's git.sync outcome.`,
 					for _, r := range results {
 						line := fmt.Sprintf("%s %s %s → %s", r["repo"], r["status"], shortSHA(r["from"]), shortSHA(r["to"]))
 						if ahead, ok := r["ahead"].(float64); ok {
-							line += fmt.Sprintf(" (%d ahead, %d behind)", int(ahead), int(num(r["behind"])))
+							behind, _ := r["behind"].(float64)
+							line += fmt.Sprintf(" (%d ahead, %d behind)", int(ahead), int(behind))
 						}
 						fmt.Fprintln(a.stdout, line)
 						failed = failed || r["status"] == "failed"
@@ -1148,8 +1149,6 @@ print each repository's git.sync outcome.`,
 	cmd.Flags().StringVar(&mode, "mode", "", syncModeHelp)
 	return cmd
 }
-
-func num(v any) float64 { f, _ := v.(float64); return f }
 
 func shortSHA(v any) string {
 	s, _ := v.(string)
