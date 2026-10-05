@@ -512,8 +512,8 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		return err
 	}
 	// Then its servers: every attached one that is up starts on every
-	// placement.
-	if err := s.startAttachedServers(ctx, tx, r.TenantID, r.ID, epoch, len(a.Sync) > 0); err != nil {
+	// placement, running afterSync first as its sync's modes say.
+	if err := s.startAttachedServers(ctx, tx, r.TenantID, r.ID, epoch, afterSyncFor(a.Sync)); err != nil {
 		return err
 	}
 	reserveHost(h, r)

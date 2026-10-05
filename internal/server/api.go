@@ -144,8 +144,8 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "syncRun", Method: http.MethodPost, Path: "/v1/runs/{id}/sync", Tags: []string{"runs"},
 		Summary: "Move a running Run's checkouts to new commits",
-		Description: "The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume): " +
-			"each repository is a git.sync event, then sync.done. Servers with afterSync run it and restart once a checkout moved; the others keep running.",
+		Description: "The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume), as its mode allows: " +
+			"each repository is a git.sync event, then sync.done (changed: whether a checkout moved). Servers with afterSync run it and restart once a checkout moved; the others keep running.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.syncRun)
@@ -1367,7 +1367,7 @@ type resumeRequest struct {
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost). Older snapshots are deleted once the latest is uploaded: one deleted is 409 snapshot_unavailable."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
 	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over). On a Run already resuming: the same as its resume asked for, 202 with that resume's resize; absent or empty, 202; other values, 409 not_resumable."`
-	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
+	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha; mode: move, fast-forward or fetch) before init, through the host's mirror. Mode move (default): tracked files become the ref's, untracked and ignored ones are kept. fast-forward: only a checkout that loses nothing moves; fetch: none does. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
 }
 
 type resumeGit struct {
@@ -1852,7 +1852,7 @@ func (s *Server) pushRun(ctx context.Context, in *pushRunInput) (*requestIDOutpu
 }
 
 // checkSync: every repo a spec's repository, every ref given, each repo
-// once.
+// once, every mode known.
 func checkSync(sp spec.RunSpec, refs []proto.SyncRef) error {
 	seen := map[string]bool{}
 	for _, r := range refs {
@@ -1864,6 +1864,8 @@ func checkSync(sp spec.RunSpec, refs []proto.SyncRef) error {
 			return errf(http.StatusUnprocessableEntity, "invalid_request", "sync[%s]: a branch, tag or sha", r.Repo)
 		case seen[r.Repo]:
 			return errf(http.StatusUnprocessableEntity, "invalid_request", "sync: %q twice", r.Repo)
+		case r.Mode != "" && !slices.Contains(proto.SyncModes, r.Mode):
+			return errf(http.StatusUnprocessableEntity, "invalid_request", "sync[%s]: unknown mode %q (one of %s)", r.Repo, r.Mode, strings.Join(proto.SyncModes, ", "))
 		}
 		seen[r.Repo] = true
 	}
@@ -1874,7 +1876,7 @@ type syncRunInput struct {
 	RunPath
 	Body struct {
 		RequestID string          `json:"requestId,omitempty"`
-		Sync      []proto.SyncRef `json:"sync" doc:"Repositories to move: repo (the spec's name) and ref (branch, tag or sha)."`
+		Sync      []proto.SyncRef `json:"sync" doc:"Repositories to move: repo (the spec's name), ref (branch, tag or sha) and mode (move, fast-forward or fetch; default move)."`
 	}
 }
 
