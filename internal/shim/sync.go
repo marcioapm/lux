@@ -88,6 +88,12 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 		return fail(err)
 	}
 	res.From = from
+	if res.Mode != proto.SyncMove {
+		// Reported whatever the outcome, a failed fetch included.
+		if res.Operation, err = operationInProgress(ctx, r.Path); err != nil {
+			return fail(err)
+		}
+	}
 	if _, err := gitIn(ctx, r.Path, "fetch", "--quiet", "--no-tags", r.Bundle, "+refs/lux/sync:refs/lux/sync"); err != nil {
 		if r.Base != "" {
 			_, lacks := gitIn(ctx, r.Path, "cat-file", "-e", r.Base+"^{commit}")
@@ -193,11 +199,12 @@ func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult) pr
 		// carry them over or refuse; neither is asked for.
 		res.Status = "kept"
 	case ahead == 0:
-		busy, err := operationInProgress(ctx, r.Path)
+		// Asked again just before the move: one may have started since.
+		res.Operation, err = operationInProgress(ctx, r.Path)
 		if err != nil {
 			return fail(err)
 		}
-		if busy {
+		if res.Operation != "" {
 			res.Status = "kept"
 			return res
 		}
@@ -210,30 +217,32 @@ func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult) pr
 	return res
 }
 
-// operationState is what git leaves in the git dir while a merge, rebase,
-// cherry-pick, revert or sequence of them waits for the workload.
-var operationState = []string{"MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"}
-
-// operationInProgress reports whether any operationState exists, at the
-// paths git resolves (a worktree's or a relocated git dir included).
-func operationInProgress(ctx context.Context, dir string) (bool, error) {
+// operationInProgress names the operation in progress in the checkout
+// (proto.OperationOf the first proto.OperationStates entry that exists, at
+// the path git resolves: a worktree's or a relocated git dir included);
+// "" when there is none.
+func operationInProgress(ctx context.Context, dir string) (string, error) {
 	args := []string{"rev-parse"}
-	for _, p := range operationState {
+	for _, p := range proto.OperationStates {
 		args = append(args, "--git-path", p)
 	}
 	out, err := gitIn(ctx, dir, args...)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	for _, p := range strings.Split(out, "\n") {
+	paths := strings.Split(out, "\n")
+	if len(paths) != len(proto.OperationStates) {
+		return "", fmt.Errorf("git rev-parse --git-path: %q", out)
+	}
+	for i, p := range paths {
 		if !filepath.IsAbs(p) {
 			p = filepath.Join(dir, p)
 		}
 		if _, err := os.Lstat(p); err == nil {
-			return true, nil
+			return proto.OperationOf(proto.OperationStates[i]), nil
 		}
 	}
-	return false, nil
+	return "", nil
 }
 
 // fastForward moves a clean checkout whose HEAD was an ancestor of

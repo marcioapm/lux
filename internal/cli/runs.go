@@ -1131,6 +1131,9 @@ print each repository's git.sync outcome.`,
 							behind, _ := r["behind"].(float64)
 							line += fmt.Sprintf(" (%d ahead, %d behind)", int(ahead), int(behind))
 						}
+						if op, _ := r["operation"].(string); op != "" {
+							line += fmt.Sprintf(" [%s in progress]", op)
+						}
 						fmt.Fprintln(a.stdout, line)
 						failed = failed || r["status"] == "failed"
 					}

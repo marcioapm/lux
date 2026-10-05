@@ -225,7 +225,7 @@ type Assign struct {
 type SyncRef struct {
 	Repo string `json:"repo"`
 	Ref  string `json:"ref"`
-	Mode string `json:"mode,omitempty" doc:"move (default): the checkout becomes the ref's, a dirty or diverged one reset (what was there saved as refs/lux/pre-sync). fast-forward: it moves only when nothing can be lost (HEAD an ancestor of the ref's commit, no tracked file changed, HEAD on the ref's branch or, for a tag or sha, detached); otherwise it is kept as it is. fetch: it never moves. In fast-forward and fetch, a branch's commit is also refs/remotes/lux/<branch> in the checkout. Any other value: 422."`
+	Mode string `json:"mode,omitempty" doc:"move (default): the checkout becomes the ref's, a dirty or diverged one reset (what was there saved as refs/lux/pre-sync). fast-forward: it moves only when nothing can be lost (HEAD an ancestor of the ref's commit, no tracked file changed, HEAD on the ref's branch or, for a tag or sha, detached, no merge, rebase, cherry-pick or revert in progress); otherwise it is kept as it is. fetch: it never moves. In fast-forward and fetch, a branch's commit is also refs/remotes/lux/<branch> in the checkout, and the git.sync event's operation names a git operation in progress in the checkout (merge, rebase, cherry-pick, revert or sequencer). Any other value: 422."`
 }
 
 // Sync modes: how a checkout may move.
