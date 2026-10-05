@@ -345,26 +345,44 @@ func (p *placement) push(ctx context.Context, req proto.Push) {
 }
 
 // bundleScript runs in the checkout as `sh -c bundleScript sh BUNDLE
-// STATE...`: it prints the first proto.OperationStates entry that exists
-// where git resolves it, or else bundles HEAD into BUNDLE. Any failure
-// (no sh, no git, not a checkout) exits non-zero, so nothing is pushed.
+// STATE...`. The workload keeps running, so nothing here is atomic with
+// it: the operation states are checked before HEAD is read as S, after,
+// and after the bundle is made, and the bundle must hold S alone. The
+// first state found where git resolves it is printed as
+// lux-operation:STATE; a bundle whose head is not S prints lux-moved. Any
+// failure (no sh, no git, not a checkout) exits non-zero. Only empty
+// output leaves a bundle to push.
 const bundleScript = `set -e
 b=$1; shift
-for s in "$@"; do
-	p=$(git rev-parse --git-path "$s")
-	if [ -e "$p" ] || [ -L "$p" ]; then
-		printf 'lux-operation:%s\n' "$s"
-		exit 0
-	fi
-done
-exec git bundle create --quiet "$b" HEAD`
+check() {
+	for s in "$@"; do
+		p=$(git rev-parse --git-path "$s")
+		if [ -e "$p" ] || [ -L "$p" ]; then
+			printf 'lux-operation:%s\n' "$s"
+			exit 0
+		fi
+	done
+}
+check "$@"
+S=$(git rev-parse --verify HEAD)
+check "$@"
+git bundle create --quiet "$b" HEAD
+check "$@"
+heads=$(git bundle list-heads "$b")
+if [ "$heads" != "$S HEAD" ]; then
+	echo lux-moved
+fi`
+
+// errMovedWhilePushed: HEAD moved between being read and being bundled.
+var errMovedWhilePushed = errors.New("the checkout changed while it was being pushed; push again")
 
 // bundle has the workload's user write a git bundle of its checkout's HEAD
 // into the runtime volume (inside the container, so the checkout's config
 // and hooks run as the workload, never as the runner). A checkout with an
-// operation in progress (HEAD a half-done rebase or merge) is not bundled:
-// op names it. Checked by the container's sh and git, never its lux-shim,
-// so a container started with any shim is checked.
+// operation in progress (HEAD a half-done rebase or merge) is not pushed:
+// op names it. A HEAD that moved while bundled is an error. Either way
+// the bundle is deleted. Checked by the container's sh and git, never its
+// lux-shim, so a container started with any shim is checked.
 func (p *placement) bundle(ctx context.Context, r spec.Repository) (path, op string, err error) {
 	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
 	if err != nil {
@@ -384,15 +402,27 @@ func (p *placement) bundle(ctx context.Context, r spec.Repository) (path, op str
 	user := fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
 	args := []string{"exec", "--user", user, "--workdir", r.Path, containerName(p.runID),
 		"sh", "-c", bundleScript, "sh", proto.ShimRunDir + "/push/" + name}
+	path = filepath.Join(dir, name)
 	out, err := p.r.pm.Run(ctx, append(args, proto.OperationStates...)...)
-	if err != nil {
-		return "", "", fmt.Errorf("git bundle in the container: %v %s", err, strings.TrimSpace(string(out)))
-	}
-	if state, found := strings.CutPrefix(strings.TrimSpace(string(out)), "lux-operation:"); found {
+	got := strings.TrimSpace(string(out))
+	switch state, found := strings.CutPrefix(got, "lux-operation:"); {
+	case err != nil:
+		err = fmt.Errorf("git bundle in the container: %v %s", err, got)
+	case found:
 		if op = proto.OperationOf(state); op == "" {
-			return "", "", fmt.Errorf("git bundle in the container: unknown operation state %q", state)
+			err = fmt.Errorf("git bundle in the container: unknown operation state %q", state)
 		}
-		return "", op, nil
+	case got == "lux-moved":
+		err = errMovedWhilePushed
+	case got != "":
+		err = fmt.Errorf("git bundle in the container: unexpected output %q", got)
+	default:
+		return path, "", nil
 	}
-	return filepath.Join(dir, name), "", nil
+	// A bundle made before an operation or a move was seen is never pushed.
+	os.Remove(path)
+	if err != nil {
+		return "", "", err
+	}
+	return "", op, nil
 }

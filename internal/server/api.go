@@ -137,7 +137,7 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Push a running Run's repositories",
 		Description: "To the spec's git.push branch, with the runner's credentials. The outcome arrives as a git.push event carrying the request id: " +
 			"per repository {repo, branch, commit?, status, operation?, error?}, status pushed, up-to-date, rejected (the lease failed: the branch moved), " +
-			"refused (a merge, rebase, cherry-pick, revert or sequencer is in progress in the checkout, named by operation: nothing was bundled or pushed), failed or skipped (push: false).\n\n" +
+			"refused (a merge, rebase, cherry-pick, revert or sequencer is in progress in the checkout, named by operation: nothing was pushed), failed (with error, e.g. the checkout changed while it was being pushed) or skipped (push: false).\n\n" +
 			"expect: per repository, the commit the push branch must be at for the push to go ahead (a compare-and-swap). " +
 			"Without it, the lease is what this Run last pushed, or, the first time, that the branch does not exist.",
 		DefaultStatus: http.StatusAccepted,

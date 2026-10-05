@@ -731,6 +731,18 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   holds whichever lux-shim the container started with. If it cannot run
   (no `sh` in the image, the container gone, not a checkout), the
   repository is `failed` and nothing is pushed.
+- The workload keeps running while its checkout is bundled, and lux does
+  not lock it out, so the push verifies what it bundled instead: it checks
+  for an operation, reads `HEAD` as S, checks again, bundles `HEAD`,
+  checks a third time, and requires the bundle's one head to be S. An
+  operation seen at any of the three checks is `refused` as above; a
+  bundle whose head is not S is `failed` (`the checkout changed while it
+  was being pushed; push again`). Either way the bundle is deleted and
+  nothing is pushed. The guarantee is exactly this: lux never pushes a
+  commit it read `HEAD` at while an operation was in progress (as seen at
+  the checks around that read), nor one that changed during the push. An
+  operation that starts and ends between two checks, leaving `HEAD`
+  where lux read it, is not seen.
 - A repository with `push: false` is never pushed: it is reported
   `skipped`, and `expect` may not name it. Use it for repositories cloned
   for context; their credential may be read-only. The workload can still

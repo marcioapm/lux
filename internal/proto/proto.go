@@ -555,7 +555,7 @@ type Push struct {
 
 // PushResult is one repository's outcome, reported in a git.push event.
 // Refused: the checkout has Operation in progress (OperationOf); nothing
-// was bundled or pushed.
+// was pushed.
 type PushResult struct {
 	Repo      string `json:"repo"`
 	Branch    string `json:"branch"`
