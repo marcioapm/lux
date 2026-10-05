@@ -252,8 +252,8 @@ type SyncRepo struct {
 // ignored ones kept, what was there saved as refs/lux/pre-sync), failed
 // (the checkout as it was, or where git stopped in a reset, with
 // refs/lux/pre-sync holding what was there). Modes fast-forward and fetch
-// never reset; they add kept (not moved: tracked files changed, or
-// diverged), ahead (not moved: HEAD has commits on top of the ref's) and
+// never reset; they add kept (not moved: tracked files changed, diverged,
+// or HEAD not on the target's branch, or not detached for a tag or sha), ahead (not moved: HEAD has commits on top of the ref's) and
 // fetched (mode fetch), with Ahead and Behind: the commits HEAD has that
 // the ref's commit has not, and the reverse. MissingBase: failed because
 // the checkout lacks the bundle's Base (the runner retries once with the

@@ -635,23 +635,27 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
     a build cache); an untracked file the commit now tracks is replaced.
 
   Right for a preview; wrong for a checkout an agent edits.
-- **Mode `fast-forward`** never discards anything in the checkout:
+- **Mode `fast-forward`** never discards anything in the checkout, and
+  moves it only where `HEAD` already is:
   - at the commit, nothing changed: `up-to-date`;
-  - `HEAD` an ancestor of the commit, no tracked file changed:
-    `fast-forward`, as in `move`;
+  - `HEAD` an ancestor of the commit, no tracked file changed, and `HEAD`
+    on the branch to sync to (or detached, for a tag or sha):
+    `fast-forward`, `HEAD` advancing with its branch;
   - `HEAD` an ancestor of (or at) the commit, tracked files changed: not
     moved, `kept` with `dirty: true`;
   - the commit an ancestor of `HEAD` (local commits on top): not moved,
     `ahead`;
   - the histories diverged: not moved, `kept` with `diverged: true`;
-  - a branch's commit that `HEAD` is not on (another branch checked out)
-    is not reset either: `kept`;
+  - `HEAD` on another branch than the one to sync to, detached with a
+    branch to sync to, or on a branch with a tag or sha to sync to: not
+    moved, `kept`; no branch moves or is created;
   - a merge, rebase, cherry-pick or revert in progress: not moved, `kept`;
-  - a detached `HEAD` and a branch to sync to: not moved, `kept`;
-  - an ignored file at a path the commit adds: not overwritten, `failed`.
+  - an ignored or untracked file at a path the commit adds: not
+    overwritten, `failed`.
 
-  The move itself never resets a branch: a commit the workload makes
-  while the sync runs makes it fail (or keep), and the commit stays.
+  The move is a fast-forward merge of whatever `HEAD` is when it runs: a
+  commit, branch switch or detach the workload makes while the sync runs
+  makes it fail (or keep), and nothing it made is lost.
 - **Mode `fetch`** never moves the checkout: `fetched`.
 - `fast-forward` and `fetch` need a host whose lux-runner and lux-shim
   have sync modes: `POST /v1/runs/{id}/sync` answers 409

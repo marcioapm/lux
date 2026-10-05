@@ -139,7 +139,9 @@ type snapshot struct {
 }
 
 func (m *modeRepo) snap() snapshot {
-	return snapshot{m.head(), gitT(m.t, m.dir, "symbolic-ref", "-q", "HEAD"), m.index(), m.ref("refs/lux/pre-sync"), m.tree()}
+	// "HEAD" when detached.
+	branch := gitT(m.t, m.dir, "rev-parse", "--symbolic-full-name", "HEAD")
+	return snapshot{m.head(), branch, m.index(), m.ref("refs/lux/pre-sync"), m.tree()}
 }
 
 func (m *modeRepo) unchanged(before snapshot) {
@@ -302,6 +304,54 @@ func TestSyncFastForward(t *testing.T) {
 			t.Fatal("main moved")
 		}
 	})
+	// Only the branch HEAD is on moves: switching HEAD between refs has no
+	// guard against the workload switching or committing meanwhile.
+	t.Run("HEAD on another branch, the target's branch a clean ancestor: kept", func(t *testing.T) {
+		m := newModeRepo(t)
+		base := m.head()
+		gitT(t, m.dir, "checkout", "-q", "-b", "side")
+		before := m.snap()
+		c2 := m.push("a.txt", "two\n")
+		res := m.sync(proto.SyncFastForward)
+		if a, b := counts(res); res.Status != "kept" || res.To != c2 || a != 0 || b != 1 {
+			t.Fatalf("%+v (ahead %d behind %d)", res, a, b)
+		}
+		m.unchanged(before)
+		if m.ref("refs/heads/main") != base || m.ref("refs/heads/side") != base || m.ref("refs/remotes/lux/main") != c2 {
+			t.Fatalf("main %s side %s, was %s", m.ref("refs/heads/main"), m.ref("refs/heads/side"), base)
+		}
+	})
+	t.Run("HEAD on another branch, the target's branch absent: kept, not created", func(t *testing.T) {
+		m := newModeRepo(t)
+		base := m.head()
+		gitT(t, m.dir, "checkout", "-q", "-b", "side")
+		gitT(t, m.dir, "branch", "-q", "-D", "main")
+		before := m.snap()
+		c2 := m.push("a.txt", "two\n")
+		res := m.sync(proto.SyncFastForward)
+		if res.Status != "kept" || res.To != c2 {
+			t.Fatalf("%+v", res)
+		}
+		m.unchanged(before)
+		if m.ref("refs/heads/main") != "" || m.ref("refs/heads/side") != base {
+			t.Fatalf("main %q side %s", m.ref("refs/heads/main"), m.ref("refs/heads/side"))
+		}
+	})
+	t.Run("HEAD detached, a branch target: kept", func(t *testing.T) {
+		m := newModeRepo(t)
+		base := m.head()
+		gitT(t, m.dir, "checkout", "-q", "--detach")
+		before := m.snap()
+		c2 := m.push("a.txt", "two\n")
+		res := m.sync(proto.SyncFastForward)
+		if res.Status != "kept" || res.To != c2 {
+			t.Fatalf("%+v", res)
+		}
+		m.unchanged(before)
+		if m.ref("refs/heads/main") != base {
+			t.Fatal("main moved")
+		}
+	})
 }
 
 func TestSyncFetch(t *testing.T) {
@@ -339,23 +389,30 @@ func TestSyncFetch(t *testing.T) {
 }
 
 // A detached target (a tag or sha: no Branch) sets no remote-tracking ref,
-// and keeps local commits as a branch target does.
+// keeps local commits as a branch target does, and moves only a detached
+// HEAD: a HEAD on a branch is kept, the branch where it is.
 func TestSyncFastForwardDetached(t *testing.T) {
 	for _, c := range []struct {
 		name          string
+		onBranch      bool
 		prep          func(m *modeRepo)
 		status        string
 		ahead, behind int
 		moves         bool
 	}{
-		{"clean behind", func(m *modeRepo) { m.push("a.txt", "two\n") }, "fast-forward", 0, 1, true},
-		{"local ahead", func(m *modeRepo) { m.commitLocal("local.txt", "mine\n") }, "ahead", 1, 0, false},
-		{"diverged", func(m *modeRepo) { m.commitLocal("local.txt", "mine\n"); m.push("a.txt", "two\n") }, "kept", 1, 1, false},
+		{"clean behind", false, func(m *modeRepo) { m.push("a.txt", "two\n") }, "fast-forward", 0, 1, true},
+		{"clean behind, HEAD on a branch", true, func(m *modeRepo) { m.push("a.txt", "two\n") }, "kept", 0, 1, false},
+		{"local ahead", false, func(m *modeRepo) { m.commitLocal("local.txt", "mine\n") }, "ahead", 1, 0, false},
+		{"diverged", false, func(m *modeRepo) { m.commitLocal("local.txt", "mine\n"); m.push("a.txt", "two\n") }, "kept", 1, 1, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := newModeRepo(t)
 			m.write("untracked.txt", "u\n")
+			if !c.onBranch {
+				gitT(t, m.dir, "checkout", "-q", "--detach")
+			}
 			c.prep(m)
+			mainTip := m.ref("refs/heads/main")
 			before := m.snap()
 			res := m.syncAs(proto.SyncFastForward, "")
 			tip := gitT(t, m.upstream, "rev-parse", "main")
@@ -365,6 +422,9 @@ func TestSyncFastForwardDetached(t *testing.T) {
 			}
 			if m.ref("refs/remotes/lux/main") != "" || m.ref("refs/lux/sync") != tip {
 				t.Fatalf("refs: lux/main %q, sync %q", m.ref("refs/remotes/lux/main"), m.ref("refs/lux/sync"))
+			}
+			if m.ref("refs/heads/main") != mainTip {
+				t.Fatalf("main %s, was %s", m.ref("refs/heads/main"), mainTip)
 			}
 			if !c.moves {
 				m.unchanged(before)
@@ -379,9 +439,10 @@ func TestSyncFastForwardDetached(t *testing.T) {
 
 // raceGit puts a git ahead of the real one on PATH that, the first time
 // it is asked to move a branch or HEAD (checkout, merge, update-ref of a
-// refs/heads/ ref), first makes a real commit: on HEAD in the checkout,
-// or, with onRef, on that ref. Returns the file the commit's id lands in.
-func raceGit(t *testing.T, onRef string) string {
+// refs/heads/ ref), first runs workload in the checkout with the real git
+// as "$REAL" and an identity as $id; workload writes the id of the commit
+// it makes to "$OUT". Returns OUT.
+func raceGit(t *testing.T, workload string) string {
 	t.Helper()
 	real, err := exec.LookPath("git")
 	if err != nil {
@@ -391,6 +452,7 @@ func raceGit(t *testing.T, onRef string) string {
 	out := filepath.Join(dir, "raced")
 	script := `#!/bin/sh
 REAL='` + real + `'
+OUT='` + out + `'
 hit=; upd=
 for a in "$@"; do
 	case "$a" in
@@ -399,18 +461,11 @@ for a in "$@"; do
 	refs/heads/*) [ -n "$upd" ] && hit=1 ;;
 	esac
 done
-if [ -n "$hit" ] && mkdir '` + out + `.once' 2>/dev/null; then
+if [ -n "$hit" ] && mkdir "$OUT.once" 2>/dev/null; then
 	id="-c user.name=t -c user.email=t@t"
-	if [ -n '` + onRef + `' ]; then
-		c=$("$REAL" $id commit-tree -p '` + onRef + `' -m raced "$("$REAL" rev-parse '` + onRef + `^{tree}')")
-		"$REAL" update-ref '` + onRef + `' "$c"
-	else
-		echo raced > local-race
-		"$REAL" add local-race
-		"$REAL" $id commit -qm raced
-		c=$("$REAL" rev-parse HEAD)
-	fi
-	echo "$c" > '` + out + `'
+	set -e
+	` + workload + `
+	set +e
 fi
 exec "$REAL" "$@"
 `
@@ -421,19 +476,30 @@ exec "$REAL" "$@"
 	return out
 }
 
+const (
+	commitOnHead = `echo raced > local-race; "$REAL" add local-race; "$REAL" $id commit -qm raced; "$REAL" rev-parse HEAD > "$OUT"`
+	detachCommit = `"$REAL" checkout -q --detach; ` + commitOnHead
+)
+
+// racedCommit is the commit raceGit's workload made; fails when none.
+func racedCommit(t *testing.T, out string, res proto.SyncResult) string {
+	t.Helper()
+	b, err := os.ReadFile(out)
+	if err != nil || strings.TrimSpace(string(b)) == "" {
+		t.Fatalf("no commit raced: %v (%+v)", err, res)
+	}
+	return strings.TrimSpace(string(b))
+}
+
 // A commit the workload makes while a fast-forward runs, between its
-// checks and its move, is never reset away.
+// checks and its move, is never reset away, nor HEAD moved off it.
 func TestSyncFastForwardRacedCommit(t *testing.T) {
 	t.Run("HEAD on the branch", func(t *testing.T) {
 		m := newModeRepo(t)
 		c2 := m.push("a.txt", "two\n")
-		raced := raceGit(t, "")
+		raced := raceGit(t, commitOnHead)
 		res := m.sync(proto.SyncFastForward)
-		b, err := os.ReadFile(raced)
-		if err != nil {
-			t.Fatalf("no commit raced: %v (%+v)", err, res)
-		}
-		local := strings.TrimSpace(string(b))
+		local := racedCommit(t, raced, res)
 		if res.Status == "fast-forward" || m.ref("refs/heads/main") != local || m.head() != local || m.read("local-race") != "raced\n" {
 			t.Fatalf("%+v: main %s, raced %s", res, m.ref("refs/heads/main"), local)
 		}
@@ -441,20 +507,61 @@ func TestSyncFastForwardRacedCommit(t *testing.T) {
 			t.Fatal("refs/remotes/lux/main not set")
 		}
 	})
-	t.Run("HEAD on another branch", func(t *testing.T) {
+	t.Run("HEAD detached and a commit made on it, a branch target", func(t *testing.T) {
 		m := newModeRepo(t)
-		gitT(t, m.dir, "checkout", "-q", "-b", "side")
-		m.push("a.txt", "two\n")
-		raced := raceGit(t, "refs/heads/main")
+		base := m.head()
+		c2 := m.push("a.txt", "two\n")
+		raced := raceGit(t, detachCommit)
 		res := m.sync(proto.SyncFastForward)
-		b, err := os.ReadFile(raced)
-		if err != nil {
-			t.Fatalf("no commit raced: %v (%+v)", err, res)
+		local := racedCommit(t, raced, res)
+		if res.Status == "fast-forward" || m.head() != local || m.read("local-race") != "raced\n" ||
+			gitT(t, m.dir, "rev-parse", "--abbrev-ref", "HEAD") != "HEAD" {
+			t.Fatalf("%+v: HEAD %s, raced %s", res, m.head(), local)
 		}
-		local := strings.TrimSpace(string(b))
-		if res.Status == "fast-forward" || m.ref("refs/heads/main") != local || gitT(t, m.dir, "symbolic-ref", "HEAD") != "refs/heads/side" {
-			t.Fatalf("%+v: main %s, raced %s", res, m.ref("refs/heads/main"), local)
+		if m.ref("refs/heads/main") != base || m.ref("refs/remotes/lux/main") != c2 {
+			t.Fatalf("main %s, lux/main %s", m.ref("refs/heads/main"), m.ref("refs/remotes/lux/main"))
 		}
+	})
+	t.Run("HEAD detached and a commit made on it, a sha target", func(t *testing.T) {
+		m := newModeRepo(t)
+		gitT(t, m.dir, "checkout", "-q", "--detach")
+		m.push("a.txt", "two\n")
+		raced := raceGit(t, `"$REAL" checkout -q -b raced; `+commitOnHead)
+		res := m.syncAs(proto.SyncFastForward, "")
+		local := racedCommit(t, raced, res)
+		if res.Status == "fast-forward" || m.head() != local || m.ref("refs/heads/raced") != local || m.read("local-race") != "raced\n" {
+			t.Fatalf("%+v: HEAD %s, raced %s", res, m.head(), local)
+		}
+	})
+	// The workload detaches HEAD and commits just as a fast-forward of a
+	// sha target would have moved HEAD.
+	t.Run("HEAD on a branch, a sha target, detached and committed meanwhile", func(t *testing.T) {
+		m := newModeRepo(t)
+		m.push("a.txt", "two\n")
+		real, _ := exec.LookPath("git")
+		d := t.TempDir()
+		marker := filepath.Join(d, "commit")
+		script := "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = checkout ] || [ \"$a\" = merge ]; then\n'" + real + "' checkout -q --detach\n" +
+			"echo local > detached-local\n'" + real + "' add detached-local\n'" + real + "' -c user.name=t -c user.email=t@t commit -qm local\n'" +
+			real + "' rev-parse HEAD > '" + marker + "'\nbreak\nfi; done\nexec '" + real + "' \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(d, "git"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", d+string(os.PathListSeparator)+os.Getenv("PATH"))
+		before := m.snap()
+		res := m.syncAs(proto.SyncFastForward, "")
+		if b, _ := os.ReadFile(marker); len(b) > 0 {
+			local := strings.TrimSpace(string(b))
+			refs := gitT(t, m.dir, "for-each-ref", "--contains", local, "--format=%(refname)")
+			if refs == "" && m.head() != local {
+				t.Fatalf("%+v: raced detached commit %s lost from HEAD and all refs", res, local)
+			}
+			return
+		}
+		if res.Status != "kept" {
+			t.Fatalf("%+v", res)
+		}
+		m.unchanged(before)
 	})
 }
 

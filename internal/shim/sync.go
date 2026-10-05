@@ -236,69 +236,39 @@ func operationInProgress(ctx context.Context, dir string) (bool, error) {
 }
 
 // fastForward moves a clean checkout whose HEAD was an ancestor of
-// r.Commit to it. The workload writes beside it, so no branch or HEAD is
-// reset: each move takes effect only from the commit it was checked
-// against, and a commit made in the meantime makes it fail or keep.
-// No checkout overwrites an ignored file the commit tracks.
+// r.Commit to it, only where HEAD already is: a branch target with HEAD on
+// that branch, a tag or sha target with HEAD detached. Any other
+// arrangement is kept: switching HEAD between refs has no guard against
+// the workload switching or committing meanwhile.
+//
+// The one move is `merge --ff-only` on whatever HEAD is when it runs: it
+// updates HEAD from the commit it read and refuses a tip that is no longer
+// an ancestor, so a commit or switch raced in before it is never lost. It
+// never overwrites an ignored file the commit tracks.
 func fastForward(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, fail func(error) proto.SyncResult) proto.SyncResult {
 	head, _ := gitIn(ctx, r.Path, "symbolic-ref", "-q", "HEAD")
-	var err error
-	switch {
-	case r.Branch == "" && head != "":
-		// Detaching leaves the branch where it is, with any commit made on it.
-		_, err = gitIn(ctx, r.Path, "checkout", "--quiet", "--no-overwrite-ignore", "--detach", r.Commit)
-	case r.Branch == "" || head == "refs/heads/"+r.Branch:
-		// merge updates HEAD from the commit it read, and refuses a tip
-		// that is no longer an ancestor.
-		_, err = gitIn(ctx, r.Path, "merge", "--quiet", "--ff-only", "--no-autostash", "--no-overwrite-ignore", r.Commit)
-	case head == "":
-		// Attaching a detached HEAD to the branch has no guard: a commit
-		// made on the detached HEAD meanwhile would be left on no branch.
+	want := ""
+	if r.Branch != "" {
+		want = "refs/heads/" + r.Branch
+	}
+	if head != want {
 		res.Status = "kept"
 		return res
-	default:
-		var moved bool
-		if moved, err = switchBranch(ctx, r); err == nil && !moved {
-			res.Status = "kept"
-			return res
-		}
 	}
+	if _, err := gitIn(ctx, r.Path, "merge", "--quiet", "--ff-only", "--no-autostash", "--no-overwrite-ignore", r.Commit); err != nil {
+		return fail(err)
+	}
+	// HEAD may have changed before the merge ran; report where it is.
+	after, err := gitIn(ctx, r.Path, "rev-parse", "HEAD")
 	if err != nil {
 		return fail(err)
 	}
-	res.Status = "fast-forward"
+	if after == r.Commit {
+		res.Status = "fast-forward"
+	} else {
+		res.Status = "kept"
+	}
 	return res
-}
-
-// switchBranch moves r.Branch, not checked out, to r.Commit when its tip is
-// an ancestor (or it does not exist), and checks it out. The ref moves by
-// compare-and-swap from the tip checked; a failed checkout moves it back.
-// false when the branch has commits of its own.
-func switchBranch(ctx context.Context, r proto.SyncRepo) (bool, error) {
-	ref := "refs/heads/" + r.Branch
-	tip, err := gitIn(ctx, r.Path, "rev-parse", "--verify", "-q", ref)
-	if err != nil {
-		tip = ""
-	}
-	old := tip
-	if tip == "" {
-		// The all-zero id: the ref must not exist.
-		old = strings.Repeat("0", len(r.Commit))
-	} else if _, notAncestor := gitIn(ctx, r.Path, "merge-base", "--is-ancestor", tip, r.Commit); notAncestor != nil {
-		return false, nil
-	}
-	if _, err := gitIn(ctx, r.Path, "update-ref", "-m", "lux sync: fast-forward", ref, r.Commit, old); err != nil {
-		return false, err
-	}
-	if _, err := gitIn(ctx, r.Path, "checkout", "--quiet", "--no-overwrite-ignore", r.Branch, "--"); err != nil {
-		if tip == "" {
-			_, _ = gitIn(ctx, r.Path, "update-ref", "-d", ref, r.Commit)
-		} else {
-			_, _ = gitIn(ctx, r.Path, "update-ref", ref, tip, r.Commit)
-		}
-		return false, err
-	}
-	return true, nil
 }
 
 // syncBeforeInit moves the checkouts a resume asked for, as the workload

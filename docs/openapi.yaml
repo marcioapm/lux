@@ -2851,7 +2851,7 @@ components:
       additionalProperties: false
       properties:
         mode:
-          description: "move (default): the checkout becomes the ref's, a dirty or diverged one reset (what was there saved as refs/lux/pre-sync). fast-forward: it moves only when nothing can be lost (HEAD an ancestor of the ref's commit, no tracked file changed); otherwise it is kept as it is. fetch: it never moves. In fast-forward and fetch, a branch's commit is also refs/remotes/lux/<branch> in the checkout. Any other value: 422."
+          description: "move (default): the checkout becomes the ref's, a dirty or diverged one reset (what was there saved as refs/lux/pre-sync). fast-forward: it moves only when nothing can be lost (HEAD an ancestor of the ref's commit, no tracked file changed, HEAD on the ref's branch or, for a tag or sha, detached); otherwise it is kept as it is. fetch: it never moves. In fast-forward and fetch, a branch's commit is also refs/remotes/lux/<branch> in the checkout. Any other value: 422."
           type: string
         ref:
           type: string
