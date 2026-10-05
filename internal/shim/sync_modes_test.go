@@ -538,19 +538,10 @@ func TestSyncFastForwardRacedCommit(t *testing.T) {
 	t.Run("HEAD on a branch, a sha target, detached and committed meanwhile", func(t *testing.T) {
 		m := newModeRepo(t)
 		m.push("a.txt", "two\n")
-		real, _ := exec.LookPath("git")
-		d := t.TempDir()
-		marker := filepath.Join(d, "commit")
-		script := "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = checkout ] || [ \"$a\" = merge ]; then\n'" + real + "' checkout -q --detach\n" +
-			"echo local > detached-local\n'" + real + "' add detached-local\n'" + real + "' -c user.name=t -c user.email=t@t commit -qm local\n'" +
-			real + "' rev-parse HEAD > '" + marker + "'\nbreak\nfi; done\nexec '" + real + "' \"$@\"\n"
-		if err := os.WriteFile(filepath.Join(d, "git"), []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("PATH", d+string(os.PathListSeparator)+os.Getenv("PATH"))
+		raced := raceGit(t, detachCommit)
 		before := m.snap()
 		res := m.syncAs(proto.SyncFastForward, "")
-		if b, _ := os.ReadFile(marker); len(b) > 0 {
+		if b, _ := os.ReadFile(raced); len(b) > 0 {
 			local := strings.TrimSpace(string(b))
 			refs := gitT(t, m.dir, "for-each-ref", "--contains", local, "--format=%(refname)")
 			if refs == "" && m.head() != local {
