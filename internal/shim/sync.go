@@ -76,13 +76,7 @@ func gitIn(ctx context.Context, dir string, args ...string) (string, error) {
 
 func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 	res := proto.SyncResult{Repo: r.Name, Ref: r.Ref, Mode: proto.SyncModeOf(r.Mode), To: r.Commit, Status: "failed"}
-	fail := func(err error) proto.SyncResult {
-		res.Error = err.Error()
-		if len(res.Error) > 1000 {
-			res.Error = res.Error[:1000]
-		}
-		return res
-	}
+	fail := func(err error) proto.SyncResult { return failedWith(res, err) }
 	if !slices.Contains(proto.SyncModes, res.Mode) {
 		return fail(fmt.Errorf("unknown sync mode %q", r.Mode))
 	}
@@ -110,7 +104,7 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 	}
 	res.Dirty = status != ""
 	if res.Mode != proto.SyncMove {
-		return syncKeeping(ctx, r, res, fail)
+		return syncKeeping(ctx, r, res)
 	}
 	checkout := []string{"checkout", "--quiet"}
 	if r.Branch != "" {
@@ -154,6 +148,17 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 	return res
 }
 
+// failedWith is res failed with err's message, cut to 1000 bytes; what res
+// already has (the counts) is kept.
+func failedWith(res proto.SyncResult, err error) proto.SyncResult {
+	res.Status = "failed"
+	res.Error = err.Error()
+	if len(res.Error) > 1000 {
+		res.Error = res.Error[:1000]
+	}
+	return res
+}
+
 // syncKeeping is modes fast-forward and fetch, after the bundle's commit
 // is refs/lux/sync: nothing that is only in the checkout (a tracked
 // change, a local commit) can be lost. A branch's commit is also
@@ -161,12 +166,8 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 // The working tree, the index, HEAD and refs/lux/pre-sync change only in
 // a fast-forward of a clean checkout with no merge, rebase, cherry-pick or
 // revert in progress.
-func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, failed func(error) proto.SyncResult) proto.SyncResult {
-	// A failure keeps what this result already has: the counts.
-	fail := func(err error) proto.SyncResult {
-		res.Error = failed(err).Error
-		return res
-	}
+func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult) proto.SyncResult {
+	fail := func(err error) proto.SyncResult { return failedWith(res, err) }
 	counts, err := gitIn(ctx, r.Path, "rev-list", "--left-right", "--count", "HEAD..."+r.Commit)
 	if err != nil {
 		return fail(err)
@@ -200,7 +201,7 @@ func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, fa
 			res.Status = "kept"
 			return res
 		}
-		return fastForward(ctx, r, res, fail)
+		return fastForward(ctx, r, res)
 	case behind == 0:
 		res.Status = "ahead"
 	default:
@@ -245,7 +246,7 @@ func operationInProgress(ctx context.Context, dir string) (bool, error) {
 // updates HEAD from the commit it read and refuses a tip that is no longer
 // an ancestor, so a commit or switch raced in before it is never lost. It
 // never overwrites an ignored file the commit tracks.
-func fastForward(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, fail func(error) proto.SyncResult) proto.SyncResult {
+func fastForward(ctx context.Context, r proto.SyncRepo, res proto.SyncResult) proto.SyncResult {
 	head, _ := gitIn(ctx, r.Path, "symbolic-ref", "-q", "HEAD")
 	want := ""
 	if r.Branch != "" {
@@ -256,12 +257,12 @@ func fastForward(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, fa
 		return res
 	}
 	if _, err := gitIn(ctx, r.Path, "merge", "--quiet", "--ff-only", "--no-autostash", "--no-overwrite-ignore", r.Commit); err != nil {
-		return fail(err)
+		return failedWith(res, err)
 	}
 	// HEAD may have changed before the merge ran; report where it is.
 	after, err := gitIn(ctx, r.Path, "rev-parse", "HEAD")
 	if err != nil {
-		return fail(err)
+		return failedWith(res, err)
 	}
 	if after == r.Commit {
 		res.Status = "fast-forward"
