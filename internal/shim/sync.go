@@ -159,7 +159,8 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 // change, a local commit) can be lost. A branch's commit is also
 // refs/remotes/lux/<branch>, for the workload to merge or rebase onto.
 // The working tree, the index, HEAD and refs/lux/pre-sync change only in
-// a fast-forward of a clean checkout.
+// a fast-forward of a clean checkout with no merge, rebase, cherry-pick or
+// revert in progress.
 func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, checkout []string,
 	fail func(error) proto.SyncResult) proto.SyncResult {
 	counts, err := gitIn(ctx, r.Path, "rev-list", "--left-right", "--count", "HEAD..."+r.Commit)
@@ -187,6 +188,14 @@ func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, ch
 		// carry them over or refuse; neither is asked for.
 		res.Status = "kept"
 	case ahead == 0:
+		busy, err := operationInProgress(ctx, r.Path)
+		if err != nil {
+			return fail(err)
+		}
+		if busy {
+			res.Status = "kept"
+			return res
+		}
 		return fastForward(ctx, r, res, fail)
 	case behind == 0:
 		res.Status = "ahead"
@@ -194,6 +203,32 @@ func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, ch
 		res.Status = "kept"
 	}
 	return res
+}
+
+// operationState is what git leaves in the git dir while a merge, rebase,
+// cherry-pick, revert or sequence of them waits for the workload.
+var operationState = []string{"MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"}
+
+// operationInProgress reports whether any operationState exists, at the
+// paths git resolves (a worktree's or a relocated git dir included).
+func operationInProgress(ctx context.Context, dir string) (bool, error) {
+	args := []string{"rev-parse"}
+	for _, p := range operationState {
+		args = append(args, "--git-path", p)
+	}
+	out, err := gitIn(ctx, dir, args...)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range strings.Split(out, "\n") {
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(dir, p)
+		}
+		if _, err := os.Lstat(p); err == nil {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // fastForward moves a clean checkout whose HEAD was an ancestor of
@@ -211,7 +246,7 @@ func fastForward(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, fa
 	case r.Branch == "" || head == "refs/heads/"+r.Branch:
 		// merge updates HEAD from the commit it read, and refuses a tip
 		// that is no longer an ancestor.
-		_, err = gitIn(ctx, r.Path, "-c", "merge.autoStash=false", "merge", "--quiet", "--ff-only", "--no-overwrite-ignore", r.Commit)
+		_, err = gitIn(ctx, r.Path, "merge", "--quiet", "--ff-only", "--no-autostash", "--no-overwrite-ignore", r.Commit)
 	case head == "":
 		// Attaching a detached HEAD to the branch has no guard: a commit
 		// made on the detached HEAD meanwhile would be left on no branch.
