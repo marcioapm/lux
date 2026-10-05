@@ -106,18 +106,18 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 	if res.Mode != proto.SyncMove {
 		return syncKeeping(ctx, r, res)
 	}
-	checkout := []string{"checkout", "--quiet"}
-	if r.Branch != "" {
-		checkout = append(checkout, "-B", r.Branch, r.Commit)
-	} else {
-		checkout = append(checkout, "--detach", r.Commit)
-	}
 	if from == r.Commit && !res.Dirty {
 		res.Status = "up-to-date"
 		return res
 	}
 	_, notAncestor := gitIn(ctx, r.Path, "merge-base", "--is-ancestor", from, r.Commit)
 	res.Diverged = notAncestor != nil
+	checkout := []string{"checkout", "--quiet"}
+	if r.Branch != "" {
+		checkout = append(checkout, "-B", r.Branch, r.Commit)
+	} else {
+		checkout = append(checkout, "--detach", r.Commit)
+	}
 	if !res.Dirty && !res.Diverged {
 		if _, err := gitIn(ctx, r.Path, checkout...); err != nil {
 			return fail(err)
