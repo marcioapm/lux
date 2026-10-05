@@ -282,9 +282,12 @@ type SyncResult struct {
 // rebase, am, cherry-pick, revert or sequence of them waits for the
 // workload, in the order OperationOf names them: an am session's
 // rebase-apply has applying in it (an apply-backend rebase's has not),
-// and a cherry-pick of a range has both CHERRY_PICK_HEAD and sequencer,
-// and is a cherry-pick.
-var OperationStates = []string{"MERGE_HEAD", "rebase-merge", "rebase-apply/applying", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"}
+// and a cherry-pick of a range has both CHERRY_PICK_HEAD and
+// sequencer/todo, and is a cherry-pick. A sequence is in progress only
+// while sequencer/todo exists (what `git cherry-pick --continue` reads;
+// without it git reports no cherry-pick or revert in progress): a
+// sequencer directory without it is stale and not an operation.
+var OperationStates = []string{"MERGE_HEAD", "rebase-merge", "rebase-apply/applying", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer/todo"}
 
 // OperationOf names the operation an OperationStates entry stands for:
 // merge, rebase, am, cherry-pick, revert or sequencer; "" for anything
@@ -301,7 +304,7 @@ func OperationOf(state string) string {
 		return "cherry-pick"
 	case "REVERT_HEAD":
 		return "revert"
-	case "sequencer":
+	case "sequencer/todo":
 		return "sequencer"
 	}
 	return ""

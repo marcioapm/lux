@@ -681,7 +681,11 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   without `applying`: either rebase backend), `am` (`rebase-apply/applying`:
   a `git am` session, finished with `git am --continue` or `--abort`, never
   `git rebase`), `cherry-pick` (`CHERRY_PICK_HEAD`), `revert` (`REVERT_HEAD`) or
-  `sequencer` (a sequence of picks or reverts between two of them),
+  `sequencer` (`sequencer/todo`: a sequence of picks or reverts between
+  two of them, such as a range cherry-pick whose stopped pick was
+  committed by hand and not continued; a range stopped on a pick's
+  conflict has `CHERRY_PICK_HEAD` too, and is `cherry-pick`; a `sequencer`
+  directory without `todo` is stale, ignored and left as it is),
   looked up where git resolves them (`git rev-parse --git-path`) as the
   result is made, after the fetch, so an operation that starts or ends
   while the sync fetches is reported as it then stands. A `fast-forward`
