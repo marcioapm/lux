@@ -82,12 +82,13 @@ func newSyncFixture(t *testing.T, script string) *syncFixture {
 			r.conn.mu.Unlock()
 			for _, fr := range reports {
 				var ev proto.RunEvent
-				if json.Unmarshal(fr.Data, &ev) == nil && ev.Type == proto.EvSyncDone {
+				_ = json.Unmarshal(fr.Data, &ev)
+				switch ev.Type {
+				case proto.EvSyncDone:
 					f.mu.Lock()
 					f.done = append(f.done, ev.Data)
 					f.mu.Unlock()
-				}
-				if json.Unmarshal(fr.Data, &ev) == nil && ev.Type == proto.EvGitSync {
+				case proto.EvGitSync:
 					var res proto.SyncResult
 					b, _ := json.Marshal(ev.Data)
 					_ = json.Unmarshal(b, &res)
