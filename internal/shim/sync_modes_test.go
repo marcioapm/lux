@@ -270,6 +270,21 @@ func TestSyncFastForward(t *testing.T) {
 			t.Fatalf("ignored.db %q, main %s", m.read("ignored.db"), m.ref("refs/heads/main"))
 		}
 	})
+	t.Run("untracked file the commit adds: failed, with its counts", func(t *testing.T) {
+		m := newModeRepo(t)
+		m.write("incoming.txt", "mine\n")
+		before := m.snap()
+		tip := m.push("incoming.txt", "theirs\n")
+		res := m.sync(proto.SyncFastForward)
+		if a, b := counts(res); res.Status != "failed" || res.Saved != "" || res.Dirty || a != 0 || b != 1 ||
+			!strings.Contains(res.Error, "incoming.txt") {
+			t.Fatalf("%+v (ahead %d behind %d)", res, a, b)
+		}
+		m.unchanged(before)
+		if m.ref("refs/remotes/lux/main") != tip {
+			t.Fatal("refs/remotes/lux/main not set")
+		}
+	})
 	t.Run("HEAD on another branch: main's own commits kept", func(t *testing.T) {
 		m := newModeRepo(t)
 		base := m.head()
