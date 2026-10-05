@@ -477,7 +477,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	}
 	// The placement is on the Run, its host and its host's pool alike.
 	// snapshotId: what its volumes start from (null: empty), the lineage
-	// its repositories' bases follow (gitBases).
+	// its repositories' bases follow (lineageBases).
 	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool, "poolId": h.PoolID, "snapshotId": r.SnapshotID}); err != nil {
 		return err
 	}
@@ -491,10 +491,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 
 	a := proto.Assign{RunID: r.ID, TenantID: r.TenantID, Epoch: epoch, Spec: r.Spec, ImageResolved: r.ImageResolved, Sync: r.PendingSync}
 	if r.SnapshotID != nil {
-		if a.GitBases, err = gitBases(ctx, tx, r.ID, epoch); err != nil {
-			return err
-		}
-		if a.SyncBases, err = syncBases(ctx, tx, r.ID, epoch); err != nil {
+		if a.GitBases, a.SyncBases, err = lineageBases(ctx, tx, r.ID, epoch); err != nil {
 			return err
 		}
 	}
