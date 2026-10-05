@@ -594,11 +594,17 @@ its branch's latest commit), and so can a running Run:
 
 ```json
 POST /v1/runs/{id}/resume   {"secrets": [...], "sync": [{"repo": "app", "ref": "feat/x"}]}
-POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
+POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…", "mode": "fast-forward"}]}
 ```
 
-`repo` is a repository's `name` in the spec; `ref` a branch, tag or sha
-(`lux resume --sync app=feat/x`, `lux sync <run> app=feat/x [--wait]`).
+`repo` is a repository's `name` in the spec; `ref` a branch, tag or sha;
+`mode` how the checkout may move: `move` (the default), `fast-forward` or
+`fetch`. Any other mode is refused (422 `invalid_request`, naming it), as
+are an unknown repo, an empty ref and a repo given twice. From the CLI,
+the mode is the call's, for every repository in it: `lux resume --sync
+app=feat/x [--sync-mode fast-forward]`, `lux sync <run> app=feat/x [--mode
+fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
+`FEATURES`.
 
 - **Credentials stay out.** The runner fetches the ref through the host's
   mirror with the repository's credential and writes a bundle of the
@@ -614,7 +620,9 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
   `init`; on a running Run, at once.
 - **The image needs `git`** (the checkout moves inside the container); an
   image without it reports every sync `failed` and the Run goes on.
-- **The rule**, per repository:
+- In every mode the commit is fetched into the checkout as
+  `refs/lux/sync` first.
+- **Mode `move`** makes the checkout the ref's, per repository:
   - already at the commit, nothing changed: `up-to-date`;
   - no tracked file changed, and the checkout's `HEAD` is an ancestor of
     the commit: `fast-forward` (a branch is checked out as itself, at the
@@ -624,19 +632,46 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
     changes, or the old `HEAD`; the next reset replaces it), then tracked
     files become the commit's.
     **Untracked and ignored files are kept** (a database file, `node_modules`,
-    a build cache); an untracked file the commit now tracks is replaced;
-  - anything that fails: `failed` with git's message, and **the Run goes
-    on** (a resume still starts). A failure before the move (the fetch, a
-    missing checkout) leaves the checkout as it was; one during a reset
-    leaves it where git stopped, with `refs/lux/pre-sync` holding what was
-    there.
-- Each repository's outcome is a `git.sync` event: `{repo, ref, from, to,
-  status, dirty?, diverged?, saved?, error?, missingBase?, fullBundle?}` (and `requestId` for a
-  running Run's sync, which ends with `sync.done {requestId, changed}`).
-  A moved checkout is the base of `lux diff` from then on.
+    a build cache); an untracked file the commit now tracks is replaced.
+
+  Right for a preview; wrong for a checkout an agent edits.
+- **Mode `fast-forward`** never discards anything in the checkout:
+  - at the commit, nothing changed: `up-to-date`;
+  - `HEAD` an ancestor of the commit, no tracked file changed:
+    `fast-forward`, as in `move`;
+  - `HEAD` an ancestor of (or at) the commit, tracked files changed: not
+    moved, `kept` with `dirty: true`;
+  - the commit an ancestor of `HEAD` (local commits on top): not moved,
+    `ahead`;
+  - the histories diverged: not moved, `kept` with `diverged: true`;
+  - a branch's commit that `HEAD` is not on (another branch checked out)
+    is not reset either: `kept`.
+- **Mode `fetch`** never moves the checkout: `fetched`.
+- In `fast-forward` and `fetch`, a branch's commit is also
+  `refs/remotes/lux/<branch>` in the checkout, after every sync, moved or
+  not, so the workload can `git log HEAD..lux/<branch>`, `git merge
+  lux/<branch>` or `git rebase lux/<branch>` itself. A checkout that does
+  not move keeps its working tree, index, `HEAD` and `refs/lux/pre-sync`
+  exactly as they were. Their results carry `ahead` and `behind`: the
+  commits `HEAD` has that the commit has not, and the reverse.
+- Anything that fails: `failed` with git's message, and **the Run goes
+  on** (a resume still starts). A failure before the move (the fetch, a
+  missing checkout) leaves the checkout as it was; one during a reset
+  leaves it where git stopped, with `refs/lux/pre-sync` holding what was
+  there.
+- Each repository's outcome is a `git.sync` event: `{repo, ref, mode,
+  from, to, status, dirty?, diverged?, ahead?, behind?, saved?, error?,
+  missingBase?, fullBundle?}`, status one of `up-to-date`,
+  `fast-forward`, `reset`, `kept`, `ahead`, `fetched`, `failed` (and
+  `requestId` for a running Run's sync, which ends with `sync.done
+  {requestId, changed}`; `changed` is true only if a checkout moved:
+  `fast-forward` or `reset`). A moved checkout is the base of `lux diff`
+  from then on.
 - After a running Run's sync that moved a checkout, servers with
   `afterSync` run it and restart; the others keep running (a dev server
-  reloads by itself).
+  reloads by itself). On a resume, servers run `afterSync` before their
+  command when its sync has a `move` repository; with only `fast-forward`
+  and `fetch` ones, only if a checkout moved.
 
 `lux push <run> [--wait]` pushes each repository's current commit to
 `git.push.branch`, again with the runner's credential:
