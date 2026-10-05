@@ -279,19 +279,24 @@ type SyncResult struct {
 }
 
 // OperationStates is what git leaves in the git dir while a merge,
-// rebase, cherry-pick, revert or sequence of them waits for the
-// workload, in the order OperationOf names them: a cherry-pick of a range
-// has both CHERRY_PICK_HEAD and sequencer, and is a cherry-pick.
-var OperationStates = []string{"MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"}
+// rebase, am, cherry-pick, revert or sequence of them waits for the
+// workload, in the order OperationOf names them: an am session's
+// rebase-apply has applying in it (an apply-backend rebase's has not),
+// and a cherry-pick of a range has both CHERRY_PICK_HEAD and sequencer,
+// and is a cherry-pick.
+var OperationStates = []string{"MERGE_HEAD", "rebase-merge", "rebase-apply/applying", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"}
 
 // OperationOf names the operation an OperationStates entry stands for:
-// merge, rebase, cherry-pick, revert or sequencer; "" for anything else.
+// merge, rebase, am, cherry-pick, revert or sequencer; "" for anything
+// else.
 func OperationOf(state string) string {
 	switch state {
 	case "MERGE_HEAD":
 		return "merge"
 	case "rebase-merge", "rebase-apply":
 		return "rebase"
+	case "rebase-apply/applying":
+		return "am"
 	case "CHERRY_PICK_HEAD":
 		return "cherry-pick"
 	case "REVERT_HEAD":

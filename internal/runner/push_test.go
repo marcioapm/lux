@@ -261,6 +261,33 @@ func TestPushFailsWhenHeadMovesWhileBundling(t *testing.T) {
 	}
 }
 
+// An am session stopped on a conflict is refused as am, not rebase.
+func TestPushRefusesAnAmSession(t *testing.T) {
+	pf := newPushFixture(t, containerExec)
+	app := pf.checkout("app")
+	run(t, app, "git", "checkout", "-q", "-b", "side")
+	os.WriteFile(filepath.Join(app, "a.txt"), []byte("side\n"), 0o644)
+	run(t, app, "git", "add", "a.txt")
+	run(t, app, "git", "commit", "-qm", "side")
+	patch := filepath.Join(pf.root, "side.patch")
+	os.WriteFile(patch, []byte(run(t, app, "git", "format-patch", "--stdout", "main..side")+"\n"), 0o644)
+	run(t, app, "git", "checkout", "-q", "main")
+	os.WriteFile(filepath.Join(app, "a.txt"), []byte("main\n"), 0o644)
+	run(t, app, "git", "add", "a.txt")
+	run(t, app, "git", "commit", "-qm", "main")
+	if out, err := exec.Command("git", "-C", app, "am", patch).CombinedOutput(); err == nil {
+		t.Fatalf("git am did not stop: %s", out)
+	}
+	a := pf.pushed(t)["app"]
+	if a["status"] != "refused" || a["operation"] != "am" ||
+		a["error"] != "an am is in progress in the checkout: finish or abort it, then push" {
+		t.Fatalf("%v", a)
+	}
+	if strings.Contains(pf.bundled(), "/co/w/app") || pf.branch("app") != "" {
+		t.Fatal("bundled or pushed")
+	}
+}
+
 // When the check cannot run, the push fails: nothing is bundled.
 func TestPushFailsClosed(t *testing.T) {
 	for _, c := range []struct{ name, script string }{

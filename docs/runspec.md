@@ -649,7 +649,7 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   - `HEAD` on another branch than the one to sync to, detached with a
     branch to sync to, or on a branch with a tag or sha to sync to: not
     moved, `kept`; no branch moves or is created;
-  - a merge, rebase, cherry-pick or revert in progress: not moved, `kept`
+  - a merge, rebase, am, cherry-pick or revert in progress: not moved, `kept`
     (with `operation`, below);
   - an ignored or untracked file at a path the commit adds: not
     overwritten, `failed`.
@@ -677,8 +677,10 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   commits `HEAD` has that the commit has not, and the reverse.
 - In `fast-forward` and `fetch`, a result whose checkout has a git
   operation in progress names it as `operation`, whatever its status:
-  `merge` (`MERGE_HEAD`), `rebase` (`rebase-merge` or `rebase-apply`),
-  `cherry-pick` (`CHERRY_PICK_HEAD`), `revert` (`REVERT_HEAD`) or
+  `merge` (`MERGE_HEAD`), `rebase` (`rebase-merge`, or `rebase-apply`
+  without `applying`: either rebase backend), `am` (`rebase-apply/applying`:
+  a `git am` session, finished with `git am --continue` or `--abort`, never
+  `git rebase`), `cherry-pick` (`CHERRY_PICK_HEAD`), `revert` (`REVERT_HEAD`) or
   `sequencer` (a sequence of picks or reverts between two of them),
   looked up where git resolves them (`git rev-parse --git-path`). The
   operation is the workload's to finish (`git rebase --continue`, `git
@@ -720,7 +722,7 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   The checkout's hooks and config never run as the runner and never see the
   token.
 - Pushing with nothing new reports `up-to-date`.
-- A checkout with a merge, rebase, cherry-pick, revert or sequencer in
+- A checkout with a merge, rebase, am, cherry-pick, revert or sequencer in
   progress is not pushed: its `HEAD` is a half-done result (mid-rebase,
   the commit rebased onto plus whatever was replayed so far). It is
   reported `refused`, with `operation` naming it and `error` saying so

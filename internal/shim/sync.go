@@ -170,7 +170,7 @@ func failedWith(res proto.SyncResult, err error) proto.SyncResult {
 // change, a local commit) can be lost. A branch's commit is also
 // refs/remotes/lux/<branch>, for the workload to merge or rebase onto.
 // The working tree, the index, HEAD and refs/lux/pre-sync change only in
-// a fast-forward of a clean checkout with no merge, rebase, cherry-pick or
+// a fast-forward of a clean checkout with no merge, rebase, am, cherry-pick or
 // revert in progress.
 func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult) proto.SyncResult {
 	fail := func(err error) proto.SyncResult { return failedWith(res, err) }
