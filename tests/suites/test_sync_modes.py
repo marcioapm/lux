@@ -6,7 +6,10 @@ afterSync only after a checkout moved."""
 
 from __future__ import annotations
 
-from env import wait_until
+import json
+
+from conftest import generic
+from env import ALPINE_IMAGE, wait_until
 from suites.test_server_wake import create, exec_in, get, preview_spec, resume_sync, wait_state
 
 GIT = ["git", "-C", "/workspace/app"]
@@ -137,4 +140,90 @@ def test_resume_fast_forward_keeps_a_dirty_checkout_and_moves_a_clean_one(lux, r
     wait_state(lux, sv["id"], "ready")
     wait_until(lambda: after_syncs(lux, run_id) >= 1, 60, 1, "afterSync never ran after the resume's fast-forward")
     assert after_syncs(lux, run_id) == 1
+    lux.run("cancel", run_id)
+
+
+def push(lux, run_id: str) -> dict:
+    """`lux push --wait`'s result for app."""
+    p = lux.run("push", run_id, "--wait", "-o", "json", check=False, timeout=180)
+    results = {r["repo"]: r for r in json.loads(p.stdout)}
+    assert (p.returncode == 0) == (results["app"]["status"] in ("pushed", "up-to-date")), (p.returncode, results)
+    return results["app"]
+
+
+def test_a_rebase_in_progress_moves_to_another_host_and_is_kept(lux, runners, hosts, fake_image, git_server):
+    """A conductor stopped mid-rebase and resumed on another host finds the
+    rebase as it left it: the resume's sync names it and moves nothing, a
+    push is refused until it is finished, and then it pushes."""
+    git_server.create("app", {"message.txt": "one\n"})
+    a, b = hosts[0], hosts[1]
+    runners.start(a, "--max-runs", "1")
+    spec = preview_spec(fake_image, git_server)
+    spec["git"]["push"] = {"branch": "lux/work"}
+    run_id = lux.submit(spec)
+    lux.wait_state(run_id, "running")
+
+    # The conductor commits; someone else pushes a conflicting commit; the
+    # conductor fetches it and rebases onto it, which stops on the conflict.
+    exec_in(lux, run_id, "sh", "-c", "cd /workspace/app && echo mine > message.txt"
+            " && git -c user.name=c -c user.email=c@c commit -qam mine")
+    theirs = git_server.commit_on("app", "main", "message.txt", "theirs\n")
+    out = lux.json("sync", run_id, "app=main", "--mode", "fetch", "--wait", timeout=120)
+    assert out[0]["status"] == "fetched" and out[0]["to"] == theirs and not out[0].get("operation"), out
+    rebase = exec_in(lux, run_id, *GIT, *COMMIT_AS, "rebase", "lux/main", check=False)
+    assert rebase.returncode != 0, rebase.stdout
+    assert exec_in(lux, run_id, "test", "-d", "/workspace/app/.git/rebase-merge", check=False).returncode == 0
+    assert git(lux, run_id, "diff", "--name-only", "--diff-filter=U") == "message.txt"
+    conflicted = exec_in(lux, run_id, "cat", "/workspace/app/message.txt").stdout
+    assert "<<<<<<<" in conflicted and "theirs" in conflicted and "mine" in conflicted, conflicted
+    head = git(lux, run_id, "rev-parse", "HEAD")
+    assert head == theirs
+    assert exec_in(lux, run_id, *GIT, "symbolic-ref", "-q", "HEAD", check=False).returncode != 0
+
+    # Stopped; A is occupied, so the resume goes to B, with a newer push
+    # to sync to.
+    blocker = lux.submit(generic(ALPINE_IMAGE, "sleep", "600"))
+    lux.run("stop", run_id, "--wait", timeout=120)
+    lux.wait_state(blocker, "running")
+    newest = git_server.commit_on("app", "main", "other.txt", "newest\n")
+    runners.start(b)
+    lux.run("resume", run_id, "--sync", "app=main", "--sync-mode", "fast-forward",
+            "--secret", f"GIT_TOKEN={git_server.token}", "--wait", timeout=180)
+    assert lux.get(run_id)["placements"][-1]["hostName"] == b.name
+
+    # The sync names the rebase and moves nothing; the rebase is as it was.
+    r = resume_sync(lux, run_id, newest)
+    assert r["status"] == "kept" and r["operation"] == "rebase" and r["mode"] == "fast-forward", r
+    assert r["from"] == head and r["ahead"] == 0 and r["behind"] == 1 and not r.get("saved"), r
+    assert exec_in(lux, run_id, "test", "-d", "/workspace/app/.git/rebase-merge", check=False).returncode == 0
+    assert git(lux, run_id, "rev-parse", "HEAD") == head
+    assert exec_in(lux, run_id, *GIT, "symbolic-ref", "-q", "HEAD", check=False).returncode != 0
+    assert exec_in(lux, run_id, "cat", "/workspace/app/message.txt").stdout == conflicted
+    assert git(lux, run_id, "diff", "--name-only", "--diff-filter=U") == "message.txt"
+    assert git(lux, run_id, "rev-parse", "refs/remotes/lux/main") == newest
+
+    # A push of the half-done rebase is refused; the branch is not created.
+    res = push(lux, run_id)
+    assert res["status"] == "refused" and res["operation"] == "rebase", res
+    assert res["error"] == "a rebase is in progress in the checkout: finish or abort it, then push", res
+    assert git_server.rev("app", "lux/work") == ""
+
+    # The conductor resolves the conflict and finishes the rebase.
+    exec_in(lux, run_id, "sh", "-c", "cd /workspace/app && echo resolved > message.txt && git add message.txt"
+            " && GIT_EDITOR=true git -c user.name=c -c user.email=c@c rebase --continue")
+    assert exec_in(lux, run_id, "test", "-e", "/workspace/app/.git/rebase-merge", check=False).returncode != 0
+    assert git(lux, run_id, "symbolic-ref", "--short", "HEAD") == "main"
+    assert git(lux, run_id, "rev-parse", "HEAD^") == theirs
+    rebased = git(lux, run_id, "rev-parse", "HEAD")
+
+    res = push(lux, run_id)
+    assert res["status"] == "pushed" and res["commit"] == rebased and not res.get("operation"), res
+    assert git_server.rev("app", "lux/work") == rebased
+
+    # It takes in the newest push itself; a sync then names no operation.
+    git(lux, run_id, *COMMIT_AS, "merge", "-q", "--no-edit", "lux/main")
+    assert exec_in(lux, run_id, "cat", "/workspace/app/message.txt", "/workspace/app/other.txt").stdout == "resolved\nnewest\n"
+    out = lux.json("sync", run_id, "app=main", "--mode", "fast-forward", "--wait", timeout=120)
+    assert out[0]["status"] == "ahead" and out[0]["behind"] == 0 and "operation" not in out[0], out
+    lux.run("cancel", blocker)
     lux.run("cancel", run_id)
