@@ -888,6 +888,69 @@ func TestSafeSyncNotDeliveredAfterDowngrade(t *testing.T) {
 	}
 }
 
+// A host's sync modes are what its latest Hello says, through
+// registerHost: none, then sync-modes, then none again (an older runner
+// back). After each, the API takes a fast-forward or fetch sync only with
+// them (no message written otherwise) and the scheduler places a safe-mode
+// resume on it only with them; move goes throughout.
+func TestSyncModesFollowRegistration(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}]}}'`)
+	tok := &hostToken{}
+	syncs := func() (n int) {
+		systemScan(t, s, `SELECT count(*) FROM host_messages WHERE type = 'sync'`, nil, &n)
+		return n
+	}
+	for i, c := range []struct {
+		caps []string
+		safe int
+	}{
+		{nil, http.StatusConflict},
+		{[]string{proto.CapDiff, proto.CapSyncModes}, http.StatusAccepted},
+		{nil, http.StatusConflict},
+	} {
+		if _, err := s.registerHost(ctx, tok, proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Capabilities: c.caps,
+			Live: []proto.LivePlacement{{RunID: r1, Epoch: 1}}}); err != nil {
+			t.Fatal(err)
+		}
+		for _, mode := range []string{proto.SyncFastForward, proto.SyncFetch} {
+			before := syncs()
+			body := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main", "mode": mode}}}
+			w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body)
+			if w.Code != c.safe {
+				t.Fatalf("hello %d %v, mode %s: %d %s", i, c.caps, mode, w.Code, w.Body)
+			}
+			if wrote := syncs() - before; (c.safe == http.StatusAccepted) != (wrote == 1) {
+				t.Fatalf("hello %d, mode %s: %d sync messages written", i, mode, wrote)
+			}
+		}
+		for _, mode := range []string{"", proto.SyncMove} {
+			body := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main", "mode": mode}}}
+			if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body); w.Code != http.StatusAccepted {
+				t.Fatalf("hello %d, mode %q: %d %s", i, mode, w.Code, w.Body)
+			}
+		}
+		var hosts []*candidateHost
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
+			hosts, err = s.candidateHosts(ctx, tx, []string{"h1"})
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(hosts) != 1 {
+			t.Fatalf("hello %d: candidates %+v", i, hosts)
+		}
+		hosts[0].Connected = true
+		for _, mode := range []string{proto.SyncFastForward, proto.SyncMove} {
+			r := pendingRun{ID: "r", TenantID: "t1", PlaceOn: "h1", PendingSync: []proto.SyncRef{{Repo: "app", Ref: "main", Mode: mode}}}
+			blocked := slices.ContainsFunc(hostFit(r, hosts[0]), func(b fitBlocker) bool { return b.Kind == kindSyncModes })
+			if want := mode != proto.SyncMove && c.safe != http.StatusAccepted; blocked != want {
+				t.Fatalf("hello %d %v, a %s resume: blocked %v, want %v", i, c.caps, mode, blocked, want)
+			}
+		}
+	}
+}
+
 // Activity is requests, not open connections: a WebSocket (a dev
 // server's hot reload) kept open and busy past idleAfter leaves the
 // server idle.
