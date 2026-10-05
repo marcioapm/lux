@@ -185,6 +185,82 @@ func TestPushRefusalNamesTheOperation(t *testing.T) {
 	}
 }
 
+// raceBundle makes the container's git run workload (sh, in the checkout,
+// the real git as "$REAL") once, just before app's `git bundle create`:
+// after every check made before the bundle.
+func (pf *pushFixture) raceBundle(t *testing.T, workload string) {
+	t.Helper()
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	once := filepath.Join(pf.root, "raced")
+	wrapper := "#!/bin/sh\nREAL='" + real + "'\n" +
+		"if [ \"$1 $2\" = 'bundle create' ] && [ \"$PWD\" = '" + pf.checkout("app") + "' ] && mkdir '" + once + "' 2>/dev/null; then\n" +
+		workload + "\nfi\n" +
+		"[ \"$1\" = bundle ] && echo \"$PWD\" >> '" + filepath.Join(pf.root, "bundles") + "'\n" +
+		"exec \"$REAL\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(pf.root, "bin", "git"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// commitTwo commits two files in app; returns HEAD.
+func (pf *pushFixture) commitTwo(t *testing.T) string {
+	app := pf.checkout("app")
+	for _, name := range []string{"first", "second"} {
+		os.WriteFile(filepath.Join(app, name), []byte(name), 0o644)
+		run(t, app, "git", "add", name)
+		run(t, app, "git", "commit", "-qm", name)
+	}
+	return run(t, app, "git", "rev-parse", "HEAD")
+}
+
+// An operation that starts after the checks before the bundle (a rebase
+// stopped after replaying a commit, HEAD half-done when bundled) is seen
+// by the check after it: refused, nothing pushed, the bundle deleted.
+func TestPushRefusesAnOperationStartedWhileBundling(t *testing.T) {
+	pf := newPushFixture(t, containerExec)
+	app := pf.checkout("app")
+	pf.commitTwo(t)
+	pf.raceBundle(t, `GIT_EDITOR=true "$REAL" -c sequence.editor=true -c user.name=t -c user.email=t@t rebase -i --exec false HEAD~2 >/dev/null 2>&1`)
+	a := pf.pushed(t)["app"]
+	if _, err := os.Stat(filepath.Join(app, ".git", "rebase-merge")); err != nil {
+		t.Fatalf("the rebase did not start: %v", err)
+	}
+	if a["status"] != "refused" || a["operation"] != "rebase" || a["commit"] != nil {
+		t.Fatalf("app: %v", a)
+	}
+	if got := pf.branch("app"); got != "" {
+		t.Fatalf("app's lux/x pushed at %s", got)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(pf.root, "rt", "push")); len(entries) != 0 {
+		t.Fatalf("bundles left: %v", entries)
+	}
+}
+
+// HEAD moving while the bundle is made (no operation): failed, nothing
+// pushed, the bundle deleted.
+func TestPushFailsWhenHeadMovesWhileBundling(t *testing.T) {
+	pf := newPushFixture(t, containerExec)
+	head := pf.commitTwo(t)
+	pf.raceBundle(t, `"$REAL" reset -q --hard HEAD~1`)
+	a := pf.pushed(t)["app"]
+	if moved := run(t, pf.checkout("app"), "git", "rev-parse", "HEAD"); moved == head {
+		t.Fatal("HEAD did not move")
+	}
+	if a["status"] != "failed" || a["error"] != "the checkout changed while it was being pushed; push again" ||
+		a["operation"] != nil || a["commit"] != nil {
+		t.Fatalf("app: %v", a)
+	}
+	if got := pf.branch("app"); got != "" {
+		t.Fatalf("app's lux/x pushed at %s", got)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(pf.root, "rt", "push")); len(entries) != 0 {
+		t.Fatalf("bundles left: %v", entries)
+	}
+}
+
 // When the check cannot run, the push fails: nothing is bundled.
 func TestPushFailsClosed(t *testing.T) {
 	for _, c := range []struct{ name, script string }{
