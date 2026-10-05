@@ -7380,6 +7380,8 @@ paths:
       description: |-
         The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume), as its mode allows: each repository is a git.sync event, then sync.done (changed: whether a checkout moved). Servers with afterSync run it and restart once a checkout moved; the others keep running.
 
+        409 `sync_modes_unsupported` when a mode other than move is asked for and the Run's host runs a lux-runner without sync modes.
+
         Needs the `run` scope.
       operationId: syncRun
       parameters:

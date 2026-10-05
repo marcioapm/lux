@@ -103,7 +103,7 @@ type Hello struct {
 	// runners that predate self-update: luxd never drains those for it.
 	RunnerSHA256 string `json:"runnerSha256,omitempty"`
 	ShimSHA256   string `json:"shimSha256,omitempty"`
-	// Capabilities: optional features this runner has (CapDiff).
+	// Capabilities: optional features this runner has (CapDiff, CapSyncModes).
 	Capabilities []string `json:"capabilities,omitempty"`
 }
 
@@ -241,6 +241,26 @@ func SyncModeOf(mode string) string {
 	}
 	return mode
 }
+
+// SafeSyncModes reports whether refs ask for a mode other than move: one
+// an older runner or lux-shim, which knows only move, would run as move.
+func SafeSyncModes(refs []SyncRef) bool {
+	for _, r := range refs {
+		if SyncModeOf(r.Mode) != SyncMove {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	// CapSyncModes is the Hello capability of a runner that carries a
+	// sync's mode, with a lux-shim that applies it.
+	CapSyncModes = "sync-modes"
+	// SyncModeProbe is no mode: a lux-shim that knows modes fails it and
+	// names it in its result's mode; an older one has no mode to name.
+	SyncModeProbe = "lux-probe"
+)
 
 // Sync is MsgSync: a running placement's repositories to move. Servers
 // with afterSync restart after it (luxd sends the new set).

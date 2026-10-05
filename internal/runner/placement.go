@@ -254,6 +254,8 @@ func (p *placement) run(ctx context.Context) {
 	// Clone commits of what an earlier placement cloned; a clone here
 	// replaces its repository's.
 	p.state.GitBases = maps.Clone(a.GitBases)
+	// The container starts with this runner's --shim mounted.
+	p.state.ShimSyncModes = p.r.shimSyncModes
 	_ = writeRunState(p.dir, p.state)
 	p.setPhase("starting")
 	go p.report(ctx, proto.MsgStatus, proto.Status{State: "starting"})

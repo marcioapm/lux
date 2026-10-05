@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -25,6 +26,26 @@ import (
 // repository's outcome is a git.sync event.
 
 const syncDir = "sync" // on the runtime volume: /.lux/run/sync/<syncSubdir>
+
+// shimKnowsSyncModes asks the lux-shim at path whether it applies a sync's
+// mode: it syncs a checkout that does not exist in mode SyncModeProbe. One
+// that knows modes fails it naming that mode; an older one names none.
+// Nothing is touched either way.
+func shimKnowsSyncModes(path string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	args := proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "probe", Path: "/nonexistent/lux-sync-probe", Mode: proto.SyncModeProbe}}}
+	out, err := exec.CommandContext(ctx, path, "sync", string(proto.Marshal(args))).Output()
+	var res []proto.SyncResult
+	if err != nil || json.Unmarshal(out, &res) != nil {
+		return false
+	}
+	return len(res) == 1 && res[0].Mode == proto.SyncModeProbe
+}
+
+// oldShim is a safe-mode sync's result on a placement whose lux-shim
+// predates modes: it would run the sync as move.
+const oldShim = "this Run's lux-shim predates sync modes; resume it to update"
 
 // prepareSync fetches and bundles each ref, and returns what the shim is
 // to do (nil: nothing), and a failed result for each repository that
@@ -46,13 +67,15 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 		}
 	}
 	bases := map[string]string{}
-	if !full {
-		p.mu.Lock()
-		if p.state != nil {
+	shimModes := false
+	p.mu.Lock()
+	if p.state != nil {
+		shimModes = p.state.ShimSyncModes
+		if !full {
 			bases = maps.Clone(p.state.GitBases)
 		}
-		p.mu.Unlock()
 	}
+	p.mu.Unlock()
 	args := &proto.SyncArgs{}
 	var failed []proto.SyncResult
 	for _, ref := range refs {
@@ -66,6 +89,8 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 			}
 		}
 		switch {
+		case res.Mode != proto.SyncMove && !shimModes:
+			res.Error = oldShim
 		case err != nil:
 			res.Error = "runtime volume: " + err.Error()
 		case repo == nil:
