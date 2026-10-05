@@ -662,7 +662,11 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   `sync_modes_unsupported` on an older runner, a resume waits for a host
   that has them, and a Run whose container started with an older lux-shim
   fails each such sync (`this Run's lux-shim predates sync modes; resume it
-  to update`). `move` goes everywhere.
+  to update`). `move` goes everywhere. A host that re-registers with an
+  older runner before such a sync reaches it is never sent it: a running
+  Run's sync ends `failed` (`the host's lux-runner no longer supports sync
+  modes`), and a resume not yet started there is placed again, waiting for
+  a host that has them.
 - In `fast-forward` and `fetch`, a branch's commit is also
   `refs/remotes/lux/<branch>` in the checkout, after every sync, moved or
   not, so the workload can `git log HEAD..lux/<branch>`, `git merge
