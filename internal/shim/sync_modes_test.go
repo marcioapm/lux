@@ -331,6 +331,87 @@ func TestSyncFastForwardDetached(t *testing.T) {
 	}
 }
 
+// raceGit puts a git ahead of the real one on PATH that, the first time
+// it is asked to move a branch or HEAD (checkout, merge, update-ref of a
+// refs/heads/ ref), first makes a real commit: on HEAD in the checkout,
+// or, with onRef, on that ref. Returns the file the commit's id lands in.
+func raceGit(t *testing.T, onRef string) string {
+	t.Helper()
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	out := filepath.Join(dir, "raced")
+	script := `#!/bin/sh
+REAL='` + real + `'
+hit=; upd=
+for a in "$@"; do
+	case "$a" in
+	checkout|merge) hit=1 ;;
+	update-ref) upd=1 ;;
+	refs/heads/*) [ -n "$upd" ] && hit=1 ;;
+	esac
+done
+if [ -n "$hit" ] && mkdir '` + out + `.once' 2>/dev/null; then
+	id="-c user.name=t -c user.email=t@t"
+	if [ -n '` + onRef + `' ]; then
+		c=$("$REAL" $id commit-tree -p '` + onRef + `' -m raced "$("$REAL" rev-parse '` + onRef + `^{tree}')")
+		"$REAL" update-ref '` + onRef + `' "$c"
+	else
+		echo raced > local-race
+		"$REAL" add local-race
+		"$REAL" $id commit -qm raced
+		c=$("$REAL" rev-parse HEAD)
+	fi
+	echo "$c" > '` + out + `'
+fi
+exec "$REAL" "$@"
+`
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return out
+}
+
+// A commit the workload makes while a fast-forward runs, between its
+// checks and its move, is never reset away.
+func TestSyncFastForwardRacedCommit(t *testing.T) {
+	t.Run("HEAD on the branch", func(t *testing.T) {
+		m := newModeRepo(t)
+		c2 := m.push("a.txt", "two\n")
+		raced := raceGit(t, "")
+		res := m.sync(proto.SyncFastForward)
+		b, err := os.ReadFile(raced)
+		if err != nil {
+			t.Fatalf("no commit raced: %v (%+v)", err, res)
+		}
+		local := strings.TrimSpace(string(b))
+		if res.Status == "fast-forward" || m.ref("refs/heads/main") != local || m.head() != local || m.read("local-race") != "raced\n" {
+			t.Fatalf("%+v: main %s, raced %s", res, m.ref("refs/heads/main"), local)
+		}
+		if m.ref("refs/remotes/lux/main") != c2 {
+			t.Fatal("refs/remotes/lux/main not set")
+		}
+	})
+	t.Run("HEAD on another branch", func(t *testing.T) {
+		m := newModeRepo(t)
+		gitT(t, m.dir, "checkout", "-q", "-b", "side")
+		m.push("a.txt", "two\n")
+		raced := raceGit(t, "refs/heads/main")
+		res := m.sync(proto.SyncFastForward)
+		b, err := os.ReadFile(raced)
+		if err != nil {
+			t.Fatalf("no commit raced: %v (%+v)", err, res)
+		}
+		local := strings.TrimSpace(string(b))
+		if res.Status == "fast-forward" || m.ref("refs/heads/main") != local || gitT(t, m.dir, "symbolic-ref", "HEAD") != "refs/heads/side" {
+			t.Fatalf("%+v: main %s, raced %s", res, m.ref("refs/heads/main"), local)
+		}
+	})
+}
+
 // An unknown mode fails, the checkout untouched.
 func TestSyncUnknownMode(t *testing.T) {
 	m := newModeRepo(t)
