@@ -646,6 +646,29 @@ func TestSyncModes(t *testing.T) {
 	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), `unknown mode \"rebase\"`) {
 		t.Fatalf("unknown mode: %d %s", w.Code, w.Body)
 	}
+	// A host whose runner has no sync modes: move (or none) still goes;
+	// fast-forward and fetch are refused, nothing sent.
+	var before int
+	systemScan(t, s, `SELECT count(*) FROM host_messages WHERE type = 'sync'`, nil, &before)
+	for _, mode := range []string{"fast-forward", "fetch"} {
+		body := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main"}, {"repo": "lib", "ref": "main", "mode": mode}}}
+		if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body); w.Code != http.StatusConflict ||
+			!strings.Contains(w.Body.String(), "sync_modes_unsupported") || !strings.Contains(w.Body.String(), "without sync modes") {
+			t.Fatalf("mode %s on an old runner: %d %s", mode, w.Code, w.Body)
+		}
+	}
+	var after int
+	systemScan(t, s, `SELECT count(*) FROM host_messages WHERE type = 'sync'`, nil, &after)
+	if after != before {
+		t.Fatalf("a refused sync was sent: %d messages, was %d", after, before)
+	}
+	for _, mode := range []string{"", "move"} {
+		body := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main", "mode": mode}}}
+		if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body); w.Code != http.StatusAccepted {
+			t.Fatalf("mode %q on an old runner: %d %s", mode, w.Code, w.Body)
+		}
+	}
+	execSQL(t, s, ctx, `UPDATE hosts SET capabilities = ARRAY['diff', 'sync-modes']`)
 	for i, mode := range []string{"", "move", "fast-forward", "fetch"} {
 		id := "m" + strconv.Itoa(i)
 		body := map[string]any{"requestId": id, "sync": []map[string]string{{"repo": "app", "ref": "main", "mode": mode}}}

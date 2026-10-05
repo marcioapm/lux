@@ -67,7 +67,7 @@ func newSyncFixture(t *testing.T, script string) *syncFixture {
 	sp := spec.RunSpec{Git: &spec.Git{Repositories: []spec.Repository{{Name: "app", URL: bare, Path: "/w/app"}}}}
 	f := &syncFixture{sp: sp, bare: bare}
 	f.p = &placement{r: r, runID: "run_x", tenantID: "t1", epoch: 1, dir: filepath.Join(root, "run"), phase: "running",
-		assign: &proto.Assign{}, state: &runState{User: "1000:1000", Spec: &sp}}
+		assign: &proto.Assign{}, state: &runState{User: "1000:1000", Spec: &sp, ShimSyncModes: true}}
 	os.MkdirAll(f.p.dir, 0o755)
 
 	// luxd: ack every report, keep the git.sync events.

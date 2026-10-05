@@ -50,6 +50,8 @@ type candidateHost struct {
 	PoolID    string
 	Retired   bool // its pool is retired
 	Connected bool
+	// Caps: the optional features its runner said it has (hosts.capabilities).
+	Caps []string
 }
 
 type pendingRun struct {
@@ -258,7 +260,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	rows, err := tx.Query(ctx, `
 		SELECT h.id, h.tenant_id, coalesce(p.name, ''), coalesce(h.pool_id, ''), h.labels, h.capacity, coalesce(h.caches->'images', '[]'),
 			coalesce(h.caches->'gitMirrors', '[]'),
-			coalesce(p.shared AND p.tenant_id IS NULL, false), coalesce(p.retired, false)
+			coalesce(p.shared AND p.tenant_id IS NULL, false), coalesce(p.retired, false), h.capabilities
 		FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id
 		WHERE h.id = ANY($2) AND h.state = 'ready' AND NOT h.draining
 		  AND h.last_heartbeat > now() - $1::interval`,
@@ -271,7 +273,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	for rows.Next() {
 		h := &candidateHost{}
 		var images []string
-		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.PoolID, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired); err != nil {
+		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.PoolID, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired, &h.Caps); err != nil {
 			rows.Close()
 			return nil, err
 		}

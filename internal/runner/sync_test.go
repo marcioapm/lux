@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +95,66 @@ fi`)
 				t.Fatalf("base %q after %s", base, c.status)
 			}
 		})
+	}
+}
+
+// A placement whose container started with a lux-shim older than sync
+// modes never runs a fast-forward or fetch there (that shim would move):
+// each fails, naming why, without lux-shim sync. Mode move still runs.
+func TestSyncModesOnAnOldShim(t *testing.T) {
+	f := newSyncFixture(t, `echo called >> "$0.calls"
+echo '[{"repo":"app","ref":"main","status":"up-to-date"}]'`)
+	f.p.state.ShimSyncModes = false
+	for _, mode := range []string{proto.SyncFastForward, proto.SyncFetch} {
+		f.p.syncRunning(context.Background(), proto.Sync{RequestID: "rq-" + mode, Repos: []proto.SyncRef{{Repo: "app", Ref: "main", Mode: mode}}})
+	}
+	if _, err := os.Stat(f.p.r.pm.Bin + ".calls"); !os.IsNotExist(err) {
+		t.Fatalf("lux-shim sync ran on an old shim: %v", err)
+	}
+	waitUntil(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.done) == 2 })
+	evs := f.events()
+	if len(evs) != 2 {
+		t.Fatalf("git.sync: %+v", evs)
+	}
+	for _, ev := range evs {
+		if ev.Status != "failed" || ev.Error != "this Run's lux-shim predates sync modes; resume it to update" {
+			t.Fatalf("git.sync: %+v", ev)
+		}
+	}
+	for _, mode := range []string{"", proto.SyncMove} {
+		f.p.syncRunning(context.Background(), proto.Sync{RequestID: "rq-move" + mode, Repos: []proto.SyncRef{{Repo: "app", Ref: "main", Mode: mode}}})
+	}
+	b, _ := os.ReadFile(f.p.r.pm.Bin + ".calls")
+	if strings.Count(string(b), "called") != 2 {
+		t.Fatalf("mode move on an old shim: %d lux-shim syncs, want 2", strings.Count(string(b), "called"))
+	}
+}
+
+// The runner asks its --shim whether it knows sync modes, and says so in
+// Hello: the shim built from this tree does; one that ignores the mode
+// (an older shim, which reports none) does not.
+func TestShimKnowsSyncModes(t *testing.T) {
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "lux-shim")
+	build := exec.Command("go", "build", "-o", shim, "github.com/marcioapm/lux/cmd/lux-shim")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	if !shimKnowsSyncModes(shim) {
+		t.Fatal("this tree's lux-shim: no sync modes")
+	}
+	old := filepath.Join(dir, "old-shim")
+	os.WriteFile(old, []byte("#!/bin/sh\necho '[{\"repo\":\"probe\",\"ref\":\"\",\"status\":\"failed\",\"error\":\"/nonexistent has no checkout\"}]'\n"), 0o755)
+	if shimKnowsSyncModes(old) || shimKnowsSyncModes(filepath.Join(dir, "missing")) {
+		t.Fatal("an old or missing lux-shim: sync modes")
+	}
+	r := &Runner{shimSyncModes: false}
+	if slices.Contains(r.capabilities(), proto.CapSyncModes) {
+		t.Fatal("Hello offers sync modes with an old shim")
+	}
+	r.shimSyncModes = true
+	if !slices.Contains(r.capabilities(), proto.CapSyncModes) {
+		t.Fatal("Hello without sync modes")
 	}
 }
 

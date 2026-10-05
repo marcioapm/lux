@@ -145,7 +145,8 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "syncRun", Method: http.MethodPost, Path: "/v1/runs/{id}/sync", Tags: []string{"runs"},
 		Summary: "Move a running Run's checkouts to new commits",
 		Description: "The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume), as its mode allows: " +
-			"each repository is a git.sync event, then sync.done (changed: whether a checkout moved). Servers with afterSync run it and restart once a checkout moved; the others keep running.",
+			"each repository is a git.sync event, then sync.done (changed: whether a checkout moved). Servers with afterSync run it and restart once a checkout moved; the others keep running.\n\n" +
+			"409 `sync_modes_unsupported` when a mode other than move is asked for and the Run's host runs a lux-runner without sync modes.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.syncRun)
@@ -1903,8 +1904,15 @@ func (s *Server) syncRun(ctx context.Context, in *syncRunInput) (*requestIDOutpu
 		if state != StateRunning {
 			return errf(http.StatusConflict, "not_running", "run is %s: sync a running Run, or resume it with sync", state)
 		}
-		if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, in.ID, epoch).Scan(&hostID); err != nil {
+		var caps []string
+		if err := tx.QueryRow(ctx, `SELECT p.host_id, coalesce(h.capabilities, '{}') FROM placements p LEFT JOIN hosts h ON h.id = p.host_id
+			WHERE p.run_id = $1 AND p.epoch = $2`, in.ID, epoch).Scan(&hostID, &caps); err != nil {
 			return err
+		}
+		// An older runner drops the mode, and runs the sync as move.
+		if proto.SafeSyncModes(msg.Repos) && !slices.Contains(caps, proto.CapSyncModes) {
+			return errf(http.StatusConflict, "sync_modes_unsupported",
+				"the Run's host runs a lux-runner without sync modes, which would move the checkout: sync with mode move, or upgrade the host")
 		}
 		return addEvent(ctx, tx, p.TenantID, in.ID, epoch, "sync.requested", map[string]any{"requestId": msg.RequestID, "by": p.Actor(), "sync": msg.Repos})
 	})

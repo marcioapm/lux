@@ -645,8 +645,20 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
     `ahead`;
   - the histories diverged: not moved, `kept` with `diverged: true`;
   - a branch's commit that `HEAD` is not on (another branch checked out)
-    is not reset either: `kept`.
+    is not reset either: `kept`;
+  - a merge, rebase, cherry-pick or revert in progress: not moved, `kept`;
+  - a detached `HEAD` and a branch to sync to: not moved, `kept`;
+  - an ignored file at a path the commit adds: not overwritten, `failed`.
+
+  The move itself never resets a branch: a commit the workload makes
+  while the sync runs makes it fail (or keep), and the commit stays.
 - **Mode `fetch`** never moves the checkout: `fetched`.
+- `fast-forward` and `fetch` need a host whose lux-runner and lux-shim
+  have sync modes: `POST /v1/runs/{id}/sync` answers 409
+  `sync_modes_unsupported` on an older runner, a resume waits for a host
+  that has them, and a Run whose container started with an older lux-shim
+  fails each such sync (`this Run's lux-shim predates sync modes; resume it
+  to update`). `move` goes everywhere.
 - In `fast-forward` and `fetch`, a branch's commit is also
   `refs/remotes/lux/<branch>` in the checkout, after every sync, moved or
   not, so the workload can `git log HEAD..lux/<branch>`, `git merge
