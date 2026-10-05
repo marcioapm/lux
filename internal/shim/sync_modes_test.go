@@ -76,14 +76,21 @@ func (m *modeRepo) ref(name string) string {
 
 // sync bundles upstream's main as refs/lux/sync (the runner's part) and
 // runs the shim's sync on the checkout in mode.
-func (m *modeRepo) sync(mode string) proto.SyncResult {
+func (m *modeRepo) sync(mode string) proto.SyncResult { return m.syncAs(mode, "main") }
+
+// syncAs is sync with the target's Branch: "" for a tag or sha.
+func (m *modeRepo) syncAs(mode, branch string) proto.SyncResult {
 	m.t.Helper()
 	commit := gitT(m.t, m.upstream, "rev-parse", "main")
 	gitT(m.t, m.upstream, "update-ref", "refs/lux/sync", commit)
 	bundle := filepath.Join(m.t.TempDir(), "r.bundle")
 	gitT(m.t, m.upstream, "bundle", "create", "-q", bundle, "refs/lux/sync")
-	got := SyncRepos(context.Background(), proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: m.dir, Ref: "main", Mode: mode,
-		Commit: commit, Branch: "main", Bundle: bundle}}})
+	ref := commit
+	if branch != "" {
+		ref = branch
+	}
+	got := SyncRepos(context.Background(), proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: m.dir, Ref: ref, Mode: mode,
+		Commit: commit, Branch: branch, Bundle: bundle}}})
 	if len(got) != 1 {
 		m.t.Fatalf("results: %+v", got)
 	}
@@ -408,6 +415,69 @@ func TestSyncFastForwardRacedCommit(t *testing.T) {
 		local := strings.TrimSpace(string(b))
 		if res.Status == "fast-forward" || m.ref("refs/heads/main") != local || gitT(t, m.dir, "symbolic-ref", "HEAD") != "refs/heads/side" {
 			t.Fatalf("%+v: main %s, raced %s", res, m.ref("refs/heads/main"), local)
+		}
+	})
+}
+
+// adopt makes the checkout's HEAD upstream's main, then commits
+// path=content on it upstream: the checkout is one behind, an ancestor.
+func (m *modeRepo) adopt(path, content string) string {
+	m.t.Helper()
+	gitT(m.t, m.upstream, "fetch", "-q", m.dir, "HEAD")
+	gitT(m.t, m.upstream, "reset", "-q", "--hard", "FETCH_HEAD")
+	return m.push(path, content)
+}
+
+// An operation in progress (a merge, a paused rebase) is the workload's:
+// fast-forward keeps the checkout, refs and counts still updated.
+func TestSyncFastForwardOperationInProgress(t *testing.T) {
+	t.Run("merge, its index resolved to HEAD", func(t *testing.T) {
+		m := newModeRepo(t)
+		gitT(t, m.dir, "checkout", "-q", "-b", "side")
+		m.commitLocal("side.txt", "side\n")
+		gitT(t, m.dir, "checkout", "-q", "main")
+		m.commitLocal("main.txt", "main\n")
+		gitT(t, m.dir, "merge", "-q", "--no-commit", "--no-ff", "side")
+		gitT(t, m.dir, "restore", "--source=HEAD", "--staged", "--worktree", ".")
+		mergeHead := filepath.Join(m.dir, ".git", "MERGE_HEAD")
+		before := m.snap()
+		c2 := m.adopt("a.txt", "two\n")
+		res := m.sync(proto.SyncFastForward)
+		if a, b := counts(res); res.Status != "kept" || a != 0 || b != 1 {
+			t.Fatalf("%+v (ahead %d behind %d)", res, a, b)
+		}
+		m.unchanged(before)
+		if _, err := os.Stat(mergeHead); err != nil || m.ref("refs/remotes/lux/main") != c2 {
+			t.Fatalf("MERGE_HEAD: %v, lux/main %q", err, m.ref("refs/remotes/lux/main"))
+		}
+	})
+	t.Run("paused rebase", func(t *testing.T) {
+		m := newModeRepo(t)
+		gitT(t, m.dir, "checkout", "-q", "-b", "side")
+		m.commitLocal("local.txt", "local\n")
+		m.push("a.txt", "two\n")
+		gitT(t, m.dir, "fetch", "-q", m.upstream, "main")
+		cmd := exec.Command("git", "-C", m.dir, "-c", "sequence.editor=true", "-c", "user.name=t", "-c", "user.email=t@t",
+			"rebase", "-i", "--exec", "false", "FETCH_HEAD")
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("rebase did not pause: %s", out)
+		}
+		rebaseDir := filepath.Join(m.dir, ".git", "rebase-merge")
+		if _, err := os.Stat(rebaseDir); err != nil {
+			t.Fatal(err)
+		}
+		head := m.head()
+		tree, index := m.tree(), m.index()
+		c3 := m.adopt("a.txt", "three\n")
+		res := m.syncAs(proto.SyncFastForward, "")
+		if a, b := counts(res); res.Status != "kept" || res.To != c3 || a != 0 || b != 1 {
+			t.Fatalf("%+v (ahead %d behind %d)", res, a, b)
+		}
+		if _, err := os.Stat(rebaseDir); err != nil || m.head() != head || m.index() != index || len(m.tree()) != len(tree) {
+			t.Fatalf("rebase state: %v, head %s was %s", err, m.head(), head)
+		}
+		if m.ref("refs/lux/sync") != c3 {
+			t.Fatal("refs/lux/sync not set")
 		}
 	})
 }
