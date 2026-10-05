@@ -130,7 +130,8 @@ servers with `afterSync` restart if a checkout moved ([syncing
 checkouts](runspec.md#syncing-checkouts) has the rule). `--sync-mode`
 (resume) and `--mode` (sync) apply one mode to every repository of the
 call: `move` (default), `fast-forward` (moves only a checkout that loses
-nothing; a dirty, diverged or ahead one is kept as it is) or `fetch`
+nothing, where `HEAD` already is; a dirty, diverged or ahead one, or one
+on another branch, is kept as it is) or `fetch`
 (never moves; the ref's commit is `refs/remotes/lux/<branch>` in the
 checkout). `lux sync --wait` prints each repository's outcome
 (`up-to-date`, `fast-forward`, `reset`, `kept`, `ahead`, `fetched`,
