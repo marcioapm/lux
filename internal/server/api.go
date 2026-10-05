@@ -145,7 +145,9 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "syncRun", Method: http.MethodPost, Path: "/v1/runs/{id}/sync", Tags: []string{"runs"},
 		Summary: "Move a running Run's checkouts to new commits",
 		Description: "The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume), as its mode allows: " +
-			"each repository is a git.sync event, then sync.done (changed: whether a checkout moved). Servers with afterSync run it and restart once a checkout moved; the others keep running.\n\n" +
+			"each repository is a git.sync event, then sync.done (changed: whether a checkout moved). " +
+			"In modes fast-forward and fetch, a git.sync event's operation names a git operation in progress in the checkout: merge, rebase, cherry-pick, revert or sequencer (a sequence of picks or reverts between steps); such a checkout never moves. " +
+			"Servers with afterSync run it and restart once a checkout moved; the others keep running.\n\n" +
 			"409 `sync_modes_unsupported` when a mode other than move is asked for and the Run's host runs a lux-runner without sync modes.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},

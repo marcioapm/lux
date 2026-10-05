@@ -2851,7 +2851,7 @@ components:
       additionalProperties: false
       properties:
         mode:
-          description: "move (default): the checkout becomes the ref's, a dirty or diverged one reset (what was there saved as refs/lux/pre-sync). fast-forward: it moves only when nothing can be lost (HEAD an ancestor of the ref's commit, no tracked file changed, HEAD on the ref's branch or, for a tag or sha, detached); otherwise it is kept as it is. fetch: it never moves. In fast-forward and fetch, a branch's commit is also refs/remotes/lux/<branch> in the checkout. Any other value: 422."
+          description: "move (default): the checkout becomes the ref's, a dirty or diverged one reset (what was there saved as refs/lux/pre-sync). fast-forward: it moves only when nothing can be lost (HEAD an ancestor of the ref's commit, no tracked file changed, HEAD on the ref's branch or, for a tag or sha, detached, no merge, rebase, cherry-pick or revert in progress); otherwise it is kept as it is. fetch: it never moves. In fast-forward and fetch, a branch's commit is also refs/remotes/lux/<branch> in the checkout, and the git.sync event's operation names a git operation in progress in the checkout (merge, rebase, cherry-pick, revert or sequencer). Any other value: 422."
           type: string
         ref:
           type: string
@@ -7378,7 +7378,7 @@ paths:
   /v1/runs/{id}/sync:
     post:
       description: |-
-        The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume), as its mode allows: each repository is a git.sync event, then sync.done (changed: whether a checkout moved). Servers with afterSync run it and restart once a checkout moved; the others keep running.
+        The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume), as its mode allows: each repository is a git.sync event, then sync.done (changed: whether a checkout moved). In modes fast-forward and fetch, a git.sync event's operation names a git operation in progress in the checkout: merge, rebase, cherry-pick, revert or sequencer (a sequence of picks or reverts between steps); such a checkout never moves. Servers with afterSync run it and restart once a checkout moved; the others keep running.
 
         409 `sync_modes_unsupported` when a mode other than move is asked for and the Run's host runs a lux-runner without sync modes.
 

@@ -649,7 +649,8 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   - `HEAD` on another branch than the one to sync to, detached with a
     branch to sync to, or on a branch with a tag or sha to sync to: not
     moved, `kept`; no branch moves or is created;
-  - a merge, rebase, cherry-pick or revert in progress: not moved, `kept`;
+  - a merge, rebase, cherry-pick or revert in progress: not moved, `kept`
+    (with `operation`, below);
   - an ignored or untracked file at a path the commit adds: not
     overwritten, `failed`.
 
@@ -674,13 +675,24 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   not move keeps its working tree, index, `HEAD` and `refs/lux/pre-sync`
   exactly as they were. Their results carry `ahead` and `behind`: the
   commits `HEAD` has that the commit has not, and the reverse.
+- In `fast-forward` and `fetch`, a result whose checkout has a git
+  operation in progress names it as `operation`, whatever its status:
+  `merge` (`MERGE_HEAD`), `rebase` (`rebase-merge` or `rebase-apply`),
+  `cherry-pick` (`CHERRY_PICK_HEAD`), `revert` (`REVERT_HEAD`) or
+  `sequencer` (a sequence of picks or reverts between two of them),
+  looked up where git resolves them (`git rev-parse --git-path`). The
+  operation is the workload's to finish (`git rebase --continue`, `git
+  merge --continue`) or abort: commands that switch branches or start
+  another merge are refused by git until then. A checkout restored
+  mid-operation on another host (a resume) keeps it, and reports it.
+  `move` does not report it.
 - Anything that fails: `failed` with git's message, and **the Run goes
   on** (a resume still starts). A failure before the move (the fetch, a
   missing checkout) leaves the checkout as it was; one during a reset
   leaves it where git stopped, with `refs/lux/pre-sync` holding what was
   there.
 - Each repository's outcome is a `git.sync` event: `{repo, ref, mode,
-  from, to, status, dirty?, diverged?, ahead?, behind?, saved?, error?,
+  from, to, status, dirty?, diverged?, ahead?, behind?, operation?, saved?, error?,
   missingBase?, fullBundle?}`, status one of `up-to-date`,
   `fast-forward`, `reset`, `kept`, `ahead`, `fetched`, `failed` (and
   `requestId` for a running Run's sync, which ends with `sync.done

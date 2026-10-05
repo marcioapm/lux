@@ -257,7 +257,9 @@ type SyncRepo struct {
 // fetched (mode fetch), with Ahead and Behind: the commits HEAD has that
 // the ref's commit has not, and the reverse. MissingBase: failed because
 // the checkout lacks the bundle's Base (the runner retries once with the
-// whole history); FullBundle: this result is that retry's.
+// whole history); FullBundle: this result is that retry's. Operation, in
+// modes fast-forward and fetch: the git operation in progress in the
+// checkout (OperationOf), whatever the status.
 type SyncResult struct {
 	Repo        string `json:"repo"`
 	Ref         string `json:"ref"`
@@ -269,10 +271,35 @@ type SyncResult struct {
 	Diverged    bool   `json:"diverged,omitempty"`
 	Ahead       *int   `json:"ahead,omitempty"`
 	Behind      *int   `json:"behind,omitempty"`
+	Operation   string `json:"operation,omitempty"`
 	Saved       string `json:"saved,omitempty"`
 	Error       string `json:"error,omitempty"`
 	MissingBase bool   `json:"missingBase,omitempty"`
 	FullBundle  bool   `json:"fullBundle,omitempty"`
+}
+
+// OperationStates is what git leaves in the git dir while a merge,
+// rebase, cherry-pick, revert or sequence of them waits for the
+// workload, in the order OperationOf names them: a cherry-pick of a range
+// has both CHERRY_PICK_HEAD and sequencer, and is a cherry-pick.
+var OperationStates = []string{"MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"}
+
+// OperationOf names the operation an OperationStates entry stands for:
+// merge, rebase, cherry-pick, revert or sequencer; "" for anything else.
+func OperationOf(state string) string {
+	switch state {
+	case "MERGE_HEAD":
+		return "merge"
+	case "rebase-merge", "rebase-apply":
+		return "rebase"
+	case "CHERRY_PICK_HEAD":
+		return "cherry-pick"
+	case "REVERT_HEAD":
+		return "revert"
+	case "sequencer":
+		return "sequencer"
+	}
+	return ""
 }
 
 // Moved: the sync changed the checkout.

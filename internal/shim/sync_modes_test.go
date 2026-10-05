@@ -580,7 +580,7 @@ func TestSyncFastForwardOperationInProgress(t *testing.T) {
 		before := m.snap()
 		c2 := m.adopt("a.txt", "two\n")
 		res := m.sync(proto.SyncFastForward)
-		if a, b := counts(res); res.Status != "kept" || a != 0 || b != 1 {
+		if a, b := counts(res); res.Status != "kept" || res.Operation != "merge" || a != 0 || b != 1 {
 			t.Fatalf("%+v (ahead %d behind %d)", res, a, b)
 		}
 		m.unchanged(before)
@@ -607,7 +607,7 @@ func TestSyncFastForwardOperationInProgress(t *testing.T) {
 		tree, index := m.tree(), m.index()
 		c3 := m.adopt("a.txt", "three\n")
 		res := m.syncAs(proto.SyncFastForward, "")
-		if a, b := counts(res); res.Status != "kept" || res.To != c3 || a != 0 || b != 1 {
+		if a, b := counts(res); res.Status != "kept" || res.Operation != "rebase" || res.To != c3 || a != 0 || b != 1 {
 			t.Fatalf("%+v (ahead %d behind %d)", res, a, b)
 		}
 		if _, err := os.Stat(rebaseDir); err != nil || m.head() != head || m.index() != index || len(m.tree()) != len(tree) {
@@ -615,6 +615,108 @@ func TestSyncFastForwardOperationInProgress(t *testing.T) {
 		}
 		if m.ref("refs/lux/sync") != c3 {
 			t.Fatal("refs/lux/sync not set")
+		}
+	})
+}
+
+// gitStops runs a git command that must stop for the workload (a
+// conflict): it fails.
+func gitStops(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_EDITOR=true",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("git %v did not stop: %s", args, out)
+	}
+}
+
+// sideConflict commits a.txt=side on branch side and a.txt=main on main,
+// HEAD on main: picking or merging side conflicts.
+func (m *modeRepo) sideConflict() {
+	gitT(m.t, m.dir, "checkout", "-q", "-b", "side")
+	m.commitLocal("a.txt", "side\n")
+	gitT(m.t, m.dir, "checkout", "-q", "main")
+	m.commitLocal("a.txt", "main\n")
+}
+
+// Modes fast-forward and fetch name the operation in progress, whatever
+// the status, and leave it as it is.
+func TestSyncReportsTheOperation(t *testing.T) {
+	for _, c := range []struct {
+		name, op, state string
+		start           func(m *modeRepo)
+	}{
+		{"merge", "merge", "MERGE_HEAD", func(m *modeRepo) {
+			m.sideConflict()
+			gitStops(m.t, m.dir, "merge", "side")
+		}},
+		{"rebase, merge backend", "rebase", "rebase-merge", func(m *modeRepo) {
+			m.commitLocal("a.txt", "mine\n")
+			m.push("a.txt", "theirs\n")
+			gitT(m.t, m.dir, "fetch", "-q", m.upstream, "main")
+			gitStops(m.t, m.dir, "rebase", "--merge", "FETCH_HEAD")
+		}},
+		{"rebase, apply backend", "rebase", "rebase-apply", func(m *modeRepo) {
+			m.commitLocal("a.txt", "mine\n")
+			m.push("a.txt", "theirs\n")
+			gitT(m.t, m.dir, "fetch", "-q", m.upstream, "main")
+			gitStops(m.t, m.dir, "rebase", "--apply", "FETCH_HEAD")
+		}},
+		{"cherry-pick", "cherry-pick", "CHERRY_PICK_HEAD", func(m *modeRepo) {
+			m.sideConflict()
+			gitStops(m.t, m.dir, "cherry-pick", "side")
+		}},
+		{"revert", "revert", "REVERT_HEAD", func(m *modeRepo) {
+			m.commitLocal("a.txt", "x\n")
+			m.commitLocal("a.txt", "y\n")
+			gitStops(m.t, m.dir, "revert", "--no-edit", "HEAD~1")
+		}},
+		// A range's first pick concluded by hand: only sequencer is left.
+		{"sequencer", "sequencer", "sequencer", func(m *modeRepo) {
+			m.sideConflict()
+			gitT(m.t, m.dir, "checkout", "-q", "side")
+			m.commitLocal("b.txt", "b\n")
+			gitT(m.t, m.dir, "checkout", "-q", "main")
+			gitStops(m.t, m.dir, "cherry-pick", "main..side")
+			m.write("a.txt", "resolved\n")
+			gitT(m.t, m.dir, "add", "a.txt")
+			gitT(m.t, m.dir, "commit", "-q", "--no-edit")
+		}},
+	} {
+		for _, mode := range []string{proto.SyncFastForward, proto.SyncFetch} {
+			t.Run(c.name+", "+mode, func(t *testing.T) {
+				m := newModeRepo(t)
+				c.start(m)
+				state := filepath.Join(m.dir, gitT(t, m.dir, "rev-parse", "--git-path", c.state))
+				if _, err := os.Lstat(state); err != nil {
+					t.Fatalf("not started: %v", err)
+				}
+				m.write("untracked.txt", "u\n")
+				before := m.snap()
+				tip := m.push("up.txt", "up\n")
+				res := m.sync(mode)
+				if res.Operation != c.op || res.To != tip || res.Ahead == nil || res.Behind == nil || *res.Behind < 1 {
+					t.Fatalf("%+v", res)
+				}
+				if want := map[string]string{proto.SyncFastForward: "kept", proto.SyncFetch: "fetched"}[mode]; res.Status != want {
+					t.Fatalf("status %q, want %q: %+v", res.Status, want, res)
+				}
+				m.unchanged(before)
+				if _, err := os.Lstat(state); err != nil || m.ref("refs/remotes/lux/main") != tip {
+					t.Fatalf("%s: %v, lux/main %q", c.state, err, m.ref("refs/remotes/lux/main"))
+				}
+			})
+		}
+	}
+	t.Run("none", func(t *testing.T) {
+		for _, mode := range []string{proto.SyncFastForward, proto.SyncFetch} {
+			m := newModeRepo(t)
+			m.commitLocal("c.txt", "c\n")
+			m.push("a.txt", "two\n")
+			if res := m.sync(mode); res.Operation != "" || res.Status == "failed" {
+				t.Fatalf("%s: %+v", mode, res)
+			}
 		}
 	})
 }
