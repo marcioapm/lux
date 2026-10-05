@@ -30,6 +30,7 @@ type syncFixture struct {
 	bare  string
 	mu    sync.Mutex
 	syncs []proto.SyncResult
+	done  []map[string]any
 }
 
 func newSyncFixture(t *testing.T, script string) *syncFixture {
@@ -81,6 +82,11 @@ func newSyncFixture(t *testing.T, script string) *syncFixture {
 			r.conn.mu.Unlock()
 			for _, fr := range reports {
 				var ev proto.RunEvent
+				if json.Unmarshal(fr.Data, &ev) == nil && ev.Type == proto.EvSyncDone {
+					f.mu.Lock()
+					f.done = append(f.done, ev.Data)
+					f.mu.Unlock()
+				}
 				if json.Unmarshal(fr.Data, &ev) == nil && ev.Type == proto.EvGitSync {
 					var res proto.SyncResult
 					b, _ := json.Marshal(ev.Data)

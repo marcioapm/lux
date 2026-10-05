@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 // no credential is involved), before init on a new placement, or while
 // the Run runs. Prints one proto.SyncResult per repository as a JSON array.
 //
-// The rule, deterministic:
+// The rule, deterministic, for mode move (the default):
 //   - HEAD is the commit: up-to-date.
 //   - No tracked file changed and HEAD is an ancestor of the commit:
 //     fast-forward (the branch moves to it, or HEAD detaches at a tag or sha).
@@ -31,6 +32,8 @@ import (
 //     tracks is replaced).
 //   - Any error: failed, with git's message; the checkout as it was where
 //     git left it. The Run goes on either way.
+//
+// Modes fast-forward and fetch never reset: see syncKeeping.
 
 // Sync is `lux-shim sync`'s main.
 func Sync(args []string) int {
@@ -72,13 +75,16 @@ func gitIn(ctx context.Context, dir string, args ...string) (string, error) {
 }
 
 func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
-	res := proto.SyncResult{Repo: r.Name, Ref: r.Ref, To: r.Commit, Status: "failed"}
+	res := proto.SyncResult{Repo: r.Name, Ref: r.Ref, Mode: proto.SyncModeOf(r.Mode), To: r.Commit, Status: "failed"}
 	fail := func(err error) proto.SyncResult {
 		res.Error = err.Error()
 		if len(res.Error) > 1000 {
 			res.Error = res.Error[:1000]
 		}
 		return res
+	}
+	if !slices.Contains(proto.SyncModes, res.Mode) {
+		return fail(fmt.Errorf("unknown sync mode %q", r.Mode))
 	}
 	if _, err := os.Stat(filepath.Join(r.Path, ".git")); err != nil {
 		return fail(fmt.Errorf("%s has no checkout", r.Path))
@@ -103,18 +109,21 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 		return fail(err)
 	}
 	res.Dirty = status != ""
-	if from == r.Commit && !res.Dirty {
-		res.Status = "up-to-date"
-		return res
-	}
-	_, notAncestor := gitIn(ctx, r.Path, "merge-base", "--is-ancestor", from, r.Commit)
-	res.Diverged = notAncestor != nil
 	checkout := []string{"checkout", "--quiet"}
 	if r.Branch != "" {
 		checkout = append(checkout, "-B", r.Branch, r.Commit)
 	} else {
 		checkout = append(checkout, "--detach", r.Commit)
 	}
+	if res.Mode != proto.SyncMove {
+		return syncKeeping(ctx, r, res, checkout, fail)
+	}
+	if from == r.Commit && !res.Dirty {
+		res.Status = "up-to-date"
+		return res
+	}
+	_, notAncestor := gitIn(ctx, r.Path, "merge-base", "--is-ancestor", from, r.Commit)
+	res.Diverged = notAncestor != nil
 	if !res.Dirty && !res.Diverged {
 		if _, err := gitIn(ctx, r.Path, checkout...); err != nil {
 			return fail(err)
@@ -145,6 +154,61 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 	return res
 }
 
+// syncKeeping is modes fast-forward and fetch, after the bundle's commit
+// is refs/lux/sync: nothing that is only in the checkout (a tracked
+// change, a local commit) can be lost. A branch's commit is also
+// refs/remotes/lux/<branch>, for the workload to merge or rebase onto.
+// The working tree, the index, HEAD and refs/lux/pre-sync change only in
+// a fast-forward of a clean checkout.
+func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, checkout []string,
+	fail func(error) proto.SyncResult) proto.SyncResult {
+	counts, err := gitIn(ctx, r.Path, "rev-list", "--left-right", "--count", "HEAD..."+r.Commit)
+	if err != nil {
+		return fail(err)
+	}
+	var ahead, behind int
+	if _, err := fmt.Sscanf(counts, "%d %d", &ahead, &behind); err != nil {
+		return fail(fmt.Errorf("rev-list --count: %q", counts))
+	}
+	res.Ahead, res.Behind = &ahead, &behind
+	res.Diverged = ahead > 0 && behind > 0
+	if r.Branch != "" {
+		if _, err := gitIn(ctx, r.Path, "update-ref", "refs/remotes/lux/"+r.Branch, r.Commit); err != nil {
+			return fail(err)
+		}
+	}
+	switch {
+	case res.Mode == proto.SyncFetch:
+		res.Status = "fetched"
+	case ahead == 0 && behind == 0 && !res.Dirty:
+		res.Status = "up-to-date"
+	case ahead == 0 && res.Dirty:
+		// Behind (or at the commit) with tracked changes: a checkout would
+		// carry them over or refuse; neither is asked for.
+		res.Status = "kept"
+	case ahead == 0:
+		// checkout -B resets the branch: when HEAD is on another branch,
+		// the branch's own commits would go with it.
+		if r.Branch != "" {
+			if tip, err := gitIn(ctx, r.Path, "rev-parse", "--verify", "-q", "refs/heads/"+r.Branch); err == nil {
+				if _, notAncestor := gitIn(ctx, r.Path, "merge-base", "--is-ancestor", tip, r.Commit); notAncestor != nil {
+					res.Status = "kept"
+					return res
+				}
+			}
+		}
+		if _, err := gitIn(ctx, r.Path, checkout...); err != nil {
+			return fail(err)
+		}
+		res.Status = "fast-forward"
+	case behind == 0:
+		res.Status = "ahead"
+	default:
+		res.Status = "kept"
+	}
+	return res
+}
+
 // syncBeforeInit moves the checkouts a resume asked for, as the workload
 // user (this binary's `sync`, through command), and records the results as
 // a lux.sync event: the runner reports them. A failure is a result, never
@@ -160,6 +224,9 @@ func (s *Shim) syncBeforeInit(env []string) {
 		}
 	}
 	s.out.Event(proto.EvSync, map[string]any{"results": results})
+	s.srv.mu.Lock()
+	s.srv.syncMoved = slices.ContainsFunc(results, proto.SyncResult.Moved)
+	s.srv.mu.Unlock()
 }
 
 // syncRetryWait bounds the wait for the runner's whole-history bundles:

@@ -56,7 +56,7 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 	args := &proto.SyncArgs{}
 	var failed []proto.SyncResult
 	for _, ref := range refs {
-		res := proto.SyncResult{Repo: ref.Repo, Ref: ref.Ref, Status: "failed"}
+		res := proto.SyncResult{Repo: ref.Repo, Ref: ref.Ref, Mode: proto.SyncModeOf(ref.Mode), Status: "failed"}
 		var repo *spec.Repository
 		if sp.Git != nil {
 			for i := range sp.Git.Repositories {
@@ -76,7 +76,7 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 			name := ref.Repo + ".bundle"
 			t, berr := p.r.git.SyncBundle(ctx, r, bases[ref.Repo], filepath.Join(rt, syncDir, sub, name))
 			if berr == nil {
-				args.Repos = append(args.Repos, proto.SyncRepo{Name: ref.Repo, Path: repo.Path, Ref: ref.Ref, Commit: t.Commit,
+				args.Repos = append(args.Repos, proto.SyncRepo{Name: ref.Repo, Path: repo.Path, Ref: ref.Ref, Mode: ref.Mode, Commit: t.Commit,
 					Branch: t.Branch, Bundle: proto.ShimRunDir + "/" + syncDir + "/" + sub + "/" + name, Base: t.Base})
 				continue
 			}
@@ -97,7 +97,7 @@ func retryRefs(args *proto.SyncArgs, names []string) []proto.SyncRef {
 	for _, name := range names {
 		for _, r := range args.Repos {
 			if r.Name == name {
-				refs = append(refs, proto.SyncRef{Repo: r.Name, Ref: r.Ref})
+				refs = append(refs, proto.SyncRef{Repo: r.Name, Ref: r.Ref, Mode: r.Mode})
 			}
 		}
 	}
@@ -124,9 +124,7 @@ func (p *placement) removeSyncBundles(ctx context.Context, requestID string) {
 }
 
 // moved: the sync changed the checkout.
-func moved(res proto.SyncResult) bool {
-	return res.Status == "fast-forward" || res.Status == "reset"
-}
+func moved(res proto.SyncResult) bool { return res.Moved() }
 
 // reportSync sends a repository's git.sync event, and keeps a moved
 // checkout's commit as the base of its live diffs.
@@ -163,7 +161,7 @@ func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
 	defer func() { _ = p.reportRetrying(ctx, proto.RunEvent{Type: proto.EvSyncDone, Data: done}) }()
 	if !running || user == "" {
 		for _, r := range req.Repos {
-			p.reportSync(ctx, proto.SyncResult{Repo: r.Repo, Ref: r.Ref, Status: "failed", Error: "the Run is not running"}, req.RequestID)
+			p.reportSync(ctx, proto.SyncResult{Repo: r.Repo, Ref: r.Ref, Mode: proto.SyncModeOf(r.Mode), Status: "failed", Error: "the Run is not running"}, req.RequestID)
 		}
 		return
 	}
