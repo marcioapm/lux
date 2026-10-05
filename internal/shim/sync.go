@@ -109,14 +109,14 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 		return fail(err)
 	}
 	res.Dirty = status != ""
+	if res.Mode != proto.SyncMove {
+		return syncKeeping(ctx, r, res, fail)
+	}
 	checkout := []string{"checkout", "--quiet"}
 	if r.Branch != "" {
 		checkout = append(checkout, "-B", r.Branch, r.Commit)
 	} else {
 		checkout = append(checkout, "--detach", r.Commit)
-	}
-	if res.Mode != proto.SyncMove {
-		return syncKeeping(ctx, r, res, checkout, fail)
 	}
 	if from == r.Commit && !res.Dirty {
 		res.Status = "up-to-date"
@@ -161,8 +161,12 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 // The working tree, the index, HEAD and refs/lux/pre-sync change only in
 // a fast-forward of a clean checkout with no merge, rebase, cherry-pick or
 // revert in progress.
-func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, checkout []string,
-	fail func(error) proto.SyncResult) proto.SyncResult {
+func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, failed func(error) proto.SyncResult) proto.SyncResult {
+	// A failure keeps what this result already has: the counts.
+	fail := func(err error) proto.SyncResult {
+		res.Error = failed(err).Error
+		return res
+	}
 	counts, err := gitIn(ctx, r.Path, "rev-list", "--left-right", "--count", "HEAD..."+r.Commit)
 	if err != nil {
 		return fail(err)
