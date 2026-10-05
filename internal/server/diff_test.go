@@ -234,3 +234,28 @@ func TestGitBasesFollowSyncs(t *testing.T) {
 		t.Fatalf("epoch 3 after a later clone: %v", m)
 	}
 }
+
+// A sync's bundle prerequisite follows every sync that fetched a commit
+// into the checkout, kept or only fetched too, across the placements that
+// restore it; the live diff's base does not move for those.
+func TestSyncBasesFollowFetches(t *testing.T) {
+	s, _ := diffFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
+		('t1', 'r1', 1, 'git.sync', '{"repo": "app", "status": "fetched", "from": "base-app", "to": "fetch-b"}'),
+		('t1', 'r1', 1, 'git.sync', '{"repo": "app", "status": "kept", "from": "base-app", "to": "kept-c"}'),
+		('t1', 'r1', 1, 'git.sync', '{"repo": "app", "status": "failed", "to": "never-d"}')`)
+	var sb map[string]string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
+		sb, err = syncBases(ctx, tx, "r1", 2)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sb["app"] != "kept-c" {
+		t.Fatalf("sync bases: %v", sb)
+	}
+	if m := gitBasesOf(t, s, "r1", 2); m["app"] != "base-app" {
+		t.Fatalf("git bases: %v", m)
+	}
+}

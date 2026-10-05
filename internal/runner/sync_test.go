@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -156,6 +157,88 @@ func TestShimKnowsSyncModes(t *testing.T) {
 	if !slices.Contains(r.capabilities(), proto.CapSyncModes) {
 		t.Fatal("Hello without sync modes")
 	}
+}
+
+// A sync that fetched a commit into the checkout, moved or not, is the
+// next bundle's prerequisite: two fetch syncs of one target in a row
+// bundle its history once. A failed one is not, and the live diff's base
+// stays the clone's throughout.
+func TestSyncBundlesFromTheLastFetch(t *testing.T) {
+	f := newSyncFixture(t, `true`)
+	ctx := context.Background()
+	base := gitOut(t, f.bare, "rev-parse", "main")
+	// 4 MiB that does not compress, upstream.
+	big := filepath.Join(t.TempDir(), "big")
+	b := make([]byte, 4<<20)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(big, b, 0o644)
+	blob := gitOut(t, f.bare, "hash-object", "-w", big)
+	tree := gitMktree(t, f.bare, "100644 blob "+blob+"\tbig\n")
+	commit := func(tree, parent, msg string) string {
+		return gitOut(t, f.bare, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree, "-p", parent, "-m", msg)
+	}
+	// The range: a big commit, then a small one on top. A bundle of the
+	// tip alone (git writes no empty bundle) holds only the small one.
+	tip := commit(gitMktree(t, f.bare, "100644 blob "+blob+"\tbig\n100644 blob "+gitOut(t, f.bare, "rev-parse", base+":a.txt")+"\tsmall\n"),
+		commit(tree, base, "big"), "small")
+	gitOut(t, f.bare, "update-ref", "refs/heads/main", tip)
+	f.p.state.GitBases = map[string]string{"app": base}
+	refs := []proto.SyncRef{{Repo: "app", Ref: "main", Mode: proto.SyncFetch}}
+	size := func(a *proto.SyncArgs) int64 {
+		t.Helper()
+		fi, err := os.Stat(filepath.Join(f.p.r.cfg.DataDir, "rt", strings.TrimPrefix(a.Repos[0].Bundle, proto.ShimRunDir+"/")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Size()
+	}
+	sync := func(id, status string) *proto.SyncArgs {
+		t.Helper()
+		a, failed := f.p.prepareSync(ctx, f.sp, refs, id, false)
+		if a == nil || len(failed) != 0 || a.Repos[0].Commit != tip {
+			t.Fatalf("%s: %+v %+v", id, a, failed)
+		}
+		f.p.reportSync(ctx, proto.SyncResult{Repo: "app", Ref: "main", Mode: proto.SyncFetch, Status: status, To: tip}, id)
+		return a
+	}
+	first := sync("s1", "failed")
+	if size(first) < 4<<20 || first.Repos[0].Base != base {
+		t.Fatalf("first bundle: %d bytes, base %q", size(first), first.Repos[0].Base)
+	}
+	// The first failed: the second bundles the same history again.
+	second := sync("s2", "fetched")
+	if size(second) < 4<<20 || second.Repos[0].Base != base {
+		t.Fatalf("after a failed sync: %d bytes, base %q", size(second), second.Repos[0].Base)
+	}
+	third := sync("s3", "fetched")
+	t.Logf("bundles: %d, %d, %d bytes", size(first), size(second), size(third))
+	if size(third) > 64<<10 || third.Repos[0].Base != tip {
+		t.Fatalf("after a fetch of the same commit: %d bytes, base %q", size(third), third.Repos[0].Base)
+	}
+	f.p.mu.Lock()
+	diffBase := f.p.state.GitBases["app"]
+	f.p.mu.Unlock()
+	if diffBase != base {
+		t.Fatalf("live diff base %q, want the clone's %s", diffBase, base)
+	}
+	// A restarted runner reads it back.
+	st, err := readRunState(f.p.dir)
+	if err != nil || st.SyncBases["app"] != tip || st.GitBases["app"] != base {
+		t.Fatalf("run state: %+v %v", st, err)
+	}
+}
+
+func gitMktree(t *testing.T, dir, entries string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "mktree")
+	cmd.Stdin = strings.NewReader(entries)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func waitUntil(t *testing.T, fn func() bool) {

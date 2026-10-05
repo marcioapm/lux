@@ -72,7 +72,12 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 	if p.state != nil {
 		shimModes = p.state.ShimSyncModes
 		if !full {
+			// The last fetch's commit, else the clone's or last move's.
 			bases = maps.Clone(p.state.GitBases)
+			if bases == nil {
+				bases = map[string]string{}
+			}
+			maps.Copy(bases, p.state.SyncBases)
 		}
 	}
 	p.mu.Unlock()
@@ -151,11 +156,15 @@ func (p *placement) removeSyncBundles(ctx context.Context, requestID string) {
 // moved: the sync changed the checkout.
 func moved(res proto.SyncResult) bool { return res.Moved() }
 
-// reportSync sends a repository's git.sync event, and keeps a moved
-// checkout's commit as the base of its live diffs.
+// reportSync sends a repository's git.sync event, keeps a moved
+// checkout's commit as the base of its live diffs, and any fetched one
+// (a sync that did not fail) as its next bundle's prerequisite.
 func (p *placement) reportSync(ctx context.Context, res proto.SyncResult, requestID string) {
 	if moved(res) && res.To != "" {
 		p.setGitBase(res.Repo, res.To)
+	}
+	if res.Status != "failed" && res.To != "" {
+		p.setSyncBase(res.Repo, res.To)
 	}
 	var d map[string]any
 	b, _ := json.Marshal(res)
