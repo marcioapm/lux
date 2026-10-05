@@ -137,7 +137,7 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Push a running Run's repositories",
 		Description: "To the spec's git.push branch, with the runner's credentials. The outcome arrives as a git.push event carrying the request id: " +
 			"per repository {repo, branch, commit?, status, operation?, error?}, status pushed, up-to-date, rejected (the lease failed: the branch moved), " +
-			"refused (a merge, rebase, cherry-pick, revert or sequencer is in progress in the checkout, named by operation: nothing was pushed), failed (with error, e.g. the checkout changed while it was being pushed) or skipped (push: false).\n\n" +
+			"refused (a merge, rebase, am, cherry-pick, revert or sequencer is in progress in the checkout, named by operation: nothing was pushed), failed (with error, e.g. the checkout changed while it was being pushed) or skipped (push: false).\n\n" +
 			"expect: per repository, the commit the push branch must be at for the push to go ahead (a compare-and-swap). " +
 			"Without it, the lease is what this Run last pushed, or, the first time, that the branch does not exist.",
 		DefaultStatus: http.StatusAccepted,
@@ -148,7 +148,7 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Move a running Run's checkouts to new commits",
 		Description: "The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume), as its mode allows: " +
 			"each repository is a git.sync event, then sync.done (changed: whether a checkout moved). " +
-			"In modes fast-forward and fetch, a git.sync event's operation names a git operation in progress in the checkout: merge, rebase, cherry-pick, revert or sequencer (a sequence of picks or reverts between steps); such a checkout never moves. " +
+			"In modes fast-forward and fetch, a git.sync event's operation names a git operation in progress in the checkout: merge, rebase, am (a git am session), cherry-pick, revert or sequencer (a sequence of picks or reverts between steps); such a checkout never moves. " +
 			"Servers with afterSync run it and restart once a checkout moved; the others keep running.\n\n" +
 			"409 `sync_modes_unsupported` when a mode other than move is asked for and the Run's host runs a lux-runner without sync modes.",
 		DefaultStatus: http.StatusAccepted,

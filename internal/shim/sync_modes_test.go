@@ -663,6 +663,13 @@ func TestSyncReportsTheOperation(t *testing.T) {
 			gitT(m.t, m.dir, "fetch", "-q", m.upstream, "main")
 			gitStops(m.t, m.dir, "rebase", "--apply", "FETCH_HEAD")
 		}},
+		// rebase-apply too, but an am session: git rebase refuses it.
+		{"am", "am", "rebase-apply/applying", func(m *modeRepo) {
+			m.sideConflict()
+			patch := filepath.Join(m.t.TempDir(), "side.patch")
+			os.WriteFile(patch, []byte(gitT(m.t, m.dir, "format-patch", "--stdout", "main..side")+"\n"), 0o644)
+			gitStops(m.t, m.dir, "am", patch)
+		}},
 		{"cherry-pick", "cherry-pick", "CHERRY_PICK_HEAD", func(m *modeRepo) {
 			m.sideConflict()
 			gitStops(m.t, m.dir, "cherry-pick", "side")

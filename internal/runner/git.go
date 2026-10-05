@@ -334,7 +334,11 @@ func (p *placement) push(ctx context.Context, req proto.Push) {
 			res.Error = err.Error()
 		case op != "":
 			res.Status, res.Operation = "refused", op
-			res.Error = "a " + op + " is in progress in the checkout: finish or abort it, then push"
+			article := "a "
+			if op == "am" {
+				article = "an "
+			}
+			res.Error = article + op + " is in progress in the checkout: finish or abort it, then push"
 		default:
 			res = p.r.git.Push(ctx, p.gitRepo(r), bundle, branch, req.Leases[r.Name])
 			os.Remove(bundle)

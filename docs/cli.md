@@ -136,7 +136,7 @@ on another branch, is kept as it is) or `fetch`
 checkout). `lux sync --wait` prints each repository's outcome
 (`up-to-date`, `fast-forward`, `reset`, `kept`, `ahead`, `fetched`,
 `failed`; with the ahead and behind counts in the new modes, and
-`[rebase in progress]` when the checkout has a merge, rebase,
+`[rebase in progress]` when the checkout has a merge, rebase, am,
 cherry-pick, revert or sequencer in progress) and exits 1
 if one failed.
 
