@@ -161,31 +161,45 @@ func TestShimKnowsSyncModes(t *testing.T) {
 
 // A lux-shim that never answers, its child holding the output open past
 // its own death, is no sync modes, within the probe's deadline: runner
-// startup waits for it.
+// startup waits for it. A child in the shim's process group goes with it;
+// one that escaped the group (setsid) keeps the output open, and the probe
+// stops waiting for it WaitDelay after the deadline.
 func TestShimProbeHangs(t *testing.T) {
-	dir := t.TempDir()
-	shim := filepath.Join(dir, "lux-shim")
-	pidFile := filepath.Join(dir, "child")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\nsleep 25 &\necho $! > '"+pidFile+"'\nwait\n"), 0o755); err != nil {
-		t.Fatal(err)
+	probe := func(t *testing.T, launch string) (pid string) {
+		dir := t.TempDir()
+		shim := filepath.Join(dir, "lux-shim")
+		pidFile := filepath.Join(dir, "child")
+		if err := os.WriteFile(shim, []byte("#!/bin/sh\n"+launch+" sleep 25 &\necho $! > '"+pidFile+"'\nwait\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		ok := shimKnowsSyncModes(shim)
+		took := time.Since(start)
+		b, _ := os.ReadFile(pidFile)
+		pid = strings.TrimSpace(string(b))
+		if pid != "" {
+			t.Cleanup(func() { _ = exec.Command("kill", "-9", pid).Run() })
+		}
+		if ok || took > 13*time.Second {
+			t.Fatalf("a hanging lux-shim: sync modes %v, after %s", ok, took)
+		}
+		return pid
 	}
-	start := time.Now()
-	ok := shimKnowsSyncModes(shim)
-	took := time.Since(start)
-	b, _ := os.ReadFile(pidFile)
-	pid := strings.TrimSpace(string(b))
-	if pid != "" {
-		t.Cleanup(func() { _ = exec.Command("kill", "-9", pid).Run() })
-	}
-	if ok || took > 12*time.Second {
-		t.Fatalf("a hanging lux-shim: sync modes %v, after %s", ok, took)
-	}
-	// Its process group went with it: the child too (a zombie until init
-	// reaps it, so its state, not its existence).
-	stat, err := os.ReadFile("/proc/" + pid + "/stat")
-	if pid == "" || err == nil && !strings.Contains(string(stat), ") Z ") {
-		t.Fatalf("the hanging lux-shim's child %q outlived the probe: %s", pid, stat)
-	}
+	t.Run("its child in its process group", func(t *testing.T) {
+		pid := probe(t, "")
+		// Its process group went with it: the child too (a zombie until
+		// init reaps it, so its state, not its existence).
+		stat, err := os.ReadFile("/proc/" + pid + "/stat")
+		if pid == "" || err == nil && !strings.Contains(string(stat), ") Z ") {
+			t.Fatalf("the hanging lux-shim's child %q outlived the probe: %s", pid, stat)
+		}
+	})
+	t.Run("its child escaped the process group", func(t *testing.T) {
+		if _, err := exec.LookPath("setsid"); err != nil {
+			t.Fatal("setsid is needed to start a child outside the shim's process group")
+		}
+		probe(t, "setsid")
+	})
 }
 
 // A sync that fetched a commit into the checkout, moved or not, is the
