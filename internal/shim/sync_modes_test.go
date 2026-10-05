@@ -679,8 +679,9 @@ func TestSyncReportsTheOperation(t *testing.T) {
 			m.commitLocal("a.txt", "y\n")
 			gitStops(m.t, m.dir, "revert", "--no-edit", "HEAD~1")
 		}},
-		// A range's first pick concluded by hand: only sequencer is left.
-		{"sequencer", "sequencer", "sequencer", func(m *modeRepo) {
+		// A range's first pick, conflicting, concluded by hand and not
+		// continued: CHERRY_PICK_HEAD is gone, sequencer/todo is left.
+		{"sequencer", "sequencer", "sequencer/todo", func(m *modeRepo) {
 			m.sideConflict()
 			gitT(m.t, m.dir, "checkout", "-q", "side")
 			m.commitLocal("b.txt", "b\n")
@@ -689,6 +690,19 @@ func TestSyncReportsTheOperation(t *testing.T) {
 			m.write("a.txt", "resolved\n")
 			gitT(m.t, m.dir, "add", "a.txt")
 			gitT(m.t, m.dir, "commit", "-q", "--no-edit")
+		}},
+		// A range A B stopped on B's conflict: CHERRY_PICK_HEAD and
+		// sequencer/todo both, and git calls it a cherry-pick.
+		{"range stopped on its second pick", "cherry-pick", "sequencer/todo", func(m *modeRepo) {
+			gitT(m.t, m.dir, "checkout", "-q", "-b", "side")
+			m.commitLocal("b.txt", "b\n")
+			m.commitLocal("a.txt", "side\n")
+			gitT(m.t, m.dir, "checkout", "-q", "main")
+			m.commitLocal("a.txt", "main\n")
+			gitStops(m.t, m.dir, "cherry-pick", "side~1", "side")
+			if _, err := os.Stat(filepath.Join(m.dir, ".git", "CHERRY_PICK_HEAD")); err != nil {
+				m.t.Fatal(err)
+			}
 		}},
 	} {
 		for _, mode := range []string{proto.SyncFastForward, proto.SyncFetch} {
@@ -723,6 +737,29 @@ func TestSyncReportsTheOperation(t *testing.T) {
 			m.push("a.txt", "two\n")
 			if res := m.sync(mode); res.Operation != "" || res.Status == "failed" {
 				t.Fatalf("%s: %+v", mode, res)
+			}
+		}
+	})
+	// An empty sequencer directory, git's own sequencer finds nothing in
+	// progress: no operation, a fast-forward moves, the directory stays.
+	t.Run("stale sequencer", func(t *testing.T) {
+		for _, mode := range []string{proto.SyncFastForward, proto.SyncFetch} {
+			m := newModeRepo(t)
+			seq := filepath.Join(m.dir, ".git", "sequencer")
+			if err := os.Mkdir(seq, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tip := m.push("a.txt", "two\n")
+			res := m.sync(mode)
+			want := map[string]string{proto.SyncFastForward: "fast-forward", proto.SyncFetch: "fetched"}[mode]
+			if res.Operation != "" || res.Status != want {
+				t.Fatalf("%s: %+v", mode, res)
+			}
+			if mode == proto.SyncFastForward && m.head() != tip {
+				t.Fatalf("HEAD %s, want %s", m.head(), tip)
+			}
+			if _, err := os.Stat(seq); err != nil {
+				t.Fatalf("sequencer removed: %v", err)
 			}
 		}
 	})

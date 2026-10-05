@@ -164,13 +164,16 @@ func TestPushRefusesAnOperationInProgress(t *testing.T) {
 func TestPushRefusalNamesTheOperation(t *testing.T) {
 	for _, c := range []struct{ op, state string }{
 		{"merge", "MERGE_HEAD"}, {"rebase", "rebase-apply"}, {"cherry-pick", "CHERRY_PICK_HEAD"},
-		{"revert", "REVERT_HEAD"}, {"sequencer", "sequencer"},
+		{"revert", "REVERT_HEAD"}, {"sequencer", "sequencer/todo"},
 	} {
 		t.Run(c.op, func(t *testing.T) {
 			pf := newPushFixture(t, containerExec)
 			// The state git leaves, as git resolves its path.
-			p := run(t, pf.checkout("app"), "git", "rev-parse", "--git-path", c.state)
-			if err := os.MkdirAll(filepath.Join(pf.checkout("app"), p), 0o755); err != nil {
+			p := filepath.Join(pf.checkout("app"), run(t, pf.checkout("app"), "git", "rev-parse", "--git-path", c.state))
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			a := pf.pushed(t)["app"]
@@ -285,6 +288,28 @@ func TestPushRefusesAnAmSession(t *testing.T) {
 	}
 	if strings.Contains(pf.bundled(), "/co/w/app") || pf.branch("app") != "" {
 		t.Fatal("bundled or pushed")
+	}
+}
+
+// An empty sequencer directory (no todo: git has no sequence in progress)
+// is not an operation: the checkout is pushed, the directory left alone.
+func TestPushIgnoresAStaleSequencer(t *testing.T) {
+	pf := newPushFixture(t, containerExec)
+	app := pf.checkout("app")
+	head := pf.commitTwo(t)
+	seq := filepath.Join(app, ".git", "sequencer")
+	if err := os.Mkdir(seq, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", app, "cherry-pick", "--continue").CombinedOutput(); err == nil {
+		t.Fatalf("git sees a sequence: %s", out)
+	}
+	a := pf.pushed(t)["app"]
+	if a["status"] != "pushed" || a["commit"] != head || a["operation"] != nil || pf.branch("app") != head {
+		t.Fatalf("%v", a)
+	}
+	if _, err := os.Stat(seq); err != nil {
+		t.Fatalf("sequencer removed: %v", err)
 	}
 }
 
