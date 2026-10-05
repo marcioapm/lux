@@ -195,34 +195,10 @@ func TestShimProbeHangs(t *testing.T) {
 func TestSyncBundlesFromTheLastFetch(t *testing.T) {
 	f := newSyncFixture(t, `true`)
 	ctx := context.Background()
-	base := gitOut(t, f.bare, "rev-parse", "main")
-	// 4 MiB that does not compress, upstream.
-	big := filepath.Join(t.TempDir(), "big")
-	b := make([]byte, 4<<20)
-	if _, err := rand.Read(b); err != nil {
-		t.Fatal(err)
-	}
-	os.WriteFile(big, b, 0o644)
-	blob := gitOut(t, f.bare, "hash-object", "-w", big)
-	tree := gitMktree(t, f.bare, "100644 blob "+blob+"\tbig\n")
-	commit := func(tree, parent, msg string) string {
-		return gitOut(t, f.bare, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree, "-p", parent, "-m", msg)
-	}
-	// The range: a big commit, then a small one on top. A bundle of the
-	// tip alone (git writes no empty bundle) holds only the small one.
-	tip := commit(gitMktree(t, f.bare, "100644 blob "+blob+"\tbig\n100644 blob "+gitOut(t, f.bare, "rev-parse", base+":a.txt")+"\tsmall\n"),
-		commit(tree, base, "big"), "small")
-	gitOut(t, f.bare, "update-ref", "refs/heads/main", tip)
+	base, tip := bigRange(t, f.bare)
 	f.p.state.GitBases = map[string]string{"app": base}
 	refs := []proto.SyncRef{{Repo: "app", Ref: "main", Mode: proto.SyncFetch}}
-	size := func(a *proto.SyncArgs) int64 {
-		t.Helper()
-		fi, err := os.Stat(filepath.Join(f.p.r.cfg.DataDir, "rt", strings.TrimPrefix(a.Repos[0].Bundle, proto.ShimRunDir+"/")))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return fi.Size()
-	}
+	size := func(a *proto.SyncArgs) int64 { return bundleSize(t, f, a) }
 	sync := func(id, status string) *proto.SyncArgs {
 		t.Helper()
 		a, failed := f.p.prepareSync(ctx, f.sp, refs, id, false)
@@ -256,6 +232,73 @@ func TestSyncBundlesFromTheLastFetch(t *testing.T) {
 	st, err := readRunState(f.p.dir)
 	if err != nil || st.SyncBases["app"] != tip || st.GitBases["app"] != base {
 		t.Fatalf("run state: %+v %v", st, err)
+	}
+}
+
+// bigRange makes main in bare base (its tip now), then a commit adding 4
+// MiB that does not compress, then a small one on top (git writes no empty
+// bundle, so a bundle of the tip alone holds only the small one).
+func bigRange(t *testing.T, bare string) (base, tip string) {
+	t.Helper()
+	base = gitOut(t, bare, "rev-parse", "main")
+	big := filepath.Join(t.TempDir(), "big")
+	b := make([]byte, 4<<20)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(big, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	blob := gitOut(t, bare, "hash-object", "-w", big)
+	commit := func(tree, parent, msg string) string {
+		return gitOut(t, bare, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree, "-p", parent, "-m", msg)
+	}
+	tip = commit(gitMktree(t, bare, "100644 blob "+blob+"\tbig\n100644 blob "+gitOut(t, bare, "rev-parse", base+":a.txt")+"\tsmall\n"),
+		commit(gitMktree(t, bare, "100644 blob "+blob+"\tbig\n"), base, "big"), "small")
+	gitOut(t, bare, "update-ref", "refs/heads/main", tip)
+	return base, tip
+}
+
+func bundleSize(t *testing.T, f *syncFixture, a *proto.SyncArgs) int64 {
+	t.Helper()
+	fi, err := os.Stat(filepath.Join(f.p.r.cfg.DataDir, "rt", strings.TrimPrefix(a.Repos[0].Bundle, proto.ShimRunDir+"/")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Size()
+}
+
+// A placement restored from a snapshot whose checkout an earlier placement
+// only fetched into (a fetch resume) starts with luxd's SyncBases from its
+// assignment, as decoded off the wire: its next sync bundles none of what
+// was fetched, while its live diff's base stays the clone's.
+func TestRestoredPlacementBundlesFromItsSyncBases(t *testing.T) {
+	f := newSyncFixture(t, `true`)
+	ctx := context.Background()
+	base, tip := bigRange(t, f.bare)
+	f.p.r.shimSyncModes = true
+	var a proto.Assign
+	if err := json.Unmarshal(proto.Marshal(proto.Assign{RunID: "run_x", Epoch: 2, Spec: f.sp,
+		GitBases: map[string]string{"app": base}, SyncBases: map[string]string{"app": tip}}), &a); err != nil {
+		t.Fatal(err)
+	}
+	f.p.epoch, f.p.assign, f.p.state = 2, &a, nil
+	f.p.restoreState()
+	f.p.mu.Lock()
+	f.p.state.User = "1000:1000"
+	f.p.mu.Unlock()
+	args, failed := f.p.prepareSync(ctx, f.sp, []proto.SyncRef{{Repo: "app", Ref: "main", Mode: proto.SyncFetch}}, "s1", false)
+	if args == nil || len(failed) != 0 || args.Repos[0].Commit != tip {
+		t.Fatalf("%+v %+v", args, failed)
+	}
+	if n := bundleSize(t, f, args); n > 64<<10 || args.Repos[0].Base != tip {
+		t.Fatalf("restored placement's bundle: %d bytes, base %q", n, args.Repos[0].Base)
+	}
+	f.p.mu.Lock()
+	diffBase := f.p.state.GitBases["app"]
+	f.p.mu.Unlock()
+	if diffBase != base {
+		t.Fatalf("live diff base %q, want the clone's %s", diffBase, base)
 	}
 }
 
