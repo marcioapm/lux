@@ -216,10 +216,30 @@ type Assign struct {
 }
 
 // SyncRef asks for a repository's checkout to be moved to ref (a branch,
-// tag or sha), fetched through the host's mirror.
+// tag or sha), fetched through the host's mirror. Mode says when it may
+// move (SyncModes; "" is SyncMove).
 type SyncRef struct {
 	Repo string `json:"repo"`
 	Ref  string `json:"ref"`
+	Mode string `json:"mode,omitempty" doc:"move (default): the checkout becomes the ref's, a dirty or diverged one reset (what was there saved as refs/lux/pre-sync). fast-forward: it moves only when nothing can be lost (HEAD an ancestor of the ref's commit, no tracked file changed); otherwise it is kept as it is. fetch: it never moves. In fast-forward and fetch, a branch's commit is also refs/remotes/lux/<branch> in the checkout. Any other value: 422."`
+}
+
+// Sync modes: how a checkout may move.
+const (
+	SyncMove        = "move"
+	SyncFastForward = "fast-forward"
+	SyncFetch       = "fetch"
+)
+
+// SyncModes are the modes a SyncRef may ask for.
+var SyncModes = []string{SyncMove, SyncFastForward, SyncFetch}
+
+// SyncModeOf is mode, or SyncMove for "".
+func SyncModeOf(mode string) string {
+	if mode == "" {
+		return SyncMove
+	}
+	return mode
 }
 
 // Sync is MsgSync: a running placement's repositories to move. Servers
@@ -453,6 +473,10 @@ type ServerSpec struct {
 	Command []string          `json:"command,omitempty"`
 	Workdir string            `json:"workdir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+	// UnmovedCommand, when set, replaces Command if the placement's sync
+	// before init moved no checkout: Command runs afterSync first, this
+	// one does not. A shim that does not know it runs Command.
+	UnmovedCommand []string `json:"unmovedCommand,omitempty"`
 }
 
 // EvServerState is the runner's report of a server's state (a RunEvent):
