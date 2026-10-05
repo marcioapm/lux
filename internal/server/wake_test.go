@@ -703,7 +703,9 @@ func TestSyncModes(t *testing.T) {
 		}
 		return a, set.Servers[0]
 	}
-	withAfter := func(cmd []string) bool { return len(cmd) == 3 && strings.Contains(cmd[2], "'npm' 'ci' && exec 'serve'") }
+	withAfter := func(cmd []string) bool {
+		return len(cmd) == 3 && strings.Contains(cmd[2], "'npm' 'ci' && exec 'serve'")
+	}
 	plain := func(cmd []string) bool { return len(cmd) == 1 && cmd[0] == "serve" }
 	for _, c := range []struct {
 		name     string
