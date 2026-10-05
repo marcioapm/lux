@@ -650,8 +650,7 @@ func TestSyncModes(t *testing.T) {
 	}
 	// A host whose runner has no sync modes: move (or none) still goes;
 	// fast-forward and fetch are refused, nothing sent.
-	var before int
-	systemScan(t, s, `SELECT count(*) FROM host_messages WHERE type = 'sync'`, nil, &before)
+	before := syncMessages(t, s)
 	for _, mode := range []string{"fast-forward", "fetch"} {
 		body := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main"}, {"repo": "lib", "ref": "main", "mode": mode}}}
 		if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body); w.Code != http.StatusConflict ||
@@ -659,9 +658,7 @@ func TestSyncModes(t *testing.T) {
 			t.Fatalf("mode %s on an old runner: %d %s", mode, w.Code, w.Body)
 		}
 	}
-	var after int
-	systemScan(t, s, `SELECT count(*) FROM host_messages WHERE type = 'sync'`, nil, &after)
-	if after != before {
+	if after := syncMessages(t, s); after != before {
 		t.Fatalf("a refused sync was sent: %d messages, was %d", after, before)
 	}
 	for _, mode := range []string{"", "move"} {
@@ -888,6 +885,13 @@ func TestSafeSyncNotDeliveredAfterDowngrade(t *testing.T) {
 	}
 }
 
+// syncMessages counts the sync messages queued for any host.
+func syncMessages(t *testing.T, s *Server) (n int) {
+	t.Helper()
+	systemScan(t, s, `SELECT count(*) FROM host_messages WHERE type = 'sync'`, nil, &n)
+	return n
+}
+
 // A host's sync modes are what its latest Hello says, through
 // registerHost: none, then sync-modes, then none again (an older runner
 // back). After each, the API takes a fast-forward or fetch sync only with
@@ -897,10 +901,6 @@ func TestSyncModesFollowRegistration(t *testing.T) {
 	s, ctx, key, _ := wakeFixture(t)
 	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}]}}'`)
 	tok := &hostToken{}
-	syncs := func() (n int) {
-		systemScan(t, s, `SELECT count(*) FROM host_messages WHERE type = 'sync'`, nil, &n)
-		return n
-	}
 	for i, c := range []struct {
 		caps []string
 		safe int
@@ -914,13 +914,13 @@ func TestSyncModesFollowRegistration(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, mode := range []string{proto.SyncFastForward, proto.SyncFetch} {
-			before := syncs()
+			before := syncMessages(t, s)
 			body := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main", "mode": mode}}}
 			w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body)
 			if w.Code != c.safe {
 				t.Fatalf("hello %d %v, mode %s: %d %s", i, c.caps, mode, w.Code, w.Body)
 			}
-			if wrote := syncs() - before; (c.safe == http.StatusAccepted) != (wrote == 1) {
+			if wrote := syncMessages(t, s) - before; (c.safe == http.StatusAccepted) != (wrote == 1) {
 				t.Fatalf("hello %d, mode %s: %d sync messages written", i, mode, wrote)
 			}
 		}
