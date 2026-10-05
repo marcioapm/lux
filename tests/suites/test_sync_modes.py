@@ -94,7 +94,7 @@ def test_fast_forward_keeps_local_work_and_moves_a_clean_checkout(lux, runners, 
     lux.run("cancel", run_id)
 
 
-def test_resume_fast_forward_keeps_a_dirty_checkout(lux, runners, hosts, fake_image, git_server):
+def test_resume_fast_forward_keeps_a_dirty_checkout_and_moves_a_clean_one(lux, runners, hosts, fake_image, git_server):
     git_server.create("app", {"message.txt": "one\n"})
     runners.start(hosts[0])
     run_id = lux.submit(preview_spec(fake_image, git_server))
@@ -120,4 +120,21 @@ def test_resume_fast_forward_keeps_a_dirty_checkout(lux, runners, hosts, fake_im
     # Nothing moved: the server started without its afterSync.
     wait_state(lux, sv["id"], "ready")
     assert after_syncs(lux, run_id) == 0
+
+    # A clean checkout behind the branch: the resume fast-forwards it, and
+    # the server runs its afterSync once before it starts.
+    git(lux, run_id, "checkout", "-q", "--", "message.txt")
+    lux.run("stop", run_id, "--wait", timeout=120)
+    three = git_server.commit_on("app", "main", "message.txt", "three\n")
+    lux.run("resume", run_id, "--sync", "app=main", "--sync-mode", "fast-forward",
+            "--secret", f"GIT_TOKEN={git_server.token}", "--wait", timeout=180)
+    r = resume_sync(lux, run_id, three)
+    assert r["status"] == "fast-forward" and r["from"] == base and r["ahead"] == 0 and r["behind"] == 2, r
+    assert git(lux, run_id, "rev-parse", "HEAD") == three
+    assert git(lux, run_id, "symbolic-ref", "--short", "HEAD") == "main"
+    files = exec_in(lux, run_id, "cat", "/workspace/app/message.txt", "/workspace/app/other.txt", "/workspace/app/untracked.txt")
+    assert files.stdout == "three\ntheirs\nnew\n", files.stdout
+    wait_state(lux, sv["id"], "ready")
+    wait_until(lambda: after_syncs(lux, run_id) >= 1, 60, 1, "afterSync never ran after the resume's fast-forward")
+    assert after_syncs(lux, run_id) == 1
     lux.run("cancel", run_id)
