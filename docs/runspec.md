@@ -682,7 +682,11 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   a `git am` session, finished with `git am --continue` or `--abort`, never
   `git rebase`), `cherry-pick` (`CHERRY_PICK_HEAD`), `revert` (`REVERT_HEAD`) or
   `sequencer` (a sequence of picks or reverts between two of them),
-  looked up where git resolves them (`git rev-parse --git-path`). The
+  looked up where git resolves them (`git rev-parse --git-path`) as the
+  result is made, after the fetch, so an operation that starts or ends
+  while the sync fetches is reported as it then stands. A `fast-forward`
+  checks once more immediately before it moves, and moves only with none
+  in progress. The
   operation is the workload's to finish (`git rebase --continue`, `git
   merge --continue`) or abort: commands that switch branches or start
   another merge are refused by git until then. A checkout restored

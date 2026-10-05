@@ -75,6 +75,24 @@ func gitIn(ctx context.Context, dir string, args ...string) (string, error) {
 }
 
 func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
+	res := syncOnce(ctx, r)
+	if (res.Mode != proto.SyncFastForward && res.Mode != proto.SyncFetch) || res.Status == "fast-forward" || res.From == "" {
+		// A fast-forward was checked for one just before it moved.
+		return res
+	}
+	// Looked at as the result is made, whatever the outcome: one may have
+	// started or ended while the sync ran.
+	op, err := operationInProgress(ctx, r.Path)
+	switch {
+	case err == nil:
+		res.Operation = op
+	case res.Status != "failed":
+		return failedWith(res, err)
+	}
+	return res
+}
+
+func syncOnce(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 	res := proto.SyncResult{Repo: r.Name, Ref: r.Ref, Mode: proto.SyncModeOf(r.Mode), To: r.Commit, Status: "failed"}
 	fail := func(err error) proto.SyncResult { return failedWith(res, err) }
 	if !slices.Contains(proto.SyncModes, res.Mode) {
@@ -88,12 +106,6 @@ func syncRepo(ctx context.Context, r proto.SyncRepo) proto.SyncResult {
 		return fail(err)
 	}
 	res.From = from
-	if res.Mode != proto.SyncMove {
-		// Reported whatever the outcome, a failed fetch included.
-		if res.Operation, err = operationInProgress(ctx, r.Path); err != nil {
-			return fail(err)
-		}
-	}
 	if _, err := gitIn(ctx, r.Path, "fetch", "--quiet", "--no-tags", r.Bundle, "+refs/lux/sync:refs/lux/sync"); err != nil {
 		if r.Base != "" {
 			_, lacks := gitIn(ctx, r.Path, "cat-file", "-e", r.Base+"^{commit}")

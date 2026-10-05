@@ -728,6 +728,89 @@ func TestSyncReportsTheOperation(t *testing.T) {
 	})
 }
 
+// fetchGit puts a git ahead of the real one on PATH that runs workload (sh,
+// in the checkout, the real git as "$REAL") once, at the sync's fetch:
+// after the operation was first looked at.
+func fetchGit(t *testing.T, workload string) {
+	t.Helper()
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\nREAL='" + real + "'\nhit=\nfor a in \"$@\"; do [ \"$a\" = fetch ] && hit=1; done\n" +
+		"if [ -n \"$hit\" ] && mkdir '" + filepath.Join(dir, "once") + "' 2>/dev/null; then\n" + workload + "\nfi\n" +
+		"exec \"$REAL\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// An operation that starts or ends while a sync fetches is what its
+// result says, whatever the outcome.
+func TestSyncOperationChangesDuringFetch(t *testing.T) {
+	const pause = `GIT_EDITOR=true "$REAL" -c sequence.editor=true -c user.name=t -c user.email=t@t rebase -i --exec false HEAD~1 >/dev/null 2>&1`
+	for _, c := range []struct {
+		name, mode, status, broken string
+		setup                      func(m *modeRepo)
+	}{
+		// A local commit and an upstream one: diverged.
+		{"kept", proto.SyncFastForward, "kept", "", func(m *modeRepo) { m.commitLocal("local.txt", "local\n"); m.push("up.txt", "up\n") }},
+		{"ahead", proto.SyncFastForward, "ahead", "", func(m *modeRepo) { m.commitLocal("local.txt", "local\n") }},
+		{"up-to-date", proto.SyncFastForward, "up-to-date", "", func(m *modeRepo) {
+			m.commitLocal("local.txt", "local\n")
+			gitT(m.t, m.upstream, "fetch", "-q", m.dir, "HEAD")
+			gitT(m.t, m.upstream, "reset", "-q", "--hard", "FETCH_HEAD")
+		}},
+		{"fetched", proto.SyncFetch, "fetched", "", func(m *modeRepo) { m.commitLocal("local.txt", "local\n"); m.push("up.txt", "up\n") }},
+		{"failed, the bundle's commit", proto.SyncFetch, "failed", "commit", func(m *modeRepo) { m.commitLocal("local.txt", "local\n") }},
+		{"failed, the fetch", proto.SyncFastForward, "failed", "fetch", func(m *modeRepo) { m.commitLocal("local.txt", "local\n") }},
+	} {
+		t.Run("starts, "+c.name, func(t *testing.T) {
+			m := newModeRepo(t)
+			c.setup(m)
+			fetchGit(t, pause)
+			res := m.syncChecked(c.mode, c.broken)
+			if _, err := os.Stat(filepath.Join(m.dir, ".git", "rebase-merge")); err != nil {
+				t.Fatalf("the rebase did not start: %v", err)
+			}
+			if res.Status != c.status || res.Operation != "rebase" {
+				t.Fatalf("%+v", res)
+			}
+		})
+		t.Run("ends, "+c.name, func(t *testing.T) {
+			m := newModeRepo(t)
+			c.setup(m)
+			gitStops(t, m.dir, "-c", "sequence.editor=true", "rebase", "-i", "--exec", "false", "HEAD~1")
+			fetchGit(t, `"$REAL" rebase --abort`)
+			res := m.syncChecked(c.mode, c.broken)
+			if _, err := os.Stat(filepath.Join(m.dir, ".git", "rebase-merge")); err == nil {
+				t.Fatal("the rebase did not end")
+			}
+			if res.Status != c.status || res.Operation != "" {
+				t.Fatalf("%+v", res)
+			}
+		})
+	}
+}
+
+// syncChecked is sync; when broken, of a commit the bundle lacks, or
+// ("fetch") from a bundle that is not there.
+func (m *modeRepo) syncChecked(mode, broken string) proto.SyncResult {
+	m.t.Helper()
+	if broken == "" {
+		return m.sync(mode)
+	}
+	bundle := filepath.Join(m.t.TempDir(), "r.bundle")
+	gitT(m.t, m.upstream, "update-ref", "refs/lux/sync", "main")
+	if broken != "fetch" {
+		gitT(m.t, m.upstream, "bundle", "create", "-q", bundle, "refs/lux/sync")
+	}
+	return SyncRepos(context.Background(), proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "r", Path: m.dir, Ref: "main", Mode: mode,
+		Commit: strings.Repeat("0", 40), Branch: "main", Bundle: bundle}}})[0]
+}
+
 // An unknown mode fails, the checkout untouched.
 func TestSyncUnknownMode(t *testing.T) {
 	m := newModeRepo(t)

@@ -259,7 +259,7 @@ type SyncRepo struct {
 // the checkout lacks the bundle's Base (the runner retries once with the
 // whole history); FullBundle: this result is that retry's. Operation, in
 // modes fast-forward and fetch: the git operation in progress in the
-// checkout (OperationOf), whatever the status.
+// checkout (OperationOf) as the result was made, whatever the status.
 type SyncResult struct {
 	Repo        string `json:"repo"`
 	Ref         string `json:"ref"`
