@@ -159,16 +159,21 @@ func TestDiffNonUTF8Patch(t *testing.T) {
 	}
 }
 
-func gitBasesOf(t *testing.T, s *Server, runID string, epoch int) map[string]string {
+func lineageBasesOf(t *testing.T, s *Server, runID string, epoch int) (gitBases, syncBases map[string]string) {
 	t.Helper()
 	ctx := context.Background()
-	var m map[string]string
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
-		m, err = gitBases(ctx, tx, runID, epoch)
+		gitBases, syncBases, err = lineageBases(ctx, tx, runID, epoch)
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
+	return gitBases, syncBases
+}
+
+func gitBasesOf(t *testing.T, s *Server, runID string, epoch int) map[string]string {
+	t.Helper()
+	m, _ := lineageBasesOf(t, s, runID, epoch)
 	return m
 }
 
@@ -243,13 +248,7 @@ func TestSyncBasesFollowFetches(t *testing.T) {
 	ctx := context.Background()
 	sync := func() map[string]string {
 		t.Helper()
-		var sb map[string]string
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
-			sb, err = syncBases(ctx, tx, "r1", 2)
-			return err
-		}); err != nil {
-			t.Fatal(err)
-		}
+		_, sb := lineageBasesOf(t, s, "r1", 2)
 		return sb
 	}
 	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
