@@ -328,42 +328,71 @@ func (p *placement) push(ctx context.Context, req proto.Push) {
 			continue
 		}
 		res := gitws.PushResult{Repo: r.Name, Branch: branch, Status: "failed"}
-		bundle, err := p.bundle(ctx, r)
-		if err == nil {
+		bundle, op, err := p.bundle(ctx, r)
+		switch {
+		case err != nil:
+			res.Error = err.Error()
+		case op != "":
+			res.Status, res.Operation = "refused", op
+			res.Error = "a " + op + " is in progress in the checkout: finish or abort it, then push"
+		default:
 			res = p.r.git.Push(ctx, p.gitRepo(r), bundle, branch, req.Leases[r.Name])
 			os.Remove(bundle)
-		} else {
-			res.Error = err.Error()
 		}
 		results = append(results, res)
 	}
 	p.event(ctx, "git.push", map[string]any{"requestId": req.RequestID, "results": results})
 }
 
+// bundleScript runs in the checkout as `sh -c bundleScript sh BUNDLE
+// STATE...`: it prints the first proto.OperationStates entry that exists
+// where git resolves it, or else bundles HEAD into BUNDLE. Any failure
+// (no sh, no git, not a checkout) exits non-zero, so nothing is pushed.
+const bundleScript = `set -e
+b=$1; shift
+for s in "$@"; do
+	p=$(git rev-parse --git-path "$s")
+	if [ -e "$p" ] || [ -L "$p" ]; then
+		printf 'lux-operation:%s\n' "$s"
+		exit 0
+	fi
+done
+exec git bundle create --quiet "$b" HEAD`
+
 // bundle has the workload's user write a git bundle of its checkout's HEAD
 // into the runtime volume (inside the container, so the checkout's config
-// and hooks run as the workload, never as the runner).
-func (p *placement) bundle(ctx context.Context, r spec.Repository) (string, error) {
+// and hooks run as the workload, never as the runner). A checkout with an
+// operation in progress (HEAD a half-done rebase or merge) is not bundled:
+// op names it. Checked by the container's sh and git, never its lux-shim,
+// so a container started with any shim is checked.
+func (p *placement) bundle(ctx context.Context, r spec.Repository) (path, op string, err error) {
 	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	// A directory the workload user may write, on the runtime volume the
 	// runner can read; emptied for each push.
 	dir := filepath.Join(rt, "push")
 	os.RemoveAll(dir)
 	if err := os.Mkdir(dir, 0o700); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := os.Chown(dir, p.user.UID, p.user.GID); err != nil {
-		return "", err
+		return "", "", err
 	}
 	name := r.Name + ".bundle"
 	user := fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
-	out, err := p.r.pm.Run(ctx, "exec", "--user", user, "--workdir", r.Path, containerName(p.runID),
-		"git", "bundle", "create", "--quiet", proto.ShimRunDir+"/push/"+name, "HEAD")
+	args := []string{"exec", "--user", user, "--workdir", r.Path, containerName(p.runID),
+		"sh", "-c", bundleScript, "sh", proto.ShimRunDir + "/push/" + name}
+	out, err := p.r.pm.Run(ctx, append(args, proto.OperationStates...)...)
 	if err != nil {
-		return "", fmt.Errorf("git bundle in the container: %v %s", err, strings.TrimSpace(string(out)))
+		return "", "", fmt.Errorf("git bundle in the container: %v %s", err, strings.TrimSpace(string(out)))
 	}
-	return filepath.Join(dir, name), nil
+	if state, found := strings.CutPrefix(strings.TrimSpace(string(out)), "lux-operation:"); found {
+		if op = proto.OperationOf(state); op == "" {
+			return "", "", fmt.Errorf("git bundle in the container: unknown operation state %q", state)
+		}
+		return "", op, nil
+	}
+	return filepath.Join(dir, name), "", nil
 }

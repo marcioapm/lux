@@ -23,14 +23,16 @@ import (
 // syncFixture is a running placement of run_x with repository app (a bare
 // repository at bare), whose podman is script (given podman's arguments),
 // and whose reports to luxd are acked; syncs are the git.sync events
-// reported so far. The script sees the bare repository as $BARE.
+// reported so far, pushes the git.push events' data. The script sees the
+// bare repository as $BARE.
 type syncFixture struct {
-	p     *placement
-	sp    spec.RunSpec
-	bare  string
-	mu    sync.Mutex
-	syncs []proto.SyncResult
-	done  []map[string]any
+	p      *placement
+	sp     spec.RunSpec
+	bare   string
+	mu     sync.Mutex
+	syncs  []proto.SyncResult
+	done   []map[string]any
+	pushes []map[string]any
 }
 
 func newSyncFixture(t *testing.T, script string) *syncFixture {
@@ -87,6 +89,10 @@ func newSyncFixture(t *testing.T, script string) *syncFixture {
 				case proto.EvSyncDone:
 					f.mu.Lock()
 					f.done = append(f.done, ev.Data)
+					f.mu.Unlock()
+				case "git.push":
+					f.mu.Lock()
+					f.pushes = append(f.pushes, ev.Data)
 					f.mu.Unlock()
 				case proto.EvGitSync:
 					var res proto.SyncResult
