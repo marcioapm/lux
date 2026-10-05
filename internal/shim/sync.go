@@ -197,7 +197,9 @@ func syncKeeping(ctx context.Context, r proto.SyncRepo, res proto.SyncResult, ch
 				}
 			}
 		}
-		if _, err := gitIn(ctx, r.Path, checkout...); err != nil {
+		// An ignored file the commit tracks is local bytes too.
+		keep := append([]string{checkout[0], checkout[1], "--no-overwrite-ignore"}, checkout[2:]...)
+		if _, err := gitIn(ctx, r.Path, keep...); err != nil {
 			return fail(err)
 		}
 		res.Status = "fast-forward"
