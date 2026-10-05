@@ -494,6 +494,9 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		if a.GitBases, err = gitBases(ctx, tx, r.ID, epoch); err != nil {
 			return err
 		}
+		if a.SyncBases, err = syncBases(ctx, tx, r.ID, epoch); err != nil {
+			return err
+		}
 	}
 	if resume {
 		a.Resume = &proto.ResumeInfo{SessionID: r.SessionID, Snapshot: snap}

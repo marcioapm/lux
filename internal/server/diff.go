@@ -174,6 +174,18 @@ func notRunning(runState, plState string) error {
 // scheduled before lineage was recorded (no snapshotId) has only its own
 // events: an earlier placement's may not be what it restored.
 func gitBases(ctx context.Context, tx pgx.Tx, runID string, epoch int) (map[string]string, error) {
+	return lineageBases(ctx, tx, runID, epoch, false)
+}
+
+// syncBases are, like gitBases, per repository, the last commit fetched
+// into the checkout: its clone, or any git.sync that did not fail (one
+// that kept or only fetched too). A sync's bundle leaves out its history.
+func syncBases(ctx context.Context, tx pgx.Tx, runID string, epoch int) (map[string]string, error) {
+	return lineageBases(ctx, tx, runID, epoch, true)
+}
+
+// lineageBases is gitBases, or syncBases with fetched.
+func lineageBases(ctx context.Context, tx pgx.Tx, runID string, epoch int, fetched bool) (map[string]string, error) {
 	m := map[string]string{}
 	for e := epoch; e > 0; {
 		// The types are literals so the plan can use run_events_sync.
@@ -181,8 +193,9 @@ func gitBases(ctx context.Context, tx pgx.Tx, runID string, epoch int) (map[stri
 				CASE WHEN type = 'git.clone' THEN coalesce(data->>'commit', '') ELSE coalesce(data->>'to', '') END
 			FROM run_events WHERE run_id = $1 AND epoch = $2 AND type IN ('git.clone', 'git.sync')
 			  AND ((type = 'git.clone' AND data->>'status' = 'cloned')
-			    OR (type = 'git.sync' AND data->>'status' IN ('fast-forward', 'reset') AND data->>'to' <> ''))
-			ORDER BY id DESC`, runID, e)
+			    OR (type = 'git.sync' AND data->>'to' <> ''
+			      AND (data->>'status' IN ('fast-forward', 'reset') OR $3 AND data->>'status' <> 'failed')))
+			ORDER BY id DESC`, runID, e, fetched)
 		if err != nil {
 			return nil, err
 		}

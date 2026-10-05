@@ -211,6 +211,10 @@ type Assign struct {
 	// last synced it to, for repositories this one restores rather than
 	// clones.
 	GitBases map[string]string `json:"gitBases,omitempty"`
+	// SyncBases: per repository, the last commit an earlier placement
+	// fetched into the checkout this one restores (its clone, or any sync
+	// that did not fail): the prerequisite of its next sync's bundle.
+	SyncBases map[string]string `json:"syncBases,omitempty"`
 	// Sync: repositories whose restored checkout moves to a ref before init.
 	Sync []SyncRef `json:"sync,omitempty"`
 }
