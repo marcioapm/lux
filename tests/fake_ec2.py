@@ -189,14 +189,18 @@ class FakeEC2:
         return H
 
     def _RunInstances(self, q):
-        if self.fail_launches:
-            raise FakeError("InsufficientInstanceCapacity", "no capacity (fake)")
         itype, subnet = q.get("InstanceType") or FAKE_TEMPLATE_TYPE, q.get("SubnetId", "")
+        if self.fail_launches:
+            # EC2's own wording, which names the zone asked for.
+            raise FakeError("InsufficientInstanceCapacity",
+                            f"We currently do not have sufficient {itype} capacity in the Availability Zone "
+                            f"you requested ({self._zone(subnet)}). Our system will be working on provisioning "
+                            f"additional capacity. (fake)")
         with self.lock:
             self.launch_attempts.append((itype, subnet))
         failure = self.launch_failures.get((itype, subnet)) or self.launch_failures.get((itype, "*"))
         if failure:
-            raise FakeError(failure, f"no {itype} in {subnet or 'the default subnet'} (fake)")
+            raise FakeError(failure, f"no {itype} in {self._zone(subnet)} (fake)")
         userdata = base64.b64decode(q.get("UserData", "")).decode()
         env = _parse_user_data(userdata)
         tags = {}
@@ -227,6 +231,12 @@ class FakeEC2:
                 f"<placement><availabilityZone>{escape(zone)}</availabilityZone></placement>"
                 f"<instanceState><code>0</code><name>pending</name>"
                 f"</instanceState></item></instancesSet></RunInstancesResponse>")
+
+    def _zone(self, subnet: str) -> str:
+        """The availability zone a capacity error names: one per subnet, as
+        EC2's own message does ("subnet-b" is in "<region>b")."""
+        region = self.template.get("region") or "us-east-1"
+        return f"{region}{subnet.rsplit('-', 1)[-1]}" if subnet else f"{region} default subnet"
 
     def _boot(self, iid: str):
         """Start the instance's host and, as its AMI's boot script would,
