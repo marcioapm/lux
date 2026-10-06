@@ -463,6 +463,20 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   ones kept ready. It keeps at
   least `--min` hosts and never more than `--max`. Launches alternate
   across the template's subnets.
+- **No capacity:** when `RunInstances` fails with
+  `InsufficientInstanceCapacity`, `InsufficientCapacity` or `Unsupported`
+  (the type is not offered in that zone), the same launch tries the
+  template's next subnet, wrapping round from the one it began in, then
+  each of `fallbackInstanceTypes` (optional, at most 4, each distinct
+  from `instanceType`, which it needs) in every subnet the same way:
+  types `[m8g, m7g]` and subnets `[a, b, c]`, starting at `b`, try m8g in
+  b, c, a, then m7g in b, c, a. Each step is logged (`ec2: no capacity`).
+  These errors are not retried in place; any other error (a quota such
+  as `VcpuLimitExceeded`, a permission, a bad parameter) ends the launch
+  at once. A launch with no capacity anywhere fails naming the code and
+  the candidates, and is retried on the next pass. Fallback types launch
+  from the same launch template, so its AMI must suit them (same
+  architecture); the host reports the type it got (`lux hosts ls`).
 - **Scale down:** a host idle longer than the pool's `--scale-down-after`
   (default `LUX_SCALE_DOWN_AFTER`, 10m), above the minimum and warm count,
   is cordoned. It is terminated once

@@ -3,8 +3,15 @@
 // A pool's template names what to launch:
 //
 //	{"region": "eu-west-1", "launchTemplate": "lt-0abc…" (id or name),
-//	 "instanceType": "m7i.2xlarge", "subnets": ["subnet-…", …],
-//	 "tags": {"team": "platform"}, "spot": true, "userData": "ignition"}
+//	 "instanceType": "m7i.2xlarge", "fallbackInstanceTypes": ["m6i.2xlarge"],
+//	 "subnets": ["subnet-…", …], "tags": {"team": "platform"}, "spot": true,
+//	 "userData": "ignition"}
+//
+// A launch EC2 has no capacity for (InsufficientInstanceCapacity,
+// InsufficientCapacity, or Unsupported: the type is not offered in that
+// zone) tries instanceType in each of the subnets, from the pool's next one
+// round, then each fallbackInstanceTypes entry the same way. Any other
+// error ends the launch.
 //
 // With "spot", instances are one-time spot instances, terminated on
 // interruption. Every instance's user data sets LUX_EC2_IMDS, so its
