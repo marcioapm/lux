@@ -78,6 +78,12 @@ class FakeEC2:
         self.instances: dict[str, dict] = {}  # id → {state, host, tags, userdata}
         self.calls: list[str] = []
         self.fail_launches = False
+        # (instanceType, subnet) → an EC2 error code RunInstances fails
+        # with there; "*" as the subnet fails the type in every subnet.
+        self.launch_failures: dict[tuple[str, str], str] = {}
+        # (instanceType, subnet) of each RunInstances not refused by
+        # fail_launches, in order.
+        self.launch_attempts: list[tuple[str, str]] = []
         self.no_boot = False  # launched instances never start a runner
         self.lose_reply = False
         self.notices: dict[str, dict] = {}  # id → spot instance-action
@@ -172,7 +178,7 @@ class FakeEC2:
                 except KeyError:
                     code, xml = 400, _error("InvalidAction", action)
                 except FakeError as e:
-                    code, xml = 400, _error(e.code, str(e))
+                    code, xml = e.status, _error(e.code, str(e))
                 out = xml.encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "text/xml")
@@ -185,6 +191,12 @@ class FakeEC2:
     def _RunInstances(self, q):
         if self.fail_launches:
             raise FakeError("InsufficientInstanceCapacity", "no capacity (fake)")
+        itype, subnet = q.get("InstanceType") or FAKE_TEMPLATE_TYPE, q.get("SubnetId", "")
+        with self.lock:
+            self.launch_attempts.append((itype, subnet))
+        failure = self.launch_failures.get((itype, subnet)) or self.launch_failures.get((itype, "*"))
+        if failure:
+            raise FakeError(failure, f"no {itype} in {subnet or 'the default subnet'} (fake)")
         userdata = base64.b64decode(q.get("UserData", "")).decode()
         env = _parse_user_data(userdata)
         tags = {}
@@ -209,7 +221,6 @@ class FakeEC2:
             raise FakeError("RequestLimitExceeded", "the reply was lost (fake)")
         # As EC2: the reply names the type actually launched (the launch
         # template's when the request gives none) and the zone.
-        itype = q.get("InstanceType") or FAKE_TEMPLATE_TYPE
         zone = (self.template.get("region") or "us-east-1") + "a"
         return (f'<RunInstancesResponse xmlns="{NS}"><reservationId>r-{uuid.uuid4().hex[:17]}</reservationId>'
                 f"<instancesSet><item><instanceId>{iid}</instanceId><instanceType>{escape(itype)}</instanceType>"
@@ -297,9 +308,14 @@ class FakeEC2:
 
 
 class FakeError(Exception):
+    # EC2 answers a capacity shortage with a 500 (the SDK's default retryer
+    # would retry it), and the client's own mistakes with a 400.
+    SERVER_ERRORS = {"InsufficientInstanceCapacity", "InsufficientCapacity", "Unsupported", "InternalError"}
+
     def __init__(self, code: str, msg: str):
         super().__init__(msg)
         self.code = code
+        self.status = 500 if code in self.SERVER_ERRORS else 400
 
 
 def _error(code: str, msg: str) -> str:

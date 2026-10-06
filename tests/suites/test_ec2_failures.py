@@ -63,6 +63,28 @@ def test_a_failed_launch_is_retried(lux, ec2):
     launched = [h for h in lux.json("hosts", "ls", "--all") if h["pool"] == "burst" and h.get("providerId")]
     assert launched and all(h["launch"]["outcome"] == "launched" for h in launched), launched
     assert {h["id"] for h in refused}.isdisjoint({h["id"] for h in launched}), (refused, launched)
+    # The fake answers InsufficientInstanceCapacity with a 500, as EC2 does:
+    # luxd makes one request per candidate (the pool's two subnets), with no
+    # SDK retries of the same one.
+    refused = lux.json("hosts", "ls", "--state", "launch_failed")
+    assert ec2.calls.count("RunInstances") == 2 * len(refused) + len(launched), (ec2.calls, refused, launched)
+
+
+def test_a_launch_falls_back_to_the_next_instance_type(lux, ec2):
+    """No capacity for the pool's instance type in either subnet: the same
+    launch tries each subnet, then the fallback type, and the host is the
+    fallback's."""
+    fake_only(ec2)
+    ec2.launch_failures = {("m7i.large", "*"): "InsufficientInstanceCapacity"}
+    pool(lux, ec2, max=1, template={**ec2.template, "fallbackInstanceTypes": ["m6i.large"]})
+    run_id = lux.submit(generic(ALPINE_IMAGE, "true", placement={"pool": "burst"}))
+    lux.wait_state(run_id, "succeeded", timeout=180)
+    [host] = [h for h in lux.json("hosts", "ls", "--all") if h["pool"] == "burst" and h.get("providerId")]
+    assert host["instanceType"] == "m6i.large", host
+    assert host["launch"]["outcome"] == "launched", host
+    assert ec2.launch_attempts[:3] == [("m7i.large", "subnet-a"), ("m7i.large", "subnet-b"), ("m6i.large", "subnet-a")], \
+        ec2.launch_attempts
+    assert not [e for e in pool_events(lux) if e["type"] == "pool.launch_failed"], pool_events(lux)
 
 
 def test_a_purged_instance_does_not_write_off_the_others(lux, ec2):
