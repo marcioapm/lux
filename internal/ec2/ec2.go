@@ -196,7 +196,12 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	// memory: LUX_RUNNER_MEMORY is all that differs.
 	byType := map[string]string{}   // instance type → base64 user data
 	byMemory := map[string]string{} // LUX_RUNNER_MEMORY → base64 user data
-	var lastErr error
+	// The all-fail error wraps the first candidate in the template's order,
+	// which every full sweep tries: EC2's message names the zone, and a
+	// rotation-dependent one would keep pool.launch_failed events apart.
+	headline := candidates(t, 0)[0]
+	var headErr error
+	headCode := ""
 	cands := candidates(t, start)
 	for n, cand := range cands {
 		ud, ok := byType[cand.instanceType]
@@ -231,28 +236,34 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 			}
 			return none, fmt.Errorf("ec2 RunInstances: %w", err)
 		}
-		lastErr = err
+		if cand == headline {
+			headErr, headCode = err, code
+		}
 		if n+1 < len(cands) {
 			p.log.Warn("ec2: no capacity; trying the next candidate", "instanceType", cand.instanceType, "subnet", cand.subnet,
 				"code", code, "next", cands[n+1].String())
 		}
 	}
 	// The code first: the provisioner keeps 200 characters of a host's
-	// launch error. The candidates in the template's order, not this
-	// launch's, so that consecutive failures read alike and their
-	// pool.launch_failed events fold into one.
-	code, _ := capacityError(lastErr)
-	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", code, candidateList(t), lastErr)
+	// launch error. Nothing in the text depends on this launch's rotation,
+	// so consecutive failures read alike and their events fold into one.
+	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", headCode, candidateList(t), headErr)
 }
 
-// candidateList is every candidate of t, by type: "m8g.2xlarge in subnet-a,
-// subnet-b; m7g.2xlarge in subnet-a, subnet-b".
+// candidateList is every candidate of t: "m8g.2xlarge, m7g.2xlarge in
+// subnet-a, subnet-b" (every type is tried in every subnet).
 func candidateList(t Template) string {
-	var perType []string
-	for _, it := range append([]string{t.InstanceType}, t.FallbackInstanceTypes...) {
-		perType = append(perType, candidate{it, strings.Join(t.Subnets, ", ")}.String())
+	var names []string
+	for _, it := range t.instanceTypes() {
+		names = append(names, candidate{instanceType: it}.String())
 	}
-	return strings.Join(perType, "; ")
+	return candidate{strings.Join(names, ", "), strings.Join(t.Subnets, ", ")}.String()
+}
+
+// instanceTypes is InstanceType, then FallbackInstanceTypes: the order
+// Launch tries them in.
+func (t Template) instanceTypes() []string {
+	return append([]string{t.InstanceType}, t.FallbackInstanceTypes...)
 }
 
 // A candidate is one RunInstances attempt: an instance type ("" for the
@@ -274,7 +285,7 @@ func (c candidate) String() string {
 // candidates is the order Launch tries: each instance type (InstanceType,
 // then FallbackInstanceTypes) in each subnet, from start and wrapping round.
 func candidates(t Template, start int) []candidate {
-	itypes := append([]string{t.InstanceType}, t.FallbackInstanceTypes...)
+	itypes := t.instanceTypes()
 	subnets := []string{""}
 	if len(t.Subnets) > 0 {
 		subnets = append(slices.Clone(t.Subnets[start:]), t.Subnets[:start]...)

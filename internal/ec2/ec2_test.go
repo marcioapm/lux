@@ -214,16 +214,16 @@ func capacityEC2(t *testing.T, fail map[[2]string]string, memMiB map[string]int)
 		action := r.PostForm.Get("Action")
 		calls[action]++
 		w.Header().Set("Content-Type", "text/xml")
-		reply := func(status int, code string) {
+		reply := func(status int, code, msg string) {
 			w.WriteHeader(status)
-			fmt.Fprintf(w, `<Response><Errors><Error><Code>%s</Code><Message>no %s (fake)</Message></Error></Errors><RequestID>1</RequestID></Response>`, code, code)
+			fmt.Fprintf(w, `<Response><Errors><Error><Code>%s</Code><Message>%s</Message></Error></Errors><RequestID>1</RequestID></Response>`, code, msg)
 		}
 		switch action {
 		case "DescribeInstanceTypes":
 			it := r.PostForm.Get("InstanceType.1")
 			mem, ok := memMiB[it]
 			if !ok {
-				reply(http.StatusBadRequest, "InvalidInstanceType")
+				reply(http.StatusBadRequest, "InvalidInstanceType", "no "+it+" (fake)")
 				return
 			}
 			fmt.Fprintf(w, `<DescribeInstanceTypesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><instanceTypeSet><item>`+
@@ -238,11 +238,15 @@ func capacityEC2(t *testing.T, fail map[[2]string]string, memMiB map[string]int)
 			}
 			switch code {
 			case "":
-			case "InsufficientInstanceCapacity", "InsufficientCapacity", "Unsupported", "InternalError":
-				reply(http.StatusInternalServerError, code)
+			case "InsufficientInstanceCapacity", "InsufficientCapacity", "Unsupported":
+				// EC2's own wording, which names the zone asked for.
+				reply(http.StatusInternalServerError, code, fmt.Sprintf("We currently do not have sufficient %s capacity in the Availability Zone you requested (%s-az).", it, sn))
+				return
+			case "InternalError":
+				reply(http.StatusInternalServerError, code, "internal error (fake)")
 				return
 			default:
-				reply(http.StatusBadRequest, code)
+				reply(http.StatusBadRequest, code, "no "+code+" (fake)")
 				return
 			}
 			fmt.Fprintf(w, `<RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><reservationId>r-1</reservationId>`+
@@ -330,31 +334,53 @@ func TestLaunchStopsAtANonCapacityErrorMidway(t *testing.T) {
 
 // Every candidate without capacity: the error leads with the code (the
 // provisioner keeps 200 characters), names the candidates, and ends with
-// EC2's own error. It reads the same whichever subnet the launch began in,
-// so repeated failures fold into one pool event. One request per
-// candidate: none is SDK-retried.
+// EC2's own error for the template's first candidate. EC2's message names
+// the zone, so wrapping whichever candidate came last would differ by the
+// subnet the launch began in; this reads the same for every rotation, and
+// repeated failures fold into one pool event. One request per candidate:
+// none is SDK-retried.
 func TestLaunchWithNoCapacityAnywhere(t *testing.T) {
 	url, attempts, _ := capacityEC2(t, map[[2]string]string{
 		{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity",
 		{"m7g.2xlarge", "*"}: "InsufficientInstanceCapacity",
 	}, nil)
 	p := New(url, discard)
-	var msgs []string
-	for range 2 {
+	want := "ec2 RunInstances: InsufficientInstanceCapacity for every candidate: " +
+		"m8g.2xlarge, m7g.2xlarge in subnet-a, subnet-b, subnet-c: " +
+		"operation error EC2: RunInstances, https response error StatusCode: 500, api error InsufficientInstanceCapacity: " +
+		"We currently do not have sufficient m8g.2xlarge capacity in the Availability Zone you requested (subnet-a-az)."
+	for i := range 3 {
 		_, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{})
 		if err == nil {
 			t.Fatal("launched without capacity")
 		}
-		msgs = append(msgs, strings.ReplaceAll(err.Error(), "RequestID: 1, ", ""))
+		if got := strings.ReplaceAll(err.Error(), "RequestID: 1, ", ""); got != want {
+			t.Errorf("launch %d (from subnet %d):\n%q\nwant\n%q", i, i, got, want)
+		}
 	}
-	want := "ec2 RunInstances: InsufficientInstanceCapacity for every candidate: " +
-		"m8g.2xlarge in subnet-a, subnet-b, subnet-c; m7g.2xlarge in subnet-a, subnet-b, subnet-c: " +
-		"operation error EC2: RunInstances, https response error StatusCode: 500, api error InsufficientInstanceCapacity: no InsufficientInstanceCapacity (fake)"
-	if msgs[0] != want || msgs[1] != want {
-		t.Errorf("errors\n%q\n%q\nwant\n%q", msgs[0], msgs[1], want)
+	if len(*attempts) != 18 {
+		t.Errorf("%d RunInstances requests for 3×6 candidates: %v", len(*attempts), *attempts)
 	}
-	if len(*attempts) != 12 {
-		t.Errorf("%d RunInstances requests for 2×6 candidates: %v", len(*attempts), *attempts)
+}
+
+// Zones failing with different codes: the headline code is the template's
+// first candidate's, whichever subnet the launch began in.
+func TestLaunchWithNoCapacityAnywhereKeepsOneCode(t *testing.T) {
+	url, _, _ := capacityEC2(t, map[[2]string]string{
+		{"m8g.2xlarge", "subnet-c"}: "Unsupported",
+		{"m8g.2xlarge", "*"}:        "InsufficientInstanceCapacity",
+		{"m7g.2xlarge", "subnet-a"}: "InsufficientCapacity",
+		{"m7g.2xlarge", "*"}:        "Unsupported",
+	}, nil)
+	p := New(url, discard)
+	for i := range 3 {
+		_, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{})
+		if err == nil {
+			t.Fatal("launched without capacity")
+		}
+		if head, _, _ := strings.Cut(err.Error(), " for every candidate"); head != "ec2 RunInstances: InsufficientInstanceCapacity" {
+			t.Errorf("launch %d: headline %q, want the code of m8g.2xlarge in subnet-a", i, head)
+		}
 	}
 }
 
