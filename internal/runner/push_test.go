@@ -225,6 +225,39 @@ func (pf *pushFixture) raceBundle(t *testing.T, workload string) {
 	}
 }
 
+// raceApp is raceBundle for any point of the push: body runs in app's
+// checkout before every git command there, with $REAL the real git and
+// "$@" the command, then the command runs (unless body exits).
+func (pf *pushFixture) raceApp(t *testing.T, body string) {
+	t.Helper()
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := "#!/bin/sh\nREAL='" + real + "'\nONCE='" + pf.root + "/once-'\n" +
+		"if [ \"$PWD\" = '" + pf.checkout("app") + "' ]; then\n" + body + "\nfi\n" +
+		"[ \"$1\" = bundle ] && echo \"$PWD\" >> '" + filepath.Join(pf.root, "bundles") + "'\n" +
+		"exec \"$REAL\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(pf.root, "bin", "git"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// refusedUnpushed asserts app was refused for a rebase, nothing pushed
+// and no bundle left.
+func (pf *pushFixture) refusedUnpushed(t *testing.T, a map[string]any) {
+	t.Helper()
+	if a["status"] != "refused" || a["operation"] != "rebase" || a["commit"] != nil {
+		t.Fatalf("app: %v", a)
+	}
+	if got := pf.branch("app"); got != "" {
+		t.Fatalf("app's lux/x pushed at %s", got)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(pf.root, "rt", "push")); len(entries) != 0 {
+		t.Fatalf("bundles left: %v", entries)
+	}
+}
+
 // commitTwo commits two files in app; returns HEAD.
 func (pf *pushFixture) commitTwo(t *testing.T) string {
 	app := pf.checkout("app")
@@ -256,6 +289,50 @@ func TestPushRefusesAnOperationStartedWhileBundling(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Join(pf.root, "rt", "push")); len(entries) != 0 {
 		t.Fatalf("bundles left: %v", entries)
+	}
+}
+
+// The first check: a rebase already stopped when the push starts is
+// refused before HEAD is read. (Here reading HEAD would abort it, so
+// without that check the later ones see none and it would push.)
+func TestPushRefusesAnOperationBeforeReadingHead(t *testing.T) {
+	pf := newPushFixture(t, containerExec)
+	app := pf.checkout("app")
+	pf.commitTwo(t)
+	if out, err := gitAs(app, "-c", "sequence.editor=true", "rebase", "-i", "--exec", "false", "HEAD~2").CombinedOutput(); err == nil {
+		t.Fatalf("the rebase did not stop: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(app, ".git", "rebase-merge")); err != nil {
+		t.Fatalf("the rebase did not start: %v", err)
+	}
+	pf.raceApp(t, `if [ "$1 $2 $3" = 'rev-parse --verify HEAD' ] && mkdir "${ONCE}head" 2>/dev/null; then
+	"$REAL" rebase --abort >/dev/null 2>&1 || exit 1
+fi`)
+	pf.refusedUnpushed(t, pf.pushed(t)["app"])
+	if _, err := os.Stat(filepath.Join(app, ".git", "rebase-merge")); err != nil {
+		t.Fatal("HEAD was read: the first check let the rebase through")
+	}
+}
+
+// The second check: a rebase that starts while HEAD is read is refused,
+// even if it ends again before the bundle (HEAD back where it was read,
+// so the third check and the head compare cannot see it).
+func TestPushRefusesAnOperationStartedWhileReadingHead(t *testing.T) {
+	pf := newPushFixture(t, containerExec)
+	pf.commitTwo(t)
+	pf.raceApp(t, `if [ "$1 $2 $3" = 'rev-parse --verify HEAD' ] && mkdir "${ONCE}head" 2>/dev/null; then
+	S=$("$REAL" "$@") || exit 1
+	GIT_EDITOR=true "$REAL" -c sequence.editor=true -c user.name=t -c user.email=t@t rebase -i --exec false HEAD~2 >/dev/null 2>&1
+	[ -d .git/rebase-merge ] || exit 1
+	printf '%s\n' "$S"
+	exit 0
+fi
+if [ "$1 $2" = 'bundle create' ] && mkdir "${ONCE}bundle" 2>/dev/null; then
+	"$REAL" rebase --abort >/dev/null 2>&1 || exit 1
+fi`)
+	pf.refusedUnpushed(t, pf.pushed(t)["app"])
+	if _, err := os.Stat(filepath.Join(pf.root, "once-head")); err != nil {
+		t.Fatal("the rebase was never started at the HEAD read")
 	}
 }
 
