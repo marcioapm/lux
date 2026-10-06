@@ -81,9 +81,10 @@ class FakeEC2:
         # (instanceType, subnet) → an EC2 error code RunInstances fails
         # with there; "*" as the subnet fails the type in every subnet.
         self.launch_failures: dict[tuple[str, str], str] = {}
-        # (instanceType, subnet) of each RunInstances not refused by
-        # fail_launches, in order.
+        # (instanceType, subnet) of each RunInstances, in order, and when
+        # it came (time.monotonic()).
         self.launch_attempts: list[tuple[str, str]] = []
+        self.launch_attempted_at: list[float] = []
         self.no_boot = False  # launched instances never start a runner
         self.lose_reply = False
         self.notices: dict[str, dict] = {}  # id → spot instance-action
@@ -190,14 +191,16 @@ class FakeEC2:
 
     def _RunInstances(self, q):
         itype, subnet = q.get("InstanceType") or FAKE_TEMPLATE_TYPE, q.get("SubnetId", "")
-        if self.fail_launches:
+        with self.lock:
+            self.launch_attempts.append((itype, subnet))
+            self.launch_attempted_at.append(time.monotonic())
+            failing = self.fail_launches
+        if failing:
             # EC2's own wording, which names the zone asked for.
             raise FakeError("InsufficientInstanceCapacity",
                             f"We currently do not have sufficient {itype} capacity in the Availability Zone "
                             f"you requested ({self._zone(subnet)}). Our system will be working on provisioning "
                             f"additional capacity. (fake)")
-        with self.lock:
-            self.launch_attempts.append((itype, subnet))
         failure = self.launch_failures.get((itype, subnet)) or self.launch_failures.get((itype, "*"))
         if failure:
             raise FakeError(failure, f"no {itype} in {self._zone(subnet)} (fake)")

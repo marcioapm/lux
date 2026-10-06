@@ -58,16 +58,32 @@ def test_a_failed_launch_is_retried(lux, ec2):
         assert h["launch"].get("finishedAt"), h
         assert not h.get("providerId") and not h["times"].get("terminated"), h
     assert "launch failed" in lux.run("hosts", "ls", "--state", "launch_failed").stdout
-    ec2.fail_launches = False
+    with ec2.lock:
+        ec2.fail_launches = False
+        attempts = list(zip(ec2.launch_attempted_at, ec2.launch_attempts))
+    refused = lux.json("hosts", "ls", "--state", "launch_failed")
     lux.wait_state(run_id, "succeeded", timeout=120)
     launched = [h for h in lux.json("hosts", "ls", "--all") if h["pool"] == "burst" and h.get("providerId")]
     assert launched and all(h["launch"]["outcome"] == "launched" for h in launched), launched
     assert {h["id"] for h in refused}.isdisjoint({h["id"] for h in launched}), (refused, launched)
-    # The fake answers InsufficientInstanceCapacity with a 500, as EC2 does:
-    # luxd makes one request per candidate (the pool's two subnets), with no
-    # SDK retries of the same one.
-    refused = lux.json("hosts", "ls", "--state", "launch_failed")
-    assert ec2.calls.count("RunInstances") == 2 * len(refused) + len(launched), (ec2.calls, refused, launched)
+    # The fake answers InsufficientInstanceCapacity with a 500 naming the
+    # zone, as EC2 does. A refused launch makes one request per candidate
+    # (the pool's two subnets), with no SDK retries, and luxd then skips
+    # both for LUX_EC2_NO_CAPACITY_RETRY_AFTER (3s here): the passes in
+    # between are refused without a call, with the same error (the one
+    # event above), so the sweeps come 3s apart, fewer than the refusals.
+    sweeps: list[list[tuple[str, str]]] = []
+    started: list[float] = []
+    last = 0.0
+    for at, attempt in attempts:
+        if not started or at - last > 1:
+            sweeps.append([])
+            started.append(at)
+        sweeps[-1].append(attempt)
+        last = at
+    assert sweeps and all(sorted(s) == [("m7i.large", "subnet-a"), ("m7i.large", "subnet-b")] for s in sweeps), sweeps
+    assert all(b - a >= 2.5 for a, b in zip(started, started[1:])), started
+    assert len(sweeps) < len(refused), (sweeps, refused)
 
 
 def test_a_launch_falls_back_to_the_next_instance_type(lux, ec2):
