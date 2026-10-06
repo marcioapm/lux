@@ -153,3 +153,41 @@ run "lux_tags_in_var_tags_are_refused" {
 
   expect_failures = [var.tags]
 }
+
+# The pool template in `lux pools set`'s --template: fallbackInstanceTypes
+# only for a pool that names fallbacks, so other pools' commands are as
+# they were.
+run "pool_template_carries_fallbacks_only_when_set" {
+  command = plan
+
+  variables {
+    runner_pools = {
+      arm64 = { instance_type = "m8g.2xlarge", arch = "arm64", fallback_instance_types = ["m7g.2xlarge", "c8g.2xlarge"] }
+      amd64 = { instance_type = "m7i.2xlarge", arch = "amd64" }
+    }
+  }
+
+  assert {
+    condition     = jsondecode(regex("--template '(.*)'$", output.runner_pools_set_commands["arm64"])[0]).fallbackInstanceTypes == ["m7g.2xlarge", "c8g.2xlarge"]
+    error_message = "The arm64 pool's template must list its fallback instance types in order."
+  }
+
+  assert {
+    condition = keys(jsondecode(regex("--template '(.*)'$", output.runner_pools_set_commands["amd64"])[0])) == [
+      "instanceType", "launchTemplate", "region", "spot", "subnets", "userData",
+    ]
+    error_message = "A pool without fallbacks must keep the template it had: no fallbackInstanceTypes key."
+  }
+}
+
+run "fallback_instance_types_luxd_would_refuse_are_refused" {
+  command = plan
+
+  variables {
+    runner_pools = {
+      arm64 = { instance_type = "m8g.2xlarge", arch = "arm64", fallback_instance_types = ["m8g.2xlarge"] }
+    }
+  }
+
+  expect_failures = [var.runner_pools]
+}
