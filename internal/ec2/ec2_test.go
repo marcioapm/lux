@@ -68,12 +68,7 @@ func TestRenderUserData(t *testing.T) {
 // module once generated) is sent once, lux's value: EC2 refuses a request
 // naming a key twice ("Duplicate tag key"), which failed every launch.
 func TestLaunchSendsEachTagKeyOnceLuxWins(t *testing.T) {
-	t.Setenv("AWS_ACCESS_KEY_ID", "test")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
-	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
-	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
-	t.Setenv("AWS_PROFILE", "")
+	awsTestEnv(t)
 	var sent [][2]string
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -105,12 +100,7 @@ func TestLaunchSendsEachTagKeyOnceLuxWins(t *testing.T) {
 // Launch returns what RunInstances reports: the instance type (not the
 // template's) and the zone; the market follows the template's spot.
 func TestLaunchReturnsInstanceFacts(t *testing.T) {
-	t.Setenv("AWS_ACCESS_KEY_ID", "test")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
-	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
-	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
-	t.Setenv("AWS_PROFILE", "")
+	awsTestEnv(t)
 	var markets []string
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -268,7 +258,14 @@ func TestLaunchFallsBackTypeMajorFromTheRoundRobinSubnet(t *testing.T) {
 		{"m7g.2xlarge", "subnet-c"}: "InsufficientCapacity",
 	}, map[string]int{"m8g.2xlarge": 32768, "m7g.2xlarge": 32768})
 	p := New(url, discard)
-	p.next["lt-1"] = 1 // this launch starts at subnet-b
+	// A launch sharing the launch template and subnets moves the round
+	// robin to subnet-b.
+	prime := `{"region": "eu-north-1", "launchTemplate": "lt-1", "userData": "env", "instanceType": "c8g.2xlarge",
+		"subnets": ["subnet-a", "subnet-b", "subnet-c"]}`
+	if _, err := p.Launch(context.Background(), json.RawMessage(prime), nil, map[string]string{}); err != nil {
+		t.Fatal(err)
+	}
+	*attempts = nil
 	l, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{"LUX_URL": "http://luxd"})
 	if err != nil {
 		t.Fatal(err)
@@ -285,8 +282,31 @@ func TestLaunchFallsBackTypeMajorFromTheRoundRobinSubnet(t *testing.T) {
 	if l.InstanceType != "m7g.2xlarge" || l.Zone != "subnet-a-az" || l.ProviderID != "i-0abc" {
 		t.Errorf("launched %+v, want m7g.2xlarge in subnet-a-az", l)
 	}
-	if p.next["lt-1"] != 2 {
-		t.Errorf("round robin at %d after one launch from 1, want 2", p.next["lt-1"])
+}
+
+// With the first fallback out of capacity too, the launch goes on to the
+// second, in the same order.
+func TestLaunchFallsBackToTheSecondFallback(t *testing.T) {
+	url, attempts, _ := capacityEC2(t, map[[2]string]string{
+		{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity",
+		{"m7g.2xlarge", "*"}: "InsufficientInstanceCapacity",
+	}, nil)
+	template := `{"region": "eu-north-1", "launchTemplate": "lt-1", "userData": "env", "instanceType": "m8g.2xlarge",
+		"fallbackInstanceTypes": ["m7g.2xlarge", "c8g.2xlarge"], "subnets": ["subnet-a", "subnet-b"]}`
+	l, err := New(url, discard).Launch(context.Background(), json.RawMessage(template), nil, map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, a := range *attempts {
+		got = append(got, a.instanceType+"@"+a.subnet)
+	}
+	want := []string{"m8g.2xlarge@subnet-a", "m8g.2xlarge@subnet-b", "m7g.2xlarge@subnet-a", "m7g.2xlarge@subnet-b", "c8g.2xlarge@subnet-a"}
+	if !slices.Equal(got, want) {
+		t.Errorf("attempts %v, want %v", got, want)
+	}
+	if l.InstanceType != "c8g.2xlarge" || l.Zone != "subnet-a-az" {
+		t.Errorf("launched %+v, want c8g.2xlarge in subnet-a-az", l)
 	}
 }
 
@@ -445,6 +465,37 @@ func TestLaunchUserDataCarriesEachTypesMemory(t *testing.T) {
 		if a.memory != "1234" {
 			t.Errorf("%s in %s offered %q, want the caller's 1234", a.instanceType, a.subnet, a.memory)
 		}
+	}
+}
+
+// One type's memory known and the other's lookup failing, either way
+// round: each attempt offers its own type's memory or none, never the
+// other type's.
+func TestLaunchUserDataMemoryWithOneLookupFailing(t *testing.T) {
+	fail := map[[2]string]string{{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity", {"m7g.2xlarge", "*"}: "InsufficientInstanceCapacity"}
+	gib := func(n int64) string { return strconv.FormatInt(n<<30, 10) }
+	for _, c := range []struct {
+		name string
+		mem  map[string]int
+		want map[string]string // instance type → LUX_RUNNER_MEMORY, "" for none
+	}{
+		{"fallback lookup fails", map[string]int{"m8g.2xlarge": 32768}, map[string]string{"m8g.2xlarge": gib(32), "m7g.2xlarge": ""}},
+		{"primary lookup fails", map[string]int{"m7g.2xlarge": 16384}, map[string]string{"m8g.2xlarge": "", "m7g.2xlarge": gib(16)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			url, attempts, _ := capacityEC2(t, fail, c.mem)
+			if _, err := New(url, discard).Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{}); err == nil {
+				t.Fatal("launched without capacity")
+			}
+			if len(*attempts) != 6 {
+				t.Fatalf("%d attempts, want 6", len(*attempts))
+			}
+			for _, a := range *attempts {
+				if a.memory != c.want[a.instanceType] {
+					t.Errorf("%s in %s offered %q, want %q", a.instanceType, a.subnet, a.memory, c.want[a.instanceType])
+				}
+			}
+		})
 	}
 }
 
@@ -618,6 +669,44 @@ func TestLaunchSkipsOnlyTheMarkedCandidates(t *testing.T) {
 	}
 }
 
+// Each capacity failure is logged at info; a launch that gets a later
+// candidate warns once, naming what it got and how many it failed or
+// skipped. A skipped candidate logs nothing.
+func TestLaunchLogsFallbacks(t *testing.T) {
+	url, _, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity"}, nil)
+	var buf strings.Builder
+	p := New(url, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey {
+			return slog.Attr{}
+		}
+		return a
+	}})))
+	lines := func() []string {
+		defer buf.Reset()
+		return strings.Split(strings.TrimSpace(buf.String()), "\n")
+	}
+	env := map[string]string{"LUX_RUNNER_MEMORY": "1"}
+	if _, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, env); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`level=INFO msg="ec2: no capacity; trying the next candidate" instanceType=m8g.2xlarge subnet=subnet-a code=InsufficientInstanceCapacity`,
+		`level=INFO msg="ec2: no capacity; trying the next candidate" instanceType=m8g.2xlarge subnet=subnet-b code=InsufficientInstanceCapacity`,
+		`level=INFO msg="ec2: no capacity; trying the next candidate" instanceType=m8g.2xlarge subnet=subnet-c code=InsufficientInstanceCapacity`,
+		`level=WARN msg="ec2: launched a later candidate: earlier ones had no capacity" instanceType=m7g.2xlarge subnet=subnet-a failed=3 skipped=0`,
+	}
+	if got := lines(); !slices.Equal(got, want) {
+		t.Errorf("first launch logged\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if _, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, env); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{`level=WARN msg="ec2: launched a later candidate: earlier ones had no capacity" instanceType=m7g.2xlarge subnet=subnet-b failed=0 skipped=3`}
+	if got := lines(); !slices.Equal(got, want) {
+		t.Errorf("second launch logged\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 // awsTestEnv points the AWS SDK's configuration away from the machine's:
 // static credentials, no shared files, no IMDS, the default retryer.
 func awsTestEnv(t *testing.T) {
@@ -698,12 +787,7 @@ func decodedUserData(t *testing.T, ud string) string {
 // and keeping each launch's user data.
 func fakeEC2(t *testing.T, memMiB int) (url string, calls map[string]int, userData *[]string) {
 	t.Helper()
-	t.Setenv("AWS_ACCESS_KEY_ID", "test")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
-	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
-	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
-	t.Setenv("AWS_PROFILE", "")
+	awsTestEnv(t)
 	calls, userData = map[string]int{}, &[]string{}
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()

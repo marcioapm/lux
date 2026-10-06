@@ -471,16 +471,19 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   each of `fallbackInstanceTypes` (optional, at most 4, each distinct
   from `instanceType`, which it needs) in every subnet the same way:
   types `[m8g, m7g]` and subnets `[a, b, c]`, starting at `b`, try m8g in
-  b, c, a, then m7g in b, c, a. Each step is logged (`ec2: no capacity`).
+  b, c, a, then m7g in b, c, a. Each step is logged at info
+  (`ec2: no capacity`), and a launch that succeeds on a later candidate
+  once at warn (`ec2: launched a later candidate`, with the type and
+  subnet it got).
   These errors are not retried in place; any other error (a quota such
   as `VcpuLimitExceeded`, a permission, a bad parameter) ends the launch
   at once. A launch with no capacity anywhere fails naming the code and
   the candidates, and is retried on the next pass. luxd remembers each
   type and subnet EC2 had no capacity for, and later launches skip it for
   `LUX_EC2_NO_CAPACITY_RETRY_AFTER` (30s): a shortage costs one sweep of
-  `RunInstances` calls per pool in that time, not one per host or per
-  pass, and when every candidate is skipped the launch fails without
-  calling EC2. Fallback types launch
+  `RunInstances` calls in that time, not one per host or per pass, and
+  when every candidate is skipped the launch fails, with the same error,
+  without calling EC2. Fallback types launch
   from the same launch template, so its AMI must suit them (same
   architecture); the host reports the type it got (`lux hosts ls`).
 - **Scale down:** a host idle longer than the pool's `--scale-down-after`
