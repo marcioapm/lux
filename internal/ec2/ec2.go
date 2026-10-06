@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -128,6 +129,11 @@ func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, e
 // availability zone as RunInstances reports them, and its market (from the
 // template's spot). tags are set on it (with the template's own); env is
 // the runner's environment, rendered into user data.
+//
+// Candidates are tried in order, type-major: the template's instanceType,
+// then each of fallbackInstanceTypes, each in every subnet from the pool's
+// next one round. Only a capacity error (capacityCodes) moves on to the next
+// candidate; any other error ends the launch at once.
 func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (server.Launched, error) {
 	var none server.Launched
 	t, err := parse(template)
@@ -142,20 +148,6 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		return none, err
 	}
 	env = runnerEnv(t, env)
-	// The runner offers the machine's gross memory, which Runs ask in. Only
-	// a template naming its type says it before the launch; without it the
-	// runner offers its MemTotal.
-	if t.InstanceType != "" && env["LUX_RUNNER_MEMORY"] == "" {
-		if mem, err := p.instanceMemory(ctx, c, t.Region, t.InstanceType); err != nil {
-			p.log.Warn("ec2: instance type memory unknown; the host offers its MemTotal", "instanceType", t.InstanceType, "err", err)
-		} else {
-			env["LUX_RUNNER_MEMORY"] = strconv.FormatInt(mem, 10)
-		}
-	}
-	ud, err := renderUserData(t.UserData, env)
-	if err != nil {
-		return none, err
-	}
 	lt := &types.LaunchTemplateSpecification{Version: aws.String("$Default")}
 	if strings.HasPrefix(t.LaunchTemplate, "lt-") {
 		lt.LaunchTemplateId = aws.String(t.LaunchTemplate)
@@ -171,17 +163,16 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	for _, k := range slices.Sorted(maps.Keys(merged)) {
 		instTags = append(instTags, types.Tag{Key: aws.String(k), Value: aws.String(merged[k])})
 	}
-	in := &awsec2.RunInstancesInput{
+	base := awsec2.RunInstancesInput{
 		MinCount:       aws.Int32(1),
 		MaxCount:       aws.Int32(1),
 		LaunchTemplate: lt,
-		UserData:       aws.String(base64.StdEncoding.EncodeToString(ud)),
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: instTags},
 		},
 	}
 	if t.Spot {
-		in.InstanceMarketOptions = &types.InstanceMarketOptionsRequest{
+		base.InstanceMarketOptions = &types.InstanceMarketOptionsRequest{
 			MarketType: types.MarketTypeSpot,
 			SpotOptions: &types.SpotMarketOptions{
 				SpotInstanceType:             types.SpotInstanceTypeOneTime,
@@ -189,18 +180,162 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 			},
 		}
 	}
-	if t.InstanceType != "" {
-		in.InstanceType = types.InstanceType(t.InstanceType)
-	}
+	start := 0
 	if len(t.Subnets) > 0 {
-		i := p.next[t.LaunchTemplate] % len(t.Subnets)
+		start = p.next[t.LaunchTemplate] % len(t.Subnets)
 		p.next[t.LaunchTemplate]++
-		in.SubnetId = aws.String(t.Subnets[i])
 	}
-	out, err := c.RunInstances(ctx, in)
+	// Rendered once per instance type, and shared between types of the same
+	// memory: LUX_RUNNER_MEMORY is all that differs.
+	byType := map[string]string{}   // instance type → base64 user data
+	byMemory := map[string]string{} // LUX_RUNNER_MEMORY → base64 user data
+	var failed []string             // each capacity failure's candidate
+	var lastErr error
+	cands := candidates(t, start)
+	for n, cand := range cands {
+		ud, ok := byType[cand.instanceType]
+		if !ok {
+			runEnv := p.withMemory(ctx, c, t.Region, env, cand.instanceType)
+			if ud, ok = byMemory[runEnv["LUX_RUNNER_MEMORY"]]; !ok {
+				raw, err := renderUserData(t.UserData, runEnv)
+				if err != nil {
+					return none, err
+				}
+				ud = base64.StdEncoding.EncodeToString(raw)
+				byMemory[runEnv["LUX_RUNNER_MEMORY"]] = ud
+			}
+			byType[cand.instanceType] = ud
+		}
+		in := base
+		in.UserData = aws.String(ud)
+		if cand.instanceType != "" {
+			in.InstanceType = types.InstanceType(cand.instanceType)
+		}
+		if cand.subnet != "" {
+			in.SubnetId = aws.String(cand.subnet)
+		}
+		out, err := c.RunInstances(ctx, &in, noCapacityRetries)
+		if err == nil {
+			return launched(t, out)
+		}
+		code, capacity := capacityError(err)
+		if !capacity {
+			if n > 0 {
+				return none, fmt.Errorf("ec2 RunInstances (%s, after %d without capacity): %w", cand, n, err)
+			}
+			return none, fmt.Errorf("ec2 RunInstances: %w", err)
+		}
+		failed = append(failed, cand.String())
+		lastErr = err
+		if n+1 < len(cands) {
+			p.log.Warn("ec2: no capacity; trying the next candidate", "instanceType", cand.instanceType, "subnet", cand.subnet,
+				"code", code, "next", cands[n+1].String())
+		}
+	}
+	// The code first: the provisioner keeps 200 characters of a host's
+	// launch error.
+	code, _ := capacityError(lastErr)
+	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", code, strings.Join(failed, ", "), lastErr)
+}
+
+// A candidate is one RunInstances attempt: an instance type ("" for the
+// launch template's) in a subnet ("" for the launch template's or the
+// default VPC's).
+type candidate struct{ instanceType, subnet string }
+
+func (c candidate) String() string {
+	it, sn := c.instanceType, c.subnet
+	if it == "" {
+		it = "template type"
+	}
+	if sn == "" {
+		return it
+	}
+	return it + " in " + sn
+}
+
+// candidates is the order Launch tries: each instance type (InstanceType,
+// then FallbackInstanceTypes) in each subnet, from start and wrapping round.
+func candidates(t Template, start int) []candidate {
+	itypes := append([]string{t.InstanceType}, t.FallbackInstanceTypes...)
+	subnets := []string{""}
+	if len(t.Subnets) > 0 {
+		subnets = append(slices.Clone(t.Subnets[start:]), t.Subnets[:start]...)
+	}
+	out := make([]candidate, 0, len(itypes)*len(subnets))
+	for _, it := range itypes {
+		for _, sn := range subnets {
+			out = append(out, candidate{it, sn})
+		}
+	}
+	return out
+}
+
+// capacityCodes are the RunInstances errors that say this type is not
+// to be had in this zone now (InsufficientInstanceCapacity,
+// InsufficientCapacity) or at all (Unsupported): another subnet or type may
+// still launch. Every other error (quotas, permissions, parameters) would
+// fail the same way for every candidate.
+var capacityCodes = map[string]bool{
+	"InsufficientInstanceCapacity": true,
+	"InsufficientCapacity":         true,
+	"Unsupported":                  true,
+}
+
+func capacityError(err error) (string, bool) {
+	var ae smithy.APIError
+	if errors.As(err, &ae) && capacityCodes[ae.ErrorCode()] {
+		return ae.ErrorCode(), true
+	}
+	return "", false
+}
+
+// noCapacityRetries keeps the SDK from retrying a capacity error (EC2
+// answers InsufficientInstanceCapacity with a 500, which the default
+// retryer repeats against the same zone): Launch moves to the next
+// candidate instead. Other errors keep the client's retry behaviour.
+func noCapacityRetries(o *awsec2.Options) {
+	o.Retryer = &capacityNotRetryable{RetryerV2: asRetryerV2(o.Retryer)}
+}
+
+type capacityNotRetryable struct{ aws.RetryerV2 }
+
+func (r *capacityNotRetryable) IsErrorRetryable(err error) bool {
+	if _, capacity := capacityError(err); capacity {
+		return false
+	}
+	return r.RetryerV2.IsErrorRetryable(err)
+}
+
+// asRetryerV2 is r as a RetryerV2. The SDK's own retryers are; any other
+// gets AddWithMaxAttempts' adapter, keeping its attempt count.
+func asRetryerV2(r aws.Retryer) aws.RetryerV2 {
+	if v, ok := r.(aws.RetryerV2); ok {
+		return v
+	}
+	return retry.AddWithMaxAttempts(r, r.MaxAttempts()).(aws.RetryerV2)
+}
+
+// withMemory is env with instanceType's memory as LUX_RUNNER_MEMORY: the
+// runner offers the machine's gross memory, which Runs ask in. Only a
+// named type says it before the launch; without one (or when its lookup
+// fails) the runner offers its MemTotal. A caller's LUX_RUNNER_MEMORY wins.
+func (p *Provider) withMemory(ctx context.Context, c *awsec2.Client, region string, env map[string]string, instanceType string) map[string]string {
+	if instanceType == "" || env["LUX_RUNNER_MEMORY"] != "" {
+		return env
+	}
+	mem, err := p.instanceMemory(ctx, c, region, instanceType)
 	if err != nil {
-		return none, fmt.Errorf("ec2 RunInstances: %w", err)
+		p.log.Warn("ec2: instance type memory unknown; the host offers its MemTotal", "instanceType", instanceType, "err", err)
+		return env
 	}
+	env = maps.Clone(env)
+	env["LUX_RUNNER_MEMORY"] = strconv.FormatInt(mem, 10)
+	return env
+}
+
+func launched(t Template, out *awsec2.RunInstancesOutput) (server.Launched, error) {
+	var none server.Launched
 	if len(out.Instances) != 1 || out.Instances[0].InstanceId == nil {
 		return none, errors.New("ec2 RunInstances: no instance in the reply")
 	}
