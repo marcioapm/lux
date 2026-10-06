@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -182,6 +184,260 @@ func TestLaunchUserDataCarriesNestedOnlyForAnOptedInTemplate(t *testing.T) {
 				t.Errorf("%s, %s: runner env lost the memory or URL: %v", format, c.name, got)
 			}
 		}
+	}
+}
+
+// attempt is one RunInstances request the capacity fake received.
+type attempt struct{ instanceType, subnet, memory string }
+
+// capacityEC2 is a fake EC2 whose RunInstances fails with fail[{type,
+// subnet}] (an EC2 error code) and otherwise launches the requested type;
+// "*" as the subnet fails the type everywhere. Capacity errors and
+// InternalError come with a 500, as EC2 sends them, others with a 400.
+// DescribeInstanceTypes answers memMiB[type] (an error when absent).
+func capacityEC2(t *testing.T, fail map[[2]string]string, memMiB map[string]int) (url string, attempts *[]attempt, calls map[string]int) {
+	t.Helper()
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_RETRY_MODE", "")
+	t.Setenv("AWS_MAX_ATTEMPTS", "")
+	attempts, calls = &[]attempt{}, map[string]int{}
+	var mu sync.Mutex
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		defer mu.Unlock()
+		action := r.PostForm.Get("Action")
+		calls[action]++
+		w.Header().Set("Content-Type", "text/xml")
+		reply := func(status int, code string) {
+			w.WriteHeader(status)
+			fmt.Fprintf(w, `<Response><Errors><Error><Code>%s</Code><Message>no %s (fake)</Message></Error></Errors><RequestID>1</RequestID></Response>`, code, code)
+		}
+		switch action {
+		case "DescribeInstanceTypes":
+			it := r.PostForm.Get("InstanceType.1")
+			mem, ok := memMiB[it]
+			if !ok {
+				reply(http.StatusBadRequest, "InvalidInstanceType")
+				return
+			}
+			fmt.Fprintf(w, `<DescribeInstanceTypesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><instanceTypeSet><item>`+
+				`<instanceType>%s</instanceType><memoryInfo><sizeInMiB>%d</sizeInMiB></memoryInfo></item></instanceTypeSet></DescribeInstanceTypesResponse>`, it, mem)
+		case "RunInstances":
+			it, sn := r.PostForm.Get("InstanceType"), r.PostForm.Get("SubnetId")
+			ud, _ := base64.StdEncoding.DecodeString(r.PostForm.Get("UserData"))
+			*attempts = append(*attempts, attempt{it, sn, runnerEnvOf(t, "env", string(ud))["LUX_RUNNER_MEMORY"]})
+			code := fail[[2]string{it, sn}]
+			if code == "" {
+				code = fail[[2]string{it, "*"}]
+			}
+			switch code {
+			case "":
+			case "InsufficientInstanceCapacity", "InsufficientCapacity", "Unsupported", "InternalError":
+				reply(http.StatusInternalServerError, code)
+				return
+			default:
+				reply(http.StatusBadRequest, code)
+				return
+			}
+			fmt.Fprintf(w, `<RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><reservationId>r-1</reservationId>`+
+				`<instancesSet><item><instanceId>i-0abc</instanceId><instanceType>%s</instanceType>`+
+				`<placement><availabilityZone>%s-az</availabilityZone></placement>`+
+				`<instanceState><code>0</code><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`, it, sn)
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(fake.Close)
+	return fake.URL, attempts, calls
+}
+
+const fallbackTemplate = `{"region": "eu-north-1", "launchTemplate": "lt-1", "userData": "env",
+	"instanceType": "m8g.2xlarge", "fallbackInstanceTypes": ["m7g.2xlarge"], "subnets": ["subnet-a", "subnet-b", "subnet-c"]}`
+
+// With no capacity anywhere for the first type, Launch tries it in every
+// subnet from the pool's next one round, then the fallback the same way,
+// once each (the SDK does not retry a capacity error), and reports the
+// instance type and zone of the one that launched.
+func TestLaunchFallsBackTypeMajorFromTheRoundRobinSubnet(t *testing.T) {
+	url, attempts, _ := capacityEC2(t, map[[2]string]string{
+		{"m8g.2xlarge", "*"}:        "InsufficientInstanceCapacity",
+		{"m7g.2xlarge", "subnet-b"}: "Unsupported",
+		{"m7g.2xlarge", "subnet-c"}: "InsufficientCapacity",
+	}, map[string]int{"m8g.2xlarge": 32768, "m7g.2xlarge": 32768})
+	p := New(url, discard)
+	p.next["lt-1"] = 1 // this launch starts at subnet-b
+	l, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{"LUX_URL": "http://luxd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, a := range *attempts {
+		got = append(got, a.instanceType+"@"+a.subnet)
+	}
+	want := []string{"m8g.2xlarge@subnet-b", "m8g.2xlarge@subnet-c", "m8g.2xlarge@subnet-a",
+		"m7g.2xlarge@subnet-b", "m7g.2xlarge@subnet-c", "m7g.2xlarge@subnet-a"}
+	if !slices.Equal(got, want) {
+		t.Errorf("attempts %v, want %v", got, want)
+	}
+	if l.InstanceType != "m7g.2xlarge" || l.Zone != "subnet-a-az" || l.ProviderID != "i-0abc" {
+		t.Errorf("launched %+v, want m7g.2xlarge in subnet-a-az", l)
+	}
+	if p.next["lt-1"] != 2 {
+		t.Errorf("round robin at %d after one launch from 1, want 2", p.next["lt-1"])
+	}
+}
+
+// Only capacity errors move to the next candidate: a quota, a permission or
+// a bad parameter would fail every candidate the same way, so Launch
+// returns it after its one request.
+func TestLaunchDoesNotFallBackOnOtherErrors(t *testing.T) {
+	for _, code := range []string{"InstanceLimitExceeded", "VcpuLimitExceeded", "MaxSpotInstanceCountExceeded",
+		"UnauthorizedOperation", "InvalidParameterValue"} {
+		t.Run(code, func(t *testing.T) {
+			url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "*"}: code}, nil)
+			_, err := New(url, discard).Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{})
+			if err == nil || !strings.Contains(err.Error(), code) {
+				t.Errorf("err %v, want %s", err, code)
+			}
+			if len(*attempts) != 1 {
+				t.Errorf("%d RunInstances requests, want 1: %v", len(*attempts), *attempts)
+			}
+		})
+	}
+}
+
+// A non-capacity error after capacity failures ends the launch there and
+// says which candidate it came from.
+func TestLaunchStopsAtANonCapacityErrorMidway(t *testing.T) {
+	url, attempts, _ := capacityEC2(t, map[[2]string]string{
+		{"m8g.2xlarge", "*"}:        "InsufficientInstanceCapacity",
+		{"m7g.2xlarge", "subnet-a"}: "VcpuLimitExceeded",
+	}, nil)
+	_, err := New(url, discard).Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{})
+	if err == nil || !strings.Contains(err.Error(), "VcpuLimitExceeded") || !strings.Contains(err.Error(), "m7g.2xlarge in subnet-a") {
+		t.Errorf("err %v, want VcpuLimitExceeded naming m7g.2xlarge in subnet-a", err)
+	}
+	if len(*attempts) != 4 {
+		t.Errorf("%d RunInstances requests, want 4: %v", len(*attempts), *attempts)
+	}
+}
+
+// Every candidate without capacity: the error leads with the code (the
+// provisioner keeps 200 characters), names each attempt, and ends with
+// EC2's own error. One request per candidate: none is SDK-retried.
+func TestLaunchWithNoCapacityAnywhere(t *testing.T) {
+	url, attempts, _ := capacityEC2(t, map[[2]string]string{
+		{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity",
+		{"m7g.2xlarge", "*"}: "InsufficientInstanceCapacity",
+	}, nil)
+	_, err := New(url, discard).Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{})
+	if err == nil {
+		t.Fatal("launched without capacity")
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "ec2 RunInstances: InsufficientInstanceCapacity for every candidate: m8g.2xlarge in subnet-a, ") {
+		t.Errorf("err %q", msg)
+	}
+	for _, c := range []string{"m8g.2xlarge in subnet-c", "m7g.2xlarge in subnet-a", "m7g.2xlarge in subnet-c", "no InsufficientInstanceCapacity (fake)"} {
+		if !strings.Contains(msg, c) {
+			t.Errorf("err %q does not name %q", msg, c)
+		}
+	}
+	if len(*attempts) != 6 {
+		t.Errorf("%d RunInstances requests for 6 candidates: %v", len(*attempts), *attempts)
+	}
+}
+
+// A template without subnets tries its types only, with no SubnetId; one
+// without fallbacks makes one request, as before.
+func TestLaunchWithoutSubnetsTriesEachType(t *testing.T) {
+	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", ""}: "InsufficientInstanceCapacity"}, nil)
+	p := New(url, discard)
+	template := `{"launchTemplate": "lt-1", "userData": "env", "instanceType": "m8g.2xlarge", "fallbackInstanceTypes": ["m7g.2xlarge", "c8g.2xlarge"]}`
+	l, err := p.Launch(context.Background(), json.RawMessage(template), nil, map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []attempt{{"m8g.2xlarge", "", ""}, {"m7g.2xlarge", "", ""}}; !slices.Equal(*attempts, want) {
+		t.Errorf("attempts %v, want %v", *attempts, want)
+	}
+	if l.InstanceType != "m7g.2xlarge" {
+		t.Errorf("launched %+v", l)
+	}
+	*attempts = nil
+	if _, err := p.Launch(context.Background(), json.RawMessage(`{"launchTemplate": "lt-1", "userData": "env", "instanceType": "m8g.2xlarge"}`), nil, map[string]string{}); err == nil {
+		t.Error("launched without capacity")
+	}
+	if len(*attempts) != 1 {
+		t.Errorf("%d requests without fallbacks or subnets, want 1", len(*attempts))
+	}
+}
+
+// Errors the SDK retries for any call (a 500 InternalError here) are still
+// retried for RunInstances: only capacity errors are not.
+func TestLaunchKeepsTheSDKRetryingOtherErrors(t *testing.T) {
+	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "subnet-a"}: "InternalError"}, nil)
+	_, err := New(url, discard).Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{})
+	if err == nil || !strings.Contains(err.Error(), "InternalError") || !strings.Contains(err.Error(), "exceeded maximum number of attempts, 3") {
+		t.Errorf("err %v, want InternalError after the SDK's 3 attempts", err)
+	}
+	if len(*attempts) != 3 {
+		t.Errorf("%d RunInstances requests, want the SDK's 3 for one candidate", len(*attempts))
+	}
+}
+
+// Each attempt's user data offers the memory of the type it asks for; a
+// caller's LUX_RUNNER_MEMORY stays for every attempt.
+func TestLaunchUserDataCarriesEachTypesMemory(t *testing.T) {
+	fail := map[[2]string]string{{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity", {"m7g.2xlarge", "*"}: "InsufficientInstanceCapacity"}
+	mem := map[string]int{"m8g.2xlarge": 32768, "m7g.2xlarge": 16384}
+	gib := func(n int64) string { return strconv.FormatInt(n<<30, 10) }
+
+	url, attempts, calls := capacityEC2(t, fail, mem)
+	if _, err := New(url, discard).Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{}); err == nil {
+		t.Fatal("launched without capacity")
+	}
+	for _, a := range *attempts {
+		if want := map[string]string{"m8g.2xlarge": gib(32), "m7g.2xlarge": gib(16)}[a.instanceType]; a.memory != want {
+			t.Errorf("%s in %s offered %q, want %s", a.instanceType, a.subnet, a.memory, want)
+		}
+	}
+	if calls["DescribeInstanceTypes"] != 2 {
+		t.Errorf("%d DescribeInstanceTypes for two types", calls["DescribeInstanceTypes"])
+	}
+
+	url, attempts, _ = capacityEC2(t, fail, mem)
+	if _, err := New(url, discard).Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{"LUX_RUNNER_MEMORY": "1234"}); err == nil {
+		t.Fatal("launched without capacity")
+	}
+	for _, a := range *attempts {
+		if a.memory != "1234" {
+			t.Errorf("%s in %s offered %q, want the caller's 1234", a.instanceType, a.subnet, a.memory)
+		}
+	}
+}
+
+// The round robin moves one subnet per Launch, however many attempts the
+// launch took.
+func TestLaunchAdvancesTheRoundRobinOncePerLaunch(t *testing.T) {
+	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "subnet-a"}: "InsufficientInstanceCapacity"}, nil)
+	p := New(url, discard)
+	var first []string
+	for range 4 {
+		*attempts = nil
+		if _, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{}); err != nil {
+			t.Fatal(err)
+		}
+		first = append(first, (*attempts)[0].subnet)
+	}
+	if want := []string{"subnet-a", "subnet-b", "subnet-c", "subnet-a"}; !slices.Equal(first, want) {
+		t.Errorf("launches started at %v, want %v", first, want)
 	}
 }
 
