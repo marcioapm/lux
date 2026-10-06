@@ -168,8 +168,8 @@ func TestPutPoolValidatesFallbackInstanceTypes(t *testing.T) {
 		{withType([]any{"m7g.2xlarge", 1}), "[1] must be a non-empty string"},
 		{withType([]any{""}), "[0] must be a non-empty string"},
 		{withType([]any{nil}), "[0] must be a non-empty string"},
-		{withType([]any{"m7g.2xlarge", "m7g.2xlarge"}), "[1] \"m7g.2xlarge\" is the instanceType or listed twice"},
-		{withType([]any{"m8g.2xlarge"}), "[0] \"m8g.2xlarge\" is the instanceType or listed twice"},
+		{withType([]any{"m7g.2xlarge", "m7g.2xlarge"}), "[1] \"m7g.2xlarge\" is listed twice"},
+		{withType([]any{"m8g.2xlarge"}), "[0] \"m8g.2xlarge\" is the instanceType"},
 		{withType([]any{"a", "b", "c", "d", "e"}), "has 5 entries; at most 4"},
 		{map[string]any{"fallbackInstanceTypes": []any{"m7g.2xlarge"}}, "needs template.instanceType"},
 		{map[string]any{"instanceType": "", "fallbackInstanceTypes": []any{"m7g.2xlarge"}}, "needs template.instanceType"},
@@ -178,6 +178,18 @@ func TestPutPoolValidatesFallbackInstanceTypes(t *testing.T) {
 		var he *HTTPError
 		if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity || he.Code != "invalid_pool" || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%v: err %v, want 422 invalid_pool %q", c.template, err, c.want)
+		}
+	}
+	// Each cause says which it is, not "the instanceType or listed twice".
+	for _, c := range []struct {
+		fb   []any
+		want string
+	}{
+		{[]any{"m7g.2xlarge", "m7g.2xlarge"}, `template.fallbackInstanceTypes[1] "m7g.2xlarge" is listed twice`},
+		{[]any{"m7g.2xlarge", "m8g.2xlarge"}, `template.fallbackInstanceTypes[1] "m8g.2xlarge" is the instanceType`},
+	} {
+		if _, err := s.putPool(ctx, poolIn(Pool{Name: "dup", Provider: "ec2", Template: withType(c.fb)})); err == nil || err.Error() != c.want {
+			t.Errorf("%v: err %v, want %q", c.fb, err, c.want)
 		}
 	}
 	for i, fb := range []any{[]any{}, []any{"m7g.2xlarge"}, []any{"m7g.2xlarge", "c8g.2xlarge", "c7g.2xlarge", "r8g.xlarge"}} {

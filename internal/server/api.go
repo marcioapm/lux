@@ -2981,14 +2981,17 @@ func checkFallbackInstanceTypes(raw, primary any) error {
 	if len(list) > maxFallbackInstanceTypes {
 		return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes has %d entries; at most %d", len(list), maxFallbackInstanceTypes)
 	}
-	seen := map[string]bool{instanceType: true}
+	seen := map[string]bool{}
 	for i, v := range list {
 		s, isString := v.(string)
 		if !isString || s == "" {
 			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes[%d] must be a non-empty string, got %#v", i, v)
 		}
+		if s == instanceType {
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes[%d] %q is the instanceType", i, s)
+		}
 		if seen[s] {
-			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes[%d] %q is the instanceType or listed twice", i, s)
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes[%d] %q is listed twice", i, s)
 		}
 		seen[s] = true
 	}
