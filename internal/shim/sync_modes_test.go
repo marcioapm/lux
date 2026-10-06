@@ -820,7 +820,10 @@ func TestSyncOperationChangesDuringFetch(t *testing.T) {
 			m := newModeRepo(t)
 			c.setup(m)
 			gitStops(t, m.dir, "-c", "sequence.editor=true", "rebase", "-i", "--exec", "false", "HEAD~1")
-			fetchGit(t, `"$REAL" rebase --abort`)
+			if _, err := os.Stat(filepath.Join(m.dir, ".git", "rebase-merge")); err != nil {
+				t.Fatalf("the rebase did not start: %v", err)
+			}
+			fetchGit(t, `"$REAL" rebase --abort >/dev/null 2>&1 || exit 1`)
 			res := m.syncChecked(c.mode, c.broken)
 			if _, err := os.Stat(filepath.Join(m.dir, ".git", "rebase-merge")); err == nil {
 				t.Fatal("the rebase did not end")
