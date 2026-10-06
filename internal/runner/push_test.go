@@ -50,15 +50,8 @@ func newPushFixture(t *testing.T, script string) *pushFixture {
 	for name, bare := range pf.bares {
 		run(t, root, "git", "clone", "-q", bare, pf.checkout(name))
 	}
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
 	os.MkdirAll(filepath.Join(root, "bin"), 0o755)
-	wrapper := "#!/bin/sh\n[ \"$1\" = bundle ] && echo \"$PWD\" >> '" + filepath.Join(root, "bundles") + "'\nexec '" + realGit + "' \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(root, "bin", "git"), []byte(wrapper), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	pf.raceApp(t, ":")
 	f.sp.Git = &spec.Git{Repositories: []spec.Repository{
 		{Name: "app", URL: pf.bares["app"], Path: "/w/app"},
 		{Name: "lib", URL: pf.bares["lib"], Path: "/w/lib"},
@@ -210,24 +203,16 @@ func TestPushRefusalNamesTheOperation(t *testing.T) {
 // after every check made before the bundle.
 func (pf *pushFixture) raceBundle(t *testing.T, workload string) {
 	t.Helper()
-	real, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	once := filepath.Join(pf.root, "raced")
-	wrapper := "#!/bin/sh\nREAL='" + real + "'\n" +
-		"if [ \"$1 $2\" = 'bundle create' ] && [ \"$PWD\" = '" + pf.checkout("app") + "' ] && mkdir '" + once + "' 2>/dev/null; then\n" +
-		workload + "\nfi\n" +
-		"[ \"$1\" = bundle ] && echo \"$PWD\" >> '" + filepath.Join(pf.root, "bundles") + "'\n" +
-		"exec \"$REAL\" \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(pf.root, "bin", "git"), []byte(wrapper), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	pf.raceApp(t, `if [ "$1 $2" = 'bundle create' ] && mkdir "${ONCE}bundle" 2>/dev/null; then
+`+workload+`
+fi`)
 }
 
-// raceApp is raceBundle for any point of the push: body runs in app's
-// checkout before every git command there, with $REAL the real git and
-// "$@" the command, then the command runs (unless body exits).
+// raceApp installs the container's git, which appends the checkout of each
+// `git bundle` to $ROOT/bundles: body runs in app's checkout before every
+// git command there, with $REAL the real git, $ONCE a path prefix for
+// run-once markers and "$@" the command, then the command runs (unless
+// body exits).
 func (pf *pushFixture) raceApp(t *testing.T, body string) {
 	t.Helper()
 	real, err := exec.LookPath("git")
