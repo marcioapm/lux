@@ -167,6 +167,7 @@ func TestPutPoolValidatesFallbackInstanceTypes(t *testing.T) {
 		{withType(nil), "must be an array of strings"},
 		{withType([]any{"m7g.2xlarge", 1}), "[1] must be a non-empty string"},
 		{withType([]any{""}), "[0] must be a non-empty string"},
+		{withType([]any{nil}), "[0] must be a non-empty string"},
 		{withType([]any{"m7g.2xlarge", "m7g.2xlarge"}), "[1] \"m7g.2xlarge\" is the instanceType or listed twice"},
 		{withType([]any{"m8g.2xlarge"}), "[0] \"m8g.2xlarge\" is the instanceType or listed twice"},
 		{withType([]any{"a", "b", "c", "d", "e"}), "has 5 entries; at most 4"},

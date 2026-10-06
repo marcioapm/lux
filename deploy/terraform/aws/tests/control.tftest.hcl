@@ -180,7 +180,7 @@ run "pool_template_carries_fallbacks_only_when_set" {
   }
 }
 
-run "fallback_instance_types_luxd_would_refuse_are_refused" {
+run "fallback_instance_type_equal_to_instance_type_is_refused" {
   command = plan
 
   variables {
@@ -190,4 +190,75 @@ run "fallback_instance_types_luxd_would_refuse_are_refused" {
   }
 
   expect_failures = [var.runner_pools]
+}
+
+run "null_fallback_instance_type_is_refused" {
+  command = plan
+
+  variables {
+    runner_pools = {
+      arm64 = { instance_type = "m8g.2xlarge", arch = "arm64", fallback_instance_types = [null] }
+    }
+  }
+
+  expect_failures = [var.runner_pools]
+}
+
+run "five_fallback_instance_types_are_refused" {
+  command = plan
+
+  variables {
+    runner_pools = {
+      arm64 = {
+        instance_type           = "m8g.2xlarge"
+        arch                    = "arm64"
+        fallback_instance_types = ["m7g.2xlarge", "c8g.2xlarge", "c7g.2xlarge", "r8g.2xlarge", "r7g.2xlarge"]
+      }
+    }
+  }
+
+  expect_failures = [var.runner_pools]
+}
+
+run "duplicate_fallback_instance_types_are_refused" {
+  command = plan
+
+  variables {
+    runner_pools = {
+      arm64 = { instance_type = "m8g.2xlarge", arch = "arm64", fallback_instance_types = ["m7g.2xlarge", "m7g.2xlarge"] }
+    }
+  }
+
+  expect_failures = [var.runner_pools]
+}
+
+run "empty_fallback_instance_type_is_refused" {
+  command = plan
+
+  variables {
+    runner_pools = {
+      arm64 = { instance_type = "m8g.2xlarge", arch = "arm64", fallback_instance_types = [""] }
+    }
+  }
+
+  expect_failures = [var.runner_pools]
+}
+
+run "four_fallback_instance_types_are_accepted" {
+  command = plan
+
+  variables {
+    runner_pools = {
+      arm64 = {
+        instance_type           = "m8g.2xlarge"
+        arch                    = "arm64"
+        fallback_instance_types = ["m7g.2xlarge", "c8g.2xlarge", "c7g.2xlarge", "r8g.2xlarge"]
+      }
+    }
+  }
+
+  assert {
+    condition     = length(jsondecode(regex("--template '(.*)'$", output.runner_pools_set_commands["arm64"])[0]).fallbackInstanceTypes) == 4
+    error_message = "Four fallback instance types are within luxd's limit and must reach the pool template."
+  }
 }
