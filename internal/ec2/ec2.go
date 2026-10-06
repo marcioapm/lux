@@ -11,7 +11,10 @@
 // InsufficientCapacity, or Unsupported: the type is not offered in that
 // zone) tries instanceType in each of the subnets, from the pool's next one
 // round, then each fallbackInstanceTypes entry the same way. Any other
-// error ends the launch.
+// error ends the launch. A type and subnet without capacity is skipped by
+// later launches for noCapacityRetryAfter (30s), so a shortage costs one
+// sweep of RunInstances calls, not one per launch; when every candidate is
+// skipped, the launch fails without calling EC2.
 //
 // With "spot", instances are one-time spot instances, terminated on
 // interruption. Every instance's user data sets LUX_EC2_IMDS, so its
@@ -97,18 +100,43 @@ type Provider struct {
 	memoryFailed map[[2]string]time.Time
 	// memoryTimeout bounds one lookup, which runs before RunInstances.
 	memoryTimeout time.Duration
+	// noCapacity is each candidate's last capacity error, per region:
+	// within noCapacityFor of it, launches skip the candidate.
+	noCapacity    map[capacityKey]noCapacityMark
+	noCapacityFor time.Duration
+	now           func() time.Time
 	log           *slog.Logger
+}
+
+type capacityKey struct{ region, instanceType, subnet string }
+
+type noCapacityMark struct {
+	at   time.Time
+	code string
+	err  error
 }
 
 const (
 	memoryLookupTimeout = 5 * time.Second
 	memoryRetryAfter    = 10 * time.Minute
+	// noCapacityRetryAfter is how long a candidate EC2 had no capacity for
+	// is skipped: long enough that a shortage costs one sweep of
+	// RunInstances per pool, not one per launch, short enough to see
+	// capacity come back within a minute.
+	noCapacityRetryAfter = 30 * time.Second
 )
 
 // New builds the provider. endpoint overrides the EC2 endpoint (tests).
 func New(endpoint string, log *slog.Logger) *Provider {
 	return &Provider{endpoint: endpoint, clients: map[string]*awsec2.Client{}, next: map[string]int{},
-		memory: map[[2]string]int64{}, memoryFailed: map[[2]string]time.Time{}, memoryTimeout: memoryLookupTimeout, log: log}
+		memory: map[[2]string]int64{}, memoryFailed: map[[2]string]time.Time{}, memoryTimeout: memoryLookupTimeout,
+		noCapacity: map[capacityKey]noCapacityMark{}, noCapacityFor: noCapacityRetryAfter, now: time.Now, log: log}
+}
+
+// SkipNoCapacityFor sets how long a candidate without capacity is skipped
+// (default noCapacityRetryAfter).
+func (p *Provider) SkipNoCapacityFor(d time.Duration) {
+	p.noCapacityFor = d
 }
 
 func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, error) {
@@ -197,13 +225,16 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	byType := map[string]string{}   // instance type → base64 user data
 	byMemory := map[string]string{} // LUX_RUNNER_MEMORY → base64 user data
 	// The all-fail error wraps the first candidate in the template's order,
-	// which every full sweep tries: EC2's message names the zone, and a
+	// which every full sweep tries or skips for a recent failure (whose
+	// mark keeps the error): EC2's message names the zone, and a
 	// rotation-dependent one would keep pool.launch_failed events apart.
-	headline := candidates(t, 0)[0]
-	var headErr error
-	headCode := ""
+	head := candidates(t, 0)[0]
 	cands := candidates(t, start)
 	for n, cand := range cands {
+		key := capacityKey{t.Region, cand.instanceType, cand.subnet}
+		if m, ok := p.noCapacity[key]; ok && p.now().Sub(m.at) < p.noCapacityFor {
+			continue
+		}
 		ud, ok := byType[cand.instanceType]
 		if !ok {
 			runEnv := p.withMemory(ctx, c, t.Region, env, cand.instanceType)
@@ -227,6 +258,7 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		}
 		out, err := c.RunInstances(ctx, &in, noCapacityRetries)
 		if err == nil {
+			delete(p.noCapacity, key)
 			return launched(t, out)
 		}
 		code, capacity := capacityError(err)
@@ -236,18 +268,19 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 			}
 			return none, fmt.Errorf("ec2 RunInstances: %w", err)
 		}
-		if cand == headline {
-			headErr, headCode = err, code
-		}
+		p.noCapacity[key] = noCapacityMark{at: p.now(), code: code, err: err}
 		if n+1 < len(cands) {
 			p.log.Warn("ec2: no capacity; trying the next candidate", "instanceType", cand.instanceType, "subnet", cand.subnet,
 				"code", code, "next", cands[n+1].String())
 		}
 	}
-	// The code first: the provisioner keeps 200 characters of a host's
-	// launch error. Nothing in the text depends on this launch's rotation,
-	// so consecutive failures read alike and their events fold into one.
-	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", headCode, candidateList(t), headErr)
+	// Every candidate failed in this sweep or is marked from a recent one,
+	// so head's mark is there. The code first: the provisioner keeps 200
+	// characters of a host's launch error. Nothing in the text depends on
+	// this launch's rotation, so consecutive failures read alike and their
+	// events fold into one.
+	m := p.noCapacity[capacityKey{t.Region, head.instanceType, head.subnet}]
+	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", m.code, candidateList(t), m.err)
 }
 
 // candidateList is every candidate of t: "m8g.2xlarge, m7g.2xlarge in

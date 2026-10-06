@@ -132,6 +132,7 @@ under a timeout. `luxd check-config` is an alias of `validate`.
 | `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
 | `LUX_OUTDATED_DRAIN_PERCENT` | `10` | Caps concurrent outdated-binaries drains per pool, as a percentage of its live hosts (at least 1 regardless). |
 | `LUX_EC2_ENDPOINT` | AWS | Overrides the EC2 endpoint (tests). |
+| `LUX_EC2_NO_CAPACITY_RETRY_AFTER` | `30s` | How long launches skip an instance type in a subnet after EC2 had no capacity for it there (see **No capacity** below). |
 | `LUX_SAMPLE_EVERY` | `10s` | How often the system is sampled for history ([Operators](operators.md#history)). |
 | `LUX_HISTORY_RAW` | `48h` | How long raw samples (hosts and placements: one per heartbeat) are kept. |
 | `LUX_HISTORY_MINUTES` | `720h` | How long minute rollups are kept. |
@@ -474,7 +475,12 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   These errors are not retried in place; any other error (a quota such
   as `VcpuLimitExceeded`, a permission, a bad parameter) ends the launch
   at once. A launch with no capacity anywhere fails naming the code and
-  the candidates, and is retried on the next pass. Fallback types launch
+  the candidates, and is retried on the next pass. luxd remembers each
+  type and subnet EC2 had no capacity for, and later launches skip it for
+  `LUX_EC2_NO_CAPACITY_RETRY_AFTER` (30s): a shortage costs one sweep of
+  `RunInstances` calls per pool in that time, not one per host or per
+  pass, and when every candidate is skipped the launch fails without
+  calling EC2. Fallback types launch
   from the same launch template, so its AMI must suit them (same
   architecture); the host reports the type it got (`lux hosts ls`).
 - **Scale down:** a host idle longer than the pool's `--scale-down-after`

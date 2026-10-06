@@ -103,6 +103,10 @@ type config struct {
 	} `toml:"costs"`
 	EC2 struct {
 		Endpoint string `toml:"endpoint" env:"LUX_EC2_ENDPOINT"`
+		// NoCapacityRetryAfter: how long a (type, subnet) EC2 had no
+		// capacity for is skipped by later launches. Zero: the provider's
+		// default (30s).
+		NoCapacityRetryAfter duration `toml:"no_capacity_retry_after" env:"LUX_EC2_NO_CAPACITY_RETRY_AFTER"`
 	} `toml:"ec2"`
 	Console struct {
 		// Auth: "key" (paste an API key) or "cloudflare-access".
@@ -526,6 +530,9 @@ func (c config) check() error {
 	}
 	if c.Costs.Compute.PricingRegion == "" {
 		problems = append(problems, "costs.compute.pricing_region (LUX_COSTS_PRICING_REGION) is required")
+	}
+	if c.EC2.NoCapacityRetryAfter.Duration < 0 {
+		problems = append(problems, "ec2.no_capacity_retry_after (LUX_EC2_NO_CAPACITY_RETRY_AFTER) must not be negative")
 	}
 	switch c.Console.Auth {
 	case "key":

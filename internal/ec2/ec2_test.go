@@ -197,14 +197,7 @@ type attempt struct{ instanceType, subnet, memory string }
 // DescribeInstanceTypes answers memMiB[type] (an error when absent).
 func capacityEC2(t *testing.T, fail map[[2]string]string, memMiB map[string]int) (url string, attempts *[]attempt, calls map[string]int) {
 	t.Helper()
-	t.Setenv("AWS_ACCESS_KEY_ID", "test")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
-	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
-	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
-	t.Setenv("AWS_PROFILE", "")
-	t.Setenv("AWS_RETRY_MODE", "")
-	t.Setenv("AWS_MAX_ATTEMPTS", "")
+	awsTestEnv(t)
 	attempts, calls = &[]attempt{}, map[string]int{}
 	var mu sync.Mutex
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -345,6 +338,7 @@ func TestLaunchWithNoCapacityAnywhere(t *testing.T) {
 		{"m7g.2xlarge", "*"}: "InsufficientInstanceCapacity",
 	}, nil)
 	p := New(url, discard)
+	p.noCapacityFor = 0 // a full sweep every launch, each from another subnet
 	want := "ec2 RunInstances: InsufficientInstanceCapacity for every candidate: " +
 		"m8g.2xlarge, m7g.2xlarge in subnet-a, subnet-b, subnet-c: " +
 		"operation error EC2: RunInstances, https response error StatusCode: 500, api error InsufficientInstanceCapacity: " +
@@ -373,6 +367,7 @@ func TestLaunchWithNoCapacityAnywhereKeepsOneCode(t *testing.T) {
 		{"m7g.2xlarge", "*"}:        "Unsupported",
 	}, nil)
 	p := New(url, discard)
+	p.noCapacityFor = 0
 	for i := range 3 {
 		_, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{})
 		if err == nil {
@@ -401,7 +396,7 @@ func TestLaunchWithoutSubnetsTriesEachType(t *testing.T) {
 		t.Errorf("launched %+v", l)
 	}
 	*attempts = nil
-	if _, err := p.Launch(context.Background(), json.RawMessage(`{"launchTemplate": "lt-1", "userData": "env", "instanceType": "m8g.2xlarge"}`), nil, map[string]string{}); err == nil {
+	if _, err := New(url, discard).Launch(context.Background(), json.RawMessage(`{"launchTemplate": "lt-1", "userData": "env", "instanceType": "m8g.2xlarge"}`), nil, map[string]string{}); err == nil {
 		t.Error("launched without capacity")
 	}
 	if len(*attempts) != 1 {
@@ -458,6 +453,7 @@ func TestLaunchUserDataCarriesEachTypesMemory(t *testing.T) {
 func TestLaunchAdvancesTheRoundRobinOncePerLaunch(t *testing.T) {
 	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "subnet-a"}: "InsufficientInstanceCapacity"}, nil)
 	p := New(url, discard)
+	p.noCapacityFor = 0
 	var first []string
 	for range 4 {
 		*attempts = nil
@@ -469,6 +465,170 @@ func TestLaunchAdvancesTheRoundRobinOncePerLaunch(t *testing.T) {
 	if want := []string{"subnet-a", "subnet-b", "subnet-c", "subnet-a"}; !slices.Equal(first, want) {
 		t.Errorf("launches started at %v, want %v", first, want)
 	}
+}
+
+// throttledEC2 is a fake EC2 with EC2's documented default RunInstances
+// request bucket (5 burst, 2 per second refill): beyond it, RunInstances
+// answers RequestLimitExceeded. The noCapacity types have no capacity
+// anywhere and every other type launches. stats are the RunInstances
+// requests received (throttled ones included), the throttled count, and the
+// (type, subnet) of each request served.
+func throttledEC2(t *testing.T, noCapacity ...string) (url string, stats func() (total, throttled int, served []string)) {
+	t.Helper()
+	awsTestEnv(t)
+	var mu sync.Mutex
+	tokens, last := 5.0, time.Now()
+	var served []string
+	total, throttled := 0, 0
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "text/xml")
+		if r.PostForm.Get("Action") != "RunInstances" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		tokens = min(5, tokens+2*now.Sub(last).Seconds())
+		last = now
+		total++
+		if tokens < 1 {
+			throttled++
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `<Response><Errors><Error><Code>RequestLimitExceeded</Code><Message>Request limit exceeded.</Message></Error></Errors><RequestID>1</RequestID></Response>`)
+			return
+		}
+		tokens--
+		it, sn := r.PostForm.Get("InstanceType"), r.PostForm.Get("SubnetId")
+		served = append(served, it+"@"+sn)
+		if slices.Contains(noCapacity, it) {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, `<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code><Message>We currently do not have sufficient %s capacity in the Availability Zone you requested (%s-az).</Message></Error></Errors><RequestID>1</RequestID></Response>`, it, sn)
+			return
+		}
+		fmt.Fprintf(w, `<RunInstancesResponse><instancesSet><item><instanceId>i-1</instanceId><instanceType>%s</instanceType><placement><availabilityZone>%s-az</availabilityZone></placement></item></instancesSet></RunInstancesResponse>`, it, sn)
+	}))
+	t.Cleanup(fake.Close)
+	return fake.URL, func() (int, int, []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return total, throttled, slices.Clone(served)
+	}
+}
+
+// A scale-up of 3 hosts while the primary type has no capacity in either
+// subnet: the first launch learns that, and the others go straight to the
+// fallback, so k hosts cost len(subnets)+k RunInstances (5), within EC2's
+// request burst. Without the marks every launch repeats the primary's
+// sweep (3k = 9 calls), which the bucket throttles.
+func TestLaunchSkipsCandidatesRecentlyWithoutCapacity(t *testing.T) {
+	url, stats := throttledEC2(t, "m8g.2xlarge")
+	p := New(url, discard)
+	template := json.RawMessage(`{"region": "eu-west-1", "launchTemplate": "lt-1", "userData": "env",
+		"instanceType": "m8g.2xlarge", "fallbackInstanceTypes": ["m7g.2xlarge"], "subnets": ["subnet-a", "subnet-b"]}`)
+	for i := range 3 {
+		l, err := p.Launch(context.Background(), template, nil, map[string]string{"LUX_RUNNER_MEMORY": "1"})
+		if err != nil {
+			t.Fatalf("launch %d: %v", i, err)
+		}
+		if l.InstanceType != "m7g.2xlarge" {
+			t.Errorf("launch %d got %+v, want the fallback", i, l)
+		}
+	}
+	total, throttled, served := stats()
+	want := []string{"m8g.2xlarge@subnet-a", "m8g.2xlarge@subnet-b", "m7g.2xlarge@subnet-a",
+		"m7g.2xlarge@subnet-b", "m7g.2xlarge@subnet-a"}
+	if total != 5 || throttled != 0 || !slices.Equal(served, want) {
+		t.Errorf("%d RunInstances (%d throttled), served %v; want 5 (none throttled): %v", total, throttled, served, want)
+	}
+}
+
+// A pool with no capacity for any of its 5 types in its 3 subnets, launched
+// on every 1s provisioner pass for 65s: it sweeps its 15 candidates once per
+// noCapacityRetryAfter (at 0s, 30s and 60s), not once per pass, and every
+// pass fails with the same error, whether it swept or skipped them all.
+func TestLaunchStuckPoolSweepsOncePerRetryAfter(t *testing.T) {
+	fail := map[[2]string]string{}
+	for _, it := range []string{"m8g.2xlarge", "m7g.2xlarge", "c8g.2xlarge", "c7g.2xlarge", "r8g.2xlarge"} {
+		fail[[2]string{it, "*"}] = "InsufficientInstanceCapacity"
+	}
+	url, attempts, _ := capacityEC2(t, fail, nil)
+	p := New(url, discard)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	p.now = func() time.Time { return now }
+	template := json.RawMessage(`{"region": "eu-west-1", "launchTemplate": "lt-1", "userData": "env",
+		"instanceType": "m8g.2xlarge", "fallbackInstanceTypes": ["m7g.2xlarge", "c8g.2xlarge", "c7g.2xlarge", "r8g.2xlarge"],
+		"subnets": ["subnet-a", "subnet-b", "subnet-c"]}`)
+	var first string
+	var sweeps []int // seconds at which a pass called EC2
+	for sec := range 66 {
+		before := len(*attempts)
+		_, err := p.Launch(context.Background(), template, nil, map[string]string{})
+		if err == nil {
+			t.Fatal("launched without capacity")
+		}
+		if sec == 0 {
+			first = err.Error()
+		} else if err.Error() != first {
+			t.Errorf("pass at %ds failed with\n%q\nwant\n%q", sec, err, first)
+		}
+		if n := len(*attempts) - before; n > 0 {
+			if n != 15 {
+				t.Errorf("pass at %ds made %d RunInstances, want a sweep of 15", sec, n)
+			}
+			sweeps = append(sweeps, sec)
+		}
+		now = now.Add(time.Second)
+	}
+	if want := []int{0, 30, 60}; !slices.Equal(sweeps, want) {
+		t.Errorf("sweeps at %vs, want %vs", sweeps, want)
+	}
+}
+
+// Marks are per region, type and subnet: a type without capacity in one
+// subnet is still tried in the others, and the same type in another
+// region is not skipped.
+func TestLaunchSkipsOnlyTheMarkedCandidates(t *testing.T) {
+	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "subnet-a"}: "InsufficientInstanceCapacity"}, nil)
+	p := New(url, discard)
+	got := func() []string {
+		var out []string
+		for _, a := range *attempts {
+			out = append(out, a.instanceType+"@"+a.subnet)
+		}
+		*attempts = nil
+		return out
+	}
+	for range 3 {
+		if _, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := got(), []string{"m8g.2xlarge@subnet-a", "m8g.2xlarge@subnet-b", "m8g.2xlarge@subnet-b", "m8g.2xlarge@subnet-c"}; !slices.Equal(got, want) {
+		t.Errorf("attempts %v, want %v", got, want)
+	}
+	// The fourth launch begins at subnet-a again, in a region with no mark.
+	other := strings.Replace(fallbackTemplate, "eu-north-1", "eu-west-1", 1)
+	if _, err := p.Launch(context.Background(), json.RawMessage(other), nil, map[string]string{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := got(), []string{"m8g.2xlarge@subnet-a", "m8g.2xlarge@subnet-b"}; !slices.Equal(got, want) {
+		t.Errorf("another region: attempts %v, want %v", got, want)
+	}
+}
+
+// awsTestEnv points the AWS SDK's configuration away from the machine's:
+// static credentials, no shared files, no IMDS, the default retryer.
+func awsTestEnv(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_RETRY_MODE", "")
+	t.Setenv("AWS_MAX_ATTEMPTS", "")
 }
 
 // runnerEnvOf is the runner env user data in format carries, key to value:

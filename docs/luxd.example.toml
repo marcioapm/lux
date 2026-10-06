@@ -77,6 +77,7 @@ pricing_endpoint = ""              # LUX_PRICING_ENDPOINT (tests)
 
 [ec2]
 endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
+no_capacity_retry_after = "30s"    # LUX_EC2_NO_CAPACITY_RETRY_AFTER: skip a type and subnet EC2 had no capacity for
 
 [console]
 # How the web console signs people in (docs/operators.md#signing-in):
