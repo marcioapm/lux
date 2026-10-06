@@ -425,8 +425,5 @@ func (p *placement) bundle(ctx context.Context, r spec.Repository) (path, op str
 	}
 	// A bundle made before an operation or a move was seen is never pushed.
 	os.Remove(path)
-	if err != nil {
-		return "", "", err
-	}
-	return "", op, nil
+	return "", op, err
 }
