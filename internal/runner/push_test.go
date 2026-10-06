@@ -159,14 +159,9 @@ func TestPushRefusesAnOperationInProgress(t *testing.T) {
 	if b := pf.bundled(); strings.Contains(b, "/co/w/app") {
 		t.Fatalf("app was bundled: %q", b)
 	}
-	if got := pf.branch("app"); got != "" {
-		t.Fatalf("app's lux/x pushed at %s", got)
-	}
+	pf.unpushed(t)
 	if l := res["lib"]; l["status"] != "pushed" || l["commit"] != libHead || l["operation"] != nil || pf.branch("lib") != libHead {
 		t.Fatalf("lib: %v, lux/x %q", l, pf.branch("lib"))
-	}
-	if entries, _ := os.ReadDir(filepath.Join(pf.root, "rt", "push")); len(entries) != 0 {
-		t.Fatalf("bundles left: %v", entries)
 	}
 }
 
@@ -235,6 +230,12 @@ func (pf *pushFixture) refusedUnpushed(t *testing.T, a map[string]any) {
 	if a["status"] != "refused" || a["operation"] != "rebase" || a["commit"] != nil {
 		t.Fatalf("app: %v", a)
 	}
+	pf.unpushed(t)
+}
+
+// unpushed asserts app's lux/x was not pushed and no bundle is left.
+func (pf *pushFixture) unpushed(t *testing.T) {
+	t.Helper()
 	if got := pf.branch("app"); got != "" {
 		t.Fatalf("app's lux/x pushed at %s", got)
 	}
@@ -266,15 +267,7 @@ func TestPushRefusesAnOperationStartedWhileBundling(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(app, ".git", "rebase-merge")); err != nil {
 		t.Fatalf("the rebase did not start: %v", err)
 	}
-	if a["status"] != "refused" || a["operation"] != "rebase" || a["commit"] != nil {
-		t.Fatalf("app: %v", a)
-	}
-	if got := pf.branch("app"); got != "" {
-		t.Fatalf("app's lux/x pushed at %s", got)
-	}
-	if entries, _ := os.ReadDir(filepath.Join(pf.root, "rt", "push")); len(entries) != 0 {
-		t.Fatalf("bundles left: %v", entries)
-	}
+	pf.refusedUnpushed(t, a)
 }
 
 // The first check: a rebase already stopped when the push starts is
@@ -335,12 +328,7 @@ func TestPushFailsWhenHeadMovesWhileBundling(t *testing.T) {
 		a["operation"] != nil || a["commit"] != nil {
 		t.Fatalf("app: %v", a)
 	}
-	if got := pf.branch("app"); got != "" {
-		t.Fatalf("app's lux/x pushed at %s", got)
-	}
-	if entries, _ := os.ReadDir(filepath.Join(pf.root, "rt", "push")); len(entries) != 0 {
-		t.Fatalf("bundles left: %v", entries)
-	}
+	pf.unpushed(t)
 }
 
 // An am session stopped on a conflict is refused as am, not rebase.
