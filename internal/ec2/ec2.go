@@ -163,12 +163,8 @@ func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, e
 // Launch starts one instance and returns its id, instance type and
 // availability zone as RunInstances reports them, and its market (from the
 // template's spot). tags are set on it (with the template's own); env is
-// the runner's environment, rendered into user data.
-//
-// Candidates are tried in order, type-major: the template's instanceType,
-// then each of fallbackInstanceTypes, each in every subnet from the pool's
-// next one round. Only a capacity error (capacityCodes) moves on to the next
-// candidate; any other error ends the launch at once.
+// the runner's environment, rendered into user data. Without capacity, it
+// falls back across subnets and fallbackInstanceTypes (see the package doc).
 func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (server.Launched, error) {
 	var none server.Launched
 	t, err := parse(template)
@@ -223,9 +219,8 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	return p.tryCandidates(ctx, c, t, base, env, start)
 }
 
-// tryCandidates sends base as each of t's candidates from subnet start, as
-// Launch describes, skipping those EC2 had no capacity for within
-// noCapacityFor.
+// tryCandidates sends base as each of t's candidates from subnet start,
+// skipping those EC2 had no capacity for within noCapacityFor.
 func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Template, base awsec2.RunInstancesInput, env map[string]string, start int) (server.Launched, error) {
 	var none server.Launched
 	userData := map[string]string{} // instance type → base64 user data
@@ -274,12 +269,11 @@ func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Templa
 		p.noCapacity[key] = noCapacityMark{at: p.now(), code: code, err: err}
 		p.log.Info("ec2: no capacity; trying the next candidate", "instanceType", cand.instanceType, "subnet", cand.subnet, "code", code)
 	}
-	// Every candidate failed in this sweep or is marked from a recent one,
-	// so the template's first candidate has a mark. Its error is the one
-	// wrapped, as every sweep tries it: EC2's message names the zone, and a
-	// rotation-dependent text would keep pool.launch_failed events apart.
-	// The code first: the provisioner keeps 200 characters of a host's
-	// launch error.
+	// Every candidate failed now or has a recent mark, so the template's
+	// first candidate has one; its error is wrapped because EC2's message
+	// names the zone, and text that varied with the rotation would split
+	// pool.launch_failed events. The code leads: the provisioner keeps 200
+	// characters of a launch error.
 	head := candidates(t, 0)[0]
 	m := p.noCapacity[capacityKey{t.Region, head.instanceType, head.subnet}]
 	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", m.code, candidateList(t), m.err)
