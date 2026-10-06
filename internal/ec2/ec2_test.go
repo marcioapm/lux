@@ -197,16 +197,12 @@ func capacityEC2(t *testing.T, fail map[[2]string]string, memMiB map[string]int)
 		action := r.PostForm.Get("Action")
 		calls[action]++
 		w.Header().Set("Content-Type", "text/xml")
-		reply := func(status int, code, msg string) {
-			w.WriteHeader(status)
-			fmt.Fprintf(w, `<Response><Errors><Error><Code>%s</Code><Message>%s</Message></Error></Errors><RequestID>1</RequestID></Response>`, code, msg)
-		}
 		switch action {
 		case "DescribeInstanceTypes":
 			it := r.PostForm.Get("InstanceType.1")
 			mem, ok := memMiB[it]
 			if !ok {
-				reply(http.StatusBadRequest, "InvalidInstanceType", "no "+it+" (fake)")
+				ec2Error(w, http.StatusBadRequest, "InvalidInstanceType", "no "+it+" (fake)")
 				return
 			}
 			fmt.Fprintf(w, `<DescribeInstanceTypesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><instanceTypeSet><item>`+
@@ -222,14 +218,13 @@ func capacityEC2(t *testing.T, fail map[[2]string]string, memMiB map[string]int)
 			switch code {
 			case "":
 			case "InsufficientInstanceCapacity", "InsufficientCapacity", "Unsupported":
-				// EC2's own wording, which names the zone asked for.
-				reply(http.StatusInternalServerError, code, fmt.Sprintf("We currently do not have sufficient %s capacity in the Availability Zone you requested (%s-az).", it, sn))
+				ec2Error(w, http.StatusInternalServerError, code, noCapacityMessage(it, sn))
 				return
 			case "InternalError":
-				reply(http.StatusInternalServerError, code, "internal error (fake)")
+				ec2Error(w, http.StatusInternalServerError, code, "internal error (fake)")
 				return
 			default:
-				reply(http.StatusBadRequest, code, "no "+code+" (fake)")
+				ec2Error(w, http.StatusBadRequest, code, "no "+code+" (fake)")
 				return
 			}
 			fmt.Fprintf(w, `<RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><reservationId>r-1</reservationId>`+
@@ -270,13 +265,9 @@ func TestLaunchFallsBackTypeMajorFromTheRoundRobinSubnet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got []string
-	for _, a := range *attempts {
-		got = append(got, a.instanceType+"@"+a.subnet)
-	}
 	want := []string{"m8g.2xlarge@subnet-b", "m8g.2xlarge@subnet-c", "m8g.2xlarge@subnet-a",
 		"m7g.2xlarge@subnet-b", "m7g.2xlarge@subnet-c", "m7g.2xlarge@subnet-a"}
-	if !slices.Equal(got, want) {
+	if got := placements(*attempts); !slices.Equal(got, want) {
 		t.Errorf("attempts %v, want %v", got, want)
 	}
 	if l.InstanceType != "m7g.2xlarge" || l.Zone != "subnet-a-az" || l.ProviderID != "i-0abc" {
@@ -297,12 +288,8 @@ func TestLaunchFallsBackToTheSecondFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got []string
-	for _, a := range *attempts {
-		got = append(got, a.instanceType+"@"+a.subnet)
-	}
 	want := []string{"m8g.2xlarge@subnet-a", "m8g.2xlarge@subnet-b", "m7g.2xlarge@subnet-a", "m7g.2xlarge@subnet-b", "c8g.2xlarge@subnet-a"}
-	if !slices.Equal(got, want) {
+	if got := placements(*attempts); !slices.Equal(got, want) {
 		t.Errorf("attempts %v, want %v", got, want)
 	}
 	if l.InstanceType != "c8g.2xlarge" || l.Zone != "subnet-a-az" {
@@ -442,7 +429,6 @@ func TestLaunchKeepsTheSDKRetryingOtherErrors(t *testing.T) {
 func TestLaunchUserDataCarriesEachTypesMemory(t *testing.T) {
 	fail := map[[2]string]string{{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity", {"m7g.2xlarge", "*"}: "InsufficientInstanceCapacity"}
 	mem := map[string]int{"m8g.2xlarge": 32768, "m7g.2xlarge": 16384}
-	gib := func(n int64) string { return strconv.FormatInt(n<<30, 10) }
 
 	url, attempts, calls := capacityEC2(t, fail, mem)
 	if _, err := New(url, discard).Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{}); err == nil {
@@ -473,7 +459,6 @@ func TestLaunchUserDataCarriesEachTypesMemory(t *testing.T) {
 // other type's.
 func TestLaunchUserDataMemoryWithOneLookupFailing(t *testing.T) {
 	fail := map[[2]string]string{{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity", {"m7g.2xlarge", "*"}: "InsufficientInstanceCapacity"}
-	gib := func(n int64) string { return strconv.FormatInt(n<<30, 10) }
 	for _, c := range []struct {
 		name string
 		mem  map[string]int
@@ -546,16 +531,14 @@ func throttledEC2(t *testing.T, noCapacity ...string) (url string, stats func() 
 		total++
 		if tokens < 1 {
 			throttled++
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprint(w, `<Response><Errors><Error><Code>RequestLimitExceeded</Code><Message>Request limit exceeded.</Message></Error></Errors><RequestID>1</RequestID></Response>`)
+			ec2Error(w, http.StatusServiceUnavailable, "RequestLimitExceeded", "Request limit exceeded.")
 			return
 		}
 		tokens--
 		it, sn := r.PostForm.Get("InstanceType"), r.PostForm.Get("SubnetId")
 		served = append(served, it+"@"+sn)
 		if slices.Contains(noCapacity, it) {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, `<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code><Message>We currently do not have sufficient %s capacity in the Availability Zone you requested (%s-az).</Message></Error></Errors><RequestID>1</RequestID></Response>`, it, sn)
+			ec2Error(w, http.StatusInternalServerError, "InsufficientInstanceCapacity", noCapacityMessage(it, sn))
 			return
 		}
 		fmt.Fprintf(w, `<RunInstancesResponse><instancesSet><item><instanceId>i-1</instanceId><instanceType>%s</instanceType><placement><availabilityZone>%s-az</availabilityZone></placement></item></instancesSet></RunInstancesResponse>`, it, sn)
@@ -644,12 +627,8 @@ func TestLaunchSkipsOnlyTheMarkedCandidates(t *testing.T) {
 	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "subnet-a"}: "InsufficientInstanceCapacity"}, nil)
 	p := New(url, discard)
 	got := func() []string {
-		var out []string
-		for _, a := range *attempts {
-			out = append(out, a.instanceType+"@"+a.subnet)
-		}
-		*attempts = nil
-		return out
+		defer func() { *attempts = nil }()
+		return placements(*attempts)
 	}
 	for range 3 {
 		if _, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{}); err != nil {
@@ -719,6 +698,29 @@ func awsTestEnv(t *testing.T) {
 	t.Setenv("AWS_RETRY_MODE", "")
 	t.Setenv("AWS_MAX_ATTEMPTS", "")
 }
+
+// ec2Error writes an EC2 query-API error reply.
+func ec2Error(w http.ResponseWriter, status int, code, msg string) {
+	w.WriteHeader(status)
+	fmt.Fprintf(w, `<Response><Errors><Error><Code>%s</Code><Message>%s</Message></Error></Errors><RequestID>1</RequestID></Response>`, code, msg)
+}
+
+// noCapacityMessage is EC2's capacity error wording, which names the zone
+// asked for (here subnet+"-az").
+func noCapacityMessage(instanceType, subnet string) string {
+	return fmt.Sprintf("We currently do not have sufficient %s capacity in the Availability Zone you requested (%s-az).", instanceType, subnet)
+}
+
+// placements is each attempt as "type@subnet".
+func placements(attempts []attempt) []string {
+	var out []string
+	for _, a := range attempts {
+		out = append(out, a.instanceType+"@"+a.subnet)
+	}
+	return out
+}
+
+func gib(n int64) string { return strconv.FormatInt(n<<30, 10) }
 
 // runnerEnvOf is the runner env user data in format carries, key to value:
 // env's lines, script's exports, or Ignition's decoded runner.env.
