@@ -58,13 +58,12 @@ variable "runner_pools" {
     error_message = "runner_pools[*].fallback_instance_types must not contain null (luxd refuses the pool otherwise)."
   }
   validation {
-    # Over the non-null entries: the block above refuses nulls.
-    condition = alltrue([for k, v in var.runner_pools : alltrue([
-      length(v.fallback_instance_types) <= 4,
-      length(distinct([for it in v.fallback_instance_types : it if it != null])) == length([for it in v.fallback_instance_types : it if it != null]),
-      !contains([for it in v.fallback_instance_types : it if it != null], v.instance_type),
-      !contains([for it in v.fallback_instance_types : it if it != null], ""),
-    ])])
+    # A null entry passes here: the block above refuses it.
+    condition = alltrue([for k, v in var.runner_pools : alltrue(concat(
+      [length(v.fallback_instance_types) <= 4],
+      [length(distinct(v.fallback_instance_types)) == length(v.fallback_instance_types)],
+      [for it in v.fallback_instance_types : it == null || (it != "" && it != v.instance_type)],
+    ))])
     error_message = "runner_pools[*].fallback_instance_types: at most 4, distinct, non-empty, and not the pool's instance_type (luxd refuses the pool otherwise)."
   }
 }
