@@ -189,7 +189,6 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	// memory: LUX_RUNNER_MEMORY is all that differs.
 	byType := map[string]string{}   // instance type → base64 user data
 	byMemory := map[string]string{} // LUX_RUNNER_MEMORY → base64 user data
-	var failed []string             // each capacity failure's candidate
 	var lastErr error
 	cands := candidates(t, start)
 	for n, cand := range cands {
@@ -225,7 +224,6 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 			}
 			return none, fmt.Errorf("ec2 RunInstances: %w", err)
 		}
-		failed = append(failed, cand.String())
 		lastErr = err
 		if n+1 < len(cands) {
 			p.log.Warn("ec2: no capacity; trying the next candidate", "instanceType", cand.instanceType, "subnet", cand.subnet,
@@ -233,9 +231,21 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		}
 	}
 	// The code first: the provisioner keeps 200 characters of a host's
-	// launch error.
+	// launch error. The candidates in the template's order, not this
+	// launch's, so that consecutive failures read alike and their
+	// pool.launch_failed events fold into one.
 	code, _ := capacityError(lastErr)
-	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", code, strings.Join(failed, ", "), lastErr)
+	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", code, candidateList(t), lastErr)
+}
+
+// candidateList is every candidate of t, by type: "m8g.2xlarge in subnet-a,
+// subnet-b; m7g.2xlarge in subnet-a, subnet-b".
+func candidateList(t Template) string {
+	var perType []string
+	for _, it := range append([]string{t.InstanceType}, t.FallbackInstanceTypes...) {
+		perType = append(perType, candidate{it, strings.Join(t.Subnets, ", ")}.String())
+	}
+	return strings.Join(perType, "; ")
 }
 
 // A candidate is one RunInstances attempt: an instance type ("" for the

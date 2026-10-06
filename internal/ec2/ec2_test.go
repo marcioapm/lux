@@ -329,28 +329,32 @@ func TestLaunchStopsAtANonCapacityErrorMidway(t *testing.T) {
 }
 
 // Every candidate without capacity: the error leads with the code (the
-// provisioner keeps 200 characters), names each attempt, and ends with
-// EC2's own error. One request per candidate: none is SDK-retried.
+// provisioner keeps 200 characters), names the candidates, and ends with
+// EC2's own error. It reads the same whichever subnet the launch began in,
+// so repeated failures fold into one pool event. One request per
+// candidate: none is SDK-retried.
 func TestLaunchWithNoCapacityAnywhere(t *testing.T) {
 	url, attempts, _ := capacityEC2(t, map[[2]string]string{
 		{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity",
 		{"m7g.2xlarge", "*"}: "InsufficientInstanceCapacity",
 	}, nil)
-	_, err := New(url, discard).Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{})
-	if err == nil {
-		t.Fatal("launched without capacity")
-	}
-	msg := err.Error()
-	if !strings.HasPrefix(msg, "ec2 RunInstances: InsufficientInstanceCapacity for every candidate: m8g.2xlarge in subnet-a, ") {
-		t.Errorf("err %q", msg)
-	}
-	for _, c := range []string{"m8g.2xlarge in subnet-c", "m7g.2xlarge in subnet-a", "m7g.2xlarge in subnet-c", "no InsufficientInstanceCapacity (fake)"} {
-		if !strings.Contains(msg, c) {
-			t.Errorf("err %q does not name %q", msg, c)
+	p := New(url, discard)
+	var msgs []string
+	for range 2 {
+		_, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{})
+		if err == nil {
+			t.Fatal("launched without capacity")
 		}
+		msgs = append(msgs, strings.ReplaceAll(err.Error(), "RequestID: 1, ", ""))
 	}
-	if len(*attempts) != 6 {
-		t.Errorf("%d RunInstances requests for 6 candidates: %v", len(*attempts), *attempts)
+	want := "ec2 RunInstances: InsufficientInstanceCapacity for every candidate: " +
+		"m8g.2xlarge in subnet-a, subnet-b, subnet-c; m7g.2xlarge in subnet-a, subnet-b, subnet-c: " +
+		"operation error EC2: RunInstances, https response error StatusCode: 500, api error InsufficientInstanceCapacity: no InsufficientInstanceCapacity (fake)"
+	if msgs[0] != want || msgs[1] != want {
+		t.Errorf("errors\n%q\n%q\nwant\n%q", msgs[0], msgs[1], want)
+	}
+	if len(*attempts) != 12 {
+		t.Errorf("%d RunInstances requests for 2×6 candidates: %v", len(*attempts), *attempts)
 	}
 }
 
