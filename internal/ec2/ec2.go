@@ -220,33 +220,31 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		start = p.next[t.LaunchTemplate] % len(t.Subnets)
 		p.next[t.LaunchTemplate]++
 	}
-	// Rendered once per instance type, and shared between types of the same
-	// memory: LUX_RUNNER_MEMORY is all that differs.
-	byType := map[string]string{}   // instance type → base64 user data
-	byMemory := map[string]string{} // LUX_RUNNER_MEMORY → base64 user data
-	// The all-fail error wraps the first candidate in the template's order,
-	// which every full sweep tries or skips for a recent failure (whose
-	// mark keeps the error): EC2's message names the zone, and a
-	// rotation-dependent one would keep pool.launch_failed events apart.
-	head := candidates(t, 0)[0]
+	return p.tryCandidates(ctx, c, t, base, env, start)
+}
+
+// tryCandidates sends base as each of t's candidates from subnet start, as
+// Launch describes, skipping those EC2 had no capacity for within
+// noCapacityFor.
+func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Template, base awsec2.RunInstancesInput, env map[string]string, start int) (server.Launched, error) {
+	var none server.Launched
+	userData := map[string]string{} // instance type → base64 user data
 	cands := candidates(t, start)
+	skipped, failed := 0, 0
 	for n, cand := range cands {
 		key := capacityKey{t.Region, cand.instanceType, cand.subnet}
 		if m, ok := p.noCapacity[key]; ok && p.now().Sub(m.at) < p.noCapacityFor {
+			skipped++
 			continue
 		}
-		ud, ok := byType[cand.instanceType]
+		ud, ok := userData[cand.instanceType]
 		if !ok {
-			runEnv := p.withMemory(ctx, c, t.Region, env, cand.instanceType)
-			if ud, ok = byMemory[runEnv["LUX_RUNNER_MEMORY"]]; !ok {
-				raw, err := renderUserData(t.UserData, runEnv)
-				if err != nil {
-					return none, err
-				}
-				ud = base64.StdEncoding.EncodeToString(raw)
-				byMemory[runEnv["LUX_RUNNER_MEMORY"]] = ud
+			raw, err := renderUserData(t.UserData, p.withMemory(ctx, c, t.Region, env, cand.instanceType))
+			if err != nil {
+				return none, err
 			}
-			byType[cand.instanceType] = ud
+			ud = base64.StdEncoding.EncodeToString(raw)
+			userData[cand.instanceType] = ud
 		}
 		in := base
 		in.UserData = aws.String(ud)
@@ -259,6 +257,10 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		out, err := c.RunInstances(ctx, &in, noCapacityRetries)
 		if err == nil {
 			delete(p.noCapacity, key)
+			if n > 0 {
+				p.log.Warn("ec2: launched a later candidate: earlier ones had no capacity", "instanceType", cand.instanceType,
+					"subnet", cand.subnet, "failed", failed, "skipped", skipped)
+			}
 			return launched(t, out)
 		}
 		code, capacity := capacityError(err)
@@ -268,17 +270,17 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 			}
 			return none, fmt.Errorf("ec2 RunInstances: %w", err)
 		}
+		failed++
 		p.noCapacity[key] = noCapacityMark{at: p.now(), code: code, err: err}
-		if n+1 < len(cands) {
-			p.log.Warn("ec2: no capacity; trying the next candidate", "instanceType", cand.instanceType, "subnet", cand.subnet,
-				"code", code, "next", cands[n+1].String())
-		}
+		p.log.Info("ec2: no capacity; trying the next candidate", "instanceType", cand.instanceType, "subnet", cand.subnet, "code", code)
 	}
 	// Every candidate failed in this sweep or is marked from a recent one,
-	// so head's mark is there. The code first: the provisioner keeps 200
-	// characters of a host's launch error. Nothing in the text depends on
-	// this launch's rotation, so consecutive failures read alike and their
-	// events fold into one.
+	// so the template's first candidate has a mark. Its error is the one
+	// wrapped, as every sweep tries it: EC2's message names the zone, and a
+	// rotation-dependent text would keep pool.launch_failed events apart.
+	// The code first: the provisioner keeps 200 characters of a host's
+	// launch error.
+	head := candidates(t, 0)[0]
 	m := p.noCapacity[capacityKey{t.Region, head.instanceType, head.subnet}]
 	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", m.code, candidateList(t), m.err)
 }
