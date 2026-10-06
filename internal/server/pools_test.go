@@ -143,4 +143,52 @@ func TestPutPoolRejectsNonStringUserData(t *testing.T) {
 	}
 }
 
+// template.fallbackInstanceTypes: an ec2 pool's array of distinct type
+// names, tried after its instanceType, which it needs; at most four, so a
+// launch's attempts stay bounded.
+func TestPutPoolValidatesFallbackInstanceTypes(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	withType := func(fb any) map[string]any {
+		return map[string]any{"instanceType": "m8g.2xlarge", "fallbackInstanceTypes": fb}
+	}
+	for i, c := range []struct {
+		template map[string]any
+		want     string
+	}{
+		{withType("m7g.2xlarge"), "must be an array of strings"},
+		{withType(nil), "must be an array of strings"},
+		{withType([]any{"m7g.2xlarge", 1}), "[1] must be a non-empty string"},
+		{withType([]any{""}), "[0] must be a non-empty string"},
+		{withType([]any{"m7g.2xlarge", "m7g.2xlarge"}), "[1] \"m7g.2xlarge\" is the instanceType or listed twice"},
+		{withType([]any{"m8g.2xlarge"}), "[0] \"m8g.2xlarge\" is the instanceType or listed twice"},
+		{withType([]any{"a", "b", "c", "d", "e"}), "has 5 entries; at most 4"},
+		{map[string]any{"fallbackInstanceTypes": []any{"m7g.2xlarge"}}, "needs template.instanceType"},
+		{map[string]any{"instanceType": "", "fallbackInstanceTypes": []any{"m7g.2xlarge"}}, "needs template.instanceType"},
+	} {
+		_, err := s.putPool(ctx, poolIn(Pool{Name: fmt.Sprintf("bad%d", i), Provider: "ec2", Template: c.template}))
+		var he *HTTPError
+		if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity || he.Code != "invalid_pool" || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%v: err %v, want 422 invalid_pool %q", c.template, err, c.want)
+		}
+	}
+	for i, fb := range []any{[]any{}, []any{"m7g.2xlarge"}, []any{"m7g.2xlarge", "c8g.2xlarge", "c7g.2xlarge", "r8g.xlarge"}} {
+		pool := poolIn(Pool{Name: fmt.Sprintf("good%d", i), Provider: "ec2", Template: withType(fb)})
+		if _, err := s.putPool(ctx, pool); err != nil {
+			t.Errorf("fallbackInstanceTypes %v refused: %v", fb, err)
+		}
+	}
+	static := poolIn(Pool{Name: "static", Provider: "static", Template: withType([]any{"m7g.2xlarge"})})
+	if _, err := s.putPool(ctx, static); err == nil || !strings.Contains(err.Error(), "is for ec2 pools") {
+		t.Errorf("a static pool's fallbackInstanceTypes: err %v", err)
+	}
+}
+
 func poolIn(pl Pool) *poolBody { return &poolBody{Body: poolInput(pl)} }

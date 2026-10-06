@@ -56,12 +56,15 @@ import (
 
 // Template is a pool's EC2 settings.
 type Template struct {
-	Region         string            `json:"region"`
-	LaunchTemplate string            `json:"launchTemplate"`
-	InstanceType   string            `json:"instanceType"`
-	Subnets        []string          `json:"subnets"`
-	Tags           map[string]string `json:"tags"`
-	Spot           bool              `json:"spot"`
+	Region         string `json:"region"`
+	LaunchTemplate string `json:"launchTemplate"`
+	InstanceType   string `json:"instanceType"`
+	// FallbackInstanceTypes are tried, in order, after InstanceType when
+	// EC2 has no capacity for it in any of Subnets (see Launch).
+	FallbackInstanceTypes []string          `json:"fallbackInstanceTypes"`
+	Subnets               []string          `json:"subnets"`
+	Tags                  map[string]string `json:"tags"`
+	Spot                  bool              `json:"spot"`
 	// UserData: "ignition" (default), "script", or "env". See the package
 	// doc. Validated when the pool is set (internal/server), so an unknown
 	// value is refused there, not here at launch time.
