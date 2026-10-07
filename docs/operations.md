@@ -492,7 +492,8 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   cordons the pool's hosts the same way, without `--force-evict`: a Run on
   one finishes where it is and the host is terminated once idle; with
   `--force-evict` it is stopped (snapshotted) and resumed elsewhere at once,
-  never cut short (a Run with `resumePolicy: never` ends `failed` instead).
+  never cut short (`resumePolicy: restart` starts it from scratch instead;
+  `manual` or `never` ends it `failed`).
 - **Scale to zero when idle:** `--warm-while-active` keeps the `--warm`
   hosts only while the pool is in use: a Run live on it, or placed or
   ended within its `--scale-down-after`. After that the pool drops to
@@ -574,10 +575,11 @@ runner reads as `--ec2-imds`; IMDSv2 must be reachable). On the notice:
    Run has time to snapshot its state volumes and upload them.
 3. Each preempted Run is resumed automatically from that snapshot, on
    another host. If the pool has none free it launches one. An agent picks
-   its session back up, as after any resume. A Run with
-   `resumePolicy: never` (one-shot work) is not resumed: it ends `failed`,
-   `preempt: not resumed (resumePolicy never)`
-   ([resume policy](runspec.md#resume-policy)).
+   its session back up, as after any resume. Its spec's `resumePolicy`
+   can change that ([resume policy](runspec.md#resume-policy)): `restart`
+   starts it again on another host from scratch, not from the snapshot;
+   `manual` and `never` (one-shot work) end it `failed`, e.g.
+   `preempt: not resumed (resumePolicy never)`.
 
 A Run whose stop or upload cannot finish in time (a very large state
 volume) is lost when the instance goes. It is resumable from its previous
