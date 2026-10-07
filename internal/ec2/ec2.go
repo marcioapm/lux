@@ -242,9 +242,12 @@ func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Templa
 	userData := map[string]string{} // instance type → base64 user data
 	cands := candidates(t, start)
 	skipped, failed := 0, 0
+	// One reading for the whole sweep: its marks expire together, so a
+	// later launch sweeps all of them or none, whatever each call took.
+	now := p.now()
 	for n, cand := range cands {
 		key := t.capacityKey(cand)
-		if m, ok := p.noCapacity[key]; ok && p.now().Sub(m.at) < p.noCapacityFor {
+		if m, ok := p.noCapacity[key]; ok && now.Sub(m.at) < p.noCapacityFor {
 			skipped++
 			continue
 		}
@@ -282,7 +285,7 @@ func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Templa
 			return none, fmt.Errorf("ec2 RunInstances: %w", err)
 		}
 		failed++
-		p.noCapacity[key] = noCapacityMark{at: p.now(), code: code, err: err}
+		p.noCapacity[key] = noCapacityMark{at: now, code: code, err: err}
 		p.log.Info("ec2: no capacity; trying the next candidate", "instanceType", cand.instanceType, "subnet", cand.subnet, "code", code)
 	}
 	// Every candidate failed now or has a recent mark, so the template's
