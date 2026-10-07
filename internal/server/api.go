@@ -94,7 +94,7 @@ func (s *Server) routes(api huma.API) {
 			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +
 			"with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. " +
 			"Adding needs a stopped, lost or failed Run: while it is resuming, 409. " +
-			"A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one.\n\n" +
+			"A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one, or unless its resumePolicy is restart and it has no session, which restores nothing.\n\n" +
 			"resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller " +
 			"only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). " +
 			"A Run already resuming refuses other sizes (409).",

@@ -213,7 +213,9 @@ reach S3 in the background:
    the recorded manifest, output and artifacts exactly. The Run's state
    reason says so; a resume starts it from that previous snapshot. A Run
    with no previous snapshot is not resumable (409 `no_snapshot`, and
-   left out of `lux ls --resumable`) unless `--from-snapshot` names one.
+   left out of `lux ls --resumable`) unless `--from-snapshot` names one,
+   or unless its resumePolicy is restart and it has no session, which
+   restores nothing.
    The runner deletes the refused snapshot's files instead of uploading
    them.
 2. The host keeps its local copy, so a resume there moves nothing. It
