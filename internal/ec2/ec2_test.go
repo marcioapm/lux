@@ -364,6 +364,32 @@ func TestLaunchWithNoCapacityAnywhere(t *testing.T) {
 	}
 }
 
+// The all-fail error names the head candidate's mark and lists the
+// candidates for a spot pool, a pool on its launch template's type and a
+// pool without subnets. The second launch starts at the other subnet and
+// skips everything, so it reads the head's mark from the first sweep.
+func TestLaunchWithNoCapacityAnywhereNamesTheHeadPerPoolShape(t *testing.T) {
+	const tail = "operation error EC2: RunInstances, https response error StatusCode: 500, RequestID: 1, api error InsufficientInstanceCapacity: "
+	for _, c := range []struct{ name, tmpl, want string }{
+		{"spot", `{"region": "eu-west-1", "launchTemplate": "lt-1", "userData": "env", "instanceType": "m8g.2xlarge", "spot": true, "subnets": ["subnet-a", "subnet-b"]}`,
+			"ec2 RunInstances: InsufficientInstanceCapacity for every candidate: m8g.2xlarge in subnet-a, subnet-b: " + tail + noCapacityMessage("m8g.2xlarge", "subnet-a")},
+		{"template type", `{"region": "eu-west-1", "launchTemplate": "lt-1", "userData": "env", "subnets": ["subnet-a", "subnet-b"]}`,
+			"ec2 RunInstances: InsufficientInstanceCapacity for every candidate: template type in subnet-a, subnet-b: " + tail + noCapacityMessage("", "subnet-a")},
+		{"no subnets", `{"region": "eu-west-1", "launchTemplate": "lt-1", "userData": "env", "instanceType": "m8g.2xlarge"}`,
+			"ec2 RunInstances: InsufficientInstanceCapacity for every candidate: m8g.2xlarge: " + tail + noCapacityMessage("m8g.2xlarge", "")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			url, _, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity", {"", "*"}: "InsufficientInstanceCapacity"}, nil)
+			p := New(url, discard)
+			for i := range 2 {
+				if _, err := p.Launch(context.Background(), json.RawMessage(c.tmpl), nil, map[string]string{"LUX_RUNNER_MEMORY": "1"}); err == nil || err.Error() != c.want {
+					t.Errorf("launch %d: %v, want %s", i, err, c.want)
+				}
+			}
+		})
+	}
+}
+
 // Zones failing with different codes: the headline code is the template's
 // first candidate's, whichever subnet the launch began in.
 func TestLaunchWithNoCapacityAnywhereKeepsOneCode(t *testing.T) {
