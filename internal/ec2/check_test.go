@@ -118,6 +118,49 @@ func TestCheckCallsPerSubnetAndFallback(t *testing.T) {
 	}
 }
 
+// Checks from request handlers share the provider with the provisioner:
+// cold-cache checks in distinct regions, alongside a Launch and an
+// Instances, each building its region's client. Run under the race
+// detector (go test -race ./internal/ec2/), which reports unsynchronised
+// access to the client cache.
+func TestConcurrentChecksShareTheClientCache(t *testing.T) {
+	endpoint, _ := dryRunEC2(t, nil)
+	p := New(endpoint, discard)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := range 16 {
+		wg.Go(func() {
+			<-start
+			errs <- p.Check(context.Background(), json.RawMessage(fmt.Sprintf(`{"region": "check-%d", "launchTemplate": "lt-1"}`, i)))
+		})
+	}
+	wg.Go(func() {
+		<-start
+		for i := range 4 {
+			_, err := p.Launch(context.Background(), json.RawMessage(fmt.Sprintf(`{"region": "launch-%d", "launchTemplate": "lt-1"}`, i)),
+				map[string]string{}, map[string]string{})
+			errs <- err
+		}
+	})
+	wg.Go(func() {
+		<-start
+		for i := range 4 {
+			// The fake answers only RunInstances: the listing fails, after
+			// its client is built.
+			_, _ = p.Instances(context.Background(), json.RawMessage(fmt.Sprintf(`{"region": "list-%d"}`, i)), map[string]string{"k": "v"})
+		}
+	})
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+}
+
 // DryRunOperation is a pass; any other answer fails the check at its
 // first request, EC2's code first.
 func TestCheckFailsOnEC2sRefusal(t *testing.T) {

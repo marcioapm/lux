@@ -54,6 +54,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -91,7 +92,10 @@ type Template struct {
 
 type Provider struct {
 	endpoint string
-	clients  map[string]*awsec2.Client
+	// clientsMu guards clients: Check runs from request handlers while the
+	// provisioner launches, lists and terminates.
+	clientsMu sync.Mutex
+	clients   map[string]*awsec2.Client
 	// next subnet per pool: launches spread across the pool's subnets.
 	next map[string]int
 	// memory is each instance type's memory in bytes, per region, as
@@ -152,8 +156,14 @@ func (p *Provider) SkipNoCapacityFor(d time.Duration) {
 	p.noCapacityFor = d
 }
 
+// client is region's cached client, built on first use. The build runs
+// without clientsMu (LoadDefaultConfig may reach IMDS or STS); when two
+// callers build the same region, the first one published wins.
 func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, error) {
-	if c := p.clients[region]; c != nil {
+	p.clientsMu.Lock()
+	c := p.clients[region]
+	p.clientsMu.Unlock()
+	if c != nil {
 		return c, nil
 	}
 	var opts []func(*config.LoadOptions) error
@@ -164,11 +174,16 @@ func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, e
 	if err != nil {
 		return nil, err
 	}
-	c := awsec2.NewFromConfig(cfg, func(o *awsec2.Options) {
+	c = awsec2.NewFromConfig(cfg, func(o *awsec2.Options) {
 		if p.endpoint != "" {
 			o.BaseEndpoint = aws.String(p.endpoint)
 		}
 	})
+	p.clientsMu.Lock()
+	defer p.clientsMu.Unlock()
+	if won := p.clients[region]; won != nil {
+		return won, nil
+	}
 	p.clients[region] = c
 	return c, nil
 }
