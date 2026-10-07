@@ -339,10 +339,13 @@ bytes in S3.
 | `stored_volume` | `storedVolume` | `volume`: state volume snapshots | Snapshots |
 | `stored_output` | `storedOutput` | `output`: a placement's output | Output |
 | `stored_artifact` | `storedArtifact` | `artifact` | Artifacts |
-| `stored_context` | `storedContext` | `context`: image build contexts | Build contexts |
+| `stored_context` | `storedContext` | `context`: image build contexts | not charted |
 
 They are levels: a rollup bucket is their mean. The four add up to the
-tenant's bytes in S3, which the Overview's **Stored** chart stacks.
+tenant's bytes in S3. The Overview's **Stored** chart stacks the first
+three: lux writes no `context` blobs yet ([RunSpec](runspec.md): no build
+context), so `stored_context` is always 0 and is kept for that future kind
+without being drawn.
 Migration 052 filled them into the samples written before they existed,
 from each blob's `uploaded_at` and `deleted_at` (in S3 from its upload
 until its deletion), so the chart reaches back as far as the samples kept.

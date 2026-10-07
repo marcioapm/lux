@@ -234,8 +234,12 @@ export function familyDisplay(families: readonly FamilyInfo[]): Map<string, { la
 
 /* ---------- stored bytes by blob kind ---------- */
 
-/** Blob kinds luxd keeps in S3 (blobs.kind). */
-export type StorageKind = "volume" | "output" | "artifact" | "context";
+/**
+ * Blob kinds luxd keeps in S3 (blobs.kind) that the console charts. The
+ * history API also samples a `context` kind (storedContext), which nothing
+ * writes yet; charting it again is an entry here and in its callers.
+ */
+export type StorageKind = "volume" | "output" | "artifact";
 
 /**
  * Label and chart slot of each kind. Fixed per kind, so a kind keeps its
@@ -245,7 +249,6 @@ const STORAGE_KINDS: Record<StorageKind, { label: string; slot: number }> = {
   volume: { label: "Snapshots", slot: 3 },
   output: { label: "Output", slot: 7 },
   artifact: { label: "Artifacts", slot: 4 },
-  context: { label: "Build contexts", slot: 5 },
 };
 
 /** Every kind, in stacking order (bottom first). */
