@@ -616,7 +616,7 @@ def test_overview_stored_chart_stacks_bytes_by_kind(page, env, lux):
         page.sign_in(lux.api_key, "/")
         card = page.locator("section.card", has=page.get_by_role("heading", name="Stored", exact=True))
         expect(card.locator(".tschart-plot canvas")).to_have_count(1, timeout=15_000)
-        expect(card.locator(".tschart-legend-item")).to_have_text(["Snapshots", "Output", "Artifacts"])
+        expect(card.locator(".tschart-legend").get_by_role("button")).to_have_text(["Snapshots", "Output", "Artifacts"])
         tip = card.locator(".tschart-tip")
 
         def hover_last():
