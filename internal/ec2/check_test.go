@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"maps"
@@ -290,6 +291,38 @@ func TestCheckFailsOnALaterCandidatesRefusal(t *testing.T) {
 		}
 		if n := len(forms()); n != c.requests {
 			t.Errorf("%s refused: %d requests, want %d (none after the refusal)", c.refuse, n, c.requests)
+		}
+	}
+}
+
+// dryRunEC2 answers with EC2's status for each code: 412 DryRunOperation,
+// 403 UnauthorizedOperation, 400 for another client error. The Check
+// tests above refuse by code alone, so this pins the statuses they run on.
+func TestEC2ErrorStatuses(t *testing.T) {
+	endpoint, _ := dryRunEC2(t, map[string]string{"lt-unauthorized": "UnauthorizedOperation", "lt-missing": "InvalidLaunchTemplateName.NotFound"})
+	for _, c := range []struct {
+		launchTemplate, code string
+		status               int
+	}{
+		{"lt-ok", "DryRunOperation", http.StatusPreconditionFailed},
+		{"lt-unauthorized", "UnauthorizedOperation", http.StatusForbidden},
+		{"lt-missing", "InvalidLaunchTemplateName.NotFound", http.StatusBadRequest},
+	} {
+		resp, err := http.PostForm(endpoint, url.Values{"Action": {"RunInstances"}, "DryRun": {"true"},
+			"LaunchTemplate.LaunchTemplateName": {c.launchTemplate}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reply struct {
+			Code string `xml:"Errors>Error>Code"`
+		}
+		err = xml.NewDecoder(resp.Body).Decode(&reply)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", c.launchTemplate, err)
+		}
+		if resp.StatusCode != c.status || reply.Code != c.code {
+			t.Errorf("%s: HTTP %d %s, want %d %s", c.launchTemplate, resp.StatusCode, reply.Code, c.status, c.code)
 		}
 	}
 }
