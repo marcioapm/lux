@@ -104,8 +104,9 @@ type config struct {
 	} `toml:"costs"`
 	EC2 struct {
 		Endpoint string `toml:"endpoint" env:"LUX_EC2_ENDPOINT"`
-		// NoCapacityRetryAfter: how long a (type, subnet) EC2 had no
-		// capacity for is skipped by later launches; 0 never skips.
+		// NoCapacityRetryAfter: how long a candidate (region, instance
+		// type, launch template, subnet, market) EC2 had no capacity for
+		// is skipped by later launches; 0 never skips.
 		NoCapacityRetryAfter duration `toml:"no_capacity_retry_after" env:"LUX_EC2_NO_CAPACITY_RETRY_AFTER"`
 	} `toml:"ec2"`
 	Console struct {

@@ -132,7 +132,7 @@ under a timeout. `luxd check-config` is an alias of `validate`.
 | `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
 | `LUX_OUTDATED_DRAIN_PERCENT` | `10` | Caps concurrent outdated-binaries drains per pool, as a percentage of its live hosts (at least 1 regardless). |
 | `LUX_EC2_ENDPOINT` | AWS | Overrides the EC2 endpoint (tests). |
-| `LUX_EC2_NO_CAPACITY_RETRY_AFTER` | `30s` | How long launches skip an instance type in a subnet after EC2 had no capacity for it there (see **No capacity** below); `0` never skips. |
+| `LUX_EC2_NO_CAPACITY_RETRY_AFTER` | `30s` | How long launches skip a candidate (region, instance type, launch template, subnet, market) after EC2 had no capacity for it (see **No capacity** below); `0` never skips. |
 | `LUX_SAMPLE_EVERY` | `10s` | How often the system is sampled for history ([Operators](operators.md#history)). |
 | `LUX_HISTORY_RAW` | `48h` | How long raw samples (hosts and placements: one per heartbeat) are kept. |
 | `LUX_HISTORY_MINUTES` | `720h` | How long minute rollups are kept. |
@@ -475,10 +475,10 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   success on a later candidate warns once (`ec2: launched a later
   candidate`). These errors are not retried in place; any other error (a
   quota such as `VcpuLimitExceeded`, a permission, a bad parameter) ends
-  the launch at once. A type and subnet without capacity is skipped for
-  `LUX_EC2_NO_CAPACITY_RETRY_AFTER` (30s; `0` never skips) by every pool
-  asking for it in the same market (spot or on-demand; a pool without
-  `instanceType` shares only with its launch template),
+  the launch at once. A candidate without capacity is skipped for
+  `LUX_EC2_NO_CAPACITY_RETRY_AFTER` (30s; `0` never skips) by every launch
+  with the same region, instance type, launch template, subnet and market
+  (spot or on-demand),
   so a shortage costs one sweep of `RunInstances` calls per interval; when
   every candidate fails or is skipped, the launch fails with the code and
   the candidates and is retried on the next pass. Fallback types use the

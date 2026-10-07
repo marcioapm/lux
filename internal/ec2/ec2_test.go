@@ -620,8 +620,8 @@ func TestLaunchStuckPoolSweepsOncePerRetryAfter(t *testing.T) {
 	}
 }
 
-// Marks are per region, type and subnet (and market, below): a type
-// without capacity in one subnet is still tried in the others, and the
+// Marks are per region, type and subnet (market and launch template below):
+// a type without capacity in one subnet is still tried in the others, and the
 // same type in another region is not skipped.
 func TestLaunchSkipsOnlyTheMarkedCandidates(t *testing.T) {
 	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "subnet-a"}: "InsufficientInstanceCapacity"}, nil)
@@ -651,8 +651,8 @@ func TestLaunchSkipsOnlyTheMarkedCandidates(t *testing.T) {
 // Spot and on-demand capacity are separate in EC2: a mark from one market
 // does not skip the same type and subnet in the other, either way round.
 func TestLaunchMarksArePerMarket(t *testing.T) {
-	const spot = `{"region": "eu-west-1", "launchTemplate": "lt-spot", "userData": "env", "instanceType": "m8g.2xlarge", "spot": true, "subnets": ["subnet-a"]}`
-	const onDemand = `{"region": "eu-west-1", "launchTemplate": "lt-od", "userData": "env", "instanceType": "m8g.2xlarge", "subnets": ["subnet-a"]}`
+	const spot = `{"region": "eu-west-1", "launchTemplate": "lt-1", "userData": "env", "instanceType": "m8g.2xlarge", "spot": true, "subnets": ["subnet-a"]}`
+	const onDemand = `{"region": "eu-west-1", "launchTemplate": "lt-1", "userData": "env", "instanceType": "m8g.2xlarge", "subnets": ["subnet-a"]}`
 	for _, c := range []struct{ name, first, second string }{
 		{"spot then on-demand", spot, onDemand},
 		{"on-demand then spot", onDemand, spot},
@@ -693,9 +693,10 @@ func TestLaunchTemplateTypeMarksArePerLaunchTemplate(t *testing.T) {
 	}
 }
 
-// Pools asking for the same type in the same market and subnet ask for the
-// same EC2 capacity, so they share a mark whatever their launch templates.
-func TestLaunchMarksAreSharedAcrossPoolsOfOneType(t *testing.T) {
+// A launch template can carry a zone, placement group, tenancy or capacity
+// reservation lux does not see, so pools on different launch templates do
+// not share marks even for the same type, market and subnet.
+func TestLaunchMarksArePerLaunchTemplate(t *testing.T) {
 	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity"}, nil)
 	p := New(url, discard)
 	if _, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{"LUX_RUNNER_MEMORY": "1"}); err != nil {
@@ -706,8 +707,9 @@ func TestLaunchMarksAreSharedAcrossPoolsOfOneType(t *testing.T) {
 	if _, err := p.Launch(context.Background(), json.RawMessage(other), nil, map[string]string{"LUX_RUNNER_MEMORY": "1"}); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := placements(*attempts), []string{"m7g.2xlarge@subnet-a"}; !slices.Equal(got, want) {
-		t.Errorf("lt-2 attempts %v, want %v: lt-1's marks skip m8g.2xlarge", got, want)
+	want := []string{"m8g.2xlarge@subnet-a", "m8g.2xlarge@subnet-b", "m8g.2xlarge@subnet-c", "m7g.2xlarge@subnet-a"}
+	if got := placements(*attempts); !slices.Equal(got, want) {
+		t.Errorf("lt-2 attempts %v, want %v: lt-1's marks do not skip m8g.2xlarge", got, want)
 	}
 }
 
