@@ -711,6 +711,37 @@ func TestLaunchMarksAreSharedAcrossPoolsOfOneType(t *testing.T) {
 	}
 }
 
+// A sweep's marks share one clock reading, so they expire together and a
+// later pass sweeps every candidate or none, however long each
+// RunInstances takes and wherever in its tick a pass starts. The clock
+// moves 5ms per reading (a round trip); pass 3 starts 3ms early, between
+// the times the two subnets would have been marked a round trip apart.
+func TestLaunchSweepDoesNotSplit(t *testing.T) {
+	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m7i.large", "*"}: "InsufficientInstanceCapacity"}, nil)
+	p := New(url, discard)
+	p.SkipNoCapacityFor(3 * time.Second)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var off time.Duration
+	p.now = func() time.Time { off += 5 * time.Millisecond; return base.Add(off) }
+	tmpl := json.RawMessage(`{"region": "us-east-1", "launchTemplate": "lt-1", "userData": "env",
+		"instanceType": "m7i.large", "subnets": ["subnet-a", "subnet-b"]}`)
+	var calls []int
+	for pass := range 9 {
+		off = time.Duration(pass) * time.Second
+		if pass == 3 {
+			off -= 3 * time.Millisecond
+		}
+		before := len(*attempts)
+		if _, err := p.Launch(context.Background(), tmpl, nil, map[string]string{"LUX_RUNNER_MEMORY": "1"}); err == nil {
+			t.Fatal("launched without capacity")
+		}
+		calls = append(calls, len(*attempts)-before)
+	}
+	if want := []int{2, 0, 0, 0, 2, 0, 0, 2, 0}; !slices.Equal(calls, want) {
+		t.Errorf("RunInstances per pass %v, want %v", calls, want)
+	}
+}
+
 // Each capacity failure is logged at info; a launch that gets a later
 // candidate warns once, naming what it got and how many it failed or
 // skipped. A skipped candidate logs nothing.
