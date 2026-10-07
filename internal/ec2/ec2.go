@@ -13,10 +13,11 @@
 // round, then each fallbackInstanceTypes entry the same way. Any other
 // error ends the launch. A type and subnet without capacity, in the
 // template's market (spot or on-demand), is skipped by later launches of
-// any pool for noCapacityRetryAfter (30s), so a shortage costs one
-// sweep of RunInstances calls, not one per launch; when every candidate is
-// skipped, the launch fails without calling EC2. A template without
-// instanceType shares such marks only with pools of its launch template.
+// any pool for SkipNoCapacityFor (default 30s; 0 never skips), so a
+// shortage costs one sweep of RunInstances calls, not one per launch; when
+// every candidate is skipped, the launch fails without calling EC2. A
+// template without instanceType shares such marks only with pools of its
+// launch template.
 //
 // With "spot", instances are one-time spot instances, terminated on
 // interruption. Every instance's user data sets LUX_EC2_IMDS, so its
@@ -135,22 +136,23 @@ type noCapacityMark struct {
 const (
 	memoryLookupTimeout = 5 * time.Second
 	memoryRetryAfter    = 10 * time.Minute
-	// noCapacityRetryAfter is how long a candidate EC2 had no capacity for
-	// is skipped: long enough that a shortage costs one sweep of
-	// RunInstances per pool, not one per launch, short enough to see
-	// capacity come back within a minute.
-	noCapacityRetryAfter = 30 * time.Second
 )
+
+// DefaultNoCapacityRetryAfter is how long a candidate EC2 had no capacity
+// for is skipped: long enough that a shortage costs one sweep of
+// RunInstances per pool, not one per launch, short enough to see capacity
+// come back within a minute.
+const DefaultNoCapacityRetryAfter = 30 * time.Second
 
 // New builds the provider. endpoint overrides the EC2 endpoint (tests).
 func New(endpoint string, log *slog.Logger) *Provider {
 	return &Provider{endpoint: endpoint, clients: map[string]*awsec2.Client{}, next: map[string]int{},
 		memory: map[[2]string]int64{}, memoryFailed: map[[2]string]time.Time{}, memoryTimeout: memoryLookupTimeout,
-		noCapacity: map[capacityKey]noCapacityMark{}, noCapacityFor: noCapacityRetryAfter, now: time.Now, log: log}
+		noCapacity: map[capacityKey]noCapacityMark{}, noCapacityFor: DefaultNoCapacityRetryAfter, now: time.Now, log: log}
 }
 
 // SkipNoCapacityFor sets how long a candidate without capacity is skipped
-// (default noCapacityRetryAfter).
+// (default DefaultNoCapacityRetryAfter); 0 never skips.
 func (p *Provider) SkipNoCapacityFor(d time.Duration) {
 	p.noCapacityFor = d
 }

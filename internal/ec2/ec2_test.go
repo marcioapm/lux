@@ -580,7 +580,7 @@ func TestLaunchSkipsCandidatesRecentlyWithoutCapacity(t *testing.T) {
 
 // A pool with no capacity for any of its 5 types in its 3 subnets, launched
 // on every 1s provisioner pass for 65s: it sweeps its 15 candidates once per
-// noCapacityRetryAfter (at 0s, 30s and 60s), not once per pass, and every
+// DefaultNoCapacityRetryAfter (at 0s, 30s and 60s), not once per pass, and every
 // pass fails with the same error, whether it swept or skipped them all.
 func TestLaunchStuckPoolSweepsOncePerRetryAfter(t *testing.T) {
 	fail := map[[2]string]string{}

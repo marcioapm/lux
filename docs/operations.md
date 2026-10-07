@@ -132,7 +132,7 @@ under a timeout. `luxd check-config` is an alias of `validate`.
 | `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
 | `LUX_OUTDATED_DRAIN_PERCENT` | `10` | Caps concurrent outdated-binaries drains per pool, as a percentage of its live hosts (at least 1 regardless). |
 | `LUX_EC2_ENDPOINT` | AWS | Overrides the EC2 endpoint (tests). |
-| `LUX_EC2_NO_CAPACITY_RETRY_AFTER` | `30s` | How long launches skip an instance type in a subnet after EC2 had no capacity for it there (see **No capacity** below). |
+| `LUX_EC2_NO_CAPACITY_RETRY_AFTER` | `30s` | How long launches skip an instance type in a subnet after EC2 had no capacity for it there (see **No capacity** below); `0` never skips. |
 | `LUX_SAMPLE_EVERY` | `10s` | How often the system is sampled for history ([Operators](operators.md#history)). |
 | `LUX_HISTORY_RAW` | `48h` | How long raw samples (hosts and placements: one per heartbeat) are kept. |
 | `LUX_HISTORY_MINUTES` | `720h` | How long minute rollups are kept. |
