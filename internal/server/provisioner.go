@@ -330,7 +330,6 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		if err != nil {
 			return err
 		}
-		delete(s.launchBackoff, pl.ID)
 		launched++
 	}
 	if launched == 0 {
@@ -804,6 +803,9 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 		}
 		return fmt.Errorf("launch in %s: %w", pl.Name, &launchRefused{launchErr})
 	}
+	// The provider launched: the pool's failures are over even if recording
+	// the instance below fails.
+	delete(s.launchBackoff, pl.ID)
 	s.log.Info("host launched", "pool", pl.Name, "host", name, "providerId", l.ProviderID,
 		"instanceType", l.InstanceType, "zone", l.Zone, "market", l.Market)
 	var drained []string
