@@ -14,14 +14,16 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/server"
 )
 
 // dryRunEC2 is a fake EC2 recording each RunInstances form. A dry run is
 // answered as EC2 does (412 DryRunOperation) unless refuse names an error
-// code for its launch template; a real one launches. DescribeInstanceTypes
-// fails, so a launch's user data carries no memory and matches a check's.
+// code for its launch template or its candidate ("type@subnet"); a real
+// one launches. DescribeInstanceTypes fails, so a launch's user data
+// carries no memory and matches a check's.
 func dryRunEC2(t *testing.T, refuse map[string]string) (string, func() []url.Values) {
 	t.Helper()
 	awsTestEnv(t)
@@ -31,7 +33,7 @@ func dryRunEC2(t *testing.T, refuse map[string]string) (string, func() []url.Val
 		_ = r.ParseForm()
 		w.Header().Set("Content-Type", "text/xml")
 		if r.PostForm.Get("Action") != "RunInstances" {
-			ec2Error(w, http.StatusBadRequest, "UnauthorizedOperation", "not here (fake)")
+			ec2Error(w, ec2Status("UnauthorizedOperation"), "UnauthorizedOperation", "not here (fake)")
 			return
 		}
 		mu.Lock()
@@ -39,7 +41,11 @@ func dryRunEC2(t *testing.T, refuse map[string]string) (string, func() []url.Val
 		mu.Unlock()
 		lt := r.PostForm.Get("LaunchTemplate.LaunchTemplateName") + r.PostForm.Get("LaunchTemplate.LaunchTemplateId")
 		if code := refuse[lt]; code != "" {
-			ec2Error(w, http.StatusBadRequest, code, "The specified launch template, with template name "+lt+", does not exist.")
+			ec2Error(w, ec2Status(code), code, "The specified launch template, with template name "+lt+", does not exist.")
+			return
+		}
+		if code := refuse[r.PostForm.Get("InstanceType")+"@"+r.PostForm.Get("SubnetId")]; code != "" {
+			ec2Error(w, ec2Status(code), code, "refused (fake)")
 			return
 		}
 		if r.PostForm.Get("DryRun") == "true" {
@@ -55,6 +61,19 @@ func dryRunEC2(t *testing.T, refuse map[string]string) (string, func() []url.Val
 		defer mu.Unlock()
 		return slices.Clone(forms)
 	}
+}
+
+// ec2Status is the HTTP status EC2 answers code with: 412 for
+// DryRunOperation, 403 for a missing permission, 400 for the client's
+// other mistakes.
+func ec2Status(code string) int {
+	switch code {
+	case "DryRunOperation":
+		return http.StatusPreconditionFailed
+	case "UnauthorizedOperation":
+		return http.StatusForbidden
+	}
+	return http.StatusBadRequest
 }
 
 const checkTemplate = `{"region": "eu-north-1", "launchTemplate": "lux-runner-arm64", "userData": "env", "spot": true,
@@ -250,5 +269,52 @@ func TestCheckFailsOnEC2sRefusal(t *testing.T) {
 	}
 	if err := New(endpoint, discard).Check(context.Background(), json.RawMessage(`{"region": "eu-north-1"}`), testTags); err == nil {
 		t.Error("a template without launchTemplate passed")
+	}
+}
+
+// A refusal on any candidate refuses the pool, there and then: a later
+// subnet, a fallback type, or a missing permission (EC2's 403).
+func TestCheckFailsOnALaterCandidatesRefusal(t *testing.T) {
+	for _, c := range []struct {
+		refuse, code, candidate string
+		requests                int
+	}{
+		{"m8g.2xlarge@subnet-b", "InvalidSubnetID.NotFound", "m8g.2xlarge in subnet-b", 2},
+		{"m7g.2xlarge@subnet-a", "InvalidParameterValue", "m7g.2xlarge in subnet-a", 4},
+		{"m8g.2xlarge@subnet-a", "UnauthorizedOperation", "m8g.2xlarge in subnet-a", 1},
+	} {
+		endpoint, forms := dryRunEC2(t, map[string]string{c.refuse: c.code})
+		err := New(endpoint, discard).Check(context.Background(), json.RawMessage(checkTemplate), testTags)
+		if err == nil || !strings.HasPrefix(err.Error(), c.code+": ") || !strings.Contains(err.Error(), "("+c.candidate+")") {
+			t.Errorf("%s refused: err %v, want %s naming %s", c.refuse, err, c.code, c.candidate)
+		}
+		if n := len(forms()); n != c.requests {
+			t.Errorf("%s refused: %d requests, want %d (none after the refusal)", c.refuse, n, c.requests)
+		}
+	}
+}
+
+// An endpoint that never answers fails the check when the caller's
+// context ends, not at CheckTimeout.
+func TestCheckEndsWithItsCallersContext(t *testing.T) {
+	awsTestEnv(t)
+	release := make(chan struct{})
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(fake.Close)
+	t.Cleanup(func() { close(release) })
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := New(fake.URL, discard).Check(ctx, json.RawMessage(checkTemplate), testTags)
+	if err == nil {
+		t.Fatal("a stalled endpoint passed the check")
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("the check took %s after its caller's 200ms deadline", took)
 	}
 }
