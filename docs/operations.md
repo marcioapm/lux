@@ -471,20 +471,19 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   at most 4, distinct, not the `instanceType`, which must be set) the same
   way: types `[m8g, m7g]` and subnets `[a, b, c]` starting at `b` try m8g
   in b, c, a, then m7g in b, c, a. Each candidate without capacity logs at
-  info (`ec2: no capacity`); a
-  success on a later candidate warns once (`ec2: launched a later
-  candidate`). These errors are not retried in place; any other error (a
-  quota such as `VcpuLimitExceeded`, a permission, a bad parameter) ends
-  the launch at once. A candidate without capacity is skipped for
-  `LUX_EC2_NO_CAPACITY_RETRY_AFTER` (30s; `0` never skips) by every launch
-  with the same region, instance type, launch template, subnet and market
-  (spot or on-demand), so a shortage costs one sweep of `RunInstances`
-  calls per interval. A sweep's marks all date from its start, so keep the
-  interval well above one sweep's duration: a 15-candidate sweep under EC2
-  throttling can take about 10s. When every candidate fails or is
-  skipped, the launch fails with the code and
-  the candidates and is retried on the next pass. Fallback types use the
-  same launch template, so its AMI must suit them (same architecture);
+  info (`ec2: no capacity`); a success on a later candidate warns once
+  (`ec2: launched a later candidate`). These errors are not retried in
+  place; any other error (a quota such as `VcpuLimitExceeded`, a
+  permission, a bad parameter) ends the launch at once. A candidate without
+  capacity is skipped for `LUX_EC2_NO_CAPACITY_RETRY_AFTER` (30s; `0` never
+  skips) by every launch with the same region, instance type, launch
+  template, subnet and market (spot or on-demand), so a shortage costs one
+  sweep of `RunInstances` calls per interval. A sweep's marks all date from
+  its start, so keep the interval well above one sweep's duration: a
+  15-candidate sweep under EC2 throttling can take about 10s. When every
+  candidate fails or is skipped, the launch fails with the code and the
+  candidates and is retried on the next pass. Fallback types use the same
+  launch template, so its AMI must suit them (same architecture);
   `lux hosts ls` shows the type a host got.
 - **Scale down:** a host idle longer than the pool's `--scale-down-after`
   (default `LUX_SCALE_DOWN_AFTER`, 10m), above the minimum and warm count,
