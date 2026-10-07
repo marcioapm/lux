@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -97,7 +98,7 @@ func assignOf(t *testing.T, s *Server, epoch int) proto.Assign {
 	return a
 }
 
-// With resumePolicy never, a move that stops the Run ends it failed, its
+// With resumePolicy manual or never, a move that stops the Run ends it failed, its
 // reason naming the move, with no new placement, its secrets dropped and
 // its servers stopped as for any end. With auto or unset it is resumed
 // from its snapshot and session; with restart it is placed again as a
@@ -105,9 +106,9 @@ func assignOf(t *testing.T, s *Server, epoch int) proto.Assign {
 // start path), its snapshot kept for a resume by hand.
 func TestResumePolicyOnMove(t *testing.T) {
 	for _, stop := range []string{"preempt", "drain", "migrate"} {
-		for _, policy := range []string{"never", "restart", "auto", ""} {
+		for _, policy := range []string{"manual", "never", "restart", "auto", ""} {
 			t.Run(stop+"/"+policy, func(t *testing.T) {
-				never := policy == "never"
+				never := policy == "manual" || policy == "never"
 				s, ctx := policyFixture(t, policy)
 				err := moveStops[stop](t, s)
 				if stop == "migrate" && never {
@@ -147,7 +148,7 @@ func TestResumePolicyOnMove(t *testing.T) {
 					FROM runs r WHERE r.id = 'r1'`, nil, &state, &reason, &placements)
 				_, cached := s.secrets.get("r1")
 				if never {
-					want := stop + ": not resumed (resumePolicy never)"
+					want := stop + ": not resumed (resumePolicy " + policy + ")"
 					if state != StateFailed || reason != want || placements != 1 || cached || svStop != "run stopped" {
 						t.Errorf("state %q reason %q placements %d secrets cached %v server %q; want failed %q 1 false \"run stopped\"",
 							state, reason, placements, cached, svStop, want)
@@ -205,23 +206,27 @@ func TestResumePolicyRestartResumeByHandRestores(t *testing.T) {
 
 // A cordon-only drain stops nothing, whatever the policy: the Run finishes
 // where it is.
-func TestResumePolicyNeverCordonOnlyDrain(t *testing.T) {
-	s, _ := policyFixture(t, "never")
-	if _, err := s.drainHost(operatorCtx(), &drainHostInput{HostPath: HostPath{ID: "h1"}}); err != nil {
-		t.Fatal(err)
-	}
-	var state string
-	var stopRequested bool
-	systemScan(t, s, `SELECT r.state, p.stop_requested_at IS NOT NULL FROM runs r JOIN placements p ON p.run_id = r.id WHERE r.id = 'r1'`,
-		nil, &state, &stopRequested)
-	if state != StateRunning || stopRequested {
-		t.Fatalf("state %q stop requested %v, want running and none", state, stopRequested)
+func TestResumePolicyCordonOnlyDrain(t *testing.T) {
+	for _, policy := range []string{"manual", "never"} {
+		t.Run(policy, func(t *testing.T) {
+			s, _ := policyFixture(t, policy)
+			if _, err := s.drainHost(operatorCtx(), &drainHostInput{HostPath: HostPath{ID: "h1"}}); err != nil {
+				t.Fatal(err)
+			}
+			var state string
+			var stopRequested bool
+			systemScan(t, s, `SELECT r.state, p.stop_requested_at IS NOT NULL FROM runs r JOIN placements p ON p.run_id = r.id WHERE r.id = 'r1'`,
+				nil, &state, &stopRequested)
+			if state != StateRunning || stopRequested {
+				t.Fatalf("state %q stop requested %v, want running and none", state, stopRequested)
+			}
+		})
 	}
 }
 
-// A resume a person asks for after a never Run failed is not refused.
-func TestResumePolicyNeverResumableByHand(t *testing.T) {
-	s, _ := policyFixture(t, "never")
+// A resume a person asks for after a manual Run failed is accepted.
+func TestResumePolicyManualResumableByHand(t *testing.T) {
+	s, _ := policyFixture(t, "manual")
 	if err := moveStops["preempt"](t, s); err != nil {
 		t.Fatal(err)
 	}
@@ -234,5 +239,60 @@ func TestResumePolicyNeverResumableByHand(t *testing.T) {
 	systemScan(t, s, `SELECT state FROM runs WHERE id = 'r1'`, nil, &state)
 	if state != StateResuming {
 		t.Fatalf("after resume: %q", state)
+	}
+}
+
+// Every resume of a never Run is refused, by its tenant or an operator,
+// whether it failed after a move or was stopped by request, and nothing
+// changes: no state, no secrets or spec written, no placement.
+func TestResumePolicyNeverRefusesResume(t *testing.T) {
+	for _, how := range []string{"failed after preempt", "stopped by request"} {
+		for _, who := range []string{"tenant", "operator"} {
+			t.Run(how+"/"+who, func(t *testing.T) {
+				s, ctx := policyFixture(t, "never")
+				if how == "stopped by request" {
+					if _, err := s.stopRun(tenantCtx("t1"), &RunPath{ID: "r1"}); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := moveStops["preempt"](t, s); err != nil {
+					t.Fatal(err)
+				}
+				exitR1(t, s)
+				var before string
+				systemScan(t, s, `SELECT state || ' ' || updated_at::text || ' ' || secrets::text || ' ' || spec::text FROM runs WHERE id = 'r1'`, nil, &before)
+
+				pctx := tenantCtx("t1")
+				if who == "operator" {
+					pctx = operatorCtx()
+				}
+				_, err := s.resumeRun(pctx, &resumeRunInput{RunPath: RunPath{ID: "r1"}, Body: &resumeRequest{
+					Input: &resumeInput{Text: "go on"}}})
+				var he *HTTPError
+				if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "not_resumable" ||
+					he.Message != "resumePolicy never: this Run cannot be resumed" {
+					t.Fatalf("resume: %v, want 409 not_resumable", err)
+				}
+				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+					t.Fatal(err)
+				}
+				var after string
+				var placements, requested int
+				systemScan(t, s, `SELECT state || ' ' || updated_at::text || ' ' || secrets::text || ' ' || spec::text,
+						(SELECT count(*) FROM placements WHERE run_id = r.id),
+						(SELECT count(*) FROM run_events WHERE run_id = r.id AND type = 'resume.requested')
+					FROM runs r WHERE id = 'r1'`, nil, &after, &placements, &requested)
+				if after != before || placements != 1 || requested != 0 {
+					t.Fatalf("after a refused resume: %q (was %q), %d placements, %d resume.requested", after, before, placements, requested)
+				}
+				run, err := s.loadRun(context.Background(), "t1", "r1", false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rs, err := s.resumability(context.Background(), "t1", run)
+				if err != nil || !slices.Contains(rs.Blockers, "resumePolicy never: this Run cannot be resumed") {
+					t.Fatalf("resumability %+v %v", rs, err)
+				}
+			})
+		}
 	}
 }

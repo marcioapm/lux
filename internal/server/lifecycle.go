@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"slices"
 	"strings"
@@ -50,13 +51,26 @@ const noSnapshotReason = "its only snapshot report was refused, so there is no s
 
 // movedStops: stop reasons that move a Run rather than stop it; it is
 // placed again as soon as it has stopped (resumed, or restarted from
-// scratch), unless its spec's resumePolicy is never, when it fails
-// instead (movePolicy).
+// scratch), unless its spec's resumePolicy is manual or never
+// (spec.FailsOnMove), when it fails instead.
 var movedStops = []string{"drain", "preempt", "migrate"}
 
-// notResumedReason follows the stop reason in the state_reason of a Run
-// failed by a move because of its resumePolicy.
-const notResumedReason = "not resumed (resumePolicy never)"
+// notResumedReason is the state_reason of a Run failed by a move (stop)
+// because of its resumePolicy.
+func notResumedReason(stop, policy string) string {
+	return stop + ": not resumed (resumePolicy " + policy + ")"
+}
+
+// failsOnMoveSQL, for SQL over runs (as r): spec.FailsOnMove of its policy.
+const failsOnMoveSQL = `coalesce(r.spec->>'resumePolicy', '') IN ('manual', 'never')`
+
+// resumeNeverSQL, for SQL over runs (as r): its resumePolicy is never.
+const resumeNeverSQL = `coalesce(r.spec->>'resumePolicy', '') = 'never'`
+
+// errNeverResumable refuses any resume of a Run whose resumePolicy is never.
+func errNeverResumable() error {
+	return errf(http.StatusConflict, "not_resumable", "resumePolicy never: this Run cannot be resumed")
+}
 
 // movePolicy reads a Run's resumePolicy ("" for none, which is auto).
 func movePolicy(ctx context.Context, tx pgx.Tx, runID string) (string, error) {
@@ -279,7 +293,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 			return err
 		}
 	}
-	resumes := policy != spec.ResumeNever
+	resumes := !spec.FailsOnMove(policy)
 	var next, reason string
 	switch {
 	case cancel || stopReason == "cancel":
@@ -290,7 +304,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		next, reason = StateFailed, "disk limit exceeded"
 	case moveStop && !resumes:
 		// One-shot: what it was doing cannot continue on another host.
-		next, reason = StateFailed, stopReason+": "+notResumedReason
+		next, reason = StateFailed, notResumedReason(stopReason, policy)
 	case stopReason == "stop" || moveStop:
 		// A requested stop: resumable (and a move resumed below).
 		next, reason = StateStopped, stopReason

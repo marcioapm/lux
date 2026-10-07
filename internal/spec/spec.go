@@ -36,19 +36,20 @@ type RunSpec struct {
 	Sandbox   Sandbox           `json:"sandbox" yaml:"sandbox"`
 	Artifacts Artifacts         `json:"artifacts" yaml:"artifacts"`
 	// Empty is stored as given and means ResumeAuto.
-	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration): auto (the default) resumes it elsewhere from its snapshot; restart starts it again elsewhere from scratch (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host; never ends it as failed, for one-shot workloads that cannot continue elsewhere, and an operator's migrate is refused (409 not_movable). A resume you ask for is never affected."`
+	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: as manual, and every resume is refused (409 not_resumable), for one-shot work such as a CI job holding a single-use token."`
 }
 
 // RunSpec.ResumePolicy values.
 const (
 	ResumeAuto    = "auto"
 	ResumeRestart = "restart"
+	ResumeManual  = "manual"
 	ResumeNever   = "never"
 )
 
-// ResumesAfterMove reports whether lux places the Run again after it
-// moves it (resumed, or restarted from scratch).
-func (s *RunSpec) ResumesAfterMove() bool { return s.ResumePolicy != ResumeNever }
+// FailsOnMove reports whether a resumePolicy ends the Run as failed when
+// lux moves it, rather than placing it again: manual and never.
+func FailsOnMove(policy string) bool { return policy == ResumeManual || policy == ResumeNever }
 
 // Image is exactly one of a pinned reference or a build.
 type Image struct {
@@ -642,9 +643,9 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		fail("timeout must not be negative")
 	}
 	switch s.ResumePolicy {
-	case "", ResumeAuto, ResumeRestart, ResumeNever:
+	case "", ResumeAuto, ResumeRestart, ResumeManual, ResumeNever:
 	default:
-		fail("resumePolicy: must be auto, restart or never, got %q", s.ResumePolicy)
+		fail("resumePolicy: must be auto, restart, manual or never, got %q", s.ResumePolicy)
 	}
 	for i, e := range s.Network.Egress {
 		if (e.Host == "") == (e.CIDR == "") {

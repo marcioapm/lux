@@ -405,7 +405,7 @@ every host, with a TENANT column (--tenant: what that tenant sees).`,
 		Short: "Stop placing new Runs on a host",
 		Long: `Stop placing new Runs on a host. Its live Runs finish where they are;
 --force-evict stops them too, so they resume elsewhere (a Run with
-resumePolicy: never fails instead).`,
+resumePolicy: manual or never fails instead).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body := map[string]any{"forceEvict": forceEvict}
@@ -722,7 +722,7 @@ alone, --default changes only the mark of an existing pool.`,
 		Long: `Remove a pool. Its provisioned hosts are cordoned (no new placements) and
 terminated once idle; their live Runs finish where they are.
 --force-evict stops those Runs too, so they resume elsewhere (a Run with
-resumePolicy: never fails instead).`,
+resumePolicy: manual or never fails instead).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := "/v1/pools/" + args[0]

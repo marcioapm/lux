@@ -88,7 +88,8 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "resumeRun", Method: http.MethodPost, Path: "/v1/runs/{id}/resume", Tags: []string{"runs"},
 		Summary: "Resume a stopped, lost or failed Run",
 		Description: "From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. " +
-			"A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been cancelled, and is not resumable.\n\n" +
+			"A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been cancelled, and is not resumable. " +
+			"A Run whose spec has resumePolicy never is never resumable: 409 not_resumable, whatever its state.\n\n" +
 			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +
 			"with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. " +
 			"Adding needs a stopped, lost or failed Run: while it is resuming, 409. " +
@@ -111,7 +112,7 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Move a running Run to another host",
 		Description: "It is stopped (its state snapshotted), then resumed at once on `to`, or on any host but the one it was on. " +
 			"An agent resumes its session; `input`, if given, is delivered once it runs again. " +
-			"A Run whose spec has resumePolicy never is refused (409 not_movable).",
+			"A Run whose spec has resumePolicy restart starts again from scratch there; one with manual or never is refused (409 not_movable).",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict},
 	}, "operator", s.migrateRun)
@@ -316,7 +317,7 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "drainHost", Method: http.MethodPost, Path: "/v1/hosts/{id}/drain", Tags: []string{"hosts"},
 		Summary: "Drain a host",
 		Description: "No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere " +
-			"(a Run with resumePolicy never fails instead; also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.",
+			"(a Run with resumePolicy manual or never fails instead; also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound},
 	}, "admin", s.drainHost)
@@ -400,7 +401,7 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Remove a pool",
 		Description: "Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. " +
 			"If it was the tenant's default pool, the tenant has none until another is marked. " +
-			"forceEvict also stops its hosts' live Runs so they resume elsewhere (a Run with resumePolicy never fails instead).",
+			"forceEvict also stops its hosts' live Runs so they resume elsewhere (a Run with resumePolicy manual or never fails instead).",
 		Errors: []int{http.StatusNotFound},
 	}, "admin", forTenant(s.deletePool))
 	register(s, api, huma.Operation{
@@ -837,7 +838,7 @@ type listRunsInput struct {
 	TenantQuery
 	PageQuery
 	State     string   `query:"state" doc:"Only Runs in these states (comma-separated)." example:"running,stopped"`
-	Resumable bool     `query:"resumable" doc:"Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused."`
+	Resumable bool     `query:"resumable" doc:"Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused or whose resumePolicy is never."`
 	Host      string   `query:"host" doc:"Only Runs with a placement (any epoch) on this host, by id or name."`
 	Label     []string `query:"label,explode" doc:"Only Runs with this label (key=value); repeat to require several."`
 	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."`
@@ -897,7 +898,7 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		where = append(where, "r.state = ANY("+arg(strings.Split(st, ","))+")")
 	}
 	if in.Resumable {
-		where = append(where, "r.state IN "+resumableRunStates+` AND NOT (r.snapshot_id IS NULL AND EXISTS (
+		where = append(where, "r.state IN "+resumableRunStates+` AND NOT `+resumeNeverSQL+` AND NOT (r.snapshot_id IS NULL AND EXISTS (
 			SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.snapshot_refused))`)
 	}
 	if in.Host != "" {
@@ -1117,6 +1118,9 @@ func (s *Server) getRun(ctx context.Context, in *RunPath) (*runOutput, error) {
 // the scheduler's to find out; a resumed Run says why it waits.)
 func (s *Server) resumability(ctx context.Context, tenantID string, run *Run) (*Resumability, error) {
 	rs := &Resumability{Snapshot: run.SnapshotID}
+	if run.Spec.ResumePolicy == spec.ResumeNever {
+		rs.Blockers = append(rs.Blockers, "resumePolicy never: this Run cannot be resumed")
+	}
 	for _, ref := range run.Secrets {
 		rs.Secrets = append(rs.Secrets, ref.Name)
 	}
@@ -1530,6 +1534,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		if err := tx.QueryRow(ctx, `SELECT r.state, r.secrets, r.spec, `+refusedWithoutSnapshot+` FROM `+runsFrom+` WHERE r.id = $1 FOR UPDATE OF r`, id).
 			Scan(&state, &refs, &sp, &noSnapshot); err != nil {
 			return err
+		}
+		// Before anything else: whatever its state, such a Run is never
+		// placed again on request.
+		if sp.ResumePolicy == spec.ResumeNever {
+			return errNeverResumable()
 		}
 		switch state {
 		case StateStopped, StateLost, StateFailed:
@@ -2520,7 +2529,7 @@ const (
 // their drain_causes, sets state_reason to reason, and, unless stopReason
 // is "" (cordon only), asks their live placements to stop with it (drain
 // or preempt: both resume elsewhere, or fail a Run whose resumePolicy is
-// never), including on hosts already draining;
+// manual or never), including on hosts already draining;
 // where selects them (placeholders from $1). A cordoned host's Runs finish
 // where they are: the reaper (static hosts) or the pool's replace path
 // (provisioned) takes it once idle. Returns their ids, to notify once the

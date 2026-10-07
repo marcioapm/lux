@@ -86,7 +86,7 @@ func TestAllProblemsAtOnce(t *testing.T) {
 }
 
 func TestResumePolicy(t *testing.T) {
-	for policy, ok := range map[string]bool{"": true, "auto": true, "restart": true, "never": true, "Never": false, "always": false} {
+	for policy, ok := range map[string]bool{"": true, "auto": true, "restart": true, "manual": true, "never": true, "Never": false, "always": false} {
 		s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}}, ResumePolicy: policy}
 		err := s.Normalize(BuiltinDefaults)
 		if (err == nil) != ok {
@@ -98,8 +98,8 @@ func TestResumePolicy(t *testing.T) {
 		if ok && s.ResumePolicy != policy {
 			t.Errorf("%q stored as %q", policy, s.ResumePolicy)
 		}
-		if ok && s.ResumesAfterMove() != (policy != "never") {
-			t.Errorf("%q: ResumesAfterMove %v", policy, s.ResumesAfterMove())
+		if ok && FailsOnMove(policy) != (policy == "manual" || policy == "never") {
+			t.Errorf("%q: FailsOnMove %v", policy, FailsOnMove(policy))
 		}
 	}
 	var s RunSpec

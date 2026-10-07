@@ -137,7 +137,7 @@ const serverSelect = `SELECT sv.id, sv.tenant_id, sv.name, sv.host, sv.port, sv.
 	sv.state, sv.exit_code, sv.error, sv.since, sv.ready_since, sv.stop_reason, sv.stopped_epoch, sv.epoch, sv.last_request_at,
 	sv.run_id, sv.wake, sv.lifetime, sv.owner, sv.idle_after_s, sv.wake_timeout_s, sv.expire_after_s, sv.after_sync,
 	sv.wake_requested_at, sv.wake_by, sv.wake_path, sv.wakes, sv.idle_notified_at, sv.created_at, sv.updated_at,
-	coalesce(r.state, ''), coalesce(r.name, ''), coalesce(p.stop_reason, ''), coalesce(r.spec->>'resumePolicy', '') <> 'never'
+	coalesce(r.state, ''), coalesce(r.name, ''), coalesce(p.stop_reason, ''), NOT ` + failsOnMoveSQL + `
 	FROM run_servers sv LEFT JOIN runs r ON r.id = sv.run_id
 	LEFT JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch `
 
@@ -156,8 +156,8 @@ func scanServerRow(row pgx.Row) (serverRow, error) {
 		v.Labels = map[string]string{}
 	}
 	// Moving: its placement is stopping to move (and the Run will be
-	// resumed: resumePolicy is not never), or its Run is on its way to the
-	// next one after a move.
+	// placed again: resumePolicy is not manual or never), or its Run is
+	// on its way to the next one after a move.
 	v.Moving = (v.RunState == StateStopping && resumes && slices.Contains(movedStops, v.PlacementStop)) ||
 		(v.StopReason != nil && *v.StopReason == "migrated" && slices.Contains(startingRunStates, v.RunState))
 	return v, err
