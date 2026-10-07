@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -294,6 +296,8 @@ func TestAdminCreatePoolChecksTheTemplateLaunches(t *testing.T) {
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
 	t.Setenv("AWS_PROFILE", "")
 	var dryRuns atomic.Int64
+	var mu sync.Mutex
+	var successfulTags map[string]string
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		if r.PostForm.Get("DryRun") == "true" {
@@ -304,6 +308,13 @@ func TestAdminCreatePoolChecksTheTemplateLaunches(t *testing.T) {
 			fmt.Fprintf(w, `<Response><Errors><Error><Code>InvalidLaunchTemplateName.NotFound</Code><Message>The specified launch template, with template name %s, does not exist.</Message></Error></Errors><RequestID>1</RequestID></Response>`, lt)
 			return
 		}
+		tags := map[string]string{}
+		for i := 1; r.PostForm.Has(fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i)); i++ {
+			tags[r.PostForm.Get(fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i))] = r.PostForm.Get(fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i))
+		}
+		mu.Lock()
+		successfulTags = tags
+		mu.Unlock()
 		w.WriteHeader(http.StatusPreconditionFailed)
 		_, _ = io.WriteString(w, `<Response><Errors><Error><Code>DryRunOperation</Code><Message>Request would have succeeded, but DryRun flag is set.</Message></Error></Errors><RequestID>1</RequestID></Response>`)
 	}))
@@ -335,6 +346,25 @@ func TestAdminCreatePoolChecksTheTemplateLaunches(t *testing.T) {
 	}
 	if dryRuns.Load() != 2 {
 		t.Errorf("%d dry runs, want one per create-pool", dryRuns.Load())
+	}
+	// The successful check's tags are a launch's in the stored pool.
+	var storedID, deployment string
+	if err := db.QueryRow(ctx, `SELECT id FROM pools WHERE name = 'arm64'`).Scan(&storedID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(ctx, `SELECT value FROM settings WHERE name = 'deployment'`).Scan(&deployment); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	got := successfulTags
+	mu.Unlock()
+	if got["lux:pool-id"] != storedID || got["lux:deployment"] != deployment || got["lux:pool"] != "arm64" {
+		t.Fatalf("checked tags %v do not identify stored pool %s (deployment %s)", got, storedID, deployment)
+	}
+	host := got["lux:host"]
+	if want := server.LaunchTags(deployment, storedID, "arm64", host); !maps.Equal(got, want) ||
+		!strings.HasPrefix(host, "host_") || got["Name"] != "arm64-"+host[len(host)-8:] {
+		t.Errorf("checked tags %v, want a launch's %v with a host_ id", got, want)
 	}
 }
 
