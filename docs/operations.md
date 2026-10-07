@@ -482,7 +482,7 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   its start, so keep the interval well above one sweep's duration: a
   15-candidate sweep under EC2 throttling can take about 10s. When every
   candidate fails or is skipped, the launch fails with the code and the
-  candidates and is retried on the next pass. Fallback types use the same
+  candidates and the pool backs off (below). Fallback types use the same
   launch template, so its AMI must suit them (same architecture);
   `lux hosts ls` shows the type a host got.
 - **Scale down:** a host idle longer than the pool's `--scale-down-after`
@@ -506,7 +506,15 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   ```
 
   Without it, `--warm` hosts are kept at all times.
-- **Failures:** a launch that fails is retried on the next pass. A host
+- **Failures:** a pool whose launch fails (any provider error, capacity
+  included; not the tenant's host quota) launches nothing for 15s, then
+  30s, 60s … at most 5m after each further consecutive failure; scale-down
+  and terminations go on meanwhile. A successful launch or any change to
+  the pool (`lux pools set`) ends the backoff, so a fix is tried on the
+  next pass; so does a luxd restart (the backoff is in memory). While it
+  waits the pool records one `pool.scale_blocked` (cause `launch_backoff`,
+  counted per pass): `lux pools events` shows `launch backing off after N
+  failures; next attempt in …: <error>`. A host
   that never registers within `LUX_LAUNCH_TIMEOUT` (default 10m) is
   terminated. An instance EC2 no longer has is written off and replaced.
 - **Orphans:** once a minute luxd lists the pool's instances by tag. One
