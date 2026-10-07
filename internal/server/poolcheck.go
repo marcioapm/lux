@@ -13,23 +13,12 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// maxCheckError bounds the provider's error in a refused pool's message.
 const maxCheckError = 300
 
-// CheckPoolTemplate asks the provider whether the pool tenantID/name ("" a
-// platform pool) would launch with template, before it is stored: a 422
-// invalid_pool "template: <provider> cannot launch it: <error>" when not. A
-// provider without a Check (static) is not asked, nor is one when the live
-// pool already has this provider and an identical template, so re-setting
-// an unchanged pool does not need the provider to be reachable.
-//
-// The check carries a launch's tags (LaunchTags): this deployment, the
-// pool's name, and its id: the stored one, or for a pool the set creates,
-// newID, the id its insert will use. The host's Name and lux:host are a
-// fresh host id's, the shape a launch gives them.
-//
-// It returns the pool id the check was made with, "" when there was no
-// check; the write passes it to ConfirmCheckedPool.
+// CheckPoolTemplate checks before persistence, outside the write transaction.
+// Providers without Checker and identical live provider/templates skip the check.
+// Launch tags use the stored pool id (newID on create) and a representative host.
+// The returned checked id, or "" for a skip, must be passed to ConfirmCheckedPool.
 func CheckPoolTemplate(ctx context.Context, db *store.Store, providers map[string]Provider, tenantID, name, newID, provider string, template map[string]any) (string, error) {
 	checker, ok := providers[provider].(Checker)
 	if !ok {
@@ -61,12 +50,9 @@ func CheckPoolTemplate(ctx context.Context, db *store.Store, providers map[strin
 	return poolID, nil
 }
 
-// ConfirmCheckedPool refuses, 409 pool_changed, a pool upsert that stored
-// the pool name under storedID (its RETURNING id) when the check was made
-// with checkedID: another write created or replaced the pool between
-// CheckPoolTemplate and this one, and the upsert kept that write's id.
-// The caller returns the error inside its transaction, which rolls the
-// upsert back. checkedID "" (no check) confirms anything.
+// ConfirmCheckedPool compares the upsert's RETURNING id with the checked id.
+// Return its error inside the write transaction to roll back a concurrent
+// creation or replacement. An empty checkedID means no check ran.
 func ConfirmCheckedPool(name, storedID, checkedID string) error {
 	if checkedID == "" || storedID == checkedID {
 		return nil
@@ -75,9 +61,7 @@ func ConfirmCheckedPool(name, storedID, checkedID string) error {
 		"pool %s was created or replaced by another write while its template was being checked: nothing was stored; set it again", name)
 }
 
-// checkedPool is what CheckPoolTemplate reads: the deployment id, and the
-// pool row of that name, retired or not (a set reviving a retired pool
-// keeps its id); id "" when there is none.
+// Retired pools are included: reviving one preserves its id.
 type checkedPool struct {
 	deployment, id, provider string
 	live                     bool
