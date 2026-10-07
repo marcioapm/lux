@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -66,6 +67,19 @@ func (s *Server) launchFailed(pl poolRow, err error) {
 	}
 	bo.notBefore = s.now().Add(min(delay, s.cfg.LaunchBackoffMax))
 	bo.lastErr = err
+}
+
+// backoffVolatile: a launch backoff's pool.scale_blocked folds across its
+// attempts; only another provider error starts a new row.
+var backoffVolatile = []string{"failures", "retryInSeconds", "detail"}
+
+// evidence is a backoff's fields of pool.scale_blocked at now: detail says
+// why the pool waits, error is the provider's last refusal (200 chars).
+func (bo *poolBackoff) evidence(now time.Time) map[string]any {
+	wait := bo.notBefore.Sub(now).Round(time.Second)
+	text := truncate(providerErrorText(bo.lastErr), 200)
+	return map[string]any{"failures": bo.failures, "retryInSeconds": int(wait.Seconds()), "error": text,
+		"detail": fmt.Sprintf("launch backing off after %d failures; next attempt in %s: %s", bo.failures, wait, text)}
 }
 
 // forgetLaunchBackoffs drops the backoffs of pools no longer provisioned.

@@ -28,13 +28,15 @@ func backoffPass(s *Server, pl poolRow, p *planningProvider) bool {
 
 // Launches that keep failing are attempted 15s after the first failure,
 // then 30s, 60s ... capped at 5m; the passes in between launch nothing and
-// record one folded pool.scale_blocked saying why.
+// record one pool.scale_blocked, its count one per waiting pass, saying why.
 func TestFailedLaunchesBackOffPerPool(t *testing.T) {
 	s, pl, p, now := backoffFixture(t)
 	start := *now
 	var attempts []time.Duration
+	passes := 0
 	for off := time.Duration(0); off <= 1065*time.Second; off += 5 * time.Second {
 		*now = start.Add(off)
+		passes++
 		if backoffPass(s, pl, p) {
 			attempts = append(attempts, off)
 		}
@@ -52,6 +54,18 @@ func TestFailedLaunchesBackOffPerPool(t *testing.T) {
 	*now = start.Add(1070 * time.Second)
 	if backoffPass(s, pl, p) {
 		t.Fatal("launched 5s after a failure")
+	}
+	blocked := passes + 1 - len(want)
+	evs := events(t, s, evScaleBlocked)
+	if len(evs) != 1 || evs[0].Count != blocked {
+		t.Fatalf("scale_blocked events %+v, want one with count %d", evs, blocked)
+	}
+	d := evs[0].Data
+	if d["cause"] != causeBackoff || d["failures"] != float64(8) || d["error"] != "launch refused" {
+		t.Errorf("scale_blocked data %+v", d)
+	}
+	if want := "launch backing off after 8 failures; next attempt in 4m55s: launch refused"; d["detail"] != want {
+		t.Errorf("detail %q, want %q", d["detail"], want)
 	}
 	if n := len(events(t, s, evLaunchFailed)); n != 1 {
 		t.Errorf("%d launch_failed events, want one folded", n)
