@@ -906,8 +906,7 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		where = append(where, "r.state = ANY("+arg(strings.Split(st, ","))+")")
 	}
 	if in.Resumable {
-		where = append(where, "r.state IN "+resumableRunStates+` AND NOT `+refusesResumeSQL+` AND NOT (r.snapshot_id IS NULL AND `+runResumePolicySQL+` <> '`+spec.ResumeRestart+`' AND EXISTS (
-			SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.snapshot_refused))`)
+		where = append(where, "r.state IN "+resumableRunStates+` AND NOT `+refusesResumeSQL+` AND NOT `+refusedWithoutSnapshot)
 	}
 	if in.Host != "" {
 		// By id, or by the name of a host not terminated (names are reused).

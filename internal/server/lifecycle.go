@@ -42,11 +42,13 @@ const queuedRunStates = "('submitted', 'resuming', 'provisioning')"
 // resumableRunStates, for SQL: Runs resume accepts.
 const resumableRunStates = "('stopped', 'lost', 'failed')"
 
-// refusedWithoutSnapshot, for SQL over runsFrom: the current placement's
-// latest report was refused and the Run has no snapshot to restore. A
-// restart Run restores nothing, so resuming it is a first placement.
-const refusedWithoutSnapshot = "coalesce(rp.snapshot_refused AND r.snapshot_id IS NULL AND " +
-	runResumePolicySQL + " <> '" + spec.ResumeRestart + "', false)"
+// refusedWithoutSnapshot, for SQL over runs (as r): the current placement's
+// latest report was refused and the Run has no snapshot to restore. Exempt
+// is a restart Run with no session either: it restores nothing, so resuming
+// it is a first placement. One with a session would resume that session on
+// empty volumes, so it stays refused.
+const refusedWithoutSnapshot = `(r.snapshot_id IS NULL AND NOT ` + restartsFromScratchSQL + ` AND EXISTS (
+	SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.snapshot_refused))`
 
 // noSnapshotReason explains why resume refuses such a Run.
 const noSnapshotReason = "its only snapshot report was refused, so there is no snapshot to restore"
@@ -72,6 +74,10 @@ const failsOnMoveSQL = runResumePolicySQL + ` IN ('` + spec.ResumeManual + `', '
 
 // refusesResumeSQL, for SQL over runs (as r): spec.RefusesResume of its policy.
 const refusesResumeSQL = runResumePolicySQL + ` = '` + spec.ResumeNever + `'`
+
+// restartsFromScratchSQL, for SQL over runs (as r): resumePolicy restart and
+// no session, so a resume restores nothing (assign sends no ResumeInfo).
+const restartsFromScratchSQL = `(` + runResumePolicySQL + ` = '` + spec.ResumeRestart + `' AND r.session_id = '')`
 
 // neverResumableReason is why a Run whose resumePolicy is never is not
 // resumed: the 409's message and its resumability blocker.

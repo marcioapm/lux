@@ -495,6 +495,52 @@ func TestSnapshotReportRefusedThenStoppedResume(t *testing.T) {
 	}
 }
 
+// A restart Run stopped by its tenant (not moved, so its session is kept)
+// whose first report was refused has a session but no snapshot: resuming
+// would resume that session on empty volumes, so it is refused like any
+// other Run without a snapshot.
+func TestResumeRestartWithSessionRefusedWithoutSnapshot(t *testing.T) {
+	s, ctx := reportFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = spec || '{"resumePolicy":"restart"}', session_id = 'sess-b' WHERE id = 'rb'`)
+	execSQL(t, s, ctx, `UPDATE placements SET stop_reason = 'stop' WHERE id = 'pb1'`)
+	sd := snapshotB("snapB", 1)
+	sd.Output = &proto.BlobInfo{BlobID: "bA-out", Size: 20, SHA256: "a-out"}
+	if f := reportSnapshot(t, s, "hb", "rb", 1, sd); f.Type != proto.MsgAck || !ackRefused(t, f) {
+		t.Fatalf("report: %s %s, want an ack with refused", f.Type, f.Data)
+	}
+	exitPlacement(t, s, 1)
+	var state, sess string
+	systemScan(t, s, `SELECT state, session_id FROM runs WHERE id = 'rb'`, nil, &state, &sess)
+	if state != StateStopped || sess != "sess-b" {
+		t.Fatalf("rb after the stop: %s session %q, want %s with sess-b", state, sess, StateStopped)
+	}
+	actx := context.WithValue(ctx, principalKey, Principal{TenantID: "t2", Scopes: []string{"run", "read"}})
+
+	got, err := s.getRun(actx, &RunPath{ID: "rb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Body.Resume == nil || !slices.Contains(got.Body.Resume.Blockers, noSnapshotReason) {
+		t.Errorf("resume %+v, want the no-snapshot blocker", got.Body.Resume)
+	}
+	list, err := s.listRuns(actx, &listRunsInput{Resumable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(list.Body.Runs, func(r *Run) bool { return r.ID == "rb" }) {
+		t.Error("rb is in the resumable list")
+	}
+	_, err = s.resumeRun(actx, &resumeRunInput{RunPath: RunPath{ID: "rb"}})
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "no_snapshot" {
+		t.Fatalf("resume: %v, want 409 no_snapshot", err)
+	}
+	systemScan(t, s, `SELECT state FROM runs WHERE id = 'rb'`, nil, &state)
+	if state != StateStopped {
+		t.Errorf("rb is %s after a refused resume, want %s", state, StateStopped)
+	}
+}
+
 // A report redelivered under a recorded snapshot id is accepted only if it
 // is the same report: the same placement, manifest, output and artifacts.
 func TestSnapshotReportRedeliveryMustMatch(t *testing.T) {
