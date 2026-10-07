@@ -159,37 +159,29 @@ func TestPutPoolValidatesFallbackInstanceTypes(t *testing.T) {
 	withType := func(fb any) map[string]any {
 		return map[string]any{"instanceType": "m8g.2xlarge", "fallbackInstanceTypes": fb}
 	}
+	// Each cause says which it is, not "the instanceType or listed twice".
 	for i, c := range []struct {
 		template map[string]any
 		want     string
 	}{
-		{withType("m7g.2xlarge"), "must be an array of strings"},
-		{withType(nil), "must be an array of strings"},
-		{withType([]any{"m7g.2xlarge", 1}), "[1] must be a non-empty string"},
-		{withType([]any{""}), "[0] must be a non-empty string"},
-		{withType([]any{nil}), "[0] must be a non-empty string"},
-		{withType([]any{"m7g.2xlarge", "m7g.2xlarge"}), "[1] \"m7g.2xlarge\" is listed twice"},
-		{withType([]any{"m8g.2xlarge"}), "[0] \"m8g.2xlarge\" is the instanceType"},
-		{withType([]any{"a", "b", "c", "d", "e"}), "has 5 entries; at most 4"},
-		{map[string]any{"fallbackInstanceTypes": []any{"m7g.2xlarge"}}, "needs template.instanceType"},
-		{map[string]any{"instanceType": "", "fallbackInstanceTypes": []any{"m7g.2xlarge"}}, "needs template.instanceType"},
+		{withType("m7g.2xlarge"), "template.fallbackInstanceTypes must be an array of strings, got string"},
+		{withType(nil), "template.fallbackInstanceTypes must be an array of strings, got <nil>"},
+		{withType([]any{"m7g.2xlarge", 1}), "template.fallbackInstanceTypes[1] must be a non-empty string, got 1"},
+		{withType([]any{""}), `template.fallbackInstanceTypes[0] must be a non-empty string, got ""`},
+		{withType([]any{nil}), "template.fallbackInstanceTypes[0] must be a non-empty string, got <nil>"},
+		{withType([]any{"m7g.2xlarge", "m7g.2xlarge"}), `template.fallbackInstanceTypes[1] "m7g.2xlarge" is listed twice`},
+		{withType([]any{"m8g.2xlarge"}), `template.fallbackInstanceTypes[0] "m8g.2xlarge" is the instanceType`},
+		{withType([]any{"m7g.2xlarge", "m8g.2xlarge"}), `template.fallbackInstanceTypes[1] "m8g.2xlarge" is the instanceType`},
+		{withType([]any{"a", "b", "c", "d", "e"}), "template.fallbackInstanceTypes has 5 entries; at most 4"},
+		{map[string]any{"fallbackInstanceTypes": []any{"m7g.2xlarge"}},
+			"template.fallbackInstanceTypes needs template.instanceType: the fallbacks are tried after it"},
+		{map[string]any{"instanceType": "", "fallbackInstanceTypes": []any{"m7g.2xlarge"}},
+			"template.fallbackInstanceTypes needs template.instanceType: the fallbacks are tried after it"},
 	} {
 		_, err := s.putPool(ctx, poolIn(Pool{Name: fmt.Sprintf("bad%d", i), Provider: "ec2", Template: c.template}))
 		var he *HTTPError
-		if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity || he.Code != "invalid_pool" || !strings.Contains(err.Error(), c.want) {
+		if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity || he.Code != "invalid_pool" || err.Error() != c.want {
 			t.Errorf("%v: err %v, want 422 invalid_pool %q", c.template, err, c.want)
-		}
-	}
-	// Each cause says which it is, not "the instanceType or listed twice".
-	for _, c := range []struct {
-		fb   []any
-		want string
-	}{
-		{[]any{"m7g.2xlarge", "m7g.2xlarge"}, `template.fallbackInstanceTypes[1] "m7g.2xlarge" is listed twice`},
-		{[]any{"m7g.2xlarge", "m8g.2xlarge"}, `template.fallbackInstanceTypes[1] "m8g.2xlarge" is the instanceType`},
-	} {
-		if _, err := s.putPool(ctx, poolIn(Pool{Name: "dup", Provider: "ec2", Template: withType(c.fb)})); err == nil || err.Error() != c.want {
-			t.Errorf("%v: err %v, want %q", c.fb, err, c.want)
 		}
 	}
 	for i, fb := range []any{[]any{}, []any{"m7g.2xlarge"}, []any{"m7g.2xlarge", "c8g.2xlarge", "c7g.2xlarge", "r8g.xlarge"}} {

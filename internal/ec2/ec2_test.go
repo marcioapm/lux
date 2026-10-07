@@ -345,7 +345,7 @@ func TestLaunchWithNoCapacityAnywhere(t *testing.T) {
 		{"m7g.2xlarge", "*"}: "InsufficientInstanceCapacity",
 	}, nil)
 	p := New(url, discard)
-	p.noCapacityFor = 0 // a full sweep every launch, each from another subnet
+	p.SkipNoCapacityFor(0) // a full sweep every launch, each from another subnet
 	want := "ec2 RunInstances: InsufficientInstanceCapacity for every candidate: " +
 		"m8g.2xlarge, m7g.2xlarge in subnet-a, subnet-b, subnet-c: " +
 		"operation error EC2: RunInstances, https response error StatusCode: 500, api error InsufficientInstanceCapacity: " +
@@ -374,7 +374,7 @@ func TestLaunchWithNoCapacityAnywhereKeepsOneCode(t *testing.T) {
 		{"m7g.2xlarge", "*"}:        "Unsupported",
 	}, nil)
 	p := New(url, discard)
-	p.noCapacityFor = 0
+	p.SkipNoCapacityFor(0)
 	for i := range 3 {
 		_, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, map[string]string{})
 		if err == nil {
@@ -489,7 +489,7 @@ func TestLaunchUserDataMemoryWithOneLookupFailing(t *testing.T) {
 func TestLaunchAdvancesTheRoundRobinOncePerLaunch(t *testing.T) {
 	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"m8g.2xlarge", "subnet-a"}: "InsufficientInstanceCapacity"}, nil)
 	p := New(url, discard)
-	p.noCapacityFor = 0
+	p.SkipNoCapacityFor(0)
 	var first []string
 	for range 4 {
 		*attempts = nil
@@ -739,6 +739,43 @@ func TestLaunchSweepDoesNotSplit(t *testing.T) {
 	}
 	if want := []int{2, 0, 0, 0, 2, 0, 0, 2, 0}; !slices.Equal(calls, want) {
 		t.Errorf("RunInstances per pass %v, want %v", calls, want)
+	}
+}
+
+// Within noCapacityFor of the primary's mark a launch goes straight to the
+// fallback; once it expires, the primary is asked first again, and gets
+// the host if its capacity came back.
+func TestLaunchRetriesThePrimaryOnceItsMarkExpires(t *testing.T) {
+	fail := map[[2]string]string{{"m8g.2xlarge", "*"}: "InsufficientInstanceCapacity"}
+	url, attempts, _ := capacityEC2(t, fail, nil)
+	p := New(url, discard)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	p.now = func() time.Time { return now }
+	env := map[string]string{"LUX_RUNNER_MEMORY": "1"}
+	launch := func(want string) {
+		t.Helper()
+		*attempts = nil
+		l, err := p.Launch(context.Background(), json.RawMessage(fallbackTemplate), nil, env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l.InstanceType != want {
+			t.Errorf("at %s launched %s (attempts %v), want %s", now.Format(time.TimeOnly), l.InstanceType, placements(*attempts), want)
+		}
+	}
+	launch("m7g.2xlarge")
+	// The fake reads fail only while serving a request, none of which is
+	// in flight here.
+	delete(fail, [2]string{"m8g.2xlarge", "*"})
+	now = now.Add(DefaultNoCapacityRetryAfter - time.Second)
+	launch("m7g.2xlarge")
+	if got, want := placements(*attempts), []string{"m7g.2xlarge@subnet-b"}; !slices.Equal(got, want) {
+		t.Errorf("before expiry: attempts %v, want %v", got, want)
+	}
+	now = now.Add(time.Second)
+	launch("m8g.2xlarge")
+	if got, want := placements(*attempts), []string{"m8g.2xlarge@subnet-c"}; !slices.Equal(got, want) {
+		t.Errorf("after expiry: attempts %v, want %v", got, want)
 	}
 }
 
