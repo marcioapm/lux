@@ -2,6 +2,7 @@ package ec2
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -59,35 +60,90 @@ const checkTemplate = `{"region": "eu-north-1", "launchTemplate": "lux-runner-ar
 	"instanceType": "m8g.2xlarge", "fallbackInstanceTypes": ["m7g.2xlarge", "c8g.2xlarge"],
 	"subnets": ["subnet-a", "subnet-b", "subnet-c"], "tags": {"team": "platform"}}`
 
-// A check's first request is the request Launch sends for the same
-// candidate, but for DryRun.
+var testTags = server.LaunchTags("0f3c9a", "pool_0123456789abcdef", "arm64", "host_0123456789abcdef")
+
+// A check's first request is the request a production launch sends for
+// the same candidate (server.LaunchTags, the provisioner's runner env), but
+// for DryRun and what is the host's own: Name and lux:host carry another
+// host id, and the user data has no LUX_URL, LUX_HOST_TOKEN or
+// LUX_HOST_NAME. Every tag key is the same.
 func TestCheckSendsLaunchsRequestWithDryRun(t *testing.T) {
 	endpoint, forms := dryRunEC2(t, nil)
 	p := New(endpoint, discard)
-	if err := p.Check(context.Background(), json.RawMessage(checkTemplate)); err != nil {
+	const deployment, poolID, pool = "0f3c9a", "pool_0123456789abcdef", "arm64"
+	if err := p.Check(context.Background(), json.RawMessage(checkTemplate), server.LaunchTags(deployment, poolID, pool, "host_checkcheckcheck01")); err != nil {
 		t.Fatal(err)
 	}
 	check := forms()[0]
+	launchHost := "host_launchlaunchlaun"
+	env := map[string]string{"LUX_URL": "https://lux.example", "LUX_HOST_TOKEN": "luxh_secret", "LUX_HOST_NAME": pool + "-" + launchHost[len(launchHost)-8:]}
 	if _, err := New(endpoint, discard).Launch(context.Background(), json.RawMessage(checkTemplate),
-		map[string]string{server.TagManaged: "true"}, map[string]string{}); err != nil {
+		server.LaunchTags(deployment, poolID, pool, launchHost), env); err != nil {
 		t.Fatal(err)
 	}
 	launch := forms()[len(forms())-1]
 	if check.Get("DryRun") != "true" || launch.Has("DryRun") {
 		t.Fatalf("DryRun: check %q, launch %q", check.Get("DryRun"), launch.Get("DryRun"))
 	}
-	check.Del("DryRun")
-	// The SDK's idempotency token, new per request.
-	check.Del("ClientToken")
-	launch.Del("ClientToken")
+	checkTags, launchTags := formTags(check), formTags(launch)
+	if !slices.Equal(slices.Sorted(maps.Keys(checkTags)), slices.Sorted(maps.Keys(launchTags))) {
+		t.Errorf("check tag keys %v, launch tag keys %v", slices.Sorted(maps.Keys(checkTags)), slices.Sorted(maps.Keys(launchTags)))
+	}
+	for _, k := range []string{"lux:managed", "lux:deployment", "lux:pool-id", "lux:pool", "team"} {
+		if checkTags[k] == "" || checkTags[k] != launchTags[k] {
+			t.Errorf("tag %s: check %q, launch %q", k, checkTags[k], launchTags[k])
+		}
+	}
+	if checkTags["lux:host"] != "host_checkcheckcheck01" || checkTags["Name"] != "arm64-kcheck01" {
+		t.Errorf("check's host tags: lux:host %q, Name %q", checkTags["lux:host"], checkTags["Name"])
+	}
+	checkEnv, launchEnv := runnerEnvOf(t, "env", userDataOf(t, check)), runnerEnvOf(t, "env", userDataOf(t, launch))
+	for _, k := range []string{"LUX_URL", "LUX_HOST_TOKEN", "LUX_HOST_NAME"} {
+		if launchEnv[k] == "" || checkEnv[k] != "" {
+			t.Errorf("%s: check %q, launch %q", k, checkEnv[k], launchEnv[k])
+		}
+		delete(launchEnv, k)
+	}
+	if !maps.Equal(checkEnv, launchEnv) {
+		t.Errorf("check runner env %v, launch's without the host's %v", checkEnv, launchEnv)
+	}
+	for _, f := range []url.Values{check, launch} {
+		f.Del("DryRun")
+		// The SDK's idempotency token, new per request.
+		f.Del("ClientToken")
+		f.Del("UserData")
+		for k := range f {
+			if strings.HasPrefix(k, "TagSpecification.") {
+				f.Del(k)
+			}
+		}
+	}
 	if !maps.EqualFunc(check, launch, slices.Equal) {
 		t.Errorf("check request\n%v\nlaunch request\n%v", check, launch)
 	}
-	for _, k := range []string{"LaunchTemplate.LaunchTemplateName", "InstanceType", "SubnetId", "InstanceMarketOptions.MarketType", "TagSpecification.1.Tag.2.Key"} {
+	for _, k := range []string{"LaunchTemplate.LaunchTemplateName", "InstanceType", "SubnetId", "InstanceMarketOptions.MarketType"} {
 		if launch.Get(k) == "" {
 			t.Errorf("the launch request has no %s: %v", k, launch)
 		}
 	}
+}
+
+// formTags is a RunInstances form's instance tags, key to value.
+func formTags(f url.Values) map[string]string {
+	out := map[string]string{}
+	for i := 1; f.Has(fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i)); i++ {
+		out[f.Get(fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i))] = f.Get(fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i))
+	}
+	return out
+}
+
+func userDataOf(t *testing.T, f url.Values) string {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(f.Get("UserData"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 // One request per subnet with instanceType, then one per fallback type in
@@ -102,7 +158,7 @@ func TestCheckCallsPerSubnetAndFallback(t *testing.T) {
 		{`{"launchTemplate": "lt-1"}`, []string{"@"}},
 	} {
 		endpoint, forms := dryRunEC2(t, nil)
-		if err := New(endpoint, discard).Check(context.Background(), json.RawMessage(c.template)); err != nil {
+		if err := New(endpoint, discard).Check(context.Background(), json.RawMessage(c.template), testTags); err != nil {
 			t.Fatalf("%s: %v", c.template, err)
 		}
 		var got []string
@@ -132,7 +188,7 @@ func TestConcurrentChecksShareTheClientCache(t *testing.T) {
 	for i := range 16 {
 		wg.Go(func() {
 			<-start
-			errs <- p.Check(context.Background(), json.RawMessage(fmt.Sprintf(`{"region": "check-%d", "launchTemplate": "lt-1"}`, i)))
+			errs <- p.Check(context.Background(), json.RawMessage(fmt.Sprintf(`{"region": "check-%d", "launchTemplate": "lt-1"}`, i)), testTags)
 		})
 	}
 	wg.Go(func() {
@@ -165,7 +221,7 @@ func TestConcurrentChecksShareTheClientCache(t *testing.T) {
 // first request, EC2's code first.
 func TestCheckFailsOnEC2sRefusal(t *testing.T) {
 	endpoint, forms := dryRunEC2(t, map[string]string{"lux-runner-arm64": "InvalidLaunchTemplateName.NotFoundException"})
-	err := New(endpoint, discard).Check(context.Background(), json.RawMessage(checkTemplate))
+	err := New(endpoint, discard).Check(context.Background(), json.RawMessage(checkTemplate), testTags)
 	if err == nil || !strings.HasPrefix(err.Error(), "InvalidLaunchTemplateName.NotFoundException: The specified launch template") ||
 		!strings.Contains(err.Error(), "m8g.2xlarge in subnet-a") {
 		t.Fatalf("err %v, want EC2's code and message, naming the candidate", err)
@@ -173,10 +229,10 @@ func TestCheckFailsOnEC2sRefusal(t *testing.T) {
 	if n := len(forms()); n != 1 {
 		t.Errorf("%d requests after a refusal, want 1", n)
 	}
-	if err := New(endpoint, discard).Check(context.Background(), json.RawMessage(`{"launchTemplate": "lt-ok", "subnets": ["subnet-a"]}`)); err != nil {
+	if err := New(endpoint, discard).Check(context.Background(), json.RawMessage(`{"launchTemplate": "lt-ok", "subnets": ["subnet-a"]}`), testTags); err != nil {
 		t.Errorf("DryRunOperation: %v, want nil", err)
 	}
-	if err := New(endpoint, discard).Check(context.Background(), json.RawMessage(`{"region": "eu-north-1"}`)); err == nil {
+	if err := New(endpoint, discard).Check(context.Background(), json.RawMessage(`{"region": "eu-north-1"}`), testTags); err == nil {
 		t.Error("a template without launchTemplate passed")
 	}
 }

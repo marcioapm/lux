@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"testing"
@@ -16,16 +17,18 @@ import (
 
 // checkingProvider answers Check as EC2's dry run would: an error for a
 // launch template it does not know (or for every template, with down),
-// and counts the checks.
+// and counts the checks and keeps the last one's tags.
 type checkingProvider struct {
 	fakeLaunchProvider
-	known  map[string]bool
-	down   bool
-	checks int
+	known    map[string]bool
+	down     bool
+	checks   int
+	lastTags map[string]string
 }
 
-func (p *checkingProvider) Check(_ context.Context, template json.RawMessage) error {
+func (p *checkingProvider) Check(_ context.Context, template json.RawMessage, tags map[string]string) error {
 	p.checks++
+	p.lastTags = tags
 	if p.down {
 		return errors.New("ec2 RunInstances: dial tcp: connection refused")
 	}
@@ -113,5 +116,47 @@ func TestPutPoolChecksTheTemplateLaunches(t *testing.T) {
 	// A static pool has no check.
 	if _, err := s.putPool(ctx, poolIn(Pool{Name: "metal", Provider: "static"})); err != nil {
 		t.Errorf("a static pool: %v", err)
+	}
+}
+
+// The check carries a launch's tags: this deployment's id, the pool's name
+// and the id it is stored under (the one a create inserts), and a host's
+// Name and lux:host.
+func TestPutPoolChecksWithTheLaunchTags(t *testing.T) {
+	s := testServer(t)
+	prov := &checkingProvider{known: map[string]bool{"lux-runner": true}}
+	s.cfg.Providers = map[string]Provider{"ec2": prov}
+	ctx := context.Background()
+	var deployment string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT value FROM settings WHERE name = 'deployment'`).Scan(&deployment)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	poolID := func() string {
+		var id string
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT id FROM pools WHERE tenant_id = 't1' AND name = 'arm64'`).Scan(&id)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	for i, tmpl := range []map[string]any{
+		{"region": "eu-north-1", "launchTemplate": "lux-runner"},               // creates
+		{"region": "eu-north-1", "launchTemplate": "lux-runner", "spot": true}, // updates
+	} {
+		if _, err := s.putPool(ctx, poolIn(Pool{Name: "arm64", Provider: "ec2", MaxHosts: 4, Template: tmpl})); err != nil {
+			t.Fatal(err)
+		}
+		got := prov.lastTags
+		want := LaunchTags(deployment, poolID(), "arm64", got[tagHost])
+		if !maps.Equal(got, want) || !strings.HasPrefix(got[tagHost], "host_") {
+			t.Errorf("set %d: check tags %v, want %v", i, got, want)
+		}
 	}
 }
