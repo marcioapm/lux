@@ -301,6 +301,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	// scale-down and terminations above have run.
 	bo := s.launchBackoffFor(pl)
 	if want > 0 && bo != nil && s.now().Before(bo.notBefore) {
+		s.scaleBlocked(ctx, pl, &st, causeBackoff, needed, bo.evidence(s.now()))
 		return nil
 	}
 	up := scaleUp(pl, &st, warm, want)
@@ -332,7 +333,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	}
 	if launched == 0 {
 		if cause := blockedCause(pl, &st, needed, quota); cause != "" {
-			s.scaleBlocked(ctx, pl, &st, cause, needed)
+			s.scaleBlocked(ctx, pl, &st, cause, needed, nil)
 		}
 	}
 	return nil
@@ -404,19 +405,25 @@ var capacityDecisionEvent = transition{typ: evCapacityDecision}
 
 // scaleBlocked records why a pass launched nothing while hosts were wanted
 // or Runs stay unmet (blockedCause); wanted is how many hosts the plan,
-// warm and min asked for.
-func (s *Server) scaleBlocked(ctx context.Context, pl poolRow, st *poolState, cause string, wanted int) {
+// warm and min asked for, extra the cause's own fields. A launch backoff
+// repeats every pass while it lasts: it folds into one counted row (its
+// failures, detail and wait volatile) rather than recording a state.
+func (s *Server) scaleBlocked(ctx context.Context, pl poolRow, st *poolState, cause string, wanted int, extra map[string]any) {
 	d := st.plan.summary()
 	d["waiting"], d["total"], d["max"], d["cause"] = st.demand, st.total, pl.Max, cause
 	if cause != causeNoFit {
 		d["wanted"] = wanted
 	}
+	maps.Copy(d, extra)
 	tr := scaleBlockedEvent
-	if cause == causeMax || cause == causeQuota {
+	if cause == causeMax || cause == causeQuota || cause == causeBackoff {
 		// At a fleet cap, the queue's size and fit do not change the cause.
 		tr.volatile = slices.Concat(tr.volatile, []string{"planned", "unmet", "blocked", "deficits", "expected", "unknown"})
 	}
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if cause == causeBackoff {
+			return poolRepeatEvent(ctx, tx, pl.ID, evScaleBlocked, d, slices.Concat(tr.volatile, backoffVolatile)...)
+		}
 		return transitionEvent(ctx, tx, poolEvents, pl.ID, tr, d)
 	}); err != nil {
 		s.log.Warn("recording a blocked scale-up", "pool", pl.Name, "err", err)
