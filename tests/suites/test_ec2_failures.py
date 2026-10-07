@@ -79,6 +79,7 @@ def test_a_failed_launch_is_retried(lux, ec2):
     # sweep about 15s after the first (bounds [13, 25] leave room for
     # request latency and a loaded host), not on every pass (~1s) nor at
     # the no-capacity marks' 3s; one refused host per sweep.
+    # Capacity-mark suppression is covered by TestLaunchSweepDoesNotSplit / TestLaunchRetriesThePrimaryOnceItsMarkExpires.
     by_key: dict[tuple[str, str], list[float]] = {}
     for at, key in attempts:
         by_key.setdefault(key, []).append(at)

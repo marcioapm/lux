@@ -257,10 +257,15 @@ per pass can make it repeat each pass. Clearing demand without a scale-up
 does not reset this bounded event lookup, and a folded scale-up retains
 its original position in the stream.
 
-`launch_backoff` is the exception: every pass that waits folds into one
-row (its `count` grows; `failures`, `retryInSeconds`, `error` and `detail`
-take the latest values) while the pool's events in between are those of
-its retry loop (a launch attempt and its failure).
+`launch_backoff` is the exception: a pass that waits folds into the
+backoff's latest row (its `count` grows; `failures`, `retryInSeconds`,
+`error` and `detail` take the latest values) while the pool's events in
+between are those of its retry loop (a launch attempt and its failure).
+That folding is best-effort, like the pool's other repeated events: the
+row is found only among the pool's latest 8 events, so a long backoff
+whose attempts fail with differing errors (each a new `pool.launch_failed`
+row) can push it out and start a new `pool.scale_blocked` row, as can any
+other pool event in between.
 
 A blocker is either a resource, with `resource` (`cpus`, `memory`, `disk`
 or `runs`), `requested`, `used`, `capacity` and `available`
