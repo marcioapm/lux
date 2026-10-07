@@ -11,10 +11,12 @@
 // InsufficientCapacity, or Unsupported: the type is not offered in that
 // zone) tries instanceType in each of the subnets, from the pool's next one
 // round, then each fallbackInstanceTypes entry the same way. Any other
-// error ends the launch. A type and subnet without capacity is skipped by
-// later launches for noCapacityRetryAfter (30s), so a shortage costs one
+// error ends the launch. A type and subnet without capacity, in the
+// template's market (spot or on-demand), is skipped by later launches of
+// any pool for noCapacityRetryAfter (30s), so a shortage costs one
 // sweep of RunInstances calls, not one per launch; when every candidate is
-// skipped, the launch fails without calling EC2.
+// skipped, the launch fails without calling EC2. A template without
+// instanceType shares such marks only with pools of its launch template.
 //
 // With "spot", instances are one-time spot instances, terminated on
 // interruption. Every instance's user data sets LUX_EC2_IMDS, so its
@@ -108,7 +110,21 @@ type Provider struct {
 	log           *slog.Logger
 }
 
-type capacityKey struct{ region, instanceType, subnet string }
+// capacityKey is the EC2 capacity a candidate asks for. Spot and on-demand
+// capacity are separate; a template-type candidate ("" instanceType) is
+// keyed by its launch template, whose type lux does not know.
+type capacityKey struct {
+	region, instanceType, launchTemplate, subnet string
+	spot                                         bool
+}
+
+func (t Template) capacityKey(c candidate) capacityKey {
+	k := capacityKey{region: t.Region, instanceType: c.instanceType, subnet: c.subnet, spot: t.Spot}
+	if c.instanceType == "" {
+		k.launchTemplate = t.LaunchTemplate
+	}
+	return k
+}
 
 type noCapacityMark struct {
 	at   time.Time
@@ -227,7 +243,7 @@ func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Templa
 	cands := candidates(t, start)
 	skipped, failed := 0, 0
 	for n, cand := range cands {
-		key := capacityKey{t.Region, cand.instanceType, cand.subnet}
+		key := t.capacityKey(cand)
 		if m, ok := p.noCapacity[key]; ok && p.now().Sub(m.at) < p.noCapacityFor {
 			skipped++
 			continue
@@ -274,8 +290,11 @@ func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Templa
 	// names the zone, and text that varied with the rotation would split
 	// pool.launch_failed events. The code leads: the provisioner keeps 200
 	// characters of a launch error.
-	head := candidates(t, 0)[0]
-	m := p.noCapacity[capacityKey{t.Region, head.instanceType, head.subnet}]
+	head := candidate{instanceType: t.InstanceType}
+	if len(t.Subnets) > 0 {
+		head.subnet = t.Subnets[0]
+	}
+	m := p.noCapacity[t.capacityKey(head)]
 	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", m.code, candidateList(t), m.err)
 }
 
