@@ -511,7 +511,9 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   30s, 60s … at most 5m after each further consecutive failure; scale-down
   and terminations go on meanwhile. A successful launch or any change to
   the pool (`lux pools set`) ends the backoff, so a fix is tried on the
-  next pass; so does a luxd restart (the backoff is in memory). While it
+  next pass. The backoff is in memory in the luxd holding the provisioner
+  lease, so a luxd restart, another luxd taking the lease over, or a luxd
+  reacquiring a lease it had lost also starts every pool afresh. While it
   waits the pool records one `pool.scale_blocked` (cause `launch_backoff`,
   counted per pass): `lux pools events` shows `launch backing off after N
   failures; next attempt in …: <error>`. A host

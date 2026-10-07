@@ -107,6 +107,40 @@ func TestPoolChangeResetsLaunchBackoff(t *testing.T) {
 	}
 }
 
+// A luxd that loses the provisioner lease and takes it again forgets its
+// backoffs: another holder may have launched for the pool in between.
+func TestRetakenLeaseResetsLaunchBackoff(t *testing.T) {
+	s, _, p, now := backoffFixture(t)
+	ctx := context.Background()
+	s.cfg.Providers = map[string]Provider{"ec2": p}
+	start := *now
+	provision := func() {
+		t.Helper()
+		if err := s.provision(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provision()
+	*now = start.Add(15 * time.Second)
+	provision()
+	if p.calls != 2 {
+		t.Fatalf("%d attempts, want 2 before the lease is lost", p.calls)
+	}
+	execSQL(t, s, ctx, `UPDATE leases SET holder='other', expires_at=now()+interval '1 minute' WHERE name='provisioner'`)
+	*now = start.Add(20 * time.Second)
+	provision()
+	if p.calls != 2 {
+		t.Fatalf("attempted a launch without the lease")
+	}
+	execSQL(t, s, ctx, `UPDATE leases SET expires_at=now()-interval '1 second' WHERE name='provisioner'`)
+	// Before the old deadline (15s + 30s).
+	*now = start.Add(25 * time.Second)
+	provision()
+	if p.calls != 3 {
+		t.Fatalf("%d attempts, want one on the retaken lease", p.calls)
+	}
+}
+
 // A successful launch resets the count: the next failure waits 15s, not
 // the doubled delay.
 func TestSuccessfulLaunchResetsLaunchBackoff(t *testing.T) {
