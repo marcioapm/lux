@@ -89,13 +89,6 @@ func errNeverResumable() error {
 	return errf(http.StatusConflict, "not_resumable", "%s", neverResumableReason)
 }
 
-// resumePolicy reads a Run's resumePolicy ("" for none, which is auto).
-func resumePolicy(ctx context.Context, tx pgx.Tx, runID string) (string, error) {
-	var policy string
-	err := tx.QueryRow(ctx, `SELECT `+runResumePolicySQL+` FROM runs r WHERE r.id = $1`, runID).Scan(&policy)
-	return policy, err
-}
-
 // forgetRestoredState makes a Run's next placement a first one: with no
 // snapshot and no session, assign sends no ResumeInfo, so the runner
 // starts it on empty state volumes through the adapter's start path. Its
@@ -306,11 +299,12 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	moveStop := slices.Contains(movedStops, stopReason)
 	var policy string
 	if moveStop {
-		if policy, err = resumePolicy(ctx, tx, runID); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT `+runResumePolicySQL+` FROM runs r WHERE r.id = $1`, runID).Scan(&policy); err != nil {
 			return err
 		}
 	}
 	failsOnMove := moveStop && spec.FailsOnMove(policy)
+	restarts := policy == spec.ResumeRestart
 	var next, reason string
 	switch {
 	case cancel || stopReason == "cancel":
@@ -350,7 +344,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	// Run stopped for a person to decide what to restore. restart is
 	// exempt: it restores nothing, and forgetRestoredState clears the
 	// snapshot_id the refusal left.
-	moved := moveStop && !failsOnMove && (!snapshotRefused || policy == spec.ResumeRestart)
+	moved := moveStop && !failsOnMove && (!snapshotRefused || restarts)
 	// Servers count as migrated only when the Run is resumed elsewhere.
 	serverStop := endReason("stop")
 	if moved {
@@ -371,7 +365,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		// (with the input a migration left, if any). restart: from
 		// scratch, as a first placement, its snapshot ignored.
 		why := "auto-resume after " + stopReason
-		if policy == spec.ResumeRestart {
+		if restarts {
 			if err := forgetRestoredState(ctx, tx, runID); err != nil {
 				return err
 			}

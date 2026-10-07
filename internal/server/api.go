@@ -764,8 +764,8 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	return &submitRunOutput{http.StatusOK, run}, nil
 }
 
-// runByIdempotencyKey reads the tenant's (the transaction's scope) Run
-// submitted with key.
+// runByIdempotencyKey reads the Run submitted with key, in the tenant the
+// transaction is scoped to.
 func runByIdempotencyKey(ctx context.Context, tx pgx.Tx, key string) (*Run, error) {
 	return scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.idempotency_key = $1`, key))
 }
@@ -1156,7 +1156,7 @@ func (s *Server) resumability(ctx context.Context, tenantID string, run *Run) (*
 	}
 	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
 		var noSnapshot bool
-		if err := tx.QueryRow(ctx, `SELECT `+refusedWithoutSnapshot+` FROM `+runsFrom+` WHERE r.id = $1`, run.ID).Scan(&noSnapshot); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT `+refusedWithoutSnapshot+` FROM runs r WHERE r.id = $1`, run.ID).Scan(&noSnapshot); err != nil {
 			return err
 		}
 		if noSnapshot {
@@ -1538,7 +1538,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		var refs []spec.SecretRef
 		var sp spec.RunSpec
 		var noSnapshot bool
-		if err := tx.QueryRow(ctx, `SELECT r.state, r.secrets, r.spec, `+refusedWithoutSnapshot+` FROM `+runsFrom+` WHERE r.id = $1 FOR UPDATE OF r`, id).
+		if err := tx.QueryRow(ctx, `SELECT r.state, r.secrets, r.spec, `+refusedWithoutSnapshot+` FROM runs r WHERE r.id = $1 FOR UPDATE OF r`, id).
 			Scan(&state, &refs, &sp, &noSnapshot); err != nil {
 			return err
 		}
