@@ -45,6 +45,7 @@
 package ec2
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -288,7 +289,7 @@ func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Templa
 		}
 		failed++
 		p.noCapacity[key] = noCapacityMark{at: now, code: code, err: err}
-		p.log.Info("ec2: no capacity; trying the next candidate", "instanceType", cand.instanceType, "subnet", cand.subnet, "code", code)
+		p.log.Info("ec2: no capacity", "instanceType", cand.instanceType, "subnet", cand.subnet, "code", code)
 	}
 	// Every candidate failed now or has a recent mark, so the template's
 	// first candidate has one; its error is wrapped because EC2's message
@@ -308,9 +309,13 @@ func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Templa
 func candidateList(t Template) string {
 	var names []string
 	for _, it := range t.instanceTypes() {
-		names = append(names, candidate{instanceType: it}.String())
+		names = append(names, cmp.Or(it, "template type"))
 	}
-	return candidate{strings.Join(names, ", "), strings.Join(t.Subnets, ", ")}.String()
+	s := strings.Join(names, ", ")
+	if len(t.Subnets) > 0 {
+		s += " in " + strings.Join(t.Subnets, ", ")
+	}
+	return s
 }
 
 // instanceTypes is InstanceType, then FallbackInstanceTypes: the order
