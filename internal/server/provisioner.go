@@ -163,10 +163,12 @@ func (s *Server) provision(ctx context.Context) error {
 
 // tookProvisionLease: another provisioner may have recorded host decisions
 // while this process did not hold the lease, so each pool's are read from
-// the database once again (idleDecisions).
+// the database once again (idleDecisions). Launch backoffs start afresh: a
+// launch another holder made meanwhile is not known here.
 func (s *Server) tookProvisionLease() {
 	s.leaseHeld = true
 	s.forgetDecisions()
+	s.launchBackoff = map[string]*poolBackoff{}
 }
 
 func (s *Server) forgetDecisions() {
