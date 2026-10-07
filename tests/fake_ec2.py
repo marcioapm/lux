@@ -67,6 +67,10 @@ def _parse_env_lines(text: str) -> dict[str, str]:
 # The instance type the fake's launch templates stand for.
 FAKE_TEMPLATE_TYPE = "m7i.large"
 
+# The capacity shortages a dry run never answers (EC2 does not test
+# capacity for one); every other injected failure fails it too.
+DRY_RUN_UNTESTED = frozenset({"InsufficientInstanceCapacity", "InsufficientCapacity"})
+
 
 class FakeEC2:
     real = False
@@ -207,7 +211,7 @@ class FakeEC2:
                 self.dry_runs.append((lt_id or lt_name, itype, subnet))
             self._check_launch_template(lt_id, lt_name)
             failure = self.launch_failures.get((itype, subnet)) or self.launch_failures.get((itype, "*"))
-            if failure and failure not in FakeError.SERVER_ERRORS:
+            if failure and failure not in DRY_RUN_UNTESTED:
                 raise FakeError(failure, f"no {itype} in {self._zone(subnet)} (fake)")
             self._instance_tags(q)
             raise FakeError("DryRunOperation", "Request would have succeeded, but DryRun flag is set.")
@@ -357,14 +361,19 @@ class FakeEC2:
 
 class FakeError(Exception):
     # EC2 answers a capacity shortage with a 500 (the SDK's default retryer
-    # would retry it), a dry run that would have succeeded with a 412, and
-    # the client's own mistakes with a 400.
+    # would retry it), a dry run that would have succeeded with a 412, a
+    # missing permission with a 403, and the client's own mistakes with a 400.
     SERVER_ERRORS = {"InsufficientInstanceCapacity", "InsufficientCapacity", "Unsupported", "InternalError"}
 
     def __init__(self, code: str, msg: str):
         super().__init__(msg)
         self.code = code
-        self.status = 500 if code in self.SERVER_ERRORS else 412 if code == "DryRunOperation" else 400
+        if code == "DryRunOperation":
+            self.status = 412
+        elif code == "UnauthorizedOperation":
+            self.status = 403
+        else:
+            self.status = 500 if code in self.SERVER_ERRORS else 400
 
 
 def _error(code: str, msg: str) -> str:
