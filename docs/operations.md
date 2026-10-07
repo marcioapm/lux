@@ -530,7 +530,9 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   check (`UnauthorizedOperation`), except for a condition on the host's
   own tag values or the user data. Setting a pool again with the same
   provider and an identical template is not checked, so a change to
-  `--max` needs no EC2.
+  `--max` needs no EC2. A set that races another create of the same pool
+  (or its replacement under a new id) fails with 409 `pool_changed` and
+  stores nothing; set it again.
 - **Failures:** provider launch errors, including capacity errors, delay
   the pool's next launch by 15s, then 30s, 60s … up to 5m after each
   consecutive failed attempt returns. Quota refusals, caller cancellation
