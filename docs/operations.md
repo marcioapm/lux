@@ -506,21 +506,19 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   ```
 
   Without it, `--warm` hosts are kept at all times.
-- **Failures:** a pool whose launch fails (any provider error, capacity
-  included; not the tenant's host quota) launches nothing for 15s, then
-  30s, 60s … at most 5m after each further consecutive failure; scale-down
-  and terminations go on meanwhile. A successful launch or any change to
-  the pool (`lux pools set`) ends the backoff, so a fix is tried on the
-  next pass. The backoff is in memory in the luxd holding the provisioner
-  lease, so a luxd restart, another luxd taking the lease over, or a luxd
-  taking the lease again once its own expired (whether or not another luxd
-  held it meanwhile) also starts every pool afresh; renewing an unexpired
-  lease does not. While it
-  waits the pool records a `pool.scale_blocked` (cause `launch_backoff`,
-  counted per pass and folded into one row on a best-effort basis: a long
-  backoff with many differing errors can start a new row):
-  `lux pools events` shows `launch backing off after N
-  failures; next attempt in …: <error>`. A host
+- **Failures:** provider launch errors, including capacity errors, delay
+  the pool's next launch by 15s, then 30s, 60s … up to 5m after each
+  consecutive failed attempt returns. Quota refusals, caller cancellation
+  and persistence errors do not count; scale-down, terminations and alive
+  checks continue. Provider success (even if persisting it fails) or a
+  change to the pool's provisioner settings (`lux pools set`) resets the
+  backoff. It is in memory: restart or any newly taken provisioner lease
+  epoch (no previous row, an expired lease or a different holder) resets
+  every pool; renewing this luxd's unexpired lease does not.
+  Waiting passes record `pool.scale_blocked` with cause `launch_backoff`,
+  counted per pass and folded best-effort into one row; a long backoff
+  with differing errors can start another row. `lux pools events` shows
+  `launch backing off after N failures; next attempt in …: <error>`. A host
   that never registers within `LUX_LAUNCH_TIMEOUT` (default 10m) is
   terminated. An instance EC2 no longer has is written off and replaced.
 - **Orphans:** once a minute luxd lists the pool's instances by tag. One

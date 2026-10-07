@@ -242,8 +242,8 @@ It carries `waiting`, `total`, `max`, the same plan fields as
 `pool.scale_up` (`ready` through `omitted`) and, for `max` and `quota`,
 `wanted`: how many hosts the pool asked for. For `launch_backoff` it also
 carries `failures` (consecutive failed launches), `retryInSeconds` (until
-the next attempt), `error` (the provider's last error, first 200
-characters) and `detail`, the line `lux pools events` prints, e.g.
+the next attempt), `error` (the provider's last error, request IDs stripped
+and limited to 200 runes) and `detail`, the line `lux pools events` prints, e.g.
 `launch backing off after 5 failures; next attempt in 2m0s: <error>`.
 
 It records a state, not each pass. For `max` and `quota`, only `cause` and
@@ -257,15 +257,12 @@ per pass can make it repeat each pass. Clearing demand without a scale-up
 does not reset this bounded event lookup, and a folded scale-up retains
 its original position in the stream.
 
-`launch_backoff` is the exception: a pass that waits folds into the
-backoff's latest row (its `count` grows; `failures`, `retryInSeconds`,
-`error` and `detail` take the latest values) while the pool's events in
-between are those of its retry loop (a launch attempt and its failure).
-That folding is best-effort, like the pool's other repeated events: the
-row is found only among the pool's latest 8 events, so a long backoff
-whose attempts fail with differing errors (each a new `pool.launch_failed`
-row) can push it out and start a new `pool.scale_blocked` row, as can any
-other pool event in between.
+`launch_backoff` instead counts each waiting pass, folding best-effort
+into the latest backoff row with updated `failures`, `retryInSeconds`,
+`error` and `detail`. Folding searches only the pool's latest 8 events
+and permits intervening retry-loop events. Differing launch errors can
+push the row outside that window; other intervening pool events can also
+prevent folding. Either starts a new `pool.scale_blocked` row.
 
 A blocker is either a resource, with `resource` (`cpus`, `memory`, `disk`
 or `runs`), `requested`, `used`, `capacity` and `available`

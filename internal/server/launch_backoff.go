@@ -6,13 +6,9 @@ import (
 	"time"
 )
 
-// A pool whose launch fails launches nothing again until its backoff
-// expires: launchBackoffInitial after the first failure, doubling per
-// consecutive failure, capped at launchBackoffMax. Held in memory by the
-// luxd holding the provisioner lease and cleared whenever it takes the
-// lease rather than renewing its unexpired one (tookProvisionLease), so a
-// restart, a takeover by another luxd, or this luxd taking the lease again
-// after it expired starts every pool afresh.
+// Provider failures delay only launches, doubling from 15s to 5m after
+// each failed attempt returns. Backoffs are in memory and reset on each
+// newly acquired lease epoch, not on renewal of an unexpired lease.
 const (
 	launchBackoffInitial = 15 * time.Second
 	launchBackoffMax     = 5 * time.Minute
@@ -22,26 +18,21 @@ type poolBackoff struct {
 	failures  int
 	notBefore time.Time
 	lastErr   error
-	// config is the pool row the failures happened under (poolConfig).
-	config string
+	config    string
 }
 
-// launchRefused wraps the provider's own error from launch, so the pass
-// tells it apart from a database error or a quota refusal.
+// launchRefused distinguishes provider errors from persistence and quota errors.
 type launchRefused struct{ err error }
 
 func (e *launchRefused) Error() string { return e.err.Error() }
 func (e *launchRefused) Unwrap() error { return e.err }
 
-// poolConfig fingerprints a pool's stored settings: any change to them
-// (template, min/max/warm, provider, ...) ends its backoff.
+// poolConfig fingerprints all provisioner settings, comparing pointers by value.
 func poolConfig(pl poolRow) string {
 	b, _ := json.Marshal(pl)
 	return string(b)
 }
 
-// launchBackoffFor is the pool's backoff, or nil when it has none or its
-// settings changed since its failures (then forgotten).
 func (s *Server) launchBackoffFor(pl poolRow) *poolBackoff {
 	bo := s.launchBackoff[pl.ID]
 	if bo != nil && bo.config != poolConfig(pl) {
@@ -51,8 +42,6 @@ func (s *Server) launchBackoffFor(pl poolRow) *poolBackoff {
 	return bo
 }
 
-// launchFailed counts a provider's refusal of a launch for the pool and
-// sets when it may launch again.
 func (s *Server) launchFailed(pl poolRow, err error) {
 	if s.launchBackoff == nil {
 		s.launchBackoff = map[string]*poolBackoff{}
@@ -71,13 +60,9 @@ func (s *Server) launchFailed(pl poolRow, err error) {
 	bo.lastErr = err
 }
 
-// backoffVolatile: one launch backoff is one pool.scale_blocked row, folded
-// across its attempts whatever each one's error (a zone named in it changes
-// with the subnet); the row keeps the latest.
+// Changing errors and countdowns do not distinguish backoff events.
 var backoffVolatile = []string{"failures", "retryInSeconds", "detail", "error"}
 
-// evidence is a backoff's fields of pool.scale_blocked at now: detail says
-// why the pool waits, error is the provider's last refusal (200 runes).
 func (bo *poolBackoff) evidence(now time.Time) map[string]any {
 	wait := bo.notBefore.Sub(now).Round(time.Second)
 	// Not providerErrorText: its 500-byte cut can split a rune.
@@ -86,7 +71,6 @@ func (bo *poolBackoff) evidence(now time.Time) map[string]any {
 		"detail": fmt.Sprintf("launch backing off after %d failures; next attempt in %s: %s", bo.failures, wait, text)}
 }
 
-// truncateRunes keeps at most n runes of s, never cutting one in two.
 func truncateRunes(s string, n int) string {
 	for i := range s {
 		if n == 0 {
@@ -97,7 +81,6 @@ func truncateRunes(s string, n int) string {
 	return s
 }
 
-// forgetLaunchBackoffs drops the backoffs of pools no longer provisioned.
 func (s *Server) forgetLaunchBackoffs(pools []poolRow) {
 	live := make(map[string]bool, len(pools))
 	for _, pl := range pools {
