@@ -20,6 +20,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"github.com/marcioapm/lux/internal/ec2"
 	"github.com/marcioapm/lux/internal/server"
 	"github.com/marcioapm/lux/internal/spec"
 )
@@ -104,8 +105,7 @@ type config struct {
 	EC2 struct {
 		Endpoint string `toml:"endpoint" env:"LUX_EC2_ENDPOINT"`
 		// NoCapacityRetryAfter: how long a (type, subnet) EC2 had no
-		// capacity for is skipped by later launches. Zero: the provider's
-		// default (30s).
+		// capacity for is skipped by later launches; 0 never skips.
 		NoCapacityRetryAfter duration `toml:"no_capacity_retry_after" env:"LUX_EC2_NO_CAPACITY_RETRY_AFTER"`
 	} `toml:"ec2"`
 	Console struct {
@@ -227,6 +227,7 @@ func defaultConfig() config {
 	c.LostGrace.Duration = server.DefaultLostGrace
 	c.ListingLag.Duration = server.DefaultListingLag
 	c.OutdatedDrainPercent = server.DefaultOutdatedDrainPercent
+	c.EC2.NoCapacityRetryAfter.Duration = ec2.DefaultNoCapacityRetryAfter
 	d := spec.BuiltinDefaults
 	c.Defaults.CPUs, c.Defaults.Memory.Bytes, c.Defaults.Disk.Bytes, c.Defaults.Pids = d.CPUs, d.Memory, d.Disk, d.Pids
 	c.History.SampleEvery.Duration = 10 * time.Second
