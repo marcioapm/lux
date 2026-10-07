@@ -215,6 +215,51 @@ func (p *cancelAfterLaunch) Launch(ctx context.Context, tmpl json.RawMessage, ta
 	return l, err
 }
 
+// One pool's backoff is its own: pool B launches while pool A backs off,
+// and neither B's successful launches nor its configuration change cut
+// short A's schedule (attempts at 0, 15, 45 and 105s).
+func TestLaunchBackoffIsPerPool(t *testing.T) {
+	s, a, pa, now := backoffFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO pools (id,tenant_id,name,provider,template,min_hosts) VALUES ('pool2','t1','other','ec2','{"version":1}',1)`)
+	b := poolRow{ID: "pool2", Name: "other", Provider: "ec2", TenantID: new("t1"), Template: json.RawMessage(`{"version":1}`), Min: 1}
+	pb := &planningProvider{}
+	start := *now
+	var attempts []time.Duration
+	for off := time.Duration(0); off <= 110*time.Second; off += time.Second {
+		*now = start.Add(off)
+		switch off {
+		case 16 * time.Second:
+			if !backoffPass(s, b, pb) {
+				t.Fatal("pool B did not launch during A's backoff")
+			}
+		case 30 * time.Second:
+			execSQL(t, s, ctx, `UPDATE pools SET min_hosts = 2 WHERE id = 'pool2'`)
+			b.Min = 2
+			if !backoffPass(s, b, pb) {
+				t.Fatal("pool B did not launch for its new minimum")
+			}
+		}
+		if backoffPass(s, a, pa) {
+			attempts = append(attempts, off)
+		}
+	}
+	want := []time.Duration{0, 15 * time.Second, 45 * time.Second, 105 * time.Second}
+	if fmt.Sprint(attempts) != fmt.Sprint(want) {
+		t.Fatalf("pool A attempted at %v, want %v", attempts, want)
+	}
+	outcomes := func(pool string) string {
+		return queryOne[string](t, s, `SELECT coalesce(string_agg(launch_outcome, ',' ORDER BY provision_requested_at, launch_outcome), '')
+			FROM hosts WHERE pool_id = $1`, pool)
+	}
+	if got := outcomes("pool1"); got != "failed,failed,failed,failed" {
+		t.Errorf("pool A launch outcomes %q, want four failures", got)
+	}
+	if got := outcomes("pool2"); got != "launched,launched" {
+		t.Errorf("pool B launch outcomes %q, want two launches", got)
+	}
+}
+
 // Attempts whose errors differ (EC2 names the subnet's zone) are still one
 // backoff: one pool.scale_blocked row, holding the latest error.
 func TestLaunchBackoffFoldsAcrossDifferentErrors(t *testing.T) {
