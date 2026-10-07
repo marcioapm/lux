@@ -97,6 +97,10 @@ def test_a_failing_launch_backs_off_until_the_pool_is_fixed(lux, ec2):
     waits 15s, then 30s, ... and says so in one pool.scale_blocked. Setting
     the pool again (the operator's fix) is tried at once."""
     fake_only(ec2)
+    # Stored while its template launches (a set checks it), then the template
+    # goes: the same set again with --min 1 is not checked, and every launch
+    # fails as EC2 fails a deleted launch template.
+    pool(lux, ec2, min=0, max=1)
     ec2.launch_failures = {("m7i.large", "*"): "InvalidLaunchTemplateName.NotFound"}
     pool(lux, ec2, min=1, max=1)
 
