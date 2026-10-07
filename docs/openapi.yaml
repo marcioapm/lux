@@ -2394,7 +2394,7 @@ components:
           $ref: "#/components/schemas/Resources"
           description: "What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS). disk bounds the writable layer plus state volumes: a Run over it is stopped and fails."
         resumePolicy:
-          description: "What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: as manual, and every resume is refused (409 not_resumable), for one-shot work such as a CI job holding a single-use token."
+          description: "What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: as manual, and every requested resume is refused (409 not_resumable; an assignment no runner started may still be placed again), for one-shot work such as a CI job holding a single-use token."
           type: string
         sandbox:
           $ref: "#/components/schemas/Sandbox"
@@ -6645,7 +6645,7 @@ paths:
   /v1/runs/{id}/resume:
     post:
       description: |-
-        From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been cancelled, and is not resumable. A Run whose spec has resumePolicy never is never resumable: 409 not_resumable, whatever its state.
+        From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been cancelled, and is not resumable. A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state (an assignment no runner started may still be placed again).
 
         git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a stopped, lost or failed Run: while it is resuming, 409. A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one.
 

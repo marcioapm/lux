@@ -110,8 +110,9 @@ what a move does to it:
   force-evict drain or `pools rm --force-evict` still stops it, and it then
   ends `failed` (`drain: not resumed (resumePolicy never)`). To let it
   finish, drain without `--force-evict`.
-- `never` also refuses every resume, an operator's included (409
-  `not_resumable`).
+- `never` also refuses every requested resume, an operator's included (409
+  `not_resumable`). An assignment no runner started may still be placed
+  again.
 
 **Resume** by an operator can choose the host (`--to`). A Run's secrets are
 never stored: luxd holds their values in memory from the submit or resume

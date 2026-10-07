@@ -61,6 +61,7 @@ since older releases lack both the file and the commands it names:
 | Feature | Since the release says it, a deployer may |
 | --- | --- |
 | `validate` | run `luxd [--config FILE] validate` against the host's configuration before migrating or switching to the release. |
+| `resume-policy` | let tenants submit a RunSpec with `resumePolicy` `restart`, `manual` or `never` ([resume policy](runspec.md#resume-policy)), once every luxd sharing the database runs such a release: an older luxd treats the Run as `auto`, and one that rewrites its spec drops the field for good. |
 
 A release with no `FEATURES` file, or no `validate` line, predates
 `luxd validate`.

@@ -167,7 +167,7 @@ lux moves a Run when a force-evicting drain (`lux hosts drain --force-evict`,
 - `auto` (the default, also when unset): resumed elsewhere, restored from its snapshot.
 - `restart`: started again from scratch elsewhere, for workloads safe to rerun whose saved state must not be trusted on another host.
 - `manual`: fails; a person may resume it.
-- `never`: fails and can never be resumed, for one-shot work such as a CI job holding a single-use token.
+- `never`: fails and refuses every requested resume, for one-shot work such as a CI job holding a single-use token.
 
 In detail:
 
@@ -182,15 +182,25 @@ In detail:
   `preempt: not resumed (resumePolicy never)`. It is snapshotted as usual
   and its servers stop. `lux migrate` refuses it with 409 `not_movable`
   and leaves it running.
-- `never` also refuses every resume, whatever the Run's state (stopped by
-  request included): 409 `not_resumable`, "resumePolicy never: this Run
-  cannot be resumed". `lux ls --resumable` leaves it out.
+- `never` also refuses every requested resume, whatever the Run's state
+  (stopped by request included): 409 `not_resumable`, "resumePolicy never:
+  this Run cannot be resumed". `lux ls --resumable` leaves it out. An
+  assignment no runner started (refused by an outdated runner) may still be
+  placed again: none of the work ran.
 
 Except for `never`, the policy covers only what lux does by itself: a resume
 you ask for restores the snapshot as usual. A cordon-only drain does not stop
 the Run. A Run whose host stopped answering ends `lost`, which is never
 resumed automatically, whatever the policy. Any other value is refused with
 422 `invalid_spec`.
+
+An older luxd ignores `resumePolicy` and treats the Run as `auto`. A client
+that relies on `restart`, `manual` or `never` should check that the release
+lists `resume-policy` in `FEATURES`, or that `GET /v1/runs/{id}` echoes
+`spec.resumePolicy`. Where several luxd share a database, an older one that
+rewrites the Run's spec (a resume adding secrets or repositories, a failed
+clone dropping one) drops the field for good: upgrade every luxd before
+submitting a policy other than `auto`.
 
 ## Images
 

@@ -36,7 +36,7 @@ type RunSpec struct {
 	Sandbox   Sandbox           `json:"sandbox" yaml:"sandbox"`
 	Artifacts Artifacts         `json:"artifacts" yaml:"artifacts"`
 	// Empty is stored as given and means ResumeAuto.
-	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: as manual, and every resume is refused (409 not_resumable), for one-shot work such as a CI job holding a single-use token."`
+	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: as manual, and every requested resume is refused (409 not_resumable; an assignment no runner started may still be placed again), for one-shot work such as a CI job holding a single-use token."`
 }
 
 // RunSpec.ResumePolicy values.
