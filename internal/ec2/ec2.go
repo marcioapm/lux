@@ -272,17 +272,17 @@ func withCandidate(base awsec2.RunInstancesInput, cand candidate) awsec2.RunInst
 // CheckTimeout bounds a whole Check.
 const CheckTimeout = 10 * time.Second
 
-// Check asks EC2 whether template would launch, launching nothing:
-// RunInstances with DryRun, built by Launch's code (launch template,
-// instance type, subnet, market, tags, user data in the template's
-// format). Only per-launch values differ: the user data carries no host's
-// URL or token, and the tags are the template's plus lux:managed, so the
-// request tags on create as a launch does. One call per subnet with
-// instanceType, then one per fallbackInstanceTypes entry in the first
-// subnet. EC2 answers DryRunOperation where the real call would have been
-// allowed; DryRun does not test capacity. The first other answer is the
-// error, EC2's code first: "<code>: <message> (<candidate>)".
-func (p *Provider) Check(ctx context.Context, template json.RawMessage) error {
+// Check asks EC2 whether template would launch with tags, launching
+// nothing: RunInstances with DryRun, built by Launch's code (launch
+// template, instance type, subnet, market, tags merged with the
+// template's). The caller passes a launch's tags (server.LaunchTags); the
+// user data is the template's format rendered without a host's URL, token
+// or instance-type memory. One call per subnet with instanceType, then one
+// per fallbackInstanceTypes entry in the first subnet. EC2 answers
+// DryRunOperation where the real call would have been allowed; DryRun does
+// not test capacity. The first other answer is the error, EC2's code
+// first: "<code>: <message> (<candidate>)".
+func (p *Provider) Check(ctx context.Context, template json.RawMessage, tags map[string]string) error {
 	t, err := parse(template)
 	if err != nil {
 		return err
@@ -300,7 +300,7 @@ func (p *Provider) Check(ctx context.Context, template json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	base := runInput(t, map[string]string{server.TagManaged: "true"})
+	base := runInput(t, tags)
 	base.DryRun = aws.Bool(true)
 	base.UserData = aws.String(base64.StdEncoding.EncodeToString(ud))
 	for _, cand := range checkCandidates(t) {

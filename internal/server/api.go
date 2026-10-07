@@ -3103,7 +3103,10 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if pl.ScaleDownAfter.Duration < 0 || pl.ScaleDownAfter.Duration > 0 && sda == nil {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "scaleDownAfter must be at least 1s")
 	}
-	if err := CheckPoolTemplate(ctx, s.db, s.cfg.Providers, p.TenantID, pl.Name, pl.Provider, pl.Template); err != nil {
+	// A pool this set creates gets newID, which its check's lux:pool-id
+	// tag carries; an existing one keeps its own.
+	newID := ids.New(ids.Pool)
+	if err := CheckPoolTemplate(ctx, s.db, s.cfg.Providers, p.TenantID, pl.Name, newID, pl.Provider, pl.Template); err != nil {
 		return nil, err
 	}
 	var out Pool
@@ -3117,7 +3120,7 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
 					`+PoolRevive,
-				ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
+				newID, p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
 				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
 			return err
 		})
