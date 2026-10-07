@@ -169,6 +169,52 @@ func TestSuccessfulLaunchResetsLaunchBackoff(t *testing.T) {
 	}
 }
 
+// A launch the provider accepted resets the count even when recording it
+// fails afterwards: the next failure waits 15s, not the doubled delay.
+func TestProviderSuccessResetsLaunchBackoffWhenItsWriteFails(t *testing.T) {
+	s, pl, p, now := backoffFixture(t)
+	start := *now
+	backoffPass(s, pl, p)
+	*now = start.Add(15 * time.Second)
+	if !backoffPass(s, pl, p) {
+		t.Fatal("no second attempt after 15s")
+	}
+	p.fail = false
+	*now = start.Add(45 * time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	cut := &cancelAfterLaunch{planningProvider: p, cancel: cancel}
+	if err := s.reconcilePool(ctx, cut, pl, false); err == nil || len(p.hosts) != 1 {
+		t.Fatalf("pass returned %v with %d launched, want a write error after one launch", err, len(p.hosts))
+	}
+	s.markTerminated(context.Background(), p.hosts[0], "the provider terminated this host")
+	p.fail = true
+	*now = start.Add(46 * time.Second)
+	if !backoffPass(s, pl, p) {
+		t.Fatal("the replacement waited after a provider success")
+	}
+	*now = start.Add(60 * time.Second)
+	if backoffPass(s, pl, p) {
+		t.Fatal("attempted 14s after the failure")
+	}
+	*now = start.Add(61 * time.Second)
+	if !backoffPass(s, pl, p) {
+		t.Fatal("the failure after a provider success waited longer than 15s")
+	}
+}
+
+// cancelAfterLaunch cancels the pass's context once the provider has
+// launched, so writing the launch's result fails.
+type cancelAfterLaunch struct {
+	*planningProvider
+	cancel context.CancelFunc
+}
+
+func (p *cancelAfterLaunch) Launch(ctx context.Context, tmpl json.RawMessage, tags, env map[string]string) (Launched, error) {
+	l, err := p.planningProvider.Launch(ctx, tmpl, tags, env)
+	p.cancel()
+	return l, err
+}
+
 // Attempts whose errors differ (EC2 names the subnet's zone) are still one
 // backoff: one pool.scale_blocked row, holding the latest error.
 func TestLaunchBackoffFoldsAcrossDifferentErrors(t *testing.T) {
