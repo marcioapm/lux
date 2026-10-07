@@ -165,28 +165,23 @@ lux moves a Run when a force-evicting drain (`lux hosts drain --force-evict`,
 `lux migrate` stops it. `resumePolicy` says what happens next:
 
 - `auto` (the default, also when unset): resumed elsewhere, restored from its snapshot.
-- `restart`: started again from scratch elsewhere, for workloads safe to rerun whose saved state must not be trusted on another host.
-- `manual`: fails; a person may resume it.
-- `never`: fails and refuses every requested resume, for one-shot work such as a CI job holding a single-use token.
-
-In detail:
-
-- `restart` places the Run as a first placement: empty state volumes,
-  the spec's command through the adapter's start path, no agent session.
-  Its snapshot is not restored, but is kept (`lux resume
-  --from-snapshot` can still use it). Its `state` event says `auto-restart
-  after preempt` (or `drain`, `migrate`). `lux migrate` restarts it on the
-  target host.
-- `manual` and `never` end the Run `failed` when it is moved, with
-  `stateReason` naming the cause and the policy, e.g.
-  `preempt: not resumed (resumePolicy never)`. It is snapshotted as usual
-  and its servers stop. `lux migrate` refuses it with 409 `not_movable`
-  and leaves it running.
-- `never` also refuses every requested resume, whatever the Run's state
-  (stopped by request included): 409 `not_resumable`, "resumePolicy never:
-  this Run cannot be resumed". `lux ls --resumable` leaves it out. An
-  assignment no runner started (refused by an outdated runner) may still be
-  placed again: none of the work ran.
+- `restart`: started again from scratch elsewhere, for workloads safe to
+  rerun whose saved state must not be trusted on another host. It is placed
+  as a first placement: empty state volumes, the spec's command through the
+  adapter's start path, no agent session. Its snapshot is not restored, but
+  is kept (`lux resume --from-snapshot` can still use it). Its `state` event
+  says `auto-restart after preempt` (or `drain`, `migrate`). `lux migrate`
+  restarts it on the target host.
+- `manual`: ends `failed`, with `stateReason` naming the cause and the
+  policy, e.g. `preempt: not resumed (resumePolicy manual)`. It is
+  snapshotted as usual and its servers stop; a person may resume it.
+  `lux migrate` refuses it with 409 `not_movable` and leaves it running.
+- `never`: as `manual`, for one-shot work such as a CI job holding a
+  single-use token, and it also refuses every requested resume, whatever
+  the Run's state (stopped by request included): 409 `not_resumable`,
+  "resumePolicy never: this Run cannot be resumed". `lux ls --resumable`
+  leaves it out. An assignment no runner started (refused by an outdated
+  runner) may still be placed again: none of the work ran.
 
 Except for `never`, the policy covers only what lux does by itself: a resume
 you ask for restores the snapshot as usual. A cordon-only drain does not stop
