@@ -189,3 +189,35 @@ def test_migrate_a_run_on_a_plainly_drained_host_succeeds(operator, lux, runners
     run = operator.json("migrate", run_id, "--wait", timeout=200)
     assert run["host"] != host and run["state"] == "running", run
     lux.run("cancel", run_id)
+
+
+def test_a_run_never_resumed_is_not_migrated_and_fails_when_force_evicted(operator, lux, runners, hosts):
+    """resumePolicy: never is for one-shot work that cannot continue on
+    another host. migrate refuses it and leaves it running; a cordon-only
+    drain leaves it running too; a force-evicting drain stops it, and it
+    ends failed, not placed again, though another host is free."""
+    runners.start(hosts[0])
+    runners.start(hosts[1])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "trap 'exit 0' TERM; sleep 300 & wait", resumePolicy="never"))
+    host = lux.wait_state(run_id, "running")["host"]
+    with pytest.raises(CLIError) as e:
+        operator.run("migrate", run_id)
+    assert "resumePolicy is never" in e.value.stderr, e.value.stderr
+    run = lux.get(run_id)
+    assert run["state"] == "running" and not run["placements"][0].get("stopRequestedAt"), run
+
+    lux.run("hosts", "drain", host)
+    wait_until(lambda: lux.json("hosts", "get", host)["draining"], 15, 0.3, "plain drain never took")
+    run = lux.get(run_id)
+    assert run["state"] == "running" and not run["placements"][0].get("stopRequestedAt"), run
+
+    lux.run("hosts", "drain", host, "--force-evict")
+    run = wait_until(lambda: (lambda r: r if r["state"] not in ("running", "stopping") or len(r["placements"]) > 1 else None)(lux.get(run_id)),
+                     60, 0.3, "the force-evicted Run never ended")
+    assert run["state"] == "failed", run
+    assert run["stateReason"] == "drain: not resumed (resumePolicy never)", run
+    assert run["placements"][0]["stopReason"] == "drain", run["placements"]
+    time.sleep(3)
+    run = lux.get(run_id)
+    assert run["state"] == "failed" and len(run["placements"]) == 1, run
+    assert not [e for e in lux.events(run_id, "state") if e["data"]["state"] == "resuming"]

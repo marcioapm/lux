@@ -40,6 +40,31 @@ def test_a_spot_interruption_moves_runs_to_another_host(lux, ec2):
     lux.run("cancel", run_id, "--wait")
 
 
+def test_a_spot_interruption_fails_a_run_that_is_never_resumed(lux, ec2):
+    """A one-shot Run (resumePolicy: never) on a spot instance EC2 takes
+    back is stopped and ends failed, saying why; it is not placed again,
+    even with room for it in the pool."""
+    fake_only(ec2)
+    pool(lux, ec2, spot=True, max=2)
+    spec = generic(ALPINE_IMAGE, "sh", "-c", "echo up; trap 'exit 0' TERM; while :; do sleep 1; done",
+                   placement={"pool": "burst"}, resumePolicy="never")
+    run_id = lux.submit(spec)
+    lux.wait_output(run_id, "up", timeout=120)
+    (inst,) = ec2.running()
+
+    ec2.interrupt(inst["id"], seconds=40)
+    run = wait_until(lambda: (lambda r: r if r["state"] not in ("running", "stopping") or len(r["placements"]) > 1 else None)(lux.get(run_id)),
+                     85, 0.3, "the interrupted Run never ended")
+    assert run["state"] == "failed", run
+    assert run["stateReason"] == "preempt: not resumed (resumePolicy never)", run
+    assert run["placements"][-1]["stopReason"] == "preempt", run["placements"]
+    wait_until(lambda: inst["id"] not in {i["id"] for i in ec2.running()}, 90, 0.3, "the interrupted instance stayed")
+    run = lux.get(run_id)
+    assert run["state"] == "failed" and len(run["placements"]) == 1, run
+    assert not [e for e in lux.events(run_id, "state") if e["data"]["state"] == "resuming"]
+    assert ec2.running() == [], "an instance was launched for a Run that is not resumed"
+
+
 def test_a_spot_interruption_shortens_a_stop_already_under_way(lux, ec2):
     """A Run already stopping with a long grace when the notice comes still
     snapshots and uploads before the instance goes."""
