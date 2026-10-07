@@ -402,6 +402,10 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		if err := server.ValidPoolPrice(*provider, *price, *currency); err != nil {
 			return err
 		}
+		log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+		if err := server.CheckPoolTemplate(ctx, db, providers(cfg, log), *tenant, *name, *provider, tmpl); err != nil {
+			return err
+		}
 		id := ids.New(ids.Pool)
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
 			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *name); err != nil {

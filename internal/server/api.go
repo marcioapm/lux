@@ -3100,6 +3100,9 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if pl.ScaleDownAfter.Duration < 0 || pl.ScaleDownAfter.Duration > 0 && sda == nil {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "scaleDownAfter must be at least 1s")
 	}
+	if err := CheckPoolTemplate(ctx, s.db, s.cfg.Providers, p.TenantID, pl.Name, pl.Provider, pl.Template); err != nil {
+		return nil, err
+	}
 	var out Pool
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		err := SavePool(ctx, tx, p.TenantID, pl.Name, pl.IsDefault, func() error {

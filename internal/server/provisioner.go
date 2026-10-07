@@ -30,6 +30,12 @@ type Provider interface {
 	Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]Instance, error)
 }
 
+// Checker is a Provider that can tell, without launching, whether a pool
+// template would launch: asked when a pool is set (CheckPoolTemplate).
+type Checker interface {
+	Check(ctx context.Context, template json.RawMessage) error
+}
+
 // Launched is a host as the provider started it. InstanceType is the
 // provider's answer, not the template's (a launch template may choose it);
 // empty fields are unknown and stored as NULL.
@@ -58,7 +64,7 @@ type Instance struct {
 // instances whatever its database knows (a launch whose reply was lost,
 // a row written off too early).
 const (
-	tagManaged    = "lux:managed"
+	TagManaged    = "lux:managed"
 	tagDeployment = "lux:deployment" // which lux database launched it
 	tagPool       = "lux:pool"       // its name at launch; informational, not updated on rename
 	tagPoolID     = "lux:pool-id"    // what a pool's instances are listed by
@@ -615,7 +621,7 @@ func (s *Server) providerGone(ctx context.Context, h hostRef, st *poolState) {
 // poolTags are what a pool's instances are listed by: its id, never its
 // name, which a rename changes.
 func (s *Server) poolTags(pl poolRow) map[string]string {
-	return map[string]string{tagManaged: "true", tagDeployment: s.deployment, tagPoolID: pl.ID}
+	return map[string]string{TagManaged: "true", tagDeployment: s.deployment, tagPoolID: pl.ID}
 }
 
 // warm is how many idle hosts the pool keeps ready: its warm count, or
