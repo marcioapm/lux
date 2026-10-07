@@ -3,6 +3,8 @@ register, failed launches, and instances whose launch reply was lost."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from conftest import fake_only, generic
@@ -85,6 +87,44 @@ def test_a_failed_launch_is_retried(lux, ec2):
         gaps = [b - a for a, b in zip(times, times[1:])]
         assert gaps and all(13 <= g <= 25 for g in gaps), (key, times)
     assert len(attempts) == 2 * len(refused), (attempts, refused)
+
+
+def test_a_failing_launch_backs_off_until_the_pool_is_fixed(lux, ec2):
+    """A launch EC2 refuses for a reason other than capacity (a launch
+    template deleted under the pool) is not retried every pass: the pool
+    waits 15s, then 30s, ... and says so in one pool.scale_blocked. Setting
+    the pool again (the operator's fix) is tried at once."""
+    fake_only(ec2)
+    ec2.launch_failures = {("m7i.large", "*"): "InvalidLaunchTemplateName.NotFound"}
+    pool(lux, ec2, min=1, max=1)
+    wait_until(lambda: ec2.launch_attempts, 30, 0.2, "never launched")
+    with ec2.lock:
+        first = ec2.launch_attempted_at[0]
+    # About 20 passes (1s apart): the first attempt and one 15s later.
+    time.sleep(max(0.0, first + 20 - time.monotonic()))
+    with ec2.lock:
+        attempts = list(ec2.launch_attempts)
+    assert 2 <= len(attempts) <= 3, attempts
+    assert ec2.calls.count("RunInstances") == len(attempts), ec2.calls
+    failed = [e for e in pool_events(lux) if e["type"] == "pool.launch_failed"]
+    assert failed and all("InvalidLaunchTemplateName.NotFound" in e["data"]["error"] for e in failed), failed
+    assert sum(e["count"] for e in failed) == len(attempts), (failed, attempts)
+    [blocked] = [e for e in pool_events(lux) if e["type"] == "pool.scale_blocked"]
+    assert blocked["data"]["cause"] == "launch_backoff", blocked
+    assert blocked["count"] >= 10, blocked
+    assert "InvalidLaunchTemplateName.NotFound" in blocked["data"]["detail"], blocked
+    assert blocked["data"]["detail"].startswith("launch backing off after "), blocked
+    assert "launch backing off after" in lux.run("pools", "events", "burst").stdout
+
+    # The fix: the pool set again with another instance type, mid-backoff.
+    pool(lux, ec2, min=1, max=1, template={**ec2.template, "instanceType": "m6i.large"})
+    fixed_at = time.monotonic()
+    wait_until(lambda: ("m6i.large", "subnet-a") in ec2.launch_attempts or ("m6i.large", "subnet-b") in ec2.launch_attempts,
+               5, 0.1, "the fixed pool waited out its backoff")
+    with ec2.lock:
+        at = next(t for t, k in zip(ec2.launch_attempted_at, ec2.launch_attempts) if k[0] == "m6i.large")
+    assert at - fixed_at < 4, at - fixed_at
+    wait_until(lambda: len(ec2_hosts(lux)) == 1, 90, 0.3, "the fixed pool's host never registered")
 
 
 def test_a_launch_falls_back_to_the_next_instance_type(lux, ec2):
