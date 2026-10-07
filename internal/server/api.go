@@ -739,13 +739,36 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	})
 	if err != nil {
 		s.secrets.drop(id)
-		return nil, err
+		if !isUniqueViolation(err, runsIdempotencyKey) {
+			return nil, err
+		}
+		// A concurrent submit with the same key committed between the
+		// SELECT and the INSERT: its Run is the answer.
+		err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+			run, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.idempotency_key = $1`, idem))
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &submitRunOutput{http.StatusOK, run}, nil
 	}
 	if created {
 		s.Kick()
 		return &submitRunOutput{http.StatusCreated, run}, nil
 	}
 	return &submitRunOutput{http.StatusOK, run}, nil
+}
+
+// runsIdempotencyKey is the name Postgres gave UNIQUE (tenant_id,
+// idempotency_key) on runs (migration 001).
+const runsIdempotencyKey = "runs_tenant_id_idempotency_key_key"
+
+// isUniqueViolation reports whether err is a unique violation (23505) of
+// the named constraint.
+func isUniqueViolation(err error, constraint string) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "23505" && pe.ConstraintName == constraint
 }
 
 // invalidSpec is a 422 invalid_spec for a spec Normalize refused, with
