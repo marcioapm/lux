@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -214,6 +215,21 @@ func TestConcurrentChecksShareTheClientCache(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
+	}
+}
+
+// Only DryRunOperation confirms a dry run: an endpoint answering it with a
+// launch (HTTP 200) refuses the pool.
+func TestCheckRefusesASuccessfulReply(t *testing.T) {
+	awsTestEnv(t)
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = io.WriteString(w, `<RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><instancesSet><item><instanceId>i-1</instanceId></item></instancesSet></RunInstancesResponse>`)
+	}))
+	t.Cleanup(fake.Close)
+	err := New(fake.URL, discard).Check(context.Background(), json.RawMessage(checkTemplate), testTags)
+	if err == nil || !strings.HasPrefix(err.Error(), "unexpected successful RunInstances response to DryRun; authorization was not confirmed") {
+		t.Fatalf("err %v, want a refusal", err)
 	}
 }
 

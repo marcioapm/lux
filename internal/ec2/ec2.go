@@ -309,8 +309,9 @@ func (p *Provider) Check(ctx context.Context, template json.RawMessage, tags map
 		var ae smithy.APIError
 		switch {
 		case err == nil:
-			// EC2 never answers a dry run with success; an endpoint that
-			// does has not refused it either.
+			// EC2 answers a dry run it would allow with DryRunOperation;
+			// an endpoint that answers success has not confirmed it.
+			return fmt.Errorf("unexpected successful RunInstances response to DryRun; authorization was not confirmed (%s)", cand)
 		case errors.As(err, &ae) && ae.ErrorCode() == "DryRunOperation":
 		case errors.As(err, &ae):
 			return fmt.Errorf("%s: %s (%s)", ae.ErrorCode(), ae.ErrorMessage(), cand)
