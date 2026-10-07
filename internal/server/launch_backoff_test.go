@@ -3,9 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // backoffFixture: planningFixture with one waiting Run, a provider whose
@@ -288,6 +291,24 @@ type zonedFailure struct{ *planningProvider }
 func (p *zonedFailure) Launch(context.Context, json.RawMessage, map[string]string, map[string]string) (Launched, error) {
 	p.calls++
 	return Launched{}, fmt.Errorf("no capacity in zone %d", p.calls)
+}
+
+// The backoff's error is cut at 200 characters, never inside one.
+func TestLaunchBackoffErrorIsCutOnACharacter(t *testing.T) {
+	ascii := strings.Repeat("a", 199)
+	for _, tc := range []struct{ name, msg, want string }{
+		{"multi-byte at the boundary", ascii + "é and more", ascii + "é"},
+		{"multi-byte throughout", strings.Repeat("é", 300), strings.Repeat("é", 200)},
+		{"short", "no capacity, request id: 0123-abcd", "no capacity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bo := &poolBackoff{failures: 1, lastErr: errors.New(tc.msg)}
+			got := bo.evidence(time.Now())["error"].(string)
+			if got != tc.want || !utf8.ValidString(got) {
+				t.Errorf("error %q (%d runes), want %q", got, utf8.RuneCountInString(got), tc.want)
+			}
+		})
+	}
 }
 
 // A launch refused by the tenant's host quota calls no provider and starts

@@ -76,12 +76,24 @@ func (s *Server) launchFailed(pl poolRow, err error) {
 var backoffVolatile = []string{"failures", "retryInSeconds", "detail", "error"}
 
 // evidence is a backoff's fields of pool.scale_blocked at now: detail says
-// why the pool waits, error is the provider's last refusal (200 chars).
+// why the pool waits, error is the provider's last refusal (200 runes).
 func (bo *poolBackoff) evidence(now time.Time) map[string]any {
 	wait := bo.notBefore.Sub(now).Round(time.Second)
-	text := truncate(providerErrorText(bo.lastErr), 200)
+	// Not providerErrorText: its 500-byte cut can split a rune.
+	text := truncateRunes(requestID.ReplaceAllString(bo.lastErr.Error(), ""), 200)
 	return map[string]any{"failures": bo.failures, "retryInSeconds": int(wait.Seconds()), "error": text,
 		"detail": fmt.Sprintf("launch backing off after %d failures; next attempt in %s: %s", bo.failures, wait, text)}
+}
+
+// truncateRunes keeps at most n runes of s, never cutting one in two.
+func truncateRunes(s string, n int) string {
+	for i := range s {
+		if n == 0 {
+			return s[:i]
+		}
+		n--
+	}
+	return s
 }
 
 // forgetLaunchBackoffs drops the backoffs of pools no longer provisioned.
