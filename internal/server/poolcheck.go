@@ -27,23 +27,26 @@ const maxCheckError = 300
 // pool's name, and its id: the stored one, or for a pool the set creates,
 // newID, the id its insert will use. The host's Name and lux:host are a
 // fresh host id's, the shape a launch gives them.
-func CheckPoolTemplate(ctx context.Context, db *store.Store, providers map[string]Provider, tenantID, name, newID, provider string, template map[string]any) error {
+//
+// It returns the pool id the check was made with, "" when there was no
+// check; the write passes it to ConfirmCheckedPool.
+func CheckPoolTemplate(ctx context.Context, db *store.Store, providers map[string]Provider, tenantID, name, newID, provider string, template map[string]any) (string, error) {
 	checker, ok := providers[provider].(Checker)
 	if !ok {
-		return nil
+		return "", nil
 	}
 	raw, err := json.Marshal(template)
 	if err != nil {
-		return err
+		return "", err
 	}
 	stored, err := readCheckedPool(ctx, db, tenantID, name)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if stored.live && stored.provider == provider {
 		same, err := sameTemplate(stored.template, raw)
 		if err != nil || same {
-			return err
+			return "", err
 		}
 	}
 	poolID := newID
@@ -52,10 +55,24 @@ func CheckPoolTemplate(ctx context.Context, db *store.Store, providers map[strin
 	}
 	tags := LaunchTags(stored.deployment, poolID, name, ids.New(ids.Host))
 	if err := checker.Check(ctx, raw, tags); err != nil {
-		return errf(http.StatusUnprocessableEntity, "invalid_pool", "template: %s cannot launch it: %s",
+		return "", errf(http.StatusUnprocessableEntity, "invalid_pool", "template: %s cannot launch it: %s",
 			provider, truncate(providerErrorText(err), maxCheckError))
 	}
-	return nil
+	return poolID, nil
+}
+
+// ConfirmCheckedPool refuses, 409 pool_changed, a pool upsert that stored
+// the pool name under storedID (its RETURNING id) when the check was made
+// with checkedID: another write created or replaced the pool between
+// CheckPoolTemplate and this one, and the upsert kept that write's id.
+// The caller returns the error inside its transaction, which rolls the
+// upsert back. checkedID "" (no check) confirms anything.
+func ConfirmCheckedPool(name, storedID, checkedID string) error {
+	if checkedID == "" || storedID == checkedID {
+		return nil
+	}
+	return errf(http.StatusConflict, "pool_changed",
+		"pool %s was created or replaced by another write while its template was being checked: nothing was stored; set it again", name)
 }
 
 // checkedPool is what CheckPoolTemplate reads: the deployment id, and the

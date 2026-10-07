@@ -337,3 +337,58 @@ func TestAdminCreatePoolChecksTheTemplateLaunches(t *testing.T) {
 		t.Errorf("%d dry runs, want one per create-pool", dryRuns.Load())
 	}
 }
+
+// A create-pool whose pool another create-pool makes while its template is
+// checked would store the pool under an id its check did not carry: it
+// fails with pool_changed, and the other create's pool stays as it was.
+func TestAdminCreatePoolRefusesAPoolCreatedDuringItsCheck(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_PROFILE", "")
+	var interleave atomic.Bool
+	var otherErr error
+	interleave.Store(true)
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The first dry run creates the pool by another create-pool
+		// (a static one: no check of its own) before it answers.
+		if interleave.Swap(false) {
+			otherErr = admin(ctx, cfg, []string{"create-pool", "--name", "arm64", "--max", "2"})
+		}
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = io.WriteString(w, `<Response><Errors><Error><Code>DryRunOperation</Code><Message>Request would have succeeded, but DryRun flag is set.</Message></Error></Errors><RequestID>1</RequestID></Response>`)
+	}))
+	defer fake.Close()
+	cfg.EC2.Endpoint = fake.URL
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	err = admin(ctx, cfg, []string{"create-pool", "--name", "arm64", "--provider", "ec2", "--max", "4",
+		"--template", `{"region": "eu-north-1", "launchTemplate": "lux-runner"}`})
+	if otherErr != nil {
+		t.Fatalf("the other create-pool: %v", otherErr)
+	}
+	var he *server.HTTPError
+	if !errors.As(err, &he) || he.Code != "pool_changed" ||
+		!strings.Contains(err.Error(), "pool arm64 was created or replaced by another write while its template was being checked") {
+		t.Fatalf("err %v, want pool_changed", err)
+	}
+	var provider string
+	var maxHosts, n, events int
+	if err := db.QueryRow(ctx, `SELECT (SELECT count(*) FROM pools), provider, max_hosts, (SELECT count(*) FROM pool_events)
+		FROM pools WHERE name = 'arm64'`).Scan(&n, &provider, &maxHosts, &events); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || provider != "static" || maxHosts != 2 || events != 1 {
+		t.Errorf("%d pools, arm64 %s max %d, %d events; want the other create's static max 2 and its one event", n, provider, maxHosts, events)
+	}
+}

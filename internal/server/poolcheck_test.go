@@ -17,18 +17,24 @@ import (
 
 // checkingProvider answers Check as EC2's dry run would: an error for a
 // launch template it does not know (or for every template, with down),
-// and counts the checks and keeps the last one's tags.
+// and counts the checks and keeps the last one's tags. during, when set,
+// runs inside the next Check (once), as another writer racing the set.
 type checkingProvider struct {
 	fakeLaunchProvider
 	known    map[string]bool
 	down     bool
 	checks   int
 	lastTags map[string]string
+	during   func()
 }
 
 func (p *checkingProvider) Check(_ context.Context, template json.RawMessage, tags map[string]string) error {
 	p.checks++
 	p.lastTags = tags
+	if during := p.during; during != nil {
+		p.during = nil
+		during()
+	}
 	if p.down {
 		return errors.New("ec2 RunInstances: dial tcp: connection refused")
 	}
@@ -186,5 +192,78 @@ func TestPutPoolChecksWithTheLaunchTags(t *testing.T) {
 		if !maps.Equal(got, want) || !strings.HasPrefix(got[tagHost], "host_") {
 			t.Errorf("set %d: check tags %v, want %v", i, got, want)
 		}
+	}
+}
+
+// A set whose pool another write creates, or replaces under a new id,
+// while its template is checked would store the pool under an id the
+// check's lux:pool-id did not carry: it is refused, 409 pool_changed, and
+// the other write's pool and events stay as that write left them.
+func TestPutPoolRefusesAPoolChangedDuringItsCheck(t *testing.T) {
+	s := testServer(t)
+	prov := &checkingProvider{known: map[string]bool{"lux-runner": true}}
+	s.cfg.Providers = map[string]Provider{"ec2": prov}
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	mine := map[string]any{"region": "eu-north-1", "launchTemplate": "lux-runner"}
+	theirs := map[string]any{"region": "eu-north-1", "launchTemplate": "lux-runner", "spot": true}
+	set := func(t *testing.T, name string, maxHosts int) {
+		t.Helper()
+		if _, err := s.putPool(ctx, poolIn(Pool{Name: name, Provider: "ec2", MaxHosts: maxHosts, Template: theirs})); err != nil {
+			t.Fatalf("the other set of %s: %v", name, err)
+		}
+	}
+
+	// A removed pool is retired under its id, so the way a name comes to
+	// hold a new id is a rename away and a create.
+	cases := []struct {
+		pool   string
+		before func(t *testing.T) // the pool as the set finds it
+		during func(t *testing.T) // the other writes, while the set's check runs
+	}{
+		{"created", func(*testing.T) {}, func(t *testing.T) { set(t, "created", 2) }},
+		{"replaced", func(t *testing.T) { set(t, "replaced", 1) }, func(t *testing.T) {
+			in := &renamePoolInput{Name: "replaced"}
+			in.Body.Name = "replaced-old"
+			if _, err := s.renamePool(ctx, in); err != nil {
+				t.Fatalf("renaming the pool away: %v", err)
+			}
+			set(t, "replaced", 2)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.pool, func(t *testing.T) {
+			c.before(t)
+			var checkedID, rowAfterThem, eventsAfterThem string
+			prov.during = func() {
+				checkedID = prov.lastTags[tagPoolID]
+				c.during(t)
+				rowAfterThem, eventsAfterThem = poolRowJSON(t, s, ctx, c.pool), poolEventsJSON(t, s, ctx)
+			}
+			_, err := s.putPool(ctx, poolIn(Pool{Name: c.pool, Provider: "ec2", MaxHosts: 8, Template: mine}))
+			var he *HTTPError
+			if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "pool_changed" {
+				t.Fatalf("err %v, want 409 pool_changed", err)
+			}
+			if rowAfterThem == "" {
+				t.Fatal("the other write did not run during the check")
+			}
+			if got := poolRowJSON(t, s, ctx, c.pool); got != rowAfterThem {
+				t.Errorf("the refused set changed the other write's pool:\nwant %s\ngot  %s", rowAfterThem, got)
+			}
+			if got := poolEventsJSON(t, s, ctx); got != eventsAfterThem {
+				t.Errorf("the refused set wrote pool events:\nwant %s\ngot  %s", eventsAfterThem, got)
+			}
+			var stored struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal([]byte(rowAfterThem), &stored); err != nil {
+				t.Fatal(err)
+			}
+			if checkedID == "" || stored.ID == checkedID {
+				t.Errorf("checked id %q, the other write's pool's %q: want two ids", checkedID, stored.ID)
+			}
+		})
 	}
 }
