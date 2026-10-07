@@ -69,9 +69,10 @@ func (s *Server) launchFailed(pl poolRow, err error) {
 	bo.lastErr = err
 }
 
-// backoffVolatile: a launch backoff's pool.scale_blocked folds across its
-// attempts; only another provider error starts a new row.
-var backoffVolatile = []string{"failures", "retryInSeconds", "detail"}
+// backoffVolatile: one launch backoff is one pool.scale_blocked row, folded
+// across its attempts whatever each one's error (a zone named in it changes
+// with the subnet); the row keeps the latest.
+var backoffVolatile = []string{"failures", "retryInSeconds", "detail", "error"}
 
 // evidence is a backoff's fields of pool.scale_blocked at now: detail says
 // why the pool waits, error is the provider's last refusal (200 chars).
