@@ -513,7 +513,9 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   the pool (`lux pools set`) ends the backoff, so a fix is tried on the
   next pass. The backoff is in memory in the luxd holding the provisioner
   lease, so a luxd restart, another luxd taking the lease over, or a luxd
-  reacquiring a lease it had lost also starts every pool afresh. While it
+  taking the lease again once its own expired (whether or not another luxd
+  held it meanwhile) also starts every pool afresh; renewing an unexpired
+  lease does not. While it
   waits the pool records a `pool.scale_blocked` (cause `launch_backoff`,
   counted per pass and folded into one row on a best-effort basis: a long
   backoff with many differing errors can start a new row):

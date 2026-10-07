@@ -10,8 +10,9 @@ import (
 // expires: launchBackoffInitial after the first failure, doubling per
 // consecutive failure, capped at launchBackoffMax. Held in memory by the
 // luxd holding the provisioner lease and cleared whenever it takes the
-// lease (tookProvisionLease), so a restart, a takeover by another luxd, or
-// this luxd reacquiring a lease it lost starts every pool afresh.
+// lease rather than renewing its unexpired one (tookProvisionLease), so a
+// restart, a takeover by another luxd, or this luxd taking the lease again
+// after it expired starts every pool afresh.
 const (
 	launchBackoffInitial = 15 * time.Second
 	launchBackoffMax     = 5 * time.Minute
