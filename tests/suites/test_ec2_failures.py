@@ -97,21 +97,24 @@ def test_a_failing_launch_backs_off_until_the_pool_is_fixed(lux, ec2):
     fake_only(ec2)
     ec2.launch_failures = {("m7i.large", "*"): "InvalidLaunchTemplateName.NotFound"}
     pool(lux, ec2, min=1, max=1)
-    wait_until(lambda: ec2.launch_attempts, 30, 0.2, "never launched")
+
+    # Wait for work done, not for time: two failures committed. Without a
+    # backoff the second follows the first on the next pass (~1s); with it,
+    # 15s later, and the third is not due for another 30s.
+    def two_completed_failures():
+        failed = [e for e in pool_events(lux) if e["type"] == "pool.launch_failed"]
+        return failed if sum(e["count"] for e in failed) >= 2 else None
+
+    failed = wait_until(two_completed_failures, 60, 0.2, "no second completed launch failure")
     with ec2.lock:
-        first = ec2.launch_attempted_at[0]
-    # About 20 passes (1s apart): the first attempt and one 15s later.
-    time.sleep(max(0.0, first + 20 - time.monotonic()))
-    with ec2.lock:
-        attempts = list(ec2.launch_attempts)
-    assert 2 <= len(attempts) <= 3, attempts
-    assert ec2.calls.count("RunInstances") == len(attempts), ec2.calls
-    failed = [e for e in pool_events(lux) if e["type"] == "pool.launch_failed"]
-    assert failed and all("InvalidLaunchTemplateName.NotFound" in e["data"]["error"] for e in failed), failed
-    assert sum(e["count"] for e in failed) == len(attempts), (failed, attempts)
+        times = list(ec2.launch_attempted_at)
+        calls = ec2.calls.count("RunInstances")
+    assert len(times) == 2 and calls == 2, (times, calls)
+    assert times[1] - times[0] >= 15, times
+    assert all("InvalidLaunchTemplateName.NotFound" in e["data"]["error"] for e in failed), failed
     [blocked] = [e for e in pool_events(lux) if e["type"] == "pool.scale_blocked"]
     assert blocked["data"]["cause"] == "launch_backoff", blocked
-    assert blocked["count"] >= 10, blocked
+    assert blocked["count"] >= 1, blocked
     assert "InvalidLaunchTemplateName.NotFound" in blocked["data"]["detail"], blocked
     assert blocked["data"]["detail"].startswith("launch backing off after "), blocked
     assert "launch backing off after" in lux.run("pools", "events", "burst").stdout
