@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -51,13 +52,8 @@ func TestFailedLaunchesBackOffPerPool(t *testing.T) {
 	}
 	want := []time.Duration{0, 15 * time.Second, 45 * time.Second, 105 * time.Second, 225 * time.Second,
 		465 * time.Second, 765 * time.Second, 1065 * time.Second}
-	if len(attempts) != len(want) {
+	if !slices.Equal(attempts, want) {
 		t.Fatalf("attempts at %v, want %v", attempts, want)
-	}
-	for i := range want {
-		if attempts[i] != want[i] {
-			t.Fatalf("attempts at %v, want %v", attempts, want)
-		}
 	}
 	*now = start.Add(1070 * time.Second)
 	if backoffPass(s, pl, p) {
@@ -117,32 +113,21 @@ func TestPoolChangeResetsLaunchBackoff(t *testing.T) {
 // A luxd that loses the provisioner lease and takes it again forgets its
 // backoffs: another holder may have launched for the pool in between.
 func TestRetakenLeaseResetsLaunchBackoff(t *testing.T) {
-	s, _, p, now := backoffFixture(t)
+	s, p, pass := provisionPasses(t)
 	ctx := context.Background()
-	s.cfg.Providers = map[string]Provider{"ec2": p}
-	start := *now
-	provision := func() {
-		t.Helper()
-		if err := s.provision(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	provision()
-	*now = start.Add(15 * time.Second)
-	provision()
+	pass(0)
+	pass(15 * time.Second)
 	if p.calls != 2 {
 		t.Fatalf("%d attempts, want 2 before the lease is lost", p.calls)
 	}
 	execSQL(t, s, ctx, `UPDATE leases SET holder='other', expires_at=now()+interval '1 minute' WHERE name='provisioner'`)
-	*now = start.Add(20 * time.Second)
-	provision()
+	pass(20 * time.Second)
 	if p.calls != 2 {
 		t.Fatalf("attempted a launch without the lease")
 	}
 	execSQL(t, s, ctx, `UPDATE leases SET expires_at=now()-interval '1 second' WHERE name='provisioner'`)
 	// Before the old deadline (15s + 30s).
-	*now = start.Add(25 * time.Second)
-	provision()
+	pass(25 * time.Second)
 	if p.calls != 3 {
 		t.Fatalf("%d attempts, want one on the retaken lease", p.calls)
 	}
@@ -361,7 +346,7 @@ func TestLaunchBackoffIsPerPool(t *testing.T) {
 		}
 	}
 	want := []time.Duration{0, 15 * time.Second, 45 * time.Second, 105 * time.Second}
-	if fmt.Sprint(attempts) != fmt.Sprint(want) {
+	if !slices.Equal(attempts, want) {
 		t.Fatalf("pool A attempted at %v, want %v", attempts, want)
 	}
 	outcomes := func(pool string) string {
