@@ -49,20 +49,31 @@ const refusedWithoutSnapshot = "coalesce(rp.snapshot_refused AND r.snapshot_id I
 const noSnapshotReason = "its only snapshot report was refused, so there is no snapshot to restore"
 
 // movedStops: stop reasons that move a Run rather than stop it; it is
-// resumed elsewhere as soon as it has stopped, unless its spec's
-// resumePolicy is never (resumesAfterMove), when it fails instead.
+// placed again as soon as it has stopped (resumed, or restarted from
+// scratch), unless its spec's resumePolicy is never, when it fails
+// instead (movePolicy).
 var movedStops = []string{"drain", "preempt", "migrate"}
 
 // notResumedReason follows the stop reason in the state_reason of a Run
 // failed by a move because of its resumePolicy.
 const notResumedReason = "not resumed (resumePolicy never)"
 
-// resumesAfterMove reads whether a Run's spec lets lux resume it after a
-// move (resumePolicy unset or auto).
-func resumesAfterMove(ctx context.Context, tx pgx.Tx, runID string) (bool, error) {
-	var never bool
-	err := tx.QueryRow(ctx, `SELECT coalesce(spec->>'resumePolicy', '') = $2 FROM runs WHERE id = $1`, runID, spec.ResumeNever).Scan(&never)
-	return !never, err
+// movePolicy reads a Run's resumePolicy ("" for none, which is auto).
+func movePolicy(ctx context.Context, tx pgx.Tx, runID string) (string, error) {
+	var policy string
+	err := tx.QueryRow(ctx, `SELECT coalesce(spec->>'resumePolicy', '') FROM runs WHERE id = $1`, runID).Scan(&policy)
+	return policy, err
+}
+
+// forgetRestoredState makes a Run's next placement a first one: with no
+// snapshot and no session, assign sends no ResumeInfo, so the runner
+// starts it on empty state volumes through the adapter's start path. Its
+// snapshots stay (resume --from-snapshot); flagged superseded, retention
+// deletes them once the next placement's snapshot is uploaded.
+func forgetRestoredState(ctx context.Context, tx pgx.Tx, runID string) error {
+	_, err := tx.Exec(ctx, `UPDATE runs SET snapshots_superseded = snapshots_superseded OR snapshot_id IS NOT NULL,
+			snapshot_id = NULL, session_id = '' WHERE id = $1`, runID)
+	return err
 }
 
 // placementRef names one placement.
@@ -262,12 +273,13 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	addEvent(ctx, tx, tenantID, runID, epoch, "exited", map[string]any{"exitCode": st.ExitCode, "reason": st.Reason, "message": st.Message})
 
 	moveStop := slices.Contains(movedStops, stopReason)
-	resumes := true
+	var policy string
 	if moveStop {
-		if resumes, err = resumesAfterMove(ctx, tx, runID); err != nil {
+		if policy, err = movePolicy(ctx, tx, runID); err != nil {
 			return err
 		}
 	}
+	resumes := policy != spec.ResumeNever
 	var next, reason string
 	switch {
 	case cancel || stopReason == "cancel":
@@ -322,9 +334,17 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		ended["stopReason"] = stopReason
 	}
 	if moved {
-		// Moved, not stopped by a person: resume elsewhere automatically
-		// (with the input a migration left, if any).
-		if err := s.requestResume(ctx, tx, tenantID, runID, nil, "auto-resume after "+stopReason); err != nil {
+		// Moved, not stopped by a person: placed again automatically
+		// (with the input a migration left, if any). restart: from
+		// scratch, as a first placement, its snapshot ignored.
+		why := "auto-resume after " + stopReason
+		if policy == spec.ResumeRestart {
+			if err := forgetRestoredState(ctx, tx, runID); err != nil {
+				return err
+			}
+			why = "auto-restart after " + stopReason
+		}
+		if err := s.requestResume(ctx, tx, tenantID, runID, nil, why); err != nil {
 			return err
 		}
 	}

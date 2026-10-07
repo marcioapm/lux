@@ -86,7 +86,7 @@ func TestAllProblemsAtOnce(t *testing.T) {
 }
 
 func TestResumePolicy(t *testing.T) {
-	for policy, ok := range map[string]bool{"": true, "auto": true, "never": true, "Never": false, "always": false} {
+	for policy, ok := range map[string]bool{"": true, "auto": true, "restart": true, "never": true, "Never": false, "always": false} {
 		s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}}, ResumePolicy: policy}
 		err := s.Normalize(BuiltinDefaults)
 		if (err == nil) != ok {

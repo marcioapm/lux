@@ -2394,7 +2394,7 @@ components:
           $ref: "#/components/schemas/Resources"
           description: "What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS). disk bounds the writable layer plus state volumes: a Run over it is stopped and fails."
         resumePolicy:
-          description: "What lux does when it moves the Run (a drain, a spot preemption, a migration): auto (the default) resumes it elsewhere; never ends it as failed, for one-shot workloads that cannot continue elsewhere, and an operator's migrate is refused (409 not_movable). A resume you ask for is never affected."
+          description: "What lux does when it moves the Run (a drain, a spot preemption, a migration): auto (the default) resumes it elsewhere from its snapshot; restart starts it again elsewhere from scratch (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host; never ends it as failed, for one-shot workloads that cannot continue elsewhere, and an operator's migrate is refused (409 not_movable). A resume you ask for is never affected."
           type: string
         sandbox:
           $ref: "#/components/schemas/Sandbox"

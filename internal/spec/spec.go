@@ -36,17 +36,18 @@ type RunSpec struct {
 	Sandbox   Sandbox           `json:"sandbox" yaml:"sandbox"`
 	Artifacts Artifacts         `json:"artifacts" yaml:"artifacts"`
 	// Empty is stored as given and means ResumeAuto.
-	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration): auto (the default) resumes it elsewhere; never ends it as failed, for one-shot workloads that cannot continue elsewhere, and an operator's migrate is refused (409 not_movable). A resume you ask for is never affected."`
+	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration): auto (the default) resumes it elsewhere from its snapshot; restart starts it again elsewhere from scratch (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host; never ends it as failed, for one-shot workloads that cannot continue elsewhere, and an operator's migrate is refused (409 not_movable). A resume you ask for is never affected."`
 }
 
 // RunSpec.ResumePolicy values.
 const (
-	ResumeAuto  = "auto"
-	ResumeNever = "never"
+	ResumeAuto    = "auto"
+	ResumeRestart = "restart"
+	ResumeNever   = "never"
 )
 
-// ResumesAfterMove reports whether lux resumes the Run elsewhere after it
-// moves it.
+// ResumesAfterMove reports whether lux places the Run again after it
+// moves it (resumed, or restarted from scratch).
 func (s *RunSpec) ResumesAfterMove() bool { return s.ResumePolicy != ResumeNever }
 
 // Image is exactly one of a pinned reference or a build.
@@ -641,9 +642,9 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		fail("timeout must not be negative")
 	}
 	switch s.ResumePolicy {
-	case "", ResumeAuto, ResumeNever:
+	case "", ResumeAuto, ResumeRestart, ResumeNever:
 	default:
-		fail("resumePolicy: must be auto or never, got %q", s.ResumePolicy)
+		fail("resumePolicy: must be auto, restart or never, got %q", s.ResumePolicy)
 	}
 	for i, e := range s.Network.Egress {
 		if (e.Host == "") == (e.CIDR == "") {

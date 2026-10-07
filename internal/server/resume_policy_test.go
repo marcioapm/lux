@@ -71,23 +71,41 @@ func r1Moving(t *testing.T, s *Server) bool {
 	return rows[0].Moving
 }
 
-// exitR1 reports r1's placement exited as a stopped workload's does.
+// exitR1 reports r1's placement exited as a stopped workload's does, after
+// its final snapshot (snapR1, with an agent session) as the runner sends it.
 func exitR1(t *testing.T, s *Server) {
 	t.Helper()
+	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "snapR1", RunID: "r1", Epoch: 1, SessionID: "sess-1",
+		Volumes: []proto.VolumeSnapshot{{Name: "work", Path: "/work", BlobID: "b-r1-vol", Size: 10, SHA256: "r1-vol"}}}}
+	if got := reportSnapshot(t, s, "h1", "r1", 1, sd); got.Type != proto.MsgAck || ackRefused(t, got) {
+		t.Fatalf("snapshot report: %s %s", got.Type, got.Data)
+	}
 	code := 143
-	f := proto.Frame{Type: proto.MsgStatus, ID: 1, RunID: "r1", Epoch: 1,
+	f := proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: "r1", Epoch: 1,
 		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "stopped"})}
 	if got := s.handleReport(context.Background(), "h1", f); got.Type != proto.MsgAck {
 		t.Fatalf("exit report: %s %s", got.Type, got.Data)
 	}
 }
 
+// assignOf is the assignment luxd sent for r1's placement epoch.
+func assignOf(t *testing.T, s *Server, epoch int) proto.Assign {
+	t.Helper()
+	var a proto.Assign
+	systemScan(t, s, `SELECT payload FROM host_messages WHERE type = $1 AND run_id = 'r1' AND epoch = $2`,
+		[]any{proto.MsgAssign, epoch}, &a)
+	return a
+}
+
 // With resumePolicy never, a move that stops the Run ends it failed, its
 // reason naming the move, with no new placement, its secrets dropped and
-// its servers stopped as for any end; with auto or unset it is resumed.
+// its servers stopped as for any end. With auto or unset it is resumed
+// from its snapshot and session; with restart it is placed again as a
+// first placement: no snapshot to restore, no session (the adapter's
+// start path), its snapshot kept for a resume by hand.
 func TestResumePolicyOnMove(t *testing.T) {
 	for _, stop := range []string{"preempt", "drain", "migrate"} {
-		for _, policy := range []string{"never", "auto", ""} {
+		for _, policy := range []string{"never", "restart", "auto", ""} {
 			t.Run(stop+"/"+policy, func(t *testing.T) {
 				never := policy == "never"
 				s, ctx := policyFixture(t, policy)
@@ -113,8 +131,12 @@ func TestResumePolicyOnMove(t *testing.T) {
 					t.Errorf("stopping for %s: moving %v", stop, got)
 				}
 				exitR1(t, s)
-				var svStop string
-				systemScan(t, s, `SELECT coalesce(stop_reason, '') FROM run_servers WHERE run_id = 'r1'`, nil, &svStop)
+				// Its upload finished, as the runner would report: a resume
+				// elsewhere waits for nothing else.
+				execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
+				var svStop, queuedReason string
+				systemScan(t, s, `SELECT (SELECT coalesce(stop_reason, '') FROM run_servers WHERE run_id = 'r1'), state_reason FROM runs WHERE id = 'r1'`,
+					nil, &svStop, &queuedReason)
 				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
 					t.Fatal(err)
 				}
@@ -132,12 +154,52 @@ func TestResumePolicyOnMove(t *testing.T) {
 					}
 					return
 				}
-				if state == StateFailed || state == StateStopped || placements != 2 || !cached || svStop != "migrated" {
-					t.Errorf("state %q reason %q placements %d secrets cached %v server %q; want resumed and placed again, secrets kept, server migrated",
+				if state != StateScheduled || placements != 2 || !cached || svStop != "migrated" {
+					t.Errorf("state %q reason %q placements %d secrets cached %v server %q; want scheduled again, secrets kept, server migrated",
 						state, reason, placements, cached, svStop)
+				}
+				a := assignOf(t, s, 2)
+				if policy == "restart" {
+					if queuedReason != "auto-restart after "+stop {
+						t.Errorf("queued with reason %q", queuedReason)
+					}
+					if a.Resume != nil {
+						t.Errorf("restart assigned a resume: %+v", a.Resume)
+					}
+					var available bool
+					systemScan(t, s, `SELECT available FROM snapshots WHERE id = 'snapR1'`, nil, &available)
+					if !available {
+						t.Error("the snapshot a restart skipped was deleted at once")
+					}
+					return
+				}
+				if queuedReason != "auto-resume after "+stop {
+					t.Errorf("queued with reason %q", queuedReason)
+				}
+				if a.Resume == nil || a.Resume.Snapshot == nil || a.Resume.Snapshot.SnapshotID != "snapR1" || a.Resume.SessionID != "sess-1" {
+					t.Errorf("resume assigned %+v, want snapR1 and sess-1", a.Resume)
 				}
 			})
 		}
+	}
+}
+
+// A restart Run stopped by a person and resumed by hand restores its
+// snapshot and session: the policy covers only moves.
+func TestResumePolicyRestartResumeByHandRestores(t *testing.T) {
+	s, ctx := policyFixture(t, "restart")
+	if _, err := s.stopRun(tenantCtx("t1"), &RunPath{ID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	exitR1(t, s)
+	if _, err := s.resumeRun(tenantCtx("t1"), &resumeRunInput{RunPath: RunPath{ID: "r1"}}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+		t.Fatal(err)
+	}
+	if a := assignOf(t, s, 2); a.Resume == nil || a.Resume.Snapshot == nil || a.Resume.Snapshot.SnapshotID != "snapR1" || a.Resume.SessionID != "sess-1" {
+		t.Fatalf("resume by hand assigned %+v, want snapR1 and sess-1", a.Resume)
 	}
 }
 
