@@ -302,7 +302,12 @@ tests assert the same tool events on fake and real variants.
 EC2 API calls lux makes (RunInstances, TerminateInstances,
 DescribeInstances). Each "instance" is a new simulated host that boots
 `lux-runner` from the instance's user data, as a real AMI would. Tests
-can make launches fail, or make instances never register.
+can make launches fail, or make instances never register. A
+`RunInstances` with `DryRun` (the check when a pool is set) answers
+`DryRunOperation`, or the error the real call would get: a launch
+template not in `ec2.launch_templates` is
+`InvalidLaunchTemplateName.NotFound`. Dry runs are recorded in
+`ec2.dry_runs`, not in `ec2.calls`.
 
 `--real-ec2` runs the same suite against AWS. The tests that need the
 fake's failure injection are skipped. It needs:
