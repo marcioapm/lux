@@ -387,7 +387,10 @@ func (s *Server) routes(api huma.API) {
 			"A body of exactly `name` and `isDefault` marks an existing pool and changes nothing else; " +
 			"any other field without `provider` is a 422 `invalid_pool`. " +
 			"From an operator key naming no tenant, a marker-only body marks a platform pool as the platform's default, " +
-			"for tenants without one of their own.",
+			"for tenants without one of their own. " +
+			"An `ec2` pool is stored only if EC2 would launch its template (a dry-run RunInstances per subnet and fallback type, within 10s); " +
+			"otherwise 422 `invalid_pool` `template: ec2 cannot launch it: <EC2's code>: <message>`. " +
+			"A pool set again with the same provider and an identical template is not checked.",
 		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity},
 	}, "admin", s.putPool)
 	register(s, api, huma.Operation{
