@@ -280,22 +280,32 @@ func TestSnapshotReportRedelivered(t *testing.T) {
 // with the refusal in its state_reason, keeps its previous snapshot, and is
 // not resumed, a move included. None of the report is stored, not even the
 // placement's snapshot_done_at. An accepted report of a move resumes it.
+// resumePolicy manual and never fail the moved Run with both reasons;
+// restart restores nothing, so it is placed again from scratch regardless.
 func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 	for _, c := range []struct {
 		name, stop    string
+		policy        string
 		earlier       bool // rb has a snapshot from before
 		refused       bool
 		state, reason string
 	}{
-		{"migrate", "migrate", true, true, StateStopped, "migrate; " + refusedSnapshotReason},
-		{"drain", "drain", true, true, StateStopped, "drain; " + refusedSnapshotReason},
-		{"stop", "stop", true, true, StateStopped, "stop; " + refusedSnapshotReason},
-		{"stop, no earlier snapshot", "stop", false, true, StateStopped, "stop; " + refusedNoSnapshotReason},
-		{"timeout", "timeout", true, true, StateFailed, "timeout; " + refusedSnapshotReason},
-		{"migrate, accepted", "migrate", true, false, StateResuming, "auto-resume after migrate"},
+		{"migrate", "migrate", "", true, true, StateStopped, "migrate; " + refusedSnapshotReason},
+		{"drain", "drain", "", true, true, StateStopped, "drain; " + refusedSnapshotReason},
+		{"drain, auto", "drain", "auto", true, true, StateStopped, "drain; " + refusedSnapshotReason},
+		{"drain, never", "drain", "never", true, true, StateFailed, "drain: not resumed (resumePolicy never); " + refusedSnapshotReason},
+		{"drain, manual", "drain", "manual", true, true, StateFailed, "drain: not resumed (resumePolicy manual); " + refusedSnapshotReason},
+		{"drain, restart", "drain", "restart", true, true, StateResuming, "auto-restart after drain"},
+		{"stop", "stop", "", true, true, StateStopped, "stop; " + refusedSnapshotReason},
+		{"stop, no earlier snapshot", "stop", "", false, true, StateStopped, "stop; " + refusedNoSnapshotReason},
+		{"timeout", "timeout", "", true, true, StateFailed, "timeout; " + refusedSnapshotReason},
+		{"migrate, accepted", "migrate", "", true, false, StateResuming, "auto-resume after migrate"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, ctx := reportFixture(t)
+			if c.policy != "" {
+				execSQL(t, s, ctx, `UPDATE runs SET spec = spec || jsonb_build_object('resumePolicy', $1::text) WHERE id = 'rb'`, c.policy)
+			}
 			wantSnap := ""
 			if c.earlier {
 				if f := reportSnapshot(t, s, "hb", "rb", 1, snapshotB("snapB", 1)); f.Type != proto.MsgAck {
@@ -325,6 +335,10 @@ func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 			if f := s.handleReport(ctx, "hb", exited); f.Type != proto.MsgAck {
 				t.Fatalf("exit: %s %s", f.Type, f.Data)
 			}
+			restart := c.policy == "restart"
+			if restart {
+				wantSnap = "" // forgotten: the next placement is a first one
+			}
 
 			var state, reason, snap string
 			var epoch int
@@ -342,7 +356,7 @@ func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 			// The Run's servers stop with the placement, refused or not; only
 			// a move that is resumed elsewhere counts as migrated.
 			wantStop := "run stopped"
-			if (c.stop == "migrate" || c.stop == "drain") && !c.refused {
+			if c.state == StateResuming {
 				wantStop = "migrated"
 			}
 			var svState, svStop string
@@ -352,15 +366,29 @@ func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 			if svState != ServerStopped || svStop != wantStop || svEpoch != 2 {
 				t.Errorf("rb's server: state %q stop_reason %q stopped_epoch %d; want %q %q 2", svState, svStop, svEpoch, ServerStopped, wantStop)
 			}
-			// Nothing schedules it: no epoch-3 placement.
+			// Nothing schedules it (no epoch-3 placement), except a restart,
+			// placed again with nothing to restore.
 			if c.refused {
+				wantPlacements := 2
+				if restart {
+					readyHost(t, s, "hc", "default", "", false)
+					wantPlacements = 3
+				}
 				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
 					t.Fatal(err)
 				}
 				var placements int
 				systemScan(t, s, `SELECT count(*) FROM placements WHERE run_id = 'rb'`, nil, &placements)
-				if placements != 2 {
-					t.Errorf("rb has %d placements after scheduling, want 2", placements)
+				if placements != wantPlacements {
+					t.Errorf("rb has %d placements after scheduling, want %d", placements, wantPlacements)
+				}
+				if restart {
+					var a proto.Assign
+					systemScan(t, s, `SELECT payload FROM host_messages WHERE type = $1 AND run_id = 'rb' AND epoch = 3`,
+						[]any{proto.MsgAssign}, &a)
+					if a.Resume != nil {
+						t.Errorf("restart after a refused snapshot assigned a resume: %+v", a.Resume)
+					}
 				}
 			}
 		})

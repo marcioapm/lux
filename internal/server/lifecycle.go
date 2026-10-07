@@ -330,8 +330,10 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		return err
 	}
 	// A refused move cannot resume from its rejected snapshot; leave the
-	// Run stopped for a person to decide what to restore.
-	moved := moveStop && resumes && !snapshotRefused
+	// Run stopped for a person to decide what to restore. restart is
+	// exempt: it restores nothing, and forgetRestoredState clears the
+	// snapshot_id the refusal left.
+	moved := moveStop && resumes && (!snapshotRefused || policy == spec.ResumeRestart)
 	// Servers count as migrated only when the Run is resumed elsewhere.
 	serverStop := endReason("stop")
 	if moved {
