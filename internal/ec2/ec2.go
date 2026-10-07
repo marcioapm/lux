@@ -185,13 +185,27 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		return none, err
 	}
 	if t.LaunchTemplate == "" {
-		return none, errors.New("ec2: the pool template needs a launchTemplate")
+		return none, errNoLaunchTemplate
 	}
 	c, err := p.client(ctx, t.Region)
 	if err != nil {
 		return none, err
 	}
 	env = runnerEnv(t, env)
+	start := 0
+	if len(t.Subnets) > 0 {
+		start = p.next[t.LaunchTemplate] % len(t.Subnets)
+		p.next[t.LaunchTemplate]++
+	}
+	return p.tryCandidates(ctx, c, t, runInput(t, tags), env, start)
+}
+
+var errNoLaunchTemplate = errors.New("ec2: the pool template needs a launchTemplate")
+
+// runInput is the RunInstancesInput every candidate of t's launches shares:
+// the launch template, its tags (t's and tags), and the spot market.
+// withCandidate sets the rest; Launch then adds the user data.
+func runInput(t Template, tags map[string]string) awsec2.RunInstancesInput {
 	lt := &types.LaunchTemplateSpecification{Version: aws.String("$Default")}
 	if strings.HasPrefix(t.LaunchTemplate, "lt-") {
 		lt.LaunchTemplateId = aws.String(t.LaunchTemplate)
@@ -224,12 +238,86 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 			},
 		}
 	}
-	start := 0
-	if len(t.Subnets) > 0 {
-		start = p.next[t.LaunchTemplate] % len(t.Subnets)
-		p.next[t.LaunchTemplate]++
+	return base
+}
+
+// withCandidate is base asking for cand's instance type and subnet; an
+// empty one leaves the launch template's.
+func withCandidate(base awsec2.RunInstancesInput, cand candidate) awsec2.RunInstancesInput {
+	in := base
+	if cand.instanceType != "" {
+		in.InstanceType = types.InstanceType(cand.instanceType)
 	}
-	return p.tryCandidates(ctx, c, t, base, env, start)
+	if cand.subnet != "" {
+		in.SubnetId = aws.String(cand.subnet)
+	}
+	return in
+}
+
+// CheckTimeout bounds a whole Check.
+const CheckTimeout = 10 * time.Second
+
+// Check asks EC2 whether template would launch, launching nothing:
+// RunInstances with DryRun, built by Launch's code (launch template,
+// instance type, subnet, market, tags, user data in the template's
+// format). Only per-launch values differ: the user data carries no host's
+// URL or token, and the tags are the template's plus lux:managed, so the
+// request tags on create as a launch does. One call per subnet with
+// instanceType, then one per fallbackInstanceTypes entry in the first
+// subnet. EC2 answers DryRunOperation where the real call would have been
+// allowed; DryRun does not test capacity. The first other answer is the
+// error, EC2's code first: "<code>: <message> (<candidate>)".
+func (p *Provider) Check(ctx context.Context, template json.RawMessage) error {
+	t, err := parse(template)
+	if err != nil {
+		return err
+	}
+	if t.LaunchTemplate == "" {
+		return errNoLaunchTemplate
+	}
+	ud, err := renderUserData(t.UserData, runnerEnv(t, map[string]string{}))
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, CheckTimeout)
+	defer cancel()
+	c, err := p.client(ctx, t.Region)
+	if err != nil {
+		return err
+	}
+	base := runInput(t, map[string]string{server.TagManaged: "true"})
+	base.DryRun = aws.Bool(true)
+	base.UserData = aws.String(base64.StdEncoding.EncodeToString(ud))
+	for _, cand := range checkCandidates(t) {
+		in := withCandidate(base, cand)
+		_, err := c.RunInstances(ctx, &in)
+		var ae smithy.APIError
+		switch {
+		case err == nil:
+			// EC2 never answers a dry run with success; an endpoint that
+			// does has not refused it either.
+		case errors.As(err, &ae) && ae.ErrorCode() == "DryRunOperation":
+		case errors.As(err, &ae):
+			return fmt.Errorf("%s: %s (%s)", ae.ErrorCode(), ae.ErrorMessage(), cand)
+		default:
+			return fmt.Errorf("ec2 RunInstances (%s): %w", cand, err)
+		}
+	}
+	return nil
+}
+
+// checkCandidates are the RunInstances Check asks about: instanceType in
+// every subnet, then each fallback type in the first.
+func checkCandidates(t Template) []candidate {
+	subnets := subnetsFrom(t, 0)
+	out := make([]candidate, 0, len(subnets)+len(t.FallbackInstanceTypes))
+	for _, sn := range subnets {
+		out = append(out, candidate{t.InstanceType, sn})
+	}
+	for _, it := range t.FallbackInstanceTypes {
+		out = append(out, candidate{it, subnets[0]})
+	}
+	return out
 }
 
 // tryCandidates sends base as each of t's candidates from subnet start,
@@ -257,14 +345,8 @@ func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Templa
 			ud = base64.StdEncoding.EncodeToString(raw)
 			userData[cand.instanceType] = ud
 		}
-		in := base
+		in := withCandidate(base, cand)
 		in.UserData = aws.String(ud)
-		if cand.instanceType != "" {
-			in.InstanceType = types.InstanceType(cand.instanceType)
-		}
-		if cand.subnet != "" {
-			in.SubnetId = aws.String(cand.subnet)
-		}
 		out, err := c.RunInstances(ctx, &in, noCapacityRetries)
 		if err == nil {
 			delete(p.noCapacity, key)

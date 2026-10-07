@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -275,5 +279,61 @@ func TestAdminPoolDefaultEvents(t *testing.T) {
 	}
 	if marked != "b" || maxA != 0 {
 		t.Fatalf("after a refused create-pool: default %q, a's max_hosts %d; want b and 0", marked, maxA)
+	}
+}
+
+// create-pool --provider ec2 asks EC2 (a dry run) whether the template
+// would launch, and stores nothing when it would not.
+func TestAdminCreatePoolChecksTheTemplateLaunches(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_PROFILE", "")
+	var dryRuns atomic.Int64
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.PostForm.Get("DryRun") == "true" {
+			dryRuns.Add(1)
+		}
+		if lt := r.PostForm.Get("LaunchTemplate.LaunchTemplateName"); lt != "lux-runner" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `<Response><Errors><Error><Code>InvalidLaunchTemplateName.NotFound</Code><Message>The specified launch template, with template name %s, does not exist.</Message></Error></Errors><RequestID>1</RequestID></Response>`, lt)
+			return
+		}
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = io.WriteString(w, `<Response><Errors><Error><Code>DryRunOperation</Code><Message>Request would have succeeded, but DryRun flag is set.</Message></Error></Errors><RequestID>1</RequestID></Response>`)
+	}))
+	defer fake.Close()
+	cfg.EC2.Endpoint = fake.URL
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	err = admin(ctx, cfg, []string{"create-pool", "--name", "arm64", "--provider", "ec2", "--max", "4",
+		"--template", `{"region": "eu-north-1", "launchTemplate": "lux-runner-arm64"}`})
+	if err == nil || !strings.Contains(err.Error(), "template: ec2 cannot launch it: InvalidLaunchTemplateName.NotFound") {
+		t.Fatalf("err %v, want the check's refusal", err)
+	}
+	var n int
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM pools`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("%d pools stored after a refused create-pool", n)
+	}
+	if err := admin(ctx, cfg, []string{"create-pool", "--name", "arm64", "--provider", "ec2", "--max", "4",
+		"--template", `{"region": "eu-north-1", "launchTemplate": "lux-runner"}`}); err != nil {
+		t.Fatalf("a template that launches: %v", err)
+	}
+	if dryRuns.Load() != 2 {
+		t.Errorf("%d dry runs, want one per create-pool", dryRuns.Load())
 	}
 }
