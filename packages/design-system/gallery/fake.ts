@@ -175,7 +175,7 @@ export function fakeStoredSeries(hours = 30 * 24): { x: number[]; volume: number
     v = i % 24 === 3 ? v * 0.7 : v + r() * 3 * GiB;
     o += r() * 0.15 * GiB;
     a += r() < 0.1 ? r() * 2 * GiB : 0;
-    // A draw per hour once fed a fourth series; kept so the others keep their values.
+    // Preserve the random sequence for the charted series.
     r();
     x.push(t0 + i * 3600);
     volume.push(Math.round(v));

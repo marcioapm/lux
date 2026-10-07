@@ -234,11 +234,7 @@ export function familyDisplay(families: readonly FamilyInfo[]): Map<string, { la
 
 /* ---------- stored bytes by blob kind ---------- */
 
-/**
- * Blob kinds luxd keeps in S3 (blobs.kind) that the console charts. The
- * history API also samples a `context` kind (storedContext), which nothing
- * writes yet; charting it again is an entry here and in its callers.
- */
+// Charted blob kinds; context is sampled but has no writer yet.
 export type StorageKind = "volume" | "output" | "artifact";
 
 /**
