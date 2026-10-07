@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -132,6 +133,36 @@ func TestSuccessfulLaunchResetsLaunchBackoff(t *testing.T) {
 	if !backoffPass(s, pl, p) {
 		t.Fatal("the failure after a success waited longer than 15s")
 	}
+}
+
+// Attempts whose errors differ (EC2 names the subnet's zone) are still one
+// backoff: one pool.scale_blocked row, holding the latest error.
+func TestLaunchBackoffFoldsAcrossDifferentErrors(t *testing.T) {
+	s, pl, p, now := backoffFixture(t)
+	start := *now
+	zoned := &zonedFailure{planningProvider: p}
+	for _, off := range []time.Duration{0, 5 * time.Second, 15 * time.Second, 20 * time.Second, 25 * time.Second} {
+		*now = start.Add(off)
+		_ = s.reconcilePool(context.Background(), zoned, pl, false)
+	}
+	if zoned.calls != 2 {
+		t.Fatalf("%d attempts, want 2", zoned.calls)
+	}
+	evs := events(t, s, evScaleBlocked)
+	if len(evs) != 1 || evs[0].Count != 3 {
+		t.Fatalf("scale_blocked events %+v, want one with count 3", evs)
+	}
+	if e := evs[0].Data["error"]; e != "no capacity in zone 2" {
+		t.Errorf("error %q, want the latest", e)
+	}
+}
+
+// zonedFailure fails every launch with an error naming a different zone.
+type zonedFailure struct{ *planningProvider }
+
+func (p *zonedFailure) Launch(context.Context, json.RawMessage, map[string]string, map[string]string) (Launched, error) {
+	p.calls++
+	return Launched{}, fmt.Errorf("no capacity in zone %d", p.calls)
 }
 
 // A launch refused by the tenant's host quota calls no provider and starts

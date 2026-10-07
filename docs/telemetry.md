@@ -258,10 +258,9 @@ does not reset this bounded event lookup, and a folded scale-up retains
 its original position in the stream.
 
 `launch_backoff` is the exception: every pass that waits folds into one
-row (its `count` grows, `failures`, `retryInSeconds` and `detail` take the
-latest values) while the pool's events in between are those of its retry
-loop (a launch attempt and its failure); a different provider error
-starts a new row.
+row (its `count` grows; `failures`, `retryInSeconds`, `error` and `detail`
+take the latest values) while the pool's events in between are those of
+its retry loop (a launch attempt and its failure).
 
 A blocker is either a resource, with `resource` (`cpus`, `memory`, `disk`
 or `runs`), `requested`, `used`, `capacity` and `available`
