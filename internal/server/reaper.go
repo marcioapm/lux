@@ -624,8 +624,9 @@ func (s *Server) deleteObjects(ctx context.Context, what string, keys []string) 
 // going. S3 objects are deleted after the claim; one that fails to delete
 // is an orphan in S3, never a Run pointing at nothing.
 //
-// The array keeps runs_pkey lookups despite artifact-skewed estimates
-// for (location, kind).
+// Candidates come from blobs_retainable, not runs: a reaped Run has no such
+// blob, so a pass never walks reaped history. The array keeps runs_pkey
+// lookups despite artifact-skewed estimates for (location, kind).
 func (s *Server) reapRetention(ctx context.Context) error {
 	var keys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
