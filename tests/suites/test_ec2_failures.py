@@ -154,15 +154,18 @@ def test_a_launch_template_ec2_does_not_have_is_refused_when_the_pool_is_set(lux
     had deleted; luxd stored it and every launch failed with
     InvalidLaunchTemplateName.NotFound. Setting the pool now asks EC2 (a
     dry-run RunInstances per subnet) and refuses it; the pool keeps its old
-    template and launches nothing."""
+    template and every other setting, writes no event, and launches nothing."""
     fake_only(ec2)
     pool(lux, ec2, max=2)
     gone = {**ec2.template, "launchTemplate": "lux-runner-arm64"}
-    r = lux.run("pools", "set", "burst", "--provider", "ec2", "--max", "2", "--template", json.dumps(gone), check=False)
+    [before] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
+    events_before = lux.json("pools", "events", "burst", "--all")
+    r = lux.run("pools", "set", "burst", "--provider", "ec2", "--max", "10", "--template", json.dumps(gone), check=False)
     assert r.returncode == 4, (r.returncode, r.stderr)
     assert "template: ec2 cannot launch it: InvalidLaunchTemplateName.NotFound" in r.stderr, r.stderr
-    [stored] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
-    assert stored["template"]["launchTemplate"] == ec2.template["launchTemplate"], stored
+    [after] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
+    assert after == before, (before, after)
+    assert lux.json("pools", "events", "burst", "--all") == events_before
     assert [d for d in ec2.dry_runs if d[0] == "lux-runner-arm64"] == [("lux-runner-arm64", "m7i.large", "subnet-a")], ec2.dry_runs
     # The first set checked every subnet; the same template set again
     # (only --max changed) is not checked; nothing was launched by either.

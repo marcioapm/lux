@@ -59,6 +59,30 @@ func storedTemplate(t *testing.T, s *Server, ctx context.Context, name string) m
 	return tmpl
 }
 
+// poolRowJSON is the whole pools row of t1's pool name, every column.
+func poolRowJSON(t *testing.T, s *Server, ctx context.Context, name string) string {
+	t.Helper()
+	var row string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT to_jsonb(p)::text FROM pools p WHERE tenant_id = 't1' AND name = $1`, name).Scan(&row)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return row
+}
+
+// poolEventsJSON is every pool event, in order.
+func poolEventsJSON(t *testing.T, s *Server, ctx context.Context) string {
+	t.Helper()
+	var events string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY e.id), '[]')::text FROM pool_events e`).Scan(&events)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
 // An ec2 pool is set only if its template would launch: a launch template
 // EC2 does not know is a 422 naming EC2's code, and the pool keeps what it
 // had. An unchanged template is not checked again.
@@ -83,16 +107,20 @@ func TestPutPoolChecksTheTemplateLaunches(t *testing.T) {
 	}
 
 	gone := map[string]any{"region": "eu-north-1", "launchTemplate": "lux-runner-arm64"}
+	rowBefore, eventsBefore := poolRowJSON(t, s, ctx, "arm64"), poolEventsJSON(t, s, ctx)
 	for _, name := range []string{"arm64", "fresh"} {
-		_, err := s.putPool(ctx, poolIn(Pool{Name: name, Provider: "ec2", MaxHosts: 10, Template: gone}))
+		_, err := s.putPool(ctx, poolIn(Pool{Name: name, Provider: "ec2", MaxHosts: 10, WarmHosts: 2, Template: gone}))
 		var he *HTTPError
 		if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity || he.Code != "invalid_pool" ||
 			!strings.HasPrefix(he.Message, "template: ec2 cannot launch it: InvalidLaunchTemplateName.NotFound: ") {
 			t.Fatalf("%s: err %v, want 422 invalid_pool naming InvalidLaunchTemplateName.NotFound", name, err)
 		}
 	}
-	if got := storedTemplate(t, s, ctx, "arm64"); got["launchTemplate"] != "lux-runner" {
-		t.Errorf("the refused set changed the pool: %v", got)
+	if got := poolRowJSON(t, s, ctx, "arm64"); got != rowBefore {
+		t.Errorf("the refused set changed the pool:\nbefore %s\nafter  %s", rowBefore, got)
+	}
+	if got := poolEventsJSON(t, s, ctx); got != eventsBefore {
+		t.Errorf("the refused set wrote pool events:\nbefore %s\nafter  %s", eventsBefore, got)
 	}
 	if got := storedTemplate(t, s, ctx, "fresh"); got != nil {
 		t.Errorf("the refused set created a pool: %v", got)
