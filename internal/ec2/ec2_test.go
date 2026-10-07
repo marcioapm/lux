@@ -699,8 +699,8 @@ func TestLaunchMarksArePerMarket(t *testing.T) {
 	}
 }
 
-// A template without instanceType launches its launch template's type, so
-// two such pools on different launch templates never share a mark.
+// Template-type candidates (no instanceType) on different launch templates
+// keep separate marks, like every candidate.
 func TestLaunchTemplateTypeMarksArePerLaunchTemplate(t *testing.T) {
 	url, attempts, _ := capacityEC2(t, map[[2]string]string{{"", "subnet-a"}: "InsufficientInstanceCapacity"}, nil)
 	p := New(url, discard)
