@@ -192,6 +192,12 @@ def test_migrate_a_run_on_a_plainly_drained_host_succeeds(operator, lux, runners
     lux.run("cancel", run_id)
 
 
+def ended_or_replaced(run):
+    """run, once it is no longer running or stopping, or has a second
+    placement; else None."""
+    return run if run["state"] not in ("running", "stopping") or len(run["placements"]) > 1 else None
+
+
 def test_a_run_never_resumed_is_not_migrated_and_fails_when_force_evicted(operator, lux, runners, hosts):
     """resumePolicy: never is for one-shot work that cannot continue on
     another host. migrate refuses it and leaves it running; a cordon-only
@@ -213,11 +219,11 @@ def test_a_run_never_resumed_is_not_migrated_and_fails_when_force_evicted(operat
     assert run["state"] == "running" and not run["placements"][0].get("stopRequestedAt"), run
 
     lux.run("hosts", "drain", host, "--force-evict")
-    run = wait_until(lambda: (lambda r: r if r["state"] not in ("running", "stopping") or len(r["placements"]) > 1 else None)(lux.get(run_id)),
-                     60, 0.3, "the force-evicted Run never ended")
+    run = wait_until(lambda: ended_or_replaced(lux.get(run_id)), 60, 0.3, "the force-evicted Run never ended")
     assert run["state"] == "failed", run
     assert run["stateReason"] == "drain: not resumed (resumePolicy never)", run
     assert run["placements"][0]["stopReason"] == "drain", run["placements"]
+    # Waits out several scheduler passes (luxd's tick is 1s): none places it.
     time.sleep(3)
     run = lux.get(run_id)
     assert run["state"] == "failed" and len(run["placements"]) == 1, run
@@ -232,6 +238,7 @@ def test_a_run_never_resumed_is_not_migrated_and_fails_when_force_evicted(operat
                       headers={"Authorization": f"Bearer {lux.api_key}"}, timeout=10)
     assert r.status_code == 409 and r.json()["error"]["code"] == "not_resumable", r.text
     assert run_id not in {r["id"] for r in lux.json("ls", "--resumable")}
+    # Waits out scheduler passes after the refused resumes (tick 1s): none placed it.
     time.sleep(2)
     run = lux.get(run_id)
     assert run["state"] == "failed" and len(run["placements"]) == 1, run

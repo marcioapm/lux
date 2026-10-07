@@ -12,6 +12,17 @@ from env import ALPINE_IMAGE, wait_until
 pytestmark = pytest.mark.ec2
 
 
+def ended_or_replaced(run):
+    """run, once it is no longer running or stopping, or has a second
+    placement; else None."""
+    return run if run["state"] not in ("running", "stopping") or len(run["placements"]) > 1 else None
+
+
+def running_again(run):
+    """run, once it runs on a second placement; else None."""
+    return run if len(run["placements"]) == 2 and run["state"] == "running" else None
+
+
 def test_a_spot_interruption_moves_runs_to_another_host(lux, ec2):
     """EC2 takes a spot instance back, with two minutes' notice. Its runner
     sees the notice; the Run on it stops, snapshots, and resumes on a new
@@ -53,8 +64,7 @@ def test_a_spot_interruption_fails_a_run_that_is_never_resumed(lux, ec2):
     (inst,) = ec2.running()
 
     ec2.interrupt(inst["id"], seconds=40)
-    run = wait_until(lambda: (lambda r: r if r["state"] not in ("running", "stopping") or len(r["placements"]) > 1 else None)(lux.get(run_id)),
-                     85, 0.3, "the interrupted Run never ended")
+    run = wait_until(lambda: ended_or_replaced(lux.get(run_id)), 85, 0.3, "the interrupted Run never ended")
     assert run["state"] == "failed", run
     assert run["stateReason"] == "preempt: not resumed (resumePolicy never)", run
     assert run["placements"][-1]["stopReason"] == "preempt", run["placements"]
@@ -79,8 +89,7 @@ def test_a_spot_interruption_restarts_a_restart_run_from_scratch(lux, ec2):
     (inst,) = ec2.running()
 
     ec2.interrupt(inst["id"], seconds=40)
-    run = wait_until(lambda: (lambda r: r if len(r["placements"]) == 2 and r["state"] == "running" else None)(lux.get(run_id)),
-                     120, 0.5, "the interrupted Run never ran again")
+    run = wait_until(lambda: running_again(lux.get(run_id)), 120, 0.5, "the interrupted Run never ran again")
     first, second = run["placements"]
     assert first["host"] != second["host"] and first["stopReason"] == "preempt", run["placements"]
     states = [e["data"] for e in lux.events(run_id, "state")]
