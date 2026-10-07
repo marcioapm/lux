@@ -11,13 +11,11 @@
 // InsufficientCapacity, or Unsupported: the type is not offered in that
 // zone) tries instanceType in each of the subnets, from the pool's next one
 // round, then each fallbackInstanceTypes entry the same way. Any other
-// error ends the launch. A type and subnet without capacity, in the
-// template's market (spot or on-demand), is skipped by later launches of
-// any pool for SkipNoCapacityFor (default 30s; 0 never skips), so a
+// error ends the launch. A candidate without capacity is skipped for
+// SkipNoCapacityFor (default 30s; 0 never skips) by later launches with the
+// same region, instance type, launch template, subnet and market, so a
 // shortage costs one sweep of RunInstances calls, not one per launch; when
-// every candidate is skipped, the launch fails without calling EC2. A
-// template without instanceType shares such marks only with pools of its
-// launch template.
+// every candidate is skipped, the launch fails without calling EC2.
 //
 // With "spot", instances are one-time spot instances, terminated on
 // interruption. Every instance's user data sets LUX_EC2_IMDS, so its
@@ -104,28 +102,24 @@ type Provider struct {
 	memoryFailed map[[2]string]time.Time
 	// memoryTimeout bounds one lookup, which runs before RunInstances.
 	memoryTimeout time.Duration
-	// noCapacity is each candidate's last capacity error, per region:
-	// within noCapacityFor of it, launches skip the candidate.
+	// noCapacity is the last capacity error per capacityKey: within
+	// noCapacityFor of it, launches skip the candidate.
 	noCapacity    map[capacityKey]noCapacityMark
 	noCapacityFor time.Duration
 	now           func() time.Time
 	log           *slog.Logger
 }
 
-// capacityKey is the EC2 capacity a candidate asks for. Spot and on-demand
-// capacity are separate; a template-type candidate ("" instanceType) is
-// keyed by its launch template, whose type lux does not know.
+// capacityKey is the EC2 capacity a candidate asks for: what lux sets on
+// RunInstances plus the launch template, whose type, zone, placement group,
+// tenancy or capacity reservation lux does not see.
 type capacityKey struct {
 	region, instanceType, launchTemplate, subnet string
 	spot                                         bool
 }
 
 func (t Template) capacityKey(c candidate) capacityKey {
-	k := capacityKey{region: t.Region, instanceType: c.instanceType, subnet: c.subnet, spot: t.Spot}
-	if c.instanceType == "" {
-		k.launchTemplate = t.LaunchTemplate
-	}
-	return k
+	return capacityKey{t.Region, c.instanceType, t.LaunchTemplate, c.subnet, t.Spot}
 }
 
 type noCapacityMark struct {
