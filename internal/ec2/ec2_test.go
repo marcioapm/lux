@@ -800,9 +800,9 @@ func TestLaunchLogsFallbacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		`level=INFO msg="ec2: no capacity; trying the next candidate" instanceType=m8g.2xlarge subnet=subnet-a code=InsufficientInstanceCapacity`,
-		`level=INFO msg="ec2: no capacity; trying the next candidate" instanceType=m8g.2xlarge subnet=subnet-b code=InsufficientInstanceCapacity`,
-		`level=INFO msg="ec2: no capacity; trying the next candidate" instanceType=m8g.2xlarge subnet=subnet-c code=InsufficientInstanceCapacity`,
+		`level=INFO msg="ec2: no capacity" instanceType=m8g.2xlarge subnet=subnet-a code=InsufficientInstanceCapacity`,
+		`level=INFO msg="ec2: no capacity" instanceType=m8g.2xlarge subnet=subnet-b code=InsufficientInstanceCapacity`,
+		`level=INFO msg="ec2: no capacity" instanceType=m8g.2xlarge subnet=subnet-c code=InsufficientInstanceCapacity`,
 		`level=WARN msg="ec2: launched a later candidate: earlier ones had no capacity" instanceType=m7g.2xlarge subnet=subnet-a failed=3 skipped=0`,
 	}
 	if got := lines(); !slices.Equal(got, want) {

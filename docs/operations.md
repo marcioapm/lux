@@ -468,16 +468,17 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   `InsufficientInstanceCapacity`, `InsufficientCapacity` or `Unsupported`
   (the type is not offered in that zone), the launch tries the next
   subnet, wrapping round, then each of `fallbackInstanceTypes` (optional,
-  at most 4, distinct, none the `instanceType`, which they need) the same way: types
-  `[m8g, m7g]` and subnets `[a, b, c]` starting at `b` try m8g in b, c, a,
-  then m7g in b, c, a. Each step logs at info (`ec2: no capacity`); a
+  at most 4, distinct, not the `instanceType`, which must be set) the same
+  way: types `[m8g, m7g]` and subnets `[a, b, c]` starting at `b` try m8g
+  in b, c, a, then m7g in b, c, a. Each candidate without capacity logs at
+  info (`ec2: no capacity`); a
   success on a later candidate warns once (`ec2: launched a later
   candidate`). These errors are not retried in place; any other error (a
   quota such as `VcpuLimitExceeded`, a permission, a bad parameter) ends
-  the launch at once. A type and subnet
-  without capacity is skipped for `LUX_EC2_NO_CAPACITY_RETRY_AFTER` (30s)
-  by every pool asking for it in the same market (spot or on-demand; a
-  pool without `instanceType` shares only with its launch template),
+  the launch at once. A type and subnet without capacity is skipped for
+  `LUX_EC2_NO_CAPACITY_RETRY_AFTER` (30s; `0` never skips) by every pool
+  asking for it in the same market (spot or on-demand; a pool without
+  `instanceType` shares only with its launch template),
   so a shortage costs one sweep of `RunInstances` calls per interval; when
   every candidate fails or is skipped, the launch fails with the code and
   the candidates and is retried on the next pass. Fallback types use the
