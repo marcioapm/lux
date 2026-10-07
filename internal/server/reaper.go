@@ -624,11 +624,8 @@ func (s *Server) deleteObjects(ctx context.Context, what string, keys []string) 
 // going. S3 objects are deleted after the claim; one that fails to delete
 // is an orphan in S3, never a Run pointing at nothing.
 //
-// Candidates come from the blobs retention may delete (index
-// blobs_retainable), not from runs: a Run already reaped has none, so a
-// pass costs the Runs still holding such data, not every finished Run. As
-// an array, the set is looked up by runs_pkey whatever the planner
-// estimates for (location, kind), which the artifacts kept in S3 skew.
+// The array keeps runs_pkey lookups despite artifact-skewed estimates
+// for (location, kind).
 func (s *Server) reapRetention(ctx context.Context) error {
 	var keys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
