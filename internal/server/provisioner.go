@@ -139,6 +139,7 @@ func (s *Server) provision(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.forgetLaunchBackoffs(pools)
 	checkAlive := time.Since(s.lastAliveCheck) > s.cfg.ProviderCheckEvery
 	if checkAlive {
 		s.lastAliveCheck = time.Now()
@@ -296,6 +297,12 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	if pl.Max > 0 {
 		want = min(want, pl.Max-st.total)
 	}
+	// After a failed launch only launching waits (launch_backoff.go); the
+	// scale-down and terminations above have run.
+	bo := s.launchBackoffFor(pl)
+	if want > 0 && bo != nil && s.now().Before(bo.notBefore) {
+		return nil
+	}
 	up := scaleUp(pl, &st, warm, want)
 	launched, quota := 0, false
 	for i := range max(want, 0) {
@@ -313,9 +320,14 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 			quota = true
 			break
 		}
+		var refused *launchRefused
+		if errors.As(err, &refused) && ctx.Err() == nil && !errors.Is(refused.err, context.Canceled) {
+			s.launchFailed(pl, refused.err)
+		}
 		if err != nil {
 			return err
 		}
+		delete(s.launchBackoff, pl.ID)
 		launched++
 	}
 	if launched == 0 {
@@ -327,11 +339,13 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 }
 
 // Why a pass that launched nothing did not: the tenant's host quota, --max
-// clipping the hosts the plan or warm wanted, or unmet Runs no new host fits.
+// clipping the hosts the plan or warm wanted, unmet Runs no new host fits,
+// or the pool's launch backoff after failed launches.
 const (
-	causeQuota = "quota"
-	causeMax   = "max"
-	causeNoFit = "no_fit"
+	causeQuota   = "quota"
+	causeMax     = "max"
+	causeNoFit   = "no_fit"
+	causeBackoff = "launch_backoff"
 )
 
 // blockedCause is "" when nothing is blocked: nothing was wanted, or unmet
@@ -779,7 +793,7 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 		if err != nil {
 			s.log.Warn("mark terminated", "host", hostID, "err", err)
 		}
-		return fmt.Errorf("launch in %s: %w", pl.Name, launchErr)
+		return fmt.Errorf("launch in %s: %w", pl.Name, &launchRefused{launchErr})
 	}
 	s.log.Info("host launched", "pool", pl.Name, "host", name, "providerId", l.ProviderID,
 		"instanceType", l.InstanceType, "zone", l.Zone, "market", l.Market)
