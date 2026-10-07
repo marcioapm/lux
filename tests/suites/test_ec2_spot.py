@@ -65,6 +65,33 @@ def test_a_spot_interruption_fails_a_run_that_is_never_resumed(lux, ec2):
     assert ec2.running() == [], "an instance was launched for a Run that is not resumed"
 
 
+def test_a_spot_interruption_restarts_a_restart_run_from_scratch(lux, ec2):
+    """A Run with resumePolicy: restart is started again on another
+    instance from scratch: its state volume is empty there (what the first
+    placement wrote is not restored) and its command runs from the start."""
+    fake_only(ec2)
+    pool(lux, ec2, spot=True, max=2)
+    script = "echo start >> /w/log; echo starts=$(wc -l < /w/log); trap 'exit 0' TERM; while :; do sleep 1; done"
+    spec = generic(ALPINE_IMAGE, "sh", "-c", script, placement={"pool": "burst"},
+                   volumes=[{"name": "w", "path": "/w", "kind": "state"}], resumePolicy="restart")
+    run_id = lux.submit(spec)
+    lux.wait_output(run_id, "starts=1", timeout=120)
+    (inst,) = ec2.running()
+
+    ec2.interrupt(inst["id"], seconds=40)
+    run = wait_until(lambda: (lambda r: r if len(r["placements"]) == 2 and r["state"] == "running" else None)(lux.get(run_id)),
+                     120, 0.5, "the interrupted Run never ran again")
+    first, second = run["placements"]
+    assert first["host"] != second["host"] and first["stopReason"] == "preempt", run["placements"]
+    states = [e["data"] for e in lux.events(run_id, "state")]
+    assert {"state": "resuming", "reason": "auto-restart after preempt"} in states, states
+    # Scheduled from no snapshot: its volumes start empty.
+    assert [d for d in states if d["state"] == "scheduled"][-1].get("snapshotId") is None, states
+    wait_until(lambda: lux.logs(run_id).count("starts=1") == 2, 60, 0.5, "the restart did not start from an empty volume")
+    assert "starts=2" not in lux.logs(run_id)
+    lux.run("cancel", run_id, "--wait")
+
+
 def test_a_spot_interruption_shortens_a_stop_already_under_way(lux, ec2):
     """A Run already stopping with a long grace when the notice comes still
     snapshots and uploads before the instance goes."""

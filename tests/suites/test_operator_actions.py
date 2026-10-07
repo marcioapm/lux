@@ -7,6 +7,7 @@ import json
 import time
 
 import pytest
+import requests
 
 from conftest import CLIError, fake_agent, generic
 from env import ALPINE_IMAGE, wait_until
@@ -221,3 +222,39 @@ def test_a_run_never_resumed_is_not_migrated_and_fails_when_force_evicted(operat
     run = lux.get(run_id)
     assert run["state"] == "failed" and len(run["placements"]) == 1, run
     assert not [e for e in lux.events(run_id, "state") if e["data"]["state"] == "resuming"]
+
+    # never: no one may resume it, its tenant or an operator.
+    for who in (lux, operator):
+        with pytest.raises(CLIError) as e:
+            who.run("resume", run_id)
+        assert e.value.code != 0 and "resumePolicy never: this Run cannot be resumed" in e.value.stderr, e.value.stderr
+    r = requests.post(f"{lux.env.luxd_url}/v1/runs/{run_id}/resume", json={},
+                      headers={"Authorization": f"Bearer {lux.api_key}"}, timeout=10)
+    assert r.status_code == 409 and r.json()["error"]["code"] == "not_resumable", r.text
+    assert run_id not in {r["id"] for r in lux.json("ls", "--resumable")}
+    time.sleep(2)
+    run = lux.get(run_id)
+    assert run["state"] == "failed" and len(run["placements"]) == 1, run
+
+
+def test_migrate_restarts_a_restart_run_from_scratch(operator, lux, runners, hosts):
+    """A Run with resumePolicy: restart can be migrated: it starts again on
+    the target host from scratch, with an empty state volume, its command
+    run from the start."""
+    runners.start(hosts[0])
+    runners.start(hosts[1])
+    script = "echo start >> /w/log; echo starts=$(wc -l < /w/log); trap 'exit 0' TERM; sleep 300 & wait"
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", script, resumePolicy="restart",
+                                volumes=[{"name": "w", "path": "/w", "kind": "state"}]))
+    lux.wait_output(run_id, "starts=1")
+    first = lux.get(run_id)["host"]
+    other = next(h.name for h in hosts[:2] if h.name != first)
+    run = operator.json("migrate", run_id, "--to", other, "--wait", timeout=200)
+    assert run["host"] == other and run["state"] == "running", run
+    assert run["placements"][0]["stopReason"] == "migrate", run["placements"]
+    states = [e["data"] for e in lux.events(run_id, "state")]
+    assert {"state": "resuming", "reason": "auto-restart after migrate"} in states, states
+    assert [d for d in states if d["state"] == "scheduled"][-1].get("snapshotId") is None, states
+    wait_until(lambda: lux.logs(run_id).count("starts=1") == 2, 60, 0.5, "the restart did not start from an empty volume")
+    assert "starts=2" not in lux.logs(run_id)
+    lux.run("cancel", run_id)
