@@ -623,15 +623,21 @@ func (s *Server) deleteObjects(ctx context.Context, what string, keys []string) 
 // it is still terminal, so a Run cannot be resumed from a snapshot that is
 // going. S3 objects are deleted after the claim; one that fails to delete
 // is an orphan in S3, never a Run pointing at nothing.
+//
+// Candidates come from the blobs retention may delete (index
+// blobs_retainable), not from runs: a Run already reaped has none, so a
+// pass costs the Runs still holding such data, not every finished Run. As
+// an array, the set is looked up by runs_pkey whatever the planner
+// estimates for (location, kind), which the artifacts kept in S3 skew.
 func (s *Server) reapRetention(ctx context.Context) error {
 	var keys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			WITH due AS (
 				SELECT r.id FROM runs r JOIN tenants t ON t.id = r.tenant_id
-				WHERE r.finished_at IS NOT NULL AND r.finished_at < now() - make_interval(days => t.retention_days)
+				WHERE r.id = ANY (ARRAY(SELECT DISTINCT run_id FROM blobs WHERE location = 's3' AND kind <> 'artifact'))
+				  AND r.finished_at IS NOT NULL AND r.finished_at < now() - make_interval(days => t.retention_days)
 				  AND r.state IN ('succeeded', 'cancelled')
-				  AND EXISTS (SELECT 1 FROM blobs bl WHERE bl.run_id = r.id AND bl.location = 's3' AND bl.kind <> 'artifact')
 				ORDER BY r.finished_at LIMIT 20
 				FOR UPDATE OF r SKIP LOCKED
 			), gone AS (
