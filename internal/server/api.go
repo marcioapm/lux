@@ -110,7 +110,8 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "migrateRun", Method: http.MethodPost, Path: "/v1/runs/{id}/migrate", Tags: []string{"runs", "operators"},
 		Summary: "Move a running Run to another host",
 		Description: "It is stopped (its state snapshotted), then resumed at once on `to`, or on any host but the one it was on. " +
-			"An agent resumes its session; `input`, if given, is delivered once it runs again.",
+			"An agent resumes its session; `input`, if given, is delivered once it runs again. " +
+			"A Run whose spec has resumePolicy never is refused (409 not_movable).",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict},
 	}, "operator", s.migrateRun)
@@ -315,7 +316,7 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "drainHost", Method: http.MethodPost, Path: "/v1/hosts/{id}/drain", Tags: []string{"hosts"},
 		Summary: "Drain a host",
 		Description: "No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere " +
-			"(also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.",
+			"(a Run with resumePolicy never fails instead; also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound},
 	}, "admin", s.drainHost)
@@ -399,7 +400,7 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Remove a pool",
 		Description: "Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. " +
 			"If it was the tenant's default pool, the tenant has none until another is marked. " +
-			"forceEvict also stops its hosts' live Runs so they resume elsewhere.",
+			"forceEvict also stops its hosts' live Runs so they resume elsewhere (a Run with resumePolicy never fails instead).",
 		Errors: []int{http.StatusNotFound},
 	}, "admin", forTenant(s.deletePool))
 	register(s, api, huma.Operation{
@@ -2518,7 +2519,8 @@ const (
 // drainHosts takes hosts out of service (no new placements), adds cause to
 // their drain_causes, sets state_reason to reason, and, unless stopReason
 // is "" (cordon only), asks their live placements to stop with it (drain
-// or preempt: both resume elsewhere), including on hosts already draining;
+// or preempt: both resume elsewhere, or fail a Run whose resumePolicy is
+// never), including on hosts already draining;
 // where selects them (placeholders from $1). A cordoned host's Runs finish
 // where they are: the reaper (static hosts) or the pool's replace path
 // (provisioned) takes it once idle. Returns their ids, to notify once the

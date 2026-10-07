@@ -9,6 +9,7 @@ import (
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -74,12 +75,17 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 	var hostID string
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var state, current, stopping string
-		if err := tx.QueryRow(ctx, `SELECT r.state, coalesce(p.host_id, ''), coalesce(p.stop_reason, '') FROM runs r
+		var resumes bool
+		if err := tx.QueryRow(ctx, `SELECT r.state, coalesce(p.host_id, ''), coalesce(p.stop_reason, ''),
+					coalesce(r.spec->>'resumePolicy', '') <> $3 FROM runs r
 				LEFT JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch
-				WHERE r.id = $1 AND r.tenant_id = $2 FOR UPDATE OF r`, in.ID, p.TenantID).Scan(&state, &current, &stopping); err != nil {
+				WHERE r.id = $1 AND r.tenant_id = $2 FOR UPDATE OF r`, in.ID, p.TenantID, spec.ResumeNever).Scan(&state, &current, &stopping, &resumes); err != nil {
 			return err
 		}
 		switch {
+		case !resumes:
+			// Moved, it would fail: the operator stops or cancels it instead.
+			return errf(http.StatusConflict, "not_movable", "the Run's resumePolicy is never: it cannot continue on another host")
 		case state != StateRunning && state != StateStopping:
 			return errf(http.StatusConflict, "not_running", "run is %s: only a running Run can be migrated (a stopped one: resume --to)", state)
 		case stopping != "":

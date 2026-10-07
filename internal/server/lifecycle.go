@@ -12,6 +12,7 @@ import (
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // Run states. See docs/lifecycle.md.
@@ -48,8 +49,21 @@ const refusedWithoutSnapshot = "coalesce(rp.snapshot_refused AND r.snapshot_id I
 const noSnapshotReason = "its only snapshot report was refused, so there is no snapshot to restore"
 
 // movedStops: stop reasons that move a Run rather than stop it; it is
-// resumed elsewhere as soon as it has stopped.
+// resumed elsewhere as soon as it has stopped, unless its spec's
+// resumePolicy is never (resumesAfterMove), when it fails instead.
 var movedStops = []string{"drain", "preempt", "migrate"}
+
+// notResumedReason follows the stop reason in the state_reason of a Run
+// failed by a move because of its resumePolicy.
+const notResumedReason = "not resumed (resumePolicy never)"
+
+// resumesAfterMove reads whether a Run's spec lets lux resume it after a
+// move (resumePolicy unset or auto).
+func resumesAfterMove(ctx context.Context, tx pgx.Tx, runID string) (bool, error) {
+	var never bool
+	err := tx.QueryRow(ctx, `SELECT coalesce(spec->>'resumePolicy', '') = $2 FROM runs WHERE id = $1`, runID, spec.ResumeNever).Scan(&never)
+	return !never, err
+}
 
 // placementRef names one placement.
 type placementRef struct {
@@ -247,6 +261,13 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	}
 	addEvent(ctx, tx, tenantID, runID, epoch, "exited", map[string]any{"exitCode": st.ExitCode, "reason": st.Reason, "message": st.Message})
 
+	moveStop := slices.Contains(movedStops, stopReason)
+	resumes := true
+	if moveStop {
+		if resumes, err = resumesAfterMove(ctx, tx, runID); err != nil {
+			return err
+		}
+	}
 	var next, reason string
 	switch {
 	case cancel || stopReason == "cancel":
@@ -255,7 +276,10 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		next, reason = StateFailed, "timeout"
 	case stopReason == "disk":
 		next, reason = StateFailed, "disk limit exceeded"
-	case stopReason == "stop" || slices.Contains(movedStops, stopReason):
+	case moveStop && !resumes:
+		// One-shot: what it was doing cannot continue on another host.
+		next, reason = StateFailed, stopReason+": "+notResumedReason
+	case stopReason == "stop" || moveStop:
 		// A requested stop: resumable (and a move resumed below).
 		next, reason = StateStopped, stopReason
 	case st.State == "failed":
@@ -279,10 +303,13 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
 		return err
 	}
-	serverStop := endReason(stopReason)
-	if snapshotRefused {
-		// A refused move is not resumed elsewhere: the servers just stop.
-		serverStop = endReason("stop")
+	// A refused move cannot resume from its rejected snapshot; leave the
+	// Run stopped for a person to decide what to restore.
+	moved := moveStop && resumes && !snapshotRefused
+	// Servers count as migrated only when the Run is resumed elsewhere.
+	serverStop := endReason("stop")
+	if moved {
+		serverStop = endReason(stopReason)
 	}
 	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, serverStop); err != nil {
 		return err
@@ -294,9 +321,6 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if stopReason != "" {
 		ended["stopReason"] = stopReason
 	}
-	// A refused move cannot resume from its rejected snapshot; leave the
-	// Run stopped for a person to decide what to restore.
-	moved := slices.Contains(movedStops, stopReason) && !snapshotRefused
 	if moved {
 		// Moved, not stopped by a person: resume elsewhere automatically
 		// (with the input a migration left, if any).

@@ -35,7 +35,19 @@ type RunSpec struct {
 	Network   Network           `json:"network" yaml:"network"`
 	Sandbox   Sandbox           `json:"sandbox" yaml:"sandbox"`
 	Artifacts Artifacts         `json:"artifacts" yaml:"artifacts"`
+	// Empty is stored as given and means ResumeAuto.
+	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration): auto (the default) resumes it elsewhere; never ends it as failed, for one-shot workloads that cannot continue elsewhere, and an operator's migrate is refused (409 not_movable). A resume you ask for is never affected."`
 }
+
+// RunSpec.ResumePolicy values.
+const (
+	ResumeAuto  = "auto"
+	ResumeNever = "never"
+)
+
+// ResumesAfterMove reports whether lux resumes the Run elsewhere after it
+// moves it.
+func (s *RunSpec) ResumesAfterMove() bool { return s.ResumePolicy != ResumeNever }
 
 // Image is exactly one of a pinned reference or a build.
 type Image struct {
@@ -627,6 +639,11 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	errs = append(errs, r.Problems()...)
 	if s.Timeout.Duration < 0 {
 		fail("timeout must not be negative")
+	}
+	switch s.ResumePolicy {
+	case "", ResumeAuto, ResumeNever:
+	default:
+		fail("resumePolicy: must be auto or never, got %q", s.ResumePolicy)
 	}
 	for i, e := range s.Network.Egress {
 		if (e.Host == "") == (e.CIDR == "") {

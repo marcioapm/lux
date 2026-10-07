@@ -2393,6 +2393,9 @@ components:
         resources:
           $ref: "#/components/schemas/Resources"
           description: "What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS). disk bounds the writable layer plus state volumes: a Run over it is stopped and fails."
+        resumePolicy:
+          description: "What lux does when it moves the Run (a drain, a spot preemption, a migration): auto (the default) resumes it elsewhere; never ends it as failed, for one-shot workloads that cannot continue elsewhere, and an operator's migrate is refused (409 not_movable). A resume you ask for is never affected."
+          type: string
         sandbox:
           $ref: "#/components/schemas/Sandbox"
         secrets:
@@ -4054,7 +4057,7 @@ paths:
   /v1/hosts/{id}/drain:
     post:
       description: |-
-        No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere (also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.
+        No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere (a Run with resumePolicy never fails instead; also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.
 
         Needs the `admin` scope.
       operationId: drainHost
@@ -4684,7 +4687,7 @@ paths:
   /v1/pools/{name}:
     delete:
       description: |-
-        Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. If it was the tenant's default pool, the tenant has none until another is marked. forceEvict also stops its hosts' live Runs so they resume elsewhere.
+        Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. If it was the tenant's default pool, the tenant has none until another is marked. forceEvict also stops its hosts' live Runs so they resume elsewhere (a Run with resumePolicy never fails instead).
 
         Needs the `admin` scope.
       operationId: deletePool
@@ -6235,7 +6238,7 @@ paths:
   /v1/runs/{id}/migrate:
     post:
       description: |-
-        It is stopped (its state snapshotted), then resumed at once on `to`, or on any host but the one it was on. An agent resumes its session; `input`, if given, is delivered once it runs again.
+        It is stopped (its state snapshotted), then resumed at once on `to`, or on any host but the one it was on. An agent resumes its session; `input`, if given, is delivered once it runs again. A Run whose spec has resumePolicy never is refused (409 not_movable).
 
         Needs the `operator` scope.
       operationId: migrateRun

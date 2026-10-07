@@ -85,6 +85,32 @@ func TestAllProblemsAtOnce(t *testing.T) {
 	}
 }
 
+func TestResumePolicy(t *testing.T) {
+	for policy, ok := range map[string]bool{"": true, "auto": true, "never": true, "Never": false, "always": false} {
+		s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}}, ResumePolicy: policy}
+		err := s.Normalize(BuiltinDefaults)
+		if (err == nil) != ok {
+			t.Errorf("%q: %v", policy, err)
+		}
+		if !ok && (err == nil || !strings.Contains(err.Error(), "resumePolicy")) {
+			t.Errorf("%q: error %v does not name resumePolicy", policy, err)
+		}
+		if ok && s.ResumePolicy != policy {
+			t.Errorf("%q stored as %q", policy, s.ResumePolicy)
+		}
+		if ok && s.ResumesAfterMove() != (policy != "never") {
+			t.Errorf("%q: ResumesAfterMove %v", policy, s.ResumesAfterMove())
+		}
+	}
+	var s RunSpec
+	if err := yaml.Unmarshal([]byte("resumePolicy: never\n"), &s); err != nil || s.ResumePolicy != ResumeNever {
+		t.Fatalf("yaml: %q %v", s.ResumePolicy, err)
+	}
+	if b, _ := json.Marshal(RunSpec{}); strings.Contains(string(b), "resumePolicy") {
+		t.Fatalf("unset resumePolicy marshalled: %s", b)
+	}
+}
+
 func TestBytes(t *testing.T) {
 	for in, want := range map[string]int64{"8Gi": 8 << 30, "1G": 1e9, "100": 100, "1.5Mi": 1.5 * (1 << 20)} {
 		var b Bytes
