@@ -395,6 +395,106 @@ func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 	}
 }
 
+// A drained Run whose final report was refused, then stopped by its tenant:
+// with resumePolicy restart (already restarting, its earlier snapshot
+// forgotten) it has nothing to restore, so an explicit resume places it
+// again from scratch; with auto and no earlier snapshot it is refused,
+// there being no snapshot to restore.
+func TestSnapshotReportRefusedThenStoppedResume(t *testing.T) {
+	for _, c := range []struct {
+		policy  string
+		earlier bool // rb has a snapshot from before
+		refused bool
+	}{
+		{"restart", true, false},
+		{"", false, true},
+	} {
+		t.Run("policy "+c.policy, func(t *testing.T) {
+			s, ctx := reportFixture(t)
+			if c.policy != "" {
+				execSQL(t, s, ctx, `UPDATE runs SET spec = spec || jsonb_build_object('resumePolicy', $1::text) WHERE id = 'rb'`, c.policy)
+			}
+			if c.earlier {
+				if f := reportSnapshot(t, s, "hb", "rb", 1, snapshotB("snapB", 1)); f.Type != proto.MsgAck || ackRefused(t, f) {
+					t.Fatalf("rb's first report: %s %s", f.Type, f.Data)
+				}
+			}
+			execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE id = 'pb1'`)
+			execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, stop_reason)
+				VALUES ('pb2', 't2', 'rb', 'hb', 2, 'stopping', 'drain')`)
+			execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 2 WHERE id = 'rb'`)
+			sd := snapshotB("snapB2", 2)
+			sd.Output = &proto.BlobInfo{BlobID: "bA-out", Size: 20, SHA256: "a-out"}
+			if f := reportSnapshot(t, s, "hb", "rb", 2, sd); f.Type != proto.MsgAck || !ackRefused(t, f) {
+				t.Fatalf("final report: %s %s, want an ack with refused", f.Type, f.Data)
+			}
+			exitPlacement(t, s, 2)
+			var before string
+			var snap *string
+			systemScan(t, s, `SELECT state, snapshot_id FROM runs WHERE id = 'rb'`, nil, &before, &snap)
+			if want := map[bool]string{true: StateStopped, false: StateResuming}[c.refused]; before != want || snap != nil {
+				t.Fatalf("rb before the stop: %s snapshot %v, want %s with none", before, snap, want)
+			}
+			actx := context.WithValue(ctx, principalKey, Principal{TenantID: "t2", Scopes: []string{"run", "read"}})
+			if _, err := s.stopRun(actx, &RunPath{ID: "rb"}); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := s.getRun(actx, &RunPath{ID: "rb"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Body.State != StateStopped || got.Body.Resume == nil {
+				t.Fatalf("rb: %+v", got.Body)
+			}
+			var wantBlockers []string
+			if c.refused {
+				wantBlockers = []string{noSnapshotReason}
+			}
+			if !slices.Equal(got.Body.Resume.Blockers, wantBlockers) {
+				t.Errorf("resume blockers %q, want %q", got.Body.Resume.Blockers, wantBlockers)
+			}
+			list, err := s.listRuns(actx, &listRunsInput{Resumable: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if listed := slices.ContainsFunc(list.Body.Runs, func(r *Run) bool { return r.ID == "rb" }); listed == c.refused {
+				t.Errorf("rb in the resumable list: %v", listed)
+			}
+
+			_, err = s.resumeRun(actx, &resumeRunInput{RunPath: RunPath{ID: "rb"}})
+			var state string
+			systemScan(t, s, `SELECT state FROM runs WHERE id = 'rb'`, nil, &state)
+			if c.refused {
+				var he *HTTPError
+				if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "no_snapshot" {
+					t.Fatalf("resume: %v, want 409 no_snapshot", err)
+				}
+				if state != StateStopped {
+					t.Errorf("rb is %s after a refused resume, want %s", state, StateStopped)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			if state != StateResuming {
+				t.Fatalf("rb is %s after resume, want %s", state, StateResuming)
+			}
+			readyHost(t, s, "hc", "default", "", false)
+			if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+				t.Fatal(err)
+			}
+			var a proto.Assign
+			systemScan(t, s, `SELECT payload FROM host_messages WHERE type = $1 AND run_id = 'rb' AND epoch = 3`,
+				[]any{proto.MsgAssign}, &a)
+			if a.Resume != nil {
+				t.Errorf("resume with nothing to restore assigned a resume: %+v", a.Resume)
+			}
+		})
+	}
+}
+
 // A report redelivered under a recorded snapshot id is accepted only if it
 // is the same report: the same placement, manifest, output and artifacts.
 func TestSnapshotReportRedeliveryMustMatch(t *testing.T) {

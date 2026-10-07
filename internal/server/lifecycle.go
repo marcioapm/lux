@@ -43,8 +43,10 @@ const queuedRunStates = "('submitted', 'resuming', 'provisioning')"
 const resumableRunStates = "('stopped', 'lost', 'failed')"
 
 // refusedWithoutSnapshot, for SQL over runsFrom: the current placement's
-// latest report was refused and the Run has no snapshot to restore.
-const refusedWithoutSnapshot = "coalesce(rp.snapshot_refused AND r.snapshot_id IS NULL, false)"
+// latest report was refused and the Run has no snapshot to restore. A
+// restart Run restores nothing, so resuming it is a first placement.
+const refusedWithoutSnapshot = "coalesce(rp.snapshot_refused AND r.snapshot_id IS NULL AND " +
+	runResumePolicySQL + " <> '" + spec.ResumeRestart + "', false)"
 
 // noSnapshotReason explains why resume refuses such a Run.
 const noSnapshotReason = "its only snapshot report was refused, so there is no snapshot to restore"
