@@ -61,21 +61,30 @@ func notResumedReason(stop, policy string) string {
 	return stop + ": not resumed (resumePolicy " + policy + ")"
 }
 
+// runResumePolicySQL, for SQL over runs (as r): its spec's resumePolicy,
+// "" when unset (auto). Every SQL reading of the policy goes through it.
+const runResumePolicySQL = `coalesce(r.spec->>'resumePolicy', '')`
+
 // failsOnMoveSQL, for SQL over runs (as r): spec.FailsOnMove of its policy.
-const failsOnMoveSQL = `coalesce(r.spec->>'resumePolicy', '') IN ('manual', 'never')`
+const failsOnMoveSQL = runResumePolicySQL + ` IN ('` + spec.ResumeManual + `', '` + spec.ResumeNever + `')`
 
-// resumeNeverSQL, for SQL over runs (as r): its resumePolicy is never.
-const resumeNeverSQL = `coalesce(r.spec->>'resumePolicy', '') = 'never'`
+// refusesResumeSQL, for SQL over runs (as r): spec.RefusesResume of its policy.
+const refusesResumeSQL = runResumePolicySQL + ` = '` + spec.ResumeNever + `'`
 
-// errNeverResumable refuses any resume of a Run whose resumePolicy is never.
+// neverResumableReason is why a Run whose resumePolicy is never is not
+// resumed: the 409's message and its resumability blocker.
+const neverResumableReason = "resumePolicy never: this Run cannot be resumed"
+
+// errNeverResumable refuses any requested resume of a Run whose
+// resumePolicy is never.
 func errNeverResumable() error {
-	return errf(http.StatusConflict, "not_resumable", "resumePolicy never: this Run cannot be resumed")
+	return errf(http.StatusConflict, "not_resumable", "%s", neverResumableReason)
 }
 
-// movePolicy reads a Run's resumePolicy ("" for none, which is auto).
-func movePolicy(ctx context.Context, tx pgx.Tx, runID string) (string, error) {
+// resumePolicy reads a Run's resumePolicy ("" for none, which is auto).
+func resumePolicy(ctx context.Context, tx pgx.Tx, runID string) (string, error) {
 	var policy string
-	err := tx.QueryRow(ctx, `SELECT coalesce(spec->>'resumePolicy', '') FROM runs WHERE id = $1`, runID).Scan(&policy)
+	err := tx.QueryRow(ctx, `SELECT `+runResumePolicySQL+` FROM runs r WHERE r.id = $1`, runID).Scan(&policy)
 	return policy, err
 }
 
@@ -289,11 +298,11 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	moveStop := slices.Contains(movedStops, stopReason)
 	var policy string
 	if moveStop {
-		if policy, err = movePolicy(ctx, tx, runID); err != nil {
+		if policy, err = resumePolicy(ctx, tx, runID); err != nil {
 			return err
 		}
 	}
-	resumes := !spec.FailsOnMove(policy)
+	failsOnMove := moveStop && spec.FailsOnMove(policy)
 	var next, reason string
 	switch {
 	case cancel || stopReason == "cancel":
@@ -302,7 +311,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		next, reason = StateFailed, "timeout"
 	case stopReason == "disk":
 		next, reason = StateFailed, "disk limit exceeded"
-	case moveStop && !resumes:
+	case failsOnMove:
 		// One-shot: what it was doing cannot continue on another host.
 		next, reason = StateFailed, notResumedReason(stopReason, policy)
 	case stopReason == "stop" || moveStop:
@@ -333,7 +342,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	// Run stopped for a person to decide what to restore. restart is
 	// exempt: it restores nothing, and forgetRestoredState clears the
 	// snapshot_id the refusal left.
-	moved := moveStop && resumes && (!snapshotRefused || policy == spec.ResumeRestart)
+	moved := moveStop && !failsOnMove && (!snapshotRefused || policy == spec.ResumeRestart)
 	// Servers count as migrated only when the Run is resumed elsewhere.
 	serverStop := endReason("stop")
 	if moved {

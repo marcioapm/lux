@@ -98,9 +98,6 @@ func TestResumePolicy(t *testing.T) {
 		if ok && s.ResumePolicy != policy {
 			t.Errorf("%q stored as %q", policy, s.ResumePolicy)
 		}
-		if ok && FailsOnMove(policy) != (policy == "manual" || policy == "never") {
-			t.Errorf("%q: FailsOnMove %v", policy, FailsOnMove(policy))
-		}
 	}
 	var s RunSpec
 	if err := yaml.Unmarshal([]byte("resumePolicy: never\n"), &s); err != nil || s.ResumePolicy != ResumeNever {
@@ -108,6 +105,28 @@ func TestResumePolicy(t *testing.T) {
 	}
 	if b, _ := json.Marshal(RunSpec{}); strings.Contains(string(b), "resumePolicy") {
 		t.Fatalf("unset resumePolicy marshalled: %s", b)
+	}
+}
+
+// Which policies fail a moved Run and which refuse a requested resume;
+// unset is auto.
+func TestResumePolicySets(t *testing.T) {
+	for _, c := range []struct {
+		policy                     string
+		failsOnMove, refusesResume bool
+	}{
+		{"", false, false},
+		{ResumeAuto, false, false},
+		{ResumeRestart, false, false},
+		{ResumeManual, true, false},
+		{ResumeNever, true, true},
+	} {
+		if got := FailsOnMove(c.policy); got != c.failsOnMove {
+			t.Errorf("FailsOnMove(%q) = %v", c.policy, got)
+		}
+		if got := RefusesResume(c.policy); got != c.refusesResume {
+			t.Errorf("RefusesResume(%q) = %v", c.policy, got)
+		}
 	}
 }
 

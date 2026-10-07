@@ -108,10 +108,10 @@ func TestResumePolicyOnMove(t *testing.T) {
 	for _, stop := range []string{"preempt", "drain", "migrate"} {
 		for _, policy := range []string{"manual", "never", "restart", "auto", ""} {
 			t.Run(stop+"/"+policy, func(t *testing.T) {
-				never := policy == "manual" || policy == "never"
+				failsOnMove := policy == "manual" || policy == "never"
 				s, ctx := policyFixture(t, policy)
 				err := moveStops[stop](t, s)
-				if stop == "migrate" && never {
+				if stop == "migrate" && failsOnMove {
 					var he *HTTPError
 					if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "not_movable" {
 						t.Fatalf("migrate: %v, want 409 not_movable", err)
@@ -128,7 +128,7 @@ func TestResumePolicyOnMove(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if got := r1Moving(t, s); got == never {
+				if got := r1Moving(t, s); got == failsOnMove {
 					t.Errorf("stopping for %s: moving %v", stop, got)
 				}
 				exitR1(t, s)
@@ -147,7 +147,7 @@ func TestResumePolicyOnMove(t *testing.T) {
 				systemScan(t, s, `SELECT r.state, r.state_reason, (SELECT count(*) FROM placements WHERE run_id = r.id)
 					FROM runs r WHERE r.id = 'r1'`, nil, &state, &reason, &placements)
 				_, cached := s.secrets.get("r1")
-				if never {
+				if failsOnMove {
 					want := stop + ": not resumed (resumePolicy " + policy + ")"
 					if state != StateFailed || reason != want || placements != 1 || cached || svStop != "run stopped" {
 						t.Errorf("state %q reason %q placements %d secrets cached %v server %q; want failed %q 1 false \"run stopped\"",
@@ -269,7 +269,7 @@ func TestResumePolicyNeverRefusesResume(t *testing.T) {
 					Input: &resumeInput{Text: "go on"}}})
 				var he *HTTPError
 				if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "not_resumable" ||
-					he.Message != "resumePolicy never: this Run cannot be resumed" {
+					he.Message != neverResumableReason {
 					t.Fatalf("resume: %v, want 409 not_resumable", err)
 				}
 				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
@@ -289,7 +289,7 @@ func TestResumePolicyNeverRefusesResume(t *testing.T) {
 					t.Fatal(err)
 				}
 				rs, err := s.resumability(context.Background(), "t1", run)
-				if err != nil || !slices.Contains(rs.Blockers, "resumePolicy never: this Run cannot be resumed") {
+				if err != nil || !slices.Contains(rs.Blockers, neverResumableReason) {
 					t.Fatalf("resumability %+v %v", rs, err)
 				}
 			})

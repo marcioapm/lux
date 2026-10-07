@@ -74,14 +74,19 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 	}
 	var hostID string
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		var state, current, stopping, policy string
-		if err := tx.QueryRow(ctx, `SELECT r.state, coalesce(p.host_id, ''), coalesce(p.stop_reason, ''),
-					coalesce(r.spec->>'resumePolicy', '') FROM runs r
+		var state, current, stopping string
+		if err := tx.QueryRow(ctx, `SELECT r.state, coalesce(p.host_id, ''), coalesce(p.stop_reason, '') FROM runs r
 				LEFT JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch
-				WHERE r.id = $1 AND r.tenant_id = $2 FOR UPDATE OF r`, in.ID, p.TenantID).Scan(&state, &current, &stopping, &policy); err != nil {
+				WHERE r.id = $1 AND r.tenant_id = $2 FOR UPDATE OF r`, in.ID, p.TenantID).Scan(&state, &current, &stopping); err != nil {
+			return err
+		}
+		policy, err := resumePolicy(ctx, tx, in.ID)
+		if err != nil {
 			return err
 		}
 		switch {
+		// Before the state: a stopped Run with such a policy gets
+		// not_movable too, since no move of it is ever possible.
 		case spec.FailsOnMove(policy):
 			// Moved, it would fail: the operator stops or cancels it instead.
 			return errf(http.StatusConflict, "not_movable", "the Run's resumePolicy is %s: it cannot continue on another host", policy)

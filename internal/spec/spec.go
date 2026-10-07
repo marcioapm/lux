@@ -51,6 +51,10 @@ const (
 // lux moves it, rather than placing it again: manual and never.
 func FailsOnMove(policy string) bool { return policy == ResumeManual || policy == ResumeNever }
 
+// RefusesResume reports whether a resumePolicy refuses every requested
+// resume: never.
+func RefusesResume(policy string) bool { return policy == ResumeNever }
+
 // Image is exactly one of a pinned reference or a build.
 type Image struct {
 	Ref          string         `json:"ref,omitempty" yaml:"ref,omitempty"`

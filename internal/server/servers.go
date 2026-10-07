@@ -133,11 +133,14 @@ type serverRow struct {
 	Moving                   bool
 }
 
+// serverSelect reads the Run's spec only while it is stopping, the one
+// state where Moving looks at its resumePolicy.
 const serverSelect = `SELECT sv.id, sv.tenant_id, sv.name, sv.host, sv.port, sv.command, sv.workdir, sv.env, sv.labels, sv.from_spec,
 	sv.state, sv.exit_code, sv.error, sv.since, sv.ready_since, sv.stop_reason, sv.stopped_epoch, sv.epoch, sv.last_request_at,
 	sv.run_id, sv.wake, sv.lifetime, sv.owner, sv.idle_after_s, sv.wake_timeout_s, sv.expire_after_s, sv.after_sync,
 	sv.wake_requested_at, sv.wake_by, sv.wake_path, sv.wakes, sv.idle_notified_at, sv.created_at, sv.updated_at,
-	coalesce(r.state, ''), coalesce(r.name, ''), coalesce(p.stop_reason, ''), NOT ` + failsOnMoveSQL + `
+	coalesce(r.state, ''), coalesce(r.name, ''), coalesce(p.stop_reason, ''),
+	CASE WHEN r.state = 'stopping' THEN NOT ` + failsOnMoveSQL + ` ELSE true END
 	FROM run_servers sv LEFT JOIN runs r ON r.id = sv.run_id
 	LEFT JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch `
 

@@ -689,7 +689,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	id := ids.New(ids.Run)
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		if idem != "" {
-			existing, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.idempotency_key = $1`, idem))
+			existing, err := runByIdempotencyKey(ctx, tx, idem)
 			if err == nil {
 				run = existing
 				return nil
@@ -747,20 +747,27 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		}
 		// A concurrent submit with the same key committed between the
 		// SELECT and the INSERT: its Run is the answer.
-		err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-			run, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.idempotency_key = $1`, idem))
+		var winner *Run
+		if err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+			r, err := runByIdempotencyKey(ctx, tx, idem)
+			winner = r
 			return err
-		})
-		if err != nil {
+		}); err != nil {
 			return nil, err
 		}
-		return &submitRunOutput{http.StatusOK, run}, nil
+		return &submitRunOutput{http.StatusOK, winner}, nil
 	}
 	if created {
 		s.Kick()
 		return &submitRunOutput{http.StatusCreated, run}, nil
 	}
 	return &submitRunOutput{http.StatusOK, run}, nil
+}
+
+// runByIdempotencyKey reads the tenant's (the transaction's scope) Run
+// submitted with key.
+func runByIdempotencyKey(ctx context.Context, tx pgx.Tx, key string) (*Run, error) {
+	return scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.idempotency_key = $1`, key))
 }
 
 // runsIdempotencyKey is the name Postgres gave UNIQUE (tenant_id,
@@ -899,7 +906,7 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		where = append(where, "r.state = ANY("+arg(strings.Split(st, ","))+")")
 	}
 	if in.Resumable {
-		where = append(where, "r.state IN "+resumableRunStates+` AND NOT `+resumeNeverSQL+` AND NOT (r.snapshot_id IS NULL AND EXISTS (
+		where = append(where, "r.state IN "+resumableRunStates+` AND NOT `+refusesResumeSQL+` AND NOT (r.snapshot_id IS NULL AND EXISTS (
 			SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.snapshot_refused))`)
 	}
 	if in.Host != "" {
@@ -1119,8 +1126,8 @@ func (s *Server) getRun(ctx context.Context, in *RunPath) (*runOutput, error) {
 // the scheduler's to find out; a resumed Run says why it waits.)
 func (s *Server) resumability(ctx context.Context, tenantID string, run *Run) (*Resumability, error) {
 	rs := &Resumability{Snapshot: run.SnapshotID}
-	if run.Spec.ResumePolicy == spec.ResumeNever {
-		rs.Blockers = append(rs.Blockers, "resumePolicy never: this Run cannot be resumed")
+	if spec.RefusesResume(run.Spec.ResumePolicy) {
+		rs.Blockers = append(rs.Blockers, neverResumableReason)
 	}
 	for _, ref := range run.Secrets {
 		rs.Secrets = append(rs.Secrets, ref.Name)
@@ -1538,7 +1545,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		}
 		// Before anything else: whatever its state, such a Run is never
 		// placed again on request.
-		if sp.ResumePolicy == spec.ResumeNever {
+		if spec.RefusesResume(sp.ResumePolicy) {
 			return errNeverResumable()
 		}
 		switch state {
