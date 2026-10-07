@@ -21,6 +21,7 @@ func TestProvidersWiresNoCapacityRetryAfter(t *testing.T) {
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_PROFILE", "")
 	cfgPath := t.TempDir() + "/luxd.toml"
 	if err := os.WriteFile(cfgPath, nil, 0o600); err != nil {
 		t.Fatal(err)
