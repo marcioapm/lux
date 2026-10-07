@@ -224,13 +224,22 @@ func TestResumePolicyCordonOnlyDrain(t *testing.T) {
 	}
 }
 
-// A resume a person asks for after a manual Run failed is accepted.
+// A resume a person asks for after a manual Run failed is accepted, and
+// nothing listed blocks it beforehand.
 func TestResumePolicyManualResumableByHand(t *testing.T) {
-	s, _ := policyFixture(t, "manual")
+	s, ctx := policyFixture(t, "manual")
 	if err := moveStops["preempt"](t, s); err != nil {
 		t.Fatal(err)
 	}
 	exitR1(t, s)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
+	run, err := s.loadRun(ctx, "t1", "r1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rs, err := s.resumability(ctx, "t1", run); err != nil || len(rs.Blockers) != 0 {
+		t.Fatalf("resumability %+v %v, want no blockers", rs, err)
+	}
 	// The fixture's Run declares no secrets, so the resume needs none.
 	if _, err := s.resumeRun(tenantCtx("t1"), &resumeRunInput{RunPath: RunPath{ID: "r1"}}); err != nil {
 		t.Fatalf("resume: %v", err)
@@ -242,22 +251,107 @@ func TestResumePolicyManualResumableByHand(t *testing.T) {
 	}
 }
 
-// Every resume of a never Run is refused, by its tenant or an operator,
-// whether it failed after a move or was stopped by request, and nothing
-// changes: no state, no secrets or spec written, no placement.
+// A cancel that lands while the Run stops for a move wins over the move,
+// whatever the policy: it ends cancelled.
+func TestResumePolicyCancelDuringMove(t *testing.T) {
+	for _, policy := range []string{"never", "manual", "restart"} {
+		t.Run(policy, func(t *testing.T) {
+			s, _ := policyFixture(t, policy)
+			if err := moveStops["preempt"](t, s); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.cancelRun(tenantCtx("t1"), &RunPath{ID: "r1"}); err != nil {
+				t.Fatal(err)
+			}
+			exitR1(t, s)
+			var state, reason string
+			var placements int
+			systemScan(t, s, `SELECT state, state_reason, (SELECT count(*) FROM placements WHERE run_id = 'r1') FROM runs WHERE id = 'r1'`,
+				nil, &state, &reason, &placements)
+			if state != StateCancelled || reason != "cancelled" || placements != 1 {
+				t.Fatalf("state %q reason %q placements %d, want cancelled \"cancelled\" 1", state, reason, placements)
+			}
+		})
+	}
+}
+
+// After a restart's new placement uploads its own snapshot, the snapshot
+// the restart skipped is reaped and the Run's superseded flag cleared.
+func TestResumePolicyRestartSkippedSnapshotIsReaped(t *testing.T) {
+	s, ctx := policyFixture(t, "restart")
+	if err := moveStops["preempt"](t, s); err != nil {
+		t.Fatal(err)
+	}
+	exitR1(t, s)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
+	// testServer has no blob.Store: a blob already gone needs no delete.
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 'deleted' WHERE id = 'b-r1-vol'`)
+	if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+		t.Fatal(err)
+	}
+	var host string
+	systemScan(t, s, `SELECT host_id FROM placements WHERE run_id = 'r1' AND epoch = 2`, nil, &host)
+	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "snapR2", RunID: "r1", Epoch: 2,
+		Volumes: []proto.VolumeSnapshot{{Name: "work", Path: "/work", BlobID: "b-r2-vol", Size: 10, SHA256: "r2-vol"}}}}
+	if got := reportSnapshot(t, s, host, "r1", 2, sd); got.Type != proto.MsgAck || ackRefused(t, got) {
+		t.Fatalf("snapshot report: %s %s", got.Type, got.Data)
+	}
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR2'`)
+	if err := s.reapSuperseded(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var available, superseded bool
+	systemScan(t, s, `SELECT (SELECT available FROM snapshots WHERE id = 'snapR1'), snapshots_superseded FROM runs WHERE id = 'r1'`,
+		nil, &available, &superseded)
+	if available || superseded {
+		t.Fatalf("snapR1 available %v, Run superseded %v; want reaped and the flag cleared", available, superseded)
+	}
+}
+
+// GET /v1/runs?resumable=true leaves out a failed never Run and lists a
+// failed manual one.
+func TestResumePolicyResumableList(t *testing.T) {
+	for policy, listed := range map[string]bool{"never": false, "manual": true} {
+		t.Run(policy, func(t *testing.T) {
+			s, ctx := policyFixture(t, policy)
+			if err := moveStops["preempt"](t, s); err != nil {
+				t.Fatal(err)
+			}
+			exitR1(t, s)
+			execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
+			out, err := s.listRuns(tenantCtx("t1"), &listRunsInput{Resumable: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := slices.ContainsFunc(out.Body.Runs, func(r *Run) bool { return r.ID == "r1" })
+			if got != listed {
+				t.Fatalf("r1 listed %v, want %v", got, listed)
+			}
+		})
+	}
+}
+
+// Every requested resume of a never Run is refused, by its tenant or an
+// operator, whether it failed after a move, was stopped by request or is
+// still running (the refusal, not "stop it first"), and nothing changes:
+// no state, no secrets or spec written, no placement.
 func TestResumePolicyNeverRefusesResume(t *testing.T) {
-	for _, how := range []string{"failed after preempt", "stopped by request"} {
+	for _, how := range []string{"failed after preempt", "stopped by request", "running"} {
 		for _, who := range []string{"tenant", "operator"} {
 			t.Run(how+"/"+who, func(t *testing.T) {
 				s, ctx := policyFixture(t, "never")
-				if how == "stopped by request" {
+				switch how {
+				case "stopped by request":
 					if _, err := s.stopRun(tenantCtx("t1"), &RunPath{ID: "r1"}); err != nil {
 						t.Fatal(err)
 					}
-				} else if err := moveStops["preempt"](t, s); err != nil {
-					t.Fatal(err)
+					exitR1(t, s)
+				case "failed after preempt":
+					if err := moveStops["preempt"](t, s); err != nil {
+						t.Fatal(err)
+					}
+					exitR1(t, s)
 				}
-				exitR1(t, s)
 				var before string
 				systemScan(t, s, `SELECT state || ' ' || updated_at::text || ' ' || secrets::text || ' ' || spec::text FROM runs WHERE id = 'r1'`, nil, &before)
 

@@ -2,6 +2,8 @@ package spec
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -92,8 +94,12 @@ func TestResumePolicy(t *testing.T) {
 		if (err == nil) != ok {
 			t.Errorf("%q: %v", policy, err)
 		}
-		if !ok && (err == nil || !strings.Contains(err.Error(), "resumePolicy")) {
-			t.Errorf("%q: error %v does not name resumePolicy", policy, err)
+		if !ok {
+			want := fmt.Sprintf("resumePolicy: must be auto, restart, manual or never, got %q", policy)
+			var ve *ValidationError
+			if !errors.As(err, &ve) || !slices.Equal(ve.Problems, []string{want}) {
+				t.Errorf("%q: error %v, want only %q", policy, err, want)
+			}
 		}
 		if ok && s.ResumePolicy != policy {
 			t.Errorf("%q stored as %q", policy, s.ResumePolicy)
