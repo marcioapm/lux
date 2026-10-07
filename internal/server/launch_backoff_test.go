@@ -9,6 +9,10 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // backoffFixture: planningFixture with one waiting Run, a provider whose
@@ -142,6 +146,115 @@ func TestRetakenLeaseResetsLaunchBackoff(t *testing.T) {
 	if p.calls != 3 {
 		t.Fatalf("%d attempts, want one on the retaken lease", p.calls)
 	}
+}
+
+// provisionPasses is backoffFixture driven through provision(), the
+// provisioner's own pass with its lease checks; pass fails the test on an
+// error.
+func provisionPasses(t *testing.T) (*Server, *planningProvider, func(time.Duration)) {
+	t.Helper()
+	s, _, p, now := backoffFixture(t)
+	s.cfg.Providers = map[string]Provider{"ec2": p}
+	start := *now
+	return s, p, func(off time.Duration) {
+		t.Helper()
+		*now = start.Add(off)
+		if err := s.provision(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A luxd whose lease expired and was held by another luxd meanwhile, all
+// without a pass of its own noticing, takes a new lease: its backoffs
+// start afresh.
+func TestNewLeaseEpochResetsLaunchBackoff(t *testing.T) {
+	s, p, pass := provisionPasses(t)
+	pass(0)
+	pass(15 * time.Second)
+	if p.calls != 2 {
+		t.Fatalf("%d attempts, want 2 before the handover", p.calls)
+	}
+	execSQL(t, s, context.Background(), `UPDATE leases SET holder='other', expires_at=now()-interval '1 second' WHERE name='provisioner'`)
+	// Before the old deadline (15s + 30s).
+	pass(25 * time.Second)
+	if p.calls != 3 {
+		t.Fatalf("%d attempts, want one on the new lease", p.calls)
+	}
+}
+
+// Renewing a lease this luxd still holds keeps the backoff.
+func TestLeaseRenewalKeepsLaunchBackoff(t *testing.T) {
+	_, p, pass := provisionPasses(t)
+	pass(0)
+	pass(15 * time.Second)
+	for _, off := range []time.Duration{16 * time.Second, 30 * time.Second, 44 * time.Second} {
+		pass(off)
+		if p.calls != 2 {
+			t.Fatalf("attempted at %v, during the backoff", off)
+		}
+	}
+	pass(45 * time.Second)
+	if p.calls != 3 {
+		t.Fatalf("%d attempts, want one when the backoff ends", p.calls)
+	}
+}
+
+// A lease check between two launches that fails marks the lease lost: the
+// next pass that holds it starts afresh, even when the database row turns
+// out to be this luxd's unexpired lease (the check failed transiently).
+func TestFailedCheckBetweenLaunchesResetsLaunchBackoff(t *testing.T) {
+	s, pa, pass := provisionPasses(t)
+	ctx := context.Background()
+	steal := &stealLeaseOnLaunch{planningProvider: pa, s: s, pool: "pool2"}
+	s.cfg.Providers = map[string]Provider{"ec2": steal}
+	pass(0)
+	pass(15 * time.Second)
+	if pa.calls != 2 {
+		t.Fatalf("%d attempts, want 2 for pool A", pa.calls)
+	}
+	// Pool B wants two hosts; its first launch takes the lease away, so the
+	// check before the second fails. B is listed after A, so that check is
+	// the pass's last.
+	execSQL(t, s, ctx, `INSERT INTO pools (id,tenant_id,name,provider,template,min_hosts) VALUES ('pool2','t1','other','ec2','{"version":1}',2)`)
+	pass(20 * time.Second)
+	if steal.launched != 1 || pa.calls != 2 {
+		t.Fatalf("pool B launched %d and pool A attempted %d, want 1 and 2", steal.launched, pa.calls)
+	}
+	if evs := events(t, s, evScaleBlocked); len(evs) != 1 || evs[0].Count != 1 {
+		t.Fatalf("scale_blocked %+v, want pool A blocked once, before pool B's launch", evs)
+	}
+	execSQL(t, s, ctx, `UPDATE leases SET holder=$1, expires_at=now()+interval '1 minute' WHERE name='provisioner'`, instanceID)
+	pass(25 * time.Second)
+	if pa.calls != 3 {
+		t.Fatalf("%d attempts for pool A, want one after the failed check", pa.calls)
+	}
+}
+
+// stealLeaseOnLaunch launches pool's hosts, the first of them handing the
+// provisioner lease to another holder; other pools' launches go to the
+// planningProvider.
+type stealLeaseOnLaunch struct {
+	*planningProvider
+	s        *Server
+	pool     string
+	launched int
+}
+
+func (p *stealLeaseOnLaunch) Launch(ctx context.Context, tmpl json.RawMessage, tags, env map[string]string) (Launched, error) {
+	if tags[tagPoolID] != p.pool {
+		return p.planningProvider.Launch(ctx, tmpl, tags, env)
+	}
+	p.launched++
+	if p.launched == 1 {
+		if err := p.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE leases SET holder='other', expires_at=now()+interval '1 minute' WHERE name='provisioner'`)
+			return err
+		}); err != nil {
+			return Launched{}, err
+		}
+	}
+	return Launched{ProviderID: fmt.Sprintf("i-b%d", p.launched)}, nil
 }
 
 // A successful launch resets the count: the next failure waits 15s, not

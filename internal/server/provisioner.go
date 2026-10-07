@@ -117,12 +117,8 @@ func (s *Server) provision(ctx context.Context) error {
 	// Leadership: a lease in the database, not a lock held on a connection
 	// across provider calls. One luxd reconciles at a time; another takes
 	// over when the lease lapses.
-	if ok, err := s.provisionLease(ctx); err != nil || !ok {
-		s.leaseHeld = false
+	if ok, err := s.holdProvisionLease(ctx); !ok {
 		return err
-	}
-	if !s.leaseHeld {
-		s.tookProvisionLease()
 	}
 	var pools []poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -150,8 +146,7 @@ func (s *Server) provision(ctx context.Context) error {
 			continue
 		}
 		// Provider calls can be slow: still the provisioner?
-		if ok, err := s.provisionLease(ctx); err != nil || !ok {
-			s.leaseHeld = false
+		if ok, err := s.holdProvisionLease(ctx); !ok {
 			return err
 		}
 		if err := s.reconcilePool(ctx, prov, pl, checkAlive); err != nil {
@@ -162,7 +157,7 @@ func (s *Server) provision(ctx context.Context) error {
 }
 
 // tookProvisionLease: another provisioner may have recorded host decisions
-// while this process did not hold the lease, so each pool's are read from
+// since this process last held the lease, so each pool's are read from
 // the database once again (idleDecisions). Launch backoffs start afresh: a
 // launch another holder made meanwhile is not known here.
 func (s *Server) tookProvisionLease() {
@@ -310,7 +305,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	launched, quota := 0, false
 	for i := range max(want, 0) {
 		if i > 0 {
-			if ok, err := s.provisionLease(ctx); err != nil || !ok {
+			if ok, err := s.holdProvisionLease(ctx); !ok {
 				return err
 			}
 			up = nil // recorded with the first launch
@@ -883,19 +878,44 @@ func checkHostQuota(ctx context.Context, tx pgx.Tx, tenantID string) error {
 var instanceID = ids.New("luxd")
 
 // provisionLease makes this luxd the provisioner for the next while, if
-// no other one is (a row with a holder and an expiry).
-func (s *Server) provisionLease(ctx context.Context) (bool, error) {
-	var ok bool
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+// no other one is (a row with a holder and an expiry). fresh: the row it
+// replaced was not this process's unexpired lease (none, expired, or
+// another holder's), so another provisioner may have run since.
+func (s *Server) provisionLease(ctx context.Context) (held, fresh bool, err error) {
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// The row is locked until commit, so the upsert replaces the version
+		// read here; now() is the transaction's, the same in both.
+		var current bool
+		err := tx.QueryRow(ctx, `SELECT holder = $1 AND expires_at >= now() FROM leases WHERE name = 'provisioner' FOR UPDATE`,
+			instanceID).Scan(&current)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		fresh = !current
 		return tx.QueryRow(ctx, `INSERT INTO leases (name, holder, expires_at) VALUES ('provisioner', $1, now() + $2::interval)
 			ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at
 				WHERE leases.holder = EXCLUDED.holder OR leases.expires_at < now()
-			RETURNING true`, instanceID, interval(max(10*s.cfg.Tick, 30*time.Second))).Scan(&ok)
+			RETURNING true`, instanceID, interval(max(10*s.cfg.Tick, 30*time.Second))).Scan(&held)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return false, false, nil
 	}
-	return ok, err
+	return held, fresh, err
+}
+
+// holdProvisionLease is every lease check of a pass. A failed check marks
+// the lease lost; holding it after a loss, or in a new epoch, starts afresh
+// (tookProvisionLease). Renewing the current epoch keeps what it knew.
+func (s *Server) holdProvisionLease(ctx context.Context) (bool, error) {
+	held, fresh, err := s.provisionLease(ctx)
+	if err != nil || !held {
+		s.leaseHeld = false
+		return false, err
+	}
+	if fresh || !s.leaseHeld {
+		s.tookProvisionLease()
+	}
+	return true, nil
 }
 
 // releaseProvisionLease gives the lease up, if this luxd holds it.
