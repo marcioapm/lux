@@ -263,7 +263,11 @@ Slot 1 stays compute's. An unknown kind keeps its key as the label and
 | `volume` | Snapshots | 3 |
 | `output` | Output | 7 |
 | `artifact` | Artifacts | 4 |
-| `context` | Build contexts | 5 |
+
+`context` (build contexts) is not in the list: luxd samples it
+(`storedContext`) but nothing writes that kind yet, and a stacked series
+that is always 0 draws its line along the top of the stack. Charting it
+again is an entry in `STORAGE_KINDS` and in the Overview's `STORED`.
 
 ## Components
 
