@@ -290,26 +290,14 @@ func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Templa
 	// names the zone, and text that varied with the rotation would split
 	// pool.launch_failed events. The code leads: the provisioner keeps 200
 	// characters of a launch error.
-	head := candidate{instanceType: t.InstanceType}
-	if len(t.Subnets) > 0 {
-		head.subnet = t.Subnets[0]
-	}
-	m := p.noCapacity[t.capacityKey(head)]
+	m := p.noCapacity[t.capacityKey(t.head())]
 	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", m.code, candidateList(t), m.err)
 }
 
 // candidateList is every candidate of t: "m8g.2xlarge, m7g.2xlarge in
 // subnet-a, subnet-b" (every type is tried in every subnet).
 func candidateList(t Template) string {
-	var names []string
-	for _, it := range t.instanceTypes() {
-		names = append(names, cmp.Or(it, "template type"))
-	}
-	s := strings.Join(names, ", ")
-	if len(t.Subnets) > 0 {
-		s += " in " + strings.Join(t.Subnets, ", ")
-	}
-	return s
+	return candidate{strings.Join(t.instanceTypes(), ", "), strings.Join(t.Subnets, ", ")}.String()
 }
 
 // instanceTypes is InstanceType, then FallbackInstanceTypes: the order
@@ -324,24 +312,33 @@ func (t Template) instanceTypes() []string {
 type candidate struct{ instanceType, subnet string }
 
 func (c candidate) String() string {
-	it, sn := c.instanceType, c.subnet
-	if it == "" {
-		it = "template type"
+	s := cmp.Or(c.instanceType, "template type")
+	if c.subnet != "" {
+		s += " in " + c.subnet
 	}
-	if sn == "" {
-		return it
+	return s
+}
+
+// head is t's first candidate whatever the rotation: InstanceType in the
+// first subnet.
+func (t Template) head() candidate {
+	return candidate{t.InstanceType, subnetsFrom(t, 0)[0]}
+}
+
+// subnetsFrom is t's subnets from start, wrapping round; [""] (the launch
+// template's or the default VPC's) when it names none.
+func subnetsFrom(t Template, start int) []string {
+	if len(t.Subnets) == 0 {
+		return []string{""}
 	}
-	return it + " in " + sn
+	return append(slices.Clone(t.Subnets[start:]), t.Subnets[:start]...)
 }
 
 // candidates is the order Launch tries: each instance type (InstanceType,
 // then FallbackInstanceTypes) in each subnet, from start and wrapping round.
 func candidates(t Template, start int) []candidate {
 	itypes := t.instanceTypes()
-	subnets := []string{""}
-	if len(t.Subnets) > 0 {
-		subnets = append(slices.Clone(t.Subnets[start:]), t.Subnets[:start]...)
-	}
+	subnets := subnetsFrom(t, start)
 	out := make([]candidate, 0, len(itypes)*len(subnets))
 	for _, it := range itypes {
 		for _, sn := range subnets {

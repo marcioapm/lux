@@ -478,9 +478,11 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   the launch at once. A candidate without capacity is skipped for
   `LUX_EC2_NO_CAPACITY_RETRY_AFTER` (30s; `0` never skips) by every launch
   with the same region, instance type, launch template, subnet and market
-  (spot or on-demand),
-  so a shortage costs one sweep of `RunInstances` calls per interval; when
-  every candidate fails or is skipped, the launch fails with the code and
+  (spot or on-demand), so a shortage costs one sweep of `RunInstances`
+  calls per interval. A sweep's marks all date from its start, so keep the
+  interval well above one sweep's duration: a 15-candidate sweep under EC2
+  throttling can take about 10s. When every candidate fails or is
+  skipped, the launch fails with the code and
   the candidates and is retried on the next pass. Fallback types use the
   same launch template, so its AMI must suit them (same architecture);
   `lux hosts ls` shows the type a host got.

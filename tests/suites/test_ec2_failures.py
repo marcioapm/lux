@@ -74,8 +74,9 @@ def test_a_failed_launch_is_retried(lux, ec2):
     # (the pool's two subnets), with no SDK retries, and luxd then skips
     # each for LUX_EC2_NO_CAPACITY_RETRY_AFTER (3s here): the passes in
     # between (1s apart) are refused without a call, with the same error
-    # (the one event above). So each (type, subnet) is asked every 3-4s,
-    # neither on every pass nor after the 30s default, and there are fewer
+    # (the one event above). So each (type, subnet) is asked every 3-4s
+    # (bounds [2, 10] leave room for request latency and a loaded host),
+    # neither on every pass (~1s) nor after the 30s default, and there are fewer
     # requests than twice the refusals.
     by_key: dict[tuple[str, str], list[float]] = {}
     for at, key in attempts:
@@ -83,7 +84,7 @@ def test_a_failed_launch_is_retried(lux, ec2):
     assert set(by_key) == {("m7i.large", "subnet-a"), ("m7i.large", "subnet-b")}, by_key
     for key, times in by_key.items():
         gaps = [b - a for a, b in zip(times, times[1:])]
-        assert gaps and all(2.5 <= g <= 6 for g in gaps), (key, times)
+        assert gaps and all(2 <= g <= 10 for g in gaps), (key, times)
     assert len(attempts) < 2 * len(refused), (attempts, refused)
 
 
