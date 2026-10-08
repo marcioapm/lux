@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"testing"
 
@@ -19,7 +20,9 @@ func TestNeverRunEndsTerminated(t *testing.T) {
 		state map[string]string // policy ("" for auto) -> state
 		// reason when it ends terminated by its policy never
 		neverReason string
-		exitCode    int
+		exitCode    int // -1: none recorded
+		// host.placement_ended's outcome for a never Run: "" for terminated
+		outcome string
 	}
 	stopThen := func(code int) func(t *testing.T, s *Server) {
 		return func(t *testing.T, s *Server) {
@@ -32,13 +35,13 @@ func TestNeverRunEndsTerminated(t *testing.T) {
 	ends := []end{
 		{"success", func(t *testing.T, s *Server) { exitR1With(t, s, 0) },
 			map[string]string{"": StateSucceeded, "auto": StateSucceeded, "restart": StateSucceeded, "manual": StateSucceeded, "never": StateTerminated},
-			"succeeded; resumePolicy never", 0},
+			"succeeded; resumePolicy never", 0, ""},
 		{"failure", func(t *testing.T, s *Server) { exitR1With(t, s, 1) },
 			map[string]string{"": StateFailed, "auto": StateFailed, "restart": StateFailed, "manual": StateFailed, "never": StateTerminated},
-			"exit code 1; resumePolicy never", 1},
+			"exit code 1; resumePolicy never", 1, ""},
 		{"requested stop", stopThen(143),
 			map[string]string{"": StateStopped, "auto": StateStopped, "restart": StateStopped, "manual": StateStopped, "never": StateTerminated},
-			"stop; resumePolicy never", 143},
+			"stop; resumePolicy never", 143, ""},
 		{"preempt", func(t *testing.T, s *Server) {
 			if err := moveStops["preempt"](t, s); err != nil {
 				t.Fatal(err)
@@ -47,7 +50,16 @@ func TestNeverRunEndsTerminated(t *testing.T) {
 		},
 			// auto and restart: resuming again at once.
 			map[string]string{"": StateResuming, "auto": StateResuming, "restart": StateResuming, "manual": StateFailed, "never": StateTerminated},
-			"preempt: not resumed (resumePolicy never)", 143},
+			"preempt: not resumed (resumePolicy never)", 143, ""},
+		{"host lost", func(t *testing.T, s *Server) {
+			execSQL(t, s, context.Background(), `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE id = 'p1'`)
+			if err := s.reapLeases(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		},
+			map[string]string{"": StateLost, "auto": StateLost, "restart": StateLost, "manual": StateLost, "never": StateTerminated},
+			// The placement is lost whatever becomes of the Run.
+			"lease expired: host stopped heartbeating; resumePolicy never", -1, StateLost},
 	}
 	for _, e := range ends {
 		for _, policy := range []string{"", "auto", "restart", "manual", "never"} {
@@ -64,7 +76,11 @@ func TestNeverRunEndsTerminated(t *testing.T) {
 					t.Fatalf("state %q (%q), want %q", state, reason, want)
 				}
 				// A Run placed again starts its next placement without one.
-				if state != StateResuming && (exitCode == nil || *exitCode != e.exitCode) {
+				if e.exitCode < 0 {
+					if exitCode != nil {
+						t.Errorf("exit code %d, want none", *exitCode)
+					}
+				} else if state != StateResuming && (exitCode == nil || *exitCode != e.exitCode) {
 					t.Errorf("exit code %v, want %d", exitCode, e.exitCode)
 				}
 				if policy != "never" {
@@ -89,8 +105,8 @@ func TestNeverRunEndsTerminated(t *testing.T) {
 				if servers {
 					t.Error("servers left")
 				}
-				if ended != StateTerminated {
-					t.Errorf("host.placement_ended outcome %q, want terminated", ended)
+				if want := cmp.Or(e.outcome, StateTerminated); ended != want {
+					t.Errorf("host.placement_ended outcome %q, want %q", ended, want)
 				}
 			})
 		}
@@ -117,10 +133,15 @@ func TestNeverRunStoppedQueuedEndsTerminated(t *testing.T) {
 }
 
 // The scheduler ends a queued Run it cannot place: one whose secrets no
-// luxd holds past the grace period, or whose snapshot does not match its
-// blob records. An auto Run rests resumable; a never Run ends terminated,
-// its reason not asking for a resume it would refuse.
+// luxd holds past the grace period, whose snapshot does not match its blob
+// records, or whose snapshot nothing holds any more. An auto Run rests
+// resumable; a never Run ends terminated, its reason not asking for a
+// resume it would refuse.
 func TestSchedulerEndsNeverRunTerminated(t *testing.T) {
+	// r1's snapshot, recorded but held by no host and no blob store.
+	const snapshotGone = `WITH snap AS (INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, available)
+		VALUES ('snap-gone', 't1', 'r1', 'p1', 1, '{}', false) RETURNING id)
+		UPDATE runs SET snapshot_id = (SELECT id FROM snap) WHERE id = 'r1'`
 	cases := []struct {
 		name, policy string
 		setup        string
@@ -136,6 +157,10 @@ func TestSchedulerEndsNeverRunTerminated(t *testing.T) {
 			StateFailed, "its snapshot does not match this Run's blob records"},
 		{"unrestorable/never", "never", `UPDATE runs SET snapshot_id = 'snap-missing' WHERE id = 'r1'`, false,
 			StateTerminated, "its snapshot does not match this Run's blob records; resumePolicy never"},
+		{"snapshot unavailable/auto", "", snapshotGone, false,
+			StateLost, "its snapshot is no longer available"},
+		{"snapshot unavailable/never", "never", snapshotGone, false,
+			StateTerminated, "its snapshot is no longer available; resumePolicy never"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -161,7 +186,8 @@ func TestSchedulerEndsNeverRunTerminated(t *testing.T) {
 			if want := c.state != StateTerminated; resumable != want {
 				t.Errorf("resumable %v, want %v", resumable, want)
 			}
-			if _, held := s.secrets.get("r1"); held && c.state != StateStopped {
+			// A stopped or lost Run keeps them for a resume.
+			if _, held := s.secrets.get("r1"); held && c.state != StateStopped && c.state != StateLost {
 				t.Error("secret values still held for a Run that cannot use them")
 			}
 		})

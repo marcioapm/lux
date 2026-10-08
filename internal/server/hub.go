@@ -466,7 +466,7 @@ func (s *Server) refuseSync(ctx context.Context, tx pgx.Tx, hostID string, id in
 			return err
 		}
 		if assigned && epoch == current {
-			if err := s.placementLost(ctx, tx, runID, epoch, syncModesGone, &later); err != nil {
+			if err := s.losePlacement(ctx, tx, runID, epoch, syncModesGone, &later, true); err != nil {
 				return err
 			}
 			var state string
