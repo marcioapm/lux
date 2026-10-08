@@ -162,6 +162,29 @@ func TestNextEpochFailsWhenThePreviousNeverEnds(t *testing.T) {
 	}
 }
 
+// A placement fenced off while it exports its snapshot writes no run state
+// from then on: the Run's next placement here owns it.
+func TestFencedPlacementLeavesTheRunStateAlone(t *testing.T) {
+	f := newFinishFixture(t)
+	f.exitedAsSupervised(context.Background())
+	f.waitFile(t, f.bin+".exporting")
+	f.p.markStale()
+	next := &runState{RunID: "run1", TenantID: "t1", Epoch: 2, Phase: "started", Container: "ctr-2"}
+	if err := writeRunState(f.p.dir, next); err != nil {
+		t.Fatal(err)
+	}
+	f.p.requestStop(context.Background(), "stop")
+	f.p.mark("late")
+	f.release()
+	if !f.p.waitDone(10 * time.Second) {
+		t.Fatal("epoch 1 never ended")
+	}
+	st, err := readRunState(f.p.dir)
+	if err != nil || st.Epoch != 2 || st.Container != "ctr-2" || st.Stale || st.VolumesSnapshot != "" || st.StopReason != "" {
+		t.Fatalf("run state %+v (%v), want epoch 2's as written", st, err)
+	}
+}
+
 // A placement fenced off before its container was created (its create
 // failed, or never came) kills nothing: not the Run's name, which another
 // epoch's container may hold.

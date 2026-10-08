@@ -233,7 +233,7 @@ func (p *placement) mark(key string) {
 	if _, ok := p.state.Times[key]; !ok {
 		p.state.Times[key] = time.Now().UnixMilli()
 	}
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveStateLocked()
 }
 
 func (p *placement) times() map[string]int64 {
@@ -313,7 +313,7 @@ func (p *placement) restoreState() {
 	p.mu.Lock()
 	p.state = st
 	p.mu.Unlock()
-	_ = writeRunState(p.dir, st)
+	_ = p.saveState()
 }
 
 // waitPrevious waits, up to handoverWait, for the Run's previous placement
@@ -508,7 +508,7 @@ func (p *placement) run(ctx context.Context) {
 	}
 	p.mark("containerStarted")
 	p.state.Phase = "started"
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveState()
 	p.mu.Lock()
 	p.memoryLimit = p.r.mem.limit(int64(sp.Resources.Memory))
 	p.mu.Unlock()
@@ -592,7 +592,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	p.state.Phase = "exited"
 	p.state.LastExitAt = time.Now().UnixMilli()
 	p.mu.Unlock()
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveState()
 	p.sampleSlow(ctx)
 	usage := p.usage()
 
@@ -655,7 +655,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	p.mu.Lock()
 	p.state.Phase = "reported"
 	p.mu.Unlock()
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveState()
 	p.setPhase("done")
 	p.logf("placement ended", "exit", exit.Code, "reason", exit.Reason)
 }
@@ -677,7 +677,7 @@ func (p *placement) finishWithoutContainer(ctx context.Context, state, msg strin
 	p.state.Exit = exit
 	p.state.Phase = "exited"
 	p.mu.Unlock()
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveState()
 	if p.isStale() {
 		return
 	}
@@ -787,7 +787,7 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume 
 	// From here the volumes are this placement's and will diverge from
 	// the snapshot.
 	p.state.VolumesSnapshot = ""
-	return writeRunState(p.dir, p.state)
+	return p.saveState()
 }
 
 // restoreVolume imports one volume from a local snapshot file if this host
@@ -887,7 +887,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 	p.mu.Lock()
 	p.state.Container = id
 	p.mu.Unlock()
-	return writeRunState(p.dir, p.state)
+	return p.saveState()
 }
 
 // createArgs is how the placement's container is made; the image is last.
@@ -1087,7 +1087,7 @@ func (p *placement) requestStop(ctx context.Context, reason string) {
 	phase := p.phase
 	if p.state != nil {
 		p.state.StopReason = p.stopWhy
-		_ = writeRunState(p.dir, p.state)
+		_ = p.saveStateLocked()
 	}
 	if phase == "starting" && p.cancelStart != nil {
 		p.cancelStart()
@@ -1454,7 +1454,7 @@ func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
 	p.mu.Lock()
 	p.state.VolumesSnapshot, p.state.VolumesEpoch = snapID, p.epoch
 	p.mu.Unlock()
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveState()
 	return sd, nil
 }
 
