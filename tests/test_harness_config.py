@@ -138,3 +138,31 @@ def test_nested_without_serve_is_refused_before_building():
     p = subprocess.run([sys.executable, "run_tests.py", "--nested"], cwd=TESTS_DIR, capture_output=True, text=True)
     assert p.returncode == 2 and "--nested needs --serve" in p.stderr, (p.stdout, p.stderr)
     assert "building" not in p.stdout, p.stdout
+
+
+@pytest.mark.parametrize("flags, nested", [(["--serve", "--nested"], True), (["--serve"], False)])
+def test_serve_passes_nested_to_the_image_build_and_the_runners(monkeypatch, flags, nested):
+    import run_tests
+    import serve
+
+    calls = {}
+    monkeypatch.setattr(run_tests, "build_binaries", lambda: {})
+    monkeypatch.setattr(run_tests, "build_fake_image", lambda _bin: None)
+    monkeypatch.setattr(run_tests, "build_agent_images", lambda _wanted: {})
+
+    def build_nested_images(podman, docker):
+        calls["podman"] = podman
+        return ("localhost/lux-nested:test" if podman else None), None
+    monkeypatch.setattr(run_tests, "build_nested_images", build_nested_images)
+
+    def fake_serve(env, fake_image, detach, nested=False):
+        calls["nested"], calls["images"] = nested, env.extra["images"]
+    monkeypatch.setattr(serve, "serve", fake_serve)
+    # suites/test_serve.py names a suite, so the nested image is selected by
+    # --nested alone, not by a full run.
+    monkeypatch.setattr(sys, "argv", ["run_tests.py", *flags, "--detach", "suites/test_serve.py"])
+    run_tests.main()
+    assert calls["nested"] is nested, calls
+    assert calls["podman"] is nested, calls
+    if nested:
+        assert calls["images"]["nested"] == "localhost/lux-nested:test", calls
