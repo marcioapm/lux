@@ -1122,7 +1122,7 @@ func (s *Server) getRun(ctx context.Context, in *RunPath) (*runOutput, error) {
 	if err != nil {
 		return nil, err
 	}
-	if run.State == StateStopped || run.State == StateLost || run.State == StateFailed || run.State == StateSucceeded {
+	if resumable(run.State) {
 		if run.Resume, err = s.resumability(ctx, principal(ctx).TenantID, run); err != nil {
 			return nil, err
 		}
@@ -1291,7 +1291,7 @@ func (s *Server) postInput(ctx context.Context, req *postInputInput) (*requestID
 			return errAttachmentsUnsupported(adapter)
 		}
 		switch {
-		case state == StateStopped || state == StateLost || state == StateSucceeded || state == StateFailed:
+		case resumable(state):
 			return errf(http.StatusConflict, "not_running", "run is %s: use resume, which accepts an input", state)
 		case terminal(state):
 			return errf(http.StatusConflict, "not_running", "run is %s", state)

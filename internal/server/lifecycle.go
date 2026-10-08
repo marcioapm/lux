@@ -42,6 +42,9 @@ const queuedRunStates = "('submitted', 'resuming', 'provisioning')"
 // resumableRunStates, for SQL: Runs resume accepts: every end but terminated.
 const resumableRunStates = "('stopped', 'lost', 'failed', 'succeeded')"
 
+// endedRunStates, for SQL: ended(state).
+const endedRunStates = "('succeeded', 'failed', 'terminated')"
+
 // restingRunStates, for SQL: Runs expiry terminates once they have rested
 // longer than their tenant's expire_after_days (reapExpiry): every
 // resumable state. Each must be in the runs_resting index's predicate.
@@ -69,12 +72,8 @@ const resumableSQL = `(r.state IN ` + resumableRunStates + ` AND NOT ` + refuses
 // (spec.FailsOnMove), when it ends instead: failed, or terminated (never).
 var movedStops = []string{"drain", "preempt", "migrate"}
 
-// stopTerminate is the stop reason of a terminate request. An older luxd
-// sharing the database writes stopTerminateLegacy for it.
-const (
-	stopTerminate       = "terminate"
-	stopTerminateLegacy = "cancel"
-)
+// stopTerminate is the stop reason of a terminate request.
+const stopTerminate = "terminate"
 
 // notResumedReason is the state_reason of a Run a move (stop) ended
 // because of its resumePolicy: failed (manual) or terminated (never).
@@ -173,6 +172,12 @@ func Ended(state string) bool { return ended(state) }
 
 func ended(state string) bool {
 	return state == StateSucceeded || state == StateFailed || state == StateTerminated
+}
+
+// resumable: resume accepts a Run in this state (resumableRunStates),
+// whatever else may refuse it.
+func resumable(state string) bool {
+	return state == StateStopped || state == StateLost || state == StateFailed || state == StateSucceeded
 }
 
 // live: a placement exists and is (or is about to be) running.
@@ -365,7 +370,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	restarts := policy == spec.ResumeRestart
 	var next, reason string
 	switch {
-	case terminate || stopReason == stopTerminate || stopReason == stopTerminateLegacy:
+	case terminate || stopReason == stopTerminate:
 		next, reason = StateTerminated, "terminated"
 	case stopReason == "timeout":
 		next, reason = StateFailed, "timeout"

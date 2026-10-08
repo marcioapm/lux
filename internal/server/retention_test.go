@@ -31,35 +31,31 @@ func retentionFixture(t *testing.T, raState, rbState string, raDays, rbDays floa
 // and output (rows deleted, S3 objects deleted) and every snapshot becomes
 // unavailable; its artifacts stay. One within retention keeps everything.
 func TestReapRetentionTerminal(t *testing.T) {
-	for _, state := range []string{StateTerminated} {
-		t.Run(state, func(t *testing.T) {
-			s, ctx, f := retentionFixture(t, state, state, 29.9, 5.01)
-			if err := s.reapRetention(ctx); err != nil {
-				t.Fatal(err)
-			}
-			for id, want := range map[string]string{"bB-vol-snapB": "deleted", "bB-out-snapB": "deleted", "bB-art-snapB": "s3",
-				"bB-vol-snapB2": "deleted", "bB-out-snapB2": "deleted", "bB-art-snapB2": "s3"} {
-				if got := blobLocations(t, s, "rb")[id]; got != want {
-					t.Errorf("rb %s: %s, want %s", id, got, want)
-				}
-			}
-			if snapshotAvailable(t, s, "snapB") || snapshotAvailable(t, s, "snapB2") {
-				t.Error("rb's snapshots still available")
-			}
-			want := []string{"rb/bB-out-snapB", "rb/bB-out-snapB2", "rb/bB-vol-snapB", "rb/bB-vol-snapB2"}
-			if got := f.Deleted(); !slices.Equal(got, want) {
-				t.Errorf("S3 deletes %v, want %v", got, want)
-			}
-			// ra: within its tenant's 30 days.
-			for id, loc := range blobLocations(t, s, "ra") {
-				if loc != "s3" {
-					t.Errorf("ra %s: %s, want s3", id, loc)
-				}
-			}
-			if !snapshotAvailable(t, s, "snapA") {
-				t.Error("snapA unavailable within retention")
-			}
-		})
+	s, ctx, f := retentionFixture(t, StateTerminated, StateTerminated, 29.9, 5.01)
+	if err := s.reapRetention(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{"bB-vol-snapB": "deleted", "bB-out-snapB": "deleted", "bB-art-snapB": "s3",
+		"bB-vol-snapB2": "deleted", "bB-out-snapB2": "deleted", "bB-art-snapB2": "s3"} {
+		if got := blobLocations(t, s, "rb")[id]; got != want {
+			t.Errorf("rb %s: %s, want %s", id, got, want)
+		}
+	}
+	if snapshotAvailable(t, s, "snapB") || snapshotAvailable(t, s, "snapB2") {
+		t.Error("rb's snapshots still available")
+	}
+	want := []string{"rb/bB-out-snapB", "rb/bB-out-snapB2", "rb/bB-vol-snapB", "rb/bB-vol-snapB2"}
+	if got := f.Deleted(); !slices.Equal(got, want) {
+		t.Errorf("S3 deletes %v, want %v", got, want)
+	}
+	// ra: within its tenant's 30 days.
+	for id, loc := range blobLocations(t, s, "ra") {
+		if loc != "s3" {
+			t.Errorf("ra %s: %s, want s3", id, loc)
+		}
+	}
+	if !snapshotAvailable(t, s, "snapA") {
+		t.Error("snapA unavailable within retention")
 	}
 }
 

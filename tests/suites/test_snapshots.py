@@ -106,7 +106,7 @@ def test_generic_state_volume_survives_stop(lux, runners, hosts):
     assert out == ["1", "2"], out
     # lux cancel is terminate's deprecated alias: it says so, and terminates.
     p = lux.run("cancel", run_id, "--wait")
-    assert "deprecated" in p.stderr and "lux terminate" in p.stderr, p.stderr
+    assert p.stderr.strip() == 'Command "cancel" is deprecated, use lux terminate', p.stderr
     assert lux.get(run_id)["state"] == "terminated"
 
 

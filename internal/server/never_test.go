@@ -65,17 +65,32 @@ func TestNeverRunEndsTerminated(t *testing.T) {
 				}
 				// A Run placed again starts its next placement without one.
 				if state != StateResuming && (exitCode == nil || *exitCode != e.exitCode) {
-					t.Fatalf("exit code %v, want %d", exitCode, e.exitCode)
+					t.Errorf("exit code %v, want %d", exitCode, e.exitCode)
 				}
 				if policy != "never" {
+					// Unchanged: every rest is resumable (a Run resuming is not at rest).
+					if want := state != StateResuming; resumable != want {
+						t.Errorf("resumable %v, want %v", resumable, want)
+					}
 					return
 				}
 				_, held := s.secrets.get("r1")
 				var ended string
 				systemScan(t, s, `SELECT data->>'outcome' FROM host_events WHERE type = 'host.placement_ended' ORDER BY id DESC LIMIT 1`, nil, &ended)
-				if reason != e.neverReason || resumable || held || servers || ended != StateTerminated {
-					t.Fatalf("reason %q resumable %v secrets held %v servers %v placement outcome %q; want %q, nothing left",
-						reason, resumable, held, servers, ended, e.neverReason)
+				if reason != e.neverReason {
+					t.Errorf("reason %q, want %q", reason, e.neverReason)
+				}
+				if resumable {
+					t.Error("resumable")
+				}
+				if held {
+					t.Error("secret values still held")
+				}
+				if servers {
+					t.Error("servers left")
+				}
+				if ended != StateTerminated {
+					t.Errorf("host.placement_ended outcome %q, want terminated", ended)
 				}
 			})
 		}
@@ -157,7 +172,7 @@ func TestSchedulerEndsNeverRunTerminated(t *testing.T) {
 // terminated for that: it rests failed and resumable unless its policy is
 // never, which terminates it as any of its ends; the refusal is still
 // named, after the policy.
-func TestNoSnapshotIsNoTerminate(t *testing.T) {
+func TestRefusedSnapshotFailedRunRestsUnlessNever(t *testing.T) {
 	for policy, want := range map[string]string{"": StateFailed, "never": StateTerminated} {
 		t.Run(policy, func(t *testing.T) {
 			s, ctx := policyFixture(t, policy)
