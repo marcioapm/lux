@@ -511,9 +511,13 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	id, image := p.state.Container, p.state.Image
 	p.mu.Unlock()
 	if id != "" {
-		if err := p.r.pm.Remove(ctx, id); err != nil {
-			p.logf("removing the stopped container failed", "err", err)
+		// Bounded: a hung podman would hold the placement in "exited", and
+		// a later resume or discard removes the container by name anyway.
+		rmCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		if err := p.r.pm.Remove(rmCtx, id); err != nil {
+			p.r.log.Warn("removing the stopped container failed", "run", p.runID, "epoch", p.epoch, "container", id, "err", err)
 		}
+		cancel()
 	}
 	if image != "" {
 		p.r.images.touch(image, p.tenantID)
