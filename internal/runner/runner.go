@@ -487,16 +487,20 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	r.placements[a.RunID] = p
 	r.mu.Unlock()
 	if old != nil {
-		// luxd gave up on the old epoch: fenced now, so it reports and
-		// writes nothing more, and killed if its workload may still run. A
-		// finishing one completes its teardown; the new placement waits for
-		// it before it touches the Run's container, volumes or run state.
-		switch {
-		case old.finishing():
-			old.markStale()
-		case old.liveState() != "":
+		// The new placement waits for the old one to be done before it
+		// touches the Run's container, volumes or run state (waitPrevious).
+		// One whose workload may still run is a placement luxd gave up on:
+		// fenced and killed, by its container's id. A finishing one is not
+		// fenced, as in onWelcome: if luxd already acked its snapshot, that
+		// snapshot is the Run's and its blobs must upload. If luxd has not,
+		// it assigned over the placement only after declaring it lost, so
+		// it will refuse the snapshot: the export is abandoned rather than
+		// holding up the new placement. A later stale nack still fences it.
+		if old.liveState() != "" && !old.finishing() {
 			old.markStale()
 			old.kill(ctx)
+		} else {
+			old.abandonSnapshot()
 		}
 		p.prev = old
 	}

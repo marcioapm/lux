@@ -3,7 +3,12 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +61,111 @@ func (f *finishFixture) epoch2Started() bool {
 	return strings.Contains(f.podmanLog(), "network create")
 }
 
+// newRemovingFixture is finishFixture's run1 epoch 1 after a normal stop:
+// luxd has acked its snapshot.done and its status, and it is removing its
+// container (held until releaseRemove). Its blobs upload to a fake luxd.
+func newRemovingFixture(t *testing.T) *finishFixture {
+	t.Helper()
+	f := newFinishFixture(t)
+	f.r.egress = &egress.Firewall{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if r.Method == http.MethodPut {
+			f.mu.Lock()
+			f.uploaded = append(f.uploaded, path.Base(r.URL.Path))
+			f.mu.Unlock()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	f.r.api = newAPI(srv.URL, "token", "h1")
+	if err := os.WriteFile(f.bin+".holdrm", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.releaseRemove)
+	f.release()
+	f.exitedAsSupervised(context.Background())
+	f.waitFile(t, f.bin+".removing")
+	if got := f.types(); len(got) != 2 || got[0] != proto.MsgSnapshotDone || got[1] != proto.MsgStatus {
+		t.Fatalf("reports %v, want snapshot.done then status acked", got)
+	}
+	return f
+}
+
+func (f *finishFixture) releaseRemove() { _ = os.Remove(f.bin + ".holdrm") }
+
+func (f *finishFixture) assignEpoch(t *testing.T, epoch int) *placement {
+	t.Helper()
+	f.r.assign(context.Background(), proto.Assign{RunID: "run1", TenantID: "t1", Epoch: epoch})
+	f.r.mu.Lock()
+	defer f.r.mu.Unlock()
+	p := f.r.placements["run1"]
+	if p == nil || p.epoch != epoch {
+		t.Fatalf("the runner holds %+v, want epoch %d", p, epoch)
+	}
+	return p
+}
+
+// waitLease waits for a heartbeat that leases run1's epoch in state.
+func (f *finishFixture) waitLease(t *testing.T, epoch int, state string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for n := 0; time.Now().Before(deadline); {
+		var leases []proto.LivePlacement
+		leases, n = f.heartbeatAfter(t, n)
+		for _, l := range leases {
+			if l.RunID == "run1" && l.Epoch == epoch && l.State == state {
+				return
+			}
+		}
+	}
+	t.Fatalf("no heartbeat leased run1 epoch %d %s", epoch, state)
+}
+
+func (f *finishFixture) wantRunState(t *testing.T, epoch int, stale bool) {
+	t.Helper()
+	st, err := readRunState(f.p.dir)
+	if err != nil || st.Epoch != epoch || st.Stale != stale {
+		t.Fatalf("run state %+v (%v), want epoch %d's, stale %v", st, err, epoch, stale)
+	}
+}
+
+// lastStatus is the last status luxd got about run1's epoch.
+func (f *finishFixture) lastStatus(epoch int) *proto.Status {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var got *proto.Status
+	for _, fr := range f.reports {
+		if fr.Type == proto.MsgStatus && fr.Epoch == epoch {
+			var st proto.Status
+			if err := json.Unmarshal(fr.Data, &st); err == nil {
+				got = &st
+			}
+		}
+	}
+	return got
+}
+
+// wantUploaded runs an upload pass and requires every blob of every
+// snapshot record to have reached luxd.
+func (f *finishFixture) wantUploaded(t *testing.T) {
+	t.Helper()
+	f.r.uploads.pass(context.Background())
+	recs := f.r.snapshotRecords()
+	if len(recs) == 0 {
+		t.Fatal("no snapshot record")
+	}
+	f.mu.Lock()
+	uploaded := slices.Clone(f.uploaded)
+	f.mu.Unlock()
+	for id, rec := range recs {
+		for _, up := range rec.Uploads {
+			if !slices.Contains(uploaded, up.BlobID) {
+				t.Errorf("blob %s of snapshot %s (reported %v) not uploaded; uploaded %v", up.BlobID, id, rec.Reported, uploaded)
+			}
+		}
+	}
+}
+
 // The stale nack of an older epoch still exporting here (its report was in
 // flight when the next epoch was assigned) kills only the container that
 // epoch made: never the Run's name, which the next epoch's container holds.
@@ -84,81 +194,122 @@ func TestStaleEpochDoesNotKillTheNextEpochsContainer(t *testing.T) {
 	}
 }
 
-// The next epoch assigned while the previous one still exports its
-// snapshot here touches nothing of the Run's (no network, volume,
-// container or run state) until that one is done; then it starts, and the
-// run state is its own, whatever the fenced epoch 1 did meanwhile.
+// The next epoch assigned while the previous one, its snapshot and end
+// acked by luxd, still removes its container here touches nothing of the
+// Run's (no network, volume, container or run state) until that one is
+// done; then it starts, and the run state is its own.
 func TestNextEpochWaitsForTheFinishingOne(t *testing.T) {
-	f := newOverlapFixture(t)
-	f.sendEpoch1Report(t)
-	f.r.assign(context.Background(), proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 2})
-	f.nackHeld()
-	time.Sleep(500 * time.Millisecond)
+	f := newRemovingFixture(t)
+	p2 := f.assignEpoch(t, 2)
+	// Epoch 2's first act: its lease in a heartbeat, as starting.
+	f.waitLease(t, 2, "starting")
 	if f.epoch2Started() {
-		t.Fatalf("epoch 2 started while epoch 1 was exporting; podman:\n%s", f.podmanLog())
+		t.Fatalf("epoch 2 started while epoch 1 was removing its container; podman:\n%s", f.podmanLog())
 	}
-	if st, err := readRunState(f.p.dir); err == nil && st.Epoch != 1 {
-		t.Fatalf("run state while epoch 1 finishes is epoch %d's, want 1's", st.Epoch)
-	}
-	f.release()
+	f.wantRunState(t, 1, false)
+	f.releaseRemove()
 	if !f.p.waitDone(10 * time.Second) {
 		t.Fatal("epoch 1 never ended")
 	}
-	f.r.mu.Lock()
-	p2 := f.r.placements["run1"]
-	f.r.mu.Unlock()
-	if p2 == nil || p2.epoch != 2 {
-		t.Fatalf("the runner holds %+v, want epoch 2", p2)
-	}
 	if !p2.waitDone(10 * time.Second) {
 		t.Fatal("epoch 2 never ended")
 	}
-	// Epoch 1's export came before anything epoch 2 ran.
+	// Epoch 1's removal came before anything epoch 2 ran.
 	log := f.podmanLog()
-	export, network := strings.Index(log, "volume export"), strings.Index(log, "network create")
-	if network < 0 || network < export {
-		t.Fatalf("epoch 2's network at %d, epoch 1's export at %d: want epoch 2 after; podman:\n%s", network, export, log)
+	rm, network := strings.Index(log, "rm -f -t 0 ctr-1"), strings.Index(log, "network create")
+	if rm < 0 || network < rm {
+		t.Fatalf("epoch 2's network at %d, epoch 1's rm at %d: want epoch 2 after; podman:\n%s", network, rm, log)
 	}
-	st, err := readRunState(f.p.dir)
-	if err != nil || st.Epoch != 2 || st.Stale {
-		t.Fatalf("run state %+v (%v), want epoch 2's, not stale", st, err)
-	}
+	f.wantRunState(t, 2, false)
 }
 
 // An earlier epoch that never ends here fails the next epoch's start once
-// the bounded wait is over, with the reason; the next epoch never ran.
+// the bounded wait is over, with the reason; the next epoch never ran, and
+// the earlier one's snapshot, which luxd has, still uploads.
 func TestNextEpochFailsWhenThePreviousNeverEnds(t *testing.T) {
-	f := newOverlapFixture(t)
+	f := newRemovingFixture(t)
 	f.r.handover = 300 * time.Millisecond
-	f.r.assign(context.Background(), proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 2})
-	f.r.mu.Lock()
-	p2 := f.r.placements["run1"]
-	f.r.mu.Unlock()
+	p2 := f.assignEpoch(t, 2)
 	if !p2.waitDone(10 * time.Second) {
 		t.Fatal("epoch 2 never ended")
 	}
 	if f.epoch2Started() {
-		t.Errorf("epoch 2 ran beside an epoch 1 still exporting; podman:\n%s", f.podmanLog())
+		t.Errorf("epoch 2 ran beside an epoch 1 still removing its container; podman:\n%s", f.podmanLog())
 	}
-	var got *proto.Status
-	f.mu.Lock()
-	for _, fr := range f.reports {
-		if fr.Type == proto.MsgStatus && fr.Epoch == 2 {
-			var st proto.Status
-			if err := json.Unmarshal(fr.Data, &st); err == nil {
-				got = &st
-			}
-		}
-	}
-	f.mu.Unlock()
+	got := f.lastStatus(2)
 	if got == nil || got.State != "failed" || !strings.Contains(got.Message, "epoch 1") {
 		t.Fatalf("epoch 2's last status %+v, want failed naming epoch 1", got)
 	}
-	if st, err := readRunState(f.p.dir); err == nil && st.Epoch != 1 {
-		t.Errorf("run state is epoch %d's, want epoch 1's left alone", st.Epoch)
+	f.wantRunState(t, 1, false)
+	f.releaseRemove()
+	if !f.p.waitDone(10 * time.Second) {
+		t.Fatal("epoch 1 never ended")
 	}
-	if !f.p.isStale() {
-		t.Error("epoch 1 was not fenced off")
+	f.wantUploaded(t)
+}
+
+// A stop of the next epoch while it waits ends it reported stopped and
+// leaves the previous epoch's run state, snapshot and upload alone: the
+// snapshot luxd acked is uploaded. So with no stop, while it waits.
+func TestAckedSnapshotUploadsAcrossTheHandover(t *testing.T) {
+	for _, stop := range []bool{true, false} {
+		t.Run(map[bool]string{true: "stopped while waiting", false: "while waiting"}[stop], func(t *testing.T) {
+			f := newRemovingFixture(t)
+			p2 := f.assignEpoch(t, 2)
+			if stop {
+				p2.requestStop(context.Background(), "stop")
+				if !p2.waitDone(10 * time.Second) {
+					t.Fatal("epoch 2 never ended")
+				}
+				f.releaseRemove()
+				if !f.p.waitDone(10 * time.Second) {
+					t.Fatal("epoch 1 never ended")
+				}
+			} else {
+				f.waitLease(t, 2, "starting")
+			}
+			if f.r.isStaleRun("run1", 1) {
+				t.Error("epoch 1's acked snapshot is skipped by the uploader")
+			}
+			f.wantUploaded(t)
+			if !stop {
+				f.releaseRemove()
+				if !p2.waitDone(10 * time.Second) {
+					t.Fatal("epoch 2 never ended")
+				}
+			}
+		})
+	}
+}
+
+// The next epoch assigned while the previous one exports a snapshot luxd
+// has not acked (luxd assigns over an unreported placement only once it is
+// lost, and refuses its snapshot) does not wait for that export: it is
+// abandoned, and its snapshot never reported.
+func TestNextEpochAbandonsAnUnackedExport(t *testing.T) {
+	f := newOverlapFixture(t)
+	f.r.handover = time.Minute
+	start := time.Now()
+	f.r.assign(context.Background(), proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 2})
+	if !f.p.waitDone(5 * time.Second) {
+		t.Fatal("epoch 1's export was not abandoned")
+	}
+	for !f.epoch2Started() {
+		if time.Since(start) > 5*time.Second {
+			t.Fatalf("epoch 2 did not start; podman:\n%s", f.podmanLog())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.mu.Lock()
+	sent := append(slices.Clone(f.held), f.reports...)
+	f.mu.Unlock()
+	for _, fr := range sent {
+		if fr.Epoch == 1 && fr.Type == proto.MsgSnapshotDone {
+			t.Error("epoch 1 reported the snapshot it abandoned")
+		}
+	}
+	for id, rec := range f.r.snapshotRecords() {
+		t.Errorf("snapshot record %s %+v of an abandoned export", id, rec)
 	}
 }
 
