@@ -132,7 +132,7 @@ def test_resume_a_succeeded_run(lux, runners, hosts):
     run = lux.get(run_id)
     assert run["state"] == "terminated" and run["resumable"] is False, run
     p = lux.run("resume", run_id, check=False)
-    assert p.returncode != 0 and "not_resumable" in p.stderr + p.stdout, p
+    assert p.returncode == 4 and p.stderr.strip() == "lux: run is terminated", p
 
 
 def test_resume_resizes_a_stopped_run(lux, runners, hosts):

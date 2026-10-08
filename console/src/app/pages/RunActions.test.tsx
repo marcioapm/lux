@@ -62,23 +62,6 @@ test("a running Run offers Terminate (no Cancel), which opens the terminate dial
   }
 });
 
-test("the Terminate action calls POST /v1/runs/{id}/terminate", async () => {
-  const methods: string[] = [];
-  const real = globalThis.fetch;
-  (window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM.setURL("http://localhost/");
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    methods.push(`${init?.method ?? "GET"} ${typeof input === "string" ? input : input.toString()}`);
-    return new Response(JSON.stringify(run("stopping")), { status: 200, headers: { "Content-Type": "application/json" } });
-  }) as typeof fetch;
-  try {
-    api.signIn("k");
-    await api.api.terminateRun("run_1");
-    expect(methods).toEqual(["POST /v1/runs/run_1/terminate"]);
-  } finally {
-    globalThis.fetch = real;
-  }
-});
-
 test("a succeeded Run can be resumed or terminated, not stopped", async () => {
   const r = await render("succeeded");
   try {

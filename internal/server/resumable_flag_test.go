@@ -27,6 +27,10 @@ func TestResumableFlagIsTheFilter(t *testing.T) {
 		{"running", StateRunning, "", false, false},
 		{"never", StateStopped, "never", false, false},
 		{"refused-no-snapshot", StateStopped, "", true, false},
+		{"succeeded-refused-no-snapshot", StateSucceeded, "", true, false},
+		// restart with no session restores nothing: a resume is a first
+		// placement, so a refused report does not block it.
+		{"restart-refused-no-session", StateStopped, "restart", true, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -37,6 +41,7 @@ func TestResumableFlagIsTheFilter(t *testing.T) {
 			}
 			if c.refusedNoSnapshot {
 				execSQL(t, s, ctx, `UPDATE placements SET snapshot_refused = true WHERE id = 'p1'`)
+				execSQL(t, s, ctx, `UPDATE runs SET session_id = '' WHERE id = 'r1'`)
 			} else if c.state != StateRunning {
 				exitedSnapshot(t, s, ctx)
 			}
