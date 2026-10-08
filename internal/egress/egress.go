@@ -323,6 +323,9 @@ func (f *Firewall) refresh(ctx context.Context) {
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, refreshWorkers)
 	for h := range names {
+		if ctx.Err() != nil {
+			break
+		}
 		slots <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-slots }()
@@ -341,6 +344,15 @@ func (f *Firewall) resolve(ctx context.Context, host string) []netip.Addr {
 	ips, err := f.lookup(rctx, host)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// The Runs that listed host may have been removed during the lookup:
+	// storing it would leave an entry nothing refreshes or prunes.
+	listed := false
+	for _, r := range f.runs {
+		listed = listed || r.hosts[host]
+	}
+	if !listed {
+		return nil
+	}
 	known := f.resolved[host]
 	if known == nil {
 		known = map[netip.Addr]bool{}

@@ -303,6 +303,38 @@ func TestRemovePrunesResolvedNames(t *testing.T) {
 	}
 }
 
+// A lookup in flight when its Run is removed stores nothing for a name no
+// remaining Run allows.
+func TestRemoveDuringRefreshStoresNothing(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	lookup := func(ctx context.Context, _ string) ([]netip.Addr, error) {
+		close(started)
+		<-release
+		return []netip.Addr{netip.MustParseAddr("93.184.216.34")}, nil
+	}
+	f := newFirewall(nil, lookup, func(string) error { return nil })
+	r, err := newRun(false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.hosts["gone.example.com"] = true
+	f.runs["lux1"] = r
+	done := make(chan struct{})
+	go func() {
+		f.refresh(context.Background())
+		close(done)
+	}()
+	<-started
+	f.Remove("lux1")
+	close(release)
+	<-done
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.resolved) != 0 {
+		t.Fatalf("resolved %v", f.resolved)
+	}
+}
+
 func TestUnrestrictedRunAdmitsNothing(t *testing.T) {
 	f, _, add := fixture(t)
 	add("lux1", true, spec.EgressRule{Host: "*.wild.example.com"})
