@@ -25,11 +25,12 @@ func expiryFixture(t *testing.T) (*Server, context.Context) {
 	return s, ctx
 }
 
-// restingRun adds a Run in state that entered it days ago.
+// restingRun adds a Run in state that entered it days ago (an ended one
+// finished 200 days ago).
 func restingRun(t *testing.T, s *Server, ctx context.Context, id, tenant, state string, days float64) {
 	t.Helper()
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, state_changed_at, finished_at)
-		VALUES ($1, $2, '{}', $3, 1, now() - make_interval(secs => $4 * 86400), CASE WHEN $3 = 'failed' THEN now() - interval '200 days' END)`,
+		VALUES ($1, $2, '{}', $3, 1, now() - make_interval(secs => $4 * 86400), CASE WHEN $3 IN ('failed', 'succeeded') THEN now() - interval '200 days' END)`,
 		id, tenant, state, days)
 }
 
@@ -39,15 +40,19 @@ func runState(t *testing.T, s *Server, id string) (state, reason string) {
 	return state, reason
 }
 
-// A Run resting longer than its tenant's limit is terminated, saying why,
-// with a state event and finished_at; one just under it, a live one, and
-// one of a tenant whose Runs never expire are not.
+// A Run resting (stopped, lost, failed or succeeded) longer than its
+// tenant's limit is terminated, saying why, with a state event and
+// terminated_at now (retention's clock); an ended one keeps its
+// finished_at, a stopped or lost one gets it now. One just under the
+// limit, a live one, and one of a tenant whose Runs never expire are not.
 func TestReapExpiry(t *testing.T) {
 	s, ctx := expiryFixture(t)
 	restingRun(t, s, ctx, "stopped-old", "t1", StateStopped, 90.01)
 	restingRun(t, s, ctx, "lost-old", "t1", StateLost, 91)
 	restingRun(t, s, ctx, "failed-old", "t1", StateFailed, 120)
+	restingRun(t, s, ctx, "succeeded-old", "t1", StateSucceeded, 95)
 	restingRun(t, s, ctx, "stopped-young", "t1", StateStopped, 89.99)
+	restingRun(t, s, ctx, "succeeded-young", "t1", StateSucceeded, 89.99)
 	restingRun(t, s, ctx, "running-old", "t1", StateRunning, 200)
 	restingRun(t, s, ctx, "never-old", "never", StateStopped, 1000)
 	restingRun(t, s, ctx, "short-old", "short", StateLost, 10.01)
@@ -56,25 +61,29 @@ func TestReapExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	for id, want := range map[string]string{
-		"stopped-old": "expired: stopped for 90 days",
-		"lost-old":    "expired: lost for 90 days",
-		"failed-old":  "expired: failed for 90 days",
-		"short-old":   "expired: lost for 10 days",
+		"stopped-old":   "expired: stopped for 90 days",
+		"lost-old":      "expired: lost for 90 days",
+		"failed-old":    "expired: failed for 90 days",
+		"succeeded-old": "expired: succeeded for 90 days",
+		"short-old":     "expired: lost for 10 days",
 	} {
 		state, reason := runState(t, s, id)
 		if state != StateTerminated || reason != want {
 			t.Errorf("%s: %s %q, want terminated %q", id, state, reason, want)
 		}
 		var events int
-		var finished bool
+		var finishedNow, terminatedNow bool
 		systemScan(t, s, `SELECT (SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'state'
 				AND data->>'state' = 'terminated' AND data->>'reason' = $2),
-			finished_at > now() - interval '1 minute' FROM runs WHERE id = $1`, []any{id, want}, &events, &finished)
-		if events != 1 || !finished {
-			t.Errorf("%s: %d terminated state events, finished now %v", id, events, finished)
+			finished_at > now() - interval '1 minute', terminated_at > now() - interval '1 minute' FROM runs WHERE id = $1`,
+			[]any{id, want}, &events, &finishedNow, &terminatedNow)
+		wantFinishedNow := id != "failed-old" && id != "succeeded-old"
+		if events != 1 || finishedNow != wantFinishedNow || !terminatedNow {
+			t.Errorf("%s: %d terminated state events, finished now %v (want %v), terminated now %v", id, events, finishedNow, wantFinishedNow, terminatedNow)
 		}
 	}
-	for id, want := range map[string]string{"stopped-young": StateStopped, "running-old": StateRunning, "never-old": StateStopped, "short-young": StateStopped} {
+	for id, want := range map[string]string{"stopped-young": StateStopped, "succeeded-young": StateSucceeded, "running-old": StateRunning,
+		"never-old": StateStopped, "short-young": StateStopped} {
 		if state, _ := runState(t, s, id); state != want {
 			t.Errorf("%s: %s, want %s", id, state, want)
 		}

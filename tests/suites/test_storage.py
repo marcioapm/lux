@@ -128,22 +128,28 @@ def test_storage_quota(env, lux, runners, hosts):
     assert e.value.code == 5 and "quota" in e.value.stderr
 
 
-def test_retention_spares_a_failed_runs_snapshot(env, lux, runners, hosts):
-    """A failed Run is resumable, so retention leaves its snapshot alone even
-    at 0 days: a later succeeded Run of the same tenant is deleted, the
-    failed one still resumes from its own state. It goes only once it
-    expires (terminated), then after retention like any terminal Run."""
+def test_retention_spares_resumable_runs(env, lux, runners, hosts):
+    """A failed or succeeded Run is resumable, so retention leaves its
+    snapshot alone even at 0 days, while a terminated Run of the same tenant
+    loses its own. The failed one still resumes from its own state. It goes
+    only once it expires (terminated), then after retention like any
+    terminated Run."""
     env.luxd_admin("set-quota", "--tenant", lux.tenant_id, "--retention-days", "0")
     runners.start(hosts[0])
     failed = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "test -f /d/f && exit 0; touch /d/f; exit 1",
                                 volumes=[{"name": "d", "path": "/d"}]))
     lux.wait_state(failed, "failed")
     lux.wait_placement_uploaded(failed)
+    ok = lux.submit(generic(ALPINE_IMAGE, "echo", "kept"))
+    lux.wait_state(ok, "succeeded")
+    lux.wait_placement_uploaded(ok)
     done = lux.submit(generic(ALPINE_IMAGE, "echo", "gone-soon"))
     lux.wait_state(done, "succeeded")
-    # Retention has run over this tenant after the failed Run finished.
-    wait_until(lambda: not s3_keys(env, done) and lux.get(done)["placements"][0].get("uploadedAt"),
-               60, 1, "retention never deleted the succeeded Run")
+    lux.wait_placement_uploaded(done)
+    lux.run("terminate", done, "--wait")
+    # Retention has run over this tenant after the others ended.
+    wait_until(lambda: not s3_keys(env, done), 60, 1, "retention never deleted the terminated Run")
+    assert s3_keys(env, ok), "retention deleted a succeeded Run's blobs"
     assert any(sn["available"] for sn in lux.json("snapshots", failed)), lux.json("snapshots", failed)
     assert s3_keys(env, failed)
     lux.run("resume", failed)

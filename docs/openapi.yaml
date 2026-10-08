@@ -2887,7 +2887,7 @@ components:
           format: date-time
           type: string
         expireAfterDays:
-          description: "Days a stopped, lost or failed Run may rest before lux terminates it; 0: never."
+          description: "Days a stopped, lost, failed or succeeded Run may rest before lux terminates it; 0: never."
           format: int64
           type: integer
         hosts:
@@ -2907,7 +2907,7 @@ components:
         name:
           type: string
         retentionDays:
-          description: Days a succeeded or terminated Run keeps its snapshots and output after it ended. Artifacts are kept until deleted.
+          description: Days a terminated Run keeps its snapshots and output after it was terminated. Artifacts are kept until deleted.
           format: int64
           type: integer
         runs:
@@ -6649,7 +6649,7 @@ paths:
   /v1/runs/{id}/resume:
     post:
       description: |-
-        From its latest snapshot (or fromSnapshot), on any host, through the adapter's resume path with its session: a succeeded Run like a stopped one. Its secrets must be supplied again. Idempotent while resuming. A terminated Run is not resumable (409 not_resumable). A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been terminated. A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state (an assignment no runner started may still be placed again).
+        From its latest snapshot (or fromSnapshot), on any host, through the adapter's resume path with its session: a succeeded Run like a stopped one. Its secrets must be supplied again. Idempotent while resuming. A terminated Run is not resumable (409 not_resumable). A Run left stopped, lost, failed or succeeded longer than its tenant's expireAfterDays has been terminated. A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state (an assignment no runner started may still be placed again).
 
         git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a Run resume accepts (not one already resuming: 409). A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one, or unless its resumePolicy is restart and it has no session, which restores nothing.
 

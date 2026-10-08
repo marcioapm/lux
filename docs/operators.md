@@ -35,7 +35,7 @@ luxd finds the Run's tenant. Commands that create something for a tenant
 ```bash
 lux status                          # Runs by state, busy/idle, queue, time to start, hosts, capacity
 lux ls [--resumable] [--host H] [--state …] [--limit N]
-lux get <run>                       # with what a resume would take, when stopped, lost or failed
+lux get <run>                       # with what a resume would take, when stopped, lost, failed or succeeded
 lux hosts ls [--pool P] [--state S] [--all]
 lux hosts get <host>                # lifecycle, capacity, what its live placements hold
 lux tenants ls                      # quotas and what each tenant uses; RETENTION, and EXPIRY (never: resting Runs are never terminated)

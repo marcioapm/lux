@@ -130,4 +130,15 @@ func TestRunTerminatedMigration(t *testing.T) {
 	if _, err := conn.Exec(ctx, `UPDATE cost_pending SET reason = 'state:cancelled' WHERE run_id = 'r_ok'`); err == nil {
 		t.Error("state:cancelled accepted")
 	}
+	// 057: terminated_at from the latest terminated state event (r_gone,
+	// r_lost, r_queued, r_expired have one); none for other Runs.
+	var withClock, withoutClock int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FILTER (WHERE terminated_at = (SELECT max(e.created_at) FROM run_events e
+			WHERE e.run_id = runs.id AND e.type = 'state' AND e.data->>'state' = 'terminated')),
+		count(*) FILTER (WHERE terminated_at IS NULL) FROM runs`).Scan(&withClock, &withoutClock); err != nil {
+		t.Fatal(err)
+	}
+	if withClock != 4 || withoutClock != 2 {
+		t.Errorf("terminated_at: %d from their events, %d unset; want 4 and 2", withClock, withoutClock)
+	}
 }

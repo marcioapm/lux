@@ -427,8 +427,9 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 	return hostID, nil
 }
 
-// reapExpiry terminates Runs that have rested (stopped, lost or failed) longer
-// than their tenant's expire_after_days (0: never). The clock is
+// reapExpiry terminates Runs that have rested (stopped, lost, failed or
+// succeeded: resumable, not running) longer than their tenant's
+// expire_after_days (0: never), reason "expired: <state> for N days". The clock is
 // state_changed_at, so a resume and a later stop restart it. The Run is
 // locked and its state re-checked by FOR UPDATE (a resume that committed
 // first fails the WHERE on the row's new version); one held by a resume or
@@ -612,15 +613,17 @@ func (s *Server) deleteObjects(ctx context.Context, what string, keys []string) 
 	}
 }
 
-// reapRetention deletes the blobs of Runs that succeeded or were terminated
-// longer ago than their tenant's retention: snapshot volumes and output.
-// Artifacts are kept until their owner deletes them (deleteArtifacts). A
-// failed Run is resumable, so it is exempt from retention until it expires
-// (reapExpiry) and its retention counts from then.
+// reapRetention deletes the blobs of Runs terminated longer ago than their
+// tenant's retention: snapshot volumes and output. The clock is
+// terminated_at, not finished_at: a Run terminated long after it ended
+// keeps the whole retention from its terminate. Artifacts are kept until
+// their owner deletes them (deleteArtifacts). Every other Run is
+// resumable, so it is exempt until it is terminated (by its owner, or by
+// expiry: reapExpiry).
 //
 // The database is the claim: blobs are marked deleted, and the Run's
 // snapshots unavailable, in one transaction that locks each Run and checks
-// it is still terminal, so a Run cannot be resumed from a snapshot that is
+// it is still terminated, so a Run cannot be resumed from a snapshot that is
 // going. S3 objects are deleted after the claim; one that fails to delete
 // is an orphan in S3, never a Run pointing at nothing.
 //
@@ -634,9 +637,9 @@ func (s *Server) reapRetention(ctx context.Context) error {
 			WITH due AS (
 				SELECT r.id FROM runs r JOIN tenants t ON t.id = r.tenant_id
 				WHERE r.id = ANY (ARRAY(SELECT DISTINCT run_id FROM blobs WHERE location = 's3' AND kind <> 'artifact'))
-				  AND r.finished_at IS NOT NULL AND r.finished_at < now() - make_interval(days => t.retention_days)
 				  AND r.state = 'terminated'
-				ORDER BY r.finished_at LIMIT 20
+				  AND r.terminated_at IS NOT NULL AND r.terminated_at < now() - make_interval(days => t.retention_days)
+				ORDER BY r.terminated_at LIMIT 20
 				FOR UPDATE OF r SKIP LOCKED
 			), gone AS (
 				UPDATE snapshots SET available = false WHERE run_id IN (SELECT id FROM due) AND available
