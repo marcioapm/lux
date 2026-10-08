@@ -59,8 +59,8 @@ type placement struct {
 	// cancelStart ends the steps before the container starts (an image
 	// build, a pull, a clone) when the placement is stopped meanwhile.
 	cancelStart context.CancelFunc
-	// cancelFinish ends finish's snapshot export; nil outside it.
-	cancelFinish context.CancelFunc
+	// cancelExport ends finish's volume exports; nil outside them.
+	cancelExport context.CancelFunc
 	shimConn     net.Conn
 	shimEnc      *json.Encoder
 	done         chan struct{}
@@ -195,15 +195,13 @@ func (p *placement) isStale() bool {
 	return p.stale
 }
 
-// abandonSnapshot cancels finish's volume exports if they are under way: a
-// snapshot luxd has not acked yet. One whose volumes are exported is
-// completed and reported, and once acked is luxd's, so finish runs to its
-// end.
+// abandonSnapshot cancels finish's volume exports if they are under way.
+// Past them the snapshot is completed and reported as usual.
 func (p *placement) abandonSnapshot() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.cancelFinish != nil {
-		p.cancelFinish()
+	if p.cancelExport != nil {
+		p.cancelExport()
 	}
 }
 
@@ -213,29 +211,15 @@ func (p *placement) setPhase(ph string) {
 	p.mu.Unlock()
 }
 
-// waitDone waits up to d for the placement to end; false if it has not.
-func (p *placement) waitDone(d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-p.done:
-		return true
-	case <-t.C:
-		return false
-	}
-}
-
 // removeTimeout bounds finish's removal of its container.
 const removeTimeout = time.Minute
 
 // handoverWait bounds how long a placement waits for the Run's previous
-// placement on this host to end. That one is either killed (its workload
-// may still run), abandoning its volume exports (luxd has not acked them;
-// sampleSlow's walk of the volumes before them ignores the cancel, so on a
-// volume of very many files the abandon is not immediate), or past the
-// exports: what is left is its reports, which outlast a host lease only
-// while the host is cut off from luxd, and its container's removal,
-// removeTimeout plus podman's WaitDelay if podman hangs.
+// placement on this host to end. That one is killed, abandoning its volume
+// exports (sampleSlow's walk of the volumes ignores the cancel, so on very
+// many files this is not immediate), or past them: its reports outlast a
+// host lease only while the host is cut off from luxd, and its container's
+// removal takes at most removeTimeout plus podman's WaitDelay.
 func (r *Runner) handoverWait() time.Duration {
 	if r.handover > 0 {
 		return r.handover
@@ -360,17 +344,16 @@ func (p *placement) waitPrevious() error {
 			next := prev.prev
 			prev.mu.Unlock()
 			prev = next
-			continue
 		case <-p.nudge:
+			if p.pendingStop() != "" {
+				return errStoppedBeforeStart
+			}
+			if p.isStale() {
+				return errStale
+			}
 		case <-deadline.C:
 			p.logf("the previous placement here did not end in time", "previous", prev.epoch, "waited", wait)
 			return fmt.Errorf("the Run's epoch %d on this host did not end within %s", prev.epoch, wait)
-		}
-		switch {
-		case p.pendingStop() != "":
-			return errStoppedBeforeStart
-		case p.isStale():
-			return errStale
 		}
 	}
 	p.mu.Lock()
@@ -379,7 +362,6 @@ func (p *placement) waitPrevious() error {
 	return nil
 }
 
-// wake has waitPrevious re-check a stop or a fence set under p.mu.
 func (p *placement) wake() {
 	select {
 	case p.nudge <- struct{}{}:
@@ -636,14 +618,12 @@ func (p *placement) readExit(code int) *exitRecord {
 
 // finish snapshots the state volumes and reports: snapshot first, so that
 // by the time luxd sees the Run stopped its snapshot is recorded.
-// abandonSnapshot cancels the volume exports only: once they are done the
-// snapshot is completed and reported as usual.
 func (p *placement) finish(ctx context.Context, exit *exitRecord) {
-	exportCtx, cancelExport := context.WithCancel(ctx)
-	defer cancelExport()
+	exportCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	p.mu.Lock()
 	p.phase = "exited"
-	p.cancelFinish = cancelExport
+	p.cancelExport = cancel
 	p.state.Exit = exit
 	p.state.Phase = "exited"
 	p.state.LastExitAt = time.Now().UnixMilli()
@@ -659,7 +639,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	}
 	sd, err := p.snapshot(ctx, exportCtx)
 	p.mu.Lock()
-	p.cancelFinish = nil
+	p.cancelExport = nil
 	p.mu.Unlock()
 	if err != nil && exportCtx.Err() != nil {
 		p.logf("snapshot abandoned: the Run's next epoch was assigned here", "err", err)
@@ -1184,8 +1164,7 @@ func (p *placement) interrupt(ctx context.Context) {
 	_ = p.sendShim(proto.ShimMsg{Type: proto.ShimInterrupt})
 }
 
-// kill ends a stale placement at once: its Run lives elsewhere now. A
-// placement that never created a container has nothing to kill.
+// kill ends a stale placement at once: its Run lives elsewhere now.
 func (p *placement) kill(ctx context.Context) {
 	if ctr := p.container(); ctr != "" {
 		_ = p.r.pm.Kill(ctx, ctr, "KILL")
@@ -1456,7 +1435,7 @@ func dirSize(root string) int64 {
 // snapshot exports every state volume (zstd), compresses the output file,
 // and records them for upload. The local volumes now hold exactly this
 // snapshot, so a resume here moves nothing. exportCtx covers the volume
-// exports only: once they are done, a cancel no longer trims the snapshot.
+// exports only.
 func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDone, error) {
 	snapID := ids.New(ids.Snapshot)
 	rec := &snapshotRecord{RunID: p.runID, Epoch: p.epoch, Created: time.Now().UnixMilli()}
