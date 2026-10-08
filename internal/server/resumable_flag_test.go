@@ -113,6 +113,22 @@ func TestResumableFlagOnActionAnswers(t *testing.T) {
 	}
 }
 
+// For every Run state, Postgres evaluates inactiveRunStates as the union of
+// endedRunStates and resumableRunStates, and those two as ended() and
+// resumable() do.
+func TestRunStateSets(t *testing.T) {
+	s := testServer(t)
+	for _, st := range []string{StateSubmitted, StateScheduled, StateProvisioning, StateStarting, StateRunning, StateStopping,
+		StateStopped, StateResuming, StateSucceeded, StateFailed, StateTerminated, StateLost} {
+		var inactive, isEnded, isResumable bool
+		systemScan(t, s, `SELECT $1 IN `+inactiveRunStates+`, $1 IN `+endedRunStates+`, $1 IN `+resumableRunStates,
+			[]any{st}, &inactive, &isEnded, &isResumable)
+		if inactive != (isEnded || isResumable) || isEnded != ended(st) || isResumable != resumable(st) {
+			t.Errorf("%s: inactive %v, ended %v (ended() %v), resumable %v (resumable() %v)", st, inactive, isEnded, ended(st), isResumable, resumable(st))
+		}
+	}
+}
+
 // exitedSnapshot gives r1 an uploaded snapshot of its exited placement, so
 // a resume has one to restore.
 func exitedSnapshot(t *testing.T, s *Server, ctx context.Context) {
