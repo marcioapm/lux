@@ -603,9 +603,8 @@ type imageCandidate struct {
 	LastUsed int64
 }
 
-// localCopyImages are the images (full refs) of the Runs whose volumes are
-// held here for a resume: their stopped containers are removed, and the
-// resume would otherwise pull or build the image again.
+// localCopyImages protects images needed by local volumes awaiting a resume,
+// keyed by full ref to match eviction candidates.
 func (r *Runner) localCopyImages() map[string]bool {
 	out := map[string]bool{}
 	entries, _ := os.ReadDir(filepath.Join(r.cfg.DataDir, "runs"))
@@ -620,8 +619,8 @@ func (r *Runner) localCopyImages() map[string]bool {
 // pickEvictions chooses which of lux's image names to remove to free need
 // bytes: whole images no container uses and no local copy awaits (held,
 // by full ref), least recently used first (an image's last use is its
-// latest name's), and none used after recent. An
-// image that also has a name lux did not give it would not be freed, so it
+// latest name's), and none used after recent. An image that also has a name
+// lux did not give it would not be freed, so it
 // is left alone. Sizes are estimates (layers can be shared): the next pass
 // measures again.
 func pickEvictions(cands []imageCandidate, inUse, held map[string]bool, need, recent int64) []string {

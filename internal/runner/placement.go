@@ -502,17 +502,13 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		}
 		time.Sleep(time.Second)
 	}
-	// Nothing reads a stopped container once its end is reported (a resume
-	// makes a new one); its volumes stay for a resume here. By id: a resume
-	// assigned here since may already have made the next one under its name.
-	// Without its container the image is no longer kept from the GC: its
-	// TTL runs from this stop, as the local copy's does.
+	// Remove by ID after the final ack: a concurrent resume may already
+	// have created another container under the Run's name. Keep the volumes.
 	p.mu.Lock()
 	id, image := p.state.Container, p.state.Image
 	p.mu.Unlock()
 	if id != "" {
-		// Bounded: a hung podman would hold the placement in "exited", and
-		// a later resume or discard removes the container by name anyway.
+		// A hung podman must not keep the placement in "exited" indefinitely.
 		rmCtx, cancel := context.WithTimeout(ctx, time.Minute)
 		if err := p.r.pm.Remove(rmCtx, id); err != nil {
 			p.r.log.Warn("removing the stopped container failed", "run", p.runID, "epoch", p.epoch, "container", id, "err", err)
@@ -520,6 +516,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		cancel()
 	}
 	if image != "" {
+		// Start the image TTL at the stop without claiming an operator's image.
 		p.r.images.touch(image, p.tenantID)
 	}
 	p.mu.Lock()
@@ -742,10 +739,7 @@ func hardening(sp spec.RunSpec) []string {
 	)
 }
 
-// createContainer makes the placement's container from the image. An
-// earlier placement's container on this host is removed first, never
-// started again: its writable layer (/tmp, /run) would carry state a
-// resume on another host does not have.
+// Every placement gets a fresh writable layer, even on a same-host resume.
 func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image string, network podman.Network, prompt []spec.Attachment) error {
 	if err := p.r.pm.Remove(ctx, containerName(p.runID)); err != nil {
 		return err
