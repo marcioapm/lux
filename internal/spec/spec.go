@@ -655,8 +655,12 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		if (e.Host == "") == (e.CIDR == "") {
 			fail("network.egress[%d]: exactly one of host or cidr", i)
 		}
-		if strings.Contains(e.Host, "*") {
-			fail("network.egress[%d]: wildcards cannot be resolved; list concrete hostnames", i)
+		if strings.Contains(e.Host, "*") && !validWildcard(e.Host) {
+			if j := strings.IndexAny(e.Host, ":/"); j > 0 && validWildcard(e.Host[:j]) {
+				fail("network.egress[%d]: a wildcard is a domain only, without a port or path", i)
+			} else {
+				fail(`network.egress[%d]: a wildcard is "*." then a domain of at least two labels, e.g. *.example.com`, i)
+			}
 		}
 	}
 	ports := map[string]bool{}
@@ -1006,13 +1010,46 @@ var (
 	repoPathRe   = regexp.MustCompile(`^[a-z0-9]+([._-]+[a-z0-9]+)*(/[a-z0-9]+([._-]+[a-z0-9]+)*)*$`)
 )
 
-// allows reports whether an egress rule covers host: a hostname equal to a
-// host rule, or an address in a cidr rule. The runner's firewall enforces
-// the rest (what a name resolves to).
+// IsWildcard reports whether a host rule is the wildcard form, *.<domain>.
+func (r EgressRule) IsWildcard() bool { return strings.HasPrefix(r.Host, "*.") }
+
+// Matches reports whether a host rule covers name: equal to it, or, for
+// *.<domain>, a valid hostname with one or more labels before <domain>
+// (not <domain> itself). Case-insensitive; trailing dots are ignored.
+func (r EgressRule) Matches(name string) bool { return HostMatches(r.Host, name) }
+
+// HostMatches is EgressRule.Matches for a host rule's text. An invalid
+// wildcard matches nothing.
+func HostMatches(rule, name string) bool {
+	rule = strings.TrimSuffix(strings.ToLower(rule), ".")
+	name = strings.TrimSuffix(strings.ToLower(name), ".")
+	if rule == "" {
+		return false
+	}
+	if !strings.HasPrefix(rule, "*.") {
+		return rule == name
+	}
+	if !validWildcard(rule) || !hostLabelsRe.MatchString(name) {
+		return false
+	}
+	suffix := rule[1:] // ".<domain>"
+	return len(name) > len(suffix) && strings.HasSuffix(name, suffix)
+}
+
+// validWildcard: "*." then a hostname of at least two labels, so a rule
+// cannot cover a whole top-level domain.
+func validWildcard(rule string) bool {
+	d, ok := strings.CutPrefix(strings.TrimSuffix(strings.ToLower(rule), "."), "*.")
+	return ok && strings.Contains(d, ".") && hostLabelsRe.MatchString(d)
+}
+
+// allows reports whether an egress rule covers host: a hostname a host
+// rule matches, or an address in a cidr rule. The runner's firewall
+// enforces the rest (what a name resolves to).
 func (n Network) allows(host string) bool {
 	ip, ipErr := netip.ParseAddr(host)
 	for _, e := range n.Egress {
-		if e.Host != "" && strings.EqualFold(strings.TrimSuffix(e.Host, "."), strings.TrimSuffix(host, ".")) {
+		if e.Host != "" && e.Matches(host) {
 			return true
 		}
 		if p, err := netip.ParsePrefix(e.CIDR); err == nil && ipErr == nil && p.Contains(ip.Unmap()) {
