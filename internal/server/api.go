@@ -90,7 +90,7 @@ func (s *Server) routes(api huma.API) {
 		Description: "From its latest snapshot (or fromSnapshot), on any host, through the adapter's resume path with its session: a succeeded Run like a stopped one. " +
 			"Its secrets must be supplied again. Idempotent while resuming. A terminated Run is not resumable (409 not_resumable). " +
 			"A Run left stopped, lost, failed or succeeded longer than its tenant's expireAfterDays has been terminated. " +
-			"A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state " +
+			"A Run whose spec has resumePolicy never ends terminated whenever it would rest resumable, and a requested resume of one is refused: 409 not_resumable, whatever its state " +
 			"(an assignment no runner started may still be placed again).\n\n" +
 			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +
 			"with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. " +
@@ -327,7 +327,7 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "drainHost", Method: http.MethodPost, Path: "/v1/hosts/{id}/drain", Tags: []string{"hosts"},
 		Summary: "Drain a host",
 		Description: "No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere " +
-			"(a Run with resumePolicy manual or never fails instead; also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.",
+			"(a Run with resumePolicy manual fails instead, one with never ends terminated; also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound},
 	}, "admin", s.drainHost)
@@ -411,7 +411,7 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Remove a pool",
 		Description: "Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. " +
 			"If it was the tenant's default pool, the tenant has none until another is marked. " +
-			"forceEvict also stops its hosts' live Runs so they resume elsewhere (a Run with resumePolicy manual or never fails instead).",
+			"forceEvict also stops its hosts' live Runs so they resume elsewhere (a Run with resumePolicy manual fails instead, one with never ends terminated).",
 		Errors: []int{http.StatusNotFound},
 	}, "admin", forTenant(s.deletePool))
 	register(s, api, huma.Operation{
@@ -2549,8 +2549,8 @@ const (
 // drainHosts takes hosts out of service (no new placements), adds cause to
 // their drain_causes, sets state_reason to reason, and, unless stopReason
 // is "" (cordon only), asks their live placements to stop with it (drain
-// or preempt: both resume elsewhere, or fail a Run whose resumePolicy is
-// manual or never), including on hosts already draining;
+// or preempt: both resume elsewhere, or end a Run whose resumePolicy is
+// manual (failed) or never (terminated)), including on hosts already draining;
 // where selects them (placeholders from $1). A cordoned host's Runs finish
 // where they are: the reaper (static hosts) or the pool's replace path
 // (provisioned) takes it once idle. Returns their ids, to notify once the

@@ -198,11 +198,11 @@ def ended_or_replaced(run):
     return run if run["state"] not in ("running", "stopping") or len(run["placements"]) > 1 else None
 
 
-def test_a_run_never_resumed_is_not_migrated_and_fails_when_force_evicted(operator, lux, runners, hosts):
+def test_a_run_never_resumed_is_not_migrated_and_terminated_when_force_evicted(operator, lux, runners, hosts):
     """resumePolicy: never is for one-shot work that cannot continue on
     another host. migrate refuses it and leaves it running; a cordon-only
     drain leaves it running too; a force-evicting drain stops it, and it
-    ends failed, not placed again, though another host is free."""
+    ends terminated, not placed again, though another host is free."""
     runners.start(hosts[0])
     runners.start(hosts[1])
     run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "trap 'exit 0' TERM; sleep 300 & wait", resumePolicy="never"))
@@ -220,13 +220,13 @@ def test_a_run_never_resumed_is_not_migrated_and_fails_when_force_evicted(operat
 
     lux.run("hosts", "drain", host, "--force-evict")
     run = wait_until(lambda: ended_or_replaced(lux.get(run_id)), 60, 0.3, "the force-evicted Run never ended")
-    assert run["state"] == "failed", run
+    assert run["state"] == "terminated", run
     assert run["stateReason"] == "drain: not resumed (resumePolicy never)", run
     assert run["placements"][0]["stopReason"] == "drain", run["placements"]
     # Waits out several scheduler passes (luxd's tick is 1s): none places it.
     time.sleep(3)
     run = lux.get(run_id)
-    assert run["state"] == "failed" and len(run["placements"]) == 1, run
+    assert run["state"] == "terminated" and len(run["placements"]) == 1, run
     assert not [e for e in lux.events(run_id, "state") if e["data"]["state"] == "resuming"]
 
     # never: no one may resume it, its tenant or an operator.
@@ -241,7 +241,23 @@ def test_a_run_never_resumed_is_not_migrated_and_fails_when_force_evicted(operat
     # Waits out scheduler passes after the refused resumes (tick 1s): none placed it.
     time.sleep(2)
     run = lux.get(run_id)
-    assert run["state"] == "failed" and len(run["placements"]) == 1, run
+    assert run["state"] == "terminated" and len(run["placements"]) == 1, run
+
+
+def test_a_run_never_resumed_that_succeeds_ends_terminated(lux, runners, hosts):
+    """A resumePolicy: never Run can never be resumed, so when it succeeds
+    it ends terminated rather than resting succeeded: its exit code kept,
+    its outcome in the reason, not resumable, its resume refused."""
+    runners.start(hosts[0])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo done", resumePolicy="never"))
+    run = lux.wait_state(run_id, "terminated", "succeeded", "failed", timeout=60)
+    assert run["state"] == "terminated", run
+    assert run["stateReason"] == "succeeded; resumePolicy never", run
+    assert run["exitCode"] == 0 and run["resumable"] is False, run
+    assert [e["data"]["state"] for e in lux.events(run_id, "state")][-1] == "terminated"
+    with pytest.raises(CLIError) as e:
+        lux.run("resume", run_id)
+    assert "resumePolicy never: this Run cannot be resumed" in e.value.stderr, e.value.stderr
 
 
 def test_migrate_restarts_a_restart_run_from_scratch(operator, lux, runners, hosts):
