@@ -35,6 +35,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"os/exec"
@@ -281,18 +282,36 @@ func (f *Firewall) Run(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		f.mu.Lock()
-		names := map[string]bool{}
-		for _, r := range f.runs {
-			for h := range r.hosts {
-				names[h] = true
-			}
-		}
-		f.mu.Unlock()
-		for h := range names {
-			f.resolve(ctx, h)
+		f.refresh(ctx)
+	}
+}
+
+// refreshWorkers bounds the concurrent lookups of one refresh: a Run's
+// admitted names are the workload's to choose, and a slow one must not
+// hold up every other Run's names for its whole timeout.
+const refreshWorkers = 16
+
+// refresh resolves every Run's distinct hostnames once and returns when
+// all lookups are done.
+func (f *Firewall) refresh(ctx context.Context) {
+	f.mu.Lock()
+	names := map[string]bool{}
+	for _, r := range f.runs {
+		for h := range r.hosts {
+			names[h] = true
 		}
 	}
+	f.mu.Unlock()
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, refreshWorkers)
+	for h := range names {
+		slots <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			f.resolve(ctx, h)
+		})
+	}
+	wg.Wait()
 }
 
 // resolve looks a host up and adds its new addresses (never one in a
@@ -437,6 +456,16 @@ func (f *Firewall) Remove(iface string) {
 	f.mu.Lock()
 	r := f.runs[iface]
 	delete(f.runs, iface)
+	// A name no remaining Run allows is no longer refreshed; dropping its
+	// addresses keeps f.resolved bounded by the live Runs' hosts.
+	if r != nil {
+		rest := slices.Collect(maps.Values(f.runs))
+		for h := range r.hosts {
+			if !slices.ContainsFunc(rest, func(o *run) bool { return o.hosts[h] }) {
+				delete(f.resolved, h)
+			}
+		}
+	}
 	f.mu.Unlock()
 	if r == nil {
 		return

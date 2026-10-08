@@ -3,11 +3,14 @@ package egress
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/spec"
 	"golang.org/x/net/dns/dnsmessage"
@@ -223,14 +226,69 @@ func TestAdmittedNamesAreRefreshed(t *testing.T) {
 	n.mu.Lock()
 	n.addr["a.wild.example.com"] = moved
 	n.mu.Unlock()
-	f.mu.Lock()
-	hosts := f.runs["lux1"].hosts
-	f.mu.Unlock()
-	for h := range hosts {
-		f.resolve(context.Background(), h)
-	}
+	f.refresh(context.Background())
 	if !n.inSet("lux1", moved) {
 		t.Fatal("the new address was not added")
+	}
+}
+
+// A refresh resolves names concurrently, at most refreshWorkers at once.
+func TestRefreshIsBoundedConcurrent(t *testing.T) {
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	gate := make(chan struct{})
+	lookup := func(ctx context.Context, _ string) ([]netip.Addr, error) {
+		mu.Lock()
+		inFlight++
+		peak = max(peak, inFlight)
+		if inFlight == refreshWorkers {
+			close(gate)
+		}
+		mu.Unlock()
+		// A serial refresh never reaches refreshWorkers: the timeout lets
+		// it finish and fail rather than hang.
+		select {
+		case <-gate:
+		case <-time.After(100 * time.Millisecond):
+		}
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return nil, fmt.Errorf("no such host")
+	}
+	f := newFirewall(nil, lookup, func(string) error { return nil })
+	r, err := newRun(false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 * refreshWorkers {
+		r.hosts[fmt.Sprintf("h%d.example.com", i)] = true
+	}
+	f.runs["lux1"] = r
+	f.refresh(context.Background())
+	if peak <= 1 || peak > refreshWorkers {
+		t.Fatalf("%d lookups at once, want 2..%d", peak, refreshWorkers)
+	}
+}
+
+// Removing a Run drops the resolved addresses of the names no other Run
+// allows, and keeps those another Run still does.
+func TestRemovePrunesResolvedNames(t *testing.T) {
+	f, _, add := fixture(t)
+	add("lux1", false, spec.EgressRule{Host: "shared.example.com"}, spec.EgressRule{Host: "one.example.com"})
+	add("lux2", false, spec.EgressRule{Host: "shared.example.com"}, spec.EgressRule{Host: "two.example.com"})
+	resolved := func() []string {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return slices.Sorted(maps.Keys(f.resolved))
+	}
+	f.Remove("lux1")
+	if got := resolved(); !slices.Equal(got, []string{"shared.example.com", "two.example.com"}) {
+		t.Fatalf("after removing lux1: %v", got)
+	}
+	f.Remove("lux2")
+	if got := resolved(); len(got) != 0 {
+		t.Fatalf("after removing both: %v", got)
 	}
 }
 
