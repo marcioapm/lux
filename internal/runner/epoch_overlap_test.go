@@ -216,7 +216,7 @@ func TestNextEpochWaitsForTheFinishingOne(t *testing.T) {
 	}
 	// Epoch 1's removal came before anything epoch 2 ran.
 	log := f.podmanLog()
-	rm, network := strings.Index(log, "rm -f -t 0 ctr-1"), strings.Index(log, "network create")
+	rm, network := strings.Index(log, "removed ctr-1"), strings.Index(log, "network create")
 	if rm < 0 || network < rm {
 		t.Fatalf("epoch 2's network at %d, epoch 1's rm at %d: want epoch 2 after; podman:\n%s", network, rm, log)
 	}
@@ -353,5 +353,157 @@ func TestKillWithoutAContainerKillsNothing(t *testing.T) {
 		if strings.HasPrefix(l, "kill ") || strings.HasPrefix(l, "stop ") {
 			t.Errorf("podman %q for a placement with no container", l)
 		}
+	}
+}
+
+// A stop or a terminate of the next epoch while it waits for the previous
+// one ends it at once, reported stopped; it ran nothing and wrote nothing.
+func TestNextEpochStoppedWhileWaiting(t *testing.T) {
+	for _, reason := range []string{"stop", "terminate"} {
+		t.Run(reason, func(t *testing.T) {
+			f := newRemovingFixture(t)
+			p2 := f.assignEpoch(t, 2)
+			p2.requestStop(context.Background(), reason)
+			if !p2.waitDone(10 * time.Second) {
+				t.Fatal("epoch 2 kept waiting after its stop")
+			}
+			if got := f.lastStatus(2); got == nil || got.State != "exited" || got.Reason != "stopped" {
+				t.Errorf("epoch 2's last status %+v, want exited, stopped", got)
+			}
+			if f.epoch2Started() {
+				t.Errorf("a stopped epoch 2 ran; podman:\n%s", f.podmanLog())
+			}
+			f.wantRunState(t, 1, false)
+		})
+	}
+}
+
+// A third epoch assigned while the second waits for the first fences the
+// second off (it reports nothing) and waits for the first itself.
+func TestThirdEpochWaitsForTheFirst(t *testing.T) {
+	f := newRemovingFixture(t)
+	p2 := f.assignEpoch(t, 2)
+	p3 := f.assignEpoch(t, 3)
+	if !p2.waitDone(10 * time.Second) {
+		t.Fatal("the fenced epoch 2 kept waiting")
+	}
+	// A heartbeat later, epoch 3 still waits.
+	f.heartbeatAfter(t, f.count())
+	if f.epoch2Started() {
+		t.Fatalf("epoch 3 started while epoch 1 was removing its container; podman:\n%s", f.podmanLog())
+	}
+	f.waitLease(t, 3, "starting")
+	f.wantRunState(t, 1, false)
+	f.releaseRemove()
+	if !p3.waitDone(10 * time.Second) {
+		t.Fatal("epoch 3 never ended")
+	}
+	log := f.podmanLog()
+	rm, network := strings.Index(log, "removed ctr-1"), strings.Index(log, "network create")
+	if rm < 0 || network < rm {
+		t.Fatalf("epoch 3's network at %d, epoch 1's removal at %d: want epoch 3 after; podman:\n%s", network, rm, log)
+	}
+	if got := f.lastStatus(2); got != nil {
+		t.Errorf("the fenced epoch 2 reported %+v", got)
+	}
+	f.wantRunState(t, 3, false)
+}
+
+// A placement acts on its own container by the id it created, never by the
+// Run's name: kill, the podman stop of sendStop, sampleSlow's probes, and
+// supervise's wait and OOM inspect.
+func TestPlacementTargetsItsContainerByID(t *testing.T) {
+	f := newFinishFixture(t)
+	f.r.egress = &egress.Firewall{}
+	f.release()
+	f.p.kill(context.Background())
+	f.p.sendStop(context.Background(), "stop")
+	f.p.sampleSlow(context.Background())
+	f.p.setPhase("running")
+	go func() {
+		defer close(f.p.done)
+		f.p.supervise(context.Background())
+	}()
+	if !f.p.waitDone(10 * time.Second) {
+		t.Fatal("the placement never ended")
+	}
+	want := []string{"kill -s KILL", "stop -t", "container inspect --size", "stats --no-stream", "wait", "container inspect", "rm -f"}
+	seen := map[string]bool{}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(seen) < len(want) && time.Now().Before(deadline) {
+		for _, l := range strings.Split(f.podmanLog(), "\n") {
+			for _, w := range want {
+				if strings.HasPrefix(l, w+" ") && strings.HasSuffix(l, " ctr-1") {
+					seen[w] = true
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, w := range want {
+		if !seen[w] {
+			t.Errorf("no podman %q on ctr-1", w)
+		}
+	}
+	for _, l := range strings.Split(f.podmanLog(), "\n") {
+		if strings.HasSuffix(l, " "+containerName("run1")) {
+			t.Errorf("podman %q by the Run's name", l)
+		}
+	}
+}
+
+// A run state written before the container id was recorded is re-adopted
+// by the Run's container name: its container is supervised and killed.
+func TestReadoptWithoutAContainerIDUsesTheRunsName(t *testing.T) {
+	f := newFinishFixture(t)
+	f.r.egress = &egress.Firewall{}
+	f.release()
+	f.p.state.Container = ""
+	if err := writeRunState(f.p.dir, f.p.state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.bin+".inspect."+containerName("run1"), []byte(`[{"State":{"Status":"exited"}}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.r.mu.Lock()
+	f.r.placements = map[string]*placement{}
+	f.r.mu.Unlock()
+	f.r.readopt(context.Background())
+	p := f.r.placement("run1", 1)
+	if p == nil {
+		t.Fatalf("the started placement was not re-adopted; podman:\n%s", f.podmanLog())
+	}
+	if !p.waitDone(10 * time.Second) {
+		t.Fatal("the re-adopted placement never ended")
+	}
+	p.kill(context.Background())
+	if !strings.Contains(f.podmanLog(), "wait "+containerName("run1")+"\n") {
+		t.Errorf("the re-adopted container was not waited on by name; podman:\n%s", f.podmanLog())
+	}
+	if b, _ := os.ReadFile(f.bin + ".killed"); string(b) != containerName("run1")+"\n" {
+		t.Errorf("killed %q, want the Run's name", b)
+	}
+}
+
+// A placement fenced off while it starts stops what is under way (here,
+// its network's creation): it would make a container for nothing.
+func TestFencedStartingPlacementStopsItsStart(t *testing.T) {
+	f := newFinishFixture(t)
+	f.r.egress = &egress.Firewall{}
+	f.r.mu.Lock()
+	f.r.placements = map[string]*placement{}
+	f.r.mu.Unlock()
+	if err := os.WriteFile(f.bin+".holdnet", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(f.bin + ".holdnet") })
+	p2 := f.assignEpoch(t, 2)
+	f.waitFile(t, f.bin+".netcreating")
+	p2.markStale()
+	if !p2.waitDone(10 * time.Second) {
+		t.Fatal("the fenced placement's start went on")
+	}
+	if got := f.lastStatus(2); got != nil && got.State != "starting" {
+		t.Errorf("the fenced placement reported its end: %+v", got)
 	}
 }

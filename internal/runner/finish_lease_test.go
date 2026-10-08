@@ -20,8 +20,10 @@ import (
 // finishFixture is a runner heartbeating every second to a fake luxd that
 // acks every report and keeps them, with a placement of run1 (epoch 1,
 // one state volume) whose container has exited. Its podman's volume
-// export blocks until release is called, and `rm -f` while $0.holdrm
-// exists (touching $0.removing). $0.ctr holds the id of the Run's
+// export blocks until release is called; `rm -f` while $0.holdrm exists
+// (touching $0.removing, then logging "removed <target>"); `network
+// create` while $0.holdnet exists (touching $0.netcreating), then fails.
+// `container inspect X` prints $0.inspect.X if it exists. $0.ctr holds the id of the Run's
 // container while one exists (the placement's, ctr-1); `rm -f` removes it
 // by that id or the Run's container name, and `volume rm` its volume's file.
 // `rmi` records the image it removes in $0.rmi. The placement's image is
@@ -58,10 +60,18 @@ case "$1 $2" in
   if [ -e "$0.holdrm" ]; then
     touch "$0.removing"
     while [ -e "$0.holdrm" ]; do sleep 0.05; done
+    echo "removed $5" >> "$0.log"
   fi
   case "$5" in lux-run1|"$(cat "$0.ctr")") rm -f "$0.ctr" ;; esac ;;
+"network create")
+  if [ -e "$0.holdnet" ]; then
+    touch "$0.netcreating"
+    while [ -e "$0.holdnet" ]; do sleep 0.05; done
+  fi
+  exit 1 ;;
 "volume rm") rm -f "$0.vol.$4" ;;
 "kill -s") echo "$4" >> "$0.killed" ;;
+"container inspect") [ -e "$0.inspect.$3" ] && cat "$0.inspect.$3" || exit 1 ;;
 "rmi "*) echo "$2" >> "$0.rmi" ;;
 *) exit 1 ;;
 esac
