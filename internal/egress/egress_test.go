@@ -237,14 +237,20 @@ func TestAdmittedNamesAreRefreshed(t *testing.T) {
 // A refresh resolves names concurrently, at most refreshWorkers at once.
 func TestRefreshIsBoundedConcurrent(t *testing.T) {
 	var mu sync.Mutex
-	inFlight, peak := 0, 0
+	inFlight, peak, over := 0, 0, 0
 	gate := make(chan struct{})
+	var open sync.Once
 	lookup := func(ctx context.Context, _ string) ([]netip.Addr, error) {
 		mu.Lock()
 		inFlight++
 		peak = max(peak, inFlight)
+		if inFlight > refreshWorkers {
+			over = max(over, inFlight)
+		}
 		if inFlight == refreshWorkers {
-			close(gate)
+			// Hold the gate a little longer, so that an unbounded refresh
+			// starts a lookup beyond the bound before any returns.
+			open.Do(func() { time.AfterFunc(20*time.Millisecond, func() { close(gate) }) })
 		}
 		mu.Unlock()
 		// A serial refresh never reaches refreshWorkers: the timeout lets
@@ -268,7 +274,10 @@ func TestRefreshIsBoundedConcurrent(t *testing.T) {
 	}
 	f.runs["lux1"] = r
 	f.refresh(context.Background())
-	if peak <= 1 || peak > refreshWorkers {
+	if over > 0 {
+		t.Fatalf("%d lookups at once, want at most %d", over, refreshWorkers)
+	}
+	if peak <= 1 {
 		t.Fatalf("%d lookups at once, want 2..%d", peak, refreshWorkers)
 	}
 }
