@@ -22,9 +22,11 @@ export function RunActions({ run, operator, onChanged }: RunActionsProps) {
   const terminal = TERMINAL_RUN_STATES.has(run.state);
   const canStop = !ENDED_RUN_STATES.has(run.state) && run.state !== "stopped" && run.state !== "lost";
   const canTerminate = !terminal;
-  // run.resumable is a resume without fromSnapshot; a Run refused only for
-  // want of a snapshot may still be resumed from an older one (the dialog).
-  const canResume = run.resumable || (RESUMABLE_RUN_STATES.has(run.state) && run.spec.resumePolicy !== "never");
+  // Every resting state, unless resumePolicy is never; not run.resumable,
+  // which is false for a Run refused only for want of a snapshot, which may
+  // still be resumed from an older one (the dialog's fromSnapshot). Any
+  // other refusal comes back from the server as the dialog's error.
+  const canResume = RESUMABLE_RUN_STATES.has(run.state) && run.spec.resumePolicy !== "never";
   const canMigrate = operator && run.state === "running";
 
   /** Runs an action; returns the error (already toasted) or null on success. */
