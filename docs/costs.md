@@ -17,8 +17,8 @@ The parts this design builds on:
 
 - **Run states** (`internal/server/lifecycle.go`): `submitted`,
   `provisioning`, `scheduled`, `starting`, `running`, `stopping`,
-  `stopped`, `resuming`, `succeeded`, `failed`, `cancelled`, `lost`. Only
-  `succeeded`, `failed` and `cancelled` are terminal (`terminal()`), and a
+  `stopped`, `resuming`, `succeeded`, `failed`, `terminated`, `lost`. Only
+  `succeeded`, `failed` and `terminated` are terminal (`terminal()`), and a
   `failed` Run can still be resumed (`resumableRunStates` =
   `stopped`, `lost`, `failed`). There is no "paused", "parked", "aborted"
   or "completed". Mapped onto lux's states, those words mean:
@@ -27,7 +27,7 @@ The parts this design builds on:
   | --- | --- |
   | paused / parked | `running → stopping → stopped` (`stop`, or a `drain`/`preempt`/`migrate` move, which then goes `stopped → resuming`) |
   | stopped | same as above |
-  | aborted / cancelled | `→ cancelled` (from `stopping`, or straight from `submitted`/`resuming`/`provisioning`/`stopped`/`lost` in `stopOrCancel`; or `lost` with `cancel_requested`) |
+  | aborted / cancelled | `→ terminated` (from `stopping`, or straight from `submitted`/`resuming`/`provisioning`/`stopped`/`lost` in `stopOrTerminate`; or `lost` with `terminate_requested`) |
   | failed | `→ failed` (non-zero exit, `timeout`, `disk`, adapter failure) |
   | completed | `→ succeeded` |
   | (host died) | `→ lost` (`placementLost`) |
@@ -575,7 +575,7 @@ config wins, logged once.
   epoch (section 6). Child or sub-agent sessions are the plugin's job: it
   resolves them from the parent session. lux sends only the top-level ids
   the adapters report.
-- `terminal` is true once the Run is `succeeded`, `failed` or `cancelled`.
+- `terminal` is true once the Run is `succeeded`, `failed` or `terminated`.
   A `failed` Run can still be resumed, and then it goes back to `false`.
 
 Response, `200`:
@@ -664,14 +664,14 @@ least(cost_pending.due_at, EXCLUDED.due_at)`).
 
 **Lifecycle trigger.** `setRunState` adds one statement to the transaction
 it already runs: when the new state is `stopping`, `stopped`, `lost`,
-`succeeded`, `failed` or `cancelled`, it upserts `cost_pending` with
+`succeeded`, `failed` or `terminated`, it upserts `cost_pending` with
 `due_at = now()`. The new row commits with the state change, or not at all
 if the change rolls back. It is one index write, and no HTTP call ever
 happens in that transaction. `stopping` is included so a stop's costs show
 up right away. The following `stopped` or terminal state queues the Run
 again, and that evaluation includes the placement's real `ended_at`.
 Entering one of these states from somewhere other than `running` (for
-example `submitted → cancelled`) queues the Run too. That is cheap, and it
+example `submitted → terminated`) queues the Run too. That is cheap, and it
 lets a plugin report costs from before a placement.
 
 **Tick.** Every `costs.every` (2m), each luxd tries to claim the tick:
@@ -785,7 +785,7 @@ terminal. After that these Runs stay quiet until resumed.
 `027_cost_placement_snapshots.sql`, `internal/server/costqueue.go`):
 
 - `setRunState` queues through `lux_cost_enqueue(run, reason)`, a
-  `SECURITY DEFINER` function: an API stop or cancel runs in the tenant's
+  `SECURITY DEFINER` function: an API stop or terminate runs in the tenant's
   scope, where the system-only `cost_pending` is out of reach. It queues
   only a Run that scope can see. `PUBLIC` may not execute it: only
   `lux_app` (granted with its other privileges when luxd migrates), and

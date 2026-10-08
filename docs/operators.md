@@ -38,7 +38,7 @@ lux ls [--resumable] [--host H] [--state …] [--limit N]
 lux get <run>                       # with what a resume would take, when stopped, lost or failed
 lux hosts ls [--pool P] [--state S] [--all]
 lux hosts get <host>                # lifecycle, capacity, what its live placements hold
-lux tenants ls                      # quotas and what each tenant uses; RETENTION, and EXPIRY (never: resting Runs are never cancelled)
+lux tenants ls                      # quotas and what each tenant uses; RETENTION, and EXPIRY (never: resting Runs are never terminated)
 lux history [--since 24h]           # the system over time (sparklines; -o json for the samples)
 lux history <run>                   # a Run's CPU, memory, disk, pids, network, across placements
 lux history --host <host>
@@ -78,7 +78,7 @@ the pool launches one host to learn the new capacity.
 
 ```bash
 lux hosts drain <host> [--force-evict]          # no new Runs; --force-evict also moves its Runs elsewhere (resumePolicy manual or never: fails them)
-lux stop <run> / lux cancel <run>
+lux stop <run> / lux terminate <run>
 lux migrate <run> [--to HOST] [--input TEXT] [--wait]
 lux resume <run> [--to HOST] [--from-snapshot S] [--input TEXT]
 ```
@@ -93,7 +93,7 @@ unless `--input` is given: that text is delivered once it runs again ("go
 on where you left off", say). A generic workload restarts its command with
 its state volumes restored.
 
-A Run already being stopped (by its tenant, a force-evict drain, a cancel)
+A Run already being stopped (by its tenant, a force-evict drain, a terminate)
 cannot also be migrated. A Run on a host that is merely cordoned (a plain
 drain, scale-down, `pools rm`) is not being stopped by that alone, so
 migrate still applies to it. A tenant's `stop` during a migration wins: the

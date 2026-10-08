@@ -35,7 +35,7 @@ func artifactID(t *testing.T, s *Server, blobID string) string {
 // after retention deleted the rest; again, it is a no-op. A resumable or
 // live Run is 409; another tenant's Run is 404.
 func TestDeleteArtifacts(t *testing.T) {
-	s, ctx, f := retentionFixture(t, StateSucceeded, StateCancelled, 1, 400)
+	s, ctx, f := retentionFixture(t, StateSucceeded, StateTerminated, 1, 400)
 	if err := s.reapRetention(ctx); err != nil {
 		t.Fatal(err)
 	}

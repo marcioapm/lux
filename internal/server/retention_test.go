@@ -24,12 +24,12 @@ func retentionFixture(t *testing.T, raState, rbState string, raDays, rbDays floa
 	return s, ctx, f
 }
 
-// A succeeded or cancelled Run past its tenant's retention loses its
+// A succeeded or terminated Run past its tenant's retention loses its
 // snapshot volumes and output (rows deleted, S3 objects deleted) and every
 // snapshot becomes unavailable; its artifacts stay. One within retention
 // keeps everything.
 func TestReapRetentionTerminal(t *testing.T) {
-	for _, state := range []string{StateSucceeded, StateCancelled} {
+	for _, state := range []string{StateSucceeded, StateTerminated} {
 		t.Run(state, func(t *testing.T) {
 			s, ctx, f := retentionFixture(t, state, state, 29.9, 5.01)
 			if err := s.reapRetention(ctx); err != nil {
@@ -78,7 +78,7 @@ func TestReapRetentionSparesResumable(t *testing.T) {
 	if got := f.Deleted(); len(got) != 0 {
 		t.Fatalf("S3 deletes %v", got)
 	}
-	// Once it expires (cancelled now), its retention counts from then.
+	// Once it expires (terminated now), its retention counts from then.
 	execSQL(t, s, ctx, `UPDATE runs SET state_changed_at = now() - interval '91 days' WHERE id = 'rb'`)
 	if err := s.reapExpiry(ctx); err != nil {
 		t.Fatal(err)

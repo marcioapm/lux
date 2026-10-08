@@ -112,7 +112,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, session_id, current_epoch, pending_input, pending_sync, image_resolved,
 				jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_id, updated_at, updated_at < now() - $3::interval
-			FROM runs WHERE state IN `+queuedRunStates+` AND NOT cancel_requested
+			FROM runs WHERE state IN `+queuedRunStates+` AND NOT terminate_requested
 			  AND (updated_at, id) > ($1, $2)
 			ORDER BY updated_at, id FOR UPDATE SKIP LOCKED LIMIT 20`,
 			pos.updated, pos.id, interval(s.secretsGrace()))

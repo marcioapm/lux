@@ -2307,7 +2307,7 @@ components:
           format: date-time
           type: string
         lifetime:
-          description: "run: deleted when its Run finishes for good (succeeded, cancelled). owner: kept until its owner deletes it."
+          description: "run: deleted when its Run finishes for good (succeeded, terminated). owner: kept until its owner deletes it."
           enum:
             - run
             - owner
@@ -2884,7 +2884,7 @@ components:
           format: date-time
           type: string
         expireAfterDays:
-          description: "Days a stopped, lost or failed Run may rest before lux cancels it; 0: never."
+          description: "Days a stopped, lost or failed Run may rest before lux terminates it; 0: never."
           format: int64
           type: integer
         hosts:
@@ -2904,7 +2904,7 @@ components:
         name:
           type: string
         retentionDays:
-          description: Days a succeeded or cancelled Run keeps its snapshots and output after it ended. Artifacts are kept until deleted.
+          description: Days a succeeded or terminated Run keeps its snapshots and output after it ended. Artifacts are kept until deleted.
           format: int64
           type: integer
         runs:
@@ -3231,7 +3231,7 @@ components:
             - "null"
         beforeStop:
           $ref: "#/components/schemas/BeforeStop"
-          description: "A command run in the container on every stop, before the workload is signalled: a stop asked for, a cancel, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."
+          description: "A command run in the container on every stop, before the workload is signalled: a stop asked for, a terminate, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."
         command:
           items:
             type: string
@@ -3257,7 +3257,7 @@ components:
         resume:
           $ref: "#/components/schemas/Resume"
         servers:
-          description: "Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration), like every server attached to it; deleted when it succeeds or is cancelled. More can be added while it runs (POST /v1/runs/{id}/servers) or attached (POST /v1/servers/{id}/attach)."
+          description: "Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration), like every server attached to it; deleted when it succeeds or is terminated. More can be added while it runs (POST /v1/runs/{id}/servers) or attached (POST /v1/servers/{id}/attach)."
           items:
             $ref: "#/components/schemas/Server"
           type:
@@ -5507,7 +5507,7 @@ paths:
   /v1/runs/{id}/artifacts:
     delete:
       description: |-
-        Every artifact of a succeeded or cancelled Run, from storage; retention never deletes artifacts. Their listing stays, available false, and a download answers 410 gone. Works however long ago the Run ended. Idempotent: deleted is 0 once none are left. 409 not_terminal on any other Run (a stopped, lost or failed one can still be resumed).
+        Every artifact of a succeeded or terminated Run, from storage; retention never deletes artifacts. Their listing stays, available false, and a download answers 410 gone. Works however long ago the Run ended. Idempotent: deleted is 0 once none are left. 409 not_terminal on any other Run (a stopped, lost or failed one can still be resumed).
 
         Needs the `run` scope.
       operationId: deleteArtifacts
@@ -5705,8 +5705,9 @@ paths:
           $ref: "#/components/schemas/StreamData"
   /v1/runs/{id}/cancel:
     post:
+      deprecated: true
       description: |-
-        It ends as cancelled and cannot be resumed. Idempotent.
+        The old name of POST /v1/runs/{id}/terminate, which it is in every way: the Run ends as terminated.
 
         Needs the `run` scope.
       operationId: cancelRun
@@ -5757,7 +5758,7 @@ paths:
           description: Internal Server Error
       security:
         - apiKey: []
-      summary: Cancel a Run
+      summary: Terminate a Run (deprecated alias)
       tags:
         - runs
   /v1/runs/{id}/cost:
@@ -6645,7 +6646,7 @@ paths:
   /v1/runs/{id}/resume:
     post:
       description: |-
-        From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been cancelled, and is not resumable. A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state (an assignment no runner started may still be placed again).
+        From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been terminated, and is not resumable. A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state (an assignment no runner started may still be placed again).
 
         git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a stopped, lost or failed Run: while it is resuming, 409. A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one, or unless its resumePolicy is restart and it has no session, which restores nothing.
 
@@ -7273,7 +7274,7 @@ paths:
   /v1/runs/{id}/snapshots:
     get:
       description: |-
-        Every snapshot it took. A Run keeps only its current one (the one a resume starts from) once that is uploaded; a succeeded or cancelled Run keeps them for its tenant's retention. A deleted one stays listed, available false.
+        Every snapshot it took. A Run keeps only its current one (the one a resume starts from) once that is uploaded; a succeeded or terminated Run keeps them for its tenant's retention. A deleted one stays listed, available false.
 
         Needs the `read` scope.
       operationId: listSnapshots
@@ -7453,6 +7454,63 @@ paths:
       security:
         - apiKey: []
       summary: Move a running Run's checkouts to new commits
+      tags:
+        - runs
+  /v1/runs/{id}/terminate:
+    post:
+      description: |-
+        It ends as terminated, for good: it cannot be resumed, and its snapshots and output go after its tenant's retention. Idempotent.
+
+        Needs the `run` scope.
+      operationId: terminateRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: Accepted
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Terminate a Run
       tags:
         - runs
   /v1/runs/{id}/tickets:

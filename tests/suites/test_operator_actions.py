@@ -32,7 +32,7 @@ def test_operator_migrates_an_agent_to_another_host(operator, lux, runners, host
     assert lux.get(run_id)["placements"][0]["stopReason"] == "migrate"
     lux.wait_output(run_id, "moved")
     assert lux.events(run_id, "migrate.requested")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_migrate_without_a_target_avoids_the_current_host(operator, lux, runners, hosts):
@@ -42,7 +42,7 @@ def test_migrate_without_a_target_avoids_the_current_host(operator, lux, runners
     first = lux.wait_state(run_id, "running")["host"]
     run = operator.json("migrate", run_id, "--wait", timeout=200)
     assert run["host"] != first, run
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_migrate_refuses_what_it_cannot_do(operator, lux, runners, hosts):
@@ -56,7 +56,7 @@ def test_migrate_refuses_what_it_cannot_do(operator, lux, runners, hosts):
     with pytest.raises(CLIError) as e:
         operator.run("migrate", run_id)
     assert "resume --to" in e.value.stderr
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_operator_inspects_and_force_resumes_a_stopped_run(operator, lux, runners, hosts):
@@ -87,7 +87,7 @@ def test_operator_inspects_and_force_resumes_a_stopped_run(operator, lux, runner
     operator.run("resume", run_id, "--to", other)
     assert lux.wait_state(run_id, "running")["host"] == other
     wait_until(lambda: lux.logs(run_id).count(f"len={len(token)}") == 2, 60, 0.5, "resumed Run did not get its secret")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_force_resume_is_refused_once_luxd_forgot_the_secrets(env, operator, lux, runners, hosts):
@@ -101,7 +101,7 @@ def test_force_resume_is_refused_once_luxd_forgot_the_secrets(env, operator, lux
     with pytest.raises(CLIError) as e:
         operator.run("resume", run_id)
     assert "only the tenant can resume it" in e.value.stderr
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def _feed(lux, after: int, *args: str) -> list[dict]:
@@ -127,12 +127,12 @@ def test_events_feed(operator, tenant_factory):
     try:
         assert json.loads(p.stdout.readline())["id"] == last
         start = time.monotonic()
-        a.run("cancel", ra)
+        a.run("terminate", ra)
         assert json.loads(p.stdout.readline())["runId"] == ra
         assert time.monotonic() - start < 2.5, "the event was not pushed"
     finally:
         p.kill()
-    b.run("cancel", rb)
+    b.run("terminate", rb)
 
 
 def test_migrate_with_nowhere_else_to_go_comes_back(operator, lux, runners, hosts):
@@ -143,7 +143,7 @@ def test_migrate_with_nowhere_else_to_go_comes_back(operator, lux, runners, host
     host = lux.wait_state(run_id, "running")["host"]
     run = operator.json("migrate", run_id, "--wait", timeout=200)
     assert run["host"] == host and run["epoch"] == 2, run
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_migrate_refuses_a_run_already_stopping(operator, lux, runners, hosts):
@@ -162,7 +162,7 @@ def test_migrate_refuses_a_run_already_stopping(operator, lux, runners, hosts):
     assert run["placements"][-1]["stopReason"] == "stop", run
     time.sleep(3)
     assert lux.get(run_id)["state"] == "stopped", "the tenant's stop was overridden"
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_migrate_leaves_a_forced_eviction_to_the_drain(operator, lux, runners, hosts):
@@ -176,7 +176,7 @@ def test_migrate_leaves_a_forced_eviction_to_the_drain(operator, lux, runners, h
     with pytest.raises(CLIError) as e:
         operator.run("migrate", run_id)
     assert "already being stopped" in e.value.stderr
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_migrate_a_run_on_a_plainly_drained_host_succeeds(operator, lux, runners, hosts):
@@ -189,7 +189,7 @@ def test_migrate_a_run_on_a_plainly_drained_host_succeeds(operator, lux, runners
     lux.run("hosts", "drain", host)
     run = operator.json("migrate", run_id, "--wait", timeout=200)
     assert run["host"] != host and run["state"] == "running", run
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def ended_or_replaced(run):
@@ -264,4 +264,4 @@ def test_migrate_restarts_a_restart_run_from_scratch(operator, lux, runners, hos
     assert [d for d in states if d["state"] == "scheduled"][-1].get("snapshotId") is None, states
     wait_until(lambda: lux.logs(run_id).count("starts=1") == 2, 60, 0.5, "the restart did not start from an empty volume")
     assert "starts=2" not in lux.logs(run_id)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)

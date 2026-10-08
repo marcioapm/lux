@@ -28,7 +28,7 @@ const (
 	StateResuming     = "resuming"
 	StateSucceeded    = "succeeded"
 	StateFailed       = "failed"
-	StateCancelled    = "cancelled"
+	StateTerminated   = "terminated"
 	StateLost         = "lost"
 )
 
@@ -58,6 +58,13 @@ const noSnapshotReason = "its only snapshot report was refused, so there is no s
 // scratch), unless its spec's resumePolicy is manual or never
 // (spec.FailsOnMove), when it fails instead.
 var movedStops = []string{"drain", "preempt", "migrate"}
+
+// stopTerminate is the stop reason of a terminate request. An older luxd
+// sharing the database writes stopTerminateLegacy for it.
+const (
+	stopTerminate       = "terminate"
+	stopTerminateLegacy = "cancel"
+)
 
 // notResumedReason is the state_reason of a Run failed by a move (stop)
 // because of its resumePolicy.
@@ -122,7 +129,7 @@ func livePlacements(ctx context.Context, tx pgx.Tx, where string, args ...any) (
 func Terminal(state string) bool { return terminal(state) }
 
 func terminal(state string) bool {
-	return state == StateSucceeded || state == StateFailed || state == StateCancelled
+	return state == StateSucceeded || state == StateFailed || state == StateTerminated
 }
 
 // live: a placement exists and is (or is about to be) running.
@@ -143,15 +150,15 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 			return err
 		}
 	}
-	// prompt_attachments: a succeeded or cancelled Run is never placed again.
+	// prompt_attachments: a succeeded or terminated Run is never placed again.
 	// A failed one can be resumed, as a first placement when it has no
 	// session and no snapshot, so it keeps them.
 	// state_changed_at is expiry's clock (reapExpiry): moved only by a
 	// change of state, so a repeated stop does not restart it.
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = $2, state_reason = $3, updated_at = now(),
 			state_changed_at = CASE WHEN state <> $2 THEN now() ELSE state_changed_at END,
-			finished_at = CASE WHEN $2 IN ('succeeded', 'failed', 'cancelled') THEN now() ELSE finished_at END,
-			prompt_attachments = CASE WHEN $2 IN ('succeeded', 'cancelled') THEN NULL ELSE prompt_attachments END,
+			finished_at = CASE WHEN $2 IN ('succeeded', 'failed', 'terminated') THEN now() ELSE finished_at END,
+			prompt_attachments = CASE WHEN $2 IN ('succeeded', 'terminated') THEN NULL ELSE prompt_attachments END,
 			activity = CASE WHEN $2 IN ('running') THEN activity ELSE '' END
 		WHERE id = $1`, runID, state, reason)
 	if err != nil {
@@ -176,7 +183,7 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 // (docs/costs.md, section 5), queued with the state change itself.
 var costStates = map[string]bool{
 	StateStopping: true, StateStopped: true, StateLost: true,
-	StateSucceeded: true, StateFailed: true, StateCancelled: true,
+	StateSucceeded: true, StateFailed: true, StateTerminated: true,
 }
 
 // enqueueCost queues a Run's costs as due now, merged with any row it
@@ -210,8 +217,8 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 	}
 
 	var runState string
-	var cancel bool
-	if err := tx.QueryRow(ctx, `SELECT state, cancel_requested FROM runs WHERE id = $1`, runID).Scan(&runState, &cancel); err != nil {
+	var terminate bool
+	if err := tx.QueryRow(ctx, `SELECT state, terminate_requested FROM runs WHERE id = $1`, runID).Scan(&runState, &terminate); err != nil {
 		return err
 	}
 	if terminal(runState) {
@@ -258,7 +265,7 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 			return err
 		}
 	case "exited", "failed":
-		return s.placementExited(ctx, tx, tenantID, runID, epoch, st, runState, cancel)
+		return s.placementExited(ctx, tx, tenantID, runID, epoch, st, runState, terminate)
 	}
 	return nil
 }
@@ -266,7 +273,7 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 // placementExited records a placement's end and decides what the Run
 // becomes. The snapshot arrives separately (snapshot.done); a stopped Run is
 // resumable once it has.
-func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status, runState string, cancel bool) error {
+func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status, runState string, terminate bool) error {
 	var stopReason, hostID string
 	var snapshotRefused, hasSnapshot bool
 	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
@@ -307,8 +314,8 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	restarts := policy == spec.ResumeRestart
 	var next, reason string
 	switch {
-	case cancel || stopReason == "cancel":
-		next, reason = StateCancelled, "cancelled"
+	case terminate || stopReason == stopTerminate || stopReason == stopTerminateLegacy:
+		next, reason = StateTerminated, "terminated"
 	case stopReason == "timeout":
 		next, reason = StateFailed, "timeout"
 	case stopReason == "disk":
@@ -415,10 +422,10 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, "host lost"); err != nil {
 		return err
 	}
-	var cancel bool
-	_ = tx.QueryRow(ctx, `SELECT cancel_requested FROM runs WHERE id = $1`, runID).Scan(&cancel)
-	if cancel {
-		return setRunState(ctx, tx, tenantID, runID, StateCancelled, "cancelled; host lost", epoch)
+	var terminate bool
+	_ = tx.QueryRow(ctx, `SELECT terminate_requested FROM runs WHERE id = $1`, runID).Scan(&terminate)
+	if terminate {
+		return setRunState(ctx, tx, tenantID, runID, StateTerminated, "terminated; host lost", epoch)
 	}
 	return setRunState(ctx, tx, tenantID, runID, StateLost, why, epoch)
 }

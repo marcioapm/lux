@@ -88,7 +88,7 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "resumeRun", Method: http.MethodPost, Path: "/v1/runs/{id}/resume", Tags: []string{"runs"},
 		Summary: "Resume a stopped, lost or failed Run",
 		Description: "From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. " +
-			"A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been cancelled, and is not resumable. " +
+			"A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been terminated, and is not resumable. " +
 			"A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state " +
 			"(an assignment no runner started may still be placed again).\n\n" +
 			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +
@@ -102,12 +102,20 @@ func (s *Server) routes(api huma.API) {
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests},
 	}, "run", s.resumeRun)
 	register(s, api, huma.Operation{
-		OperationID: "cancelRun", Method: http.MethodPost, Path: "/v1/runs/{id}/cancel", Tags: []string{"runs"},
-		Summary:       "Cancel a Run",
-		Description:   "It ends as cancelled and cannot be resumed. Idempotent.",
+		OperationID: "terminateRun", Method: http.MethodPost, Path: "/v1/runs/{id}/terminate", Tags: []string{"runs"},
+		Summary:       "Terminate a Run",
+		Description:   "It ends as terminated, for good: it cannot be resumed, and its snapshots and output go after its tenant's retention. Idempotent.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound},
-	}, "run", s.cancelRun)
+	}, "run", s.terminateRun)
+	register(s, api, huma.Operation{
+		OperationID: "cancelRun", Method: http.MethodPost, Path: "/v1/runs/{id}/cancel", Tags: []string{"runs"},
+		Summary:       "Terminate a Run (deprecated alias)",
+		Description:   "The old name of POST /v1/runs/{id}/terminate, which it is in every way: the Run ends as terminated.",
+		Deprecated:    true,
+		DefaultStatus: http.StatusAccepted,
+		Errors:        []int{http.StatusNotFound},
+	}, "run", s.terminateRun)
 	register(s, api, huma.Operation{
 		OperationID: "migrateRun", Method: http.MethodPost, Path: "/v1/runs/{id}/migrate", Tags: []string{"runs", "operators"},
 		Summary: "Move a running Run to another host",
@@ -172,7 +180,7 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "listSnapshots", Method: http.MethodGet, Path: "/v1/runs/{id}/snapshots", Tags: []string{"runs"},
 		Summary: "List a Run's snapshots",
 		Description: "Every snapshot it took. A Run keeps only its current one (the one a resume starts from) once that is uploaded; " +
-			"a succeeded or cancelled Run keeps them for its tenant's retention. A deleted one stays listed, available false.",
+			"a succeeded or terminated Run keeps them for its tenant's retention. A deleted one stays listed, available false.",
 		Errors: []int{http.StatusNotFound},
 	}, "read", s.listSnapshots)
 	register(s, api, huma.Operation{
@@ -183,7 +191,7 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "deleteArtifacts", Method: http.MethodDelete, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
 		Summary: "Delete a Run's artifacts",
-		Description: "Every artifact of a succeeded or cancelled Run, from storage; retention never deletes artifacts. Their listing stays, " +
+		Description: "Every artifact of a succeeded or terminated Run, from storage; retention never deletes artifacts. Their listing stays, " +
 			"available false, and a download answers 410 gone. Works however long ago the Run ended. Idempotent: deleted is 0 once none are left. " +
 			"409 not_terminal on any other Run (a stopped, lost or failed one can still be resumed).",
 		Errors: []int{http.StatusNotFound, http.StatusConflict},
@@ -807,7 +815,7 @@ func requireRun(ctx context.Context, tx pgx.Tx, runID string) error {
 
 // inactiveRunStates, for SQL: Runs that hold no host and count against no
 // concurrency quota.
-const inactiveRunStates = "('succeeded', 'failed', 'cancelled', 'stopped', 'lost')"
+const inactiveRunStates = "('succeeded', 'failed', 'terminated', 'stopped', 'lost')"
 
 // checkRunQuota enforces a tenant's limits on concurrent Runs and on
 // stored bytes (snapshots, output and artifacts not yet deleted by
@@ -830,7 +838,7 @@ func checkRunQuota(ctx context.Context, tx pgx.Tx, tenantID string) error {
 		return errf(http.StatusTooManyRequests, "quota_exceeded", "quota: tenant has %d active runs (limit %d)", n, *maxRuns)
 	}
 	if maxBytes != nil && stored >= *maxBytes {
-		return errf(http.StatusTooManyRequests, "quota_exceeded", "quota: tenant stores %d bytes (limit %d); cancel Runs or wait for retention", stored, *maxBytes)
+		return errf(http.StatusTooManyRequests, "quota_exceeded", "quota: tenant stores %d bytes (limit %d); terminate Runs or wait for retention", stored, *maxBytes)
 	}
 	return nil
 }
@@ -881,7 +889,7 @@ var runSortKeys = map[string]sortKey{
 	"id":         {expr: `r.id`, cast: "text", first: "asc", notNull: true},
 	"name":       {expr: `coalesce(nullif(r.name, ''), r.id)`, cast: "text", first: "asc", notNull: true},
 	"tenant":     {expr: `rt.name`, cast: "text", first: "asc", notNull: true, from: runTenantJoin},
-	"state":      {expr: `array_position(ARRAY['submitted', 'scheduled', 'provisioning', 'starting', 'running', 'stopping', 'stopped', 'resuming', 'succeeded', 'failed', 'cancelled', 'lost'], r.state)`, cast: "bigint", first: "asc"},
+	"state":      {expr: `array_position(ARRAY['submitted', 'scheduled', 'provisioning', 'starting', 'running', 'stopping', 'stopped', 'resuming', 'succeeded', 'failed', 'terminated', 'lost'], r.state)`, cast: "bigint", first: "asc"},
 	"host":       {expr: `rh.name`, cast: "text", first: "asc", from: runHostJoin},
 	"pool":       {expr: `rpool.name`, cast: "text", first: "asc", from: runPoolJoin},
 	"adapter":    {expr: `r.spec->'workload'->>'adapter'`, cast: "text", first: "asc"},
@@ -1327,14 +1335,16 @@ type acceptedRun struct {
 }
 
 func (s *Server) stopRun(ctx context.Context, in *RunPath) (*acceptedRun, error) {
-	return s.stopOrCancel(ctx, in.ID, "stop")
+	return s.stopOrTerminate(ctx, in.ID, "stop")
 }
 
-func (s *Server) cancelRun(ctx context.Context, in *RunPath) (*acceptedRun, error) {
-	return s.stopOrCancel(ctx, in.ID, "cancel")
+// terminateRun serves POST /v1/runs/{id}/terminate and its deprecated
+// alias /cancel.
+func (s *Server) terminateRun(ctx context.Context, in *RunPath) (*acceptedRun, error) {
+	return s.stopOrTerminate(ctx, in.ID, stopTerminate)
 }
 
-func (s *Server) stopOrCancel(ctx context.Context, id, reason string) (*acceptedRun, error) {
+func (s *Server) stopOrTerminate(ctx context.Context, id, reason string) (*acceptedRun, error) {
 	p := principal(ctx)
 	var hostID string
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
@@ -1345,8 +1355,8 @@ func (s *Server) stopOrCancel(ctx context.Context, id, reason string) (*accepted
 		if terminal(state) {
 			return nil // idempotent
 		}
-		if reason == "cancel" {
-			if _, err := tx.Exec(ctx, `UPDATE runs SET cancel_requested = true WHERE id = $1`, id); err != nil {
+		if reason == stopTerminate {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET terminate_requested = true WHERE id = $1`, id); err != nil {
 				return err
 			}
 		}
@@ -1356,9 +1366,9 @@ func (s *Server) stopOrCancel(ctx context.Context, id, reason string) (*accepted
 		switch state {
 		case StateSubmitted, StateResuming, StateProvisioning, StateStopped, StateLost:
 			// Nothing running: settle it here.
-			next := StateStopped
-			if reason == "cancel" {
-				next = StateCancelled
+			next, why := StateStopped, reason
+			if reason == stopTerminate {
+				next, why = StateTerminated, "terminated"
 				s.secrets.drop(id)
 			}
 			if state == next {
@@ -1367,7 +1377,7 @@ func (s *Server) stopOrCancel(ctx context.Context, id, reason string) (*accepted
 			if state == StateLost && reason == "stop" {
 				return nil
 			}
-			return setRunState(ctx, tx, p.TenantID, id, next, reason, 0)
+			return setRunState(ctx, tx, p.TenantID, id, next, why, 0)
 		}
 		return nil
 	})
@@ -1578,7 +1588,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 				}
 			}
 			return nil // idempotent: the first resume's secrets stand
-		case StateCancelled, StateSucceeded:
+		case StateTerminated, StateSucceeded:
 			return errf(http.StatusConflict, "not_resumable", "run is %s", state)
 		default:
 			return errf(http.StatusConflict, "not_resumable", "run is %s: stop it first", state)
@@ -1633,7 +1643,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		slices.SortFunc(newRefs, func(a, b spec.SecretRef) int { return cmp.Compare(a.Name, b.Name) })
 		// place_on is this resume's alone: a migration's that never took
 		// effect (its host died first) does not steer it.
-		if _, err := tx.Exec(ctx, `UPDATE runs SET secrets = $2, cancel_requested = false, place_on = $3, avoid_host = NULL, pending_input = NULL WHERE id = $1`,
+		if _, err := tx.Exec(ctx, `UPDATE runs SET secrets = $2, terminate_requested = false, place_on = $3, avoid_host = NULL, pending_input = NULL WHERE id = $1`,
 			id, newRefs, placeOn); err != nil {
 			return err
 		}

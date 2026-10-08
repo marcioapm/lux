@@ -48,7 +48,7 @@ def test_a_spot_interruption_moves_runs_to_another_host(lux, ec2):
     assert first["stopReason"] == "preempt" and first["state"] == "exited", first
     # The interrupted host was drained and let go of, not written off.
     wait_until(lambda: inst["id"] not in {i["id"] for i in ec2.running()}, 90, 0.3, "the interrupted instance stayed")
-    lux.run("cancel", run_id, "--wait")
+    lux.run("terminate", run_id, "--wait")
 
 
 def test_a_spot_interruption_fails_a_run_that_is_never_resumed(lux, ec2):
@@ -98,7 +98,7 @@ def test_a_spot_interruption_restarts_a_restart_run_from_scratch(lux, ec2):
     assert [d for d in states if d["state"] == "scheduled"][-1].get("snapshotId") is None, states
     wait_until(lambda: lux.logs(run_id).count("starts=1") == 2, 60, 0.5, "the restart did not start from an empty volume")
     assert "starts=2" not in lux.logs(run_id)
-    lux.run("cancel", run_id, "--wait")
+    lux.run("terminate", run_id, "--wait")
 
 
 def test_a_spot_interruption_shortens_a_stop_already_under_way(lux, ec2):

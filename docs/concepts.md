@@ -32,7 +32,7 @@ runtime.
 ```
 submitted → scheduled → starting → running ─┬─▶ succeeded
     ▲                                        ├─▶ failed
-    │                                        ├─▶ cancelled
+    │                                        ├─▶ terminated
     │                        stopping ◀──────┘ (stop, drain, timeout)
     │                            │
     └── resuming ◀── stopped ◀───┘
@@ -50,16 +50,16 @@ submitted → scheduled → starting → running ─┬─▶ succeeded
 | `stopping` | Asked to wind down. The adapter stops the workload gracefully, then it is killed after the grace period. |
 | `stopped` | Exited on request with its state saved. **Resumable.** A Run stopped by a move (force-evicting drain, spot preemption, migrate) is then resumed by lux at once, unless its spec's `resumePolicy` says otherwise: `restart` starts it again from scratch, `manual` and `never` end it `failed` ([resume policy](runspec.md#resume-policy)). |
 | `resuming` | Waiting for a host for its next placement. |
-| `succeeded` / `failed` / `cancelled` | Terminal. A failed Run can still be resumed, unless its `resumePolicy` is `never`. |
+| `succeeded` / `failed` / `terminated` | Terminal. A failed Run can still be resumed, unless its `resumePolicy` is `never`. |
 | `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. Never resumed automatically. |
 
 A Run that stays `stopped`, `lost` or `failed` (resting) longer than its
-tenant's `expireAfterDays` (default 90; 0: never) is **cancelled by lux**,
+tenant's `expireAfterDays` (default 90; 0: never) is **terminated by lux**,
 with `stateReason` `expired: stopped for 90 days` (or `lost`, `failed`),
-and a `state` event like any cancel. The clock is the time in that state:
+and a `state` event like any terminate. The clock is the time in that state:
 a resume restarts it at the next stop. Its storage then follows the
-cancelled Run's ([below](#which-snapshots-are-kept)): 90 days resting plus
-the tenant's retention. Cancel a Run sooner yourself to free it sooner.
+terminated Run's ([below](#which-snapshots-are-kept)): 90 days resting plus
+the tenant's retention. Terminate a Run sooner yourself to free it sooner.
 
 `stateReason` explains the current state, for example `exit code 3`,
 `waiting for capacity: 2 hosts in its pool lack cpus (requested 4)`, or
@@ -95,11 +95,11 @@ ones a Run can still use:
   host. `resume --from-snapshot` an older snapshot works while it still
   exists; a deleted one is 409 `snapshot_unavailable`. `lux snapshots`
   keeps listing every snapshot, deleted ones with `available` false.
-- **A succeeded or cancelled Run** (an expired Run too) keeps its
+- **A succeeded or terminated Run** (an expired Run too) keeps its
   snapshots and output for the tenant's retention (default 30 days) after
   it ended, then they are deleted.
 - **Artifacts** are never deleted by time: they stay until their owner
-  deletes them (`lux artifacts <run> --delete`, a succeeded or cancelled
+  deletes them (`lux artifacts <run> --delete`, a succeeded or terminated
   Run's only).
 
 **What does not survive a stop:** running processes, memory, open
@@ -300,7 +300,7 @@ lux server start|stop|restart|rm srv_…  (or <run> <name>)
   Attaching a server another Run serves is 409 `attached`.
 - **Lifetime.** `run` (the default of `lux server add`,
   `POST /v1/runs/{id}/servers` and `workload.servers`): deleted when its
-  Run can never run again, `succeeded` or `cancelled` (a `failed` Run can
+  Run can never run again, `succeeded` or `terminated` (a `failed` Run can
   be resumed: its servers stay). `owner` (every server that wakes on
   request): kept until its owner deletes it, or until `expireAfter`
   (default 30 days) passes without a request (`server.expired`). An owner
@@ -416,7 +416,7 @@ than MemTotal less headroom is not scaled.
 Everything is scoped to a **tenant**. API keys carry scopes:
 
 - `read`: see Runs, output, hosts.
-- `run`: submit, steer, stop, resume, cancel.
+- `run`: submit, steer, stop, resume, terminate.
 - `admin`: pools, drain.
 
 Each scope includes the ones before it. Runners authenticate with
