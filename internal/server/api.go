@@ -86,14 +86,15 @@ func (s *Server) routes(api huma.API) {
 	}, "run", s.stopRun)
 	register(s, api, huma.Operation{
 		OperationID: "resumeRun", Method: http.MethodPost, Path: "/v1/runs/{id}/resume", Tags: []string{"runs"},
-		Summary: "Resume a stopped, lost or failed Run",
-		Description: "From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. " +
-			"A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been terminated, and is not resumable. " +
+		Summary: "Resume a stopped, lost, failed or succeeded Run",
+		Description: "From its latest snapshot (or fromSnapshot), on any host, through the adapter's resume path with its session: a succeeded Run like a stopped one. " +
+			"Its secrets must be supplied again. Idempotent while resuming. A terminated Run is not resumable (409 not_resumable). " +
+			"A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been terminated. " +
 			"A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state " +
 			"(an assignment no runner started may still be placed again).\n\n" +
 			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +
 			"with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. " +
-			"Adding needs a stopped, lost or failed Run: while it is resuming, 409. " +
+			"Adding needs a Run resume accepts (not one already resuming: 409). " +
 			"A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one, or unless its resumePolicy is restart and it has no session, which restores nothing.\n\n" +
 			"resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller " +
 			"only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). " +
@@ -179,8 +180,8 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "listSnapshots", Method: http.MethodGet, Path: "/v1/runs/{id}/snapshots", Tags: []string{"runs"},
 		Summary: "List a Run's snapshots",
-		Description: "Every snapshot it took. A Run keeps only its current one (the one a resume starts from) once that is uploaded; " +
-			"a succeeded or terminated Run keeps them for its tenant's retention. A deleted one stays listed, available false.",
+		Description: "Every snapshot it took. A Run that can resume keeps only its current one (the one a resume starts from) once that is uploaded; " +
+			"a terminated Run keeps them for its tenant's retention. A deleted one stays listed, available false.",
 		Errors: []int{http.StatusNotFound},
 	}, "read", s.listSnapshots)
 	register(s, api, huma.Operation{
@@ -191,9 +192,9 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "deleteArtifacts", Method: http.MethodDelete, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
 		Summary: "Delete a Run's artifacts",
-		Description: "Every artifact of a succeeded or terminated Run, from storage; retention never deletes artifacts. Their listing stays, " +
+		Description: "Every artifact of a terminated Run, from storage; retention never deletes artifacts. Their listing stays, " +
 			"available false, and a download answers 410 gone. Works however long ago the Run ended. Idempotent: deleted is 0 once none are left. " +
-			"409 not_terminal on any other Run (a stopped, lost or failed one can still be resumed).",
+			"409 not_terminal on any other Run (a stopped, lost, failed or succeeded one can still be resumed).",
 		Errors: []int{http.StatusNotFound, http.StatusConflict},
 	}, "run", s.deleteArtifacts)
 	register(s, api, huma.Operation{
@@ -498,8 +499,8 @@ type Run struct {
 	Placing               bool        `json:"placing,omitempty" doc:"The Run is being placed now: waiting for a host, or starting on one; placementSeconds grows from the response's time on."`
 	Placements            []Placement `json:"placements,omitempty"`
 	Usage                 *RunUsage   `json:"usage,omitempty"`
-	// Resume: on GET /v1/runs/{id} of a stopped, lost or failed Run, what
-	// a resume would take.
+	// Resume: on GET /v1/runs/{id} of a Run resume accepts by its state
+	// (stopped, lost, failed, succeeded), what a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
 	// Servers: on GET /v1/runs/{id}, its servers.
 	Servers []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
@@ -854,7 +855,7 @@ type listRunsInput struct {
 	TenantQuery
 	PageQuery
 	State     string   `query:"state" doc:"Only Runs in these states (comma-separated)." example:"running,stopped"`
-	Resumable bool     `query:"resumable" doc:"Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused or whose resumePolicy is never."`
+	Resumable bool     `query:"resumable" doc:"Only Runs resume accepts: stopped, lost, failed or succeeded, except one whose only snapshot report was refused or whose resumePolicy is never."`
 	Host      string   `query:"host" doc:"Only Runs with a placement (any epoch) on this host, by id or name."`
 	Label     []string `query:"label,explode" doc:"Only Runs with this label (key=value); repeat to require several."`
 	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."`
@@ -914,7 +915,7 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		where = append(where, "r.state = ANY("+arg(strings.Split(st, ","))+")")
 	}
 	if in.Resumable {
-		where = append(where, "r.state IN "+resumableRunStates+` AND NOT `+refusesResumeSQL+` AND NOT `+refusedWithoutSnapshot)
+		where = append(where, resumableSQL)
 	}
 	if in.Host != "" {
 		// By id, or by the name of a host not terminated (names are reused).
@@ -1120,7 +1121,7 @@ func (s *Server) getRun(ctx context.Context, in *RunPath) (*runOutput, error) {
 	if err != nil {
 		return nil, err
 	}
-	if run.State == StateStopped || run.State == StateLost || run.State == StateFailed {
+	if run.State == StateStopped || run.State == StateLost || run.State == StateFailed || run.State == StateSucceeded {
 		if run.Resume, err = s.resumability(ctx, principal(ctx).TenantID, run); err != nil {
 			return nil, err
 		}
@@ -1289,7 +1290,7 @@ func (s *Server) postInput(ctx context.Context, req *postInputInput) (*requestID
 			return errAttachmentsUnsupported(adapter)
 		}
 		switch {
-		case state == StateStopped || state == StateLost:
+		case state == StateStopped || state == StateLost || state == StateSucceeded || state == StateFailed:
 			return errf(http.StatusConflict, "not_running", "run is %s: use resume, which accepts an input", state)
 		case terminal(state):
 			return errf(http.StatusConflict, "not_running", "run is %s", state)
@@ -1352,8 +1353,10 @@ func (s *Server) stopOrTerminate(ctx context.Context, id, reason string) (*accep
 		if err := tx.QueryRow(ctx, `SELECT state FROM runs WHERE id = $1 FOR UPDATE`, id).Scan(&state); err != nil {
 			return err
 		}
-		if terminal(state) {
-			return nil // idempotent
+		// Idempotent: a terminated Run takes nothing, and an ended one
+		// (succeeded, failed) has nothing to stop.
+		if terminal(state) || (reason == "stop" && ended(state)) {
+			return nil
 		}
 		if reason == stopTerminate {
 			if _, err := tx.Exec(ctx, `UPDATE runs SET terminate_requested = true WHERE id = $1`, id); err != nil {
@@ -1364,7 +1367,7 @@ func (s *Server) stopOrTerminate(ctx context.Context, id, reason string) (*accep
 			return err
 		}
 		switch state {
-		case StateSubmitted, StateResuming, StateProvisioning, StateStopped, StateLost:
+		case StateSubmitted, StateResuming, StateProvisioning, StateStopped, StateLost, StateSucceeded, StateFailed:
 			// Nothing running: settle it here.
 			next, why := StateStopped, reason
 			if reason == stopTerminate {
@@ -1508,7 +1511,7 @@ func requireSecrets(refs []spec.SecretRef, values map[string]string) error {
 	return he
 }
 
-// resumeRun puts a stopped, lost or failed Run back in the queue. Its
+// resumeRun puts a stopped, lost, failed or succeeded Run back in the queue. Its
 // secrets must be supplied again: luxd never kept them. An operator may
 // resume without them while this luxd still holds them in memory (it has
 // not restarted since they were last supplied), and may choose the host.
@@ -1558,14 +1561,14 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			return errNeverResumable()
 		}
 		switch state {
-		case StateStopped, StateLost, StateFailed:
+		case StateStopped, StateLost, StateFailed, StateSucceeded:
 			// Resuming would start from scratch, not from the refused state.
 			if noSnapshot && req.FromSnapshot == "" {
 				return errf(http.StatusConflict, "no_snapshot", "run cannot be resumed: %s", noSnapshotReason)
 			}
 		case StateResuming:
 			if len(adding) > 0 {
-				return errf(http.StatusConflict, "not_resumable", "run is resuming already: repositories can only be added to a stopped, lost or failed Run")
+				return errf(http.StatusConflict, "not_resumable", "run is resuming already: repositories can only be added to a Run resume accepts")
 			}
 			if req.Resources != nil {
 				asked, err := req.Resources.check()
@@ -1582,13 +1585,13 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 						firstAsked = first.Requested
 					}
 					if asked != firstAsked {
-						return errf(http.StatusConflict, "not_resumable", "run is resuming already with other resources: they can only change while it is stopped, lost or failed")
+						return errf(http.StatusConflict, "not_resumable", "run is resuming already with other resources: they can only change before it is resumed")
 					}
 					resize = first
 				}
 			}
 			return nil // idempotent: the first resume's secrets stand
-		case StateTerminated, StateSucceeded:
+		case StateTerminated:
 			return errf(http.StatusConflict, "not_resumable", "run is %s", state)
 		default:
 			return errf(http.StatusConflict, "not_resumable", "run is %s: stop it first", state)

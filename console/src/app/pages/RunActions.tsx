@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Badge, Button, ConfirmDialog, Dialog, formatBytes, IdChip, Select, useToast } from "@lux/design-system";
 import { IconTerminal } from "@lux/design-system/icons";
-import { api, errorText, EXEC_RUN_STATES, isApiError, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, useQuery, type MigrateRequest, type ResumeRequest, type Run, type Snapshot } from "../../api/index.ts";
+import { api, ENDED_RUN_STATES, errorText, EXEC_RUN_STATES, isApiError, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, useQuery, type MigrateRequest, type ResumeRequest, type Run, type Snapshot } from "../../api/index.ts";
 import { ButtonLink } from "./common.tsx";
 import { terminalPath } from "./TerminalPage.tsx";
 
@@ -20,7 +20,7 @@ export function RunActions({ run, operator, onChanged }: RunActionsProps) {
   const [busy, setBusy] = useState(false);
 
   const terminal = TERMINAL_RUN_STATES.has(run.state);
-  const canStop = !terminal && run.state !== "stopped" && run.state !== "lost";
+  const canStop = !ENDED_RUN_STATES.has(run.state) && run.state !== "stopped" && run.state !== "lost";
   const canTerminate = !terminal;
   const canResume = RESUMABLE_RUN_STATES.has(run.state);
   const canMigrate = operator && run.state === "running";

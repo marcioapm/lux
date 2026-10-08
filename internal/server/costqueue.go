@@ -416,10 +416,11 @@ type computeEval struct {
 	Open bool
 }
 
-// final: nothing about the Run's compute can change any more. Only a
-// terminal Run's; a stopped or lost one may still be resumed.
+// final: nothing about the Run's compute can change unless it is resumed
+// (resetCostFinality undoes it then). An ended Run's; a stopped or lost
+// one is expected back.
 func (e *computeEval) final() bool {
-	return terminal(e.State) && !e.Open && len(e.Missing) == 0
+	return ended(e.State) && !e.Open && len(e.Missing) == 0
 }
 
 // costHost is what a line says about the host a placement ran on.
@@ -709,7 +710,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 	}
 	final := e.final()
 	var attempts int
-	if terminal(e.State) {
+	if ended(e.State) {
 		if err := tx.QueryRow(ctx, `SELECT attempts FROM cost_sources WHERE run_id = $1 AND source = 'compute'`, runID).Scan(&attempts); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
@@ -721,7 +722,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 		status, lastError = "incomplete", strings.Join(e.Missing, "; ")
 	}
 	var nextAt *time.Time
-	if terminal(e.State) && !final {
+	if ended(e.State) && !final {
 		attempts++
 		t := now.Add(min(s.cfg.Costs.Every<<min(attempts-1, 16), costRetryMax))
 		nextAt = &t

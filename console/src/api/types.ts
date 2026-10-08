@@ -762,18 +762,20 @@ export interface Page<T> {
   offset?: number;
 }
 
-/** Run states that never change again. */
-export const TERMINAL_RUN_STATES = new Set(["succeeded", "failed", "terminated"]);
+/** Run states that never change again: terminated alone. */
+export const TERMINAL_RUN_STATES = new Set(["terminated"]);
+/** Run states whose last placement ended on its own or for good; all but terminated can be resumed. */
+export const ENDED_RUN_STATES = new Set(["succeeded", "failed", "terminated"]);
 /** What POST /input accepts. */
 export const INPUT_RUN_STATES = new Set(["starting", "running"]);
-/** What POST /resume accepts. */
-export const RESUMABLE_RUN_STATES = new Set(["stopped", "lost", "failed"]);
+/** What POST /resume accepts, by state (Run.resumable says whether this Run would be). */
+export const RESUMABLE_RUN_STATES = new Set(["stopped", "lost", "failed", "succeeded"]);
 /** What the exec stream (a terminal) and a server's start/stop/restart need. */
 export const EXEC_RUN_STATES = new Set(["running"]);
 
 /** Still changing: worth polling. */
 export function isRunActive(state: string): boolean {
-  return !TERMINAL_RUN_STATES.has(state) && state !== "stopped" && state !== "lost";
+  return !ENDED_RUN_STATES.has(state) && state !== "stopped" && state !== "lost";
 }
 
 /** GET /v1/pools/stats: one pool's figures over the range (a tenant: its own Runs, allocation and cost). */

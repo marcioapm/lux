@@ -18,9 +18,10 @@ The parts this design builds on:
 - **Run states** (`internal/server/lifecycle.go`): `submitted`,
   `provisioning`, `scheduled`, `starting`, `running`, `stopping`,
   `stopped`, `resuming`, `succeeded`, `failed`, `terminated`, `lost`. Only
-  `succeeded`, `failed` and `terminated` are terminal (`terminal()`), and a
+  `terminated` is terminal (`terminal()`); costs settle on any end
+  (`ended()`: `succeeded`, `failed`, `terminated`), and a `succeeded` or
   `failed` Run can still be resumed (`resumableRunStates` =
-  `stopped`, `lost`, `failed`). There is no "paused", "parked", "aborted"
+  `stopped`, `lost`, `failed`, `succeeded`), which resets them. There is no "paused", "parked", "aborted"
   or "completed". Mapped onto lux's states, those words mean:
 
   | Requirement's word | lux transition |
@@ -575,8 +576,9 @@ config wins, logged once.
   epoch (section 6). Child or sub-agent sessions are the plugin's job: it
   resolves them from the parent session. lux sends only the top-level ids
   the adapters report.
-- `terminal` is true once the Run is `succeeded`, `failed` or `terminated`.
-  A `failed` Run can still be resumed, and then it goes back to `false`.
+- `terminal` is true once the Run has ended: `succeeded`, `failed` or
+  `terminated`. A `succeeded` or `failed` Run can still be resumed, and
+  then it goes back to `false`.
 
 Response, `200`:
 

@@ -267,12 +267,17 @@ def test_attach_detach_and_every_placement(operator, lux, runners, hosts, fake_i
 
 def test_lifetimes_deletion_and_expiry(lux, runners, hosts, fake_image):
     runners.start(hosts[0])
-    # A Run that succeeds: its run servers go; an owner server is detached.
+    # A Run that succeeds keeps them (it can be resumed): run servers stay,
+    # an owner server stays attached.
     ok = lux.submit(generic(fake_image, "sh", "-c", "sleep 8"))
     lux.wait_state(ok, "running")
     lux.run("server", "add", ok, "a", "8080", "--no-start")
     owner = create(lux, name="b", port=8081, runId=ok, lifetime="owner")
     lux.wait_state(ok, "succeeded", timeout=60)
+    assert sorted(s["name"] for s in lux.get(ok)["servers"]) == ["a", "b"]
+    assert get(lux, owner["id"])["runId"] == ok
+    # Terminated, it loses its run servers; the owner server is detached.
+    lux.run("terminate", ok, "--wait")
     assert lux.get(ok).get("servers", []) == []
     assert get(lux, owner["id"])["runId"] is None
     # A failed one keeps them (it can be resumed).

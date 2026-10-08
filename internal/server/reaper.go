@@ -444,7 +444,7 @@ func (s *Server) reapExpiry(ctx context.Context) error {
 		rows, err := tx.Query(ctx, `WITH due AS (
 				SELECT d.id FROM tenants dt CROSS JOIN LATERAL (
 					SELECT dr.id, dr.state_changed_at FROM runs dr
-					WHERE dr.tenant_id = dt.id AND dr.state IN `+resumableRunStates+`
+					WHERE dr.tenant_id = dt.id AND dr.state IN `+restingRunStates+`
 					  AND dr.state_changed_at < now() - make_interval(days => dt.expire_after_days)
 					ORDER BY dr.state_changed_at LIMIT 20) d
 				WHERE dt.expire_after_days > 0
@@ -452,7 +452,7 @@ func (s *Server) reapExpiry(ctx context.Context) error {
 			)
 			SELECT r.id, r.tenant_id, r.state, t.expire_after_days FROM runs r
 			JOIN tenants t ON t.id = r.tenant_id
-			WHERE r.id IN (SELECT id FROM due) AND r.state IN `+resumableRunStates+`
+			WHERE r.id IN (SELECT id FROM due) AND r.state IN `+restingRunStates+`
 			  AND t.expire_after_days > 0 AND r.state_changed_at < now() - make_interval(days => t.expire_after_days)
 			ORDER BY r.state_changed_at
 			FOR UPDATE OF r SKIP LOCKED`)
@@ -491,7 +491,7 @@ const supersededWindow = 200
 // reapSuperseded deletes the volumes of a Run's snapshots other than its
 // current one (runs.snapshot_id), once the current one is uploaded: until
 // then an older snapshot is the only copy that survives losing the host.
-// Only Runs not succeeded or terminated (reapRetention has those).
+// Only Runs not terminated (reapRetention has those).
 //
 // The claim is reapRetention's: the Run is locked first, in a statement of
 // its own, so the claim's statement reads its snapshot_id after any resume
@@ -504,7 +504,7 @@ const supersededWindow = 200
 // manifest also names is kept.
 //
 // Runs are found by runs.snapshots_superseded, cleared here once the Run
-// has no other available snapshot left, or has ended (reapRetention's).
+// has no other available snapshot left, or is terminated (reapRetention's).
 // A pass inspects at most supersededWindow flagged Runs after
 // s.supersededCursor, in id order, and moves the cursor past them, so
 // Runs whose older snapshots wait for an upload cost one window per pass
@@ -544,7 +544,7 @@ func (s *Server) reapSuperseded(ctx context.Context) error {
 		// now. One whose older snapshots all wait for an upload is left
 		// out before the LIMIT, so it cannot hold a batch slot.
 		rows, err = tx.Query(ctx, `SELECT r.id FROM runs r
-			WHERE r.id = ANY($1) AND r.snapshots_superseded AND (r.state IN ('succeeded', 'terminated')
+			WHERE r.id = ANY($1) AND r.snapshots_superseded AND (r.state = 'terminated'
 				OR NOT EXISTS (SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id IS DISTINCT FROM r.snapshot_id)
 				OR (EXISTS (SELECT 1 FROM snapshots cur WHERE cur.id = r.snapshot_id AND cur.uploaded)
 					AND EXISTS (SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id <> r.snapshot_id
@@ -568,7 +568,7 @@ func (s *Server) reapSuperseded(ctx context.Context) error {
 		rows, err = tx.Query(ctx, `
 			WITH cur AS (
 				SELECT r.id AS run_id, r.snapshot_id, c.manifest FROM runs r JOIN snapshots c ON c.id = r.snapshot_id
-				WHERE r.id = ANY($1) AND c.uploaded AND r.state NOT IN ('succeeded', 'terminated')
+				WHERE r.id = ANY($1) AND c.uploaded AND r.state <> 'terminated'
 			), old AS (
 				SELECT o.id, o.run_id, o.manifest, cur.manifest AS keep FROM snapshots o JOIN cur ON cur.run_id = o.run_id
 				WHERE o.available AND o.id <> cur.snapshot_id
@@ -591,7 +591,7 @@ func (s *Server) reapSuperseded(ctx context.Context) error {
 		}
 		// After the claim's statement, so it sees the snapshots it took.
 		_, err = tx.Exec(ctx, `UPDATE runs r SET snapshots_superseded = false
-			WHERE r.id = ANY($1) AND (r.state IN ('succeeded', 'terminated') OR NOT EXISTS (
+			WHERE r.id = ANY($1) AND (r.state = 'terminated' OR NOT EXISTS (
 				SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id IS DISTINCT FROM r.snapshot_id))`, runs)
 		return err
 	})
@@ -635,7 +635,7 @@ func (s *Server) reapRetention(ctx context.Context) error {
 				SELECT r.id FROM runs r JOIN tenants t ON t.id = r.tenant_id
 				WHERE r.id = ANY (ARRAY(SELECT DISTINCT run_id FROM blobs WHERE location = 's3' AND kind <> 'artifact'))
 				  AND r.finished_at IS NOT NULL AND r.finished_at < now() - make_interval(days => t.retention_days)
-				  AND r.state IN ('succeeded', 'terminated')
+				  AND r.state = 'terminated'
 				ORDER BY r.finished_at LIMIT 20
 				FOR UPDATE OF r SKIP LOCKED
 			), gone AS (

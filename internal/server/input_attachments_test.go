@@ -394,10 +394,29 @@ func TestPromptAttachmentsDroppedOnTerminate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if st := queryOne[string](t, s, `SELECT state FROM runs WHERE id = $1`, id); st != StateTerminated {
-		t.Fatalf("state %s, want cancelled", st)
+		t.Fatalf("state %s, want terminated", st)
 	}
 	if n := queryOne[int](t, s, `SELECT count(*) FROM runs WHERE id = $1 AND prompt_attachments IS NULL`, id); n != 1 {
 		t.Fatal("prompt_attachments kept by a terminated Run")
+	}
+}
+
+// A Run that succeeds keeps its prompt's image bytes: a resume of it with
+// no session or snapshot is a first placement, which sends them again.
+func TestPromptAttachmentsKeptOnSuccess(t *testing.T) {
+	s := promptServer(t)
+	out, err := submitWithAttachments(s, "claude-code", []spec.Attachment{{Name: "a.png", ContentType: "image/png", Data: b64(tinyPNG)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := out.Body.ID
+	if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
+		return setRunState(context.Background(), tx, "t1", id, StateSucceeded, "", 0)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM runs WHERE id = $1 AND prompt_attachments IS NOT NULL`, id); n != 1 {
+		t.Fatal("prompt_attachments dropped by a succeeded Run")
 	}
 }
 

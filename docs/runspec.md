@@ -446,7 +446,7 @@ shim also writes each to `$LUX_INPUTS/prompt/<n>-<name>`, on a state
 volume, so they are there after any resume ([adapters](adapters.md#images)
 says where, and how each agent gets them). luxd keeps their bytes apart
 from the stored spec until a placement resumes the Run (it has a session
-or a snapshot) or the Run succeeds or is terminated; a failed Run keeps
+or a snapshot) or the Run is terminated; a failed or succeeded Run keeps
 them, since resuming it without a session or snapshot starts it afresh. The
 spec, and so a Run's views (`GET /v1/runs/{id}`), keep their names and
 types. Steers take
@@ -482,7 +482,7 @@ The hook runs once per placement, only after the workload has started.
 
 A **server** is a named URL that reaches a port in a Run, optionally with a
 command lux runs in its container. `workload.servers` declares servers the
-Run owns (lifetime `run`: they go when it succeeds or is terminated). More
+Run owns (lifetime `run`: they go when it is terminated). More
 can be added while it runs, and servers of the tenant's own attached to it
 (`lux server`, the API: see [concepts](concepts.md#servers), which also
 says when they start).
@@ -549,7 +549,7 @@ with its size, sha256 and content type, and listed by placement epoch.
 Downloads stream through luxd as the file the Run wrote.
 
 Artifacts are never deleted by time, not even with the Run's snapshots and
-output after retention. Once a Run has succeeded or been terminated, its
+output after retention. Once a Run has been terminated, its
 owner deletes them with `lux artifacts <run> --delete` (`DELETE
 /v1/runs/{id}/artifacts`); a download after that is 410 `gone`.
 

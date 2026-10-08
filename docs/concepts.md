@@ -2,7 +2,7 @@
 
 ## Run
 
-A **Run** is one unit of work, from submission to a terminal state. It is
+A **Run** is one unit of work, from submission until it is terminated. It is
 described by an immutable [RunSpec](runspec.md). A Run can survive being
 stopped and moved between hosts any number of times.
 
@@ -30,14 +30,16 @@ runtime.
 ## States
 
 ```
-submitted → scheduled → starting → running ─┬─▶ succeeded
-    ▲                                        ├─▶ failed
-    │                                        ├─▶ terminated
-    │                        stopping ◀──────┘ (stop, drain, timeout)
+submitted → scheduled → starting → running ─┬─▶ succeeded ─┐
+    ▲                                        ├─▶ failed ────┤ (resume)
+    │                                        │              ▼
+    │                        stopping ◀──────┘ (stop, drain, timeout, terminate)
     │                            │
     └── resuming ◀── stopped ◀───┘
                         │
          (host lost while live) ──▶ lost ──(resume)──▶ resuming
+
+any state ──(terminate, or expiry of a resting Run)──▶ terminated (final)
 ```
 
 | State | Meaning |
@@ -50,7 +52,8 @@ submitted → scheduled → starting → running ─┬─▶ succeeded
 | `stopping` | Asked to wind down. The adapter stops the workload gracefully, then it is killed after the grace period. |
 | `stopped` | Exited on request with its state saved. **Resumable.** A Run stopped by a move (force-evicting drain, spot preemption, migrate) is then resumed by lux at once, unless its spec's `resumePolicy` says otherwise: `restart` starts it again from scratch, `manual` and `never` end it `failed` ([resume policy](runspec.md#resume-policy)). |
 | `resuming` | Waiting for a host for its next placement. |
-| `succeeded` / `failed` / `terminated` | Terminal. A failed Run can still be resumed, unless its `resumePolicy` is `never`. |
+| `succeeded` / `failed` | Ended: its workload exited. **Resumable**, like `stopped` (the adapter's resume path, with its session), unless its `resumePolicy` is `never`. |
+| `terminated` | Ended for good: the only terminal state. Never resumed, and its snapshots and output go after the tenant's retention. A Run becomes terminated by `lux terminate` (`POST /v1/runs/{id}/terminate`), or by lux when it expires. |
 | `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. Never resumed automatically. |
 
 A Run that stays `stopped`, `lost` or `failed` (resting) longer than its
@@ -99,7 +102,7 @@ ones a Run can still use:
   snapshots and output for the tenant's retention (default 30 days) after
   it ended, then they are deleted.
 - **Artifacts** are never deleted by time: they stay until their owner
-  deletes them (`lux artifacts <run> --delete`, a succeeded or terminated
+  deletes them (`lux artifacts <run> --delete`, a terminated
   Run's only).
 
 **What does not survive a stop:** running processes, memory, open
@@ -300,11 +303,11 @@ lux server start|stop|restart|rm srv_…  (or <run> <name>)
   Attaching a server another Run serves is 409 `attached`.
 - **Lifetime.** `run` (the default of `lux server add`,
   `POST /v1/runs/{id}/servers` and `workload.servers`): deleted when its
-  Run can never run again, `succeeded` or `terminated` (a `failed` Run can
+  Run can never run again, `terminated` (a `failed` or `succeeded` Run can
   be resumed: its servers stay). `owner` (every server that wakes on
   request): kept until its owner deletes it, or until `expireAfter`
   (default 30 days) passes without a request (`server.expired`). An owner
-  server whose Run finishes for good is detached. Deleting a server
+  server whose Run is terminated is detached. Deleting a server
   detaches it first; its hostname then answers 404 "This preview is
   gone".
 - **Changes:** adding, editing (`PUT` on the Run's, `PATCH` on

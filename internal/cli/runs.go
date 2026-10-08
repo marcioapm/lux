@@ -242,7 +242,7 @@ an estimate, or a cost source has not answered yet.`,
 		},
 	}
 	cmd.Flags().StringVar(&state, "state", "", "filter by state (comma-separated)")
-	cmd.Flags().BoolVar(&resumable, "resumable", false, "only Runs resume accepts (stopped, lost, failed; not those whose only snapshot report was refused)")
+	cmd.Flags().BoolVar(&resumable, "resumable", false, "only Runs resume accepts (stopped, lost, failed, succeeded; not resumePolicy never, nor those whose only snapshot report was refused)")
 	cmd.Flags().StringVar(&host, "host", "", "only Runs placed on this host (id or name), ever")
 	cmd.Flags().IntVar(&limit, "limit", 0, "at most this many (default 100, max 1000)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "filter by label key=value")
@@ -697,7 +697,7 @@ func (a *app) waitMoved(ctx context.Context, id string, epoch int) (*Run, error)
 		switch {
 		case run.State == server.StateRunning && run.Epoch > epoch:
 			return true, nil
-		case run.State == server.StateStopped && run.Epoch > epoch, run.State == server.StateLost, server.Terminal(run.State):
+		case run.State == server.StateStopped && run.Epoch > epoch, run.State == server.StateLost, server.Ended(run.State):
 			return true, fmt.Errorf("run is %s: %s", run.State, run.StateReason)
 		}
 		return false, nil
@@ -888,7 +888,7 @@ func (a *app) resumeCmd() *cobra.Command {
 	var follow, wait bool
 	cmd := &cobra.Command{
 		Use:   "resume <run>",
-		Short: "Resume a stopped, lost or failed Run on any host",
+		Short: "Resume a stopped, lost, failed or succeeded Run on any host",
 		Long: `Resume a Run. Its secrets must be supplied again (lux never stores them):
 from the environment (by name), a .env file (--secrets-from), or --secret NAME=VALUE.
 

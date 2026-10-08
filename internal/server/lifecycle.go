@@ -39,8 +39,13 @@ const livePlacementStates = "('assigned', 'starting', 'running', 'stopping')"
 // queuedRunStates, for SQL: Runs waiting for a host.
 const queuedRunStates = "('submitted', 'resuming', 'provisioning')"
 
-// resumableRunStates, for SQL: Runs resume accepts.
-const resumableRunStates = "('stopped', 'lost', 'failed')"
+// resumableRunStates, for SQL: Runs resume accepts: every end but terminated.
+const resumableRunStates = "('stopped', 'lost', 'failed', 'succeeded')"
+
+// restingRunStates, for SQL: Runs expiry terminates once they have rested
+// longer than their tenant's expire_after_days (reapExpiry). Each must be
+// in the runs_resting index's predicate.
+const restingRunStates = "('stopped', 'lost', 'failed')"
 
 // refusedWithoutSnapshot, for SQL over runs (as r): the current placement's
 // latest report was refused and the Run has no snapshot to restore. Exempt
@@ -52,6 +57,10 @@ const refusedWithoutSnapshot = `(r.snapshot_id IS NULL AND NOT ` + restartsFromS
 
 // noSnapshotReason explains why resume refuses such a Run.
 const noSnapshotReason = "its only snapshot report was refused, so there is no snapshot to restore"
+
+// resumableSQL, for SQL over runs (as r): POST /v1/runs/{id}/resume
+// without fromSnapshot would accept the Run (GET /v1/runs?resumable=true).
+const resumableSQL = `(r.state IN ` + resumableRunStates + ` AND NOT ` + refusesResumeSQL + ` AND NOT ` + refusedWithoutSnapshot + `)`
 
 // movedStops: stop reasons that move a Run rather than stop it; it is
 // placed again as soon as it has stopped (resumed, or restarted from
@@ -125,10 +134,18 @@ func livePlacements(ctx context.Context, tx pgx.Tx, where string, args ...any) (
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[placementRef])
 }
 
-// Terminal: a Run in this state has ended for good.
+// Terminal: a Run in this state has ended for good: it is terminated, and
+// nothing ever runs or resumes it again.
 func Terminal(state string) bool { return terminal(state) }
 
-func terminal(state string) bool {
+func terminal(state string) bool { return state == StateTerminated }
+
+// Ended: a Run in this state has no placement and has ended its last one
+// on its own or for good (succeeded, failed, terminated). Every one but
+// terminated can still be resumed.
+func Ended(state string) bool { return ended(state) }
+
+func ended(state string) bool {
 	return state == StateSucceeded || state == StateFailed || state == StateTerminated
 }
 
@@ -142,23 +159,24 @@ func live(state string) bool {
 }
 
 func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason string, epoch int) error {
-	if terminal(state) {
-		// A terminal Run begins a new settlement epoch after a stopped/lost one.
+	if ended(state) {
+		// An ended Run begins a new settlement epoch after a stopped/lost one.
 		if _, err := tx.Exec(ctx, `UPDATE cost_sources SET settles_left = NULL, next_at = NULL, attempts = 0
 			WHERE run_id = $1 AND source <> 'compute' AND EXISTS
 			(SELECT 1 FROM runs WHERE id = $1 AND state IN ('stopped', 'lost'))`, runID); err != nil {
 			return err
 		}
 	}
-	// prompt_attachments: a succeeded or terminated Run is never placed again.
-	// A failed one can be resumed, as a first placement when it has no
-	// session and no snapshot, so it keeps them.
+	// prompt_attachments: only a terminated Run is never placed again. A
+	// succeeded or failed one can be resumed, as a first placement when it
+	// has no session and no snapshot, so it keeps them.
+	// finished_at: when it last ended, on any end.
 	// state_changed_at is expiry's clock (reapExpiry): moved only by a
 	// change of state, so a repeated stop does not restart it.
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = $2, state_reason = $3, updated_at = now(),
 			state_changed_at = CASE WHEN state <> $2 THEN now() ELSE state_changed_at END,
 			finished_at = CASE WHEN $2 IN ('succeeded', 'failed', 'terminated') THEN now() ELSE finished_at END,
-			prompt_attachments = CASE WHEN $2 IN ('succeeded', 'terminated') THEN NULL ELSE prompt_attachments END,
+			prompt_attachments = CASE WHEN $2 = 'terminated' THEN NULL ELSE prompt_attachments END,
 			activity = CASE WHEN $2 IN ('running') THEN activity ELSE '' END
 		WHERE id = $1`, runID, state, reason)
 	if err != nil {
@@ -221,7 +239,9 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 	if err := tx.QueryRow(ctx, `SELECT state, terminate_requested FROM runs WHERE id = $1`, runID).Scan(&runState, &terminate); err != nil {
 		return err
 	}
-	if terminal(runState) {
+	// A report for a placement of a Run that has ended (redelivered or out
+	// of order) moves nothing; a resume makes the Run resuming first.
+	if ended(runState) {
 		return nil
 	}
 
@@ -360,12 +380,12 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, serverStop); err != nil {
 		return err
 	}
-	ended := map[string]any{"run": runID, "epoch": epoch, "outcome": next}
+	placementEnded := map[string]any{"run": runID, "epoch": epoch, "outcome": next}
 	if st.ExitCode != nil {
-		ended["exitCode"] = *st.ExitCode
+		placementEnded["exitCode"] = *st.ExitCode
 	}
 	if stopReason != "" {
-		ended["stopReason"] = stopReason
+		placementEnded["stopReason"] = stopReason
 	}
 	if moved {
 		// Moved, not stopped by a person: placed again automatically
@@ -383,10 +403,12 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		}
 	}
 	// Last: event streams come after every row lock (infraevents.go).
-	if err := hostEvent(ctx, tx, hostID, evPlacementEnded, ended); err != nil {
+	if err := hostEvent(ctx, tx, hostID, evPlacementEnded, placementEnded); err != nil {
 		return err
 	}
-	if !moved && terminal(next) {
+	// Held secrets serve a running Run, and an operator's resume of a
+	// stopped one; an ended Run is resumed with its secrets supplied again.
+	if !moved && ended(next) {
 		s.secrets.drop(runID)
 	}
 	return nil
@@ -416,7 +438,7 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 		return err
 	}
 	later.host(ctx, tx, hostID, evPlacementEnded, map[string]any{"run": runID, "epoch": epoch, "outcome": "lost", "reason": why})
-	if epoch != current || terminal(runState) {
+	if epoch != current || ended(runState) {
 		return nil
 	}
 	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, "host lost"); err != nil {

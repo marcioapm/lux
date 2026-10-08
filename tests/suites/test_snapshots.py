@@ -110,6 +110,30 @@ def test_generic_state_volume_survives_stop(lux, runners, hosts):
     assert lux.get(run_id)["state"] == "terminated"
 
 
+def test_resume_a_succeeded_run(lux, runners, hosts):
+    """A Run that succeeded is resumable: lux ls --resumable lists it, and a
+    resume runs the generic adapter's resume.command on its restored state
+    volume, as for a stopped Run."""
+    runners.start(hosts[0])
+    spec = generic(ALPINE_IMAGE, "sh", "-c", "echo first > /data/log",
+                   volumes=[{"name": "data", "path": "/data", "kind": "state"}])
+    spec["workload"]["resume"] = {"command": ["sh", "-c", "echo again >> /data/log; cat /data/log"]}
+    run_id = lux.submit(spec)
+    run = lux.wait_state(run_id, "succeeded", timeout=60)
+    lux.wait_placement_uploaded(run_id)
+    assert run_id in [r["id"] for r in lux.json("ls", "--resumable")]
+    lux.run("resume", run_id)
+    lux.wait_output(run_id, "again", timeout=90)
+    run = lux.wait_state(run_id, "succeeded", timeout=90)
+    assert run["epoch"] == 2, run
+    assert lux.logs(run_id).split()[-2:] == ["first", "again"], lux.logs(run_id)
+    lux.run("terminate", run_id, "--wait")
+    run = lux.get(run_id)
+    assert run["state"] == "terminated", run
+    p = lux.run("resume", run_id, check=False)
+    assert p.returncode != 0 and "not_resumable" in p.stderr + p.stdout, p
+
+
 def test_resume_resizes_a_stopped_run(lux, runners, hosts):
     """A resume with less memory and more CPUs: the container's own cgroup
     limits are the new ones, the state volume's data survived, and the
