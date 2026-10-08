@@ -387,14 +387,12 @@ On a host whose AppArmor restricts unprivileged user namespaces (Ubuntu
 24.04 and later), the runner also runs nested Runs `apparmor=unconfined`:
 without it, rootless Docker cannot create its network namespace.
 
-A same-host resume can reuse the container, `/tmp` included: clear the
-engine's runtime directory before starting it (rootless Docker's pid file
-in `$XDG_RUNTIME_DIR` otherwise stops `dockerd` with "process is still
-running").
+Every placement, a same-host resume included, starts in a new container:
+`/tmp` and `/run` hold nothing of an earlier one's engine.
 
 ```bash
 # inside the container, as the workload user
-rm -rf /tmp/xdg && mkdir -p /tmp/xdg
+mkdir -p /tmp/xdg
 export XDG_RUNTIME_DIR=/tmp/xdg DOCKER_HOST=unix:///tmp/xdg/docker.sock
 dockerd-rootless >/tmp/dockerd.log 2>&1 &
 docker build -t app . && docker compose up
