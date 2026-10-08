@@ -77,7 +77,7 @@ the pool launches one host to learn the new capacity.
 ## Acting
 
 ```bash
-lux hosts drain <host> [--force-evict]          # no new Runs; --force-evict also moves its Runs elsewhere (resumePolicy manual or never: fails them)
+lux hosts drain <host> [--force-evict]          # no new Runs; --force-evict also moves its Runs elsewhere (resumePolicy manual: fails them; never: terminates them)
 lux stop <run> / lux terminate <run>
 lux migrate <run> [--to HOST] [--input TEXT] [--wait]
 lux resume <run> [--to HOST] [--from-snapshot S] [--input TEXT]
@@ -108,11 +108,12 @@ what a move does to it:
 - `manual` or `never` (one-shot work that cannot continue elsewhere): it
   cannot be migrated (409 `not_movable`), and it keeps running. A
   force-evict drain or `pools rm --force-evict` still stops it, and it then
-  ends `failed` (`drain: not resumed (resumePolicy never)`). To let it
-  finish, drain without `--force-evict`.
-- `never` also refuses every requested resume, an operator's included (409
-  `not_resumable`). An assignment no runner started may still be placed
-  again.
+  ends: `manual` `failed`, `never` `terminated` (`drain: not resumed
+  (resumePolicy never)`). To let it finish, drain without `--force-evict`.
+- `never` can never be resumed: any end that would leave it resumable
+  terminates it, and a requested resume of one still resting from an
+  older luxd is refused, an operator's included (409 `not_resumable`). An
+  assignment no runner started may still be placed again.
 
 **Resume** by an operator can choose the host (`--to`). A Run's secrets are
 never stored: luxd holds their values in memory from the submit or resume

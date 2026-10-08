@@ -50,9 +50,9 @@ any state ──(terminate, or expiry of a resting Run)──▶ terminated (fin
 | `starting` | Image ready, volumes restored, container starting, init running. |
 | `running` | The workload is running. `activity` says whether an agent is `busy` or `idle` (waiting for input). |
 | `stopping` | Asked to wind down. The adapter stops the workload gracefully, then it is killed after the grace period. |
-| `stopped` | Exited on request with its state saved. **Resumable.** A Run stopped by a move (force-evicting drain, spot preemption, migrate) is then resumed by lux at once, unless its spec's `resumePolicy` says otherwise: `restart` starts it again from scratch, `manual` and `never` end it `failed` ([resume policy](runspec.md#resume-policy)). |
+| `stopped` | Exited on request with its state saved. **Resumable.** A Run stopped by a move (force-evicting drain, spot preemption, migrate) is then resumed by lux at once, unless its spec's `resumePolicy` says otherwise: `restart` starts it again from scratch, `manual` ends it `failed` and `never` ends it `terminated` ([resume policy](runspec.md#resume-policy)). |
 | `resuming` | Waiting for a host for its next placement. |
-| `succeeded` / `failed` | Ended: its workload exited. **Resumable**, like `stopped` (the adapter's resume path, with its session), unless its `resumePolicy` is `never`. |
+| `succeeded` / `failed` | Ended: its workload exited. **Resumable**, like `stopped` (the adapter's resume path, with its session). A Run whose `resumePolicy` is `never` never rests here: it ends `terminated`, its outcome in `stateReason`. |
 | `terminated` | Ended for good: the only terminal state. Never resumed, and its snapshots and output go after the tenant's retention. A Run becomes terminated by `lux terminate` (`POST /v1/runs/{id}/terminate`), or by lux when it expires. |
 | `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. Never resumed automatically. |
 

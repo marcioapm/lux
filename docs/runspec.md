@@ -177,17 +177,25 @@ lux moves a Run when a force-evicting drain (`lux hosts drain --force-evict`,
   policy, e.g. `preempt: not resumed (resumePolicy manual)`. It is
   snapshotted as usual and its servers stop; a person may resume it.
   `lux migrate` refuses it with 409 `not_movable` and leaves it running.
-- `never`: as `manual`, for one-shot work such as a CI job holding a
-  single-use token, and it also refuses every requested resume, whatever
-  the Run's state (stopped by request included): 409 `not_resumable`,
-  "resumePolicy never: this Run cannot be resumed". `lux ls --resumable`
-  leaves it out. An assignment no runner started (refused by an outdated
-  runner) may still be placed again: none of the work ran.
+- `never`: for one-shot work such as a CI job holding a single-use token.
+  It can never be resumed, so no end leaves it resting resumable: one that
+  would leave it `stopped`, `succeeded` or `failed` ends it `terminated`
+  instead (and its storage goes after the tenant's retention), its
+  `exitCode` kept and its outcome in `stateReason`: `succeeded; resumePolicy
+  never`, `exit code 1; resumePolicy never`, `stop; resumePolicy never`,
+  or for a move `preempt: not resumed (resumePolicy never)` (or `drain`).
+  `lux migrate` refuses it with 409 `not_movable`, as `manual`. A requested
+  resume of one still resting from an older luxd is refused whatever its
+  state: 409 `not_resumable`, "resumePolicy never: this Run cannot be
+  resumed". `lux ls --resumable` leaves it out. An assignment no runner
+  started (refused by an outdated runner) may still be placed again: none
+  of the work ran.
 
 Except for `never`, the policy covers only what lux does by itself: a resume
 you ask for restores the snapshot as usual. A cordon-only drain does not stop
 the Run. A Run whose host stopped answering ends `lost`, which is never
-resumed automatically, whatever the policy. Any other value is refused with
+resumed automatically, whatever the policy (a `never` Run too: it stays
+`lost`, its resume refused, until a terminate or its expiry). Any other value is refused with
 422 `invalid_spec`.
 
 An older luxd ignores `resumePolicy` and treats the Run as `auto`. A client
