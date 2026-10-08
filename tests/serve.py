@@ -1,6 +1,7 @@
 """A lux to develop against: the test environment, left running.
 
     uv run python run_tests.py --serve [--hosts N] [--image REF ...]   # up until Ctrl-C
+    uv run python run_tests.py --serve --nested                        # hosts offer nested containers
     uv run python run_tests.py --serve --detach                        # up in the background
     uv run python run_tests.py --down [ENV_JSON]                       # take a detached one down
 
@@ -8,7 +9,9 @@ It brings up what the suite uses (Postgres, S3, simulated Podman hosts,
 luxd), starts a runner on every host, creates a tenant, and writes
 env.json: luxd_url, api_key (scopes run, read), admin_key, tenant_id,
 and the rest of the environment. `--image` preloads an image from the
-local Docker into every host, so Runs never pull.
+local Docker into every host, so Runs never pull. `--nested` starts every
+runner with `--nested`, so Runs with sandbox.nestedContainers are placed,
+and preloads localhost/lux-nested:test (Podman inside) to try them with.
 """
 
 from __future__ import annotations

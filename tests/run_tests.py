@@ -8,6 +8,7 @@
     uv run python run_tests.py --hosts 3         # more simulated hosts
     uv run python run_tests.py --real-ec2        # EC2 suites against real AWS (nightly)
     uv run python run_tests.py --serve           # a lux to develop against (see serve.py)
+    uv run python run_tests.py --serve --nested  # ... whose hosts offer nested containers
     uv run python run_tests.py -j 4              # 4 environments, suites split between them
 
 Each invocation gets its own database, bucket, Docker network and hosts, so
