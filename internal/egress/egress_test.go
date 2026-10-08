@@ -70,16 +70,11 @@ func (n *fakeNet) inSet(iface string, a netip.Addr) bool {
 }
 
 // fixture is a Firewall with Runs installed as Apply does, without the
-// stub's sockets or the chain's nft script.
-func fixture(t *testing.T) (*Firewall, *fakeNet, func(iface string, unrestricted bool, rules ...spec.EgressRule) *[]Lookup) {
-	return fixtureBlocking(t, nil)
-}
-
-// fixtureBlocking is fixture with extra hard-blocked prefixes, as New's
-// control plane.
-func fixtureBlocking(t *testing.T, extra []netip.Prefix) (*Firewall, *fakeNet, func(iface string, unrestricted bool, rules ...spec.EgressRule) *[]Lookup) {
+// stub's sockets or the chain's nft script. blocked are extra hard-blocked
+// prefixes, as New's control plane.
+func fixture(t *testing.T, blocked ...netip.Prefix) (*Firewall, *fakeNet, func(iface string, unrestricted bool, rules ...spec.EgressRule) *[]Lookup) {
 	n := &fakeNet{sets: map[string]map[string]bool{}, addr: map[string]netip.Addr{}, nx: map[string]bool{}}
-	f := newFirewall(extra, n.lookup, n.nft)
+	f := newFirewall(blocked, n.lookup, n.nft)
 	add := func(iface string, unrestricted bool, rules ...spec.EgressRule) *[]Lookup {
 		var mu sync.Mutex
 		var got []Lookup
@@ -453,7 +448,7 @@ func TestWildcardNameCannotOpenABlockedAddress(t *testing.T) {
 		"meta.wild.example.com": netip.MustParseAddr("169.254.169.254"),
 		"cp.wild.example.com":   netip.MustParseAddr("10.9.0.5"),
 	} {
-		f, n, add := fixtureBlocking(t, []netip.Prefix{controlPlane})
+		f, n, add := fixture(t, controlPlane)
 		n.addr[name] = addr
 		add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"})
 		if rc, addrs := ask(t, f, "lux1", name); rc != dnsmessage.RCodeNameError || addrs != nil {
