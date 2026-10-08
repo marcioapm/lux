@@ -22,7 +22,9 @@ export function RunActions({ run, operator, onChanged }: RunActionsProps) {
   const terminal = TERMINAL_RUN_STATES.has(run.state);
   const canStop = !ENDED_RUN_STATES.has(run.state) && run.state !== "stopped" && run.state !== "lost";
   const canTerminate = !terminal;
-  const canResume = RESUMABLE_RUN_STATES.has(run.state);
+  // run.resumable is a resume without fromSnapshot; a Run refused only for
+  // want of a snapshot may still be resumed from an older one (the dialog).
+  const canResume = run.resumable || (RESUMABLE_RUN_STATES.has(run.state) && run.spec.resumePolicy !== "never");
   const canMigrate = operator && run.state === "running";
 
   /** Runs an action; returns the error (already toasted) or null on success. */
