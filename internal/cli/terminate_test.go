@@ -3,6 +3,7 @@ package cli
 import (
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -34,11 +35,12 @@ func TestTerminateAndCancelAlias(t *testing.T) {
 			if len(posted) != 1 || posted[0] != "POST /v1/runs/run_1/terminate" {
 				t.Fatalf("requests: %v", posted)
 			}
-			if got := strings.Contains(errOut.String(), "deprecated"); got != c.deprecated {
-				t.Fatalf("stderr %q", errOut.String())
+			deprecation := "Command \"cancel\" is deprecated, use lux terminate\n"
+			if c.deprecated && errOut.String() != deprecation {
+				t.Fatalf("stderr %q, want %q", errOut.String(), deprecation)
 			}
-			if c.deprecated && strings.Count(strings.TrimSpace(errOut.String()), "\n") != 0 {
-				t.Fatalf("deprecation note is more than one line: %q", errOut.String())
+			if !c.deprecated && errOut.String() != "" {
+				t.Fatalf("stderr %q", errOut.String())
 			}
 			if strings.TrimSpace(out.String()) != "run_1 stopping" {
 				t.Fatalf("stdout %q", out.String())
@@ -57,5 +59,39 @@ func TestTerminateAndCancelAlias(t *testing.T) {
 	}
 	if cancel.IsAvailableCommand() {
 		t.Fatal("cancel is listed in help")
+	}
+}
+
+// lux terminate --wait waits for terminated alone: a Run that reads
+// succeeded on the way (its placement exited before the terminate took)
+// is not where it stops.
+func TestTerminateWaitsForTerminated(t *testing.T) {
+	gets := []string{"stopping", "succeeded", "terminated"}
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		state := "stopping"
+		if r.Method == http.MethodGet {
+			state, gets = gets[0], gets[min(1, len(gets)-1):]
+		} else {
+			w.WriteHeader(http.StatusAccepted)
+		}
+		_, _ = w.Write([]byte(`{"id":"run_1","state":"` + state + `"}`))
+	}))
+	defer srv.Close()
+	var out strings.Builder
+	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: &strings.Builder{}}
+	root := a.root()
+	root.SetArgs([]string{"--url", srv.URL, "--api-key", "k", "terminate", "--wait", "run_1"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "run_1 terminated" {
+		t.Fatalf("stdout %q, want run_1 terminated", got)
+	}
+	want := []string{"POST /v1/runs/run_1/terminate", "GET /v1/runs/run_1", "GET /v1/runs/run_1", "GET /v1/runs/run_1"}
+	if !slices.Equal(requests, want) {
+		t.Fatalf("requests %v, want %v", requests, want)
 	}
 }

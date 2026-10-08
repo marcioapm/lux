@@ -816,7 +816,8 @@ func requireRun(ctx context.Context, tx pgx.Tx, runID string) error {
 }
 
 // inactiveRunStates, for SQL: Runs that hold no host and count against no
-// concurrency quota.
+// concurrency quota. It must stay the union of endedRunStates and
+// resumableRunStates.
 const inactiveRunStates = "('succeeded', 'failed', 'terminated', 'stopped', 'lost')"
 
 // checkRunQuota enforces a tenant's limits on concurrent Runs and on
@@ -1565,13 +1566,13 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		if spec.RefusesResume(sp.ResumePolicy) {
 			return errNeverResumable()
 		}
-		switch state {
-		case StateStopped, StateLost, StateFailed, StateSucceeded:
+		switch {
+		case resumable(state):
 			// Resuming would start from scratch, not from the refused state.
 			if noSnapshot && req.FromSnapshot == "" {
 				return errf(http.StatusConflict, "no_snapshot", "run cannot be resumed: %s", noSnapshotReason)
 			}
-		case StateResuming:
+		case state == StateResuming:
 			if len(adding) > 0 {
 				return errf(http.StatusConflict, "not_resumable", "run is resuming already: repositories can only be added to a Run resume accepts")
 			}
@@ -1596,7 +1597,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 				}
 			}
 			return nil // idempotent: the first resume's secrets stand
-		case StateTerminated:
+		case terminal(state):
 			return errf(http.StatusConflict, "not_resumable", "run is %s", state)
 		default:
 			return errf(http.StatusConflict, "not_resumable", "run is %s: stop it first", state)
