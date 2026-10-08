@@ -50,15 +50,20 @@ arrive, a few seconds late.
    For a release with 056, steps 2–3 change: luxds do not keep working
    meanwhile, and are not rolled. 056 renames `runs.cancel_requested` to
    `terminate_requested` and rewrites `cancelled` to `terminated` in stored
-   Runs, events and the cost queue. Stop every `luxd serve` sharing the
-   database before it runs: a luxd older than it fails every request that
-   reads or writes the column, and while 056 runs it blocks every access
+   Runs, events and the cost queue. While 056 runs it blocks every access
    to `runs` (each luxd request, scheduler pass and runner report waits on
    it) for about 1–2 s per million `run_events` rows, plus the scan of
-   `runs` itself. Start them again on the new binary (step 3) once it has
-   committed.
+   `runs` itself; once it commits, a luxd older than it fails every
+   request that reads or writes the column, until it is restarted on the
+   new binary. With one luxd, migrate and then restart it at once (the
+   host reconciler does exactly this): the old luxd's failures last only
+   between the commit and the restart, and runners retry their reports.
+   With several luxds sharing the database, stop every one before 056
+   runs and start them again on the new binary (step 3) once it has
+   committed, so that no request reaches an older luxd.
 3. Restart (or roll) every `luxd serve` onto the new binary; for a release
-   with 056, start every one of them, all stopped in step 2: do not roll.
+   with 056 and several luxds, start every one of them, all stopped in
+   step 2: do not roll.
 
 Migrate first: a luxd newer than its schema does not check it, and fails
 requests that touch what is missing (luxds older than the schema keep
