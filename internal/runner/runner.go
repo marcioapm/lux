@@ -126,6 +126,8 @@ type Runner struct {
 	shimSyncModes bool
 	// mem scales a Run's resources.memory to its container's limit.
 	mem memoryScale
+	// handover overrides handoverWait (tests).
+	handover time.Duration
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -484,12 +486,19 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	p := newPlacement(r, a)
 	r.placements[a.RunID] = p
 	r.mu.Unlock()
-	if old != nil && old.liveState() != "" && !old.finishing() {
-		// The same Run again with a newer epoch while the old one still
-		// runs here: luxd gave up on the old one.
-		old.markStale()
-		old.kill(ctx)
-		old.waitDone(30 * time.Second)
+	if old != nil {
+		// luxd gave up on the old epoch: fenced now, so it reports and
+		// writes nothing more, and killed if its workload may still run. A
+		// finishing one completes its teardown; the new placement waits for
+		// it before it touches the Run's container, volumes or run state.
+		switch {
+		case old.finishing():
+			old.markStale()
+		case old.liveState() != "":
+			old.markStale()
+			old.kill(ctx)
+		}
+		p.prev = old
 	}
 	go p.run(context.WithoutCancel(ctx))
 	if r.evictBy.Load() != nil {

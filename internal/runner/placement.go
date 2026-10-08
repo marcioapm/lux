@@ -43,6 +43,9 @@ type placement struct {
 	epoch    int
 	assign   *proto.Assign // nil when re-adopted after a runner restart
 	dir      string
+	// prev is the Run's earlier placement on this host when this one was
+	// assigned: this one touches nothing of the Run's until prev is done.
+	prev *placement
 
 	mu      sync.Mutex
 	state   *runState
@@ -144,14 +147,39 @@ func (p *placement) finishing() bool {
 	return p.phase == "exited"
 }
 
+// markStale fences the placement off: it reports nothing more, and writes
+// nothing more under p.dir, which the Run's next placement here owns. The
+// fence itself is recorded once, before that placement starts.
 func (p *placement) markStale() {
 	p.mu.Lock()
-	p.stale = true
+	defer p.mu.Unlock()
+	if p.stale {
+		return
+	}
 	if p.state != nil {
 		p.state.Stale = true
-		_ = writeRunState(p.dir, p.state)
+		_ = p.saveStateLocked()
 	}
-	p.mu.Unlock()
+	p.stale = true
+	// One still starting stops: it would make a container for nothing.
+	if p.cancelStart != nil {
+		p.cancelStart()
+	}
+}
+
+// saveStateLocked persists the run state, unless the placement is fenced
+// off: then the Run's next placement here owns p.dir. p.mu must be held.
+func (p *placement) saveStateLocked() error {
+	if p.stale || p.state == nil {
+		return nil
+	}
+	return writeRunState(p.dir, p.state)
+}
+
+func (p *placement) saveState() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.saveStateLocked()
 }
 
 func (p *placement) isStale() bool {
@@ -166,11 +194,30 @@ func (p *placement) setPhase(ph string) {
 	p.mu.Unlock()
 }
 
-func (p *placement) waitDone(d time.Duration) {
+// waitDone waits up to d for the placement to end; false if it has not.
+func (p *placement) waitDone(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
 	select {
 	case <-p.done:
-	case <-time.After(d):
+		return true
+	case <-t.C:
+		return false
 	}
+}
+
+// handoverWait bounds how long a placement waits for the Run's previous
+// placement on this host to end: a host lease, then the minute finish
+// allows its container's removal.
+func (r *Runner) handoverWait() time.Duration {
+	if r.handover > 0 {
+		return r.handover
+	}
+	lease := time.Duration(r.lease.Load())
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	return lease + time.Minute
 }
 
 func (p *placement) logf(msg string, args ...any) {
@@ -193,6 +240,9 @@ func (p *placement) times() map[string]int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	t := map[string]int64{}
+	if p.state == nil {
+		return t
+	}
 	for k, v := range p.state.Times {
 		t[k] = v
 	}
@@ -266,6 +316,66 @@ func (p *placement) restoreState() {
 	_ = writeRunState(p.dir, st)
 }
 
+// waitPrevious waits, up to handoverWait, for the Run's previous placement
+// on this host to end (its snapshot reported, or its fenced teardown done):
+// until then its container, volumes and run state are its own. A stop or
+// a fence of this placement ends the wait.
+func (p *placement) waitPrevious() error {
+	wait := p.r.handoverWait()
+	deadline := time.Now().Add(wait)
+	p.mu.Lock()
+	prev := p.prev
+	p.mu.Unlock()
+	// prev may itself have been waiting for an older one: wait down the
+	// chain. A placement drops its prev only once that one is done.
+	for prev != nil {
+		for !prev.waitDone(max(min(100*time.Millisecond, time.Until(deadline)), 0)) {
+			switch {
+			case p.pendingStop() != "":
+				return errStoppedBeforeStart
+			case p.isStale():
+				return errStale
+			case !time.Now().Before(deadline):
+				p.logf("the previous placement here did not end in time", "previous", prev.epoch, "waited", wait)
+				return fmt.Errorf("the Run's epoch %d on this host did not end within %s", prev.epoch, wait)
+			}
+		}
+		prev.mu.Lock()
+		next := prev.prev
+		prev.mu.Unlock()
+		prev = next
+	}
+	p.mu.Lock()
+	p.prev = nil
+	p.mu.Unlock()
+	return nil
+}
+
+var errStoppedBeforeStart = errors.New("stopped before start")
+
+// failBeforeStart ends a placement that never took over the Run on this
+// host: its run state and everything else under p.dir stay the previous
+// placement's, so nothing is written there.
+func (p *placement) failBeforeStart(ctx context.Context, err error) {
+	p.setPhase("exited")
+	if errors.Is(err, errStale) {
+		p.setPhase("done")
+		return
+	}
+	state, code, reason := "failed", 125, "start-failed"
+	if errors.Is(err, errStoppedBeforeStart) {
+		state, code, reason = "exited", 0, "stopped"
+	}
+	msg := "handover: " + err.Error()
+	for p.report(ctx, proto.MsgStatus, proto.Status{State: state, ExitCode: &code, Reason: reason, Message: msg, Times: p.times()}) != nil {
+		if p.isStale() || ctx.Err() != nil {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	p.setPhase("done")
+}
+
 // run takes a placement from assignment to its final report.
 func (p *placement) run(ctx context.Context) {
 	defer close(p.done)
@@ -275,6 +385,10 @@ func (p *placement) run(ctx context.Context) {
 	// else: not runner memory past it, not state.json.
 	prompt := a.PromptAttachments
 	a.PromptAttachments = nil
+	if err := p.waitPrevious(); err != nil {
+		p.failBeforeStart(ctx, err)
+		return
+	}
 	p.restoreState()
 	p.setPhase("starting")
 	go p.report(ctx, proto.MsgStatus, proto.Status{State: "starting"})
@@ -386,6 +500,11 @@ func (p *placement) run(ctx context.Context) {
 	if err := p.r.pm.Start(ctx, ctr); err != nil {
 		fail("start", err)
 		return
+	}
+	// Fenced while it was being made: a kill then may have found it
+	// created but not yet running.
+	if p.isStale() {
+		p.kill(ctx)
 	}
 	p.mark("containerStarted")
 	p.state.Phase = "started"
