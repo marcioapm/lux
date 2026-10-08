@@ -83,14 +83,19 @@ func TestNeverRunEndsTerminated(t *testing.T) {
 				} else if state != StateResuming && (exitCode == nil || *exitCode != e.exitCode) {
 					t.Errorf("exit code %v, want %d", exitCode, e.exitCode)
 				}
+				_, held := s.secrets.get("r1")
 				if policy != "never" {
 					// Unchanged: every rest is resumable (a Run resuming is not at rest).
 					if want := state != StateResuming; resumable != want {
 						t.Errorf("resumable %v, want %v", resumable, want)
 					}
+					// Kept for an operator's resume while it is stopped or
+					// lost, and for its next placement while it resumes.
+					if want := state == StateStopped || state == StateLost || state == StateResuming; held != want {
+						t.Errorf("secrets held %v for %s, want %v", held, state, want)
+					}
 					return
 				}
-				_, held := s.secrets.get("r1")
 				var ended string
 				systemScan(t, s, `SELECT data->>'outcome' FROM host_events WHERE type = 'host.placement_ended' ORDER BY id DESC LIMIT 1`, nil, &ended)
 				if reason != e.neverReason {
@@ -144,29 +149,40 @@ func TestSchedulerEndsNeverRunTerminated(t *testing.T) {
 		UPDATE runs SET snapshot_id = (SELECT id FROM snap) WHERE id = 'r1'`
 	cases := []struct {
 		name, policy string
-		setup        string
-		dropSecrets  bool
-		state        string
-		reason       string
+		// submitted: r1 has never been placed (its luxd restarted before
+		// its first placement), rather than resuming after p1.
+		submitted   bool
+		setup       string
+		dropSecrets bool
+		state       string
+		reason      string
 	}{
-		{"secrets lost/auto", "", `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`, true,
+		{"secrets lost/auto", "", false, `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`, true,
 			StateStopped, "secrets must be supplied again: resume with them"},
-		{"secrets lost/never", "never", `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`, true,
+		{"secrets lost/never", "never", false, `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`, true,
 			StateTerminated, "its secrets are no longer held; resumePolicy never"},
-		{"unrestorable/auto", "", `UPDATE runs SET snapshot_id = 'snap-missing' WHERE id = 'r1'`, false,
+		{"secrets lost/never/submitted", "never", true, `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`, true,
+			StateTerminated, "its secrets are no longer held; resumePolicy never"},
+		{"unrestorable/auto", "", false, `UPDATE runs SET snapshot_id = 'snap-missing' WHERE id = 'r1'`, false,
 			StateFailed, "its snapshot does not match this Run's blob records"},
-		{"unrestorable/never", "never", `UPDATE runs SET snapshot_id = 'snap-missing' WHERE id = 'r1'`, false,
+		{"unrestorable/never", "never", false, `UPDATE runs SET snapshot_id = 'snap-missing' WHERE id = 'r1'`, false,
 			StateTerminated, "its snapshot does not match this Run's blob records; resumePolicy never"},
-		{"snapshot unavailable/auto", "", snapshotGone, false,
+		{"snapshot unavailable/auto", "", false, snapshotGone, false,
 			StateLost, "its snapshot is no longer available"},
-		{"snapshot unavailable/never", "never", snapshotGone, false,
+		{"snapshot unavailable/never", "never", false, snapshotGone, false,
 			StateTerminated, "its snapshot is no longer available; resumePolicy never"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s, ctx := policyFixture(t, c.policy)
-			execSQL(t, s, ctx, `UPDATE placements SET state = 'exited', ended_at = now() WHERE id = 'p1'`)
-			execSQL(t, s, ctx, `UPDATE runs SET state = 'resuming', updated_at = now() - interval '1 hour' WHERE id = 'r1'`)
+			if c.submitted {
+				execSQL(t, s, ctx, `DELETE FROM run_servers WHERE run_id = 'r1'`)
+				execSQL(t, s, ctx, `DELETE FROM placements WHERE id = 'p1'`)
+				execSQL(t, s, ctx, `UPDATE runs SET state = 'submitted', current_epoch = 0, updated_at = now() - interval '1 hour' WHERE id = 'r1'`)
+			} else {
+				execSQL(t, s, ctx, `UPDATE placements SET state = 'exited', ended_at = now() WHERE id = 'p1'`)
+				execSQL(t, s, ctx, `UPDATE runs SET state = 'resuming', updated_at = now() - interval '1 hour' WHERE id = 'r1'`)
+			}
 			execSQL(t, s, ctx, c.setup)
 			if c.dropSecrets {
 				s.secrets.drop("r1")
@@ -186,9 +202,11 @@ func TestSchedulerEndsNeverRunTerminated(t *testing.T) {
 			if want := c.state != StateTerminated; resumable != want {
 				t.Errorf("resumable %v, want %v", resumable, want)
 			}
-			// A stopped or lost Run keeps them for a resume.
-			if _, held := s.secrets.get("r1"); held && c.state != StateStopped && c.state != StateLost {
-				t.Error("secret values still held for a Run that cannot use them")
+			// A stopped or lost Run keeps them for a resume; an ended one
+			// (or one whose values are gone already) holds none.
+			want := (c.state == StateStopped || c.state == StateLost) && !c.dropSecrets
+			if _, held := s.secrets.get("r1"); held != want {
+				t.Errorf("secrets held %v, want %v", held, want)
 			}
 		})
 	}

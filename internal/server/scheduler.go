@@ -177,11 +177,12 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			// never Run cannot be resumed, so it ends terminated.
 			if _, ok := s.secrets.get(r.ID); r.HasSecrets && !ok {
 				if it.graceful {
-					next, why := StateStopped, secretsLostReason
+					why := secretsLostReason
 					if spec.RefusesResume(r.Spec.ResumePolicy) {
-						next, why = neverResumedEnd(r.Spec.ResumePolicy, StateStopped, secretsLostNeverReason)
+						why = secretsLostNeverReason
 					}
-					if err := setRunState(ctx, tx, r.TenantID, r.ID, next, why, r.Epoch); err != nil {
+					if _, err := s.endRun(ctx, tx, runEnd{tenantID: r.TenantID, runID: r.ID, epoch: r.Epoch,
+						policy: r.Spec.ResumePolicy, state: StateStopped, reason: why}); err != nil {
 						return err
 					}
 				}
@@ -417,11 +418,9 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 // its pool has one.
 func (s *Server) noHost(ctx context.Context, tx pgx.Tx, r pendingRun, wait string) error {
 	if wait == "snapshot unavailable" {
-		next, why := neverResumedEnd(r.Spec.ResumePolicy, StateLost, snapshotUnavailableReason)
-		if terminal(next) {
-			s.secrets.drop(r.ID)
-		}
-		return setRunState(ctx, tx, r.TenantID, r.ID, next, why, r.Epoch)
+		_, err := s.endRun(ctx, tx, runEnd{tenantID: r.TenantID, runID: r.ID, epoch: r.Epoch,
+			policy: r.Spec.ResumePolicy, state: StateLost, reason: snapshotUnavailableReason})
+		return err
 	}
 	// Its pool's provider. A removed pool (retired) has no stand-in;
 	// re-creating it (the same row) serves the Run again.
@@ -556,11 +555,10 @@ func (s *Server) failUnrestorable(ctx context.Context, tx pgx.Tx, r pendingRun, 
 		return false, err
 	}
 	s.log.Warn("resume refused", "run", r.ID, "snapshot", *r.SnapshotID, "err", err)
-	next, why := neverResumedEnd(r.Spec.ResumePolicy, StateFailed, foreignSnapshotReason)
-	if err := setRunState(ctx, tx, r.TenantID, r.ID, next, why, r.Epoch); err != nil {
+	if _, err := s.endRun(ctx, tx, runEnd{tenantID: r.TenantID, runID: r.ID, epoch: r.Epoch,
+		policy: r.Spec.ResumePolicy, state: StateFailed, reason: foreignSnapshotReason}); err != nil {
 		return false, err
 	}
-	s.secrets.drop(r.ID)
 	return true, nil
 }
 

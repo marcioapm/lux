@@ -11,8 +11,9 @@ import (
 // POST /v1/runs/{id}/terminate and its deprecated alias /cancel both end a
 // Run terminated, through the HTTP routes: a live one is asked to stop
 // (a terminate message, reason terminate) and ends terminated once its
-// placement exits; a stopped one ends terminated at once. Either way its
-// held secrets go, and the request is recorded as terminate.requested.
+// placement exits; a stopped one ends terminated at once; one whose host is
+// lost before its placement exits ends terminated too. Either way its held
+// secrets go, and the request is recorded as terminate.requested.
 func TestTerminateRoutes(t *testing.T) {
 	for _, path := range []string{"terminate", "cancel"} {
 		t.Run(path+"/live", func(t *testing.T) {
@@ -98,6 +99,19 @@ func TestTerminateRoutes(t *testing.T) {
 			if state != StateTerminated {
 				t.Fatalf("after exit: %q", state)
 			}
+		})
+		t.Run(path+"/host-lost", func(t *testing.T) {
+			s, ctx := policyFixture(t, "")
+			key := apiKey(t, s, new("t1"), "run")
+			if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+path, nil); code != http.StatusAccepted {
+				t.Fatalf("%s: %d %s", path, code, body)
+			}
+			// The host goes before the placement reports its exit.
+			execSQL(t, s, ctx, `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE id = 'p1'`)
+			if err := s.reapLeases(ctx); err != nil {
+				t.Fatal(err)
+			}
+			assertTerminated(t, s, "terminated; host lost")
 		})
 		t.Run(path+"/succeeded", func(t *testing.T) {
 			s, _ := policyFixture(t, "")
