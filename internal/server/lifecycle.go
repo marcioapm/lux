@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -92,11 +93,7 @@ func neverResumedEnd(policy, state, reason string) (string, string) {
 	if !spec.RefusesResume(policy) || !resumable(state) {
 		return state, reason
 	}
-	const tag = "resumePolicy " + spec.ResumeNever
-	if reason == "" {
-		return StateTerminated, state + "; " + tag
-	}
-	return StateTerminated, reason + "; " + tag
+	return StateTerminated, cmp.Or(reason, state) + "; resumePolicy " + spec.ResumeNever
 }
 
 // runResumePolicy is a Run's spec's resumePolicy, "" when unset.
@@ -159,10 +156,8 @@ func livePlacements(ctx context.Context, tx pgx.Tx, where string, args ...any) (
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[placementRef])
 }
 
-// Terminal: a Run in this state has ended for good: it is terminated, and
+// terminal: a Run in this state has ended for good: it is terminated, and
 // nothing ever runs or resumes it again.
-func Terminal(state string) bool { return terminal(state) }
-
 func terminal(state string) bool { return state == StateTerminated }
 
 // Ended: a Run in this state has no placement and has ended its last one
