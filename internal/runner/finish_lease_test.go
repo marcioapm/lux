@@ -19,15 +19,21 @@ import (
 
 // finishFixture is a runner heartbeating every second to a fake luxd that
 // acks every report and keeps them, with a placement of run1 (epoch 1,
-// one state volume) whose container has exited. Its podman's volume
-// export blocks until release is called; `rm -f` while $0.holdrm exists
-// (touching $0.removing, then logging "removed <target>"); `network
-// create` while $0.holdnet exists (touching $0.netcreating), then fails.
-// `container inspect X` prints $0.inspect.X if it exists. $0.ctr holds the id of the Run's
-// container while one exists (the placement's, ctr-1); `rm -f` removes it
-// by that id or the Run's container name, and `volume rm` its volume's file.
-// `rmi` records the image it removes in $0.rmi. The placement's image is
-// img, which lux pulled for t1.
+// one state volume) whose container has exited. Its podman:
+//   - `volume export` blocks until release is called; it exits 1 while
+//     $0.failexport exists, and returns at once for a volume X while
+//     $0.fast.X exists;
+//   - `rm -f` blocks while $0.holdrm exists (touching $0.removing, then
+//     logging "removed <target>");
+//   - `network create` blocks while $0.holdnet exists (touching
+//     $0.netcreating), then fails;
+//   - `container inspect X` prints $0.inspect.X if it exists;
+//   - $0.ctr holds the id of the Run's container while one exists (the
+//     placement's, ctr-1); `rm -f` removes it by that id or the Run's
+//     container name, and `volume rm` its volume's file;
+//   - `rmi` records the image it removes in $0.rmi.
+//
+// The placement's image is img, which lux pulled for t1.
 type finishFixture struct {
 	r       *Runner
 	p       *placement
@@ -53,6 +59,8 @@ func newFinishFixture(t *testing.T) *finishFixture {
 echo "$*" >> "$0.log"
 case "$1 $2" in
 "volume export")
+  [ -e "$0.failexport" ] && exit 1
+  if [ -e "$0.fast.$3" ]; then echo volume-data; exit 0; fi
   touch "$0.exporting"
   while [ ! -e "$0.release" ]; do sleep 0.05; done
   echo volume-data ;;
@@ -379,6 +387,29 @@ func TestReadoptedFinishingPlacementRemovesItsContainer(t *testing.T) {
 	}
 	if b, err := os.ReadFile(filepath.Join(f.data, "state")); err != nil || string(b) != "kept" {
 		t.Errorf("the state volume holds %q (%v), want its data", b, err)
+	}
+}
+
+// A volume export that fails with no next epoch assigned is not abandoned:
+// luxd is told the snapshot failed, then that the Run ended.
+func TestFailedExportIsReported(t *testing.T) {
+	f := newFinishFixture(t)
+	if err := os.WriteFile(f.bin+".failexport", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.exitedAsSupervised(context.Background())
+	if !f.p.waitDone(10 * time.Second) {
+		t.Fatal("the placement never ended")
+	}
+	if got := f.types(); len(got) != 2 || got[0] != proto.MsgSnapshotDone || got[1] != proto.MsgStatus {
+		t.Fatalf("reports %v, want snapshot.done then status", got)
+	}
+	f.mu.Lock()
+	data := f.reports[slices.IndexFunc(f.reports, func(fr proto.Frame) bool { return fr.Type == proto.MsgSnapshotDone })].Data
+	f.mu.Unlock()
+	var sd proto.SnapshotDone
+	if err := json.Unmarshal(data, &sd); err != nil || sd.Error == "" {
+		t.Fatalf("snapshot.done %+v (%v), want its error", sd, err)
 	}
 }
 
