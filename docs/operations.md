@@ -47,15 +47,18 @@ arrive, a few seconds late.
    luxd does that records an event (heartbeats, registration, placements,
    drains) waits — about 3–4 s per million events for the two together.
    A migration that fails on a deadlock with luxd can be run again.
-   056 renames `runs.cancel_requested` to `terminate_requested` and
-   rewrites `cancelled` to `terminated` in stored Runs, events and the
-   cost queue. Stop every `luxd serve` sharing the database before it
-   runs: a luxd older than it fails every request that reads or writes the
-   column, and while 056 runs it blocks every access to `runs` (each luxd
-   request, scheduler pass and runner report waits on it) for about 1–2 s
-   per million `run_events` rows, plus the scan of `runs` itself. Start
-   them again on the new binary (step 3) once it has committed.
-3. Restart (or roll) every `luxd serve` onto the new binary.
+   For a release with 056, steps 2–3 change: luxds do not keep working
+   meanwhile, and are not rolled. 056 renames `runs.cancel_requested` to
+   `terminate_requested` and rewrites `cancelled` to `terminated` in stored
+   Runs, events and the cost queue. Stop every `luxd serve` sharing the
+   database before it runs: a luxd older than it fails every request that
+   reads or writes the column, and while 056 runs it blocks every access
+   to `runs` (each luxd request, scheduler pass and runner report waits on
+   it) for about 1–2 s per million `run_events` rows, plus the scan of
+   `runs` itself. Start them again on the new binary (step 3) once it has
+   committed.
+3. Restart (or roll) every `luxd serve` onto the new binary; for a release
+   with 056, start every one of them, all stopped in step 2: do not roll.
 
 Migrate first: a luxd newer than its schema does not check it, and fails
 requests that touch what is missing (luxds older than the schema keep
@@ -286,6 +289,9 @@ reach S3 in the background:
    are now superseded and deleted once its current one is uploaded.
    Existing `cancelled` Runs become `terminated`, `terminated_at`
    taken from their `state_changed_at` (when they were cancelled).
+   Runs with `resumePolicy: never` that already rest (`stopped`, `lost`,
+   `failed`, `succeeded`) stay as they are until terminated or expired;
+   resume refuses them, as before.
    Succeeded Runs now keep their snapshots and output until
    they expire (`expire_after_days`, default 90) plus retention, and those
    bytes count toward `max_storage_bytes`: clients should terminate Runs
