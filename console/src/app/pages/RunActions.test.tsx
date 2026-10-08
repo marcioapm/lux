@@ -93,6 +93,17 @@ test("a stopped Run left without a snapshot can still be resumed from an older o
   }
 });
 
+test("a succeeded Run not resumable as it is can still be resumed, unless its resumePolicy is never", async () => {
+  for (const [resumePolicy, disabled] of [[undefined, false], ["never", true]] as const) {
+    const r = await render("succeeded", { resumable: false, resumePolicy });
+    try {
+      expect(r.button("Resume")!.disabled).toBe(disabled);
+    } finally {
+      await r.done();
+    }
+  }
+});
+
 test("a terminated Run can neither be terminated nor resumed", async () => {
   const r = await render("terminated");
   try {
