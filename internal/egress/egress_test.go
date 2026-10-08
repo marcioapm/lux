@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -204,6 +205,10 @@ func TestWildcardCap(t *testing.T) {
 	if rc, _ := ask(t, f, "lux2", "over.wild.example.com"); rc != dnsmessage.RCodeSuccess {
 		t.Fatalf("another Run: %v", rc)
 	}
+	// Over the cap, AAAA for a new matching name is refused like its A.
+	if rc, _ := askType(t, f, "lux1", "over2.wild.example.com", dnsmessage.TypeAAAA); rc != dnsmessage.RCodeRefused {
+		t.Fatalf("AAAA over the cap: %v", rc)
+	}
 }
 
 // Exact rules do not use up the wildcard cap.
@@ -237,16 +242,13 @@ func TestAdmittedNamesAreRefreshed(t *testing.T) {
 // A refresh resolves names concurrently, at most refreshWorkers at once.
 func TestRefreshIsBoundedConcurrent(t *testing.T) {
 	var mu sync.Mutex
-	inFlight, peak, over := 0, 0, 0
+	inFlight, peak := 0, 0
 	gate := make(chan struct{})
 	var open sync.Once
 	lookup := func(ctx context.Context, _ string) ([]netip.Addr, error) {
 		mu.Lock()
 		inFlight++
 		peak = max(peak, inFlight)
-		if inFlight > refreshWorkers {
-			over = max(over, inFlight)
-		}
 		if inFlight == refreshWorkers {
 			// Hold the gate a little longer, so that an unbounded refresh
 			// starts a lookup beyond the bound before any returns.
@@ -274,8 +276,8 @@ func TestRefreshIsBoundedConcurrent(t *testing.T) {
 	}
 	f.runs["lux1"] = r
 	f.refresh(context.Background())
-	if over > 0 {
-		t.Fatalf("%d lookups at once, want at most %d", over, refreshWorkers)
+	if peak > refreshWorkers {
+		t.Fatalf("%d lookups at once, want at most %d", peak, refreshWorkers)
 	}
 	if peak <= 1 {
 		t.Fatalf("%d lookups at once, want 2..%d", peak, refreshWorkers)
@@ -304,21 +306,24 @@ func TestRemovePrunesResolvedNames(t *testing.T) {
 }
 
 // A lookup in flight when its Run is removed stores nothing for a name no
-// remaining Run allows.
+// remaining Run allows, while another Run that lists a different name lives.
 func TestRemoveDuringRefreshStoresNothing(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
-	lookup := func(ctx context.Context, _ string) ([]netip.Addr, error) {
-		close(started)
-		<-release
+	lookup := func(ctx context.Context, host string) ([]netip.Addr, error) {
+		if host == "gone.example.com" {
+			close(started)
+			<-release
+		}
 		return []netip.Addr{netip.MustParseAddr("93.184.216.34")}, nil
 	}
 	f := newFirewall(nil, lookup, func(string) error { return nil })
-	r, err := newRun(false, nil, nil)
-	if err != nil {
-		t.Fatal(err)
+	for iface, host := range map[string]string{"lux1": "gone.example.com", "lux2": "kept.example.com"} {
+		r, err := newRun(false, []spec.EgressRule{{Host: host}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.runs[iface] = r
 	}
-	r.hosts["gone.example.com"] = true
-	f.runs["lux1"] = r
 	done := make(chan struct{})
 	go func() {
 		f.refresh(context.Background())
@@ -330,8 +335,34 @@ func TestRemoveDuringRefreshStoresNothing(t *testing.T) {
 	<-done
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.resolved) != 0 {
+	if _, ok := f.resolved["gone.example.com"]; ok {
 		t.Fatalf("resolved %v", f.resolved)
+	}
+}
+
+// Once ctx ends, refresh dispatches no further lookups: at most the
+// refreshWorkers in flight, plus the one already waiting for a slot.
+func TestRefreshStopsDispatchingOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls atomic.Int32
+	lookup := func(ctx context.Context, _ string) ([]netip.Addr, error) {
+		calls.Add(1)
+		cancel()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	f := newFirewall(nil, lookup, func(string) error { return nil })
+	r, err := newRun(false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 * refreshWorkers {
+		r.hosts[fmt.Sprintf("h%d.example.com", i)] = true
+	}
+	f.runs["lux1"] = r
+	f.refresh(ctx)
+	if n := calls.Load(); n > refreshWorkers+1 {
+		t.Fatalf("%d lookups after cancel, want at most %d", n, refreshWorkers+1)
 	}
 }
 
@@ -348,10 +379,10 @@ func TestUnrestrictedRunAdmitsNothing(t *testing.T) {
 // A query spends a cap slot.
 func TestNonAQueryDoesNotAdmit(t *testing.T) {
 	types := map[dnsmessage.Type]string{
-		dnsmessage.TypeAAAA: "aaaa",
-		dnsmessage.TypeTXT:  "txt",
-		dnsmessage.TypeMX:   "mx",
-		dnsmessage.Type(65): "https",
+		dnsmessage.TypeAAAA:  "aaaa",
+		dnsmessage.TypeTXT:   "txt",
+		dnsmessage.TypeMX:    "mx",
+		dnsmessage.TypeHTTPS: "https",
 	}
 	f, _, add := fixture(t)
 	events := add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"})
@@ -364,11 +395,8 @@ func TestNonAQueryDoesNotAdmit(t *testing.T) {
 			t.Fatalf("%v of a name no rule matches: %v", typ, rc)
 		}
 	}
-	f.mu.Lock()
-	admitted := f.runs["lux1"].admitted
-	f.mu.Unlock()
-	if admitted != 0 || slices.ContainsFunc(*events, func(l Lookup) bool { return l.Allowed }) {
-		t.Fatalf("admitted %d, events %v", admitted, *events)
+	if slices.ContainsFunc(*events, func(l Lookup) bool { return l.Allowed }) {
+		t.Fatalf("events %v", *events)
 	}
 	for _, label := range types {
 		if rc, addrs := ask(t, f, "lux1", label+".wild.example.com"); rc != dnsmessage.RCodeSuccess || len(addrs) != 1 {

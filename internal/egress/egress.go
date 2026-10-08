@@ -337,7 +337,8 @@ func (f *Firewall) refresh(ctx context.Context) {
 
 // resolve looks a host up and adds its new addresses (never one in a
 // hard-blocked range) to every Run that allows it, in one nft script.
-// Returns every address known for it.
+// Returns every address known for it, or nil if no Run lists host by the
+// time the lookup returns.
 func (f *Firewall) resolve(ctx context.Context, host string) []netip.Addr {
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -346,11 +347,7 @@ func (f *Firewall) resolve(ctx context.Context, host string) []netip.Addr {
 	defer f.mu.Unlock()
 	// The Runs that listed host may have been removed during the lookup:
 	// storing it would leave an entry nothing refreshes or prunes.
-	listed := false
-	for _, r := range f.runs {
-		listed = listed || r.hosts[host]
-	}
-	if !listed {
+	if !f.listed(host) {
 		return nil
 	}
 	known := f.resolved[host]
@@ -391,6 +388,17 @@ func (f *Firewall) resolve(ctx context.Context, host string) []netip.Addr {
 		out = append(out, ip)
 	}
 	return out
+}
+
+// listed: some Run allows host. resolve and Remove must agree on it, or
+// one re-creates what the other prunes. Call with f.mu held.
+func (f *Firewall) listed(host string) bool {
+	for _, r := range f.runs {
+		if r.hosts[host] {
+			return true
+		}
+	}
+	return false
 }
 
 // isBlocked: an allowed hostname that resolves into a hard-blocked range
@@ -491,9 +499,8 @@ func (f *Firewall) Remove(iface string) {
 	// A name no remaining Run allows is no longer refreshed; dropping its
 	// addresses keeps f.resolved bounded by the live Runs' hosts.
 	if r != nil {
-		rest := slices.Collect(maps.Values(f.runs))
 		for h := range r.hosts {
-			if !slices.ContainsFunc(rest, func(o *run) bool { return o.hosts[h] }) {
+			if !f.listed(h) {
 				delete(f.resolved, h)
 			}
 		}
