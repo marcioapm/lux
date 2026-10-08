@@ -156,6 +156,16 @@ esac
 
 func (f *finishFixture) release() { _ = os.WriteFile(f.bin+".release", nil, 0o600) }
 
+// waitDone waits up to d for the placement to end; false if it has not.
+func (p *placement) waitDone(d time.Duration) bool {
+	select {
+	case <-p.done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
 // nackHeld answers every held report as luxd answers a fenced-off epoch's.
 func (f *finishFixture) nackHeld() int {
 	f.mu.Lock()

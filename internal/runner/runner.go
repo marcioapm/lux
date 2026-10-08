@@ -126,8 +126,7 @@ type Runner struct {
 	shimSyncModes bool
 	// mem scales a Run's resources.memory to its container's limit.
 	mem memoryScale
-	// handover, when set, replaces handoverWait's lease + removeTimeout +
-	// podman.WaitDelay. A test seam: nothing in production sets it.
+	// handover, when set, replaces handoverWait's bound. Tests only.
 	handover time.Duration
 }
 
@@ -488,17 +487,14 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	r.placements[a.RunID] = p
 	r.mu.Unlock()
 	if old != nil {
-		// The new placement waits for the old one to be done before it
-		// touches the Run's container, volumes or run state (waitPrevious).
-		// One whose workload may still run is a placement luxd gave up on:
-		// fenced and killed, by its container's id. A finishing one is not
-		// fenced, as in onWelcome: if luxd already acked its snapshot, that
-		// snapshot is the Run's and its blobs must upload. If luxd has not,
-		// either it assigned over the placement only after declaring it
-		// lost, so it will refuse the snapshot, or the snapshot is a
-		// re-export after a restart, whose original luxd already holds:
-		// the export is abandoned rather than holding up the new placement.
-		// A later stale nack still fences it.
+		// p touches nothing of the Run's until old is done (waitPrevious).
+		// An old one whose workload may still run is one luxd gave up on:
+		// fenced and killed. A finishing one is not fenced, as in
+		// onWelcome: a snapshot luxd acked is the Run's and must upload.
+		// One still exporting has sent no snapshot.done, which luxd would
+		// refuse (it assigns over a placement only once lost) or already
+		// holds (a re-export after a restart): the export is abandoned. A
+		// later stale nack still fences it.
 		if old.liveState() != "" && !old.finishing() {
 			old.markStale()
 			old.kill(ctx)
