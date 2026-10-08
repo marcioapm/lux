@@ -963,8 +963,10 @@ echo $LUX_SERVICE_TRACKER_API   # unix:/.lux/services/tracker-api.sock
   only ever the whole first label, before a domain of at least two labels.
   A name is admitted on its first lookup and is then a hostname as above.
   A Run admits at most 256 names through wildcards; past that, a matching
-  name is refused like an unlisted one. A restarted runner admits them
-  afresh as the Run looks them up again.
+  name is refused like an unlisted one. Only an A lookup admits a name
+  and spends a slot, and a name counts toward the cap even if it does not
+  resolve. A restarted runner admits them afresh as the Run looks them up
+  again; until then, new connections to a cached address are dropped.
 - **DNS:** the Run's resolver is a stub on its network's gateway. It
   answers only allowed names, with exactly the addresses the firewall
   allows. It refuses every other name and records each distinct lookup
