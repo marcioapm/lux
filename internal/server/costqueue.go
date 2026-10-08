@@ -182,10 +182,10 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 					UNION
 					SELECT id FROM (
 						SELECT missing.id FROM runs missing
-						WHERE missing.state IN ('succeeded', 'failed', 'terminated', 'stopped', 'lost')
+						WHERE missing.state IN `+inactiveRunStates+`
 							AND (EXISTS (SELECT 1 FROM unnest($1::text[]) AS plugin(source)
 								WHERE NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = missing.id AND c.source = plugin.source))
-								OR (missing.state IN ('succeeded', 'failed', 'terminated')
+								OR (missing.state IN `+endedRunStates+`
 									AND NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = missing.id AND c.source = 'compute')))
 							AND NOT EXISTS (SELECT 1 FROM cost_pending p WHERE p.run_id = missing.id)
 						ORDER BY missing.id LIMIT $2) AS missing_sources)

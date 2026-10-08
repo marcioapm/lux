@@ -285,7 +285,11 @@ reach S3 in the background:
    pass; their retention then starts. A succeeded Run's older snapshots
    are now superseded and deleted once its current one is uploaded.
    Existing `cancelled` Runs become `terminated`, `terminated_at`
-   backfilled from their last `state` event.
+   backfilled from their last `state` event, else `finished_at`, else
+   `updated_at`. Succeeded Runs now keep their snapshots and output until
+   they expire (`expire_after_days`, default 90) plus retention, and those
+   bytes count toward `max_storage_bytes`: clients should terminate Runs
+   they will not resume.
 
 Keys are `tenants/<tenant>/runs/<run>/<blob>`. Encrypt the bucket at rest
 (SSE-KMS on AWS).

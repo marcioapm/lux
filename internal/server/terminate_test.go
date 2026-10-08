@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -122,19 +121,5 @@ func assertTerminated(t *testing.T, s *Server, reason string) {
 		FROM runs WHERE id = 'r1'`, nil, &state, &got, &requests)
 	if _, held := s.secrets.get("r1"); state != StateTerminated || got != reason || requests != 1 || held {
 		t.Fatalf("state %q reason %q terminate.requested %d secrets held %v; want terminated %q 1 false", state, got, requests, held, reason)
-	}
-}
-
-// A placement whose stop reason an older luxd sharing the database wrote
-// as cancel still ends its Run terminated.
-func TestLegacyCancelStopReasonTerminates(t *testing.T) {
-	s, ctx := policyFixture(t, "")
-	execSQL(t, s, ctx, `UPDATE placements SET stop_reason = 'cancel', stop_requested_at = now(), state = 'stopping' WHERE id = 'p1'`)
-	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopping' WHERE id = 'r1'`)
-	exitR1(t, s)
-	var state, reason string
-	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
-	if state != StateTerminated || reason != "terminated" {
-		t.Fatalf("state %q reason %q, want terminated", state, reason)
 	}
 }

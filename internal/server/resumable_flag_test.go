@@ -81,12 +81,19 @@ func TestResumableFlagIsTheFilter(t *testing.T) {
 	}
 }
 
-// The flag is on the Run every answer carries: submit, stop and terminate
-// too, as of the answer.
+// The flag is on the Run every answer carries, as of the answer: submit
+// (submitted, not resumable), stop (still stopping), resume (resuming),
+// and terminate.
 func TestResumableFlagOnActionAnswers(t *testing.T) {
 	s, _ := policyFixture(t, "")
 	key := apiKey(t, s, new("t1"), "run", "read")
-	code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/stop", nil)
+	code, body := call(t, s, key, http.MethodPost, "/v1/runs", map[string]any{
+		"image": map[string]any{"ref": "alpine"}, "workload": map[string]any{"command": []string{"true"}},
+		"placement": map[string]any{"pool": "default"}})
+	if code != http.StatusCreated || resumableOf(t, body) {
+		t.Fatalf("submit: %d %s", code, body)
+	}
+	code, body = call(t, s, key, http.MethodPost, "/v1/runs/r1/stop", nil)
 	if code != http.StatusAccepted || resumableOf(t, body) {
 		t.Fatalf("stop of a running Run: %d, resumable %v (still stopping)", code, resumableOf(t, body))
 	}
@@ -94,6 +101,11 @@ func TestResumableFlagOnActionAnswers(t *testing.T) {
 	code, body = call(t, s, key, http.MethodGet, "/v1/runs/r1", nil)
 	if code != http.StatusOK || !resumableOf(t, body) {
 		t.Fatalf("stopped: %d %s", code, body)
+	}
+	code, body = call(t, s, key, http.MethodPost, "/v1/runs/r1/resume", map[string]any{
+		"secrets": []map[string]string{}})
+	if code != http.StatusAccepted || resumableOf(t, body) {
+		t.Fatalf("resume: %d %s", code, body)
 	}
 	code, body = call(t, s, key, http.MethodPost, "/v1/runs/r1/terminate", nil)
 	if code != http.StatusAccepted || resumableOf(t, body) {

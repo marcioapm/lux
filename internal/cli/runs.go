@@ -812,18 +812,18 @@ func (a *app) stopCmd() *cobra.Command {
 }
 
 func (a *app) terminateCmd() *cobra.Command {
-	return a.lifecycle("terminate", "Stop a Run and end it for good: terminated, never resumable", "terminate", "terminated", "succeeded", "failed")
+	// A terminate request ends terminated on every path (an ended Run at
+	// once, a live one when its placement exits or is lost).
+	return a.lifecycle("terminate", "Stop a Run and end it for good: terminated, never resumable", "terminate", "terminated")
 }
 
-// cancelCmd is terminate's old name, kept hidden for scripts that use it.
+// cancelCmd is terminate's old name, kept for scripts that use it: hidden,
+// and cobra notes the deprecation on stderr (its own output, which only
+// this command routes to a.stderr).
 func (a *app) cancelCmd() *cobra.Command {
 	cmd := a.terminateCmd()
-	cmd.Use, cmd.Hidden = "cancel <run>", true
-	run := cmd.RunE
-	cmd.RunE = func(c *cobra.Command, args []string) error {
-		fmt.Fprintln(a.stderr, "lux: cancel is deprecated; use lux terminate")
-		return run(c, args)
-	}
+	cmd.Use, cmd.Deprecated = "cancel <run>", "use lux terminate"
+	cmd.SetOut(a.stderr)
 	return cmd
 }
 

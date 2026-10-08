@@ -45,15 +45,17 @@ func TestTerminateAndCancelAlias(t *testing.T) {
 			}
 		})
 	}
-	var help strings.Builder
-	a := &app{stdin: strings.NewReader(""), stdout: &help, stderr: &help}
+	a := &app{stdin: strings.NewReader(""), stdout: &strings.Builder{}, stderr: &strings.Builder{}}
 	root := a.root()
-	root.SetOut(&help)
-	root.SetArgs([]string{"--help"})
-	if err := root.Execute(); err != nil {
-		t.Fatal(err)
+	terminate, _, err := root.Find([]string{"terminate"})
+	if err != nil || !terminate.IsAvailableCommand() {
+		t.Fatalf("terminate not listed in help: %v", err)
 	}
-	if !strings.Contains(help.String(), "terminate") || strings.Contains(help.String(), "  cancel") {
-		t.Fatalf("help:\n%s", help.String())
+	cancel, _, err := root.Find([]string{"cancel"})
+	if err != nil || cancel.Name() != "cancel" {
+		t.Fatalf("cancel: %v", err)
+	}
+	if cancel.IsAvailableCommand() {
+		t.Fatal("cancel is listed in help")
 	}
 }
