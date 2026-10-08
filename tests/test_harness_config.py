@@ -140,8 +140,10 @@ def test_nested_without_serve_is_refused_before_building():
     assert "building" not in p.stdout, p.stdout
 
 
+# Two suites: the nested image must follow --nested whatever the selection.
+@pytest.mark.parametrize("suite", ["suites/test_serve.py", "suites/test_scheduling.py"])
 @pytest.mark.parametrize("flags, nested", [(["--serve", "--nested"], True), (["--serve"], False)])
-def test_serve_passes_nested_to_the_image_build_and_the_runners(monkeypatch, flags, nested):
+def test_serve_passes_nested_to_the_image_build_and_the_runners(monkeypatch, flags, nested, suite):
     import run_tests
     import serve
 
@@ -160,7 +162,7 @@ def test_serve_passes_nested_to_the_image_build_and_the_runners(monkeypatch, fla
     monkeypatch.setattr(serve, "serve", fake_serve)
     # suites/test_serve.py names a suite, so the nested image is selected by
     # --nested alone, not by a full run.
-    monkeypatch.setattr(sys, "argv", ["run_tests.py", *flags, "--detach", "suites/test_serve.py"])
+    monkeypatch.setattr(sys, "argv", ["run_tests.py", *flags, "--detach", suite])
     run_tests.main()
     assert calls["nested"] is nested, calls
     assert calls["podman"] is nested, calls
