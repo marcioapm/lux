@@ -132,7 +132,7 @@ def test_retention_spares_a_failed_runs_snapshot(env, lux, runners, hosts):
     """A failed Run is resumable, so retention leaves its snapshot alone even
     at 0 days: a later succeeded Run of the same tenant is deleted, the
     failed one still resumes from its own state. It goes only once it
-    expires (cancelled), then after retention like any terminal Run."""
+    expires (terminated), then after retention like any terminal Run."""
     env.luxd_admin("set-quota", "--tenant", lux.tenant_id, "--retention-days", "0")
     runners.start(hosts[0])
     failed = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "test -f /d/f && exit 0; touch /d/f; exit 1",

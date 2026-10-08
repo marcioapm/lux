@@ -251,16 +251,16 @@ func TestResumePolicyManualResumableByHand(t *testing.T) {
 	}
 }
 
-// A cancel that lands while the Run stops for a move wins over the move,
-// whatever the policy: it ends cancelled.
-func TestResumePolicyCancelDuringMove(t *testing.T) {
+// A terminate that lands while the Run stops for a move wins over the move,
+// whatever the policy: it ends terminated.
+func TestResumePolicyTerminateDuringMove(t *testing.T) {
 	for _, policy := range []string{"never", "manual", "restart"} {
 		t.Run(policy, func(t *testing.T) {
 			s, _ := policyFixture(t, policy)
 			if err := moveStops["preempt"](t, s); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.cancelRun(tenantCtx("t1"), &RunPath{ID: "r1"}); err != nil {
+			if _, err := s.terminateRun(tenantCtx("t1"), &RunPath{ID: "r1"}); err != nil {
 				t.Fatal(err)
 			}
 			exitR1(t, s)
@@ -268,8 +268,8 @@ func TestResumePolicyCancelDuringMove(t *testing.T) {
 			var placements int
 			systemScan(t, s, `SELECT state, state_reason, (SELECT count(*) FROM placements WHERE run_id = 'r1') FROM runs WHERE id = 'r1'`,
 				nil, &state, &reason, &placements)
-			if state != StateCancelled || reason != "cancelled" || placements != 1 {
-				t.Fatalf("state %q reason %q placements %d, want cancelled \"cancelled\" 1", state, reason, placements)
+			if state != StateTerminated || reason != "terminated" || placements != 1 {
+				t.Fatalf("state %q reason %q placements %d, want terminated \"terminated\" 1", state, reason, placements)
 			}
 		})
 	}

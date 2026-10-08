@@ -451,7 +451,7 @@ func TestAttachDetachAndEveryPlacement(t *testing.T) {
 }
 
 // Lifetimes: a Run's lifetime-run servers go when it succeeds or is
-// cancelled, not when it fails; owner servers are detached and stay.
+// terminated, not when it fails; owner servers are detached and stay.
 // Deleting a server detaches it first; its hostname is gone. expireAfter
 // deletes an owner server unrequested for that long.
 func TestServerLifetimes(t *testing.T) {
@@ -1181,13 +1181,13 @@ func TestPreviewPagesNameNoOrchestrator(t *testing.T) {
 	}
 }
 
-// A Run that succeeds or is cancelled while its owner server serves: the
+// A Run that succeeds or is terminated while its owner server serves: the
 // server stops with the placement and is detached, its events say so, and
 // it is never detached with a live process.
 func TestOwnerServerEndsStoppedWithItsRun(t *testing.T) {
 	for _, c := range []struct{ name, stopReason, outcome string }{
 		{"exit 0", "", StateSucceeded},
-		{"cancelled", "cancel", StateCancelled},
+		{"terminated", "terminate", StateTerminated},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, ctx, key, _ := wakeFixture(t)

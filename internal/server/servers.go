@@ -97,7 +97,7 @@ type RunServer struct {
 	Hostname      *string           `json:"hostname" nullable:"true" doc:"Its preview host name; null when previews are not configured."`
 	URL           *string           `json:"url" nullable:"true" doc:"Its preview URL; null when previews are not configured."`
 	Wake          string            `json:"wake" enum:"request,never"`
-	Lifetime      string            `json:"lifetime" enum:"run,owner" doc:"run: deleted when its Run finishes for good (succeeded, cancelled). owner: kept until its owner deletes it."`
+	Lifetime      string            `json:"lifetime" enum:"run,owner" doc:"run: deleted when its Run finishes for good (succeeded, terminated). owner: kept until its owner deletes it."`
 	Labels        map[string]string `json:"labels"`
 	LastRequestAt *time.Time        `json:"lastRequestAt,omitempty" doc:"When its preview URL was last requested (written at most every preview.activity_every)."`
 }
@@ -485,10 +485,10 @@ func (s *Server) startAttachedServers(ctx context.Context, tx pgx.Tx, tenantID, 
 }
 
 // endServers ends a Run's servers with the Run, once it can never run
-// again (succeeded, cancelled): lifetime run servers are deleted, owner
+// again (succeeded, terminated): lifetime run servers are deleted, owner
 // ones detached. A failed Run can be resumed: its servers stay.
 func endServers(ctx context.Context, tx pgx.Tx, tenantID, runID, state string) error {
-	if state != StateSucceeded && state != StateCancelled {
+	if state != StateSucceeded && state != StateTerminated {
 		return nil
 	}
 	rows, err := collectServerRows(tx.Query(ctx, serverSelect+`WHERE sv.run_id = $1 FOR UPDATE OF sv`, runID))

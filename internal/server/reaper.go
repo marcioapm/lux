@@ -397,7 +397,7 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 	var hostID string
 	var epoch int
 	err := tx.QueryRow(ctx, `UPDATE placements p SET stop_requested_at = coalesce(stop_requested_at, now()),
-			stop_reason = CASE WHEN stop_reason = '' OR $2 = 'cancel' OR (stop_reason = 'migrate' AND $2 = 'stop') THEN $2 ELSE stop_reason END
+			stop_reason = CASE WHEN stop_reason = '' OR $2 = 'terminate' OR (stop_reason = 'migrate' AND $2 = 'stop') THEN $2 ELSE stop_reason END
 		FROM runs r
 		WHERE r.id = $1 AND p.run_id = r.id AND p.epoch = r.current_epoch
 		  AND p.state IN `+livePlacementStates+`
@@ -409,8 +409,8 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 		return "", err
 	}
 	typ := proto.MsgStop
-	if reason == "cancel" {
-		typ = proto.MsgCancel
+	if reason == stopTerminate {
+		typ = proto.MsgTerminate
 	}
 	if err := enqueue(ctx, tx, hostID, runID, epoch, typ, proto.StopRequest{Reason: reason}); err != nil {
 		return "", err
@@ -427,12 +427,12 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 	return hostID, nil
 }
 
-// reapExpiry cancels Runs that have rested (stopped, lost or failed) longer
+// reapExpiry terminates Runs that have rested (stopped, lost or failed) longer
 // than their tenant's expire_after_days (0: never). The clock is
 // state_changed_at, so a resume and a later stop restart it. The Run is
 // locked and its state re-checked by FOR UPDATE (a resume that committed
 // first fails the WHERE on the row's new version); one held by a resume or
-// cancel in progress is skipped and seen on a later pass.
+// terminate in progress is skipped and seen on a later pass.
 func (s *Server) reapExpiry(ctx context.Context) error {
 	var expired []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -469,7 +469,7 @@ func (s *Server) reapExpiry(ctx context.Context) error {
 		}
 		for _, r := range runs {
 			reason := fmt.Sprintf("expired: %s for %d days", r.State, r.Days)
-			if err := setRunState(ctx, tx, r.Tenant, r.ID, StateCancelled, reason, 0); err != nil {
+			if err := setRunState(ctx, tx, r.Tenant, r.ID, StateTerminated, reason, 0); err != nil {
 				return err
 			}
 			expired = append(expired, r.ID)
@@ -491,7 +491,7 @@ const supersededWindow = 200
 // reapSuperseded deletes the volumes of a Run's snapshots other than its
 // current one (runs.snapshot_id), once the current one is uploaded: until
 // then an older snapshot is the only copy that survives losing the host.
-// Only Runs not succeeded or cancelled (reapRetention has those).
+// Only Runs not succeeded or terminated (reapRetention has those).
 //
 // The claim is reapRetention's: the Run is locked first, in a statement of
 // its own, so the claim's statement reads its snapshot_id after any resume
@@ -544,7 +544,7 @@ func (s *Server) reapSuperseded(ctx context.Context) error {
 		// now. One whose older snapshots all wait for an upload is left
 		// out before the LIMIT, so it cannot hold a batch slot.
 		rows, err = tx.Query(ctx, `SELECT r.id FROM runs r
-			WHERE r.id = ANY($1) AND r.snapshots_superseded AND (r.state IN ('succeeded', 'cancelled')
+			WHERE r.id = ANY($1) AND r.snapshots_superseded AND (r.state IN ('succeeded', 'terminated')
 				OR NOT EXISTS (SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id IS DISTINCT FROM r.snapshot_id)
 				OR (EXISTS (SELECT 1 FROM snapshots cur WHERE cur.id = r.snapshot_id AND cur.uploaded)
 					AND EXISTS (SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id <> r.snapshot_id
@@ -568,7 +568,7 @@ func (s *Server) reapSuperseded(ctx context.Context) error {
 		rows, err = tx.Query(ctx, `
 			WITH cur AS (
 				SELECT r.id AS run_id, r.snapshot_id, c.manifest FROM runs r JOIN snapshots c ON c.id = r.snapshot_id
-				WHERE r.id = ANY($1) AND c.uploaded AND r.state NOT IN ('succeeded', 'cancelled')
+				WHERE r.id = ANY($1) AND c.uploaded AND r.state NOT IN ('succeeded', 'terminated')
 			), old AS (
 				SELECT o.id, o.run_id, o.manifest, cur.manifest AS keep FROM snapshots o JOIN cur ON cur.run_id = o.run_id
 				WHERE o.available AND o.id <> cur.snapshot_id
@@ -591,7 +591,7 @@ func (s *Server) reapSuperseded(ctx context.Context) error {
 		}
 		// After the claim's statement, so it sees the snapshots it took.
 		_, err = tx.Exec(ctx, `UPDATE runs r SET snapshots_superseded = false
-			WHERE r.id = ANY($1) AND (r.state IN ('succeeded', 'cancelled') OR NOT EXISTS (
+			WHERE r.id = ANY($1) AND (r.state IN ('succeeded', 'terminated') OR NOT EXISTS (
 				SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id IS DISTINCT FROM r.snapshot_id))`, runs)
 		return err
 	})
@@ -612,7 +612,7 @@ func (s *Server) deleteObjects(ctx context.Context, what string, keys []string) 
 	}
 }
 
-// reapRetention deletes the blobs of Runs that succeeded or were cancelled
+// reapRetention deletes the blobs of Runs that succeeded or were terminated
 // longer ago than their tenant's retention: snapshot volumes and output.
 // Artifacts are kept until their owner deletes them (deleteArtifacts). A
 // failed Run is resumable, so it is exempt from retention until it expires
@@ -635,7 +635,7 @@ func (s *Server) reapRetention(ctx context.Context) error {
 				SELECT r.id FROM runs r JOIN tenants t ON t.id = r.tenant_id
 				WHERE r.id = ANY (ARRAY(SELECT DISTINCT run_id FROM blobs WHERE location = 's3' AND kind <> 'artifact'))
 				  AND r.finished_at IS NOT NULL AND r.finished_at < now() - make_interval(days => t.retention_days)
-				  AND r.state IN ('succeeded', 'cancelled')
+				  AND r.state IN ('succeeded', 'terminated')
 				ORDER BY r.finished_at LIMIT 20
 				FOR UPDATE OF r SKIP LOCKED
 			), gone AS (

@@ -6,7 +6,7 @@ import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, UsageBar } from "./common.tsx";
 
 // expiry: how long a stopped, lost or failed Run of the tenant may rest
-// before it is cancelled; 0 is never.
+// before it is terminated; 0 is never.
 export function expiry(days: number): string {
   return days === 0 ? "never" : formatDuration(days * 86_400);
 }

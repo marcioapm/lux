@@ -47,6 +47,11 @@ arrive, a few seconds late.
    luxd does that records an event (heartbeats, registration, placements,
    drains) waits — about 3–4 s per million events for the two together.
    A migration that fails on a deadlock with luxd can be run again.
+   056 renames `runs.cancel_requested` to `terminate_requested` and
+   rewrites `cancelled` to `terminated` in stored Runs, events and the
+   cost queue: a luxd older than it fails every request that reads or
+   writes the column until it is restarted onto the new binary, so keep
+   the time between this step and the next short.
 3. Restart (or roll) every `luxd serve` onto the new binary.
 
 Migrate first: a luxd newer than its schema does not check it, and fails
@@ -188,12 +193,12 @@ luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BY
   registers.
 - `--max-storage`: bytes in snapshots, output and artifacts not yet
   deleted. Checked when a Run is submitted or resumed.
-- `--retention-days`: how long a succeeded or cancelled Run keeps its
+- `--retention-days`: how long a succeeded or terminated Run keeps its
   snapshots and output after it ended (default 30). The Run, its events
   and its artifacts stay. A failed Run can be resumed, so retention
   deletes nothing of it.
 - `--expire-after-days`: how long a Run may rest `stopped`, `lost` or
-  `failed` before lux cancels it (default 90; 0: never). Its retention
+  `failed` before lux terminates it (default 90; 0: never). Its retention
   counts from then.
 
 A request over quota gets HTTP 429, and the CLI exits with code 5.
@@ -240,10 +245,10 @@ reach S3 in the background:
    ([Which snapshots are kept](concepts.md#which-snapshots-are-kept)):
    - the older snapshots of a resumable Run, once its current one is
      uploaded;
-   - a succeeded or cancelled Run's snapshots and output, the tenant's
+   - a succeeded or terminated Run's snapshots and output, the tenant's
      `retention_days` after it ended;
    - a `failed` Run, which is resumable, is exempt from age-based retention
-     until it expires (`expire_after_days`, default 90: cancelled, then
+     until it expires (`expire_after_days`, default 90: terminated, then
      retention); its superseded snapshots are still removed, as above.
 
    Artifacts are deleted only by `DELETE /v1/runs/{id}/artifacts`. Each
@@ -253,12 +258,12 @@ reach S3 in the background:
    its key) and left in the bucket, never retried.
 
    **Upgrading** to this release (migrations 053–054): the first reaper
-   passes, 20 Runs per pass per kind, cancel every Run resting longer than
+   passes, 20 Runs per pass per kind, terminate every Run resting longer than
    90 days (`state_changed_at` is backfilled from each Run's last `state`
    event); delete the volumes of every snapshot but the current one of
-   non-terminal Runs (any not succeeded or cancelled) whose current
+   non-terminal Runs (any not succeeded or terminated) whose current
    snapshot is uploaded; and stop deleting failed Runs' blobs and
-   artifacts. Superseded deletion leaves existing succeeded and cancelled
+   artifacts. Superseded deletion leaves existing succeeded and terminated
    Runs alone: they stay governed by retention. Expired Runs lose their
    snapshots and output 30 days later (their retention starts at the
    expiry).

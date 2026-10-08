@@ -808,11 +808,23 @@ func (a *app) lifecycle(use, short, path string, wantStates ...string) *cobra.Co
 }
 
 func (a *app) stopCmd() *cobra.Command {
-	return a.lifecycle("stop", "Stop a Run gracefully (resumable)", "stop", "stopped", "succeeded", "failed", "cancelled", "lost")
+	return a.lifecycle("stop", "Stop a Run gracefully (resumable)", "stop", "stopped", "succeeded", "failed", "terminated", "lost")
 }
 
+func (a *app) terminateCmd() *cobra.Command {
+	return a.lifecycle("terminate", "Stop a Run and end it for good: terminated, never resumable", "terminate", "terminated", "succeeded", "failed")
+}
+
+// cancelCmd is terminate's old name, kept hidden for scripts that use it.
 func (a *app) cancelCmd() *cobra.Command {
-	return a.lifecycle("cancel", "Stop a Run and make it final", "cancel", "cancelled", "succeeded", "failed")
+	cmd := a.terminateCmd()
+	cmd.Use, cmd.Hidden = "cancel <run>", true
+	run := cmd.RunE
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		fmt.Fprintln(a.stderr, "lux: cancel is deprecated; use lux terminate")
+		return run(c, args)
+	}
+	return cmd
 }
 
 // parseAddRepo reads --add-repo: name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false].
@@ -1017,7 +1029,7 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 				return a.waitExit(ctx, args[0])
 			}
 			if wait {
-				r, err := a.waitState(ctx, args[0], "running", "succeeded", "failed", "cancelled", "stopped", "lost")
+				r, err := a.waitState(ctx, args[0], "running", "succeeded", "failed", "terminated", "stopped", "lost")
 				if err != nil {
 					return err
 				}
@@ -1221,7 +1233,7 @@ func (a *app) waitFor(ctx context.Context, id string, done func(*Run) (bool, err
 // waitExit waits for a Run to stop or end and returns its exit code as the
 // command's.
 func (a *app) waitExit(ctx context.Context, id string) error {
-	run, err := a.waitState(ctx, id, "succeeded", "failed", "cancelled", "stopped", "lost")
+	run, err := a.waitState(ctx, id, "succeeded", "failed", "terminated", "stopped", "lost")
 	if err != nil {
 		return err
 	}

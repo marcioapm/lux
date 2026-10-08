@@ -229,7 +229,7 @@ image:
   image named there would not be pinned, so it is refused. Add
   `FROM image AS name` and use the name instead.
 - A build has the Run's limits: CPUs, memory (no swap), and processes.
-- A stop or cancel during a build ends the build.
+- A stop or terminate during a build ends the build.
 - If a rebuild on another host produces a different image, the Run
   continues and records an `image.rebuild-differs` event. That happens when
   a `RUN` step is not reproducible, for example one that downloads the
@@ -446,7 +446,7 @@ shim also writes each to `$LUX_INPUTS/prompt/<n>-<name>`, on a state
 volume, so they are there after any resume ([adapters](adapters.md#images)
 says where, and how each agent gets them). luxd keeps their bytes apart
 from the stored spec until a placement resumes the Run (it has a session
-or a snapshot) or the Run succeeds or is cancelled; a failed Run keeps
+or a snapshot) or the Run succeeds or is terminated; a failed Run keeps
 them, since resuming it without a session or snapshot starts it afresh. The
 spec, and so a Run's views (`GET /v1/runs/{id}`), keep their names and
 types. Steers take
@@ -456,7 +456,7 @@ images the same way (`attachments` on `POST /v1/runs/{id}/input`,
 ## Before stop
 
 `workload.beforeStop` is what a Run leaves behind as it stops. On **every
-stop** — a `lux stop`, a cancel, the Run's `timeout`, a drain, a
+stop** — a `lux stop`, a terminate, the Run's `timeout`, a drain, a
 preemption — the shim runs the command in the container first, while the
 workload is still whole, and only then signals the workload. It runs as
 the workload's user, with its environment and working directory; its
@@ -482,7 +482,7 @@ The hook runs once per placement, only after the workload has started.
 
 A **server** is a named URL that reaches a port in a Run, optionally with a
 command lux runs in its container. `workload.servers` declares servers the
-Run owns (lifetime `run`: they go when it succeeds or is cancelled). More
+Run owns (lifetime `run`: they go when it succeeds or is terminated). More
 can be added while it runs, and servers of the tenant's own attached to it
 (`lux server`, the API: see [concepts](concepts.md#servers), which also
 says when they start).
@@ -535,7 +535,7 @@ leaving the Run `stopped` and its state volume snapshotted.
 
 Artifacts are files a Run produces, kept after it ends and downloadable
 with `lux artifacts <run> --download DIR`. They are collected **on every
-exit** (a stop, a failure, a cancel, not only success), per placement:
+exit** (a stop, a failure, a terminate, not only success), per placement:
 
 - files matching `artifacts.paths`: absolute globs on the Run's volumes,
   where `*` matches within a directory and `**` any depth
@@ -549,7 +549,7 @@ with its size, sha256 and content type, and listed by placement epoch.
 Downloads stream through luxd as the file the Run wrote.
 
 Artifacts are never deleted by time, not even with the Run's snapshots and
-output after retention. Once a Run has succeeded or been cancelled, its
+output after retention. Once a Run has succeeded or been terminated, its
 owner deletes them with `lux artifacts <run> --delete` (`DELETE
 /v1/runs/{id}/artifacts`); a download after that is 410 `gone`.
 
