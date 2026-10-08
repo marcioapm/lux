@@ -101,6 +101,8 @@ export interface Run {
   name?: string;
   labels: Record<string, string>;
   state: string;
+  /** POST /resume without fromSnapshot would accept it (the ?resumable=true test); always present. */
+  resumable: boolean;
   stateReason?: string;
   activity?: string;
   /** What the adapter does with input sent while the agent works. */

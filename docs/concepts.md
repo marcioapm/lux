@@ -56,6 +56,13 @@ any state ──(terminate, or expiry of a resting Run)──▶ terminated (fin
 | `terminated` | Ended for good: the only terminal state. Never resumed, and its snapshots and output go after the tenant's retention. A Run becomes terminated by `lux terminate` (`POST /v1/runs/{id}/terminate`), or by lux when it expires. |
 | `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. Never resumed automatically. |
 
+Every Run the API returns carries `resumable`, always present: whether
+`POST /v1/runs/{id}/resume` without `fromSnapshot` would accept it now
+(its state is `stopped`, `lost`, `failed` or `succeeded`, its
+`resumePolicy` is not `never`, and it is not left with only a refused
+snapshot report). It is the same test as `GET /v1/runs?resumable=true`
+(`lux ls --resumable`).
+
 A Run that stays `stopped`, `lost` or `failed` (resting) longer than its
 tenant's `expireAfterDays` (default 90; 0: never) is **terminated by lux**,
 with `stateReason` `expired: stopped for 90 days` (or `lost`, `failed`),

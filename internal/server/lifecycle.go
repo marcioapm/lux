@@ -59,7 +59,8 @@ const refusedWithoutSnapshot = `(r.snapshot_id IS NULL AND NOT ` + restartsFromS
 const noSnapshotReason = "its only snapshot report was refused, so there is no snapshot to restore"
 
 // resumableSQL, for SQL over runs (as r): POST /v1/runs/{id}/resume
-// without fromSnapshot would accept the Run (GET /v1/runs?resumable=true).
+// without fromSnapshot would accept the Run. The one definition behind
+// both Run.resumable (runColumns) and GET /v1/runs?resumable=true.
 const resumableSQL = `(r.state IN ` + resumableRunStates + ` AND NOT ` + refusesResumeSQL + ` AND NOT ` + refusedWithoutSnapshot + `)`
 
 // movedStops: stop reasons that move a Run rather than stop it; it is

@@ -2066,6 +2066,9 @@ components:
         resize:
           $ref: "#/components/schemas/Resize"
           description: "In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."
+        resumable:
+          description: "Whether POST /v1/runs/{id}/resume without fromSnapshot would be accepted: its state is stopped, lost, failed or succeeded, its resumePolicy is not never, and it is not left with only a refused snapshot report. The same test as GET /v1/runs?resumable=true. As of this answer: a Run being stopped is not resumable until it is stopped."
+          type: boolean
         resume:
           $ref: "#/components/schemas/Resumability"
         runtimeSeconds:

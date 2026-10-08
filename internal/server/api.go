@@ -471,6 +471,7 @@ type Run struct {
 	Name        string            `json:"name,omitempty"`
 	Labels      map[string]string `json:"labels"`
 	State       string            `json:"state"`
+	Resumable   bool              `json:"resumable" doc:"Whether POST /v1/runs/{id}/resume without fromSnapshot would be accepted: its state is stopped, lost, failed or succeeded, its resumePolicy is not never, and it is not left with only a refused snapshot report. The same test as GET /v1/runs?resumable=true. As of this answer: a Run being stopped is not resumable until it is stopped."`
 	StateReason string            `json:"stateReason,omitempty"`
 	Activity    string            `json:"activity,omitempty"`
 	Steer       *spec.Steer       `json:"steer,omitempty" doc:"What the Run's adapter does with input sent while the agent works (POST /v1/runs/{id}/input)."`
@@ -572,7 +573,7 @@ type RunUsage struct {
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing`
+	rpt.wait, rpt.start, rpt.placing, ` + resumableSQL
 
 // runsFrom: a Run with its tenant, its current placement's host, and its
 // runtime (rr). Runtime is the sum over its placements of started_at
@@ -635,7 +636,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
-		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing)
+		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing, &r.Resumable)
 	r.PlacementSeconds = r.PlacementWaitSeconds + r.PlacementStartSeconds
 	if info, ok := spec.Adapters[r.Spec.Workload.Adapter]; ok && info.Steer.Lands != "" {
 		st := info.Steer
