@@ -195,9 +195,10 @@ func (p *placement) isStale() bool {
 	return p.stale
 }
 
-// abandonSnapshot ends finish's snapshot export if one is under way: a
-// snapshot luxd has not acked yet. One already exported is reported, and
-// once acked is luxd's, so finish runs to its end.
+// abandonSnapshot cancels finish's volume exports if they are under way: a
+// snapshot luxd has not acked yet. One whose volumes are exported is
+// completed and reported, and once acked is luxd's, so finish runs to its
+// end.
 func (p *placement) abandonSnapshot() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -229,10 +230,12 @@ const removeTimeout = time.Minute
 
 // handoverWait bounds how long a placement waits for the Run's previous
 // placement on this host to end. That one is either killed (its workload
-// may still run), abandoning its snapshot export (luxd has not acked it),
-// or past the export: what is left is its reports, which outlast a host
-// lease only while the host is cut off from luxd, and its container's
-// removal, removeTimeout plus podman's WaitDelay if podman hangs.
+// may still run), abandoning its volume exports (luxd has not acked them;
+// sampleSlow's walk of the volumes before them ignores the cancel, so on a
+// volume of very many files the abandon is not immediate), or past the
+// exports: what is left is its reports, which outlast a host lease only
+// while the host is cut off from luxd, and its container's removal,
+// removeTimeout plus podman's WaitDelay if podman hangs.
 func (r *Runner) handoverWait() time.Duration {
 	if r.handover > 0 {
 		return r.handover
@@ -632,7 +635,8 @@ func (p *placement) readExit(code int) *exitRecord {
 
 // finish snapshots the state volumes and reports: snapshot first, so that
 // by the time luxd sees the Run stopped its snapshot is recorded.
-// abandonSnapshot ends the export, never a finished snapshot's report.
+// abandonSnapshot cancels the volume exports only: once they are done the
+// snapshot is completed and reported as usual.
 func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	exportCtx, cancelExport := context.WithCancel(ctx)
 	defer cancelExport()
@@ -652,7 +656,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		p.setPhase("done")
 		return
 	}
-	sd, err := p.snapshot(exportCtx)
+	sd, err := p.snapshot(ctx, exportCtx)
 	p.mu.Lock()
 	p.cancelFinish = nil
 	p.mu.Unlock()
@@ -1451,8 +1455,9 @@ func dirSize(root string) int64 {
 
 // snapshot exports every state volume (zstd), compresses the output file,
 // and records them for upload. The local volumes now hold exactly this
-// snapshot, so a resume here moves nothing.
-func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
+// snapshot, so a resume here moves nothing. exportCtx covers the volume
+// exports only: once they are done, a cancel no longer trims the snapshot.
+func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDone, error) {
 	snapID := ids.New(ids.Snapshot)
 	rec := &snapshotRecord{RunID: p.runID, Epoch: p.epoch, Created: time.Now().UnixMilli()}
 	sd := &proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: snapID, RunID: p.runID, Epoch: p.epoch, Volumes: []proto.VolumeSnapshot{}}}
@@ -1462,7 +1467,7 @@ func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
 			continue
 		}
 		blobID := ids.New(ids.Blob)
-		size, sum, err := p.r.writeBlob(blobID, func(w io.Writer) error { return p.r.pm.VolumeExport(ctx, v.Volume, w) })
+		size, sum, err := p.r.writeBlob(blobID, func(w io.Writer) error { return p.r.pm.VolumeExport(exportCtx, v.Volume, w) })
 		if err != nil {
 			// No record lists the blobs already written: nothing else removes them.
 			for _, up := range rec.Uploads {
