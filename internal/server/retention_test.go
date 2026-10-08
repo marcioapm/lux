@@ -24,12 +24,11 @@ func retentionFixture(t *testing.T, raState, rbState string, raDays, rbDays floa
 	return s, ctx, f
 }
 
-// A succeeded or terminated Run past its tenant's retention loses its
-// snapshot volumes and output (rows deleted, S3 objects deleted) and every
-// snapshot becomes unavailable; its artifacts stay. One within retention
-// keeps everything.
+// A terminated Run past its tenant's retention loses its snapshot volumes
+// and output (rows deleted, S3 objects deleted) and every snapshot becomes
+// unavailable; its artifacts stay. One within retention keeps everything.
 func TestReapRetentionTerminal(t *testing.T) {
-	for _, state := range []string{StateSucceeded, StateTerminated} {
+	for _, state := range []string{StateTerminated} {
 		t.Run(state, func(t *testing.T) {
 			s, ctx, f := retentionFixture(t, state, state, 29.9, 5.01)
 			if err := s.reapRetention(ctx); err != nil {
@@ -61,10 +60,16 @@ func TestReapRetentionTerminal(t *testing.T) {
 	}
 }
 
-// A failed Run is resumable: retention deletes nothing of it, however long
-// ago it failed. Nor of a stopped Run with an old finished_at.
+// A failed or succeeded Run is resumable: retention deletes nothing of it,
+// however long ago it ended. Nor of a stopped Run with an old finished_at.
 func TestReapRetentionSparesResumable(t *testing.T) {
-	s, ctx, f := retentionFixture(t, StateStopped, StateFailed, 400, 400)
+	for _, ended := range []string{StateFailed, StateSucceeded} {
+		t.Run(ended, func(t *testing.T) { testReapRetentionSparesResumable(t, ended) })
+	}
+}
+
+func testReapRetentionSparesResumable(t *testing.T, ended string) {
+	s, ctx, f := retentionFixture(t, StateStopped, ended, 400, 400)
 	if err := s.reapRetention(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +82,9 @@ func TestReapRetentionSparesResumable(t *testing.T) {
 	}
 	if got := f.Deleted(); len(got) != 0 {
 		t.Fatalf("S3 deletes %v", got)
+	}
+	if ended == StateSucceeded {
+		return
 	}
 	// Once it expires (terminated now), its retention counts from then.
 	execSQL(t, s, ctx, `UPDATE runs SET state_changed_at = now() - interval '91 days' WHERE id = 'rb'`)
@@ -102,15 +110,15 @@ func TestReapRetentionSparesResumable(t *testing.T) {
 // batch finished before it; a Run whose only S3 data is artifacts is not a
 // candidate, however old: its snapshot stays available.
 func TestReapRetentionPastReapedHistory(t *testing.T) {
-	s, ctx, f := retentionFixture(t, StateSucceeded, StateSucceeded, 1, 30)
+	s, ctx, f := retentionFixture(t, StateTerminated, StateTerminated, 1, 30)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at)
-		SELECT 'old' || lpad(i::text, 3, '0'), 't2', '{}', 'succeeded', 1, now() - make_interval(days => 100 + i)
+		SELECT 'old' || lpad(i::text, 3, '0'), 't2', '{}', 'terminated', 1, now() - make_interval(days => 100 + i)
 		FROM generate_series(1, 50) i`)
 	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, s3_key, deleted_at)
 		SELECT r.id || '-' || k, 't2', r.id, 1, k, 'work', 'deleted', r.id || '/' || k, now()
 		FROM runs r, unnest(ARRAY['volume', 'output']) k WHERE r.id LIKE 'old___'`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at)
-		VALUES ('rart', 't2', '{}', 'succeeded', 1, now() - interval '400 days')`)
+		VALUES ('rart', 't2', '{}', 'terminated', 1, now() - interval '400 days')`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('part', 't2', 'rart', 'hb', 1, 'exited')`)
 	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, s3_key, deleted_at) VALUES
 		('rart-vol', 't2', 'rart', 1, 'volume', 'work', 'deleted', 'rart/rart-vol', now()),
@@ -135,7 +143,7 @@ func TestReapRetentionPastReapedHistory(t *testing.T) {
 
 // An S3 delete that fails leaves an orphan, logged; the claim stands.
 func TestReapRetentionS3Failure(t *testing.T) {
-	s, ctx, f := retentionFixture(t, StateSucceeded, StateSucceeded, 1, 30)
+	s, ctx, f := retentionFixture(t, StateTerminated, StateTerminated, 1, 30)
 	log := captureLog(s)
 	f.failPrefix = "rb/bB-vol"
 	if err := s.reapRetention(ctx); err != nil {

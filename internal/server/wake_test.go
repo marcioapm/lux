@@ -450,8 +450,9 @@ func TestAttachDetachAndEveryPlacement(t *testing.T) {
 	}
 }
 
-// Lifetimes: a Run's lifetime-run servers go when it succeeds or is
-// terminated, not when it fails; owner servers are detached and stay.
+// Lifetimes: a Run's lifetime-run servers go when it is terminated, not
+// when it fails or succeeds (it can be resumed); owner servers are
+// detached and stay.
 // Deleting a server detaches it first; its hostname is gone. expireAfter
 // deletes an owner server unrequested for that long.
 func TestServerLifetimes(t *testing.T) {
@@ -471,13 +472,20 @@ func TestServerLifetimes(t *testing.T) {
 	if err := set(StateSucceeded); err != nil {
 		t.Fatal(err)
 	}
+	if got := getSrv(t, s, key, owner.ID); got.RunID == nil {
+		t.Fatalf("owner server detached by a success, which a resume can undo: %+v", got)
+	}
+	getSrv(t, s, key, runServer.ID)
+	if err := set(StateTerminated); err != nil {
+		t.Fatal(err)
+	}
 	if w := apiCall(t, s, key, http.MethodGet, "/v1/servers/"+runServer.ID, nil); w.Code != http.StatusNotFound {
-		t.Fatalf("run server after success: %d", w.Code)
+		t.Fatalf("run server after terminate: %d", w.Code)
 	}
 	if got := getSrv(t, s, key, owner.ID); got.RunID != nil {
-		t.Fatalf("owner server after success: %+v", got)
+		t.Fatalf("owner server after terminate: %+v", got)
 	}
-	if ev := serverEventsOf(t, s, ctx, runServer.ID, "server.deleted"); len(ev) != 1 || ev[0]["reason"] != "run succeeded" {
+	if ev := serverEventsOf(t, s, ctx, runServer.ID, "server.deleted"); len(ev) != 1 || ev[0]["reason"] != "run terminated" {
 		t.Fatalf("deleted event: %+v", ev)
 	}
 	// Owner deletion: 404, "This preview is gone".
@@ -1181,9 +1189,10 @@ func TestPreviewPagesNameNoOrchestrator(t *testing.T) {
 	}
 }
 
-// A Run that succeeds or is terminated while its owner server serves: the
-// server stops with the placement and is detached, its events say so, and
-// it is never detached with a live process.
+// A Run that is terminated while its owner server serves: the server stops
+// with the placement and is detached, its events say so, and it is never
+// detached with a live process. A Run that succeeds keeps it attached,
+// stopped: a resume starts it again.
 func TestOwnerServerEndsStoppedWithItsRun(t *testing.T) {
 	for _, c := range []struct{ name, stopReason, outcome string }{
 		{"exit 0", "", StateSucceeded},
@@ -1211,6 +1220,12 @@ func TestOwnerServerEndsStoppedWithItsRun(t *testing.T) {
 				t.Fatalf("run: %s", runState)
 			}
 			got := getSrv(t, s, key, sv.ID)
+			if c.outcome == StateSucceeded {
+				if got.RunID == nil || *got.RunID != r1 || got.Process != ServerStopped {
+					t.Fatalf("after the Run succeeded: %+v, want attached and stopped", got)
+				}
+				return
+			}
 			if got.RunID != nil || got.Process != ServerStopped || got.StopReason == nil || *got.StopReason != "detached" || got.Epoch != nil {
 				t.Fatalf("after the Run ended: %+v", got)
 			}

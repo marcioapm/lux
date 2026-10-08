@@ -79,6 +79,17 @@ test("the Terminate action calls POST /v1/runs/{id}/terminate", async () => {
   }
 });
 
+test("a succeeded Run can be resumed or terminated, not stopped", async () => {
+  const r = await render("succeeded");
+  try {
+    expect(r.button("Resume")!.disabled).toBe(false);
+    expect(r.button("Terminate")!.disabled).toBe(false);
+    expect(r.button("Stop")!.disabled).toBe(true);
+  } finally {
+    await r.done();
+  }
+});
+
 test("a terminated Run can neither be terminated nor resumed", async () => {
   const r = await render("terminated");
   try {
