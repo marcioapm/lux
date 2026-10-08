@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // retentionFixture: supersededFixture with every snapshot uploaded, and
@@ -165,6 +166,28 @@ func TestReapRetentionPastReapedHistory(t *testing.T) {
 	}
 	if got := blobLocations(t, s, "rart")["rart-art"]; got != "s3" {
 		t.Errorf("rart's artifact: %s, want s3", got)
+	}
+}
+
+// The reaper's first tick reaps retention; a tick within the next minute
+// leaves a Run that became due meanwhile alone (leases and hosts still run
+// every tick); one a minute after the last reaps it.
+func TestReapOnceStorageCadence(t *testing.T) {
+	s, ctx, f := retentionFixture(t, StateStopped, StateTerminated, 1, 30)
+	var last time.Time
+	s.reapOnce(ctx, &last)
+	if got := f.Deleted(); len(got) != 4 {
+		t.Fatalf("first tick deleted %v, want rb's volumes and outputs", got)
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'terminated', terminated_at = now() - interval '40 days' WHERE id = 'ra'`)
+	s.reapOnce(ctx, &last)
+	if got := f.Deleted(); len(got) != 4 {
+		t.Fatalf("a tick within the minute reaped retention: %v", got)
+	}
+	last = last.Add(-storageReapEvery)
+	s.reapOnce(ctx, &last)
+	if got := f.Deleted(); len(got) <= 4 || !slices.ContainsFunc(got, func(k string) bool { return strings.HasPrefix(k, "ra/") }) {
+		t.Fatalf("a tick a minute later did not reap ra: %v", got)
 	}
 }
 
