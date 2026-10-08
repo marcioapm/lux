@@ -190,8 +190,44 @@ func live(state string) bool {
 	return false
 }
 
-// setRunState moves a Run to state, as given: a caller ending a Run whose
-// resumePolicy is never maps the end first (neverResumedEnd).
+// runEnd is how a Run's placement, or its wait for one, ended: the state
+// and reason it would rest in under any resumePolicy but never.
+type runEnd struct {
+	tenantID, runID string
+	epoch           int
+	policy          string // the Run's resumePolicy, "" for auto
+	state, reason   string
+	// note is added to the reason after neverResumedEnd's tag.
+	note string
+	// requeued: the caller places the Run again in the same transaction,
+	// so this is not how it ends: written unmapped, its secrets kept.
+	requeued bool
+}
+
+// endRun writes a Run's end: neverResumedEnd maps it by policy, setRunState
+// writes it, and once written an ended Run's held secrets go (they serve a
+// running Run and an operator's resume of a stopped or lost one; an ended
+// Run is resumed with its secrets supplied again). It returns the state
+// written. Every site that ends a Run goes through it.
+func (s *Server) endRun(ctx context.Context, tx pgx.Tx, e runEnd) (string, error) {
+	state, reason := e.state, e.reason
+	if !e.requeued {
+		state, reason = neverResumedEnd(e.policy, state, reason)
+	}
+	if e.note != "" {
+		reason = strings.TrimPrefix(reason+"; "+e.note, "; ")
+	}
+	if err := setRunState(ctx, tx, e.tenantID, e.runID, state, reason, e.epoch); err != nil {
+		return "", err
+	}
+	if ended(state) && !e.requeued {
+		s.secrets.drop(e.runID)
+	}
+	return state, nil
+}
+
+// setRunState moves a Run to state, as given. A Run's end goes through
+// endRun instead, which maps it by resumePolicy and drops its secrets.
 func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason string, epoch int) error {
 	if ended(state) {
 		// An ended Run begins a new settlement epoch after a stopped/lost one.
@@ -398,15 +434,15 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		}
 		next, reason = StateFailed, fmt.Sprintf("exit code %d", code)
 	}
-	next, reason = neverResumedEnd(policy, next, reason)
+	var note string
 	if snapshotRefused {
-		why := refusedSnapshotReason
+		note = refusedSnapshotReason
 		if !hasSnapshot {
-			why = refusedNoSnapshotReason
+			note = refusedNoSnapshotReason
 		}
-		reason = strings.TrimPrefix(reason+"; "+why, "; ")
 	}
-	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
+	next, err = s.endRun(ctx, tx, runEnd{tenantID: tenantID, runID: runID, epoch: epoch, policy: policy, state: next, reason: reason, note: note})
+	if err != nil {
 		return err
 	}
 	// A refused move cannot resume from its rejected snapshot; leave the
@@ -445,15 +481,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		}
 	}
 	// Last: event streams come after every row lock (infraevents.go).
-	if err := hostEvent(ctx, tx, hostID, evPlacementEnded, placementEnded); err != nil {
-		return err
-	}
-	// Held secrets serve a running Run, and an operator's resume of a
-	// stopped one; an ended Run is resumed with its secrets supplied again.
-	if !moved && ended(next) {
-		s.secrets.drop(runID)
-	}
-	return nil
+	return hostEvent(ctx, tx, hostID, evPlacementEnded, placementEnded)
 }
 
 // placementLost gives up on a placement: its host stopped answering (or came
@@ -463,54 +491,66 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 // several placements in one transaction; event streams come last). A Run
 // whose resumePolicy is never ends terminated instead (neverResumedEnd).
 func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epoch int, why string, later *laterEvents) error {
-	return s.losePlacement(ctx, tx, runID, epoch, why, later, false)
+	_, err := s.losePlacement(ctx, tx, runID, epoch, why, later, false)
+	return err
 }
 
-// losePlacement is placementLost; requeued: the caller places the Run
-// again in the same transaction, so lost is not how it ends and its
-// resumePolicy is not applied.
-func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epoch int, why string, later *laterEvents, requeued bool) error {
+// requeueUnstartedPlacement gives up on a placement whose assignment a
+// never reached its runner and places its Run again, with a's input and sync:
+// lost is not how the Run ends, so its resumePolicy is not applied. A Run
+// with a terminate pending ends terminated instead.
+func (s *Server) requeueUnstartedPlacement(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, why string, later *laterEvents, a proto.Assign) error {
+	state, err := s.losePlacement(ctx, tx, runID, epoch, why, later, true)
+	if err != nil || state != StateLost {
+		return err
+	}
+	if err := s.requestResume(ctx, tx, tenantID, runID, a.Input, why); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE runs SET pending_sync = $2 WHERE id = $1`, runID, a.Sync)
+	return err
+}
+
+// losePlacement is placementLost, returning the state it wrote ("" for
+// none); requeued: the caller places the Run again in the same
+// transaction, so lost is not how it ends, and it is written as is.
+func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epoch int, why string, later *laterEvents, requeued bool) (string, error) {
 	var tenantID, runState string
 	var current int
 	if err := tx.QueryRow(ctx, `SELECT tenant_id, state, current_epoch FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&tenantID, &runState, &current); err != nil {
-		return err
+		return "", err
 	}
 	var hostID string
 	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
-		return err
+		return "", err
 	}
 	if err := lockCostHost(ctx, tx, hostID); err != nil {
-		return err
+		return "", err
 	}
 	tag, err := tx.Exec(ctx, `UPDATE placements SET state = 'lost', ended_at = now(), exit_reason = $3, lease_expires_at = NULL
 		WHERE run_id = $1 AND epoch = $2 AND state IN `+livePlacementStates+``, runID, epoch, why)
 	if err != nil || tag.RowsAffected() == 0 {
-		return err
+		return "", err
 	}
 	later.host(ctx, tx, hostID, evPlacementEnded, map[string]any{"run": runID, "epoch": epoch, "outcome": "lost", "reason": why})
 	if epoch != current || ended(runState) {
-		return nil
+		return "", nil
 	}
 	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, "host lost"); err != nil {
-		return err
+		return "", err
 	}
 	var terminate bool
 	_ = tx.QueryRow(ctx, `SELECT terminate_requested FROM runs WHERE id = $1`, runID).Scan(&terminate)
-	if terminate {
-		return setRunState(ctx, tx, tenantID, runID, StateTerminated, "terminated; host lost", epoch)
+	end := runEnd{tenantID: tenantID, runID: runID, epoch: epoch, state: StateLost, reason: why, requeued: requeued}
+	switch {
+	case terminate:
+		end.state, end.reason, end.requeued = StateTerminated, "terminated; host lost", false
+	case !requeued:
+		if end.policy, err = runResumePolicy(ctx, tx, runID); err != nil {
+			return "", err
+		}
 	}
-	if requeued {
-		return setRunState(ctx, tx, tenantID, runID, StateLost, why, epoch)
-	}
-	policy, err := runResumePolicy(ctx, tx, runID)
-	if err != nil {
-		return err
-	}
-	next, reason := neverResumedEnd(policy, StateLost, why)
-	if terminal(next) {
-		s.secrets.drop(runID)
-	}
-	return setRunState(ctx, tx, tenantID, runID, next, reason, epoch)
+	return s.endRun(ctx, tx, end)
 }
 
 // foreignBlobsReason is the snapshot.failed error for a refused report.

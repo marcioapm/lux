@@ -1384,11 +1384,8 @@ func (s *Server) stopOrTerminate(ctx context.Context, id, reason string) (*accep
 			if err != nil {
 				return err
 			}
-			next, why = neverResumedEnd(policy, next, why)
-			if terminal(next) {
-				s.secrets.drop(id)
-			}
-			return setRunState(ctx, tx, p.TenantID, id, next, why, 0)
+			_, err = s.endRun(ctx, tx, runEnd{tenantID: p.TenantID, runID: id, policy: policy, state: next, reason: why})
+			return err
 		}
 		return nil
 	})
