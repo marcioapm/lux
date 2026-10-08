@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/proto"
@@ -56,6 +57,57 @@ func TestTerminateRoutes(t *testing.T) {
 			if after != before {
 				t.Fatal("a second terminate wrote the Run")
 			}
+			assertTerminated(t, s, "terminated")
+		})
+		t.Run(path+"/unknown", func(t *testing.T) {
+			s, ctx := policyFixture(t, "")
+			execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t2', 't2')`)
+			for _, tenant := range []string{"t1", "t2"} {
+				key := apiKey(t, s, new(tenant), "run")
+				// t1: no such Run; t2: r1 is another tenant's.
+				id := map[string]string{"t1": "nope", "t2": "r1"}[tenant]
+				code, body := call(t, s, key, http.MethodPost, "/v1/runs/"+id+"/"+path, nil)
+				if code != http.StatusNotFound || !strings.Contains(body, `"code":"not_found"`) {
+					t.Errorf("%s %s as %s: %d %s, want 404 not_found", path, id, tenant, code, body)
+				}
+			}
+			var state string
+			systemScan(t, s, `SELECT state FROM runs WHERE id = 'r1'`, nil, &state)
+			if state != StateRunning {
+				t.Fatalf("r1 after another tenant's %s: %q", path, state)
+			}
+		})
+		t.Run(path+"/twice-while-stopping", func(t *testing.T) {
+			s, _ := policyFixture(t, "")
+			key := apiKey(t, s, new("t1"), "run")
+			for i := range 2 {
+				if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+path, nil); code != http.StatusAccepted {
+					t.Fatalf("%s %d: %d %s", path, i+1, code, body)
+				}
+			}
+			var state string
+			var requests int
+			systemScan(t, s, `SELECT state, (SELECT count(*) FROM run_events WHERE run_id = 'r1' AND type = 'terminate.requested')
+				FROM runs WHERE id = 'r1'`, nil, &state, &requests)
+			// Each request is recorded and asks the runner again; the Run
+			// stays stopping until its placement exits.
+			if state != StateStopping || requests != 2 {
+				t.Fatalf("state %q terminate.requested %d, want stopping 2", state, requests)
+			}
+			exitR1(t, s)
+			systemScan(t, s, `SELECT state FROM runs WHERE id = 'r1'`, nil, &state)
+			if state != StateTerminated {
+				t.Fatalf("after exit: %q", state)
+			}
+		})
+		t.Run(path+"/succeeded", func(t *testing.T) {
+			s, _ := policyFixture(t, "")
+			exitR1With(t, s, 0)
+			key := apiKey(t, s, new("t1"), "run")
+			if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+path, nil); code != http.StatusAccepted {
+				t.Fatalf("%s: %d %s", path, code, body)
+			}
+			assertTerminated(t, s, "terminated")
 		})
 	}
 }

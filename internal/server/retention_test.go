@@ -138,14 +138,14 @@ func TestReapRetentionCountsFromTermination(t *testing.T) {
 // candidate, however old: its snapshot stays available.
 func TestReapRetentionPastReapedHistory(t *testing.T) {
 	s, ctx, f := retentionFixture(t, StateTerminated, StateTerminated, 1, 30)
-	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at)
-		SELECT 'old' || lpad(i::text, 3, '0'), 't2', '{}', 'terminated', 1, now() - make_interval(days => 100 + i)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at, terminated_at)
+		SELECT 'old' || lpad(i::text, 3, '0'), 't2', '{}', 'terminated', 1, now() - make_interval(days => 100 + i), now() - make_interval(days => 100 + i)
 		FROM generate_series(1, 50) i`)
 	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, s3_key, deleted_at)
 		SELECT r.id || '-' || k, 't2', r.id, 1, k, 'work', 'deleted', r.id || '/' || k, now()
 		FROM runs r, unnest(ARRAY['volume', 'output']) k WHERE r.id LIKE 'old___'`)
-	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at)
-		VALUES ('rart', 't2', '{}', 'terminated', 1, now() - interval '400 days')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at, terminated_at)
+		VALUES ('rart', 't2', '{}', 'terminated', 1, now() - interval '400 days', now() - interval '400 days')`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('part', 't2', 'rart', 'hb', 1, 'exited')`)
 	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, s3_key, deleted_at) VALUES
 		('rart-vol', 't2', 'rart', 1, 'volume', 'work', 'deleted', 'rart/rart-vol', now()),

@@ -57,6 +57,35 @@ func TestResumeSucceededRun(t *testing.T) {
 	}
 }
 
+// A succeeded Run that never took a snapshot (no snapshot report) is
+// resumable too: its next placement is a first one, with no snapshot and
+// no session to restore.
+func TestResumeSucceededRunWithoutSnapshot(t *testing.T) {
+	s, ctx := policyFixture(t, "")
+	code := 0
+	f := proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: "r1", Epoch: 1,
+		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "exited"})}
+	if got := s.handleReport(context.Background(), "h1", f); got.Type != proto.MsgAck {
+		t.Fatalf("exit report: %s %s", got.Type, got.Data)
+	}
+	var state string
+	var resumable bool
+	systemScan(t, s, `SELECT r.state, `+resumableSQL+` FROM runs r WHERE r.id = 'r1'`, nil, &state, &resumable)
+	if state != StateSucceeded || !resumable {
+		t.Fatalf("after exit 0 without a snapshot: %q resumable %v", state, resumable)
+	}
+	s.secrets.put("r1", map[string]string{"TOKEN": "jit"})
+	if _, err := s.resumeRun(tenantCtx("t1"), &resumeRunInput{RunPath: RunPath{ID: "r1"}}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+		t.Fatal(err)
+	}
+	if a := assignOf(t, s, 2); a.Resume != nil {
+		t.Fatalf("resume of a succeeded Run without a snapshot assigned %+v, want a first placement", a.Resume)
+	}
+}
+
 // A succeeded Run can be terminated (by the API, at once), and then it is
 // no longer resumable: 409, left out of ?resumable=true. A stop of a
 // succeeded Run changes nothing.
