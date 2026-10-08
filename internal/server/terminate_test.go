@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -18,10 +19,7 @@ func TestTerminateRoutes(t *testing.T) {
 	for _, path := range []string{"terminate", "cancel"} {
 		t.Run(path+"/live", func(t *testing.T) {
 			s, _ := policyFixture(t, "")
-			key := apiKey(t, s, new("t1"), "run")
-			if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+path, nil); code != http.StatusAccepted {
-				t.Fatalf("%s: %d %s", path, code, body)
-			}
+			postR1(t, s, path)
 			var msgType, stopReason, runState, runReason string
 			var requested bool
 			systemScan(t, s, `SELECT (SELECT type FROM host_messages WHERE run_id = 'r1' AND type IN ($1, $2)),
@@ -41,17 +39,12 @@ func TestTerminateRoutes(t *testing.T) {
 			}
 			exitR1(t, s)
 			s.secrets.put("r1", map[string]string{"TOKEN": "jit"})
-			key := apiKey(t, s, new("t1"), "run")
-			if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+path, nil); code != http.StatusAccepted {
-				t.Fatalf("%s: %d %s", path, code, body)
-			}
+			postR1(t, s, path)
 			assertTerminated(t, s, "terminated")
 			// Idempotent: a second terminate changes nothing.
 			var before string
 			systemScan(t, s, `SELECT updated_at::text FROM runs WHERE id = 'r1'`, nil, &before)
-			if code, _ := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+path, nil); code != http.StatusAccepted {
-				t.Fatalf("second %s: %d", path, code)
-			}
+			postR1(t, s, path)
 			var after string
 			systemScan(t, s, `SELECT updated_at::text FROM runs WHERE id = 'r1'`, nil, &after)
 			if after != before {
@@ -79,12 +72,8 @@ func TestTerminateRoutes(t *testing.T) {
 		})
 		t.Run(path+"/twice-while-stopping", func(t *testing.T) {
 			s, _ := policyFixture(t, "")
-			key := apiKey(t, s, new("t1"), "run")
-			for i := range 2 {
-				if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+path, nil); code != http.StatusAccepted {
-					t.Fatalf("%s %d: %d %s", path, i+1, code, body)
-				}
-			}
+			postR1(t, s, path)
+			postR1(t, s, path)
 			var state string
 			var requests int
 			systemScan(t, s, `SELECT state, (SELECT count(*) FROM run_events WHERE run_id = 'r1' AND type = 'terminate.requested')
@@ -101,27 +90,36 @@ func TestTerminateRoutes(t *testing.T) {
 			}
 		})
 		t.Run(path+"/host-lost", func(t *testing.T) {
-			s, ctx := policyFixture(t, "")
-			key := apiKey(t, s, new("t1"), "run")
-			if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+path, nil); code != http.StatusAccepted {
-				t.Fatalf("%s: %d %s", path, code, body)
-			}
+			s, _ := policyFixture(t, "")
+			postR1(t, s, path)
 			// The host goes before the placement reports its exit.
-			execSQL(t, s, ctx, `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE id = 'p1'`)
-			if err := s.reapLeases(ctx); err != nil {
-				t.Fatal(err)
-			}
+			loseR1Lease(t, s)
 			assertTerminated(t, s, "terminated; host lost")
 		})
 		t.Run(path+"/succeeded", func(t *testing.T) {
 			s, _ := policyFixture(t, "")
 			exitR1With(t, s, 0)
-			key := apiKey(t, s, new("t1"), "run")
-			if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+path, nil); code != http.StatusAccepted {
-				t.Fatalf("%s: %d %s", path, code, body)
-			}
+			postR1(t, s, path)
 			assertTerminated(t, s, "terminated")
 		})
+	}
+}
+
+// postR1 posts POST /v1/runs/r1/<action> as t1 and expects 202.
+func postR1(t *testing.T, s *Server, action string) {
+	t.Helper()
+	key := apiKey(t, s, new("t1"), "run")
+	if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+action, nil); code != http.StatusAccepted {
+		t.Fatalf("%s: %d %s", action, code, body)
+	}
+}
+
+// loseR1Lease expires p1's lease and reaps it: r1's host is lost.
+func loseR1Lease(t *testing.T, s *Server) {
+	t.Helper()
+	execSQL(t, s, context.Background(), `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE id = 'p1'`)
+	if err := s.reapLeases(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
