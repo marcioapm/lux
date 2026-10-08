@@ -96,6 +96,61 @@ func TestNeverRunStoppedQueuedEndsTerminated(t *testing.T) {
 	if state != StateTerminated || reason != "stop; resumePolicy never" {
 		t.Fatalf("state %q reason %q", state, reason)
 	}
+	if _, held := s.secrets.get("r1"); held {
+		t.Error("a terminated Run's secret values are still held")
+	}
+}
+
+// The scheduler ends a queued Run it cannot place: one whose secrets no
+// luxd holds past the grace period, or whose snapshot does not match its
+// blob records. An auto Run rests resumable; a never Run ends terminated,
+// its reason not asking for a resume it would refuse.
+func TestSchedulerEndsNeverRunTerminated(t *testing.T) {
+	cases := []struct {
+		name, policy string
+		setup        string
+		dropSecrets  bool
+		state        string
+		reason       string
+	}{
+		{"secrets lost/auto", "", `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`, true,
+			StateStopped, "secrets must be supplied again: resume with them"},
+		{"secrets lost/never", "never", `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`, true,
+			StateTerminated, "its secrets are no longer held; resumePolicy never"},
+		{"unrestorable/auto", "", `UPDATE runs SET snapshot_id = 'snap-missing' WHERE id = 'r1'`, false,
+			StateFailed, "its snapshot does not match this Run's blob records"},
+		{"unrestorable/never", "never", `UPDATE runs SET snapshot_id = 'snap-missing' WHERE id = 'r1'`, false,
+			StateTerminated, "its snapshot does not match this Run's blob records; resumePolicy never"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx := policyFixture(t, c.policy)
+			execSQL(t, s, ctx, `UPDATE placements SET state = 'exited', ended_at = now() WHERE id = 'p1'`)
+			execSQL(t, s, ctx, `UPDATE runs SET state = 'resuming', updated_at = now() - interval '1 hour' WHERE id = 'r1'`)
+			execSQL(t, s, ctx, c.setup)
+			if c.dropSecrets {
+				s.secrets.drop("r1")
+			}
+			if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+				t.Fatal(err)
+			}
+			var state, reason string
+			var resumable bool
+			systemScan(t, s, `SELECT r.state, r.state_reason, `+resumableSQL+` FROM runs r WHERE r.id = 'r1'`, nil, &state, &reason, &resumable)
+			if state != c.state {
+				t.Errorf("state %q, want %q", state, c.state)
+			}
+			if reason != c.reason {
+				t.Errorf("reason %q, want %q", reason, c.reason)
+			}
+			if want := c.state != StateTerminated; resumable != want {
+				t.Errorf("resumable %v, want %v", resumable, want)
+			}
+			if _, held := s.secrets.get("r1"); held && c.state != StateStopped {
+				t.Error("secret values still held for a Run that cannot use them")
+			}
+		})
+	}
 }
 
 // A failed Run with no snapshot (its only report refused) is not
