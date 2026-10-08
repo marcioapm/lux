@@ -202,9 +202,11 @@ container. Under `--userns=auto` that needed more than the commonly cited
     - an older epoch whose snapshot luxd acked finishes as usual (its
       container is removed, its snapshot uploaded).
 
-    That wait is bounded by a host lease plus a minute; past it, the newer
-    epoch fails to start and says why. A placement kills, stops and waits
-    on only the container it created, by its ID, never by the Run's name.
+    That wait is bounded by a host lease, plus the minute a finishing
+    epoch has to remove its container, plus the 30 s podman gets to exit
+    once that minute is up; past it, the newer epoch fails to start and
+    says why. A placement kills, stops and waits on only the container it
+    created, by its ID, never by the Run's name.
 
 ## Exec, attach, ports
 

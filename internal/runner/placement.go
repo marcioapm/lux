@@ -219,9 +219,15 @@ func (p *placement) waitDone(d time.Duration) bool {
 	}
 }
 
+// removeTimeout bounds finish's removal of its container.
+const removeTimeout = time.Minute
+
 // handoverWait bounds how long a placement waits for the Run's previous
-// placement on this host to end: a host lease, then the minute finish
-// allows its container's removal.
+// placement on this host to end. That one is either killed (its workload
+// may still run), abandoning its snapshot export (luxd has not acked it),
+// or past the export: what is left is its reports, which outlast a host
+// lease only while the host is cut off from luxd, and its container's
+// removal, removeTimeout plus podman's WaitDelay if podman hangs.
 func (r *Runner) handoverWait() time.Duration {
 	if r.handover > 0 {
 		return r.handover
@@ -230,7 +236,7 @@ func (r *Runner) handoverWait() time.Duration {
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
-	return lease + time.Minute
+	return lease + removeTimeout + podman.WaitDelay
 }
 
 func (p *placement) logf(msg string, args ...any) {
@@ -667,7 +673,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	p.mu.Unlock()
 	if id != "" {
 		// A hung podman must not keep the placement in "exited" indefinitely.
-		rmCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		rmCtx, cancel := context.WithTimeout(ctx, removeTimeout)
 		if err := p.r.pm.Remove(rmCtx, id); err != nil {
 			p.r.log.Warn("removing the stopped container failed", "run", p.runID, "epoch", p.epoch, "container", id, "err", err)
 		}
