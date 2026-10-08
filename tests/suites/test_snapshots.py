@@ -279,8 +279,8 @@ def test_host_dead_mid_snapshot_is_still_lost(lux, runners, hosts):
 
 def test_resume_after_lost_on_the_same_host(lux, runners, hosts):
     """A Run lost on a host that keeps its stopped container, resumed there:
-    restoring its state volume removes that container, so a new one is
-    made, and the Run starts from the snapshot before the lost placement."""
+    a new container is made, and the Run starts from the snapshot before the
+    lost placement."""
     a = hosts[0]
     runners.start(a)
     run_id = lux.submit(counting_spec())

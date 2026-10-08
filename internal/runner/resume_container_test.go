@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,19 +23,20 @@ import (
 // podmanWithVolumes is a fake podman keeping its container and volumes as
 // files beside it ($0.ctr, $0.vol.<name>), and logging its commands to
 // $0.log. As podman does, `volume rm -f` also removes the container that
-// mounts the volume. The container, while it exists, is inspected as
-// stopped, made from image img1 with the lux.spec label in $0.hash.
-// Each create assigns a new ID; start records the ID it actually starts.
+// mounts the volume; `volume import` writes its input into the volume. The
+// container, while it exists, is inspected as stopped. Each create assigns
+// a new ID and records its arguments in $0.created; start records the ID it
+// actually starts.
 const podmanWithVolumes = `#!/bin/sh
 echo "$*" >> "$0.log"
 case "$1 $2" in
 "container inspect")
   [ -e "$0.ctr" ] || { echo "no such container $3" >&2; exit 125; }
-  printf '[{"Image":"img1","State":{"Status":"exited","Running":false},"Config":{"Labels":{"lux.spec":"%s"}}}]' "$(cat "$0.hash")" ;;
+  printf '[{"Image":"img1","State":{"Status":"exited","Running":false}}]' ;;
 "volume exists") [ -e "$0.vol.$3" ] ;;
 "volume create") eval "v=\${$#}"; touch "$0.vol.$v" ;;
 "volume rm") rm -f "$0.vol.$4" "$0.ctr" ;;
-"volume import") cat > /dev/null ;;
+"volume import") cat > "$0.vol.$3" ;;
 "rm -f") rm -f "$0.ctr" ;;
 "start "*)
   [ -e "$0.ctr" ] || { echo "no container $2" >&2; exit 125; }
@@ -44,13 +46,14 @@ case "$1 $2" in
     id=$(cat "$0.next-id")
     echo "ctr-$id" > "$0.ctr"
     echo "$((id+1))" > "$0.next-id"
+    printf '%s\n' "$@" > "$0.created"
   fi ;;
 esac
 `
 
 // resumeFixture is a resume of run1 at epoch onto a host that has the
-// Run's state volume data, its runtime volume and its stopped container,
-// made as this placement would make it. local is the snapshot the host's
+// Run's state volume data, its runtime volume and its stopped container
+// ctr-1. local is the snapshot the host's
 // volumes hold ("" when they diverged from any). The snapshot to restore,
 // snap1, is held locally. luxd acks every report; events are the run
 // events reported so far.
@@ -102,18 +105,11 @@ func newResumeFixture(t *testing.T, epoch int, local string) *resumeFixture {
 	if err := os.MkdirAll(p.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{".vol." + volumeName("run1", "data"), ".vol." + runtimeVolume("run1")} {
-		if err := os.WriteFile(bin+f, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for suffix, value := range map[string]string{".ctr": "ctr-1\n", ".next-id": "2\n"} {
+	for suffix, value := range map[string]string{".ctr": "ctr-1\n", ".next-id": "2\n",
+		".vol." + volumeName("run1", "data"): "local-state", ".vol." + runtimeVolume("run1"): ""} {
 		if err := os.WriteFile(bin+suffix, []byte(value), 0o600); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := os.WriteFile(bin+".hash", []byte(argsHash(p.createArgs(sp, "img", podman.Network{}))), 0o600); err != nil {
-		t.Fatal(err)
 	}
 	f := &resumeFixture{r: r, p: p, a: a, sp: sp, bin: bin}
 
@@ -147,10 +143,10 @@ func (f *resumeFixture) start(ctx context.Context) error {
 	if err := f.p.stopPrevious(ctx); err != nil {
 		return err
 	}
-	if err := f.p.prepareVolumes(ctx, f.sp, nil, f.a.Resume); err != nil {
+	if err := f.p.prepareVolumes(ctx, f.sp, f.a.Resume); err != nil {
 		return err
 	}
-	if err := f.p.createContainer(ctx, f.sp, "img", "img1", podman.Network{}, f.a, nil); err != nil {
+	if err := f.p.createContainer(ctx, f.sp, "img", podman.Network{}, nil); err != nil {
 		return err
 	}
 	return f.r.pm.Start(ctx, containerName("run1"))
@@ -191,8 +187,8 @@ func (f *resumeFixture) podmanLog() string {
 
 // A resume on the host that still has the Run's stopped container, whose
 // volumes are not the snapshot's (its last placement was lost before it
-// reported one): restoring the state volume removes the container with
-// it, so the placement creates a new one rather than reuse it, and starts.
+// reported one): restoring the state volume removes the container with it,
+// and the placement creates a new one and starts it.
 func TestResumeAfterRestoreRemovedTheContainerCreatesOne(t *testing.T) {
 	f := newResumeFixture(t, 3, "")
 	if err := f.start(context.Background()); err != nil {
@@ -202,13 +198,27 @@ func TestResumeAfterRestoreRemovedTheContainerCreatesOne(t *testing.T) {
 	f.waitEvent(t, "volumes.restored")
 }
 
-// A same-host resume whose volumes are the snapshot's keeps its stopped
-// container: nothing removed it.
-func TestSameHostResumeReusesTheStoppedContainer(t *testing.T) {
+// A same-host resume whose volumes are the snapshot's keeps them as they
+// are (nothing imported or downloaded) and starts a new container, as on a
+// new host: the stopped one, with its writable layer, is removed.
+func TestSameHostResumeGetsANewContainerOnItsLocalVolumes(t *testing.T) {
 	f := newResumeFixture(t, 2, "snap1")
 	if err := f.start(context.Background()); err != nil {
 		t.Fatalf("start: %v; podman:\n%s", err, f.podmanLog())
 	}
-	f.assertStartedContainer(t, "ctr-1")
-	f.waitEvent(t, "container.reused")
+	f.assertStartedContainer(t, "ctr-2")
+	f.waitEvent(t, "volumes.local")
+	data := volumeName("run1", "data")
+	if got, err := os.ReadFile(f.bin + ".vol." + data); err != nil || string(got) != "local-state" {
+		t.Errorf("state volume holds %q (%v), want the host's local-state untouched; podman:\n%s", got, err, f.podmanLog())
+	}
+	created, _ := os.ReadFile(f.bin + ".created")
+	if !slices.Contains(strings.Split(string(created), "\n"), data+":/data:idmap") {
+		t.Errorf("the new container does not mount the local state volume:\n%s", created)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if slices.Contains(f.events, "volumes.restored") {
+		t.Errorf("events %q: the volumes were restored", f.events)
+	}
 }
