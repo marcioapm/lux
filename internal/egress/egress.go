@@ -224,16 +224,21 @@ func (f *Firewall) Apply(ctx context.Context, iface string, gateway netip.Addr, 
 		}
 		return fmt.Errorf("nftables for %s: %w", iface, err)
 	}
+	f.install(ctx, iface, r)
+	return nil
+}
+
+// install makes r the Run on iface and resolves its names now (adding
+// known addresses to its set); the shared loop keeps them fresh.
+func (f *Firewall) install(ctx context.Context, iface string, r *run) {
 	f.mu.Lock()
 	f.runs[iface] = r
+	hosts := slices.Collect(maps.Keys(r.hosts))
 	f.mu.Unlock()
-	// Resolve this Run's names now (adding known addresses to its set);
-	// the shared loop keeps them fresh.
-	for h := range r.hosts {
+	for _, h := range hosts {
 		f.addKnown(iface, h)
 		f.resolve(ctx, h)
 	}
-	return nil
 }
 
 // newRun sorts a Run's rules: cidrs, exact hosts, and wildcards, which
@@ -254,7 +259,7 @@ func newRun(unrestricted bool, rules []spec.EgressRule, onDNS func(Lookup)) (*ru
 				r.wildcards = append(r.wildcards, suffix)
 			}
 		case rule.Host != "":
-			r.hosts[strings.TrimSuffix(strings.ToLower(rule.Host), ".")] = true
+			r.hosts[spec.NormalHost(rule.Host)] = true
 		}
 	}
 	return r, nil
@@ -264,14 +269,24 @@ func newRun(unrestricted bool, rules []spec.EgressRule, onDNS func(Lookup)) (*ru
 // another Run's rules): resolve only adds addresses that are new.
 func (f *Firewall) addKnown(iface, host string) {
 	f.mu.Lock()
+	elems := f.knownElements(iface, host)
+	f.mu.Unlock()
+	if elems != "" {
+		_ = f.nft(elems)
+	}
+}
+
+// knownElements is the nft line adding host's resolved addresses to the
+// Run's set, or "" if none are known. Call with f.mu held.
+func (f *Firewall) knownElements(iface, host string) string {
 	var known []string
 	for ip := range f.resolved[host] {
 		known = append(known, ip.String())
 	}
-	f.mu.Unlock()
-	if len(known) > 0 {
-		_ = f.nft(fmt.Sprintf("add element inet lux %s { %s }\n", setName(iface), strings.Join(known, ", ")))
+	if len(known) == 0 {
+		return ""
 	}
+	return fmt.Sprintf("add element inet lux %s { %s }\n", setName(iface), strings.Join(known, ", "))
 }
 
 // Run keeps allowed hostnames resolved, for every Run, until ctx ends:
@@ -416,11 +431,7 @@ func (f *Firewall) admit(iface string, r *run, name string) bool {
 	if !r.admissible(name) {
 		return false
 	}
-	var known []string
-	for ip := range f.resolved[name] {
-		known = append(known, ip.String())
-	}
-	if len(known) > 0 && f.nft(fmt.Sprintf("add element inet lux %s { %s }\n", setName(iface), strings.Join(known, ", "))) != nil {
+	if elems := f.knownElements(iface, name); elems != "" && f.nft(elems) != nil {
 		return false
 	}
 	r.hosts[name] = true

@@ -64,8 +64,8 @@ func (n *fakeNet) inSet(iface string, a netip.Addr) bool {
 	return n.sets[setName(iface)][a.String()]
 }
 
-// fixture is a Firewall with Runs added as Apply would, without the stub's
-// sockets or the chain's nft script.
+// fixture is a Firewall with Runs installed as Apply does, without the
+// stub's sockets or the chain's nft script.
 func fixture(t *testing.T) (*Firewall, *fakeNet, func(iface string, unrestricted bool, rules ...spec.EgressRule) *[]Lookup) {
 	n := &fakeNet{sets: map[string]map[string]bool{}, addr: map[string]netip.Addr{}}
 	f := newFirewall(nil, n.lookup, n.nft)
@@ -75,11 +75,7 @@ func fixture(t *testing.T) (*Firewall, *fakeNet, func(iface string, unrestricted
 		if err != nil {
 			t.Fatal(err)
 		}
-		f.runs[iface] = r
-		for h := range r.hosts {
-			f.addKnown(iface, h)
-			f.resolve(context.Background(), h)
-		}
+		f.install(context.Background(), iface, r)
 		return &got
 	}
 	return f, n, add

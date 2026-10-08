@@ -5,10 +5,10 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/marcioapm/lux/internal/spec"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/sys/unix"
 )
@@ -117,7 +117,7 @@ func answer(query []byte, f *Firewall, iface string) []byte {
 	if err != nil {
 		return nil
 	}
-	name := strings.TrimSuffix(strings.ToLower(q.Name.String()), ".")
+	name := spec.NormalHost(q.Name.String())
 	resp := dnsmessage.Header{ID: h.ID, Response: true, RecursionAvailable: true, RecursionDesired: h.RecursionDesired}
 	allowed, addrs := f.answerFor(iface, name, q.Type)
 	if q.Type != dnsmessage.TypeA {

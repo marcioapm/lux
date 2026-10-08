@@ -1018,11 +1018,15 @@ func (r EgressRule) IsWildcard() bool { return strings.HasPrefix(r.Host, "*.") }
 // (not <domain> itself). Case-insensitive; trailing dots are ignored.
 func (r EgressRule) Matches(name string) bool { return HostMatches(r.Host, name) }
 
+// NormalHost is a hostname as rules and lookups compare it: lowercased,
+// with no trailing dot.
+func NormalHost(s string) string { return strings.TrimSuffix(strings.ToLower(s), ".") }
+
 // HostMatches is EgressRule.Matches for a host rule's text. An invalid
 // wildcard matches nothing.
 func HostMatches(rule, name string) bool {
-	rule = strings.TrimSuffix(strings.ToLower(rule), ".")
-	name = strings.TrimSuffix(strings.ToLower(name), ".")
+	rule = NormalHost(rule)
+	name = NormalHost(name)
 	if rule == "" {
 		return false
 	}
@@ -1035,7 +1039,7 @@ func HostMatches(rule, name string) bool {
 // WildcardSuffix is a valid wildcard rule's ".<domain>", lowercased, for
 // SuffixMatches; ok is false for anything else.
 func WildcardSuffix(rule string) (suffix string, ok bool) {
-	rule = strings.TrimSuffix(strings.ToLower(rule), ".")
+	rule = NormalHost(rule)
 	if !validWildcard(rule) {
 		return "", false
 	}
@@ -1061,7 +1065,7 @@ func SuffixMatches(suffix, name string) bool {
 // cannot cover a whole top-level domain, and not ending in a numeric
 // label, so it cannot cover IP literals.
 func validWildcard(rule string) bool {
-	d, ok := strings.CutPrefix(strings.TrimSuffix(strings.ToLower(rule), "."), "*.")
+	d, ok := strings.CutPrefix(NormalHost(rule), "*.")
 	if !ok || !strings.Contains(d, ".") || !hostLabelsRe.MatchString(d) {
 		return false
 	}
