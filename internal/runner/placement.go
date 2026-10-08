@@ -502,6 +502,17 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		}
 		time.Sleep(time.Second)
 	}
+	// Nothing reads a stopped container once its end is reported (a resume
+	// makes a new one); its volumes stay for a resume here. By id: a resume
+	// assigned here since may already have made the next one under its name.
+	p.mu.Lock()
+	id := p.state.Container
+	p.mu.Unlock()
+	if id != "" {
+		if err := p.r.pm.Remove(ctx, id); err != nil {
+			p.logf("removing the stopped container failed", "err", err)
+		}
+	}
 	p.mu.Lock()
 	p.state.Phase = "reported"
 	p.mu.Unlock()
@@ -733,8 +744,14 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 	if err := p.writeShimConfig(ctx, sp, prompt); err != nil {
 		return err
 	}
-	_, err := p.r.pm.Create(ctx, p.createArgs(sp, image, network))
-	return err
+	id, err := p.r.pm.Create(ctx, p.createArgs(sp, image, network))
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.state.Container = id
+	p.mu.Unlock()
+	return writeRunState(p.dir, p.state)
 }
 
 // createArgs is how the placement's container is made; the image is last.
