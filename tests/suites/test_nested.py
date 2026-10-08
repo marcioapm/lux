@@ -82,8 +82,11 @@ pp=$(cat /tmp/storage-run-*/libpod/tmp/pause.pid 2>/dev/null)
 if [ -n "$pp" ]; then
   while :; do sh -c : & wait $!; [ $! -ge $((pp-1)) ] && break; done
   sleep 600 & sp=$!
-  echo "PAUSE-PID-TAKEN:$pp:$sp"
-  [ "$sp" = "$pp" ] || echo "PAUSE-PID-MISSED:$pp:$sp"
+  if [ "$sp" = "$pp" ]; then
+    echo "PAUSE-PID-TAKEN:$pp:$sp"
+  else
+    echo "PAUSE-PID-MISSED:$pp:$sp"
+  fi
 fi
 date > /tmp/leak
 r="podman --remote --url unix:///tmp/engine.sock"

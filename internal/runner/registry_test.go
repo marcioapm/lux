@@ -135,7 +135,7 @@ func TestPickEvictionsLeavesALocalCopysImage(t *testing.T) {
 	dir := t.TempDir()
 	r := &Runner{cfg: Config{DataDir: dir}}
 	for run, st := range map[string]*runState{
-		"held":       {RunID: "held", Phase: "reported", Image: "ghcr.io/a/held:1", VolumesSnapshot: "snap1"},
+		"held":       {RunID: "held", Phase: "reported", Image: "alpine:3", VolumesSnapshot: "snap1"},
 		"diverged":   {RunID: "diverged", Phase: "started", Image: "ghcr.io/a/other:1"},
 		"no-volumes": {RunID: "no-volumes", Phase: "reported", Image: "alpine"},
 	} {
@@ -144,11 +144,11 @@ func TestPickEvictionsLeavesALocalCopysImage(t *testing.T) {
 		}
 	}
 	held := r.localCopyImages()
-	if !reflect.DeepEqual(held, map[string]bool{"ghcr.io/a/held:1": true}) {
-		t.Fatalf("local copies' images %v, want ghcr.io/a/held:1 only", held)
+	if !reflect.DeepEqual(held, map[string]bool{"docker.io/library/alpine:3": true}) {
+		t.Fatalf("local copies' images %v, want docker.io/library/alpine:3 only", held)
 	}
 	cands := []imageCandidate{
-		{Ref: "ghcr.io/a/held:1", ID: "h", Names: []string{"ghcr.io/a/held:1"}, Size: 100, LastUsed: 1},
+		{Ref: "alpine:3", ID: "h", Names: []string{"alpine:3"}, Size: 100, LastUsed: 1},
 		{Ref: "ghcr.io/a/free:1", ID: "f", Names: []string{"ghcr.io/a/free:1"}, Size: 100, LastUsed: 2},
 	}
 	if got := pickEvictions(cands, nil, held, 1<<40, 1000); !reflect.DeepEqual(got, []string{"ghcr.io/a/free:1"}) {

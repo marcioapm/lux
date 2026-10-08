@@ -277,6 +277,20 @@ func TestStoppedRunsImageIsUsedAtItsStop(t *testing.T) {
 	}
 }
 
+func TestStoppedRunsOperatorImageIsNotClaimed(t *testing.T) {
+	f := newFinishFixture(t)
+	f.p.state.Image = "alpine:3"
+	if _, ok := f.r.images.snapshot()[f.p.state.Image]; ok {
+		t.Fatal("the operator's image is already recorded as lux's")
+	}
+	f.release()
+	f.exitedAsSupervised(context.Background())
+	f.p.waitDone(10 * time.Second)
+	if _, ok := f.r.images.snapshot()[f.p.state.Image]; ok {
+		t.Error("finish claimed the operator's image as lux's")
+	}
+}
+
 // A finishing placement removes only the container it made: a resume here,
 // assigned before it was done, may have made the next under the Run's name.
 func TestFinishLeavesTheNextPlacementsContainer(t *testing.T) {
