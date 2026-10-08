@@ -357,6 +357,47 @@ func TestASentSnapshotDoneSurvivesTheNextAssign(t *testing.T) {
 	}
 }
 
+// A snapshot abandoned after some of its volumes were exported leaves none
+// of their blobs: no record lists them, so nothing else would remove them.
+func TestAbandonedExportRemovesEarlierVolumesBlobs(t *testing.T) {
+	f := newFinishFixture(t)
+	f.r.egress = &egress.Firewall{}
+	f.r.handover = time.Minute
+	first := volumeName("run1", "data")
+	f.p.state.Volumes = append(f.p.state.Volumes, volumeRef{Name: "data2", Volume: volumeName("run1", "data2"), Path: "/data2", Kind: "state"})
+	if err := os.WriteFile(f.bin+".fast."+first, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.holdEpoch = 1
+	f.mu.Unlock()
+	f.exitedAsSupervised(context.Background())
+	// The first volume's export is done once the second's blocks.
+	f.waitFile(t, f.bin+".exporting")
+	p2 := f.assignEpoch(t, 2)
+	if !f.p.waitDone(10 * time.Second) {
+		t.Fatal("epoch 1's export was not abandoned")
+	}
+	if !p2.waitDone(10 * time.Second) {
+		t.Fatal("epoch 2 never ended")
+	}
+	if !strings.Contains(f.podmanLog(), "volume export "+first+"\n") {
+		t.Fatalf("the first volume was not exported; podman:\n%s", f.podmanLog())
+	}
+	entries, err := os.ReadDir(f.r.cfg.DataDir + "/snapshots")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".zst") || strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("%s left in snapshots by an abandoned export", e.Name())
+		}
+	}
+	for id, rec := range f.r.snapshotRecords() {
+		t.Errorf("snapshot record %s %+v of an abandoned export", id, rec)
+	}
+}
+
 // A placement fenced off while it exports its snapshot writes no run state
 // from then on: the Run's next placement here owns it.
 func TestFencedPlacementLeavesTheRunStateAlone(t *testing.T) {
