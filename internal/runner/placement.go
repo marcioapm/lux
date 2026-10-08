@@ -45,7 +45,11 @@ type placement struct {
 	dir      string
 	// prev is the Run's earlier placement on this host when this one was
 	// assigned: this one touches nothing of the Run's until prev is done.
+	// Set before run starts; cleared under mu once prev is done, because a
+	// later placement's waitPrevious reads it under mu.
 	prev *placement
+	// nudge wakes waitPrevious to re-check a stop or a fence.
+	nudge chan struct{}
 
 	mu      sync.Mutex
 	state   *runState
@@ -89,11 +93,11 @@ type placement struct {
 	memoryLimit int64
 }
 
-func newPlacement(r *Runner, a proto.Assign) *placement {
+func newPlacement(r *Runner, a proto.Assign, prev *placement) *placement {
 	return &placement{
 		r: r, runID: a.RunID, tenantID: a.TenantID, epoch: a.Epoch, assign: &a,
-		dir: r.runDir(a.RunID), phase: "assigned",
-		done: make(chan struct{}),
+		dir: r.runDir(a.RunID), phase: "assigned", prev: prev,
+		done: make(chan struct{}), nudge: make(chan struct{}, 1),
 	}
 }
 
@@ -163,6 +167,7 @@ func (p *placement) markStale() {
 		_ = p.saveStateLocked()
 	}
 	p.stale = true
+	p.wake()
 	// One still starting stops: it would make a container for nothing.
 	if p.cancelStart != nil {
 		p.cancelStart()
@@ -341,28 +346,29 @@ func (p *placement) restoreState() {
 // a fence of this placement ends the wait.
 func (p *placement) waitPrevious() error {
 	wait := p.r.handoverWait()
-	deadline := time.Now().Add(wait)
-	p.mu.Lock()
-	prev := p.prev
-	p.mu.Unlock()
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
 	// prev may itself have been waiting for an older one: wait down the
 	// chain. A placement drops its prev only once that one is done.
-	for prev != nil {
-		for !prev.waitDone(max(min(100*time.Millisecond, time.Until(deadline)), 0)) {
-			switch {
-			case p.pendingStop() != "":
-				return errStoppedBeforeStart
-			case p.isStale():
-				return errStale
-			case !time.Now().Before(deadline):
-				p.logf("the previous placement here did not end in time", "previous", prev.epoch, "waited", wait)
-				return fmt.Errorf("the Run's epoch %d on this host did not end within %s", prev.epoch, wait)
-			}
+	for prev := p.prev; prev != nil; {
+		select {
+		case <-prev.done:
+			prev.mu.Lock()
+			next := prev.prev
+			prev.mu.Unlock()
+			prev = next
+			continue
+		case <-p.nudge:
+		case <-deadline.C:
+			p.logf("the previous placement here did not end in time", "previous", prev.epoch, "waited", wait)
+			return fmt.Errorf("the Run's epoch %d on this host did not end within %s", prev.epoch, wait)
 		}
-		prev.mu.Lock()
-		next := prev.prev
-		prev.mu.Unlock()
-		prev = next
+		switch {
+		case p.pendingStop() != "":
+			return errStoppedBeforeStart
+		case p.isStale():
+			return errStale
+		}
 	}
 	p.mu.Lock()
 	p.prev = nil
@@ -370,22 +376,30 @@ func (p *placement) waitPrevious() error {
 	return nil
 }
 
+// wake has waitPrevious re-check a stop or a fence set under p.mu.
+func (p *placement) wake() {
+	select {
+	case p.nudge <- struct{}{}:
+	default:
+	}
+}
+
 var errStoppedBeforeStart = errors.New("stopped before start")
 
-// failBeforeStart ends a placement that never took over the Run on this
-// host: its run state and everything else under p.dir stay the previous
-// placement's, so nothing is written there.
-func (p *placement) failBeforeStart(ctx context.Context, err error) {
+// startEnd is the exit code and reason of a placement that ended without
+// running its workload, in state "failed" or "exited" (stopped).
+func startEnd(state string) (int, string) {
+	if state == "exited" {
+		return 0, "stopped"
+	}
+	return 125, "start-failed"
+}
+
+// reportStartEnd reports the end of a placement that never ran its
+// workload, until luxd has it or the placement is fenced off.
+func (p *placement) reportStartEnd(ctx context.Context, state, msg string) {
 	p.setPhase("exited")
-	if errors.Is(err, errStale) {
-		p.setPhase("done")
-		return
-	}
-	state, code, reason := "failed", 125, "start-failed"
-	if errors.Is(err, errStoppedBeforeStart) {
-		state, code, reason = "exited", 0, "stopped"
-	}
-	msg := "handover: " + err.Error()
+	code, reason := startEnd(state)
 	for p.report(ctx, proto.MsgStatus, proto.Status{State: state, ExitCode: &code, Reason: reason, Message: msg, Times: p.times()}) != nil {
 		if p.isStale() || ctx.Err() != nil {
 			return
@@ -393,6 +407,20 @@ func (p *placement) failBeforeStart(ctx context.Context, err error) {
 		time.Sleep(time.Second)
 	}
 	p.setPhase("done")
+}
+
+// failBeforeStart ends a placement that never took over the Run on this
+// host: its run state and everything else under p.dir stay the previous
+// placement's, so nothing is written there.
+func (p *placement) failBeforeStart(ctx context.Context, err error) {
+	switch {
+	case errors.Is(err, errStale):
+		p.setPhase("done")
+	case errors.Is(err, errStoppedBeforeStart):
+		p.reportStartEnd(ctx, "exited", "handover: "+err.Error())
+	default:
+		p.reportStartEnd(ctx, "failed", "handover: "+err.Error())
+	}
 }
 
 // run takes a placement from assignment to its final report.
@@ -695,30 +723,14 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 // Its state volumes are unchanged, so the snapshot is the one it started
 // from.
 func (p *placement) finishWithoutContainer(ctx context.Context, state, msg string) {
-	code := 125
-	if state == "exited" {
-		code = 0
-	}
+	code, reason := startEnd(state)
 	p.setPhase("exited")
-	exit := &exitRecord{Code: code, Reason: "start-failed", Message: msg, Failed: state == "failed"}
-	if state == "exited" {
-		exit.Reason = "stopped"
-	}
 	p.mu.Lock()
-	p.state.Exit = exit
+	p.state.Exit = &exitRecord{Code: code, Reason: reason, Message: msg, Failed: state == "failed"}
 	p.state.Phase = "exited"
 	p.mu.Unlock()
 	_ = p.saveState()
-	if p.isStale() {
-		return
-	}
-	for p.report(ctx, proto.MsgStatus, proto.Status{State: state, ExitCode: &code, Reason: exit.Reason, Message: msg, Times: p.times()}) != nil {
-		if p.isStale() || ctx.Err() != nil {
-			return
-		}
-		time.Sleep(time.Second)
-	}
-	p.setPhase("done")
+	p.reportStartEnd(ctx, state, msg)
 }
 
 // ---- volumes ----------------------------------------------------------------
@@ -1124,6 +1136,7 @@ func (p *placement) requestStop(ctx context.Context, reason string) {
 		p.cancelStart()
 	}
 	p.mu.Unlock()
+	p.wake()
 	switch {
 	case phase == "running":
 		p.setPhase("stopping")
