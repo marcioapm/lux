@@ -21,19 +21,20 @@ afterAll(async () => {
   await GlobalRegistrator.unregister();
 });
 
-const run = (state: string): Run => ({ id: "run_1", state, stateReason: "", spec: { workload: {} } }) as unknown as Run;
+const run = (state: string, more: { resumable?: boolean; resumePolicy?: string } = {}): Run =>
+  ({ id: "run_1", state, stateReason: "", resumable: more.resumable ?? false, spec: { workload: {}, resumePolicy: more.resumePolicy } }) as unknown as Run;
 
 /** RunActions for a Run in state; returns its buttons by label and a cleanup. */
-async function render(state: string, answer: (path: string) => unknown = () => ({})) {
+async function render(state: string, more: { resumable?: boolean; resumePolicy?: string } = {}) {
   api.signIn("k");
-  const fake = fakeApi(answer);
+  const fake = fakeApi(() => ({}));
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
   await act(async () =>
     root.render(
       <ToastProvider>
-        <RunActions run={run(state)} operator={false} onChanged={() => {}} />
+        <RunActions run={run(state, more)} operator={false} onChanged={() => {}} />
       </ToastProvider>,
     ),
   );
@@ -63,11 +64,30 @@ test("a running Run offers Terminate (no Cancel), which opens the terminate dial
 });
 
 test("a succeeded Run can be resumed or terminated, not stopped", async () => {
-  const r = await render("succeeded");
+  const r = await render("succeeded", { resumable: true });
   try {
     expect(r.button("Resume")!.disabled).toBe(false);
     expect(r.button("Terminate")!.disabled).toBe(false);
     expect(r.button("Stop")!.disabled).toBe(true);
+  } finally {
+    await r.done();
+  }
+});
+
+test("a resumePolicy never Run that is not resumable cannot be resumed", async () => {
+  const r = await render("stopped", { resumable: false, resumePolicy: "never" });
+  try {
+    expect(r.button("Resume")!.disabled).toBe(true);
+    expect(r.button("Terminate")!.disabled).toBe(false);
+  } finally {
+    await r.done();
+  }
+});
+
+test("a stopped Run left without a snapshot can still be resumed from an older one", async () => {
+  const r = await render("stopped", { resumable: false });
+  try {
+    expect(r.button("Resume")!.disabled).toBe(false);
   } finally {
     await r.done();
   }

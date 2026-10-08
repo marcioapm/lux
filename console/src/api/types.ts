@@ -28,6 +28,7 @@ export interface RunSpec {
   workload: { adapter: string; command?: string[]; prompt?: string; workdir?: string; user?: string; tty?: boolean; servers?: SpecServer[] };
   resources: SpecResources;
   placement: { pool?: string; requires?: Record<string, string>; prefers?: Record<string, string> };
+  resumePolicy?: "auto" | "restart" | "manual" | "never";
   [key: string]: unknown;
 }
 
