@@ -131,10 +131,11 @@ def test_wildcard_admits_names_under_its_domain(lux, runners, egress_hosts, net_
         [fetch(n) for n in admitted + refused] + [resolves(n) for n in refused]),
         network={"egress": [{"host": "*.wild.lux.test"}]}))
     out = probe(lux, run_id)
+    lines = {line.strip() for line in out.splitlines()}
     for n in admitted:
-        assert f"OK:{n}" in out, out
+        assert f"OK:{n}" in lines, out
     for n in refused:
-        assert f"OK:{n}" not in out and f"DNS-NO:{n}" in out, out
+        assert f"NO:{n}" in lines and f"DNS-NO:{n}" in lines, out
     dns = [e["data"] for e in lux.json("events", run_id) if e["type"] == "dns"]
     for n in admitted:
         assert any(d["name"] == n and d["allowed"] and d.get("answers") == [t.allowed_ip] for d in dns), dns
@@ -144,7 +145,7 @@ def test_wildcard_admits_names_under_its_domain(lux, runners, egress_hosts, net_
     control = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "; ".join(resolves(n) for n in refused),
                                  network={"unrestricted": True}))
     out = probe(lux, control)
-    assert all(f"DNS-OK:{n}" in out for n in refused), out
+    assert {f"DNS-OK:{n}" for n in refused} <= {line.strip() for line in out.splitlines()}, out
 
 
 def test_rules_survive_a_runner_restart(lux, runners, egress_hosts, net_targets):

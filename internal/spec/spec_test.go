@@ -276,6 +276,13 @@ func TestEgressRuleMatches(t *testing.T) {
 		{"api.example.com", "API.example.com.", true},
 		{"api.example.com", "x.api.example.com", false},
 		{"*.1.1", "1.1.1.1", false},
+		{"*.example.com", "a..example.com", false},
+		{"*.example.com", "_x.example.com", false},
+		{"*.example.com", "-a.example.com", false},
+		{"*.example.com", "example.com.evil.com", false},
+		{"*.example.com", "a.example.com.evil.com", false},
+		{"*.example.com", "bücher.example.com", false},
+		{"*.example.com", "xn--bcher-kva.example.com", true},
 		{"", "", false},
 	} {
 		if got := (EgressRule{Host: c.rule}).Matches(c.name); got != c.want {

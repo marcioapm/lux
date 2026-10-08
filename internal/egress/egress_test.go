@@ -23,7 +23,8 @@ type fakeNet struct {
 	mu   sync.Mutex
 	sets map[string]map[string]bool
 	addr map[string]netip.Addr
-	fail bool // nft fails
+	nx   map[string]bool // names that do not resolve
+	fail bool            // nft fails
 }
 
 var addElement = regexp.MustCompile(`^add element inet lux (\S+) \{ (.*) \}$`)
@@ -50,6 +51,9 @@ func (n *fakeNet) nft(script string) error {
 func (n *fakeNet) lookup(_ context.Context, host string) ([]netip.Addr, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.nx[host] {
+		return nil, fmt.Errorf("lookup %s: no such host", host)
+	}
 	a, ok := n.addr[host]
 	if !ok {
 		a = netip.AddrFrom4([4]byte{203, 0, 113, byte(len(n.addr) + 1)})
@@ -67,11 +71,22 @@ func (n *fakeNet) inSet(iface string, a netip.Addr) bool {
 // fixture is a Firewall with Runs installed as Apply does, without the
 // stub's sockets or the chain's nft script.
 func fixture(t *testing.T) (*Firewall, *fakeNet, func(iface string, unrestricted bool, rules ...spec.EgressRule) *[]Lookup) {
-	n := &fakeNet{sets: map[string]map[string]bool{}, addr: map[string]netip.Addr{}}
-	f := newFirewall(nil, n.lookup, n.nft)
+	return fixtureBlocking(t, nil)
+}
+
+// fixtureBlocking is fixture with extra hard-blocked prefixes, as New's
+// control plane.
+func fixtureBlocking(t *testing.T, extra []netip.Prefix) (*Firewall, *fakeNet, func(iface string, unrestricted bool, rules ...spec.EgressRule) *[]Lookup) {
+	n := &fakeNet{sets: map[string]map[string]bool{}, addr: map[string]netip.Addr{}, nx: map[string]bool{}}
+	f := newFirewall(extra, n.lookup, n.nft)
 	add := func(iface string, unrestricted bool, rules ...spec.EgressRule) *[]Lookup {
+		var mu sync.Mutex
 		var got []Lookup
-		r, err := newRun(unrestricted, rules, func(l Lookup) { got = append(got, l) })
+		r, err := newRun(unrestricted, rules, func(l Lookup) {
+			mu.Lock()
+			got = append(got, l)
+			mu.Unlock()
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -123,12 +138,6 @@ func TestWildcardAdmitsMatchingNames(t *testing.T) {
 		if rc, addrs := ask(t, f, "lux1", name); rc != dnsmessage.RCodeRefused || addrs != nil {
 			t.Fatalf("%s: %v %v", name, rc, addrs)
 		}
-	}
-	f.mu.Lock()
-	admitted, hosts := f.runs["lux1"].admitted, len(f.runs["lux1"].hosts)
-	f.mu.Unlock()
-	if admitted != 2 || hosts != 3 {
-		t.Fatalf("admitted %d, hosts %d", admitted, hosts)
 	}
 	allowed := map[string]bool{}
 	for _, l := range *events {
@@ -183,15 +192,12 @@ func TestWildcardCap(t *testing.T) {
 			t.Fatalf("%s: %v %v", name, rc, addrs)
 		}
 	}
-	last := (*events)[len(*events)-1]
-	var over *Lookup
-	for i, l := range *events {
-		if l.Name == "over.wild.example.com" {
-			over = &(*events)[i]
-		}
+	allowed := map[string]bool{}
+	for _, l := range *events {
+		allowed[l.Name] = l.Allowed
 	}
-	if over == nil || over.Allowed {
-		t.Fatalf("over-cap event %+v (last %+v)", over, last)
+	if a, ok := allowed["over.wild.example.com"]; !ok || a {
+		t.Fatalf("over-cap event: reported %v, allowed %v", ok, a)
 	}
 	// The cap is per Run.
 	add("lux2", false, spec.EgressRule{Host: "*.wild.example.com"})
@@ -291,8 +297,8 @@ func TestRemovePrunesResolvedNames(t *testing.T) {
 func TestUnrestrictedRunAdmitsNothing(t *testing.T) {
 	f, _, add := fixture(t)
 	add("lux1", true, spec.EgressRule{Host: "*.wild.example.com"})
-	if ok, _ := f.answerFor("lux1", "a.wild.example.com", dnsmessage.TypeA); ok {
-		t.Fatal("admitted")
+	if rc, addrs := ask(t, f, "lux1", "a.wild.example.com"); rc != dnsmessage.RCodeRefused || addrs != nil {
+		t.Fatalf("%v %v", rc, addrs)
 	}
 }
 
@@ -317,5 +323,128 @@ func TestNonAQueryDoesNotAdmit(t *testing.T) {
 	}
 	if rc, _ := askType(t, f, "lux1", "x.other.example.com", dnsmessage.TypeAAAA); rc != dnsmessage.RCodeRefused {
 		t.Fatalf("AAAA of a name no rule matches: %v", rc)
+	}
+}
+
+// A name under a wildcard that resolves into a hard-blocked range (the
+// metadata service, or the control plane passed to New) is not opened.
+func TestWildcardNameCannotOpenABlockedAddress(t *testing.T) {
+	controlPlane := netip.MustParsePrefix("10.9.0.0/16")
+	for name, addr := range map[string]netip.Addr{
+		"meta.wild.example.com": netip.MustParseAddr("169.254.169.254"),
+		"cp.wild.example.com":   netip.MustParseAddr("10.9.0.5"),
+	} {
+		f, n, add := fixtureBlocking(t, []netip.Prefix{controlPlane})
+		n.addr[name] = addr
+		add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"})
+		if rc, addrs := ask(t, f, "lux1", name); rc != dnsmessage.RCodeNameError || addrs != nil {
+			t.Errorf("%s: %v %v", name, rc, addrs)
+		}
+		if n.inSet("lux1", addr) {
+			t.Errorf("%s: blocked address %v in the Run's set", name, addr)
+		}
+	}
+}
+
+// The stub's normalisation feeds the matcher a name it rejects: an
+// underscore label is not a hostname.
+func TestWildcardRefusesInvalidLabels(t *testing.T) {
+	f, _, add := fixture(t)
+	add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"})
+	if rc, addrs := ask(t, f, "lux1", "_x.wild.example.com"); rc != dnsmessage.RCodeRefused || addrs != nil {
+		t.Fatalf("%v %v", rc, addrs)
+	}
+}
+
+// Many concurrent first lookups of distinct names admit exactly the cap.
+func TestConcurrentAdmissionHoldsTheCap(t *testing.T) {
+	f, _, add := fixture(t)
+	add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	allowed := 0
+	for i := range 600 {
+		wg.Go(func() {
+			if ok, _ := f.answerFor("lux1", fmt.Sprintf("n%d.wild.example.com", i), dnsmessage.TypeA); ok {
+				mu.Lock()
+				allowed++
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	if allowed != maxWildcardNames {
+		t.Fatalf("%d names admitted, want %d", allowed, maxWildcardNames)
+	}
+}
+
+// Two Runs looking up the same new name at once each answer only
+// addresses in their own set.
+func TestConcurrentSameNameAcrossRuns(t *testing.T) {
+	for iter := range 200 {
+		f, n, add := fixture(t)
+		add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"})
+		add("lux2", false, spec.EgressRule{Host: "*.wild.example.com"})
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		res := map[string][]netip.Addr{}
+		for _, iface := range []string{"lux1", "lux2", "lux1", "lux2"} {
+			wg.Go(func() {
+				_, a := f.answerFor(iface, "a.wild.example.com", dnsmessage.TypeA)
+				mu.Lock()
+				res[iface] = append(res[iface], a...)
+				mu.Unlock()
+			})
+		}
+		wg.Wait()
+		for iface, as := range res {
+			for _, a := range as {
+				if !n.inSet(iface, a) {
+					t.Fatalf("iter %d: %s answered %v, not in its set", iter, iface, a)
+				}
+			}
+		}
+	}
+}
+
+// A slot is spent on admission, whether or not the name resolves.
+func TestUnresolvableNameHoldsACapSlot(t *testing.T) {
+	f, n, add := fixture(t)
+	n.nx["nx.wild.example.com"] = true
+	add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"})
+	if rc, _ := ask(t, f, "lux1", "nx.wild.example.com"); rc != dnsmessage.RCodeNameError {
+		t.Fatalf("nx: %v", rc)
+	}
+	for i := range maxWildcardNames - 1 {
+		if rc, _ := ask(t, f, "lux1", fmt.Sprintf("n%d.wild.example.com", i)); rc != dnsmessage.RCodeSuccess {
+			t.Fatalf("name %d: %v", i, rc)
+		}
+	}
+	if rc, _ := ask(t, f, "lux1", "over.wild.example.com"); rc != dnsmessage.RCodeRefused {
+		t.Fatalf("over the cap: %v", rc)
+	}
+}
+
+func TestNewRun(t *testing.T) {
+	r, err := newRun(false, []spec.EgressRule{{CIDR: "10.0.0.0/33"}}, nil)
+	if err == nil {
+		t.Fatalf("bad cidr: got %+v", r)
+	}
+	r, err = newRun(false, []spec.EgressRule{
+		{Host: "*.x.example.com"},
+		{Host: "Exact.Example.com."},
+		{CIDR: "10.1.2.3/16"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hosts := slices.Sorted(maps.Keys(r.hosts)); !slices.Equal(hosts, []string{"exact.example.com"}) {
+		t.Errorf("hosts %v", hosts)
+	}
+	if !slices.Equal(r.wildcards, []string{".x.example.com"}) {
+		t.Errorf("wildcards %v", r.wildcards)
+	}
+	if !slices.Equal(r.cidrs, []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16")}) {
+		t.Errorf("cidrs %v", r.cidrs)
 	}
 }
