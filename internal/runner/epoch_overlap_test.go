@@ -194,7 +194,8 @@ func (f *finishFixture) wantUploaded(t *testing.T) {
 // The stale nack of an older epoch whose report was in flight when the
 // next epoch was assigned kills only the container that epoch made, never
 // the Run's name. Here ctr-2 holds the name, as an epoch's container would
-// on a pre-#69 readopt; with the handover, a live next epoch has none yet.
+// on the readopt of a run state written before the container id was
+// recorded; with the handover, a live next epoch has none yet.
 func TestStaleEpochDoesNotKillTheNextEpochsContainer(t *testing.T) {
 	f := newOverlapFixture(t)
 	f.sendEpoch1Report(t)
@@ -218,8 +219,10 @@ func TestStaleEpochDoesNotKillTheNextEpochsContainer(t *testing.T) {
 func TestNextEpochWaitsForTheFinishingOne(t *testing.T) {
 	f := newRemovingFixture(t)
 	p2 := f.assignEpoch(t, 2)
-	// Epoch 2's first act: its lease in a heartbeat, as starting.
+	// Epoch 2's first act: its lease in a heartbeat, as starting. A second
+	// heartbeat later its goroutine has had time to get past waitPrevious.
 	f.waitLease(t, 2, "starting")
+	f.heartbeatAfter(t, f.count())
 	if f.epoch2Started() {
 		t.Fatalf("epoch 2 started while epoch 1 was removing its container; podman:\n%s", f.podmanLog())
 	}
@@ -323,6 +326,9 @@ func TestNextEpochAbandonsAnUnackedExport(t *testing.T) {
 	for _, fr := range sent {
 		if fr.Epoch == 1 && fr.Type == proto.MsgSnapshotDone {
 			t.Error("epoch 1 reported the snapshot it abandoned")
+		}
+		if fr.Epoch == 1 && fr.Type == proto.MsgStatus {
+			t.Error("epoch 1 reported its end after abandoning its snapshot")
 		}
 	}
 	for id, rec := range f.r.snapshotRecords() {
