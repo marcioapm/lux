@@ -2,14 +2,15 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
 )
 
 // retentionFixture: supersededFixture with every snapshot uploaded, and
-// ra (t1, retention 30 days) and rb (t2, retention 5 days) finished days
-// ago in state.
+// ra (t1, retention 30 days) and rb (t2, retention 5 days) ended days ago
+// in state (and, terminated, terminated then).
 func retentionFixture(t *testing.T, raState, rbState string, raDays, rbDays float64) (*Server, context.Context, *fakeS3) {
 	t.Helper()
 	s, ctx, f := supersededFixture(t)
@@ -19,7 +20,8 @@ func retentionFixture(t *testing.T, raState, rbState string, raDays, rbDays floa
 		id, state string
 		days      float64
 	}{{"ra", raState, raDays}, {"rb", rbState, rbDays}} {
-		execSQL(t, s, ctx, `UPDATE runs SET state = $2, finished_at = now() - make_interval(secs => $3 * 86400) WHERE id = $1`, r.id, r.state, r.days)
+		execSQL(t, s, ctx, `UPDATE runs SET state = $2, finished_at = now() - make_interval(secs => $3 * 86400),
+			terminated_at = CASE WHEN $2 = 'terminated' THEN now() - make_interval(secs => $3 * 86400) END WHERE id = $1`, r.id, r.state, r.days)
 	}
 	return s, ctx, f
 }
@@ -62,6 +64,8 @@ func TestReapRetentionTerminal(t *testing.T) {
 
 // A failed or succeeded Run is resumable: retention deletes nothing of it,
 // however long ago it ended. Nor of a stopped Run with an old finished_at.
+// Once it expires (terminated), its retention counts from the terminate,
+// not from its 400-day-old finished_at.
 func TestReapRetentionSparesResumable(t *testing.T) {
 	for _, ended := range []string{StateFailed, StateSucceeded} {
 		t.Run(ended, func(t *testing.T) { testReapRetentionSparesResumable(t, ended) })
@@ -83,13 +87,14 @@ func testReapRetentionSparesResumable(t *testing.T, ended string) {
 	if got := f.Deleted(); len(got) != 0 {
 		t.Fatalf("S3 deletes %v", got)
 	}
-	if ended == StateSucceeded {
-		return
-	}
-	// Once it expires (terminated now), its retention counts from then.
 	execSQL(t, s, ctx, `UPDATE runs SET state_changed_at = now() - interval '91 days' WHERE id = 'rb'`)
 	if err := s.reapExpiry(ctx); err != nil {
 		t.Fatal(err)
+	}
+	var state string
+	systemScan(t, s, `SELECT state FROM runs WHERE id = 'rb'`, nil, &state)
+	if state != StateTerminated {
+		t.Fatalf("rb after expiry: %s", state)
 	}
 	if err := s.reapRetention(ctx); err != nil {
 		t.Fatal(err)
@@ -97,12 +102,34 @@ func testReapRetentionSparesResumable(t *testing.T, ended string) {
 	if got := f.Deleted(); len(got) != 0 {
 		t.Fatalf("deleted on expiry, before retention: %v", got)
 	}
-	execSQL(t, s, ctx, `UPDATE runs SET finished_at = now() - interval '6 days' WHERE id = 'rb'`)
+	execSQL(t, s, ctx, `UPDATE runs SET terminated_at = now() - interval '6 days' WHERE id = 'rb'`)
 	if err := s.reapRetention(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.Deleted(); len(got) != 4 {
 		t.Fatalf("expired Run past retention: deleted %v, want its volumes and outputs", got)
+	}
+}
+
+// A Run terminated by request long after it succeeded keeps its whole
+// retention from the terminate: its old finished_at does not count.
+func TestReapRetentionCountsFromTermination(t *testing.T) {
+	s, ctx, f := retentionFixture(t, StateStopped, StateSucceeded, 1, 400)
+	key := apiKey(t, s, new("t2"), "run")
+	if code, body := call(t, s, key, http.MethodPost, "/v1/runs/rb/terminate", nil); code != http.StatusAccepted {
+		t.Fatalf("terminate: %d %s", code, body)
+	}
+	var finishedOld, terminatedNow bool
+	systemScan(t, s, `SELECT finished_at < now() - interval '399 days', terminated_at > now() - interval '1 minute' FROM runs WHERE id = 'rb'`,
+		nil, &finishedOld, &terminatedNow)
+	if !finishedOld || !terminatedNow {
+		t.Fatalf("finished_at kept %v, terminated_at now %v", finishedOld, terminatedNow)
+	}
+	if err := s.reapRetention(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Deleted(); len(got) != 0 {
+		t.Fatalf("deleted at once on a late terminate: %v", got)
 	}
 }
 

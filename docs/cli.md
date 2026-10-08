@@ -76,7 +76,7 @@ lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--se
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]... [--sync-mode move|fast-forward|fetch]  # move restored checkouts to ref before init
 lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID]   # a running Run's checkouts
-lux terminate <run> [--wait]    # ends it for good: terminated, never resumable (a snapshot is still taken); a Run left stopped, lost or failed is terminated after its tenant's expiry (default 90 days). `lux cancel` is a deprecated alias.
+lux terminate <run> [--wait]    # ends it for good: terminated, never resumable (a snapshot is still taken); a Run left stopped, lost, failed or succeeded is terminated after its tenant's expiry (default 90 days). `lux cancel` is a deprecated alias.
 lux snapshots <run>             # where each snapshot lives; only the current one is kept once uploaded (older ones: available false)
 ```
 
@@ -106,7 +106,7 @@ lux resume run_x --cpus 4 --memory 2Gi    # more CPUs, less memory
 lux resume run_x --disk 10Gi              # smaller, if its state fits
 ```
 
-`--add-repo` (repeatable) adds a repository to a stopped, lost or failed
+`--add-repo` (repeatable) adds a repository to a stopped, lost, failed or succeeded
 Run. The runner clones it into the restored workspace before the Run
 starts again (see [Git](runspec.md#git)):
 

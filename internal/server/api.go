@@ -89,7 +89,7 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Resume a stopped, lost, failed or succeeded Run",
 		Description: "From its latest snapshot (or fromSnapshot), on any host, through the adapter's resume path with its session: a succeeded Run like a stopped one. " +
 			"Its secrets must be supplied again. Idempotent while resuming. A terminated Run is not resumable (409 not_resumable). " +
-			"A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been terminated. " +
+			"A Run left stopped, lost, failed or succeeded longer than its tenant's expireAfterDays has been terminated. " +
 			"A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state " +
 			"(an assignment no runner started may still be placed again).\n\n" +
 			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +

@@ -43,9 +43,9 @@ const queuedRunStates = "('submitted', 'resuming', 'provisioning')"
 const resumableRunStates = "('stopped', 'lost', 'failed', 'succeeded')"
 
 // restingRunStates, for SQL: Runs expiry terminates once they have rested
-// longer than their tenant's expire_after_days (reapExpiry). Each must be
-// in the runs_resting index's predicate.
-const restingRunStates = "('stopped', 'lost', 'failed')"
+// longer than their tenant's expire_after_days (reapExpiry): every
+// resumable state. Each must be in the runs_resting index's predicate.
+const restingRunStates = resumableRunStates
 
 // refusedWithoutSnapshot, for SQL over runs (as r): the current placement's
 // latest report was refused and the Run has no snapshot to restore. Exempt
@@ -171,12 +171,17 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 	// prompt_attachments: only a terminated Run is never placed again. A
 	// succeeded or failed one can be resumed, as a first placement when it
 	// has no session and no snapshot, so it keeps them.
-	// finished_at: when it last ended, on any end.
+	// finished_at: when its last placement ended. A Run terminated once it
+	// had ended (succeeded, failed: nothing ran since) keeps it.
+	// terminated_at: retention's clock (reapRetention).
 	// state_changed_at is expiry's clock (reapExpiry): moved only by a
 	// change of state, so a repeated stop does not restart it.
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = $2, state_reason = $3, updated_at = now(),
 			state_changed_at = CASE WHEN state <> $2 THEN now() ELSE state_changed_at END,
-			finished_at = CASE WHEN $2 IN ('succeeded', 'failed', 'terminated') THEN now() ELSE finished_at END,
+			finished_at = CASE WHEN $2 IN ('succeeded', 'failed') THEN now()
+				WHEN $2 = 'terminated' AND state IN ('succeeded', 'failed') THEN finished_at
+				WHEN $2 = 'terminated' THEN now() ELSE finished_at END,
+			terminated_at = CASE WHEN $2 = 'terminated' THEN coalesce(terminated_at, now()) ELSE terminated_at END,
 			prompt_attachments = CASE WHEN $2 = 'terminated' THEN NULL ELSE prompt_attachments END,
 			activity = CASE WHEN $2 IN ('running') THEN activity ELSE '' END
 		WHERE id = $1`, runID, state, reason)

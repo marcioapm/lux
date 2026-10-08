@@ -63,11 +63,12 @@ Every Run the API returns carries `resumable`, always present: whether
 snapshot report). It is the same test as `GET /v1/runs?resumable=true`
 (`lux ls --resumable`).
 
-A Run that stays `stopped`, `lost` or `failed` (resting) longer than its
-tenant's `expireAfterDays` (default 90; 0: never) is **terminated by lux**,
-with `stateReason` `expired: stopped for 90 days` (or `lost`, `failed`),
-and a `state` event like any terminate. The clock is the time in that state:
-a resume restarts it at the next stop. Its storage then follows the
+A Run that stays `stopped`, `lost`, `failed` or `succeeded` (resting:
+resumable, not running) longer than its tenant's `expireAfterDays`
+(default 90; 0: never) is **terminated by lux**, with `stateReason`
+`expired: stopped for 90 days` (or `lost`, `failed`, `succeeded`), and a
+`state` event like any terminate. The clock is the time in that state: a
+resume restarts it at the next end. Its storage then follows the
 terminated Run's ([below](#which-snapshots-are-kept)): 90 days resting plus
 the tenant's retention. Terminate a Run sooner yourself to free it sooner.
 
@@ -98,16 +99,18 @@ Runners never hold S3 credentials.
 Every snapshot is a full copy of the state volumes, so lux keeps only the
 ones a Run can still use:
 
-- **A Run that can resume** (`stopped`, `lost`, `failed`, or on its way
-  back) keeps its **current** snapshot (the one a resume starts from).
+- **A Run that can resume** (`stopped`, `lost`, `failed`, `succeeded`, or
+  on its way back) keeps its **current** snapshot (the one a resume starts
+  from), however long it rests, until it is terminated.
   Older snapshots are deleted once the current one has finished uploading;
   until then the older one is the only copy that would survive losing the
   host. `resume --from-snapshot` an older snapshot works while it still
   exists; a deleted one is 409 `snapshot_unavailable`. `lux snapshots`
   keeps listing every snapshot, deleted ones with `available` false.
-- **A succeeded or terminated Run** (an expired Run too) keeps its
-  snapshots and output for the tenant's retention (default 30 days) after
-  it ended, then they are deleted.
+- **A terminated Run** (an expired Run too) keeps its snapshots and output
+  for the tenant's retention (default 30 days) counted from when it was
+  terminated (not from when its last placement ended), then they are
+  deleted.
 - **Artifacts** are never deleted by time: they stay until their owner
   deletes them (`lux artifacts <run> --delete`, a terminated
   Run's only).
@@ -141,7 +144,7 @@ on every start, so it must be idempotent.
 
 ### Resizing on resume
 
-A resume can change what a stopped, lost or failed Run gets from then on
+A resume can change what a stopped, lost, failed or succeeded Run gets from then on
 (`resources: {cpus, memory, disk}` in the request; `lux resume --cpus
 --memory --disk`). A running Run's limits never change: stop it first.
 What a resume applies is written into the Run's spec, so `GET

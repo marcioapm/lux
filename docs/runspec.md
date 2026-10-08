@@ -588,7 +588,7 @@ needs no `network.egress` rule and none is checked.
 
 ### Adding repositories on resume
 
-A resume can add repositories to a stopped, lost or failed Run. Pass them in
+A resume can add repositories to a stopped, lost, failed or succeeded Run. Pass them in
 the request's `git.repositories` (`lux resume --add-repo`), in the same shape
 as the spec's:
 
@@ -625,7 +625,7 @@ POST /v1/runs/{id}/resume
   `{requestId, by, addedRepositories}`, and `addedSecrets` and
   `removedSecrets` when it declared or removed secrets
   ([Secrets](concepts.md#secrets)).
-- Adding needs a Run that is stopped, lost or failed. While it is
+- Adding needs a Run that is stopped, lost, failed or succeeded. While it is
   resuming, the request gets 409.
 
 ### Syncing checkouts
