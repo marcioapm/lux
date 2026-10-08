@@ -25,7 +25,8 @@ import (
 // $0.log. As podman does, `volume rm -f` also removes the container that
 // mounts the volume; `volume import` writes its input into the volume. The
 // container, while it exists, is inspected as stopped. Each create assigns
-// a new ID and records its arguments in $0.created; start records the ID it
+// a new ID and records its arguments in $0.created; as podman's, it fails
+// while a container exists under the name. Start records the ID it
 // actually starts.
 const podmanWithVolumes = `#!/bin/sh
 echo "$*" >> "$0.log"
@@ -43,6 +44,7 @@ case "$1 $2" in
   cat "$0.ctr" >> "$0.started" ;;
 *)
   if [ "$1" = create ]; then
+    [ -e "$0.ctr" ] && { echo "Error: creating container storage: the container name \"lux-run1\" is already in use by $(cat "$0.ctr")" >&2; exit 125; }
     id=$(cat "$0.next-id")
     echo "ctr-$id" > "$0.ctr"
     echo "$((id+1))" > "$0.next-id"
@@ -200,13 +202,20 @@ func TestResumeAfterRestoreRemovedTheContainerCreatesOne(t *testing.T) {
 
 // A same-host resume whose volumes are the snapshot's keeps them as they
 // are (nothing imported or downloaded) and starts a new container, as on a
-// new host: the stopped one, with its writable layer, is removed.
+// new host: the stopped one, with its writable layer, is removed (a create
+// under its name would fail).
 func TestSameHostResumeGetsANewContainerOnItsLocalVolumes(t *testing.T) {
 	f := newResumeFixture(t, 2, "snap1")
+	if got, err := os.ReadFile(f.bin + ".ctr"); err != nil || string(got) != "ctr-1\n" {
+		t.Fatalf("the host holds container %q (%v), want the stopped ctr-1", got, err)
+	}
 	if err := f.start(context.Background()); err != nil {
 		t.Fatalf("start: %v; podman:\n%s", err, f.podmanLog())
 	}
 	f.assertStartedContainer(t, "ctr-2")
+	if !strings.Contains(f.podmanLog(), "rm -f -t 0 "+containerName("run1")+"\n") {
+		t.Errorf("the stopped container was not removed by name; podman:\n%s", f.podmanLog())
+	}
 	f.waitEvent(t, "volumes.local")
 	data := volumeName("run1", "data")
 	if got, err := os.ReadFile(f.bin + ".vol." + data); err != nil || string(got) != "local-state" {

@@ -23,7 +23,8 @@ import (
 // resizePodman is a fake podman keeping its container and volumes as files
 // beside it ($0.ctr, $0.vol.<name>), and logging its commands to $0.log.
 // The container, while it exists, is inspected as stopped. A create writes a new id to
-// $0.ctr and its arguments to $0.created; `volume import` copies its input
+// $0.ctr and its arguments to $0.created, and fails, as podman's does,
+// while a container exists under the name; `volume import` copies its input
 // into the volume's file; `volume rm` removes the container too, as
 // podman's -f does.
 const resizePodman = `#!/bin/sh
@@ -42,6 +43,7 @@ case "$1 $2" in
   cat "$0.ctr" >> "$0.started" ;;
 *)
   if [ "$1" = create ]; then
+    [ -e "$0.ctr" ] && { echo "Error: creating container storage: the container name \"lux-run1\" is already in use by $(cat "$0.ctr")" >&2; exit 125; }
     id=$(cat "$0.next-id")
     echo "ctr-$id" > "$0.ctr"
     echo "$((id+1))" > "$0.next-id"
