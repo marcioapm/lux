@@ -23,6 +23,8 @@ import (
 // export blocks until release is called. $0.ctr holds the id of the Run's
 // container while one exists (the placement's, ctr-1); `rm -f` removes it
 // by that id or the Run's container name, and `volume rm` its volume's file.
+// `rmi` records the image it removes in $0.rmi. The placement's image is
+// img, which lux pulled for t1.
 type finishFixture struct {
 	r       *Runner
 	p       *placement
@@ -47,6 +49,7 @@ case "$1 $2" in
   echo volume-data ;;
 "rm -f") case "$5" in lux-run1|"$(cat "$0.ctr")") rm -f "$0.ctr" ;; esac ;;
 "volume rm") rm -f "$0.vol.$4" ;;
+"rmi "*) echo "$2" >> "$0.rmi" ;;
 *) exit 1 ;;
 esac
 `
@@ -66,7 +69,9 @@ esac
 		}
 	}
 	r := &Runner{cfg: Config{DataDir: dir}, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		pm: &podman.Podman{Bin: bin}, placements: map[string]*placement{}, git: gitws.New(filepath.Join(dir, "git"))}
+		pm: &podman.Podman{Bin: bin}, placements: map[string]*placement{}, git: gitws.New(filepath.Join(dir, "git")),
+		images: newImageUse(dir)}
+	r.images.pulledBy(finishImage, "t1")
 	r.conn = newConn(r)
 	r.conn.polling = true
 	r.uploads = newUploader(r)
@@ -75,7 +80,7 @@ esac
 	r.mounts.Store(volumeName("run1", "data"), data)
 	p := &placement{r: r, runID: "run1", tenantID: "t1", epoch: 1, dir: r.runDir("run1"), phase: "stopping",
 		assign: &proto.Assign{}, done: make(chan struct{}),
-		state: &runState{RunID: "run1", TenantID: "t1", Epoch: 1, Phase: "started", Container: "ctr-1",
+		state: &runState{RunID: "run1", TenantID: "t1", Epoch: 1, Phase: "started", Container: "ctr-1", Image: finishImage,
 			Volumes: []volumeRef{{Name: "data", Volume: volumeName("run1", "data"), Path: "/data", Kind: "state"}}}}
 	if err := os.MkdirAll(p.dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -114,6 +119,8 @@ esac
 }
 
 func (f *finishFixture) release() { _ = os.WriteFile(f.bin+".release", nil, 0o600) }
+
+const finishImage = "ghcr.io/a/img:1"
 
 // exitedAsSupervised ends the placement's container as supervise does, and
 // runs finish in the background.
@@ -242,6 +249,31 @@ func TestReportedStopLeavesVolumesAndNoContainer(t *testing.T) {
 	st, err := readRunState(f.p.dir)
 	if err != nil || st.Phase != "reported" || st.VolumesSnapshot == "" {
 		t.Errorf("run state %+v (%v): want reported, its volumes the snapshot's", st, err)
+	}
+}
+
+// A stop removes the container that kept its image from the GC: the image
+// counts as used at the stop, so a Run that ran longer than the TTL keeps
+// it for a resume here as long as its volumes.
+func TestStoppedRunsImageIsUsedAtItsStop(t *testing.T) {
+	f := newFinishFixture(t)
+	started := time.Now().Add(-2 * time.Hour).UnixMilli()
+	f.r.images.mu.Lock()
+	f.r.images.last[finishImage] = started
+	f.r.images.mu.Unlock()
+	before := time.Now().UnixMilli()
+	f.release()
+	f.exitedAsSupervised(context.Background())
+	f.p.waitDone(10 * time.Second)
+	if at := f.r.images.snapshot()[finishImage]; at < before {
+		t.Fatalf("image last used at %d, want at the stop (>= %d)", at, before)
+	}
+	f.r.gcImages(context.Background(), time.Hour)
+	if b, err := os.ReadFile(f.bin + ".rmi"); err == nil {
+		t.Errorf("the GC removed %q, a stopped Run's image used within its TTL", b)
+	}
+	if _, ok := f.r.images.snapshot()[finishImage]; !ok {
+		t.Error("the image is no longer recorded as lux's")
 	}
 }
 

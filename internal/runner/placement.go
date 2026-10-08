@@ -505,13 +505,18 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	// Nothing reads a stopped container once its end is reported (a resume
 	// makes a new one); its volumes stay for a resume here. By id: a resume
 	// assigned here since may already have made the next one under its name.
+	// Without its container the image is no longer kept from the GC: its
+	// TTL runs from this stop, as the local copy's does.
 	p.mu.Lock()
-	id := p.state.Container
+	id, image := p.state.Container, p.state.Image
 	p.mu.Unlock()
 	if id != "" {
 		if err := p.r.pm.Remove(ctx, id); err != nil {
 			p.logf("removing the stopped container failed", "err", err)
 		}
+	}
+	if image != "" {
+		p.r.images.touch(image, p.tenantID)
 	}
 	p.mu.Lock()
 	p.state.Phase = "reported"
