@@ -102,17 +102,18 @@ def test_host_ttl_removes_local_copies(lux, runners, hosts):
 
 
 def test_retention_deletes_finished_runs_blobs(env, lux, runners, hosts):
-    """Retention is per tenant, in days; 0 deletes a finished Run's blobs
-    as soon as they are uploaded."""
+    """Retention is per tenant, in days; 0 deletes a terminated Run's blobs
+    as soon as they are uploaded (retention runs once a minute)."""
     env.luxd_admin("set-quota", "--tenant", lux.tenant_id, "--retention-days", "0")
     runners.start(hosts[0])
     run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "gone-soon"))
     lux.wait_state(run_id, "succeeded")
-    wait_until(lambda: not s3_keys(env, run_id) and lux.get(run_id)["placements"][0].get("uploadedAt"),
-               60, 1, "blobs were not uploaded and then deleted")
+    lux.wait_placement_uploaded(run_id)
+    lux.run("terminate", run_id, "--wait")
+    wait_until(lambda: not s3_keys(env, run_id), 120, 1, "blobs were not deleted")
     # The Run itself (and its events) stays; only its bytes are gone, and
-    # its snapshots say so: resuming it is refused, not broken.
-    assert lux.get(run_id)["state"] == "succeeded"
+    # its snapshots say so.
+    assert lux.get(run_id)["state"] == "terminated"
     assert not any(sn["available"] for sn in lux.json("snapshots", run_id))
 
 
@@ -147,8 +148,8 @@ def test_retention_spares_resumable_runs(env, lux, runners, hosts):
     lux.wait_state(done, "succeeded")
     lux.wait_placement_uploaded(done)
     lux.run("terminate", done, "--wait")
-    # Retention has run over this tenant after the others ended.
-    wait_until(lambda: not s3_keys(env, done), 60, 1, "retention never deleted the terminated Run")
+    # Retention (once a minute) has run over this tenant after the others ended.
+    wait_until(lambda: not s3_keys(env, done), 120, 1, "retention never deleted the terminated Run")
     assert s3_keys(env, ok), "retention deleted a succeeded Run's blobs"
     assert any(sn["available"] for sn in lux.json("snapshots", failed)), lux.json("snapshots", failed)
     assert s3_keys(env, failed)

@@ -16,16 +16,34 @@ import (
 func (s *Server) reaperLoop(ctx context.Context) {
 	t := time.NewTicker(s.cfg.Tick)
 	defer t.Stop()
+	var lastStorage time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
-		for _, f := range []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapExpiry, s.reapSuperseded, s.reapRetention, s.reapOutdatedStaticHosts} {
-			if err := f(ctx); err != nil && ctx.Err() == nil {
-				s.log.Warn("reaper", "err", err)
-			}
+		s.reapOnce(ctx, &lastStorage)
+	}
+}
+
+// storageReapEvery is how often reapSuperseded and reapRetention run:
+// their deadlines are uploads and days, and each scans every Run with
+// retainable blobs, so they need not run every tick as leases and hosts do.
+const storageReapEvery = time.Minute
+
+// reapOnce is one reaper tick. lastStorage is when the storage reapers
+// last ran (zero: never); it is moved when they run.
+func (s *Server) reapOnce(ctx context.Context, lastStorage *time.Time) {
+	reapers := []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapExpiry}
+	if time.Since(*lastStorage) >= storageReapEvery {
+		*lastStorage = time.Now()
+		reapers = append(reapers, s.reapSuperseded, s.reapRetention)
+	}
+	reapers = append(reapers, s.reapOutdatedStaticHosts)
+	for _, f := range reapers {
+		if err := f(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("reaper", "err", err)
 		}
 	}
 }
