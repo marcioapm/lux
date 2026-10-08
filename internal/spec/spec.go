@@ -1033,7 +1033,8 @@ func HostMatches(rule, name string) bool {
 	if !strings.HasPrefix(rule, "*.") {
 		return rule == name
 	}
-	return SuffixMatches(rule[1:], name) && validWildcard(rule)
+	suffix, ok := WildcardSuffix(rule)
+	return ok && SuffixMatches(suffix, name)
 }
 
 // WildcardSuffix is a valid wildcard rule's ".<domain>", lowercased, for

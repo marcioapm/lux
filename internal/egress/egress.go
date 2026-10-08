@@ -415,14 +415,20 @@ func (f *Firewall) isBlocked(ip netip.Addr) bool {
 func (f *Firewall) answerFor(iface, name string, qtype dnsmessage.Type) (allowed bool, addrs []netip.Addr) {
 	f.mu.Lock()
 	r := f.runs[iface]
-	if r != nil && !r.hosts[name] && qtype != dnsmessage.TypeA {
-		ok := r.admissible(name)
-		f.mu.Unlock()
-		return ok, nil
-	}
-	if r == nil || (!r.hosts[name] && !f.admit(iface, r, name)) {
+	if r == nil {
 		f.mu.Unlock()
 		return false, nil
+	}
+	if !r.hosts[name] {
+		if qtype != dnsmessage.TypeA {
+			ok := r.admissible(name)
+			f.mu.Unlock()
+			return ok, nil
+		}
+		if !f.admit(iface, r, name) {
+			f.mu.Unlock()
+			return false, nil
+		}
 	}
 	for ip := range f.resolved[name] {
 		addrs = append(addrs, ip)
