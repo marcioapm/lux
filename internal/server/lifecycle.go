@@ -85,22 +85,26 @@ func notResumedReason(stop, policy string) string {
 // neverResumedEnd is how a Run whose resumePolicy is never ends: an end
 // that would leave it resumable (stopped, succeeded, failed) terminates it
 // instead, as nothing can resume it, its outcome kept in the reason
-// ("succeeded; resumePolicy never", "exit code 1; resumePolicy never"). A
-// reason that already names the policy (notResumedReason) is kept as is.
-// Any other state, or any other policy, is returned unchanged.
+// ("succeeded; resumePolicy never", "exit code 1; resumePolicy never").
+// Any other state, or any other policy, is returned unchanged. Each caller
+// that decides how a Run ends applies it before setRunState, so that its
+// side effects (secrets, servers, events) follow the state written.
 func neverResumedEnd(policy, state, reason string) (string, string) {
 	if !spec.RefusesResume(policy) || (state != StateStopped && state != StateSucceeded && state != StateFailed) {
 		return state, reason
 	}
 	const tag = "resumePolicy " + spec.ResumeNever
-	switch {
-	case strings.Contains(reason, tag):
-	case reason == "":
-		reason = state + "; " + tag
-	default:
-		reason += "; " + tag
+	if reason == "" {
+		return StateTerminated, state + "; " + tag
 	}
-	return StateTerminated, reason
+	return StateTerminated, reason + "; " + tag
+}
+
+// runResumePolicy is a Run's spec's resumePolicy, "" when unset.
+func runResumePolicy(ctx context.Context, tx pgx.Tx, runID string) (string, error) {
+	var policy string
+	err := tx.QueryRow(ctx, `SELECT `+runResumePolicySQL+` FROM runs r WHERE r.id = $1`, runID).Scan(&policy)
+	return policy, err
 }
 
 // runResumePolicySQL, for SQL over runs (as r): its spec's resumePolicy,
@@ -180,17 +184,9 @@ func live(state string) bool {
 	return false
 }
 
-// setRunState moves a Run to state. A Run whose resumePolicy is never
-// that would come to rest resumable goes to terminated instead
-// (neverResumedEnd), whichever path ends it.
+// setRunState moves a Run to state, as given: a caller ending a Run whose
+// resumePolicy is never maps the end first (neverResumedEnd).
 func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason string, epoch int) error {
-	if state == StateStopped || state == StateSucceeded || state == StateFailed {
-		var policy string
-		if err := tx.QueryRow(ctx, `SELECT `+runResumePolicySQL+` FROM runs r WHERE r.id = $1`, runID).Scan(&policy); err != nil {
-			return err
-		}
-		state, reason = neverResumedEnd(policy, state, reason)
-	}
 	if ended(state) {
 		// An ended Run begins a new settlement epoch after a stopped/lost one.
 		if _, err := tx.Exec(ctx, `UPDATE cost_sources SET settles_left = NULL, next_at = NULL, attempts = 0
@@ -361,8 +357,8 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	addEvent(ctx, tx, tenantID, runID, epoch, "exited", map[string]any{"exitCode": st.ExitCode, "reason": st.Reason, "message": st.Message})
 
 	moveStop := slices.Contains(movedStops, stopReason)
-	var policy string
-	if err := tx.QueryRow(ctx, `SELECT `+runResumePolicySQL+` FROM runs r WHERE r.id = $1`, runID).Scan(&policy); err != nil {
+	policy, err := runResumePolicy(ctx, tx, runID)
+	if err != nil {
 		return err
 	}
 	failsOnMove := moveStop && spec.FailsOnMove(policy)
@@ -376,8 +372,12 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	case stopReason == "disk":
 		next, reason = StateFailed, "disk limit exceeded"
 	case failsOnMove:
-		// One-shot: what it was doing cannot continue on another host.
+		// One-shot: what it was doing cannot continue on another host. The
+		// reason names the policy already, so never terminates it here.
 		next, reason = StateFailed, notResumedReason(stopReason, policy)
+		if spec.RefusesResume(policy) {
+			next = StateTerminated
+		}
 	case stopReason == "stop" || moveStop:
 		// A requested stop: resumable (and a move resumed below).
 		next, reason = StateStopped, stopReason
@@ -392,8 +392,6 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		}
 		next, reason = StateFailed, fmt.Sprintf("exit code %d", code)
 	}
-	// Here rather than only in setRunState: the placement's end event,
-	// its servers and its secrets follow the state it really ends in.
 	next, reason = neverResumedEnd(policy, next, reason)
 	if snapshotRefused {
 		why := refusedSnapshotReason

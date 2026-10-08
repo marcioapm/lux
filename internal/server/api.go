@@ -1373,13 +1373,20 @@ func (s *Server) stopOrTerminate(ctx context.Context, id, reason string) (*accep
 			next, why := StateStopped, reason
 			if reason == stopTerminate {
 				next, why = StateTerminated, "terminated"
-				s.secrets.drop(id)
 			}
 			if state == next {
 				return nil
 			}
 			if state == StateLost && reason == "stop" {
 				return nil
+			}
+			policy, err := runResumePolicy(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			next, why = neverResumedEnd(policy, next, why)
+			if terminal(next) {
+				s.secrets.drop(id)
 			}
 			return setRunState(ctx, tx, p.TenantID, id, next, why, 0)
 		}

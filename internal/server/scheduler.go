@@ -173,10 +173,15 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			// Secret values live only in memory. If this luxd does not hold
 			// them past the grace period (it restarted, or they went to an
 			// instance that is gone), the Run cannot start until someone
-			// supplies them again: it stops, resumable with its secrets.
+			// supplies them again: it stops, resumable with its secrets. A
+			// never Run cannot be resumed, so it ends terminated.
 			if _, ok := s.secrets.get(r.ID); r.HasSecrets && !ok {
 				if it.graceful {
-					if err := setRunState(ctx, tx, r.TenantID, r.ID, StateStopped, "secrets must be supplied again: resume with them", r.Epoch); err != nil {
+					next, why := StateStopped, secretsLostReason
+					if spec.RefusesResume(r.Spec.ResumePolicy) {
+						next, why = neverResumedEnd(r.Spec.ResumePolicy, StateStopped, secretsLostNeverReason)
+					}
+					if err := setRunState(ctx, tx, r.TenantID, r.ID, next, why, r.Epoch); err != nil {
 						return err
 					}
 				}
@@ -525,16 +530,26 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 // foreignSnapshotReason: why a Run whose snapshot cannot be restored failed.
 const foreignSnapshotReason = "its snapshot does not match this Run's blob records"
 
+// secretsLostReason (secretsLostNeverReason for a never Run, which cannot
+// be resumed) is the state_reason of a queued Run whose secret values no
+// luxd holds any more.
+const (
+	secretsLostReason      = "secrets must be supplied again: resume with them"
+	secretsLostNeverReason = "its secrets are no longer held"
+)
+
 // failUnrestorable fails a queued Run whose snapshot restoreManifest
-// refused (err a *foreignBlobError), and reports whether it did. Nothing
-// was written for a placement; resuming the Run again meets the same check.
+// refused (err a *foreignBlobError), and reports whether it did: a never
+// Run ends terminated instead. Nothing was written for a placement;
+// resuming the Run again meets the same check.
 func (s *Server) failUnrestorable(ctx context.Context, tx pgx.Tx, r pendingRun, err error) (bool, error) {
 	var foreign *foreignBlobError
 	if !errors.As(err, &foreign) {
 		return false, err
 	}
 	s.log.Warn("resume refused", "run", r.ID, "snapshot", *r.SnapshotID, "err", err)
-	if err := setRunState(ctx, tx, r.TenantID, r.ID, StateFailed, foreignSnapshotReason, r.Epoch); err != nil {
+	next, why := neverResumedEnd(r.Spec.ResumePolicy, StateFailed, foreignSnapshotReason)
+	if err := setRunState(ctx, tx, r.TenantID, r.ID, next, why, r.Epoch); err != nil {
 		return false, err
 	}
 	s.secrets.drop(r.ID)
