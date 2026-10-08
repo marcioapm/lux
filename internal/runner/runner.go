@@ -126,7 +126,8 @@ type Runner struct {
 	shimSyncModes bool
 	// mem scales a Run's resources.memory to its container's limit.
 	mem memoryScale
-	// handover overrides handoverWait (tests).
+	// handover, when set, replaces handoverWait's lease + removeTimeout +
+	// podman.WaitDelay. A test seam: nothing in production sets it.
 	handover time.Duration
 }
 
@@ -483,7 +484,7 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 		r.log.Warn("ignoring assign for an older epoch", "run", a.RunID, "epoch", a.Epoch, "have", old.epoch)
 		return
 	}
-	p := newPlacement(r, a)
+	p := newPlacement(r, a, old)
 	r.placements[a.RunID] = p
 	r.mu.Unlock()
 	if old != nil {
@@ -502,7 +503,6 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 		} else {
 			old.abandonSnapshot()
 		}
-		p.prev = old
 	}
 	go p.run(context.WithoutCancel(ctx))
 	if r.evictBy.Load() != nil {

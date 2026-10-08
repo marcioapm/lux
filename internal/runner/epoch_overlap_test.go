@@ -166,31 +166,23 @@ func (f *finishFixture) wantUploaded(t *testing.T) {
 	}
 }
 
-// The stale nack of an older epoch still exporting here (its report was in
-// flight when the next epoch was assigned) kills only the container that
-// epoch made: never the Run's name, which the next epoch's container holds.
+// The stale nack of an older epoch whose report was in flight when the
+// next epoch was assigned kills only the container that epoch made, never
+// the Run's name. Here ctr-2 holds the name, as an epoch's container would
+// on a pre-#69 readopt; with the handover, a live next epoch has none yet.
 func TestStaleEpochDoesNotKillTheNextEpochsContainer(t *testing.T) {
 	f := newOverlapFixture(t)
 	f.sendEpoch1Report(t)
 	f.r.assign(context.Background(), proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 2})
-	// Epoch 2's container, under the Run's name.
 	if err := os.WriteFile(f.bin+".ctr", []byte("ctr-2"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f.nackHeld()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		b, _ := os.ReadFile(f.bin + ".killed")
-		for _, target := range strings.Fields(string(b)) {
-			if target == containerName("run1") || target == "ctr-2" {
-				t.Fatalf("the fenced epoch 1 killed %q; podman:\n%s", target, f.podmanLog())
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	b, _ := os.ReadFile(f.bin + ".killed")
-	if string(b) != "ctr-1\n" {
-		t.Errorf("killed %q, want epoch 1's own ctr-1", b)
+	// The fence's kill runs in its own goroutine: wait for it, then
+	// require it to be the only one.
+	f.waitFile(t, f.bin+".killed")
+	if b, _ := os.ReadFile(f.bin + ".killed"); string(b) != "ctr-1\n" {
+		t.Errorf("killed %q, want epoch 1's own ctr-1 only; podman:\n%s", b, f.podmanLog())
 	}
 }
 
