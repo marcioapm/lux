@@ -1029,18 +1029,44 @@ func HostMatches(rule, name string) bool {
 	if !strings.HasPrefix(rule, "*.") {
 		return rule == name
 	}
-	if !validWildcard(rule) || !hostLabelsRe.MatchString(name) {
+	return SuffixMatches(rule[1:], name) && validWildcard(rule)
+}
+
+// WildcardSuffix is a valid wildcard rule's ".<domain>", lowercased, for
+// SuffixMatches; ok is false for anything else.
+func WildcardSuffix(rule string) (suffix string, ok bool) {
+	rule = strings.TrimSuffix(strings.ToLower(rule), ".")
+	if !validWildcard(rule) {
+		return "", false
+	}
+	return rule[1:], true
+}
+
+// SuffixMatches is the wildcard half of HostMatches, for a suffix from
+// WildcardSuffix and a lowercased name with no trailing dot: one or more
+// valid labels before suffix. Never an IP literal, which no lookup
+// produces. The cheap checks run first: the runner calls this under its
+// lock for every refused lookup.
+func SuffixMatches(suffix, name string) bool {
+	if len(name) <= len(suffix) || !strings.HasSuffix(name, suffix) {
 		return false
 	}
-	suffix := rule[1:] // ".<domain>"
-	return len(name) > len(suffix) && strings.HasSuffix(name, suffix)
+	if _, err := netip.ParseAddr(name); err == nil {
+		return false
+	}
+	return hostLabelsRe.MatchString(name)
 }
 
 // validWildcard: "*." then a hostname of at least two labels, so a rule
-// cannot cover a whole top-level domain.
+// cannot cover a whole top-level domain, and not ending in a numeric
+// label, so it cannot cover IP literals.
 func validWildcard(rule string) bool {
 	d, ok := strings.CutPrefix(strings.TrimSuffix(strings.ToLower(rule), "."), "*.")
-	return ok && strings.Contains(d, ".") && hostLabelsRe.MatchString(d)
+	if !ok || !strings.Contains(d, ".") || !hostLabelsRe.MatchString(d) {
+		return false
+	}
+	last := d[strings.LastIndex(d, ".")+1:]
+	return strings.Trim(last, "0123456789") != ""
 }
 
 // allows reports whether an egress rule covers host: a hostname a host

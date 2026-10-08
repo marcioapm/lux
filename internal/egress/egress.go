@@ -110,8 +110,8 @@ type Firewall struct {
 type run struct {
 	unrestricted bool
 	hosts        map[string]bool // allowed hostnames, lowercased, no trailing dot
-	// wildcards are the *.<domain> rules as written (matched with
-	// spec.HostMatches). A name one matches joins hosts on its first
+	// wildcards are the *.<domain> rules as ".<domain>" suffixes (matched
+	// with spec.SuffixMatches). A name one matches joins hosts on its first
 	// lookup (admitted counts them). Runtime state only: a restarted
 	// runner re-applies the stored rules with none admitted, and the
 	// container asks again when the stub's 60s TTL runs out.
@@ -249,7 +249,10 @@ func newRun(unrestricted bool, rules []spec.EgressRule, onDNS func(Lookup)) (*ru
 			}
 			r.cidrs = append(r.cidrs, p.Masked())
 		case rule.IsWildcard():
-			r.wildcards = append(r.wildcards, rule.Host)
+			// The spec validated the rule; an invalid one admits nothing.
+			if suffix, ok := spec.WildcardSuffix(rule.Host); ok {
+				r.wildcards = append(r.wildcards, suffix)
+			}
 		case rule.Host != "":
 			r.hosts[strings.TrimSuffix(strings.ToLower(rule.Host), ".")] = true
 		}
@@ -428,7 +431,7 @@ func (f *Firewall) admit(iface string, r *run, name string) bool {
 // admissible: a restricted Run with room under the cap has a wildcard
 // that matches name. Call with f.mu held.
 func (r *run) admissible(name string) bool {
-	return !r.unrestricted && r.admitted < maxWildcardNames && slices.ContainsFunc(r.wildcards, func(w string) bool { return spec.HostMatches(w, name) })
+	return !r.unrestricted && r.admitted < maxWildcardNames && slices.ContainsFunc(r.wildcards, func(s string) bool { return spec.SuffixMatches(s, name) })
 }
 
 // report sends a lookup to the Run's events, once per (name, allowed).

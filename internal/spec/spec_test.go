@@ -239,6 +239,7 @@ func TestEgressWildcardValidation(t *testing.T) {
 		{"*.*.x.com", shape},
 		{"x.example.*", shape},
 		{"*.exa_mple.com", shape},
+		{"*.0.5", shape},
 		{"*.example.com:443", portPath},
 		{"*.example.com/path", portPath},
 	} {
@@ -274,11 +275,17 @@ func TestEgressRuleMatches(t *testing.T) {
 		{"*.com", "a.com", false},
 		{"api.example.com", "API.example.com.", true},
 		{"api.example.com", "x.api.example.com", false},
+		{"*.1.1", "1.1.1.1", false},
 		{"", "", false},
 	} {
 		if got := (EgressRule{Host: c.rule}).Matches(c.name); got != c.want {
 			t.Errorf("%q matches %q: got %v, want %v", c.rule, c.name, got, c.want)
 		}
+	}
+	// validWildcard already rejects a numeric last label; the suffix
+	// match refuses an IP literal on its own too.
+	if SuffixMatches(".1.1", "1.1.1.1") {
+		t.Error(`".1.1" matches 1.1.1.1`)
 	}
 }
 
