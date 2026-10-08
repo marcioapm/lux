@@ -198,7 +198,8 @@ container. Under `--userns=auto` that needed more than the commonly cited
       reports nothing more and writes no run state) and killed;
     - an older epoch exporting a snapshot luxd has not acked abandons the
       export: luxd assigns over it only once it is lost, and would refuse
-      that snapshot;
+      that snapshot, or it is a re-export after a restart, whose original
+      luxd already holds;
     - an older epoch whose snapshot luxd acked finishes as usual (its
       container is removed, its snapshot uploaded).
 

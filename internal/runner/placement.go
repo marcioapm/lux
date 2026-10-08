@@ -416,13 +416,14 @@ func (p *placement) reportStartEnd(ctx context.Context, state, msg string) {
 // host: its run state and everything else under p.dir stay the previous
 // placement's, so nothing is written there.
 func (p *placement) failBeforeStart(ctx context.Context, err error) {
+	msg := "handover: " + err.Error()
 	switch {
 	case errors.Is(err, errStale):
 		p.setPhase("done")
 	case errors.Is(err, errStoppedBeforeStart):
-		p.reportStartEnd(ctx, "exited", "handover: "+err.Error())
+		p.reportStartEnd(ctx, "exited", msg)
 	default:
-		p.reportStartEnd(ctx, "failed", "handover: "+err.Error())
+		p.reportStartEnd(ctx, "failed", msg)
 	}
 }
 
@@ -660,7 +661,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	p.mu.Lock()
 	p.cancelFinish = nil
 	p.mu.Unlock()
-	if err != nil && exportCtx.Err() != nil && ctx.Err() == nil {
+	if err != nil && exportCtx.Err() != nil {
 		p.logf("snapshot abandoned: the Run's next epoch was assigned here", "err", err)
 		p.setPhase("done")
 		return
@@ -728,7 +729,6 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 // from.
 func (p *placement) finishWithoutContainer(ctx context.Context, state, msg string) {
 	code, reason := startEnd(state)
-	p.setPhase("exited")
 	p.mu.Lock()
 	p.state.Exit = &exitRecord{Code: code, Reason: reason, Message: msg, Failed: state == "failed"}
 	p.state.Phase = "exited"
