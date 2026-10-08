@@ -120,6 +120,7 @@ def test_resume_a_succeeded_run(lux, runners, hosts):
     spec["workload"]["resume"] = {"command": ["sh", "-c", "echo again >> /data/log; cat /data/log"]}
     run_id = lux.submit(spec)
     run = lux.wait_state(run_id, "succeeded", timeout=60)
+    assert run["resumable"] is True, run
     lux.wait_placement_uploaded(run_id)
     assert run_id in [r["id"] for r in lux.json("ls", "--resumable")]
     lux.run("resume", run_id)
@@ -129,7 +130,7 @@ def test_resume_a_succeeded_run(lux, runners, hosts):
     assert lux.logs(run_id).split()[-2:] == ["first", "again"], lux.logs(run_id)
     lux.run("terminate", run_id, "--wait")
     run = lux.get(run_id)
-    assert run["state"] == "terminated", run
+    assert run["state"] == "terminated" and run["resumable"] is False, run
     p = lux.run("resume", run_id, check=False)
     assert p.returncode != 0 and "not_resumable" in p.stderr + p.stdout, p
 
