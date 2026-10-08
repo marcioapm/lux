@@ -34,6 +34,10 @@ type finishFixture struct {
 	reports []proto.Frame
 	// ctrAtStatus: whether the container existed when luxd got the status.
 	ctrAtStatus []bool
+	// holdEpoch: reports about this epoch are kept in held, unanswered,
+	// until nackHeld answers them stale.
+	holdEpoch int
+	held      []proto.Frame
 }
 
 func newFinishFixture(t *testing.T) *finishFixture {
@@ -49,6 +53,7 @@ case "$1 $2" in
   echo volume-data ;;
 "rm -f") case "$5" in lux-run1|"$(cat "$0.ctr")") rm -f "$0.ctr" ;; esac ;;
 "volume rm") rm -f "$0.vol.$4" ;;
+"kill -s") echo "$4" >> "$0.killed" ;;
 "rmi "*) echo "$2" >> "$0.rmi" ;;
 *) exit 1 ;;
 esac
@@ -98,6 +103,11 @@ esac
 			r.conn.mu.Unlock()
 			for _, fr := range reports {
 				f.mu.Lock()
+				if f.holdEpoch != 0 && fr.Epoch == f.holdEpoch && fr.Type != proto.MsgHeartbeat {
+					f.held = append(f.held, fr)
+					f.mu.Unlock()
+					continue
+				}
 				f.reports = append(f.reports, fr)
 				if fr.Type == proto.MsgStatus {
 					_, err := os.Stat(bin + ".ctr")
@@ -119,6 +129,19 @@ esac
 }
 
 func (f *finishFixture) release() { _ = os.WriteFile(f.bin+".release", nil, 0o600) }
+
+// nackHeld answers every held report as luxd answers a fenced-off epoch's.
+func (f *finishFixture) nackHeld() int {
+	f.mu.Lock()
+	held := f.held
+	f.held, f.holdEpoch = nil, 0
+	f.mu.Unlock()
+	for _, fr := range held {
+		f.r.conn.dispatch(context.Background(), proto.Frame{Type: proto.MsgNack, ID: fr.ID,
+			Data: proto.Marshal(proto.Nack{Error: "stale epoch", Stale: true})})
+	}
+	return len(held)
+}
 
 const finishImage = "ghcr.io/a/img:1"
 
