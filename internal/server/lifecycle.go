@@ -86,9 +86,8 @@ func notResumedReason(stop, policy string) string {
 // terminates it instead, as nothing can resume it, its outcome kept in the
 // reason ("succeeded; resumePolicy never", "host lost: missed heartbeats;
 // resumePolicy never"). Any other state, or any other policy, is returned
-// unchanged. Each caller that decides how a Run ends applies it before
-// setRunState, so that its side effects (secrets, servers, events) follow
-// the state written.
+// unchanged. endRun applies it before setRunState, so that a Run's side
+// effects (secrets, servers, events) follow the state written.
 func neverResumedEnd(policy, state, reason string) (string, string) {
 	if !spec.RefusesResume(policy) || !resumable(state) {
 		return state, reason
@@ -208,7 +207,10 @@ type runEnd struct {
 // writes it, and once written an ended Run's held secrets go (they serve a
 // running Run and an operator's resume of a stopped or lost one; an ended
 // Run is resumed with its secrets supplied again). It returns the state
-// written. Every site that ends a Run goes through it.
+// written. Every site that ends a Run goes through it except reapExpiry,
+// which only ever writes terminated and drops secrets after its commit.
+// The drop here is not deferred to commit: a rolled-back batch keeps the
+// Run as it was but its secrets gone, which is the safe direction.
 func (s *Server) endRun(ctx context.Context, tx pgx.Tx, e runEnd) (string, error) {
 	state, reason := e.state, e.reason
 	if !e.requeued {
@@ -227,7 +229,8 @@ func (s *Server) endRun(ctx context.Context, tx pgx.Tx, e runEnd) (string, error
 }
 
 // setRunState moves a Run to state, as given. A Run's end goes through
-// endRun instead, which maps it by resumePolicy and drops its secrets.
+// endRun (or reapExpiry) instead, which maps it by resumePolicy and drops
+// its secrets.
 func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason string, epoch int) error {
 	if ended(state) {
 		// An ended Run begins a new settlement epoch after a stopped/lost one.
@@ -448,8 +451,9 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	// A refused move cannot resume from its rejected snapshot; leave the
 	// Run stopped for a person to decide what to restore. restart is
 	// exempt: it restores nothing, and forgetRestoredState clears the
-	// snapshot_id the refusal left.
-	moved := moveStop && !failsOnMove && (!snapshotRefused || restarts)
+	// snapshot_id the refusal left. A terminate that raced the move wins:
+	// a terminated Run is never placed again.
+	moved := moveStop && !failsOnMove && next != StateTerminated && (!snapshotRefused || restarts)
 	// Servers count as migrated only when the Run is resumed elsewhere.
 	serverStop := endReason("stop")
 	if moved {

@@ -400,3 +400,30 @@ func TestResumePolicyNeverRefusesResume(t *testing.T) {
 		}
 	}
 }
+
+// A terminate whose first step (terminate_requested) committed before its
+// stop overrode a move's stop reason, raced by that move's exit report: the
+// Run ends terminated, is not resumed, and its secrets go.
+func TestTerminateRacedByAMoveIsNotResumed(t *testing.T) {
+	for _, move := range []string{"migrate", "drain", "preempt"} {
+		t.Run(move, func(t *testing.T) {
+			s, ctx := policyFixture(t, "")
+			if err := moveStops[move](t, s); err != nil {
+				t.Fatal(err)
+			}
+			execSQL(t, s, ctx, `UPDATE runs SET terminate_requested = true WHERE id = 'r1'`)
+			exitR1(t, s)
+			var state, reason string
+			var resumes int
+			systemScan(t, s, `SELECT state, state_reason,
+					(SELECT count(*) FROM run_events WHERE run_id = r.id AND type = 'resume.requested')
+				FROM runs r WHERE id = 'r1'`, nil, &state, &reason, &resumes)
+			if state != StateTerminated || reason != "terminated" || resumes != 0 {
+				t.Fatalf("%s %q, %d resume.requested; want terminated, none", state, reason, resumes)
+			}
+			if _, held := s.secrets.get("r1"); held {
+				t.Fatal("secrets still held")
+			}
+		})
+	}
+}
