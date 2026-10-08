@@ -50,7 +50,8 @@ def test_serve_nested_offers_nested_containers(served):
     runs = {nested_run(lux, placement={"requires": {"name": h["name"]}}): h["name"] for h in hosts}
     for run_id, name in runs.items():
         lux.wait_state(run_id, "succeeded", timeout=60)
-        assert lux.get(run_id)["placements"][0]["hostName"] == name
+        placements = lux.get(run_id)["placements"]
+        assert placements and {p["hostName"] for p in placements} == {name}, placements
         assert lux.logs(run_id).strip() == "placed"
 
 
