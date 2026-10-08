@@ -54,7 +54,7 @@ any state ──(terminate, or expiry of a resting Run)──▶ terminated (fin
 | `resuming` | Waiting for a host for its next placement. |
 | `succeeded` / `failed` | Ended: its workload exited. **Resumable**, like `stopped` (the adapter's resume path, with its session). A Run whose `resumePolicy` is `never` never rests here: it ends `terminated`, its outcome in `stateReason`. |
 | `terminated` | Ended for good: the only terminal state. Never resumed, and its snapshots and output go after the tenant's retention. A Run becomes terminated by `lux terminate` (`POST /v1/runs/{id}/terminate`), or by lux when it expires. |
-| `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. Never resumed automatically. |
+| `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. Never resumed automatically. A Run whose `resumePolicy` is `never` ends `terminated` instead. |
 
 Every Run the API returns carries `resumable`, always present: whether
 `POST /v1/runs/{id}/resume` without `fromSnapshot` would accept it now

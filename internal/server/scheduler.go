@@ -417,7 +417,11 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 // its pool has one.
 func (s *Server) noHost(ctx context.Context, tx pgx.Tx, r pendingRun, wait string) error {
 	if wait == "snapshot unavailable" {
-		return setRunState(ctx, tx, r.TenantID, r.ID, StateLost, "its snapshot is no longer available", r.Epoch)
+		next, why := neverResumedEnd(r.Spec.ResumePolicy, StateLost, snapshotUnavailableReason)
+		if terminal(next) {
+			s.secrets.drop(r.ID)
+		}
+		return setRunState(ctx, tx, r.TenantID, r.ID, next, why, r.Epoch)
 	}
 	// Its pool's provider. A removed pool (retired) has no stand-in;
 	// re-creating it (the same row) serves the Run again.
@@ -529,6 +533,10 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 
 // foreignSnapshotReason: why a Run whose snapshot cannot be restored failed.
 const foreignSnapshotReason = "its snapshot does not match this Run's blob records"
+
+// snapshotUnavailableReason: why a Run whose snapshot no host or blob store
+// holds any more is lost.
+const snapshotUnavailableReason = "its snapshot is no longer available"
 
 // secretsLostReason (secretsLostNeverReason for a never Run, which cannot
 // be resumed) is the state_reason of a queued Run whose secret values no

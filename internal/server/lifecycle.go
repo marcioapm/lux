@@ -82,14 +82,15 @@ func notResumedReason(stop, policy string) string {
 }
 
 // neverResumedEnd is how a Run whose resumePolicy is never ends: an end
-// that would leave it resumable (stopped, succeeded, failed) terminates it
-// instead, as nothing can resume it, its outcome kept in the reason
-// ("succeeded; resumePolicy never", "exit code 1; resumePolicy never").
-// Any other state, or any other policy, is returned unchanged. Each caller
-// that decides how a Run ends applies it before setRunState, so that its
-// side effects (secrets, servers, events) follow the state written.
+// that would leave it resumable (stopped, lost, succeeded, failed)
+// terminates it instead, as nothing can resume it, its outcome kept in the
+// reason ("succeeded; resumePolicy never", "host lost: missed heartbeats;
+// resumePolicy never"). Any other state, or any other policy, is returned
+// unchanged. Each caller that decides how a Run ends applies it before
+// setRunState, so that its side effects (secrets, servers, events) follow
+// the state written.
 func neverResumedEnd(policy, state, reason string) (string, string) {
-	if !spec.RefusesResume(policy) || (state != StateStopped && state != StateSucceeded && state != StateFailed) {
+	if !spec.RefusesResume(policy) || !resumable(state) {
 		return state, reason
 	}
 	const tag = "resumePolicy " + spec.ResumeNever
@@ -459,8 +460,16 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 // back without it). Its Run is lost and resumable only from the last
 // snapshot taken before it. Its host.placement_ended goes to later, for
 // the caller to write once it has locked every row it will (callers lose
-// several placements in one transaction; event streams come last).
+// several placements in one transaction; event streams come last). A Run
+// whose resumePolicy is never ends terminated instead (neverResumedEnd).
 func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epoch int, why string, later *laterEvents) error {
+	return s.losePlacement(ctx, tx, runID, epoch, why, later, false)
+}
+
+// losePlacement is placementLost; requeued: the caller places the Run
+// again in the same transaction, so lost is not how it ends and its
+// resumePolicy is not applied.
+func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epoch int, why string, later *laterEvents, requeued bool) error {
 	var tenantID, runState string
 	var current int
 	if err := tx.QueryRow(ctx, `SELECT tenant_id, state, current_epoch FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&tenantID, &runState, &current); err != nil {
@@ -490,7 +499,18 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 	if terminate {
 		return setRunState(ctx, tx, tenantID, runID, StateTerminated, "terminated; host lost", epoch)
 	}
-	return setRunState(ctx, tx, tenantID, runID, StateLost, why, epoch)
+	if requeued {
+		return setRunState(ctx, tx, tenantID, runID, StateLost, why, epoch)
+	}
+	policy, err := runResumePolicy(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	next, reason := neverResumedEnd(policy, StateLost, why)
+	if terminal(next) {
+		s.secrets.drop(runID)
+	}
+	return setRunState(ctx, tx, tenantID, runID, next, reason, epoch)
 }
 
 // foreignBlobsReason is the snapshot.failed error for a refused report.
