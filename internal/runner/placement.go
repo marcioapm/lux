@@ -97,6 +97,18 @@ func volumeName(runID, name string) string { return "lux-" + runID + "-" + name 
 func runtimeVolume(runID string) string    { return "lux-" + runID + "--rt" }
 func networkName(runID string) string      { return "lux-" + runID }
 
+// container is the id of the container this placement created; "" before
+// its create succeeded. Every podman call about this placement's own
+// container goes by it: another epoch of the Run may hold the Run's name.
+func (p *placement) container() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state == nil {
+		return ""
+	}
+	return p.state.Container
+}
+
 func (p *placement) runningStatus() proto.Status {
 	p.mu.Lock()
 	limit := p.memoryLimit
@@ -370,7 +382,8 @@ func (p *placement) run(ctx context.Context) {
 		fail("container", err)
 		return
 	}
-	if err := p.r.pm.Start(ctx, containerName(p.runID)); err != nil {
+	ctr := p.container()
+	if err := p.r.pm.Start(ctx, ctr); err != nil {
 		fail("start", err)
 		return
 	}
@@ -380,7 +393,7 @@ func (p *placement) run(ctx context.Context) {
 	p.mu.Lock()
 	p.memoryLimit = p.r.mem.limit(int64(sp.Resources.Memory))
 	p.mu.Unlock()
-	if st, err := p.r.pm.Inspect(ctx, containerName(p.runID)); err == nil {
+	if st, err := p.r.pm.Inspect(ctx, ctr); err == nil {
 		p.mu.Lock()
 		p.cgroup = st.CgroupPath
 		p.mu.Unlock()
@@ -388,7 +401,7 @@ func (p *placement) run(ctx context.Context) {
 
 	if err := p.startShim(ctx, a); err != nil {
 		p.logf("shim start failed", "err", err)
-		_ = p.r.pm.Kill(ctx, containerName(p.runID), "KILL")
+		_ = p.r.pm.Kill(ctx, ctr, "KILL")
 	} else {
 		p.setPhase("running")
 		go p.report(ctx, proto.MsgStatus, p.runningStatus())
@@ -410,7 +423,8 @@ func (p *placement) supervise(ctx context.Context) {
 	defer stopChecks()
 	go p.checkServers(checkCtx)
 
-	code, err := p.r.pm.Wait(ctx, containerName(p.runID))
+	ctr := p.container()
+	code, err := p.r.pm.Wait(ctx, ctr)
 	if err != nil {
 		p.logf("podman wait failed", "err", err)
 	}
@@ -425,7 +439,7 @@ func (p *placement) supervise(ctx context.Context) {
 	<-tailDone
 
 	exit := p.readExit(code)
-	if st, err := p.r.pm.Inspect(ctx, containerName(p.runID)); err == nil && st.OOMKilled {
+	if st, err := p.r.pm.Inspect(ctx, ctr); err == nil && st.OOMKilled {
 		exit.Reason, exit.Message = "oom", "killed: out of memory"
 	}
 	p.setPhase("exited")
@@ -889,7 +903,7 @@ func (p *placement) dialShim(ctx context.Context) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("shim socket: %w", err)
 		}
-		st, _ := p.r.pm.Inspect(ctx, containerName(p.runID))
+		st, _ := p.r.pm.Inspect(ctx, p.container())
 		if st.Exists && !st.Running {
 			return errors.New("container exited before the shim was ready")
 		}
@@ -987,7 +1001,9 @@ func (p *placement) sendStop(ctx context.Context, reason string) {
 	}
 	short := p.r.evictionGrace(grace)
 	if err := p.sendShim(proto.ShimMsg{Type: proto.ShimStop, Reason: reason, GraceSec: short.Seconds()}); err != nil {
-		go p.r.pm.Stop(context.WithoutCancel(ctx), containerName(p.runID), min(grace, short))
+		if ctr := p.container(); ctr != "" {
+			go p.r.pm.Stop(context.WithoutCancel(ctx), ctr, min(grace, short))
+		}
 	}
 }
 
@@ -1001,9 +1017,12 @@ func (p *placement) interrupt(ctx context.Context) {
 	_ = p.sendShim(proto.ShimMsg{Type: proto.ShimInterrupt})
 }
 
-// kill ends a stale placement at once: its Run lives elsewhere now.
+// kill ends a stale placement at once: its Run lives elsewhere now. A
+// placement that never created a container has nothing to kill.
 func (p *placement) kill(ctx context.Context) {
-	_ = p.r.pm.Kill(ctx, containerName(p.runID), "KILL")
+	if ctr := p.container(); ctr != "" {
+		_ = p.r.pm.Kill(ctx, ctr, "KILL")
+	}
 }
 
 // ---- events from the output file --------------------------------------------
@@ -1179,8 +1198,9 @@ func (p *placement) usage() *proto.Usage {
 func (p *placement) sampleSlow(ctx context.Context) {
 	p.mu.Lock()
 	var vols []volumeRef
+	var ctr string
 	if p.state != nil {
-		vols = p.mounts()
+		vols, ctr = p.mounts(), p.state.Container
 	}
 	p.mu.Unlock()
 	var (
@@ -1198,18 +1218,20 @@ func (p *placement) sampleSlow(ctx context.Context) {
 			}
 		})
 	}
-	wg.Go(func() {
-		if out, err := p.r.pm.Run(ctx, "container", "inspect", "--size", "--format", "{{.SizeRw}}", containerName(p.runID)); err == nil {
-			var n int64
-			fmt.Sscan(strings.TrimSpace(string(out)), &n)
-			add(n)
-		}
-	})
-	wg.Go(func() {
-		var err error
-		st, err = p.r.pm.Stats(ctx, containerName(p.runID))
-		statsOK = err == nil
-	})
+	if ctr != "" {
+		wg.Go(func() {
+			if out, err := p.r.pm.Run(ctx, "container", "inspect", "--size", "--format", "{{.SizeRw}}", ctr); err == nil {
+				var n int64
+				fmt.Sscan(strings.TrimSpace(string(out)), &n)
+				add(n)
+			}
+		})
+		wg.Go(func() {
+			var err error
+			st, err = p.r.pm.Stats(ctx, ctr)
+			statsOK = err == nil
+		})
+	}
 	wg.Wait()
 	p.checkDisk(ctx, disk)
 	p.mu.Lock()
