@@ -25,19 +25,24 @@ from env import TestEnvironment
 LAST = Path(os.environ.get("LUX_TEST_LOG_ROOT", "/tmp")) / "lux-dev-env.json"
 
 
-def serve(env: TestEnvironment, fake_image: str | None, detach: bool) -> None:
+def start_runners(runners, hosts, nested: bool = False) -> None:
+    """Starts a runner on every host, with one token, and waits until all
+    are ready. nested: each offers nested containers (`--nested`)."""
+    extra = ("--nested",) if nested else ()
+    token = runners.token()
+    for h in hosts:
+        runners.start(h, *extra, token=token, wait=False)
+    for h in hosts:
+        runners.wait_ready(h.name, timeout=60)
+
+
+def serve(env: TestEnvironment, fake_image: str | None, detach: bool, nested: bool = False) -> None:
     env.setup(fake_image=fake_image)
     t = env.luxd_admin("create-tenant", "--name", "dev")
     env.tenant_id, env.admin_key = t["tenantId"], t["apiKey"]
     env.api_key = env.luxd_admin("create-key", "--tenant", env.tenant_id, "--name", "dev", "--scopes", "run,read")["apiKey"]
-    # The suite's own runner handling: start on every host, wait until ready.
     from conftest import Lux, Runners
-    runners = Runners(env, Lux(env, env.api_key, env.tenant_id))
-    token = runners.token()
-    for h in env.hosts:
-        runners.start(h, token=token, wait=False)
-    for h in env.hosts:
-        runners.wait_ready(h.name, timeout=60)
+    start_runners(Runners(env, Lux(env, env.api_key, env.tenant_id)), env.hosts, nested)
     env.save()
     LAST.write_text(str(env.env_file))
 

@@ -132,3 +132,9 @@ def test_clean_environ_drops_the_developers_lux_settings(monkeypatch):
     for gone in ("LUX_TENANT", "LUX_URL", "LUX_API_KEY", "LUX_CONFIG", "XDG_CONFIG_HOME"):
         assert gone not in env, gone
     assert env["LUX_TEST_S3_PORT"] == "59100" and env["LUX_DEBUG"] == "1" and env["PATH_FOR_TEST"] == "kept"
+
+
+def test_nested_without_serve_is_refused_before_building():
+    p = subprocess.run([sys.executable, "run_tests.py", "--nested"], cwd=TESTS_DIR, capture_output=True, text=True)
+    assert p.returncode == 2 and "--nested needs --serve" in p.stderr, (p.stdout, p.stderr)
+    assert "building" not in p.stdout, p.stdout
