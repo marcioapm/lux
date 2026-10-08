@@ -261,15 +261,7 @@ func TestRefreshIsBoundedConcurrent(t *testing.T) {
 		mu.Unlock()
 		return nil, fmt.Errorf("no such host")
 	}
-	f := newFirewall(nil, lookup, func(string) error { return nil })
-	r, err := newRun(false, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range 3 * refreshWorkers {
-		r.hosts[fmt.Sprintf("h%d.example.com", i)] = true
-	}
-	f.runs["lux1"] = r
+	f := manyNames(lookup)
 	f.refresh(context.Background())
 	if peak > refreshWorkers {
 		t.Fatalf("%d lookups at once, want at most %d", peak, refreshWorkers)
@@ -346,19 +338,23 @@ func TestRefreshStopsDispatchingOnCancel(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	f := newFirewall(nil, lookup, func(string) error { return nil })
-	r, err := newRun(false, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range 3 * refreshWorkers {
-		r.hosts[fmt.Sprintf("h%d.example.com", i)] = true
-	}
-	f.runs["lux1"] = r
+	f := manyNames(lookup)
 	f.refresh(ctx)
 	if n := calls.Load(); n > refreshWorkers+1 {
 		t.Fatalf("%d lookups after cancel, want at most %d", n, refreshWorkers+1)
 	}
+}
+
+// manyNames is a Firewall resolving with lookup, with one Run that lists
+// 3 × refreshWorkers names.
+func manyNames(lookup func(context.Context, string) ([]netip.Addr, error)) *Firewall {
+	f := newFirewall(nil, lookup, func(string) error { return nil })
+	r := &run{hosts: map[string]bool{}}
+	for i := range 3 * refreshWorkers {
+		r.hosts[fmt.Sprintf("h%d.example.com", i)] = true
+	}
+	f.runs["lux1"] = r
+	return f
 }
 
 func TestUnrestrictedRunAdmitsNothing(t *testing.T) {
