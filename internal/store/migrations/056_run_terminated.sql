@@ -6,8 +6,7 @@
 -- stopped for good), which luxd does not otherwise write, so the row locks
 -- taken wait on nothing. Each table is scanned once: runs, placements,
 -- cost_pending (plus its CHECK's validation), run_events, host_events and
--- run_servers, and run_events is also probed by index (run_id, id) once
--- per cancelled Run. The RENAME comes first and holds ACCESS EXCLUSIVE on
+-- run_servers. The RENAME comes first and holds ACCESS EXCLUSIVE on
 -- runs until commit, so no luxd writes a cancelled row behind the rewrite;
 -- a luxd older than this migration reads and writes cancel_requested and
 -- fails once it is renamed: every luxd sharing the database stops before
@@ -23,8 +22,8 @@ ALTER TABLE runs ADD COLUMN terminated_at timestamptz;
 -- One rewrite per row. Right-hand sides read the row as it was. state_reason
 -- is display text written by luxd: the forms it wrote for a cancel, and an
 -- expiry's "expired: …" (which needs no change). terminated_at of a
--- cancelled Run: its latest state event saying cancelled (rewritten below),
--- else finished_at, else updated_at.
+-- cancelled Run: its state_changed_at (053, NOT NULL), when it became
+-- cancelled, as it has not changed state since.
 UPDATE runs r SET
 	state = CASE WHEN r.state = 'cancelled' THEN 'terminated' ELSE r.state END,
 	state_reason = CASE
@@ -32,10 +31,7 @@ UPDATE runs r SET
 		WHEN r.state_reason = 'cancel' THEN 'terminate'
 		WHEN r.state_reason LIKE 'cancelled;%' THEN 'terminated' || substr(r.state_reason, length('cancelled') + 1)
 		ELSE r.state_reason END,
-	terminated_at = CASE WHEN r.state = 'cancelled' THEN coalesce(
-		(SELECT e.created_at FROM run_events e WHERE e.run_id = r.id AND e.type = 'state' AND e.data->>'state' = 'cancelled'
-		 ORDER BY e.id DESC LIMIT 1),
-		r.finished_at, r.updated_at) END
+	terminated_at = CASE WHEN r.state = 'cancelled' THEN r.state_changed_at END
 	WHERE r.state = 'cancelled' OR r.state_reason IN ('cancel', 'cancelled') OR r.state_reason LIKE 'cancelled;%';
 
 UPDATE placements SET stop_reason = 'terminate' WHERE stop_reason = 'cancel';
