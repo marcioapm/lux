@@ -306,7 +306,7 @@ def test_resume_after_lost_on_the_same_host(lux, runners, hosts):
     # From the snapshot of epoch 1: the lost placement's count is gone.
     wait_until(lambda: lux.logs(run_id).split()[-1:] == ["2"], 30, 0.5, "third placement never counted 2")
     ev3 = [e["type"] for e in lux.json("events", run_id) if e.get("epoch") == 3]
-    assert "volumes.restored" in ev3 and "container.reused" not in ev3, ev3
+    assert "volumes.restored" in ev3, ev3
     lux.run("cancel", run_id, "--wait")
 
 
@@ -327,6 +327,8 @@ def test_same_host_resume_has_a_new_container(lux, runners, hosts):
     lux.run("cancel", run_id, "--wait")
     assert "LEAK" not in out, out
     assert lux.events(run_id, "volumes.local") and not lux.events(run_id, "volumes.restored")
+    # Documents the event a reused stopped container used to emit; the
+    # runner no longer has it, so LEAK above is the guard.
     assert not lux.events(run_id, "container.reused")
 
 

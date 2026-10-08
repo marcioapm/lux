@@ -110,7 +110,6 @@ sleep 600
     out = lux.wait_output(run_id, "kept:2", timeout=120)
     assert out.split().count("images:0") == 2, out  # the marker image is gone
     assert lux.events(run_id, "volumes.local"), "the same-host resume did not keep its volumes"
-    assert not lux.events(run_id, "container.reused"), "the same-host resume reused the container"
     lux.run("cancel", run_id, "--wait")
 
 
