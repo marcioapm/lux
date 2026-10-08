@@ -166,19 +166,29 @@ func TestReapRetentionPastReapedHistory(t *testing.T) {
 }
 
 // The reaper's first tick reaps retention; a tick within the next minute
-// leaves a Run that became due meanwhile alone (leases and hosts still run
-// every tick); one a minute after the last reaps it.
+// leaves a Run that became due meanwhile alone, but still loses a
+// placement whose lease expired meanwhile; one a minute after the last
+// reaps it.
 func TestReapOnceStorageCadence(t *testing.T) {
 	s, ctx, f := retentionFixture(t, StateStopped, StateTerminated, 1, 30)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('rl', 't1', '{"placement":{"pool":"default"}}', 'running', 1)`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, lease_expires_at)
+		VALUES ('pl1', 't1', 'rl', 'ha', 1, 'running', now() + interval '1 hour')`)
 	var last time.Time
 	s.reapOnce(ctx, &last)
 	if got := f.Deleted(); len(got) != 4 {
 		t.Fatalf("first tick deleted %v, want rb's volumes and outputs", got)
 	}
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'terminated', terminated_at = now() - interval '40 days' WHERE id = 'ra'`)
+	execSQL(t, s, ctx, `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE id = 'pl1'`)
 	s.reapOnce(ctx, &last)
 	if got := f.Deleted(); len(got) != 4 {
 		t.Fatalf("a tick within the minute reaped retention: %v", got)
+	}
+	var state string
+	systemScan(t, s, `SELECT state FROM runs WHERE id = 'rl'`, nil, &state)
+	if state != StateLost {
+		t.Fatalf("rl after its lease expired, a tick within the minute: %q, want lost", state)
 	}
 	last = last.Add(-storageReapEvery)
 	s.reapOnce(ctx, &last)
