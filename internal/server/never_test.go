@@ -2,17 +2,14 @@ package server
 
 import (
 	"cmp"
-	"context"
 	"testing"
-
-	"github.com/marcioapm/lux/internal/proto"
 )
 
 // How each end leaves a Run, by resumePolicy: a never Run, which nothing
 // can resume, ends terminated whenever it would otherwise rest resumable
 // (success, a requested stop, a failure, a move), its outcome in the
-// reason and its exit code kept; every other policy rests resumable, as
-// before. A terminate ends terminated, whatever the policy.
+// reason and its exit code kept; every other policy rests resumable. A
+// terminate ends terminated, whatever the policy.
 func TestNeverRunEndsTerminated(t *testing.T) {
 	type end struct {
 		name  string
@@ -32,16 +29,17 @@ func TestNeverRunEndsTerminated(t *testing.T) {
 			exitR1With(t, s, code)
 		}
 	}
+	// rests: every policy but never rests in state.
+	rests := func(state string) map[string]string {
+		return map[string]string{"": state, "auto": state, "restart": state, "manual": state, "never": StateTerminated}
+	}
 	ends := []end{
 		{"success", func(t *testing.T, s *Server) { exitR1With(t, s, 0) },
-			map[string]string{"": StateSucceeded, "auto": StateSucceeded, "restart": StateSucceeded, "manual": StateSucceeded, "never": StateTerminated},
-			"succeeded; resumePolicy never", 0, ""},
+			rests(StateSucceeded), "succeeded; resumePolicy never", 0, ""},
 		{"failure", func(t *testing.T, s *Server) { exitR1With(t, s, 1) },
-			map[string]string{"": StateFailed, "auto": StateFailed, "restart": StateFailed, "manual": StateFailed, "never": StateTerminated},
-			"exit code 1; resumePolicy never", 1, ""},
+			rests(StateFailed), "exit code 1; resumePolicy never", 1, ""},
 		{"requested stop", stopThen(143),
-			map[string]string{"": StateStopped, "auto": StateStopped, "restart": StateStopped, "manual": StateStopped, "never": StateTerminated},
-			"stop; resumePolicy never", 143, ""},
+			rests(StateStopped), "stop; resumePolicy never", 143, ""},
 		{"preempt", func(t *testing.T, s *Server) {
 			if err := moveStops["preempt"](t, s); err != nil {
 				t.Fatal(err)
@@ -51,13 +49,8 @@ func TestNeverRunEndsTerminated(t *testing.T) {
 			// auto and restart: resuming again at once.
 			map[string]string{"": StateResuming, "auto": StateResuming, "restart": StateResuming, "manual": StateFailed, "never": StateTerminated},
 			"preempt: not resumed (resumePolicy never)", 143, ""},
-		{"host lost", func(t *testing.T, s *Server) {
-			execSQL(t, s, context.Background(), `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE id = 'p1'`)
-			if err := s.reapLeases(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-		},
-			map[string]string{"": StateLost, "auto": StateLost, "restart": StateLost, "manual": StateLost, "never": StateTerminated},
+		{"host lost", loseR1Lease,
+			rests(StateLost),
 			// The placement is lost whatever becomes of the Run.
 			"lease expired: host stopped heartbeating; resumePolicy never", -1, StateLost},
 	}
@@ -85,7 +78,7 @@ func TestNeverRunEndsTerminated(t *testing.T) {
 				}
 				_, held := s.secrets.get("r1")
 				if policy != "never" {
-					// Unchanged: every rest is resumable (a Run resuming is not at rest).
+					// Every rest is resumable (a Run resuming is not at rest).
 					if want := state != StateResuming; resumable != want {
 						t.Errorf("resumable %v, want %v", resumable, want)
 					}
@@ -147,6 +140,8 @@ func TestSchedulerEndsNeverRunTerminated(t *testing.T) {
 	const snapshotGone = `WITH snap AS (INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, available)
 		VALUES ('snap-gone', 't1', 'r1', 'p1', 1, '{}', false) RETURNING id)
 		UPDATE runs SET snapshot_id = (SELECT id FROM snap) WHERE id = 'r1'`
+	const withSecrets = `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`
+	const unrestorable = `UPDATE runs SET snapshot_id = 'snap-missing' WHERE id = 'r1'`
 	cases := []struct {
 		name, policy string
 		// submitted: r1 has never been placed (its luxd restarted before
@@ -157,15 +152,15 @@ func TestSchedulerEndsNeverRunTerminated(t *testing.T) {
 		state       string
 		reason      string
 	}{
-		{"secrets lost/auto", "", false, `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`, true,
+		{"secrets lost/auto", "", false, withSecrets, true,
 			StateStopped, "secrets must be supplied again: resume with them"},
-		{"secrets lost/never", "never", false, `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`, true,
+		{"secrets lost/never", "never", false, withSecrets, true,
 			StateTerminated, "its secrets are no longer held; resumePolicy never"},
-		{"secrets lost/never/submitted", "never", true, `UPDATE runs SET secrets = '[{"name":"TOKEN"}]' WHERE id = 'r1'`, true,
+		{"secrets lost/never/submitted", "never", true, withSecrets, true,
 			StateTerminated, "its secrets are no longer held; resumePolicy never"},
-		{"unrestorable/auto", "", false, `UPDATE runs SET snapshot_id = 'snap-missing' WHERE id = 'r1'`, false,
+		{"unrestorable/auto", "", false, unrestorable, false,
 			StateFailed, "its snapshot does not match this Run's blob records"},
-		{"unrestorable/never", "never", false, `UPDATE runs SET snapshot_id = 'snap-missing' WHERE id = 'r1'`, false,
+		{"unrestorable/never", "never", false, unrestorable, false,
 			StateTerminated, "its snapshot does not match this Run's blob records; resumePolicy never"},
 		{"snapshot unavailable/auto", "", false, snapshotGone, false,
 			StateLost, "its snapshot is no longer available"},
@@ -221,12 +216,7 @@ func TestRefusedSnapshotFailedRunRestsUnlessNever(t *testing.T) {
 		t.Run(policy, func(t *testing.T) {
 			s, ctx := policyFixture(t, policy)
 			execSQL(t, s, ctx, `UPDATE placements SET snapshot_refused = true WHERE id = 'p1'`)
-			code := 1
-			f := proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: "r1", Epoch: 1,
-				Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "exited"})}
-			if got := s.handleReport(context.Background(), "h1", f); got.Type != proto.MsgAck {
-				t.Fatalf("exit report: %s %s", got.Type, got.Data)
-			}
+			reportR1Exit(t, s, 1, "exited")
 			var state, reason string
 			systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
 			wantReason := "exit code 1; " + refusedNoSnapshotReason

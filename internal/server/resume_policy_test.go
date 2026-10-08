@@ -76,14 +76,25 @@ func r1Moving(t *testing.T, s *Server) bool {
 // its final snapshot (snapR1, with an agent session) as the runner sends it.
 func exitR1(t *testing.T, s *Server) {
 	t.Helper()
+	snapshotR1(t, s)
+	reportR1Exit(t, s, 143, "stopped")
+}
+
+// snapshotR1 reports r1's placement 1 took snapshot snapR1 (session sess-1).
+func snapshotR1(t *testing.T, s *Server) {
+	t.Helper()
 	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "snapR1", RunID: "r1", Epoch: 1, SessionID: "sess-1",
 		Volumes: []proto.VolumeSnapshot{{Name: "work", Path: "/work", BlobID: "b-r1-vol", Size: 10, SHA256: "r1-vol"}}}}
 	if got := reportSnapshot(t, s, "h1", "r1", 1, sd); got.Type != proto.MsgAck || ackRefused(t, got) {
 		t.Fatalf("snapshot report: %s %s", got.Type, got.Data)
 	}
-	code := 143
+}
+
+// reportR1Exit reports r1's placement 1 exited with code and reason.
+func reportR1Exit(t *testing.T, s *Server, code int, reason string) {
+	t.Helper()
 	f := proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: "r1", Epoch: 1,
-		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "stopped"})}
+		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: reason})}
 	if got := s.handleReport(context.Background(), "h1", f); got.Type != proto.MsgAck {
 		t.Fatalf("exit report: %s %s", got.Type, got.Data)
 	}
@@ -338,7 +349,7 @@ func TestResumePolicyResumableList(t *testing.T) {
 }
 
 // Every requested resume of a never Run is refused, by its tenant or an
-// operator, whether a move or a stop by request ended it (terminated now),
+// operator, whether a move or a stop by request ended it (terminated),
 // it is still running (the refusal, not "stop it first"), or it still
 // rests stopped from a luxd before never Runs ended terminated; and
 // nothing changes: no state, no secrets or spec written, no placement.

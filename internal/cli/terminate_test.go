@@ -14,8 +14,8 @@ import (
 func TestTerminateAndCancelAlias(t *testing.T) {
 	for _, c := range []struct {
 		cmd        string
-		deprecated bool
-	}{{"terminate", false}, {"cancel", true}} {
+		wantStderr string
+	}{{"terminate", ""}, {"cancel", "Command \"cancel\" is deprecated, use lux terminate\n"}} {
 		t.Run(c.cmd, func(t *testing.T) {
 			var posted []string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -25,25 +25,18 @@ func TestTerminateAndCancelAlias(t *testing.T) {
 				_, _ = w.Write([]byte(`{"id":"run_1","state":"stopping"}`))
 			}))
 			defer srv.Close()
-			var out, errOut strings.Builder
-			a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: &errOut}
-			root := a.root()
-			root.SetArgs([]string{"--url", srv.URL, "--api-key", "k", c.cmd, "run_1"})
-			if err := root.Execute(); err != nil {
-				t.Fatal(err)
+			code, out, errOut := lux(srv.URL, c.cmd, "run_1")
+			if code != 0 {
+				t.Fatalf("exit %d: %s", code, errOut)
 			}
 			if len(posted) != 1 || posted[0] != "POST /v1/runs/run_1/terminate" {
 				t.Fatalf("requests: %v", posted)
 			}
-			deprecation := "Command \"cancel\" is deprecated, use lux terminate\n"
-			if c.deprecated && errOut.String() != deprecation {
-				t.Fatalf("stderr %q, want %q", errOut.String(), deprecation)
+			if errOut != c.wantStderr {
+				t.Fatalf("stderr %q, want %q", errOut, c.wantStderr)
 			}
-			if !c.deprecated && errOut.String() != "" {
-				t.Fatalf("stderr %q", errOut.String())
-			}
-			if strings.TrimSpace(out.String()) != "run_1 stopping" {
-				t.Fatalf("stdout %q", out.String())
+			if strings.TrimSpace(out) != "run_1 stopping" {
+				t.Fatalf("stdout %q", out)
 			}
 		})
 	}
@@ -80,14 +73,11 @@ func TestTerminateWaitsForTerminated(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"run_1","state":"` + state + `"}`))
 	}))
 	defer srv.Close()
-	var out strings.Builder
-	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: &strings.Builder{}}
-	root := a.root()
-	root.SetArgs([]string{"--url", srv.URL, "--api-key", "k", "terminate", "--wait", "run_1"})
-	if err := root.Execute(); err != nil {
-		t.Fatal(err)
+	code, out, errOut := lux(srv.URL, "terminate", "--wait", "run_1")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
 	}
-	if got := strings.TrimSpace(out.String()); got != "run_1 terminated" {
+	if got := strings.TrimSpace(out); got != "run_1 terminated" {
 		t.Fatalf("stdout %q, want run_1 terminated", got)
 	}
 	want := []string{"POST /v1/runs/run_1/terminate", "GET /v1/runs/run_1", "GET /v1/runs/run_1", "GET /v1/runs/run_1"}

@@ -1,27 +1,16 @@
 package server
 
 import (
-	"context"
 	"net/http"
 	"testing"
-
-	"github.com/marcioapm/lux/internal/proto"
 )
 
 // exitR1With reports r1's placement 1 exited with code after its final
-// snapshot (snapR1, session sess-1), as exitR1 does for a stopped one.
+// snapshot, as exitR1 does for a stopped one.
 func exitR1With(t *testing.T, s *Server, code int) {
 	t.Helper()
-	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "snapR1", RunID: "r1", Epoch: 1, SessionID: "sess-1",
-		Volumes: []proto.VolumeSnapshot{{Name: "work", Path: "/work", BlobID: "b-r1-vol", Size: 10, SHA256: "r1-vol"}}}}
-	if got := reportSnapshot(t, s, "h1", "r1", 1, sd); got.Type != proto.MsgAck || ackRefused(t, got) {
-		t.Fatalf("snapshot report: %s %s", got.Type, got.Data)
-	}
-	f := proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: "r1", Epoch: 1,
-		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "exited"})}
-	if got := s.handleReport(context.Background(), "h1", f); got.Type != proto.MsgAck {
-		t.Fatalf("exit report: %s %s", got.Type, got.Data)
-	}
+	snapshotR1(t, s)
+	reportR1Exit(t, s, code, "exited")
 }
 
 // A succeeded Run is resumed as a stopped one is: resume accepts it, and
@@ -62,12 +51,7 @@ func TestResumeSucceededRun(t *testing.T) {
 // no session to restore.
 func TestResumeSucceededRunWithoutSnapshot(t *testing.T) {
 	s, ctx := policyFixture(t, "")
-	code := 0
-	f := proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: "r1", Epoch: 1,
-		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "exited"})}
-	if got := s.handleReport(context.Background(), "h1", f); got.Type != proto.MsgAck {
-		t.Fatalf("exit report: %s %s", got.Type, got.Data)
-	}
+	reportR1Exit(t, s, 0, "exited")
 	var state string
 	var resumable bool
 	systemScan(t, s, `SELECT r.state, `+resumableSQL+` FROM runs r WHERE r.id = 'r1'`, nil, &state, &resumable)
@@ -100,10 +84,7 @@ func TestTerminateSucceededRun(t *testing.T) {
 	if state != StateSucceeded {
 		t.Fatalf("after a stop of a succeeded Run: %q", state)
 	}
-	key := apiKey(t, s, new("t1"), "run")
-	if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/terminate", nil); code != http.StatusAccepted {
-		t.Fatalf("terminate: %d %s", code, body)
-	}
+	postR1(t, s, "terminate")
 	assertTerminated(t, s, "terminated")
 	_, err := s.resumeRun(tenantCtx("t1"), &resumeRunInput{RunPath: RunPath{ID: "r1"}})
 	refused(t, err, http.StatusConflict, "not_resumable", "resume of a terminated Run")

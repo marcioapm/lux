@@ -99,15 +99,18 @@ func TestRunTerminatedMigration(t *testing.T) {
 		}
 	}
 
-	var stops string
-	if err := conn.QueryRow(ctx, `SELECT string_agg(id || '=' || stop_reason, ' ' ORDER BY id) FROM placements`).Scan(&stops); err != nil ||
-		stops != "p_gone=terminate p_ok=stop" {
-		t.Errorf("stop reasons: %q %v", stops, err)
+	text := func(q string) string {
+		t.Helper()
+		var s string
+		if err := conn.QueryRow(ctx, q).Scan(&s); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return s
 	}
-	var events string
-	if err := conn.QueryRow(ctx, `SELECT string_agg(run_id || ' ' || type || ' ' || data::text, '; ' ORDER BY id) FROM run_events`).Scan(&events); err != nil {
-		t.Fatal(err)
+	if stops := text(`SELECT string_agg(id || '=' || stop_reason, ' ' ORDER BY id) FROM placements`); stops != "p_gone=terminate p_ok=stop" {
+		t.Errorf("stop reasons: %q", stops)
 	}
+	events := text(`SELECT string_agg(run_id || ' ' || type || ' ' || data::text, '; ' ORDER BY id) FROM run_events`)
 	wantEvents := `r_gone terminate.requested {"by": "ada"}; ` +
 		`r_gone state {"state": "stopping", "reason": "terminate"}; ` +
 		`r_gone state {"state": "terminated", "reason": "terminated"}; ` +
@@ -120,19 +123,14 @@ func TestRunTerminatedMigration(t *testing.T) {
 	if events != wantEvents {
 		t.Errorf("run events:\n got %s\nwant %s", events, wantEvents)
 	}
-	var hostEvents string
-	if err := conn.QueryRow(ctx, `SELECT string_agg((data->>'outcome') || '/' || (data->>'stopReason'), ' ' ORDER BY id) FROM host_events`).Scan(&hostEvents); err != nil ||
-		hostEvents != "terminated/terminate stopped/stop stopped/terminate" {
-		t.Errorf("host events: %q %v", hostEvents, err)
+	if hostEvents := text(`SELECT string_agg((data->>'outcome') || '/' || (data->>'stopReason'), ' ' ORDER BY id) FROM host_events`); hostEvents != "terminated/terminate stopped/stop stopped/terminate" {
+		t.Errorf("host events: %q", hostEvents)
 	}
-	var pending string
-	if err := conn.QueryRow(ctx, `SELECT string_agg(run_id || '=' || reason, ' ' ORDER BY run_id) FROM cost_pending`).Scan(&pending); err != nil ||
-		pending != "r_gone=state:terminated r_ok=state:failed" {
-		t.Errorf("cost queue: %q %v", pending, err)
+	if pending := text(`SELECT string_agg(run_id || '=' || reason, ' ' ORDER BY run_id) FROM cost_pending`); pending != "r_gone=state:terminated r_ok=state:failed" {
+		t.Errorf("cost queue: %q", pending)
 	}
-	var serverStop string
-	if err := conn.QueryRow(ctx, `SELECT stop_reason FROM run_servers WHERE id = 'srv_aaaaaaaaaaaaaaaa'`).Scan(&serverStop); err != nil || serverStop != "run terminated" {
-		t.Errorf("server stop reason: %q %v", serverStop, err)
+	if serverStop := text(`SELECT stop_reason FROM run_servers WHERE id = 'srv_aaaaaaaaaaaaaaaa'`); serverStop != "run terminated" {
+		t.Errorf("server stop reason: %q", serverStop)
 	}
 	// The queue takes the new reason and refuses the old one.
 	if _, err := conn.Exec(ctx, `UPDATE cost_pending SET reason = 'state:terminated' WHERE run_id = 'r_ok'`); err != nil {
@@ -144,20 +142,12 @@ func TestRunTerminatedMigration(t *testing.T) {
 	// terminated_at: each formerly cancelled Run's state_changed_at, not
 	// its finished_at or updated_at (r_noevent, r_bare); none for Runs
 	// that are not terminated.
-	var clocks string
-	if err := conn.QueryRow(ctx, `SELECT string_agg(id || '=' || coalesce(to_char(terminated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), '-'), ' ' ORDER BY id)
-		FROM runs`).Scan(&clocks); err != nil {
-		t.Fatal(err)
-	}
+	clocks := text(`SELECT string_agg(id || '=' || coalesce(to_char(terminated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), '-'), ' ' ORDER BY id) FROM runs`)
 	if want := "r_bare=2026-02-15 r_expired=2026-04-04 r_gone=2026-04-01 r_lost=2026-04-02 " +
 		"r_noevent=2026-01-15 r_ok=- r_queued=2026-04-03 r_stopping=-"; clocks != want {
 		t.Errorf("terminated_at:\n got %s\nwant %s", clocks, want)
 	}
-	var orphans int
-	if err := conn.QueryRow(ctx, `SELECT count(*) FROM runs WHERE state = 'terminated' AND terminated_at IS NULL`).Scan(&orphans); err != nil {
-		t.Fatal(err)
-	}
-	if orphans != 0 {
-		t.Errorf("%d terminated Runs without a retention clock", orphans)
+	if orphans := text(`SELECT count(*)::text FROM runs WHERE state = 'terminated' AND terminated_at IS NULL`); orphans != "0" {
+		t.Errorf("%s terminated Runs without a retention clock", orphans)
 	}
 }
