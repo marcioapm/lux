@@ -8,7 +8,7 @@ import pytest
 import serve as serve_module
 from build import NESTED_IMAGE, build_nested_images
 from conftest import Lux, generic
-from env import ALPINE_IMAGE, TestEnvironment
+from env import TestEnvironment, wait_until
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def served(env, require, tmp_path, monkeypatch):
         serve_module.serve(e, env.fake_image, detach=True, nested=nested)
         return Lux(e, e.api_key, e.tenant_id)
 
-    def nested_image() -> str:
+    def nested_image() -> str | None:
         return env.extra.get("images", {}).get("nested") or build_nested_images(podman=True, docker=False)[0]
     yield up
     for e in made:
@@ -59,5 +59,12 @@ def test_plain_serve_does_not(served):
     for host in lux.json("hosts", "ls"):
         assert host["labels"].get("nested") != "true", host
     run_id = nested_run(lux)
-    lux.wait_state(lux.submit(generic(ALPINE_IMAGE, "echo", "plain")), "succeeded")
-    assert lux.get(run_id)["state"] in ("submitted", "provisioning"), lux.get(run_id)
+
+    # Queued by the scheduler for lacking nested support, not merely not yet
+    # evaluated or blocked by something else.
+    def waiting_for_nested_host():
+        run = lux.get(run_id)
+        assert run["state"] in ("submitted", "provisioning") and not run.get("placements"), run
+        # "1 host ... does not", "2 hosts ... do not" (internal/server/hostfit.go).
+        return "not support nested containers" in (run.get("stateReason") or "")
+    wait_until(waiting_for_nested_host, 60, 0.2, "nested Run did not report missing nested support")
