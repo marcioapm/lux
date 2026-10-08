@@ -68,4 +68,28 @@ func TestStaleEpochDoesNotKillTheNextEpochsContainer(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	b, _ := os.ReadFile(f.bin + ".killed")
+	if string(b) != "ctr-1\n" {
+		t.Errorf("killed %q, want epoch 1's own ctr-1", b)
+	}
+}
+
+// A placement fenced off before its container was created (its create
+// failed, or never came) kills nothing: not the Run's name, which another
+// epoch's container may hold.
+func TestKillWithoutAContainerKillsNothing(t *testing.T) {
+	f := newFinishFixture(t)
+	f.p.mu.Lock()
+	f.p.state.Container = ""
+	f.p.mu.Unlock()
+	f.p.markStale()
+	f.p.kill(context.Background())
+	f.p.sendStop(context.Background(), "stop")
+	time.Sleep(200 * time.Millisecond)
+	log, _ := os.ReadFile(f.bin + ".log")
+	for _, l := range strings.Split(string(log), "\n") {
+		if strings.HasPrefix(l, "kill ") || strings.HasPrefix(l, "stop ") {
+			t.Errorf("podman %q for a placement with no container", l)
+		}
+	}
 }
