@@ -55,11 +55,13 @@ type placement struct {
 	// cancelStart ends the steps before the container starts (an image
 	// build, a pull, a clone) when the placement is stopped meanwhile.
 	cancelStart context.CancelFunc
-	shimConn    net.Conn
-	shimEnc     *json.Encoder
-	done        chan struct{}
-	session     string      // latest session id the adapter reported
-	user        passwd.User // who the workload runs as
+	// cancelFinish ends finish's snapshot export; nil outside it.
+	cancelFinish context.CancelFunc
+	shimConn     net.Conn
+	shimEnc      *json.Encoder
+	done         chan struct{}
+	session      string      // latest session id the adapter reported
+	user         passwd.User // who the workload runs as
 	// env is what the runner places things by in the workload's
 	// environment (workloadEnv: HOME, XDG_DATA_HOME); made are the
 	// directories the engine stores' mounts make, for the shim to hand over.
@@ -186,6 +188,17 @@ func (p *placement) isStale() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.stale
+}
+
+// abandonSnapshot ends finish's snapshot export if one is under way: a
+// snapshot luxd has not acked yet. One already exported is reported, and
+// once acked is luxd's, so finish runs to its end.
+func (p *placement) abandonSnapshot() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cancelFinish != nil {
+		p.cancelFinish()
+	}
 }
 
 func (p *placement) setPhase(ph string) {
@@ -561,7 +574,6 @@ func (p *placement) supervise(ctx context.Context) {
 	if st, err := p.r.pm.Inspect(ctx, ctr); err == nil && st.OOMKilled {
 		exit.Reason, exit.Message = "oom", "killed: out of memory"
 	}
-	p.setPhase("exited")
 	p.finish(ctx, exit)
 }
 
@@ -586,14 +598,19 @@ func (p *placement) readExit(code int) *exitRecord {
 
 // finish snapshots the state volumes and reports: snapshot first, so that
 // by the time luxd sees the Run stopped its snapshot is recorded.
+// abandonSnapshot ends the export, never a finished snapshot's report.
 func (p *placement) finish(ctx context.Context, exit *exitRecord) {
+	exportCtx, cancelExport := context.WithCancel(ctx)
+	defer cancelExport()
 	p.mu.Lock()
+	p.phase = "exited"
+	p.cancelFinish = cancelExport
 	p.state.Exit = exit
 	p.state.Phase = "exited"
 	p.state.LastExitAt = time.Now().UnixMilli()
 	p.mu.Unlock()
 	_ = p.saveState()
-	p.sampleSlow(ctx)
+	p.sampleSlow(exportCtx)
 	usage := p.usage()
 
 	if p.isStale() {
@@ -601,7 +618,15 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		p.setPhase("done")
 		return
 	}
-	sd, err := p.snapshot(ctx)
+	sd, err := p.snapshot(exportCtx)
+	p.mu.Lock()
+	p.cancelFinish = nil
+	p.mu.Unlock()
+	if err != nil && exportCtx.Err() != nil && ctx.Err() == nil {
+		p.logf("snapshot abandoned: the Run's next epoch was assigned here", "err", err)
+		p.setPhase("done")
+		return
+	}
 	if err != nil {
 		p.logf("snapshot failed", "err", err)
 		sd = &proto.SnapshotDone{Error: err.Error(), OutputSeq: exit.OutputSeq}
@@ -1420,6 +1445,10 @@ func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
 		blobID := ids.New(ids.Blob)
 		size, sum, err := p.r.writeBlob(blobID, func(w io.Writer) error { return p.r.pm.VolumeExport(ctx, v.Volume, w) })
 		if err != nil {
+			// No record lists the blobs already written: nothing else removes them.
+			for _, up := range rec.Uploads {
+				os.Remove(up.Path)
+			}
 			return nil, fmt.Errorf("export %s: %w", v.Name, err)
 		}
 		sd.Manifest.Volumes = append(sd.Manifest.Volumes, proto.VolumeSnapshot{Name: v.Name, Path: v.Path, BlobID: blobID, Size: size, SHA256: sum})

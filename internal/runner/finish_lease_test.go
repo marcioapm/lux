@@ -20,7 +20,8 @@ import (
 // finishFixture is a runner heartbeating every second to a fake luxd that
 // acks every report and keeps them, with a placement of run1 (epoch 1,
 // one state volume) whose container has exited. Its podman's volume
-// export blocks until release is called. $0.ctr holds the id of the Run's
+// export blocks until release is called, and `rm -f` while $0.holdrm
+// exists (touching $0.removing). $0.ctr holds the id of the Run's
 // container while one exists (the placement's, ctr-1); `rm -f` removes it
 // by that id or the Run's container name, and `volume rm` its volume's file.
 // `rmi` records the image it removes in $0.rmi. The placement's image is
@@ -38,6 +39,8 @@ type finishFixture struct {
 	// until nackHeld answers them stale.
 	holdEpoch int
 	held      []proto.Frame
+	// uploaded: the blob ids PUT to the fake luxd (newRemovingFixture).
+	uploaded []string
 }
 
 func newFinishFixture(t *testing.T) *finishFixture {
@@ -51,7 +54,12 @@ case "$1 $2" in
   touch "$0.exporting"
   while [ ! -e "$0.release" ]; do sleep 0.05; done
   echo volume-data ;;
-"rm -f") case "$5" in lux-run1|"$(cat "$0.ctr")") rm -f "$0.ctr" ;; esac ;;
+"rm -f")
+  if [ -e "$0.holdrm" ]; then
+    touch "$0.removing"
+    while [ -e "$0.holdrm" ]; do sleep 0.05; done
+  fi
+  case "$5" in lux-run1|"$(cat "$0.ctr")") rm -f "$0.ctr" ;; esac ;;
 "volume rm") rm -f "$0.vol.$4" ;;
 "kill -s") echo "$4" >> "$0.killed" ;;
 "rmi "*) echo "$2" >> "$0.rmi" ;;
