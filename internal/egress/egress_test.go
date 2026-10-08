@@ -347,23 +347,73 @@ func TestUnrestrictedRunAdmitsNothing(t *testing.T) {
 // name's (NOERROR, no answers) but neither admits nor reports it: only an
 // A query spends a cap slot.
 func TestNonAQueryDoesNotAdmit(t *testing.T) {
+	types := map[dnsmessage.Type]string{
+		dnsmessage.TypeAAAA: "aaaa",
+		dnsmessage.TypeTXT:  "txt",
+		dnsmessage.TypeMX:   "mx",
+		dnsmessage.Type(65): "https",
+	}
 	f, _, add := fixture(t)
 	events := add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"})
-	rc, addrs := askType(t, f, "lux1", "a.wild.example.com", dnsmessage.TypeAAAA)
-	if rc != dnsmessage.RCodeSuccess || addrs != nil {
-		t.Fatalf("AAAA: %v %v", rc, addrs)
+	for typ, label := range types {
+		name := label + ".wild.example.com"
+		if rc, addrs := askType(t, f, "lux1", name, typ); rc != dnsmessage.RCodeSuccess || addrs != nil {
+			t.Fatalf("%v %s: %v %v", typ, name, rc, addrs)
+		}
+		if rc, _ := askType(t, f, "lux1", label+".other.example.com", typ); rc != dnsmessage.RCodeRefused {
+			t.Fatalf("%v of a name no rule matches: %v", typ, rc)
+		}
 	}
 	f.mu.Lock()
 	admitted := f.runs["lux1"].admitted
 	f.mu.Unlock()
-	if admitted != 0 || len(*events) != 0 {
+	if admitted != 0 || slices.ContainsFunc(*events, func(l Lookup) bool { return l.Allowed }) {
 		t.Fatalf("admitted %d, events %v", admitted, *events)
 	}
-	if rc, addrs := ask(t, f, "lux1", "a.wild.example.com"); rc != dnsmessage.RCodeSuccess || len(addrs) != 1 {
-		t.Fatalf("A after AAAA: %v %v", rc, addrs)
+	for _, label := range types {
+		if rc, addrs := ask(t, f, "lux1", label+".wild.example.com"); rc != dnsmessage.RCodeSuccess || len(addrs) != 1 {
+			t.Fatalf("A of %s after non-A: %v %v", label, rc, addrs)
+		}
 	}
-	if rc, _ := askType(t, f, "lux1", "x.other.example.com", dnsmessage.TypeAAAA); rc != dnsmessage.RCodeRefused {
-		t.Fatalf("AAAA of a name no rule matches: %v", rc)
+}
+
+// Non-A queries for names that would fill the cap leave room for an A
+// query of a fresh name.
+func TestNonAQueriesSpendNoCapSlots(t *testing.T) {
+	f, _, add := fixture(t)
+	add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"})
+	for i := range maxWildcardNames {
+		askType(t, f, "lux1", fmt.Sprintf("n%d.wild.example.com", i), dnsmessage.TypeAAAA)
+	}
+	if rc, _ := ask(t, f, "lux1", "fresh.wild.example.com"); rc != dnsmessage.RCodeSuccess {
+		t.Fatalf("AAAA spent cap slots: %v", rc)
+	}
+}
+
+// A non-A query for an exact-listed name, or a wildcard name already
+// admitted, is answered NOERROR with no answers.
+func TestNonAQueryForListedNames(t *testing.T) {
+	f, _, add := fixture(t)
+	add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"}, spec.EgressRule{Host: "exact.example.com"})
+	if rc, addrs := ask(t, f, "lux1", "a.wild.example.com"); rc != dnsmessage.RCodeSuccess || len(addrs) != 1 {
+		t.Fatalf("A: %v %v", rc, addrs)
+	}
+	for _, name := range []string{"exact.example.com", "a.wild.example.com"} {
+		if rc, addrs := askType(t, f, "lux1", name, dnsmessage.TypeAAAA); rc != dnsmessage.RCodeSuccess || addrs != nil {
+			t.Fatalf("AAAA %s: %v %v", name, rc, addrs)
+		}
+	}
+}
+
+// A Run whose exact rule names a host another Run has already resolved
+// gets those addresses in its set at Apply.
+func TestSecondRunGetsKnownAddresses(t *testing.T) {
+	f, n, add := fixture(t)
+	add("lux1", false, spec.EgressRule{Host: "a.example.com"})
+	add("lux2", false, spec.EgressRule{Host: "a.example.com"})
+	_, addrs := ask(t, f, "lux2", "a.example.com")
+	if len(addrs) != 1 || !n.inSet("lux2", addrs[0]) {
+		t.Fatalf("%v", addrs)
 	}
 }
 

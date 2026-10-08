@@ -288,6 +288,13 @@ func TestEgressRuleMatches(t *testing.T) {
 		if got := (EgressRule{Host: c.rule}).Matches(c.name); got != c.want {
 			t.Errorf("%q matches %q: got %v, want %v", c.rule, c.name, got, c.want)
 		}
+		// The runner's path for a wildcard agrees with Matches.
+		if strings.HasPrefix(c.rule, "*.") {
+			s, ok := WildcardSuffix(c.rule)
+			if got := ok && SuffixMatches(s, NormalHost(c.name)); got != c.want {
+				t.Errorf("%q suffix-matches %q: got %v, want %v", c.rule, c.name, got, c.want)
+			}
+		}
 	}
 	// validWildcard already rejects a numeric last label; the suffix
 	// match refuses an IP literal on its own too.
