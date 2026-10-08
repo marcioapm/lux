@@ -49,9 +49,12 @@ arrive, a few seconds late.
    A migration that fails on a deadlock with luxd can be run again.
    056 renames `runs.cancel_requested` to `terminate_requested` and
    rewrites `cancelled` to `terminated` in stored Runs, events and the
-   cost queue: a luxd older than it fails every request that reads or
-   writes the column until it is restarted onto the new binary, so keep
-   the time between this step and the next short.
+   cost queue. Stop every `luxd serve` sharing the database before it
+   runs: a luxd older than it fails every request that reads or writes the
+   column, and while 056 runs it blocks every access to `runs` (each luxd
+   request, scheduler pass and runner report waits on it) for about 1–2 s
+   per million `run_events` rows, plus the scan of `runs` itself. Start
+   them again on the new binary (step 3) once it has committed.
 3. Restart (or roll) every `luxd serve` onto the new binary.
 
 Migrate first: a luxd newer than its schema does not check it, and fails

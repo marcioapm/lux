@@ -34,6 +34,11 @@ func TestRunTerminatedMigration(t *testing.T) {
 			('r_expired', 't1', '{}', 'cancelled', 'expired: stopped for 90 days', false, 1),
 			('r_stopping', 't1', '{}', 'stopping', 'cancel', true, 1),
 			('r_ok', 't1', '{}', 'failed', 'exit code 1', false, 1)`,
+		// Cancelled Runs without a state event: their clock falls back to
+		// finished_at, else updated_at.
+		`INSERT INTO runs (id, tenant_id, spec, state, state_reason, cancel_requested, current_epoch, finished_at, updated_at) VALUES
+			('r_noevent', 't1', '{}', 'cancelled', 'cancelled', true, 1, '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z'),
+			('r_bare', 't1', '{}', 'cancelled', 'cancelled', true, 0, NULL, '2026-03-01T00:00:00Z')`,
 		`INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, stop_reason) VALUES
 			('p_gone', 't1', 'r_gone', 'h1', 1, 'exited', 'cancel'), ('p_ok', 't1', 'r_ok', 'h1', 1, 'exited', 'stop')`,
 		`INSERT INTO run_events (tenant_id, run_id, type, data) VALUES
@@ -47,7 +52,8 @@ func TestRunTerminatedMigration(t *testing.T) {
 			('t1', 'r_ok', 'state', '{"state": "failed", "reason": "exit code 1"}')`,
 		`INSERT INTO host_events (tenant_id, host_id, type, data) VALUES
 			('t1', 'h1', 'host.placement_ended', '{"run": "r_gone", "outcome": "cancelled", "stopReason": "cancel"}'),
-			('t1', 'h1', 'host.placement_ended', '{"run": "r_ok", "outcome": "stopped", "stopReason": "stop"}')`,
+			('t1', 'h1', 'host.placement_ended', '{"run": "r_ok", "outcome": "stopped", "stopReason": "stop"}'),
+			('t1', 'h1', 'host.placement_ended', '{"run": "r_ok", "outcome": "stopped", "stopReason": "cancel"}')`,
 		`INSERT INTO cost_pending (run_id, due_at, reason) VALUES ('r_gone', now(), 'state:cancelled'), ('r_ok', now(), 'state:failed')`,
 		`INSERT INTO run_servers (id, tenant_id, run_id, name, port, state, stop_reason) VALUES
 			('srv_aaaaaaaaaaaaaaaa', 't1', NULL, 'web', 3000, 'stopped', 'run cancelled')`,
@@ -73,9 +79,11 @@ func TestRunTerminatedMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []run{
+		{"r_bare", "terminated", "terminated", true},
 		{"r_expired", "terminated", "expired: stopped for 90 days", false},
 		{"r_gone", "terminated", "terminated", true},
 		{"r_lost", "terminated", "terminated; host lost", true},
+		{"r_noevent", "terminated", "terminated", true},
 		{"r_ok", "failed", "exit code 1", false},
 		{"r_queued", "terminated", "terminated", true},
 		{"r_stopping", "stopping", "terminate", true},
@@ -111,7 +119,7 @@ func TestRunTerminatedMigration(t *testing.T) {
 	}
 	var hostEvents string
 	if err := conn.QueryRow(ctx, `SELECT string_agg((data->>'outcome') || '/' || (data->>'stopReason'), ' ' ORDER BY id) FROM host_events`).Scan(&hostEvents); err != nil ||
-		hostEvents != "terminated/terminate stopped/stop" {
+		hostEvents != "terminated/terminate stopped/stop stopped/terminate" {
 		t.Errorf("host events: %q %v", hostEvents, err)
 	}
 	var pending string
@@ -130,8 +138,9 @@ func TestRunTerminatedMigration(t *testing.T) {
 	if _, err := conn.Exec(ctx, `UPDATE cost_pending SET reason = 'state:cancelled' WHERE run_id = 'r_ok'`); err == nil {
 		t.Error("state:cancelled accepted")
 	}
-	// 057: terminated_at from the latest terminated state event (r_gone,
-	// r_lost, r_queued, r_expired have one); none for other Runs.
+	// terminated_at from the latest terminated state event (r_gone, r_lost,
+	// r_queued, r_expired have one), else finished_at (r_noevent), else
+	// updated_at (r_bare); none for Runs that are not terminated.
 	var withClock, withoutClock int
 	if err := conn.QueryRow(ctx, `SELECT count(*) FILTER (WHERE terminated_at = (SELECT max(e.created_at) FROM run_events e
 			WHERE e.run_id = runs.id AND e.type = 'state' AND e.data->>'state' = 'terminated')),
@@ -140,5 +149,17 @@ func TestRunTerminatedMigration(t *testing.T) {
 	}
 	if withClock != 4 || withoutClock != 2 {
 		t.Errorf("terminated_at: %d from their events, %d unset; want 4 and 2", withClock, withoutClock)
+	}
+	var clocks string
+	if err := conn.QueryRow(ctx, `SELECT string_agg(id || '=' || to_char(terminated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), ' ' ORDER BY id)
+		FROM runs WHERE id IN ('r_noevent', 'r_bare')`).Scan(&clocks); err != nil || clocks != "r_bare=2026-03-01 r_noevent=2026-01-01" {
+		t.Errorf("fallback clocks: %q %v", clocks, err)
+	}
+	var orphans int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM runs WHERE state = 'terminated' AND terminated_at IS NULL`).Scan(&orphans); err != nil {
+		t.Fatal(err)
+	}
+	if orphans != 0 {
+		t.Errorf("%d terminated Runs without a retention clock", orphans)
 	}
 }
