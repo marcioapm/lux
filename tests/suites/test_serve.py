@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 import serve as serve_module
+from build import NESTED_IMAGE, build_nested_images
 from conftest import Lux, generic
 from env import ALPINE_IMAGE, TestEnvironment
 
@@ -19,17 +20,24 @@ def served(env, require, tmp_path, monkeypatch):
 
     def up(nested: bool) -> Lux:
         e = TestEnvironment(n_hosts=1)
-        e.binaries, e.extra["images"] = env.binaries, env.extra.get("images", {})
+        # Only the image a nested Run here uses: each image is exported and
+        # loaded into every host again.
+        e.binaries, e.extra["images"] = env.binaries, {"nested": nested_image()} if nested else {}
         made.append(e)
         serve_module.serve(e, env.fake_image, detach=True, nested=nested)
         return Lux(e, e.api_key, e.tenant_id)
+
+    def nested_image() -> str:
+        return env.extra.get("images", {}).get("nested") or build_nested_images(podman=True, docker=False)[0]
     yield up
     for e in made:
         e.teardown()
 
 
 def nested_run(lux: Lux) -> str:
-    return lux.submit(generic(ALPINE_IMAGE, "echo", "placed", sandbox={"nestedContainers": True}))
+    # Starts no inner container: it shows the Run is placed and its image is
+    # on the host, not that Podman works inside.
+    return lux.submit(generic(NESTED_IMAGE, "echo", "placed", sandbox={"nestedContainers": True}))
 
 
 def test_serve_nested_offers_nested_containers(served):
