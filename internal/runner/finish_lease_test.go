@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marcioapm/lux/internal/egress"
 	"github.com/marcioapm/lux/internal/gitws"
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
@@ -44,10 +45,10 @@ type finishFixture struct {
 	// ctrAtStatus: whether the container existed when luxd got the status.
 	ctrAtStatus []bool
 	// holdEpoch: reports about this epoch are kept in held, unanswered,
-	// until nackHeld answers them stale.
+	// until ackHeld or nackHeld answers them.
 	holdEpoch int
 	held      []proto.Frame
-	// uploaded: the blob ids PUT to the fake luxd (newRemovingFixture).
+	// uploaded: the blob ids PUT to the fake luxd (serveUploads).
 	uploaded []string
 }
 
@@ -106,6 +107,7 @@ esac
 	r.conn = newConn(r)
 	r.conn.polling = true
 	r.uploads = newUploader(r)
+	r.egress = &egress.Firewall{}
 	r.lease.Store(int64(3 * time.Second))
 	r.mounts.Store(runtimeVolume("run1"), filepath.Join(dir, "rt"))
 	r.mounts.Store(volumeName("run1", "data"), data)
@@ -164,19 +166,6 @@ func (p *placement) waitDone(d time.Duration) bool {
 	case <-time.After(d):
 		return false
 	}
-}
-
-// nackHeld answers every held report as luxd answers a fenced-off epoch's.
-func (f *finishFixture) nackHeld() int {
-	f.mu.Lock()
-	held := f.held
-	f.held, f.holdEpoch = nil, 0
-	f.mu.Unlock()
-	for _, fr := range held {
-		f.r.conn.dispatch(context.Background(), proto.Frame{Type: proto.MsgNack, ID: fr.ID,
-			Data: proto.Marshal(proto.Nack{Error: "stale epoch", Stale: true})})
-	}
-	return len(held)
 }
 
 const finishImage = "ghcr.io/a/img:1"
@@ -404,13 +393,9 @@ func TestReadoptedFinishingPlacementRemovesItsContainer(t *testing.T) {
 // luxd is told the snapshot failed, then that the Run ended.
 func TestFailedExportIsReported(t *testing.T) {
 	f := newFinishFixture(t)
-	if err := os.WriteFile(f.bin+".failexport", nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, f.bin+".failexport", "")
 	f.exitedAsSupervised(context.Background())
-	if !f.p.waitDone(10 * time.Second) {
-		t.Fatal("the placement never ended")
-	}
+	mustEnd(t, f.p, "the placement never ended")
 	if got := f.types(); len(got) != 2 || got[0] != proto.MsgSnapshotDone || got[1] != proto.MsgStatus {
 		t.Fatalf("reports %v, want snapshot.done then status", got)
 	}

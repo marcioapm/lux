@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/marcioapm/lux/internal/egress"
 	"github.com/marcioapm/lux/internal/proto"
 )
 
@@ -23,13 +22,43 @@ import (
 func newOverlapFixture(t *testing.T) *finishFixture {
 	t.Helper()
 	f := newFinishFixture(t)
-	f.r.egress = &egress.Firewall{}
-	f.mu.Lock()
-	f.holdEpoch = 1
-	f.mu.Unlock()
+	f.holdReports(1)
 	f.exitedAsSupervised(context.Background())
 	f.waitFile(t, f.bin+".exporting")
 	return f
+}
+
+func writeFile(t *testing.T, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitFor polls cond for up to 10 s, and fails the test with msg if it
+// never holds.
+func waitFor(t *testing.T, msg string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); !cond(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+	}
+}
+
+// mustEnd fails the test with msg unless p ends within 10 s.
+func mustEnd(t *testing.T, p *placement, msg string) {
+	t.Helper()
+	if !p.waitDone(10 * time.Second) {
+		t.Fatal(msg)
+	}
+}
+
+// holdReports has luxd hold epoch's reports unanswered.
+func (f *finishFixture) holdReports(epoch int) {
+	f.mu.Lock()
+	f.holdEpoch = epoch
+	f.mu.Unlock()
 }
 
 // sendEpoch1Report has epoch 1 send a report, which luxd holds unanswered.
@@ -42,30 +71,38 @@ func (f *finishFixture) sendEpoch1Report(t *testing.T) {
 // waitHeld waits for luxd to hold a report of holdEpoch's.
 func (f *finishFixture) waitHeld(t *testing.T) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	waitFor(t, "epoch 1 sent no report", func() bool {
 		f.mu.Lock()
-		n := len(f.held)
-		f.mu.Unlock()
-		if n > 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("epoch 1 sent no report")
-		}
-		time.Sleep(10 * time.Millisecond)
+		defer f.mu.Unlock()
+		return len(f.held) > 0
+	})
+}
+
+// takeHeld ends the hold and returns the reports held so far; accepted,
+// they join f.reports.
+func (f *finishFixture) takeHeld(accepted bool) []proto.Frame {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	held := f.held
+	f.held, f.holdEpoch = nil, 0
+	if accepted {
+		f.reports = append(f.reports, held...)
 	}
+	return held
 }
 
 // ackHeld answers every held report as luxd answers an accepted one.
 func (f *finishFixture) ackHeld() {
-	f.mu.Lock()
-	held := f.held
-	f.held, f.holdEpoch = nil, 0
-	f.reports = append(f.reports, held...)
-	f.mu.Unlock()
-	for _, fr := range held {
+	for _, fr := range f.takeHeld(true) {
 		f.r.conn.dispatch(context.Background(), proto.Frame{Type: proto.MsgAck, ID: fr.ID})
+	}
+}
+
+// nackHeld answers every held report as luxd answers a fenced-off epoch's.
+func (f *finishFixture) nackHeld() {
+	for _, fr := range f.takeHeld(false) {
+		f.r.conn.dispatch(context.Background(), proto.Frame{Type: proto.MsgNack, ID: fr.ID,
+			Data: proto.Marshal(proto.Nack{Error: "stale epoch", Stale: true})})
 	}
 }
 
@@ -95,17 +132,25 @@ func (f *finishFixture) epoch2Started() bool {
 	return strings.Contains(f.podmanLog(), "network create")
 }
 
+// wantStartedAfterRemoval requires the epoch that started (its network)
+// to have done so only after epoch 1 removed its container.
+func (f *finishFixture) wantStartedAfterRemoval(t *testing.T, epoch int) {
+	t.Helper()
+	log := f.podmanLog()
+	rm, network := strings.Index(log, "removed ctr-1"), strings.Index(log, "network create")
+	if rm < 0 || network < rm {
+		t.Fatalf("epoch %d's network at %d, epoch 1's removal at %d: want epoch %d after; podman:\n%s", epoch, network, rm, epoch, log)
+	}
+}
+
 // newRemovingFixture is finishFixture's run1 epoch 1 after a normal stop:
 // luxd has acked its snapshot.done and its status, and it is removing its
 // container (held until releaseRemove). Its blobs upload to a fake luxd.
 func newRemovingFixture(t *testing.T) *finishFixture {
 	t.Helper()
 	f := newFinishFixture(t)
-	f.r.egress = &egress.Firewall{}
 	f.serveUploads(t)
-	if err := os.WriteFile(f.bin+".holdrm", nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, f.bin+".holdrm", "")
 	t.Cleanup(f.releaseRemove)
 	f.release()
 	f.exitedAsSupervised(context.Background())
@@ -191,6 +236,13 @@ func (f *finishFixture) wantUploaded(t *testing.T) {
 	}
 }
 
+func (f *finishFixture) wantNoSnapshotRecord(t *testing.T) {
+	t.Helper()
+	for id, rec := range f.r.snapshotRecords() {
+		t.Errorf("snapshot record %s %+v of an abandoned export", id, rec)
+	}
+}
+
 // The stale nack of an older epoch whose report was in flight when the
 // next epoch was assigned kills only the container that epoch made, never
 // the Run's name. Here ctr-2 holds the name, as an epoch's container would
@@ -200,9 +252,7 @@ func TestStaleEpochDoesNotKillTheNextEpochsContainer(t *testing.T) {
 	f := newOverlapFixture(t)
 	f.sendEpoch1Report(t)
 	f.r.assign(context.Background(), proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 2})
-	if err := os.WriteFile(f.bin+".ctr", []byte("ctr-2"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, f.bin+".ctr", "ctr-2")
 	f.nackHeld()
 	// The fence's kill runs in its own goroutine: wait for it, then
 	// require it to be the only one.
@@ -228,18 +278,9 @@ func TestNextEpochWaitsForTheFinishingOne(t *testing.T) {
 	}
 	f.wantRunState(t, 1, false)
 	f.releaseRemove()
-	if !f.p.waitDone(10 * time.Second) {
-		t.Fatal("epoch 1 never ended")
-	}
-	if !p2.waitDone(10 * time.Second) {
-		t.Fatal("epoch 2 never ended")
-	}
-	// Epoch 1's removal came before anything epoch 2 ran.
-	log := f.podmanLog()
-	rm, network := strings.Index(log, "removed ctr-1"), strings.Index(log, "network create")
-	if rm < 0 || network < rm {
-		t.Fatalf("epoch 2's network at %d, epoch 1's rm at %d: want epoch 2 after; podman:\n%s", network, rm, log)
-	}
+	mustEnd(t, f.p, "epoch 1 never ended")
+	mustEnd(t, p2, "epoch 2 never ended")
+	f.wantStartedAfterRemoval(t, 2)
 	f.wantRunState(t, 2, false)
 }
 
@@ -250,9 +291,7 @@ func TestNextEpochFailsWhenThePreviousNeverEnds(t *testing.T) {
 	f := newRemovingFixture(t)
 	f.r.handover = 300 * time.Millisecond
 	p2 := f.assignEpoch(t, 2)
-	if !p2.waitDone(10 * time.Second) {
-		t.Fatal("epoch 2 never ended")
-	}
+	mustEnd(t, p2, "epoch 2 never ended")
 	if f.epoch2Started() {
 		t.Errorf("epoch 2 ran beside an epoch 1 still removing its container; podman:\n%s", f.podmanLog())
 	}
@@ -262,9 +301,7 @@ func TestNextEpochFailsWhenThePreviousNeverEnds(t *testing.T) {
 	}
 	f.wantRunState(t, 1, false)
 	f.releaseRemove()
-	if !f.p.waitDone(10 * time.Second) {
-		t.Fatal("epoch 1 never ended")
-	}
+	mustEnd(t, f.p, "epoch 1 never ended")
 	f.wantUploaded(t)
 }
 
@@ -278,13 +315,9 @@ func TestAckedSnapshotUploadsAcrossTheHandover(t *testing.T) {
 			p2 := f.assignEpoch(t, 2)
 			if stop {
 				p2.requestStop(context.Background(), "stop")
-				if !p2.waitDone(10 * time.Second) {
-					t.Fatal("epoch 2 never ended")
-				}
+				mustEnd(t, p2, "epoch 2 never ended")
 				f.releaseRemove()
-				if !f.p.waitDone(10 * time.Second) {
-					t.Fatal("epoch 1 never ended")
-				}
+				mustEnd(t, f.p, "epoch 1 never ended")
 			} else {
 				f.waitLease(t, 2, "starting")
 			}
@@ -294,9 +327,7 @@ func TestAckedSnapshotUploadsAcrossTheHandover(t *testing.T) {
 			f.wantUploaded(t)
 			if !stop {
 				f.releaseRemove()
-				if !p2.waitDone(10 * time.Second) {
-					t.Fatal("epoch 2 never ended")
-				}
+				mustEnd(t, p2, "epoch 2 never ended")
 			}
 		})
 	}
@@ -331,9 +362,7 @@ func TestNextEpochAbandonsAnUnackedExport(t *testing.T) {
 			t.Error("epoch 1 reported its end after abandoning its snapshot")
 		}
 	}
-	for id, rec := range f.r.snapshotRecords() {
-		t.Errorf("snapshot record %s %+v of an abandoned export", id, rec)
-	}
+	f.wantNoSnapshotRecord(t)
 }
 
 // A snapshot.done already sent when the next epoch is assigned is not
@@ -341,52 +370,36 @@ func TestNextEpochAbandonsAnUnackedExport(t *testing.T) {
 // luxd's later ack makes it luxd's, and its blobs upload.
 func TestASentSnapshotDoneSurvivesTheNextAssign(t *testing.T) {
 	f := newFinishFixture(t)
-	f.r.egress = &egress.Firewall{}
 	f.serveUploads(t)
-	f.mu.Lock()
-	f.holdEpoch = 1
-	f.mu.Unlock()
+	f.holdReports(1)
 	f.release()
 	f.exitedAsSupervised(context.Background())
 	f.waitHeld(t)
 	p2 := f.assignEpoch(t, 2)
 	f.ackHeld()
-	if !f.p.waitDone(10 * time.Second) {
-		t.Fatal("epoch 1 never ended")
-	}
+	mustEnd(t, f.p, "epoch 1 never ended")
 	if got := f.types(); len(got) < 1 || got[0] != proto.MsgSnapshotDone {
 		t.Fatalf("reports %v, want epoch 1's snapshot.done first", got)
 	}
 	f.wantUploaded(t)
-	if !p2.waitDone(10 * time.Second) {
-		t.Fatal("epoch 2 never ended")
-	}
+	mustEnd(t, p2, "epoch 2 never ended")
 }
 
 // A snapshot abandoned after some of its volumes were exported leaves none
 // of their blobs: no record lists them, so nothing else would remove them.
 func TestAbandonedExportRemovesEarlierVolumesBlobs(t *testing.T) {
 	f := newFinishFixture(t)
-	f.r.egress = &egress.Firewall{}
 	f.r.handover = time.Minute
 	first := volumeName("run1", "data")
 	f.p.state.Volumes = append(f.p.state.Volumes, volumeRef{Name: "data2", Volume: volumeName("run1", "data2"), Path: "/data2", Kind: "state"})
-	if err := os.WriteFile(f.bin+".fast."+first, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f.mu.Lock()
-	f.holdEpoch = 1
-	f.mu.Unlock()
+	writeFile(t, f.bin+".fast."+first, "")
+	f.holdReports(1)
 	f.exitedAsSupervised(context.Background())
 	// The first volume's export is done once the second's blocks.
 	f.waitFile(t, f.bin+".exporting")
 	p2 := f.assignEpoch(t, 2)
-	if !f.p.waitDone(10 * time.Second) {
-		t.Fatal("epoch 1's export was not abandoned")
-	}
-	if !p2.waitDone(10 * time.Second) {
-		t.Fatal("epoch 2 never ended")
-	}
+	mustEnd(t, f.p, "epoch 1's export was not abandoned")
+	mustEnd(t, p2, "epoch 2 never ended")
 	if !strings.Contains(f.podmanLog(), "volume export "+first+"\n") {
 		t.Fatalf("the first volume was not exported; podman:\n%s", f.podmanLog())
 	}
@@ -399,9 +412,7 @@ func TestAbandonedExportRemovesEarlierVolumesBlobs(t *testing.T) {
 			t.Errorf("%s left in snapshots by an abandoned export", e.Name())
 		}
 	}
-	for id, rec := range f.r.snapshotRecords() {
-		t.Errorf("snapshot record %s %+v of an abandoned export", id, rec)
-	}
+	f.wantNoSnapshotRecord(t)
 }
 
 // A placement fenced off while it exports its snapshot writes no run state
@@ -418,9 +429,7 @@ func TestFencedPlacementLeavesTheRunStateAlone(t *testing.T) {
 	f.p.requestStop(context.Background(), "stop")
 	f.p.mark("late")
 	f.release()
-	if !f.p.waitDone(10 * time.Second) {
-		t.Fatal("epoch 1 never ended")
-	}
+	mustEnd(t, f.p, "epoch 1 never ended")
 	st, err := readRunState(f.p.dir)
 	if err != nil || st.Epoch != 2 || st.Container != "ctr-2" || st.Stale || st.VolumesSnapshot != "" || st.StopReason != "" {
 		t.Fatalf("run state %+v (%v), want epoch 2's as written", st, err)
@@ -439,8 +448,7 @@ func TestKillWithoutAContainerKillsNothing(t *testing.T) {
 	f.p.kill(context.Background())
 	f.p.sendStop(context.Background(), "stop")
 	time.Sleep(200 * time.Millisecond)
-	log, _ := os.ReadFile(f.bin + ".log")
-	for _, l := range strings.Split(string(log), "\n") {
+	for _, l := range strings.Split(f.podmanLog(), "\n") {
 		if strings.HasPrefix(l, "kill ") || strings.HasPrefix(l, "stop ") {
 			t.Errorf("podman %q for a placement with no container", l)
 		}
@@ -455,9 +463,7 @@ func TestNextEpochStoppedWhileWaiting(t *testing.T) {
 			f := newRemovingFixture(t)
 			p2 := f.assignEpoch(t, 2)
 			p2.requestStop(context.Background(), reason)
-			if !p2.waitDone(10 * time.Second) {
-				t.Fatal("epoch 2 kept waiting after its stop")
-			}
+			mustEnd(t, p2, "epoch 2 kept waiting after its stop")
 			if got := f.lastStatus(2); got == nil || got.State != "exited" || got.Reason != "stopped" {
 				t.Errorf("epoch 2's last status %+v, want exited, stopped", got)
 			}
@@ -475,9 +481,7 @@ func TestThirdEpochWaitsForTheFirst(t *testing.T) {
 	f := newRemovingFixture(t)
 	p2 := f.assignEpoch(t, 2)
 	p3 := f.assignEpoch(t, 3)
-	if !p2.waitDone(10 * time.Second) {
-		t.Fatal("the fenced epoch 2 kept waiting")
-	}
+	mustEnd(t, p2, "the fenced epoch 2 kept waiting")
 	// A heartbeat later, epoch 3 still waits.
 	f.heartbeatAfter(t, f.count())
 	if f.epoch2Started() {
@@ -486,14 +490,8 @@ func TestThirdEpochWaitsForTheFirst(t *testing.T) {
 	f.waitLease(t, 3, "starting")
 	f.wantRunState(t, 1, false)
 	f.releaseRemove()
-	if !p3.waitDone(10 * time.Second) {
-		t.Fatal("epoch 3 never ended")
-	}
-	log := f.podmanLog()
-	rm, network := strings.Index(log, "removed ctr-1"), strings.Index(log, "network create")
-	if rm < 0 || network < rm {
-		t.Fatalf("epoch 3's network at %d, epoch 1's removal at %d: want epoch 3 after; podman:\n%s", network, rm, log)
-	}
+	mustEnd(t, p3, "epoch 3 never ended")
+	f.wantStartedAfterRemoval(t, 3)
 	if got := f.lastStatus(2); got != nil {
 		t.Errorf("the fenced epoch 2 reported %+v", got)
 	}
@@ -505,7 +503,6 @@ func TestThirdEpochWaitsForTheFirst(t *testing.T) {
 // supervise's wait and OOM inspect.
 func TestPlacementTargetsItsContainerByID(t *testing.T) {
 	f := newFinishFixture(t)
-	f.r.egress = &egress.Firewall{}
 	f.release()
 	f.p.kill(context.Background())
 	f.p.sendStop(context.Background(), "stop")
@@ -515,9 +512,7 @@ func TestPlacementTargetsItsContainerByID(t *testing.T) {
 		defer close(f.p.done)
 		f.p.supervise(context.Background())
 	}()
-	if !f.p.waitDone(10 * time.Second) {
-		t.Fatal("the placement never ended")
-	}
+	mustEnd(t, f.p, "the placement never ended")
 	want := []string{"kill -s KILL", "stop -t", "container inspect --size", "stats --no-stream", "wait", "container inspect", "rm -f"}
 	seen := map[string]bool{}
 	deadline := time.Now().Add(10 * time.Second)
@@ -547,15 +542,12 @@ func TestPlacementTargetsItsContainerByID(t *testing.T) {
 // by the Run's container name: its container is supervised and killed.
 func TestReadoptWithoutAContainerIDUsesTheRunsName(t *testing.T) {
 	f := newFinishFixture(t)
-	f.r.egress = &egress.Firewall{}
 	f.release()
 	f.p.state.Container = ""
 	if err := writeRunState(f.p.dir, f.p.state); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(f.bin+".inspect."+containerName("run1"), []byte(`[{"State":{"Status":"exited"}}]`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, f.bin+".inspect."+containerName("run1"), `[{"State":{"Status":"exited"}}]`)
 	f.r.mu.Lock()
 	f.r.placements = map[string]*placement{}
 	f.r.mu.Unlock()
@@ -564,9 +556,7 @@ func TestReadoptWithoutAContainerIDUsesTheRunsName(t *testing.T) {
 	if p == nil {
 		t.Fatalf("the started placement was not re-adopted; podman:\n%s", f.podmanLog())
 	}
-	if !p.waitDone(10 * time.Second) {
-		t.Fatal("the re-adopted placement never ended")
-	}
+	mustEnd(t, p, "the re-adopted placement never ended")
 	p.kill(context.Background())
 	if !strings.Contains(f.podmanLog(), "wait "+containerName("run1")+"\n") {
 		t.Errorf("the re-adopted container was not waited on by name; podman:\n%s", f.podmanLog())
@@ -580,20 +570,15 @@ func TestReadoptWithoutAContainerIDUsesTheRunsName(t *testing.T) {
 // its network's creation): it would make a container for nothing.
 func TestFencedStartingPlacementStopsItsStart(t *testing.T) {
 	f := newFinishFixture(t)
-	f.r.egress = &egress.Firewall{}
 	f.r.mu.Lock()
 	f.r.placements = map[string]*placement{}
 	f.r.mu.Unlock()
-	if err := os.WriteFile(f.bin+".holdnet", nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, f.bin+".holdnet", "")
 	t.Cleanup(func() { _ = os.Remove(f.bin + ".holdnet") })
 	p2 := f.assignEpoch(t, 2)
 	f.waitFile(t, f.bin+".netcreating")
 	p2.markStale()
-	if !p2.waitDone(10 * time.Second) {
-		t.Fatal("the fenced placement's start went on")
-	}
+	mustEnd(t, p2, "the fenced placement's start went on")
 	if got := f.lastStatus(2); got != nil && got.State != "starting" {
 		t.Errorf("the fenced placement reported its end: %+v", got)
 	}
