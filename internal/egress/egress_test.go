@@ -85,9 +85,14 @@ func fixture(t *testing.T) (*Firewall, *fakeNet, func(iface string, unrestricted
 // ask sends an A query through the stub's handler: the RCode and answers.
 func ask(t *testing.T, f *Firewall, iface, name string) (dnsmessage.RCode, []netip.Addr) {
 	t.Helper()
+	return askType(t, f, iface, name, dnsmessage.TypeA)
+}
+
+func askType(t *testing.T, f *Firewall, iface, name string, typ dnsmessage.Type) (dnsmessage.RCode, []netip.Addr) {
+	t.Helper()
 	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: 7, RecursionDesired: true})
 	_ = b.StartQuestions()
-	_ = b.Question(dnsmessage.Question{Name: dnsmessage.MustNewName(name + "."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET})
+	_ = b.Question(dnsmessage.Question{Name: dnsmessage.MustNewName(name + "."), Type: typ, Class: dnsmessage.ClassINET})
 	q, err := b.Finish()
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +237,31 @@ func TestAdmittedNamesAreRefreshed(t *testing.T) {
 func TestUnrestrictedRunAdmitsNothing(t *testing.T) {
 	f, _, add := fixture(t)
 	add("lux1", true, spec.EgressRule{Host: "*.wild.example.com"})
-	if ok, _ := f.answerFor("lux1", "a.wild.example.com"); ok {
+	if ok, _ := f.answerFor("lux1", "a.wild.example.com", dnsmessage.TypeA); ok {
 		t.Fatal("admitted")
+	}
+}
+
+// A non-A query for a name a wildcard matches is answered as an allowed
+// name's (NOERROR, no answers) but neither admits nor reports it: only an
+// A query spends a cap slot.
+func TestNonAQueryDoesNotAdmit(t *testing.T) {
+	f, _, add := fixture(t)
+	events := add("lux1", false, spec.EgressRule{Host: "*.wild.example.com"})
+	rc, addrs := askType(t, f, "lux1", "a.wild.example.com", dnsmessage.TypeAAAA)
+	if rc != dnsmessage.RCodeSuccess || addrs != nil {
+		t.Fatalf("AAAA: %v %v", rc, addrs)
+	}
+	f.mu.Lock()
+	admitted := f.runs["lux1"].admitted
+	f.mu.Unlock()
+	if admitted != 0 || len(*events) != 0 {
+		t.Fatalf("admitted %d, events %v", admitted, *events)
+	}
+	if rc, addrs := ask(t, f, "lux1", "a.wild.example.com"); rc != dnsmessage.RCodeSuccess || len(addrs) != 1 {
+		t.Fatalf("A after AAAA: %v %v", rc, addrs)
+	}
+	if rc, _ := askType(t, f, "lux1", "x.other.example.com", dnsmessage.TypeAAAA); rc != dnsmessage.RCodeRefused {
+		t.Fatalf("AAAA of a name no rule matches: %v", rc)
 	}
 }

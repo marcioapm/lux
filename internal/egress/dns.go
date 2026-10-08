@@ -119,7 +119,7 @@ func answer(query []byte, f *Firewall, iface string) []byte {
 	}
 	name := strings.TrimSuffix(strings.ToLower(q.Name.String()), ".")
 	resp := dnsmessage.Header{ID: h.ID, Response: true, RecursionAvailable: true, RecursionDesired: h.RecursionDesired}
-	allowed, addrs := f.answerFor(iface, name)
+	allowed, addrs := f.answerFor(iface, name, q.Type)
 	if q.Type != dnsmessage.TypeA {
 		// AAAA and others: never an answer (egress is IPv4), but an allowed
 		// name exists, and is reported by its A lookup.

@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/marcioapm/lux/internal/spec"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 // StubPort is where the DNS stub listens on each Run's gateway.
@@ -359,10 +360,17 @@ func (f *Firewall) isBlocked(ip netip.Addr) bool {
 // fresh), resolving only on a first lookup. A name only a wildcard matches
 // is admitted (added to the Run's hosts, up to maxWildcardNames) and then
 // answered the same way, so its addresses are in the Run's set before the
-// stub returns them.
-func (f *Firewall) answerFor(iface, name string) (allowed bool, addrs []netip.Addr) {
+// stub returns them. Only an A query admits: any other type for such a
+// name is allowed with no addresses, because a resolver that sends A and
+// AAAA together can fail the whole lookup on a refused AAAA.
+func (f *Firewall) answerFor(iface, name string, qtype dnsmessage.Type) (allowed bool, addrs []netip.Addr) {
 	f.mu.Lock()
 	r := f.runs[iface]
+	if r != nil && !r.hosts[name] && qtype != dnsmessage.TypeA {
+		ok := r.admissible(name)
+		f.mu.Unlock()
+		return ok, nil
+	}
 	if r == nil || (!r.hosts[name] && !f.admit(iface, r, name)) {
 		f.mu.Unlock()
 		return false, nil
@@ -383,7 +391,7 @@ func (f *Firewall) answerFor(iface, name string) (allowed bool, addrs []netip.Ad
 // if that fails, name is not admitted, and its next lookup tries again.
 // Call with f.mu held.
 func (f *Firewall) admit(iface string, r *run, name string) bool {
-	if r.unrestricted || r.admitted >= maxWildcardNames || !slices.ContainsFunc(r.wildcards, func(w string) bool { return spec.HostMatches(w, name) }) {
+	if !r.admissible(name) {
 		return false
 	}
 	var known []string
@@ -396,6 +404,12 @@ func (f *Firewall) admit(iface string, r *run, name string) bool {
 	r.hosts[name] = true
 	r.admitted++
 	return true
+}
+
+// admissible: a restricted Run with room under the cap has a wildcard
+// that matches name. Call with f.mu held.
+func (r *run) admissible(name string) bool {
+	return !r.unrestricted && r.admitted < maxWildcardNames && slices.ContainsFunc(r.wildcards, func(w string) bool { return spec.HostMatches(w, name) })
 }
 
 // report sends a lookup to the Run's events, once per (name, allowed).
