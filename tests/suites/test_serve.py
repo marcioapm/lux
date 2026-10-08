@@ -22,13 +22,13 @@ def served(env, require, tmp_path, monkeypatch):
         e = TestEnvironment(n_hosts=2)
         # Only the image a nested Run here uses: each image is exported and
         # loaded into every host again.
-        e.binaries, e.extra["images"] = env.binaries, {"nested": nested_image()} if nested else {}
+        e.binaries, e.extra["images"] = env.binaries, {}
+        if nested:
+            e.extra["images"]["nested"] = env.extra.get("images", {}).get("nested") or build_nested_images(podman=True, docker=False)[0]
         made.append(e)
         serve_module.serve(e, env.fake_image, detach=True, nested=nested)
         return Lux(e, e.api_key, e.tenant_id)
 
-    def nested_image() -> str | None:
-        return env.extra.get("images", {}).get("nested") or build_nested_images(podman=True, docker=False)[0]
     yield up
     for e in made:
         e.teardown()
