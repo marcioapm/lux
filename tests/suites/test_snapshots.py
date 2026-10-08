@@ -312,6 +312,24 @@ def test_resume_after_lost_on_the_same_host(lux, runners, hosts):
 
 
 
+def test_same_host_resume_has_a_new_container(lux, runners, hosts):
+    """A resume on the host the Run stopped on keeps its state volume there
+    (nothing restored) and starts in a new container, as on another host:
+    nothing written outside the volumes, /tmp included, is still there."""
+    runners.start(hosts[0])
+    script = "[ -e /tmp/mark ] && echo LEAK; date > /tmp/mark; echo run >> /data/count; echo count=$(wc -l < /data/count); sleep 300"
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", script,
+                                volumes=[{"name": "data", "path": "/data", "kind": "state"}]))
+    lux.wait_output(run_id, "count=1")
+    lux.run("stop", run_id, "--wait")
+    lux.run("resume", run_id, "--wait")
+    out = lux.wait_output(run_id, "count=2")
+    lux.run("cancel", run_id, "--wait")
+    assert "LEAK" not in out, out
+    assert lux.events(run_id, "volumes.local") and not lux.events(run_id, "volumes.restored")
+    assert not lux.events(run_id, "container.reused")
+
+
 def test_resume_elsewhere_right_after_stop(lux, runners, hosts, fake_image):
     """Resuming on another host immediately after a stop, possibly before
     the upload finished: the scheduler waits for the upload rather than
