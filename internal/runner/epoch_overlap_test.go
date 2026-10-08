@@ -36,7 +36,13 @@ func newOverlapFixture(t *testing.T) *finishFixture {
 func (f *finishFixture) sendEpoch1Report(t *testing.T) {
 	t.Helper()
 	f.p.event(context.Background(), "test.ping", nil)
-	deadline := time.Now().Add(5 * time.Second)
+	f.waitHeld(t)
+}
+
+// waitHeld waits for luxd to hold a report of holdEpoch's.
+func (f *finishFixture) waitHeld(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		f.mu.Lock()
 		n := len(f.held)
@@ -49,6 +55,34 @@ func (f *finishFixture) sendEpoch1Report(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// ackHeld answers every held report as luxd answers an accepted one.
+func (f *finishFixture) ackHeld() {
+	f.mu.Lock()
+	held := f.held
+	f.held, f.holdEpoch = nil, 0
+	f.reports = append(f.reports, held...)
+	f.mu.Unlock()
+	for _, fr := range held {
+		f.r.conn.dispatch(context.Background(), proto.Frame{Type: proto.MsgAck, ID: fr.ID})
+	}
+}
+
+// serveUploads has the runner upload blobs to a fake luxd that records
+// their ids in f.uploaded.
+func (f *finishFixture) serveUploads(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if r.Method == http.MethodPut {
+			f.mu.Lock()
+			f.uploaded = append(f.uploaded, path.Base(r.URL.Path))
+			f.mu.Unlock()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	f.r.api = newAPI(srv.URL, "token", "h1")
 }
 
 func (f *finishFixture) podmanLog() string {
@@ -68,16 +102,7 @@ func newRemovingFixture(t *testing.T) *finishFixture {
 	t.Helper()
 	f := newFinishFixture(t)
 	f.r.egress = &egress.Firewall{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-		if r.Method == http.MethodPut {
-			f.mu.Lock()
-			f.uploaded = append(f.uploaded, path.Base(r.URL.Path))
-			f.mu.Unlock()
-		}
-	}))
-	t.Cleanup(srv.Close)
-	f.r.api = newAPI(srv.URL, "token", "h1")
+	f.serveUploads(t)
 	if err := os.WriteFile(f.bin+".holdrm", nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -302,6 +327,33 @@ func TestNextEpochAbandonsAnUnackedExport(t *testing.T) {
 	}
 	for id, rec := range f.r.snapshotRecords() {
 		t.Errorf("snapshot record %s %+v of an abandoned export", id, rec)
+	}
+}
+
+// A snapshot.done already sent when the next epoch is assigned is not
+// abandoned, though luxd has not acked it yet: only an unsent snapshot is.
+// luxd's later ack makes it luxd's, and its blobs upload.
+func TestASentSnapshotDoneSurvivesTheNextAssign(t *testing.T) {
+	f := newFinishFixture(t)
+	f.r.egress = &egress.Firewall{}
+	f.serveUploads(t)
+	f.mu.Lock()
+	f.holdEpoch = 1
+	f.mu.Unlock()
+	f.release()
+	f.exitedAsSupervised(context.Background())
+	f.waitHeld(t)
+	p2 := f.assignEpoch(t, 2)
+	f.ackHeld()
+	if !f.p.waitDone(10 * time.Second) {
+		t.Fatal("epoch 1 never ended")
+	}
+	if got := f.types(); len(got) < 1 || got[0] != proto.MsgSnapshotDone {
+		t.Fatalf("reports %v, want epoch 1's snapshot.done first", got)
+	}
+	f.wantUploaded(t)
+	if !p2.waitDone(10 * time.Second) {
+		t.Fatal("epoch 2 never ended")
 	}
 }
 
