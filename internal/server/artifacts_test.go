@@ -146,7 +146,7 @@ func TestPublishedArtifactVersions(t *testing.T) {
 }
 
 // A forged report luxd could not store (a NUL in a quoted content type
-// parameter, a NUL in the description) is a refused ack with
+// parameter, a NUL in the description, blob id or sha256) is a refused ack with
 // artifacts.failed, not a failed report the runner would send forever.
 func TestPublishedArtifactUnstorableIsRefused(t *testing.T) {
 	s, _ := reportFixture(t)
@@ -154,7 +154,11 @@ func TestPublishedArtifactUnstorableIsRefused(t *testing.T) {
 	ctype := published("art_aaaaaaaaaaaaaaaa", "a.txt", "a", "")
 	ctype.ContentType = "text/plain; a=\"x\x00y\""
 	desc := published("art_bbbbbbbbbbbbbbbb", "b.txt", "b", "x\x00y")
-	for i, ap := range []proto.ArtifactPublished{ctype, desc} {
+	blob := published("art_cccccccccccccccc", "c.txt", "c", "")
+	blob.BlobID = "blob_\x00"
+	sum := published("art_dddddddddddddddd", "d.txt", "d", "")
+	sum.FileSHA256 = "\x00"
+	for i, ap := range []proto.ArtifactPublished{ctype, desc, blob, sum} {
 		f := reportPublished(t, s, "ha", "ra", 1, ap)
 		if f.Type != proto.MsgAck || !ackRefused(t, f) {
 			t.Fatalf("%s: %s %s, want a refused ack", ap.ID, f.Type, f.Data)
