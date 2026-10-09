@@ -1056,12 +1056,32 @@ func (s *Server) listRunsPage(ctx context.Context, p Principal, pg *paging, wher
 	return out, nil
 }
 
+// trailingCols scans a row's columns after the ones scanRun reads into dest.
+type trailingCols struct {
+	pgx.Row
+	dest []any
+}
+
+func (t trailingCols) Scan(d ...any) error { return t.Row.Scan(append(d, t.dest...)...) }
+
 func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) (*Run, error) {
 	var run *Run
 	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
 		var err error
-		run, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id = $1`, id))
-		if err != nil || !detail {
+		if !detail {
+			run, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id = $1`, id))
+			return err
+		}
+		// The submitter's key as this scope sees it: RLS shows a tenant its own keys only.
+		var sub submitterRow
+		run, err = scanRun(trailingCols{tx.QueryRow(ctx, `SELECT `+runColumns+`, r.submitted_by_key, r.submitted_by_email,
+				sk.name, sk.tenant_id, coalesce(sk.revoked_at IS NOT NULL, false)
+			FROM `+runsFrom+` LEFT JOIN api_keys sk ON sk.id = r.submitted_by_key WHERE r.id = $1`, id),
+			[]any{&sub.key, &sub.email, &sub.name, &sub.keyTenant, &sub.revoked}})
+		if err != nil {
+			return err
+		}
+		if run.SubmittedBy, err = s.submitter(ctx, tx, principal(ctx), sub); err != nil {
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT p.epoch, p.host_id, h.name, p.state, p.exit_code, p.exit_reason, p.stop_reason,
@@ -1136,30 +1156,50 @@ type RunSubmitter struct {
 	Email   string `json:"email,omitempty"`
 }
 
-// runSubmitter reads a Run the caller already sees. It reads api_keys as
-// the system, so an operator narrowed to a tenant still names operator
-// keys; a tenant gets only its own keys' names.
-func (s *Server) runSubmitter(ctx context.Context, p Principal, runID string) (*RunSubmitter, error) {
-	var key, email, name *string
-	var platform, revoked bool
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT r.submitted_by_key, r.submitted_by_email, k.name,
-				coalesce(k.tenant_id IS NULL, false), coalesce(k.revoked_at IS NOT NULL, false)
-			FROM runs r LEFT JOIN api_keys k ON k.id = r.submitted_by_key WHERE r.id = $1`, runID).
-			Scan(&key, &email, &name, &platform, &revoked)
-	})
-	if err != nil || key == nil && email == nil {
-		return nil, err
+type submitterRow struct {
+	key, email, name, keyTenant *string
+	revoked                     bool
+}
+
+// keyName is an API key's name, and whether it is revoked, as p may see
+// them: operators see every key, a tenant its own keys only. Both the
+// Run's submittedBy and the costs summary's keys use it.
+func keyName(p Principal, keyTenant *string, name string, revoked bool) (string, bool) {
+	if p.Operator || p.TenantID != "" && keyTenant != nil && *keyTenant == p.TenantID {
+		return name, revoked
 	}
-	sub := &RunSubmitter{Revoked: revoked}
-	if key != nil {
-		sub.KeyID = *key
+	return "", false
+}
+
+// submitter is who submitted a Run the caller already sees. An operator
+// narrowed to a tenant reads under that tenant's RLS, which hides platform
+// keys: their name is read as the system in the same transaction, which an
+// operator may always do.
+func (s *Server) submitter(ctx context.Context, tx pgx.Tx, p Principal, r submitterRow) (*RunSubmitter, error) {
+	if r.key == nil && r.email == nil {
+		return nil, nil
 	}
-	if email != nil {
-		sub.Email = *email
+	if r.key != nil && r.name == nil && p.Operator && p.TenantID != "" {
+		if _, err := tx.Exec(ctx, `SELECT set_config('lux.system', 'on', true)`); err != nil {
+			return nil, err
+		}
+		err := tx.QueryRow(ctx, `SELECT name, tenant_id, revoked_at IS NOT NULL FROM api_keys WHERE id = $1`, *r.key).Scan(&r.name, &r.keyTenant, &r.revoked)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('lux.system', '', true)`); err != nil {
+			return nil, err
+		}
 	}
-	if name != nil && (p.Operator || !platform) {
-		sub.KeyName = *name
+	sub := &RunSubmitter{}
+	if r.key != nil {
+		sub.KeyID = *r.key
+	}
+	if r.email != nil {
+		sub.Email = *r.email
+	}
+	if r.name != nil {
+		sub.KeyName, sub.Revoked = keyName(p, r.keyTenant, *r.name, r.revoked)
 	}
 	return sub, nil
 }
@@ -1167,9 +1207,6 @@ func (s *Server) runSubmitter(ctx context.Context, p Principal, runID string) (*
 func (s *Server) getRun(ctx context.Context, in *RunPath) (*runOutput, error) {
 	run, err := s.loadRun(ctx, principal(ctx).TenantID, in.ID, true)
 	if err != nil {
-		return nil, err
-	}
-	if run.SubmittedBy, err = s.runSubmitter(ctx, principal(ctx), run.ID); err != nil {
 		return nil, err
 	}
 	if resumable(run.State) {

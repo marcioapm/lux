@@ -426,8 +426,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 }
 
 // summaryKeys names each submitter in rows. The ids come from Runs the
-// caller sees; names are read as the system so an operator narrowed to a
-// tenant still names operator keys, and a tenant names only its own keys.
+// caller sees; keys are read as the system and named by keyName.
 func (s *Server) summaryKeys(ctx context.Context, p Principal, rows []CostSummaryRow) ([]CostKeyInfo, error) {
 	seen := map[string]bool{}
 	for _, r := range rows {
@@ -446,8 +445,8 @@ func (s *Server) summaryKeys(ctx context.Context, p Principal, rows []CostSummar
 		}
 	}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, name, tenant_id IS NULL, revoked_at IS NOT NULL, tenant_id IS NOT DISTINCT FROM $2
-			FROM api_keys WHERE id = ANY($1) ORDER BY id`, keyIDs, p.TenantID)
+		rows, err := tx.Query(ctx, `SELECT id, name, tenant_id, revoked_at IS NOT NULL
+			FROM api_keys WHERE id = ANY($1) ORDER BY id`, keyIDs)
 		if err != nil {
 			return err
 		}
@@ -455,13 +454,13 @@ func (s *Server) summaryKeys(ctx context.Context, p Principal, rows []CostSummar
 		for rows.Next() {
 			var k CostKeyInfo
 			var name string
-			var own bool
-			if err := rows.Scan(&k.ID, &name, &k.Operator, &k.Revoked, &own); err != nil {
+			var keyTenant *string
+			var revoked bool
+			if err := rows.Scan(&k.ID, &name, &keyTenant, &revoked); err != nil {
 				return err
 			}
-			if p.Operator || own {
-				k.Name = name
-			}
+			k.Operator = keyTenant == nil
+			k.Name, k.Revoked = keyName(p, keyTenant, name, revoked)
 			out = append(out, k)
 		}
 		return rows.Err()

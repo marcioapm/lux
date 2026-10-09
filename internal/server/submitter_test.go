@@ -94,4 +94,22 @@ func TestRunSubmitterNaming(t *testing.T) {
 	if code := getJSON(t, s, keys["t2"], "/v1/runs/r_rev", &run); code != http.StatusNotFound {
 		t.Errorf("another tenant's Run: %d", code)
 	}
+	// A key id of another tenant on t1's own Run: t1 gets the id, never t2's key name.
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, submitted_by_key) VALUES ('r_foreign', 't1', '{}', 'running', 'k2')`)
+	execSQL(t, s, ctx, `UPDATE api_keys SET revoked_at = now() WHERE id = 'k2'`)
+	run = Run{}
+	if code := getJSON(t, s, keys["t1"], "/v1/runs/r_foreign", &run); code != 200 || run.SubmittedBy == nil || *run.SubmittedBy != (RunSubmitter{KeyID: "k2"}) {
+		t.Errorf("foreign key id: %d %+v", code, run.SubmittedBy)
+	}
+	// An operator, also narrowed to t1, names every key.
+	for _, path := range []string{"/v1/runs/r_foreign", "/v1/runs/r_foreign?tenant=t1"} {
+		run = Run{}
+		if code := getJSON(t, s, keys["op"], path, &run); code != 200 || run.SubmittedBy == nil || *run.SubmittedBy != (RunSubmitter{KeyID: "k2", KeyName: "other", Revoked: true}) {
+			t.Errorf("operator %s: %d %+v", path, code, run.SubmittedBy)
+		}
+	}
+	run = Run{}
+	if code := getJSON(t, s, keys["op"], "/v1/runs/r_op?tenant=t1", &run); code != 200 || run.SubmittedBy == nil || *run.SubmittedBy != (RunSubmitter{KeyID: "ko", KeyName: "ops"}) {
+		t.Errorf("narrowed operator, operator key: %d %+v", code, run.SubmittedBy)
+	}
 }
