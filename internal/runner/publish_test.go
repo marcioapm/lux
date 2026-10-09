@@ -215,6 +215,32 @@ func TestForgedPublishRecordsAreIgnored(t *testing.T) {
 	}
 }
 
+// Run B's record naming Run A's published artifact (a forged id; records
+// are host-wide) leaves A's record and blob as they were, and reports
+// nothing.
+func TestPublishedRecordOfAnotherRunIsIgnored(t *testing.T) {
+	f := newFinishFixture(t)
+	a := stagePublished(t, f, "x.txt", "x")
+	rt, _ := os.OpenRoot(filepath.Join(f.r.cfg.DataDir, "rt"))
+	defer rt.Close()
+	f.p.runID = "runA"
+	recA, err := f.p.storePublished(rt, a.File, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.p.runID = "run1"
+	tailToEnd(f)
+	if got := f.published(); len(got) != 0 {
+		t.Fatalf("reports %+v", got)
+	}
+	if rec, err := f.r.readRecord(a.ID); err != nil || rec.RunID != "runA" || rec.Reported {
+		t.Fatalf("A's record: %+v %v", rec, err)
+	}
+	if s := blobContent(t, recA.Uploads[0].Path); s != "x" {
+		t.Fatalf("A's blob %q", s)
+	}
+}
+
 // A refused report deletes the artifact's blob and record: luxd never asks
 // for it.
 func TestPublishedArtifactRefused(t *testing.T) {
