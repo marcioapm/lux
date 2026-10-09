@@ -8,9 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net"
-	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -106,7 +104,7 @@ func (p *publisher) publish(c net.Conn) (proto.PublishReply, error) {
 	staged = true
 	ctype := req.ContentType
 	if ctype == "" {
-		ctype = detectType(req.Name, head.b)
+		ctype = proto.DetectContentType(req.Name, head.b)
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	a := proto.StagedArtifact{ID: id, Name: req.Name, Description: req.Description, ContentType: ctype,
@@ -135,14 +133,6 @@ func checkRequest(req proto.PublishRequest, max int64) error {
 		return fmt.Errorf("%d bytes: over the %d-byte limit", req.Size, max)
 	}
 	return nil
-}
-
-// detectType is the content type by the name's extension, else sniffed.
-func detectType(name string, head []byte) string {
-	if t := mime.TypeByExtension(path.Ext(name)); t != "" {
-		return t
-	}
-	return http.DetectContentType(head)
 }
 
 // headWriter keeps the first 512 bytes written (what sniffing reads).

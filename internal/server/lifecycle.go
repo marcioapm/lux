@@ -668,13 +668,15 @@ func insertSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, pla
 		// The latest version again: nothing is recorded, not even its blob,
 		// whose upload luxd then answers 404 (the runner counts it done). A
 		// blob id already recorded goes on to insertBlob's check.
-		var dup bool
-		if err := tx.QueryRow(ctx, `SELECT NOT EXISTS (SELECT 1 FROM blobs WHERE id = $1)
-			AND coalesce((SELECT sha256 FROM artifacts WHERE run_id = $2 AND md5(path) = md5($3) AND path = $3 ORDER BY version DESC LIMIT 1) = $4, false)`,
-			a.BlobID, runID, a.Path, a.FileSHA256).Scan(&dup); err != nil {
+		var blobKnown bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM blobs WHERE id = $1)`, a.BlobID).Scan(&blobKnown); err != nil {
 			return err
 		}
-		if dup {
+		latestSHA, latest, err := latestArtifact(ctx, tx, runID, a.Path)
+		if err != nil {
+			return err
+		}
+		if !blobKnown && latest > 0 && latestSHA == a.FileSHA256 {
 			continue
 		}
 		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, a.BlobID, "artifact", a.Path, a.Size, a.SHA256, sd.Manifest.SnapshotID); err != nil {
