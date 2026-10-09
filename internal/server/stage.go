@@ -116,7 +116,8 @@ func firstOf(ts ...*time.Time) time.Time {
 // transaction that changes the stage twice (a move's stopped, then
 // waiting) announces only where it leaves it, and one that rolls back
 // announces nothing. Without a Store.Tx transaction to defer to, it
-// announces at once.
+// announces at once. The caller's transaction must already hold the Run's
+// row (infraevents.go lock order, rule 5).
 func noteStage(ctx context.Context, tx pgx.Tx, runID string) error {
 	if store.BeforeCommit(tx, "stage:"+runID, func() error { return announceStage(ctx, tx, runID) }) {
 		return nil
@@ -126,9 +127,7 @@ func noteStage(ctx context.Context, tx pgx.Tx, runID string) error {
 
 // announceStage emits a stage event when the Run's stage differs from the
 // one last announced, and records it, so a report that changes nothing
-// (redelivered, late) announces nothing. Every caller's transaction already
-// holds the Run's row (each changed it, or locked it first), so the lock
-// here never waits, wherever in the transaction it runs.
+// (redelivered, late) announces nothing.
 func announceStage(ctx context.Context, tx pgx.Tx, runID string) error {
 	in := stageInputs{}
 	var tenantID string
