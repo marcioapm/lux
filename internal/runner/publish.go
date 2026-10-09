@@ -75,6 +75,12 @@ func (p *placement) onPublished(ctx context.Context, a proto.StagedArtifact) {
 		p.logf("published artifact: record", "id", a.ID, "err", err)
 		return
 	}
+	// Records are host-wide: one of another Run (an id forged by this
+	// Run's workload) or a snapshot's is not this publish's.
+	if rec != nil && (rec.RunID != p.runID || rec.Published == nil) {
+		p.logf("ignoring a lux.artifact record naming another record", "id", a.ID)
+		return
+	}
 	if rec == nil {
 		if rec, err = p.storePublished(root, staged, a); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
