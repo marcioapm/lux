@@ -279,16 +279,28 @@ export function LabelFilterPopover({ keys, initialKey, values, notSet, onApply, 
   const [picked, setPicked] = useState<string[]>([]);
   const [none, setNone] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  const addButton = useRef<HTMLButtonElement>(null);
+  const pop = useRef<HTMLDivElement>(null);
+  const wasOpen = useRef(false);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      // Focus goes back to the button that opened it, unless the user clicked elsewhere.
+      if (wasOpen.current && (document.activeElement === document.body || root.current?.contains(document.activeElement))) addButton.current?.focus();
+      wasOpen.current = false;
+      return;
+    }
+    wasOpen.current = true;
     setKey(initialKey ?? keys[0]?.key ?? "");
     setQuery("");
     setPicked([]);
     setNone(false);
+    // Into the dialog: the key picker, or the search when there is no key.
+    (pop.current?.querySelector<HTMLElement>(".label-filter-key .select-trigger") ?? pop.current?.querySelector<HTMLElement>(".label-filter-search-input"))?.focus();
     const onDoc = (e: MouseEvent) => {
       if (!root.current?.contains(e.target as Node)) setOpen(false);
     };
+    // The key Select stops its own Escape while its menu is open.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
@@ -321,11 +333,11 @@ export function LabelFilterPopover({ keys, initialKey, values, notSet, onApply, 
 
   return (
     <div className="label-filter" ref={root}>
-      <button type="button" className="filter-add" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen((o) => !o)}>
+      <button ref={addButton} type="button" className="filter-add" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen((o) => !o)}>
         <IconPlus size={12} /> {label}
       </button>
       {open && (
-        <div className="label-filter-pop" role="dialog" aria-label="Add a label filter">
+        <div ref={pop} className="label-filter-pop" role="dialog" aria-label="Add a label filter">
           <div className="label-filter-section">Label</div>
           {keys.length === 0 ? (
             <div className="muted label-filter-empty">No Run with cost in this range has a label.</div>

@@ -80,8 +80,11 @@ export function Select<V extends string>(props: SelectProps<V>) {
       return;
     }
     if (!open) return;
-    if (e.key === "Escape") setOpen(false);
-    else if (e.key === "ArrowDown") {
+    if (e.key === "Escape") {
+      // Closes this menu only, not a dialog the select sits in.
+      e.stopPropagation();
+      setOpen(false);
+    } else if (e.key === "ArrowDown") {
       e.preventDefault();
       setActive((i) => step(i, 1));
     } else if (e.key === "ArrowUp") {
