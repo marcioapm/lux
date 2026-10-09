@@ -50,6 +50,8 @@ type placement struct {
 	prev *placement
 	// nudge wakes waitPrevious to re-check a stop or a fence.
 	nudge chan struct{}
+	// startingDue asks reportStarting for a report (progress); made by run.
+	startingDue chan struct{}
 
 	mu      sync.Mutex
 	state   *runState
@@ -247,6 +249,36 @@ func (p *placement) mark(key string) {
 	_ = p.saveStateLocked()
 }
 
+// progress marks a start phase ("" for none) and asks reportStarting to
+// tell luxd, without waiting for it.
+func (p *placement) progress(key string) {
+	if key != "" {
+		p.mark(key)
+	}
+	select {
+	case p.startingDue <- struct{}{}:
+	default: // a report is already due; it carries this mark too
+	}
+}
+
+// reportStarting sends a starting status each time progress asks, until
+// the placement ends. One goroutine sends them, so they reach luxd in
+// order; each carries every mark so far, so asks made while one is sent
+// fold into the next, and a report luxd misses loses no mark. luxd ignores
+// a starting report once the placement runs.
+func (p *placement) reportStarting(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.done:
+			return
+		case <-p.startingDue:
+		}
+		_ = p.report(ctx, proto.MsgStatus, proto.Status{State: "starting", Times: p.times()})
+	}
+}
+
 func (p *placement) times() map[string]int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -424,7 +456,9 @@ func (p *placement) run(ctx context.Context) {
 	}
 	p.restoreState()
 	p.setPhase("starting")
-	go p.report(ctx, proto.MsgStatus, proto.Status{State: "starting"})
+	p.startingDue = make(chan struct{}, 1)
+	go p.reportStarting(ctx)
+	p.progress("")
 
 	// Until the container starts, a stop cancels whatever is under way.
 	startCtx, cancelStart := context.WithCancel(ctx)
@@ -469,7 +503,7 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	p.state.Image = image
-	p.mark("imageReady")
+	p.progress("imageReady")
 
 	info, err := p.r.pm.ImageInspect(startCtx, image)
 	if err != nil {
@@ -506,7 +540,7 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	closeImage()
-	p.mark("volumesRestored")
+	p.progress("volumesRestored")
 	if err := p.materializeRepos(startCtx, sp, p.user); err != nil {
 		fail("git", err)
 		return
@@ -517,6 +551,8 @@ func (p *placement) run(ctx context.Context) {
 	for _, res := range syncFailed {
 		p.reportSync(startCtx, res, "")
 	}
+	// Clones and a sync's fetches are done (at once without repositories).
+	p.progress("reposReady")
 
 	if p.pendingStop() != "" {
 		fail("stop", nil)
@@ -539,7 +575,7 @@ func (p *placement) run(ctx context.Context) {
 	if p.isStale() {
 		p.kill(ctx)
 	}
-	p.mark("containerStarted")
+	p.progress("containerStarted")
 	p.state.Phase = "started"
 	_ = p.saveState()
 	p.mu.Lock()
