@@ -14,7 +14,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 
 import psycopg
 import pytest
-from playwright.sync_api import expect
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, expect
 
 from conftest import generic
 from env import ALPINE_IMAGE, wait_until
@@ -569,12 +569,26 @@ def _cents(amount) -> str:
     return f"${Decimal(amount).quantize(Decimal('0.01'), ROUND_HALF_EVEN)}"
 
 
+def _legend_label(scope, label):
+    """A chart legend entry's label, by its exact text (the entry also holds its total)."""
+    return scope.locator(".tschart-legend-label", has_text=re.compile(rf"^{re.escape(label)}$"))
+
+
+def _legend_item(legend, label):
+    # has= is matched inside each item, so it starts from the page, not from legend.
+    return legend.locator(".tschart-legend-item", has=_legend_label(legend.page, label))
+
+
 def _ui_matches_api(page, locator, api_cents, what):
     """The UI's figure equals the API's at cents, both read again until they
-    agree: the fake plugin's open AI line grows between two reads."""
+    agree: the fake plugin's open AI line grows between two reads. A figure
+    not rendered yet after the reload is a retry, not a failure."""
     def same():
         page.reload()
-        ui = locator.inner_text(timeout=15_000)
+        try:
+            ui = locator.inner_text(timeout=15_000)
+        except PlaywrightTimeoutError:
+            return False
         return ui == api_cents()
     wait_until(same, 120, 2, f"{what}: the panel never matched the API")
 
@@ -595,12 +609,14 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     def check(theme):
         expect(card.locator(".tschart-plot canvas")).to_have_count(1, timeout=15_000)
         # Families read as on the Run page: the describe's displayName, not the key.
+        # A legend entry is its label, then its range total: the label has its own element.
         legend = card.locator(".tschart-legend")
-        expect(legend.get_by_text("Compute", exact=True)).to_have_count(1)
-        expect(legend.get_by_text("AI models", exact=True)).to_have_count(1)
-        expect(legend.get_by_text("ai", exact=True)).to_have_count(0)
+        expect(_legend_label(legend, "Compute")).to_have_count(1)
+        expect(_legend_label(legend, "AI models")).to_have_count(1)
+        expect(_legend_label(legend, "ai")).to_have_count(0)
+        expect(legend.get_by_role("button", name=re.compile(r"^Compute\s*<?\$\d"))).to_have_count(1)
         # Each family has its own colour: Compute's swatch is not AI models'.
-        swatch = lambda label: legend.get_by_role("button", name=label, exact=True).locator(".tschart-key").evaluate("e => getComputedStyle(e).backgroundColor")
+        swatch = lambda label: _legend_item(legend, label).locator(".tschart-key").evaluate("e => getComputedStyle(e).backgroundColor")
         compute, ai = swatch("Compute"), swatch("AI models")
         assert compute != ai and "0, 0, 0, 0" not in compute + ai, (theme, compute, ai)
         # The KPI strip: a dollar total, Compute and External, the peak hour.
@@ -627,8 +643,8 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     panel.get_by_role("radio", name="External", exact=True).click()
     expect(page).to_have_url(re.compile(r"[?&]cost=external(&|$)"))
     expect(card.locator(".kpi.is-muted")).to_contain_text("Compute")
-    expect(card.locator(".tschart-legend").get_by_text("Compute", exact=True)).to_have_count(0)
-    expect(card.locator(".tschart-legend").get_by_text("AI models", exact=True)).to_have_count(1)
+    expect(_legend_label(card.locator(".tschart-legend"), "Compute")).to_have_count(0)
+    expect(_legend_label(card.locator(".tschart-legend"), "AI models")).to_have_count(1)
 
     # Every Day: the top bar's step, carried on links; the panel and the trends are daily.
     page.goto(env.luxd_url + "/?range=7d&cost=external")
@@ -656,7 +672,7 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     by_app = panel.locator("section.card", has=page.get_by_role("heading", name="By app", exact=True))
     app_row = by_app.get_by_role("row").filter(has_text="e2e-app")
     expect(app_row).to_have_count(1, timeout=15_000)
-    expect(card.locator(".tschart-legend").get_by_text("e2e-app", exact=True)).to_have_count(1)
+    expect(_legend_label(card.locator(".tschart-legend"), "e2e-app")).to_have_count(1)
 
     def app_usd():
         totals = lux.api("/v1/costs?since=24h&group=label:app").json()["totals"]
