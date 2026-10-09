@@ -37,7 +37,14 @@ export function parseBreakdown(v: string | null, showTenant: boolean): Breakdown
 
 /** The ?by= value of a breakdown: null for Family (the default). */
 export function breakdownParam(b: Breakdown): string | null {
-  return b.kind === "family" ? null : b.kind === "label" ? (b.key ? `label:${b.key}` : "label") : b.kind;
+  switch (b.kind) {
+    case "family":
+      return null;
+    case "label":
+      return b.key ? `label:${b.key}` : "label";
+    default:
+      return b.kind;
+  }
 }
 
 /** The summary group of a breakdown (its label key resolved). */
@@ -98,7 +105,6 @@ function sum(amounts: string[]): string | null {
   return amounts.length ? sumMoney(amounts) : null;
 }
 
-/** Appends v to m's list at k. */
 export function push<K, V>(m: Map<K, V[]>, k: K, v: V): void {
   const a = m.get(k);
   if (a) a.push(v);
@@ -113,10 +119,19 @@ function byCurrency<T extends { currency: string }>(rows: T[]): Map<string, T[]>
 
 /** The /v1/costs family filter that keeps what show counts. */
 export function showFamily(show: CostShow): { family?: string; nofamily?: string } {
-  return show === "compute" ? { family: COMPUTE } : show === "external" ? { nofamily: COMPUTE } : {};
+  switch (show) {
+    case "compute":
+      return { family: COMPUTE };
+    case "external":
+      return { nofamily: COMPUTE };
+    default:
+      return {};
+  }
 }
 
-const familyOf = (r: CostSummaryRow) => r.group?.family ?? "(none)";
+function familyOf(r: CostSummaryRow): string {
+  return r.group?.family ?? "(none)";
+}
 
 /** Rows grouped by family summed exactly per currency, counting only the families show keeps. */
 export function shownTotals(rows: CostSummaryRow[], show: CostShow): MoneyTotal[] {
@@ -161,18 +176,25 @@ export interface FamilyChart {
 
 /** Families in the order the panel shows them: compute first, then by key. */
 export function familyOrder(a: string, b: string): number {
-  return a === COMPUTE ? -1 : b === COMPUTE ? 1 : a.localeCompare(b);
+  if (a === COMPUTE) return -1;
+  if (b === COMPUTE) return 1;
+  return a.localeCompare(b);
 }
 
-/** One chart per currency: a series per family show keeps, aligned on every bucket of the range. */
-export function familyCharts(d: CostSummary | undefined, interval: CostInterval, show: CostShow): FamilyChart[] {
-  if (!d?.series?.length) return [];
-  // Every bucket of the range: one with no row is a gap, not a zero.
+// Every bucket of the range: one with no row is a gap, not a zero.
+function bucketTimes(d: { from: string; to: string }, interval: CostInterval): number[] {
   const step = INTERVAL_HOURS[interval] * 3600;
   const start = Math.floor(Date.parse(d.from) / 1000 / step) * step;
   const end = Math.floor(Date.parse(d.to) / 1000);
   const x: number[] = [];
   for (let t = start; t < end; t += step) x.push(t);
+  return x;
+}
+
+/** One chart per currency: a series per family show keeps, aligned on every bucket of the range. */
+export function familyCharts(d: CostSummary | undefined, interval: CostInterval, show: CostShow): FamilyChart[] {
+  if (!d?.series?.length) return [];
+  const x = bucketTimes(d, interval);
   const index = new Map(x.map((t, i) => [t, i]));
   // Label and colour as on the Run page: displayName and hint from the describe.
   const meta = new Map((d.families ?? []).map((f) => [f.family, f]));
@@ -259,7 +281,9 @@ export interface Change {
   ratio: number | null;
 }
 
-const negate = (a: string) => (a.startsWith("-") ? a.slice(1) : `-${a}`);
+function negate(a: string): string {
+  return a.startsWith("-") ? a.slice(1) : `-${a}`;
+}
 
 /** The change per currency from the previous window; a currency missing there has no change. */
 export function changes(now: MoneyTotal[], before: MoneyTotal[]): Change[] {
@@ -339,11 +363,17 @@ export interface Band {
 
 /** A band's colour: the design system's band slots in rank order (never compute's), Other and (none) neutral. */
 function bandColorOf(id: string, rank: number): string {
-  return id === NONE ? NONE_BAND_COLOR : id === OTHER ? OTHER_BAND_COLOR : bandColor(rank);
+  if (id === NONE) return NONE_BAND_COLOR;
+  if (id === OTHER) return OTHER_BAND_COLOR;
+  return bandColor(rank);
 }
 
 /** Ties by value in code-unit order, as luxd breaks them (COLLATE "C" on ASCII). */
-const byValue = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+function byValue(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
 
 /**
  * Per currency, the bands a breakdown stacks: the values costing the most
@@ -370,10 +400,14 @@ export function breakdownBands(rows: CostSummaryRow[], dim: string, show: CostSh
   return out;
 }
 
-const bandOf = (bands: Band[], value: string) => bands.find((b) => b.values.includes(value));
+function bandOf(bands: Band[], value: string): Band | undefined {
+  return bands.find((b) => b.values.includes(value));
+}
 
 /** A row's value of dim: FOLDED for luxd's fold, whatever it reads; NONE when absent. */
-const valueOf = (r: CostSummaryRow, dim: string) => (r.other ? FOLDED : (r.group?.[dim] ?? NONE));
+function valueOf(r: CostSummaryRow, dim: string): string {
+  return r.other ? FOLDED : (r.group?.[dim] ?? NONE);
+}
 
 export interface BreakdownChart {
   currency: string;
@@ -390,11 +424,7 @@ export interface BreakdownChart {
  */
 export function breakdownCharts(d: CostSummary | undefined, dim: string, interval: CostInterval, bands: Map<string, Band[]>): BreakdownChart[] {
   if (!d?.series?.length) return [];
-  const step = INTERVAL_HOURS[interval] * 3600;
-  const start = Math.floor(Date.parse(d.from) / 1000 / step) * step;
-  const end = Math.floor(Date.parse(d.to) / 1000);
-  const x: number[] = [];
-  for (let t = start; t < end; t += step) x.push(t);
+  const x = bucketTimes(d, interval);
   const index = new Map(x.map((t, i) => [t, i]));
   const out: BreakdownChart[] = [];
   for (const [currency, rows] of byCurrency(d.series)) {
@@ -470,7 +500,9 @@ export function runsPerFamily(rows: CostSummaryRow[]): Map<string, number> | und
   return out;
 }
 
-export const familyCurrency = (family: string, currency: string) => `${family} ${currency}`;
+export function familyCurrency(family: string, currency: string): string {
+  return `${family} ${currency}`;
+}
 
 /** Per currency, the band that cost the most in the peak bucket, and its share of that bucket. Series rows grouped by `dim`, Show applied by the query. */
 export function peakBands(ps: Peak[], d: CostSummary | undefined, dim: string, bands: Map<string, Band[]>): Map<string, { band: Band; share: number | null }> {
