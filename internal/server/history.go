@@ -376,8 +376,8 @@ var (
 			"round(avg(placements))::int", "avg(alloc_cpus)", "avg(alloc_mem)::bigint"}, procAggs...),
 		match: "d.host_id = s.host_id"}
 	placementRollup = rollup{table: "placement_samples", keys: []string{"run_id", "epoch", "tenant_id"},
-		cols: []string{"cpu_seconds", "mem_bytes", "disk_bytes", "pids", "net_rx", "net_tx"},
-		aggs: []string{"max(cpu_seconds)", "avg(mem_bytes)::bigint", "max(disk_bytes)", "round(avg(pids))::int", "max(net_rx)", "max(net_tx)"},
+		cols:  []string{"cpu_seconds", "mem_bytes", "disk_bytes", "pids", "net_rx", "net_tx"},
+		aggs:  []string{"max(cpu_seconds)", "avg(mem_bytes)::bigint", "max(disk_bytes)", "round(avg(pids))::int", "max(net_rx)", "max(net_tx)"},
 		match: "d.run_id = s.run_id AND d.epoch = s.epoch"}
 	// Runs and hosts by state are the bucket's last sample; stored bytes
 	// are levels.
@@ -521,7 +521,7 @@ func procColumnSQL(f func(i int, c procColumn) string) string {
 }
 
 var (
-	procCols   = procColumnSQL(func(_ int, c procColumn) string { return c.name })
+	procCols = procColumnSQL(func(_ int, c procColumn) string { return c.name })
 	// The raw sample inserts, with the process columns' placeholders.
 	insertHostSample = `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem, ` + procCols + `)
 		SELECT $1, 0, now(), $2, $3, $4, count(*), coalesce(sum((pl.resources->>'cpus')::float8), 0), coalesce(sum((pl.resources->>'memory')::int8), 0),
