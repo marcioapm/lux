@@ -83,9 +83,9 @@ const costScopedSQL = `scoped AS (
 		FROM cost_hourly c JOIN runs r ON r.id = c.run_id LEFT JOIN pools cp ON cp.id = c.pool_id
 		WHERE c.run_id IS NOT NULL AND c.hour >= $1 AND c.hour < $2
 			AND ($3 = '' OR c.family = $3)
-			AND NOT EXISTS (SELECT 1 FROM jsonb_each($4::jsonb) f
-				WHERE (r.labels->>f.key) IN (SELECT jsonb_array_elements_text(f.value)) IS NOT TRUE)
-			AND NOT EXISTS (SELECT 1 FROM unnest($5::text[]) k WHERE r.labels ? k)
+			AND ($4::jsonb = '{}' OR NOT EXISTS (SELECT 1 FROM jsonb_each($4::jsonb) f
+				WHERE (r.labels->>f.key) IN (SELECT jsonb_array_elements_text(f.value)) IS NOT TRUE))
+			AND (cardinality($5::text[]) = 0 OR NOT EXISTS (SELECT 1 FROM unnest($5::text[]) k WHERE r.labels ? k))
 	)`
 
 // costTx runs read in a read-only snapshot under the principal's RLS scope.
@@ -511,8 +511,9 @@ func (s *Server) costLabels(ctx context.Context, in *costLabelsInput) (*costLabe
 	out := &costLabelsOutput{}
 	out.Body.From, out.Body.To, out.Body.Keys = from, to, []CostLabelKey{}
 	err = s.costTx(ctx, p, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `WITH `+costScopedSQL+`
-			SELECT k, count(DISTINCT run_id)::int FROM scoped, jsonb_object_keys(labels) k
+		// Each Run's labels once, not once per cost hour and family.
+		rows, err := tx.Query(ctx, `WITH `+costScopedSQL+`, labelled AS (SELECT DISTINCT run_id, labels FROM scoped)
+			SELECT k, count(*)::int FROM labelled, jsonb_object_keys(labels) k
 			GROUP BY k ORDER BY 2 DESC, 1`, from, to, "", want, absent)
 		if err != nil {
 			return err

@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -49,6 +51,9 @@ func TestCostSummaryLabelFilters(t *testing.T) {
 		{"&nolabel=app", map[string]string{"r4 USD": "100"}},
 		{"&nolabel=app&nolabel=team", map[string]string{"r4 USD": "100"}},
 		{"&label=team=beta&nolabel=note", map[string]string{"r3 USD": "10"}},
+		// nolabel removes a Run the label matched.
+		{"&label=team=alpha&nolabel=note", map[string]string{}},
+		{"&label=app=jervasion&label=app=dude&nolabel=note", map[string]string{"r3 USD": "10"}},
 		// A value with = , and non-ASCII is a value, split at the first =.
 		{"&label=" + url.QueryEscape("note=a=b,c ünï"), map[string]string{"r1 USD": "2", "r1 EUR": "2.5"}},
 		{"&label=" + url.QueryEscape("note=a=b"), map[string]string{}},
@@ -77,6 +82,26 @@ func TestCostSummaryLabelFilters(t *testing.T) {
 	for _, q := range []string{"&label=app", "&label=" + url.QueryEscape("bad key=x"), "&label=-x=1", "&nolabel=" + url.QueryEscape("a b"), "&nolabel="} {
 		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", q, code)
+		}
+	}
+	// At most 64 filters, label and nolabel together, on both endpoints.
+	filters := func(n int) string {
+		var b strings.Builder
+		for i := range n {
+			if i%2 == 0 {
+				fmt.Fprintf(&b, "&label=app=v%d", i)
+			} else {
+				fmt.Fprintf(&b, "&nolabel=k%d", i)
+			}
+		}
+		return b.String()
+	}
+	for _, path := range []string{costPath(""), "/v1/costs/labels" + costPath("")[len("/v1/costs"):]} {
+		if code := getJSON(t, s, keys["t1"], path+filters(64), &got); code != http.StatusOK {
+			t.Errorf("64 filters %s: status %d", path, code)
+		}
+		if code := getJSON(t, s, keys["t1"], path+filters(65), &got); code != http.StatusBadRequest {
+			t.Errorf("65 filters %s: status %d, want 400", path, code)
 		}
 	}
 	// Grouped by a label: Runs without it are (none), never dropped.
@@ -118,6 +143,11 @@ func TestCostLabels(t *testing.T) {
 	got = labelsBody{}
 	if code := getJSON(t, s, keys["t1"], path(""), &got); code != http.StatusOK || slices.ContainsFunc(got.Keys, func(k CostLabelKey) bool { return k.Key == "secret" }) {
 		t.Errorf("t1 sees t2's labels: %+v", got.Keys)
+	}
+	// A tenant key's ?tenant= is ignored: still its own.
+	got = labelsBody{}
+	if code := getJSON(t, s, keys["t1"], path("&tenant=t2"), &got); code != http.StatusOK || !slices.Equal(got.Keys, want) {
+		t.Errorf("t1 asking for t2: %d %+v", code, got.Keys)
 	}
 	got = labelsBody{}
 	if code := getJSON(t, s, keys["op"], path(""), &got); code != http.StatusOK || !slices.Contains(got.Keys, CostLabelKey{"secret", 1}) {
