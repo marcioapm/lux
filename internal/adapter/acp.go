@@ -209,13 +209,17 @@ func (a *ACP) Command(cfg proto.ShimConfig) ([]string, error) {
 }
 
 // ownPort is the value of a command's last --port N or --port=N argument,
-// if it is a TCP port.
+// if it is a TCP port. A last --port with no value or a bad one is no port:
+// an earlier --port does not stand in for it.
 func ownPort(argv []string) (int, bool) {
 	val := ""
 	for i, s := range argv {
 		switch {
-		case s == "--port" && i+1 < len(argv):
-			val = argv[i+1]
+		case s == "--port":
+			val = ""
+			if i+1 < len(argv) {
+				val = argv[i+1]
+			}
 		case strings.HasPrefix(s, "--port="):
 			val = strings.TrimPrefix(s, "--port=")
 		}

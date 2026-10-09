@@ -1230,7 +1230,8 @@ func TestOpenCodeCommand(t *testing.T) {
 	if len(argv) != 6 || argv[2] != "--port" || argv[4] != "--hostname" || argv[5] != "127.0.0.1" || a.bus == nil || a.bus.dir != "/w" {
 		t.Fatalf("argv %q", argv)
 	}
-	for _, cmd := range [][]string{{"opencode", "acp", "--port", "5000"}, {"my-agent"}, {"wrapper", "--acp", "--readiness-port", "4097"}, {"wrapper", "--port", "x"}} {
+	for _, cmd := range [][]string{{"opencode", "acp", "--port", "5000"}, {"my-agent"}, {"wrapper", "--acp", "--readiness-port", "4097"}, {"wrapper", "--port", "x"},
+		{"wrapper", "--port", "5000", "--port"}, {"wrapper", "--port=5000", "--port=x"}} {
 		b := NewOpenCode()
 		argv, _ := b.Command(proto.ShimConfig{Command: cmd})
 		observed := b.bus != nil && b.bus.port == 5000 && b.steerBus() == nil
