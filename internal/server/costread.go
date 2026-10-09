@@ -135,7 +135,7 @@ type CostSummaryBody struct {
 	Families    []CostFamilyInfo `json:"families,omitempty" doc:"Grouped by family: each family in totals, with the displayName and color byFamily has on a Run's cost."`
 	Runs        []CostRunInfo    `json:"runs,omitempty" doc:"Grouped by run: each Run in totals with its name and labels."`
 	Keys        []CostKeyInfo    `json:"keys,omitempty" doc:"Grouped by key: each submitter in totals. (none) is Runs from before luxd recorded who submitted them."`
-	OtherCount  map[string]int   `json:"otherCount,omitempty" doc:"With top: per currency, how many values the other row holds; a currency with none folded is absent."`
+	OtherCount  map[string]int   `json:"otherCount,omitempty" doc:"With top: per currency, how many values the other: true rows hold; a currency with none folded is absent."`
 }
 
 type CostKeyInfo struct {

@@ -1018,10 +1018,10 @@ operators), and also:
   keys must all match (AND);
 - `nolabel`: a key, repeatable: only Runs without that label;
 - `interval`: `hour` or `day`, to return a series instead of totals;
-- `top`: 1 to 50, with a `group`: fold the first group to its top N values
-  (below);
-- `rank`: with `top`, `all` (default), `compute` or `external`; a 400 when
-  it counts none of the families `family`/`nofamily` keep;
+- `top`: 1 to 50 (else 422), with a `group`: fold the first group to its
+  top N values (below);
+- `rank`: with `top`, `all` (default), `compute` or `external` (else 422);
+  a 400 when it counts none of the families `family`/`nofamily` keep;
 - `runs=true`: without `top`, each `totals` row carries `runs` too (the
   Runs with any cost under its first-group value).
 
@@ -1038,7 +1038,7 @@ never folded and does not count toward N. The second group
 (`family`, `run`, ...) is kept as it is under the fold. Each `totals` row
 then carries `runs`: the Runs with cost that `rank` counts under that
 first-group value (across the second group, so the same on each of its
-rows). `otherCount: {currency: n}` says how many values the `other` rows
+rows). `otherCount: {currency: n}` says how many values the `other: true` rows
 hold, per currency; a currency with nothing folded is absent. The 10,000-row
 limit applies to the folded rows, so a breakdown of any cardinality is
 bounded by N + 2 values per bucket. With `group=run`, `runs` names only the
