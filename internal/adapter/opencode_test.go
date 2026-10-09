@@ -390,9 +390,12 @@ func onBus(t *testing.T, a *ACP, ev string) {
 
 const ocIdle = `{"type":"session.idle","properties":{"sessionID":"` + ocSession + `"}}`
 
-// ocStatus is a session.status bus event for the Run's session.
 func ocStatus(typ string) string {
-	return `{"type":"session.status","properties":{"sessionID":"` + ocSession + `","status":{"type":"` + typ + `"}}}`
+	return ocSessionStatus(ocSession, typ)
+}
+
+func ocSessionStatus(session, typ string) string {
+	return `{"type":"session.status","properties":{"sessionID":"` + session + `","status":{"type":"` + typ + `"}}}`
 }
 
 func ocWithBus(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
@@ -829,18 +832,15 @@ func TestOpenCodeOtherSessionsDoNotChangeActivity(t *testing.T) {
 	b.setLoop(false)
 	w.resolve(first, ocResult)
 	sink.waitLast(t, "idle")
-	other := func(session, typ string) string {
-		return `{"type":"session.status","properties":{"sessionID":"` + session + `","status":{"type":"` + typ + `"}}}`
-	}
-	onBus(t, a, other("ses_other", "busy"))
-	onBus(t, a, other("ses_child", "retry"))
+	onBus(t, a, ocSessionStatus("ses_other", "busy"))
+	onBus(t, a, ocSessionStatus("ses_child", "retry"))
 	onBus(t, a, ocStatus("compacting"))
 	onBus(t, a, `{"type":"session.idle","properties":{"sessionID":"ses_other"}}`)
 	if l := sink.lines(); l[len(l)-1] != "idle" || len(l) != 5 {
 		t.Fatalf("after other sessions' status: %q", l)
 	}
 	onBus(t, a, ocStatus("busy"))
-	onBus(t, a, other("ses_other", "idle"))
+	onBus(t, a, ocSessionStatus("ses_other", "idle"))
 	onBus(t, a, ocIdle)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy", "idle")
 }
@@ -900,7 +900,13 @@ type nthEndSink struct {
 }
 
 func newNthEndSink(n int) *nthEndSink {
-	return &nthEndSink{inputSink: &inputSink{}, n: n, entered: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
+	return &nthEndSink{
+		inputSink: &inputSink{},
+		n:         n,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+		finished:  make(chan struct{}),
+	}
 }
 
 func (s *nthEndSink) Event(typ string, v any) {
@@ -918,7 +924,6 @@ func (s *nthEndSink) Event(typ string, v any) {
 	s.inputSink.Event(typ, v)
 }
 
-// await waits for ch to close, or fails.
 func await(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
 	select {
