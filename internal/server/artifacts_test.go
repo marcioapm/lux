@@ -1,0 +1,261 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/store"
+)
+
+func published(id, name, content, description string) proto.ArtifactPublished {
+	sum := sha256.Sum256([]byte(content))
+	return proto.ArtifactPublished{ID: id, Description: description, Artifact: proto.Artifact{
+		BlobInfo: proto.BlobInfo{BlobID: "blob-" + id, Size: int64(len(content)), SHA256: sha(content)},
+		Path:     proto.PublishedPrefix + name, ContentType: "text/markdown",
+		FileSize: int64(len(content)), FileSHA256: hex.EncodeToString(sum[:])}}
+}
+
+// sha is the blob's sha256: in these tests a blob's bytes are its content.
+func sha(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+func reportPublished(t *testing.T, s *Server, hostID, runID string, epoch int, ap proto.ArtifactPublished) proto.Frame {
+	t.Helper()
+	return s.handleReport(context.Background(), hostID, proto.Frame{Type: proto.MsgArtifactPublished, ID: 1, RunID: runID, Epoch: epoch,
+		Data: proto.Marshal(ap)})
+}
+
+func uploadBlob(t *testing.T, s *Server, hostName, blobID, content string) int {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut, "/runner/v1/blobs/"+blobID+"?host="+hostName, bytes.NewReader([]byte(content)))
+	req.SetPathValue("id", blobID)
+	req.Header.Set("Authorization", "Bearer host-secret")
+	rec := httptest.NewRecorder()
+	s.wrap(s.serveBlobUpload)(rec, req)
+	return rec.Code
+}
+
+type listedArtifact struct {
+	ID, Path, Description string
+	Version               int
+}
+
+func listed(t *testing.T, s *Server, key, runID, query string) []listedArtifact {
+	t.Helper()
+	code, body := callJSON(t, s, key, http.MethodGet, "/v1/runs/"+runID+"/artifacts"+query)
+	if code != http.StatusOK {
+		t.Fatalf("list: %d %v", code, body)
+	}
+	var out []listedArtifact
+	for _, a := range body["artifacts"].([]any) {
+		m := a.(map[string]any)
+		out = append(out, listedArtifact{m["id"].(string), m["path"].(string), m["description"].(string), int(m["version"].(float64))})
+	}
+	return out
+}
+
+func publishedEvents(t *testing.T, s *Server, runID string) []map[string]any {
+	t.Helper()
+	ctx := context.Background()
+	var out []map[string]any
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT data FROM run_events WHERE run_id = $1 AND type = 'artifact.published' ORDER BY id`, runID)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, pgx.RowTo[map[string]any])
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// A published artifact is recorded under the shim's id, with its
+// description; publishing the name again is version 2. The listing has
+// each path's latest version, versions=all every one. A report sent again
+// is acked and records nothing more; one naming the same id with another
+// blob is refused.
+func TestPublishedArtifactVersions(t *testing.T) {
+	s, _ := reportFixture(t)
+	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'running' WHERE id = 'ra'`)
+	key := apiKey(t, s, new("t1"), "read")
+	v1 := published("art_aaaaaaaaaaaaaaaa", "notes.md", "one", "first")
+	v2 := published("art_bbbbbbbbbbbbbbbb", "notes.md", "two", "second")
+	for _, ap := range []proto.ArtifactPublished{v1, v2, v1} {
+		if f := reportPublished(t, s, "ha", "ra", 1, ap); f.Type != proto.MsgAck || ackRefused(t, f) {
+			t.Fatalf("report %s: %s %s", ap.ID, f.Type, f.Data)
+		}
+	}
+	got := listed(t, s, key, "ra", "")
+	want := []listedArtifact{
+		{v2.ID, "/.lux/artifacts/notes.md", "second", 2},
+		{"", "/out/a.txt", "", 1},
+	}
+	if len(got) != 2 {
+		t.Fatalf("listed %+v", got)
+	}
+	got[1].ID = ""
+	if !slices.Equal(got, want) {
+		t.Fatalf("listed %+v, want %+v", got, want)
+	}
+	all := listed(t, s, key, "ra", "?versions=all")
+	if len(all) != 3 || all[0].ID != v1.ID || all[0].Version != 1 || all[1].ID != v2.ID || all[1].Version != 2 {
+		t.Fatalf("all versions %+v", all)
+	}
+	forged := v1
+	forged.BlobID = "blob-other"
+	if f := reportPublished(t, s, "ha", "ra", 1, forged); f.Type != proto.MsgAck || !ackRefused(t, f) {
+		t.Fatalf("same id, other blob: %s %s, want a refused ack", f.Type, f.Data)
+	}
+	// rb's report naming ra's blob is refused too, and stores nothing.
+	stolen := published("art_cccccccccccccccc", "x", "one", "")
+	stolen.BlobID = v1.BlobID
+	if f := reportPublished(t, s, "hb", "rb", 1, stolen); f.Type != proto.MsgAck || !ackRefused(t, f) {
+		t.Fatalf("another Run's blob: %s %s, want a refused ack", f.Type, f.Data)
+	}
+	if n := len(listed(t, s, key, "ra", "?versions=all")); n != 3 {
+		t.Fatalf("%d artifacts after refusals", n)
+	}
+	for _, bad := range []proto.ArtifactPublished{published("nope", "x", "1", ""), published("art_dddddddddddddddd", "../x", "1", "")} {
+		if f := reportPublished(t, s, "ha", "ra", 1, bad); f.Type != proto.MsgAck || !ackRefused(t, f) {
+			t.Fatalf("malformed %+v: %s %s", bad, f.Type, f.Data)
+		}
+	}
+}
+
+// artifact.published is added once per artifact, when its blob reaches S3:
+// not on the report, not on an upload sent again. A globbed artifact's
+// upload adds it too.
+func TestArtifactPublishedEventOnUpload(t *testing.T) {
+	s, ctx := reportFixture(t)
+	useFakeS3(t, s)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'ra'`)
+	ap := published("art_aaaaaaaaaaaaaaaa", "design/notes.md", "hello", "the design")
+	if f := reportPublished(t, s, "ha", "ra", 1, ap); f.Type != proto.MsgAck || ackRefused(t, f) {
+		t.Fatalf("report: %s %s", f.Type, f.Data)
+	}
+	if n := len(publishedEvents(t, s, "ra")); n != 0 {
+		t.Fatalf("%d events before the upload", n)
+	}
+	for range 2 {
+		if code := uploadBlob(t, s, "ha", ap.BlobID, "hello"); code/100 != 2 {
+			t.Fatalf("upload: %d", code)
+		}
+	}
+	evs := publishedEvents(t, s, "ra")
+	if len(evs) != 1 {
+		t.Fatalf("events %v", evs)
+	}
+	want := map[string]any{"artifactId": ap.ID, "path": "/.lux/artifacts/design/notes.md", "name": "design/notes.md", "version": float64(1),
+		"description": "the design", "size": float64(5), "sha256": ap.FileSHA256, "contentType": "text/markdown"}
+	for k, v := range want {
+		if evs[0][k] != v {
+			t.Errorf("event %s = %v, want %v", k, evs[0][k], v)
+		}
+	}
+	// snapshotA's artifact (/out/a.txt), whose blob is "a-art"'s bytes in
+	// this fixture: give it a real sha256 and upload it.
+	execSQL(t, s, ctx, `UPDATE blobs SET sha256 = $1 WHERE id = 'bA-art'`, sha("glob"))
+	if code := uploadBlob(t, s, "ha", "bA-art", "glob"); code/100 != 2 {
+		t.Fatalf("upload: %d", code)
+	}
+	evs = publishedEvents(t, s, "ra")
+	if len(evs) != 2 || evs[1]["path"] != "/out/a.txt" || evs[1]["name"] != "/out/a.txt" {
+		t.Fatalf("events %v", evs)
+	}
+	// A published artifact's upload while the Run runs does not mark the
+	// placement uploaded: it has not reported its snapshot.
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('pa2', 't1', 'ra', 'ha', 2, 'running')`)
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 2 WHERE id = 'ra'`)
+	ap2 := published("art_bbbbbbbbbbbbbbbb", "later.md", "later", "")
+	if f := reportPublished(t, s, "ha", "ra", 2, ap2); f.Type != proto.MsgAck || ackRefused(t, f) {
+		t.Fatalf("report: %s %s", f.Type, f.Data)
+	}
+	if code := uploadBlob(t, s, "ha", ap2.BlobID, "later"); code/100 != 2 {
+		t.Fatalf("upload: %d", code)
+	}
+	var uploaded bool
+	systemScan(t, s, `SELECT uploaded_at IS NOT NULL FROM placements WHERE id = 'pa2'`, nil, &uploaded)
+	if uploaded {
+		t.Fatal("a running placement marked uploaded")
+	}
+}
+
+// An exit collection of artifacts.paths whose file is the path's latest
+// version records nothing; changed, it is the next version.
+func TestCollectedArtifactNotDuplicated(t *testing.T) {
+	s, ctx := reportFixture(t)
+	key := apiKey(t, s, new("t1"), "read")
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE id = 'pa1'`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('pa2', 't1', 'ra', 'ha', 2, 'stopping'), ('pa3', 't1', 'ra', 'ha', 3, 'stopping')`)
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 2 WHERE id = 'ra'`)
+	same := snapshotA()
+	same.Manifest.SnapshotID, same.Manifest.Epoch = "snapA2", 2
+	same.Manifest.Volumes[0].BlobID = "bA2-vol"
+	same.Output.BlobID = "bA2-out"
+	same.Artifacts[0].BlobID = "bA2-art"
+	if f := reportSnapshot(t, s, "ha", "ra", 2, same); f.Type != proto.MsgAck || ackRefused(t, f) {
+		t.Fatalf("epoch 2: %s %s", f.Type, f.Data)
+	}
+	// Sent again, it is the same report.
+	if f := reportSnapshot(t, s, "ha", "ra", 2, same); f.Type != proto.MsgAck || ackRefused(t, f) {
+		t.Fatalf("epoch 2 again: %s %s", f.Type, f.Data)
+	}
+	if all := listed(t, s, key, "ra", "?versions=all"); len(all) != 1 || all[0].Version != 1 {
+		t.Fatalf("after the same file: %+v", all)
+	}
+	if _, ok := blobLocations(t, s, "ra")["bA2-art"]; ok {
+		t.Fatal("the duplicate's blob was recorded")
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 3 WHERE id = 'ra'`)
+	changed := snapshotA()
+	changed.Manifest.SnapshotID, changed.Manifest.Epoch = "snapA3", 3
+	changed.Manifest.Volumes[0].BlobID = "bA3-vol"
+	changed.Output.BlobID = "bA3-out"
+	changed.Artifacts[0].BlobID = "bA3-art"
+	changed.Artifacts[0].FileSHA256 = "a-file-changed"
+	if f := reportSnapshot(t, s, "ha", "ra", 3, changed); f.Type != proto.MsgAck || ackRefused(t, f) {
+		t.Fatalf("epoch 3: %s %s", f.Type, f.Data)
+	}
+	all := listed(t, s, key, "ra", "?versions=all")
+	if len(all) != 2 || all[1].Version != 2 {
+		t.Fatalf("after a changed file: %+v", all)
+	}
+	if latest := listed(t, s, key, "ra", ""); len(latest) != 1 || latest[0].Version != 2 {
+		t.Fatalf("latest: %+v", latest)
+	}
+}
+
+// DELETE /v1/runs/{id}/artifacts deletes every version.
+func TestDeleteArtifactsEveryVersion(t *testing.T) {
+	s, ctx := reportFixture(t)
+	useFakeS3(t, s)
+	for _, ap := range []proto.ArtifactPublished{published("art_aaaaaaaaaaaaaaaa", "n.md", "1", ""), published("art_bbbbbbbbbbbbbbbb", "n.md", "2", "")} {
+		if f := reportPublished(t, s, "ha", "ra", 1, ap); f.Type != proto.MsgAck || ackRefused(t, f) {
+			t.Fatalf("report: %s %s", f.Type, f.Data)
+		}
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'terminated' WHERE id = 'ra'`)
+	key := apiKey(t, s, new("t1"), "run", "read")
+	if code, body := callJSON(t, s, key, http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusOK || body["deleted"] != float64(3) {
+		t.Fatalf("delete: %d %v, want 3", code, body)
+	}
+	for id, loc := range blobLocations(t, s, "ra") {
+		if (id == "blob-art_aaaaaaaaaaaaaaaa" || id == "blob-art_bbbbbbbbbbbbbbbb" || id == "bA-art") && loc != "deleted" {
+			t.Errorf("%s: %s", id, loc)
+		}
+	}
+}
