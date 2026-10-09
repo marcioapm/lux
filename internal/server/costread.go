@@ -93,15 +93,14 @@ func (s *Server) costTx(ctx context.Context, p Principal, read func(pgx.Tx) erro
 	return pgx.BeginTxFunc(ctx, s.db.Pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		// pgx prepares each statement; from its sixth run Postgres may switch
 		// to a generic plan that cannot see the range ($1, $2), the filters
-		// or the groups, and these reads then took 1.5x to 3x as long.
-		if _, err := tx.Exec(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`); err != nil {
-			return err
-		}
+		// or the groups, and these reads then took 1.5x to 3x as long. Set
+		// with the scope, in one round trip.
+		const custom = `SELECT set_config('plan_cache_mode', 'force_custom_plan', true), `
 		if p.TenantID == "" {
-			if _, err := tx.Exec(ctx, `SELECT set_config('lux.system', 'on', true)`); err != nil {
+			if _, err := tx.Exec(ctx, custom+`set_config('lux.system', 'on', true)`); err != nil {
 				return err
 			}
-		} else if _, err := tx.Exec(ctx, `SELECT set_config('lux.tenant_id', $1, true)`, p.TenantID); err != nil {
+		} else if _, err := tx.Exec(ctx, custom+`set_config('lux.tenant_id', $1, true)`, p.TenantID); err != nil {
 			return err
 		}
 		return read(tx)
