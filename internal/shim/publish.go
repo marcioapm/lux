@@ -14,9 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
@@ -127,8 +125,8 @@ func checkRequest(req proto.PublishRequest, max int64) error {
 	if err := proto.ValidContentType(req.ContentType); err != nil {
 		return err
 	}
-	if len(req.Description) > proto.MaxDescription || !utf8.ValidString(req.Description) || strings.ContainsRune(req.Description, 0) {
-		return fmt.Errorf("description: at most %d bytes of UTF-8 text", proto.MaxDescription)
+	if err := proto.ValidDescription(req.Description); err != nil {
+		return err
 	}
 	if req.Size < 0 {
 		return errors.New("negative size")

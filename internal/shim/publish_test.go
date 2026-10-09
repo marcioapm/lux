@@ -145,6 +145,8 @@ func TestPublishRefusals(t *testing.T) {
 		{"short body", proto.PublishRequest{Name: "short", Size: 8}, "abc", "short read: 3 of 8"},
 		{"long body", proto.PublishRequest{Name: "long", Size: 3}, "abcdef", "more than the declared"},
 		{"bad content type", proto.PublishRequest{Name: "x", ContentType: "nope nope", Size: 1}, "x", "content type"},
+		{"NUL in a content type parameter", proto.PublishRequest{Name: "x", ContentType: "text/plain; a=\"x\x00y\"", Size: 1}, "x", "control character"},
+		{"NUL in the description", proto.PublishRequest{Name: "x", Description: "a\x00b", Size: 1}, "x", "control character"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			conn := dial()

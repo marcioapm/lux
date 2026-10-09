@@ -7,6 +7,8 @@ import (
 	"path"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/marcioapm/lux/internal/ids"
 )
 
 // Publishing an artifact: `lux-shim publish FILE --name NAME` runs in the
@@ -92,7 +94,24 @@ func ValidArtifactName(name string) error {
 	return nil
 }
 
-// ValidContentType accepts "" (detected) or a parseable media type.
+// ValidArtifactID: what the shim mints (ids.New(ids.Artifact)). A root
+// workload can forge records, and the id names files on the host.
+func ValidArtifactID(id string) bool {
+	rest, ok := strings.CutPrefix(id, ids.Artifact+"_")
+	if !ok || len(rest) != 16 {
+		return false
+	}
+	for _, c := range rest {
+		if !(c >= 'a' && c <= 'z' || c >= '2' && c <= '7') {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidContentType accepts "" (detected) or a parseable media type of
+// printable UTF-8: mime.ParseMediaType lets a NUL through in a quoted
+// parameter, which Postgres text cannot store.
 func ValidContentType(ct string) error {
 	if ct == "" {
 		return nil
@@ -100,8 +119,30 @@ func ValidContentType(ct string) error {
 	if len(ct) > 255 {
 		return errors.New("content type longer than 255 bytes")
 	}
+	if !utf8.ValidString(ct) {
+		return errors.New("content type is not valid UTF-8")
+	}
+	for i := 0; i < len(ct); i++ {
+		if ct[i] < 0x20 || ct[i] == 0x7f {
+			return errors.New("content type has a control character")
+		}
+	}
 	if _, _, err := mime.ParseMediaType(ct); err != nil {
 		return fmt.Errorf("content type: %w", err)
+	}
+	return nil
+}
+
+// ValidDescription: at most MaxDescription bytes of UTF-8 text, no control
+// characters but tab and newline.
+func ValidDescription(d string) error {
+	if len(d) > MaxDescription || !utf8.ValidString(d) {
+		return fmt.Errorf("description: at most %d bytes of UTF-8 text", MaxDescription)
+	}
+	for i := 0; i < len(d); i++ {
+		if c := d[i]; (c < 0x20 && c != '\t' && c != '\n') || c == 0x7f {
+			return errors.New("description has a control character")
+		}
 	}
 	return nil
 }
