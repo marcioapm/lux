@@ -52,9 +52,13 @@ type ACP struct {
 	images bool
 	inputs inputLedger
 
-	// OpenCode only.
-	opencode bool
-	bus      *opencodeBus
+	// OpenCode only. bus: OpenCode's server, followed for activity; lux
+	// steers through it and reads receipts from it only when lux built the
+	// command (steerBus). ocUser, ocPassword: its Basic auth, from the
+	// workload's environment (WorkloadEnv).
+	opencode           bool
+	bus                *opencodeBus
+	ocUser, ocPassword string
 	// inflight: session/prompt calls of the running turn not yet
 	// resolved; the turn ends when it drops to 0. turnEnd is the
 	// turn-starting prompt's result, which acp.turn_end reports (joined
@@ -178,12 +182,20 @@ func (wallClock) afterFunc(d time.Duration, f func()) func() bool {
 // Command: for OpenCode, `opencode acp` also serves its HTTP API on a
 // loopback port (--port), which lux steers through. A command lux did not
 // build (no "acp" argument, a --port of its own, or a resume command) is
-// run as given, and steers go over ACP only.
+// run as given, and steers go over ACP only; if it has a --port of its own,
+// the server there is followed on 127.0.0.1 for the Run's activity alone
+// (an observer bus).
 func (a *ACP) Command(cfg proto.ShimConfig) ([]string, error) {
 	argv, err := command(cfg)
-	if err != nil || !a.opencode || (cfg.Resume && len(cfg.ResumeCommand) > 0) ||
-		!slices.Contains(argv, "acp") || slices.ContainsFunc(argv, func(s string) bool { return strings.HasPrefix(s, "--port") || strings.HasPrefix(s, "--hostname") }) {
+	if err != nil || !a.opencode {
 		return argv, err
+	}
+	if (cfg.Resume && len(cfg.ResumeCommand) > 0) ||
+		!slices.Contains(argv, "acp") || slices.ContainsFunc(argv, func(s string) bool { return strings.HasPrefix(s, "--port") || strings.HasPrefix(s, "--hostname") }) {
+		if port, ok := ownPort(argv); ok {
+			a.bus = newOpencodeObserver(port, workdir(cfg), a.ocUser, a.ocPassword)
+		}
+		return argv, nil
 	}
 	port, perr := freeLoopbackPort()
 	if perr != nil {
@@ -191,6 +203,62 @@ func (a *ACP) Command(cfg proto.ShimConfig) ([]string, error) {
 	}
 	a.bus = newOpencodeBus(port, workdir(cfg))
 	return append(slices.Clone(argv), "--port", strconv.Itoa(port), "--hostname", "127.0.0.1"), nil
+}
+
+// ownPort is the value of a command's last --port N or --port=N argument,
+// if it is a TCP port.
+func ownPort(argv []string) (int, bool) {
+	val := ""
+	for i, s := range argv {
+		switch {
+		case s == "--port" && i+1 < len(argv):
+			val = argv[i+1]
+		case strings.HasPrefix(s, "--port="):
+			val = strings.TrimPrefix(s, "--port=")
+		}
+	}
+	n, err := strconv.Atoi(val)
+	return n, err == nil && n > 0 && n < 1<<16
+}
+
+// OpenCode's server takes HTTP Basic auth when OPENCODE_SERVER_PASSWORD is
+// set in its environment, as user OPENCODE_SERVER_USERNAME, by default
+// "opencode" (OpenCode's server config and `opencode attach --password`).
+const (
+	ocPasswordEnv = "OPENCODE_SERVER_PASSWORD"
+	ocUsernameEnv = "OPENCODE_SERVER_USERNAME"
+	ocDefaultUser = "opencode"
+)
+
+// WorkloadEnv keeps the credentials of OpenCode's server from the
+// workload's environment (KEY=VALUE, the last of a key standing), for an
+// observer bus Command creates.
+func (a *ACP) WorkloadEnv(env []string) {
+	if !a.opencode {
+		return
+	}
+	a.ocUser, a.ocPassword = ocDefaultUser, ""
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		switch k {
+		case ocPasswordEnv:
+			a.ocPassword = v
+		case ocUsernameEnv:
+			if v != "" {
+				a.ocUser = v
+			}
+		}
+	}
+}
+
+// steerBus is OpenCode's server when lux steers through it and reads
+// receipts from it: only the one lux started (Command). nil for an
+// observer bus, which only the Run's activity follows.
+func (a *ACP) steerBus() *opencodeBus {
+	if a.bus == nil || a.bus.observer {
+		return nil
+	}
+	return a.bus
 }
 
 func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Sink) error {
@@ -215,10 +283,15 @@ func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Si
 		a.bg.Add(1)
 		go func() {
 			defer a.bg.Done()
-			a.bus.follow(ctx, a.onBus, func() {
+			err := a.bus.follow(ctx, a.onBus, func() {
 				a.streamUp()
 				a.settle()
 			}, a.streamDown)
+			if err != nil {
+				// Refused credentials: no request is sent again; the Run's
+				// activity is lux's own turns'.
+				sink.Event(proto.EvWarning, map[string]any{"message": "opencode: its server refused lux, which no longer follows its activity: " + err.Error()})
+			}
 		}()
 	}
 	err := a.handshake(cfg)
@@ -464,7 +537,7 @@ func (a *ACP) runCtx() context.Context {
 // not returned, or one not known read, holds its turn end (endHeld) and is
 // settled: that steer may run in a loop after this one.
 func (a *ACP) endTurn(data map[string]any) {
-	if a.bus != nil {
+	if a.steerBus() != nil {
 		a.receipts(a.runCtx())
 		a.mu.Lock()
 		if a.reserved > 0 || len(a.inputs.unread("bus")) > 0 {
@@ -597,7 +670,7 @@ func (a *ACP) anotherLoop() {
 // Also run when the event stream (re)connects; before the ACP turn has
 // ended it only consumes.
 func (a *ACP) settle() {
-	if a.bus == nil {
+	if a.steerBus() == nil {
 		return
 	}
 	a.settleMu.Lock()
@@ -828,7 +901,7 @@ func (a *ACP) steer(in proto.Input) {
 		a.queueInput(in)
 		return
 	}
-	if a.bus != nil {
+	if a.steerBus() != nil {
 		if a.bus.waitConnected(ctx, 5*time.Second) {
 			a.steerHTTP(ctx, session, in)
 			return
@@ -899,7 +972,7 @@ func (a *ACP) steerHTTP(ctx context.Context, session string, in proto.Input) {
 // answering it would read that steer without lux knowing. It waits for the
 // next turn instead.
 func (a *ACP) steerACP(session string, in proto.Input) {
-	unreadHTTP := a.bus != nil && len(a.inputs.unread("bus")) > 0
+	unreadHTTP := a.steerBus() != nil && len(a.inputs.unread("bus")) > 0
 	a.mu.Lock()
 	if !a.busy || a.busTurn || a.stopped || unreadHTTP {
 		a.mu.Unlock()
@@ -947,6 +1020,9 @@ func (a *ACP) onBus(ev busEvent) {
 	p := ev.Properties
 	switch ev.Type {
 	case "message.updated":
+		if a.steerBus() == nil {
+			return
+		}
 		if p.Info.SessionID == session {
 			a.bus.observe(p.Info.ID)
 		}

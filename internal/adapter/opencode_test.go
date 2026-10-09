@@ -143,6 +143,13 @@ type fakeBus struct {
 	// dropParts: posted keeps no text, so a test can measure the adapter's
 	// heap alone.
 	dropParts bool
+	// password, if set, is the Basic auth (user opencode) every request
+	// must carry, as OpenCode's server with OPENCODE_SERVER_PASSWORD;
+	// others get 401. authed and refused count both kinds; requests counts
+	// every request by "METHOD path".
+	password        string
+	authed, refused int
+	requests        map[string]int
 }
 
 func newFakeBus(t *testing.T) *fakeBus {
@@ -235,9 +242,34 @@ func newFakeBus(t *testing.T) *fakeBus {
 		}
 		fmt.Fprint(w, `{}`)
 	})
-	b.srv = httptest.NewServer(mux)
+	b.requests = map[string]int{}
+	b.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		b.requests[r.Method+" "+r.URL.Path]++
+		pw := b.password
+		user, got, ok := r.BasicAuth()
+		allowed := pw == "" || (ok && user == "opencode" && got == pw)
+		if pw != "" && allowed {
+			b.authed++
+		} else if !allowed {
+			b.refused++
+		}
+		b.mu.Unlock()
+		if !allowed {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}))
 	t.Cleanup(b.srv.Close)
 	return b
+}
+
+// count is how many requests "METHOD path" the server has had.
+func (b *fakeBus) count(req string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.requests[req]
 }
 
 func (b *fakeBus) port() int { return b.srv.Listener.Addr().(*net.TCPAddr).Port }
@@ -1198,10 +1230,12 @@ func TestOpenCodeCommand(t *testing.T) {
 	if len(argv) != 6 || argv[2] != "--port" || argv[4] != "--hostname" || argv[5] != "127.0.0.1" || a.bus == nil || a.bus.dir != "/w" {
 		t.Fatalf("argv %q", argv)
 	}
-	for _, cmd := range [][]string{{"opencode", "acp", "--port", "5000"}, {"my-agent"}} {
+	for _, cmd := range [][]string{{"opencode", "acp", "--port", "5000"}, {"my-agent"}, {"wrapper", "--acp", "--readiness-port", "4097"}, {"wrapper", "--port", "x"}} {
 		b := NewOpenCode()
-		if argv, _ := b.Command(proto.ShimConfig{Command: cmd}); strings.Join(argv, " ") != strings.Join(cmd, " ") || b.bus != nil {
-			t.Fatalf("%q -> %q", cmd, argv)
+		argv, _ := b.Command(proto.ShimConfig{Command: cmd})
+		observed := b.bus != nil && b.bus.port == 5000 && b.steerBus() == nil
+		if strings.Join(argv, " ") != strings.Join(cmd, " ") || (b.bus != nil) != (cmd[0] == "opencode") || (b.bus != nil && !observed) {
+			t.Fatalf("%q -> %q, bus %+v", cmd, argv, b.bus)
 		}
 	}
 	if argv, _ := NewACP().Command(proto.ShimConfig{Command: []string{"opencode", "acp"}}); len(argv) != 2 {
