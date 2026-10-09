@@ -56,6 +56,11 @@ def test_cost_labels_and_submitters(lux, tenant_factory, operator, runners, host
     # Grouped by a label: a Run without it is "(none)", never dropped.
     by_app = {r["group"]["label:app"] for r in lux.api("/v1/costs?since=1h&group=label:app").json()["totals"]}
     assert by_app >= {"jervasion", "dude", "(none)"}, by_app
+    # Folded to the top value: the other app is "(other)", "(none)" is kept and not counted.
+    top = lux.api("/v1/costs?since=1h&group=label:app&top=1").json()
+    assert {r["group"]["label:app"] for r in top["totals"]} - {"jervasion", "dude"} == {"(other)", "(none)"}, top
+    assert top["otherCount"] == {"USD": 1}, top
+    assert lux.api("/v1/costs?since=1h&group=label:app&top=51").status_code == 400
 
     # The label keys on costed Runs, most Runs first; filtered like the summary.
     keys = {k["key"]: k["runs"] for k in lux.api("/v1/costs/labels?since=1h").json()["keys"]}
@@ -75,7 +80,8 @@ def test_cost_labels_and_submitters(lux, tenant_factory, operator, runners, host
     out = lux.run("costs", "--since", "1h", "--by", "run", "--no-label", "app").stdout
     assert bare in out and jer not in out, out
     out = lux.run("costs", "--since", "1h", "--by", "key").stdout
-    assert re.search(rf"^{re.escape(named[me['keyId']]['name'])}\s+[\d.<]+ USD$", out, re.M), out
+    # The amount as the CLI prints it: digits, a decimal point, thousands separators, or "<0.0001".
+    assert re.search(rf"^{re.escape(named[me['keyId']]['name'])}\s+[\d.,<]+ USD$", out, re.M), out
 
     # Another tenant sees none of it: no Runs, no label keys, no key names.
     other = tenant_factory()
@@ -90,6 +96,9 @@ def test_cost_labels_and_submitters(lux, tenant_factory, operator, runners, host
     wait_until(lambda: op_run in _runs(lux, ""), 60, 1, "the operator's Run never had a cost")
     seen = lux.api(f"/v1/runs/{op_run}").json()["submittedBy"]
     assert seen.get("keyId") and "keyName" not in seen, seen
+    # The operator names its key, also narrowed to the tenant.
+    for q in ("", f"?tenant={lux.tenant_id}"):
+        assert operator.api(f"/v1/runs/{op_run}{q}").json()["submittedBy"].get("keyName"), q
     tenant_keys = {k["id"]: k for k in lux.api("/v1/costs?since=1h&group=key").json()["keys"]}
     assert tenant_keys[seen["keyId"]].get("operator") and "name" not in tenant_keys[seen["keyId"]], tenant_keys
     op_keys = {k["id"]: k for k in operator.api(f"/v1/costs?since=1h&group=key&tenant={lux.tenant_id}").json()["keys"]}
