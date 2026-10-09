@@ -417,7 +417,7 @@ export interface CostSummaryParams {
   /** Every family but this one. */
   nofamily?: string;
   interval?: "hour" | "day";
-  /** 1–50: fold the first group past its top N values per currency into "(other)". */
+  /** 1–50: fold the first group past its top N values per currency into rows marked `other: true`. */
   top?: number;
   /** With top: the cost that ranks (all, compute, external). */
   rank?: "all" | "compute" | "external";

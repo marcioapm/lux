@@ -311,7 +311,7 @@ components:
           additionalProperties:
             format: int64
             type: integer
-          description: "With top: per currency, how many values the other row holds; a currency with none folded is absent."
+          description: "With top: per currency, how many values the other: true rows hold; a currency with none folded is absent."
           type: object
         runs:
           description: "Grouped by run: each Run in totals with its name and labels."
