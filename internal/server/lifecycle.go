@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -518,6 +519,14 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 // lost is not how the Run ends, so its resumePolicy is not applied. A Run
 // with a terminate pending ends terminated instead.
 func (s *Server) requeueUnstartedPlacement(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, why string, later *laterEvents, a proto.Assign) error {
+	// The Run never stopped waiting: its stage keeps the wait's start
+	// (an earlier requeue's, else this placement's), while placement time
+	// counts this placement's wait and a new one from now.
+	var waitingSince *time.Time
+	if err := tx.QueryRow(ctx, `SELECT coalesce(r.waiting_since, p.needed_since) FROM runs r
+		JOIN placements p ON p.run_id = r.id AND p.epoch = $2 WHERE r.id = $1`, runID, epoch).Scan(&waitingSince); err != nil {
+		return err
+	}
 	state, err := s.losePlacement(ctx, tx, runID, epoch, why, later, true)
 	if err != nil || state != StateLost {
 		return err
@@ -525,7 +534,7 @@ func (s *Server) requeueUnstartedPlacement(ctx context.Context, tx pgx.Tx, tenan
 	if err := s.requestResume(ctx, tx, tenantID, runID, a.Input, why); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE runs SET pending_sync = $2 WHERE id = $1`, runID, a.Sync)
+	_, err = tx.Exec(ctx, `UPDATE runs SET pending_sync = $2, waiting_since = $3 WHERE id = $1`, runID, a.Sync, waitingSince)
 	return err
 }
 

@@ -297,3 +297,156 @@ func TestStartingReportRecordsAcceptance(t *testing.T) {
 		t.Fatalf("stage %s since %s, placement %+v; want image since acceptedAt", run.Stage, run.StageSince, pl)
 	}
 }
+
+// stageEvent is one stage event as the tests compare it.
+type stageEvent struct {
+	Stage, Reason string
+	Since         time.Time
+	Epoch         int
+}
+
+func stageEventsOf(t *testing.T, s *Server, ctx context.Context) []stageEvent {
+	t.Helper()
+	var out []stageEvent
+	for _, e := range stageEvents(t, s, ctx) {
+		since, err := time.Parse(time.RFC3339Nano, e["since"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reason, _ := e["reason"].(string)
+		out = append(out, stageEvent{Stage: e["stage"].(string), Reason: reason, Since: since, Epoch: int(e["epoch"].(float64))})
+	}
+	return out
+}
+
+// newStageEvents fails unless the stage events after the first n are want,
+// and returns how many there are now.
+func newStageEvents(t *testing.T, s *Server, ctx context.Context, step string, n int, want ...stageEvent) int {
+	t.Helper()
+	got := stageEventsOf(t, s, ctx)
+	if len(got) < n {
+		t.Fatalf("%s: %d stage events, had %d", step, len(got), n)
+	}
+	got = got[n:]
+	ok := len(got) == len(want)
+	for i := 0; ok && i < len(want); i++ {
+		ok = got[i].Stage == want[i].Stage && got[i].Reason == want[i].Reason && got[i].Epoch == want[i].Epoch &&
+			got[i].Since.Equal(want[i].Since.Truncate(time.Microsecond))
+	}
+	if !ok {
+		t.Fatalf("%s: new stage events %+v, want %+v", step, got, want)
+	}
+	return n + len(got)
+}
+
+func wantStage(t *testing.T, step string, run Run, state, stage string, since time.Time, reason string) {
+	t.Helper()
+	if run.State != state || run.Stage != stage || !run.StageSince.Equal(since) || run.StageReason != reason {
+		t.Fatalf("%s: GET says %s, stage %s since %s (%q); want %s, %s since %s (%q)", step,
+			run.State, run.Stage, run.StageSince, run.StageReason, state, stage, since, reason)
+	}
+}
+
+func runTimes(t *testing.T, s *Server, q string) (out time.Time) {
+	t.Helper()
+	systemScan(t, s, q, []any{r1}, &out)
+	return out
+}
+
+// A move announces stopping with its reason, then waiting from the old
+// placement's end, then the next placement's start stages: never stopped,
+// which no reader could see (the exit and the resume are one
+// transaction). Its assignment changes nothing; its acceptance is image.
+func TestAMoveIsAnnouncedStoppingThenWaiting(t *testing.T) {
+	s, ctx, key := stageFixture(t)
+	t0 := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	marks := map[string]int64{"imageReady": ms(t0), "volumesRestored": ms(t0.Add(time.Second)),
+		"reposReady": ms(t0.Add(2 * time.Second)), "containerStarted": ms(t0.Add(3 * time.Second))}
+	reportStatus(t, s, ctx, proto.Status{State: "running", Times: marks})
+	wantStage(t, "running", getRun(t, s, key), StateRunning, StageRunning, t0.Add(3*time.Second), "")
+	n := len(stageEvents(t, s, ctx))
+
+	stopRun(t, s, ctx, "migrate")
+	stopAt := runTimes(t, s, `SELECT stop_requested_at FROM placements WHERE run_id = $1 AND epoch = 1`)
+	wantStage(t, "stop", getRun(t, s, key), StateStopping, StageStopping, stopAt, "migrate")
+	n = newStageEvents(t, s, ctx, "stop", n, stageEvent{StageStopping, "migrate", stopAt, 1})
+
+	code := 0
+	reportStatus(t, s, ctx, proto.Status{State: "exited", ExitCode: &code, Reason: "stopped", Times: marks})
+	endedAt := runTimes(t, s, `SELECT ended_at FROM placements WHERE run_id = $1 AND epoch = 1`)
+	if needs := runTimes(t, s, `SELECT needs_host_since FROM runs WHERE id = $1`); !needs.Equal(endedAt) {
+		t.Fatalf("needs_host_since %s, placement ended %s", needs, endedAt)
+	}
+	wantStage(t, "exit", getRun(t, s, key), StateResuming, StageWaiting, endedAt, "")
+	n = newStageEvents(t, s, ctx, "exit", n, stageEvent{StageWaiting, "", endedAt, 1})
+
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return s.assign(ctx, tx, pendingRun{ID: r1, TenantID: "t1", Epoch: 1}, &candidateHost{ID: "h1"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wantStage(t, "assign", getRun(t, s, key), StateScheduled, StageWaiting, endedAt, "")
+	n = newStageEvents(t, s, ctx, "assign", n)
+
+	var msg int64
+	systemScan(t, s, `SELECT id FROM host_messages WHERE run_id = $1 AND epoch = 2 AND type = 'assign'`, []any{r1}, &msg)
+	if err := s.ackMessage(ctx, "h1", msg); err != nil {
+		t.Fatal(err)
+	}
+	acceptedAt := runTimes(t, s, `SELECT accepted_at FROM placements WHERE run_id = $1 AND epoch = 2`)
+	wantStage(t, "accept", getRun(t, s, key), StateScheduled, StageImage, acceptedAt, "")
+	newStageEvents(t, s, ctx, "accept", n, stageEvent{StageImage, "", acceptedAt, 2})
+}
+
+// An assignment refused at delivery requeues its Run: never lost, as far
+// as its stage goes, and still waiting since the wait that placement
+// began, not since the requeue.
+func TestARequeueKeepsTheWait(t *testing.T) {
+	s, ctx, key := stageFixture(t)
+	execSQL(t, s, ctx, `UPDATE placements SET accepted_at = NULL, needed_since = now() - interval '40 seconds' WHERE run_id = $1`, r1)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}]}}' WHERE id = $1`, r1)
+	waitedFrom := runTimes(t, s, `SELECT needed_since FROM placements WHERE run_id = $1 AND epoch = 1`)
+	a := proto.Assign{RunID: r1, TenantID: "t1", Epoch: 1, Sync: []proto.SyncRef{{Repo: "app", Ref: "main", Mode: proto.SyncFastForward}}}
+	execSQL(t, s, ctx, `INSERT INTO host_messages (id, host_id, run_id, epoch, type, payload) VALUES (9, 'h1', $1, 1, 'assign', $2)`, r1, proto.Marshal(a))
+	wantStage(t, "assigned", getRun(t, s, key), StateScheduled, StageWaiting, waitedFrom, "")
+	execSQL(t, s, ctx, `UPDATE runs SET stage_announced = jsonb_build_object('stage', 'waiting', 'since', $2::timestamptz) WHERE id = $1`, r1, waitedFrom)
+	n := len(stageEvents(t, s, ctx))
+
+	requeue := func(epoch int) {
+		t.Helper()
+		var msg int64
+		systemScan(t, s, `SELECT id FROM host_messages WHERE run_id = $1 AND epoch = $2 AND type = 'assign'`, []any{r1, epoch}, &msg)
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.refuseSync(ctx, tx, "h1", msg, r1) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requeue(1)
+	var placement string
+	systemScan(t, s, `SELECT state FROM placements WHERE run_id = $1 AND epoch = 1`, []any{r1}, &placement)
+	if placement != "lost" {
+		t.Fatalf("placement %s, want lost", placement)
+	}
+	wantStage(t, "requeue", getRun(t, s, key), StateResuming, StageWaiting, waitedFrom, "")
+	n = newStageEvents(t, s, ctx, "requeue", n)
+
+	// Placed again and refused again: still the first wait.
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return s.assign(ctx, tx, pendingRun{ID: r1, TenantID: "t1", Epoch: 1, PendingSync: a.Sync}, &candidateHost{ID: "h1"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wantStage(t, "assigned again", getRun(t, s, key), StateScheduled, StageWaiting, waitedFrom, "")
+	requeue(2)
+	wantStage(t, "requeued again", getRun(t, s, key), StateResuming, StageWaiting, waitedFrom, "")
+	newStageEvents(t, s, ctx, "requeued again", n)
+
+	// An operator's resume later waits from its own request.
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped' WHERE id = $1`, r1)
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return s.requestResume(ctx, tx, "t1", r1, nil, "resume requested")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	needs := runTimes(t, s, `SELECT needs_host_since FROM runs WHERE id = $1`)
+	wantStage(t, "resumed", getRun(t, s, key), StateResuming, StageWaiting, needs, "")
+}
