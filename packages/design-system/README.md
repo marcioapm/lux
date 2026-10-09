@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, family colours, storage kind colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
+bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, chart stacking and bars, family colours, storage kind colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
 ```
 
 ## Using it
@@ -335,6 +335,8 @@ Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
 | `familySlot`, `familyColor` | cost family → `--chart-N` (above) |
 | `familyDisplay(families)` | each family's `{label, color}` from its describe `displayName` and `color` hint (the key when unnamed; `Compute` for compute): every view of cost families (Run card, Overview chart) resolves both here, so a family reads the same everywhere |
 | `TimeSeriesChart` `stacked` | series stacked bottom-first as filled bands (28% fill, 2px edges); the tooltip adds a Total; hiding a series from the legend restacks the rest; a missing value adds nothing and shows `–` |
+| `TimeSeriesChart` `bars` | each x is a bar for the bucket starting there, as wide as the smallest step of x (an amount per bucket, such as cost per hour: a line between two buckets would read as a ramp); with `stacked` the bars stack bottom-first, solid. A missing value draws no bar and a bucket with no figure stays empty, never a zero-height bar; positive values stack up from zero and negative ones (a refund) down from it, so no bar overdraws another. The x scale leaves half a bucket at either end; the hovered bucket is shaded and the tooltip names it ("19:00–20:00") (`barSegments`, `barRange`, `bucketText` in `src/chartData.ts`; gallery: "Cost per hour, as bars") |
+| `TimeSeriesChart` `legendValues`, `legendNote` | a figure after each legend entry (its total over the range), and a note at the legend's right end ("each bar is one hour") |
 | `TimeSeriesChart` `currency` | the currency of `unit="money"` |
 
 Behaviour shared by every chart and tooltip:

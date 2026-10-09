@@ -1277,6 +1277,35 @@ a.idchip-text:hover {
   padding-top: var(--sp-2);
   border-top: 1px solid var(--border-soft);
 }
+/* Bars: the hovered bucket is shaded behind its bar instead of a cursor line; keys are swatches. */
+.tschart-bars .tschart-plot {
+  position: relative;
+  z-index: 1;
+}
+.tschart-bars .u-cursor-x {
+  display: none;
+}
+.tschart-bucket {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  background: var(--bg-subtle);
+}
+.tschart-bars .tschart-key {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-sm);
+}
+.tschart-legend-value {
+  color: var(--fg);
+  margin-left: var(--sp-2);
+}
+.tschart-legend-note {
+  margin-left: auto;
+  align-self: center;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
 
 /* ---------- Cost: ColorKey, MoneyList, ListPriceNote ---------- */
 .color-key {
