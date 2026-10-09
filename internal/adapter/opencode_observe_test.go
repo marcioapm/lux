@@ -247,6 +247,71 @@ func TestOpenCodeObserverDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
+// A command's own port is its last --port, in either form; a last --port
+// with no value, or one that is not a TCP port, means none, whatever came
+// before it. Other flags ending in "port" are not it.
+func TestOwnPort(t *testing.T) {
+	for _, tc := range []struct {
+		argv []string
+		port int // 0: none
+	}{
+		{[]string{"w"}, 0},
+		{[]string{"w", "--port", "4096"}, 4096},
+		{[]string{"w", "--port=4096"}, 4096},
+		{[]string{"w", "--port"}, 0},
+		{[]string{"w", "--port", "4096", "--port"}, 0},
+		{[]string{"w", "--port=4096", "--port"}, 0},
+		{[]string{"w", "--port="}, 0},
+		{[]string{"w", "--port", "4096", "--port="}, 0},
+		{[]string{"w", "--port", "4096", "--port", "x"}, 0},
+		{[]string{"w", "--port=4096", "--port=x"}, 0},
+		{[]string{"w", "--port", "4096", "--port", ""}, 0},
+		{[]string{"w", "--port", "4096", "--port", "5000"}, 5000},
+		{[]string{"w", "--port", "4096", "--port=5000"}, 5000},
+		{[]string{"w", "--port=4096", "--port", "5000"}, 5000},
+		{[]string{"w", "--port=4096", "--port=5000"}, 5000},
+		{[]string{"w", "--port", "x", "--port", "5000"}, 5000},
+		{[]string{"w", "--port", "0"}, 0},
+		{[]string{"w", "--port", "1"}, 1},
+		{[]string{"w", "--port", "65535"}, 65535},
+		{[]string{"w", "--port", "65536"}, 0},
+		{[]string{"w", "--port", "-1"}, 0},
+		{[]string{"w", "--port", "4096", "--port", "65536"}, 0},
+		{[]string{"w", "--readiness-port", "4097"}, 0},
+		{[]string{"w", "--readiness-port=4097"}, 0},
+		{[]string{"w", "--port", "4096", "--readiness-port", "4097"}, 4096},
+		{[]string{"w", "--portx", "4096"}, 0},
+		{[]string{"w", "--port", "--readiness-port", "4097"}, 0},
+	} {
+		port, ok := ownPort(tc.argv)
+		if ok != (tc.port != 0) || (ok && port != tc.port) {
+			t.Errorf("ownPort(%q) = %d, %v; want %d", tc.argv, port, ok, tc.port)
+		}
+	}
+}
+
+// A command lux did not build is followed on its own port, and its own
+// port only: a trailing --port with no valid value leaves it unobserved
+// rather than falling back to an earlier one, so the server there gets no
+// request.
+func TestOpenCodeObservesOnlyTheLastPort(t *testing.T) {
+	earlier := newRecServer(t, serveBusy)
+	a := NewOpenCode()
+	a.WorkloadEnv([]string{"OPENCODE_SERVER_PASSWORD=" + ocPassword})
+	cmd := []string{"wrapper", "--acp", "--port", strconv.Itoa(earlier.port()), "--port"}
+	argv, err := a.Command(proto.ShimConfig{Command: cmd, Workdir: "/workspace"})
+	if err != nil || strings.Join(argv, " ") != strings.Join(cmd, " ") {
+		t.Fatalf("argv %q, %v", argv, err)
+	}
+	sink := &fullSink{inputSink: &inputSink{}}
+	w, first := ocStartedOn(t, a, sink, sink.inputSink)
+	w.resolve(first, ocResult)
+	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+	if reqs, _ := earlier.snapshot(); len(reqs) != 0 {
+		t.Fatalf("the earlier --port's server got %q", reqs)
+	}
+}
+
 // A command lux did not build, with OpenCode's server on its own --port
 // behind Basic auth: lux follows that server's bus, authenticated, for the
 // Run's activity. A loop a client starts over HTTP shows the Run busy, then
