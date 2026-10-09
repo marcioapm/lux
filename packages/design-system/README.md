@@ -282,7 +282,7 @@ of a few choices as joined buttons, a radio group), RelativeTime ("3h ago",
 the exact date, time and zone in a Tooltip; every table's times),
 DurationCell (a duration with how it was measured in a Tooltip, a live one
 in the foreground, a slow one in the warn tone),
-Tooltip, Select, TenantPicker, TimeRangePicker, TimeSeriesChart (uPlot, with
+Tooltip, Select (an option's `disabled` is the reason it cannot be picked: shown greyed with the reason on its right; clicks and arrow keys pass it by), TenantPicker, TimeRangePicker, TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline
 (placement waterfall: a stage is a bar from `start` to `end`, striped while
 it has no `end`; a `point: true` stage is an instant, a dot at `start` with
