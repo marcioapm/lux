@@ -53,16 +53,26 @@ func getRun(t *testing.T, s *Server, key string) Run {
 	return run
 }
 
+// stageEvent is one stage event as the tests compare it.
+type stageEvent struct {
+	Stage, Reason string
+	Since         time.Time
+	Epoch         int
+}
+
 // stageEvents are r1's stage events, oldest first.
-func stageEvents(t *testing.T, s *Server, ctx context.Context) []map[string]any {
+func stageEvents(t *testing.T, s *Server, ctx context.Context) []stageEvent {
 	t.Helper()
-	var out []map[string]any
+	var out []stageEvent
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT data FROM run_events WHERE run_id = $1 AND type = 'stage' ORDER BY id`, r1)
+		rows, err := tx.Query(ctx, `SELECT data->>'stage', coalesce(data->>'reason', ''), (data->>'since')::timestamptz, (data->>'epoch')::int
+			FROM run_events WHERE run_id = $1 AND type = 'stage' ORDER BY id`, r1)
 		if err != nil {
 			return err
 		}
-		out, err = pgx.CollectRows(rows, pgx.RowTo[map[string]any])
+		out, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (e stageEvent, err error) {
+			return e, row.Scan(&e.Stage, &e.Reason, &e.Since, &e.Epoch)
+		})
 		return err
 	})
 	if err != nil {
@@ -71,15 +81,9 @@ func stageEvents(t *testing.T, s *Server, ctx context.Context) []map[string]any 
 	return out
 }
 
-func stateEvents(t *testing.T, s *Server, ctx context.Context) int {
+func stateEvents(t *testing.T, s *Server) int {
 	t.Helper()
-	var n int
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'state'`, r1).Scan(&n)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return n
+	return queryOne[int](t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'state'`, r1)
 }
 
 func ms(t time.Time) int64 { return t.UnixMilli() }
@@ -132,7 +136,7 @@ func TestLateStartingAfterRunningChangesNothing(t *testing.T) {
 	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: map[string]int64{"imageReady": ms(t0)}})
 	reportStatus(t, s, ctx, proto.Status{State: "running", Times: marks})
 	before := getRun(t, s, key)
-	states, stages := stateEvents(t, s, ctx), len(stageEvents(t, s, ctx))
+	states, stages := stateEvents(t, s), len(stageEvents(t, s, ctx))
 	if before.State != StateRunning || before.Stage != StageRunning {
 		t.Fatalf("after running: %s, stage %s", before.State, before.Stage)
 	}
@@ -146,7 +150,7 @@ func TestLateStartingAfterRunningChangesNothing(t *testing.T) {
 	if after.Stage != before.Stage || !after.StageSince.Equal(before.StageSince) {
 		t.Fatalf("stage moved: %s since %s, was %s since %s", after.Stage, after.StageSince, before.Stage, before.StageSince)
 	}
-	if n := stateEvents(t, s, ctx); n != states {
+	if n := stateEvents(t, s); n != states {
 		t.Fatalf("%d state events, was %d", n, states)
 	}
 	if n := len(stageEvents(t, s, ctx)); n != stages {
@@ -173,51 +177,20 @@ func TestRunStageEmittedOncePerChange(t *testing.T) {
 	reportStatus(t, s, ctx, proto.Status{State: "running", Times: running})
 	reportStatus(t, s, ctx, proto.Status{State: "running", Times: running})
 
-	got := stageEvents(t, s, ctx)
-	want := []struct {
-		stage string
-		since time.Time
-	}{
-		{StageVolumes, t0}, {StageRepositories, t0.Add(time.Second)}, {StageContainer, t0.Add(2 * time.Second)}, {StageRunning, t0.Add(3 * time.Second)},
-	}
-	if len(got) != len(want) {
-		t.Fatalf("stage events %v, want %d: one per change", got, len(want))
-	}
-	for i, w := range want {
-		since, err := time.Parse(time.RFC3339Nano, got[i]["since"].(string))
-		if err != nil || got[i]["stage"] != w.stage || !since.Equal(w.since) || got[i]["epoch"] != float64(1) {
-			t.Errorf("event %d: %v, want %s since %s, epoch 1", i, got[i], w.stage, w.since)
-		}
-	}
+	n := newStageEvents(t, s, ctx, "starting and running reports", 0,
+		stageEvent{StageVolumes, "", t0, 1}, stageEvent{StageRepositories, "", t0.Add(time.Second), 1},
+		stageEvent{StageContainer, "", t0.Add(2 * time.Second), 1}, stageEvent{StageRunning, "", t0.Add(3 * time.Second), 1})
 
 	// A stop moves it to stopping, with the stop's reason, once; the
 	// runner's stopping report changes nothing more.
-	var host string
-	for range 2 {
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			var err error
-			host, err = s.requestStop(ctx, tx, "t1", r1, "migrate")
-			return err
-		}); err != nil || host != "h1" {
-			t.Fatalf("stop: %q %v", host, err)
-		}
-	}
+	stopRun(t, s, ctx, "migrate")
+	stopRun(t, s, ctx, "migrate")
 	reportStatus(t, s, ctx, proto.Status{State: "stopping"})
-	got = stageEvents(t, s, ctx)
-	if len(got) != len(want)+1 || got[len(got)-1]["stage"] != StageStopping || got[len(got)-1]["reason"] != "migrate" {
-		t.Fatalf("after two stops: %v, want one more: stopping, reason migrate", got)
-	}
+	stopAt := queryOne[time.Time](t, s, `SELECT stop_requested_at FROM placements WHERE run_id = $1 AND epoch = 1`, r1)
+	n = newStageEvents(t, s, ctx, "two stops", n, stageEvent{StageStopping, "migrate", stopAt, 1})
 	// A terminate while it stops replaces the reason: announced, same since.
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := s.requestStop(ctx, tx, "t1", r1, stopTerminate)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	got = stageEvents(t, s, ctx)
-	if len(got) != len(want)+2 || got[len(got)-1]["reason"] != stopTerminate || got[len(got)-1]["since"] != got[len(got)-2]["since"] {
-		t.Fatalf("after a terminate: %v, want one more: stopping since the same time, reason terminate", got)
-	}
+	stopRun(t, s, ctx, stopTerminate)
+	newStageEvents(t, s, ctx, "terminate", n, stageEvent{StageStopping, stopTerminate, stopAt, 1})
 }
 
 // A placement assigned and not yet accepted is waiting; its runner's ack
@@ -238,10 +211,7 @@ func TestAcceptedAssignmentLeavesWaiting(t *testing.T) {
 	if run.Stage != StageImage || run.Placements[0].AcceptedAt == nil || !run.StageSince.Equal(*run.Placements[0].AcceptedAt) {
 		t.Fatalf("accepted: stage %s since %s, placement %+v; want image since acceptedAt", run.Stage, run.StageSince, run.Placements[0])
 	}
-	got := stageEvents(t, s, ctx)
-	if len(got) != 1 || got[0]["stage"] != StageImage {
-		t.Fatalf("stage events %v, want one: image", got)
-	}
+	newStageEvents(t, s, ctx, "accepted", 0, stageEvent{StageImage, "", *run.Placements[0].AcceptedAt, 1})
 }
 
 // stopRun asks r1's placement to stop for reason, in a transaction of its own.
@@ -298,32 +268,11 @@ func TestStartingReportRecordsAcceptance(t *testing.T) {
 	}
 }
 
-// stageEvent is one stage event as the tests compare it.
-type stageEvent struct {
-	Stage, Reason string
-	Since         time.Time
-	Epoch         int
-}
-
-func stageEventsOf(t *testing.T, s *Server, ctx context.Context) []stageEvent {
-	t.Helper()
-	var out []stageEvent
-	for _, e := range stageEvents(t, s, ctx) {
-		since, err := time.Parse(time.RFC3339Nano, e["since"].(string))
-		if err != nil {
-			t.Fatal(err)
-		}
-		reason, _ := e["reason"].(string)
-		out = append(out, stageEvent{Stage: e["stage"].(string), Reason: reason, Since: since, Epoch: int(e["epoch"].(float64))})
-	}
-	return out
-}
-
 // newStageEvents fails unless the stage events after the first n are want,
 // and returns how many there are now.
 func newStageEvents(t *testing.T, s *Server, ctx context.Context, step string, n int, want ...stageEvent) int {
 	t.Helper()
-	got := stageEventsOf(t, s, ctx)
+	got := stageEvents(t, s, ctx)
 	if len(got) < n {
 		t.Fatalf("%s: %d stage events, had %d", step, len(got), n)
 	}
@@ -347,12 +296,6 @@ func wantStage(t *testing.T, step string, run Run, state, stage string, since ti
 	}
 }
 
-func runTimes(t *testing.T, s *Server, q string) (out time.Time) {
-	t.Helper()
-	systemScan(t, s, q, []any{r1}, &out)
-	return out
-}
-
 // A move announces stopping with its reason, then waiting from the old
 // placement's end, then the next placement's start stages: never stopped,
 // which no reader could see (the exit and the resume are one
@@ -367,14 +310,14 @@ func TestAMoveIsAnnouncedStoppingThenWaiting(t *testing.T) {
 	n := len(stageEvents(t, s, ctx))
 
 	stopRun(t, s, ctx, "migrate")
-	stopAt := runTimes(t, s, `SELECT stop_requested_at FROM placements WHERE run_id = $1 AND epoch = 1`)
+	stopAt := queryOne[time.Time](t, s, `SELECT stop_requested_at FROM placements WHERE run_id = $1 AND epoch = 1`, r1)
 	wantStage(t, "stop", getRun(t, s, key), StateStopping, StageStopping, stopAt, "migrate")
 	n = newStageEvents(t, s, ctx, "stop", n, stageEvent{StageStopping, "migrate", stopAt, 1})
 
 	code := 0
 	reportStatus(t, s, ctx, proto.Status{State: "exited", ExitCode: &code, Reason: "stopped", Times: marks})
-	endedAt := runTimes(t, s, `SELECT ended_at FROM placements WHERE run_id = $1 AND epoch = 1`)
-	if needs := runTimes(t, s, `SELECT needs_host_since FROM runs WHERE id = $1`); !needs.Equal(endedAt) {
+	endedAt := queryOne[time.Time](t, s, `SELECT ended_at FROM placements WHERE run_id = $1 AND epoch = 1`, r1)
+	if needs := queryOne[time.Time](t, s, `SELECT needs_host_since FROM runs WHERE id = $1`, r1); !needs.Equal(endedAt) {
 		t.Fatalf("needs_host_since %s, placement ended %s", needs, endedAt)
 	}
 	wantStage(t, "exit", getRun(t, s, key), StateResuming, StageWaiting, endedAt, "")
@@ -393,7 +336,7 @@ func TestAMoveIsAnnouncedStoppingThenWaiting(t *testing.T) {
 	if err := s.ackMessage(ctx, "h1", msg); err != nil {
 		t.Fatal(err)
 	}
-	acceptedAt := runTimes(t, s, `SELECT accepted_at FROM placements WHERE run_id = $1 AND epoch = 2`)
+	acceptedAt := queryOne[time.Time](t, s, `SELECT accepted_at FROM placements WHERE run_id = $1 AND epoch = 2`, r1)
 	wantStage(t, "accept", getRun(t, s, key), StateScheduled, StageImage, acceptedAt, "")
 	newStageEvents(t, s, ctx, "accept", n, stageEvent{StageImage, "", acceptedAt, 2})
 }
@@ -405,7 +348,7 @@ func TestARequeueKeepsTheWait(t *testing.T) {
 	s, ctx, key := stageFixture(t)
 	execSQL(t, s, ctx, `UPDATE placements SET accepted_at = NULL, needed_since = now() - interval '40 seconds' WHERE run_id = $1`, r1)
 	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}]}}' WHERE id = $1`, r1)
-	waitedFrom := runTimes(t, s, `SELECT needed_since FROM placements WHERE run_id = $1 AND epoch = 1`)
+	waitedFrom := queryOne[time.Time](t, s, `SELECT needed_since FROM placements WHERE run_id = $1 AND epoch = 1`, r1)
 	a := proto.Assign{RunID: r1, TenantID: "t1", Epoch: 1, Sync: []proto.SyncRef{{Repo: "app", Ref: "main", Mode: proto.SyncFastForward}}}
 	execSQL(t, s, ctx, `INSERT INTO host_messages (id, host_id, run_id, epoch, type, payload) VALUES (9, 'h1', $1, 1, 'assign', $2)`, r1, proto.Marshal(a))
 	wantStage(t, "assigned", getRun(t, s, key), StateScheduled, StageWaiting, waitedFrom, "")
@@ -447,7 +390,7 @@ func TestARequeueKeepsTheWait(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	needs := runTimes(t, s, `SELECT needs_host_since FROM runs WHERE id = $1`)
+	needs := queryOne[time.Time](t, s, `SELECT needs_host_since FROM runs WHERE id = $1`, r1)
 	wantStage(t, "resumed", getRun(t, s, key), StateResuming, StageWaiting, needs, "")
 }
 
@@ -462,7 +405,7 @@ func TestAFailedStartIsAnnouncedOnce(t *testing.T) {
 
 	code := 125
 	reportStatus(t, s, ctx, proto.Status{State: "failed", ExitCode: &code, Reason: "start-failed", Message: "volumes: no space", Times: marks})
-	changed := runTimes(t, s, `SELECT state_changed_at FROM runs WHERE id = $1`)
+	changed := queryOne[time.Time](t, s, `SELECT state_changed_at FROM runs WHERE id = $1`, r1)
 	wantStage(t, "failed", getRun(t, s, key), StateFailed, StateFailed, changed, "")
 	n = newStageEvents(t, s, ctx, "failed", n, stageEvent{StateFailed, "", changed, 1})
 
@@ -491,7 +434,7 @@ func TestALostPlacementIsAnnounced(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	changed := runTimes(t, s, `SELECT state_changed_at FROM runs WHERE id = $1`)
+	changed := queryOne[time.Time](t, s, `SELECT state_changed_at FROM runs WHERE id = $1`, r1)
 	wantStage(t, "lost", getRun(t, s, key), StateLost, StateLost, changed, "")
 	newStageEvents(t, s, ctx, "lost", n, stageEvent{StateLost, "", changed, 1})
 }
@@ -507,13 +450,13 @@ func TestATerminateDuringStartIsAnnounced(t *testing.T) {
 
 	execSQL(t, s, ctx, `UPDATE runs SET terminate_requested = true WHERE id = $1`, r1)
 	stopRun(t, s, ctx, stopTerminate)
-	stopAt := runTimes(t, s, `SELECT stop_requested_at FROM placements WHERE run_id = $1 AND epoch = 1`)
+	stopAt := queryOne[time.Time](t, s, `SELECT stop_requested_at FROM placements WHERE run_id = $1 AND epoch = 1`, r1)
 	wantStage(t, "terminate", getRun(t, s, key), StateStopping, StageStopping, stopAt, stopTerminate)
 	n = newStageEvents(t, s, ctx, "terminate", n, stageEvent{StageStopping, stopTerminate, stopAt, 1})
 
 	code := 0
 	reportStatus(t, s, ctx, proto.Status{State: "exited", ExitCode: &code, Reason: "stopped", Message: "stopped before start", Times: marks})
-	changed := runTimes(t, s, `SELECT state_changed_at FROM runs WHERE id = $1`)
+	changed := queryOne[time.Time](t, s, `SELECT state_changed_at FROM runs WHERE id = $1`, r1)
 	wantStage(t, "exited", getRun(t, s, key), StateTerminated, StateTerminated, changed, "")
 	newStageEvents(t, s, ctx, "exited", n, stageEvent{StateTerminated, "", changed, 1})
 }
