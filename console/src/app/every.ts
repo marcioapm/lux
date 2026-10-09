@@ -91,7 +91,6 @@ export function resolveStep(range: TimeRange, every: Every, kind: ChartKind): Re
   const auto = autoStep(range, kind);
   if (e === "auto") return { step: auto, auto: true };
   if (kind === "cost" && e === "minute") return { step: "hour", auto: false, note: "cost is never finer than an hour" };
-  if (kind === "trend" && e === "minute" && RANGE_HOURS[range] > MINUTE_KEEP_HOURS) return { step: "hour", auto: false, note: "minute samples are not kept this long" };
   const n = points(range, e, kind);
   if (!fits(n)) return { step: auto, auto: true, note: `per ${e} would be ${pointsText(n!)}` };
   return { step: e, auto: false };
