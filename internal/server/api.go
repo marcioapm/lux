@@ -499,7 +499,7 @@ type Run struct {
 	PlacementStartSeconds float64     `json:"placementStartSeconds" doc:"The part spent starting on the host (assigned until the workload started, or the placement ended without starting)."`
 	Placing               bool        `json:"placing,omitempty" doc:"The Run is being placed now: waiting for a host, or starting on one; placementSeconds grows from the response's time on."`
 	Stage                 string      `json:"stage" enum:"waiting,image,volumes,repositories,container,running,stopping,stopped,lost,succeeded,failed,terminated" doc:"Where the Run is now (docs/concepts.md#stages): waiting for a host; image, volumes, repositories, container while it starts on one; running; stopping (stageReason says why); or its resting state. A run.stage event announces each change."`
-	StageSince            time.Time   `json:"stageSince" doc:"When the stage began: one recorded time. The start stages' and running's are the runner's marks, on its host's clock; waiting's, stopping's and a resting state's are luxd's."`
+	StageSince            time.Time   `json:"stageSince" doc:"When the stage began: one recorded time. volumes, repositories, container and running begin at the runner's marks, on its host's clock; waiting, image (acceptedAt), stopping and a resting state at luxd's."`
 	StageReason           string      `json:"stageReason,omitempty" doc:"For stopping: the stop's reason (stop, terminate, drain, preempt, migrate, timeout, disk)."`
 	Placements            []Placement `json:"placements,omitempty"`
 	Usage                 *RunUsage   `json:"usage,omitempty"`
