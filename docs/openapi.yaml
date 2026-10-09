@@ -311,7 +311,7 @@ components:
           additionalProperties:
             format: int64
             type: integer
-          description: "With top: per currency, how many values (other) holds; a currency with none folded is absent."
+          description: "With top: per currency, how many values the other row holds; a currency with none folded is absent."
           type: object
         runs:
           description: "Grouped by run: each Run in totals with its name and labels."
@@ -356,8 +356,11 @@ components:
           additionalProperties:
             type: string
           type: object
+        other:
+          description: "With top: the first-group value is the fold of every value past the top N, not a value of its own (a real value may also read (other))."
+          type: boolean
         runs:
-          description: "With top, on totals: the Runs with cost that rank counts under this row's first-group value, across the second group."
+          description: "With top or runs, on totals: the Runs with cost (that rank counts, with top) under this row's first-group value, across the second group."
           format: int64
           type: integer
       type: object
@@ -3562,12 +3565,12 @@ paths:
             type:
               - array
               - "null"
-        - description: Only this family.
+        - description: Only this family. Not with nofamily.
           explode: false
           in: query
           name: family
           schema:
-            description: Only this family.
+            description: Only this family. Not with nofamily.
             type: string
         - description: Every family but this one.
           explode: false
@@ -3583,20 +3586,35 @@ paths:
           schema:
             description: hour or day; include a time series.
             type: string
-        - description: "1 to 50: keep the first group's N values costing the most per currency (ties by value) and fold the rest into the reserved value (other), in totals and series; (none) is never folded nor counted, and the second group is kept. Needs a group. The row limit applies to the folded rows. Totals rows then carry runs, and otherCount says how many values were folded."
+        - description: "Keep the first group's N values costing the most per currency (ties by value) and fold the rest into one row per second-group value and currency, marked other: true (its value reads (other)), in totals and series; (none) is never folded nor counted, and the second group is kept. Needs a group. The row limit applies to the folded rows. Totals rows then carry runs, and otherCount says how many values were folded."
           explode: false
           in: query
           name: top
           schema:
-            description: "1 to 50: keep the first group's N values costing the most per currency (ties by value) and fold the rest into the reserved value (other), in totals and series; (none) is never folded nor counted, and the second group is kept. Needs a group. The row limit applies to the folded rows. Totals rows then carry runs, and otherCount says how many values were folded."
-            type: string
-        - description: "With top: all (default), compute, or external (every family but compute): the cost that ranks the values and that runs counts."
+            description: "Keep the first group's N values costing the most per currency (ties by value) and fold the rest into one row per second-group value and currency, marked other: true (its value reads (other)), in totals and series; (none) is never folded nor counted, and the second group is kept. Needs a group. The row limit applies to the folded rows. Totals rows then carry runs, and otherCount says how many values were folded."
+            format: int64
+            maximum: 50
+            minimum: 1
+            type: integer
+        - description: "With top: all (default), compute, or external (every family but compute): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."
           explode: false
           in: query
           name: rank
           schema:
-            description: "With top: all (default), compute, or external (every family but compute): the cost that ranks the values and that runs counts."
+            description: "With top: all (default), compute, or external (every family but compute): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."
+            enum:
+              - all
+              - compute
+              - external
+              - ""
             type: string
+        - description: "Without top: totals rows carry runs too (with top they always do)."
+          explode: false
+          in: query
+          name: runs
+          schema:
+            description: "Without top: totals rows carry runs too (with top they always do)."
+            type: boolean
       responses:
         "200":
           content:

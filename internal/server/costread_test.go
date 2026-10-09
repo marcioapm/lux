@@ -75,6 +75,18 @@ func TestCostSummaryScopeAndGroups(t *testing.T) {
 	if code := getJSON(t, s, keys["op"], costPath("&group=host&family=compute"), &got); code != http.StatusOK || len(got.Hosts) != 3 || got.Hosts[0].Allocated != "2" {
 		t.Errorf("host breakdown: %d %+v", code, got)
 	}
+	// Unallocated host time is compute: nofamily=compute drops it and the
+	// host allocations with it; nofamily=ai keeps both.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["op"], costPath("&group=host&nofamily=compute"), &got); code != http.StatusOK ||
+		len(got.Unallocated) != 0 || len(got.Hosts) != 0 || len(got.Totals) != 1 || got.Totals[0].Amount != "2.5" {
+		t.Errorf("nofamily=compute: %d %+v", code, got)
+	}
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["op"], costPath("&group=host&nofamily=ai"), &got); code != http.StatusOK ||
+		len(got.Unallocated) != 2 || got.Unallocated[1].Amount != "3.25" || len(got.Hosts) != 3 || got.Hosts[0].Allocated != "2" {
+		t.Errorf("nofamily=ai: %d %+v", code, got)
+	}
 }
 
 // Grouped by family, the summary names each family as a Run's byFamily does.

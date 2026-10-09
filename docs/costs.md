@@ -1011,7 +1011,8 @@ operators), and also:
 
 - `group`: `tenant` (operators), `pool`, `host`, `family`, `run`, `key`,
   or `label:<key>`, repeatable for two levels;
-- `family`: filter by family; `nofamily`: every family but this one;
+- `family`: filter by family; `nofamily`: every family but this one (not
+  both: 400);
 - `label`: `key=value` (split at the first `=`), repeatable: only Runs
   with that label. Repeating a key accepts any of its values (OR); different
   keys must all match (AND);
@@ -1019,20 +1020,26 @@ operators), and also:
 - `interval`: `hour` or `day`, to return a series instead of totals;
 - `top`: 1 to 50, with a `group`: fold the first group to its top N values
   (below);
-- `rank`: with `top`, `all` (default), `compute` or `external`.
+- `rank`: with `top`, `all` (default), `compute` or `external`; a 400 when
+  it counts none of the families `family`/`nofamily` keep;
+- `runs=true`: without `top`, each `totals` row carries `runs` too (the
+  Runs with any cost under its first-group value).
 
 **Top N.** With `top=N`, the first group's values are ranked per currency
 (never across currencies) by their total over the range of what `rank`
 counts (`compute`: the compute family; `external`: every other family),
 largest first, ties by value (byte order). A value with no such cost ranks
-last. Every value past the N-th is returned as the reserved value
-`(other)`, in `totals` and in `series`; `(none)` (no label, no submitter,
-no pool) is never folded and does not count toward N. The second group
+last. Every value past the N-th is folded into one row per second-group
+value and currency, in `totals` and in `series`, marked `other: true`; its
+first-group value reads `(other)`. A real value literally named `(other)`
+(a label value can be) stays a row of its own, without `other`: `other` is
+what tells the fold apart. `(none)` (no label, no submitter, no pool) is
+never folded and does not count toward N. The second group
 (`family`, `run`, ...) is kept as it is under the fold. Each `totals` row
 then carries `runs`: the Runs with cost that `rank` counts under that
 first-group value (across the second group, so the same on each of its
-rows). `otherCount: {currency: n}` says how many values `(other)` holds,
-per currency; a currency with nothing folded is absent. The 10,000-row
+rows). `otherCount: {currency: n}` says how many values the `other` rows
+hold, per currency; a currency with nothing folded is absent. The 10,000-row
 limit applies to the folded rows, so a breakdown of any cardinality is
 bounded by N + 2 values per bucket. With `group=run`, `runs` names only the
 kept Runs.
