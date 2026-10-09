@@ -1,4 +1,4 @@
--- 059_run_stage.sql — a Run's stage (GET /v1/runs/{id} stage, stageSince).
+-- 060_run_stage.sql — a Run's stage (GET /v1/runs/{id} stage, stageSince).
 --
 -- repos_ready_at: the runner's reposReady mark, the end of its clones and a
 -- resume's sync fetches (at once for a spec without repositories); the
