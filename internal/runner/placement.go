@@ -1195,6 +1195,8 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 	// Published artifacts are handled in order, off the tailer (a large one
 	// takes a while to store); all of them before tailEvents returns, so
 	// before finish reports the placement's snapshot.
+	// Once maxPublished records are pending (luxd unreachable), the tailer
+	// blocks on this send, and with it idle/busy and input-ack events.
 	pub := make(chan proto.StagedArtifact, maxPublished)
 	pubDone := make(chan struct{})
 	go func() {
