@@ -106,6 +106,18 @@ type ACP struct {
 	closed bool
 	// bg: the adapter's own goroutines, joined when Run returns.
 	bg sync.WaitGroup
+
+	// ocBusy (under mu): OpenCode's bus reports a loop running for the
+	// session (session.status busy or retry), whoever started it; cleared
+	// by idle and whenever the stream is down. The Run's activity is busy
+	// while ocBusy or lux's own turn is. actMu orders activity reports;
+	// shown and shownIdle (under actMu) are the last one reported; ocGen
+	// (under actMu) counts the bus status events handled.
+	ocBusy    bool
+	actMu     sync.Mutex
+	shown     bool
+	shownIdle bool
+	ocGen     int
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -195,7 +207,10 @@ func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Si
 		a.bg.Add(1)
 		go func() {
 			defer a.bg.Done()
-			a.bus.follow(ctx, a.onBus, func() { a.settle() })
+			a.bus.follow(ctx, a.onBus, func() {
+				a.syncBusStatus(ctx)
+				a.settle()
+			}, func() { a.setOpenCodeBusy(false) })
 		}()
 	}
 	err := a.handshake(cfg)
@@ -298,7 +313,7 @@ func (a *ACP) setSession(id string) {
 	a.session = id
 	a.mu.Unlock()
 	a.sink.Session(id)
-	a.sink.Activity(true)
+	a.activity(true)
 }
 
 // drain sends the next queued input as a prompt, if the agent is idle.
@@ -329,7 +344,7 @@ func (a *ACP) drain() {
 	session := a.session
 	a.mu.Unlock()
 
-	a.sink.Activity(false)
+	a.activity(false)
 	wait, err := a.rpc.start("session/prompt", map[string]any{"sessionId": session, "prompt": inputContent(dialectACP, in)})
 	if err != nil {
 		a.inputs.fail(a.sink, in, err)
@@ -448,7 +463,7 @@ func (a *ACP) endTurn(data map[string]any) {
 	idle := len(a.queue) == 0
 	a.mu.Unlock()
 	if idle {
-		a.sink.Activity(true)
+		a.activity(true)
 	}
 	a.drain()
 }
@@ -749,7 +764,7 @@ func (a *ACP) busTurnEnded() {
 		a.reportTurnEnd(map[string]any{"stopReason": "end_turn", "source": "opencode-bus"})
 	}
 	if idle {
-		a.sink.Activity(true)
+		a.activity(true)
 	}
 	a.drain()
 }
@@ -905,7 +920,8 @@ func (a *ACP) queueInput(in proto.Input) {
 
 // onBus follows OpenCode's bus: an assistant step answering a steer lux
 // sent has read it and the steers sent before it (bus.answered);
-// session.idle after the ACP turn has ended settles the Run's work.
+// session.idle after the ACP turn has ended settles the Run's work;
+// session.status is the Run's activity (setOpenCodeBusy).
 func (a *ACP) onBus(ev busEvent) {
 	a.mu.Lock()
 	session, bt := a.session, a.busTurn
@@ -919,11 +935,100 @@ func (a *ACP) onBus(ev busEvent) {
 		if p.Info.Role == "assistant" && p.Info.SessionID == session && p.Info.ParentID != "" {
 			a.read(p.Info.ParentID)
 		}
+	case "session.status":
+		if busy, known := busyStatus(p.Status.Type); known && session != "" && p.SessionID == session {
+			a.setOpenCodeBusy(busy)
+		}
 	case "session.idle":
+		if session != "" && p.SessionID == session {
+			a.setOpenCodeBusy(false)
+		}
 		if p.SessionID == session && bt {
 			a.settle()
 		}
 	}
+}
+
+// setOpenCodeBusy records whether OpenCode runs a loop for the session and
+// reports the Run's activity if that changes it.
+func (a *ACP) setOpenCodeBusy(busy bool) {
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	a.ocGen++
+	a.applyOpenCodeBusyLocked(busy)
+}
+
+// applyOpenCodeBusyLocked sets ocBusy and reports the combined activity.
+// Lux's side is idle only with no turn of its own and nothing queued for
+// one, so a turn about to start does not flash idle. Under actMu.
+func (a *ACP) applyOpenCodeBusyLocked(busy bool) {
+	a.mu.Lock()
+	a.ocBusy = busy
+	idle := !a.busy && !busy && len(a.queue) == 0
+	a.mu.Unlock()
+	a.showLocked(idle)
+}
+
+// syncBusStatus reads OpenCode's status for the session: when the event
+// stream (re)connects, since events from while it was down are not
+// replayed, and when lux's turn ends while the bus last said busy. An
+// error reads as not busy. A bus event handled during the read supersedes
+// it (ocGen).
+func (a *ACP) syncBusStatus(ctx context.Context) {
+	a.actMu.Lock()
+	gen := a.ocGen
+	a.actMu.Unlock()
+	a.mu.Lock()
+	session := a.session
+	a.mu.Unlock()
+	if session == "" {
+		return
+	}
+	busy, err := a.bus.sessionBusy(ctx, session)
+	if ctx.Err() != nil {
+		return
+	}
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	if a.ocGen == gen {
+		a.applyOpenCodeBusyLocked(err == nil && busy)
+	}
+}
+
+// activity reports what lux's own turns say of the Run's activity. With
+// OpenCode's server, idle waits while OpenCode reports a loop running (one
+// a client started over its HTTP API), and that status is read again in
+// case its idle event raced ahead of the ACP result.
+func (a *ACP) activity(idle bool) {
+	if a.bus == nil {
+		a.sink.Activity(idle)
+		return
+	}
+	a.actMu.Lock()
+	a.mu.Lock()
+	oc := a.ocBusy
+	a.mu.Unlock()
+	if !idle || !oc {
+		a.report(idle)
+		a.actMu.Unlock()
+		return
+	}
+	a.actMu.Unlock()
+	a.spawn(func() { a.syncBusStatus(a.runCtx()) })
+}
+
+// showLocked reports idle unless it is what was last reported. Under actMu.
+func (a *ACP) showLocked(idle bool) {
+	if a.shown && a.shownIdle == idle {
+		return
+	}
+	a.report(idle)
+}
+
+// report reports idle to the sink. Under actMu.
+func (a *ACP) report(idle bool) {
+	a.shown, a.shownIdle = true, idle
+	a.sink.Activity(idle)
 }
 
 func (a *ACP) handleNotification(m rpcMsg) {
