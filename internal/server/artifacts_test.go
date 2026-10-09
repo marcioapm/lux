@@ -20,17 +20,37 @@ import (
 )
 
 func published(id, name, content, description string) proto.ArtifactPublished {
-	sum := sha256.Sum256([]byte(content))
 	return proto.ArtifactPublished{ID: id, Description: description, Artifact: proto.Artifact{
 		BlobInfo: proto.BlobInfo{BlobID: "blob-" + id, Size: int64(len(content)), SHA256: sha(content)},
 		Path:     proto.PublishedPrefix + name, ContentType: "text/markdown",
-		FileSize: int64(len(content)), FileSHA256: hex.EncodeToString(sum[:])}}
+		FileSize: int64(len(content)), FileSHA256: sha(content)}}
 }
 
 // sha is the blob's sha256: in these tests a blob's bytes are its content.
 func sha(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
+}
+
+// snapshotAAt is snapshotA as ra's placement at epoch reports it, with
+// that placement's own blob ids.
+func snapshotAAt(epoch int) proto.SnapshotDone {
+	sd := snapshotA()
+	e := strconv.Itoa(epoch)
+	sd.Manifest.SnapshotID, sd.Manifest.Epoch = "snapA"+e, epoch
+	sd.Manifest.Volumes[0].BlobID = "bA" + e + "-vol"
+	sd.Output.BlobID = "bA" + e + "-out"
+	sd.Artifacts[0].BlobID = "bA" + e + "-art"
+	return sd
+}
+
+// laterPlacements ends ra's epoch 1 and adds its placements at epochs 2
+// and 3 on ha.
+func laterPlacements(t *testing.T, s *Server) {
+	t.Helper()
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE id = 'pa1'`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('pa2', 't1', 'ra', 'ha', 2, 'stopping'), ('pa3', 't1', 'ra', 'ha', 3, 'stopping')`)
 }
 
 func reportPublished(t *testing.T, s *Server, hostID, runID string, epoch int, ap proto.ArtifactPublished) proto.Frame {
@@ -247,14 +267,9 @@ func TestArtifactPublishedEventOnUpload(t *testing.T) {
 func TestCollectedArtifactNotDuplicated(t *testing.T) {
 	s, ctx := reportFixture(t)
 	key := apiKey(t, s, new("t1"), "read")
-	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE id = 'pa1'`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('pa2', 't1', 'ra', 'ha', 2, 'stopping'), ('pa3', 't1', 'ra', 'ha', 3, 'stopping')`)
+	laterPlacements(t, s)
 	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 2 WHERE id = 'ra'`)
-	same := snapshotA()
-	same.Manifest.SnapshotID, same.Manifest.Epoch = "snapA2", 2
-	same.Manifest.Volumes[0].BlobID = "bA2-vol"
-	same.Output.BlobID = "bA2-out"
-	same.Artifacts[0].BlobID = "bA2-art"
+	same := snapshotAAt(2)
 	if f := reportSnapshot(t, s, "ha", "ra", 2, same); f.Type != proto.MsgAck || ackRefused(t, f) {
 		t.Fatalf("epoch 2: %s %s", f.Type, f.Data)
 	}
@@ -277,11 +292,7 @@ func TestCollectedArtifactNotDuplicated(t *testing.T) {
 		t.Fatal("the duplicate's blob was recorded")
 	}
 	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 3 WHERE id = 'ra'`)
-	changed := snapshotA()
-	changed.Manifest.SnapshotID, changed.Manifest.Epoch = "snapA3", 3
-	changed.Manifest.Volumes[0].BlobID = "bA3-vol"
-	changed.Output.BlobID = "bA3-out"
-	changed.Artifacts[0].BlobID = "bA3-art"
+	changed := snapshotAAt(3)
 	changed.Artifacts[0].FileSHA256 = "a-file-changed"
 	if f := reportSnapshot(t, s, "ha", "ra", 3, changed); f.Type != proto.MsgAck || ackRefused(t, f) {
 		t.Fatalf("epoch 3: %s %s", f.Type, f.Data)
@@ -307,16 +318,10 @@ func TestCollectedArtifactLongPath(t *testing.T) {
 		long += "/" + sha(strconv.Itoa(i))[:31]
 	}
 	long += "/f.txt"
-	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE id = 'pa1'`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('pa2', 't1', 'ra', 'ha', 2, 'stopping'), ('pa3', 't1', 'ra', 'ha', 3, 'stopping')`)
+	laterPlacements(t, s)
 	for epoch := 2; epoch <= 3; epoch++ {
 		execSQL(t, s, ctx, `UPDATE runs SET current_epoch = $1 WHERE id = 'ra'`, epoch)
-		sd := snapshotA()
-		e := strconv.Itoa(epoch)
-		sd.Manifest.SnapshotID, sd.Manifest.Epoch = "snapA"+e, epoch
-		sd.Manifest.Volumes[0].BlobID = "bA" + e + "-vol"
-		sd.Output.BlobID = "bA" + e + "-out"
-		sd.Artifacts[0].BlobID = "bA" + e + "-art"
+		sd := snapshotAAt(epoch)
 		sd.Artifacts[0].Path = long
 		if f := reportSnapshot(t, s, "ha", "ra", epoch, sd); f.Type != proto.MsgAck || ackRefused(t, f) {
 			t.Fatalf("epoch %d: %s %s", epoch, f.Type, f.Data)
