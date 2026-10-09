@@ -34,6 +34,8 @@ func TestValidArtifactName(t *testing.T) {
 		{strings.Repeat("x", 255), true},
 		{strings.Repeat("x", 256), false},
 		{"d/" + strings.Repeat("x", 256), false},
+		{strings.Repeat(strings.Repeat("x", 255)+"/", 3) + strings.Repeat("y", 254) + "/z", true},
+		{strings.Repeat(strings.Repeat("x", 255)+"/", 3) + strings.Repeat("y", 254) + "/zz", false},
 	} {
 		if err := ValidArtifactName(c.name); (err == nil) != c.ok {
 			t.Errorf("ValidArtifactName(%q) = %v, want ok %v", c.name, err, c.ok)

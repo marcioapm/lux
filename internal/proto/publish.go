@@ -29,7 +29,7 @@ const (
 	PublishedPrefix = "/.lux/artifacts/"
 	// MaxDescription and MaxArtifactName bound a publish's text fields.
 	MaxDescription  = 4096
-	MaxArtifactName = 4096
+	MaxArtifactName = 1024
 )
 
 type PublishRequest struct {

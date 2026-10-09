@@ -670,7 +670,7 @@ func insertSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, pla
 		// blob id already recorded goes on to insertBlob's check.
 		var dup bool
 		if err := tx.QueryRow(ctx, `SELECT NOT EXISTS (SELECT 1 FROM blobs WHERE id = $1)
-			AND coalesce((SELECT sha256 FROM artifacts WHERE run_id = $2 AND path = $3 ORDER BY version DESC LIMIT 1) = $4, false)`,
+			AND coalesce((SELECT sha256 FROM artifacts WHERE run_id = $2 AND md5(path) = md5($3) AND path = $3 ORDER BY version DESC LIMIT 1) = $4, false)`,
 			a.BlobID, runID, a.Path, a.FileSHA256).Scan(&dup); err != nil {
 			return err
 		}
@@ -770,7 +770,7 @@ func recordedBlobsMatch(ctx context.Context, tx pgx.Tx, runID string, epoch int,
 		// was not: its blob must be unknown and that content recorded.
 		var known bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM blobs WHERE id = $1)
-			OR NOT EXISTS (SELECT 1 FROM artifacts WHERE run_id = $2 AND path = $3 AND sha256 = $4)`,
+			OR NOT EXISTS (SELECT 1 FROM artifacts WHERE run_id = $2 AND md5(path) = md5($3) AND path = $3 AND sha256 = $4)`,
 			a.BlobID, runID, a.Path, a.FileSHA256).Scan(&known); err != nil {
 			return err
 		}
