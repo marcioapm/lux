@@ -1011,12 +1011,31 @@ operators), and also:
 
 - `group`: `tenant` (operators), `pool`, `host`, `family`, `run`, `key`,
   or `label:<key>`, repeatable for two levels;
-- `family`: filter by family;
+- `family`: filter by family; `nofamily`: every family but this one;
 - `label`: `key=value` (split at the first `=`), repeatable: only Runs
   with that label. Repeating a key accepts any of its values (OR); different
   keys must all match (AND);
 - `nolabel`: a key, repeatable: only Runs without that label;
-- `interval`: `hour` or `day`, to return a series instead of totals.
+- `interval`: `hour` or `day`, to return a series instead of totals;
+- `top`: 1 to 50, with a `group`: fold the first group to its top N values
+  (below);
+- `rank`: with `top`, `all` (default), `compute` or `external`.
+
+**Top N.** With `top=N`, the first group's values are ranked per currency
+(never across currencies) by their total over the range of what `rank`
+counts (`compute`: the compute family; `external`: every other family),
+largest first, ties by value (byte order). A value with no such cost ranks
+last. Every value past the N-th is returned as the reserved value
+`(other)`, in `totals` and in `series`; `(none)` (no label, no submitter,
+no pool) is never folded and does not count toward N. The second group
+(`family`, `run`, ...) is kept as it is under the fold. Each `totals` row
+then carries `runs`: the Runs with cost that `rank` counts under that
+first-group value (across the second group, so the same on each of its
+rows). `otherCount: {currency: n}` says how many values `(other)` holds,
+per currency; a currency with nothing folded is absent. The 10,000-row
+limit applies to the folded rows, so a breakdown of any cardinality is
+bounded by N + 2 values per bucket. With `group=run`, `runs` names only the
+kept Runs.
 
 Label keys in `label`, `nolabel` and `group=label:<key>` are values bound
 to the query, never SQL text; a `label` or `nolabel` key that is not a
@@ -1050,8 +1069,9 @@ allocated vs unallocated. Tenants never get these fields.
 Grouped by `family`, the response has `families: [{family, displayName,
 color}]`, resolved as a Run's `byFamily` is (the first usable plugin's
 describe; `Compute` for compute), so a family reads the same everywhere.
-Grouped by `run`, it has `runs: [{id, name}]` for the Runs in `totals`,
-read in the same snapshot, so a list of top Runs needs no call per Run.
+Grouped by `run`, it has `runs: [{id, name, labels}]` for the Runs in
+`totals`, read in the same snapshot, so a list of top Runs needs no call
+per Run.
 
 Grouped by `key`, the group value is who submitted the Run
 (`runs.submitted_by_key`, `submitted_by_email`, recorded at submit since
