@@ -99,16 +99,23 @@ func (r *Runner) snapshotRecords() map[string]*snapshotRecord {
 		if !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(r.cfg.DataDir, "snapshots", name))
-		if err != nil {
-			continue
-		}
-		var rec snapshotRecord
-		if json.Unmarshal(b, &rec) == nil {
-			out[strings.TrimSuffix(name, ".json")] = &rec
+		if rec, err := readRecordFile(filepath.Join(r.cfg.DataDir, "snapshots", name)); err == nil {
+			out[strings.TrimSuffix(name, ".json")] = rec
 		}
 	}
 	return out
+}
+
+func readRecordFile(path string) (*snapshotRecord, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rec snapshotRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
 }
 
 // uploader uploads blobs in the background, oldest first, retrying until
@@ -191,9 +198,10 @@ func (u *uploader) pass(ctx context.Context) {
 }
 
 // markReported records that luxd has a snapshot's report; and so an
-// earlier record of the same placement (same epoch: a restarted runner
-// finished it again), whose report went through before the runner could
-// mark it. Other placements' records are theirs alone.
+// earlier snapshot record of the same placement (same epoch: a restarted
+// runner finished it again), whose report went through before the runner
+// could mark it. Other placements' records, and published artifacts'
+// (reported on their own), are theirs alone.
 func (r *Runner) markReported(snapID string) {
 	var runID string
 	var epoch int
@@ -202,7 +210,7 @@ func (r *Runner) markReported(snapID string) {
 		runID, epoch = rec.RunID, rec.Epoch
 	})
 	for id, rec := range r.snapshotRecords() {
-		if id != snapID && !rec.Reported && rec.RunID == runID && rec.Epoch == epoch {
+		if id != snapID && !rec.Reported && rec.Published == nil && rec.RunID == runID && rec.Epoch == epoch {
 			r.updateRecord(id, func(rec *snapshotRecord) { rec.Reported = true })
 		}
 	}
