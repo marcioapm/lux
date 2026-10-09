@@ -121,7 +121,7 @@ type CostSummaryBody struct {
 	Unallocated []CostSummaryRow `json:"unallocated,omitempty"`
 	Hosts       []HostAllocation `json:"hosts,omitempty"`
 	Families    []CostFamilyInfo `json:"families,omitempty" doc:"Grouped by family: each family in totals, with the displayName and color byFamily has on a Run's cost."`
-	Runs        []CostRunInfo    `json:"runs,omitempty" doc:"Grouped by run: each Run in totals with its name."`
+	Runs        []CostRunInfo    `json:"runs,omitempty" doc:"Grouped by run: each Run in totals with its name and labels."`
 	Keys        []CostKeyInfo    `json:"keys,omitempty" doc:"Grouped by key: each submitter in totals. (none) is Runs from before luxd recorded who submitted them."`
 }
 
@@ -134,8 +134,9 @@ type CostKeyInfo struct {
 }
 
 type CostRunInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name,omitempty"`
+	ID     string            `json:"id"`
+	Name   string            `json:"name,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type CostFamilyInfo struct {
@@ -484,7 +485,7 @@ func summaryRuns(ctx context.Context, tx pgx.Tx, rows []CostSummaryRow) ([]CostR
 		seen[r.Group["run"]] = true
 	}
 	ids := slices.Sorted(maps.Keys(seen))
-	names, err := tx.Query(ctx, `SELECT id, name FROM runs WHERE id = ANY($1) ORDER BY id`, ids)
+	names, err := tx.Query(ctx, `SELECT id, name, nullif(labels, '{}') FROM runs WHERE id = ANY($1) ORDER BY id`, ids)
 	if err != nil {
 		return nil, err
 	}

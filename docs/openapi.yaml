@@ -254,6 +254,10 @@ components:
       properties:
         id:
           type: string
+        labels:
+          additionalProperties:
+            type: string
+          type: object
         name:
           type: string
       type: object
@@ -304,7 +308,7 @@ components:
             - array
             - "null"
         runs:
-          description: "Grouped by run: each Run in totals with its name."
+          description: "Grouped by run: each Run in totals with its name and labels."
           items:
             $ref: "#/components/schemas/CostRunInfo"
           type:
