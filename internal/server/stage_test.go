@@ -23,10 +23,14 @@ func TestDeriveStage(t *testing.T) {
 		since  time.Time
 		reason string
 	}{
-		{"submitted: since created", stageInputs{State: StateSubmitted, NeedsHostSince: at(0)}, StageWaiting, t0, ""},
+		{"submitted: since needs_host_since", stageInputs{State: StateSubmitted, NeedsHostSince: at(3)}, StageWaiting, *at(3), ""},
 		{"submitted before needs_host_since was kept", stageInputs{State: StateSubmitted}, StageWaiting, created, ""},
-		{"provisioning", stageInputs{State: StateProvisioning, NeedsHostSince: at(0)}, StageWaiting, t0, ""},
-		{"assigned, not accepted", stageInputs{State: StateScheduled, PState: "assigned", PNeededSince: at(0)}, StageWaiting, t0, ""},
+		{"provisioning", stageInputs{State: StateProvisioning, NeedsHostSince: at(3)}, StageWaiting, *at(3), ""},
+		{"resumed before needs_host_since was kept: since its last placement's end", stageInputs{State: StateResuming, LastEnded: at(30), PState: "exited"}, StageWaiting, *at(30), ""},
+		{"requeued: since the wait the given-up placement began", stageInputs{State: StateResuming, WaitingSince: at(3), NeedsHostSince: at(30), LastEnded: at(30), PState: "lost"}, StageWaiting, *at(3), ""},
+		{"requeued, assigned again", stageInputs{State: StateScheduled, WaitingSince: at(3), LastEnded: at(30), PState: "assigned", PNeededSince: at(30)}, StageWaiting, *at(3), ""},
+		{"assigned, not accepted", stageInputs{State: StateScheduled, PState: "assigned", PNeededSince: at(3)}, StageWaiting, *at(3), ""},
+		{"assigned before needed_since was kept: since the last placement's end", stageInputs{State: StateScheduled, LastEnded: at(30), PState: "assigned"}, StageWaiting, *at(30), ""},
 		{"accepted", accepted(stageInputs{}), StageImage, *at(2), ""},
 		{"image ready", func() stageInputs { in := accepted(stageInputs{}); in.PImageReady = at(5); return in }(), StageVolumes, *at(5), ""},
 		{"volumes restored", func() stageInputs {
@@ -39,6 +43,11 @@ func TestDeriveStage(t *testing.T) {
 			in.PImageReady, in.PVolumesRestored, in.PReposReady = at(5), at(7), at(9)
 			return in
 		}(), StageContainer, *at(9), ""},
+		{"no repositories: repositories ends as it begins", func() stageInputs {
+			in := accepted(stageInputs{})
+			in.PImageReady, in.PVolumesRestored, in.PReposReady = at(5), at(7), at(7)
+			return in
+		}(), StageContainer, *at(7), ""},
 		{"container started, running not yet seen", func() stageInputs {
 			in := accepted(stageInputs{})
 			in.PImageReady, in.PVolumesRestored, in.PReposReady, in.PContainerStarted = at(5), at(7), at(9), at(11)
@@ -46,6 +55,8 @@ func TestDeriveStage(t *testing.T) {
 		}(), StageRunning, *at(11), ""},
 		{"running", stageInputs{State: StateRunning, PState: "running", PAccepted: at(2), PContainerStarted: at(11), PStarted: at(12)}, StageRunning, *at(11), ""},
 		{"running, from a runner without containerStarted", stageInputs{State: StateRunning, PState: "running", PAccepted: at(2), PStarted: at(12)}, StageRunning, *at(12), ""},
+		{"stopping on its own, from a runner without containerStarted", stageInputs{State: StateRunning, PState: "stopping", PAccepted: at(2), PImageReady: at(5), PStarted: at(12)}, StageRunning, *at(12), ""},
+		{"stopping without a stop request", stageInputs{State: StateStopping, StateChangedAt: *at(25), PState: "running", PContainerStarted: at(11)}, StageStopping, *at(25), ""},
 		{"stopping", stageInputs{State: StateStopping, PState: "running", PContainerStarted: at(11), PStopRequested: at(20), PStopReason: "stop"}, StageStopping, *at(20), "stop"},
 		{"a start stopped", stageInputs{State: StateStopping, PState: "starting", PAccepted: at(2), PImageReady: at(5), PStopRequested: at(6), PStopReason: "terminate"}, StageStopping, *at(6), "terminate"},
 		{"a move: stopping", stageInputs{State: StateStopping, PState: "stopping", PContainerStarted: at(11), PStopRequested: at(20), PStopReason: "migrate"}, StageStopping, *at(20), "migrate"},
