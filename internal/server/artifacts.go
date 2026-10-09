@@ -73,7 +73,7 @@ func applyArtifactPublished(ctx context.Context, tx pgx.Tx, tenantID, hostID, ru
 	case err == nil && gotRun == runID && gotBlob == ap.BlobID && gotSHA == ap.FileSHA256:
 		return false, nil
 	case err == nil:
-		return true, nil
+		return true, refusedReuse(ctx, tx, tenantID, runID, epoch, ap)
 	case !errors.Is(err, pgx.ErrNoRows):
 		return false, err
 	}
@@ -86,7 +86,10 @@ func applyArtifactPublished(ctx context.Context, tx pgx.Tx, tenantID, hostID, ru
 	err = insertBlob(ctx, sp, tenantID, runID, epoch, hostID, ap.BlobID, "artifact", ap.Path, ap.Size, ap.SHA256, "")
 	var foreign *foreignBlobError
 	if errors.As(err, &foreign) {
-		return true, sp.Rollback(ctx)
+		if err := sp.Rollback(ctx); err != nil {
+			return false, err
+		}
+		return true, refusedReuse(ctx, tx, tenantID, runID, epoch, ap)
 	}
 	if err != nil {
 		return false, err
@@ -95,6 +98,11 @@ func applyArtifactPublished(ctx context.Context, tx pgx.Tx, tenantID, hostID, ru
 		return false, err
 	}
 	return false, sp.Commit(ctx)
+}
+
+func refusedReuse(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, ap proto.ArtifactPublished) error {
+	return addEvent(ctx, tx, tenantID, runID, epoch, "artifacts.failed", map[string]any{
+		"error": artifactName(ap.Path) + ": refused, its artifact id or blob is already recorded as another"})
 }
 
 // artifactUploaded adds artifact.published for the artifact whose blob just

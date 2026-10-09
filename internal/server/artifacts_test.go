@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -130,6 +131,12 @@ func TestPublishedArtifactVersions(t *testing.T) {
 	}
 	if n := len(listed(t, s, key, "ra", "?versions=all")); n != 3 {
 		t.Fatalf("%d artifacts after refusals", n)
+	}
+	if got := eventErrors(t, s, "ra", "artifacts.failed"); len(got) != 1 || !strings.Contains(got[0], "notes.md: refused") {
+		t.Fatalf("ra's artifacts.failed %q", got)
+	}
+	if got := eventErrors(t, s, "rb", "artifacts.failed"); len(got) != 1 || !strings.Contains(got[0], "x: refused") {
+		t.Fatalf("rb's artifacts.failed %q", got)
 	}
 	for _, bad := range []proto.ArtifactPublished{published("nope", "x", "1", ""), published("art_dddddddddddddddd", "../x", "1", "")} {
 		if f := reportPublished(t, s, "ha", "ra", 1, bad); f.Type != proto.MsgAck || !ackRefused(t, f) {
