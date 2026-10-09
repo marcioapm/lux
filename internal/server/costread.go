@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +20,10 @@ type costSummaryInput struct {
 	CostLabelQuery
 	Group    []string `query:"group,explode" doc:"Repeat up to twice: tenant (operators), pool, host, family, run, key, label:key."`
 	Family   string   `query:"family" doc:"Only this family."`
+	NoFamily string   `query:"nofamily" doc:"Every family but this one."`
 	Interval string   `query:"interval" doc:"hour or day; include a time series."`
+	Top      string   `query:"top" doc:"1 to 50: keep the first group's N values costing the most per currency (ties by value) and fold the rest into the reserved value (other), in totals and series; (none) is never folded nor counted, and the second group is kept. Needs a group. The row limit applies to the folded rows. Totals rows then carry runs, and otherCount says how many values were folded."`
+	Rank     string   `query:"rank" doc:"With top: all (default), compute, or external (every family but compute): the cost that ranks the values and that runs counts."`
 }
 
 func (in *costSummaryInput) Resolve(ctx huma.Context) []error {
@@ -103,6 +107,7 @@ type CostSummaryRow struct {
 	Group    map[string]string `json:"group,omitempty"`
 	Currency string            `json:"currency"`
 	Amount   string            `json:"amount"`
+	Runs     *int              `json:"runs,omitempty" doc:"With top, on totals: the Runs with cost that rank counts under this row's first-group value, across the second group."`
 }
 
 type HostAllocation struct {
@@ -123,6 +128,7 @@ type CostSummaryBody struct {
 	Families    []CostFamilyInfo `json:"families,omitempty" doc:"Grouped by family: each family in totals, with the displayName and color byFamily has on a Run's cost."`
 	Runs        []CostRunInfo    `json:"runs,omitempty" doc:"Grouped by run: each Run in totals with its name and labels."`
 	Keys        []CostKeyInfo    `json:"keys,omitempty" doc:"Grouped by key: each submitter in totals. (none) is Runs from before luxd recorded who submitted them."`
+	OtherCount  map[string]int   `json:"otherCount,omitempty" doc:"With top: per currency, how many values (other) holds; a currency with none folded is absent."`
 }
 
 type CostKeyInfo struct {
@@ -152,7 +158,35 @@ type costSummaryOutput struct {
 const (
 	costMaxRange = 90 * 24 * time.Hour
 	costMaxRows  = 10000
+	costMaxTop   = 50
+	// costOther is the value a top fold gives every value past the top N.
+	costOther = "(other)"
 )
+
+// fold is top (0: none) and what it ranks by.
+func (in *costSummaryInput) fold() (int, string, error) {
+	rank := in.Rank
+	if rank == "" {
+		rank = "all"
+	}
+	if rank != "all" && rank != "compute" && rank != "external" {
+		return 0, "", errf(http.StatusBadRequest, "bad_request", "rank must be all, compute or external")
+	}
+	if in.Top == "" {
+		if in.Rank != "" {
+			return 0, "", errf(http.StatusBadRequest, "bad_request", "rank needs top")
+		}
+		return 0, rank, nil
+	}
+	top, err := strconv.Atoi(in.Top)
+	if err != nil || top < 1 || top > costMaxTop {
+		return 0, "", errf(http.StatusBadRequest, "bad_request", "top must be 1 to %d", costMaxTop)
+	}
+	if len(in.Group) == 0 {
+		return 0, "", errf(http.StatusBadRequest, "bad_request", "top needs a group")
+	}
+	return top, rank, nil
+}
 
 // Cost buckets are whole UTC hours; a partial boundary includes its hour.
 func costRange(from, to time.Time) (time.Time, time.Time, error) {
@@ -212,17 +246,45 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	if err != nil {
 		return nil, err
 	}
+	top, rank, err := in.fold()
+	if err != nil {
+		return nil, err
+	}
 	filtered := len(want) > 0 || len(absent) > 0
 	out := &costSummaryOutput{Body: CostSummaryBody{From: from, To: to, Basis: "list", Totals: []CostSummaryRow{}}}
 	// Group selectors and label keys are values, never SQL identifiers.
 	const base = `WITH ` + costScopedSQL + `, dimensions AS (
-		SELECT hour, currency, amount,
+		SELECT hour, currency, amount, run_id, ($10 = 'all' OR (family = 'compute') = ($10 = 'compute')) AS ranks,
 			CASE $6::text WHEN 'tenant' THEN tenant_id WHEN 'pool' THEN pool WHEN 'host' THEN host WHEN 'key' THEN submitter
 				WHEN 'family' THEN family WHEN 'run' THEN run_id WHEN 'label' THEN coalesce(labels->>$8, '(none)') END AS g1,
 			CASE $7::text WHEN 'tenant' THEN tenant_id WHEN 'pool' THEN pool WHEN 'host' THEN host WHEN 'key' THEN submitter
 				WHEN 'family' THEN family WHEN 'run' THEN run_id WHEN 'label' THEN coalesce(labels->>$9, '(none)') END AS g2
-		FROM scoped
-	) SELECT `
+		FROM scoped WHERE $12 = '' OR family <> $12
+	)`
+	// The fold ranks g1 per currency by the cost rank counts (a value with
+	// none ranks last), then names every value past $11 (other). nvals is
+	// every value but (none): the folded ones are nvals - $11. vals is read
+	// by the totals only: Runs per folded value, across g2.
+	const folded = `, sums AS (
+		SELECT g1, currency, sum(amount) FILTER (WHERE ranks) AS total FROM dimensions WHERE g1 <> '(none)' GROUP BY 1, 2
+	), ranked AS (
+		SELECT g1, currency, row_number() OVER (PARTITION BY currency ORDER BY total DESC NULLS LAST, g1 COLLATE "C") AS n,
+			count(*) OVER (PARTITION BY currency) AS nvals
+		FROM sums
+	), shaped AS (
+		SELECT d.hour, d.currency, d.amount, d.run_id, d.ranks, d.g2, rk.nvals,
+			CASE WHEN rk.n > $11 THEN '(other)' ELSE d.g1 END AS g1
+		FROM dimensions d LEFT JOIN ranked rk ON rk.g1 = d.g1 AND rk.currency = d.currency
+	), vals AS (
+		SELECT g1, currency, (count(DISTINCT run_id) FILTER (WHERE ranks))::int AS runs, max(nvals)::int AS nvals
+		FROM shaped GROUP BY 1, 2
+	) `
+	const plain = `, shaped AS (SELECT * FROM dimensions WHERE $11::int = 0) `
+	query := base + plain
+	if top > 0 {
+		query = base + folded
+	}
+	args := []any{from, to, in.Family, want, absent, group[0], group[1], label[0], label[1], rank, top, in.NoFamily}
 	rowCount := 0
 	read := func(tx pgx.Tx, interval string) ([]CostSummaryRow, error) {
 		bucket := "NULL::timestamptz"
@@ -232,10 +294,16 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		case "day":
 			bucket = "date_trunc('day', hour AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
 		}
+		grouped := `SELECT ` + bucket + ` AS at, g1, g2, currency, trim_scale(sum(amount))::text AS amount FROM shaped GROUP BY 1, 2, 3, 4`
+		var sql string
+		if top > 0 && interval == "" {
+			sql = query + `SELECT b.*, v.runs, v.nvals FROM (` + grouped + `) b
+				LEFT JOIN vals v ON v.g1 IS NOT DISTINCT FROM b.g1 AND v.currency = b.currency ORDER BY 1 NULLS FIRST, 2, 3, 4`
+		} else {
+			sql = query + `SELECT *, NULL::int, NULL::int FROM (` + grouped + `) b ORDER BY 1 NULLS FIRST, 2, 3, 4`
+		}
 		result := []CostSummaryRow{}
-		rows, err := tx.Query(ctx, base+bucket+`, g1, g2, currency, trim_scale(sum(amount))::text
-				FROM dimensions GROUP BY 1, 2, 3, 4 ORDER BY 1 NULLS FIRST, 2, 3, 4`,
-			from, to, in.Family, want, absent, group[0], group[1], label[0], label[1])
+		rows, err := tx.Query(ctx, sql, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -243,8 +311,15 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		for rows.Next() {
 			var row CostSummaryRow
 			var g1, g2 *string
-			if err := rows.Scan(&row.At, &g1, &g2, &row.Currency, &row.Amount); err != nil {
+			var nvals *int
+			if err := rows.Scan(&row.At, &g1, &g2, &row.Currency, &row.Amount, &row.Runs, &nvals); err != nil {
 				return nil, err
+			}
+			if g1 != nil && *g1 == costOther && nvals != nil && *nvals > top {
+				if out.Body.OtherCount == nil {
+					out.Body.OtherCount = map[string]int{}
+				}
+				out.Body.OtherCount[row.Currency] = *nvals - top
 			}
 			if len(in.Group) > 0 {
 				value := "(none)"
@@ -289,8 +364,8 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		if p.Operator && p.TenantID == "" && !filtered {
 			out.Body.Unallocated = []CostSummaryRow{}
 			rows, err := tx.Query(ctx, `SELECT currency, trim_scale(sum(unallocated))::text FROM cost_hourly
-				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3)
-				GROUP BY currency ORDER BY currency`, from, to, in.Family)
+				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)
+				GROUP BY currency ORDER BY currency`, from, to, in.Family, in.NoFamily)
 			if err != nil {
 				return err
 			}
@@ -315,8 +390,8 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			out.Body.Hosts = []HostAllocation{}
 			rows, err = tx.Query(ctx, `SELECT host_id, currency, trim_scale(sum(allocated))::text,
 				trim_scale(sum(unallocated))::text FROM cost_hourly
-				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3)
-				GROUP BY host_id, currency ORDER BY host_id, currency`, from, to, in.Family)
+				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)
+				GROUP BY host_id, currency ORDER BY host_id, currency`, from, to, in.Family, in.NoFamily)
 			if err != nil {
 				return err
 			}
@@ -356,7 +431,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 func (s *Server) summaryKeys(ctx context.Context, p Principal, rows []CostSummaryRow) ([]CostKeyInfo, error) {
 	seen := map[string]bool{}
 	for _, r := range rows {
-		if v := r.Group["key"]; v != "(none)" {
+		if v := r.Group["key"]; v != "(none)" && v != costOther {
 			seen[v] = true
 		}
 	}
@@ -466,7 +541,9 @@ func (s *Server) costLabels(ctx context.Context, in *costLabelsInput) (*costLabe
 func (s *Server) summaryFamilies(rows []CostSummaryRow) []CostFamilyInfo {
 	seen := map[string]bool{}
 	for _, r := range rows {
-		seen[r.Group["family"]] = true
+		if f := r.Group["family"]; f != costOther {
+			seen[f] = true
+		}
 	}
 	names := slices.Sorted(maps.Keys(seen))
 	meta := s.costFamilyMetadata()
@@ -482,7 +559,9 @@ func (s *Server) summaryFamilies(rows []CostSummaryRow) []CostFamilyInfo {
 func summaryRuns(ctx context.Context, tx pgx.Tx, rows []CostSummaryRow) ([]CostRunInfo, error) {
 	seen := map[string]bool{}
 	for _, r := range rows {
-		seen[r.Group["run"]] = true
+		if id := r.Group["run"]; id != costOther {
+			seen[id] = true
+		}
 	}
 	ids := slices.Sorted(maps.Keys(seen))
 	names, err := tx.Query(ctx, `SELECT id, name, nullif(labels, '{}') FROM runs WHERE id = ANY($1) ORDER BY id`, ids)
