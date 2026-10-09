@@ -133,10 +133,13 @@ type fakeBus struct {
 	drop chan struct{}
 	gets int
 	// statusFail: GET /session/status answers 500; statusGets counts
-	// those GETs; statusHold, if set, is waited on before one answers.
+	// those GETs. statusQ, if set, gets each one as it arrives, with the
+	// answer it took then, and it waits for its release.
 	statusFail bool
 	statusGets int
-	statusHold chan struct{}
+	statusQ    chan heldStatus
+	// eventFail: GET /event answers 503.
+	eventFail bool
 	// dropParts: posted keeps no text, so a test can measure the adapter's
 	// heap alone.
 	dropParts bool
@@ -148,7 +151,12 @@ func newFakeBus(t *testing.T) *fakeBus {
 	mux.HandleFunc("GET /event", func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
 		b.gets++
+		fail := b.eventFail
 		b.mu.Unlock()
+		if fail {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"type\":\"server.connected\",\"properties\":{}}\n\n")
 		w.(http.Flusher).Flush()
@@ -202,18 +210,21 @@ func newFakeBus(t *testing.T) *fakeBus {
 	mux.HandleFunc("GET /session/status", func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
 		b.statusGets++
-		hold := b.statusHold
+		q, loop, fail := b.statusQ, b.loop, b.statusFail
 		b.mu.Unlock()
-		if hold != nil {
+		if q != nil {
+			h := heldStatus{busy: loop, release: make(chan struct{}), gone: r.Context().Done()}
 			select {
-			case <-hold:
+			case q <- h:
+			case <-r.Context().Done():
+				return
+			}
+			select {
+			case <-h.release:
 			case <-r.Context().Done():
 				return
 			}
 		}
-		b.mu.Lock()
-		loop, fail := b.loop, b.statusFail
-		b.mu.Unlock()
 		if fail {
 			http.Error(w, "down", http.StatusInternalServerError)
 			return
@@ -257,6 +268,75 @@ func (b *fakeBus) setStatus(code int) {
 func (b *fakeBus) setStatusFail(fail bool) {
 	b.mu.Lock()
 	b.statusFail = fail
+	b.mu.Unlock()
+}
+
+// heldStatus is a GET /session/status waiting to answer busy (the loop as
+// it was when the request arrived) until release closes; gone closes if
+// the client gives up on it first.
+type heldStatus struct {
+	busy    bool
+	release chan struct{}
+	gone    <-chan struct{}
+}
+
+// pending fails if the client has given up on h.
+func (h heldStatus) pending(t *testing.T, when string) {
+	t.Helper()
+	select {
+	case <-h.gone:
+		t.Fatalf("%s: the held status read was abandoned", when)
+	default:
+	}
+}
+
+// holdStatus makes each GET /session/status from now on wait for its
+// release (nextStatus); off answers them at once again.
+func (b *fakeBus) holdStatus(on bool) {
+	b.mu.Lock()
+	if on && b.statusQ == nil {
+		b.statusQ = make(chan heldStatus)
+	} else if !on {
+		b.statusQ = nil
+	}
+	b.mu.Unlock()
+}
+
+// nextStatus is the next held GET /session/status, once it has arrived.
+func (b *fakeBus) nextStatus(t *testing.T) heldStatus {
+	t.Helper()
+	b.mu.Lock()
+	q := b.statusQ
+	b.mu.Unlock()
+	select {
+	case h := <-q:
+		return h
+	case <-time.After(5 * time.Second):
+		t.Fatal("no GET /session/status")
+	}
+	return heldStatus{}
+}
+
+// waitHandled waits until the adapter has applied or discarded every status
+// read it dispatched.
+func waitHandled(t *testing.T, a *ACP) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		a.actMu.Lock()
+		n := a.statusReads
+		a.actMu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(end) {
+			t.Fatalf("%d status reads still in flight", n)
+		}
+	}
+}
+
+func (b *fakeBus) setEventFail(fail bool) {
+	b.mu.Lock()
+	b.eventFail = fail
 	b.mu.Unlock()
 }
 
@@ -340,11 +420,9 @@ func ocWithBusOn(t *testing.T, clk *testClock, sink Sink, log *inputSink) (*ACP,
 	}
 	b.setLoop(true) // the first prompt's loop
 	w, first := ocStartedOn(t, a, sink, log)
-	for end := time.Now().Add(5 * time.Second); !a.bus.isConnected(); time.Sleep(5 * time.Millisecond) {
-		if time.Now().After(end) {
-			t.Fatal("bus never connected")
-		}
-	}
+	// Connected (streamUp has run) and its status read handled.
+	waitGen(t, a, 1)
+	waitHandled(t, a)
 	return a, b, w, first
 }
 
@@ -567,36 +645,40 @@ func TestOpenCodeHTTPTurnShowsBusy(t *testing.T) {
 	b.events <- ocStatus("retry")
 	b.events <- ocStatus("busy")
 	b.setLoop(false)
+	gen := busGen(a)
 	b.events <- ocStatus("idle")
 	b.events <- ocIdle
+	waitGen(t, a, gen+2) // both of the idle pair handled
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy", "idle")
 	if a.bus.isConnected() {
 		t.Fatal("the event stream outlived Run")
 	}
 }
 
-// stays fails if the sink's last line is not want for d.
-func (s *inputSink) stays(t *testing.T, want string, d time.Duration) {
-	t.Helper()
-	for end := time.Now().Add(d); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
-		if l := s.lines(); len(l) == 0 || l[len(l)-1] != want {
-			t.Fatalf("last line is not %q: %q", want, l)
-		}
-	}
-}
-
 // lux's ACP turn ends while a loop a client started over HTTP still runs:
 // the Run stays busy, with no idle in between, until OpenCode reports the
-// session idle.
+// session idle; the status read at the turn's end confirms busy.
 func TestOpenCodeACPTurnEndsWhileHTTPLoopRuns(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
+	b.holdStatus(true)
 	onBus(t, a, ocStatus("busy"))
 	w.resolve(first, ocResult)
 	sink.wait(t, "turn_end")
-	sink.stays(t, "turn_end", 300*time.Millisecond)
+	h := b.nextStatus(t)
+	if !h.busy {
+		t.Fatal("the status read found no loop")
+	}
+	close(h.release)
+	waitHandled(t, a)
+	if l := sink.lines(); l[len(l)-1] != "turn_end" {
+		t.Fatalf("after the status read: %q", l)
+	}
+	b.holdStatus(false)
 	b.setLoop(false)
+	gen := busGen(a)
 	b.events <- ocStatus("idle")
 	b.events <- ocIdle
+	waitGen(t, a, gen+2)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
 }
 
@@ -613,8 +695,8 @@ func TestOpenCodeACPTurnEndRereadsStatus(t *testing.T) {
 
 // OpenCode's server goes away during a loop a client started: the Run is
 // not left busy on a status nobody can confirm. The stream's end clears
-// it; a status read that fails on reconnect reads as not busy; and the
-// failing server is not asked in a hot loop.
+// it; a status read that fails on reconnect reads as not busy; and one
+// reconnect asks the server once for each.
 func TestOpenCodeServerDownIsNotBusy(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
 	b.setLoop(false)
@@ -624,23 +706,20 @@ func TestOpenCodeServerDownIsNotBusy(t *testing.T) {
 	sink.waitLast(t, "busy")
 	b.setLoop(true) // OpenCode would say busy, but cannot answer
 	b.setStatusFail(true)
+	b.holdStatus(true)
 	b.mu.Lock()
 	gets0, status0 := b.gets, b.statusGets
 	b.mu.Unlock()
 	b.drop <- struct{}{}
 	sink.waitLast(t, "idle")
-	time.Sleep(500 * time.Millisecond)
-	if !a.bus.isConnected() {
-		t.Fatal("the stream did not reconnect")
-	}
-	sink.stays(t, "idle", 100*time.Millisecond)
+	h := b.nextStatus(t) // the reconnect's read
+	close(h.release)
+	waitHandled(t, a)
 	b.mu.Lock()
 	gets, status := b.gets-gets0, b.statusGets-status0
 	b.mu.Unlock()
-	// One reconnect: one GET /event, one status read for activity and at
-	// most a few by settle.
-	if gets != 1 || status < 1 || status > 3 {
-		t.Fatalf("in 500 ms: %d GET /event, %d GET /session/status", gets, status)
+	if gets != 1 || status != 1 || !a.bus.isConnected() {
+		t.Fatalf("one reconnect: %d GET /event, %d GET /session/status, connected %v", gets, status, a.bus.isConnected())
 	}
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy", "idle")
 }
@@ -650,35 +729,64 @@ func TestOpenCodeServerDownIsNotBusy(t *testing.T) {
 // the read end with it, and nothing is reported after.
 func TestOpenCodeStopEndsStatusFollowing(t *testing.T) {
 	a, b, w, sink, first := ocWithBus(t)
+	b.holdStatus(true)
 	onBus(t, a, ocStatus("busy"))
-	hold := make(chan struct{})
-	defer close(hold)
-	b.mu.Lock()
-	b.statusHold = hold
-	n := b.statusGets
-	b.mu.Unlock()
 	w.resolve(first, ocResult)
 	sink.wait(t, "turn_end")
-	for end := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		b.mu.Lock()
-		read := b.statusGets > n
-		b.mu.Unlock()
-		if read {
-			break
-		}
-		if time.Now().After(end) {
-			t.Fatal("no status read after the ACP turn ended while busy")
-		}
-	}
+	b.nextStatus(t) // held, never released
 	_ = a.Stop()
 	w.exit()
-	got := sink.lines()
 	if a.bus.isConnected() {
 		t.Fatal("the event stream outlived Run")
 	}
-	time.Sleep(50 * time.Millisecond)
-	if want := []string{"idle", "busy", "accepted prompt next_step receipt=false", "turn_end"}; !slices.Equal(got, want) || !slices.Equal(sink.lines(), want) {
-		t.Fatalf("got %q then %q, want %q", got, sink.lines(), want)
+	if got, want := sink.lines(), []string{"idle", "busy", "accepted prompt next_step receipt=false", "turn_end"}; !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// The status read on reconnect does not hold up the event stream: while it
+// waits for OpenCode, a step answering a steer is read (its receipt) and a
+// status event is applied; the read, answering after that event, is
+// superseded by it.
+func TestOpenCodeReconnectStatusReadDoesNotBlockEvents(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	a.Deliver(proto.Input{RequestID: "s", Text: "x"})
+	sink.wait(t, "accepted s")
+	msgID := b.postedID(t, 0)
+	b.holdStatus(true)
+	b.drop <- struct{}{}
+	h := b.nextStatus(t) // the reconnect's read, held
+	b.events <- b.answer(msgID)
+	sink.wait(t, "consumed s")
+	gen := busGen(a)
+	b.events <- ocStatus("idle")
+	waitGen(t, a, gen+1)
+	h.pending(t, "events handled") // handled while the read was still held
+	close(h.release)               // answers busy: the loop still runs
+	waitHandled(t, a)
+	b.holdStatus(false)
+	b.setLoop(false)
+	w.resolve(first, ocResult)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted s next_step receipt=true", "consumed s", "turn_end", "idle")
+}
+
+// busGen is the count of bus status events, connects and disconnects the
+// adapter has handled.
+func busGen(a *ACP) int {
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	return a.ocGen
+}
+
+// waitGen waits until the adapter has handled bus status events,
+// connects and disconnects up to gen.
+func waitGen(t *testing.T, a *ACP, gen int) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); busGen(a) < gen; time.Sleep(time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("bus generation %d, want %d", busGen(a), gen)
+		}
 	}
 }
 
