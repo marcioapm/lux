@@ -34,6 +34,17 @@ type publisher struct {
 // maxPublishHeader bounds the request line.
 const maxPublishHeader = 64 << 10
 
+// accept serves each connection on ln until it is closed.
+func (p *publisher) accept(ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go p.serve(c)
+	}
+}
+
 // serve answers one connection with one proto.PublishReply line.
 func (p *publisher) serve(c net.Conn) {
 	defer c.Close()
@@ -189,14 +200,6 @@ func (s *Shim) startPublish() error {
 	p := &publisher{base: proto.ShimRunDir, rel: filepath.ToSlash(rel), max: proto.MaxArtifactBytes, emit: func(a proto.StagedArtifact) error {
 		return s.out.TryEvent(proto.EvArtifact, a)
 	}}
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go p.serve(c)
-		}
-	}()
+	go p.accept(ln)
 	return nil
 }
