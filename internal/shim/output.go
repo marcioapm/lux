@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"slices"
 	"strings"
@@ -322,6 +323,23 @@ func (o *Output) Event(typ string, data any) {
 	}
 	o.event(typ, data)
 	o.w.Flush()
+}
+
+// errOutputClosed: the shim is ending; nothing more is recorded.
+var errOutputClosed = errors.New("the Run's container is ending")
+
+// TryEvent is Event that says whether the record reached the file.
+func (o *Output) TryEvent(typ string, data any) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed {
+		return errOutputClosed
+	}
+	for _, b := range slices.Clone(o.order) {
+		o.flushTo(b, len(b.data))
+	}
+	o.event(typ, data)
+	return o.w.Flush()
 }
 
 // boundary reports whether an event ends any text in progress: a turn's
