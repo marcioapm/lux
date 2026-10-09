@@ -51,6 +51,12 @@ type opencodeBus struct {
 	last int64
 	// seeded: the session whose stored messages last was raised to.
 	seeded string
+
+	// observer: a server the workload's own command runs (not lux's
+	// `opencode acp --port`): followed for activity only, never sent to.
+	// user and password: OpenCode's server Basic auth, if set.
+	observer       bool
+	user, password string
 }
 
 // freeLoopbackPort is a port nothing listens on at 127.0.0.1 now.
@@ -73,6 +79,24 @@ func newOpencodeBus(port int, dir string) *opencodeBus {
 	return &opencodeBus{port: port, dir: dir, expect: map[string]busSteer{},
 		hc: &http.Client{Timeout: 30 * time.Second, Transport: direct}, stream: &http.Client{Transport: direct}}
 }
+
+// newOpencodeObserver follows the server a command lux did not build runs
+// on 127.0.0.1:port, with OpenCode's Basic auth if password is set.
+func newOpencodeObserver(port int, dir, user, password string) *opencodeBus {
+	b := newOpencodeBus(port, dir)
+	b.observer, b.user, b.password = true, user, password
+	return b
+}
+
+// authorize adds the server's Basic auth to a request, if it has a password.
+func (b *opencodeBus) authorize(req *http.Request) {
+	if b.password != "" {
+		req.SetBasicAuth(b.user, b.password)
+	}
+}
+
+// errRefused: OpenCode's server refused lux's credentials (401 or 403).
+var errRefused = errors.New("refused")
 
 func (b *opencodeBus) url(path string) string {
 	return "http://127.0.0.1:" + strconv.Itoa(b.port) + path
@@ -135,14 +159,21 @@ type busEvent struct {
 //
 // Every end of the stream, clean or not, is followed by a wait: capped
 // exponential backoff with jitter, back to its start after a stream that
-// stayed up for healthyStream.
-func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, disconnected func()) {
+// stayed up for healthyStream. An observer the server refuses (errRefused)
+// stops at once and returns that error; otherwise follow returns nil.
+func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, disconnected func()) error {
 	wait := followMin
 	for ctx.Err() == nil {
 		began := time.Now()
 		err := b.followOnce(ctx, on, connected, disconnected)
 		if ctx.Err() != nil {
-			return
+			return nil
+		}
+		if b.observer && errors.Is(err, errRefused) {
+			b.mu.Lock()
+			b.lastErr = err
+			b.mu.Unlock()
+			return err
 		}
 		if err == nil {
 			err = errors.New("GET /event: the stream ended")
@@ -159,11 +190,12 @@ func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, 
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return
+			return nil
 		case <-t.C:
 		}
 		wait = min(wait*2, followMax)
 	}
+	return nil
 }
 
 // Reconnect backoff of the event stream.
@@ -180,11 +212,15 @@ func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connect
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("x-opencode-directory", b.dir)
+	b.authorize(req)
 	resp, err := b.stream.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: GET /event: %s", errRefused, resp.Status)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET /event: %s", resp.Status)
 	}
@@ -300,6 +336,9 @@ var errNotSent = errors.New("not sent")
 // (starting one if none runs). An error wrapping errNotSent means OpenCode
 // did not take it.
 func (b *opencodeBus) promptAsync(ctx context.Context, session, msgID string, in proto.Input) error {
+	if b.observer {
+		return fmt.Errorf("%w: an observed server is not steered through", errNotSent)
+	}
 	body, _ := json.Marshal(map[string]any{"messageID": msgID, "parts": inputContent(dialectOpenCode, in)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.url("/session/"+session+"/prompt_async"), bytes.NewReader(body))
 	if err != nil {
@@ -307,6 +346,7 @@ func (b *opencodeBus) promptAsync(ctx context.Context, session, msgID string, in
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-opencode-directory", b.dir)
+	b.authorize(req)
 	resp, err := b.hc.Do(req)
 	if err != nil {
 		var op *net.OpError
@@ -388,6 +428,7 @@ func (b *opencodeBus) get(ctx context.Context, path string, v any) (string, erro
 		return "", err
 	}
 	req.Header.Set("x-opencode-directory", b.dir)
+	b.authorize(req)
 	resp, err := b.hc.Do(req)
 	if err != nil {
 		return "", err
