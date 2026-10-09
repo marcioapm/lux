@@ -2118,7 +2118,7 @@ components:
           description: "For stopping: the stop's reason (stop, terminate, drain, preempt, migrate, timeout, disk)."
           type: string
         stageSince:
-          description: "When the stage began: one recorded time. The start stages' and running's are the runner's marks, on its host's clock; waiting's, stopping's and a resting state's are luxd's."
+          description: "When the stage began: one recorded time. volumes, repositories, container and running begin at the runner's marks, on its host's clock; waiting, image (acceptedAt), stopping and a resting state at luxd's."
           format: date-time
           type: string
         state:
