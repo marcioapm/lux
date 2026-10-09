@@ -210,6 +210,23 @@ func TestPublishRefusesALinkedStagingDir(t *testing.T) {
 	}
 }
 
+// A staging directory off the runtime volume is refused before anything
+// is done to it: not emptied, no socket opened.
+func TestStartPublishOffTheVolume(t *testing.T) {
+	dir := t.TempDir()
+	keep := filepath.Join(dir, "keep")
+	if err := os.WriteFile(keep, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Shim{cfg: proto.ShimConfig{ArtifactsDir: dir}}
+	if err := s.startPublish(); err == nil || !strings.Contains(err.Error(), "not on the runtime volume") {
+		t.Fatalf("err %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("staging dir emptied: %v", err)
+	}
+}
+
 func TestParsePublishArgs(t *testing.T) {
 	for _, c := range []struct {
 		args    []string

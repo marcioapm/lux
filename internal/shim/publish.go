@@ -191,16 +191,16 @@ func (s *Shim) startPublish() error {
 	if s.cfg.ArtifactsDir == "" {
 		return nil
 	}
+	rel, err := filepath.Rel(proto.ShimRunDir, s.cfg.ArtifactsDir)
+	if err != nil || !filepath.IsLocal(rel) {
+		return fmt.Errorf("artifacts staging %s is not on the runtime volume", s.cfg.ArtifactsDir)
+	}
 	if err := prepareStaging(s.cfg.ArtifactsDir); err != nil {
 		return fmt.Errorf("artifacts staging: %w", err)
 	}
 	ln, err := s.listenPublish()
 	if err != nil {
 		return fmt.Errorf("publish socket: %w", err)
-	}
-	rel, err := filepath.Rel(proto.ShimRunDir, s.cfg.ArtifactsDir)
-	if err != nil || !filepath.IsLocal(rel) {
-		return fmt.Errorf("artifacts staging %s is not on the runtime volume", s.cfg.ArtifactsDir)
 	}
 	p := &publisher{base: proto.ShimRunDir, rel: filepath.ToSlash(rel), max: proto.MaxArtifactBytes, emit: func(a proto.StagedArtifact) error {
 		return s.out.TryEvent(proto.EvArtifact, a)
