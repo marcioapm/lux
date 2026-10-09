@@ -138,32 +138,40 @@ test("Every Auto sends no history res", async () => {
   }
 });
 
-test("every cost summary that lists values asks luxd to fold to its top N, ranked by Show", async () => {
-  const p = await render("operator", "http://localhost/?by=key&cost=external");
-  try {
-    const costs = costCalls(p.fake.calls);
-    const of = (g: string[]) => costs.filter((q) => JSON.stringify(q.getAll("group")) === JSON.stringify(g));
-    for (const [g, top] of [
-      [["key"], "7"],
-      [["key", "family"], "7"],
-      [["run", "family"], "10"],
-      [["tenant", "family"], "10"],
-    ] as const) {
-      const qs = of([...g]);
-      expect(qs.length).toBe(1);
-      expect([qs[0]!.get("top"), qs[0]!.get("rank")]).toEqual([top, "external"]);
+for (const [cost, rank, showFilter] of [
+  ["all", "all", {}],
+  ["compute", "compute", { family: "compute" }],
+  ["external", "external", { nofamily: "compute" }],
+] as const) {
+  test(`?cost=${cost}: every summary that lists values is folded ranked by ${rank}; only the breakdown series filters by family`, async () => {
+    const p = await render("operator", `http://localhost/?by=key&cost=${cost}`);
+    try {
+      const costs = costCalls(p.fake.calls);
+      const of = (g: string[]) => costs.filter((q) => JSON.stringify(q.getAll("group")) === JSON.stringify(g));
+      const filterOf = (q: URLSearchParams) => ({ family: q.get("family") ?? undefined, nofamily: q.get("nofamily") ?? undefined });
+      for (const [g, top] of [
+        [["key"], "7"],
+        [["key", "family"], "7"],
+        [["run", "family"], "10"],
+        [["tenant", "family"], "10"],
+      ] as const) {
+        const qs = of([...g]);
+        expect(qs.length).toBe(1);
+        expect([qs[0]!.get("top"), qs[0]!.get("rank")]).toEqual([top, rank]);
+      }
+      expect(filterOf(of(["key"])[0]!)).toEqual({ family: undefined, nofamily: undefined, ...showFilter });
+      for (const g of [["key", "family"], ["run", "family"], ["tenant", "family"], ["family"]]) {
+        expect(filterOf(of(g)[0]!)).toEqual({ family: undefined, nofamily: undefined });
+      }
+      // The family summary is not folded: it asks for runs, not top.
+      expect([of(["family"])[0]!.get("runs"), of(["family"])[0]!.has("top")]).toEqual(["true", false]);
+      // No summary is grouped by a value and run: Runs per value come with the fold.
+      expect(costs.some((q) => q.getAll("group").length === 2 && q.getAll("group")[1] === "run")).toBe(false);
+    } finally {
+      await p.done();
     }
-    // The breakdown's series applies Show by family; its split keeps every family.
-    expect(of(["key"])[0]!.get("nofamily")).toBe("compute");
-    expect(of(["key", "family"])[0]!.has("nofamily")).toBe(false);
-    // The family summary is not folded: it asks for runs, not top.
-    expect([of(["family"])[0]!.get("runs"), of(["family"])[0]!.has("top")]).toEqual(["true", false]);
-    // No summary is grouped by a value and run any more: Runs per value come with the fold.
-    expect(costs.some((q) => q.getAll("group").length === 2 && q.getAll("group")[1] === "run")).toBe(false);
-  } finally {
-    await p.done();
-  }
-});
+  });
+}
 
 const costRow = (group: Record<string, string>, amount: string, extra: Record<string, unknown> = {}) => ({ group, currency: "USD", amount, ...extra });
 // One hourly bucket: two would draw a uPlot chart, which needs a canvas happy-dom lacks.
@@ -189,15 +197,16 @@ test("the peak Run is asked folded to one Run, ranked by Show, over the peak buc
   }
 });
 
-test("By family: each family's Runs from the family summary's runs", async () => {
+test("By family: each family's Runs from the family summary's runs, per currency", async () => {
   const p = await render("tenant", "http://localhost/", (path) => {
     if (!path.startsWith("/v1/costs?")) return undefined;
-    if (groupsOf(path) === "family") return summary([costRow({ family: "compute" }, "5", { runs: 3 }), costRow({ family: "ai" }, "2", { runs: 1 })]);
+    if (groupsOf(path) === "family") return summary([costRow({ family: "compute" }, "5", { runs: 3 }), costRow({ family: "ai" }, "2", { runs: 1 }), costRow({ family: "ai" }, "1", { runs: 2, currency: "EUR" })]);
     return summary([]);
   });
   try {
     const rows = [...cellsOf(p.el, "By family")].map((r) => [...r.querySelectorAll("td")].map((td) => td.textContent));
     expect(rows.map((r) => [r[0], r[1]])).toEqual([
+      ["ai", "2"],
       ["Compute", "3"],
       ["ai", "1"],
     ]);
