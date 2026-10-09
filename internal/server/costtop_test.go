@@ -119,13 +119,179 @@ func TestCostSummaryTop(t *testing.T) {
 		t.Errorf("run names: %d %+v", code, got.Runs)
 	}
 
-	for _, q := range []string{"&group=run&top=0", "&group=run&top=51", "&group=run&top=x", "&top=3", "&group=run&rank=compute", "&group=run&top=3&rank=ai"} {
+	// The schema refuses top out of range and an unknown rank (422); the
+	// handler refuses what the schema cannot say (400).
+	for _, q := range []string{"&group=run&top=0", "&group=run&top=51", "&group=run&top=x", "&group=run&top=3&rank=ai"} {
+		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: status %d, want 422", q, code)
+		}
+	}
+	for _, q := range []string{
+		"&top=3", "&group=run&rank=compute",
+		"&group=run&family=compute&nofamily=compute", "&group=run&family=ai&nofamily=compute",
+		"&group=run&top=3&family=ai&rank=compute", "&group=run&top=3&nofamily=compute&rank=compute",
+		"&group=run&top=3&family=compute&rank=external",
+	} {
 		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", q, code)
 		}
 	}
-	if code := getJSON(t, s, keys["t1"], costPath("&group=run&top=50"), &got); code != http.StatusOK {
-		t.Errorf("top=50: status %d", code)
+	for _, q := range []string{"&group=run&top=50", "&group=run&top=3&family=compute&rank=compute", "&group=run&top=3&nofamily=compute&rank=external", "&group=run&top=3&family=ai&rank=external"} {
+		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusOK {
+			t.Errorf("%s: status %d", q, code)
+		}
+	}
+
+	// nofamily=compute: compute is gone from totals and series; USD has one
+	// value left (nothing folds), EUR folds a3.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=label:app&top=2&rank=external&nofamily=compute&interval=hour"), &got); code != http.StatusOK {
+		t.Fatalf("nofamily status %d", code)
+	}
+	if m, want := byGroup(got.Totals, "label:app"), map[string]string{"a4 USD": "100", "a5 EUR": "9", "a1 EUR": "1", "(other) EUR": "1"}; !maps.Equal(m, want) {
+		t.Errorf("nofamily totals %v, want %v", m, want)
+	}
+	if len(got.Series) != 4 {
+		t.Errorf("nofamily series %+v", got.Series)
+	}
+	if !maps.Equal(got.OtherCount, map[string]int{"EUR": 1}) {
+		t.Errorf("nofamily otherCount %v", got.OtherCount)
+	}
+
+	// runs counts the Runs with cost rank counts: compute-only Runs count 0 under external.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=label:app&top=2&rank=external"), &got); code != http.StatusOK {
+		t.Fatalf("rank=external status %d", code)
+	}
+	if m, want := runsByGroup(got.Totals, "label:app"), map[string]int{"a4 USD": 1, "a1 USD": 0, "(other) USD": 0, "(none) USD": 0, "a5 EUR": 1, "a1 EUR": 1, "(other) EUR": 1}; !maps.Equal(m, want) {
+		t.Errorf("rank=external runs %v, want %v", m, want)
+	}
+
+	// otherCount is per currency: USD keeps a4 140, a1 100, a2 80 and folds
+	// a3 and a5; EUR has 3 values and folds none.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=label:app&top=3"), &got); code != http.StatusOK {
+		t.Fatalf("top=3 status %d", code)
+	}
+	if !maps.Equal(got.OtherCount, map[string]int{"USD": 2}) {
+		t.Errorf("top=3 otherCount %v, want USD 2 only", got.OtherCount)
+	}
+
+	// runs=true without top: Runs per family and currency, nothing folded.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=family&runs=true&interval=hour"), &got); code != http.StatusOK {
+		t.Fatalf("runs=true status %d", code)
+	}
+	if m, want := runsByGroup(got.Totals, "family"), map[string]int{"compute USD": 6, "ai USD": 1, "ai EUR": 3}; !maps.Equal(m, want) || got.OtherCount != nil {
+		t.Errorf("runs=true runs %v, want %v (otherCount %v)", m, want, got.OtherCount)
+	}
+	for _, r := range got.Series {
+		if r.Runs != nil {
+			t.Errorf("runs=true: series row with runs: %+v", r)
+		}
+	}
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=family"), &got); code != http.StatusOK || slices.ContainsFunc(got.Totals, func(r CostSummaryRow) bool { return r.Runs != nil }) {
+		t.Errorf("without runs=true: %d %+v", code, got.Totals)
+	}
+}
+
+// runsByGroup is totals as "value currency" -> runs for group key g (-1: none).
+func runsByGroup(rows []CostSummaryRow, g string) map[string]int {
+	m := map[string]int{}
+	for _, r := range rows {
+		m[r.Group[g]+" "+r.Currency] = -1
+		if r.Runs != nil {
+			m[r.Group[g]+" "+r.Currency] = *r.Runs
+		}
+	}
+	return m
+}
+
+// a6 costs the most in USD but has no compute; a7, added later, is labelled
+// app=(other), a value like any other.
+func TestCostSummaryTopEdges(t *testing.T) {
+	s, keys := topFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, labels) VALUES ('a6', 't1', '{}', 'running', '{"app":"a6"}')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount, allocated, unallocated)
+		VALUES ($1, 't1', 'a6', 'plugin', 'ai', 'USD', 500, 0, 0)`, t0)
+	key := func(r CostSummaryRow, gs ...string) string {
+		k := ""
+		for _, g := range gs {
+			k += r.Group[g] + " "
+		}
+		if r.Other {
+			k += "other "
+		}
+		return k + r.Currency
+	}
+	read := func(q string, gs ...string) (CostSummaryBody, map[string]string, map[string]int) {
+		t.Helper()
+		var got CostSummaryBody
+		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusOK {
+			t.Fatalf("%s: status %d", q, code)
+		}
+		amounts, runs := map[string]string{}, map[string]int{}
+		for _, r := range got.Totals {
+			amounts[key(r, gs...)] = r.Amount
+			if r.Runs != nil {
+				runs[key(r, gs...)] = *r.Runs
+			}
+		}
+		return got, amounts, runs
+	}
+
+	// rank=compute: a6 has no compute and ranks last, so a1 and a2 are kept and a6 is folded.
+	got, split, _ := read("&group=label:app&group=family&top=2&rank=compute", "label:app", "family")
+	want := map[string]string{
+		"a1 compute USD": "100", "a2 compute USD": "80",
+		"(other) compute other USD": "120", "(other) ai other USD": "600", "(none) compute USD": "1000",
+		"a1 ai EUR": "1", "a3 ai EUR": "1", "(other) ai other EUR": "9",
+	}
+	if !maps.Equal(split, want) {
+		t.Errorf("rank=compute totals %v, want %v", split, want)
+	}
+	if !maps.Equal(got.OtherCount, map[string]int{"USD": 4, "EUR": 1}) {
+		t.Errorf("rank=compute otherCount %v", got.OtherCount)
+	}
+
+	// 120 hours x 50 values x 2 families: 12,000 folded series rows pass the row limit.
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, labels)
+		SELECT 'w' || n, 't1', '{}', 'running', jsonb_build_object('app', 'w' || n) FROM generate_series(1, 50) n`)
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount, allocated, unallocated)
+		SELECT $1::timestamptz - h * interval '1 hour', 't1', 'w' || n, f, f, 'JPY', 1, 0, 0
+		FROM generate_series(1, 120) h, generate_series(1, 50) n, unnest(ARRAY['compute', 'ai']) f`, t0)
+	limit := "/v1/costs?from=" + url.QueryEscape(t0.Add(-120*time.Hour).Format(time.RFC3339)) + "&to=" + url.QueryEscape(t0.Format(time.RFC3339)) + "&group=label:app&group=family&interval=hour&top=50"
+	if code := getJSON(t, s, keys["t1"], limit, &got); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("folded series over the row limit: status %d, want 413", code)
+	}
+	execSQL(t, s, ctx, `DELETE FROM cost_hourly WHERE currency = 'JPY'`)
+
+	// A value named (other): a row of its own, never marked other, and not merged with the fold.
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, labels) VALUES ('a7', 't1', '{}', 'running', '{"app":"(other)"}')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount, allocated, unallocated)
+		VALUES ($1, 't1', 'a7', 'compute', 'compute', 'USD', 700, 0, 0)`, t0)
+	got, totals, _ := read("&group=label:app&top=10&interval=hour", "label:app")
+	if totals["(other) USD"] != "700" || got.OtherCount != nil || slices.ContainsFunc(append(got.Totals, got.Series...), func(r CostSummaryRow) bool { return r.Other }) {
+		t.Errorf("top=10: totals %v, otherCount %v", totals, got.OtherCount)
+	}
+	// USD compute ranks (other) 700 first: kept; a1..a6 folded. EUR has no compute: a1 kept by value.
+	got, totals, runs := read("&group=label:app&top=1&rank=compute", "label:app")
+	wantTotals := map[string]string{"(other) USD": "700", "(other) other USD": "900", "(none) USD": "1000", "a1 EUR": "1", "(other) other EUR": "10"}
+	if !maps.Equal(totals, wantTotals) || len(got.Totals) != len(wantTotals) {
+		t.Errorf("top=1 totals %v (%d rows), want %v", totals, len(got.Totals), wantTotals)
+	}
+	if wantRuns := map[string]int{"(other) USD": 1, "(other) other USD": 5, "(none) USD": 1, "a1 EUR": 0, "(other) other EUR": 0}; !maps.Equal(runs, wantRuns) {
+		t.Errorf("top=1 runs %v, want %v", runs, wantRuns)
+	}
+	if !maps.Equal(got.OtherCount, map[string]int{"USD": 6, "EUR": 2}) {
+		t.Errorf("top=1 otherCount %v", got.OtherCount)
+	}
+	// Grouped by run, the fold names no Run; the kept ones (n1, and a1 by value in EUR) are named.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=run&top=1&rank=compute"), &got); code != http.StatusOK || len(got.Runs) != 2 || got.Runs[0].ID != "a1" || got.Runs[1].ID != "n1" {
+		t.Errorf("run names under the fold: %d %+v", code, got.Runs)
 	}
 }
 

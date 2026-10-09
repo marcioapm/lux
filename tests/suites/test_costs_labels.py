@@ -56,11 +56,14 @@ def test_cost_labels_and_submitters(lux, tenant_factory, operator, runners, host
     # Grouped by a label: a Run without it is "(none)", never dropped.
     by_app = {r["group"]["label:app"] for r in lux.api("/v1/costs?since=1h&group=label:app").json()["totals"]}
     assert by_app >= {"jervasion", "dude", "(none)"}, by_app
-    # Folded to the top value: the other app is "(other)", "(none)" is kept and not counted.
+    # Folded to the top value: the other app is the fold (other: true, read "(other)"), "(none)" is kept and not counted.
+    # Either app can cost more (real runtimes), so exactly one of them is kept.
     top = lux.api("/v1/costs?since=1h&group=label:app&top=1").json()
-    assert {r["group"]["label:app"] for r in top["totals"]} - {"jervasion", "dude"} == {"(other)", "(none)"}, top
+    values = {r["group"]["label:app"] for r in top["totals"] if not r.get("other")}
+    assert len(values & {"jervasion", "dude"}) == 1 and values - {"jervasion", "dude"} == {"(none)"}, top
+    assert [r["group"]["label:app"] for r in top["totals"] if r.get("other")] == ["(other)"], top
     assert top["otherCount"] == {"USD": 1}, top
-    assert lux.api("/v1/costs?since=1h&group=label:app&top=51").status_code == 400
+    assert lux.api("/v1/costs?since=1h&group=label:app&top=51").status_code == 422
 
     # The label keys on costed Runs, most Runs first; filtered like the summary.
     keys = {k["key"]: k["runs"] for k in lux.api("/v1/costs/labels?since=1h").json()["keys"]}

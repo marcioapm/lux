@@ -354,7 +354,7 @@ export interface CostSummaryRow {
   group?: Record<string, string>;
   currency: string;
   amount: string;
-  /** With top, on totals: the Runs with cost that rank counts under the first group's value. */
+  /** With top or runs, on totals: the Runs with cost (that rank counts, with top) under the first group's value. */
   runs?: number;
 }
 
@@ -419,6 +419,8 @@ export interface CostSummaryParams {
   top?: number;
   /** With top: the cost that ranks (all, compute, external). */
   rank?: "all" | "compute" | "external";
+  /** Without top: totals rows carry runs too. */
+  runs?: boolean;
   since?: string;
   from?: string;
   to?: string;

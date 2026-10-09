@@ -126,7 +126,7 @@ export function OverviewCost() {
 
   // Every summary that lists values is folded by luxd to its top N (ranked by what Show counts), so none grows with how many values there are.
   const top = { top: TOP_VALUES, rank: show };
-  const byFamily = useScopedQuery(`costs:family:${since}:${interval}:${fkey}`, (t, s) => api.costs(t, { group: ["family"], interval, top: 50, since, ...fq }, s), { interval: POLL });
+  const byFamily = useScopedQuery(`costs:family:${since}:${interval}:${fkey}`, (t, s) => api.costs(t, { group: ["family"], interval, runs: true, since, ...fq }, s), { interval: POLL });
   // The breakdown's series, Show applied by family, and its totals split by family for the bands, the table and the Runs per value.
   const dimSeries = useScopedQuery(`costs:${dim}:${since}:${interval}:${show}:${fkey}`, (t, s) => api.costs(t, { group: [dim], interval, ...top, ...showFamily(show), since, ...fq }, s), { interval: POLL, enabled: !family && keyKnown });
   const byDim = useScopedQuery(`costs:${dim}-family:${since}:${show}:${fkey}`, (t, s) => api.costs(t, { group: [dim, "family"], ...top, since, ...fq }, s), { interval: POLL, enabled: !family && keyKnown });
