@@ -173,7 +173,7 @@ func TestPublishedArtifactUnstorableIsRefused(t *testing.T) {
 // upload adds it too.
 func TestArtifactPublishedEventOnUpload(t *testing.T) {
 	s, ctx := reportFixture(t)
-	useFakeS3(t, s)
+	fs3 := useFakeS3(t, s)
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'ra'`)
 	ap := published("art_aaaaaaaaaaaaaaaa", "design/notes.md", "hello", "the design")
 	if f := reportPublished(t, s, "ha", "ra", 1, ap); f.Type != proto.MsgAck || ackRefused(t, f) {
@@ -182,11 +182,23 @@ func TestArtifactPublishedEventOnUpload(t *testing.T) {
 	if n := len(publishedEvents(t, s, "ra")); n != 0 {
 		t.Fatalf("%d events before the upload", n)
 	}
+	// A retried PUT that arrives while the first is still in S3: both read
+	// location 'host'; the second to commit adds no event.
+	nested := false
+	fs3.onPut = func(string) {
+		if !nested {
+			nested = true
+			if code := uploadBlob(t, s, "ha", ap.BlobID, "hello"); code/100 != 2 {
+				t.Errorf("nested upload: %d", code)
+			}
+		}
+	}
 	for range 2 {
 		if code := uploadBlob(t, s, "ha", ap.BlobID, "hello"); code/100 != 2 {
 			t.Fatalf("upload: %d", code)
 		}
 	}
+	fs3.onPut = nil
 	evs := publishedEvents(t, s, "ra")
 	if len(evs) != 1 {
 		t.Fatalf("events %v", evs)
