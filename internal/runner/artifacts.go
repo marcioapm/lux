@@ -59,7 +59,7 @@ func (c *collector) add(root *os.Root, rel, name string) {
 		}
 		return
 	}
-	a, err := c.p.artifactBlob(root, rel, name, "")
+	a, err := c.p.artifactBlob(ids.New(ids.Blob), root, rel, name, "")
 	if err != nil {
 		c.errs = append(c.errs, fmt.Errorf("%s: %w", name, err))
 		return
@@ -131,11 +131,7 @@ func (c *collector) walkVolume(mountpoint, mountPath string, inner []string, pat
 
 // artifactBlob stores one file as a blob (zstd, like every blob). ctype ""
 // is detected from the name and the first bytes.
-func (p *placement) artifactBlob(root *os.Root, rel, name, ctype string) (proto.Artifact, error) {
-	return p.artifactBlobAs(ids.New(ids.Blob), root, rel, name, ctype)
-}
-
-func (p *placement) artifactBlobAs(blobID string, root *os.Root, rel, name, ctype string) (proto.Artifact, error) {
+func (p *placement) artifactBlob(blobID string, root *os.Root, rel, name, ctype string) (proto.Artifact, error) {
 	f, err := root.OpenFile(rel, os.O_RDONLY|oNoFollow, 0)
 	if err != nil {
 		return proto.Artifact{}, err

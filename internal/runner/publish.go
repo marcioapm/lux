@@ -120,7 +120,7 @@ func (p *placement) onPublished(ctx context.Context, a proto.StagedArtifact) {
 // storePublished writes the staged file as a blob and saves its record.
 func (p *placement) storePublished(root *os.Root, staged string, a proto.StagedArtifact) (*snapshotRecord, error) {
 	blobID := publishedBlobID(a.ID)
-	art, err := p.artifactBlobAs(blobID, root, staged, proto.PublishedPrefix+a.Name, a.ContentType)
+	art, err := p.artifactBlob(blobID, root, staged, proto.PublishedPrefix+a.Name, a.ContentType)
 	if err != nil {
 		return nil, err
 	}
@@ -136,13 +136,6 @@ func (p *placement) storePublished(root *os.Root, staged string, a proto.StagedA
 		return nil, err
 	}
 	return rec, nil
-}
-
-// readRecord is the record named id, or an fs.ErrNotExist.
-func (r *Runner) readRecord(id string) (*snapshotRecord, error) {
-	r.recordMu.Lock()
-	defer r.recordMu.Unlock()
-	return readRecordFile(r.recordPath(id))
 }
 
 // publishedAcked follows luxd's ack of a published artifact: its blob is
