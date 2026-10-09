@@ -200,7 +200,7 @@ All in `src/tokens.css`.
 | Accent | `--accent` `--accent-hover` `--accent-active` `--accent-fg` `--accent-subtle` `--accent-text` `--focus-ring` |
 | Semantic | `--{success,warn,danger,info}-{fg,bg,dot}` |
 | State hues | `--st-{neutral,blue,teal,green,amber,red,violet}-{fg,bg,dot}` |
-| Chart | `--chart-1` … `--chart-8` (fixed order; cost families and stored blob kinds map onto them, compute is `--chart-1`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
+| Chart | `--chart-1` … `--chart-8` (fixed order; cost families and stored blob kinds map onto them, compute is `--chart-1`, breakdown bands never are: `bandSlots`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
 | Logs | `--log-stderr-bg` `--log-stderr-fg` `--log-line-hover` |
 | Terminal | `--term-bg` `--term-scrollbar` (the frame around the screen, following the console theme; a Terminal with a `scheme` sets its own on `.term[data-term-scheme]`; the screen's palette is `terminalThemes.ts`) |
 | Type | `--font-sans` `--font-mono`, `--text-{xs,sm,md,lg,xl,2xl,3xl}` (density-dependent), `--leading-{tight,normal}`, `--weight-{normal,medium,semibold}` |
@@ -251,6 +251,16 @@ hint alone, never on the families shown beside it, so it has one colour in
 every view.
 Two families that land on one slot share it: a collision is accepted, a
 colour that changes between views is not.
+
+Breakdown band colours (`bandSlots(n)`, `bandColor(i)`, `BAND_SLOTS`,
+`OTHER_BAND_COLOR`, `NONE_BAND_COLOR`): when cost is stacked by something
+other than family (a label value, an API key, a pool, a tenant, a Run),
+the bands take the `--chart-N` slots in rank order, skipping compute's
+slot (`--chart-1`), so compute's blue only ever means compute. That is
+slots 2–8 for bands 1–7, repeating from slot 2 past seven. "Other"
+(every value folded past the top ones) is `--st-neutral-fg` and "(none)"
+(cost with no value) `--st-neutral-dot`. The Family view uses
+`familyColor` and keeps compute on `--chart-1`.
 
 Stored bytes by blob kind (`storageKindStyle`, `STORAGE_KIND_LIST`, the
 `StorageKind` type): each kind luxd keeps in S3 has a fixed label and
@@ -336,7 +346,7 @@ Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
 | `familyDisplay(families)` | each family's `{label, color}` from its describe `displayName` and `color` hint (the key when unnamed; `Compute` for compute): every view of cost families (Run card, Overview chart) resolves both here, so a family reads the same everywhere |
 | `TimeSeriesChart` `stacked` | series stacked bottom-first as filled bands (28% fill, 2px edges); the tooltip adds a Total; hiding a series from the legend restacks the rest; a missing value adds nothing and shows `–` |
 | `TimeSeriesChart` `bars` | each x is a bar for the bucket starting there, as wide as the smallest step of x (an amount per bucket, such as cost per hour: a line between two buckets would read as a ramp); with `stacked` the bars stack bottom-first, solid. A missing value draws no bar and a bucket with no figure stays empty, never a zero-height bar; positive values stack up from zero and negative ones (a refund) down from it, so no bar overdraws another. The x scale leaves half a bucket at either end; the hovered bucket is shaded and the tooltip names it ("19:00–20:00") (`barSegments`, `barRange`, `bucketText` in `src/chartData.ts`; gallery: "Cost per hour, as bars") |
-| `TimeSeriesChart` `legendValues`, `legendNote` | a figure after each legend entry (its total over the range), and a note at the legend's right end ("each bar is one hour") |
+| `TimeSeriesChart` `legendValues`, `legendNote` | a figure after each legend entry (its total over the range, `.tschart-legend-value`; the label is `.tschart-legend-label`, so a test finds it by its exact text), and a note at the legend's right end ("each bar is one hour") |
 | `TimeSeriesChart` `currency` | the currency of `unit="money"` |
 
 Cost panel (`src/CostPanel.tsx`; gallery section "costpanel"), what the

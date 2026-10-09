@@ -188,6 +188,7 @@ test("breakdown: the top 7 values by shown cost, luxd's (other) as Other with it
   expect(bands.find((b) => b.id === OTHER)!.values).toEqual([FOLDED]);
   expect(bandLabel(bands.find((b) => b.id === OTHER)!, { kind: "label", key: "app" })).toBe("Other (3)");
   expect(bands.at(-1)!.color).toBe("var(--st-neutral-dot)");
+  expect(bands.find((b) => b.id === OTHER)!.color).toBe("var(--st-neutral-fg)");
   // Nothing folded: no Other.
   expect(breakdownBands(rows.slice(0, 7), "label:app", "all").get("USD")!.map((b) => b.id)).toEqual(["v0", "v1", "v2", "v3", "v4", "v5", "v6"]);
   // A value past the limit locally (Show ranks differently than luxd did) joins Other too.
@@ -304,6 +305,14 @@ test("a real value named (other) is a band of its own; Other is only luxd's fold
 test("ties break by code unit, as luxd's COLLATE \"C\": B before b", () => {
   const bands = breakdownBands([app("b", "ai", "USD", "1"), app("B", "ai", "USD", "1"), app("a", "ai", "USD", "1")], "label:app", "all").get("USD")!;
   expect(bands.map((b) => b.id)).toEqual(["B", "a", "b"]);
+});
+
+test("band colours: never compute's, in rank order; Other and (none) neutral", () => {
+  const rows = Array.from({ length: 7 }, (_, i) => app(`v${i}`, "compute", "USD", String(100 - i)));
+  rows.push(folded("compute", "USD", "1"), app(NONE, "compute", "USD", "1"));
+  const bands = breakdownBands(rows, "label:app", "compute", { USD: 1 }).get("USD")!;
+  expect(bands.map((b) => b.color)).toEqual(["var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)", "var(--chart-6)", "var(--chart-7)", "var(--chart-8)", "var(--st-neutral-fg)", "var(--st-neutral-dot)"]);
+  expect(bands.map((b) => b.color)).not.toContain("var(--chart-1)");
 });
 
 test("breakdown labels: label values, (no key label), key names with the operator and pre-tracking cases", () => {

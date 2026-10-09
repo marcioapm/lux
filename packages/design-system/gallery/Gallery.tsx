@@ -27,6 +27,7 @@ import {
   DurationCell,
   EmptyState,
   EventTable,
+  bandColor,
   familyColor,
   familySlot,
   FamilyKey,
@@ -549,7 +550,7 @@ function CostPanelDemo() {
   const [filters, setFilters] = useState<{ key: string; op: string; value: string }[]>([{ key: "app", op: "=", value: "jervasion" }]);
   const [picked, setPicked] = useState("app");
   return (
-    <Section id="costpanel" title="Cost panel: KPIs, breakdown, filters" note="The Overview's Cost panel is built from these. A KpiStrip heads a card (the first figure wider); a SplitBar draws parts of one amount (a faint part is hidden by the view, never dropped). BreakdownTable is cost by one dimension with its Runs, Compute and External parts and share; a row can be a filter. LabelChips show a Run's labels as key=value, truncated. FilterBar holds FilterChips and the LabelFilterPopover: pick a key, then values with their cost, biggest first, or (not set). InfoStrip explains why some figures read as they do.">
+    <Section id="costpanel" title="Cost panel: KPIs, breakdown, filters" note="The Overview's Cost panel is built from these. A KpiStrip heads a card (the first figure wider); a SplitBar draws parts of one amount (a faint part is hidden by the view, never dropped). BreakdownTable is cost by one dimension with its Runs, Compute and External parts and share; a row can be a filter. Its bands take bandColor() slots in rank order, never compute's blue; Other and (none) are neutral. LabelChips show a Run's labels as key=value, truncated. FilterBar holds FilterChips and the LabelFilterPopover: pick a key, then values with their cost, biggest first, or (not set). InfoStrip explains why some figures read as they do.">
       <div className="stack">
         <FilterBar
           add={
@@ -578,8 +579,8 @@ function CostPanelDemo() {
               <KpiSub>▲ 38% vs previous 24h</KpiSub>
               <SplitBar currency="USD" whole="58.95" parts={[{ amount: "3.92", color: familyColor("compute"), label: "Compute" }, { amount: "55.03", color: "var(--chart-7)", label: "External" }]} />
             </Kpi>
-            <Kpi label={<ColorKey color="var(--chart-1)">ci-review-bot</ColorKey>} value={<Money amount="41.26" currency="USD" decimals={CENTS} />} sub="70% · 41 Runs" />
-            <Kpi label={<ColorKey color="var(--chart-2)">dude-prod</ColorKey>} value={<Money amount="12.97" currency="USD" decimals={CENTS} />} sub="22% · 23 Runs" />
+            <Kpi label={<ColorKey color={bandColor(0)}>ci-review-bot</ColorKey>} value={<Money amount="41.26" currency="USD" decimals={CENTS} />} sub="70% · 41 Runs" />
+            <Kpi label={<ColorKey color={bandColor(1)}>dude-prod</ColorKey>} value={<Money amount="12.97" currency="USD" decimals={CENTS} />} sub="22% · 23 Runs" />
             <Kpi label="Peak hour" value={<Money amount="41.40" currency="USD" decimals={CENTS} />} sub="09:00 · ci-review-bot (90%)" />
           </KpiStrip>
           <div style={{ padding: "var(--pad-card)" }}>

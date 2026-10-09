@@ -1,5 +1,5 @@
 // Deterministic fake data for the style guide. Seeded so reloads look the same.
-import { AnsiDecoder, type HostState, type LogLine, type RunState, type ServerInfo, type Tenant, type TimelineStage } from "../src/index.ts";
+import { AnsiDecoder, bandColor, NONE_BAND_COLOR, OTHER_BAND_COLOR, type HostState, type LogLine, type RunState, type ServerInfo, type Tenant, type TimelineStage } from "../src/index.ts";
 
 function rng(seed: number) {
   let s = seed >>> 0;
@@ -379,11 +379,12 @@ export const fakeCostLines: FakeCostLine[] = [
 
 /** Cost broken down by who submitted it (the Overview's "API key"): names, a revoked key, a person, and Runs from before tracking. */
 export const fakeKeyBreakdown = [
-  { id: "key_ci", label: "ci-review-bot", color: "var(--chart-1)", currency: "USD", runs: 41, compute: "2.71", external: "38.55", total: "41.26", share: 0.7, mono: true },
-  { id: "key_dude", label: "dude-prod", color: "var(--chart-2)", currency: "USD", runs: 23, compute: "0.85", external: "12.12", total: "12.97", share: 0.22, mono: true },
-  { id: "key_old", label: "marcio-laptop", color: "var(--chart-3)", currency: "USD", runs: 4, compute: "0.22", external: "2.73", total: "2.95", share: 0.05, mono: true, pill: "revoked" },
-  { id: "email:ada@example.com", label: "ada@example.com", color: "var(--chart-4)", currency: "USD", runs: 2, compute: "0.05", external: null, total: "0.05", share: 0.001 },
-  { id: "(none)", label: "Before key tracking", color: "var(--st-neutral-dot)", currency: "USD", runs: 6, compute: "0.09", external: "1.68", total: "1.77", share: 0.03, quiet: true },
+  { id: "key_ci", label: "ci-review-bot", color: bandColor(0), currency: "USD", runs: 41, compute: "2.71", external: "38.55", total: "41.26", share: 0.7, mono: true },
+  { id: "key_dude", label: "dude-prod", color: bandColor(1), currency: "USD", runs: 23, compute: "0.85", external: "12.12", total: "12.97", share: 0.22, mono: true },
+  { id: "key_old", label: "marcio-laptop", color: bandColor(2), currency: "USD", runs: 4, compute: "0.22", external: "2.73", total: "2.95", share: 0.05, mono: true, pill: "revoked" },
+  { id: "email:ada@example.com", label: "ada@example.com", color: bandColor(3), currency: "USD", runs: 2, compute: "0.05", external: null, total: "0.05", share: 0.001 },
+  { id: "other", label: "Other (3)", color: OTHER_BAND_COLOR, currency: "USD", runs: 3, compute: "0.01", external: "0.02", total: "0.03", share: 0.001, quiet: true },
+  { id: "(none)", label: "Before key tracking", color: NONE_BAND_COLOR, currency: "USD", runs: 6, compute: "0.09", external: "1.68", total: "1.77", share: 0.03, quiet: true },
 ];
 
 /** A label's values with their cost, for the label filter picker. */
