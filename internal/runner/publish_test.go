@@ -199,10 +199,19 @@ func TestForgedPublishRecordsAreIgnored(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rt, "config.json"), []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// What art_/../x resolves to once joined: staged and well-formed but
+	// for its id, so only the id check stops it.
+	if err := os.MkdirAll(filepath.Join(rt, stagingDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rt, stagingDir, "x"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, a := range []proto.StagedArtifact{
 		{ID: "../config.json", Name: "x", Size: 2},
 		{ID: "art_aaaaaaaaaaaaaaa/", Name: "x"},
 		{ID: ids.New(ids.Artifact), Name: "../../etc/passwd"},
+		{ID: "art_/../x", Name: "x", Size: 1, SHA256: "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881", File: "artifacts/x"},
 	} {
 		appendEvent(t, f, proto.EvArtifact, a)
 	}
@@ -212,6 +221,15 @@ func TestForgedPublishRecordsAreIgnored(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(rt, "config.json")); err != nil {
 		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(f.r.cfg.DataDir, "snapshots"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if ext := filepath.Ext(e.Name()); ext == ".zst" || ext == ".json" {
+			t.Errorf("snapshots/%s written", e.Name())
+		}
 	}
 }
 
