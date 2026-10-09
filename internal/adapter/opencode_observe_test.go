@@ -428,9 +428,9 @@ func TestOpenCodeObservedWrongPasswordWarnsOnce(t *testing.T) {
 }
 
 // A server that refuses lux for a while (still setting up its auth, or
-// restarting) and then accepts it is followed: each success clears the
-// count of refusals, so two runs of refusalLimit-1 refusals give no
-// warning, and OpenCode's busy reaches the Run once it accepts.
+// restarting) and then accepts it is followed: an accepted status read
+// clears the count of refusals, so two runs of refusalLimit-1 refusals give
+// no warning, and OpenCode's busy reaches the Run once it accepts.
 func TestOpenCodeObserverRetriesRefusal(t *testing.T) {
 	b := newFakeBus(t)
 	connected := make(chan struct{}, 2)
@@ -450,20 +450,198 @@ func TestOpenCodeObserverRetriesRefusal(t *testing.T) {
 		return http.StatusUnauthorized
 	}
 	pauses := 0
+	reads := make(statusReads, 64)
 	_, w, sink, first := ocObservedOn(t, b.port(), nil, func(a *ACP) {
 		a.bus.pause = func(context.Context, time.Duration) bool { pauses++; return true }
+		a.statusRead = reads.hook
 	})
 	w.resolve(first, ocResult)
 	sink.waitLast(t, "idle")
 	await(t, connected, "the first accepted GET /event")
+	if err := reads.next(t); err != nil {
+		t.Fatalf("status read on the first stream: %v", err)
+	}
 	b.drop <- struct{}{}
 	await(t, connected, "the second accepted GET /event")
+	if err := reads.next(t); err != nil {
+		t.Fatalf("status read on the second stream: %v", err)
+	}
 	// Only the second stream is open: the event goes there.
-	b.setLoop(true)
 	b.events <- ocStatus("busy")
 	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy")
 	sink.noMoreWarnings(t)
 	if got := b.count("GET /event"); got != 2*refusalLimit || pauses != 2*refusalLimit-1 {
 		t.Fatalf("GET /event %d times, %d backoffs", got, pauses)
 	}
+}
+
+// statusReads is a test's view of an adapter's status reads (statusRead).
+type statusReads chan error
+
+func (c statusReads) hook(err error) {
+	select {
+	case c <- err:
+	default:
+		panic("more status reads than the test's channel holds")
+	}
+}
+
+// next is the error of the next status read that was not superseded or
+// cancelled.
+func (c statusReads) next(t *testing.T) error {
+	t.Helper()
+	for {
+		select {
+		case err := <-c:
+			if !errors.Is(err, context.Canceled) {
+				return err
+			}
+		case <-waitTimeout():
+			t.Fatal("no status read")
+		}
+	}
+}
+
+// The server accepts lux's event stream but refuses its status reads: each
+// refusal counts as the stream's do, and drops the stream, so lux backs
+// off, reconnects and reads the status again. After refusalLimit refusals
+// in a row: one warning, and no request after it. OpenCode's busy, which
+// the stream says on every connect after the first refusal, never reaches
+// the Run.
+func TestOpenCodeObserverStatusRefusedGivesUp(t *testing.T) {
+	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			var mu sync.Mutex
+			streams := 0
+			srv := newRecServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/event" {
+					http.Error(w, http.StatusText(code), code)
+					return
+				}
+				mu.Lock()
+				streams++
+				n := streams
+				mu.Unlock()
+				switch n {
+				case 1: // lux connects again once the session is known
+					http.Error(w, "starting", http.StatusServiceUnavailable)
+				case 2:
+					serveStream(w, r)
+				default:
+					serveStream(w, r, ocStatus("busy"))
+				}
+			})
+			gate := make(chan struct{})
+			pauses := 0
+			_, w, sink, first := ocObservedOn(t, srv.port(), []string{"OPENCODE_SERVER_PASSWORD=" + ocPassword}, func(a *ACP) {
+				a.bus.pause = func(ctx context.Context, _ time.Duration) bool {
+					if pauses++; pauses == 1 {
+						select {
+						case <-gate:
+						case <-ctx.Done():
+							return false
+						}
+					}
+					return true
+				}
+			})
+			close(gate)
+			want := fmt.Sprintf("opencode: its server refused lux %d times in a row; lux no longer follows its activity: refused: GET /session/status: %d %s",
+				refusalLimit, code, http.StatusText(code))
+			if got := sink.nextWarning(t); got != want {
+				t.Fatalf("warning %q, want %q", got, want)
+			}
+			atWarning, _ := srv.snapshot()
+			w.resolve(first, ocResult)
+			checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+			sink.noMoreWarnings(t)
+			reqs, authed := srv.snapshot()
+			onlyBus(t, "observed", reqs)
+			events, statuses := 0, 0
+			for _, r := range reqs {
+				if r == "GET /event" {
+					events++
+				} else {
+					statuses++
+				}
+			}
+			if len(reqs) != len(atWarning) || len(authed) != len(reqs) || events != refusalLimit+1 ||
+				statuses != refusalLimit || pauses != refusalLimit {
+				t.Fatalf("%d requests at the warning, %d after (%d authorized); %d GET /event, %d GET /session/status, %d backoffs",
+					len(atWarning), len(reqs), len(authed), events, statuses, pauses)
+			}
+			sink.noSecret(t)
+		})
+	}
+}
+
+// A refused status read after OpenCode's busy was shown: the Run is idle at
+// once, and lux reconnects after a backoff. A busy event on the stream while
+// the status is still refused is not shown; once the server accepts the
+// status read again, its busy is.
+func TestOpenCodeObserverStatusRefusalAfterActivity(t *testing.T) {
+	b := newFakeBus(t)
+	b.setLoop(true)
+	paused, resume := make(chan struct{}), make(chan struct{})
+	reads := make(statusReads, 64)
+	handled := make(chan string, 64)
+	_, w, sink, first := ocObservedOn(t, b.port(), nil, func(a *ACP) {
+		a.bus.pause = func(ctx context.Context, _ time.Duration) bool {
+			select {
+			case paused <- struct{}{}:
+			case <-ctx.Done():
+				return false
+			}
+			select {
+			case <-resume:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		a.statusRead = reads.hook
+		a.busHandled = func(ev busEvent) { handled <- ev.Type }
+	})
+	if err := reads.next(t); err != nil {
+		t.Fatalf("status read: %v", err)
+	}
+	b.mu.Lock()
+	b.statusCode = http.StatusForbidden
+	b.mu.Unlock()
+	// Lux's turn ends while OpenCode's busy: the status is read again.
+	w.resolve(first, ocResult)
+	if err := reads.next(t); !errors.Is(err, errRefused) {
+		t.Fatalf("status read after the turn: %v", err)
+	}
+	await(t, paused, "a backoff after the refused status read")
+	sink.waitLast(t, "idle")
+
+	b.holdStatus(true)
+	resume <- struct{}{}
+	held := b.nextStatus(t)
+	b.events <- ocStatus("busy")
+	for ev := ""; ev != "session.status"; {
+		select {
+		case ev = <-handled:
+		case <-waitTimeout():
+			t.Fatal("the busy event was not handled")
+		}
+	}
+	b.holdStatus(false)
+	close(held.release)
+	if err := reads.next(t); !errors.Is(err, errRefused) {
+		t.Fatalf("held status read: %v", err)
+	}
+	await(t, paused, "a backoff after the second refused status read")
+	sink.waitLast(t, "idle")
+
+	b.mu.Lock()
+	b.statusCode = 0
+	b.mu.Unlock()
+	resume <- struct{}{}
+	if err := reads.next(t); err != nil {
+		t.Fatalf("status read once accepted: %v", err)
+	}
+	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy")
+	sink.noMoreWarnings(t)
 }

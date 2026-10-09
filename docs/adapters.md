@@ -179,11 +179,14 @@ Per agent:
   `OPENCODE_SERVER_PASSWORD` (as an `env` secret or a plain variable), each
   request carries HTTP Basic auth as `OPENCODE_SERVER_USERNAME` (default
   `opencode`) with that password, OpenCode's own server-auth convention;
-  the value is never logged. A 401 or 403 is retried with the same
-  backoff, since OpenCode can answer before its auth is set up or while it
-  restarts; after 30 refusals in a row (one to two minutes) lux gives one
-  `lux.warning` and stops following: activity is then lux's turns only. A
-  request the server accepts clears the count. A command with no
+  the value is never logged. A 401 or 403 on either request is retried
+  with the same backoff (a refused status read also drops the stream and
+  shows OpenCode idle), since OpenCode can answer before its auth is set
+  up or while it restarts; after 30 refusals with no status read accepted
+  between (one to two minutes) lux gives one `lux.warning` and sends that
+  server nothing more: activity is then lux's turns only. OpenCode is
+  never shown busy while it refuses lux. lux follows no redirect from it.
+  A command with no
   `--port` gets no server following, as before.
   **Interrupt** reaches only turns lux started: a Run shown busy by a loop
   a client started over OpenCode's HTTP API alone is not cancelled.
