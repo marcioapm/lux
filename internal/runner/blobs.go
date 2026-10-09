@@ -149,6 +149,10 @@ func (u *uploader) loop(ctx context.Context) {
 }
 
 func (u *uploader) pass(ctx context.Context) {
+	// A Run's state.json is read once per pass, and only for records with
+	// something to upload: a Run keeps up to maxPublished records besides
+	// its snapshots', long after their uploads finished.
+	staleEpochs := map[string]int{}
 	for snapID, rec := range u.r.snapshotRecords() {
 		// Only once luxd has the report that lists them: before, it does
 		// not know the blobs (and answers 404). A record that will never be
@@ -161,7 +165,15 @@ func (u *uploader) pass(ctx context.Context) {
 			}
 			continue
 		}
-		if u.r.isStaleRun(rec.RunID, rec.Epoch) {
+		if !rec.Discard && allUploaded(rec) {
+			continue
+		}
+		stale, ok := staleEpochs[rec.RunID]
+		if !ok {
+			stale = u.r.staleEpoch(rec.RunID)
+			staleEpochs[rec.RunID] = stale
+		}
+		if rec.Epoch == stale {
 			continue
 		}
 		done := true
@@ -195,6 +207,15 @@ func (u *uploader) pass(ctx context.Context) {
 			removeSnapshotFiles(u.r, snapID, rec)
 		}
 	}
+}
+
+func allUploaded(rec *snapshotRecord) bool {
+	for _, up := range rec.Uploads {
+		if !up.Done {
+			return false
+		}
+	}
+	return true
 }
 
 // markReported records that luxd has a snapshot's report; and so an
@@ -280,8 +301,17 @@ func (u *uploader) upload(ctx context.Context, up pendingUpload) error {
 }
 
 func (r *Runner) isStaleRun(runID string, epoch int) bool {
+	return r.staleEpoch(runID) == epoch
+}
+
+// staleEpoch is the epoch of runID's placement that was fenced off on this
+// host, or -1.
+func (r *Runner) staleEpoch(runID string) int {
 	st, err := readRunState(r.runDir(runID))
-	return err == nil && st.Stale && st.Epoch == epoch
+	if err != nil || !st.Stale {
+		return -1
+	}
+	return st.Epoch
 }
 
 // discard deletes the local copy of a Run's state: luxd says it resumed
