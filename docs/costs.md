@@ -1148,21 +1148,58 @@ is fixed to slot 1).
   `—` while pending, and a leading `~` when the total may still change (an
   estimate part, or `incomplete`). Its Tooltip names the status and gives
   the exact amounts.
-- **Host page**: allocated vs unallocated per hour, stacked, from
+- **Host page**: allocated vs unallocated per hour (or per UTC day with
+  Every Day), stacked, from
   `/v1/hosts/{id}/cost` (a tenant sees its allocated part only), and, for
   operators, the rate periods in a `KeyValue` (price per hour, and the
   source once: `static`, `on-demand` or `spot`). Shown to those who can see
   the host's history.
-- **Overview**, over the page's range (1h reads 6h: costs are hourly):
-  - cost per hour (per day at 30d), stacked by family, one chart per
-    currency, labelled and coloured as on the Run page;
-  - top tenants (operators across tenants) and top Runs, each ranked per
-    currency; a Run is shown by name with its id beside it (the summary's
-    `runs`);
-  - a Cost tile and, for an operator viewing all tenants, an
-    **Unallocated** tile.
+- **Overview, the Cost section**, over the page's range (1h reads 6h:
+  costs are hourly), bucketed by the top bar's **Every** (`?every=`): Auto
+  is hourly up to 24h and daily from 7d; Hour and Day are taken as asked;
+  Minute stays hourly ("cost is never finer than an hour"). Built from the
+  design system's cost panel pieces (gallery section "costpanel"):
+  - **Show** (`?cost=`): All, Compute (the compute family) or External
+    (every other family). A hidden side is drawn faint, never dropped.
+  - **Break down by** (`?by=`): Family (default), Label (a label key, `app`
+    by default when Runs carry it: `?by=label:<key>`), API key (who
+    submitted the Runs, `group=key`), Pool, and Tenant (operators viewing
+    all tenants only). The chart stacks by the breakdown: the top 7 values
+    by cost, the rest as Other, Runs without the value as a grey band
+    ("(no app label)", "Before key tracking"), never dropped. Every query
+    groups by the breakdown and by family, so Show still applies.
+  - **Label filters** (`?label=key=value`, repeated: one key's values OR,
+    different keys AND; `?nolabel=key` for "is not set"): chips and a
+    "＋ Label filter" picker (keys from `/v1/costs/labels`, values with their
+    cost from `/v1/costs?group=label:<key>`, biggest first, searchable,
+    and "(not set)"). They apply to every figure of the section, the
+    previous window and the peak included; unallocated host time, which
+    belongs to no Run, is left out while filtering. The filter bar says
+    the other Overview charts are not per-label.
+  - **KPIs**: Total (vs the previous window), then Compute and External
+    (Family) or the top two values of the breakdown with their share and
+    Runs, then the peak hour or day with what dominated it (the Run, or the
+    value).
+  - **By <breakdown>**: name, Runs, Compute, External, Total, Share; with
+    Label a row adds its value as a filter. With Family it is the By family
+    table, with the unallocated host time under it for operators viewing
+    all tenants.
+  - **Top Runs**: name, id, its labels as chips (the breakdown's key and
+    `app` first), its Compute/External split, its cost. "All Runs →" opens
+    the Runs list with the same label filter when it is one `key=value`
+    (the list's `label` filter cannot express more).
+  - **Top tenants** beside them (operators across tenants, unless the
+    breakdown is Tenant).
+  - With API key, an info strip says how many Runs in the range were
+    submitted before Lux recorded the submitting key.
   - Not built: plugin health (last answer, failing since). No endpoint
     exposes plugin state.
+- **Run page**: "Submitted by" in the facts: the key's name (a "revoked"
+  pill after a revoked one), the person's email, "Operator key" for an
+  operator's key a tenant may not name, or "not recorded" for Runs from
+  before key tracking.
+- **Pool page, Cost tab**: the page's Every (hour or day); otherwise as
+  before.
 - Every page with money says "list price" once, explained in a Tooltip.
   Amounts are never added across currencies. An amount rounded for display
   shows its exact value in a Tooltip (`Money`).
