@@ -112,12 +112,15 @@ type ACP struct {
 	// by idle and whenever the stream is down. The Run's activity is busy
 	// while ocBusy or lux's own turn is. actMu orders activity reports;
 	// shown and shownIdle (under actMu) are the last one reported; ocGen
-	// (under actMu) counts the bus status events handled.
-	ocBusy    bool
-	actMu     sync.Mutex
-	shown     bool
-	shownIdle bool
-	ocGen     int
+	// (under actMu) counts the bus status events handled and the stream's
+	// connects and disconnects; statusReads (under actMu) is the status
+	// reads in flight.
+	ocBusy      bool
+	actMu       sync.Mutex
+	shown       bool
+	shownIdle   bool
+	ocGen       int
+	statusReads int
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -208,7 +211,7 @@ func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Si
 		go func() {
 			defer a.bg.Done()
 			a.bus.follow(ctx, a.onBus, func() {
-				a.syncBusStatus(ctx)
+				a.streamUp()
 				a.settle()
 			}, func() { a.setOpenCodeBusy(false) })
 		}()
@@ -316,7 +319,7 @@ func (a *ACP) setSession(id string) {
 	a.activity(true)
 	// A stream that connected before the session was known read no status.
 	if a.bus != nil && a.bus.isConnected() {
-		a.spawn(func() { a.syncBusStatus(a.runCtx()) })
+		a.requestStatus()
 	}
 }
 
@@ -369,18 +372,19 @@ func (a *ACP) drain() {
 }
 
 // spawn runs f on a goroutine Run joins before it returns; none once Run
-// is returning.
-func (a *ACP) spawn(f func()) {
+// is returning. It reports whether f was started.
+func (a *ACP) spawn(f func()) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
-		return
+		return false
 	}
 	a.bg.Add(1)
 	go func() {
 		defer a.bg.Done()
 		f()
 	}()
+	return true
 }
 
 // promptDone is a session/prompt of the running turn resolving; the last
@@ -973,29 +977,49 @@ func (a *ACP) applyOpenCodeBusyLocked(busy bool) {
 	a.showLocked(idle)
 }
 
-// syncBusStatus reads OpenCode's status for the session: when the event
-// stream (re)connects, since events from while it was down are not
-// replayed, and when lux's turn ends while the bus last said busy. An
-// error reads as not busy. A bus event handled during the read supersedes
-// it (ocGen).
-func (a *ACP) syncBusStatus(ctx context.Context) {
+// streamUp is the event stream (re)connecting: events from while it was
+// down are not replayed, so OpenCode's status is read, off the stream's
+// goroutine, which goes on to read events at once.
+func (a *ACP) streamUp() {
 	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	a.ocGen++
+	a.requestStatusLocked()
+}
+
+// requestStatus reads OpenCode's status for the session on a joined
+// goroutine: on (re)connect (streamUp), once the session is known, and when
+// lux's turn ends while the bus last said busy. An error reads as not
+// busy. A bus event or a disconnect after the dispatch supersedes it
+// (ocGen).
+func (a *ACP) requestStatus() {
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	a.requestStatusLocked()
+}
+
+// requestStatusLocked is requestStatus under actMu.
+func (a *ACP) requestStatusLocked() {
 	gen := a.ocGen
-	a.actMu.Unlock()
 	a.mu.Lock()
 	session := a.session
 	a.mu.Unlock()
 	if session == "" {
 		return
 	}
-	busy, err := a.bus.sessionBusy(ctx, session)
-	if ctx.Err() != nil {
-		return
-	}
-	a.actMu.Lock()
-	defer a.actMu.Unlock()
-	if a.ocGen == gen {
-		a.applyOpenCodeBusyLocked(err == nil && busy)
+	a.statusReads++
+	ok := a.spawn(func() {
+		ctx := a.runCtx()
+		busy, err := a.bus.sessionBusy(ctx, session)
+		a.actMu.Lock()
+		defer a.actMu.Unlock()
+		a.statusReads--
+		if ctx.Err() == nil && a.ocGen == gen {
+			a.applyOpenCodeBusyLocked(err == nil && busy)
+		}
+	})
+	if !ok {
+		a.statusReads--
 	}
 }
 
@@ -1017,7 +1041,7 @@ func (a *ACP) activity(idle bool) {
 	a.showLocked(combinedIdle)
 	a.actMu.Unlock()
 	if reread {
-		a.spawn(func() { a.syncBusStatus(a.runCtx()) })
+		a.requestStatus()
 	}
 }
 
