@@ -243,3 +243,57 @@ func TestAcceptedAssignmentLeavesWaiting(t *testing.T) {
 		t.Fatalf("run.stage events %v, want one: image", got)
 	}
 }
+
+// stopRun asks r1's placement to stop for reason, in a transaction of its own.
+func stopRun(t *testing.T, s *Server, ctx context.Context, reason string) {
+	t.Helper()
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := s.requestStop(ctx, tx, "t1", r1, reason)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A starting report that arrives after a move's exit (sent before it,
+// delivered after) leaves the Run resuming: its placement has ended, so
+// nothing is starting.
+func TestLateStartingAfterAMoveLeavesTheRunResuming(t *testing.T) {
+	s, ctx, key := stageFixture(t)
+	t0 := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: map[string]int64{"imageReady": ms(t0)}})
+	stopRun(t, s, ctx, "migrate")
+	code := 0
+	reportStatus(t, s, ctx, proto.Status{State: "exited", ExitCode: &code, Reason: "stopped", Times: map[string]int64{"imageReady": ms(t0)}})
+	before := getRun(t, s, key)
+	if before.State != StateResuming || before.Stage != StageWaiting {
+		t.Fatalf("after the move's exit: %s, stage %s; want resuming, waiting", before.State, before.Stage)
+	}
+	stages := len(stageEvents(t, s, ctx))
+
+	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: map[string]int64{"imageReady": ms(t0), "volumesRestored": ms(t0.Add(time.Second))}})
+	after := getRun(t, s, key)
+	if after.State != StateResuming || after.Placements[0].State != "exited" {
+		t.Fatalf("after a late starting: run %s, placement %s; want resuming, exited", after.State, after.Placements[0].State)
+	}
+	if after.Stage != StageWaiting || !after.StageSince.Equal(before.StageSince) {
+		t.Fatalf("stage %s since %s, was waiting since %s", after.Stage, after.StageSince, before.StageSince)
+	}
+	if n := len(stageEvents(t, s, ctx)); n != stages {
+		t.Fatalf("%d stage events, was %d", n, stages)
+	}
+}
+
+// A starting report for a placement whose acceptance luxd never recorded
+// (the ack lost across a reconnect) records it: the stage is image, not
+// waiting.
+func TestStartingReportRecordsAcceptance(t *testing.T) {
+	s, ctx, key := stageFixture(t)
+	execSQL(t, s, ctx, `UPDATE placements SET accepted_at = NULL WHERE run_id = $1`, r1)
+	reportStatus(t, s, ctx, proto.Status{State: "starting"})
+	run := getRun(t, s, key)
+	pl := run.Placements[0]
+	if pl.State != "starting" || pl.AcceptedAt == nil || run.Stage != StageImage || !run.StageSince.Equal(*pl.AcceptedAt) {
+		t.Fatalf("stage %s since %s, placement %+v; want image since acceptedAt", run.Stage, run.StageSince, pl)
+	}
+}

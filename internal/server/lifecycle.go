@@ -332,10 +332,17 @@ func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID
 
 	switch st.State {
 	case "starting":
-		if _, err := tx.Exec(ctx, `UPDATE placements SET state = 'starting' WHERE run_id = $1 AND epoch = $2 AND state = 'assigned'`, runID, epoch); err != nil {
+		// A starting report proves the runner took the assignment, even if
+		// its ack was lost. One for a placement that already ended (a move's
+		// exit, then a late report) moves nothing: the Run has no placement.
+		var live bool
+		err := tx.QueryRow(ctx, `UPDATE placements SET state = 'starting', accepted_at = coalesce(accepted_at, now())
+			WHERE run_id = $1 AND epoch = $2 AND state IN ('assigned', 'starting')
+			RETURNING true`, runID, epoch).Scan(&live)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if runState == StateScheduled || runState == StateResuming || runState == StateProvisioning {
+		if live && (runState == StateScheduled || runState == StateResuming || runState == StateProvisioning) {
 			return setRunState(ctx, tx, tenantID, runID, StateStarting, "", epoch)
 		}
 	case "running":
