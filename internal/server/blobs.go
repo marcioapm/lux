@@ -33,13 +33,13 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 	}
 	id := r.PathValue("id")
 	hostName := r.URL.Query().Get("host")
-	var tenantID, runID, want, location, hostID string
+	var tenantID, runID, want, location, hostID, kind string
 	var epoch int
 	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(), `SELECT b.tenant_id, b.run_id, b.epoch, b.sha256, b.location, coalesce(b.host_id, '')
+		return tx.QueryRow(r.Context(), `SELECT b.tenant_id, b.run_id, b.epoch, b.sha256, b.location, coalesce(b.host_id, ''), b.kind
 			FROM blobs b JOIN hosts h ON h.id = b.host_id
 			WHERE b.id = $1 AND h.token_id = $2 AND h.name = $3`, id, tok.ID, hostName).
-			Scan(&tenantID, &runID, &epoch, &want, &location, &hostID)
+			Scan(&tenantID, &runID, &epoch, &want, &location, &hostID, &kind)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errf(http.StatusNotFound, "not_found", "no blob %s from this host", id)
@@ -78,7 +78,7 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 		}
-		if err := markUploaded(r.Context(), tx, runID, epoch); err != nil || tag.RowsAffected() == 0 {
+		if err := markUploaded(r.Context(), tx, runID, epoch); err != nil || tag.RowsAffected() == 0 || kind != "artifact" {
 			return err
 		}
 		// The event last: event streams come after every row lock.

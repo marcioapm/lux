@@ -17,3 +17,6 @@ UPDATE artifacts a SET version = v.n
 
 ALTER TABLE artifacts ALTER COLUMN version SET NOT NULL;
 CREATE UNIQUE INDEX artifacts_run_path_version ON artifacts (run_id, md5(path), version);
+
+-- artifact.published looks the artifact up by the blob that was uploaded.
+CREATE INDEX artifacts_blob ON artifacts (blob_id);
