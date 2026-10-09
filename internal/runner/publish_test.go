@@ -291,6 +291,45 @@ func TestUploaderTakesSnapshotsFirst(t *testing.T) {
 	}
 }
 
+// A staged copy that is not what its record says (rewritten by a root
+// workload after the publish) is not reported: one artifacts.failed, the
+// staged copy removed, no blob or record kept.
+func TestPublishedArtifactNotAsRecorded(t *testing.T) {
+	f := newFinishFixture(t)
+	a := stagePublished(t, f, "x.txt", "x")
+	rt := filepath.Join(f.r.cfg.DataDir, "rt")
+	if err := os.WriteFile(filepath.Join(rt, a.File), []byte("y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tailToEnd(f)
+	if got := f.published(); len(got) != 0 {
+		t.Fatalf("reports %+v", got)
+	}
+	waitFor(t, "artifacts.failed", func() bool { return slices.Contains(f.types(), proto.MsgRunEvent) })
+	var events []proto.RunEvent
+	f.mu.Lock()
+	for _, fr := range f.reports {
+		if fr.Type == proto.MsgRunEvent {
+			var ev proto.RunEvent
+			_ = json.Unmarshal(fr.Data, &ev)
+			events = append(events, ev)
+		}
+	}
+	f.mu.Unlock()
+	if len(events) != 1 || events[0].Type != "artifacts.failed" {
+		t.Fatalf("events %+v", events)
+	}
+	if _, err := os.Stat(filepath.Join(rt, a.File)); !os.IsNotExist(err) {
+		t.Fatalf("staged copy kept: %v", err)
+	}
+	if _, err := os.Stat(f.r.blobPath(publishedBlobID(a.ID))); !os.IsNotExist(err) {
+		t.Fatalf("blob kept: %v", err)
+	}
+	if _, err := f.r.readRecord(a.ID); !os.IsNotExist(err) {
+		t.Fatalf("record kept: %v", err)
+	}
+}
+
 // A refused report deletes the artifact's blob and record: luxd never asks
 // for it.
 func TestPublishedArtifactRefused(t *testing.T) {
