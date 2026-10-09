@@ -354,6 +354,8 @@ export interface CostSummaryRow {
   group?: Record<string, string>;
   currency: string;
   amount: string;
+  /** With top, on totals: the Runs with cost that rank counts under the first group's value. */
+  runs?: number;
 }
 
 export interface HostAllocation {
@@ -380,6 +382,8 @@ export interface CostSummary {
   runs?: { id: string; name?: string; labels?: Record<string, string> }[];
   /** Grouped by key: each submitter but "(none)" (Runs from before luxd recorded who submitted them). */
   keys?: CostKey[];
+  /** With top: per currency, how many values (other) holds. */
+  otherCount?: Record<string, number>;
 }
 
 /** Who submitted Runs: an API key (id; its name when the caller may see it), or a person (id "email:<address>"). */
@@ -408,7 +412,13 @@ export interface CostSummaryParams {
   /** Up to two: tenant (operators), pool, host, family, run, key, label:key. */
   group?: string[];
   family?: string;
+  /** Every family but this one. */
+  nofamily?: string;
   interval?: "hour" | "day";
+  /** 1–50: fold the first group past its top N values per currency into "(other)". */
+  top?: number;
+  /** With top: the cost that ranks (all, compute, external). */
+  rank?: "all" | "compute" | "external";
   since?: string;
   from?: string;
   to?: string;

@@ -3,7 +3,7 @@
 // /v1/costs summaries into the panel's figures. Amounts stay decimal
 // strings; nothing is ever added or ranked across currencies. The step
 // (hour or day) is the page's (every.ts).
-import { compareMoney, familyDisplay, sumMoney, type TimeRange } from "@lux/design-system";
+import { compareMoney, familyDisplay, sumMoney } from "@lux/design-system";
 import type { CostFamily, CostKey, CostSummary, CostSummaryRow, MoneyTotal } from "../../api/index.ts";
 
 /** Which costs the panel counts: every family, compute (host time) only, or every other family. */
@@ -57,19 +57,23 @@ export interface LabelFilter {
   notSet?: boolean;
 }
 
-/** ?label=key=value (repeated: one key's values OR) and ?nolabel=key, in the order first seen; a label without "=" is ignored. */
+/** A label key as luxd accepts it (labelKeyRe in internal/server). */
+const LABEL_KEY = /^[A-Za-z0-9]([A-Za-z0-9._/-]{0,62}[A-Za-z0-9])?$/;
+
+/** ?label=key=value (repeated: one key's values OR) and ?nolabel=key, in the order first seen; a label without "=" or a key luxd would refuse is ignored. */
 export function parseFilters(labels: string[], nolabels: string[]): LabelFilter[] {
   const out: LabelFilter[] = [];
   for (const l of labels) {
     const i = l.indexOf("=");
     if (i <= 0) continue;
     const key = l.slice(0, i);
+    if (!LABEL_KEY.test(key)) continue;
     const value = l.slice(i + 1);
     const f = out.find((x) => x.key === key && !x.notSet);
     if (!f) out.push({ key, values: [value] });
     else if (!f.values.includes(value)) f.values.push(value);
   }
-  for (const key of nolabels) if (key && !out.some((x) => x.key === key && x.notSet)) out.push({ key, values: [], notSet: true });
+  for (const key of nolabels) if (LABEL_KEY.test(key) && !out.some((x) => x.key === key && x.notSet)) out.push({ key, values: [], notSet: true });
   return out;
 }
 
@@ -87,13 +91,6 @@ export function runsListPath(fs: LabelFilter[]): string {
   return f && !f.notSet && f.values.length === 1 ? `/runs?label=${encodeURIComponent(`${f.key}=${f.values[0]}`)}` : "/runs";
 }
 
-/** The range costs are read over: 1h reads 6h, as costs are whole-hour buckets and an hour is one bar. */
-export function costSince(range: TimeRange): CostSince {
-  return range === "1h" ? "6h" : range;
-}
-
-export type CostSince = "6h" | "24h" | "7d" | "30d";
-
 const INTERVAL_HOURS: Record<CostInterval, number> = { hour: 1, day: 24 };
 
 /** Amounts of one currency, exact; null when there are none (no figure is not a zero). */
@@ -101,10 +98,22 @@ function sum(amounts: string[]): string | null {
   return amounts.length ? sumMoney(amounts) : null;
 }
 
+/** Appends v to m's list at k. */
+export function push<K, V>(m: Map<K, V[]>, k: K, v: V): void {
+  const a = m.get(k);
+  if (a) a.push(v);
+  else m.set(k, [v]);
+}
+
 function byCurrency<T extends { currency: string }>(rows: T[]): Map<string, T[]> {
   const m = new Map<string, T[]>();
-  for (const r of rows) m.set(r.currency, [...(m.get(r.currency) ?? []), r]);
+  for (const r of rows) push(m, r.currency, r);
   return new Map([...m].sort(([a], [b]) => a.localeCompare(b)));
+}
+
+/** The /v1/costs family filter that keeps what show counts. */
+export function showFamily(show: CostShow): { family?: string; nofamily?: string } {
+  return show === "compute" ? { family: COMPUTE } : show === "external" ? { nofamily: COMPUTE } : {};
 }
 
 const familyOf = (r: CostSummaryRow) => r.group?.family ?? "(none)";
@@ -197,15 +206,15 @@ export interface SplitRow {
   all: string;
 }
 
-/** Rows' largest `limit` per currency by what show counts, largest first; never ranks across currencies. Rows grouped by `key` and family. */
+/** Rows' largest `limit` per currency by what show counts, largest first; never ranks across currencies. Rows grouped by `key` and family; luxd's (other) is not a row. */
 export function topSplit(rows: CostSummaryRow[], key: string, show: CostShow, limit = 10): SplitRow[] {
   const out: SplitRow[] = [];
   for (const [currency, rs] of byCurrency(rows)) {
     const byKey = new Map<string, Part[]>();
     for (const r of rs) {
       const k = r.group?.[key];
-      if (!k) continue;
-      byKey.set(k, [...(byKey.get(k) ?? []), { family: familyOf(r), amount: r.amount }]);
+      if (!k || k === SERVER_OTHER) continue;
+      push(byKey, k, { family: familyOf(r), amount: r.amount });
     }
     const ranked: SplitRow[] = [];
     for (const [k, parts] of byKey) {
@@ -275,7 +284,7 @@ export function peaks(d: CostSummary | undefined, show: CostShow): Peak[] {
     const buckets = new Map<number, string[]>();
     for (const r of rs) {
       const at = Math.floor(Date.parse(r.at!) / 1000);
-      buckets.set(at, [...(buckets.get(at) ?? []), r.amount]);
+      push(buckets, at, r.amount);
     }
     let best: Peak | null = null;
     for (const [at, amounts] of [...buckets].sort(([a], [b]) => a - b)) {
@@ -313,15 +322,19 @@ export function familyMeta(families: CostFamily[] | undefined): Map<string, Cost
 export const NONE = "(none)";
 /** The band of every value past the top ones; not a group value luxd sends. */
 export const OTHER = "\u0000other";
-/** Values stacked apart before the rest go into Other. */
+/** The value luxd gives every value a top=N summary folds. */
+export const SERVER_OTHER = "(other)";
+/** Values stacked apart before the rest go into Other: the summaries' top=N. */
 export const TOP_VALUES = 7;
 
 export interface Band {
   /** A group value, OTHER or NONE. */
   id: string;
-  /** The group values it holds. */
+  /** The group values it holds (Other: SERVER_OTHER among them). */
   values: string[];
   color: string;
+  /** Other: how many values it holds. */
+  count?: number;
 }
 
 /** A band's colour: chart slots in rank order, Other the last slot, (none) grey. */
@@ -329,29 +342,28 @@ function bandColor(id: string, rank: number): string {
   return id === NONE ? "var(--st-neutral-dot)" : id === OTHER ? "var(--chart-8)" : `var(--chart-${rank + 1})`;
 }
 
+/** Ties by value in code-unit order, as luxd breaks them (COLLATE "C" on ASCII). */
+const byValue = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
 /**
- * Per currency, the bands a breakdown stacks: the `limit` values costing
- * the most (as show counts) in their own colours, the rest as Other, and
- * the value-less Runs (NONE) last, never dropped. A value with no shown cost
- * has no band. Rows are grouped by `dim` and family.
+ * Per currency, the bands a breakdown stacks: the values costing the most
+ * (as show counts) in their own colours, luxd's folded (other) and any value
+ * past `limit` as Other, and the value-less Runs (NONE) last, never dropped.
+ * A value with no shown cost has no band. Rows are a top=N summary's totals
+ * grouped by `dim` and family; otherCount is its otherCount.
  */
-export function breakdownBands(rows: CostSummaryRow[], dim: string, show: CostShow, limit = TOP_VALUES): Map<string, Band[]> {
+export function breakdownBands(rows: CostSummaryRow[], dim: string, show: CostShow, otherCount?: Record<string, number>, limit = TOP_VALUES): Map<string, Band[]> {
   const out = new Map<string, Band[]>();
   for (const [currency, rs] of byCurrency(rows.filter((r) => shows(show, familyOf(r))))) {
     const amounts = new Map<string, string[]>();
-    for (const r of rs) {
-      const v = r.group?.[dim] ?? NONE;
-      amounts.set(v, [...(amounts.get(v) ?? []), r.amount]);
-    }
+    for (const r of rs) push(amounts, r.group?.[dim] ?? NONE, r.amount);
     const ranked = [...amounts]
-      .filter(([v]) => v !== NONE)
+      .filter(([v]) => v !== NONE && v !== SERVER_OTHER)
       .map(([v, a]) => ({ v, amount: sumMoney(a) ?? "0" }))
-      .sort((a, b) => compareMoney(b.amount, a.amount) || a.v.localeCompare(b.v));
-    // Other only when it would hold two values or more: one value is shown as itself.
-    const top = ranked.length > limit + 1 ? ranked.slice(0, limit) : ranked;
-    const rest = ranked.slice(top.length);
-    const bands: Band[] = top.map(({ v }, i) => ({ id: v, values: [v], color: bandColor(v, i) }));
-    if (rest.length) bands.push({ id: OTHER, values: rest.map((x) => x.v), color: bandColor(OTHER, 0) });
+      .sort((a, b) => compareMoney(b.amount, a.amount) || byValue(a.v, b.v));
+    const rest = ranked.slice(limit).map((x) => x.v);
+    const bands: Band[] = ranked.slice(0, limit).map(({ v }, i) => ({ id: v, values: [v], color: bandColor(v, i) }));
+    if (rest.length || amounts.has(SERVER_OTHER)) bands.push({ id: OTHER, values: [...rest, SERVER_OTHER], color: bandColor(OTHER, 0), count: rest.length + (otherCount?.[currency] ?? 0) });
     if (amounts.has(NONE)) bands.push({ id: NONE, values: [NONE], color: bandColor(NONE, 0) });
     out.set(currency, bands);
   }
@@ -365,12 +377,12 @@ export interface BreakdownChart {
   x: number[];
   ys: (number | null)[][];
   bands: Band[];
-  /** Each band's shown total over the range, exact, aligned with bands. */
+  /** Each band's total over the range, exact, aligned with bands. */
   totals: string[];
 }
 
-/** One chart per currency: a stacked series per band over every bucket of the range (a bucket with no row is a gap), counting what show keeps. Series rows grouped by `dim` and family. */
-export function breakdownCharts(d: CostSummary | undefined, dim: string, interval: CostInterval, show: CostShow, bands: Map<string, Band[]>): BreakdownChart[] {
+/** One chart per currency: a stacked series per band over every bucket of the range (a bucket with no row is a gap). Series rows grouped by `dim` alone, Show applied by the query (showFamily). */
+export function breakdownCharts(d: CostSummary | undefined, dim: string, interval: CostInterval, bands: Map<string, Band[]>): BreakdownChart[] {
   if (!d?.series?.length) return [];
   const step = INTERVAL_HOURS[interval] * 3600;
   const start = Math.floor(Date.parse(d.from) / 1000 / step) * step;
@@ -379,7 +391,7 @@ export function breakdownCharts(d: CostSummary | undefined, dim: string, interva
   for (let t = start; t < end; t += step) x.push(t);
   const index = new Map(x.map((t, i) => [t, i]));
   const out: BreakdownChart[] = [];
-  for (const [currency, rows] of byCurrency(d.series.filter((r) => shows(show, familyOf(r))))) {
+  for (const [currency, rows] of byCurrency(d.series)) {
     const bs = bands.get(currency) ?? [];
     const cells = bs.map(() => x.map((): string[] => []));
     const totals = bs.map((): string[] => []);
@@ -408,55 +420,53 @@ export interface BreakdownRow {
   amount: string;
   /** Of what show counts in this currency. */
   share: number | null;
-  /** Runs with a shown cost in the band; null while unknown. */
+  /** Runs with a shown cost in the band; null when the rows do not say. */
   runs: number | null;
 }
 
-/** The table under a breakdown: each band per currency, in band order, with its Compute and External parts, its share and its Runs. */
-export function breakdownRows(rows: CostSummaryRow[], dim: string, show: CostShow, bands: Map<string, Band[]>, runs?: Map<string, Set<string>>): BreakdownRow[] {
+/**
+ * The table under a breakdown: each band per currency, in band order, with
+ * its Compute and External parts, its share and its Runs. Rows are a top=N
+ * summary's totals grouped by `dim` and family, ranked by show: each carries
+ * its value's Runs (the same on every family's row). Exact where a Run has
+ * one value (a label, its submitter, its tenant); a Run whose cost spans
+ * pools counts in each.
+ */
+export function breakdownRows(rows: CostSummaryRow[], dim: string, show: CostShow, bands: Map<string, Band[]>): BreakdownRow[] {
   const totals = new Map(shownTotals(rows, show).map((t) => [t.currency, t.amount]));
   const out: BreakdownRow[] = [];
   for (const [currency, rs] of byCurrency(rows)) {
+    const runs = new Map<string, number>();
+    for (const r of rs) if (r.runs != null) runs.set(r.group?.[dim] ?? NONE, r.runs);
     for (const band of bands.get(currency) ?? []) {
       const mine = rs.filter((r) => band.values.includes(r.group?.[dim] ?? NONE));
       const part = (compute: boolean) => sum(mine.filter((r) => (familyOf(r) === COMPUTE) === compute).map((r) => r.amount));
       const amount = sum(mine.filter((r) => shows(show, familyOf(r))).map((r) => r.amount));
       if (amount == null) continue;
-      const ids = runs ? new Set(band.values.flatMap((v) => [...(runs.get(v) ?? [])])) : null;
-      out.push({ band, currency, compute: part(true), external: part(false), amount, share: ratio(amount, totals.get(currency)), runs: ids ? ids.size : null });
+      const known = band.values.filter((v) => runs.has(v));
+      out.push({ band, currency, compute: part(true), external: part(false), amount, share: ratio(amount, totals.get(currency)), runs: known.length ? known.reduce((n, v) => n + runs.get(v)!, 0) : null });
     }
   }
   return out;
 }
 
-/**
- * The Runs under each value: rows grouped by `dim` and run, kept to the
- * Runs with a shown cost (`shownRuns`, from rows grouped by run and family).
- * Exact where a Run has one value (a label, its submitter, its tenant); a
- * Run whose cost spans pools counts in each.
- */
-export function runsByValue(dimRuns: CostSummaryRow[], dim: string, shownRuns: Set<string>): Map<string, Set<string>> {
-  const out = new Map<string, Set<string>>();
-  for (const r of dimRuns) {
-    const run = r.group?.run;
-    if (!run || !shownRuns.has(run)) continue;
-    const v = r.group?.[dim] ?? NONE;
-    out.set(v, (out.get(v) ?? new Set()).add(run));
-  }
+/** Runs per family, from a top=N summary's totals grouped by family (any family's cost counts it). */
+export function runsPerFamily(rows: CostSummaryRow[]): Map<string, number> | undefined {
+  if (!rows.some((r) => r.runs != null)) return undefined;
+  const out = new Map<string, number>();
+  for (const r of rows) if (r.runs != null) out.set(familyOf(r), Math.max(out.get(familyOf(r)) ?? 0, r.runs));
   return out;
 }
 
-/** The Runs with a cost show counts; rows grouped by run and family. */
-export function shownRunIds(rows: CostSummaryRow[], show: CostShow): Set<string> {
-  return new Set(rows.filter((r) => r.group?.run && shows(show, familyOf(r))).map((r) => r.group!.run!));
-}
-
-/** Per currency, the band that cost the most in the peak bucket, and its share of that bucket. Series rows grouped by `dim` and family. */
-export function peakBands(ps: Peak[], d: CostSummary | undefined, dim: string, show: CostShow, bands: Map<string, Band[]>): Map<string, { band: Band; share: number | null }> {
+/** Per currency, the band that cost the most in the peak bucket, and its share of that bucket. Series rows grouped by `dim`, Show applied by the query. */
+export function peakBands(ps: Peak[], d: CostSummary | undefined, dim: string, bands: Map<string, Band[]>): Map<string, { band: Band; share: number | null }> {
   const out = new Map<string, { band: Band; share: number | null }>();
+  // The series grouped once by bucket and currency.
+  const at = new Map<string, CostSummaryRow[]>();
+  for (const r of d?.series ?? []) if (r.at) push(at, `${Math.floor(Date.parse(r.at) / 1000)} ${r.currency}`, r);
   for (const p of ps) {
     const bs = bands.get(p.currency) ?? [];
-    const rows = (d?.series ?? []).filter((r) => r.currency === p.currency && r.at && Math.floor(Date.parse(r.at) / 1000) === p.at && shows(show, familyOf(r)));
+    const rows = at.get(`${p.at} ${p.currency}`) ?? [];
     const per = bs.map((b) => sum(rows.filter((r) => b.values.includes(r.group?.[dim] ?? NONE)).map((r) => r.amount)));
     let best = -1;
     per.forEach((a, i) => {
@@ -479,7 +489,7 @@ export function keyLabel(value: string, keys: Map<string, CostKey>): string {
 
 /** How a band reads in a legend, a KPI or a table row. */
 export function bandLabel(band: Band, b: Breakdown, names: { keys?: Map<string, CostKey>; tenants?: Map<string, string> } = {}): string {
-  if (band.id === OTHER) return `Other (${band.values.length})`;
+  if (band.id === OTHER) return `Other (${band.count ?? band.values.length})`;
   switch (b.kind) {
     case "label":
       return band.id === NONE ? `(no ${b.key} label)` : band.id;
