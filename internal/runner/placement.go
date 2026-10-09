@@ -50,8 +50,12 @@ type placement struct {
 	prev *placement
 	// nudge wakes waitPrevious to re-check a stop or a fence.
 	nudge chan struct{}
-	// startingDue asks reportStarting for a report (progress); made by run.
-	startingDue chan struct{}
+	// startingDue asks reportStarting for a report (progress);
+	// stopStarting ends it and startingDone closes once it has returned.
+	// Made by run; nil for a placement adopted after a restart.
+	startingDue  chan struct{}
+	stopStarting context.CancelFunc
+	startingDone chan struct{}
 
 	mu      sync.Mutex
 	state   *runState
@@ -262,21 +266,30 @@ func (p *placement) progress(key string) {
 }
 
 // reportStarting sends a starting status each time progress asks, until
-// the placement ends. One goroutine sends them, so they reach luxd in
-// order; each carries every mark so far, so asks made while one is sent
-// fold into the next, and a report luxd misses loses no mark. luxd ignores
-// a starting report once the placement runs.
+// ctx ends (endStartingReports). One goroutine sends them, so they reach
+// luxd in order; each carries every mark so far, so asks made while one is
+// sent fold into the next, and a report luxd misses loses no mark.
 func (p *placement) reportStarting(ctx context.Context) {
+	defer close(p.startingDone)
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-p.done:
 			return
 		case <-p.startingDue:
 		}
 		_ = p.report(ctx, proto.MsgStatus, proto.Status{State: "starting", Times: p.times()})
 	}
+}
+
+// endStartingReports stops reportStarting, abandoning a report in flight,
+// and waits for it to return: called before the placement's running or end
+// report, so no starting report is sent or retried after either.
+func (p *placement) endStartingReports() {
+	if p.stopStarting == nil {
+		return
+	}
+	p.stopStarting()
+	<-p.startingDone
 }
 
 func (p *placement) times() map[string]int64 {
@@ -456,8 +469,10 @@ func (p *placement) run(ctx context.Context) {
 	}
 	p.restoreState()
 	p.setPhase("starting")
-	p.startingDue = make(chan struct{}, 1)
-	go p.reportStarting(ctx)
+	startingCtx, stopStarting := context.WithCancel(ctx)
+	p.startingDue, p.stopStarting, p.startingDone = make(chan struct{}, 1), stopStarting, make(chan struct{})
+	go p.reportStarting(startingCtx)
+	defer p.endStartingReports()
 	p.progress("")
 
 	// Until the container starts, a stop cancels whatever is under way.
@@ -471,6 +486,7 @@ func (p *placement) run(ctx context.Context) {
 		cancelStart()
 	}
 	fail := func(stage string, err error) {
+		p.endStartingReports()
 		// Nothing runs on the Run's network without a container.
 		p.r.egress.Remove(bridgeName(p.runID))
 		if p.pendingStop() != "" {
@@ -587,8 +603,12 @@ func (p *placement) run(ctx context.Context) {
 		p.mu.Unlock()
 	}
 
-	if err := p.startShim(ctx, a); err != nil {
-		p.logf("shim start failed", "err", err)
+	shimErr := p.startShim(ctx, a)
+	// Whatever the starting reports have not delivered rides on the
+	// running report or the end report: both carry every mark.
+	p.endStartingReports()
+	if shimErr != nil {
+		p.logf("shim start failed", "err", shimErr)
 		_ = p.r.pm.Kill(ctx, ctr, "KILL")
 	} else {
 		p.setPhase("running")
