@@ -220,7 +220,7 @@ export function OverviewCost() {
           </div>
         }
       />
-      <CostFilters filters={filters} since={since} keys={labelKeys.data?.keys ?? []} fq={fq} />
+      <CostFilters filters={filters} since={since} keys={labelKeys.data?.keys ?? []} fq={fq} prefer={by.kind === "label" ? by.key : "app"} />
       <ErrorStrip error={error} />
       <Card className="cost-card" flush>
         <KpiStrip>
@@ -261,12 +261,12 @@ export function OverviewCost() {
                   bars
                   legend
                   legendValues={c.totals.map((t) => formatMoney(t, c.currency, { decimals: CENTS }))}
-                  legendNote={family ? legendNote : `stacked by ${by.kind === "label" ? by.key : BY_LABEL[by.kind].toLowerCase()} · top 7 + Other · ${legendNote}`}
+                  legendNote={family ? legendNote : `stacked by ${by.kind === "label" ? by.key : by.kind === "key" ? "API key" : BY_LABEL[by.kind].toLowerCase()} · top 7 + Other · ${legendNote}`}
                 />
               </div>
             ))
           )}
-          {preTracking > 0 && <InfoStrip tone="warn">{preTracking} {preTracking === 1 ? "Run" : "Runs"} in this range were submitted before Lux recorded the submitting key; they show as “Before key tracking”.</InfoStrip>}
+          {preTracking > 0 && <InfoStrip tone="warn">{preTracking === 1 ? "1 Run in this range was" : `${preTracking} Runs in this range were`} submitted before Lux recorded the submitting key; they show as “Before key tracking”.</InfoStrip>}
         </div>
       </Card>
       <div className="cost-lower">
@@ -276,7 +276,7 @@ export function OverviewCost() {
               <FamilyTable rows={familyRows(all, show)} meta={meta} loading={loading} runs={familyRuns} />
             </Card>
           ) : (
-            <Card title={`By ${by.kind === "label" ? by.key : BY_LABEL[by.kind] === "API key" ? "API key" : BY_LABEL[by.kind].toLowerCase()}`} subtitle={`${words}${by.kind === "label" ? " · click a row to filter" : by.kind === "key" ? " · the key's name as it is now" : ""}`} flush>
+            <Card title={`By ${by.kind === "label" ? by.key : by.kind === "key" ? "API key" : BY_LABEL[by.kind].toLowerCase()}`} subtitle={`${words}${by.kind === "label" ? " · click a row to filter" : by.kind === "key" ? " · the key's name as it is now" : ""}`} flush>
               <BreakdownTable
                 lead={by.kind === "label" ? by.key : BY_LABEL[by.kind]}
                 loading={loading}
@@ -313,7 +313,7 @@ export function OverviewCost() {
             lead="Run"
             name={(r) => <RunNameLink id={r.key} name={runInfo.get(r.key)?.name} />}
             sub={(r) => (runInfo.get(r.key)?.name ? <RunLink id={r.key} /> : null)}
-            labels={(r) => <LabelChips labels={runInfo.get(r.key)?.labels} first={by.kind === "label" ? [by.key, "app"] : ["app"]} />}
+            labels={(r) => <LabelChips labels={runInfo.get(r.key)?.labels} max={2} first={by.kind === "label" ? [by.key, "app"] : ["app"]} />}
             onClick={(r) => go(runPath(r.key))}
             empty={`No Run has a ${SHOW_WORD[show] === "total" ? "" : SHOW_WORD[show] + " "}cost in this range.`}
           />
@@ -324,7 +324,10 @@ export function OverviewCost() {
 }
 
 /** The filter bar: a chip per filter, the "＋ Label filter" popover, and what the filters reach. */
-function CostFilters({ filters, since, keys, fq }: { filters: LabelFilter[]; since: string; keys: { key: string; runs: number }[]; fq: ReturnType<typeof filterQuery> }) {
+function CostFilters({ filters, since, keys, fq, prefer }: { filters: LabelFilter[]; since: string; keys: { key: string; runs: number }[]; fq: ReturnType<typeof filterQuery>; prefer: string }) {
+  // The picker opens on a key not filtered yet: the breakdown's, else app, else the most common.
+  const free = keys.filter((k) => !filters.some((f) => f.key === k.key));
+  const initialKey = (free.find((k) => k.key === prefer) ?? free.find((k) => k.key === "app") ?? free[0])?.key;
   const scope = useScope();
   const [picking, setPicking] = useState<string | null>(null);
   // The picked key's values with their cost, under the filters already set.
@@ -346,7 +349,7 @@ function CostFilters({ filters, since, keys, fq }: { filters: LabelFilter[]; sin
       add={
         <LabelFilterPopover
           keys={keys}
-          initialKey={keys.some((k) => k.key === "app") ? "app" : undefined}
+          initialKey={initialKey}
           values={valueList}
           notSet={(key) => (key === picking ? amounts.get(NONE) : undefined)}
           onKeyChange={setPicking}
@@ -431,7 +434,7 @@ function TopBandKpis({ rows, loading, label }: { rows: ReturnType<typeof breakdo
             key={r.band.id}
             label={<ColorKey color={r.band.color}>{label(r.band)}</ColorKey>}
             loading={loading}
-            value={<Money amount={r.amount} currency={r.currency} decimals={CENTS} />}
+            value={<MoneyList amounts={[{ currency: r.currency, amount: r.amount }]} large decimals={CENTS} />}
             sub={[pct(r.share), r.runs != null ? `${r.runs} ${r.runs === 1 ? "Run" : "Runs"}` : null].filter(Boolean).join(" · ")}
           />
         );
