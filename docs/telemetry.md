@@ -34,11 +34,12 @@ Each stint on a host, in `placements[]`:
 | `uploadedAt` | All its blobs reached S3. |
 
 `assignedAt`, `acceptedAt`, `stopRequestedAt` and the ends are luxd's
-clock; `imageReadyAt` through `workloadStartedAt` and `exitedAt` are the
-runner's marks, on its host's clock. The runner sends each start mark as
+clock; `imageReadyAt` through `workloadStartedAt` are the runner's marks,
+on its host's clock, and so is `exitedAt` when the runner reports it
+(luxd's time of the exit report otherwise). The runner sends each start mark as
 it reaches it (a `starting` status carrying every mark so far), not only
 once the placement runs, so luxd knows a starting Run's phase as it
-happens: the Run's [stage](concepts.md#stages) and its `run.stage`
+happens: the Run's [stage](concepts.md#stages) and its `stage`
 events follow from them. The first time reported for a mark is kept.
 
 Resource figures are read from the container's cgroup (v2):
