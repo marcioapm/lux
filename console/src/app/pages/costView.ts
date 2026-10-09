@@ -384,7 +384,10 @@ export interface BreakdownChart {
   totals: string[];
 }
 
-/** One chart per currency: a stacked series per band over every bucket of the range (a bucket with no row is a gap). Series rows grouped by `dim` alone, Show applied by the query (showFamily). */
+/**
+ * One chart per currency: a stacked series per band over every bucket of the range (a bucket with no row is a gap). Series rows grouped by `dim` alone, Show applied by the query (showFamily).
+ * The series and the bands come from two polls: a series value with no band (the split folded it) is drawn in Other, added if the bands have none, so the stack still sums to the series.
+ */
 export function breakdownCharts(d: CostSummary | undefined, dim: string, interval: CostInterval, bands: Map<string, Band[]>): BreakdownChart[] {
   if (!d?.series?.length) return [];
   const step = INTERVAL_HOURS[interval] * 3600;
@@ -395,14 +398,20 @@ export function breakdownCharts(d: CostSummary | undefined, dim: string, interva
   const index = new Map(x.map((t, i) => [t, i]));
   const out: BreakdownChart[] = [];
   for (const [currency, rows] of byCurrency(d.series)) {
-    const bs = bands.get(currency) ?? [];
+    let bs = bands.get(currency) ?? [];
+    if (rows.some((r) => !bandOf(bs, valueOf(r, dim))) && !bs.some((b) => b.id === OTHER)) {
+      const none = bs.findIndex((b) => b.id === NONE);
+      const other: Band = { id: OTHER, values: [FOLDED], color: bandColorOf(OTHER, 0) };
+      bs = none < 0 ? [...bs, other] : [...bs.slice(0, none), other, ...bs.slice(none)];
+    }
+    const otherAt = bs.findIndex((b) => b.id === OTHER);
     const cells = bs.map(() => x.map((): string[] => []));
     const totals = bs.map((): string[] => []);
     for (const r of rows) {
       const b = bandOf(bs, valueOf(r, dim));
       const i = index.get(Math.floor(Date.parse(r.at!) / 1000));
-      if (!b || i == null) continue;
-      const k = bs.indexOf(b);
+      if (i == null) continue;
+      const k = b ? bs.indexOf(b) : otherAt;
       cells[k]![i]!.push(r.amount);
       totals[k]!.push(r.amount);
     }

@@ -250,6 +250,31 @@ test("breakdown charts: a series per band, Other summed exactly, a bucket with n
   expect(c!.totals).toEqual(["3", "0.3"]);
 });
 
+test("breakdown charts: a series value the split has no band for is drawn in Other, and the stack still sums to the series", () => {
+  const one = (v: string, amount: string, at: string): CostSummaryRow => ({ group: { "label:app": v }, currency: "USD", amount, at });
+  // The split kept a and b; by the series poll c has overtaken b.
+  const series = [one("a", "5", T(0)), one("c", "5.1", T(0)), { ...one("(other)", "5", T(0)), other: true }, one(NONE, "1", T(1))];
+  const d: CostSummary = { from: T(0), to: T(2), basis: "list", totals: [], series };
+  const split = [app("a", "ai", "USD", "5"), app("b", "ai", "USD", "4"), folded("ai", "USD", "5"), app(NONE, "ai", "USD", "1")];
+  const [c] = breakdownCharts(d, "label:app", "hour", breakdownBands(split, "label:app", "all", { USD: 3 }, 2));
+  expect(c!.bands.map((b) => b.id)).toEqual(["a", "b", OTHER, NONE]);
+  expect(c!.ys).toEqual([
+    [5, null],
+    [null, null],
+    [10.1, null],
+    [null, 1],
+  ]);
+  expect(c!.totals).toEqual(["5", "0", "10.1", "1"]);
+  // No fold in the split: an Other band is added before (none), in Other's colour.
+  const [n] = breakdownCharts(d, "label:app", "hour", breakdownBands([app("a", "ai", "USD", "5"), app(NONE, "ai", "USD", "1")], "label:app", "all"));
+  expect(n!.bands.map((b) => [b.id, b.color])).toEqual([
+    ["a", "var(--chart-2)"],
+    [OTHER, "var(--st-neutral-fg)"],
+    [NONE, "var(--st-neutral-dot)"],
+  ]);
+  expect(n!.totals).toEqual(["5", "10.1", "1"]);
+});
+
 test("breakdown: Runs per band from the folded totals; the peak names the band that dominated it", () => {
   const rows: CostSummaryRow[] = [
     { group: { "label:app": "a", family: "ai" }, currency: "USD", amount: "1", runs: 2 },
@@ -271,6 +296,12 @@ test("breakdown: Runs per band from the folded totals; the peak names the band t
   const sb = breakdownBands([app("a", "ai", "USD", "9"), app("b", "ai", "USD", "6")], "label:app", "all");
   const pk = peakBands(peaks({ ...d, series: series.map((r) => ({ ...r, group: { family: "ai" } })) }, "all"), d, "label:app", sb).get("USD")!;
   expect([pk.band.id, pk.share]).toEqual(["a", 0.9]);
+  // The fold dominating the peak bucket names Other, keyed by other: true, not by the value it reads.
+  const withFold = [one("a", "9", T(1)), { ...one("(other)", "30", T(1)), other: true }, one("b", "5", T(2))];
+  const fd: CostSummary = { ...d, series: withFold };
+  const fb = breakdownBands([app("a", "ai", "USD", "9"), app("b", "ai", "USD", "5"), folded("ai", "USD", "30")], "label:app", "all", { USD: 2 });
+  const fpk = peakBands(peaks({ ...fd, series: withFold.map((r) => ({ ...r, group: { family: "ai" } })) }, "all"), fd, "label:app", fb).get("USD")!;
+  expect([fpk.band.id, fpk.share]).toEqual([OTHER, 30 / 39]);
 });
 
 test("family Runs: from the family summary's runs, per family and currency", () => {
