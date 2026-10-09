@@ -152,8 +152,5 @@ func announceStage(ctx context.Context, tx pgx.Tx, runID string) error {
 	if st.Reason != "" {
 		data["reason"] = st.Reason
 	}
-	return addEvent(ctx, tx, tenantID, runID, epoch, evRunStage, data)
+	return addEvent(ctx, tx, tenantID, runID, epoch, "stage", data)
 }
-
-// evRunStage is the Run event noteStage emits.
-const evRunStage = "stage"
