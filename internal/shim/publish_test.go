@@ -33,7 +33,7 @@ func newPublishFixture(t *testing.T, max int64) *publishFixture {
 	if err := os.Mkdir(f.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	p := &publisher{dir: f.dir, rel: "artifacts", max: max, emit: func(a proto.StagedArtifact) error {
+	p := &publisher{base: base, rel: "artifacts", max: max, emit: func(a proto.StagedArtifact) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if f.fail != nil {
@@ -186,6 +186,25 @@ func TestPublishWithoutItsRecordFails(t *testing.T) {
 	}
 	if names := f.staged(t); len(names) != 0 {
 		t.Fatalf("staged %v", names)
+	}
+}
+
+// A link in place of the staging directory that leads off the runtime
+// volume fails the publish; nothing is written where it points.
+func TestPublishRefusesALinkedStagingDir(t *testing.T) {
+	f := newPublishFixture(t, 1<<20)
+	elsewhere := t.TempDir()
+	if err := os.Remove(f.dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, f.dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publishFile(f.socket, writeTemp(t, []byte("x")), proto.PublishRequest{Name: "x"}); err == nil {
+		t.Fatal("published through a link off the volume")
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 || len(f.events) != 0 {
+		t.Fatalf("written %v, events %v", entries, f.events)
 	}
 }
 
