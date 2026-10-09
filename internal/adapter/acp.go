@@ -122,12 +122,16 @@ type ACP struct {
 	// connected; statusSeq numbers the status reads dispatched, of which
 	// only the newest applies; statusCancel cancels the one in flight;
 	// statusReads counts those not yet applied or discarded.
-	ocBusy       bool
-	actMu        sync.Mutex
-	shown        bool
-	shownIdle    bool
-	ocGen        int
-	ocUp         bool
+	ocBusy    bool
+	actMu     sync.Mutex
+	shown     bool
+	shownIdle bool
+	ocGen     int
+	ocUp      bool
+	// ocObserved (under actMu) is the latest status on this stream,
+	// before the refusal mask. A successful read can lift that mask even
+	// when a newer event has superseded the read's status.
+	ocObserved   bool
 	statusSeq    int
 	statusCancel context.CancelFunc
 	statusReads  int
@@ -1068,6 +1072,7 @@ func (a *ACP) setOpenCodeBusy(busy bool) {
 	a.actMu.Lock()
 	defer a.actMu.Unlock()
 	a.ocGen++
+	a.ocObserved = busy
 	a.applyOpenCodeBusyLocked(busy)
 }
 
@@ -1102,6 +1107,7 @@ func (a *ACP) streamDown() {
 	defer a.actMu.Unlock()
 	a.ocGen++
 	a.ocUp = false
+	a.ocObserved = false
 	if a.statusCancel != nil {
 		a.statusCancel()
 		a.statusCancel = nil
@@ -1162,8 +1168,11 @@ func (a *ACP) requestStatusLocked() {
 			case err == nil:
 				a.bus.accepted()
 			}
-			if refused || a.ocGen == gen {
-				a.applyOpenCodeBusyLocked(err == nil && busy)
+			if a.ocGen == gen {
+				a.ocObserved = err == nil && busy
+			}
+			if refused || err == nil || a.ocGen == gen {
+				a.applyOpenCodeBusyLocked(a.ocObserved)
 			}
 		}
 		if a.statusRead != nil {
