@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { familyDisplay, STORAGE_KIND_LIST, storageKindStyle } from "./states.ts";
+import { bandColor, bandSlots, familyColor, familyDisplay, NONE_BAND_COLOR, OTHER_BAND_COLOR, STORAGE_KIND_LIST, storageKindStyle } from "./states.ts";
 
 const color = (families: Parameters<typeof familyDisplay>[0], family: string) => familyDisplay(families).get(family)?.color;
 
@@ -54,6 +54,26 @@ test("each storage kind has its own label and categorical slot, never compute's"
 
 test("an unknown storage kind keeps its key and a neutral colour", () => {
   expect(storageKindStyle("cache")).toEqual({ label: "cache", color: "var(--st-neutral-dot)" });
+});
+
+test("breakdown bands never take compute's colour, for any number of bands", () => {
+  const compute = familyColor("compute");
+  for (let n = 1; n <= 24; n++) {
+    const slots = bandSlots(n);
+    expect(slots.length).toBe(n);
+    expect(slots.map((s) => `var(--chart-${s})`)).not.toContain(compute);
+    expect(Array.from({ length: n }, (_, i) => bandColor(i))).not.toContain(compute);
+    expect([OTHER_BAND_COLOR, NONE_BAND_COLOR]).not.toContain(compute);
+  }
+  // Bands take the remaining slots in rank order, each once before any repeats.
+  expect(bandSlots(7)).toEqual([2, 3, 4, 5, 6, 7, 8]);
+  expect(bandSlots(9)).toEqual([2, 3, 4, 5, 6, 7, 8, 2, 3]);
+  expect(bandSlots(0)).toEqual([]);
+});
+
+test("the Family view keeps compute's colour: compute is --chart-1 there", () => {
+  expect(familyColor("compute")).toBe("var(--chart-1)");
+  expect(familyDisplay([{ family: "ai" }, { family: "compute" }]).get("compute")!.color).toBe("var(--chart-1)");
 });
 
 test("build contexts are not a charted kind", () => {

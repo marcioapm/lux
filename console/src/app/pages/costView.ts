@@ -3,7 +3,7 @@
 // /v1/costs summaries into the panel's figures. Amounts stay decimal
 // strings; nothing is ever added or ranked across currencies. The step
 // (hour or day) is the page's (every.ts).
-import { compareMoney, familyDisplay, sumMoney } from "@lux/design-system";
+import { bandColor, compareMoney, familyDisplay, NONE_BAND_COLOR, OTHER_BAND_COLOR, sumMoney } from "@lux/design-system";
 import type { CostFamily, CostKey, CostSummary, CostSummaryRow, MoneyTotal } from "../../api/index.ts";
 
 /** Which costs the panel counts: every family, compute (host time) only, or every other family. */
@@ -337,9 +337,9 @@ export interface Band {
   count?: number;
 }
 
-/** A band's colour: chart slots in rank order, Other the last slot, (none) grey. */
+/** A band's colour: the design system's band slots in rank order (never compute's), Other and (none) neutral. */
 function bandColorOf(id: string, rank: number): string {
-  return id === NONE ? "var(--st-neutral-dot)" : id === OTHER ? "var(--chart-8)" : `var(--chart-${rank + 1})`;
+  return id === NONE ? NONE_BAND_COLOR : id === OTHER ? OTHER_BAND_COLOR : bandColor(rank);
 }
 
 /** Ties by value in code-unit order, as luxd breaks them (COLLATE "C" on ASCII). */
