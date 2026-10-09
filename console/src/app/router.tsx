@@ -3,8 +3,8 @@
 // the path, the query (page filters) and the global scope (scope.tsx).
 import { useMemo, useSyncExternalStore } from "react";
 
-/** Query keys that make up the global scope; links keep them across pages. */
-const SCOPE_KEYS = ["tenant", "range"] as const;
+/** Query keys that make up the global scope; links keep them across pages (cost and per: the Overview's Cost panel). */
+const SCOPE_KEYS = ["tenant", "range", "cost", "per"] as const;
 
 const listeners = new Set<() => void>();
 function notify() {
