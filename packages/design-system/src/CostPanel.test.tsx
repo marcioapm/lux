@@ -188,6 +188,24 @@ describe("cost panel components", () => {
       expect(document.activeElement?.getAttribute("aria-label")).toBe("Search values");
     });
 
+    test("focus: a click elsewhere closes the dialog and leaves focus where the user put it", async () => {
+      const p = await popover();
+      const outside = document.createElement("button");
+      outside.textContent = "elsewhere";
+      document.body.appendChild(outside);
+      try {
+        await p.open();
+        await act(async () => {
+          outside.focus();
+          outside.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+        });
+        expect(p.dialog()).toBeNull();
+        expect(document.activeElement).toBe(outside);
+      } finally {
+        outside.remove();
+      }
+    });
+
     test("Escape with the key picker open closes the picker only", async () => {
       const p = await popover();
       await p.open();

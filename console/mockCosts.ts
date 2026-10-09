@@ -157,7 +157,7 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
     return "(none)";
   };
   const bucket = (h: number) => (interval === "day" ? Math.floor(h / 86400) * 86400 : h);
-  // top=N: the first group's values past the N costliest per currency (by what rank counts) read "(other)", as luxd folds them.
+  // top=N: the first group's values past the N costliest per currency (by what rank counts) fold into rows marked other: true (read "(other)"), as luxd folds them.
   const top = Number(q.get("top") ?? 0);
   const rank = q.get("rank") ?? "all";
   const ranks = (r: Row) => rank === "all" || (r.family === "compute") === (rank === "compute");
@@ -179,32 +179,37 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
       if (rest.length) otherCount[c] = rest.length;
     }
   }
-  const groupOf = (r: Row) => Object.fromEntries(groups.map((g, i) => [g, i === 0 && folded.get(r.currency)?.has(value(r, g)) ? "(other)" : value(r, g)]));
+  const isOther = (r: Row) => groups.length > 0 && !!folded.get(r.currency)?.has(value(r, groups[0]!));
+  const groupOf = (r: Row) => Object.fromEntries(groups.map((g, i) => [g, i === 0 && isOther(r) ? "(other)" : value(r, g)]));
+  // runs: with top, the Runs with ranked cost per first-group value; with runs=true (no top), every Run with cost.
+  const withRuns = top > 0 || q.get("runs") === "true";
   const runsOf = new Map<string, Set<string>>();
-  if (top > 0) for (const r of s.rows) if (ranks(r)) { const k = JSON.stringify([groupOf(r)[groups[0]!], r.currency]); runsOf.set(k, (runsOf.get(k) ?? new Set()).add(r.run)); }
+  if (withRuns) for (const r of s.rows) if (top === 0 || ranks(r)) { const k = JSON.stringify([isOther(r), groupOf(r)[groups[0]!], r.currency]); runsOf.set(k, (runsOf.get(k) ?? new Set()).add(r.run)); }
   const aggregate = (withAt: boolean) => {
-    const m = new Map<string, { at?: number; group: Record<string, string>; currency: string; micros: number }>();
+    const m = new Map<string, { at?: number; group: Record<string, string>; other: boolean; currency: string; micros: number }>();
     for (const r of s.rows) {
       const group = groupOf(r);
+      const other = isOther(r);
       const at = withAt ? bucket(r.hour) : undefined;
-      const k = JSON.stringify([at, group, r.currency]);
-      const e = m.get(k) ?? { at, group, currency: r.currency, micros: 0 };
+      const k = JSON.stringify([at, group, other, r.currency]);
+      const e = m.get(k) ?? { at, group, other, currency: r.currency, micros: 0 };
       e.micros += r.micros;
       m.set(k, e);
     }
     return [...m.values()]
-      .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || JSON.stringify(a.group).localeCompare(JSON.stringify(b.group)) || a.currency.localeCompare(b.currency))
-      .map((e) => ({ ...(e.at != null ? { at: new Date(e.at * 1000).toISOString() } : {}), ...(groups.length ? { group: e.group } : {}), currency: e.currency, amount: money(e.micros), ...(top > 0 && !withAt ? { runs: runsOf.get(JSON.stringify([e.group[groups[0]!], e.currency]))?.size ?? 0 } : {}) }));
+      .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || JSON.stringify(a.group).localeCompare(JSON.stringify(b.group)) || Number(a.other) - Number(b.other) || a.currency.localeCompare(b.currency))
+      .map((e) => ({ ...(e.at != null ? { at: new Date(e.at * 1000).toISOString() } : {}), ...(groups.length ? { group: e.group } : {}), currency: e.currency, amount: money(e.micros), ...(withRuns && !withAt ? { runs: runsOf.get(JSON.stringify([e.other, e.group[groups[0]!], e.currency]))?.size ?? 0 } : {}), ...(e.other ? { other: true } : {}) }));
   };
   const totals = aggregate(false);
   const body: Record<string, unknown> = { from: new Date(s.from * 1000).toISOString(), to: new Date(s.to * 1000).toISOString(), basis: "list", totals };
   if (Object.keys(otherCount).length) body.otherCount = otherCount;
   if (interval) body.series = aggregate(true);
-  if (groups.includes("family")) body.families = [...new Set(totals.map((t) => t.group!.family!))].sort().map((f) => (f === "ai" ? { family: f, displayName: "AI models", color: "violet" } : f === "compute" ? { family: f, displayName: "Compute" } : { family: f }));
-  if (groups.includes("run")) body.runs = [...new Set(totals.map((t) => t.group!.run!))].filter((id) => id !== "(other)").sort().map((id) => ({ id, name: runInfo(id)?.name ?? "", ...(Object.keys(runInfo(id)?.labels ?? {}).length ? { labels: runInfo(id)!.labels } : {}) }));
+  const named = (g: string) => [...new Set(totals.filter((t) => !(t.other && groups[0] === g)).map((t) => t.group![g]!))];
+  if (groups.includes("family")) body.families = named("family").sort().map((f) => (f === "ai" ? { family: f, displayName: "AI models", color: "violet" } : f === "compute" ? { family: f, displayName: "Compute" } : { family: f }));
+  if (groups.includes("run")) body.runs = named("run").sort().map((id) => ({ id, name: runInfo(id)?.name ?? "", ...(Object.keys(runInfo(id)?.labels ?? {}).length ? { labels: runInfo(id)!.labels } : {}) }));
   if (groups.includes("key")) {
-    body.keys = [...new Set(totals.map((t) => t.group!.key!))]
-      .filter((k) => k !== "(none)" && k !== "(other)")
+    body.keys = named("key")
+      .filter((k) => k !== "(none)")
       .sort()
       .map((id) => {
         if (id.startsWith("email:")) return { id, email: id.slice("email:".length) };

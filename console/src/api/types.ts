@@ -356,6 +356,8 @@ export interface CostSummaryRow {
   amount: string;
   /** With top or runs, on totals: the Runs with cost (that rank counts, with top) under the first group's value. */
   runs?: number;
+  /** With top: the fold of every value past the top N (its value reads "(other)"); a real value of that name lacks it. */
+  other?: boolean;
 }
 
 export interface HostAllocation {
@@ -382,7 +384,7 @@ export interface CostSummary {
   runs?: { id: string; name?: string; labels?: Record<string, string> }[];
   /** Grouped by key: each submitter but "(none)" (Runs from before luxd recorded who submitted them). */
   keys?: CostKey[];
-  /** With top: per currency, how many values (other) holds. */
+  /** With top: per currency, how many values the other: true rows hold. */
   otherCount?: Record<string, number>;
 }
 
