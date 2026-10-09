@@ -36,8 +36,7 @@ func publishedBlobID(artifactID string) string {
 }
 
 func (p *placement) onPublished(ctx context.Context, a proto.StagedArtifact) {
-	if !proto.ValidArtifactID(a.ID) || proto.ValidArtifactName(a.Name) != nil || proto.ValidDescription(a.Description) != nil ||
-		proto.ValidContentType(a.ContentType) != nil {
+	if !proto.ValidArtifactID(a.ID) || proto.ValidPublishFields(a.Name, a.ContentType, a.Description) != nil {
 		p.logf("ignoring a malformed lux.artifact record", "id", a.ID)
 		return
 	}
