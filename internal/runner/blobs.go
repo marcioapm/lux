@@ -109,6 +109,13 @@ func (r *Runner) snapshotRecords() map[string]*snapshotRecord {
 	return out
 }
 
+// readRecord is the record named id, or an fs.ErrNotExist.
+func (r *Runner) readRecord(id string) (*snapshotRecord, error) {
+	r.recordMu.Lock()
+	defer r.recordMu.Unlock()
+	return readRecordFile(r.recordPath(id))
+}
+
 func readRecordFile(path string) (*snapshotRecord, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -270,15 +277,8 @@ func (r *Runner) snapshotAcked(snapID string, ack proto.Ack) {
 		return
 	}
 	r.log.Warn("luxd refused the snapshot report; deleting its files", "snapshot", snapID)
-	r.recordMu.Lock()
-	b, err := os.ReadFile(r.recordPath(snapID))
-	r.recordMu.Unlock()
-	if err != nil {
-		return
-	}
-	var rec snapshotRecord
-	if json.Unmarshal(b, &rec) == nil {
-		removeSnapshotFiles(r, snapID, &rec)
+	if rec, err := r.readRecord(snapID); err == nil {
+		removeSnapshotFiles(r, snapID, rec)
 	}
 }
 
@@ -297,14 +297,9 @@ func (r *Runner) unreportable(rec *snapshotRecord) bool {
 func (r *Runner) updateRecord(snapID string, fn func(*snapshotRecord)) {
 	r.recordMu.Lock()
 	defer r.recordMu.Unlock()
-	b, err := os.ReadFile(r.recordPath(snapID))
-	if err != nil {
-		return
-	}
-	var rec snapshotRecord
-	if json.Unmarshal(b, &rec) == nil {
-		fn(&rec)
-		_ = r.saveSnapshotRecord(snapID, &rec)
+	if rec, err := readRecordFile(r.recordPath(snapID)); err == nil {
+		fn(rec)
+		_ = r.saveSnapshotRecord(snapID, rec)
 	}
 }
 
@@ -322,10 +317,6 @@ func (u *uploader) upload(ctx context.Context, up pendingUpload) error {
 		return err
 	}
 	return u.r.api.upload(ctx, up.BlobID, f, fi.Size())
-}
-
-func (r *Runner) isStaleRun(runID string, epoch int) bool {
-	return r.staleEpoch(runID) == epoch
 }
 
 // staleEpoch is the epoch of runID's placement that was fenced off on this
