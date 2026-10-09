@@ -350,6 +350,11 @@ func (a *ACP) drain() {
 		a.mu.Unlock()
 		a.inputs.fail(a.sink, in, errNoImages)
 		a.drain()
+		// The queue that kept the Run busy may now be empty with no turn
+		// started; no turn end will report that.
+		if a.bus != nil {
+			a.showCombined()
+		}
 		return
 	}
 	a.busy, a.inflight, a.turnEnd = true, 1, nil
@@ -1075,6 +1080,17 @@ func (a *ACP) activity(idle bool) {
 	if reread {
 		a.requestStatus()
 	}
+}
+
+// showCombined reports the combined activity as it is now (OpenCode's
+// server only).
+func (a *ACP) showCombined() {
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	a.mu.Lock()
+	idle := !a.busy && !a.ocBusy && len(a.queue) == 0
+	a.mu.Unlock()
+	a.showLocked(idle)
 }
 
 // showLocked reports idle unless it is what was last reported. Under actMu.
