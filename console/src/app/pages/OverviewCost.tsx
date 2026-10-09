@@ -163,7 +163,8 @@ export function OverviewCost() {
   const peakRun = useMemo(() => peakRuns(peakList, (peakRows.data ?? []).map((w) => ({ at: w.at, rows: w.d.totals })), show), [peakList, peakRows.data, show]);
 
   // The breakdown: bands per currency, its charts, its rows and its peak.
-  const bands = useMemo(() => breakdownBands(byDim.data?.totals ?? [], dim, show, byDim.data?.otherCount), [byDim.data, dim, show]);
+  // Other's count from the series call: Show is its family filter, so it counts only values with a shown cost.
+  const bands = useMemo(() => breakdownBands(byDim.data?.totals ?? [], dim, show, dimSeries.data?.otherCount), [byDim.data, dim, show, dimSeries.data]);
   const names = { keys: keyInfo, tenants: tenantName };
   const label = (b: Band) => bandLabel(b, by, names);
   const dimCharts = useMemo(() => breakdownCharts(dimSeries.data, dim, interval, bands), [dimSeries.data, dim, interval, bands]);
