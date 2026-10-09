@@ -1186,8 +1186,14 @@ is fixed to slot 1).
     submitted the Runs, `group=key`), Pool, and Tenant (operators viewing
     all tenants only). The chart stacks by the breakdown: the top 7 values
     by cost, the rest as Other, Runs without the value as a grey band
-    ("(no app label)", "Before key tracking"), never dropped. Every query
-    groups by the breakdown and by family, so Show still applies.
+    ("(no app label)", "Before key tracking"), never dropped. luxd does the
+    fold (`top=7`, ranked by Show), so no breakdown grows with how many
+    values there are: the series is asked with Show as a family filter,
+    and the table's Compute/External split and Runs per value come from one
+    more folded summary grouped by the breakdown and family. Top Runs and
+    Top tenants are `top=10` summaries, and the peak's Run a `top=1` one.
+    When a cost request fails, the error is shown and the chart area does
+    not also claim there is no cost.
   - **Label filters** (`?label=key=value`, repeated: one key's values OR,
     different keys AND; `?nolabel=key` for "is not set"): chips and a
     "＋ Label filter" picker (keys from `/v1/costs/labels`, values with their

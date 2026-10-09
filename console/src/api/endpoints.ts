@@ -26,7 +26,7 @@ export const api = {
   downloadArtifact: (a: Artifact) => download(`/artifacts/${enc(a.id)}`, a.path.split("/").pop() || a.id),
   runCost: (id: string, signal?: Sig) => request<RunCost>(`/runs/${enc(id)}/cost`, { signal }),
   costs: (tenant: Scope, p: CostSummaryParams, signal?: Sig) =>
-    request<CostSummary>("/costs", { tenant, query: { group: p.group, family: p.family, interval: p.interval, since: p.since, from: p.from, to: p.to, label: p.label, nolabel: p.nolabel }, signal }),
+    request<CostSummary>("/costs", { tenant, query: { group: p.group, family: p.family, nofamily: p.nofamily, interval: p.interval, top: p.top, rank: p.rank, since: p.since, from: p.from, to: p.to, label: p.label, nolabel: p.nolabel }, signal }),
   /** The label keys on Runs with cost in the range (after the filters), most Runs first. */
   costLabels: (tenant: Scope, p: Pick<CostSummaryParams, "since" | "label" | "nolabel">, signal?: Sig) => request<CostLabels>("/costs/labels", { tenant, query: { since: p.since, label: p.label, nolabel: p.nolabel }, signal }),
 

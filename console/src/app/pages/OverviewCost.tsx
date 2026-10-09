@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   BreakdownTable,
   Card,
@@ -32,7 +32,7 @@ import {
   type MoneyAmount,
 } from "@lux/design-system";
 import { api, type CostSummaryRow, type MoneyTotal } from "../../api/index.ts";
-import { costInterval, stepNote } from "../every.ts";
+import { costInterval, costRange, stepNote } from "../every.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorStrip, RunLink, RunNameLink, runPath } from "./common.tsx";
@@ -46,7 +46,6 @@ import {
   breakdownRows,
   changes,
   COMPUTE,
-  costSince,
   defaultLabelKey,
   familyCharts,
   familyMeta,
@@ -60,12 +59,14 @@ import {
   peaks,
   peakWindows,
   previousWindow,
+  push,
   ratio,
-  runsByValue,
   runsListPath,
-  shownRunIds,
+  runsPerFamily,
   shownTotals,
+  showFamily,
   sideTotals,
+  TOP_VALUES,
   topSplit,
   type Band,
   type Breakdown,
@@ -80,6 +81,10 @@ import {
 } from "./costView.ts";
 
 const POLL = 60_000;
+/** Label keys change only when a newly labelled Run gains cost. */
+const LABEL_KEYS_POLL = 10 * 60_000;
+/** Top Runs and Top tenants: the summaries' top=N. */
+const TOP_ROWS = 10;
 /** External is every family but compute: one colour for the group, apart from compute's. */
 const EXTERNAL_COLOR = "var(--chart-7)";
 const COMPUTE_COLOR = familyColor(COMPUTE);
@@ -98,7 +103,7 @@ const BY_LABEL: Record<BreakdownKind, string> = { family: "Family", label: "Labe
 export function OverviewCost() {
   const scope = useScope();
   const show = scope.costShow;
-  const since = costSince(scope.range);
+  const since = costRange(scope.range);
   const step = scope.step("cost");
   const interval = costInterval(step);
   const filters = scope.costFilters;
@@ -107,30 +112,37 @@ export function OverviewCost() {
   const filtered = filters.length > 0;
 
   // Label keys on costed Runs in range (unfiltered: the breakdown and the picker offer every key).
-  const labelKeys = useScopedQuery(`costs:labels:${since}`, (t, s) => api.costLabels(t, { since }, s), { interval: POLL });
+  const labelKeys = useScopedQuery(`costs:labels:${since}`, (t, s) => api.costLabels(t, { since }, s), { interval: LABEL_KEYS_POLL });
   const keys = useMemo(() => (labelKeys.data?.keys ?? []).map((k) => k.key), [labelKeys.data]);
+  const keyKnown = scope.costBy.kind !== "label" || scope.costBy.key !== "" || labelKeys.data != null;
   const by: Breakdown = scope.costBy.kind === "label" ? { kind: "label", key: defaultLabelKey(scope.costBy.key, keys) } : scope.costBy;
   const dim = breakdownGroup(by);
   const family = by.kind === "family";
+  // ?by=label names its key in the URL once the keys are known (a replace: no history entry).
+  const setCostBy = scope.setCostBy;
+  useEffect(() => {
+    if (scope.costBy.kind === "label" && scope.costBy.key === "" && labelKeys.data) setCostBy({ kind: "label", key: defaultLabelKey("", keys) });
+  }, [scope.costBy, labelKeys.data, keys, setCostBy]);
 
-  const byFamily = useScopedQuery(`costs:family:${since}:${interval}:${fkey}`, (t, s) => api.costs(t, { group: ["family"], interval, since, ...fq }, s), { interval: POLL });
-  // The breakdown's series and totals, with the family to apply Show.
-  const byDim = useScopedQuery(`costs:${dim}-family:${since}:${interval}:${fkey}`, (t, s) => api.costs(t, { group: [dim, "family"], interval, since, ...fq }, s), { interval: POLL, enabled: !family });
-  const byRun = useScopedQuery(`costs:run-family:${since}:${fkey}`, (t, s) => api.costs(t, { group: ["run", "family"], since, ...fq }, s), { interval: POLL });
-  // Runs per value: one more summary, by the breakdown and run.
-  const dimRuns = useScopedQuery(`costs:${dim}-run:${since}:${fkey}`, (t, s) => api.costs(t, { group: [dim, "run"], since, ...fq }, s), { interval: POLL, enabled: !family });
-  const byTenant = useScopedQuery(`costs:tenant-family:${since}:${fkey}`, (t, s) => api.costs(t, { group: ["tenant", "family"], since, ...fq }, s), { interval: POLL, enabled: scope.showTenant && by.kind !== "tenant" });
+  // Every summary that lists values is folded by luxd to its top N (ranked by what Show counts), so none grows with how many values there are.
+  const top = { top: TOP_VALUES, rank: show };
+  const byFamily = useScopedQuery(`costs:family:${since}:${interval}:${fkey}`, (t, s) => api.costs(t, { group: ["family"], interval, top: 50, since, ...fq }, s), { interval: POLL });
+  // The breakdown's series, Show applied by family, and its totals split by family for the bands, the table and the Runs per value.
+  const dimSeries = useScopedQuery(`costs:${dim}:${since}:${interval}:${show}:${fkey}`, (t, s) => api.costs(t, { group: [dim], interval, ...top, ...showFamily(show), since, ...fq }, s), { interval: POLL, enabled: !family && keyKnown });
+  const byDim = useScopedQuery(`costs:${dim}-family:${since}:${show}:${fkey}`, (t, s) => api.costs(t, { group: [dim, "family"], ...top, since, ...fq }, s), { interval: POLL, enabled: !family && keyKnown });
+  const byRun = useScopedQuery(`costs:run-family:${since}:${show}:${fkey}`, (t, s) => api.costs(t, { group: ["run", "family"], top: TOP_ROWS, rank: show, since, ...fq }, s), { interval: POLL });
+  const byTenant = useScopedQuery(`costs:tenant-family:${since}:${show}:${fkey}`, (t, s) => api.costs(t, { group: ["tenant", "family"], top: TOP_ROWS, rank: show, since, ...fq }, s), { interval: POLL, enabled: scope.showTenant && by.kind !== "tenant" });
   const tenantNames = useScopedQuery("tenants-names", (_t, s) => api.tenants(s), { enabled: scope.showTenant });
   // The window of equal length before this one, from the summary's own effective bounds, under the same filters.
   const prev = byFamily.data ? previousWindow(byFamily.data) : null;
   const before = useScopedQuery(`costs:family:prev:${prev?.from}:${prev?.to}:${fkey}`, (t, s) => api.costs(t, { group: ["family"], from: prev!.from, to: prev!.to, ...fq }, s), { enabled: prev != null });
-  // The peak bucket's Runs: one small summary per distinct peak bucket (one per currency at most), once the peak is known.
+  // The peak bucket's top Run per currency: one small summary per distinct peak bucket (one per currency at most), once the peak is known.
   const peakList = useMemo(() => peaks(byFamily.data, show), [byFamily.data, show]);
   const windows = useMemo(() => peakWindows(peakList, interval), [peakList, interval]);
   const peakKey = windows.map((w) => w.from).join(",");
   const peakRows = useScopedQuery(
-    `costs:peak-runs:${interval}:${peakKey}:${fkey}`,
-    (t, s) => Promise.all(windows.map((w) => api.costs(t, { group: ["run", "family"], from: w.from, to: w.to, ...fq }, s).then((d) => ({ at: Date.parse(w.from) / 1000, d })))),
+    `costs:peak-runs:${interval}:${peakKey}:${show}:${fkey}`,
+    (t, s) => Promise.all(windows.map((w) => api.costs(t, { group: ["run", "family"], top: 1, rank: show, from: w.from, to: w.to, ...fq }, s).then((d) => ({ at: Date.parse(w.from) / 1000, d })))),
     { interval: POLL, enabled: windows.length > 0 && family },
   );
 
@@ -151,21 +163,20 @@ export function OverviewCost() {
   const peakRun = useMemo(() => peakRuns(peakList, (peakRows.data ?? []).map((w) => ({ at: w.at, rows: w.d.totals })), show), [peakList, peakRows.data, show]);
 
   // The breakdown: bands per currency, its charts, its rows and its peak.
-  const bands = useMemo(() => breakdownBands(byDim.data?.totals ?? [], dim, show), [byDim.data, dim, show]);
+  const bands = useMemo(() => breakdownBands(byDim.data?.totals ?? [], dim, show, byDim.data?.otherCount), [byDim.data, dim, show]);
   const names = { keys: keyInfo, tenants: tenantName };
   const label = (b: Band) => bandLabel(b, by, names);
-  const dimCharts = useMemo(() => breakdownCharts(byDim.data, dim, interval, show, bands), [byDim.data, dim, interval, show, bands]);
+  const dimCharts = useMemo(() => breakdownCharts(dimSeries.data, dim, interval, bands), [dimSeries.data, dim, interval, bands]);
   const famCharts = useMemo(() => familyCharts(byFamily.data, interval, show), [byFamily.data, interval, show]);
-  const perValue = useMemo(() => runsByValue(dimRuns.data?.totals ?? [], dim, shownRunIds(byRun.data?.totals ?? [], show)), [dimRuns.data, dim, byRun.data, show]);
-  const dimRows = useMemo(() => breakdownRows(byDim.data?.totals ?? [], dim, show, bands, dimRuns.data ? perValue : undefined), [byDim.data, dim, show, bands, dimRuns.data, perValue]);
-  const familyRuns = useMemo(() => (byRun.data?.totals ? runsByValue(byRun.data.totals, "family", shownRunIds(byRun.data.totals, show)) : undefined), [byRun.data, show]);
-  const peakBand = useMemo(() => peakBands(peakList, byDim.data, dim, show, bands), [peakList, byDim.data, dim, show, bands]);
+  const dimRows = useMemo(() => breakdownRows(byDim.data?.totals ?? [], dim, show, bands), [byDim.data, dim, show, bands]);
+  const familyRuns = useMemo(() => runsPerFamily(all), [all]);
+  const peakBand = useMemo(() => peakBands(peakList, dimSeries.data, dim, bands), [peakList, dimSeries.data, dim, bands]);
 
-  const error = labelKeys.error ?? byFamily.error ?? byDim.error ?? byRun.error ?? dimRuns.error ?? byTenant.error ?? before.error ?? peakRows.error;
+  const error = labelKeys.error ?? byFamily.error ?? dimSeries.error ?? byDim.error ?? byRun.error ?? byTenant.error ?? before.error ?? peakRows.error;
   const words = rangeText(since);
-  const loading = byFamily.loading || (!family && byDim.loading);
+  const loading = byFamily.loading || (!family && (byDim.loading || dimSeries.loading || !keyKnown));
   const empty = !loading && all.length === 0;
-  const preTracking = by.kind === "key" ? perValue.get(NONE)?.size ?? 0 : 0;
+  const preTracking = by.kind === "key" ? (dimRows.find((r) => r.band.id === NONE)?.runs ?? 0) : 0;
 
   const showOptions = [
     { value: "all" as const, label: "All" },
@@ -174,7 +185,7 @@ export function OverviewCost() {
   ];
   const kinds: BreakdownKind[] = scope.showTenant ? ["family", "label", "key", "pool", "tenant"] : ["family", "label", "key", "pool"];
   const byOptions = kinds.map((k) => ({ value: k, label: BY_LABEL[k] }));
-  const setBy = (k: BreakdownKind) => scope.setCostBy(k === "label" ? { kind: "label", key: by.kind === "label" ? by.key : "" } : ({ kind: k } as Breakdown));
+  const setBy = (k: BreakdownKind) => scope.setCostBy(k === "label" ? { kind: "label", key: by.kind === "label" ? by.key : labelKeys.data ? defaultLabelKey("", keys) : "" } : ({ kind: k } as Breakdown));
   const filterBy = (f: LabelFilter | null) => f && scope.setCostFilters(addFilter(filters, f));
 
   const legendNote = `each bar is one ${interval === "hour" ? "hour" : "UTC day"} · no bar: nothing recorded, not $0`;
@@ -246,7 +257,7 @@ export function OverviewCost() {
         </KpiStrip>
         <div className="cost-charts">
           {charts.length === 0 ? (
-            <EmptyState compact title={loading ? "Loading…" : empty ? `No cost recorded in this range${filtered ? " for these filters" : ""}` : `No ${SHOW_WORD[show]} cost in this range`} description={loading ? undefined : "Nothing has been costed yet in this range; no figure is not a zero."} />
+            error && !loading ? null : <EmptyState compact title={loading ? "Loading…" : empty ? `No cost recorded in this range${filtered ? " for these filters" : ""}` : `No ${SHOW_WORD[show]} cost in this range`} description={loading ? undefined : "Nothing has been costed yet in this range; no figure is not a zero."} />
           ) : (
             charts.map((c) => (
               <div className="cost-chart" key={c.currency}>
@@ -336,7 +347,7 @@ function CostFilters({ filters, since, keys, fq, prefer }: { filters: LabelFilte
     const m = new Map<string, MoneyAmount[]>();
     for (const r of values.data?.totals ?? []) {
       const v = r.group?.[`label:${picking}`] ?? NONE;
-      m.set(v, [...(m.get(v) ?? []), { currency: r.currency, amount: r.amount }]);
+      push(m, v, { currency: r.currency, amount: r.amount });
     }
     return m;
   }, [values.data, picking]);
@@ -502,7 +513,7 @@ function SplitTable({ rows, loading, show, lead, name, sub, labels, onClick, emp
   return <Table columns={cols} rows={rows} rowKey={(r) => `${r.currency}:${r.key}`} loading={loading} loadingRows={3} onRowClick={onClick} empty={empty} dense={compact} />;
 }
 
-function FamilyTable({ rows, meta, loading, runs }: { rows: FamilyRow[]; meta: ReturnType<typeof familyMeta>; loading: boolean; runs?: Map<string, Set<string>> }) {
+function FamilyTable({ rows, meta, loading, runs }: { rows: FamilyRow[]; meta: ReturnType<typeof familyMeta>; loading: boolean; runs?: Map<string, number> }) {
   return (
     <BreakdownTable
       lead="Family"
@@ -510,7 +521,7 @@ function FamilyTable({ rows, meta, loading, runs }: { rows: FamilyRow[]; meta: R
       rows={rows.map((r) => {
         const m = meta.get(r.family);
         const compute = r.family === COMPUTE;
-        return { id: r.family, label: m?.displayName ?? (compute ? "Compute" : r.family), color: familyColor(r.family, m?.color), currency: r.currency, runs: runs ? (runs.get(r.family)?.size ?? 0) : null, compute: compute ? r.amount : null, external: compute ? null : r.amount, total: r.amount, share: r.share };
+        return { id: r.family, label: m?.displayName ?? (compute ? "Compute" : r.family), color: familyColor(r.family, m?.color), currency: r.currency, runs: runs ? (runs.get(r.family) ?? 0) : null, compute: compute ? r.amount : null, external: compute ? null : r.amount, total: r.amount, share: r.share };
       })}
       empty="No family has a cost in this range."
     />

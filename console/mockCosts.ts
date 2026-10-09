@@ -134,7 +134,7 @@ function scoped(u: URL, tenantOf: string | null): { from: number; to: number; ro
     return [...want].every(([k, vs]) => r.labels[k] != null && vs.includes(r.labels[k]!)) && absent.every((k) => r.labels[k] == null);
   };
   const { rows, unallocated } = generate();
-  const inRange = rows.filter((r) => r.hour >= from && r.hour < to && (!tenant || r.tenant === tenant) && (!q.get("family") || r.family === q.get("family")) && runOk(r.run));
+  const inRange = rows.filter((r) => r.hour >= from && r.hour < to && (!tenant || r.tenant === tenant) && (!q.get("family") || r.family === q.get("family")) && (!q.get("nofamily") || r.family !== q.get("nofamily")) && runOk(r.run));
   return { from, to, rows: inRange, unallocated, filtered: want.size > 0 || absent.length > 0 };
 }
 
@@ -157,10 +157,35 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
     return "(none)";
   };
   const bucket = (h: number) => (interval === "day" ? Math.floor(h / 86400) * 86400 : h);
+  // top=N: the first group's values past the N costliest per currency (by what rank counts) read "(other)", as luxd folds them.
+  const top = Number(q.get("top") ?? 0);
+  const rank = q.get("rank") ?? "all";
+  const ranks = (r: Row) => rank === "all" || (r.family === "compute") === (rank === "compute");
+  const folded = new Map<string, Set<string>>();
+  const otherCount: Record<string, number> = {};
+  if (top > 0 && groups.length) {
+    const sums = new Map<string, Map<string, number | null>>();
+    for (const r of s.rows) {
+      const v = value(r, groups[0]!);
+      if (v === "(none)") continue;
+      const m = sums.get(r.currency) ?? new Map<string, number | null>();
+      // null: no cost rank counts, which ranks last.
+      m.set(v, ranks(r) ? (m.get(v) ?? 0) + r.micros : (m.get(v) ?? null));
+      sums.set(r.currency, m);
+    }
+    for (const [c, m] of sums) {
+      const rest = [...m].sort(([a, x], [b, y]) => (x == null ? (y == null ? 0 : 1) : y == null ? -1 : y - x) || (a < b ? -1 : 1)).slice(top);
+      folded.set(c, new Set(rest.map(([v]) => v)));
+      if (rest.length) otherCount[c] = rest.length;
+    }
+  }
+  const groupOf = (r: Row) => Object.fromEntries(groups.map((g, i) => [g, i === 0 && folded.get(r.currency)?.has(value(r, g)) ? "(other)" : value(r, g)]));
+  const runsOf = new Map<string, Set<string>>();
+  if (top > 0) for (const r of s.rows) if (ranks(r)) { const k = JSON.stringify([groupOf(r)[groups[0]!], r.currency]); runsOf.set(k, (runsOf.get(k) ?? new Set()).add(r.run)); }
   const aggregate = (withAt: boolean) => {
     const m = new Map<string, { at?: number; group: Record<string, string>; currency: string; micros: number }>();
     for (const r of s.rows) {
-      const group = Object.fromEntries(groups.map((g) => [g, value(r, g)]));
+      const group = groupOf(r);
       const at = withAt ? bucket(r.hour) : undefined;
       const k = JSON.stringify([at, group, r.currency]);
       const e = m.get(k) ?? { at, group, currency: r.currency, micros: 0 };
@@ -169,16 +194,17 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
     }
     return [...m.values()]
       .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || JSON.stringify(a.group).localeCompare(JSON.stringify(b.group)) || a.currency.localeCompare(b.currency))
-      .map((e) => ({ ...(e.at != null ? { at: new Date(e.at * 1000).toISOString() } : {}), ...(groups.length ? { group: e.group } : {}), currency: e.currency, amount: money(e.micros) }));
+      .map((e) => ({ ...(e.at != null ? { at: new Date(e.at * 1000).toISOString() } : {}), ...(groups.length ? { group: e.group } : {}), currency: e.currency, amount: money(e.micros), ...(top > 0 && !withAt ? { runs: runsOf.get(JSON.stringify([e.group[groups[0]!], e.currency]))?.size ?? 0 } : {}) }));
   };
   const totals = aggregate(false);
   const body: Record<string, unknown> = { from: new Date(s.from * 1000).toISOString(), to: new Date(s.to * 1000).toISOString(), basis: "list", totals };
+  if (Object.keys(otherCount).length) body.otherCount = otherCount;
   if (interval) body.series = aggregate(true);
   if (groups.includes("family")) body.families = [...new Set(totals.map((t) => t.group!.family!))].sort().map((f) => (f === "ai" ? { family: f, displayName: "AI models", color: "violet" } : f === "compute" ? { family: f, displayName: "Compute" } : { family: f }));
-  if (groups.includes("run")) body.runs = [...new Set(totals.map((t) => t.group!.run!))].sort().map((id) => ({ id, name: runInfo(id)?.name ?? "", ...(Object.keys(runInfo(id)?.labels ?? {}).length ? { labels: runInfo(id)!.labels } : {}) }));
+  if (groups.includes("run")) body.runs = [...new Set(totals.map((t) => t.group!.run!))].filter((id) => id !== "(other)").sort().map((id) => ({ id, name: runInfo(id)?.name ?? "", ...(Object.keys(runInfo(id)?.labels ?? {}).length ? { labels: runInfo(id)!.labels } : {}) }));
   if (groups.includes("key")) {
     body.keys = [...new Set(totals.map((t) => t.group!.key!))]
-      .filter((k) => k !== "(none)")
+      .filter((k) => k !== "(none)" && k !== "(other)")
       .sort()
       .map((id) => {
         if (id.startsWith("email:")) return { id, email: id.slice("email:".length) };

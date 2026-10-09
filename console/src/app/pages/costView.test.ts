@@ -9,7 +9,6 @@ import {
   breakdownParam,
   breakdownRows,
   changes,
-  costSince,
   defaultLabelKey,
   familyCharts,
   familyRows,
@@ -26,9 +25,10 @@ import {
   peaks,
   peakWindows,
   previousWindow,
-  runsByValue,
   runsListPath,
-  shownRunIds,
+  runsPerFamily,
+  SERVER_OTHER,
+  showFamily,
   shownTotals,
   sideTotals,
   topSplit,
@@ -37,9 +37,10 @@ import {
 const fam = (family: string, currency: string, amount: string, at?: string): CostSummaryRow => ({ group: { family }, currency, amount, ...(at ? { at } : {}) });
 const runFam = (run: string, family: string, currency: string, amount: string): CostSummaryRow => ({ group: { run, family }, currency, amount });
 
-test("1h reads 6h: costs are whole-hour buckets", () => {
-  expect(costSince("1h")).toBe("6h");
-  expect(costSince("7d")).toBe("7d");
+test("Show as the summary's family filter: compute is family=compute, external nofamily=compute", () => {
+  expect(showFamily("all")).toEqual({});
+  expect(showFamily("compute")).toEqual({ family: "compute" });
+  expect(showFamily("external")).toEqual({ nofamily: "compute" });
 });
 
 const ROWS = [fam("compute", "USD", "3.87"), fam("ai", "USD", "55.08"), fam("video", "USD", "1.05"), fam("compute", "EUR", "2"), fam("ai", "EUR", "0.5")];
@@ -175,15 +176,23 @@ test("peak Run: the costliest Run of that bucket, as Show counts, per currency",
 
 const app = (v: string, family: string, currency: string, amount: string, at?: string): CostSummaryRow => ({ group: { "label:app": v, family }, currency, amount, ...(at ? { at } : {}) });
 
-test("breakdown: the top 7 values by shown cost, the rest as Other, the value-less band last and grey", () => {
-  const rows = Array.from({ length: 10 }, (_, i) => app(`v${i}`, "ai", "USD", String(100 - i)));
-  rows.push(app(NONE, "compute", "USD", "500"));
-  const bands = breakdownBands(rows, "label:app", "all").get("USD")!;
+test("breakdown: the top 7 values by shown cost, luxd's (other) as Other with its count, the value-less band last and grey", () => {
+  // luxd folded three values past the top 7 into (other).
+  const rows = Array.from({ length: 7 }, (_, i) => app(`v${i}`, "ai", "USD", String(100 - i)));
+  rows.push(app(SERVER_OTHER, "ai", "USD", "200"), app(NONE, "compute", "USD", "500"));
+  const bands = breakdownBands(rows, "label:app", "all", { USD: 3 }).get("USD")!;
   expect(bands.map((b) => b.id)).toEqual(["v0", "v1", "v2", "v3", "v4", "v5", "v6", OTHER, NONE]);
-  expect(bands.find((b) => b.id === OTHER)!.values).toEqual(["v7", "v8", "v9"]);
+  expect(bands.find((b) => b.id === OTHER)!.values).toEqual([SERVER_OTHER]);
+  expect(bandLabel(bands.find((b) => b.id === OTHER)!, { kind: "label", key: "app" })).toBe("Other (3)");
   expect(bands.at(-1)!.color).toBe("var(--st-neutral-dot)");
-  // Eight values: the eighth is shown as itself, not as a one-value Other.
-  expect(breakdownBands(rows.slice(0, 8), "label:app", "all").get("USD")!.map((b) => b.id)).toEqual(["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"]);
+  // Nothing folded: no Other.
+  expect(breakdownBands(rows.slice(0, 7), "label:app", "all").get("USD")!.map((b) => b.id)).toEqual(["v0", "v1", "v2", "v3", "v4", "v5", "v6"]);
+  // A value past the limit locally (Show ranks differently than luxd did) joins Other too.
+  const two = breakdownBands([app("a", "ai", "USD", "1"), app("b", "ai", "USD", "2"), app(SERVER_OTHER, "ai", "USD", "1")], "label:app", "all", { USD: 4 }, 1).get("USD")!;
+  expect(two.map((b) => [b.id, b.values, b.count])).toEqual([
+    ["b", ["b"], undefined],
+    [OTHER, ["a", SERVER_OTHER], 5],
+  ]);
 });
 
 test("breakdown: Show still applies; a value with nothing shown has no band, and never leaks into the figures", () => {
@@ -217,36 +226,53 @@ test("breakdown: currencies stay apart; each has its own bands, ranks and shares
 });
 
 test("breakdown charts: a series per band, Other summed exactly, a bucket with no row a gap", () => {
-  const series = [app("a", "ai", "USD", "1", T(0)), app("b", "ai", "USD", "0.1", T(0)), app("c", "ai", "USD", "0.2", T(0)), app("a", "compute", "USD", "2", T(2))];
+  // The series as asked: grouped by the breakdown alone, Show applied by luxd.
+  const one = (v: string, amount: string, at: string): CostSummaryRow => ({ group: { "label:app": v }, currency: "USD", amount, at });
+  const series = [one("a", "1", T(0)), one("b", "0.1", T(0)), one(SERVER_OTHER, "0.2", T(0)), one("a", "2", T(2))];
   const d: CostSummary = { from: T(0), to: T(3), basis: "list", totals: [], series };
-  const bands = breakdownBands(series, "label:app", "all", 1);
-  const [c] = breakdownCharts(d, "label:app", "hour", "all", bands);
+  const bands = breakdownBands([app("a", "ai", "USD", "3"), app("b", "ai", "USD", "0.1"), app(SERVER_OTHER, "ai", "USD", "0.2")], "label:app", "all", { USD: 1 }, 1);
+  const [c] = breakdownCharts(d, "label:app", "hour", bands);
   expect(c!.bands.map((b) => b.id)).toEqual(["a", OTHER]);
   expect(c!.ys).toEqual([
     [1, null, 2],
     [0.3, null, null],
   ]);
   expect(c!.totals).toEqual(["3", "0.3"]);
-  const ext = breakdownCharts(d, "label:app", "hour", "external", breakdownBands(series, "label:app", "external", 1))[0]!;
-  expect(ext.ys[0]).toEqual([1, null, null]);
 });
 
-test("breakdown: Runs per value count only Runs with a shown cost; the peak names the band that dominated it", () => {
-  const dimRuns: CostSummaryRow[] = [
-    { group: { "label:app": "a", run: "r1" }, currency: "USD", amount: "1" },
-    { group: { "label:app": "a", run: "r2" }, currency: "USD", amount: "1" },
-    { group: { "label:app": NONE, run: "r3" }, currency: "USD", amount: "1" },
+test("breakdown: Runs per band from the folded totals; the peak names the band that dominated it", () => {
+  const rows: CostSummaryRow[] = [
+    { group: { "label:app": "a", family: "ai" }, currency: "USD", amount: "1", runs: 2 },
+    { group: { "label:app": "a", family: "compute" }, currency: "USD", amount: "1", runs: 2 },
+    { group: { "label:app": SERVER_OTHER, family: "ai" }, currency: "USD", amount: "1", runs: 5 },
+    { group: { "label:app": NONE, family: "ai" }, currency: "USD", amount: "1", runs: 1 },
   ];
-  const per = runsByValue(dimRuns, "label:app", shownRunIds([runFam("r1", "ai", "USD", "1"), runFam("r2", "compute", "USD", "1"), runFam("r3", "ai", "USD", "1")], "external"));
-  expect([...per].map(([k, v]) => [k, [...v]])).toEqual([
-    ["a", ["r1"]],
-    [NONE, ["r3"]],
+  const bands = breakdownBands(rows, "label:app", "all", { USD: 3 });
+  expect(breakdownRows(rows, "label:app", "all", bands).map((r) => [r.band.id, r.runs])).toEqual([
+    ["a", 2],
+    [OTHER, 5],
+    [NONE, 1],
   ]);
-  const series = [app("a", "ai", "USD", "9", T(1)), app("b", "ai", "USD", "1", T(1)), app("b", "ai", "USD", "5", T(2))];
+  // Without runs on the rows (no top), the count is unknown, not zero.
+  expect(breakdownRows([app("a", "ai", "USD", "1")], "label:app", "all", breakdownBands([app("a", "ai", "USD", "1")], "label:app", "all"))[0]!.runs).toBeNull();
+  const one = (v: string, amount: string, at: string): CostSummaryRow => ({ group: { "label:app": v }, currency: "USD", amount, at });
+  const series = [one("a", "9", T(1)), one("b", "1", T(1)), one("b", "5", T(2))];
   const d: CostSummary = { from: T(0), to: T(3), basis: "list", totals: [], series };
-  const bands = breakdownBands(series, "label:app", "all");
-  const pk = peakBands(peaks({ ...d, series: series.map((r) => ({ ...r, group: { family: "ai" } })) }, "all"), d, "label:app", "all", bands).get("USD")!;
+  const sb = breakdownBands([app("a", "ai", "USD", "9"), app("b", "ai", "USD", "6")], "label:app", "all");
+  const pk = peakBands(peaks({ ...d, series: series.map((r) => ({ ...r, group: { family: "ai" } })) }, "all"), d, "label:app", sb).get("USD")!;
   expect([pk.band.id, pk.share]).toEqual(["a", 0.9]);
+});
+
+test("family Runs: from the family summary's runs, per family", () => {
+  expect(runsPerFamily([fam("compute", "USD", "1")])).toBeUndefined();
+  expect([...runsPerFamily([{ ...fam("compute", "USD", "1"), runs: 3 }, { ...fam("compute", "EUR", "1"), runs: 1 }, { ...fam("ai", "USD", "1"), runs: 2 }])!]).toEqual([
+    ["compute", 3],
+    ["ai", 2],
+  ]);
+});
+
+test("Top Runs: luxd's (other) is never a Run", () => {
+  expect(topSplit([runFam("r1", "ai", "USD", "1"), runFam(SERVER_OTHER, "ai", "USD", "9")], "run", "all").map((r) => r.key)).toEqual(["r1"]);
 });
 
 test("breakdown labels: label values, (no key label), key names with the operator and pre-tracking cases", () => {
@@ -275,8 +301,8 @@ test("?by=: label:key, key, pool; tenant only where tenants are shown; anything 
   expect(defaultLabelKey("repo", ["app"])).toBe("repo");
 });
 
-test("?label= and ?nolabel=: one key repeated is one filter of several values; a value keeps its = , and unicode", () => {
-  const fs = parseFilters(["app=jervasion", "repo=a/b", "app=dude", "app=jervasion", "note=x=y,z ü", "broken"], ["phase"]);
+test("?label= and ?nolabel=: one key repeated is one filter of several values; a value keeps its = , and unicode; a key luxd refuses is dropped", () => {
+  const fs = parseFilters(["app=jervasion", "repo=a/b", "app=dude", "app=jervasion", "note=x=y,z ü", "broken", "bad key=x", "-x=1"], ["phase", "a b", ""]);
   expect(fs).toEqual([
     { key: "app", values: ["jervasion", "dude"] },
     { key: "repo", values: ["a/b"] },
