@@ -138,6 +138,8 @@ type fakeBus struct {
 	statusFail bool
 	statusGets int
 	statusQ    chan heldStatus
+	// statusCode, if set, answers GET /session/status (after any hold).
+	statusCode int
 	// eventFail: GET /event answers 503.
 	eventFail bool
 	// dropParts: posted keeps no text, so a test can measure the adapter's
@@ -239,6 +241,13 @@ func newFakeBus(t *testing.T) *fakeBus {
 			http.Error(w, "down", http.StatusInternalServerError)
 			return
 		}
+		b.mu.Lock()
+		code := b.statusCode
+		b.mu.Unlock()
+		if code != 0 {
+			http.Error(w, http.StatusText(code), code)
+			return
+		}
 		if loop {
 			fmt.Fprintf(w, `{"%s":{"type":"busy"}}`, ocSession)
 			return
@@ -261,7 +270,7 @@ func newFakeBus(t *testing.T) *fakeBus {
 		}
 		if pw != "" && allowed {
 			b.authed++
-		} else if !allowed {
+		} else if !allowed && (code == http.StatusUnauthorized || code == http.StatusForbidden) {
 			b.refused++
 		}
 		b.mu.Unlock()

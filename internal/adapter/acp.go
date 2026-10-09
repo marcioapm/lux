@@ -131,8 +131,10 @@ type ACP struct {
 	statusCancel context.CancelFunc
 	statusReads  int
 	// statusRead, if set (by a test, before Run), gets the error of each
-	// status read once it is applied or discarded, under actMu.
+	// status read once it is applied or discarded, under actMu; busHandled
+	// gets each bus event once onBus has handled it.
 	statusRead func(error)
+	busHandled func(busEvent)
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -1027,6 +1029,9 @@ func (a *ACP) queueInput(in proto.Input) {
 // session.idle after the ACP turn has ended settles the Run's work;
 // session.status is the Run's activity (setOpenCodeBusy).
 func (a *ACP) onBus(ev busEvent) {
+	if a.busHandled != nil {
+		defer a.busHandled(ev)
+	}
 	a.mu.Lock()
 	session, bt := a.session, a.busTurn
 	a.mu.Unlock()
@@ -1067,8 +1072,10 @@ func (a *ACP) setOpenCodeBusy(busy bool) {
 
 // applyOpenCodeBusyLocked sets ocBusy and reports the combined activity.
 // Lux's side is idle only with no turn of its own and nothing queued for
-// one, so a turn about to start does not flash idle. Under actMu.
+// one, so a turn about to start does not flash idle. A server refusing an
+// observer is never shown busy. Under actMu.
 func (a *ACP) applyOpenCodeBusyLocked(busy bool) {
+	busy = busy && !a.bus.refusing()
 	a.mu.Lock()
 	a.ocBusy = busy
 	idle := !a.busy && !busy && len(a.queue) == 0
@@ -1118,7 +1125,7 @@ func (a *ACP) requestStatusLocked() {
 	a.mu.Lock()
 	session := a.session
 	a.mu.Unlock()
-	if session == "" || !a.ocUp {
+	if session == "" || !a.ocUp || a.bus.givenUp() != nil {
 		return
 	}
 	if a.statusCancel != nil {
@@ -1132,13 +1139,20 @@ func (a *ACP) requestStatusLocked() {
 	ok := a.spawn(func() {
 		defer cancel()
 		busy, err := a.bus.sessionBusy(ctx, session)
+		refused := a.bus.observer && errors.Is(err, errRefused)
+		switch {
+		case refused:
+			a.bus.refused(err)
+		case err == nil:
+			a.bus.accepted()
+		}
 		a.actMu.Lock()
 		defer a.actMu.Unlock()
 		a.statusReads--
 		if a.statusSeq == seq {
 			a.statusCancel = nil
 		}
-		if ctx.Err() == nil && a.ocGen == gen && a.statusSeq == seq {
+		if refused || (ctx.Err() == nil && a.ocGen == gen && a.statusSeq == seq) {
 			a.applyOpenCodeBusyLocked(err == nil && busy)
 		}
 		if a.statusRead != nil {

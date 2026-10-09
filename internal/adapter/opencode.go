@@ -58,10 +58,12 @@ type opencodeBus struct {
 	observer       bool
 	user, password string
 	// refusals (under mu): an observer's requests refused since the server
-	// last accepted one; gaveUp: it reached refusalLimit, and the observer
-	// sends nothing more.
+	// last accepted a status read; gaveUp: the refusal that reached
+	// refusalLimit, after which the observer sends nothing more. drop ends
+	// the open event stream, nil when none is.
 	refusals int
-	gaveUp   bool
+	gaveUp   error
+	drop     context.CancelFunc
 
 	// pause waits out one reconnect backoff d, false if ctx ends first; a
 	// timer unless a test sets it before Run.
@@ -120,37 +122,42 @@ func refusal(what string, resp *http.Response) error {
 	return nil
 }
 
-// refused counts a refusal of an observer's request; it is true exactly
-// once, for the refusal that reaches refusalLimit.
-func (b *opencodeBus) refused() (giveUp bool) {
+// refused counts err, a refusal of an observer's request, and ends the open
+// event stream: lux connects again after a backoff, or not at all once the
+// count reaches refusalLimit.
+func (b *opencodeBus) refused(err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.gaveUp {
-		return false
+	if b.gaveUp != nil {
+		return
 	}
-	b.refusals++
-	b.gaveUp = b.refusals >= refusalLimit
-	return b.gaveUp
+	if b.refusals++; b.refusals >= refusalLimit {
+		b.gaveUp = err
+	}
+	if b.drop != nil {
+		b.drop()
+	}
 }
 
-// accepted clears the refusals: the server took an observer's request.
+// accepted clears the refusals: the server answered a status read.
 func (b *opencodeBus) accepted() {
 	b.mu.Lock()
-	if !b.gaveUp {
+	if b.gaveUp == nil {
 		b.refusals = 0
 	}
 	b.mu.Unlock()
 }
 
-// refusing: the server's last answer to the observer was a refusal, or it
-// has given up. Nothing then shows OpenCode busy.
+// refusing: the server refused the observer since it last accepted a
+// status read. Nothing it says then shows OpenCode busy.
 func (b *opencodeBus) refusing() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.refusals > 0 || b.gaveUp
+	return b.refusals > 0 || b.gaveUp != nil
 }
 
-func (b *opencodeBus) givenUp() bool {
+// givenUp is the refusal that made the observer stop, nil if none did.
+func (b *opencodeBus) givenUp() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.gaveUp
@@ -218,23 +225,39 @@ type busEvent struct {
 // Every end of the stream, clean or not, is followed by a wait: capped
 // exponential backoff with jitter, back to its start after a stream that
 // stayed up for healthyStream. An observer stops once its requests have
-// been refused refusalLimit times with none accepted between (refused),
-// returning the refusal that reached it; otherwise follow returns nil.
+// been refused refusalLimit times with no status read accepted between
+// (refused), returning the refusal that reached it; otherwise follow
+// returns nil.
 func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, disconnected func()) error {
 	wait := followMin
-	for ctx.Err() == nil && !b.givenUp() {
+	for ctx.Err() == nil {
+		if err := b.givenUp(); err != nil {
+			return err
+		}
 		began := time.Now()
-		err := b.followOnce(ctx, on, connected, disconnected)
+		stream, drop := context.WithCancel(ctx)
+		b.mu.Lock()
+		b.drop = drop
+		b.mu.Unlock()
+		err := b.followOnce(ctx, stream, on, connected, disconnected)
+		b.mu.Lock()
+		b.drop = nil
+		b.mu.Unlock()
+		dropped := stream.Err() != nil
+		drop()
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err == nil {
+		if err == nil || dropped {
 			err = errors.New("GET /event: the stream ended")
 		}
 		b.mu.Lock()
 		b.lastErr = err
 		b.mu.Unlock()
-		if b.observer && errors.Is(err, errRefused) && b.refused() {
+		if b.observer && errors.Is(err, errRefused) {
+			b.refused(err)
+		}
+		if err := b.givenUp(); err != nil {
 			return err
 		}
 		if time.Since(began) >= healthyStream {
@@ -274,9 +297,10 @@ const (
 	refusalLimit = 30
 )
 
-// followOnce reads one GET /event stream until it ends.
-func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connected, disconnected func()) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.url("/event"), nil)
+// followOnce reads one GET /event stream until it or stream (ctx, or a
+// refused status read) ends. disconnected is skipped only when ctx ends.
+func (b *opencodeBus) followOnce(ctx, stream context.Context, on func(busEvent), connected, disconnected func()) error {
+	req, err := http.NewRequestWithContext(stream, http.MethodGet, b.url("/event"), nil)
 	if err != nil {
 		return err
 	}
@@ -294,7 +318,6 @@ func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connect
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET /event: %s", resp.Status)
 	}
-	b.accepted()
 	b.mu.Lock()
 	b.connected = true
 	b.mu.Unlock()
@@ -503,6 +526,9 @@ func (b *opencodeBus) get(ctx context.Context, path string, v any) (string, erro
 		return "", err
 	}
 	defer resp.Body.Close()
+	if err := refusal("GET "+path, resp); err != nil {
+		return "", err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GET %s: %s", path, resp.Status)
 	}
