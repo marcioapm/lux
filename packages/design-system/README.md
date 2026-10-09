@@ -282,7 +282,7 @@ of a few choices as joined buttons, a radio group), RelativeTime ("3h ago",
 the exact date, time and zone in a Tooltip; every table's times),
 DurationCell (a duration with how it was measured in a Tooltip, a live one
 in the foreground, a slow one in the warn tone),
-Tooltip, Select (an option's `disabled` is the reason it cannot be picked: shown greyed with the reason on its right; clicks and arrow keys pass it by), TenantPicker, TimeRangePicker, TimeSeriesChart (uPlot, with
+Tooltip, Select (an option's `disabled` is the reason it cannot be picked: shown greyed with the reason on its right; clicks and arrow keys pass it by; `hint` is a quiet note on the right of a pickable one; `footer` sits under the options), TenantPicker, TimeRangePicker, StepPicker (the page's step beside the range, "Every": Auto shows what it resolved to, `min/hour`; each choice its points or why it is off; a footer says what each kind of chart does with it), TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline
 (placement waterfall: a stage is a bar from `start` to `end`, striped while
 it has no `end`; a `point: true` stage is an instant, a dot at `start` with
@@ -338,6 +338,19 @@ Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
 | `TimeSeriesChart` `bars` | each x is a bar for the bucket starting there, as wide as the smallest step of x (an amount per bucket, such as cost per hour: a line between two buckets would read as a ramp); with `stacked` the bars stack bottom-first, solid. A missing value draws no bar and a bucket with no figure stays empty, never a zero-height bar; positive values stack up from zero and negative ones (a refund) down from it, so no bar overdraws another. The x scale leaves half a bucket at either end; the hovered bucket is shaded and the tooltip names it ("19:00–20:00") (`barSegments`, `barRange`, `bucketText` in `src/chartData.ts`; gallery: "Cost per hour, as bars") |
 | `TimeSeriesChart` `legendValues`, `legendNote` | a figure after each legend entry (its total over the range), and a note at the legend's right end ("each bar is one hour") |
 | `TimeSeriesChart` `currency` | the currency of `unit="money"` |
+
+Cost panel (`src/CostPanel.tsx`; gallery section "costpanel"), what the
+Overview's Cost panel is composed of:
+
+| Export | What |
+| --- | --- |
+| `KpiStrip`, `Kpi({label, value, sub?, loading?, muted?})`, `KpiSub` | figures across the top of a card, the first wider; two across in a narrow container, four from 760px; a muted Kpi is a figure the view hides but still states |
+| `SplitBar({parts, whole, currency, label?, scale?})` | parts of one amount as one thin bar, each part its share of `whole`; a `faint` part is hidden by the view, drawn, never dropped; amounts in the title; `scale` sets its length against the largest row |
+| `BreakdownTable({rows, lead, onRowClick?})` | cost by one dimension: swatch and name (mono for ids and label values, `quiet` for the value-less row, a `pill` such as "revoked"), Runs, Compute, External, Total, Share per currency; a missing part is `–`, not $0 |
+| `LabelChips({labels, max?, first?})` | a Run's labels as `key=value` chips, the `first` keys first, `max` shown and the rest counted (`+2`, their text in the title) |
+| `InfoStrip({tone, children})` | a one-line notice inside a card (why some figures read as they do) |
+| `FilterBar({add, note?})`, `FilterChip({name, op, value, onRemove})` | the active filters as removable chips, the add control, and what the filters reach |
+| `LabelFilterPopover({keys, values, notSet?, onApply, onKeyChange?})` | "＋ Label filter": a label key (with its Runs), then values as checkboxes with their cost, biggest first, a search (`matchValues`), and "(not set)"; Apply reports `{key, values, notSet}`; Cancel, Escape or a click outside leave things as they were |
 
 Behaviour shared by every chart and tooltip:
 

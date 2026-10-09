@@ -10,6 +10,8 @@ export interface SelectOption<V extends string = string> {
   group?: string;
   /** Shown greyed and not pickable; the text says why (shown on the right, and as the option's title). */
   disabled?: string;
+  /** A quiet note on the right of a pickable option ("24 points"). */
+  hint?: string;
 }
 
 export interface SelectProps<V extends string = string> {
@@ -27,11 +29,13 @@ export interface SelectProps<V extends string = string> {
   className?: string;
   /** Minimum trigger width. */
   width?: number;
+  /** Below the options in the menu: what the choices mean. */
+  footer?: ReactNode;
 }
 
 /** Listbox-style select with optional filter. Presets listed as rows, selection marked by a check. */
 export function Select<V extends string>(props: SelectProps<V>) {
-  const { options, value, onChange, placeholder = "Select…", prefix, icon, searchable, size = "md", disabled, className, width } = props;
+  const { options, value, onChange, placeholder = "Select…", prefix, icon, searchable, size = "md", disabled, className, width, footer } = props;
   const id = useId();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -147,12 +151,13 @@ export function Select<V extends string>(props: SelectProps<V>) {
                       <span className="select-opt-label">{o.label}</span>
                       {o.description && <span className="select-opt-desc">{o.description}</span>}
                     </span>
-                    {o.disabled && <span className="select-opt-why">{o.disabled}</span>}
+                    {o.disabled ? <span className="select-opt-why">{o.disabled}</span> : o.hint && <span className="select-opt-why">{o.hint}</span>}
                   </div>
                 </li>
               );
             })}
           </ul>
+          {footer && <div className="select-footer">{footer}</div>}
         </div>
       )}
     </div>
