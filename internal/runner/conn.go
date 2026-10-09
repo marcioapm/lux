@@ -288,7 +288,10 @@ func (c *conn) reportOnce(ctx context.Context, f proto.Frame) (proto.Frame, erro
 		return proto.Frame{}, errors.New("not connected")
 	}
 	if ws != nil {
-		if err := c.writeRaw(ctx, ws, f); err != nil {
+		// websocket.Conn closes itself when a write's ctx ends mid-frame:
+		// a report abandoned by its caller must not drop the connection,
+		// so the write is bounded by writeRaw's timeout alone.
+		if err := c.writeRaw(context.WithoutCancel(ctx), ws, f); err != nil {
 			cleanup()
 			return proto.Frame{}, err
 		}
