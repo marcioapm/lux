@@ -83,10 +83,8 @@ func ValidArtifactName(name string) error {
 	case strings.HasPrefix(name, "/"):
 		return errors.New("name must be relative, not start with /")
 	}
-	for _, r := range name {
-		if r < 0x20 || r == 0x7f {
-			return errors.New("name has a control character")
-		}
+	if hasControl(name, "") {
+		return errors.New("name has a control character")
 	}
 	for _, seg := range strings.Split(name, "/") {
 		switch {
@@ -144,10 +142,8 @@ func ValidContentType(ct string) error {
 	if !utf8.ValidString(ct) {
 		return errors.New("content type is not valid UTF-8")
 	}
-	for i := 0; i < len(ct); i++ {
-		if ct[i] < 0x20 || ct[i] == 0x7f {
-			return errors.New("content type has a control character")
-		}
+	if hasControl(ct, "") {
+		return errors.New("content type has a control character")
 	}
 	if _, _, err := mime.ParseMediaType(ct); err != nil {
 		return fmt.Errorf("content type: %w", err)
@@ -161,10 +157,18 @@ func ValidDescription(d string) error {
 	if len(d) > MaxDescription || !utf8.ValidString(d) {
 		return fmt.Errorf("description: at most %d bytes of UTF-8 text", MaxDescription)
 	}
-	for i := 0; i < len(d); i++ {
-		if c := d[i]; (c < 0x20 && c != '\t' && c != '\n') || c == 0x7f {
-			return errors.New("description has a control character")
-		}
+	if hasControl(d, "\t\n") {
+		return errors.New("description has a control character")
 	}
 	return nil
+}
+
+// hasControl: s has a byte below 0x20 or 0x7f that is not in allowed.
+func hasControl(s, allowed string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < 0x20 || c == 0x7f) && strings.IndexByte(allowed, c) < 0 {
+			return true
+		}
+	}
+	return false
 }
