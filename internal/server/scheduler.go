@@ -489,6 +489,9 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool, "poolId": h.PoolID, "snapshotId": r.SnapshotID}); err != nil {
 		return err
 	}
+	if err := noteStage(ctx, tx, r.ID); err != nil {
+		return err
+	}
 	placed := map[string]any{"run": r.ID, "epoch": epoch, "host": h.ID, "resources": r.Spec.Resources}
 	if err := hostEvent(ctx, tx, h.ID, evPlacementAssign, placed); err != nil {
 		return err
@@ -637,5 +640,8 @@ func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID s
 	if err := enqueueCost(ctx, tx, runID, "state:"+StateResuming); err != nil {
 		return err
 	}
-	return addEvent(ctx, tx, tenantID, runID, 0, "state", map[string]any{"state": StateResuming, "reason": why})
+	if err := addEvent(ctx, tx, tenantID, runID, 0, "state", map[string]any{"state": StateResuming, "reason": why}); err != nil {
+		return err
+	}
+	return noteStage(ctx, tx, runID)
 }

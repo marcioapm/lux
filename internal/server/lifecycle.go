@@ -267,6 +267,9 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 	if err := addEvent(ctx, tx, tenantID, runID, epoch, "state", data); err != nil {
 		return err
 	}
+	if err := noteStage(ctx, tx, runID); err != nil {
+		return err
+	}
 	return endServers(ctx, tx, tenantID, runID, state)
 }
 
@@ -285,8 +288,16 @@ func enqueueCost(ctx context.Context, tx pgx.Tx, runID, reason string) error {
 	return err
 }
 
-// applyStatus moves a Run forward from what its runner reports.
+// applyStatus moves a Run forward from what its runner reports, and
+// announces the stage that leaves it in.
 func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status) error {
+	if err := s.applyStatusOnly(ctx, tx, tenantID, runID, epoch, st); err != nil {
+		return err
+	}
+	return noteStage(ctx, tx, runID)
+}
+
+func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status) error {
 	t := st.Times
 	_, err := tx.Exec(ctx, `UPDATE placements SET
 			image_ready_at       = coalesce(image_ready_at, $3),
@@ -294,10 +305,11 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 			container_started_at = coalesce(container_started_at, $5),
 			workload_started_at  = coalesce(workload_started_at, $6),
 			exited_at            = coalesce(exited_at, $7),
-			memory_limit         = coalesce(memory_limit, nullif($8::bigint, 0))
+			memory_limit         = coalesce(memory_limit, nullif($8::bigint, 0)),
+			repos_ready_at       = coalesce(repos_ready_at, $9)
 		WHERE run_id = $1 AND epoch = $2`, runID, epoch,
 		msToTime(t["imageReady"]), msToTime(t["volumesRestored"]), msToTime(t["containerStarted"]),
-		msToTime(t["workloadStarted"]), msToTime(t["exited"]), st.MemoryLimit)
+		msToTime(t["workloadStarted"]), msToTime(t["exited"]), st.MemoryLimit, msToTime(t["reposReady"]))
 	if err != nil {
 		return err
 	}
