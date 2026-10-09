@@ -51,15 +51,7 @@ func newPublishFixture(t *testing.T, max int64) *publishFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go p.serve(c)
-		}
-	}()
+	go p.accept(ln)
 	return f
 }
 
