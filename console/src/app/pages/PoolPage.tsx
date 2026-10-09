@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Badge, Card, compareMoney, EmptyState, familyDisplay, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, ListPriceNote, Money, MoneyList, PageHeader, rangeText, SectionHeader, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
 import { api, type Pool, type PoolCost, type PoolMetrics, type PoolOwner } from "../../api/index.ts";
-import { costInterval, historyRes, stepNote, stepOfRes } from "../every.ts";
+import { costInterval, costRange, historyRes, stepNote, stepOfRes } from "../every.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostPath, labelsText, PageSkeleton, RunLink, RunNameLink, runPath } from "./common.tsx";
@@ -114,16 +114,11 @@ export function PoolPage({ name }: { name: string }) {
   );
 }
 
-/** Costs are hourly: the 1h range reads 6h. */
-function costSince(range: string): string {
-  return range === "1h" ? "6h" : range;
-}
-
 function PoolTiles({ pool, metrics, loading }: { pool: Pool; metrics?: PoolMetrics; loading: boolean }) {
   const scope = useScope();
   const clock = useNow();
   const n = metrics?.now;
-  const since = costSince(scope.range);
+  const since = costRange(scope.range);
   const cost = useScopedQuery(`pool-cost-tile:${pool.id}:${since}`, (t, s) => api.poolCost(pool.name, t, pool.platform ? "platform" : "tenant", since, "hour", s), { interval: 60_000 });
   return (
     <div className="grid grid-stats">
@@ -271,7 +266,7 @@ interface HostTimeRow {
 function PoolCostTab({ name, owner, operatorView }: { name: string; owner?: PoolOwner; operatorView: boolean }) {
   const scope = useScope();
   const step = scope.step("cost");
-  const since = costSince(scope.range);
+  const since = costRange(scope.range);
   const interval = costInterval(step);
   const q = useScopedQuery(`pool-cost:${name}:${owner}:${since}:${interval}`, (t, s) => api.poolCost(name, t, owner, since, interval, s), { interval: 60_000 });
   const charts = useMemo(() => familyCharts(q.data), [q.data]);

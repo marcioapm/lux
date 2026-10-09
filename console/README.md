@@ -146,8 +146,8 @@ points; cost: hourly up to 24h, daily from 7d), Minute, Hour or Day apply
 to them all. Trend charts ask `/v1/history` (and host, pool and control
 history) for `res` 60, 3600 or 86400; cost charts ask for `interval` hour
 or day and stay hourly with Minute, and say so. A chart that cannot take
-the step keeps its own and says why in its subtitle ("per hour · minute
-samples are not kept this long"). A choice that would give fewer than 3
+the step keeps its own and says why in its subtitle ("per hour · cost is
+never finer than an hour"). A choice that would give fewer than 3
 or more than 2,000 points to every kind of chart is greyed with the
 reason, and in the URL reads as Auto. Links carry it with the tenant and
 range. A Run's own resources (its lifetime, not the range) do not follow
