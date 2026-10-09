@@ -397,7 +397,13 @@ func TestOpenCodeObservesServerItDidNotStart(t *testing.T) {
 func TestOpenCodeObserverEmptyUsernameIsDefault(t *testing.T) {
 	b := newFakeBus(t)
 	b.password = ocPassword
-	_, w, sink, first := ocObserved(t, b, []string{"OPENCODE_SERVER_USERNAME=alice", "OPENCODE_SERVER_PASSWORD=" + ocPassword, "OPENCODE_SERVER_USERNAME="})
+	reads := make(statusReads, 64)
+	_, w, sink, first := ocObservedOn(t, b.port(), []string{"OPENCODE_SERVER_USERNAME=alice", "OPENCODE_SERVER_PASSWORD=" + ocPassword, "OPENCODE_SERVER_USERNAME="}, func(a *ACP) {
+		a.statusRead = reads.hook
+	})
+	if err := reads.next(t); err != nil {
+		t.Fatalf("authenticated status read: %v", err)
+	}
 	w.resolve(first, ocResult)
 	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
 	b.mu.Lock()
