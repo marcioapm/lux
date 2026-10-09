@@ -85,8 +85,8 @@ func deriveStage(in stageInputs) runStage {
 		return runStage{Stage: StageWaiting, Since: firstOf(in.WaitingSince, in.NeedsHostSince, in.LastEnded, &in.CreatedAt)}
 	case in.PContainerStarted != nil:
 		return runStage{Stage: StageRunning, Since: *in.PContainerStarted}
-	case in.PState == "running" && in.PStarted != nil:
-		// A runner that reported no containerStarted.
+	case in.PStarted != nil:
+		// A runner that reported no containerStarted: luxd saw it running.
 		return runStage{Stage: StageRunning, Since: *in.PStarted}
 	case in.PReposReady != nil:
 		return runStage{Stage: StageContainer, Since: *in.PReposReady}

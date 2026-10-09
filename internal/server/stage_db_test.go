@@ -450,3 +450,83 @@ func TestARequeueKeepsTheWait(t *testing.T) {
 	needs := runTimes(t, s, `SELECT needs_host_since FROM runs WHERE id = $1`)
 	wantStage(t, "resumed", getRun(t, s, key), StateResuming, StageWaiting, needs, "")
 }
+
+// A start that fails at its volumes announces failed once, since the
+// Run's state changed; a starting report after it adds nothing.
+func TestAFailedStartIsAnnouncedOnce(t *testing.T) {
+	s, ctx, key := stageFixture(t)
+	t0 := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	marks := map[string]int64{"imageReady": ms(t0)}
+	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: marks})
+	n := newStageEvents(t, s, ctx, "image ready", 0, stageEvent{StageVolumes, "", t0, 1})
+
+	code := 125
+	reportStatus(t, s, ctx, proto.Status{State: "failed", ExitCode: &code, Reason: "start-failed", Message: "volumes: no space", Times: marks})
+	changed := runTimes(t, s, `SELECT state_changed_at FROM runs WHERE id = $1`)
+	wantStage(t, "failed", getRun(t, s, key), StateFailed, StateFailed, changed, "")
+	n = newStageEvents(t, s, ctx, "failed", n, stageEvent{StateFailed, "", changed, 1})
+
+	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: map[string]int64{"imageReady": ms(t0), "volumesRestored": ms(t0.Add(time.Second))}})
+	run := getRun(t, s, key)
+	wantStage(t, "late starting", run, StateFailed, StateFailed, changed, "")
+	if run.Placements[0].State != "exited" {
+		t.Fatalf("late starting: placement %s, want exited", run.Placements[0].State)
+	}
+	newStageEvents(t, s, ctx, "late starting", n)
+}
+
+// A placement luxd gives up on (its host lost) announces lost, since the
+// Run's state changed: a change made by setRunState alone.
+func TestALostPlacementIsAnnounced(t *testing.T) {
+	s, ctx, key := stageFixture(t)
+	t0 := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: map[string]int64{"imageReady": ms(t0)}})
+	n := newStageEvents(t, s, ctx, "image ready", 0, stageEvent{StageVolumes, "", t0, 1})
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var later laterEvents
+		if err := s.placementLost(ctx, tx, r1, 1, "host lost", &later); err != nil {
+			return err
+		}
+		return later.write()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	changed := runTimes(t, s, `SELECT state_changed_at FROM runs WHERE id = $1`)
+	wantStage(t, "lost", getRun(t, s, key), StateLost, StateLost, changed, "")
+	newStageEvents(t, s, ctx, "lost", n, stageEvent{StateLost, "", changed, 1})
+}
+
+// A terminate while the Run starts is stopping (terminate) from the
+// request, then terminated.
+func TestATerminateDuringStartIsAnnounced(t *testing.T) {
+	s, ctx, key := stageFixture(t)
+	t0 := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	marks := map[string]int64{"imageReady": ms(t0)}
+	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: marks})
+	n := newStageEvents(t, s, ctx, "image ready", 0, stageEvent{StageVolumes, "", t0, 1})
+
+	execSQL(t, s, ctx, `UPDATE runs SET terminate_requested = true WHERE id = $1`, r1)
+	stopRun(t, s, ctx, stopTerminate)
+	stopAt := runTimes(t, s, `SELECT stop_requested_at FROM placements WHERE run_id = $1 AND epoch = 1`)
+	wantStage(t, "terminate", getRun(t, s, key), StateStopping, StageStopping, stopAt, stopTerminate)
+	n = newStageEvents(t, s, ctx, "terminate", n, stageEvent{StageStopping, stopTerminate, stopAt, 1})
+
+	code := 0
+	reportStatus(t, s, ctx, proto.Status{State: "exited", ExitCode: &code, Reason: "stopped", Message: "stopped before start", Times: marks})
+	changed := runTimes(t, s, `SELECT state_changed_at FROM runs WHERE id = $1`)
+	wantStage(t, "exited", getRun(t, s, key), StateTerminated, StateTerminated, changed, "")
+	newStageEvents(t, s, ctx, "exited", n, stageEvent{StateTerminated, "", changed, 1})
+}
+
+// Without repositories, reposReady is marked as the volumes are restored:
+// one report with both moves the Run straight to container.
+func TestNoRepositoriesGoesStraightToContainer(t *testing.T) {
+	s, ctx, key := stageFixture(t)
+	t0 := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: map[string]int64{"imageReady": ms(t0)}})
+	n := newStageEvents(t, s, ctx, "image ready", 0, stageEvent{StageVolumes, "", t0, 1})
+	t1 := t0.Add(time.Second)
+	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: map[string]int64{"imageReady": ms(t0), "volumesRestored": ms(t1), "reposReady": ms(t1)}})
+	wantStage(t, "volumes restored", getRun(t, s, key), StateStarting, StageContainer, t1, "")
+	newStageEvents(t, s, ctx, "volumes restored", n, stageEvent{StageContainer, "", t1, 1})
+}
