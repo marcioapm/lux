@@ -101,9 +101,9 @@ starts. luxd derives it from the Run and its current placement:
 start stages follow one another with no gap on one clock. A move (`drain`,
 `preempt`, `migrate`) is `stopping`, then `waiting` (since its placement
 ended) and the start stages on the next host: its placement's end and its
-resume are one change, so it is never `stopped`. The runner reports each start mark as it reaches it, and luxd keeps
-the first time reported for each, so a late or repeated report changes
-nothing.
+resume are one change, so it is never `stopped`. The runner reports each
+start mark as it reaches it, and luxd keeps the first time reported for
+each.
 
 Each change of stage is a **`stage`** event on the Run (and the
 tenant's feed): `{stage, since, epoch, reason?}`, once per change and in

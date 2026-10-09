@@ -36,11 +36,9 @@ Each stint on a host, in `placements[]`:
 `assignedAt`, `acceptedAt`, `stopRequestedAt` and the ends are luxd's
 clock; `imageReadyAt` through `workloadStartedAt` are the runner's marks,
 on its host's clock, and so is `exitedAt` when the runner reports it
-(luxd's time of the exit report otherwise). The runner sends each start mark as
-it reaches it (a `starting` status carrying every mark so far), not only
-once the placement runs, so luxd knows a starting Run's phase as it
-happens: the Run's [stage](concepts.md#stages) and its `stage`
-events follow from them. The first time reported for a mark is kept.
+(luxd's time of the exit report otherwise). The runner sends each start
+mark as it reaches it, in a `starting` status carrying every mark so far;
+the Run's [stage](concepts.md#stages) follows from them.
 
 Resource figures are read from the container's cgroup (v2):
 
