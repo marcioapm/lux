@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -259,6 +261,43 @@ func TestCollectedArtifactNotDuplicated(t *testing.T) {
 	}
 	if latest := listed(t, s, key, "ra", ""); len(latest) != 1 || latest[0].Version != 2 {
 		t.Fatalf("latest: %+v", latest)
+	}
+}
+
+// A collected artifact's path can be up to PATH_MAX, past what a btree
+// index entry holds: one of about 3300 bytes is recorded, listed, and is
+// not a new version when collected again unchanged.
+func TestCollectedArtifactLongPath(t *testing.T) {
+	s, ctx := reportFixture(t)
+	key := apiKey(t, s, new("t1"), "read")
+	// Segments of hex digests: Postgres compresses a repetitive key to fit.
+	var long string
+	for i := range 103 {
+		long += "/" + sha(strconv.Itoa(i))[:31]
+	}
+	long += "/f.txt"
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE id = 'pa1'`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('pa2', 't1', 'ra', 'ha', 2, 'stopping'), ('pa3', 't1', 'ra', 'ha', 3, 'stopping')`)
+	for epoch := 2; epoch <= 3; epoch++ {
+		execSQL(t, s, ctx, `UPDATE runs SET current_epoch = $1 WHERE id = 'ra'`, epoch)
+		sd := snapshotA()
+		e := strconv.Itoa(epoch)
+		sd.Manifest.SnapshotID, sd.Manifest.Epoch = "snapA"+e, epoch
+		sd.Manifest.Volumes[0].BlobID = "bA" + e + "-vol"
+		sd.Output.BlobID = "bA" + e + "-out"
+		sd.Artifacts[0].BlobID = "bA" + e + "-art"
+		sd.Artifacts[0].Path = long
+		if f := reportSnapshot(t, s, "ha", "ra", epoch, sd); f.Type != proto.MsgAck || ackRefused(t, f) {
+			t.Fatalf("epoch %d: %s %s", epoch, f.Type, f.Data)
+		}
+	}
+	var got []string
+	for _, a := range listed(t, s, key, "ra", "?versions=all") {
+		got = append(got, fmt.Sprintf("%d %d", len(a.Path), a.Version))
+	}
+	want := []string{fmt.Sprintf("%d 1", len(long)), "10 1"}
+	if len(long) < 3300 || !slices.Equal(got, want) {
+		t.Fatalf("listed %v, want %v", got, want)
 	}
 }
 

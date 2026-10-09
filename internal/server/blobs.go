@@ -187,7 +187,7 @@ func (s *Server) listArtifacts(ctx context.Context, in *listArtifactsInput) (*li
 		}
 		rows, err := tx.Query(ctx, `SELECT a.id, a.epoch, a.path, a.version, a.description, a.content_type, a.size, a.sha256, b.location = 's3', a.created_at
 			FROM artifacts a JOIN blobs b ON b.id = a.blob_id
-			WHERE a.run_id = $1 AND ($2 OR a.version = (SELECT max(l.version) FROM artifacts l WHERE l.run_id = a.run_id AND l.path = a.path))
+			WHERE a.run_id = $1 AND ($2 OR a.version = (SELECT max(l.version) FROM artifacts l WHERE l.run_id = a.run_id AND md5(l.path) = md5(a.path) AND l.path = a.path))
 			ORDER BY a.path, a.version`, in.ID, in.Versions == "all")
 		if err != nil {
 			return err

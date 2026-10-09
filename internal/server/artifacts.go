@@ -20,7 +20,7 @@ import (
 // has none) and that version (0 if none).
 func latestArtifact(ctx context.Context, tx pgx.Tx, runID, path string) (sha string, version int, err error) {
 	err = tx.QueryRow(ctx, `SELECT coalesce((array_agg(sha256 ORDER BY version DESC))[1], ''), coalesce(max(version), 0)
-		FROM artifacts WHERE run_id = $1 AND path = $2`, runID, path).Scan(&sha, &version)
+		FROM artifacts WHERE run_id = $1 AND md5(path) = md5($2) AND path = $2`, runID, path).Scan(&sha, &version)
 	return sha, version, err
 }
 
