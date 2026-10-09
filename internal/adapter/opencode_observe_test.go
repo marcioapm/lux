@@ -21,12 +21,13 @@ import (
 const ocPassword = "s3cr3t-opencode-pw"
 
 // fullSink is an inputSink that also keeps every event, with its data,
-// and everything written to stdout and stderr, to search for a secret.
+// and everything written to stdout and stderr, to search for a secret;
+// warnings gets the message of each lux.warning.
 type fullSink struct {
 	*inputSink
 	mu       sync.Mutex
 	all      []string
-	warnings int
+	warnings chan string
 }
 
 func (s *fullSink) keep(v string) {
@@ -39,19 +40,44 @@ func (s *fullSink) Event(typ string, v any) {
 	b, _ := json.Marshal(v)
 	s.keep(typ + " " + string(b))
 	if typ == proto.EvWarning {
-		s.mu.Lock()
-		s.warnings++
-		s.mu.Unlock()
+		m, _ := v.(map[string]any)
+		msg, _ := m["message"].(string)
+		select {
+		case s.warnings <- msg:
+		default:
+			panic("more lux.warning events than the test's sink holds")
+		}
 	}
 	s.inputSink.Event(typ, v)
 }
 func (s *fullSink) Stdout(p []byte) { s.keep(string(p)) }
 func (s *fullSink) Stderr(p []byte) { s.keep(string(p)) }
 
-func (s *fullSink) warned() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.warnings
+func newFullSink() *fullSink {
+	return &fullSink{inputSink: &inputSink{}, warnings: make(chan string, 16)}
+}
+
+// nextWarning is the message of the next lux.warning, once it is given.
+func (s *fullSink) nextWarning(t *testing.T) string {
+	t.Helper()
+	select {
+	case m := <-s.warnings:
+		return m
+	case <-waitTimeout():
+		t.Fatal("no lux.warning")
+	}
+	return ""
+}
+
+// noMoreWarnings fails if a lux.warning came that nextWarning did not
+// take; call it after the adapter's Run has returned.
+func (s *fullSink) noMoreWarnings(t *testing.T) {
+	t.Helper()
+	select {
+	case m := <-s.warnings:
+		t.Fatalf("lux.warning %q", m)
+	default:
+	}
 }
 
 // noSecret fails if the password is in anything the adapter reported.
@@ -94,7 +120,7 @@ func ocObservedOn(t *testing.T, port int, env []string, setup func(*ACP)) (*ACP,
 	if setup != nil {
 		setup(a)
 	}
-	sink := &fullSink{inputSink: &inputSink{}}
+	sink := newFullSink()
 	w, first := ocStartedOn(t, a, sink, sink.inputSink)
 	return a, w, sink, first
 }
@@ -303,7 +329,7 @@ func TestOpenCodeObservesOnlyTheLastPort(t *testing.T) {
 	if err != nil || strings.Join(argv, " ") != strings.Join(cmd, " ") {
 		t.Fatalf("argv %q, %v", argv, err)
 	}
-	sink := &fullSink{inputSink: &inputSink{}}
+	sink := newFullSink()
 	w, first := ocStartedOn(t, a, sink, sink.inputSink)
 	w.resolve(first, ocResult)
 	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
@@ -362,29 +388,82 @@ func TestOpenCodeObservesServerItDidNotStart(t *testing.T) {
 	sink.noSecret(t)
 }
 
-// The server refuses lux's password: one warning, the bus is not asked
-// again, and the Run's activity is lux's own turns', with no busy from
-// OpenCode.
+// The server refuses lux's password on every GET /event: lux asks again
+// after each backoff, refusalLimit times in all, then gives exactly one
+// warning and sends nothing more. The Run's activity is lux's own turns',
+// with no busy from OpenCode.
 func TestOpenCodeObservedWrongPasswordWarnsOnce(t *testing.T) {
+	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			b := newFakeBus(t)
+			if code == http.StatusUnauthorized {
+				b.password = "the-right-one"
+			} else {
+				b.deny = func(string) int { return code }
+			}
+			b.setLoop(true)
+			var pauses int
+			_, w, sink, first := ocObservedOn(t, b.port(), []string{"OPENCODE_SERVER_PASSWORD=" + ocPassword}, func(a *ACP) {
+				a.bus.pause = func(context.Context, time.Duration) bool { pauses++; return true }
+			})
+			want := fmt.Sprintf("opencode: its server refused lux %d times in a row; lux no longer follows its activity: refused: GET /event: %d %s",
+				refusalLimit, code, http.StatusText(code))
+			if got := sink.nextWarning(t); got != want {
+				t.Fatalf("warning %q, want %q", got, want)
+			}
+			atWarning := b.count("GET /event")
+			w.resolve(first, ocResult)
+			checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+			sink.noMoreWarnings(t)
+			b.mu.Lock()
+			refused, authed, kinds, reqs := b.refused, b.authed, len(b.requests), fmt.Sprint(b.requests)
+			b.mu.Unlock()
+			if atWarning != refusalLimit || refused != refusalLimit || authed != 0 || pauses != refusalLimit-1 || kinds != 1 {
+				t.Fatalf("GET /event %d at the warning; %d refused, %d authenticated, %d backoffs; requests %s",
+					atWarning, refused, authed, pauses, reqs)
+			}
+			sink.noSecret(t)
+		})
+	}
+}
+
+// A server that refuses lux for a while (still setting up its auth, or
+// restarting) and then accepts it is followed: each success clears the
+// count of refusals, so two runs of refusalLimit-1 refusals give no
+// warning, and OpenCode's busy reaches the Run once it accepts.
+func TestOpenCodeObserverRetriesRefusal(t *testing.T) {
 	b := newFakeBus(t)
-	b.password = "the-right-one"
-	b.setLoop(true)
-	_, w, sink, first := ocObserved(t, b, []string{"OPENCODE_SERVER_PASSWORD=" + ocPassword})
-	for end := time.Now().Add(5 * time.Second); sink.warned() == 0; time.Sleep(time.Millisecond) {
-		if time.Now().After(end) {
-			t.Fatal("no warning")
+	connected := make(chan struct{}, 2)
+	n := 0
+	b.deny = func(req string) int {
+		if req != "GET /event" {
+			return 0
 		}
+		n++
+		switch {
+		case n == refusalLimit || n == 2*refusalLimit:
+			connected <- struct{}{}
+			return 0
+		case n%2 == 0:
+			return http.StatusForbidden
+		}
+		return http.StatusUnauthorized
 	}
+	pauses := 0
+	_, w, sink, first := ocObservedOn(t, b.port(), nil, func(a *ACP) {
+		a.bus.pause = func(context.Context, time.Duration) bool { pauses++; return true }
+	})
 	w.resolve(first, ocResult)
-	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
-	if n := sink.warned(); n != 1 {
-		t.Fatalf("%d warnings", n)
+	sink.waitLast(t, "idle")
+	await(t, connected, "the first accepted GET /event")
+	b.drop <- struct{}{}
+	await(t, connected, "the second accepted GET /event")
+	// Only the second stream is open: the event goes there.
+	b.setLoop(true)
+	b.events <- ocStatus("busy")
+	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy")
+	sink.noMoreWarnings(t)
+	if got := b.count("GET /event"); got != 2*refusalLimit || pauses != 2*refusalLimit-1 {
+		t.Fatalf("GET /event %d times, %d backoffs", got, pauses)
 	}
-	b.mu.Lock()
-	refused, authed := b.refused, b.authed
-	b.mu.Unlock()
-	if refused != 1 || authed != 0 || b.count("GET /session/status") != 0 {
-		t.Fatalf("after a refusal: %d refused, %d authenticated, %d status reads", refused, authed, b.count("GET /session/status"))
-	}
-	sink.noSecret(t)
 }
