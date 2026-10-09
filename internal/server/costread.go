@@ -272,19 +272,29 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	// (other); other stays a column so a real value (other) is not merged
 	// with the fold. nvals is every value but (none): the folded ones are
 	// nvals - $11. vals is read by the totals only: Runs per value, across g2.
-	// ranked is MATERIALIZED: inlined, Postgres puts its window (sort over
-	// every value) on the inner side of a nested loop and re-runs it per
-	// dimensions row; 500 values x 144000 rows took 37.7 s instead of 0.23 s.
+	// ranked is MATERIALIZED so its window runs once, but that alone is not
+	// enough: any join from dimensions to it (whose rows Postgres estimates
+	// at ~1) may become a nested loop that scans it once per cost row (op 7d
+	// Top Runs: 8 s). kept therefore reduces it to one row, read by shaped
+	// only through uncorrelated scalar subqueries, which run once.
 	const folded = `, sums AS (
 		SELECT g1, currency, sum(amount) FILTER (WHERE ranks) AS total FROM dimensions WHERE g1 <> '(none)' GROUP BY 1, 2
 	), ranked AS MATERIALIZED (
 		SELECT g1, currency, row_number() OVER (PARTITION BY currency ORDER BY total DESC NULLS LAST, g1 COLLATE "C") AS n,
 			count(*) OVER (PARTITION BY currency) AS nvals
 		FROM sums
+	), kept AS MATERIALIZED (
+		SELECT coalesce(array_agg(currency || E'\x1f' || g1) FILTER (WHERE n <= $11), '{}') AS keys,
+			jsonb_object_agg(currency, nvals) AS nvals
+		FROM ranked
+	), marked AS (
+		SELECT d.*, coalesce(d.g1 <> '(none)' AND d.currency || E'\x1f' || d.g1 <> ALL ((SELECT keys FROM kept)::text[]), false) AS other
+		FROM dimensions d
 	), shaped AS (
-		SELECT d.hour, d.currency, d.amount, d.run_id, d.ranks, d.g2, rk.nvals, coalesce(rk.n > $11, false) AS other,
-			CASE WHEN rk.n > $11 THEN '(other)' ELSE d.g1 END AS g1
-		FROM dimensions d LEFT JOIN ranked rk ON rk.g1 = d.g1 AND rk.currency = d.currency
+		SELECT hour, currency, amount, run_id, ranks, g2, other,
+			CASE WHEN g1 <> '(none)' THEN ((SELECT nvals FROM kept) ->> currency)::int END AS nvals,
+			CASE WHEN other THEN '(other)' ELSE g1 END AS g1
+		FROM marked
 	), vals AS (
 		SELECT g1, currency, other, (count(*) FILTER (WHERE ranks))::int AS runs, max(nvals)::int AS nvals
 		FROM (SELECT DISTINCT g1, currency, other, run_id, ranks, nvals FROM shaped) d GROUP BY 1, 2, 3
