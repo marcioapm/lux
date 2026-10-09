@@ -182,7 +182,7 @@ func readControl(ctx context.Context, tx pgx.Tx, res int, from, to time.Time) (*
 			c.db_bytes, c.db_connections,
 			coalesce((SELECT jsonb_agg(jsonb_build_object('path', d.path, 'usedBytes', d.used_bytes, 'freeBytes', d.free_bytes,
 				'totalBytes', d.total_bytes) ORDER BY d.path)
-				FROM `+controlDiskRollup.source(res, "$2", "$3")+` d WHERE d.instance = c.instance AND d.res = c.res AND d.at = c.at), '[]'),
+				FROM `+controlDiskRollup.source(res, "c.at", "c.at")+` d WHERE d.instance = c.instance AND d.res = c.res AND d.at = c.at), '[]'),
 			`+procCols+`
 		FROM `+controlRollup.source(res, "$2", "$3")+` c WHERE c.res = $1 AND c.at BETWEEN $2 AND $3
 		ORDER BY c.hostname, c.at, c.instance`, res, from, to)
