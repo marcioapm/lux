@@ -418,6 +418,8 @@ const FAMILIES: { family: string; displayName: string; color?: string }[] = [
 
 /** The AI series with one hour refunded: a -$6 credit, more than that hour's compute. */
 const refundHour = (ai: (number | null)[]) => ai.map((v, i) => (i === 18 ? -6 : v));
+// Three hours nothing reported: gaps, not zeros.
+const gapHours = (ai: (number | null)[]) => ai.map((v, i) => (i >= 8 && i < 11 ? null : v));
 
 interface RunCostRow {
   name: string;
@@ -512,6 +514,12 @@ function Costs() {
         </Card>
         <Card title="Cost by family, a refund hour" subtitle="an AI models credit of -$6 in one hour: the y axis goes below zero, with gridlines">
           <TimeSeriesChart x={c.x} ys={refund} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }]} unit="money" currency="USD" stacked />
+        </Card>
+        <Card title="Cost per hour, as bars" subtitle="bars stacked: one bar per bucket, an amount, not a rate; a bucket with no figure stays empty">
+          <TimeSeriesChart x={c.x} ys={[c.compute, gapHours(c.ai)]} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }]} unit="money" currency="USD" stacked bars legendValues={["$3.87", "$55.08"]} legendNote="each bar is one hour" />
+        </Card>
+        <Card title="Cost per hour, bars with a refund" subtitle="the credit stacks down from zero, apart from the costs above it">
+          <TimeSeriesChart x={c.x} ys={refund} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }]} unit="money" currency="USD" stacked bars />
         </Card>
       </div>
       <p className="sg-note">
