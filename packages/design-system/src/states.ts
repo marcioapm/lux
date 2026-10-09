@@ -213,20 +213,15 @@ export function familyColor(family: string, hint?: string | null): string {
   return `var(--chart-${familySlot(family, hint)})`;
 }
 
-/** The chart slots a breakdown band may take: every slot but compute's. */
-export const BAND_SLOTS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 8].filter((s) => s !== familySlot("compute"));
+// Every chart slot but compute's.
+const BAND_SLOTS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 8].filter((s) => s !== familySlot("compute"));
 
 /**
- * Chart slots of n breakdown bands (label values, API keys, pools,
- * tenants, Runs) in rank order: never compute's slot, so compute's colour
+ * The colour of the breakdown band at rank i (0-based; label values, API
+ * keys, pools, tenants, Runs): never compute's slot, so compute's colour
  * means compute alone. Past BAND_SLOTS.length bands the slots repeat;
  * Other and "(none)" are not bands here (OTHER_BAND_COLOR, NONE_BAND_COLOR).
  */
-export function bandSlots(n: number): number[] {
-  return Array.from({ length: Math.max(0, n) }, (_, i) => BAND_SLOTS[i % BAND_SLOTS.length]!);
-}
-
-/** The colour of the band at rank i (0-based), as bandSlots gives it. */
 export function bandColor(i: number): string {
   return `var(--chart-${BAND_SLOTS[i % BAND_SLOTS.length]})`;
 }
