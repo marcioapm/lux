@@ -132,7 +132,9 @@ type fakeBus struct {
 	loop   bool
 	// drop ends the open event stream.
 	drop chan struct{}
-	gets int
+	// streamEnded acknowledges that an admitted stream handler returned.
+	streamEnded chan struct{}
+	gets        int
 	// statusFail: GET /session/status answers 500; statusGets counts
 	// those GETs. statusQ, if set, gets each one as it arrives, with the
 	// answer it took then, and it waits for its release.
@@ -164,8 +166,11 @@ func newFakeBus(t *testing.T) *fakeBus {
 	mux.HandleFunc("GET /event", func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
 		b.gets++
-		fail := b.eventFail
+		fail, ended := b.eventFail, b.streamEnded
 		b.mu.Unlock()
+		if !fail && ended != nil {
+			defer func() { ended <- struct{}{} }()
+		}
 		if fail {
 			http.Error(w, "down", http.StatusServiceUnavailable)
 			return

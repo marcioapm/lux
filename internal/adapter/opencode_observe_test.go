@@ -686,6 +686,7 @@ func TestOpenCodeObserverRecoveryReconcilesMaskedStatus(t *testing.T) {
 				t.Fatalf("initial refusal: %v", err)
 			}
 			o.backoff(t, "refused stream cancellation")
+			await(t, o.b.streamEnded, "the refused SSE handler exiting")
 			o.b.setStatusCode(0)
 			o.b.holdStatus(true)
 			o.step()
@@ -747,6 +748,7 @@ func newStepObserver(t *testing.T, setup func(*fakeBus)) *stepObserver {
 	o := &stepObserver{b: newFakeBus(t), paused: make(chan struct{}), resume: make(chan struct{}),
 		free: make(chan struct{}), got: make(chan gotStatus), reads: make(statusReads, 256), handled: make(chan string, 1024)}
 	t.Cleanup(o.unstep)
+	o.b.streamEnded = make(chan struct{}, 256)
 	o.b.setEventFail(true)
 	if setup != nil {
 		setup(o.b)
@@ -872,6 +874,7 @@ func TestOpenCodeObserverStaleSuccessKeepsNewerRefusal(t *testing.T) {
 		t.Fatalf("read B applied: %v", err)
 	}
 	o.backoff(t, "a backoff after read B's refusal")
+	await(t, o.b.streamEnded, "the refused SSE handler exiting")
 	close(readA.release)
 	if err := o.nextRead(t); err != nil {
 		t.Fatalf("read A applied: %v", err)
