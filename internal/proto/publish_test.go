@@ -1,0 +1,59 @@
+package proto
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestValidArtifactName(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		ok   bool
+	}{
+		{"notes.md", true},
+		{"design/notes.md", true},
+		{"a/b/c/d.txt", true},
+		{"ünïcode.txt", true},
+		{"..hidden", true},
+		{"a..b", true},
+		{"", false},
+		{"/etc/passwd", false},
+		{"..", false},
+		{"../x", false},
+		{"a/../b", false},
+		{"a/..", false},
+		{".", false},
+		{"./a", false},
+		{"a/./b", false},
+		{"a//b", false},
+		{"a/", false},
+		{"a\x00b", false},
+		{"a\nb", false},
+		{"a\x7fb", false},
+		{"bad\xffutf8", false},
+		{strings.Repeat("x", 255), true},
+		{strings.Repeat("x", 256), false},
+		{"d/" + strings.Repeat("x", 256), false},
+	} {
+		if err := ValidArtifactName(c.name); (err == nil) != c.ok {
+			t.Errorf("ValidArtifactName(%q) = %v, want ok %v", c.name, err, c.ok)
+		}
+	}
+}
+
+func TestValidContentType(t *testing.T) {
+	for _, c := range []struct {
+		ct string
+		ok bool
+	}{
+		{"", true},
+		{"text/markdown", true},
+		{"text/plain; charset=utf-8", true},
+		{"not a type", false},
+		{"text/" + strings.Repeat("x", 300), false},
+	} {
+		if err := ValidContentType(c.ct); (err == nil) != c.ok {
+			t.Errorf("ValidContentType(%q) = %v, want ok %v", c.ct, err, c.ok)
+		}
+	}
+}
