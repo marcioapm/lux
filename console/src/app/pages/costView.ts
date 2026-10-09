@@ -1,14 +1,13 @@
-// What the Overview's Cost panel shows and how it buckets it: the Show
-// filter (All / Compute / External), the granularity (Per), and the shaping
-// of /v1/costs summaries into the panel's figures. Amounts stay decimal
-// strings; nothing is ever added or ranked across currencies.
+// What the Overview's Cost panel shows: the Show filter (All / Compute /
+// External), what it breaks down by, its label filters, and the shaping of
+// /v1/costs summaries into the panel's figures. Amounts stay decimal
+// strings; nothing is ever added or ranked across currencies. The step
+// (hour or day) is the page's (every.ts).
 import { compareMoney, familyDisplay, sumMoney, type TimeRange } from "@lux/design-system";
-import type { CostFamily, CostSummary, CostSummaryRow, MoneyTotal } from "../../api/index.ts";
+import type { CostFamily, CostKey, CostSummary, CostSummaryRow, MoneyTotal } from "../../api/index.ts";
 
 /** Which costs the panel counts: every family, compute (host time) only, or every other family. */
 export type CostShow = "all" | "compute" | "external";
-/** The granularity asked for: auto picks one from the range. */
-export type CostPer = "auto" | "hour" | "day";
 export type CostInterval = "hour" | "day";
 
 export const COMPUTE = "compute";
@@ -18,59 +17,84 @@ export function parseShow(v: string | null): CostShow {
   return v === "compute" || v === "external" ? v : "all";
 }
 
-/** ?per=: hour or day; anything else is Auto. */
-export function parsePer(v: string | null): CostPer {
-  return v === "hour" || v === "day" ? v : "auto";
-}
-
 /** Whether a family counts under show. */
 export function shows(show: CostShow, family: string): boolean {
   return show === "all" || (show === "compute") === (family === COMPUTE);
 }
 
-export type CostSince = "6h" | "24h" | "7d" | "30d";
+/** What the panel breaks cost down by. A label breakdown without a key takes the default key (defaultLabelKey). */
+export type Breakdown = { kind: "family" } | { kind: "label"; key: string } | { kind: "key" } | { kind: "pool" } | { kind: "tenant" };
+export type BreakdownKind = Breakdown["kind"];
+
+/** ?by=: label:<key>, label, key, pool, or tenant (only where tenants are shown); anything else is Family. */
+export function parseBreakdown(v: string | null, showTenant: boolean): Breakdown {
+  if (v === "key" || v === "pool") return { kind: v };
+  if (v === "tenant" && showTenant) return { kind: "tenant" };
+  if (v === "label") return { kind: "label", key: "" };
+  if (v?.startsWith("label:")) return { kind: "label", key: v.slice("label:".length) };
+  return { kind: "family" };
+}
+
+/** The ?by= value of a breakdown: null for Family (the default). */
+export function breakdownParam(b: Breakdown): string | null {
+  return b.kind === "family" ? null : b.kind === "label" ? (b.key ? `label:${b.key}` : "label") : b.kind;
+}
+
+/** The summary group of a breakdown (its label key resolved). */
+export function breakdownGroup(b: Breakdown): string {
+  return b.kind === "label" ? `label:${b.key}` : b.kind;
+}
+
+/** The label key a label breakdown uses: its own, else app when Runs carry it, else the most common key. */
+export function defaultLabelKey(asked: string, keys: string[]): string {
+  return asked || (keys.includes("app") ? "app" : (keys[0] ?? "app"));
+}
+
+/** A label filter: the label is one of values (OR), or, with notSet, the Runs lack the key (values empty). Filters AND together. */
+export interface LabelFilter {
+  key: string;
+  values: string[];
+  notSet?: boolean;
+}
+
+/** ?label=key=value (repeated: one key's values OR) and ?nolabel=key, in the order first seen; a label without "=" is ignored. */
+export function parseFilters(labels: string[], nolabels: string[]): LabelFilter[] {
+  const out: LabelFilter[] = [];
+  for (const l of labels) {
+    const i = l.indexOf("=");
+    if (i <= 0) continue;
+    const key = l.slice(0, i);
+    const value = l.slice(i + 1);
+    const f = out.find((x) => x.key === key && !x.notSet);
+    if (!f) out.push({ key, values: [value] });
+    else if (!f.values.includes(value)) f.values.push(value);
+  }
+  for (const key of nolabels) if (key && !out.some((x) => x.key === key && x.notSet)) out.push({ key, values: [], notSet: true });
+  return out;
+}
+
+/** The label and nolabel parameters of filters: in the page URL and in /v1/costs alike. */
+export function filtersParams(fs: LabelFilter[]): { label: string[]; nolabel: string[] } {
+  return {
+    label: fs.flatMap((f) => (f.notSet ? [] : f.values.map((v) => `${f.key}=${v}`))),
+    nolabel: fs.filter((f) => f.notSet).map((f) => f.key),
+  };
+}
+
+/** The Runs list for the same Runs, where it can say so: it filters by one key=value; anything more is the plain list. */
+export function runsListPath(fs: LabelFilter[]): string {
+  const f = fs.length === 1 ? fs[0]! : null;
+  return f && !f.notSet && f.values.length === 1 ? `/runs?label=${encodeURIComponent(`${f.key}=${f.values[0]}`)}` : "/runs";
+}
 
 /** The range costs are read over: 1h reads 6h, as costs are whole-hour buckets and an hour is one bar. */
 export function costSince(range: TimeRange): CostSince {
   return range === "1h" ? "6h" : range;
 }
 
-const SINCE_HOURS: Record<CostSince, number> = { "6h": 6, "24h": 24, "7d": 168, "30d": 720 };
+export type CostSince = "6h" | "24h" | "7d" | "30d";
+
 const INTERVAL_HOURS: Record<CostInterval, number> = { hour: 1, day: 24 };
-/** Fewer buckets than this says nothing over time; more cannot be told apart. */
-export const MIN_BUCKETS = 3;
-export const MAX_BUCKETS = 200;
-
-export interface PerChoice {
-  value: CostPer;
-  interval: CostInterval;
-  buckets: number;
-  /** Why it cannot be picked for this range; undefined when it can. */
-  disabled?: string;
-}
-
-/** Auto, Hourly and Daily for a range: each with its bucket count, and the reason a choice is off. */
-export function perChoices(since: CostSince): PerChoice[] {
-  const hours = SINCE_HOURS[since];
-  const auto: CostInterval = hours <= 24 ? "hour" : "day";
-  const choice = (value: CostPer, interval: CostInterval): PerChoice => {
-    const buckets = Math.ceil(hours / INTERVAL_HOURS[interval]);
-    const disabled = buckets < MIN_BUCKETS ? `${buckets} ${buckets === 1 ? "bar" : "bars"} · too coarse` : buckets > MAX_BUCKETS ? `${buckets} bars · too many` : undefined;
-    return { value, interval, buckets, disabled };
-  };
-  return [{ ...choice("auto", auto), disabled: undefined }, choice("hour", "hour"), choice("day", "day")];
-}
-
-/** The choice in effect: the one asked for, or Auto when it is off for this range. */
-export function resolvePer(since: CostSince, per: CostPer): PerChoice {
-  const all = perChoices(since);
-  const asked = all.find((c) => c.value === per);
-  return asked && !asked.disabled ? asked : all[0]!;
-}
-
-export function intervalWord(i: CostInterval): string {
-  return i === "hour" ? "hourly" : "daily";
-}
 
 /** Amounts of one currency, exact; null when there are none (no figure is not a zero). */
 function sum(amounts: string[]): string | null {
@@ -283,4 +307,215 @@ export function peakRuns(ps: Peak[], windows: { at: number; rows: CostSummaryRow
 /** Families by key, for describe metadata. */
 export function familyMeta(families: CostFamily[] | undefined): Map<string, CostFamily> {
   return new Map((families ?? []).map((f) => [f.family, f]));
+}
+
+/** The group value of Runs without the label, without a submitter on record, or (pool) cost tied to no host. */
+export const NONE = "(none)";
+/** The band of every value past the top ones; not a group value luxd sends. */
+export const OTHER = "\u0000other";
+/** Values stacked apart before the rest go into Other. */
+export const TOP_VALUES = 7;
+
+export interface Band {
+  /** A group value, OTHER or NONE. */
+  id: string;
+  /** The group values it holds. */
+  values: string[];
+  color: string;
+}
+
+/** A band's colour: chart slots in rank order, Other the last slot, (none) grey. */
+function bandColor(id: string, rank: number): string {
+  return id === NONE ? "var(--st-neutral-dot)" : id === OTHER ? "var(--chart-8)" : `var(--chart-${rank + 1})`;
+}
+
+/**
+ * Per currency, the bands a breakdown stacks: the `limit` values costing
+ * the most (as show counts) in their own colours, the rest as Other, and
+ * the value-less Runs (NONE) last, never dropped. A value with no shown cost
+ * has no band. Rows are grouped by `dim` and family.
+ */
+export function breakdownBands(rows: CostSummaryRow[], dim: string, show: CostShow, limit = TOP_VALUES): Map<string, Band[]> {
+  const out = new Map<string, Band[]>();
+  for (const [currency, rs] of byCurrency(rows.filter((r) => shows(show, familyOf(r))))) {
+    const amounts = new Map<string, string[]>();
+    for (const r of rs) {
+      const v = r.group?.[dim] ?? NONE;
+      amounts.set(v, [...(amounts.get(v) ?? []), r.amount]);
+    }
+    const ranked = [...amounts]
+      .filter(([v]) => v !== NONE)
+      .map(([v, a]) => ({ v, amount: sumMoney(a) ?? "0" }))
+      .sort((a, b) => compareMoney(b.amount, a.amount) || a.v.localeCompare(b.v));
+    // Other only when it would hold two values or more: one value is shown as itself.
+    const top = ranked.length > limit + 1 ? ranked.slice(0, limit) : ranked;
+    const rest = ranked.slice(top.length);
+    const bands: Band[] = top.map(({ v }, i) => ({ id: v, values: [v], color: bandColor(v, i) }));
+    if (rest.length) bands.push({ id: OTHER, values: rest.map((x) => x.v), color: bandColor(OTHER, 0) });
+    if (amounts.has(NONE)) bands.push({ id: NONE, values: [NONE], color: bandColor(NONE, 0) });
+    out.set(currency, bands);
+  }
+  return out;
+}
+
+const bandOf = (bands: Band[], value: string) => bands.find((b) => b.values.includes(value));
+
+export interface BreakdownChart {
+  currency: string;
+  x: number[];
+  ys: (number | null)[][];
+  bands: Band[];
+  /** Each band's shown total over the range, exact, aligned with bands. */
+  totals: string[];
+}
+
+/** One chart per currency: a stacked series per band over every bucket of the range (a bucket with no row is a gap), counting what show keeps. Series rows grouped by `dim` and family. */
+export function breakdownCharts(d: CostSummary | undefined, dim: string, interval: CostInterval, show: CostShow, bands: Map<string, Band[]>): BreakdownChart[] {
+  if (!d?.series?.length) return [];
+  const step = INTERVAL_HOURS[interval] * 3600;
+  const start = Math.floor(Date.parse(d.from) / 1000 / step) * step;
+  const end = Math.floor(Date.parse(d.to) / 1000);
+  const x: number[] = [];
+  for (let t = start; t < end; t += step) x.push(t);
+  const index = new Map(x.map((t, i) => [t, i]));
+  const out: BreakdownChart[] = [];
+  for (const [currency, rows] of byCurrency(d.series.filter((r) => shows(show, familyOf(r))))) {
+    const bs = bands.get(currency) ?? [];
+    const cells = bs.map(() => x.map((): string[] => []));
+    const totals = bs.map((): string[] => []);
+    for (const r of rows) {
+      const b = bandOf(bs, r.group?.[dim] ?? NONE);
+      const i = index.get(Math.floor(Date.parse(r.at!) / 1000));
+      if (!b || i == null) continue;
+      const k = bs.indexOf(b);
+      cells[k]![i]!.push(r.amount);
+      totals[k]!.push(r.amount);
+    }
+    // Chart geometry only: the figures in text are formatted from the strings.
+    const ys = cells.map((c) => c.map((amounts) => (amounts.length ? Number(sumMoney(amounts)) : null)));
+    out.push({ currency, x, ys, bands: bs, totals: totals.map((t) => sumMoney(t) ?? "0") });
+  }
+  return out;
+}
+
+export interface BreakdownRow {
+  band: Band;
+  currency: string;
+  /** The band's compute and external parts; null when it has none (not zero). */
+  compute: string | null;
+  external: string | null;
+  /** What show counts. */
+  amount: string;
+  /** Of what show counts in this currency. */
+  share: number | null;
+  /** Runs with a shown cost in the band; null while unknown. */
+  runs: number | null;
+}
+
+/** The table under a breakdown: each band per currency, in band order, with its Compute and External parts, its share and its Runs. */
+export function breakdownRows(rows: CostSummaryRow[], dim: string, show: CostShow, bands: Map<string, Band[]>, runs?: Map<string, Set<string>>): BreakdownRow[] {
+  const totals = new Map(shownTotals(rows, show).map((t) => [t.currency, t.amount]));
+  const out: BreakdownRow[] = [];
+  for (const [currency, rs] of byCurrency(rows)) {
+    for (const band of bands.get(currency) ?? []) {
+      const mine = rs.filter((r) => band.values.includes(r.group?.[dim] ?? NONE));
+      const part = (compute: boolean) => sum(mine.filter((r) => (familyOf(r) === COMPUTE) === compute).map((r) => r.amount));
+      const amount = sum(mine.filter((r) => shows(show, familyOf(r))).map((r) => r.amount));
+      if (amount == null) continue;
+      const ids = runs ? new Set(band.values.flatMap((v) => [...(runs.get(v) ?? [])])) : null;
+      out.push({ band, currency, compute: part(true), external: part(false), amount, share: ratio(amount, totals.get(currency)), runs: ids ? ids.size : null });
+    }
+  }
+  return out;
+}
+
+/**
+ * The Runs under each value: rows grouped by `dim` and run, kept to the
+ * Runs with a shown cost (`shownRuns`, from rows grouped by run and family).
+ * Exact where a Run has one value (a label, its submitter, its tenant); a
+ * Run whose cost spans pools counts in each.
+ */
+export function runsByValue(dimRuns: CostSummaryRow[], dim: string, shownRuns: Set<string>): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const r of dimRuns) {
+    const run = r.group?.run;
+    if (!run || !shownRuns.has(run)) continue;
+    const v = r.group?.[dim] ?? NONE;
+    out.set(v, (out.get(v) ?? new Set()).add(run));
+  }
+  return out;
+}
+
+/** The Runs with a cost show counts; rows grouped by run and family. */
+export function shownRunIds(rows: CostSummaryRow[], show: CostShow): Set<string> {
+  return new Set(rows.filter((r) => r.group?.run && shows(show, familyOf(r))).map((r) => r.group!.run!));
+}
+
+/** Per currency, the band that cost the most in the peak bucket, and its share of that bucket. Series rows grouped by `dim` and family. */
+export function peakBands(ps: Peak[], d: CostSummary | undefined, dim: string, show: CostShow, bands: Map<string, Band[]>): Map<string, { band: Band; share: number | null }> {
+  const out = new Map<string, { band: Band; share: number | null }>();
+  for (const p of ps) {
+    const bs = bands.get(p.currency) ?? [];
+    const rows = (d?.series ?? []).filter((r) => r.currency === p.currency && r.at && Math.floor(Date.parse(r.at) / 1000) === p.at && shows(show, familyOf(r)));
+    const per = bs.map((b) => sum(rows.filter((r) => b.values.includes(r.group?.[dim] ?? NONE)).map((r) => r.amount)));
+    let best = -1;
+    per.forEach((a, i) => {
+      if (a != null && (best < 0 || compareMoney(a, per[best]!) > 0)) best = i;
+    });
+    if (best >= 0) out.set(p.currency, { band: bs[best]!, share: ratio(per[best], p.amount) });
+  }
+  return out;
+}
+
+/** How a submitter (a group=key value) reads: the key's name, a person's email, "Operator key" for an operator's key a tenant may not name, "Before key tracking" for NONE. */
+export function keyLabel(value: string, keys: Map<string, CostKey>): string {
+  if (value === NONE) return "Before key tracking";
+  const k = keys.get(value);
+  if (k?.email) return k.email;
+  if (k?.name) return k.name;
+  if (k?.operator) return "Operator key";
+  return value.startsWith("email:") ? value.slice("email:".length) : value;
+}
+
+/** How a band reads in a legend, a KPI or a table row. */
+export function bandLabel(band: Band, b: Breakdown, names: { keys?: Map<string, CostKey>; tenants?: Map<string, string> } = {}): string {
+  if (band.id === OTHER) return `Other (${band.values.length})`;
+  switch (b.kind) {
+    case "label":
+      return band.id === NONE ? `(no ${b.key} label)` : band.id;
+    case "key":
+      return keyLabel(band.id, names.keys ?? new Map());
+    case "pool":
+      return band.id === NONE ? "(no pool)" : band.id;
+    case "tenant":
+      return names.tenants?.get(band.id) ?? band.id;
+    default:
+      return band.id;
+  }
+}
+
+/** A filter for a band of a label breakdown: its value, or the label not set; null where filtering by it is not a label filter. */
+export function bandFilter(band: Band, b: Breakdown): LabelFilter | null {
+  if (b.kind !== "label" || band.id === OTHER) return null;
+  return band.id === NONE ? { key: b.key, values: [], notSet: true } : { key: b.key, values: [band.id] };
+}
+
+/** Filters with one more: a value joins its key's filter (OR); "not set" replaces the key's values, and a value replaces "not set". */
+export function addFilter(fs: LabelFilter[], f: LabelFilter): LabelFilter[] {
+  const others = fs.filter((x) => x.key !== f.key);
+  const same = fs.find((x) => x.key === f.key && !x.notSet);
+  if (f.notSet || !same) return [...others, f];
+  return [...others, { key: f.key, values: [...new Set([...same.values, ...f.values])] }];
+}
+
+/** The label filters as luxd's /v1/costs parameters. */
+export function filterQuery(fs: LabelFilter[]): { label?: string[]; nolabel?: string[] } {
+  const p = filtersParams(fs);
+  return { ...(p.label.length ? { label: p.label } : {}), ...(p.nolabel.length ? { nolabel: p.nolabel } : {}) };
+}
+
+/** A filter in words, for its chip: "app = jervasion", "repo ∈ a, b", "phase is not set". */
+export function filterText(f: LabelFilter): { key: string; op: string; values: string } {
+  if (f.notSet) return { key: f.key, op: "is", values: "not set" };
+  return { key: f.key, op: f.values.length > 1 ? "∈" : "=", values: f.values.join(", ") };
 }

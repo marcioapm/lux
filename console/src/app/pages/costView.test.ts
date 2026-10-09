@@ -1,32 +1,45 @@
 import { expect, test } from "bun:test";
 import type { CostSummary, CostSummaryRow } from "../../api/index.ts";
-import { changes, costSince, familyCharts, familyRows, peakRuns, peaks, peakWindows, perChoices, previousWindow, resolvePer, shownTotals, sideTotals, topSplit } from "./costView.ts";
+import {
+  addFilter,
+  bandFilter,
+  bandLabel,
+  breakdownBands,
+  breakdownCharts,
+  breakdownParam,
+  breakdownRows,
+  changes,
+  costSince,
+  defaultLabelKey,
+  familyCharts,
+  familyRows,
+  filterQuery,
+  filtersParams,
+  filterText,
+  keyLabel,
+  NONE,
+  OTHER,
+  parseBreakdown,
+  parseFilters,
+  peakBands,
+  peakRuns,
+  peaks,
+  peakWindows,
+  previousWindow,
+  runsByValue,
+  runsListPath,
+  shownRunIds,
+  shownTotals,
+  sideTotals,
+  topSplit,
+} from "./costView.ts";
 
 const fam = (family: string, currency: string, amount: string, at?: string): CostSummaryRow => ({ group: { family }, currency, amount, ...(at ? { at } : {}) });
 const runFam = (run: string, family: string, currency: string, amount: string): CostSummaryRow => ({ group: { run, family }, currency, amount });
 
-test("granularity: 1h reads 6h; Auto is hourly up to 24h and daily from 7d", () => {
+test("1h reads 6h: costs are whole-hour buckets", () => {
   expect(costSince("1h")).toBe("6h");
   expect(costSince("7d")).toBe("7d");
-  for (const [since, interval] of [["6h", "hour"], ["24h", "hour"], ["7d", "day"], ["30d", "day"]] as const) {
-    expect([since, resolvePer(since, "auto").interval]).toEqual([since, interval]);
-  }
-});
-
-test("granularity: a choice under 3 or over 200 buckets is off, with its reason; 168 hourly bars are allowed", () => {
-  const off = (since: "6h" | "24h" | "7d" | "30d") => Object.fromEntries(perChoices(since).map((c) => [c.value, c.disabled ?? null]));
-  expect(off("6h")).toEqual({ auto: null, hour: null, day: "1 bar · too coarse" });
-  expect(off("24h")).toEqual({ auto: null, hour: null, day: "1 bar · too coarse" });
-  expect(off("7d")).toEqual({ auto: null, hour: null, day: null });
-  expect(off("30d")).toEqual({ auto: null, hour: "720 bars · too many", day: null });
-  expect(perChoices("7d").find((c) => c.value === "hour")!.buckets).toBe(168);
-});
-
-test("granularity: the URL asking for a choice that is off falls back to Auto", () => {
-  expect(resolvePer("24h", "day")).toMatchObject({ value: "auto", interval: "hour" });
-  expect(resolvePer("30d", "hour")).toMatchObject({ value: "auto", interval: "day" });
-  expect(resolvePer("7d", "hour")).toMatchObject({ value: "hour", interval: "hour" });
-  expect(resolvePer("6h", "hour")).toMatchObject({ value: "hour", interval: "hour" });
 });
 
 const ROWS = [fam("compute", "USD", "3.87"), fam("ai", "USD", "55.08"), fam("video", "USD", "1.05"), fam("compute", "EUR", "2"), fam("ai", "EUR", "0.5")];
@@ -158,4 +171,147 @@ test("peak Run: the costliest Run of that bucket, as Show counts, per currency",
   expect(peakRuns(ps, [{ at, rows }], "all").get("USD")).toBe("big-compute");
   expect(peakRuns(ps, [{ at, rows }], "external").get("USD")).toBe("big-ai");
   expect(peakRuns(ps, [{ at: at + 3600, rows }], "all").size).toBe(0);
+});
+
+const app = (v: string, family: string, currency: string, amount: string, at?: string): CostSummaryRow => ({ group: { "label:app": v, family }, currency, amount, ...(at ? { at } : {}) });
+
+test("breakdown: the top 7 values by shown cost, the rest as Other, the value-less band last and grey", () => {
+  const rows = Array.from({ length: 10 }, (_, i) => app(`v${i}`, "ai", "USD", String(100 - i)));
+  rows.push(app(NONE, "compute", "USD", "500"));
+  const bands = breakdownBands(rows, "label:app", "all").get("USD")!;
+  expect(bands.map((b) => b.id)).toEqual(["v0", "v1", "v2", "v3", "v4", "v5", "v6", OTHER, NONE]);
+  expect(bands.find((b) => b.id === OTHER)!.values).toEqual(["v7", "v8", "v9"]);
+  expect(bands.at(-1)!.color).toBe("var(--st-neutral-dot)");
+  // Eight values: the eighth is shown as itself, not as a one-value Other.
+  expect(breakdownBands(rows.slice(0, 8), "label:app", "all").get("USD")!.map((b) => b.id)).toEqual(["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"]);
+});
+
+test("breakdown: Show still applies; a value with nothing shown has no band, and never leaks into the figures", () => {
+  const rows = [app("jervasion", "ai", "USD", "50"), app("jervasion", "compute", "USD", "2"), app("dude", "compute", "USD", "7"), app(NONE, "compute", "USD", "1")];
+  const ext = breakdownBands(rows, "label:app", "external");
+  expect(ext.get("USD")!.map((b) => b.id)).toEqual(["jervasion"]);
+  const all = breakdownBands(rows, "label:app", "all");
+  expect(all.get("USD")!.map((b) => b.id)).toEqual(["jervasion", "dude", NONE]);
+  const r = breakdownRows(rows, "label:app", "external", ext);
+  expect(r.map((x) => [x.band.id, x.compute, x.external, x.amount, x.share])).toEqual([["jervasion", "2", "50", "50", 1]]);
+  const comp = breakdownRows(rows, "label:app", "compute", breakdownBands(rows, "label:app", "compute"));
+  expect(comp.map((x) => [x.band.id, x.amount])).toEqual([
+    ["dude", "7"],
+    ["jervasion", "2"],
+    [NONE, "1"],
+  ]);
+});
+
+test("breakdown: currencies stay apart; each has its own bands, ranks and shares, nothing summed across", () => {
+  const rows = [app("a", "ai", "USD", "1"), app("b", "ai", "USD", "9"), app("a", "ai", "EUR", "100"), app("b", "ai", "EUR", "1")];
+  const bands = breakdownBands(rows, "label:app", "all");
+  expect(bands.get("USD")!.map((b) => b.id)).toEqual(["b", "a"]);
+  expect(bands.get("EUR")!.map((b) => b.id)).toEqual(["a", "b"]);
+  const out = breakdownRows(rows, "label:app", "all", bands);
+  expect(out.map((x) => [x.currency, x.band.id, x.amount, x.share?.toFixed(2)])).toEqual([
+    ["EUR", "a", "100", "0.99"],
+    ["EUR", "b", "1", "0.01"],
+    ["USD", "b", "9", "0.90"],
+    ["USD", "a", "1", "0.10"],
+  ]);
+});
+
+test("breakdown charts: a series per band, Other summed exactly, a bucket with no row a gap", () => {
+  const series = [app("a", "ai", "USD", "1", T(0)), app("b", "ai", "USD", "0.1", T(0)), app("c", "ai", "USD", "0.2", T(0)), app("a", "compute", "USD", "2", T(2))];
+  const d: CostSummary = { from: T(0), to: T(3), basis: "list", totals: [], series };
+  const bands = breakdownBands(series, "label:app", "all", 1);
+  const [c] = breakdownCharts(d, "label:app", "hour", "all", bands);
+  expect(c!.bands.map((b) => b.id)).toEqual(["a", OTHER]);
+  expect(c!.ys).toEqual([
+    [1, null, 2],
+    [0.3, null, null],
+  ]);
+  expect(c!.totals).toEqual(["3", "0.3"]);
+  const ext = breakdownCharts(d, "label:app", "hour", "external", breakdownBands(series, "label:app", "external", 1))[0]!;
+  expect(ext.ys[0]).toEqual([1, null, null]);
+});
+
+test("breakdown: Runs per value count only Runs with a shown cost; the peak names the band that dominated it", () => {
+  const dimRuns: CostSummaryRow[] = [
+    { group: { "label:app": "a", run: "r1" }, currency: "USD", amount: "1" },
+    { group: { "label:app": "a", run: "r2" }, currency: "USD", amount: "1" },
+    { group: { "label:app": NONE, run: "r3" }, currency: "USD", amount: "1" },
+  ];
+  const per = runsByValue(dimRuns, "label:app", shownRunIds([runFam("r1", "ai", "USD", "1"), runFam("r2", "compute", "USD", "1"), runFam("r3", "ai", "USD", "1")], "external"));
+  expect([...per].map(([k, v]) => [k, [...v]])).toEqual([
+    ["a", ["r1"]],
+    [NONE, ["r3"]],
+  ]);
+  const series = [app("a", "ai", "USD", "9", T(1)), app("b", "ai", "USD", "1", T(1)), app("b", "ai", "USD", "5", T(2))];
+  const d: CostSummary = { from: T(0), to: T(3), basis: "list", totals: [], series };
+  const bands = breakdownBands(series, "label:app", "all");
+  const pk = peakBands(peaks({ ...d, series: series.map((r) => ({ ...r, group: { family: "ai" } })) }, "all"), d, "label:app", "all", bands).get("USD")!;
+  expect([pk.band.id, pk.share]).toEqual(["a", 0.9]);
+});
+
+test("breakdown labels: label values, (no key label), key names with the operator and pre-tracking cases", () => {
+  const keys = new Map([
+    ["k1", { id: "k1", name: "ci-bot" }],
+    ["ko", { id: "ko", operator: true }],
+    ["email:ada@x.io", { id: "email:ada@x.io", email: "ada@x.io" }],
+  ]);
+  const band = (id: string) => ({ id, values: [id], color: "" });
+  expect(bandLabel(band(NONE), { kind: "label", key: "app" })).toBe("(no app label)");
+  expect(bandLabel({ id: OTHER, values: ["x", "y"], color: "" }, { kind: "label", key: "app" })).toBe("Other (2)");
+  expect(["k1", "ko", "email:ada@x.io", NONE, "k9"].map((k) => keyLabel(k, keys))).toEqual(["ci-bot", "Operator key", "ada@x.io", "Before key tracking", "k9"]);
+});
+
+test("?by=: label:key, key, pool; tenant only where tenants are shown; anything else is Family", () => {
+  expect(parseBreakdown("label:app", false)).toEqual({ kind: "label", key: "app" });
+  expect(parseBreakdown("label:a=b", false)).toEqual({ kind: "label", key: "a=b" });
+  expect(parseBreakdown("key", false)).toEqual({ kind: "key" });
+  expect(parseBreakdown("tenant", false)).toEqual({ kind: "family" });
+  expect(parseBreakdown("tenant", true)).toEqual({ kind: "tenant" });
+  expect(parseBreakdown("bogus", true)).toEqual({ kind: "family" });
+  expect(breakdownParam({ kind: "family" })).toBeNull();
+  expect(breakdownParam({ kind: "label", key: "app" })).toBe("label:app");
+  expect(defaultLabelKey("", ["team", "app"])).toBe("app");
+  expect(defaultLabelKey("", ["team"])).toBe("team");
+  expect(defaultLabelKey("repo", ["app"])).toBe("repo");
+});
+
+test("?label= and ?nolabel=: one key repeated is one filter of several values; a value keeps its = , and unicode", () => {
+  const fs = parseFilters(["app=jervasion", "repo=a/b", "app=dude", "app=jervasion", "note=x=y,z ü", "broken"], ["phase"]);
+  expect(fs).toEqual([
+    { key: "app", values: ["jervasion", "dude"] },
+    { key: "repo", values: ["a/b"] },
+    { key: "note", values: ["x=y,z ü"] },
+    { key: "phase", values: [], notSet: true },
+  ]);
+  expect(filtersParams(fs)).toEqual({ label: ["app=jervasion", "app=dude", "repo=a/b", "note=x=y,z ü"], nolabel: ["phase"] });
+  expect(filterQuery([])).toEqual({});
+  expect(filterQuery(fs)).toEqual({ label: ["app=jervasion", "app=dude", "repo=a/b", "note=x=y,z ü"], nolabel: ["phase"] });
+  expect(filterText(fs[0]!)).toEqual({ key: "app", op: "∈", values: "jervasion, dude" });
+  expect(filterText(fs[3]!)).toEqual({ key: "phase", op: "is", values: "not set" });
+});
+
+test("filters: a value joins its key (OR); not set replaces it; a clicked band becomes a filter", () => {
+  let fs = addFilter([], { key: "app", values: ["a"] });
+  fs = addFilter(fs, { key: "app", values: ["b"] });
+  fs = addFilter(fs, { key: "team", values: ["x"] });
+  expect(fs).toEqual([
+    { key: "app", values: ["a", "b"] },
+    { key: "team", values: ["x"] },
+  ]);
+  expect(addFilter(fs, { key: "app", values: [], notSet: true })).toEqual([
+    { key: "team", values: ["x"] },
+    { key: "app", values: [], notSet: true },
+  ]);
+  const lb = { kind: "label" as const, key: "app" };
+  expect(bandFilter({ id: "dude", values: ["dude"], color: "" }, lb)).toEqual({ key: "app", values: ["dude"] });
+  expect(bandFilter({ id: NONE, values: [NONE], color: "" }, lb)).toEqual({ key: "app", values: [], notSet: true });
+  expect(bandFilter({ id: OTHER, values: ["x"], color: "" }, lb)).toBeNull();
+  expect(bandFilter({ id: "k1", values: ["k1"], color: "" }, { kind: "key" })).toBeNull();
+});
+
+test("All Runs: the Runs list takes one key=value; more is the plain list", () => {
+  expect(runsListPath([])).toBe("/runs");
+  expect(runsListPath([{ key: "app", values: ["a b"] }])).toBe("/runs?label=app%3Da%20b");
+  expect(runsListPath([{ key: "app", values: ["a", "b"] }])).toBe("/runs");
+  expect(runsListPath([{ key: "app", values: [], notSet: true }])).toBe("/runs");
 });
