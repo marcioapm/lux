@@ -996,9 +996,10 @@ func (a *ACP) syncBusStatus(ctx context.Context) {
 }
 
 // activity reports what lux's own turns say of the Run's activity. With
-// OpenCode's server, idle waits while OpenCode reports a loop running (one
-// a client started over its HTTP API), and that status is read again in
-// case its idle event raced ahead of the ACP result.
+// OpenCode's server it publishes the combined activity as it is now, not
+// the caller's idle, which another turn may have made stale; an idle
+// request that finds OpenCode busy re-reads its status, in case its idle
+// event raced ahead of the ACP result.
 func (a *ACP) activity(idle bool) {
 	if a.bus == nil {
 		a.sink.Activity(idle)
@@ -1006,15 +1007,14 @@ func (a *ACP) activity(idle bool) {
 	}
 	a.actMu.Lock()
 	a.mu.Lock()
-	oc := a.ocBusy
+	combinedIdle := !a.busy && !a.ocBusy && len(a.queue) == 0
+	reread := idle && a.ocBusy && !a.busy
 	a.mu.Unlock()
-	if !idle || !oc {
-		a.report(idle)
-		a.actMu.Unlock()
-		return
-	}
+	a.showLocked(combinedIdle)
 	a.actMu.Unlock()
-	a.spawn(func() { a.syncBusStatus(a.runCtx()) })
+	if reread {
+		a.spawn(func() { a.syncBusStatus(a.runCtx()) })
+	}
 }
 
 // showLocked reports idle unless it is what was last reported. Under actMu.
@@ -1022,11 +1022,6 @@ func (a *ACP) showLocked(idle bool) {
 	if a.shown && a.shownIdle == idle {
 		return
 	}
-	a.report(idle)
-}
-
-// report reports idle to the sink. Under actMu.
-func (a *ACP) report(idle bool) {
 	a.shown, a.shownIdle = true, idle
 	a.sink.Activity(idle)
 }
