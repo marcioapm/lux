@@ -325,8 +325,16 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		grouped := `SELECT ` + bucket + ` AS at, g1, g2, currency, other, trim_scale(sum(amount))::text AS amount FROM shaped GROUP BY 1, 2, 3, 4, 5`
 		var sql string
 		if (top > 0 || in.Runs) && interval == "" {
-			sql = query + `SELECT b.*, v.runs, v.nvals FROM (` + grouped + `) b
-				LEFT JOIN vals v ON v.g1 IS NOT DISTINCT FROM b.g1 AND v.currency = b.currency AND v.other = b.other ORDER BY 1 NULLS FIRST, 2, 3, 4, 5`
+			// vals is read once, as a map keyed like each row, through a scalar
+			// subquery: joined, both sides estimate at ~1 row and the planner
+			// nests the loop, comparing every row with every value (op 7d
+			// group=run&runs=true: 10.3M comparisons). currency holds no \x1f,
+			// and a NULL g1 (no group, no pool, no host) keys apart from any value.
+			const valKey = `(currency || E'\x1f' || other::text || coalesce(E'\x1f' || g1, ''))`
+			sql = query + `, valmap AS MATERIALIZED (SELECT jsonb_object_agg(` + valKey + `, jsonb_build_array(runs, nvals)) AS m FROM vals)
+				SELECT at, g1, g2, currency, other, amount,
+					((SELECT m FROM valmap) -> ` + valKey + ` ->> 0)::int, ((SELECT m FROM valmap) -> ` + valKey + ` ->> 1)::int
+				FROM (` + grouped + `) b ORDER BY 1 NULLS FIRST, 2, 3, 4, 5`
 		} else {
 			sql = query + `SELECT *, NULL::int, NULL::int FROM (` + grouped + `) b ORDER BY 1 NULLS FIRST, 2, 3, 4, 5`
 		}

@@ -194,6 +194,41 @@ func TestCostSummaryTop(t *testing.T) {
 	if code := getJSON(t, s, keys["t1"], costPath("&group=family"), &got); code != http.StatusOK || slices.ContainsFunc(got.Totals, func(r CostSummaryRow) bool { return r.Runs != nil }) {
 		t.Errorf("without runs=true: %d %+v", code, got.Totals)
 	}
+	// runs=true by Run: each Run counts once per currency, on every family row of
+	// it (a4 has compute and ai in USD); with no group, once per currency.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=run&runs=true"), &got); code != http.StatusOK {
+		t.Fatalf("group=run runs=true status %d", code)
+	}
+	if m, want := runsByGroup(got.Totals, "run"), map[string]int{
+		"a1 USD": 1, "a2 USD": 1, "a3 USD": 1, "a4 USD": 1, "a5 USD": 1, "n1 USD": 1, "a1 EUR": 1, "a3 EUR": 1, "a5 EUR": 1,
+	}; !maps.Equal(m, want) || len(got.Totals) != len(want) || byGroup(got.Totals, "run")["a4 USD"] != "140" {
+		t.Errorf("group=run runs=true %v (%d rows, a4 %s), want %v", m, len(got.Totals), byGroup(got.Totals, "run")["a4 USD"], want)
+	}
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=run&group=family&runs=true"), &got); code != http.StatusOK {
+		t.Fatalf("group=run runs=true status %d", code)
+	}
+	byRun := map[string]int{}
+	for _, r := range got.Totals {
+		byRun[rowKey(r, "run", "family")] = -1
+		if r.Runs != nil {
+			byRun[rowKey(r, "run", "family")] = *r.Runs
+		}
+	}
+	if want := map[string]int{
+		"a1 compute USD": 1, "a2 compute USD": 1, "a3 compute USD": 1, "a4 compute USD": 1, "a5 compute USD": 1, "n1 compute USD": 1,
+		"a4 ai USD": 1, "a1 ai EUR": 1, "a3 ai EUR": 1, "a5 ai EUR": 1,
+	}; !maps.Equal(byRun, want) || len(got.Totals) != len(want) {
+		t.Errorf("group=run runs=true %v (%d rows), want %v", byRun, len(got.Totals), want)
+	}
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&runs=true"), &got); code != http.StatusOK {
+		t.Fatalf("no group runs=true status %d", code)
+	}
+	if m, want := runsByGroup(got.Totals, ""), map[string]int{" USD": 6, " EUR": 3}; !maps.Equal(m, want) || len(got.Totals) != len(want) {
+		t.Errorf("no group runs=true %v, want %v", m, want)
+	}
 }
 
 // rowKey is "value… [other] currency" for group keys gs.
