@@ -530,3 +530,24 @@ func TestNoRepositoriesGoesStraightToContainer(t *testing.T) {
 	wantStage(t, "volumes restored", getRun(t, s, key), StateStarting, StageContainer, t1, "")
 	newStageEvents(t, s, ctx, "volumes restored", n, stageEvent{StageContainer, "", t1, 1})
 }
+
+// A starting report wakes the scheduler for nothing (it frees no capacity
+// and queues no Run); running does.
+func TestStartingReportDoesNotKickTheScheduler(t *testing.T) {
+	s, ctx, _ := stageFixture(t)
+	drain := func() {
+		select {
+		case <-s.kick:
+		default:
+		}
+	}
+	drain()
+	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: map[string]int64{"imageReady": ms(time.Now())}})
+	if len(s.kick) != 0 {
+		t.Fatal("a starting report kicked the scheduler")
+	}
+	reportStatus(t, s, ctx, proto.Status{State: "running"})
+	if len(s.kick) != 1 {
+		t.Fatal("a running report did not kick the scheduler")
+	}
+}
