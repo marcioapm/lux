@@ -5,23 +5,66 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/marcioapm/lux/internal/ids"
 )
+
+// sessionTimeZone makes every new connection of s's database use tz as its
+// session time zone, so a test pins behaviour that must not depend on it.
+func sessionTimeZone(t *testing.T, s *Server, tz string) {
+	t.Helper()
+	ctx := context.Background()
+	var db string
+	if err := s.db.Pool.QueryRow(ctx, `SELECT current_database()`).Scan(&db); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := pgx.Connect(ctx, os.Getenv("LUX_TEST_PG"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close(ctx)
+	// Identifiers cannot be bind parameters; db is the test's own generated name.
+	if _, err := admin.Exec(ctx, fmt.Sprintf(`ALTER DATABASE %s SET timezone TO %s`, pgx.Identifier{db}.Sanitize(), pgQuote(tz))); err != nil {
+		t.Fatal(err)
+	}
+	s.db.Pool.Reset()
+	var got string
+	if err := s.db.Pool.QueryRow(ctx, `SHOW timezone`).Scan(&got); err != nil || got != tz {
+		t.Fatalf("session time zone %q, want %q (%v)", got, tz, err)
+	}
+}
+
+func pgQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+// Days are UTC days whatever the database session's time zone is.
+var dailyTimeZones = []string{"UTC", "Asia/Tokyo"}
 
 // res=86400 folds the hourly samples into UTC days as the stored rollups
 // fold theirs: a counter keeps its maximum (read as a rate), a level its
 // mean, a p95 its maximum and a p50 its mean, a flow its sum, a state its
 // last. A day without hours is absent, not zero.
 func TestHistoryDaily(t *testing.T) {
+	for _, tz := range dailyTimeZones {
+		t.Run(tz, func(t *testing.T) { testHistoryDaily(t, tz) })
+	}
+}
+
+func testHistoryDaily(t *testing.T, tz string) {
 	s := testServer(t)
+	sessionTimeZone(t, s, tz)
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, state) VALUES ('h1', 'h1', 't1', 'ready')`)
-	key := ids.Secret("luxk")
-	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(key))
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{}', 'running')`)
+	key, tenantKey := ids.Secret("luxk"), ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator']), ('k1', 't1', 'k', $2, ARRAY['read'])`,
+		ids.Hash(key), ids.Hash(tenantKey))
 	day0 := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -5)
 	day1, day3 := day0.AddDate(0, 0, 1), day0.AddDate(0, 0, 3)
 	// Day 0: 22:00 and 23:00. Day 1: 00:00 and 01:00 (across the boundary).
@@ -45,6 +88,12 @@ func TestHistoryDaily(t *testing.T) {
 		execSQL(t, s, ctx, `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes) VALUES ('h1', 3600, $1, $2, $3)`, h.at, h.cpu, h.mem)
 		execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, runs, started, start_p50, start_p95) VALUES ('', 3600, $1, $2, $3, $4, $5)`,
 			h.at, map[string]int{"running": h.running}, h.started, h.p50, h.p95)
+		// The Run: net_rx a counter like CPU, pids a level.
+		execSQL(t, s, ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, pids, net_rx) VALUES ('r1', 1, 't1', 3600, $1, $2, $3, $4, $5)`,
+			h.at, h.cpu, h.mem, h.running*2, int64(h.cpu)/10)
+		// The control host: CPU a counter, disk use a mean, disk size a maximum.
+		execSQL(t, s, ctx, `INSERT INTO control_samples (instance, hostname, res, at, cpu_seconds, cpus, mem_bytes) VALUES ('ctl', 'ctl', 3600, $1, $2, 8, $3)`, h.at, h.cpu, h.mem)
+		execSQL(t, s, ctx, `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes) VALUES ('ctl', '/', 3600, $1, $2, $3, 10000)`, h.at, h.mem, 10000-h.mem)
 	}
 	q := "?res=86400&from=" + url.QueryEscape(day0.Format(time.RFC3339)) + "&to=" + url.QueryEscape(day3.Add(23*time.Hour).Format(time.RFC3339))
 
@@ -86,6 +135,46 @@ func TestHistoryDaily(t *testing.T) {
 		t.Errorf("host days:\n got %v\nwant %v", got, want)
 	}
 
+	// The Run: day 0 mem (100+300)/2, pids round((2+4)/2), day 1 net_rx 390 - 20 over a day.
+	run := historyRequest(t, s, tenantKey, "/v1/runs/r1/history"+q)
+	got = nil
+	for _, sm := range run.Samples {
+		rx := "-"
+		if sm.NetRxRate != nil {
+			rx = fmt.Sprintf("%g", *sm.NetRxRate)
+		}
+		got = append(got, fmt.Sprintf("%s mem=%d pids=%d rx=%s", sm.At.UTC().Format("01-02"), *sm.MemoryBytes, *sm.Pids, rx))
+	}
+	want = []string{
+		day0.Format("01-02") + " mem=200 pids=3 rx=-",
+		day1.Format("01-02") + fmt.Sprintf(" mem=1500 pids=7 rx=%g", 370.0/86400),
+		day3.Format("01-02") + fmt.Sprintf(" mem=50 pids=10 rx=%g", (9030.0-390)/172800),
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("run days:\n got %v\nwant %v", got, want)
+	}
+
+	// The control host, its disk folded per day with the day itself.
+	if sys.Control == nil || len(sys.Control.Machines) != 1 {
+		t.Fatalf("control: %+v", sys.Control)
+	}
+	got = nil
+	for _, sm := range sys.Control.Machines[0].Samples {
+		cores := "-"
+		if sm.CPUCores != nil {
+			cores = fmt.Sprintf("%g", *sm.CPUCores)
+		}
+		got = append(got, fmt.Sprintf("%s cores=%s disks=%v", sm.At.UTC().Format("01-02"), cores, sm.Disks))
+	}
+	want = []string{
+		day0.Format("01-02") + " cores=- disks=[{/ 200 9800 10000}]",
+		day1.Format("01-02") + fmt.Sprintf(" cores=%g disks=[{/ 1500 8500 10000}]", 3700.0/86400),
+		day3.Format("01-02") + " cores=0.5 disks=[{/ 50 9950 10000}]",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("control days:\n got %v\nwant %v", got, want)
+	}
+
 	// A range starting mid-day gets the days that start in it, as a stored
 	// resolution does: day 0 starts before 12:00 and is left out.
 	mid := "?res=86400&from=" + url.QueryEscape(day0.Add(12*time.Hour).Format(time.RFC3339)) + "&to=" + url.QueryEscape(day1.Add(23*time.Hour).Format(time.RFC3339))
@@ -102,7 +191,14 @@ func TestHistoryDaily(t *testing.T) {
 // A pool's metrics read at res=86400 are its hours folded into days, and
 // historyFrom is the first day with an hour.
 func TestPoolMetricsDaily(t *testing.T) {
+	for _, tz := range dailyTimeZones {
+		t.Run(tz, func(t *testing.T) { testPoolMetricsDaily(t, tz) })
+	}
+}
+
+func testPoolMetricsDaily(t *testing.T, tz string) {
 	s := testServer(t)
+	sessionTimeZone(t, s, tz)
 	ctx := context.Background()
 	key := ids.Secret("luxk")
 	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(key))
