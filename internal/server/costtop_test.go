@@ -151,8 +151,8 @@ func TestCostSummaryTop(t *testing.T) {
 	if m, want := byGroup(got.Totals, "label:app"), map[string]string{"a4 USD": "100", "a5 EUR": "9", "a1 EUR": "1", "(other) EUR": "1"}; !maps.Equal(m, want) {
 		t.Errorf("nofamily totals %v, want %v", m, want)
 	}
-	if len(got.Series) != 4 {
-		t.Errorf("nofamily series %+v", got.Series)
+	if m, want := seriesByHour(got.Series, "label:app"), map[string]string{"10 a4 USD": "100", "10 a5 EUR": "9", "10 a1 EUR": "1", "10 (other) other EUR": "1"}; !maps.Equal(m, want) {
+		t.Errorf("nofamily series %v, want %v", m, want)
 	}
 	if !maps.Equal(got.OtherCount, map[string]int{"EUR": 1}) {
 		t.Errorf("nofamily otherCount %v", got.OtherCount)
@@ -196,6 +196,35 @@ func TestCostSummaryTop(t *testing.T) {
 	}
 }
 
+// rowKey is "value… [other] currency" for group keys gs.
+func rowKey(r CostSummaryRow, gs ...string) string {
+	k := ""
+	for _, g := range gs {
+		k += r.Group[g] + " "
+	}
+	if r.Other {
+		k += "other "
+	}
+	return k + r.Currency
+}
+
+// seriesByHour is series rows as "hour value… [other] currency" -> amount.
+func seriesByHour(rows []CostSummaryRow, gs ...string) map[string]string {
+	m := map[string]string{}
+	for _, r := range rows {
+		m[r.At.UTC().Format("15")+" "+rowKey(r, gs...)] = r.Amount
+	}
+	return m
+}
+
+func familyNames(fs []CostFamilyInfo) []string {
+	out := []string{}
+	for _, f := range fs {
+		out = append(out, f.Family)
+	}
+	return out
+}
+
 // runsByGroup is totals as "value currency" -> runs for group key g (-1: none).
 func runsByGroup(rows []CostSummaryRow, g string) map[string]int {
 	m := map[string]int{}
@@ -216,16 +245,7 @@ func TestCostSummaryTopEdges(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, labels) VALUES ('a6', 't1', '{}', 'running', '{"app":"a6"}')`)
 	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount, allocated, unallocated)
 		VALUES ($1, 't1', 'a6', 'plugin', 'ai', 'USD', 500, 0, 0)`, t0)
-	key := func(r CostSummaryRow, gs ...string) string {
-		k := ""
-		for _, g := range gs {
-			k += r.Group[g] + " "
-		}
-		if r.Other {
-			k += "other "
-		}
-		return k + r.Currency
-	}
+	key := rowKey
 	read := func(q string, gs ...string) (CostSummaryBody, map[string]string, map[string]int) {
 		t.Helper()
 		var got CostSummaryBody
@@ -287,6 +307,26 @@ func TestCostSummaryTopEdges(t *testing.T) {
 	}
 	if !maps.Equal(got.OtherCount, map[string]int{"USD": 6, "EUR": 2}) {
 		t.Errorf("top=1 otherCount %v", got.OtherCount)
+	}
+	// Per bucket too, the real (other) and the fold stay apart and only the fold is marked other.
+	got, _, _ = read("&group=label:app&top=1&rank=compute&interval=hour", "label:app")
+	if m, want := seriesByHour(got.Series, "label:app"), map[string]string{
+		"10 (other) USD": "700", "10 (other) other USD": "750", "11 (other) other USD": "150",
+		"10 (none) USD": "1000", "10 a1 EUR": "1", "10 (other) other EUR": "10",
+	}; !maps.Equal(m, want) || len(got.Series) != len(want) {
+		t.Errorf("top=1 series %v (%d rows), want %v", m, len(got.Series), want)
+	}
+	// Families never name the fold, and still name a family seen only under it.
+	got, _, _ = read("&group=family&group=label:app&top=1", "family", "label:app")
+	if fs := familyNames(got.Families); !slices.Equal(fs, []string{"ai", "compute"}) {
+		t.Errorf("family first, folded: families %v", fs)
+	}
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, labels) VALUES ('a8', 't1', '{}', 'running', '{"app":"a8"}')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount, allocated, unallocated)
+		VALUES ($1, 't1', 'a8', 'plugin', 'storage', 'USD', 1, 0, 0)`, t0)
+	got, split, _ = read("&group=label:app&group=family&top=1&rank=compute", "label:app", "family")
+	if split["(other) storage other USD"] != "1" || !slices.Contains(familyNames(got.Families), "storage") {
+		t.Errorf("storage only under the fold: totals %v, families %v", split, familyNames(got.Families))
 	}
 	// Grouped by run, the fold names no Run; the kept ones (n1, and a1 by value in EUR) are named.
 	got = CostSummaryBody{}
