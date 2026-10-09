@@ -145,6 +145,12 @@ func (s *Server) routes(api huma.API) {
 		Errors:  []int{http.StatusBadRequest},
 	}, "read", s.costSummary)
 	register(s, api, huma.Operation{
+		OperationID: "costLabels", Method: http.MethodGet, Path: "/v1/costs/labels", Tags: []string{"costs"},
+		Summary:     "The label keys on Runs with cost in a range",
+		Description: "Each key with how many Runs with cost in the range carry it, after the label and nolabel filters. A key's values and their cost: GET /v1/costs?group=label:<key>.",
+		Errors:      []int{http.StatusBadRequest},
+	}, "read", s.costLabels)
+	register(s, api, huma.Operation{
 		OperationID: "pushRun", Method: http.MethodPost, Path: "/v1/runs/{id}/push", Tags: []string{"runs"},
 		Summary: "Push a running Run's repositories",
 		Description: "To the spec's git.push branch, with the runner's credentials. The outcome arrives as a git.push event carrying the request id: " +
