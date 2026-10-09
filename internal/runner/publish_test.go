@@ -269,8 +269,8 @@ func TestUploaderTakesSnapshotsFirst(t *testing.T) {
 		created   int64
 		published bool
 	}{
-		{"pub-b", 1, true}, {"snap-c", 6, false}, {"pub-a", 0, true},
-		{"snap-a", 4, false}, {"pub-c", 2, true}, {"snap-b", 5, false},
+		{"pub-b", 1, true}, {"snap-c", 4, false}, {"pub-a", 0, true},
+		{"snap-a", 6, false}, {"pub-c", 2, true}, {"snap-b", 5, false},
 	} {
 		blob := f.r.blobPath(c.id)
 		if err := os.WriteFile(blob, []byte(c.id), 0o600); err != nil {
@@ -286,8 +286,45 @@ func TestUploaderTakesSnapshotsFirst(t *testing.T) {
 		}
 	}
 	f.r.uploads.pass(context.Background())
-	if want := []string{"snap-a", "snap-b", "snap-c", "pub-a", "pub-b", "pub-c"}; !slices.Equal(f.uploaded, want) {
+	if want := []string{"snap-c", "snap-b", "snap-a", "pub-a", "pub-b", "pub-c"}; !slices.Equal(f.uploaded, want) {
 		t.Fatalf("uploaded %v, want %v", f.uploaded, want)
+	}
+}
+
+// One pass uploads only what is pending for a live placement: a fenced-off
+// placement's blob is not uploaded, a done record is kept, a discarded done
+// record is removed. Stale is per Run: runA's fence does not touch runB.
+func TestUploaderPassSkipsOnlyWhatIsDoneOrStale(t *testing.T) {
+	f := newFinishFixture(t)
+	f.serveUploads(t)
+	if err := writeRunState(f.r.runDir("runA"), &runState{RunID: "runA", Epoch: 1, Stale: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		id, run       string
+		done, discard bool
+	}{
+		{"a-stale", "runA", false, false}, {"b-pending", "runB", false, false},
+		{"c-done", "runB", true, false}, {"d-discarded", "runB", true, true},
+	} {
+		blob := f.r.blobPath(c.id)
+		if err := os.WriteFile(blob, []byte(c.id), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.r.saveSnapshotRecord(c.id, &snapshotRecord{RunID: c.run, Epoch: 1, Reported: true, Discard: c.discard,
+			Uploads: []pendingUpload{{BlobID: c.id, Path: blob, Size: int64(len(c.id)), Done: c.done}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.r.uploads.pass(context.Background())
+	if want := []string{"b-pending"}; !slices.Equal(f.uploaded, want) {
+		t.Fatalf("uploaded %v, want %v", f.uploaded, want)
+	}
+	if _, err := os.Stat(f.r.recordPath("d-discarded")); !os.IsNotExist(err) {
+		t.Fatalf("discarded done record kept: %v", err)
+	}
+	if _, err := os.Stat(f.r.recordPath("c-done")); err != nil {
+		t.Fatalf("done record removed: %v", err)
 	}
 }
 
