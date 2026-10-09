@@ -309,6 +309,8 @@ reach S3 in the background:
    no version): with several luxds sharing the database, a snapshot
    report that lands on an older one is refused with an error and the
    runner retries it, so move them all to the new release promptly.
+   Artifacts reads and writes block for the length of the migration on a
+   large table; run `VACUUM artifacts` afterwards.
 
 Keys are `tenants/<tenant>/runs/<run>/<blob>`. Encrypt the bucket at rest
 (SSE-KMS on AWS).
