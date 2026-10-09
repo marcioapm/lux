@@ -124,8 +124,11 @@ type fakeBus struct {
 	// drop ends the open event stream.
 	drop chan struct{}
 	gets int
-	// statusFail: GET /session/status answers 500.
+	// statusFail: GET /session/status answers 500; statusGets counts
+	// those GETs; statusHold, if set, is waited on before one answers.
 	statusFail bool
+	statusGets int
+	statusHold chan struct{}
 	// dropParts: posted keeps no text, so a test can measure the adapter's
 	// heap alone.
 	dropParts bool
@@ -189,6 +192,17 @@ func newFakeBus(t *testing.T) *fakeBus {
 		_ = json.NewEncoder(w).Encode(out)
 	})
 	mux.HandleFunc("GET /session/status", func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		b.statusGets++
+		hold := b.statusHold
+		b.mu.Unlock()
+		if hold != nil {
+			select {
+			case <-hold:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		b.mu.Lock()
 		loop, fail := b.loop, b.statusFail
 		b.mu.Unlock()
@@ -579,6 +593,77 @@ func TestOpenCodeACPTurnEndRereadsStatus(t *testing.T) {
 	b.setLoop(false)
 	w.resolve(first, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+}
+
+// OpenCode's server goes away during a loop a client started: the Run is
+// not left busy on a status nobody can confirm. The stream's end clears
+// it; a status read that fails on reconnect reads as not busy; and the
+// failing server is not asked in a hot loop.
+func TestOpenCodeServerDownIsNotBusy(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.setLoop(false)
+	w.resolve(first, ocResult)
+	sink.waitLast(t, "idle")
+	onBus(t, a, ocStatus("busy"))
+	sink.waitLast(t, "busy")
+	b.setLoop(true) // OpenCode would say busy, but cannot answer
+	b.setStatusFail(true)
+	b.mu.Lock()
+	gets0, status0 := b.gets, b.statusGets
+	b.mu.Unlock()
+	b.drop <- struct{}{}
+	sink.waitLast(t, "idle")
+	time.Sleep(500 * time.Millisecond)
+	if !a.bus.isConnected() {
+		t.Fatal("the stream did not reconnect")
+	}
+	sink.stays(t, "idle", 100*time.Millisecond)
+	b.mu.Lock()
+	gets, status := b.gets-gets0, b.statusGets-status0
+	b.mu.Unlock()
+	// One reconnect: one GET /event, one status read for activity and at
+	// most a few by settle.
+	if gets != 1 || status < 1 || status > 3 {
+		t.Fatalf("in 500 ms: %d GET /event, %d GET /session/status", gets, status)
+	}
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy", "idle")
+}
+
+// The Run ends while a client's loop shows it busy and a status read is in
+// flight: Run returns without waiting on OpenCode, the event stream and
+// the read end with it, and nothing is reported after.
+func TestOpenCodeStopEndsStatusFollowing(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	onBus(t, a, ocStatus("busy"))
+	hold := make(chan struct{})
+	defer close(hold)
+	b.mu.Lock()
+	b.statusHold = hold
+	n := b.statusGets
+	b.mu.Unlock()
+	w.resolve(first, ocResult)
+	sink.wait(t, "turn_end")
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		b.mu.Lock()
+		read := b.statusGets > n
+		b.mu.Unlock()
+		if read {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("no status read after the ACP turn ended while busy")
+		}
+	}
+	_ = a.Stop()
+	w.exit()
+	got := sink.lines()
+	if a.bus.isConnected() {
+		t.Fatal("the event stream outlived Run")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if want := []string{"idle", "busy", "accepted prompt next_step receipt=false", "turn_end"}; !slices.Equal(got, want) || !slices.Equal(sink.lines(), want) {
+		t.Fatalf("got %q then %q, want %q", got, sink.lines(), want)
+	}
 }
 
 // waitBusTurn waits until the adapter has handled the ACP turn's result.
