@@ -242,9 +242,17 @@ func TestCollectedArtifactNotDuplicated(t *testing.T) {
 	if f := reportSnapshot(t, s, "ha", "ra", 2, same); f.Type != proto.MsgAck || ackRefused(t, f) {
 		t.Fatalf("epoch 2: %s %s", f.Type, f.Data)
 	}
-	// Sent again, it is the same report.
+	// Sent again, it is the same report: not refused, not marked so.
 	if f := reportSnapshot(t, s, "ha", "ra", 2, same); f.Type != proto.MsgAck || ackRefused(t, f) {
 		t.Fatalf("epoch 2 again: %s %s", f.Type, f.Data)
+	}
+	if got := eventErrors(t, s, "ra", "snapshot.failed"); len(got) != 0 {
+		t.Fatalf("redelivery refused: %q", got)
+	}
+	var refused bool
+	systemScan(t, s, `SELECT snapshot_refused FROM placements WHERE id = 'pa2'`, nil, &refused)
+	if refused {
+		t.Fatal("redelivery marked the placement snapshot_refused")
 	}
 	if all := listed(t, s, key, "ra", "?versions=all"); len(all) != 1 || all[0].Version != 1 {
 		t.Fatalf("after the same file: %+v", all)
