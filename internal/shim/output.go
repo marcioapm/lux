@@ -307,23 +307,7 @@ func (o *Output) EndLine(ch string) {
 // first so records stay in order: all of it at a boundary (an event that
 // ends any text in progress), else up to a safe cut, so an event mid-reply
 // does not release the start of a secret.
-func (o *Output) Event(typ string, data any) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.closed {
-		return
-	}
-	all := boundary(typ, data)
-	for _, b := range slices.Clone(o.order) {
-		if all {
-			o.release(b, false)
-		} else {
-			o.flushTo(b, len(b.data))
-		}
-	}
-	o.event(typ, data)
-	o.w.Flush()
-}
+func (o *Output) Event(typ string, data any) { _ = o.TryEvent(typ, data) }
 
 // errOutputClosed: the shim is ending; nothing more is recorded.
 var errOutputClosed = errors.New("the Run's container is ending")
@@ -335,8 +319,13 @@ func (o *Output) TryEvent(typ string, data any) error {
 	if o.closed {
 		return errOutputClosed
 	}
+	all := boundary(typ, data)
 	for _, b := range slices.Clone(o.order) {
-		o.flushTo(b, len(b.data))
+		if all {
+			o.release(b, false)
+		} else {
+			o.flushTo(b, len(b.data))
+		}
 	}
 	o.event(typ, data)
 	return o.w.Flush()
