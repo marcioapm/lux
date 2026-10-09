@@ -265,9 +265,12 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	// none ranks last), then names every value past $11 (other). nvals is
 	// every value but (none): the folded ones are nvals - $11. vals is read
 	// by the totals only: Runs per folded value, across g2.
+	// ranked is MATERIALIZED: inlined, Postgres puts its window (sort over
+	// every value) on the inner side of a nested loop and re-runs it per
+	// dimensions row; 500 values x 144000 rows took 37.7 s instead of 0.23 s.
 	const folded = `, sums AS (
 		SELECT g1, currency, sum(amount) FILTER (WHERE ranks) AS total FROM dimensions WHERE g1 <> '(none)' GROUP BY 1, 2
-	), ranked AS (
+	), ranked AS MATERIALIZED (
 		SELECT g1, currency, row_number() OVER (PARTITION BY currency ORDER BY total DESC NULLS LAST, g1 COLLATE "C") AS n,
 			count(*) OVER (PARTITION BY currency) AS nvals
 		FROM sums
