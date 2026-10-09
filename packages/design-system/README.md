@@ -200,7 +200,7 @@ All in `src/tokens.css`.
 | Accent | `--accent` `--accent-hover` `--accent-active` `--accent-fg` `--accent-subtle` `--accent-text` `--focus-ring` |
 | Semantic | `--{success,warn,danger,info}-{fg,bg,dot}` |
 | State hues | `--st-{neutral,blue,teal,green,amber,red,violet}-{fg,bg,dot}` |
-| Chart | `--chart-1` … `--chart-8` (fixed order; cost families and stored blob kinds map onto them, compute is `--chart-1`, breakdown bands never are: `bandSlots`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
+| Chart | `--chart-1` … `--chart-8` (fixed order; cost families and stored blob kinds map onto them, compute is `--chart-1`, breakdown bands never are: `bandColor`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
 | Logs | `--log-stderr-bg` `--log-stderr-fg` `--log-line-hover` |
 | Terminal | `--term-bg` `--term-scrollbar` (the frame around the screen, following the console theme; a Terminal with a `scheme` sets its own on `.term[data-term-scheme]`; the screen's palette is `terminalThemes.ts`) |
 | Type | `--font-sans` `--font-mono`, `--text-{xs,sm,md,lg,xl,2xl,3xl}` (density-dependent), `--leading-{tight,normal}`, `--weight-{normal,medium,semibold}` |
@@ -252,8 +252,8 @@ every view.
 Two families that land on one slot share it: a collision is accepted, a
 colour that changes between views is not.
 
-Breakdown band colours (`bandSlots(n)`, `bandColor(i)`, `BAND_SLOTS`,
-`OTHER_BAND_COLOR`, `NONE_BAND_COLOR`): when cost is stacked by something
+Breakdown band colours (`bandColor(i)`, `OTHER_BAND_COLOR`,
+`NONE_BAND_COLOR`): when cost is stacked by something
 other than family (a label value, an API key, a pool, a tenant, a Run),
 the bands take the `--chart-N` slots in rank order, skipping compute's
 slot (`--chart-1`), so compute's blue only ever means compute. That is
