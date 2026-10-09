@@ -282,7 +282,7 @@ export function LabelFilterPopover({ keys, initialKey, values, notSet, onApply, 
 
   useEffect(() => {
     if (!open) return;
-    setKey((k) => (keys.some((x) => x.key === k) ? k : (initialKey ?? keys[0]?.key ?? "")));
+    setKey(initialKey ?? keys[0]?.key ?? "");
     setQuery("");
     setPicked([]);
     setNone(false);

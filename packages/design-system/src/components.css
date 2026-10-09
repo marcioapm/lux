@@ -1427,13 +1427,16 @@ a.idchip-text:hover {
 }
 .label-chips {
   display: inline-flex;
-  flex-wrap: wrap;
   gap: var(--sp-2);
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 .label-chip {
   display: inline-block;
-  max-width: 18ch;
+  max-width: 20ch;
+  flex: 0 1 auto;
+  min-width: 0;
   padding: 0 var(--sp-3);
   border-radius: var(--radius-pill);
   background: var(--bg-muted);
@@ -1445,8 +1448,12 @@ a.idchip-text:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.label-chip:first-child {
+  flex-shrink: 0;
+}
 .label-chip.is-more {
   color: var(--fg-muted);
+  flex: none;
 }
 .info-strip {
   display: flex;
