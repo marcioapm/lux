@@ -146,6 +146,10 @@ def test_republishing_a_name_is_a_new_version(lux, runners, hosts, tmp_path):
     assert (tmp_path / "all/1/.lux/artifacts/a.txt.v2").read_text() == "two\n"
     wait_until(lambda: len(published_events(lux, run_id)) >= 3, 30, 0.5, "artifact.published events")
     assert len(published_events(lux, run_id)) == 3
+    # Still exactly three once every upload is in: no late duplicate.
+    lux.run("stop", run_id, "--wait")
+    lux.wait_placement_uploaded(run_id)
+    assert len(published_events(lux, run_id)) == 3
 
 
 def test_only_publishing_makes_an_artifact(lux, runners, hosts):
@@ -195,10 +199,11 @@ def test_a_runner_restart_does_not_duplicate_published_artifacts(lux, runners, h
     wait_available(lux, run_id, 1)
     runners.stop(hosts[0], "KILL")
     runners.start(hosts[0])
-    # Records are handled in order: once this one is in, the re-read
-    # reached the first again. The exec waits for the new connection.
-    wait_until(lambda: sh(lux, run_id, f"echo after > /tmp/b && {PUBLISH} /tmp/b", check=False).returncode == 0,
-               30, 0.5, "publish after the restart")
+    # A harmless exec until the runner is back, then one publish: a retried
+    # publish could be a second version of b. Records are handled in
+    # order: once this one is in, the re-read reached the first again.
+    wait_until(lambda: sh(lux, run_id, "true", check=False).returncode == 0, 30, 0.5, "exec after the restart")
+    sh(lux, run_id, f"echo after > /tmp/b && {PUBLISH} /tmp/b")
     arts = wait_available(lux, run_id, 2, "--all-versions")
     assert sorted((a["path"], a["version"]) for a in arts) == [("/.lux/artifacts/a", 1), ("/.lux/artifacts/b", 1)], arts
     wait_until(lambda: len(published_events(lux, run_id)) >= 2, 30, 0.5, "artifact.published events")
