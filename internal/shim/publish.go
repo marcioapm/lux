@@ -23,11 +23,13 @@ import (
 )
 
 // publisher stages what `lux-shim publish` sends (proto.PublishRequest)
-// in dir and records it with emit. It reads only the bytes on the
-// connection: nothing the client names is opened.
+// in base/rel and records it with emit. It reads only the bytes on the
+// connection: nothing the client names is opened. Files are opened
+// through an os.Root on base (the runtime volume): a root workload's link
+// in place of the staging directory cannot lead them off the volume.
 type publisher struct {
-	dir string
-	// rel is dir relative to the runtime volume, as records name files.
+	base string
+	// rel is the staging directory relative to base, as records name files.
 	rel  string
 	max  int64
 	emit func(proto.StagedArtifact) error
@@ -60,9 +62,14 @@ func (p *publisher) publish(c net.Conn) (proto.PublishReply, error) {
 	if err := checkRequest(req, p.max); err != nil {
 		return proto.PublishReply{}, err
 	}
+	root, err := os.OpenRoot(p.base)
+	if err != nil {
+		return proto.PublishReply{}, fmt.Errorf("staging: %w", err)
+	}
+	defer root.Close()
 	id := ids.New(ids.Artifact)
-	tmp := filepath.Join(p.dir, "."+id+".tmp")
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp := path.Join(p.rel, "."+id+".tmp")
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return proto.PublishReply{}, fmt.Errorf("staging: %w", err)
 	}
@@ -70,7 +77,7 @@ func (p *publisher) publish(c net.Conn) (proto.PublishReply, error) {
 	defer func() {
 		if !staged {
 			f.Close()
-			os.Remove(tmp)
+			root.Remove(tmp)
 		}
 	}()
 	h := sha256.New()
@@ -94,8 +101,8 @@ func (p *publisher) publish(c net.Conn) (proto.PublishReply, error) {
 	if err := f.Close(); err != nil {
 		return proto.PublishReply{}, fmt.Errorf("staging: %w", err)
 	}
-	final := filepath.Join(p.dir, id)
-	if err := os.Rename(tmp, final); err != nil {
+	final := path.Join(p.rel, id)
+	if err := root.Rename(tmp, final); err != nil {
 		return proto.PublishReply{}, fmt.Errorf("staging: %w", err)
 	}
 	staged = true
@@ -105,9 +112,9 @@ func (p *publisher) publish(c net.Conn) (proto.PublishReply, error) {
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	a := proto.StagedArtifact{ID: id, Name: req.Name, Description: req.Description, ContentType: ctype,
-		Size: n, SHA256: sum, File: path.Join(p.rel, id)}
+		Size: n, SHA256: sum, File: final}
 	if err := p.emit(a); err != nil {
-		os.Remove(final)
+		root.Remove(final)
 		return proto.PublishReply{}, err
 	}
 	return proto.PublishReply{ID: id, Name: req.Name, Size: n, SHA256: sum}, nil
@@ -197,7 +204,7 @@ func (s *Shim) startPublish() error {
 	if err != nil || !filepath.IsLocal(rel) {
 		return fmt.Errorf("artifacts staging %s is not on the runtime volume", s.cfg.ArtifactsDir)
 	}
-	p := &publisher{dir: s.cfg.ArtifactsDir, rel: filepath.ToSlash(rel), max: proto.MaxArtifactBytes, emit: func(a proto.StagedArtifact) error {
+	p := &publisher{base: proto.ShimRunDir, rel: filepath.ToSlash(rel), max: proto.MaxArtifactBytes, emit: func(a proto.StagedArtifact) error {
 		return s.out.TryEvent(proto.EvArtifact, a)
 	}}
 	go func() {
