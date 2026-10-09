@@ -1,16 +1,19 @@
 package runner
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -153,7 +156,9 @@ func (u *uploader) pass(ctx context.Context) {
 	// something to upload: a Run keeps up to maxPublished records besides
 	// its snapshots', long after their uploads finished.
 	staleEpochs := map[string]int{}
-	for snapID, rec := range u.r.snapshotRecords() {
+	records := u.r.snapshotRecords()
+	for _, snapID := range uploadOrder(records) {
+		rec := records[snapID]
 		// Only once luxd has the report that lists them: before, it does
 		// not know the blobs (and answers 404). A record that will never be
 		// reported (its placement was fenced off, or a later placement of
@@ -207,6 +212,25 @@ func (u *uploader) pass(ctx context.Context) {
 			removeSnapshotFiles(u.r, snapID, rec)
 		}
 	}
+}
+
+// uploadOrder: snapshots' records before published artifacts' (a resume
+// elsewhere waits for a snapshot), each group oldest first.
+func uploadOrder(records map[string]*snapshotRecord) []string {
+	ids := slices.Collect(maps.Keys(records))
+	slices.SortFunc(ids, func(a, b string) int {
+		ra, rb := records[a], records[b]
+		return cmp.Or(cmp.Compare(btoi(ra.Published != nil), btoi(rb.Published != nil)),
+			cmp.Compare(ra.Created, rb.Created), strings.Compare(a, b))
+	})
+	return ids
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func allUploaded(rec *snapshotRecord) bool {
