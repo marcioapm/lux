@@ -863,6 +863,7 @@ func TestOpenCodeObserverStaleSuccessKeepsNewerRefusal(t *testing.T) {
 	}
 	o.b.drop <- struct{}{}
 	o.backoff(t, "a backoff after the first stream dropped")
+	await(t, o.b.streamEnded, "the first SSE handler exiting")
 	o.b.setStatusCode(http.StatusForbidden)
 	o.step()
 	readB := o.nextGot(t)
