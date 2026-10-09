@@ -42,8 +42,7 @@ func insertArtifact(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoc
 // is refused instead.
 func validPublished(ap proto.ArtifactPublished) bool {
 	name, ok := strings.CutPrefix(ap.Path, proto.PublishedPrefix)
-	return ok && proto.ValidArtifactID(ap.ID) && proto.ValidArtifactName(name) == nil &&
-		proto.ValidContentType(ap.ContentType) == nil && proto.ValidDescription(ap.Description) == nil &&
+	return ok && proto.ValidArtifactID(ap.ID) && proto.ValidPublishFields(name, ap.ContentType, ap.Description) == nil &&
 		storableText(ap.BlobID, ap.SHA256, ap.FileSHA256)
 }
 

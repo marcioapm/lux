@@ -117,13 +117,7 @@ func (p *publisher) publish(c net.Conn) (proto.PublishReply, error) {
 }
 
 func checkRequest(req proto.PublishRequest, max int64) error {
-	if err := proto.ValidArtifactName(req.Name); err != nil {
-		return err
-	}
-	if err := proto.ValidContentType(req.ContentType); err != nil {
-		return err
-	}
-	if err := proto.ValidDescription(req.Description); err != nil {
+	if err := proto.ValidPublishFields(req.Name, req.ContentType, req.Description); err != nil {
 		return err
 	}
 	if req.Size < 0 {

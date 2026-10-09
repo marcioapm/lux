@@ -104,6 +104,18 @@ func ValidArtifactName(name string) error {
 	return nil
 }
 
+// ValidPublishFields checks a publish's name, content type and
+// description, in that order; the shim, the runner and luxd all apply it.
+func ValidPublishFields(name, contentType, description string) error {
+	if err := ValidArtifactName(name); err != nil {
+		return err
+	}
+	if err := ValidContentType(contentType); err != nil {
+		return err
+	}
+	return ValidDescription(description)
+}
+
 // ValidArtifactID: what the shim mints (ids.New(ids.Artifact)). A root
 // workload can forge records, and the id names files on the host.
 func ValidArtifactID(id string) bool {
