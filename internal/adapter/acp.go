@@ -130,6 +130,9 @@ type ACP struct {
 	statusSeq    int
 	statusCancel context.CancelFunc
 	statusReads  int
+	// statusRead, if set (by a test, before Run), gets the error of each
+	// status read once it is applied or discarded, under actMu.
+	statusRead func(error)
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -1127,6 +1130,9 @@ func (a *ACP) requestStatusLocked() {
 		}
 		if ctx.Err() == nil && a.ocGen == gen && a.statusSeq == seq {
 			a.applyOpenCodeBusyLocked(err == nil && busy)
+		}
+		if a.statusRead != nil {
+			a.statusRead(err)
 		}
 	})
 	if !ok {

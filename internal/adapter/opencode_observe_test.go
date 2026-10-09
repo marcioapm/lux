@@ -1,8 +1,14 @@
 package adapter
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,15 +78,173 @@ func jervasionCommand(port int) []string {
 // prompt.
 func ocObserved(t *testing.T, b *fakeBus, env []string) (*ACP, *agentWire, *fullSink, string) {
 	t.Helper()
+	return ocObservedOn(t, b.port(), env, nil)
+}
+
+// ocObservedOn is ocObserved on the server at 127.0.0.1:port; setup, if
+// set, runs on the adapter after Command and before Run.
+func ocObservedOn(t *testing.T, port int, env []string, setup func(*ACP)) (*ACP, *agentWire, *fullSink, string) {
+	t.Helper()
 	a := NewOpenCode()
 	a.WorkloadEnv(env)
-	cmd := jervasionCommand(b.port())
+	cmd := jervasionCommand(port)
 	if argv, err := a.Command(proto.ShimConfig{Command: cmd, Workdir: "/workspace"}); err != nil || strings.Join(argv, " ") != strings.Join(cmd, " ") {
 		t.Fatalf("argv %q, %v", argv, err)
+	}
+	if setup != nil {
+		setup(a)
 	}
 	sink := &fullSink{inputSink: &inputSink{}}
 	w, first := ocStartedOn(t, a, sink, sink.inputSink)
 	return a, w, sink, first
+}
+
+// recServer is an HTTP server that records each request as "METHOD path",
+// and the requests that carried an Authorization header.
+type recServer struct {
+	srv          *httptest.Server
+	mu           sync.Mutex
+	reqs, authed []string
+}
+
+func newRecServer(t *testing.T, h http.HandlerFunc) *recServer {
+	s := &recServer{}
+	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.reqs = append(s.reqs, r.Method+" "+r.URL.Path)
+		if r.Header.Get("Authorization") != "" {
+			s.authed = append(s.authed, r.Method+" "+r.URL.Path)
+		}
+		s.mu.Unlock()
+		h(w, r)
+	}))
+	t.Cleanup(s.srv.Close)
+	return s
+}
+
+func (s *recServer) port() int { return s.srv.Listener.Addr().(*net.TCPAddr).Port }
+
+func (s *recServer) snapshot() (reqs, authed []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.reqs), slices.Clone(s.authed)
+}
+
+// onlyBus fails unless every request in reqs is one of the two an observer
+// may send.
+func onlyBus(t *testing.T, what string, reqs []string) {
+	t.Helper()
+	for _, r := range reqs {
+		if r != "GET /event" && r != "GET /session/status" {
+			t.Fatalf("%s: request %q beyond GET /event and GET /session/status (all: %q)", what, r, reqs)
+		}
+	}
+}
+
+// serveStream answers an event stream: server.connected, then events, then
+// nothing until the client leaves.
+func serveStream(w http.ResponseWriter, r *http.Request, events ...string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	fmt.Fprint(w, "data: {\"type\":\"server.connected\",\"properties\":{}}\n\n")
+	for _, e := range events {
+		fmt.Fprintf(w, "data: %s\n\n", e)
+	}
+	w.(http.Flusher).Flush()
+	<-r.Context().Done()
+}
+
+// serveBusy answers as an OpenCode server whose session is busy: its event
+// stream says so, as does any other GET.
+func serveBusy(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/event") {
+		serveStream(w, r, ocStatus("busy"))
+		return
+	}
+	fmt.Fprintf(w, `{"%s":{"type":"busy"}}`, ocSession)
+}
+
+// An observed server that redirects GET /event or GET /session/status, to
+// another loopback server or to another path of its own: lux does not
+// follow. The target gets no request, no Authorization goes anywhere but
+// the two bus endpoints, a redirected stream is retried after a backoff, a
+// redirected status read is an error, and nothing the targets say (busy)
+// reaches the Run's activity.
+func TestOpenCodeObserverDoesNotFollowRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		endpoint  string
+		elsewhere bool
+	}{
+		{"event to another server", "/event", true},
+		{"event to another path", "/event", false},
+		{"status to another server", "/session/status", true},
+		{"status to another path", "/session/status", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			elsewhere := newRecServer(t, serveBusy)
+			target := "/elsewhere" + tc.endpoint
+			if tc.elsewhere {
+				target = elsewhere.srv.URL + tc.endpoint
+			}
+			observed := newRecServer(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == tc.endpoint:
+					http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+				case r.URL.Path == "/event":
+					serveStream(w, r)
+				case r.URL.Path == "/session/status":
+					fmt.Fprint(w, `{}`)
+				default:
+					serveBusy(w, r)
+				}
+			})
+			paused := make(chan time.Duration, 1)
+			statusErr := make(chan error, 64)
+			_, w, sink, first := ocObservedOn(t, observed.port(), []string{"OPENCODE_SERVER_PASSWORD=" + ocPassword}, func(a *ACP) {
+				a.bus.pause = func(_ context.Context, d time.Duration) bool {
+					paused <- d
+					return false // the test has seen the one attempt it needs
+				}
+				a.statusRead = func(err error) {
+					select {
+					case statusErr <- err:
+					default:
+					}
+				}
+			})
+			if tc.endpoint == "/event" {
+				select {
+				case <-paused:
+				case <-waitTimeout():
+					t.Fatal("a redirected GET /event was not retried after a backoff")
+				}
+			} else {
+				for done := false; !done; {
+					select {
+					case err := <-statusErr:
+						if err == nil {
+							t.Fatal("a redirected status read succeeded")
+						}
+						done = !errors.Is(err, context.Canceled)
+					case <-waitTimeout():
+						t.Fatal("no status read")
+					}
+				}
+			}
+			w.resolve(first, ocResult)
+			checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+			if reqs, authed := elsewhere.snapshot(); len(reqs) != 0 || len(authed) != 0 {
+				t.Fatalf("the redirect's target got %q (authorized: %q)", reqs, authed)
+			}
+			reqs, authed := observed.snapshot()
+			onlyBus(t, "observed", reqs)
+			onlyBus(t, "observed, authorized", authed)
+			if !slices.Contains(reqs, "GET "+tc.endpoint) {
+				t.Fatalf("observed: no GET %s in %q", tc.endpoint, reqs)
+			}
+			sink.noSecret(t)
+		})
+	}
 }
 
 // A command lux did not build, with OpenCode's server on its own --port
