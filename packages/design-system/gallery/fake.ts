@@ -376,3 +376,32 @@ export const fakeCostLines: FakeCostLine[] = [
   { source: "model-gateway", family: "ai", item: "text-embedding-3-small", amount: "0.000412", currency: "USD", final: false },
   { source: "render-farm", family: "video", item: "encode-1080p", amount: "2.10", currency: "EUR", final: true },
 ];
+
+/** Cost broken down by who submitted it (the Overview's "API key"): names, a revoked key, a person, and Runs from before tracking. */
+export const fakeKeyBreakdown = [
+  { id: "key_ci", label: "ci-review-bot", color: "var(--chart-1)", currency: "USD", runs: 41, compute: "2.71", external: "38.55", total: "41.26", share: 0.7, mono: true },
+  { id: "key_dude", label: "dude-prod", color: "var(--chart-2)", currency: "USD", runs: 23, compute: "0.85", external: "12.12", total: "12.97", share: 0.22, mono: true },
+  { id: "key_old", label: "marcio-laptop", color: "var(--chart-3)", currency: "USD", runs: 4, compute: "0.22", external: "2.73", total: "2.95", share: 0.05, mono: true, pill: "revoked" },
+  { id: "email:ada@example.com", label: "ada@example.com", color: "var(--chart-4)", currency: "USD", runs: 2, compute: "0.05", external: null, total: "0.05", share: 0.001 },
+  { id: "(none)", label: "Before key tracking", color: "var(--st-neutral-dot)", currency: "USD", runs: 6, compute: "0.09", external: "1.68", total: "1.77", share: 0.03, quiet: true },
+];
+
+/** A label's values with their cost, for the label filter picker. */
+export const fakeLabelValues: Record<string, { value: string; amounts: { currency: string; amount: string }[] }[]> = {
+  app: [
+    { value: "jervasion", amounts: [{ currency: "USD", amount: "50.60" }] },
+    { value: "dude", amounts: [{ currency: "USD", amount: "7.39" }] },
+  ],
+  "jervasion.repository": [
+    { value: "absmartly/abs", amounts: [{ currency: "USD", amount: "31.40" }] },
+    { value: "absmartly/sdk-plugins", amounts: [{ currency: "USD", amount: "9.10" }] },
+    { value: "marcioapm/jervasion", amounts: [{ currency: "USD", amount: "7.90" }] },
+    { value: "absmartly/docs", amounts: [{ currency: "USD", amount: "1.20" }] },
+  ],
+};
+
+export const fakeRunLabels: Record<string, string>[] = [
+  { app: "jervasion", "jervasion.repository": "absmartly/abs", "jervasion.pr": "5336" },
+  { app: "dude", "dude.phase": "implement", "dude.ticket": "DASH-41" },
+  {},
+];
