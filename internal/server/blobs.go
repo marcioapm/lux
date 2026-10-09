@@ -78,10 +78,14 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 		}
-		if err := markUploaded(r.Context(), tx, runID, epoch); err != nil || tag.RowsAffected() == 0 || kind != "artifact" {
+		if err := markUploaded(r.Context(), tx, runID, epoch); err != nil {
 			return err
 		}
-		// The event last: event streams come after every row lock.
+		// Only the upload that moved the blob to s3 adds the event, and
+		// last: event streams come after every row lock.
+		if tag.RowsAffected() == 0 || kind != "artifact" {
+			return nil
+		}
 		return artifactUploaded(r.Context(), tx, id)
 	})
 	if err != nil {
