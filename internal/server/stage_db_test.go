@@ -214,14 +214,17 @@ func TestAcceptedAssignmentLeavesWaiting(t *testing.T) {
 	newStageEvents(t, s, ctx, "accepted", 0, stageEvent{StageImage, "", *run.Placements[0].AcceptedAt, 1})
 }
 
-// stopRun asks r1's placement to stop for reason, in a transaction of its own.
+// stopRun asks r1's placement on h1 to stop for reason, in a transaction
+// of its own.
 func stopRun(t *testing.T, s *Server, ctx context.Context, reason string) {
 	t.Helper()
+	var host string
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := s.requestStop(ctx, tx, "t1", r1, reason)
+		var err error
+		host, err = s.requestStop(ctx, tx, "t1", r1, reason)
 		return err
-	}); err != nil {
-		t.Fatal(err)
+	}); err != nil || host != "h1" {
+		t.Fatalf("stop: %q %v", host, err)
 	}
 }
 

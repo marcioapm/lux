@@ -290,8 +290,11 @@ func (c *conn) reportOnce(ctx context.Context, f proto.Frame) (proto.Frame, erro
 	if ws != nil {
 		// websocket.Conn closes itself when a write's ctx ends mid-frame:
 		// a report abandoned by its caller must not drop the connection,
-		// so the write is bounded by writeRaw's timeout alone.
-		if err := c.writeRaw(context.WithoutCancel(ctx), ws, f); err != nil {
+		// but the caller's deadline (the heartbeat's 10 s) still applies.
+		wctx, cancel := withoutCancelKeepDeadline(ctx)
+		err := c.writeRaw(wctx, ws, f)
+		cancel()
+		if err != nil {
 			cleanup()
 			return proto.Frame{}, err
 		}
@@ -309,6 +312,16 @@ func (c *conn) reportOnce(ctx context.Context, f proto.Frame) (proto.Frame, erro
 		cleanup()
 		return proto.Frame{}, ctx.Err()
 	}
+}
+
+// withoutCancelKeepDeadline detaches ctx from its parent's cancellation
+// while keeping the parent's deadline, if any.
+func withoutCancelKeepDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	wctx := context.WithoutCancel(ctx)
+	if d, ok := ctx.Deadline(); ok {
+		return context.WithDeadline(wctx, d)
+	}
+	return wctx, func() {}
 }
 
 func (c *conn) writeRaw(ctx context.Context, ws *websocket.Conn, f proto.Frame) error {
