@@ -377,15 +377,35 @@ func TestOpenCodeObservesServerItDidNotStart(t *testing.T) {
 		"accepted steer next_step receipt=false", "turn_end", "idle", "busy", "idle")
 
 	b.mu.Lock()
-	authed, refused, reqs := b.authed, b.refused, fmt.Sprint(b.requests)
+	authed, refused := b.authed, b.refused
+	var reqs []string
+	for r, n := range b.requests {
+		for range n {
+			reqs = append(reqs, r)
+		}
+	}
 	b.mu.Unlock()
 	if authed == 0 || refused != 0 {
 		t.Fatalf("Basic auth: %d requests authenticated, %d refused", authed, refused)
 	}
-	if b.count("POST /session/"+ocSession+"/prompt_async") != 0 || b.count("GET /session/"+ocSession+"/message") != 0 {
-		t.Fatalf("lux used the observed server beyond its bus: %s", reqs)
-	}
+	onlyBus(t, "observed", reqs)
 	sink.noSecret(t)
+}
+
+// The last OPENCODE_SERVER_USERNAME stands, and an empty one is the
+// default user, as it is when it is the only one.
+func TestOpenCodeObserverEmptyUsernameIsDefault(t *testing.T) {
+	b := newFakeBus(t)
+	b.password = ocPassword
+	_, w, sink, first := ocObserved(t, b, []string{"OPENCODE_SERVER_USERNAME=alice", "OPENCODE_SERVER_PASSWORD=" + ocPassword, "OPENCODE_SERVER_USERNAME="})
+	w.resolve(first, ocResult)
+	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+	b.mu.Lock()
+	authed, refused := b.authed, b.refused
+	b.mu.Unlock()
+	if authed == 0 || refused != 0 {
+		t.Fatalf("Basic auth: %d requests authenticated, %d refused", authed, refused)
+	}
 }
 
 // The server refuses lux's password on every GET /event: lux asks again

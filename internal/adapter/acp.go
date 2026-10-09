@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -253,9 +254,7 @@ func (a *ACP) WorkloadEnv(env []string) {
 		case ocPasswordEnv:
 			a.ocPassword = v
 		case ocUsernameEnv:
-			if v != "" {
-				a.ocUser = v
-			}
+			a.ocUser = cmp.Or(v, ocDefaultUser)
 		}
 	}
 }
