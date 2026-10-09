@@ -37,6 +37,22 @@ func stagePublished(t *testing.T, f *finishFixture, name, content string) proto.
 	return a
 }
 
+// storeStaged stores a's staged copy as onPublished would, without
+// reporting it.
+func storeStaged(t *testing.T, f *finishFixture, a proto.StagedArtifact) *snapshotRecord {
+	t.Helper()
+	rt, err := os.OpenRoot(filepath.Join(f.r.cfg.DataDir, "rt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	rec, err := f.p.storePublished(rt, a.File, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
+
 func appendEvent(t *testing.T, f *finishFixture, typ string, data any) {
 	t.Helper()
 	path := filepath.Join(f.r.cfg.DataDir, "rt", proto.OutputFile(1))
@@ -151,13 +167,8 @@ func TestPublishedArtifactIsReportedOnce(t *testing.T) {
 func TestPublishedArtifactUnackedIsReportedAgain(t *testing.T) {
 	f := newFinishFixture(t)
 	a := stagePublished(t, f, "x.txt", "x")
-	rt, _ := os.OpenRoot(filepath.Join(f.r.cfg.DataDir, "rt"))
-	defer rt.Close()
-	rec, err := f.p.storePublished(rt, a.File, a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = rt.Remove(a.File)
+	rec := storeStaged(t, f, a)
+	_ = os.Remove(filepath.Join(f.r.cfg.DataDir, "rt", a.File))
 	tailToEnd(f)
 	got := f.published()
 	if len(got) != 1 || got[0].ID != a.ID || got[0].BlobID != rec.Published.BlobID {
@@ -239,13 +250,8 @@ func TestForgedPublishRecordsAreIgnored(t *testing.T) {
 func TestPublishedRecordOfAnotherRunIsIgnored(t *testing.T) {
 	f := newFinishFixture(t)
 	a := stagePublished(t, f, "x.txt", "x")
-	rt, _ := os.OpenRoot(filepath.Join(f.r.cfg.DataDir, "rt"))
-	defer rt.Close()
 	f.p.runID = "runA"
-	recA, err := f.p.storePublished(rt, a.File, a)
-	if err != nil {
-		t.Fatal(err)
-	}
+	recA := storeStaged(t, f, a)
 	f.p.runID = "run1"
 	tailToEnd(f)
 	if got := f.published(); len(got) != 0 {
@@ -372,12 +378,7 @@ func TestPublishedArtifactNotAsRecorded(t *testing.T) {
 func TestPublishedArtifactRefused(t *testing.T) {
 	f := newFinishFixture(t)
 	a := stagePublished(t, f, "x.txt", "x")
-	rt, _ := os.OpenRoot(filepath.Join(f.r.cfg.DataDir, "rt"))
-	defer rt.Close()
-	rec, err := f.p.storePublished(rt, a.File, a)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rec := storeStaged(t, f, a)
 	f.r.publishedAcked(a.ID, proto.Ack{Refused: true})
 	if _, err := os.Stat(rec.Uploads[0].Path); !os.IsNotExist(err) {
 		t.Fatalf("blob kept: %v", err)
