@@ -53,12 +53,12 @@ func getRun(t *testing.T, s *Server, key string) Run {
 	return run
 }
 
-// stageEvents are r1's run.stage events, oldest first.
+// stageEvents are r1's stage events, oldest first.
 func stageEvents(t *testing.T, s *Server, ctx context.Context) []map[string]any {
 	t.Helper()
 	var out []map[string]any
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT data FROM run_events WHERE run_id = $1 AND type = 'run.stage' ORDER BY id`, r1)
+		rows, err := tx.Query(ctx, `SELECT data FROM run_events WHERE run_id = $1 AND type = 'stage' ORDER BY id`, r1)
 		if err != nil {
 			return err
 		}
@@ -150,11 +150,11 @@ func TestLateStartingAfterRunningChangesNothing(t *testing.T) {
 		t.Fatalf("%d state events, was %d", n, states)
 	}
 	if n := len(stageEvents(t, s, ctx)); n != stages {
-		t.Fatalf("%d run.stage events, was %d", n, stages)
+		t.Fatalf("%d stage events, was %d", n, stages)
 	}
 }
 
-// run.stage is emitted once per change of stage, in order, with its since
+// A stage event is emitted once per change of stage, in order, with its since
 // and epoch, and never for a report that changes nothing.
 func TestRunStageEmittedOncePerChange(t *testing.T) {
 	s, ctx, _ := stageFixture(t)
@@ -181,7 +181,7 @@ func TestRunStageEmittedOncePerChange(t *testing.T) {
 		{StageVolumes, t0}, {StageRepositories, t0.Add(time.Second)}, {StageContainer, t0.Add(2 * time.Second)}, {StageRunning, t0.Add(3 * time.Second)},
 	}
 	if len(got) != len(want) {
-		t.Fatalf("run.stage events %v, want %d: one per change", got, len(want))
+		t.Fatalf("stage events %v, want %d: one per change", got, len(want))
 	}
 	for i, w := range want {
 		since, err := time.Parse(time.RFC3339Nano, got[i]["since"].(string))
@@ -240,7 +240,7 @@ func TestAcceptedAssignmentLeavesWaiting(t *testing.T) {
 	}
 	got := stageEvents(t, s, ctx)
 	if len(got) != 1 || got[0]["stage"] != StageImage {
-		t.Fatalf("run.stage events %v, want one: image", got)
+		t.Fatalf("stage events %v, want one: image", got)
 	}
 }
 

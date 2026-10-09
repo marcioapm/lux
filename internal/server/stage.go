@@ -157,4 +157,4 @@ func announceStage(ctx context.Context, tx pgx.Tx, runID string) error {
 }
 
 // evRunStage is the Run event noteStage emits.
-const evRunStage = "run.stage"
+const evRunStage = "stage"

@@ -5,7 +5,7 @@
 -- start of the container stage.
 ALTER TABLE placements ADD COLUMN repos_ready_at timestamptz;
 
--- stage_announced: the stage the latest run.stage event announced
+-- stage_announced: the stage the latest stage event announced
 -- ({stage, since, reason}), so a report that changes nothing announces
 -- nothing. NULL until the first announcement: a Run from before this
 -- migration announces its stage at its next change of any input.
