@@ -133,9 +133,11 @@ type ACP struct {
 	statusReads  int
 	// statusRead, if set (by a test, before Run), gets the error of each
 	// status read once it is applied or discarded, under actMu; busHandled
-	// gets each bus event once onBus has handled it.
+	// gets each bus event once onBus has handled it; statusGot gets each
+	// status read's error as its response is in, before actMu.
 	statusRead func(error)
 	busHandled func(busEvent)
+	statusGot  func(error)
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -1138,21 +1140,31 @@ func (a *ACP) requestStatusLocked() {
 	ok := a.spawn(func() {
 		defer cancel()
 		busy, err := a.bus.sessionBusy(ctx, session)
-		refused := a.bus.observer && errors.Is(err, errRefused)
-		switch {
-		case refused:
-			a.bus.refused(err)
-		case err == nil:
-			a.bus.accepted()
+		if a.statusGot != nil {
+			a.statusGot(err)
 		}
 		a.actMu.Lock()
 		defer a.actMu.Unlock()
 		a.statusReads--
+		// Only a current read's outcome counts, its auth outcome too: one
+		// a newer read superseded, or whose stream ended, says nothing of
+		// the server now. A bus event since its dispatch (ocGen) outdates
+		// its status, not whether the server accepted lux.
+		current := ctx.Err() == nil && a.statusSeq == seq
 		if a.statusSeq == seq {
 			a.statusCancel = nil
 		}
-		if refused || (ctx.Err() == nil && a.ocGen == gen && a.statusSeq == seq) {
-			a.applyOpenCodeBusyLocked(err == nil && busy)
+		if current {
+			refused := a.bus.observer && errors.Is(err, errRefused)
+			switch {
+			case refused:
+				a.bus.refused(err)
+			case err == nil:
+				a.bus.accepted()
+			}
+			if refused || a.ocGen == gen {
+				a.applyOpenCodeBusyLocked(err == nil && busy)
+			}
 		}
 		if a.statusRead != nil {
 			a.statusRead(err)
