@@ -627,7 +627,7 @@ func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID s
 	// what was pending (a migration's).
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = 'resuming', state_reason = $3, pending_input = coalesce($2, pending_input), updated_at = now(),
 			state_changed_at = CASE WHEN state <> 'resuming' THEN now() ELSE state_changed_at END,
-			exit_code = NULL, finished_at = NULL, needs_host_since = now()
+			exit_code = NULL, finished_at = NULL, needs_host_since = now(), waiting_since = NULL
 		WHERE id = $1`, runID, in, why)
 	if err != nil {
 		return err
