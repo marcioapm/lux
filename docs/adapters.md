@@ -172,7 +172,12 @@ Per agent:
   container, is run as given and lux follows OpenCode's server on
   `127.0.0.1:N` for **activity only**, as above: the same combined state,
   status reads on connect and once the session is known, idle while the
-  stream is down, the same backoff. lux sends that server nothing but
+  stream is down, the same backoff. The last `--port` counts; a last
+  `--port` with no value or a bad one means no server following. lux
+  trusts that this port is OpenCode's: it does not check what answers
+  there. A wrapper that runs OpenCode in a container of its own (for
+  example in a `--nested` pool) must share the Run's network namespace or
+  forward the port onto its `127.0.0.1`. lux sends that server nothing but
   `GET /event` and `GET /session/status`: steers, interrupts and input receipts stay on ACP (a steer is a
   second `session/prompt`, accepted with no receipt), and lux never calls
   its `prompt_async`. If the workload's environment has
