@@ -1,31 +1,79 @@
-import { useMemo, type ReactNode } from "react";
-import { Badge, Card, CENTS, ColorKey, EmptyState, familyColor, FamilyKey, formatMoney, ListPriceNote, Money, MoneyList, rangeText, SectionHeader, SegmentedControl, Select, Skeleton, sumMoney, Table, TimeSeriesChart, type Column, type SelectOption } from "@lux/design-system";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
+import {
+  BreakdownTable,
+  Card,
+  CENTS,
+  ColorKey,
+  EmptyState,
+  familyColor,
+  FilterBar,
+  FilterChip,
+  formatMoney,
+  InfoStrip,
+  Kpi,
+  KpiStrip,
+  KpiSub,
+  LabelChips,
+  LabelFilterPopover,
+  ListPriceNote,
+  Money,
+  MoneyList,
+  rangeText,
+  SectionHeader,
+  SegmentedControl,
+  Select,
+  SplitBar,
+  sumMoney,
+  Table,
+  TimeSeriesChart,
+  type BreakdownTableRow,
+  type Column,
+  type LabelValueOption,
+  type MoneyAmount,
+} from "@lux/design-system";
 import { api, type CostSummaryRow, type MoneyTotal } from "../../api/index.ts";
+import { costInterval, stepNote } from "../every.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorStrip, RunLink, RunNameLink, runPath } from "./common.tsx";
 import {
+  addFilter,
+  bandFilter,
+  bandLabel,
+  breakdownBands,
+  breakdownCharts,
+  breakdownGroup,
+  breakdownRows,
   changes,
   COMPUTE,
   costSince,
+  defaultLabelKey,
   familyCharts,
   familyMeta,
   familyRows,
-  intervalWord,
+  filterQuery,
+  filterText,
+  NONE,
+  OTHER,
+  peakBands,
   peakRuns,
   peaks,
   peakWindows,
-  perChoices,
   previousWindow,
   ratio,
-  resolvePer,
+  runsByValue,
+  runsListPath,
+  shownRunIds,
   shownTotals,
   sideTotals,
   topSplit,
+  type Band,
+  type Breakdown,
+  type BreakdownKind,
   type CostInterval,
-  type CostPer,
   type CostShow,
   type FamilyRow,
+  type LabelFilter,
   type Peak,
   type SideTotals,
   type SplitRow,
@@ -36,78 +84,103 @@ const POLL = 60_000;
 const EXTERNAL_COLOR = "var(--chart-7)";
 const COMPUTE_COLOR = familyColor(COMPUTE);
 const SHOW_WORD: Record<CostShow, string> = { all: "total", compute: "compute", external: "external" };
+const BY_LABEL: Record<BreakdownKind, string> = { family: "Family", label: "Label", key: "API key", pool: "Pool", tenant: "Tenant" };
 
 /**
- * Cost over the page's range, in one panel: KPIs, cost per bucket as
- * stacked bars by family (one chart per currency), the top Runs with their
- * Compute/External split, cost by family and, for an operator viewing all
- * tenants, the unallocated host time and the top tenants. Show (?cost=)
- * counts all, compute or external costs; Per (?per=) picks the bucket.
- * Costs are hourly: the 1h range reads 6h.
+ * Cost over the page's range, in one panel: KPIs, cost per bucket (the
+ * page's step, hour or UTC day) stacked by the breakdown, one chart per
+ * currency; the top Runs with their split and labels; cost by the
+ * breakdown; and, for an operator viewing all tenants, unallocated host
+ * time and the top tenants. Show (?cost=) counts all, compute or external
+ * costs; Break down by (?by=) picks the stack; label filters (?label=,
+ * ?nolabel=) narrow every figure here, the previous window included.
  */
 export function OverviewCost() {
   const scope = useScope();
   const show = scope.costShow;
   const since = costSince(scope.range);
-  const per = resolvePer(since, scope.costPer);
-  const interval = per.interval;
+  const step = scope.step("cost");
+  const interval = costInterval(step);
+  const filters = scope.costFilters;
+  const fq = filterQuery(filters);
+  const fkey = JSON.stringify(fq);
+  const filtered = filters.length > 0;
 
-  const byFamily = useScopedQuery(`costs:family:${since}:${interval}`, (t, s) => api.costs(t, { group: ["family"], interval, since }, s), { interval: POLL });
-  const byRun = useScopedQuery(`costs:run-family:${since}`, (t, s) => api.costs(t, { group: ["run", "family"], since }, s), { interval: POLL });
-  const byTenant = useScopedQuery(`costs:tenant-family:${since}`, (t, s) => api.costs(t, { group: ["tenant", "family"], since }, s), { interval: POLL, enabled: scope.showTenant });
+  // Label keys on costed Runs in range (unfiltered: the breakdown and the picker offer every key).
+  const labelKeys = useScopedQuery(`costs:labels:${since}`, (t, s) => api.costLabels(t, { since }, s), { interval: POLL });
+  const keys = useMemo(() => (labelKeys.data?.keys ?? []).map((k) => k.key), [labelKeys.data]);
+  const by: Breakdown = scope.costBy.kind === "label" ? { kind: "label", key: defaultLabelKey(scope.costBy.key, keys) } : scope.costBy;
+  const dim = breakdownGroup(by);
+  const family = by.kind === "family";
+
+  const byFamily = useScopedQuery(`costs:family:${since}:${interval}:${fkey}`, (t, s) => api.costs(t, { group: ["family"], interval, since, ...fq }, s), { interval: POLL });
+  // The breakdown's series and totals, with the family to apply Show.
+  const byDim = useScopedQuery(`costs:${dim}-family:${since}:${interval}:${fkey}`, (t, s) => api.costs(t, { group: [dim, "family"], interval, since, ...fq }, s), { interval: POLL, enabled: !family });
+  const byRun = useScopedQuery(`costs:run-family:${since}:${fkey}`, (t, s) => api.costs(t, { group: ["run", "family"], since, ...fq }, s), { interval: POLL });
+  // Runs per value: one more summary, by the breakdown and run.
+  const dimRuns = useScopedQuery(`costs:${dim}-run:${since}:${fkey}`, (t, s) => api.costs(t, { group: [dim, "run"], since, ...fq }, s), { interval: POLL, enabled: !family });
+  const byTenant = useScopedQuery(`costs:tenant-family:${since}:${fkey}`, (t, s) => api.costs(t, { group: ["tenant", "family"], since, ...fq }, s), { interval: POLL, enabled: scope.showTenant && by.kind !== "tenant" });
   const tenantNames = useScopedQuery("tenants-names", (_t, s) => api.tenants(s), { enabled: scope.showTenant });
-  // The window of equal length before this one, from the summary's own effective bounds.
+  // The window of equal length before this one, from the summary's own effective bounds, under the same filters.
   const prev = byFamily.data ? previousWindow(byFamily.data) : null;
-  const before = useScopedQuery(`costs:family:prev:${prev?.from}:${prev?.to}`, (t, s) => api.costs(t, { group: ["family"], from: prev!.from, to: prev!.to }, s), { enabled: prev != null });
+  const before = useScopedQuery(`costs:family:prev:${prev?.from}:${prev?.to}:${fkey}`, (t, s) => api.costs(t, { group: ["family"], from: prev!.from, to: prev!.to, ...fq }, s), { enabled: prev != null });
   // The peak bucket's Runs: one small summary per distinct peak bucket (one per currency at most), once the peak is known.
   const peakList = useMemo(() => peaks(byFamily.data, show), [byFamily.data, show]);
   const windows = useMemo(() => peakWindows(peakList, interval), [peakList, interval]);
   const peakKey = windows.map((w) => w.from).join(",");
   const peakRows = useScopedQuery(
-    `costs:peak-runs:${interval}:${peakKey}`,
-    (t, s) => Promise.all(windows.map((w) => api.costs(t, { group: ["run", "family"], from: w.from, to: w.to }, s).then((d) => ({ at: Date.parse(w.from) / 1000, d })))),
-    { interval: POLL, enabled: windows.length > 0 },
+    `costs:peak-runs:${interval}:${peakKey}:${fkey}`,
+    (t, s) => Promise.all(windows.map((w) => api.costs(t, { group: ["run", "family"], from: w.from, to: w.to, ...fq }, s).then((d) => ({ at: Date.parse(w.from) / 1000, d })))),
+    { interval: POLL, enabled: windows.length > 0 && family },
   );
 
   const all = byFamily.data?.totals ?? [];
   const shown = useMemo(() => shownTotals(all, show), [all, show]);
   const sides = useMemo(() => sideTotals(all), [all]);
   const change = useMemo(() => changes(shown, before.data ? shownTotals(before.data.totals, show) : []), [shown, before.data, show]);
-  const charts = useMemo(() => familyCharts(byFamily.data, interval, show), [byFamily.data, interval, show]);
   const runs = useMemo(() => topSplit(byRun.data?.totals ?? [], "run", show), [byRun.data, show]);
   const tenants = useMemo(() => topSplit(byTenant.data?.totals ?? [], "tenant", show), [byTenant.data, show]);
-  const families = useMemo(() => familyRows(all, show), [all, show]);
   const meta = useMemo(() => familyMeta(byFamily.data?.families), [byFamily.data]);
   const tenantName = useMemo(() => new Map((tenantNames.data ?? []).map((t) => [t.id, t.name])), [tenantNames.data]);
-  // Names come with the summary grouped by run: one call, not one per row.
-  const runNames = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const d of [byRun.data, ...(peakRows.data ?? []).map((w) => w.d)]) for (const r of d?.runs ?? []) m.set(r.id, r.name ?? "");
+  const keyInfo = useMemo(() => new Map((byDim.data?.keys ?? []).map((k) => [k.id, k])), [byDim.data]);
+  const runInfo = useMemo(() => {
+    const m = new Map<string, { name?: string; labels?: Record<string, string> }>();
+    for (const d of [byRun.data, ...(peakRows.data ?? []).map((w) => w.d)]) for (const r of d?.runs ?? []) m.set(r.id, r);
     return m;
   }, [byRun.data, peakRows.data]);
   const peakRun = useMemo(() => peakRuns(peakList, (peakRows.data ?? []).map((w) => ({ at: w.at, rows: w.d.totals })), show), [peakList, peakRows.data, show]);
 
-  const error = byFamily.error ?? byRun.error ?? byTenant.error ?? before.error ?? peakRows.error;
+  // The breakdown: bands per currency, its charts, its rows and its peak.
+  const bands = useMemo(() => breakdownBands(byDim.data?.totals ?? [], dim, show), [byDim.data, dim, show]);
+  const names = { keys: keyInfo, tenants: tenantName };
+  const label = (b: Band) => bandLabel(b, by, names);
+  const dimCharts = useMemo(() => breakdownCharts(byDim.data, dim, interval, show, bands), [byDim.data, dim, interval, show, bands]);
+  const famCharts = useMemo(() => familyCharts(byFamily.data, interval, show), [byFamily.data, interval, show]);
+  const perValue = useMemo(() => runsByValue(dimRuns.data?.totals ?? [], dim, shownRunIds(byRun.data?.totals ?? [], show)), [dimRuns.data, dim, byRun.data, show]);
+  const dimRows = useMemo(() => breakdownRows(byDim.data?.totals ?? [], dim, show, bands, dimRuns.data ? perValue : undefined), [byDim.data, dim, show, bands, dimRuns.data, perValue]);
+  const familyRuns = useMemo(() => (byRun.data?.totals ? runsByValue(byRun.data.totals, "family", shownRunIds(byRun.data.totals, show)) : undefined), [byRun.data, show]);
+  const peakBand = useMemo(() => peakBands(peakList, byDim.data, dim, show, bands), [peakList, byDim.data, dim, show, bands]);
+
+  const error = labelKeys.error ?? byFamily.error ?? byDim.error ?? byRun.error ?? dimRuns.error ?? byTenant.error ?? before.error ?? peakRows.error;
   const words = rangeText(since);
-  const loading = byFamily.loading;
+  const loading = byFamily.loading || (!family && byDim.loading);
   const empty = !loading && all.length === 0;
+  const preTracking = by.kind === "key" ? perValue.get(NONE)?.size ?? 0 : 0;
 
   const showOptions = [
     { value: "all" as const, label: "All" },
     { value: "compute" as const, label: <ColorKey color={COMPUTE_COLOR}>Compute</ColorKey>, title: "Host time Runs reserved (the compute family)" },
     { value: "external" as const, label: <ColorKey color={EXTERNAL_COLOR}>External</ColorKey>, title: "Every other family: what cost plugins report (AI models and others)" },
   ];
-  const perOptions: SelectOption<CostPer>[] = perChoices(since).map((c) => ({
-    value: c.value,
-    text: c.value === "auto" ? `Auto · ${intervalWord(c.interval)}` : c.value === "hour" ? "Hourly" : "Daily",
-    label: (
-      <span className="cost-per-opt">
-        <span>{c.value === "auto" ? "Auto" : c.value === "hour" ? "Hourly" : "Daily"}</span>
-        {!c.disabled && <span className="muted">{c.value === "auto" ? `${intervalWord(c.interval)} for ${since}` : `${c.buckets} bars`}</span>}
-      </span>
-    ),
-    disabled: c.disabled,
-  }));
+  const kinds: BreakdownKind[] = scope.showTenant ? ["family", "label", "key", "pool", "tenant"] : ["family", "label", "key", "pool"];
+  const byOptions = kinds.map((k) => ({ value: k, label: BY_LABEL[k] }));
+  const setBy = (k: BreakdownKind) => scope.setCostBy(k === "label" ? { kind: "label", key: by.kind === "label" ? by.key : "" } : ({ kind: k } as Breakdown));
+  const filterBy = (f: LabelFilter | null) => f && scope.setCostFilters(addFilter(filters, f));
+
+  const legendNote = `each bar is one ${interval === "hour" ? "hour" : "UTC day"} · no bar: nothing recorded, not $0`;
+  const charts = family
+    ? famCharts.map((c) => ({ currency: c.currency, x: c.x, ys: c.ys, series: c.series, totals: c.totals }))
+    : dimCharts.map((c) => ({ currency: c.currency, x: c.x, ys: c.ys, series: c.bands.map((b) => ({ label: label(b), color: b.color })), totals: c.totals }));
 
   return (
     <div className="stack cost-panel">
@@ -116,6 +189,7 @@ export function OverviewCost() {
         note={
           <span className="row">
             <ListPriceNote />
+            <span>{stepNote(step)}</span>
             {scope.range === "1h" && <span>the last hour reads 6h: costs are hourly buckets</span>}
           </span>
         }
@@ -127,21 +201,52 @@ export function OverviewCost() {
               </span>
               <SegmentedControl label="Show" options={showOptions} value={show} onChange={scope.setCostShow} />
             </span>
-            <Select options={perOptions} value={per.value} onChange={scope.setCostPer} prefix="Per" size="sm" />
+            <span className="cost-control">
+              <span className="cost-control-label" aria-hidden="true">
+                Break down by
+              </span>
+              <SegmentedControl label="Break down by" options={byOptions} value={by.kind} onChange={setBy} />
+              {by.kind === "label" && (
+                <Select
+                  options={(keys.length ? keys : [by.key]).map((k) => ({ value: k, text: k, label: <span className="mono">{k}</span> }))}
+                  value={by.key}
+                  onChange={(k) => scope.setCostBy({ kind: "label", key: k })}
+                  searchable={keys.length > 8}
+                  size="sm"
+                  prefix="Label"
+                />
+              )}
+            </span>
           </div>
         }
       />
+      <CostFilters filters={filters} since={since} keys={labelKeys.data?.keys ?? []} fq={fq} />
       <ErrorStrip error={error} />
       <Card className="cost-card" flush>
-        <div className="cost-kpis">
-          <TotalKpi show={show} words={words} since={since} loading={loading} shown={shown} sides={sides} change={change} />
-          <SideKpi side="compute" show={show} loading={loading} sides={sides} unit="host time Runs reserved" />
-          <SideKpi side="external" show={show} loading={loading} sides={sides} unit="reported by cost plugins" />
-          <PeakKpi interval={interval} show={show} loading={loading} peaks={peakList} runs={peakRun} names={runNames} />
-        </div>
+        <KpiStrip>
+          <TotalKpi show={show} words={words} since={since} loading={loading} shown={shown} sides={sides} change={change} filtered={filtered} />
+          {family ? (
+            <>
+              <SideKpi side="compute" show={show} loading={loading} sides={sides} unit="host time Runs reserved" />
+              <SideKpi side="external" show={show} loading={loading} sides={sides} unit="reported by cost plugins" />
+            </>
+          ) : (
+            <TopBandKpis rows={dimRows} loading={loading} label={label} />
+          )}
+          <PeakKpi interval={interval} show={show} loading={loading} peaks={peakList}>
+            {(p) => {
+              if (!family) {
+                const pb = peakBand.get(p.currency);
+                return pb ? `${label(pb.band)}${pb.share != null ? ` (${Math.round(pb.share * 100)}%)` : ""}` : null;
+              }
+              const run = peakRun.get(p.currency);
+              return run ? <RunNameLink id={run} name={runInfo.get(run)?.name} /> : null;
+            }}
+          </PeakKpi>
+        </KpiStrip>
         <div className="cost-charts">
           {charts.length === 0 ? (
-            <EmptyState compact title={loading ? "Loading…" : empty ? "No cost recorded in this range" : `No ${SHOW_WORD[show]} cost in this range`} description={loading ? undefined : "Nothing has been costed yet in this range; no figure is not a zero."} />
+            <EmptyState compact title={loading ? "Loading…" : empty ? `No cost recorded in this range${filtered ? " for these filters" : ""}` : `No ${SHOW_WORD[show]} cost in this range`} description={loading ? undefined : "Nothing has been costed yet in this range; no figure is not a zero."} />
           ) : (
             charts.map((c) => (
               <div className="cost-chart" key={c.currency}>
@@ -156,53 +261,118 @@ export function OverviewCost() {
                   bars
                   legend
                   legendValues={c.totals.map((t) => formatMoney(t, c.currency, { decimals: CENTS }))}
-                  legendNote={`each bar is one ${interval === "hour" ? "hour" : "UTC day"} · no bar: nothing recorded, not $0`}
+                  legendNote={family ? legendNote : `stacked by ${by.kind === "label" ? by.key : BY_LABEL[by.kind].toLowerCase()} · top 7 + Other · ${legendNote}`}
                 />
               </div>
             ))
           )}
+          {preTracking > 0 && <InfoStrip tone="warn">{preTracking} {preTracking === 1 ? "Run" : "Runs"} in this range were submitted before Lux recorded the submitting key; they show as “Before key tracking”.</InfoStrip>}
         </div>
       </Card>
       <div className="cost-lower">
-        <Card title="Top Runs" subtitle={`by ${SHOW_WORD[show]} cost · ${words}`} actions={<Link to="/runs">All Runs →</Link>} flush>
-          <SplitTable rows={runs} loading={byRun.loading} show={show} lead="Run" name={(r) => <RunNameLink id={r.key} name={runNames.get(r.key)} />} sub={(r) => (runNames.get(r.key) ? <RunLink id={r.key} /> : null)} onClick={(r) => go(runPath(r.key))} empty={`No Run has a ${SHOW_WORD[show] === "total" ? "" : SHOW_WORD[show] + " "}cost in this range.`} />
-        </Card>
         <div className="cost-side">
-          <Card title="By family" subtitle={words} flush footer={scope.showTenant && show !== "external" ? <Unallocated amounts={byFamily.data?.unallocated} loading={loading} /> : undefined}>
-            <FamilyTable rows={families} meta={meta} loading={loading} />
-          </Card>
-          {scope.showTenant && (
+          {family ? (
+            <Card title="By family" subtitle={words} flush footer={scope.showTenant && show !== "external" && !filtered ? <Unallocated amounts={byFamily.data?.unallocated} loading={loading} /> : undefined}>
+              <FamilyTable rows={familyRows(all, show)} meta={meta} loading={loading} runs={familyRuns} />
+            </Card>
+          ) : (
+            <Card title={`By ${by.kind === "label" ? by.key : BY_LABEL[by.kind] === "API key" ? "API key" : BY_LABEL[by.kind].toLowerCase()}`} subtitle={`${words}${by.kind === "label" ? " · click a row to filter" : by.kind === "key" ? " · the key's name as it is now" : ""}`} flush>
+              <BreakdownTable
+                lead={by.kind === "label" ? by.key : BY_LABEL[by.kind]}
+                loading={loading}
+                rows={dimRows.map((r): BreakdownTableRow => ({
+                  id: r.band.id,
+                  label: label(r.band),
+                  color: r.band.color,
+                  currency: r.currency,
+                  runs: r.runs,
+                  compute: r.compute,
+                  external: r.external,
+                  total: r.amount,
+                  share: r.share,
+                  mono: by.kind === "label" || (by.kind === "key" && !keyInfo.get(r.band.id)?.email && r.band.id !== NONE && !(keyInfo.get(r.band.id)?.operator && !keyInfo.get(r.band.id)?.name)),
+                  quiet: r.band.id === NONE || r.band.id === OTHER,
+                  pill: by.kind === "key" && keyInfo.get(r.band.id)?.revoked ? "revoked" : undefined,
+                }))}
+                onRowClick={by.kind === "label" ? (r) => filterBy(bandFilter(dimRows.find((x) => x.band.id === r.id)!.band, by)) : undefined}
+                empty="Nothing has a cost in this range."
+              />
+            </Card>
+          )}
+          {scope.showTenant && by.kind !== "tenant" && (
             <Card title="Top tenants" subtitle={`by ${SHOW_WORD[show]} cost · ${words}`} flush>
               <SplitTable rows={tenants} loading={byTenant.loading} show={show} lead="Tenant" name={(r) => tenantName.get(r.key) ?? r.key} empty="No tenant has a cost in this range." compact />
             </Card>
           )}
         </div>
+        <Card title="Top Runs" subtitle={`by ${SHOW_WORD[show]} cost · ${words}`} actions={<Link to={runsListPath(filters)}>All Runs →</Link>} flush>
+          <SplitTable
+            rows={runs}
+            loading={byRun.loading}
+            show={show}
+            lead="Run"
+            name={(r) => <RunNameLink id={r.key} name={runInfo.get(r.key)?.name} />}
+            sub={(r) => (runInfo.get(r.key)?.name ? <RunLink id={r.key} /> : null)}
+            labels={(r) => <LabelChips labels={runInfo.get(r.key)?.labels} first={by.kind === "label" ? [by.key, "app"] : ["app"]} />}
+            onClick={(r) => go(runPath(r.key))}
+            empty={`No Run has a ${SHOW_WORD[show] === "total" ? "" : SHOW_WORD[show] + " "}cost in this range.`}
+          />
+        </Card>
       </div>
     </div>
   );
 }
 
-function Kpi({ label, value, sub, loading, muted, children }: { label: ReactNode; value: ReactNode; sub?: ReactNode; loading: boolean; muted?: boolean; children?: ReactNode }) {
+/** The filter bar: a chip per filter, the "＋ Label filter" popover, and what the filters reach. */
+function CostFilters({ filters, since, keys, fq }: { filters: LabelFilter[]; since: string; keys: { key: string; runs: number }[]; fq: ReturnType<typeof filterQuery> }) {
+  const scope = useScope();
+  const [picking, setPicking] = useState<string | null>(null);
+  // The picked key's values with their cost, under the filters already set.
+  const values = useScopedQuery(`costs:values:${picking}:${since}:${JSON.stringify(fq)}`, (t, s) => api.costs(t, { group: [`label:${picking}`], since, ...fq }, s), { enabled: picking != null });
+  const amounts = useMemo(() => {
+    const m = new Map<string, MoneyAmount[]>();
+    for (const r of values.data?.totals ?? []) {
+      const v = r.group?.[`label:${picking}`] ?? NONE;
+      m.set(v, [...(m.get(v) ?? []), { currency: r.currency, amount: r.amount }]);
+    }
+    return m;
+  }, [values.data, picking]);
+  const valueList = useCallback(
+    (key: string): LabelValueOption[] | undefined => (key !== picking || !values.data ? undefined : [...amounts].filter(([v]) => v !== NONE).map(([value, a]) => ({ value, amounts: a }))),
+    [picking, values.data, amounts],
+  );
   return (
-    <div className={muted ? "cost-kpi is-muted" : "cost-kpi"}>
-      <div className="cost-kpi-label">{label}</div>
-      <div className="cost-kpi-value">{loading ? <Skeleton width={96} height={24} /> : value}</div>
-      {!loading && sub && <div className="cost-kpi-sub">{sub}</div>}
-      {!loading && children}
-    </div>
+    <FilterBar
+      add={
+        <LabelFilterPopover
+          keys={keys}
+          initialKey={keys.some((k) => k.key === "app") ? "app" : undefined}
+          values={valueList}
+          notSet={(key) => (key === picking ? amounts.get(NONE) : undefined)}
+          onKeyChange={setPicking}
+          onApply={(f) => scope.setCostFilters(addFilter(filters, f.notSet ? { key: f.key, values: [], notSet: true } : { key: f.key, values: f.values }))}
+        />
+      }
+      note={filters.length > 0 ? "filters apply to every cost figure below · the other Overview charts are not per-label" : "the other Overview charts are not per-label"}
+    >
+      {filters.map((f) => {
+        const t = filterText(f);
+        return <FilterChip key={`${f.key}:${f.notSet ? "-" : "+"}`} name={t.key} op={t.op} value={t.values} onRemove={() => scope.setCostFilters(filters.filter((x) => x !== f))} />;
+      })}
+    </FilterBar>
   );
 }
 
 const pct = (r: number | null) => (r == null ? null : `${Math.round(r * 100)}%`);
 
-function TotalKpi({ show, words, since, loading, shown, sides, change }: { show: CostShow; words: string; since: string; loading: boolean; shown: MoneyTotal[]; sides: SideTotals[]; change: ReturnType<typeof changes> }) {
+function TotalKpi({ show, words, since, loading, shown, sides, change, filtered }: { show: CostShow; words: string; since: string; loading: boolean; shown: MoneyTotal[]; sides: SideTotals[]; change: ReturnType<typeof changes>; filtered: boolean }) {
   const label = show === "all" ? "Total" : show === "compute" ? "Compute total" : "External total";
   const one = shown.length === 1;
   const lines = change.filter((c) => c.ratio != null);
   return (
-    <Kpi label={`${label} · ${words}`} loading={loading} value={<MoneyList amounts={shown} large decimals={CENTS} />}>
+    <Kpi label={`${label}${filtered ? " · filtered" : ""} · ${words}`} loading={loading} value={<MoneyList amounts={shown} large decimals={CENTS} />}>
       {lines.length > 0 && (
-        <div className="cost-kpi-sub" data-cost-change>
+        <KpiSub data-cost-change>
           {lines.map((c) => (
             <span key={c.currency} className="cost-change">
               {!one && `${c.currency} `}
@@ -210,18 +380,26 @@ function TotalKpi({ show, words, since, loading, shown, sides, change }: { show:
             </span>
           ))}{" "}
           vs previous {since}
-        </div>
+        </KpiSub>
       )}
       {show !== "all" && (
-        <div className="cost-kpi-sub">
+        <KpiSub>
           of <MoneyList amounts={sides.flatMap((s) => (s.all == null ? [] : [{ currency: s.currency, amount: s.all }]))} decimals={CENTS} /> all costs
-        </div>
+        </KpiSub>
       )}
       {sides.map((s) => (
-        <SplitBar key={s.currency} compute={s.compute} external={s.external} whole={s.all} currency={s.currency} show={show} label={sides.length > 1 ? s.currency : undefined} />
+        <SplitBar key={s.currency} currency={s.currency} whole={s.all} label={sides.length > 1 ? s.currency : undefined} parts={splitParts(s.compute, s.external, show)} />
       ))}
     </Kpi>
   );
+}
+
+/** Compute and External as SplitBar parts; the side Show hides is drawn faint, never dropped. */
+function splitParts(compute: string | null, external: string | null, show: CostShow) {
+  return [
+    { amount: compute, color: COMPUTE_COLOR, label: "Compute", faint: show === "external" },
+    { amount: external, color: EXTERNAL_COLOR, label: "External", faint: show === "compute" },
+  ];
 }
 
 function SideKpi({ side, show, loading, sides, unit }: { side: "compute" | "external"; show: CostShow; loading: boolean; sides: SideTotals[]; unit: string }) {
@@ -239,6 +417,29 @@ function SideKpi({ side, show, loading, sides, unit }: { side: "compute" | "exte
   );
 }
 
+/** The two values costing the most (in the first currency), with their share and Runs; Other and the value-less band never lead. */
+function TopBandKpis({ rows, loading, label }: { rows: ReturnType<typeof breakdownRows>; loading: boolean; label: (b: Band) => string }) {
+  const currency = rows[0]?.currency;
+  const top = rows.filter((r) => r.currency === currency && r.band.id !== OTHER && r.band.id !== NONE).slice(0, 2);
+  return (
+    <>
+      {[0, 1].map((i) => {
+        const r = top[i];
+        if (!r) return <Kpi key={i} label={i === 0 ? "Top value" : "Next"} loading={loading} value={<span className="muted">–</span>} muted />;
+        return (
+          <Kpi
+            key={r.band.id}
+            label={<ColorKey color={r.band.color}>{label(r.band)}</ColorKey>}
+            loading={loading}
+            value={<Money amount={r.amount} currency={r.currency} decimals={CENTS} />}
+            sub={[pct(r.share), r.runs != null ? `${r.runs} ${r.runs === 1 ? "Run" : "Runs"}` : null].filter(Boolean).join(" · ")}
+          />
+        );
+      })}
+    </>
+  );
+}
+
 function peakWhen(at: number, interval: CostInterval): string {
   const d = new Date(at * 1000);
   if (interval === "day") return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
@@ -250,43 +451,22 @@ function peakWhen(at: number, interval: CostInterval): string {
   return `${p(d.getHours())}:${p(d.getMinutes())} ${day}`;
 }
 
-function PeakKpi({ interval, show, loading, peaks: ps, runs, names }: { interval: CostInterval; show: CostShow; loading: boolean; peaks: Peak[]; runs: Map<string, string>; names: Map<string, string> }) {
+/** The bucket that cost the most, per currency, and what dominated it. */
+function PeakKpi({ interval, show, loading, peaks: ps, children }: { interval: CostInterval; show: CostShow; loading: boolean; peaks: Peak[]; children: (p: Peak) => ReactNode }) {
   return (
     <Kpi label={interval === "hour" ? "Peak hour" : "Peak day"} loading={loading} value={<MoneyList amounts={ps.map((p) => ({ currency: p.currency, amount: p.amount }))} large decimals={CENTS} />}>
       {ps.map((p) => {
-        const run = runs.get(p.currency);
+        const what = children(p);
         return (
-          <div className="cost-kpi-sub cost-peak" key={p.currency} data-cost-peak={p.currency}>
+          <KpiSub className="kpi-sub cost-peak" key={p.currency} data-cost-peak={p.currency}>
             {ps.length > 1 && `${p.currency} · `}
             {peakWhen(p.at, interval)}
-            {run && (
-              <>
-                {" · "}
-                <RunNameLink id={run} name={names.get(run)} />
-              </>
-            )}
-          </div>
+            {what && <> · {what}</>}
+          </KpiSub>
         );
       })}
-      {ps.length === 0 && show !== "all" && <div className="cost-kpi-sub">none in this range</div>}
+      {ps.length === 0 && show !== "all" && <KpiSub>none in this range</KpiSub>}
     </Kpi>
-  );
-}
-
-/** Compute and External as one bar against `whole`; the side Show hides is drawn faint, never dropped. */
-function SplitBar({ compute, external, whole, currency, show, label, scale = 1 }: { compute: string | null; external: string | null; whole: string | null; currency: string; show: CostShow; label?: string; scale?: number }) {
-  const c = Math.max(0, ratio(compute, whole) ?? 0);
-  const e = Math.max(0, ratio(external, whole) ?? 0);
-  const sum = c + e || 1;
-  const title = [compute != null ? `Compute ${formatMoney(compute, currency)}` : null, external != null ? `External ${formatMoney(external, currency)}` : null].filter(Boolean).join(" · ");
-  return (
-    <div className="cost-split" title={title || undefined} data-cost-split>
-      {label && <span className="cost-split-label">{label}</span>}
-      <span className="cost-split-track" style={{ width: `${Math.max(2, scale * 100)}%` }}>
-        {c > 0 && <span className={show === "external" ? "cost-split-part is-faint" : "cost-split-part"} style={{ flexGrow: c / sum, background: COMPUTE_COLOR }} />}
-        {e > 0 && <span className={show === "compute" ? "cost-split-part is-faint" : "cost-split-part"} style={{ flexGrow: e / sum, background: EXTERNAL_COLOR }} />}
-      </span>
-    </div>
   );
 }
 
@@ -295,7 +475,7 @@ const partOf = (r: SplitRow, side: "compute" | "external") => {
   return parts.length ? sumMoney(parts) : null;
 };
 
-function SplitTable({ rows, loading, show, lead, name, sub, onClick, empty, compact }: { rows: SplitRow[]; loading: boolean; show: CostShow; lead: string; name: (r: SplitRow) => ReactNode; sub?: (r: SplitRow) => ReactNode; onClick?: (r: SplitRow) => void; empty: string; compact?: boolean }) {
+function SplitTable({ rows, loading, show, lead, name, sub, labels, onClick, empty, compact }: { rows: SplitRow[]; loading: boolean; show: CostShow; lead: string; name: (r: SplitRow) => ReactNode; sub?: (r: SplitRow) => ReactNode; labels?: (r: SplitRow) => ReactNode; onClick?: (r: SplitRow) => void; empty: string; compact?: boolean }) {
   // Bars are as long as a row's whole cost against the largest in its currency: a ratio for drawing, never a sum across currencies.
   const max = new Map<string, number>();
   for (const r of rows) max.set(r.currency, Math.max(max.get(r.currency) ?? 0, Number(r.all)));
@@ -311,29 +491,35 @@ function SplitTable({ rows, loading, show, lead, name, sub, onClick, empty, comp
         </span>
       ),
     },
-    ...(compact ? [] : [{ key: "split", header: "Split", width: "30%", cell: (r: SplitRow) => <SplitBar compute={partOf(r, "compute")} external={partOf(r, "external")} whole={r.all} currency={r.currency} show={show} scale={Number(r.all) / (max.get(r.currency) || 1)} /> }]),
+    ...(labels ? [{ key: "labels", header: "Labels", width: "34%", cell: labels }] : []),
+    ...(compact ? [] : [{ key: "split", header: "Split", width: labels ? "16%" : "30%", cell: (r: SplitRow) => <SplitBar parts={splitParts(partOf(r, "compute"), partOf(r, "external"), show)} whole={r.all} currency={r.currency} scale={Number(r.all) / (max.get(r.currency) || 1)} /> }]),
     // Ordering only: the figure is formatted from the string.
-    { key: "amount", header: "Cost", cell: (r) => <Money amount={r.amount} currency={r.currency} decimals={CENTS} />, align: "right", mono: true, width: 110 },
+    { key: "amount", header: "Cost", cell: (r) => <Money amount={r.amount} currency={r.currency} decimals={CENTS} />, align: "right", mono: true, width: 96 },
   ];
   return <Table columns={cols} rows={rows} rowKey={(r) => `${r.currency}:${r.key}`} loading={loading} loadingRows={3} onRowClick={onClick} empty={empty} dense={compact} />;
 }
 
-function FamilyTable({ rows, meta, loading }: { rows: FamilyRow[]; meta: ReturnType<typeof familyMeta>; loading: boolean }) {
-  const multi = new Set(rows.map((r) => r.currency)).size > 1;
-  const cols: Column<FamilyRow>[] = [
-    { key: "family", header: "Family", lead: true, cell: (r) => <FamilyKey family={r.family} displayName={meta.get(r.family)?.displayName ?? (r.family === COMPUTE ? "Compute" : undefined)} color={meta.get(r.family)?.color} /> },
-    { key: "kind", header: "Kind", width: 96, cell: (r) => <Badge tone="neutral">{r.family === COMPUTE ? "Compute" : "External"}</Badge> },
-    { key: "amount", header: "Cost", align: "right", mono: true, width: 104, cell: (r) => <Money amount={r.amount} currency={r.currency} decimals={CENTS} /> },
-    { key: "share", header: multi ? "Share (per currency)" : "Share", align: "right", mono: true, width: multi ? 92 : 64, cell: (r) => pct(r.share) ?? "–" },
-  ];
-  return <Table columns={cols} rows={rows} rowKey={(r) => `${r.currency}:${r.family}`} loading={loading} loadingRows={2} empty="No family has a cost in this range." dense />;
+function FamilyTable({ rows, meta, loading, runs }: { rows: FamilyRow[]; meta: ReturnType<typeof familyMeta>; loading: boolean; runs?: Map<string, Set<string>> }) {
+  return (
+    <BreakdownTable
+      lead="Family"
+      loading={loading}
+      rows={rows.map((r) => {
+        const m = meta.get(r.family);
+        const compute = r.family === COMPUTE;
+        return { id: r.family, label: m?.displayName ?? (compute ? "Compute" : r.family), color: familyColor(r.family, m?.color), currency: r.currency, runs: runs ? (runs.get(r.family)?.size ?? 0) : null, compute: compute ? r.amount : null, external: compute ? null : r.amount, total: r.amount, share: r.share };
+      })}
+      empty="No family has a cost in this range."
+    />
+  );
 }
 
 function Unallocated({ amounts, loading }: { amounts: CostSummaryRow[] | undefined; loading: boolean }) {
   return (
     <div className="cost-unallocated" title="Host time no Run reserved: apart from the Runs' cost, never added to it">
       <span>Unallocated host time</span>
-      {loading ? <Skeleton width={56} height={14} /> : <MoneyList amounts={amounts} decimals={CENTS} />}
+      {loading ? null : <MoneyList amounts={amounts} decimals={CENTS} />}
     </div>
   );
 }
+
