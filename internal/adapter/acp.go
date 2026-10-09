@@ -314,6 +314,10 @@ func (a *ACP) setSession(id string) {
 	a.mu.Unlock()
 	a.sink.Session(id)
 	a.activity(true)
+	// A stream that connected before the session was known read no status.
+	if a.bus != nil && a.bus.isConnected() {
+		a.spawn(func() { a.syncBusStatus(a.runCtx()) })
+	}
 }
 
 // drain sends the next queued input as a prompt, if the agent is idle.

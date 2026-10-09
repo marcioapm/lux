@@ -781,6 +781,29 @@ func TestOpenCodeBusIdleBeforeTurnIdleIsOne(t *testing.T) {
 		"accepted late next_step receipt=true", "consumed late", "turn_end", "idle", "turn_end")
 }
 
+// A resumed session OpenCode already runs a loop for, with the event
+// stream up before session/load answers and no busy event after: once the
+// session is known its status is read, and the Run shows busy.
+func TestOpenCodeResumeReadsStatusOnceSessionKnown(t *testing.T) {
+	b := newFakeBus(t)
+	b.setLoop(true)
+	a := NewOpenCode()
+	a.bus = newOpencodeBus(b.port(), "/workspace")
+	w, sink := startWire(t, a, proto.ShimConfig{Resume: true, SessionID: ocSession})
+	id, _ := w.next("initialize")
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}`)
+	id, _ = w.next("session/load")
+	if !a.bus.waitConnected(context.Background(), 5*time.Second) {
+		t.Fatal("bus never connected")
+	}
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{}}`)
+	sink.wait(t, "busy")
+	w.exit()
+	if got := sink.lines(); !slices.Equal(got, []string{"idle", "busy"}) {
+		t.Fatalf("got %q", got)
+	}
+}
+
 // waitBusTurn waits until the adapter has handled the ACP turn's result.
 func waitBusTurn(t *testing.T, a *ACP) {
 	t.Helper()
