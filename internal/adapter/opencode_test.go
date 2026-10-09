@@ -642,10 +642,12 @@ func TestOpenCodeHTTPTurnShowsBusy(t *testing.T) {
 	b.setLoop(true)
 	b.events <- ocStatus("busy")
 	sink.waitLast(t, "busy")
+	gen := busGen(a)
 	b.events <- ocStatus("retry")
 	b.events <- ocStatus("busy")
+	waitGen(t, a, gen+2) // retry and busy handled
 	b.setLoop(false)
-	gen := busGen(a)
+	gen = busGen(a)
 	b.events <- ocStatus("idle")
 	b.events <- ocIdle
 	waitGen(t, a, gen+2) // both of the idle pair handled
@@ -998,9 +1000,7 @@ func TestOpenCodeResumeReadsStatusOnceSessionKnown(t *testing.T) {
 	id, _ := w.next("initialize")
 	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}`)
 	id, _ = w.next("session/load")
-	if !a.bus.waitConnected(context.Background(), 5*time.Second) {
-		t.Fatal("bus never connected")
-	}
+	waitGen(t, a, 1) // streamUp has run, with the session still unknown
 	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{}}`)
 	sink.wait(t, "busy")
 	w.exit()
