@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"net/http"
 	"path"
 	"strings"
 	"unicode/utf8"
@@ -57,6 +58,15 @@ type StagedArtifact struct {
 	Size        int64  `json:"size"`
 	SHA256      string `json:"sha256"`
 	File        string `json:"file"`
+}
+
+// DetectContentType is a file's content type by its name's extension, else
+// sniffed from head, its first 512 bytes.
+func DetectContentType(name string, head []byte) string {
+	if t := mime.TypeByExtension(path.Ext(name)); t != "" {
+		return t
+	}
+	return http.DetectContentType(head)
 }
 
 // ValidArtifactName checks a published artifact's name: relative,

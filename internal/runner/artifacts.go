@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"mime"
-	"net/http"
 	"os"
 	"path"
 	"slices"
@@ -156,10 +154,7 @@ func (p *placement) artifactBlobAs(blobID string, root *os.Root, rel, name, ctyp
 	head := make([]byte, 512)
 	n, _ := io.ReadFull(f, head)
 	if ctype == "" {
-		ctype = mime.TypeByExtension(path.Ext(name))
-	}
-	if ctype == "" {
-		ctype = http.DetectContentType(head[:n])
+		ctype = proto.DetectContentType(name, head[:n])
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return proto.Artifact{}, err
