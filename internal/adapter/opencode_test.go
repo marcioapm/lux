@@ -545,6 +545,42 @@ func TestOpenCodeHTTPTurnShowsBusy(t *testing.T) {
 	}
 }
 
+// stays fails if the sink's last line is not want for d.
+func (s *inputSink) stays(t *testing.T, want string, d time.Duration) {
+	t.Helper()
+	for end := time.Now().Add(d); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if l := s.lines(); len(l) == 0 || l[len(l)-1] != want {
+			t.Fatalf("last line is not %q: %q", want, l)
+		}
+	}
+}
+
+// lux's ACP turn ends while a loop a client started over HTTP still runs:
+// the Run stays busy, with no idle in between, until OpenCode reports the
+// session idle.
+func TestOpenCodeACPTurnEndsWhileHTTPLoopRuns(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	onBus(t, a, ocStatus("busy"))
+	w.resolve(first, ocResult)
+	sink.wait(t, "turn_end")
+	sink.stays(t, "turn_end", 300*time.Millisecond)
+	b.setLoop(false)
+	b.events <- ocStatus("idle")
+	b.events <- ocIdle
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+}
+
+// The bus said busy and its idle was lost, or raced ahead of the ACP
+// result: when lux's turn ends, OpenCode's status is read again, so the
+// Run goes idle without waiting for another event.
+func TestOpenCodeACPTurnEndRereadsStatus(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	onBus(t, a, ocStatus("busy"))
+	b.setLoop(false)
+	w.resolve(first, ocResult)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+}
+
 // waitBusTurn waits until the adapter has handled the ACP turn's result.
 func waitBusTurn(t *testing.T, a *ACP) {
 	t.Helper()
