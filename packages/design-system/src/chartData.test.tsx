@@ -87,6 +87,12 @@ test("TimeSeriesChart bars: legend entries carry their values and the note", asy
     const legend = [...html.matchAll(/<button[^>]*tschart-legend-item[^>]*>(.*?)<\/button>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, ""));
     expect(legend).toEqual(["Compute$3.00", "AI models$7.00"]);
     expect(html).toContain("each bar is one hour");
+    // The label has an element of its own, apart from the value, so it can be found by its exact text.
+    const el = document.createElement("div");
+    el.innerHTML = html;
+    const items = [...el.querySelectorAll(".tschart-legend-item")];
+    expect(items.map((b) => b.querySelector(".tschart-legend-label")?.textContent)).toEqual(["Compute", "AI models"]);
+    expect(items.map((b) => b.querySelector(".tschart-legend-value")?.textContent)).toEqual(["$3.00", "$7.00"]);
   } finally {
     await GlobalRegistrator.unregister();
   }

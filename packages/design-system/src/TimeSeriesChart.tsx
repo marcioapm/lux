@@ -361,7 +361,7 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
             series.map((s, i) => (
               <button key={s.label} type="button" className={hidden.has(i) ? "tschart-legend-item is-hidden" : "tschart-legend-item"} onClick={() => toggle(i)} aria-pressed={!hidden.has(i)}>
                 <span className="tschart-key" style={{ background: colors[i], borderStyle: s.dashed ? "dashed" : undefined }} />
-                {s.label}
+                <span className="tschart-legend-label">{s.label}</span>
                 {legendValues?.[i] != null && <span className="tschart-legend-value num">{legendValues[i]}</span>}
               </button>
             ))}
