@@ -163,6 +163,51 @@ components:
         family:
           type: string
       type: object
+    CostKeyInfo:
+      additionalProperties: false
+      properties:
+        email:
+          description: A person's address.
+          type: string
+        id:
+          description: "The group value: an API key id, or email:<address> for a person."
+          type: string
+        name:
+          description: The key's name; absent for an operator's key when a tenant asks.
+          type: string
+        operator:
+          description: An operator's key.
+          type: boolean
+        revoked:
+          type: boolean
+      type: object
+    CostLabelKey:
+      additionalProperties: false
+      properties:
+        key:
+          type: string
+        runs:
+          description: Runs with cost in the range that carry this label.
+          format: int64
+          type: integer
+      type: object
+    CostLabels:
+      additionalProperties: false
+      properties:
+        from:
+          format: date-time
+          type: string
+        keys:
+          description: Most Runs first, then by key.
+          items:
+            $ref: "#/components/schemas/CostLabelKey"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+      type: object
     CostLine:
       additionalProperties: false
       properties:
@@ -248,6 +293,13 @@ components:
         hosts:
           items:
             $ref: "#/components/schemas/HostAllocation"
+          type:
+            - array
+            - "null"
+        keys:
+          description: "Grouped by key: each submitter in totals. (none) is Runs from before luxd recorded who submitted them."
+          items:
+            $ref: "#/components/schemas/CostKeyInfo"
           type:
             - array
             - "null"
@@ -2113,6 +2165,9 @@ components:
         steer:
           $ref: "#/components/schemas/Steer"
           description: What the Run's adapter does with input sent while the agent works (POST /v1/runs/{id}/input).
+        submittedBy:
+          $ref: "#/components/schemas/RunSubmitter"
+          description: "On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."
         tenant:
           description: The owning tenant's name.
           type: string
@@ -2430,6 +2485,19 @@ components:
             - "null"
         workload:
           $ref: "#/components/schemas/Workload"
+      type: object
+    RunSubmitter:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        keyId:
+          type: string
+        keyName:
+          description: Absent for an operator's key when a tenant asks.
+          type: string
+        revoked:
+          type: boolean
       type: object
     RunUsage:
       additionalProperties: false
@@ -3440,19 +3508,41 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
             type: string
-        - description: "Repeat up to twice: tenant (operators), pool, host, family, run, label:key."
+        - description: "Only Runs with this label (key=value, split at the first =). Repeat: the same key repeated matches any of its values; different keys must all match."
+          explode: true
+          in: query
+          name: label
+          schema:
+            description: "Only Runs with this label (key=value, split at the first =). Repeat: the same key repeated matches any of its values; different keys must all match."
+            items:
+              type: string
+            type:
+              - array
+              - "null"
+        - description: Only Runs without this label key. Repeatable.
+          explode: true
+          in: query
+          name: nolabel
+          schema:
+            description: Only Runs without this label key. Repeatable.
+            items:
+              type: string
+            type:
+              - array
+              - "null"
+        - description: "Repeat up to twice: tenant (operators), pool, host, family, run, key, label:key."
           explode: true
           in: query
           name: group
           schema:
-            description: "Repeat up to twice: tenant (operators), pool, host, family, run, label:key."
+            description: "Repeat up to twice: tenant (operators), pool, host, family, run, key, label:key."
             items:
               type: string
             type:
@@ -3512,6 +3602,115 @@ paths:
       security:
         - apiKey: []
       summary: Summarize costs by currency, time and up to two groups
+      tags:
+        - costs
+  /v1/costs/labels:
+    get:
+      description: |-
+        Each key with how many Runs with cost in the range carry it, after the label and nolabel filters. A key's values and their cost: GET /v1/costs?group=label:<key>.
+
+        Needs the `read` scope.
+      operationId: costLabels
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+            type: string
+        - description: "Only Runs with this label (key=value, split at the first =). Repeat: the same key repeated matches any of its values; different keys must all match."
+          explode: true
+          in: query
+          name: label
+          schema:
+            description: "Only Runs with this label (key=value, split at the first =). Repeat: the same key repeated matches any of its values; different keys must all match."
+            items:
+              type: string
+            type:
+              - array
+              - "null"
+        - description: Only Runs without this label key. Repeatable.
+          explode: true
+          in: query
+          name: nolabel
+          schema:
+            description: Only Runs without this label key. Repeatable.
+            items:
+              type: string
+            type:
+              - array
+              - "null"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CostLabels"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: The label keys on Runs with cost in a range
       tags:
         - costs
   /v1/events:
@@ -3658,12 +3857,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
             type: string
       responses:
         "200":
@@ -4009,12 +4208,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
             type: string
       responses:
         "200":
@@ -4315,12 +4514,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
             type: string
       responses:
         "200":
@@ -4818,12 +5017,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
             type: string
         - description: "Buckets of series: hour (default) or day."
           explode: false
@@ -5093,12 +5292,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
             type: string
       responses:
         "200":
@@ -6136,12 +6335,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
             type: string
       responses:
         "200":
