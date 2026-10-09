@@ -3242,7 +3242,7 @@ components:
             - "null"
         beforeStop:
           $ref: "#/components/schemas/BeforeStop"
-          description: "A command run in the container on every stop, before the workload is signalled: a stop asked for, a terminate, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."
+          description: "A command run in the container on every stop, before the workload is signalled: a stop asked for, a terminate, a timeout, a drain. Its output is the Run's; it can publish files as artifacts (/.lux/bin/lux-shim publish FILE). It cannot run when the container dies or its host is lost."
         command:
           items:
             type: string
