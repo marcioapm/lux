@@ -565,7 +565,21 @@ def cost_plugin(env):
     plugin.close()
 
 
-def test_overview_charts_cost_by_family(page, env, lux, runners, hosts, cost_plugin):
+def _cents(amount) -> str:
+    return f"${Decimal(amount).quantize(Decimal('0.01'), ROUND_HALF_EVEN)}"
+
+
+def _ui_matches_api(page, locator, api_cents, what):
+    """The UI's figure equals the API's at cents, both read again until they
+    agree: the fake plugin's open AI line grows between two reads."""
+    def same():
+        page.reload()
+        ui = locator.inner_text(timeout=15_000)
+        return ui == api_cents()
+    wait_until(same, 120, 2, f"{what}: the panel never matched the API")
+
+
+def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     """The Cost panel: KPIs over stacked bars by family, Top Runs with their
     labels, By family; then Show External, Every Day, Break down by the app
     label, and a label filter, each in the URL and in the figures."""
@@ -610,7 +624,7 @@ def test_overview_charts_cost_by_family(page, env, lux, runners, hosts, cost_plu
     # Show External: the Compute KPI is muted, the chart has no Compute series.
     page.goto(env.luxd_url + "/")
     expect(card.locator(".tschart-plot canvas")).to_have_count(1, timeout=15_000)
-    panel.get_by_role("radio", name="External").click()
+    panel.get_by_role("radio", name="External", exact=True).click()
     expect(page).to_have_url(re.compile(r"[?&]cost=external(&|$)"))
     expect(card.locator(".kpi.is-muted")).to_contain_text("Compute")
     expect(card.locator(".tschart-legend").get_by_text("Compute", exact=True)).to_have_count(0)
@@ -640,27 +654,31 @@ def test_overview_charts_cost_by_family(page, env, lux, runners, hosts, cost_plu
     panel.get_by_role("radio", name="Label", exact=True).click()
     expect(page).to_have_url(re.compile(r"[?&]by=label%3Aapp(&|$)"))
     by_app = panel.locator("section.card", has=page.get_by_role("heading", name="By app", exact=True))
-    expect(by_app.get_by_role("row").filter(has_text="e2e-app")).to_have_count(1, timeout=15_000)
+    app_row = by_app.get_by_role("row").filter(has_text="e2e-app")
+    expect(app_row).to_have_count(1, timeout=15_000)
     expect(card.locator(".tschart-legend").get_by_text("e2e-app", exact=True)).to_have_count(1)
-    want = lux.api("/v1/costs?since=24h&group=label:app").json()["totals"]
-    app_usd = next(r["amount"] for r in want if r["group"]["label:app"] == "e2e-app" and r["currency"] == "USD")
-    expect(by_app.get_by_role("row").filter(has_text="e2e-app").locator("td").nth(4)).to_have_text(f"${Decimal(app_usd).quantize(Decimal('0.01'), ROUND_HALF_EVEN)}")
+
+    def app_usd():
+        totals = lux.api("/v1/costs?since=24h&group=label:app").json()["totals"]
+        return _cents(next(r["amount"] for r in totals if r["group"]["label:app"] == "e2e-app" and r["currency"] == "USD"))
+    _ui_matches_api(page, app_row.locator("td").nth(4), app_usd, "By app e2e-app Total")
 
     # A row is a filter: app = e2e-app, in the URL and on every figure.
-    by_app.get_by_role("row").filter(has_text="e2e-app").click()
+    app_row.click()
     expect(page).to_have_url(re.compile(r"[?&]label=app%3De2e-app(&|$)"))
     expect(panel.locator("[data-filter-chip=app]")).to_contain_text("e2e-app")
     expect(card.locator(".kpi-label").first).to_contain_text("filtered")
-    filtered = lux.api("/v1/costs?since=24h&group=family&label=app%3De2e-app").json()["totals"]
-    total = sum(Decimal(r["amount"]) for r in filtered if r["currency"] == "USD")
-    expect(card.locator(".kpi").first.locator(".money-list-lg")).to_have_text(f"${total.quantize(Decimal('0.01'), ROUND_HALF_EVEN)}")
+
+    def filtered_usd():
+        totals = lux.api("/v1/costs?since=24h&group=family&label=app%3De2e-app").json()["totals"]
+        return _cents(sum(Decimal(r["amount"]) for r in totals if r["currency"] == "USD"))
+    _ui_matches_api(page, card.locator(".kpi").first.locator(".money-list-lg"), filtered_usd, "filtered Total")
     # All Runs → the Runs list filtered by the same label.
     expect(panel.get_by_role("link", name="All Runs →")).to_have_attribute("href", re.compile(r"^/runs\?label=app%3De2e-app"))
-    # A second filter from the picker: phase = check.
+    # A second filter from the picker: with app filtered, the picker opens on the only key left, phase.
     panel.locator(".filter-add").click()
     pop = panel.locator(".label-filter-pop")
-    pop.locator(".select-trigger").click()
-    pop.get_by_role("option", name=re.compile(r"^phase")).click()
+    expect(pop.locator(".select-value")).to_have_text("phase")
     pop.locator(".label-filter-value", has_text="check").click()
     pop.get_by_role("button", name="Apply").click()
     expect(page).to_have_url(re.compile(r"[?&]label=phase%3Dcheck(&|$)"))
@@ -782,7 +800,7 @@ def test_overview_memory_chart_fits_its_y_labels_and_tooltip_follows_the_cursor(
         ctx.close()
 
 
-def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator):
+def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator, lux):
     """All tenants: the Cost panel's By family has the unallocated host time
     under it, Top tenants beside it, and Tenant is a breakdown; narrowed to
     one tenant, neither."""
@@ -796,6 +814,12 @@ def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator):
     expect(panel.get_by_role("heading", name="By tenant", exact=True)).to_have_count(1)
     # Top tenants would repeat the breakdown: it gives way to it.
     expect(panel.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(0)
+    # Narrowed to one tenant: no Top tenants, no Tenant breakdown, no unallocated host time.
+    page.goto(env.luxd_url + f"/?tenant={lux.tenant_id}")
+    expect(panel.get_by_role("heading", name="By family", exact=True)).to_have_count(1, timeout=15_000)
+    expect(panel.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(0)
+    expect(panel.get_by_role("radio", name="Tenant", exact=True)).to_have_count(0)
+    expect(panel.locator(".cost-unallocated")).to_have_count(0)
     assert not page.errors, page.errors
 
 
