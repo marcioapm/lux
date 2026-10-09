@@ -665,3 +665,229 @@ func TestOpenCodeObserverStatusRefusalAfterActivity(t *testing.T) {
 	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy")
 	sink.noMoreWarnings(t)
 }
+
+// stepObserver is an observer of a fakeBus the test drives step by step:
+// each reconnect backoff waits for step, and each status read, once its
+// response is in, waits for the test to release it (got), until unstep.
+// Its first GET /event fails, Lux's turn is over and the Run idle.
+type stepObserver struct {
+	b                      *fakeBus
+	w                      *agentWire
+	sink                   *fullSink
+	paused, resume, free   chan struct{}
+	got                    chan gotStatus
+	reads                  statusReads
+	handled                chan string
+	freeOnce               sync.Once
+	first                  string
+	stepping, interceptGot bool
+}
+
+// gotStatus is a status read whose response is in, held until release
+// closes.
+type gotStatus struct {
+	err     error
+	release chan struct{}
+}
+
+func newStepObserver(t *testing.T, setup func(*fakeBus)) *stepObserver {
+	t.Helper()
+	o := &stepObserver{b: newFakeBus(t), paused: make(chan struct{}), resume: make(chan struct{}),
+		free: make(chan struct{}), got: make(chan gotStatus), reads: make(statusReads, 256), handled: make(chan string, 1024)}
+	t.Cleanup(o.unstep)
+	o.b.setEventFail(true)
+	if setup != nil {
+		setup(o.b)
+	}
+	_, w, sink, first := ocObservedOn(t, o.b.port(), nil, func(a *ACP) {
+		a.bus.pause = func(ctx context.Context, _ time.Duration) bool {
+			select {
+			case o.paused <- struct{}{}:
+			case <-o.free:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+			select {
+			case <-o.resume:
+				return true
+			case <-o.free:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		a.statusGot = func(err error) {
+			h := gotStatus{err, make(chan struct{})}
+			select {
+			case o.got <- h:
+			case <-o.free:
+				return
+			}
+			select {
+			case <-h.release:
+			case <-o.free:
+			}
+		}
+		a.statusRead = o.reads.hook
+		a.busHandled = func(ev busEvent) { o.handled <- ev.Type }
+	})
+	o.w, o.sink = w, sink
+	w.resolve(first, ocResult)
+	sink.waitLast(t, "idle")
+	await(t, o.paused, "a backoff after the failed GET /event")
+	o.b.setEventFail(false)
+	return o
+}
+
+// step ends the backoff the follower is in, so it connects again.
+func (o *stepObserver) step() { o.resume <- struct{}{} }
+
+// backoff waits for the follower's next backoff.
+func (o *stepObserver) backoff(t *testing.T, what string) {
+	t.Helper()
+	await(t, o.paused, what)
+}
+
+// nextGot is the next status read whose response is in, held.
+func (o *stepObserver) nextGot(t *testing.T) gotStatus {
+	t.Helper()
+	select {
+	case h := <-o.got:
+		return h
+	case <-waitTimeout():
+		t.Fatal("no status response")
+	}
+	return gotStatus{}
+}
+
+// nextRead is the error of the next status read applied or discarded,
+// cancelled or not.
+func (o *stepObserver) nextRead(t *testing.T) error {
+	t.Helper()
+	select {
+	case err := <-o.reads:
+		return err
+	case <-waitTimeout():
+		t.Fatal("no status read")
+	}
+	return nil
+}
+
+// statusHandled waits until the adapter has handled a session.status event.
+func (o *stepObserver) statusHandled(t *testing.T) {
+	t.Helper()
+	for ev := ""; ev != "session.status"; {
+		select {
+		case ev = <-o.handled:
+		case <-waitTimeout():
+			t.Fatal("the session.status event was not handled")
+		}
+	}
+}
+
+// unstep lets backoffs and status reads run without the test from now on.
+func (o *stepObserver) unstep() { o.freeOnce.Do(func() { close(o.free) }) }
+
+func (b *fakeBus) setStatusCode(code int) {
+	b.mu.Lock()
+	b.statusCode = code
+	b.mu.Unlock()
+}
+
+// Status read A succeeds, but its stream drops before A is applied; the
+// next stream's read B is refused. A, superseded, does not clear B's
+// refusal: a busy event on the stream after it stays masked, and the count
+// goes on from B's refusal, so lux gives up after refusalLimit refused
+// reads, with one warning, and is idle throughout.
+func TestOpenCodeObserverStaleSuccessKeepsNewerRefusal(t *testing.T) {
+	o := newStepObserver(t, func(b *fakeBus) { b.setLoop(true) })
+	o.step()
+	readA := o.nextGot(t)
+	if readA.err != nil {
+		t.Fatalf("read A: %v", readA.err)
+	}
+	o.b.drop <- struct{}{}
+	o.backoff(t, "a backoff after the first stream dropped")
+	o.b.setStatusCode(http.StatusForbidden)
+	o.step()
+	readB := o.nextGot(t)
+	if !errors.Is(readB.err, errRefused) {
+		t.Fatalf("read B: %v", readB.err)
+	}
+	close(readB.release)
+	if err := o.nextRead(t); !errors.Is(err, errRefused) {
+		t.Fatalf("read B applied: %v", err)
+	}
+	o.backoff(t, "a backoff after read B's refusal")
+	close(readA.release)
+	if err := o.nextRead(t); err != nil {
+		t.Fatalf("read A applied: %v", err)
+	}
+
+	// The third stream: its read is held while a busy event arrives.
+	o.b.holdStatus(true)
+	o.step()
+	held := o.b.nextStatus(t)
+	o.b.events <- ocStatus("busy")
+	o.statusHandled(t)
+	o.b.holdStatus(false)
+	o.unstep()
+	close(held.release)
+	want := fmt.Sprintf("opencode: its server refused lux %d times in a row; lux no longer follows its activity: refused: GET /session/status: 403 Forbidden",
+		refusalLimit)
+	if got := o.sink.nextWarning(t); got != want {
+		t.Fatalf("warning %q, want %q", got, want)
+	}
+	statuses := o.b.count("GET /session/status")
+	checkLines(t, o.w, o.sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+	o.sink.noMoreWarnings(t)
+	// Read A, then refusalLimit refused reads.
+	if statuses != 1+refusalLimit || o.b.count("GET /session/status") != statuses {
+		t.Fatalf("GET /session/status %d times at the warning, %d in all", statuses, o.b.count("GET /session/status"))
+	}
+}
+
+// Status read A is refused, but its stream drops before A is applied; the
+// next stream's read B succeeds, busy. A, superseded, neither drops the
+// recovered stream nor shows the Run idle: OpenCode's busy stands, and the
+// stream goes on to deliver its events unmasked.
+func TestOpenCodeObserverStaleRefusalKeepsRecovery(t *testing.T) {
+	o := newStepObserver(t, func(b *fakeBus) {
+		b.setLoop(true)
+		b.setStatusCode(http.StatusForbidden)
+	})
+	o.step()
+	readA := o.nextGot(t)
+	if !errors.Is(readA.err, errRefused) {
+		t.Fatalf("read A: %v", readA.err)
+	}
+	o.b.drop <- struct{}{}
+	o.backoff(t, "a backoff after the first stream dropped")
+	o.b.setStatusCode(0)
+	o.step()
+	readB := o.nextGot(t)
+	if readB.err != nil {
+		t.Fatalf("read B: %v", readB.err)
+	}
+	close(readB.release)
+	if err := o.nextRead(t); err != nil {
+		t.Fatalf("read B applied: %v", err)
+	}
+	o.sink.waitLast(t, "busy")
+	close(readA.release)
+	if err := o.nextRead(t); !errors.Is(err, errRefused) {
+		t.Fatalf("read A applied: %v", err)
+	}
+	o.b.events <- ocStatus("idle")
+	o.statusHandled(t)
+	o.b.events <- ocStatus("busy")
+	o.statusHandled(t)
+	o.unstep()
+	checkLines(t, o.w, o.sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy", "idle", "busy")
+	o.sink.noMoreWarnings(t)
+	// The failed one, the first stream and the recovered one.
+	if n := o.b.count("GET /event"); n != 3 {
+		t.Fatalf("GET /event %d times", n)
+	}
+}
