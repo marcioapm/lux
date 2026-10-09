@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -1239,6 +1240,128 @@ func TestOpenCodeBusRetriesUnansweredStream(t *testing.T) {
 	go b.follow(ctx, func(busEvent) {}, nil, nil)
 	if !b.waitConnected(context.Background(), 8*time.Second) {
 		t.Fatalf("never connected: %v", b.err())
+	}
+}
+
+// A terminal status refusal before stream registration prevents both the
+// initial event request and a reconnect, even if the server would hold it open.
+func TestOpenCodeTerminalRefusalBeforeStreamRegistration(t *testing.T) {
+	for _, reconnect := range []bool{false, true} {
+		name := "first_connection"
+		if reconnect {
+			name = "reconnect"
+		}
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			events, statuses, afterTerminal := 0, 0, 0
+			terminal := false
+			lateRequest := make(chan struct{}, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				late := terminal
+				if late {
+					afterTerminal++
+				}
+				if r.URL.Path == "/event" {
+					events++
+				} else if r.URL.Path == "/session/status" {
+					statuses++
+				}
+				mu.Unlock()
+				if late {
+					lateRequest <- struct{}{}
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					w.(http.Flusher).Flush()
+					<-r.Context().Done()
+					return
+				}
+				switch r.URL.Path {
+				case "/session/status":
+					http.Error(w, "denied", http.StatusForbidden)
+				case "/event":
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK) // clean EOF triggers a reconnect
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			b := newOpencodeObserver(srv.Listener.Addr().(*net.TCPAddr).Port, "/", "", "")
+			ctx, cancel := context.WithCancel(context.Background())
+			entered, release := make(chan struct{}), make(chan struct{})
+			registrations := 0
+			b.beforeRegister = func() {
+				registrations++
+				if reconnect && registrations == 1 {
+					return
+				}
+				close(entered)
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+			}
+			b.pause = func(ctx context.Context, _ time.Duration) bool { return ctx.Err() == nil }
+			sink := newFullSink()
+			a := NewOpenCode()
+			a.sink = sink
+			done := make(chan struct{})
+			var result error
+			go func() {
+				defer close(done)
+				result = b.follow(ctx, func(busEvent) {}, nil, nil)
+				if result != nil {
+					a.observerGaveUp(result)
+				}
+			}()
+			defer func() {
+				cancel()
+				await(t, done, "follower cleanup")
+			}()
+			await(t, entered, "stream registration seam")
+			var last error
+			for range refusalLimit {
+				var status any
+				_, last = b.get(ctx, "/session/status", &status)
+				if !errors.Is(last, errRefused) {
+					t.Fatalf("status refusal: %v", last)
+				}
+				b.refused(last)
+			}
+			if b.givenUp() != last {
+				t.Fatal("observer did not reach terminal refusal")
+			}
+			mu.Lock()
+			terminal = true
+			mu.Unlock()
+			close(release)
+			select {
+			case <-lateRequest:
+				t.Fatal("HTTP request after terminal refusal; server would hold the stream forever")
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("follower did not return the terminal refusal")
+			}
+			if result != last {
+				t.Fatalf("follower returned %v, want terminal refusal %v", result, last)
+			}
+			wantWarning := fmt.Sprintf("opencode: its server refused lux %d times in a row; lux no longer follows its activity: %v", refusalLimit, last)
+			if got := sink.nextWarning(t); got != wantWarning {
+				t.Fatalf("warning %q, want %q", got, wantWarning)
+			}
+			sink.noMoreWarnings(t)
+			mu.Lock()
+			defer mu.Unlock()
+			wantEvents := 0
+			if reconnect {
+				wantEvents = 1
+			}
+			if afterTerminal != 0 || events != wantEvents || statuses != refusalLimit {
+				t.Fatalf("requests: after terminal %d, events %d (want %d), statuses %d (want %d)", afterTerminal, events, wantEvents, statuses, refusalLimit)
+			}
+		})
 	}
 }
 

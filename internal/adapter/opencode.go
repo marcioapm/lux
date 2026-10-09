@@ -68,6 +68,9 @@ type opencodeBus struct {
 	// pause waits out one reconnect backoff d, false if ctx ends first; a
 	// timer unless a test sets it before Run.
 	pause func(ctx context.Context, d time.Duration) bool
+	// beforeRegister, nil in production, lets tests schedule a refusal before
+	// the terminal check and stream cancellation registration.
+	beforeRegister func()
 }
 
 // freeLoopbackPort is a port nothing listens on at 127.0.0.1 now.
@@ -231,12 +234,17 @@ type busEvent struct {
 func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, disconnected func()) error {
 	wait := followMin
 	for ctx.Err() == nil {
-		if err := b.givenUp(); err != nil {
-			return err
-		}
 		began := time.Now()
 		stream, drop := context.WithCancel(ctx)
+		if b.beforeRegister != nil {
+			b.beforeRegister()
+		}
 		b.mu.Lock()
+		if err := b.gaveUp; err != nil {
+			b.mu.Unlock()
+			drop()
+			return err
+		}
 		b.drop = drop
 		b.mu.Unlock()
 		err := b.followOnce(ctx, stream, on, connected, disconnected)
