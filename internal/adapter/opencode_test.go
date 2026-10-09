@@ -771,6 +771,54 @@ func TestOpenCodeReconnectStatusReadDoesNotBlockEvents(t *testing.T) {
 		"accepted s next_step receipt=true", "consumed s", "turn_end", "idle")
 }
 
+// A status read dispatched while the stream was up answers busy only after
+// the stream has dropped, and it cannot reconnect: OpenCode's side stays
+// idle while nothing can tell lux it went idle.
+func TestOpenCodeStatusReadAcrossDisconnectStaysIdle(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.holdStatus(true)
+	onBus(t, a, ocStatus("busy"))
+	w.resolve(first, ocResult)
+	h := b.nextStatus(t) // the turn end's read; the loop runs
+	b.setEventFail(true)
+	gen := busGen(a)
+	b.drop <- struct{}{}
+	waitGen(t, a, gen+1) // the disconnect
+	sink.waitLast(t, "idle")
+	close(h.release)
+	waitHandled(t, a)
+	if l := sink.lines(); l[len(l)-1] != "idle" || a.bus.isConnected() {
+		t.Fatalf("disconnected, after the held read answered busy: %q", l)
+	}
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+}
+
+// Two status reads overlap with no bus event between them: the older, which
+// saw OpenCode busy, answers last, after the newer saw it idle. The newer
+// stands.
+func TestOpenCodeOlderStatusReadDoesNotOverwriteNewer(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.holdStatus(true)
+	onBus(t, a, ocStatus("busy"))
+	w.resolve(first, ocResult)
+	older := b.nextStatus(t) // the first turn's end; the loop runs
+	b.setLoop(false)
+	a.Deliver(proto.Input{RequestID: "next", Text: "y"})
+	second, _ := w.next("session/prompt")
+	sink.wait(t, "accepted next")
+	w.resolve(second, ocResult)
+	newer := b.nextStatus(t) // the second turn's end; no loop
+	if !older.busy || newer.busy {
+		t.Fatalf("snapshots: older busy %v, newer busy %v", older.busy, newer.busy)
+	}
+	close(newer.release)
+	sink.waitLast(t, "idle")
+	close(older.release)
+	waitHandled(t, a)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end",
+		"accepted next next_step receipt=false", "turn_end", "idle")
+}
+
 // busGen is the count of bus status events, connects and disconnects the
 // adapter has handled.
 func busGen(a *ACP) int {
