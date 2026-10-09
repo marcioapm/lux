@@ -48,6 +48,7 @@ import {
   COMPUTE,
   defaultLabelKey,
   familyCharts,
+  familyCurrency,
   familyMeta,
   familyRows,
   filterQuery,
@@ -114,7 +115,8 @@ export function OverviewCost() {
   // Label keys on costed Runs in range (unfiltered: the breakdown and the picker offer every key).
   const labelKeys = useScopedQuery(`costs:labels:${since}`, (t, s) => api.costLabels(t, { since }, s), { interval: LABEL_KEYS_POLL });
   const keys = useMemo(() => (labelKeys.data?.keys ?? []).map((k) => k.key), [labelKeys.data]);
-  const keyKnown = scope.costBy.kind !== "label" || scope.costBy.key !== "" || labelKeys.data != null;
+  // A failed keys read falls back to the default key rather than holding the breakdown (and "Loading…") forever.
+  const keyKnown = scope.costBy.kind !== "label" || scope.costBy.key !== "" || labelKeys.data != null || labelKeys.error != null;
   const by: Breakdown = scope.costBy.kind === "label" ? { kind: "label", key: defaultLabelKey(scope.costBy.key, keys) } : scope.costBy;
   const dim = breakdownGroup(by);
   const family = by.kind === "family";
@@ -522,7 +524,7 @@ function FamilyTable({ rows, meta, loading, runs }: { rows: FamilyRow[]; meta: R
       rows={rows.map((r) => {
         const m = meta.get(r.family);
         const compute = r.family === COMPUTE;
-        return { id: r.family, label: m?.displayName ?? (compute ? "Compute" : r.family), color: familyColor(r.family, m?.color), currency: r.currency, runs: runs ? (runs.get(r.family) ?? 0) : null, compute: compute ? r.amount : null, external: compute ? null : r.amount, total: r.amount, share: r.share };
+        return { id: r.family, label: m?.displayName ?? (compute ? "Compute" : r.family), color: familyColor(r.family, m?.color), currency: r.currency, runs: runs ? (runs.get(familyCurrency(r.family, r.currency)) ?? 0) : null, compute: compute ? r.amount : null, external: compute ? null : r.amount, total: r.amount, share: r.share };
       })}
       empty="No family has a cost in this range."
     />

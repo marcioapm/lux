@@ -206,14 +206,14 @@ export interface SplitRow {
   all: string;
 }
 
-/** Rows' largest `limit` per currency by what show counts, largest first; never ranks across currencies. Rows grouped by `key` and family; luxd's (other) is not a row. */
+/** Rows' largest `limit` per currency by what show counts, largest first; never ranks across currencies. Rows grouped by `key` and family; luxd's fold (other: true) is not a row. */
 export function topSplit(rows: CostSummaryRow[], key: string, show: CostShow, limit = 10): SplitRow[] {
   const out: SplitRow[] = [];
   for (const [currency, rs] of byCurrency(rows)) {
     const byKey = new Map<string, Part[]>();
     for (const r of rs) {
       const k = r.group?.[key];
-      if (!k || k === SERVER_OTHER) continue;
+      if (!k || r.other) continue;
       push(byKey, k, { family: familyOf(r), amount: r.amount });
     }
     const ranked: SplitRow[] = [];
@@ -322,15 +322,15 @@ export function familyMeta(families: CostFamily[] | undefined): Map<string, Cost
 export const NONE = "(none)";
 /** The band of every value past the top ones; not a group value luxd sends. */
 export const OTHER = "\u0000other";
-/** The value luxd gives every value a top=N summary folds. */
-export const SERVER_OTHER = "(other)";
+/** The value a top=N summary's fold row (other: true) is keyed by here: no group value can be it (luxd's text holds no NUL). */
+export const FOLDED = "\u0000folded";
 /** Values stacked apart before the rest go into Other: the summaries' top=N. */
 export const TOP_VALUES = 7;
 
 export interface Band {
   /** A group value, OTHER or NONE. */
   id: string;
-  /** The group values it holds (Other: SERVER_OTHER among them). */
+  /** The group values it holds (Other: FOLDED among them). */
   values: string[];
   color: string;
   /** Other: how many values it holds. */
@@ -338,7 +338,7 @@ export interface Band {
 }
 
 /** A band's colour: chart slots in rank order, Other the last slot, (none) grey. */
-function bandColor(id: string, rank: number): string {
+function bandColorOf(id: string, rank: number): string {
   return id === NONE ? "var(--st-neutral-dot)" : id === OTHER ? "var(--chart-8)" : `var(--chart-${rank + 1})`;
 }
 
@@ -356,21 +356,24 @@ export function breakdownBands(rows: CostSummaryRow[], dim: string, show: CostSh
   const out = new Map<string, Band[]>();
   for (const [currency, rs] of byCurrency(rows.filter((r) => shows(show, familyOf(r))))) {
     const amounts = new Map<string, string[]>();
-    for (const r of rs) push(amounts, r.group?.[dim] ?? NONE, r.amount);
+    for (const r of rs) push(amounts, valueOf(r, dim), r.amount);
     const ranked = [...amounts]
-      .filter(([v]) => v !== NONE && v !== SERVER_OTHER)
+      .filter(([v]) => v !== NONE && v !== FOLDED)
       .map(([v, a]) => ({ v, amount: sumMoney(a) ?? "0" }))
       .sort((a, b) => compareMoney(b.amount, a.amount) || byValue(a.v, b.v));
     const rest = ranked.slice(limit).map((x) => x.v);
-    const bands: Band[] = ranked.slice(0, limit).map(({ v }, i) => ({ id: v, values: [v], color: bandColor(v, i) }));
-    if (rest.length || amounts.has(SERVER_OTHER)) bands.push({ id: OTHER, values: [...rest, SERVER_OTHER], color: bandColor(OTHER, 0), count: rest.length + (otherCount?.[currency] ?? 0) });
-    if (amounts.has(NONE)) bands.push({ id: NONE, values: [NONE], color: bandColor(NONE, 0) });
+    const bands: Band[] = ranked.slice(0, limit).map(({ v }, i) => ({ id: v, values: [v], color: bandColorOf(v, i) }));
+    if (rest.length || amounts.has(FOLDED)) bands.push({ id: OTHER, values: [...rest, FOLDED], color: bandColorOf(OTHER, 0), count: rest.length + (otherCount?.[currency] ?? 0) });
+    if (amounts.has(NONE)) bands.push({ id: NONE, values: [NONE], color: bandColorOf(NONE, 0) });
     out.set(currency, bands);
   }
   return out;
 }
 
 const bandOf = (bands: Band[], value: string) => bands.find((b) => b.values.includes(value));
+
+/** A row's value of dim: FOLDED for luxd's fold, whatever it reads; NONE when absent. */
+const valueOf = (r: CostSummaryRow, dim: string) => (r.other ? FOLDED : (r.group?.[dim] ?? NONE));
 
 export interface BreakdownChart {
   currency: string;
@@ -396,7 +399,7 @@ export function breakdownCharts(d: CostSummary | undefined, dim: string, interva
     const cells = bs.map(() => x.map((): string[] => []));
     const totals = bs.map((): string[] => []);
     for (const r of rows) {
-      const b = bandOf(bs, r.group?.[dim] ?? NONE);
+      const b = bandOf(bs, valueOf(r, dim));
       const i = index.get(Math.floor(Date.parse(r.at!) / 1000));
       if (!b || i == null) continue;
       const k = bs.indexOf(b);
@@ -437,9 +440,9 @@ export function breakdownRows(rows: CostSummaryRow[], dim: string, show: CostSho
   const out: BreakdownRow[] = [];
   for (const [currency, rs] of byCurrency(rows)) {
     const runs = new Map<string, number>();
-    for (const r of rs) if (r.runs != null) runs.set(r.group?.[dim] ?? NONE, r.runs);
+    for (const r of rs) if (r.runs != null) runs.set(valueOf(r, dim), r.runs);
     for (const band of bands.get(currency) ?? []) {
-      const mine = rs.filter((r) => band.values.includes(r.group?.[dim] ?? NONE));
+      const mine = rs.filter((r) => band.values.includes(valueOf(r, dim)));
       const part = (compute: boolean) => sum(mine.filter((r) => (familyOf(r) === COMPUTE) === compute).map((r) => r.amount));
       const amount = sum(mine.filter((r) => shows(show, familyOf(r))).map((r) => r.amount));
       if (amount == null) continue;
@@ -450,13 +453,15 @@ export function breakdownRows(rows: CostSummaryRow[], dim: string, show: CostSho
   return out;
 }
 
-/** Runs per family, from a top=N summary's totals grouped by family (any family's cost counts it). */
+/** Runs per family and currency (key familyCurrency), from the family summary's totals asked with runs; undefined when they carry none. */
 export function runsPerFamily(rows: CostSummaryRow[]): Map<string, number> | undefined {
   if (!rows.some((r) => r.runs != null)) return undefined;
   const out = new Map<string, number>();
-  for (const r of rows) if (r.runs != null) out.set(familyOf(r), Math.max(out.get(familyOf(r)) ?? 0, r.runs));
+  for (const r of rows) if (r.runs != null) out.set(familyCurrency(familyOf(r), r.currency), r.runs);
   return out;
 }
+
+export const familyCurrency = (family: string, currency: string) => `${family} ${currency}`;
 
 /** Per currency, the band that cost the most in the peak bucket, and its share of that bucket. Series rows grouped by `dim`, Show applied by the query. */
 export function peakBands(ps: Peak[], d: CostSummary | undefined, dim: string, bands: Map<string, Band[]>): Map<string, { band: Band; share: number | null }> {
@@ -467,7 +472,7 @@ export function peakBands(ps: Peak[], d: CostSummary | undefined, dim: string, b
   for (const p of ps) {
     const bs = bands.get(p.currency) ?? [];
     const rows = at.get(`${p.at} ${p.currency}`) ?? [];
-    const per = bs.map((b) => sum(rows.filter((r) => b.values.includes(r.group?.[dim] ?? NONE)).map((r) => r.amount)));
+    const per = bs.map((b) => sum(rows.filter((r) => b.values.includes(valueOf(r, dim))).map((r) => r.amount)));
     let best = -1;
     per.forEach((a, i) => {
       if (a != null && (best < 0 || compareMoney(a, per[best]!) > 0)) best = i;
@@ -489,7 +494,11 @@ export function keyLabel(value: string, keys: Map<string, CostKey>): string {
 
 /** How a band reads in a legend, a KPI or a table row. */
 export function bandLabel(band: Band, b: Breakdown, names: { keys?: Map<string, CostKey>; tenants?: Map<string, string> } = {}): string {
-  if (band.id === OTHER) return `Other (${band.count ?? band.values.length})`;
+  if (band.id === OTHER) {
+    // A count of 0 (the fold's size unknown) reads "Other", never "Other (0)".
+    const n = band.count ?? band.values.filter((v) => v !== FOLDED).length;
+    return n ? `Other (${n})` : "Other";
+  }
   switch (b.kind) {
     case "label":
       return band.id === NONE ? `(no ${b.key} label)` : band.id;
