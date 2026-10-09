@@ -57,6 +57,10 @@ type opencodeBus struct {
 	// user and password: OpenCode's server Basic auth, if set.
 	observer       bool
 	user, password string
+
+	// pause waits out one reconnect backoff d, false if ctx ends first; a
+	// timer unless a test sets it before Run.
+	pause func(ctx context.Context, d time.Duration) bool
 }
 
 // freeLoopbackPort is a port nothing listens on at 127.0.0.1 now.
@@ -76,8 +80,13 @@ func newOpencodeBus(port int, dir string) *opencodeBus {
 	// try again.
 	direct := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 		ResponseHeaderTimeout: 3 * time.Second}
+	// A redirect is never followed: it could lead off 127.0.0.1:port, or to
+	// another port there with the Basic auth still attached. The 3xx itself
+	// is the answer, an error to every caller (none takes it as success).
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &opencodeBus{port: port, dir: dir, expect: map[string]busSteer{},
-		hc: &http.Client{Timeout: 30 * time.Second, Transport: direct}, stream: &http.Client{Transport: direct}}
+		hc:     &http.Client{Timeout: 30 * time.Second, Transport: direct, CheckRedirect: noRedirect},
+		stream: &http.Client{Transport: direct, CheckRedirect: noRedirect}}
 }
 
 // newOpencodeObserver follows the server a command lux did not build runs
@@ -185,17 +194,27 @@ func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, 
 			wait = followMin
 		}
 		// Jitter: between half and all of wait.
-		d := wait/2 + time.Duration(mrand.Int64N(int64(wait/2)+1))
-		t := time.NewTimer(d)
-		select {
-		case <-ctx.Done():
-			t.Stop()
+		if !b.wait(ctx, wait/2+time.Duration(mrand.Int64N(int64(wait/2)+1))) {
 			return nil
-		case <-t.C:
 		}
 		wait = min(wait*2, followMax)
 	}
 	return nil
+}
+
+// wait is one reconnect backoff of d; false if ctx ended first.
+func (b *opencodeBus) wait(ctx context.Context, d time.Duration) bool {
+	if b.pause != nil {
+		return b.pause(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // Reconnect backoff of the event stream.
