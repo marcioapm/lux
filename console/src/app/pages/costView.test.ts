@@ -121,6 +121,7 @@ test("Top Runs: ranked by what Show counts, per currency, with every family's pa
 
 test("previous window: the same length, just before", () => {
   expect(previousWindow({ from: T(4), to: T(8) })).toEqual({ from: T(0), to: T(4) });
+  expect(previousWindow({})).toBeNull();
 });
 
 test("change vs previous: per currency; no earlier figure, or a zero or refund one, has none", () => {

@@ -212,10 +212,11 @@ export function familyRows(rows: CostSummaryRow[], show: CostShow): FamilyRow[] 
   );
 }
 
-/** The window of equal length just before a summary's own [from, to). */
-export function previousWindow(d: { from: string; to: string }): { from: string; to: string } {
-  const from = Date.parse(d.from);
-  const to = Date.parse(d.to);
+/** The window of equal length just before a summary's own [from, to); null when its bounds do not parse. */
+export function previousWindow(d: { from?: string; to?: string }): { from: string; to: string } | null {
+  const from = Date.parse(d.from ?? "");
+  const to = Date.parse(d.to ?? "");
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
   return { from: new Date(from - (to - from)).toISOString(), to: new Date(from).toISOString() };
 }
 
