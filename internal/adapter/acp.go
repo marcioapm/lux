@@ -268,6 +268,14 @@ func (a *ACP) steerBus() *opencodeBus {
 	return a.bus
 }
 
+// observerGaveUp reports, once, an observer bus whose server refused it
+// refusalLimit times in a row (err, the last refusal): it sends nothing
+// more, and the Run's activity is lux's own turns'.
+func (a *ACP) observerGaveUp(err error) {
+	a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+		"opencode: its server refused lux %d times in a row; lux no longer follows its activity: %v", refusalLimit, err)})
+}
+
 func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Sink) error {
 	ctx, cancel := context.WithCancel(ctx)
 	a.mu.Lock()
@@ -295,9 +303,7 @@ func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Si
 				a.settle()
 			}, a.streamDown)
 			if err != nil {
-				// Refused credentials: no request is sent again; the Run's
-				// activity is lux's own turns'.
-				sink.Event(proto.EvWarning, map[string]any{"message": "opencode: its server refused lux, which no longer follows its activity: " + err.Error()})
+				a.observerGaveUp(err)
 			}
 		}()
 	}

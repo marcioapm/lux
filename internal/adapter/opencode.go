@@ -57,6 +57,11 @@ type opencodeBus struct {
 	// user and password: OpenCode's server Basic auth, if set.
 	observer       bool
 	user, password string
+	// refusals (under mu): an observer's requests refused since the server
+	// last accepted one; gaveUp: it reached refusalLimit, and the observer
+	// sends nothing more.
+	refusals int
+	gaveUp   bool
 
 	// pause waits out one reconnect backoff d, false if ctx ends first; a
 	// timer unless a test sets it before Run.
@@ -106,6 +111,50 @@ func (b *opencodeBus) authorize(req *http.Request) {
 
 // errRefused: OpenCode's server refused lux's credentials (401 or 403).
 var errRefused = errors.New("refused")
+
+// refusal is an error wrapping errRefused if resp is a 401 or 403.
+func refusal(what string, resp *http.Response) error {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: %s: %s", errRefused, what, resp.Status)
+	}
+	return nil
+}
+
+// refused counts a refusal of an observer's request; it is true exactly
+// once, for the refusal that reaches refusalLimit.
+func (b *opencodeBus) refused() (giveUp bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.gaveUp {
+		return false
+	}
+	b.refusals++
+	b.gaveUp = b.refusals >= refusalLimit
+	return b.gaveUp
+}
+
+// accepted clears the refusals: the server took an observer's request.
+func (b *opencodeBus) accepted() {
+	b.mu.Lock()
+	if !b.gaveUp {
+		b.refusals = 0
+	}
+	b.mu.Unlock()
+}
+
+// refusing: the server's last answer to the observer was a refusal, or it
+// has given up. Nothing then shows OpenCode busy.
+func (b *opencodeBus) refusing() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.refusals > 0 || b.gaveUp
+}
+
+func (b *opencodeBus) givenUp() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.gaveUp
+}
 
 func (b *opencodeBus) url(path string) string {
 	return "http://127.0.0.1:" + strconv.Itoa(b.port) + path
@@ -168,21 +217,16 @@ type busEvent struct {
 //
 // Every end of the stream, clean or not, is followed by a wait: capped
 // exponential backoff with jitter, back to its start after a stream that
-// stayed up for healthyStream. An observer the server refuses (errRefused)
-// stops at once and returns that error; otherwise follow returns nil.
+// stayed up for healthyStream. An observer stops once its requests have
+// been refused refusalLimit times with none accepted between (refused),
+// returning the refusal that reached it; otherwise follow returns nil.
 func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, disconnected func()) error {
 	wait := followMin
-	for ctx.Err() == nil {
+	for ctx.Err() == nil && !b.givenUp() {
 		began := time.Now()
 		err := b.followOnce(ctx, on, connected, disconnected)
 		if ctx.Err() != nil {
 			return nil
-		}
-		if b.observer && errors.Is(err, errRefused) {
-			b.mu.Lock()
-			b.lastErr = err
-			b.mu.Unlock()
-			return err
 		}
 		if err == nil {
 			err = errors.New("GET /event: the stream ended")
@@ -190,6 +234,9 @@ func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, 
 		b.mu.Lock()
 		b.lastErr = err
 		b.mu.Unlock()
+		if b.observer && errors.Is(err, errRefused) && b.refused() {
+			return err
+		}
 		if time.Since(began) >= healthyStream {
 			wait = followMin
 		}
@@ -222,8 +269,12 @@ const (
 	followMin     = 100 * time.Millisecond
 	followMax     = 5 * time.Second
 	healthyStream = 10 * time.Second
+	// refusalLimit: an observer's requests refused in a row before it gives
+	// up; with the backoff above, 60 to 120 s of refusals.
+	refusalLimit = 30
 )
 
+// followOnce reads one GET /event stream until it ends.
 func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connected, disconnected func()) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.url("/event"), nil)
 	if err != nil {
@@ -237,12 +288,13 @@ func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connect
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return fmt.Errorf("%w: GET /event: %s", errRefused, resp.Status)
+	if err := refusal("GET /event", resp); err != nil {
+		return err
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET /event: %s", resp.Status)
 	}
+	b.accepted()
 	b.mu.Lock()
 	b.connected = true
 	b.mu.Unlock()
@@ -260,13 +312,11 @@ func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connect
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64<<10), 64<<20)
 	for sc.Scan() {
-		data, ok := bytes.CutPrefix(sc.Bytes(), []byte("data:"))
-		if !ok {
-			continue
-		}
-		var ev busEvent
-		if json.Unmarshal(bytes.TrimSpace(data), &ev) == nil && ev.Type != "" {
-			on(ev)
+		if data, ok := bytes.CutPrefix(sc.Bytes(), []byte("data:")); ok {
+			var ev busEvent
+			if json.Unmarshal(bytes.TrimSpace(data), &ev) == nil && ev.Type != "" {
+				on(ev)
+			}
 		}
 	}
 	return sc.Err()

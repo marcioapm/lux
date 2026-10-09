@@ -150,6 +150,9 @@ type fakeBus struct {
 	password        string
 	authed, refused int
 	requests        map[string]int
+	// deny, if set, is called (under mu) with each request that passed the
+	// password check, as "METHOD path"; a non-zero status answers it.
+	deny func(req string) int
 }
 
 func newFakeBus(t *testing.T) *fakeBus {
@@ -245,10 +248,17 @@ func newFakeBus(t *testing.T) *fakeBus {
 	b.requests = map[string]int{}
 	b.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
-		b.requests[r.Method+" "+r.URL.Path]++
+		req := r.Method + " " + r.URL.Path
+		b.requests[req]++
 		pw := b.password
 		user, got, ok := r.BasicAuth()
 		allowed := pw == "" || (ok && user == "opencode" && got == pw)
+		code := http.StatusUnauthorized
+		if allowed && b.deny != nil {
+			if c := b.deny(req); c != 0 {
+				allowed, code = false, c
+			}
+		}
 		if pw != "" && allowed {
 			b.authed++
 		} else if !allowed {
@@ -256,7 +266,7 @@ func newFakeBus(t *testing.T) *fakeBus {
 		}
 		b.mu.Unlock()
 		if !allowed {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			http.Error(w, http.StatusText(code), code)
 			return
 		}
 		mux.ServeHTTP(w, r)
