@@ -666,6 +666,52 @@ func TestOpenCodeObserverStatusRefusalAfterActivity(t *testing.T) {
 	sink.noMoreWarnings(t)
 }
 
+func TestOpenCodeObserverRecoveryReconcilesMaskedStatus(t *testing.T) {
+	for _, status := range []string{"busy", "idle"} {
+		t.Run(status, func(t *testing.T) {
+			o := newStepObserver(t, func(b *fakeBus) {
+				b.setLoop(true)
+				b.setStatusCode(http.StatusForbidden)
+			})
+			o.step()
+			refused := o.nextGot(t)
+			close(refused.release)
+			if err := o.nextRead(t); !errors.Is(err, errRefused) {
+				t.Fatalf("initial refusal: %v", err)
+			}
+			o.backoff(t, "refused stream cancellation")
+			o.b.setStatusCode(0)
+			o.b.holdStatus(true)
+			o.step()
+			held := o.b.nextStatus(t)
+			o.b.events <- ocStatus(status)
+			o.statusHandled(t)
+			close(held.release)
+			recovery := o.nextGot(t)
+			close(recovery.release)
+			if err := o.nextRead(t); err != nil {
+				t.Fatalf("recovery: %v", err)
+			}
+			want := []string{"idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle"}
+			if status == "busy" {
+				want = append(want, "busy")
+			}
+			// statusRead is an application milestone: no event or reread
+			// is needed to expose the latest observed status.
+			if got := o.sink.lines(); !slices.Equal(got, want) {
+				t.Fatalf("activity after recovery: %q, want %q", got, want)
+			}
+			o.b.holdStatus(false)
+			o.unstep()
+			o.w.exit()
+			o.sink.noMoreWarnings(t)
+			if got := o.b.count("GET /session/status"); got != 2 {
+				t.Fatalf("status reads: %d, want 2", got)
+			}
+		})
+	}
+}
+
 // stepObserver is an observer of a fakeBus the test drives step by step:
 // each reconnect backoff waits for step, and each status read, once its
 // response is in, waits for the test to release it (got), until unstep.
