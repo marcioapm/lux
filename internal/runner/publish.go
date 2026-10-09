@@ -29,21 +29,6 @@ const stagingDir = "artifacts"
 
 var errTooManyPublished = fmt.Errorf("more than %d published artifacts: the rest were dropped", maxPublished)
 
-// validStagedID: what the shim mints (ids.New(ids.Artifact)). A root
-// workload can forge records, and the id names files on the host.
-func validStagedID(id string) bool {
-	rest, ok := strings.CutPrefix(id, ids.Artifact+"_")
-	if !ok || len(rest) != 16 {
-		return false
-	}
-	for _, c := range rest {
-		if !(c >= 'a' && c <= 'z' || c >= '2' && c <= '7') {
-			return false
-		}
-	}
-	return true
-}
-
 // publishedBlobID: one blob id per artifact, so storing it again after a
 // crash before its record was saved replaces the same file.
 func publishedBlobID(artifactID string) string {
@@ -51,7 +36,7 @@ func publishedBlobID(artifactID string) string {
 }
 
 func (p *placement) onPublished(ctx context.Context, a proto.StagedArtifact) {
-	if !validStagedID(a.ID) || proto.ValidArtifactName(a.Name) != nil || len(a.Description) > proto.MaxDescription ||
+	if !proto.ValidArtifactID(a.ID) || proto.ValidArtifactName(a.Name) != nil || proto.ValidDescription(a.Description) != nil ||
 		proto.ValidContentType(a.ContentType) != nil {
 		p.logf("ignoring a malformed lux.artifact record", "id", a.ID)
 		return

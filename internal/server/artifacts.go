@@ -7,7 +7,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
 )
 
@@ -38,13 +37,34 @@ func insertArtifact(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoc
 	return err
 }
 
+// validPublished: a report luxd can record. Anything else would fail the
+// insert on every redelivery (Postgres text and jsonb refuse NUL), so it
+// is refused instead.
+func validPublished(ap proto.ArtifactPublished) bool {
+	name, ok := strings.CutPrefix(ap.Path, proto.PublishedPrefix)
+	return ok && proto.ValidArtifactID(ap.ID) && proto.ValidArtifactName(name) == nil &&
+		proto.ValidContentType(ap.ContentType) == nil && proto.ValidDescription(ap.Description) == nil &&
+		storableText(ap.BlobID, ap.SHA256, ap.FileSHA256)
+}
+
+// storableText: no NUL, which encoding/json decodes from \u0000 and
+// Postgres text cannot hold, and short enough for a btree key (blobs.id).
+// JSON decoding already replaces invalid UTF-8.
+func storableText(ss ...string) bool {
+	for _, s := range ss {
+		if len(s) > 255 || strings.ContainsRune(s, 0) {
+			return false
+		}
+	}
+	return true
+}
+
 // applyArtifactPublished records a published artifact under the id the
 // shim gave it. The same report again (a runner that restarted before it
 // had the ack) is accepted as it is; any other report naming a recorded
 // id or blob is refused.
 func applyArtifactPublished(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch int, ap proto.ArtifactPublished) (refused bool, err error) {
-	if !strings.HasPrefix(ap.ID, ids.Artifact+"_") || !strings.HasPrefix(ap.Path, proto.PublishedPrefix) ||
-		proto.ValidArtifactName(strings.TrimPrefix(ap.Path, proto.PublishedPrefix)) != nil {
+	if !validPublished(ap) {
 		return true, addEvent(ctx, tx, tenantID, runID, epoch, "artifacts.failed", map[string]any{"error": "a malformed published artifact was refused"})
 	}
 	var gotRun, gotBlob, gotSHA string

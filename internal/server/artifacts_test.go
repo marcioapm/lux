@@ -136,6 +136,29 @@ func TestPublishedArtifactVersions(t *testing.T) {
 	}
 }
 
+// A forged report luxd could not store (a NUL in a quoted content type
+// parameter, a NUL in the description) is a refused ack with
+// artifacts.failed, not a failed report the runner would send forever.
+func TestPublishedArtifactUnstorableIsRefused(t *testing.T) {
+	s, _ := reportFixture(t)
+	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'running' WHERE id = 'ra'`)
+	ctype := published("art_aaaaaaaaaaaaaaaa", "a.txt", "a", "")
+	ctype.ContentType = "text/plain; a=\"x\x00y\""
+	desc := published("art_bbbbbbbbbbbbbbbb", "b.txt", "b", "x\x00y")
+	for i, ap := range []proto.ArtifactPublished{ctype, desc} {
+		f := reportPublished(t, s, "ha", "ra", 1, ap)
+		if f.Type != proto.MsgAck || !ackRefused(t, f) {
+			t.Fatalf("%s: %s %s, want a refused ack", ap.ID, f.Type, f.Data)
+		}
+		if got := eventErrors(t, s, "ra", "artifacts.failed"); len(got) != i+1 {
+			t.Fatalf("%s: artifacts.failed %q", ap.ID, got)
+		}
+	}
+	if _, ok := blobLocations(t, s, "ra")[desc.BlobID]; ok {
+		t.Fatal("a refused artifact's blob was recorded")
+	}
+}
+
 // artifact.published is added once per artifact, when its blob reaches S3:
 // not on the report, not on an upload sent again. A globbed artifact's
 // upload adds it too.
