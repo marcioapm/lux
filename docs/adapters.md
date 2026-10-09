@@ -167,32 +167,27 @@ Per agent:
   lost while the stream stays up leaves the Run busy until the next status
   event, reconnect or end of a lux turn.
   Without OpenCode's server, activity follows lux's turns only, as `acp`.
-  **A command lux did not build** with a `--port N` (or `--port=N`) of its
-  own, such as a wrapper that starts `opencode acp --port N` in the same
-  container, is run as given and lux follows OpenCode's server on
-  `127.0.0.1:N` for **activity only**, as above: the same combined state,
-  status reads on connect and once the session is known, idle while the
-  stream is down, the same backoff. The last `--port` counts; a last
-  `--port` with no value or a bad one means no server following. lux
-  trusts that this port is OpenCode's: it does not check what answers
-  there. A wrapper that runs OpenCode in a container of its own (for
-  example in a `--nested` pool) must share the Run's network namespace or
-  forward the port onto its `127.0.0.1`. lux sends that server nothing but
-  `GET /event` and `GET /session/status`: steers, interrupts and input receipts stay on ACP (a steer is a
-  second `session/prompt`, accepted with no receipt), and lux never calls
-  its `prompt_async`. If the workload's environment has
-  `OPENCODE_SERVER_PASSWORD` (as an `env` secret or a plain variable), each
-  request carries HTTP Basic auth as `OPENCODE_SERVER_USERNAME` (default
-  `opencode`) with that password, OpenCode's own server-auth convention;
-  the value is never logged. A 401 or 403 on either request is retried
-  with the same backoff (a refused status read also drops the stream and
-  shows OpenCode idle), since OpenCode can answer before its auth is set
-  up or while it restarts; after 30 refusals with no status read accepted
-  between (one to two minutes) lux gives one `lux.warning` and sends that
-  server nothing more: activity is then lux's turns only. OpenCode is
-  never shown busy while it refuses lux. lux follows no redirect from it.
-  A command with no
-  `--port` gets no server following, as before.
+  **A command lux did not build**, such as a wrapper starting
+  `opencode acp --port N`, runs as given. With its own `--port N` or
+  `--port=N`, lux follows `127.0.0.1:N` for **activity only**, using the
+  combined state, status reads, stream-down idle and backoff described
+  above. Only the last `--port` counts; a missing or invalid value, or no
+  `--port`, means no server following. lux assumes the port serves OpenCode
+  without checking. OpenCode in another container (for example in a
+  `--nested` pool) must share the Run's network namespace or forward the
+  port onto its `127.0.0.1`.
+  lux sends only `GET /event` and `GET /session/status` to this server,
+  never `prompt_async`. Steers, interrupts and input receipts stay on ACP;
+  a steer is a second `session/prompt`, accepted with no receipt.
+  If the workload has `OPENCODE_SERVER_PASSWORD` (an `env` secret or plain
+  variable), each request uses HTTP Basic auth with
+  `OPENCODE_SERVER_USERNAME` (default `opencode`); the password is never
+  logged. lux follows no redirects. A 401 or 403 on either request retries
+  with the same backoff, allowing auth setup or restarts; a refused status
+  read also drops the stream and shows OpenCode idle. After 30 refusals
+  without an accepted status read (one to two minutes), lux emits one
+  `lux.warning` and sends no more requests: activity follows lux's turns
+  only. OpenCode is never shown busy while it refuses lux.
   **Interrupt** reaches only turns lux started: a Run shown busy by a loop
   a client started over OpenCode's HTTP API alone is not cancelled.
   `lux interrupt` succeeds and sends nothing; an interrupt carrying input

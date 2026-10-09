@@ -57,7 +57,6 @@ func newFullSink() *fullSink {
 	return &fullSink{inputSink: &inputSink{}, warnings: make(chan string, 16)}
 }
 
-// nextWarning is the message of the next lux.warning, once it is given.
 func (s *fullSink) nextWarning(t *testing.T) string {
 	t.Helper()
 	select {
@@ -80,7 +79,6 @@ func (s *fullSink) noMoreWarnings(t *testing.T) {
 	}
 }
 
-// noSecret fails if the password is in anything the adapter reported.
 func (s *fullSink) noSecret(t *testing.T) {
 	t.Helper()
 	s.mu.Lock()
@@ -631,9 +629,7 @@ func TestOpenCodeObserverStatusRefusalAfterActivity(t *testing.T) {
 	if err := reads.next(t); err != nil {
 		t.Fatalf("status read: %v", err)
 	}
-	b.mu.Lock()
-	b.statusCode = http.StatusForbidden
-	b.mu.Unlock()
+	b.setStatusCode(http.StatusForbidden)
 	// Lux's turn ends while OpenCode's busy: the status is read again.
 	w.resolve(first, ocResult)
 	if err := reads.next(t); !errors.Is(err, errRefused) {
@@ -661,9 +657,7 @@ func TestOpenCodeObserverStatusRefusalAfterActivity(t *testing.T) {
 	await(t, paused, "a backoff after the second refused status read")
 	sink.waitLast(t, "idle")
 
-	b.mu.Lock()
-	b.statusCode = 0
-	b.mu.Unlock()
+	b.setStatusCode(0)
 	resume <- struct{}{}
 	if err := reads.next(t); err != nil {
 		t.Fatalf("status read once accepted: %v", err)
@@ -724,16 +718,14 @@ func TestOpenCodeObserverRecoveryReconcilesMaskedStatus(t *testing.T) {
 // response is in, waits for the test to release it (got), until unstep.
 // Its first GET /event fails, Lux's turn is over and the Run idle.
 type stepObserver struct {
-	b                      *fakeBus
-	w                      *agentWire
-	sink                   *fullSink
-	paused, resume, free   chan struct{}
-	got                    chan gotStatus
-	reads                  statusReads
-	handled                chan string
-	freeOnce               sync.Once
-	first                  string
-	stepping, interceptGot bool
+	b                    *fakeBus
+	w                    *agentWire
+	sink                 *fullSink
+	paused, resume, free chan struct{}
+	got                  chan gotStatus
+	reads                statusReads
+	handled              chan string
+	freeOnce             sync.Once
 }
 
 // gotStatus is a status read whose response is in, held until release
@@ -797,7 +789,6 @@ func newStepObserver(t *testing.T, setup func(*fakeBus)) *stepObserver {
 // step ends the backoff the follower is in, so it connects again.
 func (o *stepObserver) step() { o.resume <- struct{}{} }
 
-// backoff waits for the follower's next backoff.
 func (o *stepObserver) backoff(t *testing.T, what string) {
 	t.Helper()
 	await(t, o.paused, what)
