@@ -241,6 +241,38 @@ func TestPublishedRecordOfAnotherRunIsIgnored(t *testing.T) {
 	}
 }
 
+// The uploader takes snapshots' blobs before published artifacts' (a
+// resume elsewhere waits for the snapshot), each group oldest first.
+func TestUploaderTakesSnapshotsFirst(t *testing.T) {
+	f := newFinishFixture(t)
+	f.serveUploads(t)
+	for _, c := range []struct {
+		id        string
+		created   int64
+		published bool
+	}{
+		{"pub-b", 1, true}, {"snap-c", 6, false}, {"pub-a", 0, true},
+		{"snap-a", 4, false}, {"pub-c", 2, true}, {"snap-b", 5, false},
+	} {
+		blob := f.r.blobPath(c.id)
+		if err := os.WriteFile(blob, []byte(c.id), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rec := &snapshotRecord{RunID: "run1", Epoch: 1, Created: c.created, Reported: true,
+			Uploads: []pendingUpload{{BlobID: c.id, Path: blob, Size: int64(len(c.id))}}}
+		if c.published {
+			rec.Published = &proto.ArtifactPublished{ID: c.id}
+		}
+		if err := f.r.saveSnapshotRecord(c.id, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.r.uploads.pass(context.Background())
+	if want := []string{"snap-a", "snap-b", "snap-c", "pub-a", "pub-b", "pub-c"}; !slices.Equal(f.uploaded, want) {
+		t.Fatalf("uploaded %v, want %v", f.uploaded, want)
+	}
+}
+
 // A refused report deletes the artifact's blob and record: luxd never asks
 // for it.
 func TestPublishedArtifactRefused(t *testing.T) {
