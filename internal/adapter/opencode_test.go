@@ -23,14 +23,22 @@ const ocSession = "ses_f0d8b1671ffexBr8v2rWwmuXTt"
 // first prompt's session/prompt; it returns that prompt's RPC id.
 func ocStarted(t *testing.T, a *ACP) (*agentWire, *inputSink, string) {
 	t.Helper()
-	w, sink := startWire(t, a, proto.ShimConfig{Prompt: "Run `sleep 20 && echo FIRST`"})
+	sink := &inputSink{}
+	w, first := ocStartedOn(t, a, sink, sink)
+	return w, sink, first
+}
+
+// ocStartedOn is ocStarted reporting to sink, whose log is log.
+func ocStartedOn(t *testing.T, a *ACP, sink Sink, log *inputSink) (*agentWire, string) {
+	t.Helper()
+	w := startWireSink(t, a, proto.ShimConfig{Prompt: "Run `sleep 20 && echo FIRST`"}, sink)
 	id, _ := w.next("initialize")
 	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"agentInfo":{"name":"OpenCode","version":"1.18.31"}}}`)
 	id, _ = w.next("session/new")
 	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"sessionId":"` + ocSession + `"}}`)
 	first, _ := w.next("session/prompt")
-	sink.wait(t, "accepted prompt")
-	return w, sink, first
+	log.wait(t, "accepted prompt")
+	return w, first
 }
 
 // The result both prompts of a joined turn get (opencode-acp-prompt-1).
@@ -315,6 +323,14 @@ func ocWithBus(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
 // ocWithBusClock is ocWithBus with settle on clk (a wall clock if nil).
 func ocWithBusClock(t *testing.T, clk *testClock) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
 	t.Helper()
+	sink := &inputSink{}
+	a, b, w, first := ocWithBusOn(t, clk, sink, sink)
+	return a, b, w, sink, first
+}
+
+// ocWithBusOn is ocWithBusClock reporting to sink, whose log is log.
+func ocWithBusOn(t *testing.T, clk *testClock, sink Sink, log *inputSink) (*ACP, *fakeBus, *agentWire, string) {
+	t.Helper()
 	b := newFakeBus(t)
 	a := NewOpenCode()
 	a.bus = newOpencodeBus(b.port(), "/workspace")
@@ -323,13 +339,13 @@ func ocWithBusClock(t *testing.T, clk *testClock) (*ACP, *fakeBus, *agentWire, *
 		a.clock, a.settleEvery = clk, time.Second
 	}
 	b.setLoop(true) // the first prompt's loop
-	w, sink, first := ocStarted(t, a)
+	w, first := ocStartedOn(t, a, sink, log)
 	for end := time.Now().Add(5 * time.Second); !a.bus.isConnected(); time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(end) {
 			t.Fatal("bus never connected")
 		}
 	}
-	return a, b, w, sink, first
+	return a, b, w, first
 }
 
 // noConsumed fails if anything was reported read.
@@ -664,6 +680,105 @@ func TestOpenCodeStopEndsStatusFollowing(t *testing.T) {
 	if want := []string{"idle", "busy", "accepted prompt next_step receipt=false", "turn_end"}; !slices.Equal(got, want) || !slices.Equal(sink.lines(), want) {
 		t.Fatalf("got %q then %q, want %q", got, sink.lines(), want)
 	}
+}
+
+// nthEndSink holds the adapter's nth acp.turn_end report (from 1) until
+// release closes; entered closes when it is reached, finished once it has
+// been logged.
+type nthEndSink struct {
+	*inputSink
+	n                          int
+	ends                       int
+	entered, release, finished chan struct{}
+}
+
+func newNthEndSink(n int) *nthEndSink {
+	return &nthEndSink{inputSink: &inputSink{}, n: n, entered: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
+}
+
+func (s *nthEndSink) Event(typ string, v any) {
+	if typ == "acp.turn_end" {
+		s.mu.Lock()
+		s.ends++
+		held := s.ends == s.n
+		s.mu.Unlock()
+		if held {
+			close(s.entered)
+			<-s.release
+			defer close(s.finished)
+		}
+	}
+	s.inputSink.Event(typ, v)
+}
+
+// await waits for ch to close, or fails.
+func await(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// settled waits until no settle is running: busTurnEnded, which only
+// settle calls, has returned.
+func settled(a *ACP) {
+	a.settleMu.Lock()
+	a.settleMu.Unlock() //nolint:staticcheck // the lock itself is the barrier
+}
+
+// lateSteerHeldEnd drives a turn whose late steer runs a loop of its own,
+// up to busTurnEnded holding that loop's turn end (sink's 2nd), with
+// OpenCode's loop over and its bus status oc.
+func lateSteerHeldEnd(t *testing.T, oc string) (*ACP, *fakeBus, *agentWire, *nthEndSink) {
+	t.Helper()
+	sink := newNthEndSink(2)
+	a, b, w, first := ocWithBusOn(t, nil, sink, sink.inputSink)
+	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
+	sink.wait(t, "accepted late")
+	msgID := b.postedID(t, 0)
+	w.resolve(first, ocResult)
+	waitBusTurn(t, a)
+	b.events <- b.answer(msgID)
+	sink.wait(t, "consumed late")
+	b.setLoop(false)
+	onBus(t, a, ocStatus(oc))
+	await(t, sink.entered, "the late loop's turn end")
+	return a, b, w, sink
+}
+
+// The late loop's end has cleared lux's turn when a new input starts the
+// next one, before that end's idle is published: the Run stays busy (no
+// idle while the new prompt runs), and no second busy is reported.
+func TestOpenCodeOldTurnEndDoesNotIdleNewTurn(t *testing.T) {
+	a, _, w, sink := lateSteerHeldEnd(t, "idle")
+	a.Deliver(proto.Input{RequestID: "next", Text: "y"})
+	second, _ := w.next("session/prompt")
+	sink.wait(t, "accepted next")
+	close(sink.release)
+	await(t, sink.finished, "the held turn end")
+	settled(a)
+	if l := sink.lines(); l[len(l)-1] != "turn_end" {
+		t.Fatalf("after the old turn's end, with the new prompt running: %q", l)
+	}
+	w.resolve(second, ocResult)
+	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted late next_step receipt=true", "consumed late", "turn_end",
+		"accepted next next_step receipt=false", "turn_end", "turn_end", "idle")
+}
+
+// OpenCode's bus reports the session idle after the late loop's end has
+// cleared lux's turn and before that end publishes its idle: one idle.
+func TestOpenCodeBusIdleBeforeTurnIdleIsOne(t *testing.T) {
+	a, _, w, sink := lateSteerHeldEnd(t, "busy")
+	onBus(t, a, ocStatus("idle"))
+	sink.waitLast(t, "idle")
+	close(sink.release)
+	await(t, sink.finished, "the held turn end")
+	settled(a)
+	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted late next_step receipt=true", "consumed late", "turn_end", "idle", "turn_end")
 }
 
 // waitBusTurn waits until the adapter has handled the ACP turn's result.
