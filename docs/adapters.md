@@ -160,9 +160,17 @@ Per agent:
   the bus last said busy, the Run stays busy and lux reads
   `GET /session/status` once to confirm. Busy is never inferred from an
   error: while the event stream is down OpenCode's side counts as idle, and
-  on reconnect it is read from `GET /session/status` (a failed read is
-  idle). Reconnects back off as for steering (100 ms doubling to 5 s).
+  on reconnect, or once the Run's session is known, it is read from
+  `GET /session/status` (a failed read is idle; only the newest read
+  counts, and none after the stream drops). Reconnects back off as for
+  steering (100 ms doubling to 5 s). There is no polling: an idle event
+  lost while the stream stays up leaves the Run busy until the next status
+  event, reconnect or end of a lux turn.
   Without OpenCode's server, activity follows lux's turns only, as `acp`.
+  **Interrupt** reaches only turns lux started: a Run shown busy by a loop
+  a client started over OpenCode's HTTP API alone is not cancelled.
+  `lux interrupt` succeeds and sends nothing; an interrupt carrying input
+  sends that input as a prompt, and the loop is not cancelled.
 - **Generic ACP** agents keep a queue: the ACP spec does not say what a
   second prompt during a turn does.
 
