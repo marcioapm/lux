@@ -506,9 +506,10 @@ type Run struct {
 	// (stopped, lost, failed, succeeded), what a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
 	// Servers: on GET /v1/runs/{id}, its servers.
-	Servers []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
-	Cost    *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
-	Resize  *Resize       `json:"resize,omitempty" doc:"In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."`
+	Servers     []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
+	SubmittedBy *RunSubmitter `json:"submittedBy,omitempty" doc:"On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."`
+	Cost        *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
+	Resize      *Resize       `json:"resize,omitempty" doc:"In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."`
 }
 
 // Resumability says whether a Run can be resumed now, and from what.
@@ -727,9 +728,10 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		stored.Placement.Pool = rp.Name
 		var prompt []spec.Attachment
 		stored, prompt = splitPromptAttachments(stored)
-		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since, prompt_attachments)
-			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9)`,
-			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt)
+		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since, prompt_attachments,
+				submitted_by_key, submitted_by_email)
+			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''))`,
+			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email)
 		if err != nil {
 			return err
 		}
@@ -1120,9 +1122,48 @@ type runOutput struct {
 	Body *Run
 }
 
+// RunSubmitter is who submitted a Run: an API key, or a person signed in.
+type RunSubmitter struct {
+	KeyID   string `json:"keyId,omitempty"`
+	KeyName string `json:"keyName,omitempty" doc:"Absent for an operator's key when a tenant asks."`
+	Revoked bool   `json:"revoked,omitempty"`
+	Email   string `json:"email,omitempty"`
+}
+
+// runSubmitter reads a Run the caller already sees. It reads api_keys as
+// the system, so an operator narrowed to a tenant still names operator
+// keys; a tenant gets only its own keys' names.
+func (s *Server) runSubmitter(ctx context.Context, p Principal, runID string) (*RunSubmitter, error) {
+	var key, email, name *string
+	var platform, revoked bool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT r.submitted_by_key, r.submitted_by_email, k.name,
+				coalesce(k.tenant_id IS NULL, false), coalesce(k.revoked_at IS NOT NULL, false)
+			FROM runs r LEFT JOIN api_keys k ON k.id = r.submitted_by_key WHERE r.id = $1`, runID).
+			Scan(&key, &email, &name, &platform, &revoked)
+	})
+	if err != nil || key == nil && email == nil {
+		return nil, err
+	}
+	sub := &RunSubmitter{Revoked: revoked}
+	if key != nil {
+		sub.KeyID = *key
+	}
+	if email != nil {
+		sub.Email = *email
+	}
+	if name != nil && (p.Operator || !platform) {
+		sub.KeyName = *name
+	}
+	return sub, nil
+}
+
 func (s *Server) getRun(ctx context.Context, in *RunPath) (*runOutput, error) {
 	run, err := s.loadRun(ctx, principal(ctx).TenantID, in.ID, true)
 	if err != nil {
+		return nil, err
+	}
+	if run.SubmittedBy, err = s.runSubmitter(ctx, principal(ctx), run.ID); err != nil {
 		return nil, err
 	}
 	if resumable(run.State) {
