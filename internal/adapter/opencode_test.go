@@ -288,6 +288,11 @@ func onBus(t *testing.T, a *ACP, ev string) {
 
 const ocIdle = `{"type":"session.idle","properties":{"sessionID":"` + ocSession + `"}}`
 
+// ocStatus is a session.status bus event for the Run's session.
+func ocStatus(typ string) string {
+	return `{"type":"session.status","properties":{"sessionID":"` + ocSession + `","status":{"type":"` + typ + `"}}}`
+}
+
 func ocWithBus(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
 	t.Helper()
 	return ocWithBusClock(t, nil)
@@ -517,6 +522,29 @@ func TestOpenCodeLateSteerKeepsRunBusy(t *testing.T) {
 		"accepted late next_step receipt=true", "consumed late", "turn_end", "turn_end", "idle")
 }
 
+// A loop a client starts over OpenCode's HTTP API (prompt_async, not
+// through lux) shows the Run busy until OpenCode reports the session idle;
+// retry is busy, and OpenCode's idle pair (session.status idle, then
+// session.idle) is one idle.
+func TestOpenCodeHTTPTurnShowsBusy(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.setLoop(false)
+	w.resolve(first, ocResult)
+	sink.waitLast(t, "idle")
+	b.setLoop(true)
+	b.events <- ocStatus("busy")
+	sink.waitLast(t, "busy")
+	b.events <- ocStatus("retry")
+	b.events <- ocStatus("busy")
+	b.setLoop(false)
+	b.events <- ocStatus("idle")
+	b.events <- ocIdle
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy", "idle")
+	if a.bus.isConnected() {
+		t.Fatal("the event stream outlived Run")
+	}
+}
+
 // waitBusTurn waits until the adapter has handled the ACP turn's result.
 func waitBusTurn(t *testing.T, a *ACP) {
 	t.Helper()
@@ -659,6 +687,7 @@ func TestOpenCodeFallsBackToACP(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "s", Text: "x"})
 	second, _ := w.next("session/prompt")
 	sink.wait(t, "accepted s next_step receipt=false")
+	b.setLoop(false)
 	w.resolve(first, ocResult)
 	w.resolve(second, ocResult)
 	sink.waitLast(t, "idle")
@@ -687,7 +716,7 @@ func TestOpenCodeBusRetriesUnansweredStream(t *testing.T) {
 	b := newOpencodeBus(srv.Listener.Addr().(*net.TCPAddr).Port, "/")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go b.follow(ctx, func(busEvent) {}, nil)
+	go b.follow(ctx, func(busEvent) {}, nil, nil)
 	if !b.waitConnected(context.Background(), 8*time.Second) {
 		t.Fatalf("never connected: %v", b.err())
 	}
@@ -728,7 +757,7 @@ func TestOpenCodeBusBacksOffAfterCleanEOF(t *testing.T) {
 	b := newOpencodeBus(srv.Listener.Addr().(*net.TCPAddr).Port, "/")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); b.follow(ctx, func(busEvent) {}, nil) }()
+	go func() { defer close(done); b.follow(ctx, func(busEvent) {}, nil, nil) }()
 	time.Sleep(200 * time.Millisecond)
 	cancel()
 	<-done
