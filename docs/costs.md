@@ -1009,10 +1009,22 @@ This is the summary endpoint. It takes the range parameters that
 `HistoryQuery` already has (`since`, `from`, `to`, plus `tenant` for
 operators), and also:
 
-- `group`: `tenant` (operators), `pool`, `host`, `family`, `run`, or
-  `label:<key>`, repeatable for two levels;
+- `group`: `tenant` (operators), `pool`, `host`, `family`, `run`, `key`,
+  or `label:<key>`, repeatable for two levels;
 - `family`: filter by family;
+- `label`: `key=value` (split at the first `=`), repeatable: only Runs
+  with that label. Repeating a key accepts any of its values (OR); different
+  keys must all match (AND);
+- `nolabel`: a key, repeatable: only Runs without that label;
 - `interval`: `hour` or `day`, to return a series instead of totals.
+
+Label keys in `label`, `nolabel` and `group=label:<key>` are values bound
+to the query, never SQL text; a `label` or `nolabel` key that is not a
+valid label key (letters, digits, `.`, `_`, `/`, `-`) is a 400. A filter
+applies to every part of the response read from Runs' cost: `totals`,
+`series`, and the names in `runs` and `keys`. `unallocated` and `hosts`
+(cost charged to no Run, so with no labels) are left out of a filtered
+summary.
 
 Both cost range endpoints use `[from, to)` over whole UTC hour buckets.
 An omitted `to` is now; an omitted `from` is one hour before `to` (or
@@ -1040,6 +1052,28 @@ color}]`, resolved as a Run's `byFamily` is (the first usable plugin's
 describe; `Compute` for compute), so a family reads the same everywhere.
 Grouped by `run`, it has `runs: [{id, name}]` for the Runs in `totals`,
 read in the same snapshot, so a list of top Runs needs no call per Run.
+
+Grouped by `key`, the group value is who submitted the Run
+(`runs.submitted_by_key`, `submitted_by_email`, recorded at submit since
+migration 058): an API key id, `email:<address>` for a person signed in
+through Cloudflare Access, or `(none)` for Runs from before luxd recorded
+it. The response has `keys: [{id, name?, operator?, revoked?, email?}]`
+for each submitter in `totals` but `(none)`. A tenant gets the names of
+its own keys only: an operator's key that submitted one of its Runs is
+`{id, operator: true}` without a name. Operators get every name, also
+when narrowed to a tenant.
+
+A Run's label `app` names the tool that submitted it (jervasion sets
+`app=jervasion`). It is a convention, not enforced; the console's Cost
+panel breaks down by `label:app` by default when the key is present.
+
+### `GET /v1/costs/labels`
+
+The label keys present on Runs with cost in the range, each with its
+number of Runs (`keys: [{key, runs}]`, most Runs first), for a picker. It
+takes the same range, `tenant`, `label` and `nolabel` parameters as
+`GET /v1/costs`, reads in the same tenant scope, and has the same limits.
+A key's values and their cost come from `GET /v1/costs?group=label:<key>`.
 
 ### `GET /v1/hosts/{id}/cost`
 
@@ -1069,9 +1103,12 @@ cost is visible exactly when the Run is. It is not stored on `runs`.
   by family (item, source, amount, currency, from–to, final or estimate),
   and each source's status and `answeredAt`.
 - `lux costs [--since 7d | --from T [--to T]] [--by G]... [--family F]
-  [--interval hour|day]`: `--by` is `tenant` (operators), `pool`, `host`,
-  `family`, `run` or `label:K`, at most twice. An operator without
-  `--tenant` also gets the unallocated total and, by `host`, each host's
+  [--label K=V]... [--no-label K]... [--interval hour|day]`: `--by` is
+  `tenant` (operators), `pool`, `host`, `family`, `run`, `key` or
+  `label:K`, at most twice; by `key`, rows show the key's name (`(revoked)`
+  after a revoked one), a person's email, or `operator key`. `--label`
+  and `--no-label` are the summary's `label` and `nolabel`. An operator
+  without `--tenant` or a label filter also gets the unallocated total and, by `host`, each host's
   allocated and unallocated. luxd's 400 and 413 messages are printed as
   they are.
 - `lux ls` has a COST column: the total for one currency, `multi` for
