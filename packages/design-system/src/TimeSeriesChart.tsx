@@ -145,7 +145,7 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
   segmentsRef.current = segments;
   const data = useMemo(() => plotData(x, ys, hidden, stacked, segments), [x, ys, stacked, hidden, segments]);
   const fmt = (v: number | null | undefined) => formatUnit(v, unit, currency);
-  const dayBars = !!bars && barStep(x) >= 86400;
+  const dayBars = useMemo(() => !!bars && barStep(x) >= 86400, [bars, x]);
 
   useLayoutEffect(() => {
     const el = host.current;
