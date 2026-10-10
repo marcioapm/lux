@@ -74,10 +74,10 @@ export function Overview() {
           />
         }
       />
-      {status.error && !st && <ErrorBlock error={status.error} onRetry={status.refetch} />}
-      {status.error && st && <ErrorStrip error={`Showing stale numbers: the last refresh failed (${status.error}).`} />}
       {tab === "activity" && (
         <>
+          {status.error && !st && <ErrorBlock error={status.error} onRetry={status.refetch} />}
+          {status.error && st && <ErrorStrip error={`Showing stale numbers: the last refresh failed (${status.error}).`} />}
           <div className="grid grid-stats">
             <StatTile label="Running" onClick={() => go("/runs?state=running")} loading={loading} value={formatCount(runs.running ?? 0)} unit={st ? `${st.busy} busy · ${st.idle} idle` : undefined} />
             <StatTile label="Queued" onClick={() => go(`/runs?state=${QUEUED.join(",")}`)} loading={loading} value={formatCount(st?.queued ?? 0)} unit={st?.oldestQueuedAt ? `oldest ${formatElapsed(st.oldestQueuedAt, now)}` : undefined} tone={(st?.queued ?? 0) > 0 && st?.oldestQueuedAt && now - Date.parse(st.oldestQueuedAt) > 300_000 ? "warn" : "default"} />
