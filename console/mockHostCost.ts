@@ -5,8 +5,9 @@
 // (unallocated), per family. A host whose volumes are not known has no
 // block-storage period, so no block-storage rows (missing, never zero).
 // Amounts are integers of nano-units (luxd's 9 digits), so every sum is exact.
+import { noise, SINCE } from "./mockCosts.ts";
 
-export interface Volume {
+interface Volume {
   type: string;
   sizeGiB: number;
   iops?: number;
@@ -14,12 +15,10 @@ export interface Volume {
   assumed?: boolean;
 }
 
-export interface CostHost {
+interface CostHost {
   id: string;
   name: string;
   poolId: string;
-  /** The owning tenant's id; null for a platform host. */
-  tenant: string | null;
   /** Seconds ago its billed window began (provision request). */
   startAgo: number;
   /** Seconds ago it was terminated; null while it lives. */
@@ -36,31 +35,23 @@ const GP3_PER_GB_MONTH = 0.0836;
 const HOURS_PER_MONTH = 730;
 const ebsHourly = (vs: Volume[]) => Math.round(vs.reduce((a, v) => a + (v.sizeGiB * GP3_PER_GB_MONTH * 1e9) / HOURS_PER_MONTH, 0));
 
-export const RUN_HOST = "host_7f2cq9m1x0";
-export const COST_HOSTS: CostHost[] = [
-  { id: RUN_HOST, name: "gp-eu-west-1-c4", poolId: "pool_default01", tenant: null, startAgo: 3 * 86400, endAgo: null, compute: 138_600_000, volumes: [GP3_100] },
-  { id: "host_3k8wq2n5vz", name: "gp-eu-west-1-a7", poolId: "pool_default01", tenant: null, startAgo: 5 * 3600, endAgo: null, compute: 138_600_000, volumes: [{ ...GP3_100, assumed: true }] },
+const COST_HOSTS: CostHost[] = [
+  { id: "host_7f2cq9m1x0", name: "gp-eu-west-1-c4", poolId: "pool_default01", startAgo: 3 * 86400, endAgo: null, compute: 138_600_000, volumes: [GP3_100] },
+  { id: "host_3k8wq2n5vz", name: "gp-eu-west-1-a7", poolId: "pool_default01", startAgo: 5 * 3600, endAgo: null, compute: 138_600_000, volumes: [{ ...GP3_100, assumed: true }] },
   // Launched before luxd recorded volumes and never backfilled: compute only.
-  { id: "host_9p4tz6c1mh", name: "gp-eu-west-1-b2", poolId: "pool_default01", tenant: null, startAgo: 5 * 3600, endAgo: 28 * 60, compute: 138_600_000 },
-  { id: "host_acme0ci001", name: "acme-ci-1", poolId: "pool_acme_ci01", tenant: "ten_acme", startAgo: 2 * 86400, endAgo: null, compute: 96_000_000, volumes: [{ type: "gp3", sizeGiB: 50, iops: 3000, throughputMiBps: 125 }] },
+  { id: "host_9p4tz6c1mh", name: "gp-eu-west-1-b2", poolId: "pool_default01", startAgo: 5 * 3600, endAgo: 28 * 60, compute: 138_600_000 },
+  { id: "host_acme0ci001", name: "acme-ci-1", poolId: "pool_acme_ci01", startAgo: 2 * 86400, endAgo: null, compute: 96_000_000, volumes: [{ ...GP3_100, sizeGiB: 50 }] },
 ];
 
 export const costHost = (id: string) => COST_HOSTS.find((h) => h.id === id);
 
 const HOUR = 3600;
-const SINCE: Record<string, number> = { "1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720 };
 
 const money = (nanos: number) => {
   const s = String(Math.abs(nanos)).padStart(10, "0");
   return `${nanos < 0 ? "-" : ""}${s.slice(0, -9)}.${s.slice(-9)}`.replace(/\.?0+$/, "") || "0";
 };
 const iso = (t: number) => new Date(t * 1000).toISOString();
-
-/** A deterministic 0..1 from a seed: the same figures on every reload. */
-function noise(seed: number): number {
-  const x = Math.sin(seed * 12.9898) * 43758.5453;
-  return x - Math.floor(x);
-}
 
 /** The share of a host its placements reserved over an hour (S clipped to 1): busy by day, part-filled, empty some hours. */
 function occupancy(host: CostHost, hour: number): number {

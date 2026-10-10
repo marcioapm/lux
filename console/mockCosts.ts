@@ -61,7 +61,7 @@ export function submittedBy(by: string | null, tenant: string | null) {
 }
 
 /** A deterministic 0..1 from a seed: the same data on every reload. */
-function noise(seed: number): number {
+export function noise(seed: number): number {
   const x = Math.sin(seed * 12.9898) * 43758.5453;
   return x - Math.floor(x);
 }
@@ -110,7 +110,8 @@ const money = (micros: number) => {
   return `${neg ? "-" : ""}${s.slice(0, -6)}.${s.slice(-6)}`.replace(/\.?0+$/, "");
 };
 
-const SINCE: Record<string, number> = { "1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720 };
+/** ?since= in hours. */
+export const SINCE: Record<string, number> = { "1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720 };
 const LABEL_KEY = /^[A-Za-z0-9]([A-Za-z0-9._/-]{0,62}[A-Za-z0-9])?$/;
 
 type Bad = { error: { code: string; message: string } };
