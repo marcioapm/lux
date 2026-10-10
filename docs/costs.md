@@ -951,7 +951,7 @@ luxd admin costs backfill-volumes --pool burst [--tenant acme] \
 
 For that pool's provider hosts with `volumes` NULL (live or terminated),
 in batches of 100 hosts, one transaction per host (its Runs locked first,
-then the host, as the drainer does):
+then its cost-host lock, then the host, as the drainer does):
 
 1. records the given volumes, each marked `"assumed": true` (shown in
    `GET /v1/hosts` and in the rate's `details`);

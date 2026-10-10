@@ -79,6 +79,8 @@ func (s *Server) refreshBlockStorage(ctx context.Context) {
 		}
 		if failed == nil {
 			failed = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				// The cost-host lock keeps a concurrent updateHostHours from
+				// overwriting openBlockStorageRate's rewound cursor.
 				runs, err := lockBlockStorageHost(ctx, tx, h.ID)
 				if err != nil {
 					return err
@@ -126,7 +128,8 @@ func blockStorageHourly(volumes []HostVolume, prices map[string]BlockStoragePric
 // has one, has no known volumes, or no capacity to share (it never
 // registered) gets none. It reports whether it wrote one. The host's
 // host-hour cursor moves back to the period's start (within retention) so
-// its unallocated rows are rebuilt with the new family.
+// its unallocated rows are rebuilt with the new family. The caller holds
+// the host's cost-host lock (lockBlockStorageHost).
 func openBlockStorageRate(ctx context.Context, tx pgx.Tx, hostID string, prices map[string]BlockStoragePrice, source string, retention time.Duration) (bool, error) {
 	var volumes *[]HostVolume
 	var from time.Time
