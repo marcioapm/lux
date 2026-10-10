@@ -99,6 +99,8 @@ const (
 	dimThroughpt = "GiBps-Mo"
 )
 
+var blockStorageDims = []string{dimStorage, dimIOPS, dimThroughpt}
+
 func (p BlockStoragePrice) dims() map[string]string {
 	return map[string]string{dimStorage: p.PerGBMonth, dimIOPS: p.PerIOPSMonth, dimThroughpt: p.PerGiBpsMonth}
 }
@@ -175,9 +177,13 @@ func (s *Server) blockStoragePrice(ctx context.Context, provider, region, kind s
 		return BlockStoragePrice{}, fmt.Errorf("%s block storage price %s/%s: %w", provider, region, kind, err)
 	}
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		// Upserts, as onDemandPrice's: two luxds refreshing one type at
-		// once both succeed. A dimension the new answer lacks is dropped.
-		for dim, v := range price.dims() {
+		// Upserts and deletes in blockStorageDims order, so two luxds
+		// refreshing one type at once take the row locks in the same order
+		// and queue rather than deadlock. A dimension the new answer lacks
+		// is deleted.
+		dims := price.dims()
+		for _, dim := range blockStorageDims {
+			v := dims[dim]
 			if v == "" {
 				if _, err := tx.Exec(ctx, `DELETE FROM price_cache WHERE provider = $1 AND region = $2 AND instance_type = $3 AND os = $4`,
 					provider, region, kind+":"+dim, ebsCacheOS); err != nil {
