@@ -36,3 +36,32 @@ func TestNeverRunZeroVolumeSnapshotEndsTerminated(t *testing.T) {
 	_, err := s.resumeRun(tenantCtx("t1"), &resumeRunInput{RunPath: RunPath{ID: "r1"}})
 	refused(t, err, http.StatusConflict, "not_resumable", "resume of a never Run")
 }
+
+// The runner sends a snapshot.done again when its ack was lost: luxd acks
+// the same zero-volume report both times, records one snapshot, does not
+// mark the placement refused, and the Run still ends terminated.
+func TestNeverRunZeroVolumeSnapshotRedelivered(t *testing.T) {
+	s, _ := policyFixture(t, "never")
+	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "snapR1", RunID: "r1", Epoch: 1, Volumes: []proto.VolumeSnapshot{}},
+		Output: &proto.BlobInfo{BlobID: "b-r1-out", Size: 7, SHA256: "r1-out"}, OutputSeq: 3}
+	for i := range 2 {
+		if got := reportSnapshot(t, s, "h1", "r1", 1, sd); got.Type != proto.MsgAck || ackRefused(t, got) {
+			t.Fatalf("snapshot report %d: %s %s", i+1, got.Type, got.Data)
+		}
+	}
+	reportR1Exit(t, s, 0, "exited")
+
+	var state, reason string
+	var events int64
+	var refusedCol bool
+	systemScan(t, s, `SELECT r.state, r.state_reason, p.snapshot_refused,
+			(SELECT count(*) FROM run_events WHERE run_id = r.id AND type = 'snapshot')
+		FROM runs r JOIN placements p ON p.run_id = r.id AND p.epoch = 1 WHERE r.id = 'r1'`, nil,
+		&state, &reason, &refusedCol, &events)
+	if events != 1 || refusedCol {
+		t.Errorf("snapshot events %d, snapshot_refused %v: want 1, false", events, refusedCol)
+	}
+	if state != StateTerminated || reason != "succeeded; resumePolicy never" {
+		t.Errorf("state %q reason %q, want terminated, succeeded; resumePolicy never", state, reason)
+	}
+}
