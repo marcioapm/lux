@@ -114,7 +114,7 @@ export function runsListPath(fs: LabelFilter[]): string {
 const INTERVAL_HOURS: Record<CostInterval, number> = { hour: 1, day: 24 };
 
 /** Amounts of one currency, exact; null when there are none (no figure is not a zero). */
-function sum(amounts: string[]): string | null {
+export function sum(amounts: string[]): string | null {
   return amounts.length ? sumMoney(amounts) : null;
 }
 
@@ -124,7 +124,7 @@ export function push<K, V>(m: Map<K, V[]>, k: K, v: V): void {
   else m.set(k, [v]);
 }
 
-function byCurrency<T extends { currency: string }>(rows: T[]): Map<string, T[]> {
+export function byCurrency<T extends { currency: string }>(rows: readonly T[]): Map<string, T[]> {
   const m = new Map<string, T[]>();
   for (const r of rows) push(m, r.currency, r);
   return new Map([...m].sort(([a], [b]) => a.localeCompare(b)));

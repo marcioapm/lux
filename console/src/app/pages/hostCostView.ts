@@ -4,26 +4,14 @@
 // per currency and never across currencies; numbers are for geometry only.
 import { familyDisplay, sumMoney } from "@lux/design-system";
 import type { CostLine, CostPlacement, HostVolume, MoneyTotal } from "../../api/index.ts";
-import { push, ratio } from "./costView.ts";
+import { BLOCK_STORAGE, byCurrency, COMPUTE, push, ratio, sum } from "./costView.ts";
 
-export const COMPUTE = "compute";
-export const BLOCK_STORAGE = "block-storage";
 /** The host-tied families, in the order every screen lists them. */
-export const HOST_FAMILIES = [COMPUTE, BLOCK_STORAGE] as const;
+const HOST_FAMILIES: readonly string[] = [COMPUTE, BLOCK_STORAGE];
+const isHostFamily = (f: string) => HOST_FAMILIES.includes(f);
 
 const LABELS = familyDisplay(HOST_FAMILIES.map((family) => ({ family })));
 export const familyLabel = (f: string) => LABELS.get(f)?.label ?? f;
-
-/** Amounts of one currency summed exactly; null when there are none (no figure is not a zero). */
-function sum(amounts: string[]): string | null {
-  return amounts.length ? sumMoney(amounts) : null;
-}
-
-function byCurrency<T extends { currency: string }>(rows: readonly T[]): Map<string, T[]> {
-  const m = new Map<string, T[]>();
-  for (const r of rows) push(m, r.currency, r);
-  return new Map([...m].sort(([a], [b]) => a.localeCompare(b)));
-}
 
 /** One figure per currency, summed over families (a pool's idle per family and currency, say). */
 export function sumPerCurrency(rows: readonly { currency: string; amount: string }[] | null | undefined): MoneyTotal[] {
@@ -56,7 +44,7 @@ interface HostTimeRow {
   unallocated?: string;
 }
 
-const present = (a: (string | undefined)[]) => a.filter((v): v is string => v != null);
+const present = (a: (string | null | undefined)[]) => a.filter((v): v is string => v != null);
 
 function paid(rows: readonly HostTimeRow[]): Paid {
   return {
@@ -68,7 +56,7 @@ function paid(rows: readonly HostTimeRow[]): Paid {
 
 /** Per currency, who paid for the host time: Runs or nobody, per family and both. A family with no row is all null, never zero. */
 export function whoPaid(rows: readonly HostTimeRow[] | null | undefined): WhoPaid[] {
-  return [...byCurrency((rows ?? []).filter((r) => (HOST_FAMILIES as readonly string[]).includes(r.family)))].map(([currency, rs]) => ({
+  return [...byCurrency((rows ?? []).filter((r) => isHostFamily(r.family)))].map(([currency, rs]) => ({
     currency,
     compute: paid(rs.filter((r) => r.family === COMPUTE)),
     blockStorage: paid(rs.filter((r) => r.family === BLOCK_STORAGE)),
@@ -207,7 +195,7 @@ export function hostCharts(rows: readonly TimedHostRow[], from: string, to: stri
   const x: number[] = [];
   for (let t = start; t < end; t += step) x.push(t);
   const index = new Map(x.map((t, i) => [t, i]));
-  return [...byCurrency(rows.filter((r) => (HOST_FAMILIES as readonly string[]).includes(r.family)))].map(([currency, rs]) => {
+  return [...byCurrency(rows.filter((r) => isHostFamily(r.family)))].map(([currency, rs]) => {
     const series = hostChartSeries([...new Set(rs.map((r) => r.family))], rs.some((r) => r.unallocated != null));
     const cells = series.map(() => x.map((): string[] => []));
     for (const r of rs) {
@@ -254,7 +242,7 @@ const placementsOf = (l: CostLine): CostPlacement[] => {
 export function placementRows(lines: readonly CostLine[]): PlacementRow[] {
   const rows = new Map<string, PlacementRow>();
   for (const l of lines) {
-    if (l.source !== "compute" || !(HOST_FAMILIES as readonly string[]).includes(l.family)) continue;
+    if (l.source !== "compute" || !isHostFamily(l.family)) continue;
     for (const p of placementsOf(l)) {
       const k = `${p.epoch}\u0000${p.hostId}\u0000${l.currency}`;
       const r = rows.get(k) ?? { epoch: p.epoch, hostId: p.hostId, currency: l.currency, from: p.from, to: p.to, share: null, compute: null, blockStorage: null, total: "0" };
@@ -276,8 +264,8 @@ export function placementRows(lines: readonly CostLine[]): PlacementRow[] {
 export function placementTotals(rows: readonly PlacementRow[]): { currency: string; compute: string | null; blockStorage: string | null; total: string }[] {
   return [...byCurrency(rows)].map(([currency, rs]) => ({
     currency,
-    compute: sum(rs.flatMap((r) => (r.compute == null ? [] : [r.compute]))),
-    blockStorage: sum(rs.flatMap((r) => (r.blockStorage == null ? [] : [r.blockStorage]))),
+    compute: sum(present(rs.map((r) => r.compute))),
+    blockStorage: sum(present(rs.map((r) => r.blockStorage))),
     total: sumMoney(rs.map((r) => r.total))!,
   }));
 }
