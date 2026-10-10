@@ -292,6 +292,10 @@ func TestBlockStoragePriceCacheRefreshReplaces(t *testing.T) {
 	if got, err := s.blockStoragePrice(ctx, "ec2", "eu-north-1", "gp3"); err != nil || got != want || len(p.blockStorageCalls) != 2 {
 		t.Fatalf("refresh: %+v %v, calls %v", got, err, p.blockStorageCalls)
 	}
+	// The refresh stamped fetched_at: the next read is the cache's, not another call.
+	if got, err := s.blockStoragePrice(ctx, "ec2", "eu-north-1", "gp3"); err != nil || got != want || len(p.blockStorageCalls) != 2 {
+		t.Fatalf("after refresh: %+v %v, calls %v", got, err, p.blockStorageCalls)
+	}
 	var rows []string
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		r, err := tx.Query(ctx, `SELECT split_part(instance_type, ':', 2) || '=' || trim_scale(per_hour)::text
