@@ -1162,6 +1162,33 @@ a.idchip-text:hover {
   color: var(--fg);
 }
 
+/* ---------- Callout ----------
+   A page's one explanatory sentence: the info hue as a faint wash and
+   border, the text in the body colour (it is prose, not a status). */
+.callout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-5) var(--sp-6);
+  border: 1px solid color-mix(in srgb, var(--info-dot) 22%, var(--border-soft));
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--info-bg) 45%, var(--bg-surface));
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+.callout-icon {
+  display: inline-flex;
+  flex: none;
+  /* One text line high, so the icon centres on the first line. */
+  height: calc(var(--text-sm) * 1.5);
+  align-items: center;
+  color: var(--info-fg);
+}
+.callout-text {
+  min-width: 0;
+}
+
 /* ---------- StatTile ----------
    Compact: a 12px muted label, the value at --text-2xl (22 / 20px), the
    unit or note on its own line under it. */

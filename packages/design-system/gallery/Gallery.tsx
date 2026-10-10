@@ -3,6 +3,7 @@ import {
   Badge,
   BreakdownTable,
   Button,
+  Callout,
   Card,
   CENTS,
   FilterBar,
@@ -561,7 +562,7 @@ const WHY_UNALLOCATED = [
 function PartsDemo() {
   const shares = partShares(WHY_UNALLOCATED.map((p) => p.value));
   return (
-    <Section id="parts" title="PartBar, Meter" note="PartBar: one total split into parts, a single bar of segments with 1px gaps, each its share of the parts' sum, each with a Tooltip (label, the caller's formatted value, share). Values are numbers for geometry only; the figures in text come from the caller. A zero or missing part draws nothing; a drawn part under 1% reads <1%. Percents use largest remainder, so they add up to 100 (partShares). Pair it with a list of the parts: the bar is the picture, not the record. Meter: one ratio in a table cell; the fill clamps to 0..1, the text keeps the true figure, no ratio is an en dash.">
+    <Section id="parts" title="PartBar, Meter, Callout" note="PartBar: one total split into parts, a single bar of segments with 1px gaps, each its share of the parts' sum, each with a Tooltip (label, the caller's formatted value, share). Values are numbers for geometry only; the figures in text come from the caller. A zero or missing part draws nothing; a drawn part under 1% reads <1%. Percents use largest remainder, so they add up to 100 (partShares). Pair it with a list of the parts: the bar is the picture, not the record. Meter: one ratio in a table cell; the fill clamps to 0..1, the text keeps the true figure, no ratio is an en dash, a non-zero one under 1% reads <1%. Callout: the page's one explanatory sentence, a soft info-tinted box between cards (optional icon); not a toast, not an error strip, not an InfoStrip.">
       <div className="grid grid-2">
         <Card title="Why $6.94 was unallocated" subtitle="four parts, colours from the chart slots">
           <div className="stack stack-tight">
@@ -582,6 +583,9 @@ function PartsDemo() {
       <Card title="Meter" subtitle="a ratio in a table cell: 46px track, the percentage to its right in mono" flush>
         <Table columns={METER_COLS} rows={METER_ROWS} rowKey={(r) => r.host} dense />
       </Card>
+      <h3 className="sg-h3">Callout</h3>
+      <Callout>Pool cost is the machines only — instance and disk. AI and other external costs belong to runs and stay on the Overview and run pages.</Callout>
+      <Callout icon={<IconInfo size={14} />}>With an icon. One sentence that explains the page, between its cards; it wraps when the content is narrow and never carries an action. A status inside a card is an InfoStrip; a failure is an error strip; an outcome is a toast.</Callout>
     </Section>
   );
 }
