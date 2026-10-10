@@ -127,6 +127,32 @@ func TestBackfillVolumes(t *testing.T) {
 	}
 }
 
+// A host still live when luxd first records its volumes (one launched
+// before the upgrade): the price loop opens its block-storage period and
+// re-queues the Runs already final on it, so a finished Run gains a final
+// block-storage line while its compute snapshot row stays byte for byte.
+func TestBlockStorageLiveHostRequeuesFinalRuns(t *testing.T) {
+	s, keys, _ := backfillFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE hosts SET state = 'ready', terminated_at = NULL WHERE id = 'disk'`)
+	before := snapshotRow(t, s)
+	if err := s.storeVolumes(ctx, "disk", []HostVolume{{Type: "gp3", SizeGiB: 100, IOPS: 3000, ThroughputMiBps: 125}}); err != nil {
+		t.Fatal(err)
+	}
+	s.refreshBlockStorage(ctx)
+	if p := pending(t, s, "A"); p == "" {
+		t.Fatalf("A was not queued")
+	}
+	drain(t, s)
+	lines, src := familyLines(t, s, keys["t1"], "A")
+	if fmt.Sprint(lines) != "[block-storage gp3:100GiB 0.002863014 true compute m7i.2xlarge 0.1 true]" || src != "final" {
+		t.Errorf("after: %v %s", lines, src)
+	}
+	if after := snapshotRow(t, s); after != before {
+		t.Errorf("compute snapshot changed:\n%s\n%s", before, after)
+	}
+}
+
 // ParseVolume takes the operator's flag; an unknown type, key or a missing
 // size is refused.
 func TestParseVolume(t *testing.T) {
