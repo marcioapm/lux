@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatPercent, formatTimestamp, KeyValue, ListPriceNote, Money, MoneyList, Table, Tooltip, type Column, RelativeTime } from "@lux/design-system";
+import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatTimestamp, KeyValue, ListPriceNote, meterText, Money, MoneyList, Table, Tooltip, type Column, RelativeTime } from "@lux/design-system";
 import { api, isRunActive, useQuery, type CostLine, type CostTotal, type Run, type RunCost as RunCostData } from "../../api/index.ts";
 import { DASH, ErrorBlock, ErrorStrip, HostLink } from "./common.tsx";
 import { placementRows, placementTotals, type PlacementRow } from "./hostCostView.ts";
@@ -42,7 +42,7 @@ function RunPlacementsCost({ run, lines }: { run: Run; lines: CostLine[] }) {
       { key: "epoch", header: "Epoch", cell: (p) => p.epoch, sortValue: (p) => p.epoch, mono: true, width: 72 },
       { key: "host", header: "Host", cell: (p) => <HostLink id={p.hostId} name={names.get(p.hostId)} />, sortValue: (p) => names.get(p.hostId) ?? p.hostId, lead: true },
       { key: "window", header: "Window", cell: (p) => <PlacementWindow from={p.from} to={p.to} />, sortValue: (p) => Date.parse(p.from), sortKind: "time", width: 190 },
-      { key: "share", header: "Share", cell: (p) => (p.share == null ? DASH : formatPercent(p.share, 0)), sortValue: (p) => p.share, align: "right", mono: true, width: 72 },
+      { key: "share", header: "Share", cell: (p) => (p.share == null ? DASH : meterText(p.share)), sortValue: (p) => p.share, align: "right", mono: true, width: 72 },
       ...(multi ? [{ key: "currency", header: "Currency", cell: (p: PlacementRow) => p.currency, width: 80 }] : []),
       { key: "compute", header: "Compute", cell: (p) => (p.compute == null ? DASH : <Money amount={p.compute} currency={p.currency} />), sortValue: (p) => (p.compute == null ? null : Number(p.compute)), align: "right", mono: true, width: 110 },
       { key: "bs", header: "Block storage", cell: (p) => (p.blockStorage == null ? DASH : <Money amount={p.blockStorage} currency={p.currency} />), sortValue: (p) => (p.blockStorage == null ? null : Number(p.blockStorage)), align: "right", mono: true, width: 120 },

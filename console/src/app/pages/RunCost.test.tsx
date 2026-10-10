@@ -101,6 +101,17 @@ test("Run cost placements: one row per placement, compute and block storage apar
   }
 });
 
+test("Run cost placements: a non-zero share under 1% of the host reads <1%, never 0%", async () => {
+  const small = { ...pl(1, "hA", "0.0012"), share: 0.004 };
+  const p = await render({ ...COST, lines: [line("compute", "compute", "m8g.metal-48xl", "0.0012", [small])] });
+  try {
+    await until(() => p.card("Placements") != null, "the placements card");
+    expect(cells(p.card("Placements")).map((r) => [r[0], r[3]])).toEqual([["1", "<1%"]]);
+  } finally {
+    await p.done();
+  }
+});
+
 test("Run cost placements: no compute line (a pending Run, or only plugin lines) means no Placements card", async () => {
   const p = await render({ ...COST, lines: [line("ai", "llm-proxy", "claude", "1")] });
   try {
