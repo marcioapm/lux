@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -142,6 +143,41 @@ func TestBlockStorageRates(t *testing.T) {
 	s.refreshPrices(ctx)
 	if again := rates("od"); len(again) != 2 || again[0].PerHour != got[0].PerHour || !again[0].From.Equal(got[0].From) || *again[0].Details != *got[0].Details {
 		t.Errorf("second refresh: %+v", again)
+	}
+}
+
+// A launch that never registered (no capacity, no compute period) is not
+// selected by the block-storage refresh, so it is not priced or locked on
+// every pass; once it registers it is.
+func TestBlockStorageHostsSkipNeverRegistered(t *testing.T) {
+	p := &fakePriceProvider{blockStorage: map[string]BlockStoragePrice{"gp3": gp3eun1Answer}}
+	s := providerPriceServer(t, p)
+	ctx := context.Background()
+	from := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	insertProviderHost(t, s, "t1", "burst", "ec2", "od", MarketOnDemand, from)
+	execSQL(t, s, ctx, `UPDATE hosts SET volumes = $1::jsonb WHERE id = 'od'`, gp3Root)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, terminated_at, launch_template, volumes) VALUES
+		('ghost', 't1', 'ghost', 'pool-t1-ec2-burst', 'terminated', 'i-g', $1, $2, '{"region":"us-east-1"}', $3::jsonb),
+		('booting', 't1', 'booting', 'pool-t1-ec2-burst', 'provisioning', 'i-b', $1, NULL, '{"region":"us-east-1"}', $3::jsonb)`,
+		from, from.Add(10*time.Minute), gp3Root)
+	ids := func() []string {
+		hosts, err := s.blockStorageHosts(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, h := range hosts {
+			out = append(out, h.ID)
+		}
+		return out
+	}
+	if got := fmt.Sprint(ids()); got != "[od]" {
+		t.Fatalf("selected %s, want [od]", got)
+	}
+	execSQL(t, s, ctx, `UPDATE hosts SET capacity = '{"cpus": 4}', registered_at = $1, state = 'ready' WHERE id = 'booting'`, from.Add(time.Minute))
+	if got := fmt.Sprint(ids()); got != "[booting od]" {
+		t.Fatalf("after registering: %s", got)
 	}
 }
 
