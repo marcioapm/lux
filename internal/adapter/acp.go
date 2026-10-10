@@ -1082,9 +1082,11 @@ func (a *ACP) onBus(ev busEvent) {
 // summary read from OpenCode's stored messages (session.compacted carries
 // none), off the bus goroutine and within compactionTimeout. Unread, the
 // record goes without it, and a warning says why. A session.compacted
-// whose summary was already reported is a duplicate: no record.
+// whose summary was already reported is a duplicate: no record. One that
+// comes as the Run ends (no read can start) is reported without a summary,
+// on the bus goroutine, which the Run's end waits for.
 func (a *ACP) compacted(session string) {
-	a.spawn(func() {
+	started := a.spawn(func() {
 		a.compactionMu.Lock()
 		defer a.compactionMu.Unlock()
 		a.mu.Lock()
@@ -1103,12 +1105,26 @@ func (a *ACP) compacted(session string) {
 			a.lastSummary = id
 			a.mu.Unlock()
 		}
-		a.sink.Compacted(proto.Compaction{SessionID: session, Trigger: trigger, Summary: summary})
-		if err != nil {
-			a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
-				"opencode: session %s was compacted; its summary could not be read: %v", session, err)})
+		if err != nil && a.runCtx().Err() != nil {
+			err = errRunEndedBeforeSummary
 		}
+		a.reportCompaction(session, trigger, summary, err)
 	})
+	if !started {
+		a.reportCompaction(session, "", "", errRunEndedBeforeSummary)
+	}
+}
+
+var errRunEndedBeforeSummary = errors.New("the Run ended before it was read")
+
+// reportCompaction writes the record, then the warning if the summary
+// could not be read.
+func (a *ACP) reportCompaction(session, trigger, summary string, err error) {
+	a.sink.Compacted(proto.Compaction{SessionID: session, Trigger: trigger, Summary: summary})
+	if err != nil {
+		a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+			"opencode: session %s was compacted; its summary could not be read: %v", session, err)})
+	}
 }
 
 // setOpenCodeBusy records whether OpenCode runs a loop for the session and

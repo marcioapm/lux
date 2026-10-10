@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -232,6 +233,10 @@ func newFakeBus(t *testing.T) *fakeBus {
 		out = append(out, b.whole...)
 		code, hang := b.messagesCode, b.messagesHang
 		b.mu.Unlock()
+		// ?limit=N: the newest N, oldest first, as OpenCode pages.
+		if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n < len(out) {
+			out = out[len(out)-n:]
+		}
 		if hang != nil {
 			select {
 			case <-hang:
@@ -1554,7 +1559,8 @@ func TestOpenCodeCompactionIsReported(t *testing.T) {
 	onBus(t, a, ocIdle)
 	w.exit()
 	got = log.compactions()
-	if len(got) != 1 || !strings.HasPrefix(got[0], `compacted {"sessionId":"`+ocSession+`","trigger":"manual","summary":"## Objective\n- User wants agent to remember`) {
+	want, _ := json.Marshal(proto.Compaction{SessionID: ocSession, Trigger: "manual", Summary: ocCompactionSummary(t)})
+	if !slices.Equal(got, []string{"compacted " + string(want)}) {
 		t.Fatalf("got %q", got)
 	}
 	if log.has("warning") {
@@ -1714,4 +1720,124 @@ func ocWithBusOn2(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, string)
 	b.whole = ocCompactionMessages(t)
 	b.mu.Unlock()
 	return a, b, w, log, first
+}
+
+// ocCompactionWith is ocCompactionMessages with edit applied to the user
+// message (the compaction part's holder, [0]) and the summary ([1]).
+func ocCompactionWith(t *testing.T, edit func(user, summary map[string]any)) []any {
+	t.Helper()
+	msgs := ocCompactionMessages(t)
+	edit(msgs[0].(map[string]any), msgs[1].(map[string]any))
+	return msgs
+}
+
+// ocCompactionSummary is the summary text OpenCode stored in the testdata.
+func ocCompactionSummary(t *testing.T) string {
+	t.Helper()
+	var text strings.Builder
+	for _, p := range ocCompactionMessages(t)[1].(map[string]any)["parts"].([]any) {
+		if p := p.(map[string]any); p["type"] == "text" {
+			text.WriteString(p["text"].(string))
+		}
+	}
+	return text.String()
+}
+
+// The record's trigger is the compaction part's: auto, overflow (with
+// auto), or manual.
+func TestOpenCodeCompactionTrigger(t *testing.T) {
+	for _, tc := range []struct {
+		part map[string]any
+		want string
+	}{
+		{map[string]any{"auto": true}, "auto"},
+		{map[string]any{"auto": true, "overflow": true}, "overflow"},
+		{map[string]any{"auto": false}, "manual"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			a, b, w, log, first := ocWithBusOn2(t)
+			b.mu.Lock()
+			b.whole = ocCompactionWith(t, func(user, _ map[string]any) {
+				part := user["parts"].([]any)[0].(map[string]any)
+				delete(part, "auto")
+				for k, v := range tc.part {
+					part[k] = v
+				}
+			})
+			b.mu.Unlock()
+			onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+			got := waitCompactions(t, log, 1)
+			w.resolve(first, ocResult)
+			w.exit()
+			want, _ := json.Marshal(proto.Compaction{SessionID: ocSession, Trigger: tc.want, Summary: ocCompactionSummary(t)})
+			if !slices.Equal(got, []string{"compacted " + string(want)}) {
+				t.Fatalf("got %.200q", got)
+			}
+		})
+	}
+}
+
+// A summary message with no text: the record without a summary, with the
+// trigger, and a warning.
+func TestOpenCodeCompactionSummaryWithoutText(t *testing.T) {
+	a, b, w, log, first := ocWithBusOn2(t)
+	b.mu.Lock()
+	b.whole = ocCompactionWith(t, func(_, summary map[string]any) {
+		summary["parts"] = slices.DeleteFunc(summary["parts"].([]any), func(p any) bool { return p.(map[string]any)["type"] == "text" })
+	})
+	b.mu.Unlock()
+	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	got := waitCompactions(t, log, 1)
+	w.resolve(first, ocResult)
+	w.exit()
+	if want := []string{`compacted {"sessionId":"` + ocSession + `","trigger":"manual"}`}; !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if next := lineAfter(log.lines(), "compacted "); next != "warning opencode: session "+ocSession+" was compacted; its summary could not be read: its summary message has no text" {
+		t.Fatalf("after the record: %q", next)
+	}
+}
+
+// The summary is looked for among the session's newest compactionWindow
+// messages only: one further back is not read.
+func TestOpenCodeCompactionWindow(t *testing.T) {
+	a, b, w, log, first := ocWithBusOn2(t)
+	b.mu.Lock()
+	for i := range compactionWindow {
+		var m any
+		_ = json.Unmarshal([]byte(fmt.Sprintf(`{"info":{"id":"msg_zzz%03d","role":"assistant"},"parts":[{"type":"text","text":"later"}]}`, i)), &m)
+		b.whole = append(b.whole, m)
+	}
+	b.mu.Unlock()
+	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	got := waitCompactions(t, log, 1)
+	w.resolve(first, ocResult)
+	w.exit()
+	if want := []string{`compacted {"sessionId":"` + ocSession + `","trigger":""}`}; !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if !log.has(fmt.Sprintf("warning opencode: session %s was compacted; its summary could not be read: no summary message among the session's newest %d", ocSession, compactionWindow)) {
+		t.Fatalf("no warning: %q", log.lines())
+	}
+}
+
+// A session.compacted handled once the Run is ending, when no summary read
+// can start, is still reported, without a summary, with a warning.
+func TestOpenCodeCompactionAfterClose(t *testing.T) {
+	a, _, w, log, first := ocWithBusOn2(t)
+	w.resolve(first, ocResult)
+	w.exit()
+	a.mu.Lock()
+	closed := a.closed
+	a.mu.Unlock()
+	if !closed {
+		t.Fatal("the adapter is not closed after Run")
+	}
+	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	if got, want := log.compactions(), []string{`compacted {"sessionId":"` + ocSession + `","trigger":""}`}; !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if next := lineAfter(log.lines(), "compacted "); next != "warning opencode: session "+ocSession+" was compacted; its summary could not be read: the Run ended before it was read" {
+		t.Fatalf("after the record: %q", next)
+	}
 }

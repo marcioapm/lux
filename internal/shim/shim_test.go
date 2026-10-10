@@ -201,6 +201,9 @@ func TestCompactedRecord(t *testing.T) {
 	k.Compacted(proto.Compaction{SessionID: "s1", Trigger: "auto"})
 	// "é" is two bytes: the cap falls inside it.
 	k.Compacted(proto.Compaction{SessionID: "s1", Summary: strings.Repeat("a", proto.MaxCompactionSummary-1) + "é"})
+	// The secret straddles the cap: redacted before the cut, and the cut
+	// does not keep half of its marker.
+	k.Compacted(proto.Compaction{SessionID: "s1", Summary: strings.Repeat("y", proto.MaxCompactionSummary-5) + "s3cr3t-value"})
 	out.Close()
 	var got []map[string]any
 	for _, r := range readRecords(t, path) {
@@ -212,7 +215,7 @@ func TestCompactedRecord(t *testing.T) {
 			got = append(got, ev.Data)
 		}
 	}
-	if len(got) != 3 {
+	if len(got) != 4 {
 		t.Fatalf("got %d records: %v", len(got), got)
 	}
 	want0 := map[string]any{"sessionId": "s1", "trigger": "manual", "preTokens": float64(36694), "postTokens": float64(1172),
@@ -226,6 +229,11 @@ func TestCompactedRecord(t *testing.T) {
 	s, _ := got[2]["summary"].(string)
 	if len(s) != proto.MaxCompactionSummary-1 || !utf8.ValidString(s) || got[2]["summaryTruncated"] != true {
 		t.Errorf("capped: %d bytes, valid %v, truncated %v", len(s), utf8.ValidString(s), got[2]["summaryTruncated"])
+	}
+	s, _ = got[3]["summary"].(string)
+	if strings.Contains(s, "s3cr") || strings.Contains(s, "[REDA") || s != strings.Repeat("y", proto.MaxCompactionSummary-5) ||
+		got[3]["summaryTruncated"] != true {
+		t.Errorf("straddling: ends %q, truncated %v", s[max(0, len(s)-20):], got[3]["summaryTruncated"])
 	}
 }
 

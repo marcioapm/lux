@@ -49,6 +49,10 @@ class Caps:
     # The real agent compacts when sent "/compact" as input; otherwise its
     # compaction is forced with compact_args and a large turn.
     compact_command: bool = False
+    # The event type under which the adapter relays the agent's own
+    # announcement of a compaction (claude.system compact_boundary,
+    # codex.item/completed contextCompaction); "" where none is relayed.
+    compaction_relay: str = ""
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,8 @@ HARNESSES = [
         name="claude",
         adapter="claude-code",
         caps=Caps(steer_joins_turn=True, steer_receipt=True, steer_in_final_step_is_next_turn=True, stop_is_sigint=True,
-                  reports_compaction=True, compaction_summary=True, compact_command=True),
+                  reports_compaction=True, compaction_summary=True, compact_command=True,
+                  compaction_relay="claude.system"),
         real_command=lambda: ["claude", "--model", _env("LUX_TEST_CLAUDE_MODEL") or "haiku", "--permission-mode", "bypassPermissions"],
         real_secrets=lambda: [{"name": "ANTHROPIC_API_KEY", "value": _env("LUX_TEST_ANTHROPIC_API_KEY")}],
         real_env=lambda: {"ANTHROPIC_BASE_URL": b} if (b := _env("LUX_TEST_ANTHROPIC_BASE_URL")) else {},
@@ -120,7 +125,8 @@ HARNESSES = [
         # openai_base_url keeps Codex's built-in openai provider, which
         # compacts remotely (codex 0.145.0): the rollout's compacted entry
         # has an empty message, so there is no summary text.
-        caps=Caps(steer_joins_turn=True, steer_receipt=True, reports_compaction=True),
+        caps=Caps(steer_joins_turn=True, steer_receipt=True, reports_compaction=True,
+                  compaction_relay="codex.item/completed"),
         real_command=_codex_command,
         # Its context with no conversation is about 10k tokens; a turn of
         # about 3.5k goes past this, and the next turn starts by compacting.

@@ -52,16 +52,18 @@ type Codex struct {
 	// (before lux checks whether its turn has ended) and "done" (a test
 	// seam for interleavings).
 	onSteer func(stage, requestID string)
-	// rollout: the thread's rollout file (thread.path), where Codex writes
-	// each compaction's summary as a compacted entry. rolloutBase: the
-	// entries it held when the thread started or resumed; reported: the
-	// contextCompaction items reported, by id. ctx ends with Run; bg joins
-	// the summary reads.
-	rollout     string
+	// rollout: thread.path, where Codex writes each compaction's summary.
+	rollout string
+	// rolloutBase: the compacted entries the rollout held at thread
+	// start or resume, which are not this Run's.
 	rolloutBase int
-	reported    map[string]bool
-	ctx         context.Context
-	bg          sync.WaitGroup
+	// baseErr: why rolloutBase is unknown; no entry is then taken.
+	baseErr error
+	// reported: the contextCompaction items reported, by id.
+	reported map[string]bool
+	// ctx ends with Run; bg joins the summary reads waiting on the rollout.
+	ctx context.Context
+	bg  sync.WaitGroup
 	// rolloutMu guards rolloutOff, how far the rollout has been read, and
 	// compacted, the compacted entries read so far.
 	rolloutMu  sync.Mutex
@@ -216,10 +218,18 @@ func (c *Codex) handshake(cfg proto.ShimConfig, sink Sink) error {
 	c.thread, c.rollout = r.Thread.ID, r.Thread.Path
 	c.mu.Unlock()
 	if r.Thread.Path != "" {
-		// A resumed thread's earlier compactions are not this Run's.
-		prior, _ := c.compactedEntries()
+		// A resumed thread's earlier compactions are not this Run's. A new
+		// thread's rollout may not exist yet: it holds none. Any other
+		// failure leaves the base unknown, so no entry is guessed at.
+		prior, err := c.compactedEntries()
+		if errors.Is(err, os.ErrNotExist) && !cfg.Resume {
+			err = nil
+		}
+		if err != nil {
+			sink.Event(proto.EvWarning, map[string]any{"message": "codex: the thread's rollout could not be read; compactions are reported without a summary: " + err.Error()})
+		}
 		c.mu.Lock()
-		c.rolloutBase = len(prior)
+		c.rolloutBase, c.baseErr = len(prior), err
 		c.mu.Unlock()
 	}
 	sink.Session(r.Thread.ID)
@@ -481,8 +491,12 @@ func (c *Codex) compactionCompleted(id string) {
 	}
 	c.reported[id] = true
 	n := c.rolloutBase + len(c.reported) - 1
-	thread, sink, ctx := c.thread, c.sink, c.ctx
+	thread, sink, ctx, baseErr := c.thread, c.sink, c.ctx, c.baseErr
 	c.mu.Unlock()
+	if baseErr != nil {
+		reportCodexCompaction(sink, thread, "", fmt.Errorf("the rollout's earlier entries are unknown: %w", baseErr))
+		return
+	}
 	if summary, done, err := c.rolloutEntry(n); done {
 		reportCodexCompaction(sink, thread, summary, err)
 		return
@@ -533,16 +547,22 @@ func (c *Codex) rolloutEntry(n int) (summary string, done bool, err error) {
 }
 
 // rolloutSummary waits up to compactionWait for the rollout's nth
-// compacted entry.
+// compacted entry, reading it once more when the wait or the Run ends.
 func (c *Codex) rolloutSummary(ctx context.Context, n int) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.compactionWait)
+	wait, cancel := context.WithTimeout(ctx, c.compactionWait)
 	defer cancel()
 	for {
 		if summary, done, err := c.rolloutEntry(n); done {
 			return summary, err
 		}
 		select {
-		case <-ctx.Done():
+		case <-wait.Done():
+			if summary, done, err := c.rolloutEntry(n); done {
+				return summary, err
+			}
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("the Run ended before Codex wrote its compacted entry to %s", c.rolloutFile())
+			}
 			return "", fmt.Errorf("no compacted entry in %s after %s", c.rolloutFile(), c.compactionWait)
 		case <-time.After(50 * time.Millisecond):
 		}

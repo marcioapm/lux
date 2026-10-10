@@ -374,11 +374,20 @@ def _turn(lux, harness, run_id: str, text: str) -> None:
     lux.wait_activity(run_id, "idle", timeout=harness.timeout)
 
 
+def _announces_compaction(data: dict) -> bool:
+    """Whether an agent's relayed event is its own compaction announcement:
+    Claude Code's compact_boundary, Codex's contextCompaction item."""
+    item = data.get("item")
+    return data.get("subtype") == "compact_boundary" or (isinstance(item, dict) and item.get("type") == "contextCompaction")
+
+
 @harnesses(lambda h: h.caps.reports_compaction)
 def test_compaction_is_reported_with_its_summary(lux, runners, hosts, harness):
     """The agent compacts its context once: lux reports it as one
     lux.compacted record, with the summary the agent made where it makes
-    one, and the agent still remembers what it was told before."""
+    one, after the agent's own announcement where that is relayed, and
+    the agent still remembers what it was told before. (A fake agent keeps
+    its whole transcript, so its recall holds whether or not it compacted.)"""
     runners.start(hosts[0])
     word = f"PERIWINKLE{int(time.time() * 1000) % 100000:05d}"
     run_id = lux.submit(harness.compaction_spec(harness.remember(word)))
@@ -388,14 +397,19 @@ def test_compaction_is_reported_with_its_summary(lux, runners, hosts, harness):
     since = lux.records(run_id)[-1]["cursor"]
     _turn(lux, harness, run_id, harness.recall_word())
     assert word in lux.logs(run_id, "--since", since).upper(), lux.logs(run_id, "--since", since)[-2000:]
+    # A whole turn has ended since the compaction: a second record for it
+    # would be in by now.
     compacted = wait_until(lambda: _events(lux, run_id, "lux.compacted"), harness.timeout, 0.5,
                            f"no lux.compacted; warnings: {_events(lux, run_id, 'lux.warning')}")
-    time.sleep(1)
-    compacted = _events(lux, run_id, "lux.compacted")
     assert len(compacted) == 1, compacted
     rec = compacted[0]
     assert rec["sessionId"] == session, rec
     assert rec.get("trigger") in ("auto", "manual", "overflow", ""), rec
+    if relay := harness.caps.compaction_relay:
+        events = [r["event"] for r in lux.records(run_id, "--events") if r.get("event")]
+        at = next(i for i, e in enumerate(events) if e.get("type") == "lux.compacted")
+        raw = [i for i, e in enumerate(events) if e.get("type") == relay and _announces_compaction(e.get("data") or {})]
+        assert raw and raw[0] < at, ([e.get("type") for e in events], raw, at)
     if harness.caps.compaction_summary:
         assert rec.get("summary"), (rec, _events(lux, run_id, "lux.warning"))
         assert word in rec["summary"].upper(), rec["summary"][:2000]

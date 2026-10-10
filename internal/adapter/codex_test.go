@@ -29,13 +29,23 @@ func cxCompaction(t *testing.T, prior ...string) (*Codex, *agentWire, *inputSink
 // cxStartedAt is a Codex adapter whose thread.path is rollout, as it is.
 func cxStartedAt(t *testing.T, rollout string) (*Codex, *agentWire, *inputSink) {
 	t.Helper()
+	return cxHandshake(t, rollout, proto.ShimConfig{})
+}
+
+// cxHandshake is cxStartedAt with cfg: thread/resume for a resume.
+func cxHandshake(t *testing.T, rollout string, cfg proto.ShimConfig) (*Codex, *agentWire, *inputSink) {
+	t.Helper()
 	log := &inputSink{}
 	c := NewCodex()
 	c.compactionWait = 300 * time.Millisecond
-	w := startWireSink(t, c, proto.ShimConfig{}, cxEvents{warnSink{log}})
+	w := startWireSink(t, c, cfg, cxEvents{warnSink{log}})
 	id, _ := w.next("initialize")
 	w.send(`{"id":` + id + `,"result":{"userAgent":"lux/0.145.0 (Ubuntu; x86_64)"}}`)
-	id, _ = w.next("thread/start")
+	method := "thread/start"
+	if cfg.Resume {
+		method = "thread/resume"
+	}
+	id, _ = w.next(method)
 	w.send(`{"id":` + id + `,"result":{"thread":{"id":"` + cxThread + `","path":"` + rollout + `","status":{"type":"idle"}}}}`)
 	// The handshake is done (it reports idle last).
 	log.wait(t, "idle")
@@ -151,18 +161,22 @@ func TestCodexCompactionIsReported(t *testing.T) {
 	}
 }
 
-// Codex may write the rollout's entry just after the item completes: it is
-// waited for, and reported once, after the relay.
+// Codex may write the rollout's entry just after the item completes, and a
+// read may find it half written: it is waited for whole, and reported
+// once, after the relay.
 func TestCodexCompactionSummaryWrittenLate(t *testing.T) {
 	c, w, log, rollout := cxCompaction(t)
 	c.compactionWait = 2 * time.Second
 	started, completed := cxItems(t)
 	lines, summary := cxRolloutCompacted(t)
 	w.send(started)
+	half := len(lines[0]) / 2
+	appendRaw(t, rollout, lines[0][:half])
 	w.send(completed)
 	log.wait(t, "codex.item/completed contextCompaction")
 	time.Sleep(60 * time.Millisecond)
-	appendRollout(t, rollout, lines...)
+	appendRaw(t, rollout, lines[0][half:]+"\n")
+	appendRollout(t, rollout, lines[1])
 	waitCompactions(t, log, 1)
 	w.exit()
 	want, _ := json.Marshal(proto.Compaction{SessionID: cxThread, Summary: summary})
@@ -175,11 +189,24 @@ func TestCodexCompactionSummaryWrittenLate(t *testing.T) {
 	}
 }
 
+// appendRaw appends s to the file as it is, with no newline added.
+func appendRaw(t *testing.T, path, s string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(s); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Two compactions in a Run: each record has its own entry's summary.
 func TestCodexTwoCompactions(t *testing.T) {
 	_, w, log, rollout := cxCompaction(t)
 	started, completed := cxItems(t)
-	lines, summary := cxRolloutCompacted(t)
+	lines, _ := cxRolloutCompacted(t)
 	w.send(started)
 	appendRollout(t, rollout, lines...)
 	w.send(completed)
@@ -190,10 +217,29 @@ func TestCodexTwoCompactions(t *testing.T) {
 	w.send(strings.ReplaceAll(completed, "01a12680-3221", "01a12690-0000"))
 	got := waitCompactions(t, log, 2)
 	w.exit()
-	if len(got) != 2 || !strings.Contains(got[0], "PERIWINKLE") || !strings.Contains(got[1], "MARIGOLD") ||
-		strings.Count(summary, "PERIWINKLE") == 0 {
+	if len(got) != 2 || !strings.Contains(got[0], "PERIWINKLE") || !strings.Contains(got[1], "MARIGOLD") {
 		t.Fatalf("got %q", got)
 	}
+}
+
+// The testdata is the capture lux reads PERIWINKLE from.
+func TestCodexRolloutTestdata(t *testing.T) {
+	if _, summary := cxRolloutCompacted(t); !strings.Contains(summary, "PERIWINKLE") {
+		t.Fatalf("summary %q", summary)
+	}
+}
+
+// cxRolloutRemote is codex 0.145.0's compacted entry and context_compacted
+// event for a remote compaction, through the built-in openai provider
+// (testdata/codex-0.145.0-rollout-compacted-remote.jsonl): an empty
+// message, and an encrypted compaction item in replacement_history.
+func cxRolloutRemote(t *testing.T) []string {
+	t.Helper()
+	b, err := os.ReadFile("testdata/codex-0.145.0-rollout-compacted-remote.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(b)), "\n")
 }
 
 // A compaction whose summary is not in the rollout (none written in time,
@@ -205,15 +251,11 @@ func TestCodexCompactionWithoutSummary(t *testing.T) {
 		name, warning string
 		// adjacent: the entry is in the rollout when the item completes.
 		adjacent bool
-		after    func(t *testing.T, rollout string, lines []string)
+		after    func(t *testing.T, rollout string)
 	}{
-		{"never written", "no compacted entry in", false, func(*testing.T, string, []string) {}},
-		{"remote", "Codex compacted remotely and exposes no summary text", true, func(t *testing.T, rollout string, lines []string) {
-			var e map[string]any
-			_ = json.Unmarshal([]byte(lines[0]), &e)
-			e["payload"].(map[string]any)["message"] = ""
-			b, _ := json.Marshal(e)
-			appendRollout(t, rollout, string(b), lines[1])
+		{"never written", "no compacted entry in", false, func(*testing.T, string) {}},
+		{"remote", "Codex compacted remotely and exposes no summary text", true, func(t *testing.T, rollout string) {
+			appendRollout(t, rollout, cxRolloutRemote(t)...)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -221,7 +263,7 @@ func TestCodexCompactionWithoutSummary(t *testing.T) {
 			_, w, log, rollout := cxCompaction(t, lines...)
 			started, completed := cxItems(t)
 			w.send(started)
-			tc.after(t, rollout, lines)
+			tc.after(t, rollout)
 			w.send(completed)
 			got := waitCompactions(t, log, 1)
 			w.exit()
@@ -323,5 +365,88 @@ func TestCodexRolloutLineTooLong(t *testing.T) {
 	}
 	if !log.has("warning codex: thread " + cxThread + " was compacted; its summary could not be read: its rollout entry is longer than") {
 		t.Fatalf("no warning: %q", log.lines())
+	}
+}
+
+// A Run that ends while a compaction's entry is awaited: the rollout is
+// read once more, so an entry written just before is still taken; with
+// none, the warning says the Run ended, not that the wait ran out.
+func TestCodexCompactionWhenTheRunEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		written bool
+	}{{"entry written", true}, {"no entry", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, w, log, rollout := cxCompaction(t)
+			c.compactionWait = time.Minute
+			started, completed := cxItems(t)
+			lines, summary := cxRolloutCompacted(t)
+			w.send(started)
+			w.send(completed)
+			log.wait(t, "codex.item/completed contextCompaction")
+			if tc.written {
+				appendRollout(t, rollout, lines...)
+			}
+			w.exit()
+			got := log.compactions()
+			if !tc.written {
+				summary = ""
+			}
+			want, _ := json.Marshal(proto.Compaction{SessionID: cxThread, Summary: summary})
+			if !slices.Equal(got, []string{"compacted " + string(want)}) {
+				t.Fatalf("got %q", got)
+			}
+			warned := log.has("warning codex: thread " + cxThread + " was compacted; its summary could not be read: the Run ended before Codex wrote its compacted entry to ")
+			if warned == tc.written {
+				t.Fatalf("warning: %q", log.lines())
+			}
+		})
+	}
+}
+
+// A resumed thread whose rollout could not be read at resume: its earlier
+// entries are unknown, so a compaction is reported without a summary
+// rather than with one of them.
+func TestCodexResumeRolloutUnreadable(t *testing.T) {
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	_, w, log := cxHandshake(t, rollout, proto.ShimConfig{Resume: true, SessionID: cxThread})
+	if !log.has("warning codex: the thread's rollout could not be read; compactions are reported without a summary: ") {
+		t.Fatalf("no warning: %q", log.lines())
+	}
+	lines, _ := cxRolloutCompacted(t)
+	second := strings.Replace(lines[0], "PERIWINKLE", "MARIGOLD", 1)
+	if err := os.WriteFile(rollout, []byte(lines[0]+"\n"+lines[1]+"\n"+second+"\n"+lines[1]+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	started, completed := cxItems(t)
+	w.send(started)
+	w.send(completed)
+	got := waitCompactions(t, log, 1)
+	w.exit()
+	want, _ := json.Marshal(proto.Compaction{SessionID: cxThread})
+	if !slices.Equal(got, []string{"compacted " + string(want)}) {
+		t.Fatalf("got %q", got)
+	}
+	if next := lineAfter(log.lines(), "compacted "); !strings.HasPrefix(next, "warning codex: thread "+cxThread+" was compacted; its summary could not be read: the rollout's earlier entries are unknown: ") {
+		t.Fatalf("after the record: %q", next)
+	}
+}
+
+// A new thread's rollout that does not exist yet holds no earlier entries.
+func TestCodexNewThreadRolloutNotYetWritten(t *testing.T) {
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	_, w, log := cxStartedAt(t, rollout)
+	lines, summary := cxRolloutCompacted(t)
+	if err := os.WriteFile(rollout, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	started, completed := cxItems(t)
+	w.send(started)
+	w.send(completed)
+	got := waitCompactions(t, log, 1)
+	w.exit()
+	want, _ := json.Marshal(proto.Compaction{SessionID: cxThread, Summary: summary})
+	if !slices.Equal(got, []string{"compacted " + string(want)}) || log.has("warning") {
+		t.Fatalf("got %q; lines %q", got, log.lines())
 	}
 }

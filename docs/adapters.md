@@ -238,7 +238,11 @@ Header values come from secrets and are never in the command line. See
   (`--request-id`) never sends it twice.
 - **Structured events.** The agent's own protocol messages are kept as
   events in the output (`lux logs --events`). The reply text also goes to
-  stdout, so `lux logs` reads like a conversation.
+  stdout, so `lux logs` reads like a conversation. `claude-code` relays
+  every stream-json line with a `type` as `claude.<type>`, including user
+  lines whose `message.content` is a string (a compaction's summary, a
+  slash command's `<local-command-stdout>` replay); none of those go to
+  stdout.
 - **The session id.** It is stored on the Run and passed back on resume, so
   the conversation continues from its transcript on the restored state
   volume.
@@ -267,9 +271,11 @@ the Run's session as one `lux.compacted` record in the output (`lux logs
 | `summaryTruncated` | `true` when `summary` was cut |
 
 Fields the agent does not give are left out. A summary lux could not read
-(OpenCode's server did not answer within 10 s, Codex wrote none to its
-rollout within 10 s) leaves `summary` out and adds a `lux.warning` saying
-why, right after the record; the record still comes.
+leaves `summary` out and adds a `lux.warning` saying why, right after the
+record; the record still comes. Both reads lux waits on are bounded at
+10 s: OpenCode's server answering, and Codex writing the entry to its
+rollout. Codex's rollout is read only as a regular file (not through a
+symlink or from a FIFO), and a line over 16 MiB in it is skipped.
 
 | Adapter | Signal | Summary from | `trigger` | tokens |
 | --- | --- | --- | --- | --- |

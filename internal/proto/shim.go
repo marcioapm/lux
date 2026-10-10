@@ -227,6 +227,8 @@ type Compaction struct {
 	PreTokens  *int64 `json:"preTokens,omitempty"`
 	PostTokens *int64 `json:"postTokens,omitempty"`
 	Summary    string `json:"summary,omitempty"`
+	// SummaryTruncated is set by the shim when it cuts Summary.
+	SummaryTruncated bool `json:"summaryTruncated,omitempty"`
 }
 
 // Input phases: lux.input's phase (accepted, failed), and
