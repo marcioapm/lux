@@ -1089,21 +1089,9 @@ func (k *sink) input(in proto.Input, phase string, extra map[string]any, err err
 		text = string(in.Raw)
 	}
 	if text != "" {
-		// Redacted before it is cut, so a secret straddling the cut is not
-		// half kept; cut on a rune boundary.
-		text = k.s.red.Redact(text)
-		if len(text) > maxAckedText {
-			cut := maxAckedText
-			for cut > 0 && !utf8.RuneStart(text[cut]) {
-				cut--
-			}
-			// Not inside a redaction marker, either: the last one starting
-			// before the cut must also end before it.
-			if open := strings.LastIndex(text[:cut], "["); open >= 0 && strings.HasPrefix(text[open:], "[REDACTED:") &&
-				!strings.Contains(text[open:cut], "]") {
-				cut = open
-			}
-			text, d["truncated"] = text[:cut], true
+		var cut bool
+		if text, cut = k.redactCut(text, maxAckedText); cut {
+			d["truncated"] = true
 		}
 		d["text"] = text
 	}
@@ -1111,6 +1099,45 @@ func (k *sink) input(in proto.Input, phase string, extra map[string]any, err err
 		d["error"] = err.Error()
 	}
 	k.s.out.Event(proto.EvInputAck, d)
+}
+
+// redactCut is text redacted, then cut to at most max bytes, and whether
+// it was cut. Redacted before it is cut, so a secret straddling the cut is
+// not half kept; cut on a rune boundary, and not inside a redaction marker.
+func (k *sink) redactCut(text string, max int) (string, bool) {
+	text = k.s.red.Redact(text)
+	if len(text) <= max {
+		return text, false
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	if open := strings.LastIndex(text[:cut], "["); open >= 0 && strings.HasPrefix(text[open:], "[REDACTED:") &&
+		!strings.Contains(text[open:cut], "]") {
+		cut = open
+	}
+	return text[:cut], true
+}
+
+// Compacted writes lux.compacted: the summary redacted like any agent
+// output and capped at proto.MaxCompactionSummary.
+func (k *sink) Compacted(c proto.Compaction) {
+	d := map[string]any{"sessionId": c.SessionID, "trigger": c.Trigger}
+	if c.PreTokens != nil {
+		d["preTokens"] = *c.PreTokens
+	}
+	if c.PostTokens != nil {
+		d["postTokens"] = *c.PostTokens
+	}
+	if c.Summary != "" {
+		summary, cut := k.redactCut(c.Summary, proto.MaxCompactionSummary)
+		d["summary"] = summary
+		if cut {
+			d["summaryTruncated"] = true
+		}
+	}
+	k.s.out.Event(proto.EvCompacted, d)
 }
 
 // maxAckedText caps the input text an ack repeats.
