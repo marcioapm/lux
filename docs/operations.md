@@ -666,10 +666,13 @@ What an instance needs:
   `DescribeInstanceTypes` (a template's `instanceType`'s memory, passed to
   the runner as `LUX_RUNNER_MEMORY`; without it the launch still goes
   ahead, logged, and the host offers its MemTotal), plus
-  `pricing:GetProducts` for on-demand prices and
-  `ec2:DescribeSpotPriceHistory` for spot prices, from its standard AWS
-  configuration (environment or instance role). Both pricing actions are
-  read-only and require `Resource: "*"`; the runner needs neither. The
+  `pricing:GetProducts` for on-demand and EBS prices,
+  `ec2:DescribeSpotPriceHistory` for spot prices and `ec2:DescribeVolumes`
+  for each host's block-storage volumes (their size and type price its
+  block storage; without it a host's block storage stays missing, never
+  zero), from its standard AWS
+  configuration (environment or instance role). These three actions are
+  read-only and require `Resource: "*"`; the runner needs none. The
   Pricing API uses `LUX_COSTS_PRICING_REGION` regardless of the host's
   region. `LUX_EC2_ENDPOINT` and `LUX_PRICING_ENDPOINT` override their
   respective endpoints for tests.

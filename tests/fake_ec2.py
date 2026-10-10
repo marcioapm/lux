@@ -1,6 +1,6 @@
 """A fake EC2 for the test suite: an HTTP server speaking the EC2 Query API
 calls lux uses (RunInstances, TerminateInstances, DescribeInstances,
-DescribeInstanceTypes), where an instance is a simulated host container that
+DescribeInstanceTypes, DescribeVolumes), where an instance is a simulated host container that
 boots lux-runner from its user data, as a real instance's AMI would.
 
 luxd's EC2 provider is pointed at it with LUX_EC2_ENDPOINT, so the real
@@ -67,6 +67,10 @@ def _parse_env_lines(text: str) -> dict[str, str]:
 # The instance type the fake's launch templates stand for.
 FAKE_TEMPLATE_TYPE = "m7i.large"
 
+# The root volume the fake's launch template gives each instance: gp3,
+# 100 GiB, 3000 IOPS, 125 MiB/s, deleted with the instance.
+FAKE_ROOT_VOLUME = {"type": "gp3", "size": 100, "iops": 3000, "throughput": 125, "deleteOnTermination": True}
+
 # The capacity shortages a dry run never answers (EC2 does not test
 # capacity for one); every other injected failure fails it too.
 DRY_RUN_UNTESTED = frozenset({"InsufficientInstanceCapacity", "InsufficientCapacity"})
@@ -102,6 +106,13 @@ class FakeEC2:
         # much as the harness's runners offer by default, so a launched
         # host packs as a static one does.
         self.type_memory_mib = RUNNER_MEMORY >> 20
+        # The volumes every launched instance gets, as its launch template's
+        # block device mappings would give them (the aiverse template's root
+        # disk); each instance keeps the list it launched with. A test may
+        # change it before a launch, or set volumes_error to fail
+        # DescribeVolumes as a missing ec2:DescribeVolumes would.
+        self.volumes = [dict(FAKE_ROOT_VOLUME)]
+        self.volumes_error = ""
         self.server = ThreadingHTTPServer((env.gateway, 0), self._handler())
         self.url = f"http://{env.gateway}:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -238,7 +249,8 @@ class FakeEC2:
                                    "userdata": userdata,
                                    "launchTemplate": lt_id or lt_name,
                                    "instanceType": q.get("InstanceType"), "subnet": q.get("SubnetId"),
-                                   "market": q.get("InstanceMarketOptions.MarketType")}
+                                   "market": q.get("InstanceMarketOptions.MarketType"),
+                                   "volumes": [dict(v) for v in self.volumes]}
         threading.Thread(target=self._boot, args=(iid,), daemon=True).start()
         if self.lose_reply:
             self.lose_reply = False
@@ -357,6 +369,34 @@ class FakeEC2:
                 f"</instanceState><tagSet>{_tags(self.instances[i]['tags'])}</tagSet></item>" for i in chosen)
         return (f'<DescribeInstancesResponse xmlns="{NS}"><reservationSet><item><reservationId>r-0</reservationId>'
                 f"<instancesSet>{items}</instancesSet></item></reservationSet></DescribeInstancesResponse>")
+
+    def _DescribeVolumes(self, q):
+        """The volumes attached to the instances an attachment.instance-id
+        filter names (unknown ids match nothing, as EC2's filters do), each
+        with its one attachment; terminated instances have none left."""
+        if self.volumes_error:
+            raise FakeError(self.volumes_error, "not authorized to perform ec2:DescribeVolumes (fake)")
+        wanted: set[str] = set()
+        i = 1
+        while f"Filter.{i}.Name" in q:
+            if q[f"Filter.{i}.Name"] == "attachment.instance-id":
+                wanted |= set(_list(q, f"Filter.{i}.Value"))
+            i += 1
+        items = ""
+        with self.lock:
+            for iid in sorted(wanted):
+                inst = self.instances.get(iid)
+                if not inst or inst["state"] == "terminated":
+                    continue
+                for n, v in enumerate(inst.get("volumes", [])):
+                    items += (f"<item><volumeId>vol-{iid[2:]}-{n}</volumeId><size>{v['size']}</size>"
+                              f"<volumeType>{escape(v['type'])}</volumeType><iops>{v.get('iops', 0)}</iops>"
+                              f"<throughput>{v.get('throughput', 0)}</throughput><status>in-use</status>"
+                              f"<attachmentSet><item><volumeId>vol-{iid[2:]}-{n}</volumeId><instanceId>{iid}</instanceId>"
+                              f"<device>/dev/xvda</device><status>attached</status>"
+                              f"<deleteOnTermination>{'true' if v.get('deleteOnTermination') else 'false'}</deleteOnTermination>"
+                              f"</item></attachmentSet></item>")
+        return f'<DescribeVolumesResponse xmlns="{NS}"><volumeSet>{items}</volumeSet></DescribeVolumesResponse>'
 
 
 class FakeError(Exception):
