@@ -410,6 +410,23 @@ test("Overview Cost by family: Block storage is its own KPI and row, apart from 
   }
 });
 
+test("Show External: the total is every family but compute and says so; the External KPI is the plugins' alone", async () => {
+  const p = await render("operator", "http://localhost/?tab=cost&cost=external", familyAnswer);
+  try {
+    await until(() => kpis(p.el).some(([l]) => l === "Block storage"), "the Block storage KPI");
+    expect(kpis(p.el).slice(0, 4)).toEqual([
+      ["Non-compute total · last 24 hours", "$626.47"],
+      ["Compute", "$6.61"],
+      ["Block storage", "$0.71"],
+      ["External", "$625.76"],
+    ]);
+    const option = [...p.el.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-label="Show"] [role="radio"]')].find((b) => b.textContent === "External")!;
+    expect(option.getAttribute("title")).toBe("Every family but compute: block storage and what cost plugins report");
+  } finally {
+    await p.done();
+  }
+});
+
 test("Overview Cost: unallocated host time is split into Compute and Block storage; a tenant sees its own pools' when luxd sends them", async () => {
   for (const [role, url] of [
     ["operator", "http://localhost/?tab=cost"],

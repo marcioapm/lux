@@ -190,7 +190,7 @@ export function OverviewCost() {
   const showOptions = [
     { value: "all" as const, label: "All" },
     { value: "compute" as const, label: <ColorKey color={COMPUTE_COLOR}>Compute</ColorKey>, title: "Host time Runs reserved (the compute family)" },
-    { value: "external" as const, label: <ColorKey color={EXTERNAL_COLOR}>External</ColorKey>, title: "Every other family: what cost plugins report (AI models and others)" },
+    { value: "external" as const, label: <ColorKey color={EXTERNAL_COLOR}>External</ColorKey>, title: "Every family but compute: block storage and what cost plugins report" },
   ];
   const kinds: BreakdownKind[] = scope.showTenant ? ["family", "label", "key", "pool", "tenant"] : ["family", "label", "key", "pool"];
   const byOptions = kinds.map((k) => ({ value: k, label: BY_LABEL[k] }));
@@ -392,7 +392,8 @@ function CostFilters({ filters, since, keys, fq, prefer }: { filters: LabelFilte
 const pct = (r: number | null) => (r == null ? null : `${Math.round(r * 100)}%`);
 
 function TotalKpi({ show, words, since, loading, shown, sides, change, filtered }: { show: CostShow; words: string; since: string; loading: boolean; shown: MoneyTotal[]; sides: SideTotals[]; change: ReturnType<typeof changes>; filtered: boolean }) {
-  const label = show === "all" ? "Total" : show === "compute" ? "Compute total" : "External total";
+  // Show External is luxd's nofamily=compute: block storage is in this total, not in the External KPI beside it.
+  const label = show === "all" ? "Total" : show === "compute" ? "Compute total" : "Non-compute total";
   const one = shown.length === 1;
   const lines = change.filter((c) => c.ratio != null);
   return (
