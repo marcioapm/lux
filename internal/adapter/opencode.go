@@ -493,6 +493,10 @@ type compactionMessage struct {
 	} `json:"parts"`
 }
 
+func (m compactionMessage) isSummary() bool {
+	return m.Info.Role == "assistant" && string(bytes.TrimSpace(m.Info.Summary)) == "true"
+}
+
 // compactionWindow: the newest messages read for a compaction's summary;
 // by the time session.compacted is handled the loop may have stored a few
 // more after it (an auto compaction's synthetic "continue" and its reply).
@@ -514,7 +518,7 @@ func (b *opencodeBus) compaction(ctx context.Context, session, after string) (su
 	}
 	at, older := -1, false
 	for i, m := range page {
-		if m.Info.Role != "assistant" || string(bytes.TrimSpace(m.Info.Summary)) != "true" {
+		if !m.isSummary() {
 			continue
 		}
 		if m.Info.ID <= after {
@@ -553,6 +557,22 @@ func (b *opencodeBus) compaction(ctx context.Context, session, after string) (su
 		return "", trigger, m.Info.ID, errors.New("its summary message has no text")
 	}
 	return text.String(), trigger, m.Info.ID, nil
+}
+
+// newestSummary is the id of the newest summary message among the
+// session's newest compactionWindow, "" if there is none.
+func (b *opencodeBus) newestSummary(ctx context.Context, session string) (string, error) {
+	var page []compactionMessage
+	if _, err := b.get(ctx, "/session/"+session+"/message?limit="+strconv.Itoa(compactionWindow), &page); err != nil {
+		return "", err
+	}
+	id := ""
+	for _, m := range page {
+		if m.isSummary() && m.Info.ID > id {
+			id = m.Info.ID
+		}
+	}
+	return id, nil
 }
 
 // messagesSince lists the session's stored messages, newest page first, back

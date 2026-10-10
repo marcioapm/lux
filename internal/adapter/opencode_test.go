@@ -1642,8 +1642,15 @@ func TestOpenCodeCompactionSummaryTimesOut(t *testing.T) {
 // store it: ids above the first's, MARIGOLD for PERIWINKLE.
 func ocSecondCompaction(t *testing.T) []any {
 	t.Helper()
+	return ocLaterCompaction(t, "msg_1267a9", "MARIGOLD")
+}
+
+// ocLaterCompaction is ocCompactionMessages with ids prefixed by prefix
+// (which must sort above "msg_1267a87") and word for PERIWINKLE.
+func ocLaterCompaction(t *testing.T, prefix, word string) []any {
+	t.Helper()
 	b, _ := json.Marshal(ocCompactionMessages(t))
-	s := strings.ReplaceAll(strings.ReplaceAll(string(b), "msg_1267a87", "msg_1267a9"), "PERIWINKLE", "MARIGOLD")
+	s := strings.ReplaceAll(strings.ReplaceAll(string(b), "msg_1267a87", prefix), "PERIWINKLE", word)
 	var msgs []any
 	if err := json.Unmarshal([]byte(s), &msgs); err != nil {
 		t.Fatal(err)
@@ -1696,6 +1703,45 @@ func TestOpenCodeEachCompactionTakesItsOwnSummary(t *testing.T) {
 				t.Fatalf("got %q", got)
 			}
 		})
+	}
+}
+
+// A resumed session whose newest messages already hold an earlier Run's
+// summary: the Run's first compaction reports its own summary, not that
+// one, and its second the one after.
+func TestOpenCodeResumedCompactionSkipsEarlierSummary(t *testing.T) {
+	b := newFakeBus(t)
+	b.mu.Lock()
+	b.whole = ocCompactionMessages(t)
+	b.mu.Unlock()
+	a := NewOpenCode()
+	a.bus = newOpencodeBus(b.port(), "/workspace")
+	log := &inputSink{}
+	w := startWireSink(t, a, proto.ShimConfig{Resume: true, SessionID: ocSession}, warnSink{log})
+	id, _ := w.next("initialize")
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}`)
+	id, _ = w.next("session/load")
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{}}`)
+	log.wait(t, "idle")
+	compacted := `{"type":"session.compacted","properties":{"sessionID":"` + ocSession + `"}}`
+	b.mu.Lock()
+	b.whole = append(ocCompactionMessages(t), ocLaterCompaction(t, "msg_1267a9", "MARIGOLD")...)
+	b.mu.Unlock()
+	onBus(t, a, compacted)
+	waitCompactions(t, log, 1)
+	b.mu.Lock()
+	b.whole = append(b.whole, ocLaterCompaction(t, "msg_1267b", "SAFFRON")...)
+	b.mu.Unlock()
+	onBus(t, a, compacted)
+	waitCompactions(t, log, 2)
+	w.exit()
+	got := log.compactions()
+	if len(got) != 2 || !strings.Contains(got[0], "MARIGOLD") || strings.Contains(got[0], "PERIWINKLE") ||
+		!strings.Contains(got[1], "SAFFRON") || strings.Contains(got[1], "MARIGOLD") {
+		t.Fatalf("got %q", got)
+	}
+	if log.has("warning") {
+		t.Fatalf("warned: %q", log.lines())
 	}
 }
 
