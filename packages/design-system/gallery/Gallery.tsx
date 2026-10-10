@@ -812,7 +812,7 @@ function States() {
 function Stats() {
   const series = useMemo(() => fakeSeries(48, 1800), []);
   return (
-    <Section id="stats" title="StatTile" note="Compact: a 12px muted label (with a ColorKey swatch when the figure is one family or series), the value at --text-2xl, its unit or note on the line under it, an optional signed delta and sparkline. lead tints the one figure a page is about; tone=warn is money you would want back, danger a count that needs action. .grid-stats goes 2 → 3 → 5 across; a row of exactly six goes 3 + 3, then 6 on the widest content.">
+    <Section id="stats" title="StatTile" note="Compact: a 12px muted label (with a ColorKey swatch when the figure is one family or series), the value at --text-2xl, its unit or note on the line under it, an optional signed delta and sparkline. lead tints the one figure a page is about; tone=warn is money you would want back, danger a count that needs action. .grid-stats goes 2 → 3 → 5 across; a row of exactly four goes 2 + 2 then 4 across, one of exactly six 3 + 3 then 6 on the widest content.">
       <h3 className="sg-h3">A cost row: lead, swatches, warn</h3>
       <div className="grid grid-stats">
         <StatTile lead label="Host cost (7d)" value="$14.26" unit="list price · 121 host-hours" />
