@@ -332,6 +332,8 @@ def test_control_host_row_is_the_operators_whole_system_view(page, env, operator
     # Narrowed to a tenant, the row is gone.
     page.goto(env.luxd_url + f"/?tenant={a.tenant_id}")
     page.get_by_text(re.compile(rf"^tenant {re.escape(a.tenant_id)} · charts over")).wait_for(timeout=15_000)
+    # Anchor on Activity, where Control host would render: the absences below are not vacuous.
+    expect(page.get_by_role("heading", name="Trends", exact=True)).to_have_count(1)
     expect(page.get_by_role("heading", name="Control host", exact=True)).to_have_count(0)
     expect(page.get_by_role("heading", name="Postgres size", exact=True)).to_have_count(0)
     expect(page.get_by_role("heading", name="luxd CPU", exact=True)).to_have_count(0)
@@ -654,6 +656,7 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     expect(panel.locator(".section-note")).to_contain_text("per day")
     expect(card.locator(".kpi-label")).to_contain_text(["Peak day"])
     page.get_by_role("tab", name="Activity", exact=True).click()
+    expect(page.get_by_role("tab", name="Activity", exact=True)).to_have_attribute("aria-selected", "true")
     expect(page).to_have_url(re.compile(r"[?&]every=day(&|$)"))
     expect(page.locator(".section-head", has_text="Trends")).to_contain_text("per day")
     expect(page.get_by_role("link", name="Runs", exact=True).first).to_have_attribute("href", re.compile(r"every=day"))
