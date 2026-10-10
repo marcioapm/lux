@@ -266,13 +266,21 @@ func TestClaudeCompactionIsReported(t *testing.T) {
 	if want := []string{"claude.system", "claude.system", "claude.user", "claude.user", "claude.result"}; !slices.Equal(relayed, want) {
 		t.Fatalf("relayed %q, want %q", relayed, want)
 	}
+	// The record directly follows the boundary's relay, read with the
+	// summary line, which is relayed right after it.
+	l := log.lines()
+	at := slices.Index(l, "compacted "+string(want))
+	if at < 1 || !strings.Contains(l[at-1], `"subtype":"compact_boundary"`) ||
+		at+1 >= len(l) || !strings.HasPrefix(l[at+1], "claude.user ") || !strings.Contains(l[at+1], `"isSynthetic":true`) {
+		t.Fatalf("record not between the boundary and the summary line: %q", l)
+	}
 	if !strings.Contains(summary, "PERIWINKLE") {
 		t.Fatalf("testdata summary %q", summary)
 	}
 }
 
 // A boundary its summary line does not follow is still reported, without
-// a summary, with a warning.
+// a summary, directly after the boundary's relay, then a warning.
 func TestClaudeCompactionWithoutSummary(t *testing.T) {
 	log := &inputSink{}
 	c := NewClaude()
@@ -287,8 +295,11 @@ func TestClaudeCompactionWithoutSummary(t *testing.T) {
 	if got := log.compactions(); !slices.Equal(got, []string{"compacted " + string(want)}) {
 		t.Fatalf("got %q", got)
 	}
-	if !log.has(`lux.warning {"message":"claude: compacted, but no summary line followed its compact_boundary"}`) {
-		t.Fatalf("no warning: %q", log.lines())
+	l := log.lines()
+	at := slices.Index(l, "compacted "+string(want))
+	if at < 1 || !strings.Contains(l[at-1], `"subtype":"compact_boundary"`) || at+1 >= len(l) ||
+		l[at+1] != `lux.warning {"message":"claude: compacted, but no summary line followed its compact_boundary"}` {
+		t.Fatalf("not boundary, record, warning: %q", l)
 	}
 }
 

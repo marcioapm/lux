@@ -1083,11 +1083,11 @@ func (a *ACP) compacted(session string) {
 		ctx, cancel := context.WithTimeout(a.runCtx(), a.compactionTimeout)
 		defer cancel()
 		summary, trigger, err := a.bus.compaction(ctx, session)
+		a.sink.Compacted(proto.Compaction{SessionID: session, Trigger: trigger, Summary: summary})
 		if err != nil {
 			a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
 				"opencode: session %s was compacted; its summary could not be read: %v", session, err)})
 		}
-		a.sink.Compacted(proto.Compaction{SessionID: session, Trigger: trigger, Summary: summary})
 	})
 }
 

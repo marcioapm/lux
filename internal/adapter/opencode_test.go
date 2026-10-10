@@ -1605,8 +1605,8 @@ func TestOpenCodeCompactionSummaryUnreadable(t *testing.T) {
 	if want := []string{`compacted {"sessionId":"` + ocSession + `","trigger":""}`}; !slices.Equal(got, want) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
-	if !log.has("warning opencode: session " + ocSession + " was compacted; its summary could not be read: GET /session/") {
-		t.Fatalf("no warning: %q", log.lines())
+	if next := lineAfter(log.lines(), "compacted "); !strings.HasPrefix(next, "warning opencode: session "+ocSession+" was compacted; its summary could not be read: GET /session/") {
+		t.Fatalf("no warning after the record: %q", log.lines())
 	}
 }
 

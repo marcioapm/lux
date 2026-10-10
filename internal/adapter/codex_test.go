@@ -24,7 +24,7 @@ func cxCompaction(t *testing.T, prior ...string) (*Codex, *agentWire, *inputSink
 	log := &inputSink{}
 	c := NewCodex()
 	c.compactionWait = 300 * time.Millisecond
-	w := startWireSink(t, c, proto.ShimConfig{}, warnSink{log})
+	w := startWireSink(t, c, proto.ShimConfig{}, cxEvents{warnSink{log}})
 	id, _ := w.next("initialize")
 	w.send(`{"id":` + id + `,"result":{"userAgent":"lux/0.145.0 (Ubuntu; x86_64)"}}`)
 	id, _ = w.next("thread/start")
@@ -80,45 +80,90 @@ func cxRolloutCompacted(t *testing.T) ([]string, string) {
 	return lines, e.Payload.Message
 }
 
+// cxEvents is warnSink also logging each codex.item/* relay as
+// "codex.<method> <item type>", in order with the rest.
+type cxEvents struct{ warnSink }
+
+func (s cxEvents) Event(typ string, data any) {
+	if strings.HasPrefix(typ, "codex.item/") {
+		raw, _ := data.(json.RawMessage)
+		var p struct {
+			Item struct {
+				Type string `json:"type"`
+			} `json:"item"`
+		}
+		_ = json.Unmarshal(raw, &p)
+		s.add(typ + " " + p.Item.Type)
+	}
+	s.warnSink.Event(typ, data)
+}
+
+// lineAfter is the line right after the first one starting with prefix, or
+// "" if there is none.
+func lineAfter(lines []string, prefix string) string {
+	for i, l := range lines {
+		if strings.HasPrefix(l, prefix) {
+			if i+1 < len(lines) {
+				return lines[i+1]
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
 // A compaction is one lux.compacted, when its item completes (not when it
-// starts), with the summary Codex wrote to the rollout. The items are
-// still relayed as codex.item/*.
+// starts), with the summary Codex wrote to the rollout, directly after the
+// item/completed relay when the rollout already holds the entry. The items
+// are still relayed as codex.item/*.
 func TestCodexCompactionIsReported(t *testing.T) {
 	_, w, log, rollout := cxCompaction(t)
 	started, completed := cxItems(t)
 	lines, summary := cxRolloutCompacted(t)
-	w.send(started)
 	appendRollout(t, rollout, lines...)
+	w.send(started)
+	log.wait(t, "codex.item/started contextCompaction")
+	time.Sleep(200 * time.Millisecond)
+	if got := log.compactions(); len(got) != 0 {
+		t.Fatalf("reported on item/started: %q", got)
+	}
 	w.send(completed)
-	// Sent again (a replay): not a second record.
+	// Sent again (a replay): not a second record. exit joins every read.
 	w.send(completed)
-	got := waitCompactions(t, log, 1)
-	time.Sleep(50 * time.Millisecond)
 	w.exit()
 	want, _ := json.Marshal(proto.Compaction{SessionID: cxThread, Summary: summary})
-	if got = log.compactions(); !slices.Equal(got, []string{"compacted " + string(want)}) {
+	if got := log.compactions(); !slices.Equal(got, []string{"compacted " + string(want)}) {
 		t.Fatalf("got %q", got)
 	}
-	if !strings.Contains(summary, "PERIWINKLE") || log.has("warning") {
-		t.Fatalf("summary %q, lines %q", summary, log.lines())
+	if next := lineAfter(log.lines(), "codex.item/completed contextCompaction"); next != "compacted "+string(want) {
+		t.Fatalf("after the item/completed relay: %q; lines %q", next, log.lines())
+	}
+	if log.has("warning") {
+		t.Fatalf("warned: %q", log.lines())
 	}
 }
 
 // Codex may write the rollout's entry just after the item completes: it is
-// waited for.
+// waited for, and reported once, after the relay.
 func TestCodexCompactionSummaryWrittenLate(t *testing.T) {
-	_, w, log, rollout := cxCompaction(t)
+	c, w, log, rollout := cxCompaction(t)
+	c.compactionWait = 2 * time.Second
 	started, completed := cxItems(t)
 	lines, summary := cxRolloutCompacted(t)
 	w.send(started)
 	w.send(completed)
+	log.wait(t, "codex.item/completed contextCompaction")
 	time.Sleep(60 * time.Millisecond)
 	appendRollout(t, rollout, lines...)
-	got := waitCompactions(t, log, 1)
+	waitCompactions(t, log, 1)
 	w.exit()
 	want, _ := json.Marshal(proto.Compaction{SessionID: cxThread, Summary: summary})
-	if !slices.Equal(got, []string{"compacted " + string(want)}) {
+	l := log.lines()
+	if got := log.compactions(); !slices.Equal(got, []string{"compacted " + string(want)}) {
 		t.Fatalf("got %q", got)
+	}
+	if slices.Index(l, "compacted "+string(want)) < slices.Index(l, "codex.item/completed contextCompaction") {
+		t.Fatalf("record before the relay: %q", l)
 	}
 }
 
@@ -150,10 +195,12 @@ func TestCodexTwoCompactions(t *testing.T) {
 func TestCodexCompactionWithoutSummary(t *testing.T) {
 	for _, tc := range []struct {
 		name, warning string
-		after         func(t *testing.T, rollout string, lines []string)
+		// adjacent: the entry is in the rollout when the item completes.
+		adjacent bool
+		after    func(t *testing.T, rollout string, lines []string)
 	}{
-		{"never written", "no compacted entry in", func(*testing.T, string, []string) {}},
-		{"remote", "Codex compacted remotely and exposes no summary text", func(t *testing.T, rollout string, lines []string) {
+		{"never written", "no compacted entry in", false, func(*testing.T, string, []string) {}},
+		{"remote", "Codex compacted remotely and exposes no summary text", true, func(t *testing.T, rollout string, lines []string) {
 			var e map[string]any
 			_ = json.Unmarshal([]byte(lines[0]), &e)
 			e["payload"].(map[string]any)["message"] = ""
@@ -174,8 +221,14 @@ func TestCodexCompactionWithoutSummary(t *testing.T) {
 			if !slices.Equal(got, []string{"compacted " + string(want)}) {
 				t.Fatalf("got %q", got)
 			}
-			if !log.has("warning codex: thread " + cxThread + " was compacted; its summary could not be read: " + tc.warning) {
-				t.Fatalf("no warning: %q", log.lines())
+			warning := "warning codex: thread " + cxThread + " was compacted; its summary could not be read: " + tc.warning
+			if next := lineAfter(log.lines(), "compacted "); !strings.HasPrefix(next, warning) {
+				t.Fatalf("after the record: %q, want %q; lines %q", next, warning, log.lines())
+			}
+			if tc.adjacent {
+				if next := lineAfter(log.lines(), "codex.item/completed contextCompaction"); next != "compacted "+string(want) {
+					t.Fatalf("after the item/completed relay: %q; lines %q", next, log.lines())
+				}
 			}
 		})
 	}

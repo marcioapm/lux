@@ -356,6 +356,14 @@ func (c *Codex) handleRequest(m rpcMsg) {
 }
 
 func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
+	// compaction: a contextCompaction item that completed, reported once
+	// its codex.item/completed is relayed.
+	var compaction *string
+	defer func() {
+		if compaction != nil {
+			c.compactionCompleted(*compaction)
+		}
+	}()
 	switch m.Method {
 	case "turn/started":
 		var p struct {
@@ -441,7 +449,7 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 			sink.EndMessage()
 		}
 		if p.Item.Type == "contextCompaction" {
-			c.compactionCompleted(p.Item.ID)
+			compaction = &p.Item.ID
 		}
 	}
 	// Streamed text (item/agentMessage/delta, item/reasoning/textDelta,
@@ -456,8 +464,12 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 // compactionCompleted reports a compaction once, as its item completes,
 // with the summary read off the rollout (the app-server's item carries
 // none). Codex writes one compacted entry per compaction, in order: the
-// nth item reported in this Run is the nth entry after rolloutBase. Read
-// off the reader's goroutine: Codex may write the entry just after.
+// nth item reported in this Run is the nth entry after rolloutBase.
+//
+// Called on the reader goroutine right after the item/completed relay:
+// when the rollout already holds the entry (Codex writes it in the same
+// millisecond), the record directly follows that relay. Otherwise the
+// entry is waited for off the reader goroutine, and the record comes later.
 func (c *Codex) compactionCompleted(id string) {
 	c.mu.Lock()
 	if c.reported == nil {
@@ -470,17 +482,27 @@ func (c *Codex) compactionCompleted(id string) {
 	c.reported[id] = true
 	n := c.rolloutBase + len(c.reported) - 1
 	thread, sink, ctx := c.thread, c.sink, c.ctx
-	c.bg.Add(1)
 	c.mu.Unlock()
+	if summary, done, err := c.rolloutEntry(n); done {
+		reportCodexCompaction(sink, thread, summary, err)
+		return
+	}
+	c.bg.Add(1)
 	go func() {
 		defer c.bg.Done()
 		summary, err := c.rolloutSummary(ctx, n)
-		if err != nil {
-			sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
-				"codex: thread %s was compacted; its summary could not be read: %v", thread, err)})
-		}
-		sink.Compacted(proto.Compaction{SessionID: thread, Summary: summary})
+		reportCodexCompaction(sink, thread, summary, err)
 	}()
+}
+
+// reportCodexCompaction writes the record, then the warning if the summary
+// could not be read.
+func reportCodexCompaction(sink Sink, thread, summary string, err error) {
+	sink.Compacted(proto.Compaction{SessionID: thread, Summary: summary})
+	if err != nil {
+		sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+			"codex: thread %s was compacted; its summary could not be read: %v", thread, err)})
+	}
 }
 
 // errRemoteCompaction: Codex wrote the compaction with an empty message.
@@ -488,30 +510,38 @@ func (c *Codex) compactionCompleted(id string) {
 // encrypted compaction item and no text is exposed.
 var errRemoteCompaction = errors.New("Codex compacted remotely and exposes no summary text")
 
-// rolloutSummary is the message of the rollout's nth compacted entry,
-// waiting up to compactionWait for it.
+// rolloutEntry is the message of the rollout's nth compacted entry as the
+// rollout holds it now; done is false while the entry is not written yet.
 //
 //	{"timestamp", "type":"compacted", "payload":{"message", "replacement_history", …}}
-func (c *Codex) rolloutSummary(ctx context.Context, n int) (string, error) {
-	path := c.rolloutFile()
-	if path == "" {
-		return "", errors.New("Codex named no rollout file for the thread")
+func (c *Codex) rolloutEntry(n int) (summary string, done bool, err error) {
+	if c.rolloutFile() == "" {
+		return "", true, errors.New("Codex named no rollout file for the thread")
 	}
+	msgs, err := c.compactedEntries()
+	switch {
+	case err != nil:
+		return "", true, err
+	case len(msgs) <= n:
+		return "", false, nil
+	case msgs[n] == "":
+		return "", true, errRemoteCompaction
+	}
+	return msgs[n], true, nil
+}
+
+// rolloutSummary waits up to compactionWait for the rollout's nth
+// compacted entry.
+func (c *Codex) rolloutSummary(ctx context.Context, n int) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.compactionWait)
 	defer cancel()
 	for {
-		msgs, err := c.compactedEntries()
-		switch {
-		case err != nil:
-			return "", err
-		case len(msgs) > n && msgs[n] == "":
-			return "", errRemoteCompaction
-		case len(msgs) > n:
-			return msgs[n], nil
+		if summary, done, err := c.rolloutEntry(n); done {
+			return summary, err
 		}
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("no compacted entry in %s after %s", path, c.compactionWait)
+			return "", fmt.Errorf("no compacted entry in %s after %s", c.rolloutFile(), c.compactionWait)
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
