@@ -375,9 +375,9 @@ Overview's Cost panel is composed of:
 
 | Export | What |
 | --- | --- |
-| `KpiStrip`, `Kpi({label, value, sub?, loading?, muted?})`, `KpiSub` | figures across the top of a card, the first wider; two across in a narrow container, four from 760px; a muted Kpi is a figure the view hides but still states |
+| `KpiStrip`, `Kpi({label, value, sub?, loading?, muted?})`, `KpiSub` | figures across the top of a card, the first wider; two across in a narrow container, four from 760px, and a strip of five (Total, Compute, Block storage, External, peak) five across from 960px; a muted Kpi is a figure the view hides but still states |
 | `SplitBar({parts, whole, currency, label?, scale?})` | parts of one amount as one thin bar, each part its share of `whole`; a `faint` part is hidden by the view, drawn, never dropped; amounts in the title; `scale` sets its length against the largest row |
-| `BreakdownTable({rows, lead, onRowClick?})` | cost by one dimension: swatch and name (mono for ids and label values, `quiet` for the value-less row, a `pill` such as "revoked"), Runs, Compute, External, Total, Share per currency; a missing part is `–`, not $0 |
+| `BreakdownTable({rows, lead, onRowClick?, blockStorage?})` | cost by one dimension: swatch and name (mono for ids and label values, `quiet` for the value-less row, a `pill` such as "revoked"), Runs, Compute, External, Total, Share per currency; `blockStorage` adds a Block storage column between Compute and External (lux's disk family, apart from both); a missing part is `–`, not $0; a non-zero share under 0.5% reads `<1%` |
 | `LabelChips({labels, max?, first?})` | a Run's labels as `key=value` chips, the `first` keys first, `max` shown and the rest counted (`+2`, their text in the title) |
 | `InfoStrip({tone, children})` | a one-line notice inside a card (why some figures read as they do) |
 | `FilterBar({add, note?})`, `FilterChip({name, op, value, onRemove})` | the active filters as removable chips, the add control, and what the filters reach |
