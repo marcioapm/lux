@@ -359,6 +359,56 @@ def test_stop_resume_elsewhere_and_remember(lux, runners, hosts, harness):
     lux.run("terminate", run_id)
 
 
+def _events(lux, run_id: str, typ: str) -> list[dict]:
+    """The data of the Run's event records of one type, in output order."""
+    return [r["event"]["data"] for r in lux.records(run_id, "--events") if r.get("event", {}).get("type") == typ]
+
+
+def _turn(lux, harness, run_id: str, text: str) -> None:
+    """Send text and wait for the turn it starts to end, and the Run idle."""
+    ended = len([r for r in lux.records(run_id, "--events") if r.get("event", {}).get("type") in TURN_ENDS])
+    lux.run("steer", run_id, text)
+    wait_until(lambda: len([r for r in lux.records(run_id, "--events")
+                            if r.get("event", {}).get("type") in TURN_ENDS]) > ended,
+               harness.timeout, 0.5, f"no turn end after {text[:60]!r}")
+    lux.wait_activity(run_id, "idle", timeout=harness.timeout)
+
+
+@harnesses(lambda h: h.caps.reports_compaction)
+def test_compaction_is_reported_with_its_summary(lux, runners, hosts, harness):
+    """The agent compacts its context once: lux reports it as one
+    lux.compacted record, with the summary the agent made where it makes
+    one, and the agent still remembers what it was told before."""
+    runners.start(hosts[0])
+    word = f"PERIWINKLE{int(time.time() * 1000) % 100000:05d}"
+    run_id = lux.submit(harness.compaction_spec(harness.remember(word)))
+    session = lux.wait_activity(run_id, "idle", timeout=harness.timeout)["sessionId"]
+    for text in harness.compaction_steers():
+        _turn(lux, harness, run_id, text)
+    since = lux.records(run_id)[-1]["cursor"]
+    _turn(lux, harness, run_id, harness.recall_word())
+    assert word in lux.logs(run_id, "--since", since).upper(), lux.logs(run_id, "--since", since)[-2000:]
+    compacted = wait_until(lambda: _events(lux, run_id, "lux.compacted"), harness.timeout, 0.5,
+                           f"no lux.compacted; warnings: {_events(lux, run_id, 'lux.warning')}")
+    time.sleep(1)
+    compacted = _events(lux, run_id, "lux.compacted")
+    assert len(compacted) == 1, compacted
+    rec = compacted[0]
+    assert rec["sessionId"] == session, rec
+    assert rec.get("trigger") in ("auto", "manual", "overflow", ""), rec
+    if harness.caps.compaction_summary:
+        assert rec.get("summary"), (rec, _events(lux, run_id, "lux.warning"))
+        assert word in rec["summary"].upper(), rec["summary"][:2000]
+    else:
+        # Codex compacting through OpenAI's provider: done remotely, no text.
+        assert "summary" not in rec, rec
+        assert any("compacted remotely" in w["message"] for w in _events(lux, run_id, "lux.warning")), \
+            _events(lux, run_id, "lux.warning")
+    for v in harness.secret_values():
+        assert v not in json.dumps(rec), "a credential leaked into lux.compacted"
+    lux.run("terminate", run_id)
+
+
 @harnesses(lambda h: h.name == "codex")
 def test_codex_key_as_an_env_secret(lux, runners, hosts, harness):
     """Codex reads its key from ~/.codex/auth.json; the adapter writes that
