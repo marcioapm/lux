@@ -5,6 +5,8 @@ same reservation."""
 
 from __future__ import annotations
 
+import json
+import subprocess
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -13,7 +15,7 @@ import pytest
 
 from conftest import FAKE_EC2_TIMERS, fake_only, generic
 from ec2_helpers import _clean, ec2_hosts, pool  # noqa: F401 (_clean is an autouse fixture)
-from env import ALPINE_IMAGE, wait_until
+from env import ALPINE_IMAGE, BIN_DIR, wait_until
 
 pytestmark = pytest.mark.ec2
 
@@ -108,3 +110,28 @@ def test_a_launched_hosts_disk_is_its_runs_block_storage(env, lux, operator, pri
         raise AssertionError(f"{e}; the host's cost: {seen}") from None
     assert [r["perHour"] for r in body["rates"] if r["family"] == "block-storage"] == [GP3_100_PER_HOUR], body["rates"]
     assert all(v > 0 for v in got.values()), got
+
+    # The operator's backfill command, through the binary: with the host's
+    # volumes unknown again, a dry run prices the stated disk from the
+    # fake's Pricing API (a 1s cache refresh forces the call) and reports
+    # the host and its Run, changing nothing.
+    with psycopg.connect(env.owner_dsn, autocommit=True) as conn:
+        conn.execute("UPDATE hosts SET volumes = NULL WHERE id = %s", (host["id"],))
+    calls = len(priced.pricing_calls)
+    out = subprocess.run(
+        [str(BIN_DIR / "luxd"), "admin", "costs", "backfill-volumes", "--pool", "burst", "--tenant", lux.tenant_id,
+         "--volume", "type=gp3,size=100,iops=3000,throughput=125", "--dry-run"],
+        env={**env._luxd_base_env(), "LUX_DATABASE_URL": env.owner_dsn, "LUX_PRICING_ENDPOINT": priced.url,
+             "LUX_COSTS_PRICES_REFRESH": "1s", "AWS_ACCESS_KEY_ID": "fake", "AWS_SECRET_ACCESS_KEY": "fake",
+             "AWS_REGION": "us-east-1"},
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    report = json.loads(out.stdout)
+    assert report["dryRun"] is True and report["runs"] == 1 and report["skipped"] == [], report
+    [bh] = report["hosts"]
+    assert bh["id"] == host["id"] and bh["perHour"] == GP3_100_PER_HOUR and bh["runs"] == [run_id], bh
+    assert report["hours"] == bh["hours"] == len(expected), (report, expected)
+    assert any(c.get("volumeApiName") == "gp3" and c.get("regionCode") == "eu-north-1"
+               for c in priced.pricing_calls[calls:]), priced.pricing_calls[calls:]
+    with psycopg.connect(env.owner_dsn, autocommit=True) as conn:
+        assert conn.execute("SELECT volumes FROM hosts WHERE id = %s", (host["id"],)).fetchone() == (None,)
