@@ -275,7 +275,7 @@ why, right after the record; the record still comes.
 | --- | --- | --- | --- | --- |
 | `claude-code` | `system` `compact_boundary` | the synthetic `user` line right after it | yes | yes |
 | `codex` | `item/completed` of a `contextCompaction` item | the rollout's `compacted` entry; none when Codex compacts remotely (OpenAI's provider) | no | no |
-| `opencode` | bus `session.compacted` for the Run's session | the newest stored assistant message with `summary: true` (`GET /session/{id}/message`) | yes | no |
+| `opencode` | bus `session.compacted` for the Run's session | the oldest stored assistant message with `summary: true` newer than the one last reported (`GET /session/{id}/message`); a repeated `session.compacted` gives no second record | yes | no |
 | `acp`, `generic` | — | — | — | — |
 
 The agent's own messages are still kept as they came (`claude.system`,
