@@ -962,7 +962,10 @@ then its cost-host lock, then the host, as the drainer does):
    compute source goes back to `ok` and its lines become estimates until
    the drainer evaluates it again. Compute snapshots are frozen and are not
    touched; the new block-storage snapshots are written, frozen and the
-   source is final again;
+   source is final again. A Run whose compute is final without a finalized
+   compute snapshot for every placement (it went final before migration
+   027) is not re-queued, since evaluating it would price its compute anew:
+   the report lists it under `skipped`, with the reason;
 4. moves the host's host-hour cursor back to its start (within
    `costs.hourly` retention), so its allocated and unallocated rows are
    rebuilt per family.

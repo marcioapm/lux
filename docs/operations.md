@@ -709,9 +709,12 @@ pool's hosts whose volumes are unknown, marked `"assumed": true`, prices
 them at today's list price, re-evaluates the Runs placed on them (finished
 ones gain a block-storage line; their compute amounts do not change) and
 rebuilds the hosts' hourly rows within `costs.hourly`. It prints the hosts,
-hours and Runs it touched (or would, with `--dry-run`). Running it again
-changes nothing. It needs `pricing:GetProducts` (or a fresh cached price)
-and luxd's database settings, like the other admin commands.
+hours and Runs it touched (or would, with `--dry-run`), and under `skipped`
+the Runs it leaves alone: those whose compute went final before compute
+snapshots existed (migration 027), which re-evaluating would reprice.
+Running it again changes nothing. It needs `pricing:GetProducts` (or a
+fresh cached price) and luxd's database settings, like the other admin
+commands.
 
 ### Nested containers on an EC2 pool
 

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -150,6 +151,45 @@ func TestBlockStorageLiveHostRequeuesFinalRuns(t *testing.T) {
 	}
 	if after := snapshotRow(t, s); after != before {
 		t.Errorf("compute snapshot changed:\n%s\n%s", before, after)
+	}
+}
+
+// A Run that went final before compute snapshots existed (migration 027)
+// has none to keep frozen: re-evaluating it would price its compute anew.
+// The backfill leaves it as it is and reports it as skipped, while still
+// recording the host's disk and period.
+func TestBackfillVolumesSkipsRunsWithoutComputeSnapshots(t *testing.T) {
+	s, keys, _ := backfillFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `DELETE FROM cost_placement_snapshots WHERE placement_id = 'p-A'`)
+	execSQL(t, s, ctx, `UPDATE host_rates SET per_hour = 0.80 WHERE host_id = 'disk' AND family = 'compute'`)
+	root, err := ParseVolume("type=gp3,size=100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := BackfillVolumes{Pool: "burst", Tenant: "t1", Volumes: []HostVolume{root}, DryRun: true}
+	for _, dry := range []bool{true, false} {
+		req.DryRun = dry
+		rep, err := s.BackfillVolumes(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []BackfillSkipped{{Run: "A", Host: "disk", Reason: skipLegacyCompute}}
+		if rep.Runs != 0 || len(rep.Hosts) != 1 || len(rep.Hosts[0].Runs) != 0 || !slices.Equal(rep.Skipped, want) {
+			t.Errorf("dry run %v: %+v", dry, rep)
+		}
+	}
+	if p := pending(t, s, "A"); p != "" {
+		t.Errorf("A queued: %q", p)
+	}
+	drain(t, s)
+	if lines, src := familyLines(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[compute m7i.2xlarge 0.1 true]" || src != "final" {
+		t.Errorf("after: %v %s", lines, src)
+	}
+	var rates int
+	systemScan(t, s, `SELECT count(*) FROM host_rates WHERE host_id = 'disk' AND family = 'block-storage'`, nil, &rates)
+	if rates != 1 {
+		t.Errorf("%d block-storage periods", rates)
 	}
 }
 
