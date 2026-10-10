@@ -926,8 +926,11 @@ function Paging() {
 function TabsDemo() {
   const [v, setV] = useState("logs");
   const [w, setW] = useState("all");
+  const [s, setS] = useState("all");
+  const [m, setM] = useState("md");
   return (
-    <Section id="tabs" title="Tabs">
+    <Section id="tabs" title="Tabs, SegmentedControl" note="One look for “pick one of a few”: a sunken track, the chosen option a raised pill with semibold text. Tabs switch what a page or card shows (role tablist; counts are a muted number inside the pill; a disabled tab is greyed). SegmentedControl picks a value (role radiogroup) and draws with exactly the same rules. md heads a page (in PageHeader actions); sm sits in a card or a section header.">
+      <h3 className="sg-h3">Tabs, md and sm</h3>
       <Tabs
         value={v}
         onChange={setV}
@@ -949,6 +952,13 @@ function TabsDemo() {
           { key: "failed", label: "Failed", count: 3 },
         ]}
       />
+      <h3 className="sg-h3">SegmentedControl, sm and md</h3>
+      <div className="sg-row">
+        <SegmentedControl label="Show" value={s} onChange={setS} options={[{ value: "all", label: "All" }, { value: "compute", label: "Compute" }, { value: "storage", label: "Block storage" }, { value: "external", label: "External" }]} />
+        <SegmentedControl label="Size" size="md" value={m} onChange={setM} options={[{ value: "sm", label: "Small" }, { value: "md", label: "Medium" }]} />
+      </div>
+      <h3 className="sg-h3">In a section header</h3>
+      <SectionHeader title="Cost" actions={<Tabs size="sm" value={w} onChange={setW} items={[{ key: "all", label: "All" }, { key: "live", label: "Live" }, { key: "failed", label: "Failed" }]} />} />
     </Section>
   );
 }
