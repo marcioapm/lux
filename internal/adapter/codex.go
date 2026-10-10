@@ -188,11 +188,13 @@ func (c *Codex) handshake(cfg proto.ShimConfig, sink Sink) error {
 	c.mu.Unlock()
 	cwd := workdir(cfg)
 	var res json.RawMessage
+	resumed := false
 	if cfg.Resume && cfg.SessionID != "" {
 		res, err = c.call("thread/resume", map[string]any{"threadId": cfg.SessionID})
 		if err != nil {
 			sink.Event(proto.EvWarning, map[string]any{"message": "thread/resume failed, starting a new thread: " + err.Error()})
 		}
+		resumed = res != nil
 	}
 	if res == nil {
 		res, err = c.call("thread/start", map[string]any{"cwd": cwd})
@@ -222,7 +224,7 @@ func (c *Codex) handshake(cfg proto.ShimConfig, sink Sink) error {
 		// thread's rollout may not exist yet: it holds none. Any other
 		// failure leaves the base unknown, so no entry is guessed at.
 		prior, err := c.compactedEntries()
-		if errors.Is(err, os.ErrNotExist) && !cfg.Resume {
+		if errors.Is(err, os.ErrNotExist) && !resumed {
 			err = nil
 		}
 		if err != nil {
