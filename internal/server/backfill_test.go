@@ -52,6 +52,9 @@ func snapshotRow(t *testing.T, s *Server) string {
 func TestBackfillVolumes(t *testing.T) {
 	s, keys, _ := backfillFixture(t)
 	ctx := context.Background()
+	// A launch that never registered: no capacity, no Runs; recorded, not priced.
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, terminated_at, launch_template)
+		VALUES ('ghost', 't1', 'ghost', 'pb', 'terminated', 'i-ghost', $1, $2, '{"region":"eu-north-1"}')`, at("10:00"), at("10:05"))
 	before := snapshotRow(t, s)
 	_, c := getCost(t, s, keys["t1"], "A")
 	computeBefore := c.Lines[0].Amount
@@ -64,8 +67,8 @@ func TestBackfillVolumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rep.Hosts) != 1 || rep.Hosts[0].ID != "disk" || rep.Runs != 1 || fmt.Sprint(rep.Hosts[0].Runs) != "[A]" ||
-		rep.Hosts[0].PerHour != "0.011452055" || rep.Hours != 1 {
+	if len(rep.Hosts) != 2 || rep.Hosts[0].ID != "disk" || rep.Hosts[1].ID != "ghost" || rep.Runs != 1 || fmt.Sprint(rep.Hosts[0].Runs) != "[A]" ||
+		rep.Hosts[0].PerHour != "0.011452055" || rep.Hours != 2 {
 		t.Errorf("dry run: %+v", rep)
 	}
 	var volumes *string
@@ -77,8 +80,14 @@ func TestBackfillVolumes(t *testing.T) {
 	}
 
 	req.DryRun = false
-	if rep, err = s.BackfillVolumes(ctx, req); err != nil || len(rep.Hosts) != 1 {
+	if rep, err = s.BackfillVolumes(ctx, req); err != nil || len(rep.Hosts) != 2 {
 		t.Fatalf("apply: %+v %v", rep, err)
+	}
+	var ghostRates int
+	var ghostVolumes *string
+	systemScan(t, s, `SELECT (SELECT volumes::text FROM hosts WHERE id = 'ghost'), (SELECT count(*) FROM host_rates WHERE host_id = 'ghost')`, nil, &ghostVolumes, &ghostRates)
+	if ghostVolumes == nil || ghostRates != 0 {
+		t.Errorf("unregistered host: volumes %v, %d rates", ghostVolumes, ghostRates)
 	}
 	systemScan(t, s, `SELECT volumes::text FROM hosts WHERE id = 'disk'`, nil, &volumes)
 	if volumes == nil || *volumes != `[{"iops": 3000, "type": "gp3", "assumed": true, "sizeGiB": 100, "throughputMiBps": 125}]` {

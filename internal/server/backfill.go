@@ -214,11 +214,10 @@ func (s *Server) backfillHost(ctx context.Context, tx pgx.Tx, hostID string, vol
 		return err
 	}
 	opened, err := openBlockStorageRate(ctx, tx, hostID, prices, provider+"-ebs-pricing", s.cfg.Costs.Hourly)
-	if err != nil {
+	if err != nil || !opened {
+		// Not opened: the host never registered (no capacity to share, as
+		// for its compute), so it has no placement to re-evaluate.
 		return err
-	}
-	if !opened {
-		return fmt.Errorf("no block-storage period opened (the host has no capacity to share, or one exists)")
 	}
 	// A final Run's compute source is evaluated again: its frozen compute
 	// snapshots are kept, the new block-storage ones are written and frozen.
