@@ -269,3 +269,35 @@ func TestBlockStoragePriceCache(t *testing.T) {
 		t.Error("nothing cached and the provider failing: no error")
 	}
 }
+
+// A refresh of a stale type overwrites the cached rows in place, and drops
+// a dimension the new answer no longer has.
+func TestBlockStoragePriceCacheRefreshReplaces(t *testing.T) {
+	p := &fakePriceProvider{blockStorage: map[string]BlockStoragePrice{"gp3": gp3eun1Answer}}
+	s := providerPriceServer(t, p)
+	ctx := context.Background()
+	if got, err := s.blockStoragePrice(ctx, "ec2", "eu-north-1", "gp3"); err != nil || got != eun1GP3 {
+		t.Fatalf("first: %+v %v", got, err)
+	}
+	execSQL(t, s, ctx, `UPDATE price_cache SET fetched_at = now() - interval '2 hours'`)
+	p.blockStorage["gp3"] = BlockStoragePrice{Currency: "USD", PerGBMonth: "0.0900000000", PerIOPSMonth: "0.0052000000"}
+	want := BlockStoragePrice{Currency: "USD", PerGBMonth: "0.09", PerIOPSMonth: "0.0052"}
+	if got, err := s.blockStoragePrice(ctx, "ec2", "eu-north-1", "gp3"); err != nil || got != want || len(p.blockStorageCalls) != 2 {
+		t.Fatalf("refresh: %+v %v, calls %v", got, err, p.blockStorageCalls)
+	}
+	var rows []string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		r, err := tx.Query(ctx, `SELECT split_part(instance_type, ':', 2) || '=' || trim_scale(per_hour)::text
+			FROM price_cache WHERE os = 'EBS' ORDER BY instance_type COLLATE "C"`)
+		if err != nil {
+			return err
+		}
+		rows, err = pgx.CollectRows(r, pgx.RowTo[string])
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(rows); got != "[GB-Mo=0.09 IOPS-Mo=0.0052]" {
+		t.Errorf("cache rows %s, want [GB-Mo=0.09 IOPS-Mo=0.0052]", got)
+	}
+}
