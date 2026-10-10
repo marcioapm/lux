@@ -17,6 +17,7 @@ export * from "./LogView.tsx";
 export * from "./Logo.tsx";
 export * from "./PageHeader.tsx";
 export * from "./Pagination.tsx";
+export * from "./PartBar.tsx";
 export * from "./RelativeTime.tsx";
 export * from "./SegmentedControl.tsx";
 export * from "./Select.tsx";

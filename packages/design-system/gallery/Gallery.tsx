@@ -52,6 +52,8 @@ import {
   Logo,
   PageHeader,
   Pagination,
+  PartBar,
+  partShares,
   RelativeTime,
   RUN_STATE_LIST,
   SegmentedControl,
@@ -109,7 +111,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "costpanel", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "costpanel", "parts", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -168,6 +170,7 @@ function Sections() {
         <Charts />
         <Costs />
         <CostPanelDemo />
+        <PartsDemo />
         <TimelineDemo />
         <EventsDemo />
         <Logs />
@@ -541,6 +544,40 @@ function Costs() {
       <p className="sg-note">
         familySlot: {FAMILIES.map((f) => `${f.family}${f.color ? ` (${f.color})` : ""} → ${familySlot(f.family, f.color)}`).join(" · ")}. Named hints map to a slot (blue hints avoid slot 1, which is compute&apos;s), <Code>#rrggbb</Code> to the nearest hue, no hint to a slot from the family&apos;s name. A family's slot never depends on its companions: egress and video share slot 4 above, an accepted collision.
       </p>
+    </Section>
+  );
+}
+
+/* ---------- parts of a whole ---------- */
+
+const WHY_UNALLOCATED = [
+  { label: "Part-filled while busy", value: 5.15, text: "$5.15", color: "var(--chart-4)" },
+  { label: "Waiting to scale down", value: 1.3, text: "$1.30", color: "var(--chart-2)" },
+  { label: "Ready, no run yet", value: 0.42, text: "$0.42", color: "var(--chart-7)" },
+  { label: "Booting", value: 0.07, text: "$0.07", color: "var(--chart-5)" },
+];
+
+function PartsDemo() {
+  const shares = partShares(WHY_UNALLOCATED.map((p) => p.value));
+  return (
+    <Section id="parts" title="PartBar" note="One total split into parts: a single bar of segments with 1px gaps, each its share of the parts' sum, each with a Tooltip (label, the caller's formatted value, share). Values are numbers for geometry only; the figures in text come from the caller. A zero or missing part draws nothing; a drawn part under 1% reads <1%. Percents use largest remainder, so they add up to 100 (partShares). Pair it with a list of the parts: the bar is the picture, not the record.">
+      <div className="grid grid-2">
+        <Card title="Why $6.94 was unallocated" subtitle="four parts, colours from the chart slots">
+          <div className="stack stack-tight">
+            <PartBar label="Why $6.94 was unallocated" parts={WHY_UNALLOCATED} />
+            <KeyValue items={WHY_UNALLOCATED.map((p, i) => ({ key: <ColorKey color={p.color}>{p.label}</ColorKey>, value: `${p.text} · ${shares[i]!.label}`, mono: true }))} />
+          </div>
+        </Card>
+        <Card title="States" subtitle="families; a zero part; one part; a tiny part; nothing">
+          <div className="stack stack-tight">
+            <PartBar label="By family" parts={[{ label: "Compute", value: 12.87, text: "$12.87", color: familyColor("compute") }, { label: "Block storage", value: 1.38, text: "$1.38", color: "var(--chart-3)" }]} />
+            <PartBar label="A zero part draws nothing" parts={[{ label: "Busy", value: 3, color: "var(--chart-4)" }, { label: "Idle", value: 0, color: "var(--chart-2)" }, { label: "Booting", value: null, color: "var(--chart-5)" }, { label: "Ready", value: 1, color: "var(--chart-7)" }]} />
+            <PartBar label="One part" parts={[{ label: "Compute", value: 4, color: familyColor("compute") }]} />
+            <PartBar label="A tiny part" height={8} parts={[{ label: "AI models", value: 625.76, text: "$625.76", color: familyColor("ai", "violet") }, { label: "Compute", value: 6.61, text: "$6.61", color: familyColor("compute") }, { label: "Block storage", value: 0.71, text: "$0.71", color: "var(--chart-3)" }]} />
+            <PartBar label="Nothing" parts={[{ label: "Compute", value: 0, color: familyColor("compute") }]} />
+          </div>
+        </Card>
+      </div>
     </Section>
   );
 }
