@@ -372,6 +372,7 @@ func (a *ACP) handshake(cfg proto.ShimConfig) error {
 		_, err := a.rpc.call("session/load", map[string]any{"sessionId": cfg.SessionID, "cwd": cwd, "mcpServers": mcp})
 		a.setLoading(false)
 		if err == nil {
+			a.seedLastSummary(cfg.SessionID)
 			a.setSession(cfg.SessionID)
 			return nil
 		}
@@ -1116,6 +1117,27 @@ func (a *ACP) compacted(session string) {
 }
 
 var errRunEndedBeforeSummary = errors.New("the Run ended before it was read")
+
+// seedLastSummary sets lastSummary to the newest summary a resumed session
+// already holds, so the Run's first compaction does not report an earlier
+// Run's. Runs before setSession, so no compaction read races it. Unread,
+// lastSummary stays empty.
+func (a *ACP) seedLastSummary(session string) {
+	if a.bus == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(a.runCtx(), a.compactionTimeout)
+	defer cancel()
+	id, err := a.bus.newestSummary(ctx, session)
+	if err != nil {
+		a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+			"opencode: the resumed session %s's earlier summaries could not be read; its first compaction may report one of them: %v", session, err)})
+		return
+	}
+	a.mu.Lock()
+	a.lastSummary = id
+	a.mu.Unlock()
+}
 
 // reportCompaction writes the record, then the warning if the summary
 // could not be read.
