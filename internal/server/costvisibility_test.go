@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
@@ -124,6 +125,33 @@ func TestPoolCostMachinesOnlyAndIdleVisibility(t *testing.T) {
 	getJSON(t, s, keys["op"], "/v1/pools/shared/cost?owner=platform&since=6h", &op)
 	if got := fmt.Sprint(idleOf(op.Idle)); got != "map[block-storage USD:0.002 compute USD:0.25]" {
 		t.Errorf("operator's platform idle %s", got)
+	}
+}
+
+// A range with no host time: idle is [] to a reader who may see the pool's
+// host time (operator, owner tenant) and absent to one who may not (a
+// tenant on a platform pool), so the console can tell the two apart.
+func TestPoolCostEmptyRangeIdleVisibility(t *testing.T) {
+	s, keys, _ := costVisibilityFixture(t)
+	const empty = "from=2020-01-01T00:00:00Z&to=2020-01-02T00:00:00Z"
+	for _, c := range []struct {
+		key, path, idle string
+	}{
+		{"op", "/v1/pools/shared/cost?owner=platform&" + empty, "[]"},
+		{"a", "/v1/pools/own/cost?" + empty, "[]"},
+		{"a", "/v1/pools/shared/cost?owner=platform&" + empty, ""},
+	} {
+		var body map[string]json.RawMessage
+		if code := getJSON(t, s, keys[c.key], c.path, &body); code != http.StatusOK {
+			t.Fatalf("%s %s: %d", c.key, c.path, code)
+		}
+		idle, ok := body["idle"]
+		if got := string(idle); ok != (c.idle != "") || got != c.idle {
+			t.Errorf("%s %s: idle %q (present %v), want %q", c.key, c.path, got, ok, c.idle)
+		}
+		if string(body["totals"]) != "[]" {
+			t.Errorf("%s %s: totals %s, want [] on an empty range", c.key, c.path, body["totals"])
+		}
 	}
 }
 

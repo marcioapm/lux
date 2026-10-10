@@ -962,7 +962,7 @@ export interface PoolCost {
   series: { at: string; family: string; currency: string; amount: string }[];
   families?: { family: string; displayName?: string; color?: string }[];
   topRuns: { id: string; name?: string; currency: string; amount: string; estimate: boolean }[];
-  /** Host time per family: operators over every tenant and the pool's owner tenant; absent otherwise (never a platform pool's to a tenant). */
+  /** Host time per family: present (maybe []) for operators over every tenant and the pool's owner tenant; absent otherwise (never a platform pool's to a tenant). */
   idle?: PoolIdle[];
   hostSeries?: PoolHostTime[];
   hosts?: PoolHostTime[];
