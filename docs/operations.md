@@ -197,6 +197,7 @@ luxd admin create-tenant --name acme [--max-runs N] [--max-hosts N] [--retention
 luxd admin create-key --tenant T --scopes read,run
 luxd admin create-operator-key [--name N]       # every tenant: see docs/operators.md
 luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N] [--expire-after-days N]
+luxd admin costs backfill-volumes --pool P [--tenant T] --volume type=gp3,size=100,iops=3000,throughput=125 [--dry-run]   # see EC2 pools
 ```
 
 - `--max-runs`: Runs that are not stopped or finished. Checked when a Run
@@ -685,6 +686,32 @@ with an unrecognized value is refused, not left to fail at boot:
 | `ignition` (default) | An Ignition v3.4.0 config for Fedora CoreOS. | The default: no packages to install, fastest boot. |
 | `script` | A `#!/bin/bash` script cloud-init runs. | A stock Fedora Cloud, Ubuntu, Debian or AL2023 AMI. |
 | `env` | Plain `KEY=value` lines (`LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`, `LUX_RUNNER_MEMORY` when luxd knows the instance type's memory, and `LUX_NESTED` for a nested pool). | A custom AMI with its own boot script, from before self-update. |
+
+### Block storage of hosts launched before luxd recorded volumes
+
+luxd prices each EC2 host's own disk (the volumes deleted with the
+instance) as the **Block storage** cost family, from `DescribeVolumes`
+([costs](costs.md#block-storage-built-in)). Hosts launched before that have
+no recorded volumes, so their block storage is missing. State the launch
+template's disk once per pool to fill it in, history included:
+
+```bash
+luxd admin costs backfill-volumes --pool burst --dry-run \
+  --volume type=gp3,size=100,iops=3000,throughput=125
+luxd admin costs backfill-volumes --pool burst \
+  --volume type=gp3,size=100,iops=3000,throughput=125
+```
+
+`--tenant` (id or name) picks a tenant's pool; without it, the platform's.
+`--volume` repeats for several volumes (`size` in GiB, `throughput` in
+MiB/s; `iops` and `throughput` optional). It records the volumes on the
+pool's hosts whose volumes are unknown, marked `"assumed": true`, prices
+them at today's list price, re-evaluates the Runs placed on them (finished
+ones gain a block-storage line; their compute amounts do not change) and
+rebuilds the hosts' hourly rows within `costs.hourly`. It prints the hosts,
+hours and Runs it touched (or would, with `--dry-run`). Running it again
+changes nothing. It needs `pricing:GetProducts` (or a fresh cached price)
+and luxd's database settings, like the other admin commands.
 
 ### Nested containers on an EC2 pool
 
