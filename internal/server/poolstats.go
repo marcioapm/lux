@@ -502,13 +502,11 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		return out, nil
 	}
 	scope := store.System()
-	// RLS (cost_hourly_own_hosts) is the guard; a tenant's own-pools
-	// predicate is also explicit, as GET /v1/costs has it.
+	// RLS (cost_hourly_own_hosts) is the guard; the pool is the tenant's own
+	// (checked above), so c.pool_id = $1 needs no further predicate.
 	hostRows, args := `c.run_id IS NULL AND c.pool_id = $1 AND c.hour >= $2 AND c.hour < $3`, []any{pool.ID, from, to}
 	if p.TenantID != "" {
 		scope = store.Tenant(p.TenantID)
-		hostRows += ` AND c.pool_id IN (SELECT id FROM pools WHERE tenant_id = $4)`
-		args = append(args, p.TenantID)
 	}
 	err = s.db.Tx(ctx, scope, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT c.family, c.currency, trim_scale(sum(c.unallocated))::text FROM cost_hourly c WHERE `+hostRows+`
