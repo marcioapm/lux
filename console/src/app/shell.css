@@ -695,12 +695,6 @@
 /* Overview Cost panel: one card (KPI strip over the charts), then the
    breakdown table (and Top tenants) beside Top Runs. Laid out by the chart column's width (.overview-charts
    is a container), so it fits beside the feed. */
-.cost-panel .section-head {
-  align-items: center;
-}
-.cost-panel .section-head .section-note {
-  margin-right: auto;
-}
 .cost-controls {
   display: flex;
   align-items: center;
