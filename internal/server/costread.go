@@ -677,11 +677,11 @@ func (s *Server) hostCost(ctx context.Context, in *hostCostInput) (*hostCostOutp
 		}
 		// A tenant reads its own host's cost, and its unallocated part only
 		// while the host is in one of its own pools, never a platform pool.
-		ownPool := p.TenantID == ""
+		seesUnallocated := p.TenantID == ""
 		if p.TenantID != "" {
 			var own bool
 			if err := tx.QueryRow(ctx, `SELECT h.tenant_id IS NOT DISTINCT FROM $2, coalesce(pl.tenant_id = $2, false)
-				FROM hosts h LEFT JOIN pools pl ON pl.id = h.pool_id WHERE h.id = $1`, id, p.TenantID).Scan(&own, &ownPool); err != nil {
+				FROM hosts h LEFT JOIN pools pl ON pl.id = h.pool_id WHERE h.id = $1`, id, p.TenantID).Scan(&own, &seesUnallocated); err != nil {
 				return err
 			}
 			if !own {
@@ -702,7 +702,7 @@ func (s *Server) hostCost(ctx context.Context, in *hostCostInput) (*hostCostOutp
 				rows.Close()
 				return err
 			}
-			if !ownPool {
+			if !seesUnallocated {
 				h.Unallocated = nil
 			}
 			out.Body.Hours = append(out.Body.Hours, h)
