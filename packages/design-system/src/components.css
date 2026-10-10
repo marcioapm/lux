@@ -1093,6 +1093,47 @@ a.idchip-text:hover {
   font-weight: var(--weight-medium);
 }
 
+/* ---------- PartBar ----------
+   One total in parts: segments with 1px gaps; the ends are rounded by the
+   bar's own clip. */
+.part-bar {
+  display: flex;
+  gap: 1px;
+  width: 100%;
+  min-width: 0;
+  border-radius: var(--radius-sm);
+}
+/* Nothing to split: the empty track, so the row keeps its shape. */
+.part-bar:empty {
+  background: var(--bg-muted);
+}
+.part-bar > .part-bar-seg {
+  display: flex;
+  flex-basis: 0;
+  min-width: 2px;
+}
+.part-bar > .part-bar-seg:first-child {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+.part-bar > .part-bar-seg:last-child {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.part-bar > .part-bar-seg:only-child {
+  border-radius: var(--radius-sm);
+}
+.part-bar-hit {
+  flex: 1;
+  outline: none;
+}
+.part-bar > .part-bar-seg:focus-within {
+  box-shadow: var(--focus-ring);
+}
+.part-bar-tip {
+  display: inline-flex;
+  gap: var(--sp-4);
+  white-space: nowrap;
+}
+
 /* ---------- StatTile ----------
    Compact: a 12px muted label, the value at --text-2xl (22 / 20px), the
    unit or note on its own line under it. */
