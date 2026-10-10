@@ -1,6 +1,7 @@
 """A fake EC2 for the test suite: an HTTP server speaking the EC2 Query API
 calls lux uses (RunInstances, TerminateInstances, DescribeInstances,
-DescribeInstanceTypes, DescribeVolumes), where an instance is a simulated host container that
+DescribeInstanceTypes, DescribeVolumes), and the Pricing API's GetProducts,
+where an instance is a simulated host container that
 boots lux-runner from its user data, as a real instance's AMI would.
 
 luxd's EC2 provider is pointed at it with LUX_EC2_ENDPOINT, so the real
@@ -15,6 +16,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs
 from xml.sax.saxutils import escape
 
@@ -71,6 +73,15 @@ FAKE_TEMPLATE_TYPE = "m7i.large"
 # 100 GiB, 3000 IOPS, 125 MiB/s, deleted with the instance.
 FAKE_ROOT_VOLUME = {"type": "gp3", "size": 100, "iops": 3000, "throughput": 125, "deleteOnTermination": True}
 
+# A real Pricing API answer for gp3 in eu-north-1 (0.0836 per GB-Mo, 0.0052
+# per IOPS-Mo, 42.8032 per GiBps-mo), one product per page; luxd's own
+# provider tests read the same file.
+_EBS_FIXTURE = Path(__file__).resolve().parent.parent / "internal" / "ec2" / "testdata" / "ebs-pricing-eu-north-1.json"
+EBS_PRICING = {("eu-north-1", "gp3"): json.loads(_EBS_FIXTURE.read_text())}
+
+# On-demand list prices the fake quotes (made up), by (region, type).
+ON_DEMAND_PRICES = {("eu-north-1", FAKE_TEMPLATE_TYPE): "0.1000000000", ("us-east-1", FAKE_TEMPLATE_TYPE): "0.1000000000"}
+
 # The capacity shortages a dry run never answers (EC2 does not test
 # capacity for one); every other injected failure fails it too.
 DRY_RUN_UNTESTED = frozenset({"InsufficientInstanceCapacity", "InsufficientCapacity"})
@@ -113,6 +124,8 @@ class FakeEC2:
         # DescribeVolumes as a missing ec2:DescribeVolumes would.
         self.volumes = [dict(FAKE_ROOT_VOLUME)]
         self.volumes_error = ""
+        # Each GetProducts' filters, {field: value}, in order.
+        self.pricing_calls: list[dict] = []
         self.server = ThreadingHTTPServer((env.gateway, 0), self._handler())
         self.url = f"http://{env.gateway}:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -191,6 +204,15 @@ class FakeEC2:
 
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+                if self.headers.get("X-Amz-Target", "").endswith(".GetProducts"):
+                    code, out = fake._get_products(json.loads(body or "{}"))
+                    data = json.dumps(out).encode()
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/x-amz-json-1.1")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 q = {k: v[0] for k, v in parse_qs(body).items()}
                 action = q.get("Action", "")
                 if q.get("DryRun") != "true":
@@ -397,6 +419,32 @@ class FakeEC2:
                               f"<deleteOnTermination>{'true' if v.get('deleteOnTermination') else 'false'}</deleteOnTermination>"
                               f"</item></attachmentSet></item>")
         return f'<DescribeVolumesResponse xmlns="{NS}"><volumeSet>{items}</volumeSet></DescribeVolumesResponse>'
+
+    # -- the Pricing API (LUX_PRICING_ENDPOINT points here too) -------------
+
+    def _get_products(self, req: dict) -> tuple[int, dict]:
+        """GetProducts on AmazonEC2, as luxd asks it: an instance type's
+        on-demand price (ON_DEMAND_PRICES), or a volume type's EBS products,
+        one page each, from the real eu-north-1 gp3 answer (EBS_PRICING). An
+        unknown key answers no products, as AWS does."""
+        f = {x["Field"]: x["Value"] for x in req.get("Filters", [])}
+        with self.lock:
+            self.pricing_calls.append(f)
+        if "volumeApiName" in f:
+            pages = EBS_PRICING.get((f.get("regionCode"), f["volumeApiName"]), [])
+            i = int(req.get("NextToken") or 0)
+            if i >= len(pages):
+                return 200, {"PriceList": [], "FormatVersion": "aws_v1"}
+            page = dict(pages[i])
+            if i + 1 < len(pages):
+                page["NextToken"] = str(i + 1)
+            return 200, page
+        price = ON_DEMAND_PRICES.get((f.get("regionCode"), f.get("instanceType")))
+        if price is None:
+            return 200, {"PriceList": [], "FormatVersion": "aws_v1"}
+        product = {"product": {"productFamily": "Compute Instance", "attributes": {"instanceType": f["instanceType"]}},
+                   "terms": {"OnDemand": {"T.1": {"priceDimensions": {"T.1.1": {"unit": "Hrs", "pricePerUnit": {"USD": price}}}}}}}
+        return 200, {"PriceList": [json.dumps(product)], "FormatVersion": "aws_v1"}
 
 
 class FakeError(Exception):
