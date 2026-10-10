@@ -1109,10 +1109,10 @@ func (a *ACP) compacted(session string) {
 		if err != nil && a.runCtx().Err() != nil {
 			err = errRunEndedBeforeSummary
 		}
-		a.reportCompaction(session, trigger, summary, err)
+		reportCompacted(a.sink, "opencode: session", proto.Compaction{SessionID: session, Trigger: trigger, Summary: summary}, err)
 	})
 	if !started {
-		a.reportCompaction(session, "", "", errRunEndedBeforeSummary)
+		reportCompacted(a.sink, "opencode: session", proto.Compaction{SessionID: session}, errRunEndedBeforeSummary)
 	}
 }
 
@@ -1137,16 +1137,6 @@ func (a *ACP) seedLastSummary(session string) {
 	a.mu.Lock()
 	a.lastSummary = id
 	a.mu.Unlock()
-}
-
-// reportCompaction writes the record, then the warning if the summary
-// could not be read.
-func (a *ACP) reportCompaction(session, trigger, summary string, err error) {
-	a.sink.Compacted(proto.Compaction{SessionID: session, Trigger: trigger, Summary: summary})
-	if err != nil {
-		a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
-			"opencode: session %s was compacted; its summary could not be read: %v", session, err)})
-	}
 }
 
 // setOpenCodeBusy records whether OpenCode runs a loop for the session and
