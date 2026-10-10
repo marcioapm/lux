@@ -58,7 +58,7 @@ func snapshotRow(t *testing.T, s *Server) string {
 func TestBackfillVolumes(t *testing.T) {
 	s, keys, _ := backfillFixture(t)
 	ctx := context.Background()
-	// A launch that never registered: no capacity, no Runs; recorded, not priced.
+	// A launch that never registered: no capacity; recorded, not priced.
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, terminated_at, launch_template)
 		VALUES ('ghost', 't1', 'ghost', 'pb', 'terminated', 'i-ghost', $1, $2, '{"region":"eu-north-1"}')`, at("10:00"), at("10:05"))
 	before := snapshotRow(t, s)
@@ -86,8 +86,15 @@ func TestBackfillVolumes(t *testing.T) {
 	}
 
 	req.DryRun = false
-	if rep, err = s.BackfillVolumes(ctx, req); err != nil || len(rep.Hosts) != 2 {
+	// A Run on the never-registered host: no period opens there, so the
+	// backfill re-queues nothing on it and does not report it.
+	placeRun(t, s, "t1", "G", StateStopped, "ghost", place("G", 1, 1, "10:00", "10:05"))
+	if rep, err = s.BackfillVolumes(ctx, req); err != nil || len(rep.Hosts) != 2 || rep.Runs != 1 ||
+		fmt.Sprint(rep.Hosts[0].Runs) != "[A]" || len(rep.Hosts[1].Runs) != 0 {
 		t.Fatalf("apply: %+v %v", rep, err)
+	}
+	if p := pending(t, s, "G"); p != "" {
+		t.Errorf("G queued: %q", p)
 	}
 	var ghostRates int
 	var ghostVolumes *string
