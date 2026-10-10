@@ -21,7 +21,8 @@ export function HostCost({ host, range, operator }: { host: Host; range: TimeRan
   const daily = step.step === "day";
   // Hourly buckets: the 1h range would chart one or two points.
   const since = costRange(range);
-  const q = useQuery(`host-cost:${host.id}:${since}`, (s) => api.hostCost(host.id, since, s), { interval: 30_000 });
+  const tenant = scope.apiTenant;
+  const q = useQuery(`host-cost:${host.id}:${since}@${tenant ?? ""}`, (s) => api.hostCost(host.id, since, tenant, s), { interval: 30_000 });
   const c = q.data;
   // Stable per response: the host page re-renders on its clock, and a fresh
   // series or ys array would rebuild the chart.
