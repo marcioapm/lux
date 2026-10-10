@@ -21,8 +21,9 @@ export function parseShow(v: string | null): CostShow {
 
 /**
  * Whether a family counts under show. Show is luxd's family filter: compute
- * is family=compute, external nofamily=compute, so block storage counts
- * under External (its figure is still shown apart from the plugins').
+ * is family=compute, external nofamily=compute, so Show External is every
+ * family but compute: block storage counts under it (its total reads
+ * "Non-compute total"), while the External KPI is the plugins' families alone.
  */
 export function shows(show: CostShow, family: string): boolean {
   return show === "all" || (show === "compute") === (family === COMPUTE);
