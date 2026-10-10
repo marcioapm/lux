@@ -142,6 +142,8 @@ type ACP struct {
 	statusRead func(error)
 	busHandled func(busEvent)
 	statusGot  func(error)
+	// compactionTimeout bounds reading a compaction's summary.
+	compactionTimeout time.Duration
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -149,7 +151,8 @@ func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
 // NewOpenCode is the ACP adapter for OpenCode.
 func NewOpenCode() *ACP {
 	return &ACP{ready: make(chan struct{}), opencode: true, steerKick: make(chan struct{}, 1),
-		suspect: map[string]time.Time{}, resent: map[string]bool{}, admittedLate: map[string]bool{}, settleEvery: time.Second, clock: wallClock{}}
+		suspect: map[string]time.Time{}, resent: map[string]bool{}, admittedLate: map[string]bool{}, settleEvery: time.Second, clock: wallClock{},
+		compactionTimeout: 10 * time.Second}
 }
 
 // settleClock is the time settle reads and schedules its next look by.
@@ -1066,9 +1069,26 @@ func (a *ACP) onBus(ev busEvent) {
 		}
 	case "session.compacted":
 		if session != "" && p.SessionID == session {
-			a.sink.Compacted(proto.Compaction{SessionID: p.SessionID})
+			a.compacted(session)
 		}
 	}
+}
+
+// compacted reports a compaction of the session as lux.compacted, with the
+// summary read from OpenCode's stored messages (session.compacted carries
+// none), off the bus goroutine and within compactionTimeout. Unread, the
+// record goes without it, and a warning says why.
+func (a *ACP) compacted(session string) {
+	a.spawn(func() {
+		ctx, cancel := context.WithTimeout(a.runCtx(), a.compactionTimeout)
+		defer cancel()
+		summary, trigger, err := a.bus.compaction(ctx, session)
+		if err != nil {
+			a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+				"opencode: session %s was compacted; its summary could not be read: %v", session, err)})
+		}
+		a.sink.Compacted(proto.Compaction{SessionID: session, Trigger: trigger, Summary: summary})
+	})
 }
 
 // setOpenCodeBusy records whether OpenCode runs a loop for the session and

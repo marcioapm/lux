@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -158,6 +159,12 @@ type fakeBus struct {
 	// deny, if set, is called (under mu) with each request that passed the
 	// password check, as "METHOD path"; a non-zero status answers it.
 	deny func(req string) int
+	// whole: messages GET /session/{id}/message lists after stored, as
+	// given (with their parts). messagesCode, if set, answers it instead;
+	// messagesHang, if set, holds it until closed.
+	whole        []any
+	messagesCode int
+	messagesHang chan struct{}
 }
 
 func newFakeBus(t *testing.T) *fakeBus {
@@ -218,11 +225,24 @@ func newFakeBus(t *testing.T) *fakeBus {
 	})
 	mux.HandleFunc("GET /session/{id}/message", func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
-		var out []map[string]any
+		var out []any
 		for _, m := range b.stored {
 			out = append(out, map[string]any{"info": map[string]string{"id": m["id"], "role": m["role"], "parentID": m["parentID"]}, "parts": []any{}})
 		}
+		out = append(out, b.whole...)
+		code, hang := b.messagesCode, b.messagesHang
 		b.mu.Unlock()
+		if hang != nil {
+			select {
+			case <-hang:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		if code != 0 {
+			http.Error(w, http.StatusText(code), code)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(out)
 	})
 	mux.HandleFunc("GET /session/status", func(w http.ResponseWriter, r *http.Request) {
@@ -1523,16 +1543,114 @@ func TestOpenCodeRunLeavesNoGoroutines(t *testing.T) {
 
 // OpenCode announces a compaction only on its bus (session.compacted,
 // carrying just the session id), never over ACP. lux reports the Run's own
-// session's as lux.compacted, once, and ignores another session's.
+// session's as lux.compacted, once, with the summary and trigger it reads
+// from the stored messages, and ignores another session's.
 func TestOpenCodeCompactionIsReported(t *testing.T) {
-	a, _, w, log, first := ocWithBus(t)
+	a, _, w, log, first := ocWithBusOn2(t)
 	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"ses_other"}}`)
 	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	got := waitCompactions(t, log, 1)
 	w.resolve(first, ocResult)
 	onBus(t, a, ocIdle)
 	w.exit()
-	want := []string{`compacted {"sessionId":"` + ocSession + `","trigger":""}`}
-	if got := log.compactions(); !slices.Equal(got, want) {
+	got = log.compactions()
+	if len(got) != 1 || !strings.HasPrefix(got[0], `compacted {"sessionId":"`+ocSession+`","trigger":"manual","summary":"## Objective\n- User wants agent to remember`) {
+		t.Fatalf("got %q", got)
+	}
+	if log.has("warning") {
+		t.Fatalf("warned: %q", log.lines())
+	}
+}
+
+// ocCompactionMessages are the messages OpenCode 1.18.35 stores for a
+// /compact (testdata/opencode-1.18.35-compaction.json, trimmed): a user
+// message with a compaction part, then the summary, an assistant message
+// with info.summary true answering it.
+func ocCompactionMessages(t *testing.T) []any {
+	t.Helper()
+	b, err := os.ReadFile("testdata/opencode-1.18.35-compaction.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msgs []any
+	if err := json.Unmarshal(b, &msgs); err != nil {
+		t.Fatal(err)
+	}
+	return msgs
+}
+
+// waitCompactions waits until the sink has n compacted lines.
+func waitCompactions(t *testing.T, log *inputSink, n int) []string {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if c := log.compactions(); len(c) >= n {
+			return c
+		}
+	}
+	t.Fatalf("not %d compactions: %q", n, log.lines())
+	return nil
+}
+
+// A summary that cannot be read still gives the compaction's record,
+// without a summary, and a warning saying why.
+func TestOpenCodeCompactionSummaryUnreadable(t *testing.T) {
+	a, b, w, log, first := ocWithBusOn2(t)
+	b.mu.Lock()
+	b.messagesCode = http.StatusInternalServerError
+	b.mu.Unlock()
+	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	got := waitCompactions(t, log, 1)
+	w.resolve(first, ocResult)
+	w.exit()
+	if want := []string{`compacted {"sessionId":"` + ocSession + `","trigger":""}`}; !slices.Equal(got, want) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
+	if !log.has("warning opencode: session " + ocSession + " was compacted; its summary could not be read: GET /session/") {
+		t.Fatalf("no warning: %q", log.lines())
+	}
+}
+
+// A summary read that hangs is given up after its timeout: the record
+// comes without it.
+func TestOpenCodeCompactionSummaryTimesOut(t *testing.T) {
+	a, b, w, log, first := ocWithBusOn2(t)
+	a.compactionTimeout = 50 * time.Millisecond
+	hang := make(chan struct{})
+	defer close(hang)
+	b.mu.Lock()
+	b.messagesHang = hang
+	b.mu.Unlock()
+	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	got := waitCompactions(t, log, 1)
+	w.resolve(first, ocResult)
+	w.exit()
+	if want := []string{`compacted {"sessionId":"` + ocSession + `","trigger":""}`}; !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if !log.has("warning opencode: session " + ocSession + " was compacted; its summary could not be read") {
+		t.Fatalf("no warning: %q", log.lines())
+	}
+}
+
+// warnSink is an inputSink that also logs each lux.warning.
+type warnSink struct{ *inputSink }
+
+func (s warnSink) Event(typ string, data any) {
+	if typ == proto.EvWarning {
+		m, _ := data.(map[string]any)
+		s.add(fmt.Sprintf("warning %v", m["message"]))
+	}
+	s.inputSink.Event(typ, data)
+}
+
+// ocWithBusOn2 is ocWithBus whose sink also logs warnings, with the
+// compaction's messages stored.
+func ocWithBusOn2(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
+	t.Helper()
+	log := &inputSink{}
+	a, b, w, first := ocWithBusOn(t, nil, warnSink{log}, log)
+	b.mu.Lock()
+	b.whole = ocCompactionMessages(t)
+	b.mu.Unlock()
+	return a, b, w, log, first
 }
