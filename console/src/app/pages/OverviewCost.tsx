@@ -17,6 +17,7 @@ import {
   LabelChips,
   LabelFilterPopover,
   ListPriceNote,
+  meterText,
   Money,
   MoneyList,
   rangeText,
@@ -389,7 +390,8 @@ function CostFilters({ filters, since, keys, fq, prefer }: { filters: LabelFilte
   );
 }
 
-const pct = (r: number | null) => (r == null ? null : `${Math.round(r * 100)}%`);
+// meterText's rule: a non-zero share that rounds to 0% reads <1%.
+const pct = (r: number | null) => (r == null ? null : meterText(r));
 
 function TotalKpi({ show, words, since, loading, shown, sides, change, filtered }: { show: CostShow; words: string; since: string; loading: boolean; shown: MoneyTotal[]; sides: SideTotals[]; change: ReturnType<typeof changes>; filtered: boolean }) {
   // Show External is luxd's nofamily=compute: block storage is in this total, not in the External KPI beside it.

@@ -399,6 +399,9 @@ test("Overview Cost by family: Block storage is its own KPI and row, apart from 
       ["Block storage", "$0.71"],
       ["External", "$625.76"],
     ]);
+    // Block storage is 0.11% of the total: a non-zero share under 1% reads <1%, never 0%.
+    const bs = [...p.el.querySelectorAll(".kpi")].find((k) => k.querySelector(".kpi-label")?.textContent === "Block storage")!;
+    expect(bs.textContent).toContain("<1% · the disks");
     const rows = [...cellsOf(p.el, "By family")].map((r) => [...r.querySelectorAll("td")].map((td) => td.textContent));
     expect(rows).toEqual([
       ["AI models", "312", "–", "–", "$625.76", "$625.76", "99%"],
