@@ -251,8 +251,7 @@ func TestComputeCostBlockStorage(t *testing.T) {
 // for costs.prices_refresh; a failed refresh keeps the stale cache; with
 // nothing cached a failure is an error.
 func TestBlockStoragePriceCache(t *testing.T) {
-	p := &fakePriceProvider{blockStorage: map[string]BlockStoragePrice{
-		"gp3": {Currency: "USD", PerGBMonth: "0.0836000000", PerIOPSMonth: "0.0052000000", PerGiBpsMonth: "42.8032000000"}}}
+	p := &fakePriceProvider{blockStorage: map[string]BlockStoragePrice{"gp3": gp3eun1Answer}}
 	s := providerPriceServer(t, p)
 	ctx := context.Background()
 	got, err := s.blockStoragePrice(ctx, "ec2", "eu-north-1", "gp3")
