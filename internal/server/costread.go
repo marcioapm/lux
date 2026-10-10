@@ -401,10 +401,10 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		// Host rows are read in the caller's scope: an operator over every
 		// tenant sees every host's, a tenant (or an operator narrowed to one)
 		// only those of hosts in its own pools (RLS, cost_hourly_own_hosts).
+		// The explicit pool predicate lets the planner use
+		// cost_hourly_host_pool_hour per owned pool instead of filtering every
+		// tenant's host rows.
 		if !filtered {
-			// RLS (cost_hourly_own_hosts) is the guard; the explicit pool
-			// predicate lets the planner use cost_hourly_host_pool_hour per
-			// owned pool instead of filtering every tenant's host rows.
 			args, ownPools := []any{from, to, in.Family, in.NoFamily}, ""
 			if p.TenantID != "" {
 				args, ownPools = append(args, p.TenantID), ` AND pool_id IN (SELECT id FROM pools WHERE tenant_id = $5)`
