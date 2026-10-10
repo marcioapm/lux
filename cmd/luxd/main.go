@@ -501,6 +501,9 @@ func adminCosts(ctx context.Context, cfg config, db *store.Store, args []string)
 	if err != nil {
 		return err
 	}
+	for _, sk := range rep.Skipped {
+		log.Warn("backfill-volumes: Run not re-evaluated", "run", sk.Run, "host", sk.Host, "reason", sk.Reason)
+	}
 	return json.NewEncoder(os.Stdout).Encode(rep)
 }
 

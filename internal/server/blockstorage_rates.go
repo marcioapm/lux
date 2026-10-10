@@ -91,7 +91,11 @@ func (s *Server) refreshBlockStorage(ctx context.Context) {
 				}
 				// Runs already final on a host live when its volumes became
 				// known gain their block storage as a backfill's do.
-				return requeueBlockStorageRuns(ctx, tx, runs)
+				skipped, err := requeueBlockStorageRuns(ctx, tx, runs)
+				if len(skipped) > 0 {
+					s.log.Warn("costs: block storage not added to Runs final without compute snapshots", "host", h.ID, "runs", skipped)
+				}
+				return err
 			})
 		}
 		if failed != nil && ctx.Err() == nil {
