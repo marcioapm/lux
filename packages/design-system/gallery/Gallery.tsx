@@ -47,6 +47,7 @@ import {
   ListPriceNote,
   LiveDot,
   LogView,
+  Meter,
   Money,
   MoneyList,
   Logo,
@@ -560,7 +561,7 @@ const WHY_UNALLOCATED = [
 function PartsDemo() {
   const shares = partShares(WHY_UNALLOCATED.map((p) => p.value));
   return (
-    <Section id="parts" title="PartBar" note="One total split into parts: a single bar of segments with 1px gaps, each its share of the parts' sum, each with a Tooltip (label, the caller's formatted value, share). Values are numbers for geometry only; the figures in text come from the caller. A zero or missing part draws nothing; a drawn part under 1% reads <1%. Percents use largest remainder, so they add up to 100 (partShares). Pair it with a list of the parts: the bar is the picture, not the record.">
+    <Section id="parts" title="PartBar, Meter" note="PartBar: one total split into parts, a single bar of segments with 1px gaps, each its share of the parts' sum, each with a Tooltip (label, the caller's formatted value, share). Values are numbers for geometry only; the figures in text come from the caller. A zero or missing part draws nothing; a drawn part under 1% reads <1%. Percents use largest remainder, so they add up to 100 (partShares). Pair it with a list of the parts: the bar is the picture, not the record. Meter: one ratio in a table cell; the fill clamps to 0..1, the text keeps the true figure, no ratio is an en dash.">
       <div className="grid grid-2">
         <Card title="Why $6.94 was unallocated" subtitle="four parts, colours from the chart slots">
           <div className="stack stack-tight">
@@ -578,9 +579,37 @@ function PartsDemo() {
           </div>
         </Card>
       </div>
+      <Card title="Meter" subtitle="a ratio in a table cell: 46px track, the percentage to its right in mono" flush>
+        <Table columns={METER_COLS} rows={METER_ROWS} rowKey={(r) => r.host} dense />
+      </Card>
     </Section>
   );
 }
+
+interface MeterRow {
+  host: string;
+  total: string;
+  util: number | null;
+  note: string;
+  color?: string;
+}
+
+const METER_ROWS: MeterRow[] = [
+  { host: "default-5ar45u7s", total: "$0.863", util: 0.91, note: "most of it reserved" },
+  { host: "default-hjogolfb", total: "$0.620", util: 0.5, note: "half" },
+  { host: "default-d222eff5", total: "$0.570", util: 0.004, note: "a sliver" },
+  { host: "default-zgf3i72f", total: "$0.544", util: 0, note: "zero: 0%, no fill" },
+  { host: "default-r76idik7", total: "$0.622", util: 1.12, note: "over 1: the fill clamps, the text does not" },
+  { host: "default-5pr3pyid", total: "–", util: null, note: "no figure: en dash" },
+  { host: "ai share", total: "$625.76", util: 0.987, note: "a series colour", color: "var(--chart-7)" },
+];
+
+const METER_COLS: Column<MeterRow>[] = [
+  { key: "host", header: "Host", cell: (r) => <span className="mono">{r.host}</span>, lead: true },
+  { key: "note", header: "State", cell: (r) => <span className="secondary">{r.note}</span> },
+  { key: "total", header: "Total", cell: (r) => r.total, align: "right", mono: true, width: 110 },
+  { key: "util", header: "Utilisation", cell: (r) => <Meter value={r.util} color={r.color} />, sortValue: (r) => r.util, align: "right", width: 140 },
+];
 
 /* ---------- components ---------- */
 
