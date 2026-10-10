@@ -402,10 +402,17 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		// tenant sees every host's, a tenant (or an operator narrowed to one)
 		// only those of hosts in its own pools (RLS, cost_hourly_own_hosts).
 		if !filtered {
+			// RLS (cost_hourly_own_hosts) is the guard; the explicit pool
+			// predicate lets the planner use cost_hourly_host_pool_hour per
+			// owned pool instead of filtering every tenant's host rows.
+			args, ownPools := []any{from, to, in.Family, in.NoFamily}, ""
+			if p.TenantID != "" {
+				args, ownPools = append(args, p.TenantID), ` AND pool_id IN (SELECT id FROM pools WHERE tenant_id = $5)`
+			}
 			out.Body.Unallocated = []CostSummaryRow{}
 			rows, err := tx.Query(ctx, `SELECT family, currency, trim_scale(sum(unallocated))::text FROM cost_hourly
-				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)
-				GROUP BY family, currency ORDER BY currency, family`, from, to, in.Family, in.NoFamily)
+				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)`+ownPools+`
+				GROUP BY family, currency ORDER BY currency, family`, args...)
 			if err != nil {
 				return err
 			}
@@ -430,8 +437,8 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			out.Body.Hosts = []HostAllocation{}
 			rows, err = tx.Query(ctx, `SELECT host_id, family, currency, trim_scale(sum(allocated))::text,
 				trim_scale(sum(unallocated))::text FROM cost_hourly
-				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)
-				GROUP BY host_id, family, currency ORDER BY host_id, currency, family`, from, to, in.Family, in.NoFamily)
+				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)`+ownPools+`
+				GROUP BY host_id, family, currency ORDER BY host_id, currency, family`, args...)
 			if err != nil {
 				return err
 			}
