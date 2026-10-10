@@ -1134,6 +1134,34 @@ a.idchip-text:hover {
   white-space: nowrap;
 }
 
+/* ---------- Meter ----------
+   A ratio in a table cell; the text column is fixed so a column of meters lines up. */
+.meter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-4);
+  vertical-align: middle;
+}
+.meter-track {
+  position: relative;
+  width: 46px;
+  height: 6px;
+  flex: none;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--bg-muted);
+}
+.meter-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: var(--radius-pill);
+}
+.meter-text {
+  min-width: 4.5ch;
+  text-align: right;
+  color: var(--fg);
+}
+
 /* ---------- StatTile ----------
    Compact: a 12px muted label, the value at --text-2xl (22 / 20px), the
    unit or note on its own line under it. */
