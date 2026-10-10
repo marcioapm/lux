@@ -101,15 +101,18 @@ export interface HostCostRow {
   utilisation: number | null;
 }
 
+/** A pool's hosts row: one host's time of one family and currency. */
+type HostRow = HostTimeRow & { hostId?: string; hostName?: string; hours?: number };
+
 /** A pool's hosts rows (one per host, family and currency) as one row per host and currency. */
-export function hostCostRows(
-  rows: readonly (HostTimeRow & { hostId?: string; hostName?: string; hours?: number })[] | null | undefined,
-): HostCostRow[] {
-  const groups = new Map<string, (HostTimeRow & { hostId?: string; hostName?: string; hours?: number })[]>();
+export function hostCostRows(rows: readonly HostRow[] | null | undefined): HostCostRow[] {
+  const groups = new Map<string, HostRow[]>();
   for (const r of rows ?? []) {
     if (!r.hostId) continue;
     const k = `${r.hostId}\u0000${r.currency}`;
-    groups.set(k, [...(groups.get(k) ?? []), r]);
+    const group = groups.get(k);
+    if (group) group.push(r);
+    else groups.set(k, [r]);
   }
   return [...groups.values()].map((rs) => {
     const p = paid(rs);
@@ -131,7 +134,7 @@ export function hostCostRows(
 }
 
 /** The hours of the hosts, counted once per host (rows repeat a host per family); null when none says. */
-export function hostHours(rows: readonly { hostId?: string; hours?: number }[] | null | undefined): number | null {
+export function hostHours(rows: readonly HostRow[] | null | undefined): number | null {
   const seen = new Map<string, number>();
   for (const r of rows ?? []) if (r.hostId && r.hours != null) seen.set(r.hostId, r.hours);
   return seen.size ? [...seen.values()].reduce((a, b) => a + b, 0) : null;

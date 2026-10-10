@@ -147,8 +147,9 @@ function PoolTiles({ pool, metrics, loading }: { pool: Pool; metrics?: PoolMetri
 function PoolCostTile({ since, cost, loading }: { since: string; cost?: PoolCost; loading: boolean }) {
   const visible = cost?.idle != null;
   if (!visible) return <StatTile label={`Cost (${since})`} loading={loading} value={<MoneyList amounts={cost?.totals} decimals={CENTS} />} unit={cost ? <>list price · charged to your Runs</> : "list price"} />;
-  const host = sumPerCurrency((cost.hostSeries ?? []).flatMap((r) => [{ currency: r.currency, amount: r.allocated }, { currency: r.currency, amount: r.unallocated }]));
-  const idle = sumPerCurrency(cost.idle);
+  // The same figure as the Cost tab's lead tile: whoPaid's host cost per currency.
+  const host = whoPaid(cost.hostSeries ?? []).flatMap((p) => (p.all.total == null ? [] : [{ currency: p.currency, amount: p.all.total }]));
+  const idle = sumPerCurrency(cost.idle ?? []);
   return (
     <StatTile
       label={`Host cost (${since})`}
