@@ -8,10 +8,9 @@ export function meterFill(value: number | null | undefined): number | null {
 
 /** The meter's text: the true ratio as a percentage; a non-zero one that rounds to zero reads "<1%" (with decimals, "<0.1%"). */
 export function meterText(value: number | null | undefined, decimals = 0): string {
-  if (meterFill(value) == null) return formatPercent(null);
+  if (value == null || !Number.isFinite(value)) return formatPercent(null);
   const text = formatPercent(value, decimals);
-  const floor = 10 ** -decimals;
-  return value! > 0 && Number(text.slice(0, -1)) === 0 ? `<${floor}%` : text;
+  return value > 0 && Number(text.slice(0, -1)) === 0 ? `<${10 ** -decimals}%` : text;
 }
 
 export interface MeterProps {
