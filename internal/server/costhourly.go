@@ -340,17 +340,40 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 	return nil
 }
 
+// writeHostHour rebuilds a host's rows for one hour, per host-tied family:
+// allocated and unallocated from that family's rate periods. Only compute's
+// missing time is tracked as gaps (and retried); a block-storage period
+// opens over the whole billed window and rewinds the host's cursor itself
+// (openBlockStorageRate), so its missing time needs no retry of its own.
 func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, to time.Time, provisioned, registered, terminated *time.Time) error {
-	in, err := loadHostCompute(ctx, tx, id, familyCompute, hour, to)
-	if err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM cost_hourly WHERE host_id = $1 AND run_id IS NULL AND hour = $2`, id, hour); err != nil {
 		return err
 	}
-	res, err := computeCost(in)
-	if err != nil {
-		return err
+	for _, family := range hostFamilies {
+		in, err := loadHostCompute(ctx, tx, id, family, hour, to)
+		if err != nil {
+			return err
+		}
+		res, err := computeCost(in)
+		if err != nil {
+			return err
+		}
+		if family == familyCompute {
+			if err := s.writeHostHourGaps(ctx, tx, id, hour, res.Missing, provisioned, registered, terminated); err != nil {
+				return err
+			}
+		}
+		if err := writeHostHourRows(ctx, tx, id, family, res); err != nil {
+			return err
+		}
 	}
-	// Unpriced intervals stay visible; recoverable gaps retry independently
-	// of the forward cursor, while priced pieces remain available immediately.
+	return nil
+}
+
+// writeHostHourGaps records an hour's unpriced compute intervals. They stay
+// visible; recoverable gaps retry independently of the forward cursor, while
+// priced pieces remain available immediately.
+func (s *Server) writeHostHourGaps(ctx context.Context, tx pgx.Tx, id string, hour time.Time, missing []timeRange, provisioned, registered, terminated *time.Time) error {
 	clock := time.Now().UTC()
 	retry := clock.Add(min(time.Hour, max(s.cfg.Costs.Every, DefaultCostsEvery)))
 	boundary := hour.Add(s.cfg.Costs.Hourly)
@@ -361,6 +384,30 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 			retry = clock
 		}
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM cost_host_hour_gaps WHERE host_id = $1 AND hour = $2`, id, hour); err != nil {
+		return err
+	}
+	for _, gap := range missing {
+		reason := "rate_pending"
+		var retryAt *time.Time = &retry
+		if provisioned == nil && terminated != nil {
+			reason, retryAt = "static_unpriced", nil
+		} else if provisioned != nil && terminated != nil && registered != nil && !gap.To.After(*registered) {
+			reason, retryAt = "provider_pre_registration", nil
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO cost_host_hour_gaps (host_id, hour, missing_from, missing_to, reason, retry_at)
+			VALUES ($1, $2, $3, $4, $5, $6)`, id, hour, gap.From, gap.To, reason, retryAt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeHostHourRows writes one family's allocated and unallocated rows of a
+// host's priced pieces, per hour and currency. Each is rounded once, and
+// unallocated is the rounded total less the rounded allocated, so the two
+// add up to the rounded host cost.
+func writeHostHourRows(ctx context.Context, tx pgx.Tx, id, family string, res computeResult) error {
 	type key struct {
 		hour     time.Time
 		currency string
@@ -381,32 +428,13 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 			total[k].Add(total[k], new(big.Rat).Mul(piece.Host, fraction))
 		})
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM cost_host_hour_gaps WHERE host_id = $1 AND hour = $2`, id, hour); err != nil {
-		return err
-	}
-	for _, gap := range res.Missing {
-		reason := "rate_pending"
-		var retryAt *time.Time = &retry
-		if provisioned == nil && terminated != nil {
-			reason, retryAt = "static_unpriced", nil
-		} else if provisioned != nil && terminated != nil && registered != nil && !gap.To.After(*registered) {
-			reason, retryAt = "provider_pre_registration", nil
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO cost_host_hour_gaps (host_id, hour, missing_from, missing_to, reason, retry_at)
-			VALUES ($1, $2, $3, $4, $5, $6)`, id, hour, gap.From, gap.To, reason, retryAt); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM cost_hourly WHERE host_id = $1 AND run_id IS NULL AND hour = $2`, id, hour); err != nil {
-		return err
-	}
 	for k, v := range allocated {
 		billed := mustRat(moneyString(total[k]))
 		charged := mustRat(moneyString(v))
 		idle := new(big.Rat).Sub(billed, charged)
 		_, err := tx.Exec(ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool_id, allocated, unallocated)
-				SELECT $1, 'compute', 'compute', $2, id, pool_id, $3::numeric, $4::numeric FROM hosts WHERE id = $5`,
-			k.hour, k.currency, moneyString(charged), moneyString(idle), id)
+				SELECT $1, 'compute', $6, $2, id, pool_id, $3::numeric, $4::numeric FROM hosts WHERE id = $5`,
+			k.hour, k.currency, moneyString(charged), moneyString(idle), id, family)
 		if err != nil {
 			return err
 		}

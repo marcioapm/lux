@@ -6,6 +6,11 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // gp3Host adds t1's provider host "disk" (8 CPUs, 32 GiB, on-demand at
@@ -157,5 +162,65 @@ func TestDrainBlockStorageStaticHostNone(t *testing.T) {
 	drain(t, s)
 	if lines, src := familyLines(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[compute static 0.05 true]" || src != "final" {
 		t.Errorf("static: %v, source %q", lines, src)
+	}
+}
+
+// hostHourRows is a host's rows as "family allocated unallocated" per hour.
+func hostHourRows(t *testing.T, s *Server, host string) string {
+	t.Helper()
+	var rows *string
+	systemScan(t, s, `SELECT string_agg(to_char(hour AT TIME ZONE 'UTC', 'HH24') || ' ' || family || ' ' || trim_scale(allocated)::text || ' ' || trim_scale(unallocated)::text,
+		', ' ORDER BY hour, family) FROM cost_hourly WHERE host_id = $1 AND run_id IS NULL`, []any{host}, &rows)
+	if rows == nil {
+		return ""
+	}
+	return *rows
+}
+
+// Host-hour rows per family: compute and block storage each split their own
+// rate by the same shares, allocated + unallocated = that family's cost of
+// the hour. A block-storage period opened later rewinds the host's cursor,
+// so hours already refreshed are rebuilt with it.
+func TestHostHoursPerFamily(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 10
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, registered_at, terminated_at, capacity, volumes)
+		VALUES ('hh', 't1', 'hh', 'p', 'terminated', $1, $1, $2, '{"cpus":8,"memory":34359738368}', $3)`, hour, hour.Add(2*time.Hour), gp3Root)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('hh', $1, $2, 0.40, 'USD', 8, $3, 'aws-pricing')`, hour, hour.Add(2*time.Hour), 32*gib)
+	// A: 2 of 8 CPUs over the first hour.
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
+		VALUES ('p-hh', 't1', 'r1', 'hh', 1, 'exited', '{"cpus":2,"memory":8589934592}', $1, $2)`, hour, hour.Add(time.Hour))
+	for range 3 {
+		if err := s.updateHostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := func(n int) string { return hour.Add(time.Duration(n) * time.Hour).Format("15") }
+	if got, want := hostHourRows(t, s, "hh"), h(0)+" compute 0.1 0.3, "+h(1)+" compute 0 0.4"; got != want {
+		t.Fatalf("compute only: %s, want %s", got, want)
+	}
+
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		opened, err := openBlockStorageRate(ctx, tx, "hh", map[string]BlockStoragePrice{"gp3": {Currency: "USD", PerGBMonth: "0.292"}}, "ec2-ebs-pricing", s.cfg.Costs.Hourly)
+		if err == nil && !opened {
+			t.Error("no period opened")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := s.updateHostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 100 GiB × 0.292 / 730 = 0.04 an hour: A a quarter of it in the first hour.
+	want := h(0) + " block-storage 0.01 0.03, " + h(0) + " compute 0.1 0.3, " + h(1) + " block-storage 0 0.04, " + h(1) + " compute 0 0.4"
+	if got := hostHourRows(t, s, "hh"); got != want {
+		t.Errorf("per family: %s, want %s", got, want)
 	}
 }
