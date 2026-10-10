@@ -549,15 +549,14 @@ func (c *Codex) rolloutSummary(ctx context.Context, n int) (string, error) {
 		if summary, done, err := c.rolloutEntry(n); done {
 			return summary, err
 		}
-		select {
-		case <-wait.Done():
-			if summary, done, err := c.rolloutEntry(n); done {
-				return summary, err
-			}
+		if wait.Err() != nil {
 			if ctx.Err() != nil {
 				return "", fmt.Errorf("the Run ended before Codex wrote its compacted entry to %s", c.rolloutFile())
 			}
 			return "", fmt.Errorf("no compacted entry in %s after %s", c.rolloutFile(), c.compactionWait)
+		}
+		select {
+		case <-wait.Done():
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
