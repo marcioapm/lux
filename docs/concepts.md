@@ -292,7 +292,9 @@ Besides the agent's own messages, an agent Run's structured events include
 lux's: its session (`lux.session`), activity (`lux.activity`), each
 input's phases (`lux.input`, `lux.input.consumed`, `lux.input.failed`),
 warnings (`lux.warning`) and each compaction of the agent's context with
-its summary (`lux.compacted`); see [Adapters](adapters.md#compactions).
+its summary (`lux.compacted`); see [Adapters](adapters.md#compactions), and
+[Where the record lands](adapters.md#where-the-record-lands) for its
+place relative to the agent's own announcement.
 
 A Run's servers write their output into the same file, as records with
 `ch: "server"`, `server: <name>` and `stream: stdout | stderr` (and their

@@ -304,3 +304,63 @@ func TestClaudeCompactionWithoutSummary(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// The summary is the user line whose uuid is the boundary's anchor_uuid
+// (or, with no anchor, a synthetic one), with lines of other types
+// relayed before it; any other line, or the end of output, means none.
+func TestClaudeCompactionSummaryLine(t *testing.T) {
+	cl := clCompact(t)
+	var line map[string]any
+	_ = json.Unmarshal([]byte(cl[1]), &line)
+	summary := line["message"].(map[string]any)["content"].(string)
+	const status = `{"type":"system","subtype":"status","status":"compacting","session_id":"4238a343-9196-4242-a5d3-c8ccd4d1ed94"}`
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		exit  bool
+		// summary: the record carries it; else it has none, and a warning
+		// follows it.
+		summary bool
+		// before: the relay right before the record.
+		before string
+	}{
+		// The /compact replay line (string content, not the anchor) is not
+		// the summary.
+		{"replay line first", []string{cl[0], cl[2], clResult}, false, false, `"subtype":"compact_boundary"`},
+		{"no anchor", []string{strings.Replace(cl[0], `"anchor_uuid":"5ed60a81-a8d3-43cc-a453-ff6dba87b048",`, "", 1), cl[1], clResult},
+			false, true, `"subtype":"compact_boundary"`},
+		{"status line between", []string{cl[0], status, cl[1], clResult}, false, true, `"subtype":"status"`},
+		{"boundary then exit", []string{cl[0]}, true, false, `"subtype":"compact_boundary"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &inputSink{}
+			w := startWireSink(t, NewClaude(), proto.ShimConfig{}, claudeEvents{log})
+			w.send(clInit)
+			for _, l := range tc.lines {
+				w.send(l)
+			}
+			if !tc.exit {
+				log.wait(t, "turn_end")
+			}
+			w.exit()
+			got := log.compactions()
+			if len(got) != 1 {
+				t.Fatalf("got %q", got)
+			}
+			var c proto.Compaction
+			_ = json.Unmarshal([]byte(strings.TrimPrefix(got[0], "compacted ")), &c)
+			if want := map[bool]string{true: summary}[tc.summary]; c.Summary != want {
+				t.Fatalf("summary %.80q, want %.80q", c.Summary, want)
+			}
+			l := log.lines()
+			at := slices.Index(l, got[0])
+			if at < 1 || !strings.Contains(l[at-1], tc.before) {
+				t.Fatalf("not after %s: %q", tc.before, l)
+			}
+			warning := `lux.warning {"message":"claude: compacted, but no summary line followed its compact_boundary"}`
+			if tc.summary == (at+1 < len(l) && l[at+1] == warning) || tc.summary == log.has("lux.warning") {
+				t.Fatalf("warning: %q", l)
+			}
+		})
+	}
+}

@@ -1123,21 +1123,11 @@ func (k *sink) redactCut(text string, max int) (string, bool) {
 // Compacted writes lux.compacted: the summary redacted like any agent
 // output and capped at proto.MaxCompactionSummary.
 func (k *sink) Compacted(c proto.Compaction) {
-	d := map[string]any{"sessionId": c.SessionID, "trigger": c.Trigger}
-	if c.PreTokens != nil {
-		d["preTokens"] = *c.PreTokens
-	}
-	if c.PostTokens != nil {
-		d["postTokens"] = *c.PostTokens
-	}
+	c.SummaryTruncated = false
 	if c.Summary != "" {
-		summary, cut := k.redactCut(c.Summary, proto.MaxCompactionSummary)
-		d["summary"] = summary
-		if cut {
-			d["summaryTruncated"] = true
-		}
+		c.Summary, c.SummaryTruncated = k.redactCut(c.Summary, proto.MaxCompactionSummary)
 	}
-	k.s.out.Event(proto.EvCompacted, d)
+	k.s.out.Event(proto.EvCompacted, c)
 }
 
 // maxAckedText caps the input text an ack repeats.
