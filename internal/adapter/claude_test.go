@@ -209,16 +209,36 @@ func TestClaudeQueuedLineFailsWhenTheAgentExits(t *testing.T) {
 	}
 }
 
+// testdataLines is testdata/name's lines.
+func testdataLines(t *testing.T, name string) []string {
+	t.Helper()
+	b, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(b)), "\n")
+}
+
 // clCompact is what claude 2.1.207 writes for a /compact
 // (testdata/claude-2.1.207-compact.jsonl): compact_boundary, the summary
 // as a synthetic user line, then the command's output.
 func clCompact(t *testing.T) []string {
 	t.Helper()
-	b, err := os.ReadFile("testdata/claude-2.1.207-compact.jsonl")
-	if err != nil {
+	return testdataLines(t, "claude-2.1.207-compact.jsonl")
+}
+
+// clCompactSummary is the content of clCompact's summary line.
+func clCompactSummary(t *testing.T) string {
+	t.Helper()
+	var line struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(clCompact(t)[1]), &line); err != nil {
 		t.Fatal(err)
 	}
-	return strings.Split(strings.TrimSpace(string(b)), "\n")
+	return line.Message.Content
 }
 
 // claudeEvents is inputSink logging each event's type, and each claude.*
@@ -248,10 +268,7 @@ func TestClaudeCompactionIsReported(t *testing.T) {
 	w.send(clResult)
 	log.wait(t, "turn_end")
 	w.exit()
-	var summary string
-	var line map[string]any
-	_ = json.Unmarshal([]byte(lines[1]), &line)
-	summary = line["message"].(map[string]any)["content"].(string)
+	summary := clCompactSummary(t)
 	want, _ := json.Marshal(proto.Compaction{SessionID: "4238a343-9196-4242-a5d3-c8ccd4d1ed94", Trigger: "manual",
 		PreTokens: ptr(int64(36663)), PostTokens: ptr(int64(972)), Summary: summary})
 	if got := log.compactions(); !slices.Equal(got, []string{"compacted " + string(want)}) {
@@ -309,10 +326,7 @@ func ptr[T any](v T) *T { return &v }
 // (or, with no anchor, a synthetic one), with lines of other types
 // relayed before it; any other line, or the end of output, means none.
 func TestClaudeCompactionSummaryLine(t *testing.T) {
-	cl := clCompact(t)
-	var line map[string]any
-	_ = json.Unmarshal([]byte(cl[1]), &line)
-	summary := line["message"].(map[string]any)["content"].(string)
+	cl, summary := clCompact(t), clCompactSummary(t)
 	const status = `{"type":"system","subtype":"status","status":"compacting","session_id":"4238a343-9196-4242-a5d3-c8ccd4d1ed94"}`
 	for _, tc := range []struct {
 		name  string

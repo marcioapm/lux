@@ -1553,7 +1553,7 @@ func TestOpenCodeRunLeavesNoGoroutines(t *testing.T) {
 func TestOpenCodeCompactionIsReported(t *testing.T) {
 	a, _, w, log, first := ocWithBusOn2(t)
 	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"ses_other"}}`)
-	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	onBus(t, a, ocCompacted)
 	got := waitCompactions(t, log, 1)
 	w.resolve(first, ocResult)
 	onBus(t, a, ocIdle)
@@ -1604,7 +1604,7 @@ func TestOpenCodeCompactionSummaryUnreadable(t *testing.T) {
 	b.mu.Lock()
 	b.messagesCode = http.StatusInternalServerError
 	b.mu.Unlock()
-	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	onBus(t, a, ocCompacted)
 	got := waitCompactions(t, log, 1)
 	w.resolve(first, ocResult)
 	w.exit()
@@ -1626,7 +1626,7 @@ func TestOpenCodeCompactionSummaryTimesOut(t *testing.T) {
 	b.mu.Lock()
 	b.messagesHang = hang
 	b.mu.Unlock()
-	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	onBus(t, a, ocCompacted)
 	got := waitCompactions(t, log, 1)
 	w.resolve(first, ocResult)
 	w.exit()
@@ -1638,15 +1638,9 @@ func TestOpenCodeCompactionSummaryTimesOut(t *testing.T) {
 	}
 }
 
-// ocSecondCompaction is ocCompactionMessages as a later compaction would
-// store it: ids above the first's, MARIGOLD for PERIWINKLE.
-func ocSecondCompaction(t *testing.T) []any {
-	t.Helper()
-	return ocLaterCompaction(t, "msg_1267a9", "MARIGOLD")
-}
-
-// ocLaterCompaction is ocCompactionMessages with ids prefixed by prefix
-// (which must sort above "msg_1267a87") and word for PERIWINKLE.
+// ocLaterCompaction is ocCompactionMessages as a later compaction would
+// store it: ids prefixed by prefix (which must sort above "msg_1267a87")
+// and word for PERIWINKLE.
 func ocLaterCompaction(t *testing.T, prefix, word string) []any {
 	t.Helper()
 	b, _ := json.Marshal(ocCompactionMessages(t))
@@ -1657,6 +1651,9 @@ func ocLaterCompaction(t *testing.T, prefix, word string) []any {
 	}
 	return msgs
 }
+
+// ocCompacted is OpenCode's bus event for a compaction of ocSession.
+const ocCompacted = `{"type":"session.compacted","properties":{"sessionID":"` + ocSession + `"}}`
 
 // ocUserAfter is a user message stored after both compactions, as an auto
 // compaction's synthetic "continue": its summary is an object.
@@ -1671,7 +1668,6 @@ const ocUserAfter = `{"info":{"id":"msg_zzz","role":"user","summary":{"diffs":[]
 func TestOpenCodeEachCompactionTakesItsOwnSummary(t *testing.T) {
 	var after any
 	_ = json.Unmarshal([]byte(ocUserAfter), &after)
-	compacted := `{"type":"session.compacted","properties":{"sessionID":"` + ocSession + `"}}`
 	for _, tc := range []struct {
 		name string
 		// together: both compactions are stored before the first
@@ -1684,7 +1680,8 @@ func TestOpenCodeEachCompactionTakesItsOwnSummary(t *testing.T) {
 	}{{"one after the other", false, false}, {"back to back", true, false}, {"resumed", false, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			var held []any
-			firstPair, secondPair := ocCompactionMessages(t), ocSecondCompaction(t)
+			marigold := ocLaterCompaction(t, "msg_1267a9", "MARIGOLD")
+			firstPair, secondPair := ocCompactionMessages(t), marigold
 			words, stale := [2]string{"PERIWINKLE", "MARIGOLD"}, ""
 			var a *ACP
 			var b *fakeBus
@@ -1692,7 +1689,7 @@ func TestOpenCodeEachCompactionTakesItsOwnSummary(t *testing.T) {
 			var end func()
 			if tc.resume {
 				held = ocCompactionMessages(t)
-				firstPair, secondPair = ocSecondCompaction(t), ocLaterCompaction(t, "msg_1267b", "SAFFRON")
+				firstPair, secondPair = marigold, ocLaterCompaction(t, "msg_1267b", "SAFFRON")
 				words, stale = [2]string{"MARIGOLD", "SAFFRON"}, "PERIWINKLE"
 				var w *agentWire
 				a, b, w, log = ocResumedWithBus(t, held)
@@ -1711,12 +1708,12 @@ func TestOpenCodeEachCompactionTakesItsOwnSummary(t *testing.T) {
 				b.whole = both
 			}
 			b.mu.Unlock()
-			onBus(t, a, compacted)
+			onBus(t, a, ocCompacted)
 			waitCompactions(t, log, 1)
 			b.mu.Lock()
 			b.whole = both
 			b.mu.Unlock()
-			onBus(t, a, compacted)
+			onBus(t, a, ocCompacted)
 			waitCompactions(t, log, 2)
 			check := func(got []string) {
 				t.Helper()
@@ -1730,7 +1727,7 @@ func TestOpenCodeEachCompactionTakesItsOwnSummary(t *testing.T) {
 			}
 			check(log.compactions())
 			// The same compaction announced again.
-			onBus(t, a, compacted)
+			onBus(t, a, ocCompacted)
 			log.wait(t, "warning opencode: session "+ocSession+" was compacted again, with no summary newer than the one already reported")
 			end()
 			check(log.compactions())
@@ -1825,7 +1822,7 @@ func TestOpenCodeCompactionTrigger(t *testing.T) {
 				}
 			})
 			b.mu.Unlock()
-			onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+			onBus(t, a, ocCompacted)
 			got := waitCompactions(t, log, 1)
 			w.resolve(first, ocResult)
 			w.exit()
@@ -1846,7 +1843,7 @@ func TestOpenCodeCompactionSummaryWithoutText(t *testing.T) {
 		summary["parts"] = slices.DeleteFunc(summary["parts"].([]any), func(p any) bool { return p.(map[string]any)["type"] == "text" })
 	})
 	b.mu.Unlock()
-	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	onBus(t, a, ocCompacted)
 	got := waitCompactions(t, log, 1)
 	w.resolve(first, ocResult)
 	w.exit()
@@ -1869,7 +1866,7 @@ func TestOpenCodeCompactionWindow(t *testing.T) {
 		b.whole = append(b.whole, m)
 	}
 	b.mu.Unlock()
-	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	onBus(t, a, ocCompacted)
 	got := waitCompactions(t, log, 1)
 	w.resolve(first, ocResult)
 	w.exit()
@@ -1893,7 +1890,7 @@ func TestOpenCodeCompactionAfterClose(t *testing.T) {
 	if !closed {
 		t.Fatal("the adapter is not closed after Run")
 	}
-	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	onBus(t, a, ocCompacted)
 	if got, want := log.compactions(), []string{`compacted {"sessionId":"` + ocSession + `","trigger":""}`}; !slices.Equal(got, want) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
