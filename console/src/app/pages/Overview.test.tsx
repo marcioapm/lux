@@ -144,6 +144,24 @@ test("the Overview's tabs: Activity by default (tiles, trends, feed); Cost and S
   }
 });
 
+test("lost hosts show on the Hosts ready tile in danger; the row stays six tiles either way", async () => {
+  const status = (lost: number) => ({ runs: {}, busy: 0, idle: 0, queued: 0, startLatency: { n: 0 }, hosts: { ready: 3, draining: 1, lost }, capacity: { cpus: 0, memory: 0 }, allocated: { cpus: 0, memory: 0 } });
+  for (const lost of [0, 2]) {
+    const p = await render("operator", "http://localhost/", (path) => (path.startsWith("/v1/status") ? status(lost) : undefined));
+    try {
+      const tiles = [...p.el.querySelectorAll(".stat")];
+      expect(tiles.length).toBe(6);
+      const hosts = tiles.find((t) => t.textContent!.includes("Hosts ready"))!;
+      expect(hosts.textContent).toContain(`1 draining · ${lost} lost`);
+      expect(hosts.classList.contains("stat-danger")).toBe(lost > 0);
+      await act(async () => (hosts as HTMLElement).click());
+      expect(location.pathname + location.search).toBe(lost > 0 ? "/hosts?state=lost" : "/hosts");
+    } finally {
+      await p.done();
+    }
+  }
+});
+
 test("a failed status read shows on Activity, which it feeds, and not on Cost or Storage", async () => {
   const failed = () => new Response(JSON.stringify({ error: { code: "internal", message: "status unavailable" } }), { status: 500, headers: { "Content-Type": "application/json" } });
   const answer = (path: string) => (path.startsWith("/v1/status") ? failed() : undefined);
