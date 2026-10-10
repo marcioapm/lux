@@ -150,7 +150,8 @@ func TestBlockStorageRates(t *testing.T) {
 
 // A launch that never registered (no capacity, no compute period) is not
 // selected by the block-storage refresh, so it is not priced or locked on
-// every pass; once it registers it is.
+// every pass; once it registers it is. Capacity may come from the host row
+// or from its compute period.
 func TestBlockStorageHostsSkipNeverRegistered(t *testing.T) {
 	p := &fakePriceProvider{blockStorage: map[string]BlockStoragePrice{"gp3": gp3eun1Answer}}
 	s := providerPriceServer(t, p)
@@ -163,6 +164,12 @@ func TestBlockStorageHostsSkipNeverRegistered(t *testing.T) {
 		('ghost', 't1', 'ghost', 'pool-t1-ec2-burst', 'terminated', 'i-g', $1, $2, '{"region":"us-east-1"}', $3::jsonb),
 		('booting', 't1', 'booting', 'pool-t1-ec2-burst', 'provisioning', 'i-b', $1, NULL, '{"region":"us-east-1"}', $3::jsonb)`,
 		from, from.Add(10*time.Minute), gp3Root)
+	// Capacity known only from its compute period, as for a host whose
+	// capacity column was never filled.
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, launch_template, capacity, volumes) VALUES
+		('rated', 't1', 'rated', 'pool-t1-ec2-burst', 'ready', 'i-r', $1, '{"region":"us-east-1"}', '{}', $2::jsonb)`, from, gp3Root)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('rated', $1, 0.10, 'USD', 8, 0, 'test')`, from)
 	ids := func() []string {
 		hosts, err := s.blockStorageHosts(ctx)
 		if err != nil {
@@ -174,11 +181,11 @@ func TestBlockStorageHostsSkipNeverRegistered(t *testing.T) {
 		}
 		return out
 	}
-	if got := fmt.Sprint(ids()); got != "[od]" {
-		t.Fatalf("selected %s, want [od]", got)
+	if got := fmt.Sprint(ids()); got != "[od rated]" {
+		t.Fatalf("selected %s, want [od rated]", got)
 	}
 	execSQL(t, s, ctx, `UPDATE hosts SET capacity = '{"cpus": 4}', registered_at = $1, state = 'ready' WHERE id = 'booting'`, from.Add(time.Minute))
-	if got := fmt.Sprint(ids()); got != "[booting od]" {
+	if got := fmt.Sprint(ids()); got != "[booting od rated]" {
 		t.Fatalf("after registering: %s", got)
 	}
 }
