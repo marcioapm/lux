@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -33,6 +34,16 @@ func validPrice(price, currency string) error {
 		return errf(http.StatusUnprocessableEntity, "invalid_price", "currency %q: want an ISO 4217 code such as USD", currency)
 	}
 	return nil
+}
+
+// trimmedDecimal drops a decimal's trailing fractional zeros, exactly: the
+// Pricing API answers "0.0960000000", ten digits that numeric(24, 9) holds
+// as nine. Anything else is returned as given, for validPrice to judge.
+func trimmedDecimal(v string) string {
+	if strings.Contains(v, ".") {
+		return strings.TrimSuffix(strings.TrimRight(v, "0"), ".")
+	}
+	return v
 }
 
 // syncStaticRate keeps a host's 'static' rate periods in step with its

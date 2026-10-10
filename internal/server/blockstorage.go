@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -197,14 +196,10 @@ func (s *Server) blockStoragePrice(ctx context.Context, provider, region, kind s
 	return price, nil
 }
 
-// trimmedBlockStorage drops trailing fractional zeros, exactly: the Pricing
-// API answers "0.0836000000", ten digits that numeric(24, 9) holds as nine.
+// trimmedBlockStorage is p with every price trimmedDecimal.
 func trimmedBlockStorage(p BlockStoragePrice) BlockStoragePrice {
 	for dim, v := range p.dims() {
-		if strings.Contains(v, ".") {
-			v = strings.TrimSuffix(strings.TrimRight(v, "0"), ".")
-		}
-		p.set(dim, v)
+		p.set(dim, trimmedDecimal(v))
 	}
 	return p
 }
