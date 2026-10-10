@@ -5,8 +5,10 @@ same reservation."""
 
 from __future__ import annotations
 
-from decimal import Decimal
+from datetime import datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 
+import psycopg
 import pytest
 
 from conftest import FAKE_EC2_TIMERS, fake_only, generic
@@ -18,6 +20,7 @@ pytestmark = pytest.mark.ec2
 # The fake's root disk (gp3, 100 GiB, 3000 IOPS, 125 MiB/s) at the real
 # eu-north-1 list price: 100 × 0.0836 / 730 per hour, rounded to 9 digits.
 GP3_100_PER_HOUR = "0.011452055"
+NINE_DIGITS = Decimal("0.000000001")
 
 
 @pytest.fixture
@@ -32,13 +35,16 @@ def priced(env, ec2):
     return ec2
 
 
-def test_a_launched_hosts_disk_is_its_runs_block_storage(lux, priced):
+def test_a_launched_hosts_disk_is_its_runs_block_storage(env, lux, operator, priced):
     pool(lux, priced, template={**priced.template, "region": "eu-north-1"}, max=1, min=1)
     [host] = wait_until(lambda: ec2_hosts(lux) or None, 120, 0.5, "the pool's host never registered")
     host = wait_until(lambda: (h := next(x for x in ec2_hosts(lux) if x["id"] == host["id"])).get("volumes") and h,
                       60, 0.5, "the host's volumes were never recorded")
     assert host["volumes"] == [{"type": "gp3", "sizeGiB": 100, "iops": 3000, "throughputMiBps": 125}], host["volumes"]
-    assert any(c.get("volumeApiName") == "gp3" and c.get("regionCode") == "eu-north-1" for c in priced.pricing_calls)
+    # The price loop asks on its next pass, not when the volumes are recorded.
+    wait_until(lambda: any(c.get("volumeApiName") == "gp3" and c.get("regionCode") == "eu-north-1"
+                           for c in priced.pricing_calls),
+               60, 0.5, "luxd never asked the Pricing API for gp3 in eu-north-1")
 
     run_id = lux.submit(generic(ALPINE_IMAGE, "sleep", "3", placement={"pool": "burst"}))
     lux.wait_state(run_id, "succeeded", timeout=120)
@@ -63,3 +69,42 @@ def test_a_launched_hosts_disk_is_its_runs_block_storage(lux, priced):
     assert families == {"compute": "Compute", "block-storage": "Block storage"}, cost["byFamily"]
     # lux cost names the family as luxd does.
     assert "Block storage (block-storage)" in lux.run("cost", run_id).stdout
+
+    # The host's own block-storage hours, once it is gone: each hour's
+    # allocated + unallocated is the disk's rate over the part of the hour
+    # the host was billed, rounded once to 9 digits.
+    lux.run("pools", "rm", "burst")
+    with psycopg.connect(env.owner_dsn, autocommit=True) as conn:
+        launched, ended = wait_until(
+            lambda: (r := conn.execute("SELECT provision_requested_at, terminated_at FROM hosts WHERE id = %s",
+                                       (host["id"],)).fetchone()) and r[1] and r,
+            90, 0.5, "the host was never terminated")
+    launched, ended = launched.astimezone(timezone.utc), ended.astimezone(timezone.utc)
+    expected = {}
+    hour = launched.replace(minute=0, second=0, microsecond=0)
+    while hour < ended:
+        covered = min(ended, hour + timedelta(hours=1)) - max(launched, hour)
+        fraction = Decimal(covered // timedelta(microseconds=1)) / Decimal(3_600_000_000)
+        expected[hour] = (Decimal(GP3_100_PER_HOUR) * fraction).quantize(NINE_DIGITS, ROUND_HALF_UP)
+        hour += timedelta(hours=1)
+    window = {"from": launched.replace(minute=0, second=0, microsecond=0).isoformat(),
+              "to": (ended + timedelta(hours=1)).isoformat()}
+
+    seen = []
+
+    def block_storage_hours():
+        r = operator.api(f"/v1/hosts/{host['id']}/cost", params=window)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        got = {datetime.fromisoformat(h["hour"]): Decimal(h["allocated"]) + Decimal(h["unallocated"])
+               for h in body["hours"] if h["family"] == "block-storage"}
+        seen[:] = [body]
+        return (body, got) if got == expected else None
+    # A live host's open hour is rebuilt at most every 2 minutes
+    # (DefaultCostsEvery), so its last hour is final within that of the end.
+    try:
+        body, got = wait_until(block_storage_hours, 180, 2, f"block-storage host hours never became {expected}")
+    except AssertionError as e:
+        raise AssertionError(f"{e}; the host's cost: {seen}") from None
+    assert [r["perHour"] for r in body["rates"] if r["family"] == "block-storage"] == [GP3_100_PER_HOUR], body["rates"]
+    assert all(v > 0 for v in got.values()), got
