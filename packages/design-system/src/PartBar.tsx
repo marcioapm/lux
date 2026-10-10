@@ -21,7 +21,15 @@ export interface PartShare {
   label: string;
 }
 
-const drawn = (v: number | null | undefined): v is number => v != null && Number.isFinite(v) && v > 0;
+function drawn(v: number | null | undefined): v is number {
+  return v != null && Number.isFinite(v) && v > 0;
+}
+
+function shareLabel(share: number, percent: number): string {
+  if (share === 0) return "";
+  if (percent === 0) return "<1%";
+  return `${percent}%`;
+}
 
 /**
  * Each part's share of the sum of the drawn parts, with whole percents by
@@ -32,18 +40,18 @@ export function partShares(values: readonly (number | null | undefined)[]): Part
   const total = values.reduce<number>((a, v) => a + (drawn(v) ? v : 0), 0);
   if (total <= 0) return values.map(() => ({ share: 0, percent: 0, label: "" }));
   const shares = values.map((v) => (drawn(v) ? v / total : 0));
-  const floors = shares.map((s) => Math.floor(s * 100));
-  let left = 100 - floors.reduce((a, b) => a + b, 0);
+  const percents = shares.map((s) => Math.floor(s * 100));
+  let left = 100 - percents.reduce((a, b) => a + b, 0);
   const order = shares
-    .map((s, i) => ({ i, rem: s * 100 - floors[i]! }))
+    .map((s, i) => ({ i, rem: s * 100 - percents[i]! }))
     .filter(({ i }) => shares[i]! > 0)
     .sort((a, b) => b.rem - a.rem || a.i - b.i);
   for (const { i } of order) {
     if (left <= 0) break;
-    floors[i]! += 1;
+    percents[i]! += 1;
     left -= 1;
   }
-  return shares.map((share, i) => ({ share, percent: floors[i]!, label: share === 0 ? "" : floors[i]! === 0 ? "<1%" : `${floors[i]}%` }));
+  return shares.map((share, i) => ({ share, percent: percents[i]!, label: shareLabel(share, percents[i]!) }));
 }
 
 export interface PartBarProps {
