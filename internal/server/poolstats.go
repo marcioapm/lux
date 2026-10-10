@@ -357,13 +357,15 @@ type PoolCostPoint struct {
 }
 
 type PoolHostTime struct {
-	At          *time.Time `json:"at,omitempty"`
-	HostID      string     `json:"hostId,omitempty"`
-	HostName    string     `json:"hostName,omitempty"`
-	Family      string     `json:"family" doc:"A host-tied family: compute or block-storage."`
-	Currency    string     `json:"currency"`
-	Allocated   string     `json:"allocated" doc:"Host time reserved by Runs (their compute cost comes from it)."`
-	Unallocated string     `json:"unallocated" doc:"Host time no Run reserved: idle."`
+	At          *time.Time    `json:"at,omitempty"`
+	HostID      string        `json:"hostId,omitempty"`
+	HostName    string        `json:"hostName,omitempty"`
+	Family      string        `json:"family" doc:"A host-tied family: compute or block-storage."`
+	Currency    string        `json:"currency"`
+	Allocated   string        `json:"allocated" doc:"Host time reserved by Runs (their compute cost comes from it)."`
+	Unallocated string        `json:"unallocated" doc:"Host time no Run reserved: idle."`
+	Hours       *float64      `json:"hours,omitempty" doc:"Per host: the hours of its billed window (provision request, or registration, to termination or now) within the range; the same on each of its family rows."`
+	Volumes     *[]HostVolume `json:"volumes,omitempty" doc:"Per host: its recorded block-storage volumes, as GET /v1/hosts has them; absent while not known and for a host that registered itself."`
 }
 
 // PoolIdle is a pool's unallocated host time of one family and currency.
@@ -513,7 +515,8 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		if b.Idle, err = pgx.CollectRows(rows, pgx.RowToStructByPos[PoolIdle]); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT `+bucket+`, '', '', c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text
+		rows, err = tx.Query(ctx, `SELECT `+bucket+`, '', '', c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text,
+			NULL::float8, NULL::jsonb
 			FROM cost_hourly c WHERE `+hostRows+` GROUP BY 1, 4, 5 ORDER BY 1, 5, 4`, pool.ID, from, to)
 		if err != nil {
 			return err
@@ -521,9 +524,12 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		if b.HostSeries, err = pgx.CollectRows(rows, pgx.RowToStructByPos[PoolHostTime]); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT NULL::timestamptz, c.host_id, h.name, c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text
+		// hours: the host's billed window (as loadHostCompute bounds it) within [from, to).
+		rows, err = tx.Query(ctx, `SELECT NULL::timestamptz, h.id, h.name, c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text,
+				greatest(0, extract(epoch FROM least(coalesce(h.terminated_at, now()), $3) - greatest(coalesce(h.provision_requested_at, h.registered_at, h.created_at), $2)) / 3600)::float8,
+				h.volumes
 			FROM cost_hourly c JOIN hosts h ON h.id = c.host_id WHERE `+hostRows+`
-			GROUP BY 2, 3, 4, 5 ORDER BY 5, sum(sum(c.allocated) + sum(c.unallocated)) OVER (PARTITION BY c.host_id, c.currency) DESC, 2, 4`, pool.ID, from, to)
+			GROUP BY h.id, c.family, c.currency ORDER BY 5, sum(sum(c.allocated) + sum(c.unallocated)) OVER (PARTITION BY h.id, c.currency) DESC, 2, 4`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}

@@ -84,6 +84,8 @@ func TestCostSummaryUnallocatedPerFamilyAndTenant(t *testing.T) {
 // operators, never a platform pool's to a tenant.
 func TestPoolCostMachinesOnlyAndIdleVisibility(t *testing.T) {
 	s, keys, _ := costVisibilityFixture(t)
+	execSQL(t, s, context.Background(), `UPDATE hosts SET provision_requested_at = now() - interval '2 hours', terminated_at = NULL,
+		volumes = '[{"type": "gp3", "sizeGiB": 100, "iops": 3000, "throughputMiBps": 125}]' WHERE id = 'ha'`)
 	var own costBody
 	if code := getJSON(t, s, keys["a"], "/v1/pools/own/cost?since=6h", &own); code != http.StatusOK {
 		t.Fatalf("a own: %d", code)
@@ -100,6 +102,18 @@ func TestPoolCostMachinesOnlyAndIdleVisibility(t *testing.T) {
 	}
 	if fmt.Sprint(fams) != "[ha block-storage ha compute]" || len(own.HostSeries) != 2 {
 		t.Errorf("a's own pool hosts %v series %v", fams, own.HostSeries)
+	}
+	// Per host: its billed hours within the range (created 2h ago: provision
+	// request first, then registration, then created_at) and its volumes.
+	for _, h := range own.Hosts {
+		if h.Hours == nil || *h.Hours < 1.99 || *h.Hours > 2.01 || h.Volumes == nil || len(*h.Volumes) != 1 || (*h.Volumes)[0].SizeGiB != 100 {
+			t.Errorf("a's own host row %+v hours %v volumes %v", h, h.Hours, h.Volumes)
+		}
+	}
+	for _, h := range own.HostSeries {
+		if h.Hours != nil || h.Volumes != nil {
+			t.Errorf("a bucket row carries host fields: %+v", h)
+		}
 	}
 	var shared costBody
 	getJSON(t, s, keys["a"], "/v1/pools/shared/cost?owner=platform&since=6h", &shared)
@@ -166,8 +180,9 @@ func TestCostHostRowsTenantOwnPoolsExactly(t *testing.T) {
 // reads its unallocated; rates carry their family (operators).
 func TestHostCostPerFamily(t *testing.T) {
 	s, keys, hour := costVisibilityFixture(t)
-	execSQL(t, s, context.Background(), `INSERT INTO host_rates (host_id, family, valid_from, per_hour, currency, cap_cpus, cap_memory, source) VALUES
-		('ha', 'compute', $1, 0.4, 'USD', 2, 100, 'static'), ('ha', 'block-storage', $1, 0.04, 'USD', 2, 100, 'ec2-ebs-pricing')`, hour)
+	execSQL(t, s, context.Background(), `INSERT INTO host_rates (host_id, family, valid_from, per_hour, currency, cap_cpus, cap_memory, source, details) VALUES
+		('ha', 'compute', $1, 0.4, 'USD', 2, 100, 'static', NULL),
+		('ha', 'block-storage', $1, 0.04, 'USD', 2, 100, 'ec2-ebs-pricing', '{"volumes": [{"type": "gp3", "sizeGiB": 100}], "prices": {"gp3": {"currency": "USD", "perGBMonth": "0.0836"}}, "hoursPerMonth": 730}')`, hour)
 	var c struct {
 		Hours []hostCostHour
 		Rates []hostCostRate
@@ -194,5 +209,17 @@ func TestHostCostPerFamily(t *testing.T) {
 	}
 	if fmt.Sprint(rates) != "[compute 0.4 block-storage 0.04]" {
 		t.Errorf("operator rates %v", rates)
+	}
+	// Block storage's period says what it was priced from; compute's has nothing to say.
+	if len(c.Rates) == 2 {
+		if c.Rates[0].Details != nil {
+			t.Errorf("compute rate details %v", c.Rates[0].Details)
+		}
+		prices, _ := c.Rates[1].Details["prices"].(map[string]any)
+		gp3, _ := prices["gp3"].(map[string]any)
+		vols, _ := c.Rates[1].Details["volumes"].([]any)
+		if gp3["perGBMonth"] != "0.0836" || len(vols) != 1 {
+			t.Errorf("block-storage rate details %v", c.Rates[1].Details)
+		}
 	}
 }
