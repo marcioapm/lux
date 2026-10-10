@@ -6,6 +6,7 @@ neither Docker nor an environment.
 
 from __future__ import annotations
 
+import json
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -81,3 +82,28 @@ def test_describe_volumes_answers_the_filtered_instances_root_disk(ec2):
         assert part in xml
     ec2.volumes_error = "UnauthorizedOperation"
     assert describe_volumes(ec2, "i-aaa")[0] == 403
+
+
+def get_products(ec2, filters: dict, token: str = "") -> dict:
+    body = {"ServiceCode": "AmazonEC2", "Filters": [{"Type": "TERM_MATCH", "Field": k, "Value": v} for k, v in filters.items()]}
+    if token:
+        body["NextToken"] = token
+    req = urllib.request.Request(ec2.url, data=json.dumps(body).encode(),
+                                 headers={"X-Amz-Target": "AWSPriceListService.GetProducts",
+                                          "Content-Type": "application/x-amz-json-1.1"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read())
+
+
+def test_get_products_pages_the_real_gp3_answer(ec2):
+    units, token = [], ""
+    while True:
+        page = get_products(ec2, {"regionCode": "eu-north-1", "volumeApiName": "gp3"}, token)
+        for p in page["PriceList"]:
+            for term in json.loads(p)["terms"]["OnDemand"].values():
+                units += [(d["unit"], d["pricePerUnit"]["USD"]) for d in term["priceDimensions"].values()]
+        token = page.get("NextToken", "")
+        if not token:
+            break
+    assert sorted(units) == [("GB-Mo", "0.0836000000"), ("GiBps-mo", "42.8032000000"), ("IOPS-Mo", "0.0052000000")]
+    assert get_products(ec2, {"regionCode": "eu-north-1", "volumeApiName": "io2"})["PriceList"] == []
