@@ -2,9 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -97,8 +97,11 @@ func TestBackfillVolumes(t *testing.T) {
 	var details string
 	systemScan(t, s, `SELECT details::text FROM host_rates WHERE host_id = 'disk' AND family = 'block-storage' AND valid_from = $1 AND valid_to = $2`,
 		[]any{at("10:00"), at("11:00")}, &details)
-	if want := `"assumed": true`; !strings.Contains(details, want) {
-		t.Errorf("rate details %s lack %s", details, want)
+	var d struct {
+		Volumes []HostVolume `json:"volumes"`
+	}
+	if err := json.Unmarshal([]byte(details), &d); err != nil || len(d.Volumes) != 1 || d.Volumes[0] != root {
+		t.Errorf("rate details %s: volumes %+v, want [%+v] (%v)", details, d.Volumes, root, err)
 	}
 	if _, src := familyLines(t, s, keys["t1"], "A"); src != "ok" {
 		t.Errorf("queued Run's source %q, want ok until evaluated", src)

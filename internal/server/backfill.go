@@ -52,6 +52,9 @@ type BackfillSkipped struct {
 // skipLegacyCompute is why a Run is not re-evaluated (legacyComputeRuns).
 const skipLegacyCompute = "its compute is final without a finalized compute snapshot for every placement (it went final before migration 027); re-evaluating it would reprice that compute"
 
+// BackfillHost is one host a backfill records volumes on: its billed window,
+// the period's hourly price, its host-hours within retention, and the Runs
+// re-evaluated.
 type BackfillHost struct {
 	ID      string     `json:"id"`
 	From    time.Time  `json:"from"`
