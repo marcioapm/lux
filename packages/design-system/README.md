@@ -147,9 +147,11 @@ the right grid.
 Page widths (`src/layout.css`): `.page` (detail), `.page-list` (tables), `.page-wide`
 (dashboards). Grids: `.grid-stats` (2 / 3 / 5 by container width: under
 720px, from 720px, from 1000px; a row of exactly four goes 2 / 4, one of
-exactly six goes 3 / 6 from 1400px, so no row leaves a gap or an orphan),
-`.grid-charts` (1 / 2 / 3 / 4 by container width), `.grid-2`, `.grid-3`
-(collapse to one column under 900px of content).
+exactly three stays 3, one of exactly six goes 3 / 6 from 1400px, so no row
+leaves a gap or an orphan),
+`.grid-charts` (1 / 2 / 3 / 4 by container width), `.grid-2`, `.grid-3`,
+`.grid-2-1` (a main card two thirds wide and one beside it: a chart and its
+summary) (collapse to one column under 900px of content).
 
 Tables (`Table`): every column that has a `sortValue` (client sort) or
 `sortable: true` (server sort) sorts. Its header is focusable (Enter or
@@ -390,6 +392,7 @@ Parts of a whole, ratios and page notes (gallery section "parts"):
 | `Meter({value, color?, decimals?})` | a ratio in a table cell: a 46px track with its fill (default `--chart-1`) and the percentage to its right in mono. The fill clamps to 0..1, the text keeps the true figure (`112%`); null or not finite is an en dash; a non-zero ratio that rounds to zero reads `<1%` (`meterFill`, `meterText`) |
 | `Callout({children, icon?})` | the page's one explanatory sentence ("Pool cost is the machines only…"): a soft info-tinted box, `--text-sm`, between cards. Not a toast, an error strip or an `InfoStrip` (which qualifies figures inside one card) |
 | `TimeSeriesChart` series `faded` | a lighter, opaque shade of the series' colour (`fadedColor`: mixed toward `--bg-surface`, keeping `FADE_KEEP`, 42%), the same in the plot, the legend and the tooltip: one family split into "charged to runs" and "not" (gallery: costs, "Host cost per day") |
+| `fadedCss(color)` | the same faded shade for the DOM: `color-mix()` of a token toward `--bg-surface`, keeping `FADE_KEEP`, so a `PartBar` segment or swatch under a chart matches its faded series (gallery: parts, "Charged to runs vs unallocated") |
 | `TimeSeriesChart` day bars | bars a day or wider put one x tick under each bar (`barTicks`), every k-th when they do not fit. They are UTC-day buckets (cost): the tick names the UTC date (`timeTickText`) and the tooltip the UTC day ("2026-10-09 UTC", `bucketText`), whatever the browser's zone |
 
 A cost family is always named with its `ColorKey` square: rows
