@@ -18,7 +18,7 @@ export function HostPage({ id }: { id: string }) {
   const now = useNow();
   const toast = useToast();
   const tabParam = useSearchParams().get("tab");
-  const tab: HostTab = HOST_TABS.includes(tabParam as HostTab) ? (tabParam as HostTab) : "overview";
+  const requestedTab: HostTab = HOST_TABS.includes(tabParam as HostTab) ? (tabParam as HostTab) : "overview";
   const host = useQuery(`host:${id}`, (s) => api.host(id, s), { interval: 5000 });
   const trend = scope.step("trend");
   const res = historyRes(trend);
@@ -79,6 +79,9 @@ export function HostPage({ id }: { id: string }) {
   // The host history rule: operators, and a tenant for its own host (a tenant sees no other non-platform host).
   const showCost = scope.operator || !h.platform;
   const showEvents = hostEventsVisible(h.platform, scope);
+  // A tab the reader cannot open reads as Overview, like an unknown one; ?tab= is left as is.
+  const hidden = (requestedTab === "cost" && !showCost) || (requestedTab === "events" && !showEvents);
+  const tab: HostTab = hidden ? "overview" : requestedTab;
   return (
     <div className="page">
       <PageHeader
@@ -173,7 +176,7 @@ export function HostPage({ id }: { id: string }) {
         </>
       )}
 
-      {tab === "cost" && showCost && <HostCost id={h.id} range={scope.range} operator={scope.operator} />}
+      {tab === "cost" && <HostCost id={h.id} range={scope.range} operator={scope.operator} />}
 
       {tab === "runs" && (
         <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>

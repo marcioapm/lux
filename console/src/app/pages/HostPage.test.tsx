@@ -197,13 +197,31 @@ test("the host's tabs: Overview by default; each tab shows its own cards and ?ta
   }
 });
 
-test("a tenant on a platform host: Cost and Events are disabled tabs, and ?tab=cost shows nothing of them", async () => {
+test("a tenant on a platform host: Cost and Events are disabled tabs, and ?tab=cost reads as Overview", async () => {
   const p = await render(registered({ platform: true, tenant: "" }), "tenant", "http://localhost/hosts/h1?tab=cost");
   try {
     expect(tab(p.el, "Cost").disabled).toBe(true);
     expect(tab(p.el, "Events").disabled).toBe(true);
-    expect(cardTitles(p.el)).toEqual([]);
+    expect(tab(p.el, "Overview").getAttribute("aria-selected")).toBe("true");
+    expect(tab(p.el, "Cost").getAttribute("aria-selected")).toBe("false");
+    expect(cardTitles(p.el)).toEqual(["Details", "Lifecycle", "Live placements"]);
     expect(p.fake.calls.some((c) => c.startsWith("/v1/hosts/h1/cost"))).toBe(false);
+  } finally {
+    await p.done();
+  }
+});
+
+test("an operator on a platform host's Events who narrows to a tenant reads as Overview and reads no events as the tenant", async () => {
+  const p = await render(registered({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tab=events");
+  try {
+    expect(p.eventsCard()).toBeDefined();
+    await act(async () => setSearchParams({ tenant: "acme" }));
+    await sleep(50);
+    expect(new URLSearchParams(location.search).get("tab")).toBe("events");
+    expect(tab(p.el, "Events").disabled).toBe(true);
+    expect(tab(p.el, "Overview").getAttribute("aria-selected")).toBe("true");
+    expect(cardTitles(p.el)).toEqual(["Details", "Lifecycle", "Live placements"]);
+    expect(p.eventCalls().filter((c) => query(c).tenant)).toEqual([]);
   } finally {
     await p.done();
   }
