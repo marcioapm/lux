@@ -713,13 +713,24 @@ function CostPanelDemo() {
         </div>
         <Card flush>
           <KpiStrip>
-            <Kpi label="Total · last 7 days" value={<MoneyList amounts={[{ currency: "USD", amount: "633.08" }]} large decimals={CENTS} />} sub="five figures: five across from 960px" />
+            <Kpi label="Total · last 7 days" value={<MoneyList amounts={[{ currency: "USD", amount: "633.08" }]} large decimals={CENTS} />} sub="five figures: 3 + 2 from 760px, five across from 960px" />
             <Kpi label={<ColorKey color={familyColor("compute")}>Compute</ColorKey>} value={<Money amount="6.61" currency="USD" decimals={CENTS} />} sub="1% · host time Runs reserved" />
             <Kpi label={<ColorKey color={familyColor("block-storage")}>Block storage</ColorKey>} value={<Money amount="0.71" currency="USD" decimals={CENTS} />} sub="0% · the disks" />
             <Kpi label={<ColorKey color="var(--chart-7)">External</ColorKey>} value={<Money amount="625.76" currency="USD" decimals={CENTS} />} sub="99% · reported by cost plugins" />
             <Kpi label="Peak day" value={<Money amount="141.40" currency="USD" decimals={CENTS} />} sub="Thu, Oct 8" />
           </KpiStrip>
         </Card>
+        <div style={{ maxWidth: 880 }} data-gallery="kpi-strip-5-narrow">
+          <Card flush>
+            <KpiStrip>
+              <Kpi label="Total · 880px container" value={<MoneyList amounts={[{ currency: "USD", amount: "633.08" }]} large decimals={CENTS} />} sub="five figures, 760–959px: 3 + 2, no orphan" />
+              <Kpi label={<ColorKey color={familyColor("compute")}>Compute</ColorKey>} value={<Money amount="6.61" currency="USD" decimals={CENTS} />} sub="1% · host time Runs reserved" />
+              <Kpi label={<ColorKey color={familyColor("block-storage")}>Block storage</ColorKey>} value={<Money amount="0.71" currency="USD" decimals={CENTS} />} sub="<1% · the disks" />
+              <Kpi label={<ColorKey color="var(--chart-7)">External</ColorKey>} value={<Money amount="625.76" currency="USD" decimals={CENTS} />} sub="99% · reported by cost plugins" />
+              <Kpi label="Peak day" value={<Money amount="141.40" currency="USD" decimals={CENTS} />} sub="Thu, Oct 8" />
+            </KpiStrip>
+          </Card>
+        </div>
         <div className="grid grid-2">
           <Card title="Labels" subtitle="LabelChips: a Run's labels, app first, three at most" flush>
             <div className="stack" style={{ padding: "var(--pad-card)" }}>

@@ -148,7 +148,8 @@ Page widths (`src/layout.css`): `.page` (detail), `.page-list` (tables), `.page-
 (dashboards). Grids: `.grid-stats` (2 / 3 / 5 by container width: under
 720px, from 720px, from 1000px; a row of exactly four goes 2 / 4, one of
 exactly three stays 3, one of exactly six goes 3 / 6 from 1400px, so no row
-leaves a gap or an orphan),
+leaves a gap or an orphan; a `KpiStrip` of exactly five goes 2 / 3 + 2 on
+six columns from 760px of its container / 5 across from 960px, never 4 + 1),
 `.grid-charts` (1 / 2 / 3 / 4 by container width), `.grid-2`, `.grid-3`,
 `.grid-2-1` (a main card two thirds wide and one beside it: a chart and its
 summary) (collapse to one column under 900px of content).
@@ -375,7 +376,7 @@ Overview's Cost panel is composed of:
 
 | Export | What |
 | --- | --- |
-| `KpiStrip`, `Kpi({label, value, sub?, loading?, muted?})`, `KpiSub` | figures across the top of a card, the first wider; two across in a narrow container, four from 760px, and a strip of five (Total, Compute, Block storage, External, peak) five across from 960px; a muted Kpi is a figure the view hides but still states |
+| `KpiStrip`, `Kpi({label, value, sub?, loading?, muted?})`, `KpiSub` | figures across the top of a card, the first wider; two across in a narrow container, four from 760px, and a strip of five (Total, Compute, Block storage, External, peak) 3 + 2 from 760px and five across from 960px; a muted Kpi is a figure the view hides but still states |
 | `SplitBar({parts, whole, currency, label?, scale?})` | parts of one amount as one thin bar, each part its share of `whole`; a `faint` part is hidden by the view, drawn, never dropped; amounts in the title; `scale` sets its length against the largest row |
 | `BreakdownTable({rows, lead, onRowClick?, blockStorage?})` | cost by one dimension: swatch and name (mono for ids and label values, `quiet` for the value-less row, a `pill` such as "revoked"), Runs, Compute, External, Total, Share per currency; `blockStorage` adds a Block storage column between Compute and External (lux's disk family, apart from both); a missing part is `–`, not $0; a non-zero share under 0.5% reads `<1%` |
 | `LabelChips({labels, max?, first?})` | a Run's labels as `key=value` chips, the `first` keys first, `max` shown and the rest counted (`+2`, their text in the title) |
