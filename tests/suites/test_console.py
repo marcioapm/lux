@@ -1119,15 +1119,11 @@ def test_pool_events_pages_stay_put_as_new_events_arrive(page, env, tenant_facto
 
 
 @pytest.fixture
-def priced_ec2(env, ec2, lux, monkeypatch):
+def priced_ec2(env, ec2, lux):
     """luxd with the fake EC2 and its Pricing API (on-demand and gp3 list
     prices), second-scale cost ticks; the tenant's pool burst is removed
     after the test, and its instances with it."""
     fake_only(ec2)
-    # luxd takes an on-demand price of at most 9 fractional digits; the fake's
-    # default has AWS's 10 ("0.1000000000"), which leaves compute unpriced.
-    import fake_ec2
-    monkeypatch.setitem(fake_ec2.ON_DEMAND_PRICES, ("eu-north-1", fake_ec2.FAKE_TEMPLATE_TYPE), "0.1")
     env.stop_luxd()
     env.start_luxd(LUX_EC2_ENDPOINT=ec2.url, LUX_PRICING_ENDPOINT=ec2.url, AWS_ACCESS_KEY_ID="fake",
                    AWS_SECRET_ACCESS_KEY="fake", AWS_REGION="us-east-1", LUX_COSTS_EVERY="5s",
