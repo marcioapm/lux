@@ -22,17 +22,12 @@ func cxCompaction(t *testing.T, prior ...string) (*Codex, *agentWire, *inputSink
 		t.Fatal(err)
 	}
 	appendRollout(t, rollout, prior...)
-	c, w, log := cxStartedAt(t, rollout)
+	c, w, log := cxHandshake(t, rollout, proto.ShimConfig{})
 	return c, w, log, rollout
 }
 
-// cxStartedAt is a Codex adapter whose thread.path is rollout, as it is.
-func cxStartedAt(t *testing.T, rollout string) (*Codex, *agentWire, *inputSink) {
-	t.Helper()
-	return cxHandshake(t, rollout, proto.ShimConfig{})
-}
-
-// cxHandshake is cxStartedAt with cfg: thread/resume for a resume.
+// cxHandshake is a Codex adapter whose thread.path is rollout, as it is:
+// thread/start, or thread/resume for a resume.
 func cxHandshake(t *testing.T, rollout string, cfg proto.ShimConfig) (*Codex, *agentWire, *inputSink) {
 	t.Helper()
 	log := &inputSink{}
@@ -57,26 +52,16 @@ func cxHandshake(t *testing.T, rollout string, cfg proto.ShimConfig) (*Codex, *a
 // (testdata/codex-0.145.0-compaction-items.jsonl), on cxThread.
 func cxItems(t *testing.T) (started, completed string) {
 	t.Helper()
-	b, err := os.ReadFile("testdata/codex-0.145.0-compaction-items.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	l := strings.Split(strings.TrimSpace(strings.ReplaceAll(string(b), "01a12680-2d6c-79d1-9c30-ce71d2847d5e", cxThread)), "\n")
-	return l[0], l[1]
+	l := testdataLines(t, "codex-0.145.0-compaction-items.jsonl")
+	r := strings.NewReplacer("01a12680-2d6c-79d1-9c30-ce71d2847d5e", cxThread)
+	return r.Replace(l[0]), r.Replace(l[1])
 }
 
 // appendRollout appends lines to the rollout, as Codex writes it.
 func appendRollout(t *testing.T, path string, lines ...string) {
 	t.Helper()
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
 	for _, l := range lines {
-		if _, err := f.WriteString(l + "\n"); err != nil {
-			t.Fatal(err)
-		}
+		appendRaw(t, path, l+"\n")
 	}
 }
 
@@ -84,11 +69,7 @@ func appendRollout(t *testing.T, path string, lines ...string) {
 // event from that compaction (testdata/codex-0.145.0-rollout-compacted.jsonl).
 func cxRolloutCompacted(t *testing.T) ([]string, string) {
 	t.Helper()
-	b, err := os.ReadFile("testdata/codex-0.145.0-rollout-compacted.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	lines := testdataLines(t, "codex-0.145.0-rollout-compacted.jsonl")
 	var e struct {
 		Payload struct {
 			Message string `json:"message"`
@@ -235,11 +216,7 @@ func TestCodexRolloutTestdata(t *testing.T) {
 // message, and an encrypted compaction item in replacement_history.
 func cxRolloutRemote(t *testing.T) []string {
 	t.Helper()
-	b, err := os.ReadFile("testdata/codex-0.145.0-rollout-compacted-remote.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.Split(strings.TrimSpace(string(b)), "\n")
+	return testdataLines(t, "codex-0.145.0-rollout-compacted-remote.jsonl")
 }
 
 // A compaction whose summary is not in the rollout (none written in time,
@@ -314,7 +291,7 @@ func TestCodexRolloutNotARegularFile(t *testing.T) {
 			ran := make(chan struct{})
 			go func() {
 				defer close(ran)
-				_, w, log := cxStartedAt(t, rollout)
+				_, w, log := cxHandshake(t, rollout, proto.ShimConfig{})
 				started, completed := cxItems(t)
 				w.send(started)
 				w.send(completed)
@@ -435,7 +412,7 @@ func TestCodexResumeRolloutUnreadable(t *testing.T) {
 // A new thread's rollout that does not exist yet holds no earlier entries.
 func TestCodexNewThreadRolloutNotYetWritten(t *testing.T) {
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
-	_, w, log := cxStartedAt(t, rollout)
+	_, w, log := cxHandshake(t, rollout, proto.ShimConfig{})
 	lines, summary := cxRolloutCompacted(t)
 	if err := os.WriteFile(rollout, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
