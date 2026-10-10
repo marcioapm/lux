@@ -242,6 +242,47 @@ Header values come from secrets and are never in the command line. See
 - **The session id.** It is stored on the Run and passed back on resume, so
   the conversation continues from its transcript on the restored state
   volume.
+- **Compactions.** When the agent compacts its context, one `lux.compacted`
+  record says so, with the summary it replaced the context with (see
+  [Compactions](#compactions)).
+
+## Compactions
+
+An agent near its context limit, or told to (`/compact`), replaces its
+conversation with a summary it writes and carries on from that. The
+`claude-code`, `codex` and `opencode` adapters report each compaction of
+the Run's session as one `lux.compacted` record in the output (`lux logs
+--events`), whatever the agent's own protocol calls it:
+
+```json
+{"type": "lux.compacted", "data": {"sessionId": "…", "trigger": "manual", "preTokens": 36663, "postTokens": 972, "summary": "…"}}
+```
+
+| Field | |
+| --- | --- |
+| `sessionId` | the session (thread) compacted: the Run's `sessionId` |
+| `trigger` | `auto` (the context was full), `manual` (`/compact`), `overflow` (OpenCode: an automatic compaction in the middle of a step that did not finish), or `""` where the agent does not say |
+| `preTokens`, `postTokens` | the context's size before and after, where the agent gives them (Claude Code) |
+| `summary` | the summary's text, where the agent makes one lux can read; redacted like all output, cut at 64 KiB on a UTF-8 boundary |
+| `summaryTruncated` | `true` when `summary` was cut |
+
+Fields the agent does not give are left out. A summary lux could not read
+(OpenCode's server did not answer within 10 s, Codex wrote none to its
+rollout) leaves `summary` out and adds a `lux.warning` saying why; the
+record still comes. What the summary does not cover is what came after it:
+a client replaying a conversation into a new agent can start from the last
+summary and the inputs and replies after its record.
+
+| Adapter | Signal | Summary from | `trigger` | tokens |
+| --- | --- | --- | --- | --- |
+| `claude-code` | `system` `compact_boundary` | the synthetic `user` line right after it | yes | yes |
+| `codex` | `item/completed` of a `contextCompaction` item | the rollout's `compacted` entry; none when Codex compacts remotely (OpenAI's provider) | no | no |
+| `opencode` | bus `session.compacted` for the Run's session | the newest stored assistant message with `summary: true` (`GET /session/{id}/message`) | yes | no |
+| `acp`, `generic` | — | — | — | — |
+
+The agent's own messages are still kept as they came (`claude.system`,
+`codex.item/*`). The details, verified against each CLI, are in
+[agent-protocols.md](agent-protocols.md).
 
 ## State paths
 

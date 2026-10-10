@@ -288,6 +288,12 @@ move.
 If a host dies unannounced, the output of its live placement is lost along
 with its state. Everything before that placement is safe.
 
+Besides the agent's own messages, an agent Run's structured events include
+lux's: its session (`lux.session`), activity (`lux.activity`), each
+input's phases (`lux.input`, `lux.input.consumed`, `lux.input.failed`),
+warnings (`lux.warning`) and each compaction of the agent's context with
+its summary (`lux.compacted`); see [Adapters](adapters.md#compactions).
+
 A Run's servers write their output into the same file, as records with
 `ch: "server"`, `server: <name>` and `stream: stdout | stderr` (and their
 starts and exits as `lux.server` events there). `GET /v1/runs/{id}/output`
