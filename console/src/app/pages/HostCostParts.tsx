@@ -8,7 +8,8 @@ import { familyLabel, perHour, type HostChart, type Paid, type WhoPaid } from ".
 const COMPUTE_COLOR = familyColor(COMPUTE);
 const BS_COLOR = familyColor(BLOCK_STORAGE);
 
-const pick = (w: WhoPaid[], f: (p: WhoPaid) => string | null): MoneyAmount[] => w.flatMap((p) => (f(p) == null ? [] : [{ currency: p.currency, amount: f(p)! }]));
+/** One figure per currency of a WhoPaid list, skipping the currencies that have none. */
+export const pick = (w: WhoPaid[], f: (p: WhoPaid) => string | null): MoneyAmount[] => w.flatMap((p) => (f(p) == null ? [] : [{ currency: p.currency, amount: f(p)! }]));
 /** A ratio per currency in words: "49%", "<1%" for a non-zero one under 1%, or "USD 49% · EUR 30%" with several. */
 const ratios = (w: WhoPaid[], f: (p: WhoPaid) => number | null) => {
   const rs = w.flatMap((p) => (f(p) == null ? [] : [`${w.length > 1 ? `${p.currency} ` : ""}${meterText(f(p))}`]));

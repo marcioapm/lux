@@ -5,7 +5,7 @@ import { costInterval, costRange, historyRes, stepNote, stepOfRes } from "../eve
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostPath, labelsText, PageSkeleton, RunLink, RunNameLink, runPath } from "./common.tsx";
-import { HostCostChart, HostCostTiles, WhoPaidCard } from "./HostCostParts.tsx";
+import { HostCostChart, HostCostTiles, pick, WhoPaidCard } from "./HostCostParts.tsx";
 import { hostCharts, hostCostRows, hostHours, sumPerCurrency, volumeSummary, whoPaid, type HostChart, type HostCostRow, type WhoPaid } from "./hostCostView.ts";
 import { HostsList } from "./Hosts.tsx";
 import { PagedEvents } from "./PagedEvents.tsx";
@@ -148,7 +148,7 @@ function PoolCostTile({ since, cost, loading }: { since: string; cost?: PoolCost
   const visible = cost?.idle != null;
   if (!visible) return <StatTile label={`Cost (${since})`} loading={loading} value={<MoneyList amounts={cost?.totals} decimals={CENTS} />} unit={cost ? <>list price · charged to your Runs</> : "list price"} />;
   // The same figure as the Cost tab's lead tile: whoPaid's host cost per currency.
-  const host = whoPaid(cost.hostSeries ?? []).flatMap((p) => (p.all.total == null ? [] : [{ currency: p.currency, amount: p.all.total }]));
+  const host = pick(whoPaid(cost.hostSeries ?? []), (p) => p.all.total);
   const idle = sumPerCurrency(cost.idle ?? []);
   return (
     <StatTile
