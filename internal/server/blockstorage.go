@@ -19,6 +19,16 @@ import (
 // into hours with AWS's convention of 730 hours a month.
 const hoursPerMonth = 730
 
+// The cost families lux prices itself: the machine, and the volumes that
+// live and die with it. Both are host-tied: shared between a host's Runs by
+// their share, the rest unallocated.
+const (
+	familyCompute      = "compute"
+	familyBlockStorage = "block-storage"
+)
+
+var hostFamilies = []string{familyCompute, familyBlockStorage}
+
 // ebsBilling is what each volume type bills beyond its storage: IOPS and
 // throughput above the free baseline (Free*), or not at all (false). A type
 // not listed has no known price: its host's block storage is missing.

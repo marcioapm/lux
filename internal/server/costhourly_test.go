@@ -635,7 +635,7 @@ func TestComputeHourlyPiecesAndHostIdle(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
 		VALUES ('p1','t1','r1','h1',1,'exited','{"cpus":2,"memory":200}',$1,$2)`, t0.Add(30*time.Minute), t0.Add(90*time.Minute))
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		in, err := loadHostCompute(ctx, tx, "h1", t0, t0.Add(2*time.Hour))
+		in, err := loadHostCompute(ctx, tx, "h1", familyCompute, t0, t0.Add(2*time.Hour))
 		if err != nil {
 			return err
 		}

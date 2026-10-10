@@ -762,7 +762,7 @@ func resolvePlacementRate(ctx context.Context, tx pgx.Tx, hostID string, start t
 			WHERE h.id = $1
 		), own_capacity AS (
 			SELECT r.cap_cpus, r.cap_memory FROM host_rates r JOIN target t ON r.host_id = t.id
-			WHERE r.cap_cpus > 0 OR r.cap_memory > 0
+			WHERE r.family = 'compute' AND (r.cap_cpus > 0 OR r.cap_memory > 0)
 			ORDER BY (r.valid_from <= $2) DESC, r.valid_from DESC LIMIT 1
 		), candidates AS (
 			SELECT r.valid_from, r.valid_to, r.per_hour, r.currency, r.source,
@@ -771,7 +771,7 @@ func resolvePlacementRate(ctx context.Context, tx pgx.Tx, hostID string, start t
 				h.id = t.id AS own, r.valid_from <= $2 AND (r.valid_to IS NULL OR r.valid_to > $2) AS covering
 			FROM target t JOIN hosts h ON true
 			LEFT JOIN pools p ON p.id = h.pool_id
-			JOIN host_rates r ON r.host_id = h.id
+			JOIN host_rates r ON r.host_id = h.id AND r.family = 'compute'
 			LEFT JOIN own_capacity c ON true
 			WHERE (h.id = t.id AND t.provider = 'static' AND r.source = 'static')
 				OR (t.provider <> 'static' AND t.kind <> '' AND

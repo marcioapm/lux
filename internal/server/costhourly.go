@@ -340,7 +340,7 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 }
 
 func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, to time.Time, provisioned, registered, terminated *time.Time) error {
-	in, err := loadHostCompute(ctx, tx, id, hour, to)
+	in, err := loadHostCompute(ctx, tx, id, familyCompute, hour, to)
 	if err != nil {
 		return err
 	}

@@ -703,7 +703,7 @@ func (s *Server) hostCost(ctx context.Context, in *hostCostInput) (*hostCostOutp
 			return nil
 		}
 		rows, err = tx.Query(ctx, `SELECT valid_from, valid_to, trim_scale(per_hour)::text, currency, source
-			FROM host_rates WHERE host_id = $1 AND valid_from < $3 AND (valid_to IS NULL OR valid_to > $2)
+			FROM host_rates WHERE host_id = $1 AND family = 'compute' AND valid_from < $3 AND (valid_to IS NULL OR valid_to > $2)
 			ORDER BY valid_from`, id, from, to)
 		if err != nil {
 			return err
