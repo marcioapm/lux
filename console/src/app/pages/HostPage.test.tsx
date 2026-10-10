@@ -77,7 +77,7 @@ async function clickNext(card: Element) {
  * events as cursor pages of 50. url is the page's (its ?tenant= narrows an
  * operator); events are on the Events tab (a launch-failed host has no tabs).
  */
-async function render(h: Host, role: "tenant" | "operator" = "tenant", url = "http://localhost/hosts/h1?tab=events", cost?: HostCost) {
+async function render(h: Host, role: "tenant" | "operator" = "tenant", url = "http://localhost/hosts/h1?tab=events", cost?: HostCost | ((path: string) => HostCost)) {
   api.signIn("k");
   api.setRole(role);
   const fake = fakeApi((path) => {
@@ -85,7 +85,7 @@ async function render(h: Host, role: "tenant" | "operator" = "tenant", url = "ht
       return query(path).next ? { events: events(50, 50), prev: "p2", page: "s2" } : { events: events(100, 50), next: "n1", page: "s1" };
     }
     if (path.startsWith("/v1/hosts/h1/history")) return { from: iso(0), to: iso(60), resolution: 60, samples: [] };
-    if (path.startsWith("/v1/hosts/h1/cost")) return cost ?? { hostId: "h1", from: iso(0), to: iso(60), basis: "list", hours: [] };
+    if (path.startsWith("/v1/hosts/h1/cost")) return (typeof cost === "function" ? cost(path) : cost) ?? { hostId: "h1", from: iso(0), to: iso(60), basis: "list", hours: [] };
     if (path.startsWith("/v1/hosts/h1")) return h;
     if (path.startsWith("/v1/runs")) return { runs: [] };
     return {};
@@ -360,14 +360,20 @@ test("host Cost tab, a tenant on its own host: its unallocated too, no rate peri
   }
 });
 
+const costCalls = (calls: readonly string[]) => calls.filter((c) => c.startsWith("/v1/hosts/h1/cost"));
+
 test("host Cost tab with no hours, an operator narrowed to a tenant on a platform host: that tenant's view, no unallocated and no rate periods", async () => {
+  // luxd 403s a host's cost to a tenant other than its owner, so the narrowed operator gets a tenant's view of a
+  // platform host: a disabled Cost tab, ?tab=cost reading as Overview, and no /cost read.
   const none: HostCost = { hostId: "h1", from: HOUR0, to: "2026-09-01T13:00:00.000Z", basis: "list", hours: [] };
   const p = await render(ec2Host({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tenant=acme&tab=cost", none);
   try {
-    await until(() => tiles(p.el).length === 3, "the three tiles");
-    expect(tiles(p.el).map(([l]) => l)).toEqual(["Charged to your Runs (24h)", "Compute", "Block storage"]);
-    expect(p.el.querySelector(".host-cost")!.textContent).not.toMatch(/nallocated|Utilisation/);
-    expect(cardTitles(p.el)).toEqual(["Charged to your Runs per hour"]);
+    expect(tab(p.el, "Cost").disabled).toBe(true);
+    expect(tab(p.el, "Overview").getAttribute("aria-selected")).toBe("true");
+    expect(new URLSearchParams(location.search).get("tab")).toBe("cost");
+    expect(cardTitles(p.el)).toEqual(["Details", "Lifecycle", "Live placements"]);
+    expect(p.el.querySelector(".host-cost")).toBeNull();
+    expect(costCalls(p.fake.calls)).toEqual([]);
   } finally {
     await p.done();
   }
@@ -375,10 +381,61 @@ test("host Cost tab with no hours, an operator narrowed to a tenant on a platfor
   const q = await render(ec2Host({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tab=cost", none);
   try {
     await until(() => tiles(q.el).length === 5, "the five tiles");
+    expect(costCalls(q.fake.calls).map(query)).toEqual([{ since: "24h" }]);
     expect(tiles(q.el)[3]![0]).toBe("Unallocated");
     expect(cardTitles(q.el)).toEqual(["Host cost per hour", "Rate periods"]);
   } finally {
     await q.done();
+  }
+});
+
+test("host Cost tab, an operator narrowed to the tenant of its own host: the read carries ?tenant=, and luxd's answer without unallocated renders the tenant's view", async () => {
+  // luxd answers ?tenant=acme as acme: for a host in a platform pool, no unallocated and no rates.
+  const asAcme: HostCost = { ...opCost, rates: undefined, hours: opCost.hours.map(({ unallocated: _, ...h }) => h) };
+  const p = await render(ec2Host(), "operator", "http://localhost/hosts/h1?tab=cost", (path) => (query(path).tenant === "acme" ? asAcme : opCost));
+  try {
+    await until(() => tiles(p.el).length === 5, "the operator's five tiles");
+    expect(costCalls(p.fake.calls).map(query)).toEqual([{ since: "24h" }]);
+    expect(cardTitles(p.el)).toEqual(["Host cost per hour", "Rate periods"]);
+    // Narrowing refetches as the tenant.
+    await act(async () => setSearchParams({ tenant: "acme" }));
+    await until(() => tiles(p.el).length === 3, "the tenant's three tiles");
+    expect(costCalls(p.fake.calls).map(query).at(-1)).toEqual({ since: "24h", tenant: "acme" });
+    expect(tiles(p.el)).toEqual([
+      ["Charged to your Runs (24h)", "$0.10"],
+      ["Compute", "$0.10"],
+      ["Block storage", "<$0.01"],
+    ]);
+    expect(p.el.querySelector(".host-cost")!.textContent).not.toMatch(/nallocated|Utilisation/);
+    expect(cardTitles(p.el)).toEqual(["Charged to your Runs per hour"]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("host Cost tab with no hours, an operator narrowed to the tenant of its own host: the read carries ?tenant=, and it reads as that tenant, no rate periods", async () => {
+  const none: HostCost = { hostId: "h1", from: HOUR0, to: "2026-09-01T13:00:00.000Z", basis: "list", hours: [] };
+  const p = await render(ec2Host(), "operator", "http://localhost/hosts/h1?tenant=acme&tab=cost", none);
+  try {
+    await until(() => tiles(p.el).length === 5, "the five tiles");
+    expect(costCalls(p.fake.calls).map(query)).toEqual([{ tenant: "acme", since: "24h" }]);
+    // What a tenant reads of its own host with no hours: unallocated (its own pool's), no rate periods.
+    expect(tiles(p.el).map(([l]) => l)).toEqual(["Host cost (24h)", "Compute", "Block storage", "Unallocated", "Utilisation"]);
+    expect(cardTitles(p.el)).toEqual(["Host cost per hour"]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("host Cost tab, an operator over every tenant on a tenant's host: no ?tenant=, unallocated and rate periods", async () => {
+  const p = await render(ec2Host(), "operator", "http://localhost/hosts/h1?tab=cost", opCost);
+  try {
+    await until(() => tiles(p.el).length === 5, "the five tiles");
+    expect(costCalls(p.fake.calls).map(query)).toEqual([{ since: "24h" }]);
+    expect(tiles(p.el)[3]).toEqual(["Unallocated", "$0.31"]);
+    expect(cardTitles(p.el)).toEqual(["Host cost per hour", "Rate periods"]);
+  } finally {
+    await p.done();
   }
 });
 

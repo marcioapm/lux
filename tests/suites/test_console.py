@@ -884,6 +884,13 @@ def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux
         expect(rates.get_by_text(re.compile(r"static price|\(static\)"))).to_have_count(0)
         expect(page.get_by_text(re.compile(r"^charged to Runs vs unallocated, per hour"))).to_have_count(1)
     _both_themes(page, env, f"/hosts/{host_id}?tab=cost", check)
+    # Narrowed to the host's tenant, the operator reads its cost as that tenant
+    # (?tenant= on the read): unallocated of its own pool, no rate periods.
+    with page.expect_request(lambda r: f"/v1/hosts/{host_id}/cost" in r.url and f"tenant={lux.tenant_id}" in r.url, timeout=15_000):
+        page.goto(env.luxd_url + f"/hosts/{host_id}?tab=cost&tenant={lux.tenant_id}")
+    expect(tiles).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Unallocated", "Utilisation"], timeout=15_000)
+    expect(page.get_by_role("heading", name="Rate periods", exact=True)).to_have_count(0)
+    assert not page.errors, page.errors
 
 
 def test_rename_a_pool_through_the_dialog(page, lux, runners, hosts):

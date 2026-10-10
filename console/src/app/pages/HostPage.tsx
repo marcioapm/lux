@@ -77,8 +77,9 @@ export function HostPage({ id }: { id: string }) {
   if (forceOnly) dialogDescription = `Its ${liveRunsText} will be stopped and resumed elsewhere.`;
   else if (h.liveRuns)
     dialogDescription = `No new placements will be assigned. Its ${liveRunsText} ${oneRun ? "finishes where it is" : "finish where they are"}, unless forced. A provisioned host is terminated once empty.`;
-  // The host history rule: operators, and a tenant for its own host (a tenant sees no other non-platform host).
-  const showCost = scope.operator || !h.platform;
+  // A host's cost is its owner's or the operators'. The read carries ?tenant=, so luxd 403s an operator
+  // narrowed to a tenant on a platform host, as it does for the host's events.
+  const showCost = (scope.operator && !scope.apiTenant) || !h.platform;
   const showEvents = hostEventsVisible(h.platform, scope);
   // A tab the reader cannot open reads as Overview, like an unknown one; ?tab= is left as is.
   const hidden = (requestedTab === "cost" && !showCost) || (requestedTab === "events" && !showEvents);
@@ -178,7 +179,8 @@ export function HostPage({ id }: { id: string }) {
         </>
       )}
 
-      {/* An operator narrowed to a tenant reads as that tenant (luxd answers so): no unallocated of a platform host, no rate periods. */}
+      {/* HostCost's read carries ?tenant=, so luxd answers a narrowed operator as that tenant. With hours, unallocated shows when luxd sent it;
+          with none, and for the rate periods, operator = scope.operator && !scope.apiTenant, which is luxd's rule for the narrowed read. */}
       {tab === "cost" && <HostCost host={h} range={scope.range} operator={scope.operator && !scope.apiTenant} />}
 
       {tab === "runs" && (
