@@ -415,7 +415,8 @@ function Layout() {
             </>
           }
         />
-        <SectionHeader title="Section header" note="a quiet label between groups of cards" />
+        <SectionHeader title="Trends" note="sentence case, a step above a card title; the note follows it" />
+        <SectionHeader title="Cost" note="hourly over the last 7d" actions={<Tabs size="sm" value="all" onChange={() => {}} items={[{ key: "all", label: "All" }, { key: "compute", label: "Compute" }]} />} />
       </Card>
     </Section>
   );
