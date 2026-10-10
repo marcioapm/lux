@@ -175,16 +175,20 @@ func (s *Server) blockStoragePrice(ctx context.Context, provider, region, kind s
 		return BlockStoragePrice{}, fmt.Errorf("%s block storage price %s/%s: %w", provider, region, kind, err)
 	}
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `DELETE FROM price_cache WHERE provider = $1 AND region = $2 AND os = $3
-			AND split_part(instance_type, ':', 1) = $4`, provider, region, ebsCacheOS, kind); err != nil {
-			return err
-		}
+		// Upserts, as onDemandPrice's: two luxds refreshing one type at
+		// once both succeed. A dimension the new answer lacks is dropped.
 		for dim, v := range price.dims() {
 			if v == "" {
+				if _, err := tx.Exec(ctx, `DELETE FROM price_cache WHERE provider = $1 AND region = $2 AND instance_type = $3 AND os = $4`,
+					provider, region, kind+":"+dim, ebsCacheOS); err != nil {
+					return err
+				}
 				continue
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO price_cache (provider, region, instance_type, os, per_hour, currency, fetched_at)
-				VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp())`, provider, region, kind+":"+dim, ebsCacheOS, v, price.Currency); err != nil {
+				VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp()) ON CONFLICT (provider, region, instance_type, os)
+				DO UPDATE SET per_hour = EXCLUDED.per_hour, currency = EXCLUDED.currency, fetched_at = EXCLUDED.fetched_at`,
+				provider, region, kind+":"+dim, ebsCacheOS, v, price.Currency); err != nil {
 				return err
 			}
 		}
