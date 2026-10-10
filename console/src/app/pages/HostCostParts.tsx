@@ -106,9 +106,9 @@ const money = (a: string | null, currency: string) => (a == null ? <span classNa
 
 const PAID_COLS: Column<PaidRow>[] = [
   { key: "family", header: "", cell: (r) => (r.total ? <strong>Total</strong> : r.label), lead: true },
-  { key: "runs", header: "Runs", cell: (r) => money(r.paid.runs, r.currency), align: "right", mono: true, width: 96 },
-  { key: "unallocated", header: "Unallocated", cell: (r) => money(r.paid.unallocated, r.currency), align: "right", mono: true, width: 110 },
-  { key: "total", header: "Total", cell: (r) => (r.total ? <strong>{money(r.paid.total, r.currency)}</strong> : money(r.paid.total, r.currency)), align: "right", mono: true, width: 96 },
+  { key: "runs", header: "Runs", cell: (r) => money(r.paid.runs, r.currency), align: "right", mono: true, width: 76 },
+  { key: "unallocated", header: "Unallocated", cell: (r) => money(r.paid.unallocated, r.currency), align: "right", mono: true, width: 100 },
+  { key: "total", header: "Total", cell: (r) => (r.total ? <strong>{money(r.paid.total, r.currency)}</strong> : money(r.paid.total, r.currency)), align: "right", mono: true, width: 80 },
 ];
 
 /** Charged to Runs vs unallocated of one family, as a bar: Runs in the family's colour, unallocated its faded shade. */
@@ -144,9 +144,9 @@ export function WhoPaidCard({ paid, loading }: { paid: WhoPaid[]; loading: boole
     { key: `${p.currency}:total`, label: "Total", currency: p.currency, paid: p.all, total: true },
   ]);
   return (
-    <Card title="Who paid" subtitle="Runs vs nobody, per family" className="who-paid">
-      <div className="stack">
-        <Table columns={PAID_COLS} rows={rows} rowKey={(r) => r.key} loading={loading} loadingRows={3} empty="No host time recorded in this range." dense />
+    <Card title="Who paid" subtitle="Runs vs nobody, per family" className="who-paid" flush>
+      <Table columns={PAID_COLS} rows={rows} rowKey={(r) => r.key} loading={loading} loadingRows={3} empty="No host time recorded in this range." dense minWidth={340} />
+      <div className="stack who-paid-split">
         {paid.map((p) => (
           <div key={p.currency} className="stack stack-tight">
             {paid.length > 1 && <span className="secondary">{p.currency}</span>}

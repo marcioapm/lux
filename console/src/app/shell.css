@@ -862,6 +862,10 @@
 .placements-total .row {
   gap: var(--sp-6);
 }
+/* Under the flush Who paid table: each family's charged-vs-unallocated bar, at the card's padding. */
+.who-paid-split {
+  padding: var(--pad-card);
+}
 .run-facts {
   padding: var(--sp-2) var(--pad-card);
   background: var(--bg-surface);
