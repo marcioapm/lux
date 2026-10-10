@@ -495,30 +495,22 @@ func (c *Codex) compactionCompleted(id string) {
 	n := c.rolloutBase + len(c.reported) - 1
 	thread, sink, ctx, baseErr := c.thread, c.sink, c.ctx, c.baseErr
 	c.mu.Unlock()
+	report := func(summary string, err error) {
+		reportCompacted(sink, "codex: thread", proto.Compaction{SessionID: thread, Summary: summary}, err)
+	}
 	if baseErr != nil {
-		reportCodexCompaction(sink, thread, "", fmt.Errorf("the rollout's earlier entries are unknown: %w", baseErr))
+		report("", fmt.Errorf("the rollout's earlier entries are unknown: %w", baseErr))
 		return
 	}
 	if summary, done, err := c.rolloutEntry(n); done {
-		reportCodexCompaction(sink, thread, summary, err)
+		report(summary, err)
 		return
 	}
 	c.bg.Add(1)
 	go func() {
 		defer c.bg.Done()
-		summary, err := c.rolloutSummary(ctx, n)
-		reportCodexCompaction(sink, thread, summary, err)
+		report(c.rolloutSummary(ctx, n))
 	}()
-}
-
-// reportCodexCompaction writes the record, then the warning if the summary
-// could not be read.
-func reportCodexCompaction(sink Sink, thread, summary string, err error) {
-	sink.Compacted(proto.Compaction{SessionID: thread, Summary: summary})
-	if err != nil {
-		sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
-			"codex: thread %s was compacted; its summary could not be read: %v", thread, err)})
-	}
 }
 
 // errRemoteCompaction: Codex wrote the compaction with an empty message.

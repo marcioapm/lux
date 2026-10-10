@@ -494,6 +494,16 @@ func unreadWhy(stopped bool) error {
 	return errExitedUnread
 }
 
+// reportCompacted writes the record, then, if err says why its summary
+// could not be read, a warning: "<what> <session> was compacted; …".
+func reportCompacted(sink Sink, what string, c proto.Compaction, err error) {
+	sink.Compacted(c)
+	if err != nil {
+		sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+			"%s %s was compacted; its summary could not be read: %v", what, c.SessionID, err)})
+	}
+}
+
 // lineWriter serializes JSON lines to a process's stdin.
 type lineWriter struct {
 	mu sync.Mutex
