@@ -184,7 +184,7 @@ func (s *Server) BackfillVolumes(ctx context.Context, req BackfillVolumes) (Back
 				if req.DryRun {
 					return nil
 				}
-				return s.backfillHost(ctx, tx, h.ID, vols, prices[h.Region], provider, bh.Runs)
+				return s.backfillHost(ctx, tx, h.ID, vols, prices[h.Region], provider)
 			})
 			if err != nil {
 				return rep, fmt.Errorf("host %s: %w", h.ID, err)
@@ -200,13 +200,11 @@ func (s *Server) BackfillVolumes(ctx context.Context, req BackfillVolumes) (Back
 	return rep, nil
 }
 
-// backfillHost writes one host's backfill in tx: its runs locked first (the
-// order a state change and the drainer take them in), then the host.
-func (s *Server) backfillHost(ctx context.Context, tx pgx.Tx, hostID string, vols []HostVolume, prices map[string]BlockStoragePrice, provider string, runs []string) error {
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR UPDATE`, runs); err != nil {
-		return err
-	}
-	if err := lockCostHost(ctx, tx, hostID); err != nil {
+// backfillHost writes one host's backfill in tx, in the documented lock
+// order (lockBlockStorageHost): its Runs, its cost-host lock, then the host.
+func (s *Server) backfillHost(ctx context.Context, tx pgx.Tx, hostID string, vols []HostVolume, prices map[string]BlockStoragePrice, provider string) error {
+	runs, err := lockBlockStorageHost(ctx, tx, hostID)
+	if err != nil {
 		return err
 	}
 	tag, err := tx.Exec(ctx, `UPDATE hosts SET volumes = $2 WHERE id = $1 AND volumes IS NULL`, hostID, vols)
@@ -219,8 +217,37 @@ func (s *Server) backfillHost(ctx context.Context, tx pgx.Tx, hostID string, vol
 		// for its compute), so it has no placement to re-evaluate.
 		return err
 	}
-	// A final Run's compute source is evaluated again: its frozen compute
-	// snapshots are kept, the new block-storage ones are written and frozen.
+	return requeueBlockStorageRuns(ctx, tx, runs)
+}
+
+// lockBlockStorageHost takes, before hostID's row is locked, what opening its
+// block-storage period needs held: the Runs placed on it (FOR UPDATE, id
+// order), then its cost-host lock (infraevents.go's order). It returns
+// those Runs.
+func lockBlockStorageHost(ctx context.Context, tx pgx.Tx, hostID string) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT run_id FROM placements WHERE host_id = $1 ORDER BY run_id`, hostID)
+	if err != nil {
+		return nil, err
+	}
+	runs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR UPDATE`, runs); err != nil {
+		return nil, err
+	}
+	return runs, lockCostHost(ctx, tx, hostID)
+}
+
+// requeueBlockStorageRuns has runs, placed on a host whose block-storage
+// period just opened, evaluated again: a final Run's compute source and
+// lines go back to ok and not final, and each is queued. Its frozen compute
+// snapshots are kept; the new block-storage ones are written and frozen.
+// The caller holds the Runs' locks.
+func requeueBlockStorageRuns(ctx context.Context, tx pgx.Tx, runs []string) error {
+	if len(runs) == 0 {
+		return nil
+	}
 	if _, err := tx.Exec(ctx, `UPDATE cost_sources SET status = 'ok', next_at = NULL, attempts = 0
 		WHERE run_id = ANY($1) AND source = 'compute' AND status = 'final'`, runs); err != nil {
 		return err
@@ -228,7 +255,7 @@ func (s *Server) backfillHost(ctx context.Context, tx pgx.Tx, hostID string, vol
 	if _, err := tx.Exec(ctx, `UPDATE cost_lines SET final = false WHERE run_id = ANY($1) AND source = 'compute' AND final`, runs); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO cost_pending (run_id, due_at, reason)
+	_, err := tx.Exec(ctx, `INSERT INTO cost_pending (run_id, due_at, reason)
 		SELECT id, now(), 'retry' FROM runs WHERE id = ANY($1) ORDER BY id
 		ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at),
 			reason = EXCLUDED.reason, claimed_by = NULL, claimed_until = NULL`, runs)

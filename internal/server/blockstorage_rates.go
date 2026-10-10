@@ -79,8 +79,17 @@ func (s *Server) refreshBlockStorage(ctx context.Context) {
 		}
 		if failed == nil {
 			failed = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-				_, err := openBlockStorageRate(ctx, tx, h.ID, got, h.Provider+"-ebs-pricing", s.cfg.Costs.Hourly)
-				return err
+				runs, err := lockBlockStorageHost(ctx, tx, h.ID)
+				if err != nil {
+					return err
+				}
+				opened, err := openBlockStorageRate(ctx, tx, h.ID, got, h.Provider+"-ebs-pricing", s.cfg.Costs.Hourly)
+				if err != nil || !opened {
+					return err
+				}
+				// Runs already final on a host live when its volumes became
+				// known gain their block storage as a backfill's do.
+				return requeueBlockStorageRuns(ctx, tx, runs)
 			})
 		}
 		if failed != nil && ctx.Err() == nil {

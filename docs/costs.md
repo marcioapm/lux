@@ -967,6 +967,11 @@ then the host, as the drainer does):
    `costs.hourly` retention), so its allocated and unallocated rows are
    rebuilt per family.
 
+A host still live when luxd first records its volumes (one launched before
+the upgrade) needs no backfill: the price refresh that opens its period
+does steps 2–4 itself, in the same lock order, so the Runs already final
+on it gain their block-storage lines too.
+
 It prints `{dryRun, poolId, hosts: [{id, from, to, perHour, hours, runs}],
 hours, runs}`; `--dry-run` prints the same and changes nothing. A second run
 finds no host with `volumes` NULL and changes nothing. This is the one
