@@ -12,14 +12,15 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 )
 
-// cxCompaction is a Codex adapter whose thread's rollout is a file in a
-// temporary directory (thread/start's thread.path), with the turn running.
-func cxCompaction(t *testing.T) (*Codex, *agentWire, *inputSink, string) {
+// cxCompaction is a Codex adapter whose thread's rollout (thread/start's
+// thread.path) is a file in a temporary directory holding prior lines.
+func cxCompaction(t *testing.T, prior ...string) (*Codex, *agentWire, *inputSink, string) {
 	t.Helper()
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
 	if err := os.WriteFile(rollout, []byte(`{"type":"session_meta","payload":{}}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	appendRollout(t, rollout, prior...)
 	log := &inputSink{}
 	c := NewCodex()
 	c.compactionWait = 300 * time.Millisecond
@@ -28,6 +29,8 @@ func cxCompaction(t *testing.T) (*Codex, *agentWire, *inputSink, string) {
 	w.send(`{"id":` + id + `,"result":{"userAgent":"lux/0.145.0 (Ubuntu; x86_64)"}}`)
 	id, _ = w.next("thread/start")
 	w.send(`{"id":` + id + `,"result":{"thread":{"id":"` + cxThread + `","path":"` + rollout + `","status":{"type":"idle"}}}}`)
+	// The handshake is done (it reports idle last).
+	log.wait(t, "idle")
 	return c, w, log, rollout
 }
 
@@ -119,10 +122,31 @@ func TestCodexCompactionSummaryWrittenLate(t *testing.T) {
 	}
 }
 
+// Two compactions in a Run: each record has its own entry's summary.
+func TestCodexTwoCompactions(t *testing.T) {
+	_, w, log, rollout := cxCompaction(t)
+	started, completed := cxItems(t)
+	lines, summary := cxRolloutCompacted(t)
+	w.send(started)
+	appendRollout(t, rollout, lines...)
+	w.send(completed)
+	waitCompactions(t, log, 1)
+	second := strings.Replace(lines[0], "PERIWINKLE", "MARIGOLD", 1)
+	w.send(strings.ReplaceAll(started, "01a12680-3221", "01a12690-0000"))
+	appendRollout(t, rollout, second, lines[1])
+	w.send(strings.ReplaceAll(completed, "01a12680-3221", "01a12690-0000"))
+	got := waitCompactions(t, log, 2)
+	w.exit()
+	if len(got) != 2 || !strings.Contains(got[0], "PERIWINKLE") || !strings.Contains(got[1], "MARIGOLD") ||
+		strings.Count(summary, "PERIWINKLE") == 0 {
+		t.Fatalf("got %q", got)
+	}
+}
+
 // A compaction whose summary is not in the rollout (none written in time,
 // or an empty message: remote compaction) is reported without one, with a
-// warning saying why. A compacted entry from before the item started is
-// not taken for it.
+// warning saying why. A compacted entry the rollout held when the thread
+// started (a resumed thread's) is not taken for it.
 func TestCodexCompactionWithoutSummary(t *testing.T) {
 	for _, tc := range []struct {
 		name, warning string
@@ -138,10 +162,9 @@ func TestCodexCompactionWithoutSummary(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, w, log, rollout := cxCompaction(t)
-			started, completed := cxItems(t)
 			lines, _ := cxRolloutCompacted(t)
-			appendRollout(t, rollout, lines...) // an earlier compaction's
+			_, w, log, rollout := cxCompaction(t, lines...)
+			started, completed := cxItems(t)
 			w.send(started)
 			tc.after(t, rollout, lines)
 			w.send(completed)

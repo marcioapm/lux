@@ -505,36 +505,40 @@ func (b *opencodeBus) compaction(ctx context.Context, session string) (summary, 
 	if _, err := b.get(ctx, "/session/"+session+"/message?limit="+strconv.Itoa(compactionWindow), &page); err != nil {
 		return "", "", err
 	}
-	for i := len(page) - 1; i >= 0; i-- {
-		m := page[i]
-		if m.Info.Role != "assistant" || string(bytes.TrimSpace(m.Info.Summary)) != "true" {
+	// The newest summary by id: ids ascend, whatever order the page has.
+	at := -1
+	for i, m := range page {
+		if m.Info.Role == "assistant" && string(bytes.TrimSpace(m.Info.Summary)) == "true" && (at < 0 || m.Info.ID > page[at].Info.ID) {
+			at = i
+		}
+	}
+	if at < 0 {
+		return "", "", fmt.Errorf("no summary message among the session's newest %d", compactionWindow)
+	}
+	m := page[at]
+	var text strings.Builder
+	for _, p := range m.Parts {
+		if p.Type == "text" {
+			text.WriteString(p.Text)
+		}
+	}
+	for _, u := range page {
+		if u.Info.ID != m.Info.ParentID {
 			continue
 		}
-		var text strings.Builder
-		for _, p := range m.Parts {
-			if p.Type == "text" {
-				text.WriteString(p.Text)
-			}
-		}
-		for _, u := range page[:i] {
-			if u.Info.ID != m.Info.ParentID {
-				continue
-			}
-			for _, p := range u.Parts {
-				if p.Type == "compaction" {
-					trigger = map[bool]string{true: "auto", false: "manual"}[p.Auto]
-					if p.Overflow {
-						trigger = "overflow"
-					}
+		for _, p := range u.Parts {
+			if p.Type == "compaction" {
+				trigger = map[bool]string{true: "auto", false: "manual"}[p.Auto]
+				if p.Overflow {
+					trigger = "overflow"
 				}
 			}
 		}
-		if text.Len() == 0 {
-			return "", trigger, errors.New("its summary message has no text")
-		}
-		return text.String(), trigger, nil
 	}
-	return "", "", fmt.Errorf("no summary message among the session's newest %d", compactionWindow)
+	if text.Len() == 0 {
+		return "", trigger, errors.New("its summary message has no text")
+	}
+	return text.String(), trigger, nil
 }
 
 // messagesSince lists the session's stored messages, newest page first, back
