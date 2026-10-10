@@ -6,6 +6,11 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // backfillFixture: t1's ec2 pool "burst" (eu-north-1) with host "disk"
@@ -154,6 +159,49 @@ func TestBlockStorageLiveHostRequeuesFinalRuns(t *testing.T) {
 	}
 	if after := snapshotRow(t, s); after != before {
 		t.Errorf("compute snapshot changed:\n%s\n%s", before, after)
+	}
+}
+
+// The price loop opens a block-storage period under the host's cost-host
+// lock: a host-hour refresh that holds it and then writes the cursor
+// cannot overwrite the period's rewind.
+func TestBlockStorageRewindWaitsForCostHostLock(t *testing.T) {
+	s, _, _ := backfillFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	execSQL(t, s, ctx, `UPDATE hosts SET state = 'ready', terminated_at = NULL WHERE id = 'disk'`)
+	if err := s.storeVolumes(ctx, "disk", []HostVolume{{Type: "gp3", SizeGiB: 100, IOPS: 3000, ThroughputMiBps: 125}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO cost_host_refresh (host_id, next_hour) VALUES ('disk', $1)`, now.Add(-2*time.Hour))
+	locked, release, held := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		held <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if err := lockCostHost(ctx, tx, "disk"); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			_, err := tx.Exec(ctx, `UPDATE cost_host_refresh SET next_hour = $1 WHERE host_id = 'disk'`, now)
+			return err
+		})
+	}()
+	<-locked
+	done := make(chan struct{})
+	go func() { s.refreshBlockStorage(ctx); close(done) }()
+	if err := waitLocked(s, 1, done); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-held; err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	var next time.Time
+	systemScan(t, s, `SELECT next_hour FROM cost_host_refresh WHERE host_id = 'disk'`, nil, &next)
+	if !next.Before(now) {
+		t.Errorf("cursor %v: the rewind was overwritten", next)
 	}
 }
 
