@@ -650,7 +650,7 @@ func TestComputeHourlyPiecesAndHostIdle(t *testing.T) {
 			}
 			forEachCostHour(piece.From, piece.To, func(hour time.Time, fraction *big.Rat) {
 				for _, v := range piece.Charged {
-					hours = append(hours, computeHour{hour, "h1", "USD", new(big.Rat).Mul(v, fraction)})
+					hours = append(hours, computeHour{hour, "h1", familyCompute, "USD", new(big.Rat).Mul(v, fraction)})
 				}
 			})
 		}
@@ -696,7 +696,7 @@ func TestHourlyCostSurvivesResumeAndRetention(t *testing.T) {
 		if err := replacePluginHours(ctx, tx, "t1", "r1", "plugin", lines, s.cfg.Costs.Hourly); err != nil {
 			return err
 		}
-		return replaceComputeHours(ctx, tx, "t1", "r1", []computeHour{{Hour: old, Host: "", Currency: "USD", Amount: big.NewRat(2, 1)}}, s.cfg.Costs.Hourly)
+		return replaceComputeHours(ctx, tx, "t1", "r1", []computeHour{{Hour: old, Host: "", Family: familyCompute, Currency: "USD", Amount: big.NewRat(2, 1)}}, s.cfg.Costs.Hourly)
 	}); err != nil {
 		t.Fatal(err)
 	}

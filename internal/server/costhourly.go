@@ -13,6 +13,7 @@ import (
 type computeHour struct {
 	Hour     time.Time
 	Host     string
+	Family   string
 	Currency string
 	Amount   *big.Rat
 }
@@ -48,8 +49,8 @@ func replaceComputeHours(ctx context.Context, tx pgx.Tx, tenant, run string, hou
 		return err
 	}
 	type key struct {
-		hour           time.Time
-		host, currency string
+		hour                   time.Time
+		host, family, currency string
 	}
 	amounts := map[key]*big.Rat{}
 	cutoff := time.Now().UTC().Add(-retention)
@@ -57,7 +58,7 @@ func replaceComputeHours(ctx context.Context, tx pgx.Tx, tenant, run string, hou
 		if h.Hour.Before(cutoff) {
 			continue
 		}
-		k := key{h.Hour, h.Host, h.Currency}
+		k := key{h.Hour, h.Host, h.Family, h.Currency}
 		if amounts[k] == nil {
 			amounts[k] = new(big.Rat)
 		}
@@ -66,8 +67,8 @@ func replaceComputeHours(ctx context.Context, tx pgx.Tx, tenant, run string, hou
 	for k, v := range amounts {
 		// The aggregation key includes the host to keep host and pool groups accurate.
 		_, err := tx.Exec(ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount)
-			SELECT $1, $2, $3, 'compute', 'compute', $4, h.id, h.pool_id, $5::numeric FROM hosts h WHERE h.id = $6`,
-			k.hour, tenant, run, k.currency, moneyString(v), k.host)
+			SELECT $1, $2, $3, 'compute', $7, $4, h.id, h.pool_id, $5::numeric FROM hosts h WHERE h.id = $6`,
+			k.hour, tenant, run, k.currency, moneyString(v), k.host, k.family)
 		if err != nil {
 			return err
 		}
