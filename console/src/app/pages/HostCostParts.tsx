@@ -16,7 +16,7 @@ const ratios = (w: WhoPaid[], f: (p: WhoPaid) => number | null) => {
   return rs.length ? rs.join(" · ") : null;
 };
 
-export interface HostCostTilesProps {
+interface HostCostTilesProps {
   /** "Host cost (7d)", "Host cost (24h)". */
   since: string;
   paid: WhoPaid[];
