@@ -1,17 +1,16 @@
 // The pieces the pool and host Cost tabs share: the tiles, the host-cost
 // chart and the "who paid" card, built from hostCostView.ts's figures.
 import type { ReactNode } from "react";
-import { Card, CENTS, ColorKey, EmptyState, fadedCss, familyColor, formatMoney, ListPriceNote, Money, MoneyList, PartBar, partShares, StatTile, Table, TimeSeriesChart, type Column, type MoneyAmount } from "@lux/design-system";
+import { Card, CENTS, ColorKey, EmptyState, fadedCss, familyColor, formatMoney, ListPriceNote, meterText, Money, MoneyList, PartBar, partShares, StatTile, Table, TimeSeriesChart, type Column, type MoneyAmount } from "@lux/design-system";
 import { BLOCK_STORAGE, COMPUTE, familyLabel, perHour, ratio, type HostChart, type Paid, type WhoPaid } from "./hostCostView.ts";
 
 const COMPUTE_COLOR = familyColor(COMPUTE);
 const BS_COLOR = familyColor(BLOCK_STORAGE);
 
-const pct = (r: number | null) => (r == null ? null : `${Math.round(r * 100)}%`);
 const pick = (w: WhoPaid[], f: (p: WhoPaid) => string | null): MoneyAmount[] => w.flatMap((p) => (f(p) == null ? [] : [{ currency: p.currency, amount: f(p)! }]));
-/** A ratio per currency in words: "49%", or "USD 49% · EUR 30%" with several. */
+/** A ratio per currency in words: "49%", "<1%" for a non-zero one under 1%, or "USD 49% · EUR 30%" with several. */
 const ratios = (w: WhoPaid[], f: (p: WhoPaid) => number | null) => {
-  const rs = w.flatMap((p) => (f(p) == null ? [] : [`${w.length > 1 ? `${p.currency} ` : ""}${pct(f(p))}`]));
+  const rs = w.flatMap((p) => (f(p) == null ? [] : [`${w.length > 1 ? `${p.currency} ` : ""}${meterText(f(p))}`]));
   return rs.length ? rs.join(" · ") : null;
 };
 

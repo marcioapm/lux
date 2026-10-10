@@ -335,6 +335,19 @@ test("host Cost tab, operator: tiles with unallocated, a four-series chart and r
   }
 });
 
+test("host Cost tab: a non-zero share under 1% reads <1%, never 0%", async () => {
+  const busy: HostCost = { ...opCost, hours: [{ hour: HOUR0, family: "compute", currency: "USD", allocated: "9.99", unallocated: "0.01" }] };
+  const p = await render(ec2Host({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tab=cost", busy);
+  try {
+    await until(() => tiles(p.el).length === 5, "the five tiles");
+    const unit = (label: string) => [...p.el.querySelectorAll(".host-cost .stat")].find((s) => s.querySelector(".stat-label")?.textContent === label)!.querySelector(".stat-unit")!.textContent;
+    expect(unit("Unallocated")).toBe("<1% of host cost · no Run reserved it");
+    expect(tiles(p.el)[4]).toEqual(["Utilisation", "100%"]);
+  } finally {
+    await p.done();
+  }
+});
+
 test("host Cost tab, a tenant on its own host: its unallocated too, no rate periods", async () => {
   const { rates: _, ...own } = opCost;
   const p = await render(ec2Host(), "tenant", "http://localhost/hosts/h1?tab=cost", own);
