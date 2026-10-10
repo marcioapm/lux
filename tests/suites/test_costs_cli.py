@@ -90,7 +90,8 @@ def test_cost_cli(lux, tenant_factory, operator, runners, hosts):
     # The database is the session's: other tests' hosts may add to these.
     assert any(r["currency"] == "USD" for r in operator.json("costs", "--since", "1h")["unallocated"])
     out = operator.run("costs", "--since", "1h", "--by", "host").stdout
-    assert re.search(r"^unallocated \(hosts' cost charged to no Run\):\nFAMILY\s+UNALLOCATED\ncompute\s+[\d.<]+ USD$", out, re.M), out
+    # The database is the session's: other hosts may add other families' rows.
+    assert re.search(r"^unallocated \(hosts' cost charged to no Run\):\nFAMILY\s+UNALLOCATED\n(?:\S+\s+\S+ USD\n)*compute\s+[\d.<]+ USD$", out, re.M), out
     assert re.search(r"^HOST\s+FAMILY\s+ALLOCATED\s+UNALLOCATED$", out, re.M), out
 
     # The priced host's row shows luxd's amounts as `lux costs` rounds them.
