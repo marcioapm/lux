@@ -2,9 +2,15 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // eun1GP3 is AWS's eu-north-1 gp3 list price (Pricing API, October 2026).
@@ -64,6 +70,78 @@ func TestVolumeHourlyRefusesUnpriced(t *testing.T) {
 	}
 	if _, err := volumeHourly(HostVolume{Type: "gp3", SizeGiB: 1, IOPS: 3000}, noIOPS); err != nil {
 		t.Errorf("gp3 at the baseline needs no IOPS price: %v", err)
+	}
+}
+
+// gp3eun1Answer is the Pricing API's gp3 eu-north-1 answer as ec2.Prices
+// returns it (ten fractional digits).
+var gp3eun1Answer = BlockStoragePrice{Currency: "USD", PerGBMonth: "0.0836000000", PerIOPSMonth: "0.0052000000", PerGiBpsMonth: "42.8032000000"}
+
+// The price refresh opens one block-storage period per provider host whose
+// volumes are known: from its launch request to its end, at the sum of its
+// volumes' hourly prices, with the volumes and unit prices it used. Hosts
+// with unknown volumes, or a type that cannot be priced, get none (missing,
+// not zero); compute periods are untouched; a second refresh changes nothing.
+func TestBlockStorageRates(t *testing.T) {
+	p := &fakePriceProvider{onDemand: []fakeOnDemandAnswer{{rate: HourlyRate{PerHour: "0.10", Currency: "USD"}}},
+		blockStorage: map[string]BlockStoragePrice{"gp3": gp3eun1Answer}}
+	s := providerPriceServer(t, p)
+	ctx := context.Background()
+	from := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	insertProviderHost(t, s, "t1", "burst", "ec2", "od", MarketOnDemand, from)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, registered_at,
+			instance_type, market, zone, launch_template, capacity, volumes) VALUES
+		('unknown', 't1', 'unknown', 'pool-t1-ec2-burst', 'ready', 'i-u', $1, $1, 'm7i.large', 'on-demand', 'us-east-1a', '{"region":"us-east-1"}', '{"cpus":4}', NULL),
+		('weird', 't1', 'weird', 'pool-t1-ec2-burst', 'ready', 'i-w', $1, $1, 'm7i.large', 'on-demand', 'us-east-1a', '{"region":"us-east-1"}', '{"cpus":4}',
+			'[{"type":"floppy","sizeGiB":1}]')`, from)
+	execSQL(t, s, ctx, `UPDATE hosts SET volumes = '[{"type":"gp3","sizeGiB":100,"iops":3000,"throughputMiBps":125},{"type":"gp3","sizeGiB":50,"iops":4000,"throughputMiBps":125}]' WHERE id = 'od'`)
+
+	s.refreshPrices(ctx)
+	type rate struct {
+		Family, PerHour, Source string
+		From                    time.Time
+		Open                    bool
+		CPUs                    float64
+		Details                 *string
+	}
+	rates := func(host string) []rate {
+		var out []rate
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `SELECT family, trim_scale(per_hour)::text, source, valid_from, valid_to IS NULL, cap_cpus, details::text
+				FROM host_rates WHERE host_id = $1 ORDER BY family, valid_from`, host)
+			if err != nil {
+				return err
+			}
+			out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[rate])
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	got := rates("od")
+	// 100 GiB × 0.0836 + 50 GiB × 0.0836 + 1000 IOPS × 0.0052 = 17.74 a month; ÷ 730.
+	if len(got) != 2 || got[0].Family != "block-storage" || got[0].PerHour != "0.02430137" || !got[0].From.Equal(from) ||
+		!got[0].Open || got[0].Source != "ec2-ebs-pricing" || got[0].CPUs != 4 || got[1].Family != "compute" || got[1].PerHour != "0.1" {
+		t.Fatalf("rates: %+v", got)
+	}
+	var d struct {
+		Volumes []HostVolume
+		Prices  map[string]map[string]string
+	}
+	if err := json.Unmarshal([]byte(*got[0].Details), &d); err != nil || len(d.Volumes) != 2 || d.Prices["gp3"]["perGiBpsMonth"] != "42.8032" {
+		t.Errorf("details %s (%v)", *got[0].Details, err)
+	}
+	if r := rates("unknown"); len(r) != 1 || r[0].Family != "compute" {
+		t.Errorf("unknown volumes priced: %+v", r)
+	}
+	if r := rates("weird"); len(r) != 1 || r[0].Family != "compute" {
+		t.Errorf("unpriceable type priced: %+v", r)
+	}
+	s.refreshPrices(ctx)
+	if again := rates("od"); len(again) != 2 || again[0].PerHour != got[0].PerHour || !again[0].From.Equal(got[0].From) || *again[0].Details != *got[0].Details {
+		t.Errorf("second refresh: %+v", again)
 	}
 }
 

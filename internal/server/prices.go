@@ -56,7 +56,7 @@ func syncStaticRate(ctx context.Context, tx pgx.Tx, hostID string, registering b
 		closed AS (
 			UPDATE host_rates r SET valid_to = (SELECT at FROM at)
 			FROM hosts h
-			WHERE h.id = $1 AND r.host_id = h.id AND r.valid_to IS NULL AND r.source = 'static'
+			WHERE h.id = $1 AND r.host_id = h.id AND r.family = 'compute' AND r.valid_to IS NULL AND r.source = 'static'
 			  AND (h.hourly_price IS DISTINCT FROM r.per_hour OR h.price_currency IS DISTINCT FROM r.currency
 			       OR coalesce((h.capacity->>'cpus')::float8, 0) <> r.cap_cpus
 			       OR coalesce((h.capacity->>'memory')::int8, 0) <> r.cap_memory)
@@ -68,7 +68,7 @@ func syncStaticRate(ctx context.Context, tx pgx.Tx, hostID string, registering b
 		WHERE h.id = $1 AND h.hourly_price IS NOT NULL
 		  AND (coalesce((h.capacity->>'cpus')::float8, 0) > 0 OR coalesce((h.capacity->>'memory')::int8, 0) > 0)
 		  AND (EXISTS (SELECT 1 FROM closed)
-		       OR NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.valid_to IS NULL))`, hostID, registering)
+		       OR NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.family = 'compute' AND r.valid_to IS NULL))`, hostID, registering)
 	return err
 }
 

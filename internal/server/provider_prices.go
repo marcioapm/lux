@@ -51,7 +51,7 @@ func (s *Server) pricedHosts(ctx context.Context) ([]pricedHost, error) {
     FROM hosts h JOIN pools p ON p.id = h.pool_id
     WHERE h.provision_requested_at IS NOT NULL AND h.provider_id IS NOT NULL AND p.provider <> 'static'
       AND (h.terminated_at IS NULL OR (
-       NOT EXISTS (SELECT 1 FROM host_rates hr WHERE hr.host_id = h.id)
+       NOT EXISTS (SELECT 1 FROM host_rates hr WHERE hr.host_id = h.id AND hr.family = 'compute')
        AND EXISTS (SELECT 1 FROM placements pl
          JOIN cost_sources source ON source.run_id = pl.run_id AND source.source = 'compute' AND source.status = 'incomplete'
          LEFT JOIN cost_placement_snapshots snap ON snap.placement_id = pl.id
@@ -130,6 +130,7 @@ func (s *Server) refreshPrices(ctx context.Context) {
 		s.log.Warn("costs: list priced hosts", "err", err)
 		return
 	}
+	defer s.refreshBlockStorage(ctx)
 	type spotKey struct{ provider, zone, kind string }
 	groups := map[spotKey][]pricedHost{}
 	type demandKey struct{ provider, region, kind string }
@@ -228,7 +229,7 @@ func (s *Server) applySpotPrice(ctx context.Context, h pricedHost, price SpotRat
 		if ended != nil {
 			// Recovery uses one observed estimate only for a host with no rate history.
 			var exists bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM host_rates WHERE host_id=$1)`, h.ID).Scan(&exists); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM host_rates WHERE host_id=$1 AND family='compute')`, h.ID).Scan(&exists); err != nil {
 				return err
 			}
 			if exists {
@@ -241,7 +242,7 @@ func (s *Server) applySpotPrice(ctx context.Context, h pricedHost, price SpotRat
 				return nil
 			}
 			_, err := tx.Exec(ctx, `INSERT INTO host_rates (host_id,valid_from,valid_to,per_hour,currency,cap_cpus,cap_memory,source)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (host_id,valid_from) DO NOTHING`,
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (host_id,family,valid_from) DO NOTHING`,
 				h.ID, from, ended, price.PerHour, price.Currency, cpus, memory, h.Provider+"-spot-history")
 			return err
 		}
@@ -253,7 +254,7 @@ func (s *Server) applySpotPrice(ctx context.Context, h pricedHost, price SpotRat
 		var oldCPUs float64
 		var oldMemory int64
 		err := tx.QueryRow(ctx, `SELECT valid_from,trim_scale(per_hour)::text,currency,cap_cpus,cap_memory
-    FROM host_rates WHERE host_id=$1 AND valid_to IS NULL`, h.ID).
+    FROM host_rates WHERE host_id=$1 AND family='compute' AND valid_to IS NULL`, h.ID).
 			Scan(&oldFrom, &oldRate, &oldCurrency, &oldCPUs, &oldMemory)
 		if err != nil && err != pgx.ErrNoRows {
 			return err
@@ -266,7 +267,7 @@ func (s *Server) applySpotPrice(ctx context.Context, h pricedHost, price SpotRat
 			if !from.After(oldFrom) {
 				return nil
 			}
-			if _, err := tx.Exec(ctx, `UPDATE host_rates SET valid_to=$2 WHERE host_id=$1 AND valid_to IS NULL`, h.ID, from); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE host_rates SET valid_to=$2 WHERE host_id=$1 AND family='compute' AND valid_to IS NULL`, h.ID, from); err != nil {
 				return err
 			}
 		} else {
@@ -307,14 +308,14 @@ func (s *Server) applyCurrentPrice(ctx context.Context, h pricedHost, rate Hourl
 		}
 		if ended != nil {
 			var exists bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM host_rates WHERE host_id=$1)`, h.ID).Scan(&exists); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM host_rates WHERE host_id=$1 AND family='compute')`, h.ID).Scan(&exists); err != nil {
 				return err
 			}
 			if exists || !from.Before(*ended) {
 				return nil
 			}
 			_, err := tx.Exec(ctx, `INSERT INTO host_rates (host_id,valid_from,valid_to,per_hour,currency,cap_cpus,cap_memory,source)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (host_id,valid_from) DO NOTHING`,
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (host_id,family,valid_from) DO NOTHING`,
 				h.ID, from, ended, rate.PerHour, rate.Currency, cpus, memory, source)
 			return err
 		}
@@ -328,7 +329,7 @@ func (s *Server) applyCurrentPrice(ctx context.Context, h pricedHost, rate Hourl
 		var oldCPUs float64
 		var oldMemory int64
 		err := tx.QueryRow(ctx, `SELECT valid_from,trim_scale(per_hour)::text,currency,cap_cpus,cap_memory FROM host_rates
-    WHERE host_id=$1 AND valid_to IS NULL`, h.ID).Scan(&oldFrom, &oldRate, &oldCurrency, &oldCPUs, &oldMemory)
+    WHERE host_id=$1 AND family='compute' AND valid_to IS NULL`, h.ID).Scan(&oldFrom, &oldRate, &oldCurrency, &oldCPUs, &oldMemory)
 		if err != nil && err != pgx.ErrNoRows {
 			return err
 		}
@@ -346,7 +347,7 @@ func (s *Server) applyCurrentPrice(ctx context.Context, h pricedHost, rate Hourl
 			if !at.After(oldFrom) {
 				return nil
 			}
-			if _, err := tx.Exec(ctx, `UPDATE host_rates SET valid_to=$2 WHERE host_id=$1 AND valid_to IS NULL`, h.ID, at); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE host_rates SET valid_to=$2 WHERE host_id=$1 AND family='compute' AND valid_to IS NULL`, h.ID, at); err != nil {
 				return err
 			}
 			from = at
@@ -357,7 +358,7 @@ func (s *Server) applyCurrentPrice(ctx context.Context, h pricedHost, rate Hourl
 			return nil
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO host_rates (host_id,valid_from,valid_to,per_hour,currency,cap_cpus,cap_memory,source)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (host_id,valid_from) DO NOTHING`, h.ID, from, ended, rate.PerHour, rate.Currency, cpus, memory, source)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (host_id,family,valid_from) DO NOTHING`, h.ID, from, ended, rate.PerHour, rate.Currency, cpus, memory, source)
 		return err
 	})
 }
