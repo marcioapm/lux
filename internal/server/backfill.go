@@ -195,11 +195,7 @@ func (s *Server) BackfillVolumes(ctx context.Context, req BackfillVolumes) (Back
 					bh.Runs, skipped, err = s.backfillHost(ctx, tx, h.ID, vols, prices[h.Region], provider)
 					return err
 				}
-				rows, err := tx.Query(ctx, `SELECT DISTINCT run_id FROM placements WHERE host_id = $1 ORDER BY run_id`, h.ID)
-				if err != nil {
-					return err
-				}
-				runs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+				runs, err := hostRuns(ctx, tx, h.ID)
 				if err != nil {
 					return err
 				}
@@ -256,11 +252,7 @@ func (s *Server) backfillHost(ctx context.Context, tx pgx.Tx, hostID string, vol
 // order), then its cost-host lock (infraevents.go's order). It returns
 // those Runs.
 func lockBlockStorageHost(ctx context.Context, tx pgx.Tx, hostID string) ([]string, error) {
-	rows, err := tx.Query(ctx, `SELECT DISTINCT run_id FROM placements WHERE host_id = $1 ORDER BY run_id`, hostID)
-	if err != nil {
-		return nil, err
-	}
-	runs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	runs, err := hostRuns(ctx, tx, hostID)
 	if err != nil {
 		return nil, err
 	}
@@ -268,6 +260,15 @@ func lockBlockStorageHost(ctx context.Context, tx pgx.Tx, hostID string) ([]stri
 		return nil, err
 	}
 	return runs, lockCostHost(ctx, tx, hostID)
+}
+
+// hostRuns is the Runs ever placed on hostID, in id order.
+func hostRuns(ctx context.Context, tx pgx.Tx, hostID string) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT run_id FROM placements WHERE host_id = $1 ORDER BY run_id`, hostID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // requeueBlockStorageRuns has runs, placed on a host whose block-storage
