@@ -144,6 +144,24 @@ test("the Overview's tabs: Activity by default (tiles, trends, feed); Cost and S
   }
 });
 
+test("a failed status read shows on Activity, which it feeds, and not on Cost or Storage", async () => {
+  const failed = () => new Response(JSON.stringify({ error: { code: "internal", message: "status unavailable" } }), { status: 500, headers: { "Content-Type": "application/json" } });
+  const answer = (path: string) => (path.startsWith("/v1/status") ? failed() : undefined);
+  for (const [url, shown] of [
+    ["http://localhost/", true],
+    ["http://localhost/?tab=cost", false],
+    ["http://localhost/?tab=storage", false],
+  ] as const) {
+    const p = await render("tenant", url, answer);
+    try {
+      expect(p.fake.calls.some((u) => u.startsWith("/v1/status"))).toBe(true);
+      expect(p.el.textContent!.includes("status unavailable")).toBe(shown);
+    } finally {
+      await p.done();
+    }
+  }
+});
+
 test("the Cost panel's filters and Every reach every cost request, and Every the history's res", async () => {
   const p = await render("tenant", "http://localhost/?tab=cost&range=7d&every=hour&label=app%3Da&label=app%3Db&nolabel=phase");
   try {
