@@ -156,7 +156,7 @@ export function volumeSummary(hosts: readonly { volumes?: readonly HostVolume[] 
 }
 
 /** A row of host time per bucket (or hour): its start in epoch seconds. */
-export interface TimedHostRow {
+interface TimedHostRow {
   t: number;
   family: string;
   currency: string;
@@ -175,7 +175,7 @@ export interface HostChart {
 }
 
 /** The series of the host-cost chart: each family charged to Runs, then (when visible) unallocated faded; a family with no row draws nothing, so its legend entry is absent too. */
-export function hostChartSeries(families: readonly string[], unallocated: boolean): { family: string; part: "runs" | "unallocated"; label: string; color: string; faded?: boolean }[] {
+function hostChartSeries(families: readonly string[], unallocated: boolean): { family: string; part: "runs" | "unallocated"; label: string; color: string; faded?: boolean }[] {
   return HOST_FAMILIES.filter((f) => families.includes(f)).flatMap((family) => {
     const color = LABELS.get(family)!.color;
     const runs = { family, part: "runs" as const, label: `${familyLabel(family)} · runs`, color };

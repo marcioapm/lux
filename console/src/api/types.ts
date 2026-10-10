@@ -455,9 +455,6 @@ export interface CostSummaryParams {
   nolabel?: string[];
 }
 
-/** The host-tied cost families: what a pool's or a host's cost is made of. */
-export type HostFamily = "compute" | "block-storage";
-
 export interface HostCostHour {
   hour: string;
   /** A host-tied family: compute or block-storage (a string: a family luxd adds later still reads). */
