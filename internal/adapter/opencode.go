@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -470,6 +471,70 @@ type storedMessage struct {
 		Role     string `json:"role"`
 		ParentID string `json:"parentID"`
 	} `json:"info"`
+}
+
+// compactionMessage is what lux reads of a stored message to find a
+// compaction: the summary is an assistant message with info.summary true
+// (a user message's summary is an object), whose text parts are the
+// summary; its parent is the user message holding the compaction part
+// ({"type":"compaction","auto","overflow"?}). opencode 1.18.35.
+type compactionMessage struct {
+	Info struct {
+		ID       string          `json:"id"`
+		Role     string          `json:"role"`
+		ParentID string          `json:"parentID"`
+		Summary  json.RawMessage `json:"summary"`
+	} `json:"info"`
+	Parts []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Auto     bool   `json:"auto"`
+		Overflow bool   `json:"overflow"`
+	} `json:"parts"`
+}
+
+// compactionWindow: the newest messages read for a compaction's summary;
+// by the time session.compacted is handled the loop may have stored a few
+// more after it (an auto compaction's synthetic "continue" and its reply).
+const compactionWindow = 20
+
+// compaction reads the session's newest compaction: its summary text and
+// trigger. An error if no summary is stored among the newest messages.
+func (b *opencodeBus) compaction(ctx context.Context, session string) (summary, trigger string, err error) {
+	var page []compactionMessage
+	if _, err := b.get(ctx, "/session/"+session+"/message?limit="+strconv.Itoa(compactionWindow), &page); err != nil {
+		return "", "", err
+	}
+	for i := len(page) - 1; i >= 0; i-- {
+		m := page[i]
+		if m.Info.Role != "assistant" || string(bytes.TrimSpace(m.Info.Summary)) != "true" {
+			continue
+		}
+		var text strings.Builder
+		for _, p := range m.Parts {
+			if p.Type == "text" {
+				text.WriteString(p.Text)
+			}
+		}
+		for _, u := range page[:i] {
+			if u.Info.ID != m.Info.ParentID {
+				continue
+			}
+			for _, p := range u.Parts {
+				if p.Type == "compaction" {
+					trigger = map[bool]string{true: "auto", false: "manual"}[p.Auto]
+					if p.Overflow {
+						trigger = "overflow"
+					}
+				}
+			}
+		}
+		if text.Len() == 0 {
+			return "", trigger, errors.New("its summary message has no text")
+		}
+		return text.String(), trigger, nil
+	}
+	return "", "", fmt.Errorf("no summary message among the session's newest %d", compactionWindow)
 }
 
 // messagesSince lists the session's stored messages, newest page first, back
