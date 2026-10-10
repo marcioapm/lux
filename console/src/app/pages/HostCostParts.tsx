@@ -125,7 +125,6 @@ function FamilySplit({ family, paid, currency }: { family: string; paid: Paid; c
       </div>
       <PartBar
         label={`${label}: charged to Runs vs unallocated`}
-        height={8}
         parts={[
           { label: `${label} · runs`, value: Number(paid.runs ?? 0), color, text: formatMoney(paid.runs, currency) },
           { label: `${label} · unallocated`, value: Number(paid.unallocated ?? 0), color: fadedCss(color), text: formatMoney(paid.unallocated, currency) },
