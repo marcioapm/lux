@@ -27,7 +27,7 @@ export interface MeterProps {
 export function Meter({ value, color = "var(--chart-1)", decimals = 0 }: MeterProps) {
   const fill = meterFill(value);
   return (
-    <span className="meter" data-meter={fill == null ? "none" : String(fill)}>
+    <span className="meter">
       <span className="meter-track" aria-hidden="true">
         {fill != null && fill > 0 && <span className="meter-fill" style={{ width: `${fill * 100}%`, background: color }} />}
       </span>
