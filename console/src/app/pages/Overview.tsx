@@ -82,8 +82,8 @@ export function Overview() {
             <StatTile label="Running" onClick={() => go("/runs?state=running")} loading={loading} value={formatCount(runs.running ?? 0)} unit={st ? `${st.busy} busy · ${st.idle} idle` : undefined} />
             <StatTile label="Queued" onClick={() => go(`/runs?state=${QUEUED.join(",")}`)} loading={loading} value={formatCount(st?.queued ?? 0)} unit={st?.oldestQueuedAt ? `oldest ${formatElapsed(st.oldestQueuedAt, now)}` : undefined} tone={(st?.queued ?? 0) > 0 && st?.oldestQueuedAt && now - Date.parse(st.oldestQueuedAt) > 300_000 ? "warn" : "default"} />
             <StatTile label="Start latency (1h)" loading={loading} value={formatDuration(st?.startLatency.p50)} unit={st?.startLatency.n ? `p95 ${formatDuration(st.startLatency.p95)} · n=${st.startLatency.n}` : "no starts"} />
-            {/* Lost hosts ride on this tile, not their own: the row stays six tiles during an incident. */}
-            <StatTile label="Hosts ready" onClick={() => go(lostHosts > 0 ? "/hosts?state=lost" : "/hosts")} loading={loading} value={formatCount(hosts.ready ?? 0)} unit={`${hosts.draining ?? 0} draining · ${lostHosts} lost`} tone={lostHosts > 0 ? "danger" : "default"} />
+            {/* Lost hosts ride on this tile, not their own: the row stays six tiles during an incident. Only the lost figure is red; tone would colour the ready count. */}
+            <StatTile label="Hosts ready" onClick={() => go(lostHosts > 0 ? "/hosts?state=lost" : "/hosts")} loading={loading} value={formatCount(hosts.ready ?? 0)} unit={<>{hosts.draining ?? 0} draining · <span className={lostHosts > 0 ? "text-danger" : undefined}>{lostHosts} lost</span></>} />
             <StatTile label="CPU allocated" loading={loading} value={formatCores(st?.allocated.cpus)} unit={`of ${formatCores(st?.capacity.cpus)}`} />
             <StatTile label="Memory allocated" loading={loading} value={formatBytes(st?.allocated.memory)} unit={`of ${formatBytes(st?.capacity.memory)}`} />
           </div>
