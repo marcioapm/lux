@@ -178,7 +178,8 @@ export function HostPage({ id }: { id: string }) {
         </>
       )}
 
-      {tab === "cost" && <HostCost host={h} range={scope.range} operator={scope.operator} />}
+      {/* An operator narrowed to a tenant reads as that tenant (luxd answers so): no unallocated of a platform host, no rate periods. */}
+      {tab === "cost" && <HostCost host={h} range={scope.range} operator={scope.operator && !scope.apiTenant} />}
 
       {tab === "runs" && (
         <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
