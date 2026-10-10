@@ -99,7 +99,7 @@ import {
   type TimeRange,
 } from "../src/index.ts";
 import { IconDots, IconInfo, IconMinus, IconMoon, IconPencil, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconStar, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
-import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeKeyBreakdown, fakeLabelValues, fakeRunLabels, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeStoredSeries, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
+import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeKeyBreakdown, fakeLabelValues, fakeRunLabels, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakePoolDaily, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeStoredSeries, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
   return (
@@ -465,6 +465,7 @@ const RUN_COST_COLS: Column<RunCostRow>[] = [
 
 function Costs() {
   const c = useMemo(() => fakeCostSeries(), []);
+  const daily = useMemo(() => fakePoolDaily(), []);
   const refund = useMemo(() => [c.compute, refundHour(c.ai)], [c]);
   const byCurrency = useMemo(() => {
     const m = new Map<string, string[]>();
@@ -543,6 +544,23 @@ function Costs() {
           <TimeSeriesChart x={c.x} ys={refund} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }]} unit="money" currency="USD" stacked bars />
         </Card>
       </div>
+      <Card title="Host cost per day" subtitle="faded series: compute and block storage, each split into what runs reserved and a lighter shade of the same family for what they did not; the same shade in legend and tooltip">
+        <TimeSeriesChart
+          x={daily.x}
+          ys={[daily.computeRuns, daily.computeIdle, daily.storageRuns, daily.storageIdle]}
+          series={[
+            { label: "Compute · runs", color: familyColor("compute") },
+            { label: "Compute · unallocated", color: familyColor("compute"), faded: true },
+            { label: "Block storage · runs", color: "var(--chart-3)" },
+            { label: "Block storage · unallocated", color: "var(--chart-3)", faded: true },
+          ]}
+          unit="money"
+          currency="USD"
+          stacked
+          bars
+          legendNote="each bar is one day"
+        />
+      </Card>
       <p className="sg-note">
         familySlot: {FAMILIES.map((f) => `${f.family}${f.color ? ` (${f.color})` : ""} → ${familySlot(f.family, f.color)}`).join(" · ")}. Named hints map to a slot (blue hints avoid slot 1, which is compute&apos;s), <Code>#rrggbb</Code> to the nearest hue, no hint to a slot from the family&apos;s name. A family's slot never depends on its companions: egress and video share slot 4 above, an accepted collision.
       </p>
