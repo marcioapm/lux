@@ -131,7 +131,6 @@ func (s *Server) refreshPrices(ctx context.Context) {
 		s.log.Warn("costs: list priced hosts", "err", err)
 		return
 	}
-	defer s.refreshBlockStorage(ctx)
 	type spotKey struct{ provider, zone, kind string }
 	groups := map[spotKey][]pricedHost{}
 	type demandKey struct{ provider, region, kind string }
