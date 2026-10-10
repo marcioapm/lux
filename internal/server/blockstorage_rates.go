@@ -175,7 +175,7 @@ func openBlockStorageRate(ctx context.Context, tx pgx.Tx, hostID string, prices 
 	for _, v := range *volumes {
 		used[v.Type] = prices[v.Type]
 	}
-	details := map[string]any{"volumes": *volumes, "prices": blockStoragePriceDetails(used), "hoursPerMonth": hoursPerMonth}
+	details := map[string]any{"volumes": *volumes, "prices": used, "hoursPerMonth": hoursPerMonth}
 	if _, err := tx.Exec(ctx, `INSERT INTO host_rates (host_id, family, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source, details)
 		VALUES ($1, 'block-storage', $2, $3, $4, $5, $6, $7, $8, $9)`,
 		hostID, from, to, moneyString(hourly), currency, cpus, memory, source, details); err != nil {
@@ -191,19 +191,4 @@ func rewindHostHours(ctx context.Context, tx pgx.Tx, hostID string, from time.Ti
 	start := maxTime(from.UTC().Truncate(time.Hour), oldest)
 	_, err := tx.Exec(ctx, `UPDATE cost_host_refresh SET next_hour = least(next_hour, $2), retry_at = NULL WHERE host_id = $1`, hostID, start)
 	return err
-}
-
-type blockStoragePriceDetail struct {
-	Currency      string `json:"currency"`
-	PerGBMonth    string `json:"perGBMonth"`
-	PerIOPSMonth  string `json:"perIOPSMonth,omitempty"`
-	PerGiBpsMonth string `json:"perGiBpsMonth,omitempty"`
-}
-
-func blockStoragePriceDetails(prices map[string]BlockStoragePrice) map[string]blockStoragePriceDetail {
-	out := map[string]blockStoragePriceDetail{}
-	for k, p := range prices {
-		out[k] = blockStoragePriceDetail{p.Currency, p.PerGBMonth, p.PerIOPSMonth, p.PerGiBpsMonth}
-	}
-	return out
 }
