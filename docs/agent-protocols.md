@@ -365,9 +365,11 @@ OpenCode-specific behavior.
   A user message's `summary` is an object; only the compaction's assistant message has
   `summary: true`. `auto` is `true` for an automatic compaction, with `overflow: true`
   when it interrupted a step that did not finish (`SessionCompaction.create` in the
-  binary). lux reads the newest 20 messages on `session.compacted`, takes the newest
-  `summary: true` assistant message's text parts and the trigger from its parent's
-  compaction part, and reports `lux.compacted`. Sample:
+  binary). lux reads the newest 20 messages on `session.compacted`, takes the oldest
+  `summary: true` assistant message newer than the one it last reported (so two
+  compactions close together each get their own; none newer is a repeated
+  `session.compacted`, reported with a warning and no record), its text parts and the
+  trigger from its parent's compaction part, and reports `lux.compacted`. Sample:
   `internal/adapter/testdata/opencode-1.18.35-compaction.json`.
 - `session/cancel` while a turn is genuinely in-progress was not cleanly isolated in
   testing (timing meant both test prompts had completed before cancel was sent) — its

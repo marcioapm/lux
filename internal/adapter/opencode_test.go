@@ -1632,6 +1632,67 @@ func TestOpenCodeCompactionSummaryTimesOut(t *testing.T) {
 	}
 }
 
+// ocSecondCompaction is ocCompactionMessages as a later compaction would
+// store it: ids above the first's, MARIGOLD for PERIWINKLE.
+func ocSecondCompaction(t *testing.T) []any {
+	t.Helper()
+	b, _ := json.Marshal(ocCompactionMessages(t))
+	s := strings.ReplaceAll(strings.ReplaceAll(string(b), "msg_1267a87", "msg_1267a9"), "PERIWINKLE", "MARIGOLD")
+	var msgs []any
+	if err := json.Unmarshal([]byte(s), &msgs); err != nil {
+		t.Fatal(err)
+	}
+	return msgs
+}
+
+// ocUserAfter is a user message stored after both compactions, as an auto
+// compaction's synthetic "continue": its summary is an object.
+const ocUserAfter = `{"info":{"id":"msg_zzz","role":"user","summary":{"diffs":[]}},"parts":[{"type":"text","text":"continue"}]}`
+
+// Each compaction's record carries its own summary: the oldest summary
+// newer than the one last reported, whatever order the page lists them in
+// (the second pair is listed first here) and whatever user messages come
+// after. A session.compacted whose summary was reported already adds no
+// record.
+func TestOpenCodeEachCompactionTakesItsOwnSummary(t *testing.T) {
+	var after any
+	_ = json.Unmarshal([]byte(ocUserAfter), &after)
+	compacted := `{"type":"session.compacted","properties":{"sessionID":"` + ocSession + `"}}`
+	for _, tc := range []struct {
+		name string
+		// together: both compactions are stored before the first
+		// session.compacted is handled.
+		together bool
+	}{{"one after the other", false}, {"back to back", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b, w, log, first := ocWithBusOn2(t)
+			both := append(append(ocSecondCompaction(t), ocCompactionMessages(t)...), after)
+			if tc.together {
+				b.mu.Lock()
+				b.whole = both
+				b.mu.Unlock()
+			}
+			onBus(t, a, compacted)
+			waitCompactions(t, log, 1)
+			b.mu.Lock()
+			b.whole = both
+			b.mu.Unlock()
+			onBus(t, a, compacted)
+			waitCompactions(t, log, 2)
+			// The same compaction announced again.
+			onBus(t, a, compacted)
+			log.wait(t, "warning opencode: session "+ocSession+" was compacted again, with no summary newer than the one already reported")
+			w.resolve(first, ocResult)
+			w.exit()
+			got := log.compactions()
+			if len(got) != 2 || !strings.Contains(got[0], "PERIWINKLE") || strings.Contains(got[0], "MARIGOLD") ||
+				!strings.Contains(got[1], "MARIGOLD") || strings.Contains(got[1], "PERIWINKLE") {
+				t.Fatalf("got %q", got)
+			}
+		})
+	}
+}
+
 // warnSink is an inputSink that also logs each lux.warning.
 type warnSink struct{ *inputSink }
 

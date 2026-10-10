@@ -144,6 +144,10 @@ type ACP struct {
 	statusGot  func(error)
 	// compactionTimeout bounds reading a compaction's summary.
 	compactionTimeout time.Duration
+	// compactionMu runs one compaction's summary read at a time, so each
+	// sees the summary the one before it reported (lastSummary, under mu).
+	compactionMu sync.Mutex
+	lastSummary  string
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -1077,12 +1081,28 @@ func (a *ACP) onBus(ev busEvent) {
 // compacted reports a compaction of the session as lux.compacted, with the
 // summary read from OpenCode's stored messages (session.compacted carries
 // none), off the bus goroutine and within compactionTimeout. Unread, the
-// record goes without it, and a warning says why.
+// record goes without it, and a warning says why. A session.compacted
+// whose summary was already reported is a duplicate: no record.
 func (a *ACP) compacted(session string) {
 	a.spawn(func() {
+		a.compactionMu.Lock()
+		defer a.compactionMu.Unlock()
+		a.mu.Lock()
+		after := a.lastSummary
+		a.mu.Unlock()
 		ctx, cancel := context.WithTimeout(a.runCtx(), a.compactionTimeout)
 		defer cancel()
-		summary, trigger, err := a.bus.compaction(ctx, session)
+		summary, trigger, id, err := a.bus.compaction(ctx, session, after)
+		if errors.Is(err, errCompactionReported) {
+			a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+				"opencode: session %s was compacted again, with %s", session, err)})
+			return
+		}
+		if id != "" {
+			a.mu.Lock()
+			a.lastSummary = id
+			a.mu.Unlock()
+		}
 		a.sink.Compacted(proto.Compaction{SessionID: session, Trigger: trigger, Summary: summary})
 		if err != nil {
 			a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(

@@ -498,22 +498,36 @@ type compactionMessage struct {
 // more after it (an auto compaction's synthetic "continue" and its reply).
 const compactionWindow = 20
 
-// compaction reads the session's newest compaction: its summary text and
-// trigger. An error if no summary is stored among the newest messages.
-func (b *opencodeBus) compaction(ctx context.Context, session string) (summary, trigger string, err error) {
+// errCompactionReported: the session's newest summary is one already
+// reported; session.compacted came again for the same compaction.
+var errCompactionReported = errors.New("no summary newer than the one already reported")
+
+// compaction reads a compaction of the session: the oldest summary message
+// with an id above after (the summary last reported; ids ascend, whatever
+// order the page has), its text and its trigger, and the summary's id. So
+// two compactions close together each get their own summary.
+// errCompactionReported if the page holds summaries, none newer than after.
+func (b *opencodeBus) compaction(ctx context.Context, session, after string) (summary, trigger, id string, err error) {
 	var page []compactionMessage
 	if _, err := b.get(ctx, "/session/"+session+"/message?limit="+strconv.Itoa(compactionWindow), &page); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	// The newest summary by id: ids ascend, whatever order the page has.
-	at := -1
+	at, older := -1, false
 	for i, m := range page {
-		if m.Info.Role == "assistant" && string(bytes.TrimSpace(m.Info.Summary)) == "true" && (at < 0 || m.Info.ID > page[at].Info.ID) {
+		if m.Info.Role != "assistant" || string(bytes.TrimSpace(m.Info.Summary)) != "true" {
+			continue
+		}
+		if m.Info.ID <= after {
+			older = true
+		} else if at < 0 || m.Info.ID < page[at].Info.ID {
 			at = i
 		}
 	}
-	if at < 0 {
-		return "", "", fmt.Errorf("no summary message among the session's newest %d", compactionWindow)
+	switch {
+	case at < 0 && older:
+		return "", "", "", errCompactionReported
+	case at < 0:
+		return "", "", "", fmt.Errorf("no summary message among the session's newest %d", compactionWindow)
 	}
 	m := page[at]
 	var text strings.Builder
@@ -536,9 +550,9 @@ func (b *opencodeBus) compaction(ctx context.Context, session string) (summary, 
 		}
 	}
 	if text.Len() == 0 {
-		return "", trigger, errors.New("its summary message has no text")
+		return "", trigger, m.Info.ID, errors.New("its summary message has no text")
 	}
-	return text.String(), trigger, nil
+	return text.String(), trigger, m.Info.ID, nil
 }
 
 // messagesSince lists the session's stored messages, newest page first, back
