@@ -1,5 +1,6 @@
-"""Pill tabs on the Host page: a click switches what the page shows and
-writes ?tab=; a ?tab= link opens on that tab; the first tab has no ?tab=."""
+"""Pill tabs on the Host page and the Overview: a click switches what the
+page shows and writes ?tab=; a ?tab= link opens on that tab; the first tab
+has no ?tab= at all."""
 
 from __future__ import annotations
 
@@ -64,4 +65,32 @@ def test_host_tabs_switch_content_and_deep_link(page, mock_console):
     assert _tab_param(page) == "cost"
     page.get_by_role("tab", name="Overview").click()
     _card(page, "Details").wait_for()
+    assert _tab_param(page) is None
+
+
+def test_overview_tabs_switch_content_and_deep_link(page, mock_console):
+    page.goto(f"{mock_console}/")
+    page.wait_for_selector(".stat")
+    assert _selected(page) == "Activity" and _tab_param(page) is None
+    assert page.locator(".stat-label", has_text="Running").count() == 1
+    assert "Runs" in _cards(page) and "Stored" not in _cards(page)
+    assert page.locator(".cost-panel").count() == 0
+
+    page.get_by_role("tab", name="Storage").click()
+    _card(page, "Stored").wait_for()
+    assert _tab_param(page) == "storage"
+    assert page.locator(".stat").count() == 0
+    assert _cards(page) == ["Stored"]
+
+    page.get_by_role("tab", name="Cost").click()
+    page.locator(".cost-panel").wait_for()
+    assert _tab_param(page) == "cost"
+    assert "Stored" not in _cards(page)
+
+    page.goto(f"{mock_console}/?tab=storage")
+    _card(page, "Stored").wait_for()
+    assert _selected(page) == "Storage"
+    assert page.locator(".cost-panel").count() == 0
+    page.get_by_role("tab", name="Activity").click()
+    page.locator(".stat").first.wait_for()
     assert _tab_param(page) is None
