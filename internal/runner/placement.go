@@ -1523,8 +1523,12 @@ func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDon
 	sd := &proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: snapID, RunID: p.runID, Epoch: p.epoch, Volumes: []proto.VolumeSnapshot{}}}
 	sd.Manifest.SessionID = p.sessionID()
 	exportVolumes := p.assign == nil || !spec.RefusesResume(p.assign.Spec.ResumePolicy)
-	for _, v := range p.state.Volumes {
-		if v.Kind != "state" || !exportVolumes {
+	vols := p.state.Volumes
+	if !exportVolumes {
+		vols = nil
+	}
+	for _, v := range vols {
+		if v.Kind != "state" {
 			continue
 		}
 		blobID := ids.New(ids.Blob)
