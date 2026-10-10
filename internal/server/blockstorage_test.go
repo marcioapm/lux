@@ -145,6 +145,63 @@ func TestBlockStorageRates(t *testing.T) {
 	}
 }
 
+// The worked example's host with its 100 GiB gp3 root disk (eu-north-1 list
+// price, 0.011452055/h after rounding to the period's 9 digits): placements
+// pay the same share of the disk as of the machine, scaled by 1/max(1, S),
+// and in every piece allocated + unallocated is exactly the disk's cost.
+func TestComputeCostBlockStorage(t *testing.T) {
+	hourly, _ := volumeHourly(HostVolume{Type: "gp3", SizeGiB: 100, IOPS: 3000, ThroughputMiBps: 125}, eun1GP3)
+	disk := usdRate("10:00", "", moneyString(hourly))
+	disk.Source = "ec2-ebs-pricing"
+	quarter := new(big.Rat).Quo(mustRat(disk.PerHour), big.NewRat(4, 1)) // one 15-minute piece
+	for _, c := range []struct {
+		name       string
+		placements []placementWindow
+		// Each Run's share of the disk-hour (sum of its pieces' share/max(1,S)
+		// × 1/4), and the unallocated share.
+		share   map[string]*big.Rat
+		unalloc *big.Rat
+	}{{
+		name:       "worked example",
+		placements: workedExample,
+		// A 0.25+0.25, B 0.5×3, C 0.5 (quarters); unallocated 0.75+0.25+0+0.5.
+		share:   map[string]*big.Rat{"A": big.NewRat(2, 16), "B": big.NewRat(6, 16), "C": big.NewRat(2, 16)},
+		unalloc: big.NewRat(6, 16),
+	}, {
+		name:       "S > 1",
+		placements: append(append([]placementWindow{}, workedExample...), place("D", 2, 4, "10:30", "10:45")),
+		// 10:30–10:45: B, C, D pay 0.5/1.25, 0.5/1.25, 0.25/1.25 of the quarter.
+		share: map[string]*big.Rat{"A": big.NewRat(2, 16), "B": new(big.Rat).Add(big.NewRat(4, 16), big.NewRat(1, 10)),
+			"C": big.NewRat(1, 10), "D": big.NewRat(1, 20)},
+		unalloc: big.NewRat(6, 16),
+	}} {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := computeCost(hostCompute{From: at("10:00"), To: atp("11:00"), Rates: []ratePeriod{disk}, Placements: c.placements})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, p := range c.placements {
+				want := new(big.Rat).Mul(mustRat(disk.PerHour), c.share[p.RunID])
+				if got := res.Placements[i].Amounts["USD"]; got == nil || got.Cmp(want) != 0 {
+					t.Errorf("%s: %v, want %s", p.RunID, got, want.FloatString(12))
+				}
+			}
+			if want := new(big.Rat).Mul(mustRat(disk.PerHour), c.unalloc); res.Unallocated["USD"].Cmp(want) != 0 {
+				t.Errorf("unallocated %s, want %s", res.Unallocated["USD"].FloatString(12), want.FloatString(12))
+			}
+			for _, piece := range res.Pieces {
+				sum := new(big.Rat).Set(piece.Unallocated)
+				for _, v := range piece.Charged {
+					sum.Add(sum, v)
+				}
+				if sum.Cmp(piece.Host) != 0 || piece.Host.Cmp(quarter) != 0 {
+					t.Errorf("piece %s: allocated + unallocated %s, disk %s", piece.From.Format("15:04"), sum.FloatString(12), piece.Host.FloatString(12))
+				}
+			}
+		})
+	}
+}
+
 // Unit prices are fetched once per (region, type) and cached in price_cache
 // for costs.prices_refresh; a failed refresh keeps the stale cache; with
 // nothing cached a failure is an error.

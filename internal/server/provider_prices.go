@@ -54,7 +54,7 @@ func (s *Server) pricedHosts(ctx context.Context) ([]pricedHost, error) {
        NOT EXISTS (SELECT 1 FROM host_rates hr WHERE hr.host_id = h.id AND hr.family = 'compute')
        AND EXISTS (SELECT 1 FROM placements pl
          JOIN cost_sources source ON source.run_id = pl.run_id AND source.source = 'compute' AND source.status = 'incomplete'
-         LEFT JOIN cost_placement_snapshots snap ON snap.placement_id = pl.id
+         LEFT JOIN cost_placement_snapshots snap ON snap.placement_id = pl.id AND snap.family = 'compute'
          WHERE pl.host_id = h.id AND pl.ended_at IS NOT NULL
            AND (snap.placement_id IS NULL OR snap.amount IS NULL))))
     ORDER BY h.id`)

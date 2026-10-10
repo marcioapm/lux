@@ -81,6 +81,8 @@ func providerPriceServer(t *testing.T, p PriceProvider) *Server {
 	return s
 }
 
+// insertProviderHost adds a launched host whose volumes are known to be
+// none ([]): its cost is compute alone.
 func insertProviderHost(t *testing.T, s *Server, tenant, pool, provider, id, market string, from time.Time) {
 	t.Helper()
 	ctx := context.Background()
@@ -88,9 +90,9 @@ func insertProviderHost(t *testing.T, s *Server, tenant, pool, provider, id, mar
 		VALUES ($1, $2, $3, $4)`, "pool-"+tenant+"-"+provider+"-"+pool, tenant, pool, provider)
 	execSQL(t, s, ctx, `INSERT INTO hosts
 		(id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, registered_at,
-		 instance_type, market, zone, launch_template, capacity)
+		 instance_type, market, zone, launch_template, capacity, volumes)
 		VALUES ($1, $2, $1, $3, 'ready', 'i-' || $1::text, $4, $4, 'm7i.large', $5, 'us-east-1a',
-		        '{"region":"us-east-1"}', jsonb_build_object('cpus', 4, 'memory', $6::int8))`,
+		        '{"region":"us-east-1"}', jsonb_build_object('cpus', 4, 'memory', $6::int8), '[]')`,
 		id, tenant, "pool-"+tenant+"-"+provider+"-"+pool, from, market, int64(16)<<30)
 }
 

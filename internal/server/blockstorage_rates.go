@@ -31,7 +31,8 @@ func (s *Server) blockStorageHosts(ctx context.Context) ([]bsHost, error) {
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT h.id, p.provider, coalesce(h.launch_template->>'region', ''), h.volumes
 			FROM hosts h JOIN pools p ON p.id = h.pool_id
-			WHERE h.volumes IS NOT NULL AND h.provision_requested_at IS NOT NULL AND p.provider <> 'static'
+			WHERE h.volumes IS NOT NULL AND jsonb_array_length(h.volumes) > 0
+				AND h.provision_requested_at IS NOT NULL AND p.provider <> 'static'
 				AND NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.family = 'block-storage')
 			ORDER BY h.id`)
 		if err != nil {
@@ -89,7 +90,7 @@ func (s *Server) refreshBlockStorage(ctx context.Context) {
 }
 
 // blockStorageHourly is volumes' summed hourly price, exact, in their one
-// currency. An empty list costs zero: the host has no volume deleted with it.
+// currency.
 func blockStorageHourly(volumes []HostVolume, prices map[string]BlockStoragePrice) (*big.Rat, string, error) {
 	total := new(big.Rat)
 	currency := ""
@@ -131,7 +132,7 @@ func openBlockStorageRate(ctx context.Context, tx pgx.Tx, hostID string, prices 
 			ORDER BY r.valid_from DESC LIMIT 1) c ON true
 		WHERE h.id = $1 AND h.provision_requested_at IS NOT NULL FOR UPDATE OF h`, hostID).
 		Scan(&volumes, &from, &to, &cpus, &memory)
-	if err == pgx.ErrNoRows || (err == nil && (volumes == nil || (cpus <= 0 && memory <= 0))) {
+	if err == pgx.ErrNoRows || (err == nil && (volumes == nil || len(*volumes) == 0 || (cpus <= 0 && memory <= 0))) {
 		return false, nil
 	}
 	if err != nil {
@@ -147,9 +148,6 @@ func openBlockStorageRate(ctx context.Context, tx pgx.Tx, hostID string, prices 
 	hourly, currency, err := blockStorageHourly(*volumes, prices)
 	if err != nil {
 		return false, err
-	}
-	if currency == "" {
-		currency = "USD" // no volume: a zero rate, in the provider's currency
 	}
 	used := map[string]BlockStoragePrice{}
 	for _, v := range *volumes {
