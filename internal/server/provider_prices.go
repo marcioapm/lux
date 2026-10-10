@@ -27,11 +27,12 @@ type PriceProvider interface {
 // IOPS-month and provisioned throughput per GiB/s-month (the Pricing API's
 // unit; one MiB/s is 1/1024 of it). Empty: the provider does not charge
 // that dimension for the type. ebsBilling says which part of each is billed.
+// The JSON form is a block-storage period's details.prices entry.
 type BlockStoragePrice struct {
-	Currency      string
-	PerGBMonth    string
-	PerIOPSMonth  string
-	PerGiBpsMonth string
+	Currency      string `json:"currency"`
+	PerGBMonth    string `json:"perGBMonth"`
+	PerIOPSMonth  string `json:"perIOPSMonth,omitempty"`
+	PerGiBpsMonth string `json:"perGiBpsMonth,omitempty"`
 }
 
 const DefaultPricesRefresh = 24 * time.Hour
