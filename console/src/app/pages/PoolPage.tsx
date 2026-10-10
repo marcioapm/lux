@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Badge, Callout, Card, compareMoney, EmptyState, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, Meter, Money, MoneyList, PageHeader, rangeText, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
+import { Badge, Callout, Card, CENTS, compareMoney, EmptyState, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, Meter, Money, MoneyList, PageHeader, rangeText, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
 import { api, type Pool, type PoolCost, type PoolMetrics, type PoolOwner } from "../../api/index.ts";
 import { costInterval, costRange, historyRes, stepNote, stepOfRes } from "../every.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
@@ -146,15 +146,15 @@ function PoolTiles({ pool, metrics, loading }: { pool: Pool; metrics?: PoolMetri
  */
 function PoolCostTile({ since, cost, loading }: { since: string; cost?: PoolCost; loading: boolean }) {
   const visible = cost?.idle != null;
-  if (!visible) return <StatTile label={`Cost (${since})`} loading={loading} value={<MoneyList amounts={cost?.totals} />} unit={cost ? <>list price · charged to your Runs</> : "list price"} />;
+  if (!visible) return <StatTile label={`Cost (${since})`} loading={loading} value={<MoneyList amounts={cost?.totals} decimals={CENTS} />} unit={cost ? <>list price · charged to your Runs</> : "list price"} />;
   const host = sumPerCurrency((cost.hostSeries ?? []).flatMap((r) => [{ currency: r.currency, amount: r.allocated }, { currency: r.currency, amount: r.unallocated }]));
   const idle = sumPerCurrency(cost.idle);
   return (
     <StatTile
       label={`Host cost (${since})`}
       loading={loading}
-      value={<MoneyList amounts={host} />}
-      unit={idle.length ? <>list price · <MoneyList amounts={idle} /> unallocated</> : "list price"}
+      value={<MoneyList amounts={host} decimals={CENTS} />}
+      unit={idle.length ? <>list price · <MoneyList amounts={idle} decimals={CENTS} /> unallocated</> : "list price"}
     />
   );
 }

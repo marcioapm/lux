@@ -222,7 +222,7 @@ function VolumesValue({ host: h }: { host: Host }) {
     <span className="stack stack-tight" data-host-volumes>
       {h.volumes.map((v, i) => (
         <span key={i} className="row">
-          <span className="mono">{volumeText([v], true)}</span>
+          <span>{volumeText([v], true)}</span>
           {v.assumed && (
             <Tooltip content="Supplied by an operator for a host launched before luxd recorded volumes (luxd admin costs backfill-volumes), not read from the provider.">
               <Badge tone="warn">assumed</Badge>
