@@ -4,6 +4,7 @@
 // per currency and never across currencies; numbers are for geometry only.
 import { familyDisplay, sumMoney } from "@lux/design-system";
 import type { CostLine, CostPlacement, HostVolume, MoneyTotal } from "../../api/index.ts";
+import { push, ratio } from "./costView.ts";
 
 export const COMPUTE = "compute";
 export const BLOCK_STORAGE = "block-storage";
@@ -20,11 +21,7 @@ function sum(amounts: string[]): string | null {
 
 function byCurrency<T extends { currency: string }>(rows: readonly T[]): Map<string, T[]> {
   const m = new Map<string, T[]>();
-  for (const r of rows) {
-    const group = m.get(r.currency);
-    if (group) group.push(r);
-    else m.set(r.currency, [r]);
-  }
+  for (const r of rows) push(m, r.currency, r);
   return new Map([...m].sort(([a], [b]) => a.localeCompare(b)));
 }
 
@@ -34,13 +31,6 @@ export function sumPerCurrency(rows: readonly { currency: string; amount: string
     const amount = sum(rs.map((r) => r.amount));
     return amount == null ? [] : [{ currency, amount }];
   });
-}
-
-/** A ratio of two amounts of one currency, for a share or a meter; display only. */
-export function ratio(part: string | null | undefined, whole: string | null | undefined): number | null {
-  const p = Number(part);
-  const w = Number(whole);
-  return part == null || whole == null || !Number.isFinite(p) || !Number.isFinite(w) || w === 0 ? null : p / w;
 }
 
 /** Host time of one family: what Runs reserved, what nobody did, and both. */
@@ -108,11 +98,7 @@ type HostRow = HostTimeRow & { hostId?: string; hostName?: string; hours?: numbe
 export function hostCostRows(rows: readonly HostRow[] | null | undefined): HostCostRow[] {
   const groups = new Map<string, HostRow[]>();
   for (const r of rows ?? []) {
-    if (!r.hostId) continue;
-    const k = `${r.hostId}\u0000${r.currency}`;
-    const group = groups.get(k);
-    if (group) group.push(r);
-    else groups.set(k, [r]);
+    if (r.hostId) push(groups, `${r.hostId}\u0000${r.currency}`, r);
   }
   return [...groups.values()].map((rs) => {
     const p = paid(rs);
