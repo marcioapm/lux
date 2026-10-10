@@ -42,7 +42,8 @@ arrive, a few seconds late.
    message; the running luxd is untouched.
 2. Run `luxd migrate` with the owner's DSN. It applies what is new and is
    safe to run again; running luxds keep working meanwhile, except while a
-   migration builds an index. 045 and 046 index the pool and host events
+   migration builds an index, and except in a release whose note below
+   says otherwise (056; 062–064). 045 and 046 index the pool and host events
    tables in their migration's transaction: until each commits, anything
    luxd does that records an event (heartbeats, registration, placements,
    drains) waits — about 3–4 s per million events for the two together.
@@ -61,13 +62,32 @@ arrive, a few seconds late.
    With several luxds sharing the database, stop every one before 056
    runs and start them again on the new binary (step 3) once it has
    committed, so that no request reaches an older luxd.
+   For a release with 062–066 (block storage as its own cost family),
+   grant the EC2 role `ec2:DescribeVolumes` **before** deploying it
+   ([EC2 pools](#ec2-pools)): until a host's volumes are known, every Run
+   on an EC2 host stays `incomplete` and is retried hourly; hosts that
+   terminate before the grant need `luxd admin costs backfill-volumes`
+   ([below](#block-storage-of-hosts-launched-before-luxd-recorded-volumes)).
+   062–064 each take an ACCESS EXCLUSIVE lock in their transaction: 062 on
+   `host_rates`, 063 on `cost_placement_snapshots`, 064 on `cost_hourly`,
+   which revalidates its CHECK and rebuilds `cost_hourly_host` in about
+   3.2 s per 4.4 million `cost_hourly` rows; 062 and 063 are sub-second at
+   ordinary sizes. Until each commits, cost writes and cost reads
+   (dashboards) wait. 066 builds `cost_hourly_host_pool_hour` the same
+   way (about 3 s per 5 million rows), holding back cost writes only.
+   Running luxds do **not** keep working through this release: once 062
+   and 063 commit, an older luxd's cost writes (the cost drainer and the
+   price refresh) fail with "no unique or exclusion constraint matching the
+   ON CONFLICT specification" until it is restarted on the new binary.
+   No data is lost: the cost queue and the price refresh retry them. So
+   migrate and then restart (or roll) every luxd promptly.
 3. Restart (or roll) every `luxd serve` onto the new binary; for a release
    with 056 and several luxds, start every one of them, all stopped in
    step 2: do not roll.
 
 Migrate first: a luxd newer than its schema does not check it, and fails
 requests that touch what is missing (luxds older than the schema keep
-working). Configuration through the environment alone keeps working: a
+working, except across the releases with 056 and with 062–064 above). Configuration through the environment alone keeps working: a
 configuration file is optional.
 
 Each Linux release tarball has a `FEATURES` file at its root, one feature
