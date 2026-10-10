@@ -20,7 +20,11 @@ function sum(amounts: string[]): string | null {
 
 function byCurrency<T extends { currency: string }>(rows: readonly T[]): Map<string, T[]> {
   const m = new Map<string, T[]>();
-  for (const r of rows) m.set(r.currency, [...(m.get(r.currency) ?? []), r]);
+  for (const r of rows) {
+    const group = m.get(r.currency);
+    if (group) group.push(r);
+    else m.set(r.currency, [r]);
+  }
   return new Map([...m].sort(([a], [b]) => a.localeCompare(b)));
 }
 
