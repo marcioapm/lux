@@ -976,7 +976,8 @@ does steps 2–4 itself, in the same lock order, so the Runs already final
 on it gain their block-storage lines too.
 
 It prints `{dryRun, poolId, hosts: [{id, from, to, perHour, hours, runs}],
-hours, runs}`; `--dry-run` prints the same and changes nothing. A second run
+hours, runs, skipped: [{run, host, reason}]}`; `--dry-run` prints the same
+and changes nothing. A second run
 finds no host with `volumes` NULL and changes nothing. This is the one
 exception to "frozen amounts are never revised", and only in the sense of
 **adding a family that did not exist**: no frozen compute amount, rate or
