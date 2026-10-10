@@ -1,0 +1,133 @@
+package server
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+)
+
+// backfillFixture: t1's ec2 pool "burst" (eu-north-1) with host "disk"
+// (launched 10:00, terminated 11:00) and a finished Run A on it whose
+// compute is final, as it was before luxd recorded volumes: its host's
+// volumes are unknown and it has no block-storage snapshot.
+func backfillFixture(t *testing.T) (*Server, map[string]string, *fakePriceProvider) {
+	t.Helper()
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	p := &fakePriceProvider{blockStorage: map[string]BlockStoragePrice{"gp3": gp3eun1Answer}}
+	s.cfg.Costs.Prices = map[string]PriceProvider{"ec2": p}
+	s.cfg.Costs.PricesRefresh = DefaultPricesRefresh
+	s.cfg.Costs.Hourly = DefaultPricesRefresh * 400
+	s.cfg.Costs.Every = DefaultCostsEvery
+	s.cfg.Costs.Batch = DefaultCostsBatch
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider, template) VALUES ('pb', 't1', 'burst', 'ec2', '{"region":"eu-north-1"}')`)
+	gp3Host(t, s, "[]", "")
+	execSQL(t, s, ctx, `UPDATE hosts SET pool_id = 'pb', provider_id = 'i-disk', launch_template = '{"region":"eu-north-1"}',
+		capacity = '{"cpus":8,"memory":34359738368}', state = 'terminated', terminated_at = $1 WHERE id = 'disk'`, at("11:00"))
+	execSQL(t, s, ctx, `UPDATE host_rates SET source = 'ec2-pricing' WHERE host_id = 'disk'`)
+	placeRun(t, s, "t1", "A", StateRunning, "disk", place("A", 2, 8, "10:00", "11:00"))
+	finish(t, s, "t1", "A", StateSucceeded)
+	drain(t, s)
+	execSQL(t, s, ctx, `UPDATE hosts SET volumes = NULL WHERE id = 'disk'`)
+	if lines, src := familyLines(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[compute m7i.2xlarge 0.1 true]" || src != "final" {
+		t.Fatalf("before: %v %s", lines, src)
+	}
+	return s, keys, p
+}
+
+// snapshotRow is A's compute snapshot as stored, every column.
+func snapshotRow(t *testing.T, s *Server) string {
+	t.Helper()
+	var row string
+	systemScan(t, s, `SELECT row(s.*)::text FROM cost_placement_snapshots s WHERE placement_id = 'p-A' AND family = 'compute'`, nil, &row)
+	return row
+}
+
+// The backfill: a dry run reports the host, its hours and Runs and changes
+// nothing; the real one records the assumed disk, opens its block-storage
+// period at the list price, and the finished Run gains a final
+// block-storage line while its compute snapshot and amount are byte for
+// byte as they were; a second run finds nothing to do.
+func TestBackfillVolumes(t *testing.T) {
+	s, keys, _ := backfillFixture(t)
+	ctx := context.Background()
+	before := snapshotRow(t, s)
+	_, c := getCost(t, s, keys["t1"], "A")
+	computeBefore := c.Lines[0].Amount
+	root, err := ParseVolume("type=gp3,size=100,iops=3000,throughput=125")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := BackfillVolumes{Pool: "burst", Tenant: "t1", Volumes: []HostVolume{root}, DryRun: true}
+	rep, err := s.BackfillVolumes(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Hosts) != 1 || rep.Hosts[0].ID != "disk" || rep.Runs != 1 || fmt.Sprint(rep.Hosts[0].Runs) != "[A]" ||
+		rep.Hosts[0].PerHour != "0.011452055" || rep.Hours != 1 {
+		t.Errorf("dry run: %+v", rep)
+	}
+	var volumes *string
+	var rates, queued int
+	systemScan(t, s, `SELECT (SELECT volumes::text FROM hosts WHERE id = 'disk'),
+		(SELECT count(*) FROM host_rates WHERE family = 'block-storage'), (SELECT count(*) FROM cost_pending)`, nil, &volumes, &rates, &queued)
+	if volumes != nil || rates != 0 || queued != 0 {
+		t.Fatalf("dry run changed something: volumes %v, rates %d, queued %d", volumes, rates, queued)
+	}
+
+	req.DryRun = false
+	if rep, err = s.BackfillVolumes(ctx, req); err != nil || len(rep.Hosts) != 1 {
+		t.Fatalf("apply: %+v %v", rep, err)
+	}
+	systemScan(t, s, `SELECT volumes::text FROM hosts WHERE id = 'disk'`, nil, &volumes)
+	if volumes == nil || *volumes != `[{"iops": 3000, "type": "gp3", "assumed": true, "sizeGiB": 100, "throughputMiBps": 125}]` {
+		t.Errorf("volumes %v", volumes)
+	}
+	var details string
+	systemScan(t, s, `SELECT details::text FROM host_rates WHERE host_id = 'disk' AND family = 'block-storage' AND valid_from = $1 AND valid_to = $2`,
+		[]any{at("10:00"), at("11:00")}, &details)
+	if want := `"assumed": true`; !strings.Contains(details, want) {
+		t.Errorf("rate details %s lack %s", details, want)
+	}
+	if _, src := familyLines(t, s, keys["t1"], "A"); src != "ok" {
+		t.Errorf("queued Run's source %q, want ok until evaluated", src)
+	}
+	drain(t, s)
+	// A holds 2 of 8 CPUs for the disk's hour: 0.011452055 / 4.
+	lines, src := familyLines(t, s, keys["t1"], "A")
+	if fmt.Sprint(lines) != "[block-storage gp3:100GiB 0.002863014 true compute m7i.2xlarge 0.1 true]" || src != "final" {
+		t.Errorf("after: %v %s", lines, src)
+	}
+	if after := snapshotRow(t, s); after != before {
+		t.Errorf("compute snapshot changed:\n%s\n%s", before, after)
+	}
+	_, c = getCost(t, s, keys["t1"], "A")
+	for _, l := range c.Lines {
+		if l.Family == "compute" && l.Amount != computeBefore {
+			t.Errorf("compute amount %s, was %s", l.Amount, computeBefore)
+		}
+	}
+
+	again, err := s.BackfillVolumes(ctx, req)
+	if err != nil || len(again.Hosts) != 0 || again.Runs != 0 {
+		t.Errorf("second run: %+v %v", again, err)
+	}
+	if pending(t, s, "A") != "" {
+		t.Errorf("second run queued A")
+	}
+}
+
+// ParseVolume takes the operator's flag; an unknown type, key or a missing
+// size is refused.
+func TestParseVolume(t *testing.T) {
+	v, err := ParseVolume("type=gp3,size=100,iops=3000,throughput=125")
+	if err != nil || v != (HostVolume{Type: "gp3", SizeGiB: 100, IOPS: 3000, ThroughputMiBps: 125, Assumed: true}) {
+		t.Errorf("%+v %v", v, err)
+	}
+	for _, bad := range []string{"type=floppy,size=1", "type=gp3", "type=gp3,size=1,color=red", "type=gp3,size=-1", "gp3"} {
+		if _, err := ParseVolume(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
