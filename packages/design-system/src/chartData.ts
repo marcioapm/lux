@@ -129,10 +129,31 @@ export function chartColors(base: readonly string[], faded: readonly (boolean | 
   return base.map((c, i) => (faded[i] ? fadedColor(c, surface) : c));
 }
 
-/** A bucket [start, start + step) in words, local time: "2026-10-09 19:00–20:00"; a day or longer names both ends in full. */
+/** A UTC calendar date, "2026-10-09". */
+function utcDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * An x-axis tick label: the clock over a day or less, else the month and
+ * day. Day bars are UTC-day buckets (cost), so with `utcDays` a tick names
+ * its UTC date, not the local date of its start.
+ */
+export function timeTickText(v: number, span: number, utcDays = false): string {
+  if (utcDays) return utcDate(v * 1000).slice(5);
+  return span <= 86400 ? formatClock(v * 1000).slice(0, 5) : formatTimestamp(v * 1000, { seconds: false }).slice(5, 11);
+}
+
+/**
+ * A bucket [start, start + step) in words: "2026-10-09 19:00–20:00" in
+ * local time. A day or longer is a UTC-day bucket and is named by its UTC
+ * dates: "2026-10-09 UTC", "2026-10-09 – 2026-10-15 UTC" (last day inclusive).
+ */
 export function bucketText(start: number, step: number): string {
   const from = formatTimestamp(start * 1000, { seconds: false });
   if (step <= 0) return from;
-  const end = (start + step) * 1000;
-  return step < 86400 ? `${from}–${formatClock(end).slice(0, 5)}` : `${from} – ${formatTimestamp(end, { seconds: false })}`;
+  if (step < 86400) return `${from}–${formatClock((start + step) * 1000).slice(0, 5)}`;
+  const first = utcDate(start * 1000);
+  const last = utcDate((start + step) * 1000 - 1);
+  return first === last ? `${first} UTC` : `${first} – ${last} UTC`;
 }

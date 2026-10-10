@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { renderToStaticMarkup } from "react-dom/server";
-import { barRange, barSegments, barStep, barTicks, bucketText, chartColors, FADE_KEEP, fadedColor, stackData, stackTotal } from "./chartData.ts";
+import { barRange, barSegments, barStep, barTicks, bucketText, chartColors, FADE_KEEP, fadedColor, stackData, stackTotal, timeTickText } from "./chartData.ts";
 import { TimeSeriesChart } from "./TimeSeriesChart.tsx";
 
 const none = new Set<number>();
@@ -59,11 +59,47 @@ test("barStep is the smallest positive step; barRange leaves half a bucket at ei
   expect(barRange([])).toBeNull();
 });
 
-test("bucketText names the bucket, not just its start", () => {
+test("bucketText names the bucket, not just its start; a day bucket by its UTC date", () => {
   const start = new Date(2026, 9, 9, 19, 0).getTime() / 1000;
   expect(bucketText(start, 3600)).toBe("2026-10-09 19:00–20:00");
-  const day = new Date(2026, 9, 9, 0, 0).getTime() / 1000;
-  expect(bucketText(day, 86400)).toBe("2026-10-09 00:00 – 2026-10-10 00:00");
+  const day = Date.UTC(2026, 9, 9) / 1000;
+  expect(bucketText(day, 86400)).toBe("2026-10-09 UTC");
+  expect(bucketText(day, 7 * 86400)).toBe("2026-10-09 – 2026-10-15 UTC");
+});
+
+/**
+ * Runs fn with the process in time zone tz, then back in the one it had.
+ * bun test runs in UTC when TZ is unset; deleting TZ again would leave the
+ * last zone in effect, so the restore sets UTC explicitly.
+ */
+function inZone<T>(tz: string, fn: () => T): T {
+  const was = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    return fn();
+  } finally {
+    process.env.TZ = was ?? "UTC";
+  }
+}
+
+test("day-bar ticks and tooltips name the UTC day, west and east of UTC", () => {
+  const day = Date.UTC(2026, 9, 9) / 1000;
+  const week = 7 * 86400;
+  for (const [tz, localDate, localTick] of [
+    ["America/Los_Angeles", 8, "10-08"],
+    ["Pacific/Auckland", 9, "10-09"],
+  ] as const) {
+    inZone(tz, () => {
+      // The zone took: local time is off UTC here (7h earlier, or 13h later).
+      expect(new Date(day * 1000).getDate()).toBe(localDate);
+      expect(new Date(day * 1000).getTimezoneOffset()).not.toBe(0);
+      expect(timeTickText(day, week, true)).toBe("10-09");
+      expect(timeTickText(day + 86400, week, true)).toBe("10-10");
+      expect(bucketText(day, 86400)).toBe("2026-10-09 UTC");
+      // Without day bars a tick over a week is the local month-day.
+      expect(timeTickText(day, week).trim()).toBe(localTick);
+    });
+  }
 });
 
 test("stackData and stackTotal: a gap is not a zero", () => {

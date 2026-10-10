@@ -389,7 +389,7 @@ Parts of a whole, ratios and page notes (gallery section "parts"):
 | `Meter({value, color?, decimals?})` | a ratio in a table cell: a 46px track with its fill (default `--chart-1`) and the percentage to its right in mono. The fill clamps to 0..1, the text keeps the true figure (`112%`); null or not finite is an en dash; a non-zero ratio that rounds to zero reads `<1%` (`meterFill`, `meterText`) |
 | `Callout({children, icon?})` | the page's one explanatory sentence ("Pool cost is the machines only…"): a soft info-tinted box, `--text-sm`, between cards. Not a toast, an error strip or an `InfoStrip` (which qualifies figures inside one card) |
 | `TimeSeriesChart` series `faded` | a lighter, opaque shade of the series' colour (`fadedColor`: mixed toward `--bg-surface`, keeping `FADE_KEEP`, 42%), the same in the plot, the legend and the tooltip: one family split into "charged to runs" and "not" (gallery: costs, "Host cost per day") |
-| `TimeSeriesChart` day bars | bars a day or wider put one x tick under each bar (`barTicks`), every k-th when they do not fit |
+| `TimeSeriesChart` day bars | bars a day or wider put one x tick under each bar (`barTicks`), every k-th when they do not fit. They are UTC-day buckets (cost): the tick names the UTC date (`timeTickText`) and the tooltip the UTC day ("2026-10-09 UTC", `bucketText`), whatever the browser's zone |
 
 A cost family is always named with its `ColorKey` square: rows
 (`FamilyKey`, `BreakdownTable`), KPIs and StatTiles (`swatch`), bar and

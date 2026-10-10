@@ -2,8 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { measuredAxisSize } from "./axisSize.ts";
-import { barRange, barSegments, barStep, barTicks, bucketText, chartColors, stackData, stackTotal, type BarSegment } from "./chartData.ts";
-import { formatClock, formatTimestamp, formatUnit, type Unit } from "./format.ts";
+import { barRange, barSegments, barStep, barTicks, bucketText, chartColors, stackData, stackTotal, timeTickText, type BarSegment } from "./chartData.ts";
+import { formatTimestamp, formatUnit, type Unit } from "./format.ts";
 import { niceScale, niceSplits } from "./scale.ts";
 import { cssVar, useDensity, useTheme } from "./theme.ts";
 
@@ -205,7 +205,7 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
             // From the plotted data, which setData replaces without a rebuild.
             const xs = u.data[0];
             const span = xs.length > 1 ? xs[xs.length - 1]! - xs[0]! : 0;
-            return vals.map((v) => (span <= 86400 ? formatClock(v * 1000).slice(0, 5) : formatTimestamp(v * 1000, { seconds: false }).slice(5, 11)));
+            return vals.map((v) => timeTickText(v, span, dayBars));
           },
           space: 64,
           // Day (or longer) bars: one tick per bucket, under its bar; a label per day, never a date twice.
