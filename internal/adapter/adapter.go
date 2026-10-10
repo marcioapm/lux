@@ -54,6 +54,9 @@ type Sink interface {
 	InputConsumed(requestID string)
 	// InputFailed: the input was not delivered, or the agent dropped it.
 	InputFailed(in proto.Input, err error)
+	// Compacted: the agent compacted its conversation (proto.EvCompacted).
+	// The sink redacts and caps the summary.
+	Compacted(c proto.Compaction)
 }
 
 // Delivery is when an accepted input reaches the agent's model.

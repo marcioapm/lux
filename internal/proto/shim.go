@@ -193,6 +193,12 @@ const (
 	EvStop         = "lux.stop"       // {"reason"}
 	EvBeforeStop   = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
 	EvWarning      = "lux.warning"    // {"message"}
+	// EvCompacted: the agent compacted its conversation, once per
+	// compaction: {"sessionId", "trigger": "auto"|"manual"|"overflow"|"",
+	// "preTokens"?, "postTokens"?, "summary"?, "summaryTruncated"?}. summary
+	// is the text the agent replaced its context with, redacted, at most
+	// MaxCompactionSummary bytes.
+	EvCompacted = "lux.compacted"
 	// EvArtifact: a published file is staged, whole, as file (on the
 	// runtime volume): {"id", "name", "description", "contentType",
 	// "size", "sha256", "file"}.
@@ -202,6 +208,19 @@ const (
 	// "exitCode"?, "error"?}.
 	EvServer = "lux.server"
 )
+
+// MaxCompactionSummary caps lux.compacted's summary, in bytes.
+const MaxCompactionSummary = 64 << 10
+
+// Compaction is an agent's compaction of its conversation, as an adapter
+// reports it (EvCompacted). Zero fields are ones the agent did not give.
+type Compaction struct {
+	SessionID  string `json:"sessionId"`
+	Trigger    string `json:"trigger"`
+	PreTokens  *int64 `json:"preTokens,omitempty"`
+	PostTokens *int64 `json:"postTokens,omitempty"`
+	Summary    string `json:"summary,omitempty"`
+}
 
 // Input phases: lux.input's phase (accepted, failed), and
 // AdapterEvent.InputProgress's (consumed, failed).

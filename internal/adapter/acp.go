@@ -1033,7 +1033,7 @@ func (a *ACP) queueInput(in proto.Input) {
 // sent has read it and the steers sent before it (bus.answered);
 // session.idle after the ACP turn has ended settles the Run's work;
 // session.status is the Run's activity (setOpenCodeBusy); session.compacted
-// is reported as acp.compacted, the only sign of a compaction OpenCode gives.
+// of the Run's session is reported as lux.compacted (compacted).
 func (a *ACP) onBus(ev busEvent) {
 	if a.busHandled != nil {
 		defer a.busHandled(ev)
@@ -1066,7 +1066,7 @@ func (a *ACP) onBus(ev busEvent) {
 		}
 	case "session.compacted":
 		if session != "" && p.SessionID == session {
-			a.sink.Event("acp.compacted", map[string]any{"sessionID": p.SessionID})
+			a.sink.Compacted(proto.Compaction{SessionID: p.SessionID})
 		}
 	}
 }
