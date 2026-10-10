@@ -501,16 +501,12 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 	if p.TenantID != "" && (pool.TenantID == nil || *pool.TenantID != p.TenantID) {
 		return out, nil
 	}
-	scope := store.System()
 	// RLS (cost_hourly_own_hosts) is the guard; the pool is the tenant's own
 	// (checked above), so c.pool_id = $1 needs no further predicate.
-	hostRows, args := `c.run_id IS NULL AND c.pool_id = $1 AND c.hour >= $2 AND c.hour < $3`, []any{pool.ID, from, to}
-	if p.TenantID != "" {
-		scope = store.Tenant(p.TenantID)
-	}
-	err = s.db.Tx(ctx, scope, func(tx pgx.Tx) error {
+	const hostRows = `c.run_id IS NULL AND c.pool_id = $1 AND c.hour >= $2 AND c.hour < $3`
+	err = s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT c.family, c.currency, trim_scale(sum(c.unallocated))::text FROM cost_hourly c WHERE `+hostRows+`
-			GROUP BY 1, 2 ORDER BY 2, 1`, args...)
+			GROUP BY 1, 2 ORDER BY 2, 1`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}
@@ -518,7 +514,7 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 			return err
 		}
 		rows, err = tx.Query(ctx, `SELECT `+bucket+`, '', '', c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text
-			FROM cost_hourly c WHERE `+hostRows+` GROUP BY 1, 4, 5 ORDER BY 1, 5, 4`, args...)
+			FROM cost_hourly c WHERE `+hostRows+` GROUP BY 1, 4, 5 ORDER BY 1, 5, 4`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}
@@ -527,7 +523,7 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		}
 		rows, err = tx.Query(ctx, `SELECT NULL::timestamptz, c.host_id, h.name, c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text
 			FROM cost_hourly c JOIN hosts h ON h.id = c.host_id WHERE `+hostRows+`
-			GROUP BY 2, 3, 4, 5 ORDER BY 5, sum(sum(c.allocated) + sum(c.unallocated)) OVER (PARTITION BY c.host_id, c.currency) DESC, 2, 4`, args...)
+			GROUP BY 2, 3, 4, 5 ORDER BY 5, sum(sum(c.allocated) + sum(c.unallocated)) OVER (PARTITION BY c.host_id, c.currency) DESC, 2, 4`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}
