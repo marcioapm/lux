@@ -347,6 +347,28 @@ test("host Cost tab, a tenant on its own host: its unallocated too, no rate peri
   }
 });
 
+test("host Cost tab with no hours, an operator narrowed to a tenant on a platform host: that tenant's view, no unallocated and no rate periods", async () => {
+  const none: HostCost = { hostId: "h1", from: HOUR0, to: "2026-09-01T13:00:00.000Z", basis: "list", hours: [] };
+  const p = await render(ec2Host({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tenant=acme&tab=cost", none);
+  try {
+    await until(() => tiles(p.el).length === 3, "the three tiles");
+    expect(tiles(p.el).map(([l]) => l)).toEqual(["Charged to your Runs (24h)", "Compute", "Block storage"]);
+    expect(p.el.querySelector(".host-cost")!.textContent).not.toMatch(/nallocated|Utilisation/);
+    expect(cardTitles(p.el)).toEqual(["Charged to your Runs per hour"]);
+  } finally {
+    await p.done();
+  }
+  // The same answer to an operator over every tenant: the host's own view, its rate periods card included.
+  const q = await render(ec2Host({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tab=cost", none);
+  try {
+    await until(() => tiles(q.el).length === 5, "the five tiles");
+    expect(tiles(q.el)[3]![0]).toBe("Unallocated");
+    expect(cardTitles(q.el)).toEqual(["Host cost per hour", "Rate periods"]);
+  } finally {
+    await q.done();
+  }
+});
+
 test("host Cost tab, a tenant's host in a platform pool: luxd omits unallocated, so only what its Runs were charged", async () => {
   const runsOnly: HostCost = { ...opCost, rates: undefined, hours: opCost.hours.map(({ unallocated: _, ...h }) => h) };
   const p = await render(ec2Host(), "tenant", "http://localhost/hosts/h1?tab=cost", runsOnly);
