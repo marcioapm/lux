@@ -404,8 +404,9 @@ For A above, 1,080 CPU seconds against 2 CPU × 1,800 s is 30%, and a
 
 - `pricing:GetProducts`
 - `ec2:DescribeSpotPriceHistory`
+- `ec2:DescribeVolumes` (block storage, below)
 
-Both are read-only and cannot be scoped to a resource (`Resource: "*"`).
+All are read-only and cannot be scoped to a resource (`Resource: "*"`).
 The endpoint overrides that already exist for tests (`LUX_EC2_ENDPOINT`)
 need a twin for pricing (`LUX_PRICING_ENDPOINT`), so the fake EC2 in the
 test suite can serve prices.
@@ -426,6 +427,20 @@ ALTER TABLE hosts ADD COLUMN instance_type text;   -- from the reply, not the te
 ALTER TABLE hosts ADD COLUMN zone text;            -- Placement.AvailabilityZone
 ALTER TABLE hosts ADD COLUMN market text CHECK (market IN ('on-demand', 'spot'));
 ```
+
+**Volumes** (**built**: migration `061_host_volumes.sql`): `hosts.volumes
+jsonb`, the block-storage volumes that live and die with the instance
+(`DeleteOnTermination`; a volume that outlives it is not its cost), e.g.
+`[{"type":"gp3","sizeGiB":100,"iops":3000,"throughputMiBps":125}]`. NULL
+means not known yet. The provisioner's provider check (every
+`provider_check_every`) asks `Provider.Volumes` for every live provider
+host whose volumes are NULL: for EC2, one paged `DescribeVolumes` filtered
+by `attachment.instance-id` per region per pass (at most 200 ids per call).
+It never runs in the runner's hello and never holds up a launch. A failed
+call leaves the hosts NULL (block storage missing, retried at the next
+pass), never empty. `GET /v1/hosts[/{id}]` returns them as `volumes`,
+omitted while NULL; `"assumed": true` marks volumes an operator supplied
+for a host launched before luxd recorded them (section 5, backfill).
 
 Rate periods for each host. A new period starts when the price changes
 (spot) or when the advertised capacity changes on a re-hello:

@@ -721,6 +721,11 @@ components:
         versions:
           additionalProperties: {}
           type: object
+        volumes:
+          description: "The block-storage volumes deleted with it, as the provider reported them (assumed: supplied by an operator for a host from before luxd recorded them); absent while not known, and for a host that registered itself."
+          items:
+            $ref: "#/components/schemas/HostVolume"
+          type: array
         zone:
           description: The availability zone the provider launched it in.
           type: string
@@ -946,6 +951,23 @@ components:
           description: Hosts not terminated.
           format: int64
           type: integer
+      type: object
+    HostVolume:
+      additionalProperties: false
+      properties:
+        assumed:
+          type: boolean
+        iops:
+          format: int64
+          type: integer
+        sizeGiB:
+          format: int64
+          type: integer
+        throughputMiBps:
+          format: int64
+          type: integer
+        type:
+          type: string
       type: object
     Image:
       additionalProperties: false

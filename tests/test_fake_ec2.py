@@ -57,3 +57,27 @@ def test_a_dry_run_does_not_test_capacity(ec2, code):
 def test_a_missing_permission_is_403(ec2):
     ec2.launch_failures = {("m7i.large", "subnet-a"): "UnauthorizedOperation"}
     assert dry_run(ec2) == (403, "UnauthorizedOperation")
+
+
+def describe_volumes(ec2, *ids: str) -> tuple[int, str]:
+    q = {"Action": "DescribeVolumes", "Filter.1.Name": "attachment.instance-id"}
+    q.update({f"Filter.1.Value.{n}": i for n, i in enumerate(ids, 1)})
+    try:
+        with urllib.request.urlopen(urllib.request.Request(ec2.url, data=urllib.parse.urlencode(q).encode()), timeout=5) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def test_describe_volumes_answers_the_filtered_instances_root_disk(ec2):
+    with ec2.lock:
+        ec2.instances["i-aaa"] = {"state": "running", "tags": {}, "volumes": [dict(ec2.volumes[0])]}
+        ec2.instances["i-bbb"] = {"state": "terminated", "tags": {}, "volumes": [dict(ec2.volumes[0])]}
+    code, xml = describe_volumes(ec2, "i-aaa", "i-bbb", "i-unknown")
+    assert code == 200
+    assert xml.count("<instanceId>") == 1 and "<instanceId>i-aaa</instanceId>" in xml
+    for part in ("<size>100</size>", "<volumeType>gp3</volumeType>", "<iops>3000</iops>",
+                 "<throughput>125</throughput>", "<deleteOnTermination>true</deleteOnTermination>"):
+        assert part in xml
+    ec2.volumes_error = "UnauthorizedOperation"
+    assert describe_volumes(ec2, "i-aaa")[0] == 403
