@@ -145,7 +145,7 @@ type ACP struct {
 	// compactionTimeout bounds reading a compaction's summary.
 	compactionTimeout time.Duration
 	// compactionMu runs one compaction's summary read at a time, so each
-	// sees the summary the one before it reported (lastSummary, under mu).
+	// sees lastSummary, the summary the one before it reported.
 	compactionMu sync.Mutex
 	lastSummary  string
 }
@@ -1090,21 +1090,16 @@ func (a *ACP) compacted(session string) {
 	started := a.spawn(func() {
 		a.compactionMu.Lock()
 		defer a.compactionMu.Unlock()
-		a.mu.Lock()
-		after := a.lastSummary
-		a.mu.Unlock()
 		ctx, cancel := context.WithTimeout(a.runCtx(), a.compactionTimeout)
 		defer cancel()
-		summary, trigger, id, err := a.bus.compaction(ctx, session, after)
+		summary, trigger, id, err := a.bus.compaction(ctx, session, a.lastSummary)
 		if errors.Is(err, errCompactionReported) {
 			a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
 				"opencode: session %s was compacted again, with %s", session, err)})
 			return
 		}
 		if id != "" {
-			a.mu.Lock()
 			a.lastSummary = id
-			a.mu.Unlock()
 		}
 		if err != nil && a.runCtx().Err() != nil {
 			err = errRunEndedBeforeSummary
@@ -1134,9 +1129,9 @@ func (a *ACP) seedLastSummary(session string) {
 			"opencode: the resumed session %s's earlier summaries could not be read; its first compaction may report one of them: %v", session, err)})
 		return
 	}
-	a.mu.Lock()
+	a.compactionMu.Lock()
 	a.lastSummary = id
-	a.mu.Unlock()
+	a.compactionMu.Unlock()
 }
 
 // setOpenCodeBusy records whether OpenCode runs a loop for the session and
