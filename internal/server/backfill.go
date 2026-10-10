@@ -239,13 +239,13 @@ func (s *Server) backfillHost(ctx context.Context, tx pgx.Tx, hostID string, vol
 	}
 	tag, err := tx.Exec(ctx, `UPDATE hosts SET volumes = $2 WHERE id = $1 AND volumes IS NULL`, hostID, vols)
 	if err != nil || tag.RowsAffected() == 0 {
-		return runs, nil, err
+		return nil, nil, err
 	}
 	opened, err := openBlockStorageRate(ctx, tx, hostID, prices, provider+"-ebs-pricing", s.cfg.Costs.Hourly)
 	if err != nil || !opened {
 		// Not opened: the host never registered (no capacity to share, as
 		// for its compute), so it has no placement to re-evaluate.
-		return runs, nil, err
+		return nil, nil, err
 	}
 	skipped, err = requeueBlockStorageRuns(ctx, tx, runs)
 	return without(runs, skipped), skipped, err
