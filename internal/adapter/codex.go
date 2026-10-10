@@ -63,10 +63,10 @@ type Codex struct {
 	ctx         context.Context
 	bg          sync.WaitGroup
 	// rolloutMu guards rolloutOff, how far the rollout has been read, and
-	// compacted, the messages of the compacted entries read so far.
+	// compacted, the compacted entries read so far.
 	rolloutMu  sync.Mutex
 	rolloutOff int64
-	compacted  []string
+	compacted  []compactedEntry
 	// compactionWait bounds waiting for a compaction's rollout entry.
 	compactionWait time.Duration
 }
@@ -518,16 +518,18 @@ func (c *Codex) rolloutEntry(n int) (summary string, done bool, err error) {
 	if c.rolloutFile() == "" {
 		return "", true, errors.New("Codex named no rollout file for the thread")
 	}
-	msgs, err := c.compactedEntries()
+	entries, err := c.compactedEntries()
 	switch {
 	case err != nil:
 		return "", true, err
-	case len(msgs) <= n:
+	case len(entries) <= n:
 		return "", false, nil
-	case msgs[n] == "":
+	case entries[n].err != nil:
+		return "", true, entries[n].err
+	case entries[n].message == "":
 		return "", true, errRemoteCompaction
 	}
-	return msgs[n], true, nil
+	return entries[n].message, true, nil
 }
 
 // rolloutSummary waits up to compactionWait for the rollout's nth
@@ -553,27 +555,54 @@ func (c *Codex) rolloutFile() string {
 	return c.rollout
 }
 
+// compactedEntry is a compacted entry of the rollout: its message, or why
+// it could not be read.
+type compactedEntry struct {
+	message string
+	err     error
+}
+
+// rolloutLineMax: a rollout line longer than this is skipped, not held.
+const rolloutLineMax = 16 << 20
+
 // compactedEntries reads the rollout's whole lines not read yet, and
-// returns the message of every compacted entry in it so far.
-func (c *Codex) compactedEntries() ([]string, error) {
+// returns every compacted entry in it so far. The rollout is under the
+// agent's home, which the agent can write: it is opened without following
+// a symlink or blocking on a FIFO, and read only if it is a regular file.
+func (c *Codex) compactedEntries() ([]compactedEntry, error) {
 	c.rolloutMu.Lock()
 	defer c.rolloutMu.Unlock()
-	f, err := os.Open(c.rolloutFile())
+	path := c.rolloutFile()
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	if fi, err := f.Stat(); err != nil {
+		return nil, err
+	} else if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("the rollout %s is not a regular file (%s)", path, fi.Mode().Type())
+	}
 	if _, err := f.Seek(c.rolloutOff, io.SeekStart); err != nil {
 		return nil, err
 	}
 	r := bufio.NewReaderSize(f, 64<<10)
 	for {
-		line, err := r.ReadBytes('\n')
+		line, n, long, err := readLine(r, rolloutLineMax)
 		if err != nil {
 			// A line without its newline is still being written.
 			return slices.Clone(c.compacted), nil
 		}
-		c.rolloutOff += int64(len(line))
+		c.rolloutOff += n
+		if long {
+			// Its type is near the start of the line ({"timestamp","type",…}):
+			// a compacted entry still counts, so later ones keep their place.
+			if bytes.Contains(line[:min(len(line), 256)], []byte(`"type":"compacted"`)) {
+				c.compacted = append(c.compacted, compactedEntry{err: fmt.Errorf(
+					"its rollout entry is longer than %d bytes", rolloutLineMax)})
+			}
+			continue
+		}
 		if !bytes.Contains(line, []byte(`"type":"compacted"`)) {
 			continue
 		}
@@ -584,7 +613,26 @@ func (c *Codex) compactedEntries() ([]string, error) {
 			} `json:"payload"`
 		}
 		if json.Unmarshal(line, &e) == nil && e.Type == "compacted" {
-			c.compacted = append(c.compacted, e.Payload.Message)
+			c.compacted = append(c.compacted, compactedEntry{message: e.Payload.Message})
+		}
+	}
+}
+
+// readLine reads a line through its '\n'. n is its whole length; a line
+// longer than max bytes is read and dropped past its first max bytes, and
+// long is true. An error (io.EOF) means no whole line is left.
+func readLine(r *bufio.Reader, max int) (line []byte, n int64, long bool, err error) {
+	for {
+		chunk, err := r.ReadSlice('\n')
+		n += int64(len(chunk))
+		if room := max - len(line); room > 0 {
+			line = append(line, chunk[:min(room, len(chunk))]...)
+		}
+		switch {
+		case err == nil:
+			return line, n, n > int64(max), nil
+		case !errors.Is(err, bufio.ErrBufferFull):
+			return nil, n, false, err
 		}
 	}
 }

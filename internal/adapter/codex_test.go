@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +22,13 @@ func cxCompaction(t *testing.T, prior ...string) (*Codex, *agentWire, *inputSink
 		t.Fatal(err)
 	}
 	appendRollout(t, rollout, prior...)
+	c, w, log := cxStartedAt(t, rollout)
+	return c, w, log, rollout
+}
+
+// cxStartedAt is a Codex adapter whose thread.path is rollout, as it is.
+func cxStartedAt(t *testing.T, rollout string) (*Codex, *agentWire, *inputSink) {
+	t.Helper()
 	log := &inputSink{}
 	c := NewCodex()
 	c.compactionWait = 300 * time.Millisecond
@@ -31,7 +39,7 @@ func cxCompaction(t *testing.T, prior ...string) (*Codex, *agentWire, *inputSink
 	w.send(`{"id":` + id + `,"result":{"thread":{"id":"` + cxThread + `","path":"` + rollout + `","status":{"type":"idle"}}}}`)
 	// The handshake is done (it reports idle last).
 	log.wait(t, "idle")
-	return c, w, log, rollout
+	return c, w, log
 }
 
 // cxItems are codex 0.145.0's contextCompaction item/started and
@@ -231,5 +239,89 @@ func TestCodexCompactionWithoutSummary(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A rollout path that is not a regular file (a FIFO, which an open would
+// block on, or a symlink, which is not followed) is not read: the Run
+// goes on, and the compaction is reported without a summary.
+func TestCodexRolloutNotARegularFile(t *testing.T) {
+	for _, tc := range []struct {
+		name, warning string
+		make          func(t *testing.T, path string)
+	}{
+		{"fifo", "is not a regular file", func(t *testing.T, path string) {
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symlink", "too many levels of symbolic links", func(t *testing.T, path string) {
+			lines, _ := cxRolloutCompacted(t)
+			target := filepath.Join(t.TempDir(), "elsewhere.jsonl")
+			if err := os.WriteFile(target, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+			tc.make(t, rollout)
+			ran := make(chan struct{})
+			go func() {
+				defer close(ran)
+				_, w, log := cxStartedAt(t, rollout)
+				started, completed := cxItems(t)
+				w.send(started)
+				w.send(completed)
+				got := waitCompactions(t, log, 1)
+				w.exit()
+				want, _ := json.Marshal(proto.Compaction{SessionID: cxThread})
+				if !slices.Equal(got, []string{"compacted " + string(want)}) {
+					t.Errorf("got %q", got)
+				}
+				if next := lineAfter(log.lines(), "compacted "); !strings.Contains(next, tc.warning) {
+					t.Errorf("after the record: %q, want %q", next, tc.warning)
+				}
+			}()
+			select {
+			case <-ran:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the Run hung on the rollout")
+			}
+		})
+	}
+}
+
+// A rollout line longer than rolloutLineMax is skipped, not held: a
+// compacted entry that long is reported without its summary, and the
+// entries after it keep their place.
+func TestCodexRolloutLineTooLong(t *testing.T) {
+	_, w, log, rollout := cxCompaction(t)
+	started, completed := cxItems(t)
+	lines, _ := cxRolloutCompacted(t)
+	huge := `{"timestamp":"2026-10-10T15:48:19.823Z","type":"compacted","payload":{"message":"` +
+		strings.Repeat("x", rolloutLineMax) + `"}}`
+	// A long line of another type is skipped too.
+	other := `{"timestamp":"2026-10-10T15:48:19.823Z","type":"response_item","payload":{"text":"` +
+		strings.Repeat("y", rolloutLineMax) + `"}}`
+	appendRollout(t, rollout, other, huge, lines[1])
+	w.send(started)
+	w.send(completed)
+	waitCompactions(t, log, 1)
+	second := strings.Replace(lines[0], "PERIWINKLE", "MARIGOLD", 1)
+	appendRollout(t, rollout, second, lines[1])
+	w.send(strings.ReplaceAll(started, "01a12680-3221", "01a12690-0000"))
+	w.send(strings.ReplaceAll(completed, "01a12680-3221", "01a12690-0000"))
+	got := waitCompactions(t, log, 2)
+	w.exit()
+	want, _ := json.Marshal(proto.Compaction{SessionID: cxThread})
+	if len(got) != 2 || got[0] != "compacted "+string(want) || !strings.Contains(got[1], "MARIGOLD") {
+		t.Fatalf("got %q", got)
+	}
+	if !log.has("warning codex: thread " + cxThread + " was compacted; its summary could not be read: its rollout entry is longer than") {
+		t.Fatalf("no warning: %q", log.lines())
 	}
 }
