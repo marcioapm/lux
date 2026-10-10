@@ -197,7 +197,14 @@ const (
 	// compaction: {"sessionId", "trigger": "auto"|"manual"|"overflow"|"",
 	// "preTokens"?, "postTokens"?, "summary"?, "summaryTruncated"?}. summary
 	// is the text the agent replaced its context with, redacted, at most
-	// MaxCompactionSummary bytes.
+	// MaxCompactionSummary bytes. Any lux.warning about it comes after it.
+	// Relative to the agent's own announcement, among the adapter's records:
+	// claude-code, directly after the compact_boundary's claude.system (bar
+	// lines of other types Claude wrote before its summary line) and before
+	// the summary line's claude.user; codex, directly after the
+	// contextCompaction's codex.item/completed when the rollout holds its
+	// entry, else later, up to 10 s; opencode, no raw counterpart, 0-10 s
+	// after. docs/adapters.md#where-the-record-lands.
 	EvCompacted = "lux.compacted"
 	// EvArtifact: a published file is staged, whole, as file (on the
 	// runtime volume): {"id", "name", "description", "contentType",

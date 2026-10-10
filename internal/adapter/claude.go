@@ -247,12 +247,15 @@ func (cc *claudeCompaction) reportWith(sink Sink, typ, uuid string, synthetic bo
 	return true
 }
 
+// report writes the record before its warning, and before the line that
+// ended the wait is relayed: the record is the next thing a client sees
+// after the boundary, bar lines of other types Claude wrote in between.
 func (cc *claudeCompaction) report(sink Sink, summary string) {
+	cc.c.Summary = summary
+	sink.Compacted(cc.c)
 	if summary == "" {
 		sink.Event(proto.EvWarning, map[string]any{"message": "claude: compacted, but no summary line followed its compact_boundary"})
 	}
-	cc.c.Summary = summary
-	sink.Compacted(cc.c)
 }
 
 // exited fails every line written that Claude Code never started, once
