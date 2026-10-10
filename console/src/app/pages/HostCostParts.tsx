@@ -98,7 +98,8 @@ interface PaidRow {
   label: ReactNode;
   currency: string;
   paid: Paid;
-  total?: boolean;
+  /** The currency's Total row (both families), drawn bold. */
+  total: boolean;
 }
 
 const money = (a: string | null, currency: string) => (a == null ? <span className="muted">–</span> : <Money amount={a} currency={currency} decimals={CENTS} />);
@@ -137,8 +138,8 @@ function FamilySplit({ family, paid, currency }: { family: string; paid: Paid; c
 /** Who paid for the host time, per currency: Runs or nobody, Compute and Block storage apart, then each family's split as a bar. */
 export function WhoPaidCard({ paid, loading }: { paid: WhoPaid[]; loading: boolean }) {
   const rows: PaidRow[] = paid.flatMap((p) => [
-    { key: `${p.currency}:compute`, label: <ColorKey color={COMPUTE_COLOR}>{familyLabel(COMPUTE)}</ColorKey>, currency: p.currency, paid: p.compute },
-    { key: `${p.currency}:block-storage`, label: <ColorKey color={BS_COLOR}>{familyLabel(BLOCK_STORAGE)}</ColorKey>, currency: p.currency, paid: p.blockStorage },
+    { key: `${p.currency}:compute`, label: <ColorKey color={COMPUTE_COLOR}>{familyLabel(COMPUTE)}</ColorKey>, currency: p.currency, paid: p.compute, total: false },
+    { key: `${p.currency}:block-storage`, label: <ColorKey color={BS_COLOR}>{familyLabel(BLOCK_STORAGE)}</ColorKey>, currency: p.currency, paid: p.blockStorage, total: false },
     { key: `${p.currency}:total`, label: "Total", currency: p.currency, paid: p.all, total: true },
   ]);
   return (
