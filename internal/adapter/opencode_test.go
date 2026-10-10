@@ -1666,7 +1666,8 @@ const ocUserAfter = `{"info":{"id":"msg_zzz","role":"user","summary":{"diffs":[]
 // newer than the one last reported, whatever order the page lists them in
 // (the second pair is listed first here) and whatever user messages come
 // after. A session.compacted whose summary was reported already adds no
-// record.
+// record. A resumed session's summaries from an earlier Run are none of
+// this Run's compactions.
 func TestOpenCodeEachCompactionTakesItsOwnSummary(t *testing.T) {
 	var after any
 	_ = json.Unmarshal([]byte(ocUserAfter), &after)
@@ -1676,15 +1677,40 @@ func TestOpenCodeEachCompactionTakesItsOwnSummary(t *testing.T) {
 		// together: both compactions are stored before the first
 		// session.compacted is handled.
 		together bool
-	}{{"one after the other", false}, {"back to back", true}} {
+		// resume: the Run resumes the session (session/load), whose page
+		// already holds an earlier Run's PERIWINKLE pair; this Run's
+		// compactions are MARIGOLD, then SAFFRON.
+		resume bool
+	}{{"one after the other", false, false}, {"back to back", true, false}, {"resumed", false, true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			a, b, w, log, first := ocWithBusOn2(t)
-			both := append(append(ocSecondCompaction(t), ocCompactionMessages(t)...), after)
-			if tc.together {
-				b.mu.Lock()
-				b.whole = both
-				b.mu.Unlock()
+			var held []any
+			firstPair, secondPair := ocCompactionMessages(t), ocSecondCompaction(t)
+			words, stale := [2]string{"PERIWINKLE", "MARIGOLD"}, ""
+			var a *ACP
+			var b *fakeBus
+			var log *inputSink
+			var end func()
+			if tc.resume {
+				held = ocCompactionMessages(t)
+				firstPair, secondPair = ocSecondCompaction(t), ocLaterCompaction(t, "msg_1267b", "SAFFRON")
+				words, stale = [2]string{"MARIGOLD", "SAFFRON"}, "PERIWINKLE"
+				var w *agentWire
+				a, b, w, log = ocResumedWithBus(t, held)
+				end = w.exit
+			} else {
+				var w *agentWire
+				var first string
+				a, b, w, log, first = ocWithBusOn2(t)
+				end = func() { w.resolve(first, ocResult); w.exit() }
 			}
+			one := append(slices.Clone(held), firstPair...)
+			both := append(append(slices.Clone(secondPair), one...), after)
+			b.mu.Lock()
+			b.whole = one
+			if tc.together {
+				b.whole = both
+			}
+			b.mu.Unlock()
 			onBus(t, a, compacted)
 			waitCompactions(t, log, 1)
 			b.mu.Lock()
@@ -1692,27 +1718,33 @@ func TestOpenCodeEachCompactionTakesItsOwnSummary(t *testing.T) {
 			b.mu.Unlock()
 			onBus(t, a, compacted)
 			waitCompactions(t, log, 2)
+			check := func(got []string) {
+				t.Helper()
+				if len(got) != 2 || !strings.Contains(got[0], words[0]) || strings.Contains(got[0], words[1]) ||
+					!strings.Contains(got[1], words[1]) || strings.Contains(got[1], words[0]) {
+					t.Fatalf("got %q", got)
+				}
+				if stale != "" && slices.ContainsFunc(got, func(l string) bool { return strings.Contains(l, stale) }) {
+					t.Fatalf("an earlier Run's summary was reported: %q", got)
+				}
+			}
+			check(log.compactions())
 			// The same compaction announced again.
 			onBus(t, a, compacted)
 			log.wait(t, "warning opencode: session "+ocSession+" was compacted again, with no summary newer than the one already reported")
-			w.resolve(first, ocResult)
-			w.exit()
-			got := log.compactions()
-			if len(got) != 2 || !strings.Contains(got[0], "PERIWINKLE") || strings.Contains(got[0], "MARIGOLD") ||
-				!strings.Contains(got[1], "MARIGOLD") || strings.Contains(got[1], "PERIWINKLE") {
-				t.Fatalf("got %q", got)
-			}
+			end()
+			check(log.compactions())
 		})
 	}
 }
 
-// A resumed session whose newest messages already hold an earlier Run's
-// summary: the Run's first compaction reports its own summary, not that
-// one, and its second the one after.
-func TestOpenCodeResumedCompactionSkipsEarlierSummary(t *testing.T) {
+// ocResumedWithBus is an OpenCode adapter with its bus that resumes
+// ocSession (session/load) whose stored messages are held.
+func ocResumedWithBus(t *testing.T, held []any) (*ACP, *fakeBus, *agentWire, *inputSink) {
+	t.Helper()
 	b := newFakeBus(t)
 	b.mu.Lock()
-	b.whole = ocCompactionMessages(t)
+	b.whole = held
 	b.mu.Unlock()
 	a := NewOpenCode()
 	a.bus = newOpencodeBus(b.port(), "/workspace")
@@ -1722,27 +1754,9 @@ func TestOpenCodeResumedCompactionSkipsEarlierSummary(t *testing.T) {
 	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}`)
 	id, _ = w.next("session/load")
 	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{}}`)
+	// setSession reports idle once the load, and the seed before it, are done.
 	log.wait(t, "idle")
-	compacted := `{"type":"session.compacted","properties":{"sessionID":"` + ocSession + `"}}`
-	b.mu.Lock()
-	b.whole = append(ocCompactionMessages(t), ocLaterCompaction(t, "msg_1267a9", "MARIGOLD")...)
-	b.mu.Unlock()
-	onBus(t, a, compacted)
-	waitCompactions(t, log, 1)
-	b.mu.Lock()
-	b.whole = append(b.whole, ocLaterCompaction(t, "msg_1267b", "SAFFRON")...)
-	b.mu.Unlock()
-	onBus(t, a, compacted)
-	waitCompactions(t, log, 2)
-	w.exit()
-	got := log.compactions()
-	if len(got) != 2 || !strings.Contains(got[0], "MARIGOLD") || strings.Contains(got[0], "PERIWINKLE") ||
-		!strings.Contains(got[1], "SAFFRON") || strings.Contains(got[1], "MARIGOLD") {
-		t.Fatalf("got %q", got)
-	}
-	if log.has("warning") {
-		t.Fatalf("warned: %q", log.lines())
-	}
+	return a, b, w, log
 }
 
 // warnSink is an inputSink that also logs each lux.warning.
