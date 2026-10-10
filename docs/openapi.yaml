@@ -1528,12 +1528,10 @@ components:
             - array
             - "null"
         idle:
-          description: Host time no Run reserved, per family and currency. Not part of totals. Operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant.
+          description: "Host time no Run reserved, per family and currency. Not part of totals. Present (maybe empty) exactly when the reader may see the pool's host time: operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."
           items:
             $ref: "#/components/schemas/PoolIdle"
-          type:
-            - array
-            - "null"
+          type: array
         interval:
           type: string
         poolId:

@@ -191,9 +191,30 @@ test("pool Cost tab while loading: skeleton tiles, no figure, no zero", async ()
   }
 });
 
+/**
+ * An empty range as luxd sends it to a reader who may see host time: idle
+ * is [] (present), and the empty families, hostSeries and hosts are omitted.
+ */
+const emptyVisible: PoolCost = { poolId: "p", from: FROM, to: TO, basis: "list", interval: "hour", totals: [], series: [], topRuns: [], idle: [] };
+
+async function emptyHostView(role: "operator" | "tenant", pool: Pool) {
+  const p = await render(role, pool, emptyVisible);
+  try {
+    await until(() => p.tab()?.textContent?.includes("No host time recorded here in this range.") ?? false, "the Cost by host empty state");
+    expect(p.tiles()[0]![0]).toBe("Host cost (24h)");
+    expect(p.titles()).toEqual(["Host cost per hour", "Who paid", "Cost by host", "Top runs in this pool"]);
+    expect(p.card("Cost by host")!.textContent).toContain("No host time recorded here in this range.");
+    expect(p.tab()!.textContent).not.toMatch(/your Runs|\$0/);
+    await until(() => p.summary() != null, "the summary tile");
+    expect(p.summary()!.querySelector(".stat-label")!.textContent).toBe("Host cost (24h)");
+    expect(p.summary()!.textContent).not.toMatch(/your Runs/);
+  } finally {
+    await p.done();
+  }
+}
+
 test("pool Cost tab with nothing costed: an empty state, never $0", async () => {
-  const empty: PoolCost = { ...withHostTime, totals: [], series: [], topRuns: [], idle: [], hostSeries: [], hosts: [] };
-  const p = await render("operator", PLATFORM, empty);
+  const p = await render("operator", PLATFORM, emptyVisible);
   try {
     await until(() => p.tab()?.textContent?.includes("No host cost recorded in this range") ?? false, "the empty state");
     expect(p.tab()!.textContent).not.toMatch(/\$0/);
@@ -201,6 +222,14 @@ test("pool Cost tab with nothing costed: an empty state, never $0", async () => 
   } finally {
     await p.done();
   }
+});
+
+test("pool Cost tab, operator on an empty range: still the host cost view, Cost by host empty", async () => {
+  await emptyHostView("operator", PLATFORM);
+});
+
+test("pool Cost tab, a tenant on its own pool on an empty range: still the host cost view, Cost by host empty", async () => {
+  await emptyHostView("tenant", OWN);
 });
 
 test("pool Cost tab when the read fails: the error, not an empty pool", async () => {

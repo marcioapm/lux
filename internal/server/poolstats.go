@@ -400,7 +400,7 @@ type poolCostOutput struct {
 		Series     []PoolCostPoint  `json:"series" doc:"The same by family and bucket; a bucket without a row is no cost reported, not zero."`
 		Families   []CostFamilyInfo `json:"families,omitempty"`
 		TopRuns    []PoolTopRun     `json:"topRuns" doc:"The costliest Runs by the pool's machines, up to 10 per currency, costliest first."`
-		Idle       []PoolIdle       `json:"idle,omitempty" doc:"Host time no Run reserved, per family and currency. Not part of totals. Operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."`
+		Idle       *[]PoolIdle      `json:"idle,omitempty" doc:"Host time no Run reserved, per family and currency. Not part of totals. Present (maybe empty) exactly when the reader may see the pool's host time: operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."`
 		HostSeries []PoolHostTime   `json:"hostSeries,omitempty" doc:"Host time per bucket and family, allocated and idle; visible as idle."`
 		Hosts      []PoolHostTime   `json:"hosts,omitempty" doc:"Host time per host and family in the range, allocated and idle; visible as idle."`
 	} `nameHint:"PoolCost"`
@@ -512,9 +512,12 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		if err != nil {
 			return err
 		}
-		if b.Idle, err = pgx.CollectRows(rows, pgx.RowToStructByPos[PoolIdle]); err != nil {
+		idle, err := pgx.CollectRows(rows, pgx.RowToStructByPos[PoolIdle])
+		if err != nil {
 			return err
 		}
+		// A pointer to an empty slice encodes as []: visible, nothing in range.
+		b.Idle = &idle
 		rows, err = tx.Query(ctx, `SELECT `+bucket+`, '', '', c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text,
 			NULL::float8, NULL::jsonb
 			FROM cost_hourly c WHERE `+hostRows+` GROUP BY 1, 4, 5 ORDER BY 1, 5, 4`, pool.ID, from, to)
