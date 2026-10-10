@@ -723,14 +723,24 @@ function States() {
 function Stats() {
   const series = useMemo(() => fakeSeries(48, 1800), []);
   return (
-    <Section id="stats" title="StatTile" note="Label, proportional-figure value, optional unit, signed delta vs a named period, 12–48 point sparkline in the de-emphasis hue with the current point in accent.">
+    <Section id="stats" title="StatTile" note="Compact: a 12px muted label (with a ColorKey swatch when the figure is one family or series), the value at --text-2xl, its unit or note on the line under it, an optional signed delta and sparkline. lead tints the one figure a page is about; tone=warn is money you would want back, danger a count that needs action. .grid-stats goes 2 → 3 → 5 across; a row of exactly six goes 3 + 3, then 6 on the widest content.">
+      <h3 className="sg-h3">A cost row: lead, swatches, warn</h3>
+      <div className="grid grid-stats">
+        <StatTile lead label="Host cost (7d)" value="$14.26" unit="list price · 121 host-hours" />
+        <StatTile label="Compute" swatch={familyColor("compute")} value="$12.87" unit="$0.107/h avg · spot" />
+        <StatTile label="Block storage" swatch="var(--chart-3)" value="$1.38" unit="100 GB gp3 · $0.0115/h" />
+        <StatTile label="Unallocated" tone="warn" value="$6.94" unit="49% — no run reserved it" />
+        <StatTile label="Utilisation" value="51%" unit="charged to runs ÷ host cost" />
+      </div>
+      <h3 className="sg-h3">Deltas, sparklines, tones, loading</h3>
       <div className="grid grid-stats">
         <StatTile label="Running" value={formatCount(series.running.at(-1))} delta={12.5} deltaLabel="yesterday" trend={series.running} />
         <StatTile label="Queued" value={formatCount(series.queued.at(-1))} delta={-38} deltaUnit="" deltaLabel="1h ago" upIsGood={false} trend={series.queued} />
         <StatTile label="Hosts ready" value="14" unit="of 16" delta={0} deltaLabel="1h ago" />
-        <StatTile label="Hosts lost" value="2" tone="danger" delta={2} deltaUnit="" deltaLabel="1h ago" upIsGood={false} />
-        <StatTile label="Peak memory" value="1.4" unit="GiB" trend={series.mem} />
+        <StatTile label="Hosts lost" value="2" tone="danger" unit="stopped heartbeating" delta={2} deltaUnit="" deltaLabel="1h ago" upIsGood={false} />
+        <StatTile label="Peak memory" value="1.4 GiB" trend={series.mem} />
         <StatTile label="p50 queue time" value={formatDuration(83)} delta={-14.2} deltaLabel="7d" upIsGood={false} />
+        <StatTile label="Start latency (1h)" value="–" unit="no starts" />
         <StatTile label="Loading" value="" loading />
       </div>
     </Section>

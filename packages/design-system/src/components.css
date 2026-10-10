@@ -1093,19 +1093,26 @@ a.idchip-text:hover {
   font-weight: var(--weight-medium);
 }
 
-/* ---------- StatTile ---------- */
+/* ---------- StatTile ----------
+   Compact: a 12px muted label, the value at --text-2xl (22 / 20px), the
+   unit or note on its own line under it. */
 .stat {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
+  gap: var(--sp-2);
   min-width: 0;
-  padding: var(--pad-card);
+  padding: calc(var(--pad-card) - 4px) var(--pad-card);
   background: var(--bg-surface);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
   text-align: left;
   color: inherit;
   font: inherit;
+}
+/* The one figure a page is about: a soft accent tint, never a second accent. */
+.stat-lead {
+  background: color-mix(in srgb, var(--accent-subtle) 40%, var(--bg-surface));
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-soft));
 }
 .stat.is-clickable {
   cursor: pointer;
@@ -1115,8 +1122,12 @@ a.idchip-text:hover {
   border-color: var(--border-strong);
 }
 .stat-label {
-  font-size: var(--text-sm);
+  min-width: 0;
+  font-size: var(--text-xs);
   color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .stat-main {
   display: flex;
@@ -1124,18 +1135,22 @@ a.idchip-text:hover {
   justify-content: space-between;
   gap: var(--sp-5);
   min-width: 0;
+  margin-top: var(--sp-1);
 }
 .stat-value {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0 var(--sp-3);
-  font-size: var(--text-3xl);
+  font-size: var(--text-2xl);
   font-weight: var(--weight-semibold);
-  line-height: 1.1;
-  letter-spacing: -0.015em;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
   color: var(--fg);
   min-width: 0;
+}
+.stat-value .money-list {
+  gap: 0 var(--sp-4);
 }
 .stat-warn .stat-value {
   color: var(--warn-fg);
@@ -1147,19 +1162,20 @@ a.idchip-text:hover {
   color: var(--success-fg);
 }
 .stat-unit {
-  font-size: var(--text-sm);
-  font-weight: var(--weight-normal);
+  min-width: 0;
+  font-size: var(--text-xs);
   color: var(--fg-muted);
-  letter-spacing: 0;
-  white-space: nowrap;
-  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.stat-unit .money-list {
+  display: inline-flex;
 }
 .stat-spark {
   flex: none;
   line-height: 0;
 }
 .stat-delta {
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   color: var(--fg-muted);
 }
 .stat-delta-good .num {
