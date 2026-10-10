@@ -83,7 +83,7 @@ test("TimeSeriesChart bars: legend entries carry their values and the note", asy
     const html = renderToStaticMarkup(
       <TimeSeriesChart x={[0, 3600]} ys={[[1, 2], [3, 4]]} series={[{ label: "Compute" }, { label: "AI models" }]} unit="money" currency="USD" stacked bars legendValues={["$3.00", "$7.00"]} legendNote="each bar is one hour" />,
     );
-    expect(html).toContain('class="tschart tschart-bars"');
+    expect(html).toContain('class="tschart tschart-bars tschart-stacked"');
     const legend = [...html.matchAll(/<button[^>]*tschart-legend-item[^>]*>(.*?)<\/button>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, ""));
     expect(legend).toEqual(["Compute$3.00", "AI models$7.00"]);
     expect(html).toContain("each bar is one hour");
