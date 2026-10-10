@@ -1398,7 +1398,10 @@ a.idchip-text:hover {
   pointer-events: none;
   background: var(--bg-subtle);
 }
-.tschart-bars .tschart-key {
+/* Bars and stacked bands are parts of a whole (cost families, stored kinds):
+   their keys are the ColorKey swatch, the same square as in every cost row. */
+.tschart-bars .tschart-key,
+.tschart-stacked .tschart-key {
   width: 10px;
   height: 10px;
   border-radius: var(--radius-sm);

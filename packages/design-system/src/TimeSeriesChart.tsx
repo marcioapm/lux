@@ -334,7 +334,7 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
   const flip = hover ? hover.left > width * 0.6 : false;
 
   return (
-    <div className={["tschart", bars ? "tschart-bars" : "", className ?? ""].join(" ").trim()}>
+    <div className={["tschart", bars ? "tschart-bars" : "", stacked ? "tschart-stacked" : "", className ?? ""].join(" ").trim()}>
       {x.length < 2 ? (
         <div className="tschart-empty muted" style={{ height }}>
           {x.length === 0 ? "No samples in this range." : "Waiting for a second sample."}
