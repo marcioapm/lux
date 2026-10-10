@@ -25,7 +25,10 @@ type bsHost struct {
 	Volumes              []HostVolume
 }
 
-// blockStorageHosts are the hosts refreshBlockStorage prices.
+// blockStorageHosts are the hosts refreshBlockStorage prices: only those
+// with capacity to share (as openBlockStorageRate needs), so a launch that
+// never registered is not selected and locked on every pass; a live one is
+// selected once it registers.
 func (s *Server) blockStorageHosts(ctx context.Context) ([]bsHost, error) {
 	var out []bsHost
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -34,6 +37,9 @@ func (s *Server) blockStorageHosts(ctx context.Context) ([]bsHost, error) {
 			WHERE h.volumes IS NOT NULL AND jsonb_array_length(h.volumes) > 0
 				AND h.provision_requested_at IS NOT NULL AND p.provider <> 'static'
 				AND NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.family = 'block-storage')
+				AND (coalesce((h.capacity->>'cpus')::float8, 0) > 0 OR coalesce((h.capacity->>'memory')::int8, 0) > 0
+					OR EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.family = 'compute'
+						AND (r.cap_cpus > 0 OR r.cap_memory > 0)))
 			ORDER BY h.id`)
 		if err != nil {
 			return err
