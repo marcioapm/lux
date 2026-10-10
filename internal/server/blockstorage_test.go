@@ -99,6 +99,7 @@ func TestBlockStorageRates(t *testing.T) {
 	execSQL(t, s, ctx, `UPDATE hosts SET volumes = '[{"type":"gp3","sizeGiB":100,"iops":3000,"throughputMiBps":125},{"type":"gp3","sizeGiB":50,"iops":4000,"throughputMiBps":125}]' WHERE id = 'od'`)
 
 	s.refreshPrices(ctx)
+	s.refreshBlockStorage(ctx)
 	type rate struct {
 		Family, PerHour, Source string
 		From                    time.Time
@@ -141,6 +142,7 @@ func TestBlockStorageRates(t *testing.T) {
 		t.Errorf("unpriceable type priced: %+v", r)
 	}
 	s.refreshPrices(ctx)
+	s.refreshBlockStorage(ctx)
 	if again := rates("od"); len(again) != 2 || again[0].PerHour != got[0].PerHour || !again[0].From.Equal(got[0].From) || *again[0].Details != *got[0].Details {
 		t.Errorf("second refresh: %+v", again)
 	}
