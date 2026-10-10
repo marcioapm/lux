@@ -183,6 +183,32 @@ func TestProviderPricesOnDemandCacheRefreshAndRetry(t *testing.T) {
 	}
 }
 
+// The Pricing API quotes ten fractional digits ("0.0960000000", as
+// internal/ec2's fixture); onDemandPrice caches and returns it as the exact
+// nine-digit value, and the host gets a usable period at it.
+func TestProviderPricesOnDemandTenDigitAnswer(t *testing.T) {
+	p := &fakePriceProvider{onDemand: []fakeOnDemandAnswer{{rate: HourlyRate{PerHour: "0.0960000000", Currency: "USD"}}}}
+	s := providerPriceServer(t, p)
+	from := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	insertProviderHost(t, s, "t1", "burst", "ec2", "od", MarketOnDemand, from)
+
+	rate, err := s.onDemandPrice(context.Background(), "ec2", "us-east-1", "m7i.large")
+	if err != nil || rate != (HourlyRate{PerHour: "0.096", Currency: "USD"}) {
+		t.Fatalf("onDemandPrice = %+v, %v", rate, err)
+	}
+	if got := cachedProviderRate(t, s); got != "0.096" {
+		t.Fatalf("cached %q", got)
+	}
+	s.refreshPrices(context.Background())
+	if p.onDemandCalls != 1 {
+		t.Errorf("cached price not reused: %d calls", p.onDemandCalls)
+	}
+	if got := providerRates(t, s, "od"); len(got) != 1 || got[0].perHour != "0.096" || !got[0].open {
+		t.Errorf("rates %+v", got)
+	}
+}
+
 func TestProviderPricesRespectPoolTenantBoundary(t *testing.T) {
 	p := &fakePriceProvider{onDemand: []fakeOnDemandAnswer{{rate: HourlyRate{PerHour: "0.42", Currency: "USD"}}}}
 	s := providerPriceServer(t, p)

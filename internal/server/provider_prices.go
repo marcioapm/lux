@@ -105,6 +105,7 @@ func (s *Server) onDemandPrice(ctx context.Context, provider, region, kind strin
 		}
 		return rate, err
 	}
+	rate.PerHour = trimmedDecimal(rate.PerHour)
 	if err := validPrice(rate.PerHour, rate.Currency); err != nil || rate.Currency == "" {
 		return HourlyRate{}, fmt.Errorf("invalid %s on-demand price %q %q: %v", provider, rate.PerHour, rate.Currency, err)
 	}
