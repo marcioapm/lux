@@ -10,6 +10,7 @@ let ScopeProvider: typeof import("../scope.tsx").ScopeProvider;
 let ToastProvider: typeof import("@lux/design-system").ToastProvider;
 let formatTimestamp: typeof import("@lux/design-system").formatTimestamp;
 let fakeApi: typeof import("../testing.ts").fakeApi;
+let until: typeof import("../testing.ts").until;
 let hostStages: typeof import("./hostStages.ts").hostStages;
 let api: typeof import("../../api/index.ts");
 let setSearchParams: typeof import("../router.tsx").setSearchParams;
@@ -18,7 +19,7 @@ beforeAll(async () => {
   ({ HostPage } = await import("./HostPage.tsx"));
   ({ ScopeProvider } = await import("../scope.tsx"));
   ({ ToastProvider, formatTimestamp } = await import("@lux/design-system"));
-  ({ fakeApi } = await import("../testing.ts"));
+  ({ fakeApi, until } = await import("../testing.ts"));
   ({ hostStages } = await import("./hostStages.ts"));
   api = await import("../../api/index.ts");
   ({ setSearchParams } = await import("../router.tsx"));
@@ -185,7 +186,7 @@ test("the host's tabs: Overview by default; each tab shows its own cards and ?ta
       ["Events", "events", ["Events"]],
     ] as const) {
       await act(async () => tab(p.el, name).click());
-      await sleep(30);
+      await until(() => JSON.stringify(cardTitles(p.el)) === JSON.stringify(titles), `the ${name} tab's cards`);
       expect(new URLSearchParams(location.search).get("tab")).toBe(key);
       expect(tab(p.el, name).getAttribute("aria-selected")).toBe("true");
       expect(cardTitles(p.el)).toEqual([...titles]);
@@ -216,9 +217,8 @@ test("an operator on a platform host's Events who narrows to a tenant reads as O
   try {
     expect(p.eventsCard()).toBeDefined();
     await act(async () => setSearchParams({ tenant: "acme" }));
-    await sleep(50);
+    await until(() => tab(p.el, "Events").disabled, "the Events tab to disable");
     expect(new URLSearchParams(location.search).get("tab")).toBe("events");
-    expect(tab(p.el, "Events").disabled).toBe(true);
     expect(tab(p.el, "Overview").getAttribute("aria-selected")).toBe("true");
     expect(cardTitles(p.el)).toEqual(["Details", "Lifecycle", "Live placements"]);
     expect(p.eventCalls().filter((c) => query(c).tenant)).toEqual([]);

@@ -9,12 +9,13 @@ let Overview: typeof import("./Overview.tsx").Overview;
 let storedSeries: typeof import("./Overview.tsx").storedSeries;
 let ScopeProvider: typeof import("../scope.tsx").ScopeProvider;
 let fakeApi: typeof import("../testing.ts").fakeApi;
+let until: typeof import("../testing.ts").until;
 let api: typeof import("../../api/index.ts");
 beforeAll(async () => {
   GlobalRegistrator.register();
   ({ Overview, storedSeries } = await import("./Overview.tsx"));
   ({ ScopeProvider } = await import("../scope.tsx"));
-  ({ fakeApi } = await import("../testing.ts"));
+  ({ fakeApi, until } = await import("../testing.ts"));
   api = await import("../../api/index.ts");
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -126,14 +127,13 @@ test("the Overview's tabs: Activity by default (tiles, trends, feed); Cost and S
     expect(costCalls(p.fake.calls)).toEqual([]);
 
     await act(async () => tab("Cost").click());
-    await sleep(30);
+    await until(() => p.el.querySelector(".cost-panel") != null, "the cost panel");
     expect(new URLSearchParams(location.search).get("tab")).toBe("cost");
-    expect(p.el.querySelector(".cost-panel")).not.toBeNull();
     expect(p.el.querySelectorAll(".stat").length).toBe(0);
-    expect(costCalls(p.fake.calls).length).toBeGreaterThan(0);
+    await until(() => costCalls(p.fake.calls).length > 0, "a cost read");
 
     await act(async () => tab("Storage").click());
-    await sleep(30);
+    await until(() => titles(p.el).includes("Stored"), "the Stored card");
     expect(new URLSearchParams(location.search).get("tab")).toBe("storage");
     expect(titles(p.el)).toEqual(["Stored"]);
 
