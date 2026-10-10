@@ -450,3 +450,36 @@ func TestCodexNewThreadRolloutNotYetWritten(t *testing.T) {
 		t.Fatalf("got %q; lines %q", got, log.lines())
 	}
 }
+
+// A resume whose thread/resume fails starts a new thread: its rollout not
+// existing yet is no failure, so its compactions carry their summaries.
+func TestCodexResumeFallbackRolloutNotYetWritten(t *testing.T) {
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	log := &inputSink{}
+	c := NewCodex()
+	c.compactionWait = 300 * time.Millisecond
+	w := startWireSink(t, c, proto.ShimConfig{Resume: true, SessionID: "gone"}, cxEvents{warnSink{log}})
+	id, _ := w.next("initialize")
+	w.send(`{"id":` + id + `,"result":{"userAgent":"lux/0.145.0 (Ubuntu; x86_64)"}}`)
+	id, _ = w.next("thread/resume")
+	w.send(`{"id":` + id + `,"error":{"code":-32600,"message":"no rollout found for thread id gone"}}`)
+	id, _ = w.next("thread/start")
+	w.send(`{"id":` + id + `,"result":{"thread":{"id":"` + cxThread + `","path":"` + rollout + `","status":{"type":"idle"}}}}`)
+	log.wait(t, "idle")
+	lines, summary := cxRolloutCompacted(t)
+	if err := os.WriteFile(rollout, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	started, completed := cxItems(t)
+	w.send(started)
+	w.send(completed)
+	got := waitCompactions(t, log, 1)
+	w.exit()
+	want, _ := json.Marshal(proto.Compaction{SessionID: cxThread, Summary: summary})
+	if !slices.Equal(got, []string{"compacted " + string(want)}) || log.has("warning codex:") {
+		t.Fatalf("got %q; lines %q", got, log.lines())
+	}
+	if !log.has("warning thread/resume failed, starting a new thread: ") {
+		t.Fatalf("no resume warning: %q", log.lines())
+	}
+}
