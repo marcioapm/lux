@@ -19,6 +19,19 @@ type SpotRate struct {
 type PriceProvider interface {
 	OnDemand(context.Context, string, string) (HourlyRate, error)                          // region, instance type
 	SpotHistory(context.Context, string, string, time.Time, time.Time) ([]SpotRate, error) // zone, type, from, to
+	BlockStorage(context.Context, string, string) (BlockStoragePrice, error)               // region, volume type
+}
+
+// BlockStoragePrice is a volume type's monthly list prices per unit, as
+// decimal strings: provisioned storage per GiB-month, provisioned IOPS per
+// IOPS-month and provisioned throughput per GiB/s-month (the Pricing API's
+// unit; one MiB/s is 1/1024 of it). Empty: the provider does not charge
+// that dimension for the type. ebsBilling says which part of each is billed.
+type BlockStoragePrice struct {
+	Currency      string
+	PerGBMonth    string
+	PerIOPSMonth  string
+	PerGiBpsMonth string
 }
 
 const DefaultPricesRefresh = 24 * time.Hour

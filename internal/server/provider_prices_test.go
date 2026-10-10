@@ -19,6 +19,10 @@ type fakePriceProvider struct {
 
 	onDemandCalls int
 	spotCalls     []spotPriceCall
+
+	blockStorage      map[string]BlockStoragePrice
+	blockStorageErr   error
+	blockStorageCalls []string
 }
 
 type fakeOnDemandAnswer struct {
@@ -50,6 +54,19 @@ func (p *fakePriceProvider) SpotHistory(_ context.Context, zone, kind string, fr
 		return nil, p.spotErr[i]
 	}
 	return p.spot[i], nil
+}
+
+// BlockStorage answers blockStorage[volume type], or blockStorageErr.
+func (p *fakePriceProvider) BlockStorage(_ context.Context, region, kind string) (BlockStoragePrice, error) {
+	p.blockStorageCalls = append(p.blockStorageCalls, region+"/"+kind)
+	if p.blockStorageErr != nil {
+		return BlockStoragePrice{}, p.blockStorageErr
+	}
+	price, ok := p.blockStorage[kind]
+	if !ok {
+		return BlockStoragePrice{}, errors.New("unexpected block storage price request")
+	}
+	return price, nil
 }
 
 func providerPriceServer(t *testing.T, p PriceProvider) *Server {
