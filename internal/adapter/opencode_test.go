@@ -1520,3 +1520,34 @@ func TestOpenCodeRunLeavesNoGoroutines(t *testing.T) {
 		t.Fatalf("%d goroutines after 10 lifecycles, %d before\n%s", n, base, buf[:runtime.Stack(buf, true)])
 	}
 }
+
+// compactSink is an inputSink that also logs each acp.compacted record.
+type compactSink struct {
+	*inputSink
+}
+
+func (s compactSink) Event(typ string, data any) {
+	if typ == "acp.compacted" {
+		b, _ := json.Marshal(data)
+		s.add("compacted " + string(b))
+	}
+	s.inputSink.Event(typ, data)
+}
+
+// OpenCode announces a compaction only on its bus (session.compacted,
+// carrying just the session id), never over ACP. lux reports the Run's own
+// session's as acp.compacted, and ignores another session's.
+func TestOpenCodeCompactionIsReported(t *testing.T) {
+	log := &inputSink{}
+	a, _, w, first := ocWithBusOn(t, nil, compactSink{log}, log)
+	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"ses_other"}}`)
+	onBus(t, a, `{"type":"session.compacted","properties":{"sessionID":"`+ocSession+`"}}`)
+	w.resolve(first, ocResult)
+	onBus(t, a, ocIdle)
+	got := slices.DeleteFunc(log.lines(), func(l string) bool { return !strings.HasPrefix(l, "compacted ") })
+	want := []string{`compacted {"sessionID":"` + ocSession + `"}`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	w.exit()
+}

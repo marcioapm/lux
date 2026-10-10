@@ -272,6 +272,9 @@ OpenCode-specific behavior.
   - `GET /event` (server-sent events) is the bus. A model step is an assistant
     `message.updated` whose `info.parentID` is the user message it answers;
     `session.status` (`busy`/`idle`) and `session.idle` mark the loop.
+    `session.compacted` (`{"sessionID"}` only, no summary or token counts) is OpenCode's
+    one sign that it compacted the session's context; ACP has no such update. lux
+    reports it for the Run's session as an `acp.compacted` event, `{"sessionID"}`.
   - `POST /session/{id}/prompt_async` with `{"messageID":"msg_…","parts":[{"type":"text","text":…}]}`
     (204) stores the message **under that id** and joins it to the running ACP loop,
     exactly as a second `session/prompt` does. The first assistant `message.updated`
