@@ -699,6 +699,28 @@ function CostPanelDemo() {
           <Card title="By API key" subtitle="last 24h · the key's name as it is now" flush>
             <BreakdownTable lead="API key" rows={fakeKeyBreakdown} />
           </Card>
+          <Card title="By family" subtitle="blockStorage: lux's disk family in its own column; a small share reads <1%" flush>
+            <BreakdownTable
+              lead="Family"
+              blockStorage
+              rows={[
+                { id: "ai", label: "AI models", color: familyColor("ai", "violet"), currency: "USD", runs: 312, compute: null, blockStorage: null, external: "625.76", total: "625.76", share: 0.988 },
+                { id: "compute", label: "Compute", color: familyColor("compute"), currency: "USD", runs: 341, compute: "6.61", blockStorage: null, external: null, total: "6.61", share: 0.0104 },
+                { id: "block-storage", label: "Block storage", color: familyColor("block-storage"), currency: "USD", runs: 341, compute: null, blockStorage: "0.71", external: null, total: "0.71", share: 0.0011 },
+              ]}
+            />
+          </Card>
+        </div>
+        <Card flush>
+          <KpiStrip>
+            <Kpi label="Total · last 7 days" value={<MoneyList amounts={[{ currency: "USD", amount: "633.08" }]} large decimals={CENTS} />} sub="five figures: five across from 960px" />
+            <Kpi label={<ColorKey color={familyColor("compute")}>Compute</ColorKey>} value={<Money amount="6.61" currency="USD" decimals={CENTS} />} sub="1% · host time Runs reserved" />
+            <Kpi label={<ColorKey color={familyColor("block-storage")}>Block storage</ColorKey>} value={<Money amount="0.71" currency="USD" decimals={CENTS} />} sub="0% · the disks" />
+            <Kpi label={<ColorKey color="var(--chart-7)">External</ColorKey>} value={<Money amount="625.76" currency="USD" decimals={CENTS} />} sub="99% · reported by cost plugins" />
+            <Kpi label="Peak day" value={<Money amount="141.40" currency="USD" decimals={CENTS} />} sub="Thu, Oct 8" />
+          </KpiStrip>
+        </Card>
+        <div className="grid grid-2">
           <Card title="Labels" subtitle="LabelChips: a Run's labels, app first, three at most" flush>
             <div className="stack" style={{ padding: "var(--pad-card)" }}>
               {fakeRunLabels.map((l, i) => (

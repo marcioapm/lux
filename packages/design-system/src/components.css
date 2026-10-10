@@ -1451,6 +1451,12 @@ a.idchip-text:hover {
     grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr));
   }
 }
+/* Five figures (Total, three sides, the peak): one row once each has room. */
+@container (min-width: 960px) {
+  .kpi-strip:has(> :nth-child(5):last-child) {
+    grid-template-columns: 1.3fr repeat(4, minmax(0, 1fr));
+  }
+}
 .kpi {
   display: flex;
   flex-direction: column;
