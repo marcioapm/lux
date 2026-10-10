@@ -4,8 +4,9 @@ import { api, useQuery, type Host, type HostCostRate } from "../../api/index.ts"
 import { costRange, stepNote } from "../every.ts";
 import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip } from "./common.tsx";
+import { BLOCK_STORAGE } from "./costView.ts";
 import { HostCostChart, HostCostTiles } from "./HostCostParts.tsx";
-import { BLOCK_STORAGE, billedHours, familyLabel, hostCharts, volumeSummary, volumeText, whoPaid } from "./hostCostView.ts";
+import { billedHours, familyLabel, hostCharts, volumeSummary, volumeText, whoPaid } from "./hostCostView.ts";
 
 /**
  * A host's cost per hour or UTC day (the page's step): compute and block

@@ -2,8 +2,8 @@
 // chart and the "who paid" card, built from hostCostView.ts's figures.
 import type { ReactNode } from "react";
 import { Card, CENTS, ColorKey, EmptyState, fadedCss, familyColor, formatMoney, ListPriceNote, meterText, Money, MoneyList, PartBar, partShares, StatTile, Table, TimeSeriesChart, type Column, type MoneyAmount } from "@lux/design-system";
-import { ratio } from "./costView.ts";
-import { BLOCK_STORAGE, COMPUTE, familyLabel, perHour, type HostChart, type Paid, type WhoPaid } from "./hostCostView.ts";
+import { BLOCK_STORAGE, COMPUTE, ratio } from "./costView.ts";
+import { familyLabel, perHour, type HostChart, type Paid, type WhoPaid } from "./hostCostView.ts";
 
 const COMPUTE_COLOR = familyColor(COMPUTE);
 const BS_COLOR = familyColor(BLOCK_STORAGE);
