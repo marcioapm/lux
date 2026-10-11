@@ -5,16 +5,13 @@
 // (hour or day) is the page's (every.ts).
 import { bandColor, compareMoney, familyDisplay, NONE_BAND_COLOR, OTHER_BAND_COLOR, sumMoney } from "@lux/design-system";
 import type { CostFamily, CostKey, CostSummary, CostSummaryRow, MoneyTotal } from "../../api/index.ts";
+import { BLOCK_STORAGE, COMPUTE, HOST_FAMILIES } from "../../costFamilies.ts";
+
+export { BLOCK_STORAGE, COMPUTE, HOST_FAMILIES };
 
 /** Which costs the panel counts: every family, the host-tied ones (compute and block storage), or what cost plugins report. */
 export type CostShow = "all" | "compute" | "external";
 export type CostInterval = "hour" | "day";
-
-export const COMPUTE = "compute";
-/** lux's own disk family: a figure apart from compute and from the plugins' families, counted under Show Compute. */
-export const BLOCK_STORAGE = "block-storage";
-/** The host-tied families lux prices itself: what Show Compute counts (luxd's rank=compute). */
-export const HOST_FAMILIES: readonly string[] = [COMPUTE, BLOCK_STORAGE];
 
 /** ?cost=: compute or external; anything else is All. */
 export function parseShow(v: string | null): CostShow {
