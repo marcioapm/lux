@@ -419,7 +419,7 @@ const showTitle = (el: Element, name: string) => [...el.querySelectorAll<HTMLEle
 // The total KPI's split bar: each part's label and whether it is drawn faint.
 const totalSplit = (el: Element) => [...el.querySelector(".kpi [data-split-bar]")!.querySelectorAll<HTMLElement>(".split-bar-part")].map((p) => p.classList.contains("is-faint"));
 
-test("Show External: the total is every family but compute and says so; the External KPI is the plugins' alone", async () => {
+test("Show External: the total excludes compute and block storage; the External KPI is the plugins' alone", async () => {
   // External is what cost plugins report: compute and block storage are both left out and muted.
   const p = await render("operator", "http://localhost/?tab=cost&cost=external", familyAnswer);
   try {
