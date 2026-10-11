@@ -197,7 +197,39 @@ func TestClaudeCancelledLineFailsOnStop(t *testing.T) {
 // On a live Run, a line is written again claudeMaxResends times; the next
 // cancel fails it with a reason saying so, not as a stop.
 func TestClaudeLineCancelledTooOftenFails(t *testing.T) {
-	_, w, sink, steer := claudeQueuedSteer(t)
+	c, w, sink, steer := claudeQueuedSteer(t)
+	steer = cancelUntilLastResend(t, w, steer)
+	w.send(clLifecycle(steer, "cancelled"))
+	sink.wait(t, "failed s: ")
+	// The limit is per line: another line cancelled once is written again.
+	c.Deliver(proto.Input{RequestID: "t", Text: "y"})
+	other := userLine(t, w)
+	w.send(clLifecycle(other, "queued"))
+	sink.wait(t, "accepted t")
+	w.send(clLifecycle(other, "cancelled"))
+	again := userLine(t, w)
+	if again != claudeUUID("t#1") {
+		t.Fatalf("t resent as %s", again)
+	}
+	w.send(clLifecycle(again, "started"))
+	sink.wait(t, "consumed t")
+	w.exit()
+	want := fmt.Sprintf("failed s: claude: the message was cancelled %d times by interrupts", claudeMaxResends+1)
+	if got := failures(sink, "s"); !slices.Equal(got, []string{want}) {
+		t.Fatalf("failed %q, want %q", got, want)
+	}
+	if got := failures(sink, "t"); len(got) != 0 {
+		t.Fatalf("t failed %q", got)
+	}
+	if rest := w.rest(); len(rest) != 0 {
+		t.Fatalf("%d lines written after the limit", len(rest))
+	}
+}
+
+// cancelUntilLastResend cancels steer claudeMaxResends times, checking each
+// copy is written again under its own uuid; it returns the last copy's.
+func cancelUntilLastResend(t *testing.T, w *agentWire, steer string) string {
+	t.Helper()
 	for i := 1; i <= claudeMaxResends; i++ {
 		w.send(clLifecycle(steer, "cancelled"))
 		steer = userLine(t, w)
@@ -206,12 +238,35 @@ func TestClaudeLineCancelledTooOftenFails(t *testing.T) {
 		}
 		w.send(clLifecycle(steer, "queued"))
 	}
+	return steer
+}
+
+// A Run that starts stopping once a line used up its resends fails it as
+// unread by the stop, not as cancelled too often: the stop decides.
+func TestClaudeLinePastItsResendsFailsAsAStopWhileStopping(t *testing.T) {
+	c, w, sink, steer := claudeQueuedSteer(t)
+	steer = cancelUntilLastResend(t, w, steer)
+	c.mu.Lock()
+	c.stopping = true // what Stop sets before its SIGINT
+	c.mu.Unlock()
 	w.send(clLifecycle(steer, "cancelled"))
 	sink.wait(t, "failed s: ")
 	w.exit()
-	want := fmt.Sprintf("failed s: claude: the message was cancelled %d times by interrupts", claudeMaxResends+1)
-	if got := failures(sink, "s"); !slices.Equal(got, []string{want}) {
-		t.Fatalf("failed %q, want %q", got, want)
+	if got := failures(sink, "s"); !slices.Equal(got, []string{"failed s: the Run stopped before the agent read it"}) {
+		t.Fatalf("failed %q", got)
+	}
+}
+
+// A copy that cannot be written (the agent's stdin is gone) fails with the
+// write error, not with a reason a consumer reads as a stop.
+func TestClaudeLineWhoseCopyCannotBeWrittenFailsWithTheWriteError(t *testing.T) {
+	_, w, sink, steer := claudeQueuedSteer(t)
+	w.inPipe.Close()
+	w.send(clLifecycle(steer, "cancelled"))
+	sink.wait(t, "failed s: ")
+	got := failures(sink, "s")
+	if len(got) != 1 || strings.Contains(got[0], "the message was") || strings.Contains(got[0], "stopped before") {
+		t.Fatalf("failed %q, want the write error", got)
 	}
 }
 

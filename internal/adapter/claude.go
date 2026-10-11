@@ -422,17 +422,13 @@ func (c *Claude) lifecycleFrame(uuid, state string) {
 }
 
 // claudeMaxResends: how many times one request id's line is written again
-// after interrupts cancel it; the next cancel, its claudeMaxResends+1th,
-// fails it.
+// after interrupts cancel it; the cancel after the last resend fails it.
 const claudeMaxResends = 3
 
 var errClaudeCancelledTooOften = fmt.Errorf("claude: the message was cancelled %d times by interrupts", claudeMaxResends+1)
 
 // resend writes an accepted, unread line again, under a new uuid mapped to
-// the same request id. It returns nil once written, or why the line fails
-// instead: errStoppedUnread if the Run is stopping,
-// errClaudeCancelledTooOften past claudeMaxResends, or, if it was not
-// accepted unread or the write failed, "claude: the message was <state>".
+// the same request id. It returns nil once written, or why the line fails.
 func (c *Claude) resend(in proto.Input, state string) error {
 	c.mu.Lock()
 	if c.resent == nil {
@@ -451,9 +447,8 @@ func (c *Claude) resend(in proto.Input, state string) error {
 	case !ok:
 		return errClaudeCancelledTooOften
 	}
-	unwritten := fmt.Errorf("claude: the message was %s", state)
 	if !c.inputs.unreadOne(in.RequestID) {
-		return unwritten
+		return fmt.Errorf("claude: the message was %s", state)
 	}
 	uuid := claudeUUID(fmt.Sprintf("%s#%d", in.RequestID, n))
 	c.mu.Lock()
@@ -462,8 +457,12 @@ func (c *Claude) resend(in proto.Input, state string) error {
 	if err := c.writeLine(uuid, in); err != nil {
 		c.mu.Lock()
 		c.dropSent(uuid)
+		stopping := c.stopping
 		c.mu.Unlock()
-		return unwritten
+		if stopping {
+			return errStoppedUnread
+		}
+		return err
 	}
 	return nil
 }

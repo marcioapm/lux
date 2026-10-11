@@ -73,11 +73,13 @@ the next `turn/start`; OpenCode, they go again through `prompt_async`
 (under a new message id) once the cancelled loop ends; Claude Code, a line
 reported `cancelled` or `discarded` after an interrupt is written again
 with a new `uuid`, up to 3 times. Each is sent again with its images.
-A Claude Code line that fails here fails with one of two reasons: `the Run
-stopped before the agent read it` while the Run stops (the same reason
-Codex and OpenCode give), or `claude: the message was cancelled 4 times by
-interrupts` on a live Run, once its 3 resends were cancelled too. Only the
-first means the Run will not read it.
+A Claude Code line that fails here fails with `the Run stopped before the
+agent read it` while the Run stops (the same reason Codex and OpenCode
+give), with `claude: the message was cancelled 4 times by interrupts` on a
+live Run once its 3 resends were cancelled too, or with the write error if
+its copy cannot be written. Only the first means the Run is stopping. A line
+Claude Code cancels before it reported it queued fails as `claude: the
+message was cancelled` (or `discarded`).
 
 ## Images
 
