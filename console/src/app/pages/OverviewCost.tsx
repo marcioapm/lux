@@ -424,7 +424,7 @@ function TotalKpi({ show, words, since, loading, shown, sides, change, filtered 
   );
 }
 
-/** Compute, Block storage and External as SplitBar parts; a side Show hides is drawn faint, never dropped. Block storage counts under Compute, so it hides with Compute under External. */
+// Hidden sides stay in the split bar, drawn faint.
 function splitParts(compute: string | null, blockStorage: string | null, external: string | null, show: CostShow) {
   return [
     { amount: compute, color: COMPUTE_COLOR, label: "Compute", faint: sideHidden("compute", show) },

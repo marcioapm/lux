@@ -18,12 +18,7 @@ export function parseShow(v: string | null): CostShow {
   return v === "compute" || v === "external" ? v : "all";
 }
 
-/**
- * Whether a family counts under show. Show is luxd's family filter: compute
- * is family=compute&family=block-storage (the host and its disks), external
- * nofamily on both (what cost plugins report). The Compute and Block storage
- * figures stay apart; only what each Show counts includes both.
- */
+// Show groups the host families; the Compute and Block storage KPIs stay separate.
 export function shows(show: CostShow, family: string): boolean {
   return show === "all" || (show === "compute") === HOST_FAMILIES.includes(family);
 }

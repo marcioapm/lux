@@ -219,7 +219,6 @@ for (const [cost, rank, showFilter] of [
     try {
       const costs = costCalls(p.fake.calls);
       const of = (g: string[]) => costs.filter((q) => JSON.stringify(q.getAll("group")) === JSON.stringify(g));
-      // Repeated parameters, every value in order: family=compute&family=block-storage.
       const filterOf = (q: URLSearchParams): { family: readonly string[]; nofamily: readonly string[] } => ({ family: q.getAll("family"), nofamily: q.getAll("nofamily") });
       for (const [g, top] of [
         [["key"], "7"],
@@ -416,11 +415,9 @@ test("Overview Cost by family: Block storage is its own KPI and row, apart from 
 
 const muted = (el: Element) => [...el.querySelectorAll(".kpi")].map((k) => [k.querySelector(".kpi-label")?.textContent, k.classList.contains("is-muted"), k.querySelector(".kpi-sub")?.textContent ?? ""]);
 const showTitle = (el: Element, name: string) => [...el.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-label="Show"] [role="radio"]')].find((b) => b.textContent === name)!.getAttribute("title");
-// The total KPI's split bar: each part's label and whether it is drawn faint.
 const totalSplit = (el: Element) => [...el.querySelector(".kpi [data-split-bar]")!.querySelectorAll<HTMLElement>(".split-bar-part")].map((p) => p.classList.contains("is-faint"));
 
 test("Show External: the total excludes compute and block storage; the External KPI is the plugins' alone", async () => {
-  // External is what cost plugins report: compute and block storage are both left out and muted.
   const p = await render("operator", "http://localhost/?tab=cost&cost=external", familyAnswer);
   try {
     await until(() => kpis(p.el).some(([l]) => l === "Block storage"), "the Block storage KPI");

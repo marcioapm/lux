@@ -44,7 +44,6 @@ const fam = (family: string, currency: string, amount: string, at?: string): Cos
 const runFam = (run: string, family: string, currency: string, amount: string): CostSummaryRow => ({ group: { run, family }, currency, amount });
 
 test("Show as the summary's repeated family filter: Compute keeps both host families, External excludes both", () => {
-  // Both name the host families: compute and block storage.
   expect(showFamily("all")).toEqual({});
   expect(showFamily("compute")).toEqual({ family: ["compute", "block-storage"] });
   expect(showFamily("external")).toEqual({ nofamily: ["compute", "block-storage"] });
@@ -94,9 +93,7 @@ test("split: Compute is the compute family, External every other, per currency a
 
 test("split: Block storage is a side of its own and counts under Show Compute, not External", () => {
   const rows = [fam("compute", "USD", "6.61"), fam("block-storage", "USD", "0.71"), fam("ai", "USD", "625.76")];
-  // Its own side in the split; what Show counts puts it with Compute.
   expect(sideTotals(rows)).toEqual([{ currency: "USD", all: "633.08", compute: "6.61", blockStorage: "0.71", external: "625.76" }]);
-  // Show Compute is luxd's family=compute&family=block-storage: block storage is in Compute's total, never External's.
   expect(shownTotals(rows, "compute")).toEqual([{ currency: "USD", amount: "7.32" }]);
   expect(shownTotals(rows, "external")).toEqual([{ currency: "USD", amount: "625.76" }]);
   expect(familyRows(rows, "compute").map((r) => r.family)).toEqual(["compute", "block-storage"]);
