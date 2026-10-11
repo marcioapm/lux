@@ -96,3 +96,27 @@ def test_run_cost_placements_join_compute_and_block_storage(page, mock_console):
     card.get_by_role("link", name="gp-eu-west-1-b2").click()
     page.wait_for_url("**/hosts/host_9p4tz6c1mh**")
     assert not page.errors, page.errors
+
+
+def test_overview_show_compute_counts_block_storage_and_external_neither(page, mock_console):
+    get = lambda q: requests.get(f"{mock_console}/v1/costs?since=7d&{q}", headers={"Authorization": "Bearer x"}, timeout=10).json()
+    by_family = {r["group"]["family"]: Decimal(r["amount"]) for r in get("group=family")["totals"] if r["currency"] == "USD"}
+    host = by_family["compute"] + by_family["block-storage"]
+    # The mock honours repeated family and nofamily, as luxd does.
+    assert sum(Decimal(r["amount"]) for r in get("family=compute&family=block-storage")["totals"]) == host
+    assert {r["group"]["family"] for r in get("group=family&nofamily=compute&nofamily=block-storage")["totals"]} == {"ai"}
+
+    card = page.locator("section.card.cost-card")
+    total = card.locator(".kpi").first
+    muted = lambda: card.locator(".kpi.is-muted .kpi-label").all_inner_texts()
+    page.goto(f"{mock_console}/?tab=cost&range=7d&cost=compute")
+    total.locator(".money-list-lg").wait_for(timeout=20_000)
+    page.wait_for_function("() => document.querySelector('.kpi .kpi-label')?.textContent.startsWith('Compute total')", timeout=20_000)
+    assert total.locator(".money-list-lg").inner_text() == _dollars(str(host)), (total.inner_text(), host)
+    assert muted() == ["External"], muted()
+
+    page.goto(f"{mock_console}/?tab=cost&range=7d&cost=external")
+    page.wait_for_function("() => document.querySelector('.kpi .kpi-label')?.textContent.startsWith('External total')", timeout=20_000)
+    assert total.locator(".money-list-lg").inner_text() == _dollars(str(by_family["ai"])), (total.inner_text(), by_family)
+    assert muted() == ["Compute", "Block storage"], muted()
+    assert not page.errors, page.errors
