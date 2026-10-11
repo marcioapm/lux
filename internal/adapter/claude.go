@@ -436,15 +436,16 @@ func (c *Claude) resend(in proto.Input, state string) error {
 	}
 	n := c.resent[in.RequestID] + 1
 	stopping := c.stopping
-	ok := !stopping && n <= claudeMaxResends
-	if ok {
+	if !stopping && n <= claudeMaxResends {
 		c.resent[in.RequestID] = n
 	}
 	c.mu.Unlock()
+	// Stopping is checked first: a line past its limit on a stopping Run
+	// still fails as unread by the stop.
 	switch {
 	case stopping:
 		return errStoppedUnread
-	case !ok:
+	case n > claudeMaxResends:
 		return errClaudeCancelledTooOften
 	}
 	if !c.inputs.unreadOne(in.RequestID) {
@@ -457,7 +458,7 @@ func (c *Claude) resend(in proto.Input, state string) error {
 	if err := c.writeLine(uuid, in); err != nil {
 		c.mu.Lock()
 		c.dropSent(uuid)
-		stopping := c.stopping
+		stopping = c.stopping
 		c.mu.Unlock()
 		if stopping {
 			return errStoppedUnread
