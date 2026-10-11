@@ -52,3 +52,15 @@ test("mock /v1/costs: repeated family and nofamily keep or drop every value, tot
   expect(fams("family=compute")).toEqual([["compute"], ["compute"]]);
   expect(fams("nofamily=compute")).toEqual([["ai", "block-storage"], ["block-storage"]]);
 });
+
+test("mock /v1/costs rank: compute counts block storage, external never does", () => {
+  const runsOf = (q: string) => Object.fromEntries(ask(q).totals.map((r) => [r.group.run, r.runs]));
+  // Block storage alone, ranked by compute: every disk's Run counts as contributing.
+  const disks = runsOf("group=run&family=block-storage&top=50&rank=compute");
+  expect(Object.keys(disks).length).toBe(8);
+  expect(Object.values(disks).every((n) => n === 1)).toBe(true);
+  // run_bsn6jhmfcejni8a has compute and block storage only: no external cost, no contributing Run.
+  const ext = runsOf("group=run&top=50&rank=external");
+  expect(ext["run_bsn6jhmfcejni8a"]).toBe(0);
+  expect(ext["run_a4aao3fvcuzpa2k"]).toBe(1);
+});
