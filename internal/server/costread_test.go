@@ -150,10 +150,11 @@ func TestCostSummaryRunNames(t *testing.T) {
 // rows, unallocated host time and host allocations alike.
 func TestCostSummaryRepeatedFamilyFilters(t *testing.T) {
 	s, keys := costReadFixture(t)
+	at := func(hour time.Time) string { return hour.UTC().Format(time.RFC3339Nano) }
 	execSQL(t, s, context.Background(), `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount, allocated, unallocated) VALUES
 		($1, 't1', 'r1', 'compute', 'block-storage', 'USD', 'h1', 'blue', 0.5, 0, 0),
 		($2, NULL, NULL, 'compute', 'block-storage', 'USD', 'h1', 'blue', 0, 0.125, 0.0625)`, t0, t0.Add(time.Hour))
-	// series is keyed "hour host family currency" (hour as UTC HH); a key seen twice fails the test.
+	// series is keyed "<UTC RFC 3339 hour> host family currency"; a row without at, or a key seen twice, fails the test.
 	read := func(q string) (totals, series map[string]string, unallocated, hosts []string) {
 		t.Helper()
 		var got CostSummaryBody
@@ -165,7 +166,10 @@ func TestCostSummaryRepeatedFamilyFilters(t *testing.T) {
 			totals[rowKey(r, "host", "family")] = r.Amount
 		}
 		for _, r := range got.Series {
-			k := r.At.UTC().Format("15") + " " + rowKey(r, "host", "family")
+			if r.At == nil {
+				t.Fatalf("%s: series row without at: %+v", q, r)
+			}
+			k := at(*r.At) + " " + rowKey(r, "host", "family")
 			if _, dup := series[k]; dup {
 				t.Errorf("%s: series key %q twice", q, k)
 			}
@@ -180,8 +184,9 @@ func TestCostSummaryRepeatedFamilyFilters(t *testing.T) {
 		}
 		return totals, series, unallocated, hosts
 	}
-	plugins := map[string]string{"10 (none) ai EUR": "2.5"}
-	pluginsAndDisk := map[string]string{"10 (none) ai EUR": "2.5", "10 h1 block-storage USD": "0.5"}
+	h0, h1 := at(t0), at(t0.Add(time.Hour))
+	plugins := map[string]string{h0 + " (none) ai EUR": "2.5"}
+	pluginsAndDisk := map[string]string{h0 + " (none) ai EUR": "2.5", h0 + " h1 block-storage USD": "0.5"}
 	for _, tc := range []struct {
 		q                  string
 		totals, series     map[string]string
@@ -189,7 +194,7 @@ func TestCostSummaryRepeatedFamilyFilters(t *testing.T) {
 	}{
 		{"&group=host&group=family&interval=hour&family=compute&family=block-storage",
 			map[string]string{"h1 compute USD": "2", "h1 block-storage USD": "0.5", "h2 compute USD": "7"},
-			map[string]string{"10 h1 compute USD": "1.25", "11 h1 compute USD": "0.75", "10 h1 block-storage USD": "0.5", "10 h2 compute USD": "7"},
+			map[string]string{h0 + " h1 compute USD": "1.25", h1 + " h1 compute USD": "0.75", h0 + " h1 block-storage USD": "0.5", h0 + " h2 compute USD": "7"},
 			[]string{"compute EUR 1.5", "block-storage USD 0.0625", "compute USD 3.25"},
 			[]string{"h1 block-storage USD 0.125 0.0625", "h1 compute USD 2 0.25", "h2 compute USD 7 3", "hp compute EUR 0.5 1.5"}},
 		{"&group=host&group=family&interval=hour&nofamily=compute&nofamily=block-storage",
