@@ -153,15 +153,23 @@ func TestCostSummaryRepeatedFamilyFilters(t *testing.T) {
 	execSQL(t, s, context.Background(), `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount, allocated, unallocated) VALUES
 		($1, 't1', 'r1', 'compute', 'block-storage', 'USD', 'h1', 'blue', 0.5, 0, 0),
 		($2, NULL, NULL, 'compute', 'block-storage', 'USD', 'h1', 'blue', 0, 0.125, 0.0625)`, t0, t0.Add(time.Hour))
-	read := func(q string) (totals map[string]string, series int, unallocated, hosts []string) {
+	// series is keyed "hour host family currency" (hour as UTC HH); a key seen twice fails the test.
+	read := func(q string) (totals, series map[string]string, unallocated, hosts []string) {
 		t.Helper()
 		var got CostSummaryBody
 		if code := getJSON(t, s, keys["op"], costPath(q), &got); code != http.StatusOK {
 			t.Fatalf("%s: status %d", q, code)
 		}
-		totals = map[string]string{}
+		totals, series = map[string]string{}, map[string]string{}
 		for _, r := range got.Totals {
 			totals[rowKey(r, "host", "family")] = r.Amount
+		}
+		for _, r := range got.Series {
+			k := r.At.UTC().Format("15") + " " + rowKey(r, "host", "family")
+			if _, dup := series[k]; dup {
+				t.Errorf("%s: series key %q twice", q, k)
+			}
+			series[k] = r.Amount
 		}
 		unallocated, hosts = []string{}, []string{}
 		for _, r := range got.Unallocated {
@@ -170,30 +178,35 @@ func TestCostSummaryRepeatedFamilyFilters(t *testing.T) {
 		for _, h := range got.Hosts {
 			hosts = append(hosts, h.HostID+" "+h.Family+" "+h.Currency+" "+h.Allocated+" "+h.Unallocated)
 		}
-		return totals, len(got.Series), unallocated, hosts
+		return totals, series, unallocated, hosts
 	}
+	plugins := map[string]string{"10 (none) ai EUR": "2.5"}
+	pluginsAndDisk := map[string]string{"10 (none) ai EUR": "2.5", "10 h1 block-storage USD": "0.5"}
 	for _, tc := range []struct {
 		q                  string
-		totals             map[string]string
-		series             int
+		totals, series     map[string]string
 		unallocated, hosts []string
 	}{
 		{"&group=host&group=family&interval=hour&family=compute&family=block-storage",
-			map[string]string{"h1 compute USD": "2", "h1 block-storage USD": "0.5", "h2 compute USD": "7"}, 4,
+			map[string]string{"h1 compute USD": "2", "h1 block-storage USD": "0.5", "h2 compute USD": "7"},
+			map[string]string{"10 h1 compute USD": "1.25", "11 h1 compute USD": "0.75", "10 h1 block-storage USD": "0.5", "10 h2 compute USD": "7"},
 			[]string{"compute EUR 1.5", "block-storage USD 0.0625", "compute USD 3.25"},
 			[]string{"h1 block-storage USD 0.125 0.0625", "h1 compute USD 2 0.25", "h2 compute USD 7 3", "hp compute EUR 0.5 1.5"}},
 		{"&group=host&group=family&interval=hour&nofamily=compute&nofamily=block-storage",
-			map[string]string{"(none) ai EUR": "2.5"}, 1, []string{}, []string{}},
+			map[string]string{"(none) ai EUR": "2.5"}, plugins, []string{}, []string{}},
 		{"&group=host&group=family&interval=hour&nofamily=compute",
-			map[string]string{"(none) ai EUR": "2.5", "h1 block-storage USD": "0.5"}, 2,
+			map[string]string{"(none) ai EUR": "2.5", "h1 block-storage USD": "0.5"}, pluginsAndDisk,
 			[]string{"block-storage USD 0.0625"}, []string{"h1 block-storage USD 0.125 0.0625"}},
 		{"&group=host&group=family&interval=hour&family=block-storage&family=ai",
-			map[string]string{"(none) ai EUR": "2.5", "h1 block-storage USD": "0.5"}, 2,
+			map[string]string{"(none) ai EUR": "2.5", "h1 block-storage USD": "0.5"}, pluginsAndDisk,
 			[]string{"block-storage USD 0.0625"}, []string{"h1 block-storage USD 0.125 0.0625"}},
 	} {
 		totals, series, unallocated, hosts := read(tc.q)
-		if !maps.Equal(totals, tc.totals) || series != tc.series {
-			t.Errorf("%s: totals %v (%d series rows), want %v (%d)", tc.q, totals, series, tc.totals, tc.series)
+		if !maps.Equal(totals, tc.totals) {
+			t.Errorf("%s: totals %v, want %v", tc.q, totals, tc.totals)
+		}
+		if !maps.Equal(series, tc.series) {
+			t.Errorf("%s: series %v, want %v", tc.q, series, tc.series)
 		}
 		if !slices.Equal(unallocated, tc.unallocated) || !slices.Equal(hosts, tc.hosts) {
 			t.Errorf("%s: unallocated %v hosts %v, want %v %v", tc.q, unallocated, hosts, tc.unallocated, tc.hosts)
