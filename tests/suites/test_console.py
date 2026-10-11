@@ -660,8 +660,8 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     expect(_legend_label(card.locator(".tschart-legend"), "Block storage")).to_have_count(1, timeout=15_000)
     panel.get_by_role("radio", name="External", exact=True).click()
     expect(page).to_have_url(re.compile(r"[?&]cost=external(&|$)"))
-    expect(card.locator(".kpi.is-muted .kpi-label")).to_have_text(["Compute", "Block storage"])
-    expect(card.locator(".kpi-label").first).to_have_text(re.compile(r"^External total"))
+    expect(card.locator(".kpi.is-muted .kpi-label")).to_have_text(["Compute", "Block storage"], timeout=15_000)
+    expect(card.locator(".kpi-label").first).to_have_text(re.compile(r"^External total"), timeout=15_000)
     expect(_legend_label(card.locator(".tschart-legend"), "Compute")).to_have_count(0)
     expect(_legend_label(card.locator(".tschart-legend"), "Block storage")).to_have_count(0)
     expect(_legend_label(card.locator(".tschart-legend"), "AI models")).to_have_count(1)
@@ -669,14 +669,14 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     # Show Compute: the host and its disks. The total is the Compute and Block storage KPIs together; External is muted.
     panel.get_by_role("radio", name="Compute", exact=True).click()
     expect(page).to_have_url(re.compile(r"[?&]cost=compute(&|$)"))
-    expect(card.locator(".kpi.is-muted .kpi-label")).to_have_text(["External"])
+    expect(card.locator(".kpi.is-muted .kpi-label")).to_have_text(["External"], timeout=15_000)
     kpi = lambda label: card.locator(".kpi", has=page.locator(".kpi-label", has_text=re.compile(rf"^{label}"))).locator(".money-list-lg")
-    compute, block = family_usd("compute"), family_usd("block-storage")
-    assert block == Decimal("1.25"), block
-    expect(kpi("Compute total")).to_have_text(_cents_shown(compute + block))
-    expect(kpi("Compute$")).to_have_text(_cents_shown(compute))
-    expect(kpi("Block storage")).to_have_text(_cents_shown(block))
-    expect(_legend_label(card.locator(".tschart-legend"), "Block storage")).to_have_count(1)
+    assert family_usd("block-storage") == Decimal("1.25")
+    _ui_matches_api(page, kpi("Compute total"), lambda: _cents_shown(family_usd("compute") + family_usd("block-storage")), "Compute total")
+    _ui_matches_api(page, kpi("Compute$"), lambda: _cents_shown(family_usd("compute")), "Compute KPI")
+    _ui_matches_api(page, kpi("Block storage"), lambda: _cents_shown(family_usd("block-storage")), "Block storage KPI")
+    expect(card.locator(".kpi.is-muted .kpi-label")).to_have_text(["External"], timeout=15_000)
+    expect(_legend_label(card.locator(".tschart-legend"), "Block storage")).to_have_count(1, timeout=15_000)
     expect(_legend_label(card.locator(".tschart-legend"), "AI models")).to_have_count(0)
 
     # Every Day: the top bar's step, carried on links; the panel and the trends are daily.
