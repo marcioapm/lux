@@ -6,13 +6,15 @@
 import { bandColor, compareMoney, familyDisplay, NONE_BAND_COLOR, OTHER_BAND_COLOR, sumMoney } from "@lux/design-system";
 import type { CostFamily, CostKey, CostSummary, CostSummaryRow, MoneyTotal } from "../../api/index.ts";
 
-/** Which costs the panel counts: every family, compute (host time) only, or every other family. */
+/** Which costs the panel counts: every family, the host-tied ones (compute and block storage), or what cost plugins report. */
 export type CostShow = "all" | "compute" | "external";
 export type CostInterval = "hour" | "day";
 
 export const COMPUTE = "compute";
-/** lux's own disk family: shown apart from compute and from the plugins' families (the "external" side). */
+/** lux's own disk family: a figure apart from compute and from the plugins' families, counted under Show Compute. */
 export const BLOCK_STORAGE = "block-storage";
+/** The host-tied families lux prices itself: what Show Compute counts (luxd's rank=compute). */
+export const HOST_FAMILIES: readonly string[] = [COMPUTE, BLOCK_STORAGE];
 
 /** ?cost=: compute or external; anything else is All. */
 export function parseShow(v: string | null): CostShow {
@@ -21,18 +23,24 @@ export function parseShow(v: string | null): CostShow {
 
 /**
  * Whether a family counts under show. Show is luxd's family filter: compute
- * is family=compute, external nofamily=compute, so Show External is every
- * family but compute: block storage counts under it (its total reads
- * "Non-compute total"), while the External KPI is the plugins' families alone.
+ * is family=compute&family=block-storage (the host and its disks), external
+ * nofamily on both (what cost plugins report). The Compute and Block storage
+ * figures stay apart; only what each Show counts includes both.
  */
 export function shows(show: CostShow, family: string): boolean {
-  return show === "all" || (show === "compute") === (family === COMPUTE);
+  return show === "all" || (show === "compute") === HOST_FAMILIES.includes(family);
 }
 
 /** Which of a split's three sides a family is on: compute, block storage, or what plugins report. */
 export type Side = "compute" | "blockStorage" | "external";
 export function sideOf(family: string): Side {
-  return family === COMPUTE ? "compute" : family === BLOCK_STORAGE ? "blockStorage" : "external";
+  if (!HOST_FAMILIES.includes(family)) return "external";
+  return family === COMPUTE ? "compute" : "blockStorage";
+}
+
+/** Whether show leaves a side out: Compute and Block storage under External, External under Compute. */
+export function sideHidden(side: Side, show: CostShow): boolean {
+  return show !== "all" && (show === "compute") === (side === "external");
 }
 
 /** What the panel breaks cost down by. A label breakdown without a key takes the default key (defaultLabelKey). */
@@ -131,12 +139,12 @@ export function byCurrency<T extends { currency: string }>(rows: readonly T[]): 
 }
 
 /** The /v1/costs family filter that keeps what show counts. */
-export function showFamily(show: CostShow): { family?: string; nofamily?: string } {
+export function showFamily(show: CostShow): { family?: string[]; nofamily?: string[] } {
   switch (show) {
     case "compute":
-      return { family: COMPUTE };
+      return { family: [...HOST_FAMILIES] };
     case "external":
-      return { nofamily: COMPUTE };
+      return { nofamily: [...HOST_FAMILIES] };
     default:
       return {};
   }

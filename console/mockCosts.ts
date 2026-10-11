@@ -138,8 +138,19 @@ function scoped(u: URL, tenantOf: string | null): { from: number; to: number; ro
     return [...want].every(([k, vs]) => r.labels[k] != null && vs.includes(r.labels[k]!)) && absent.every((k) => r.labels[k] == null);
   };
   const { rows, unallocated } = generate();
-  const inRange = rows.filter((r) => r.hour >= from && r.hour < to && (!tenant || r.tenant === tenant) && (!q.get("family") || r.family === q.get("family")) && (!q.get("nofamily") || r.family !== q.get("nofamily")) && runOk(r.run));
+  const fam = families(q);
+  const inRange = rows.filter((r) => r.hour >= from && r.hour < to && (!tenant || r.tenant === tenant) && fam(r.family) && runOk(r.run));
   return { from, to, rows: inRange, unallocated, filtered: want.size > 0 || absent.length > 0 };
+}
+
+/** The host-tied families: what rank=compute counts, as luxd's hostFamilies. */
+const HOST_FAMILIES = ["compute", "block-storage"];
+
+/** Whether a family passes the request's repeated family (any of) and nofamily (none of) parameters. */
+function families(q: URLSearchParams): (family: string) => boolean {
+  const keep = q.getAll("family");
+  const drop = q.getAll("nofamily");
+  return (f) => (keep.length === 0 || keep.includes(f)) && !drop.includes(f);
 }
 
 /** The summary for a request's range, groups, interval and label filters, as luxd answers it; tenantOf: a tenant key's tenant (null: an operator). */
@@ -164,7 +175,7 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
   // top=N: the first group's values past the N costliest per currency (by what rank counts) fold into rows marked other: true (read "(other)"), as luxd folds them.
   const top = Number(q.get("top") ?? 0);
   const rank = q.get("rank") ?? "all";
-  const ranks = (r: Row) => rank === "all" || (r.family === "compute") === (rank === "compute");
+  const ranks = (r: Row) => rank === "all" || HOST_FAMILIES.includes(r.family) === (rank === "compute");
   const folded = new Map<string, Set<string>>();
   const otherCount: Record<string, number> = {};
   if (top > 0 && groups.length) {
@@ -229,9 +240,9 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
     const share = !tenant ? 1 : OWN_POOL_SHARE[tenant] ?? 0;
     const idle = new Map<string, number>();
     for (const [h, by] of s.unallocated) if (h >= s.from && h < s.to) for (const [c, v] of by) idle.set(c, (idle.get(c) ?? 0) + v);
-    const fams = (q.get("family") ? [q.get("family")!] : ["block-storage", "compute"]).filter((f) => f !== q.get("nofamily"));
+    const fams = HOST_FAMILIES.filter(families(q)).sort();
     body.unallocated = share === 0 ? [] : [...idle].sort(([a], [b]) => a.localeCompare(b)).flatMap(([currency, v]) =>
-      fams.filter((f) => f === "compute" || f === "block-storage").map((family) => ({ family, currency, amount: money(Math.round(v * share * (family === "compute" ? 11 / 12 : 1 / 12))) })),
+      fams.map((family) => ({ family, currency, amount: money(Math.round(v * share * (family === "compute" ? 11 / 12 : 1 / 12))) })),
     );
   }
   return { status: 200, body };
