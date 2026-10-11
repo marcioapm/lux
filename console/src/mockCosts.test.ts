@@ -40,3 +40,15 @@ test("mock /v1/costs runs=true: Runs per family without a fold", () => {
   expect(Object.fromEntries(fam.totals.map((r) => [r.group.family, r.runs]))).toEqual({ ai: 7, "block-storage": 8, compute: 8 });
   expect(ask("group=family").totals.every((r) => r.runs === undefined)).toBe(true);
 });
+
+test("mock /v1/costs: repeated family and nofamily keep or drop every value, totals and unallocated alike", () => {
+  type Body = { totals: Row[]; unallocated?: { family: string }[] };
+  const fams = (q: string) => {
+    const b = ask(`group=family&${q}`) as Body;
+    return [b.totals.map((r) => r.group.family).sort(), [...new Set((b.unallocated ?? []).map((u) => u.family))].sort()];
+  };
+  expect(fams("family=compute&family=block-storage")).toEqual([["block-storage", "compute"], ["block-storage", "compute"]]);
+  expect(fams("nofamily=compute&nofamily=block-storage")).toEqual([["ai"], []]);
+  expect(fams("family=compute")).toEqual([["compute"], ["compute"]]);
+  expect(fams("nofamily=compute")).toEqual([["ai", "block-storage"], ["block-storage"]]);
+});
