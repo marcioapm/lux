@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -142,6 +143,74 @@ func TestCostSummaryRunNames(t *testing.T) {
 	}
 	if len(got.Series) != 3 || slices.ContainsFunc(got.Series, func(r CostSummaryRow) bool { return r.Group["run"] != "r1" }) {
 		t.Errorf("narrowed operator series: %+v", got.Series)
+	}
+}
+
+// Repeated family and nofamily keep, or drop, every value given: on Run
+// rows, unallocated host time and host allocations alike.
+func TestCostSummaryRepeatedFamilyFilters(t *testing.T) {
+	s, keys := costReadFixture(t)
+	execSQL(t, s, context.Background(), `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount, allocated, unallocated) VALUES
+		($1, 't1', 'r1', 'compute', 'block-storage', 'USD', 'h1', 'blue', 0.5, 0, 0),
+		($2, NULL, NULL, 'compute', 'block-storage', 'USD', 'h1', 'blue', 0, 0.125, 0.0625)`, t0, t0.Add(time.Hour))
+	read := func(q string) (totals map[string]string, series int, unallocated, hosts []string) {
+		t.Helper()
+		var got CostSummaryBody
+		if code := getJSON(t, s, keys["op"], costPath(q), &got); code != http.StatusOK {
+			t.Fatalf("%s: status %d", q, code)
+		}
+		totals = map[string]string{}
+		for _, r := range got.Totals {
+			totals[rowKey(r, "host", "family")] = r.Amount
+		}
+		unallocated, hosts = []string{}, []string{}
+		for _, r := range got.Unallocated {
+			unallocated = append(unallocated, r.Family+" "+r.Currency+" "+r.Amount)
+		}
+		for _, h := range got.Hosts {
+			hosts = append(hosts, h.HostID+" "+h.Family+" "+h.Currency+" "+h.Allocated+" "+h.Unallocated)
+		}
+		return totals, len(got.Series), unallocated, hosts
+	}
+	for _, tc := range []struct {
+		q                  string
+		totals             map[string]string
+		series             int
+		unallocated, hosts []string
+	}{
+		{"&group=host&group=family&interval=hour&family=compute&family=block-storage",
+			map[string]string{"h1 compute USD": "2", "h1 block-storage USD": "0.5", "h2 compute USD": "7"}, 4,
+			[]string{"compute EUR 1.5", "block-storage USD 0.0625", "compute USD 3.25"},
+			[]string{"h1 block-storage USD 0.125 0.0625", "h1 compute USD 2 0.25", "h2 compute USD 7 3", "hp compute EUR 0.5 1.5"}},
+		{"&group=host&group=family&interval=hour&nofamily=compute&nofamily=block-storage",
+			map[string]string{"(none) ai EUR": "2.5"}, 1, []string{}, []string{}},
+		{"&group=host&group=family&interval=hour&nofamily=compute",
+			map[string]string{"(none) ai EUR": "2.5", "h1 block-storage USD": "0.5"}, 2,
+			[]string{"block-storage USD 0.0625"}, []string{"h1 block-storage USD 0.125 0.0625"}},
+		{"&group=host&group=family&interval=hour&family=block-storage&family=ai",
+			map[string]string{"(none) ai EUR": "2.5", "h1 block-storage USD": "0.5"}, 2,
+			[]string{"block-storage USD 0.0625"}, []string{"h1 block-storage USD 0.125 0.0625"}},
+	} {
+		totals, series, unallocated, hosts := read(tc.q)
+		if !maps.Equal(totals, tc.totals) || series != tc.series {
+			t.Errorf("%s: totals %v (%d series rows), want %v (%d)", tc.q, totals, series, tc.totals, tc.series)
+		}
+		if !slices.Equal(unallocated, tc.unallocated) || !slices.Equal(hosts, tc.hosts) {
+			t.Errorf("%s: unallocated %v hosts %v, want %v %v", tc.q, unallocated, hosts, tc.unallocated, tc.hosts)
+		}
+	}
+
+	// Bounded and non-empty: the filters stay bind parameters of known size.
+	nine := strings.Repeat("&family=f", costMaxFamilyFilters+1)
+	var got CostSummaryBody
+	for _, q := range []string{nine, strings.ReplaceAll(nine, "family", "nofamily"), "&family=", "&nofamily=", "&family=compute&family=",
+		"&family=compute&nofamily=block-storage"} {
+		if code := getJSON(t, s, keys["op"], costPath(q), &got); code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", q, code)
+		}
+	}
+	if code := getJSON(t, s, keys["op"], costPath(strings.Repeat("&family=f", costMaxFamilyFilters)), &got); code != http.StatusOK || len(got.Totals) != 0 {
+		t.Errorf("%d family values: %d %+v", costMaxFamilyFilters, code, got.Totals)
 	}
 }
 
