@@ -166,9 +166,18 @@ func claudeQueuedSteer(t *testing.T) (*Claude, *agentWire, *inputSink, string) {
 	return c, w, sink, steer
 }
 
-// failures is the sink's lines for request id id that start with "failed".
+// failures is the sink's "failed <id>: ..." lines.
 func failures(sink *inputSink, id string) []string {
 	return slices.DeleteFunc(sink.lines(), func(l string) bool { return !strings.HasPrefix(l, "failed "+id+":") })
+}
+
+// checkFailures fails t unless request id id failed exactly with want, in
+// order; no want means it never failed.
+func checkFailures(t *testing.T, sink *inputSink, id string, want ...string) {
+	t.Helper()
+	if got := failures(sink, id); !slices.Equal(got, want) {
+		t.Fatalf("%s failed %q, want %q", id, got, want)
+	}
 }
 
 // When the Run is stopping, a cancelled or discarded unread line fails as
@@ -184,9 +193,7 @@ func TestClaudeCancelledLineFailsOnStop(t *testing.T) {
 			w.send(clLifecycle(steer, state))
 			sink.wait(t, "failed s: ")
 			w.exit()
-			if got := failures(sink, "s"); !slices.Equal(got, []string{"failed s: the Run stopped before the agent read it"}) {
-				t.Fatalf("failed %q", got)
-			}
+			checkFailures(t, sink, "s", "failed s: the Run stopped before the agent read it")
 			if rest := w.rest(); len(rest) != 0 {
 				t.Fatalf("%d lines written after the stop", len(rest))
 			}
@@ -214,13 +221,8 @@ func TestClaudeLineCancelledTooOftenFails(t *testing.T) {
 	w.send(clLifecycle(again, "started"))
 	sink.wait(t, "consumed t")
 	w.exit()
-	want := fmt.Sprintf("failed s: claude: the message was cancelled %d times by interrupts", claudeMaxResends+1)
-	if got := failures(sink, "s"); !slices.Equal(got, []string{want}) {
-		t.Fatalf("failed %q, want %q", got, want)
-	}
-	if got := failures(sink, "t"); len(got) != 0 {
-		t.Fatalf("t failed %q", got)
-	}
+	checkFailures(t, sink, "s", fmt.Sprintf("failed s: claude: the message was cancelled %d times by interrupts", claudeMaxResends+1))
+	checkFailures(t, sink, "t")
 	if rest := w.rest(); len(rest) != 0 {
 		t.Fatalf("%d lines written after the limit", len(rest))
 	}
@@ -252,9 +254,7 @@ func TestClaudeLinePastItsResendsFailsAsAStopWhileStopping(t *testing.T) {
 	w.send(clLifecycle(steer, "cancelled"))
 	sink.wait(t, "failed s: ")
 	w.exit()
-	if got := failures(sink, "s"); !slices.Equal(got, []string{"failed s: the Run stopped before the agent read it"}) {
-		t.Fatalf("failed %q", got)
-	}
+	checkFailures(t, sink, "s", "failed s: the Run stopped before the agent read it")
 }
 
 // A copy that cannot be written (the agent's stdin is gone) fails with the
@@ -281,9 +281,7 @@ func TestClaudeRefusedLineFails(t *testing.T) {
 			w.send(clLifecycle(steer, "refused"))
 			sink.wait(t, "failed s: ")
 			w.exit()
-			if got := failures(sink, "s"); !slices.Equal(got, []string{"failed s: claude: the message was refused"}) {
-				t.Fatalf("failed %q", got)
-			}
+			checkFailures(t, sink, "s", "failed s: claude: the message was refused")
 		})
 	}
 }
