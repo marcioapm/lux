@@ -8,6 +8,8 @@
 // from before tracking). MOCK_COST_CURRENCIES=USD,EUR adds a second
 // currency. Amounts are integers of micro-units, so every sum is exact.
 
+import { HOST_FAMILIES } from "./src/costFamilies.ts";
+
 interface Row {
   hour: number;
   tenant: string;
@@ -143,9 +145,6 @@ function scoped(u: URL, tenantOf: string | null): { from: number; to: number; ro
   return { from, to, rows: inRange, unallocated, filtered: want.size > 0 || absent.length > 0 };
 }
 
-/** The host-tied families: what rank=compute counts, as luxd's hostFamilies. */
-const HOST_FAMILIES = ["compute", "block-storage"];
-
 /** Whether a family passes the request's repeated family (any of) and nofamily (none of) parameters. */
 function families(q: URLSearchParams): (family: string) => boolean {
   const keep = q.getAll("family");
@@ -166,7 +165,7 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
     if (g === "tenant") return r.tenant;
     if (g === "run") return r.run;
     if (g === "family") return r.family;
-    if (g === "pool") return r.family === "compute" || r.family === "block-storage" ? run.pool : "(none)";
+    if (g === "pool") return HOST_FAMILIES.includes(r.family) ? run.pool : "(none)";
     if (g === "key") return run.by ?? "(none)";
     if (g.startsWith("label:")) return run.labels[g.slice("label:".length)] ?? "(none)";
     return "(none)";
