@@ -8,7 +8,7 @@ interface Row {
   runs?: number;
   other?: boolean;
 }
-const ask = (q: string) => costSummary(new URL(`http://x/v1/costs?since=7d&${q}`)).body as { totals: Row[]; otherCount?: Record<string, number> };
+const ask = (q: string) => costSummary(new URL(`http://x/v1/costs?since=7d&${q}`)).body as { totals: Row[]; otherCount?: Record<string, number>; unallocated?: { family: string }[] };
 const micros = (rows: Row[]) => rows.reduce((n, r) => n + Math.round(Number(r.amount) * 1e6), 0);
 
 // The dev mock folds as luxd does, so screenshots and local runs show what luxd would.
@@ -42,9 +42,8 @@ test("mock /v1/costs runs=true: Runs per family without a fold", () => {
 });
 
 test("mock /v1/costs: repeated family and nofamily keep or drop every value, totals and unallocated alike", () => {
-  type Body = { totals: Row[]; unallocated?: { family: string }[] };
   const fams = (q: string) => {
-    const b = ask(`group=family&${q}`) as Body;
+    const b = ask(`group=family&${q}`);
     return [b.totals.map((r) => r.group.family).sort(), [...new Set((b.unallocated ?? []).map((u) => u.family))].sort()];
   };
   expect(fams("family=compute&family=block-storage")).toEqual([["block-storage", "compute"], ["block-storage", "compute"]]);
