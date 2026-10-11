@@ -1172,8 +1172,9 @@ operators), and also:
 
 - `group`: `tenant` (operators), `pool`, `host`, `family`, `run`, `key`,
   or `label:<key>`, repeatable for two levels;
-- `family`: filter by family; `nofamily`: every family but this one (not
-  both: 400);
+- `family`: only these families; `nofamily`: every family but these.
+  Each is repeatable, up to 8 values, none empty (else 400); not both
+  (400);
 - `label`: `key=value` (split at the first `=`), repeatable: only Runs
   with that label. Repeating a key accepts any of its values (OR); different
   keys must all match (AND);
@@ -1182,13 +1183,15 @@ operators), and also:
 - `top`: 1 to 50 (else 422), with a `group`: fold the first group to its
   top N values (below);
 - `rank`: with `top`, `all` (default), `compute` or `external` (else 422);
-  a 400 when it counts none of the families `family`/`nofamily` keep;
+  a 400 when it counts none of the families `family`/`nofamily` keep
+  (`rank=compute` with `nofamily=compute&nofamily=block-storage`, say);
 - `runs=true`: without `top`, each `totals` row carries `runs` too (the
   Runs with any cost under its first-group value).
 
 **Top N.** With `top=N`, the first group's values are ranked per currency
 (never across currencies) by their total over the range of what `rank`
-counts (`compute`: the compute family; `external`: every other family),
+counts (`compute`: the host-tied families, `compute` and `block-storage`;
+`external`: every other family),
 largest first, ties by value (byte order). A value with no such cost ranks
 last. Every value past the N-th is folded into one row per second-group
 value and currency, in `totals` and in `series`, marked `other: true`; its
@@ -1402,8 +1405,9 @@ see.
   is hourly up to 24h and daily from 7d; Hour and Day are taken as asked;
   Minute stays hourly ("cost is never finer than an hour"). Built from the
   design system's cost panel pieces (gallery section "costpanel"):
-  - **Show** (`?cost=`): All, Compute (the compute family) or External
-    (every other family). A hidden side is drawn faint, never dropped.
+  - **Show** (`?cost=`): All, Compute (the host and its disks: the compute
+    and block storage families) or External (what cost plugins report:
+    every other family). A hidden side is drawn faint, never dropped.
   - **Break down by** (`?by=`): Family (default), Label (a label key, `app`
     by default when Runs carry it: `?by=label:<key>`), API key (who
     submitted the Runs, `group=key`), Pool, and Tenant (operators viewing
@@ -1461,9 +1465,10 @@ see.
   unallocated (booting, ready with no Run, part-filled, waiting to scale
   down), which needs server-side data.
 - **Overview, Cost tab**: Block storage is a KPI, a By family row and a
-  breakdown column of its own; Show keeps luxd's filter (Compute is
-  `family=compute`, External `nofamily=compute`, so block storage counts
-  under External's total while its figure stays apart). Unallocated host
+  breakdown column of its own; Show is luxd's filter: Compute is
+  `family=compute&family=block-storage` (the host and its disks), External
+  `nofamily=compute&nofamily=block-storage` (what cost plugins report), and
+  the Compute and Block storage figures stay apart. Unallocated host
   time reads Compute and Block storage apart, for operators over every
   tenant and for a tenant when luxd sends its own pools'.
 - Every page with money says "list price" once, explained in a Tooltip.
