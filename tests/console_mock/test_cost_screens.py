@@ -4,10 +4,12 @@ the Run's cost lists what each placement paid for its host."""
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 import pytest
 import requests
+from playwright.sync_api import expect
 
 
 @pytest.fixture()
@@ -108,15 +110,14 @@ def test_overview_show_compute_counts_block_storage_and_external_neither(page, m
 
     card = page.locator("section.card.cost-card")
     total = card.locator(".kpi").first
-    muted = lambda: card.locator(".kpi.is-muted .kpi-label").all_inner_texts()
+    muted = card.locator(".kpi.is-muted .kpi-label")
     page.goto(f"{mock_console}/?tab=cost&range=7d&cost=compute")
-    total.locator(".money-list-lg").wait_for(timeout=20_000)
-    page.wait_for_function("() => document.querySelector('.kpi .kpi-label')?.textContent.startsWith('Compute total')", timeout=20_000)
-    assert total.locator(".money-list-lg").inner_text() == _dollars(str(host)), (total.inner_text(), host)
-    assert muted() == ["External"], muted()
+    expect(total.locator(".kpi-label")).to_have_text(re.compile(r"^Compute total"), timeout=20_000)
+    expect(total.locator(".money-list-lg")).to_have_text(_dollars(str(host)), timeout=20_000)
+    expect(muted).to_have_text(["External"], timeout=20_000)
 
     page.goto(f"{mock_console}/?tab=cost&range=7d&cost=external")
-    page.wait_for_function("() => document.querySelector('.kpi .kpi-label')?.textContent.startsWith('External total')", timeout=20_000)
-    assert total.locator(".money-list-lg").inner_text() == _dollars(str(by_family["ai"])), (total.inner_text(), by_family)
-    assert muted() == ["Compute", "Block storage"], muted()
+    expect(total.locator(".kpi-label")).to_have_text(re.compile(r"^External total"), timeout=20_000)
+    expect(total.locator(".money-list-lg")).to_have_text(_dollars(str(by_family["ai"])), timeout=20_000)
+    expect(muted).to_have_text(["Compute", "Block storage"], timeout=20_000)
     assert not page.errors, page.errors
