@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -151,8 +152,10 @@ func TestClaudeSteerCarriedPastInterrupt(t *testing.T) {
 	checkCarried(t, w, sink, "s")
 }
 
-// When the Run is stopping, a cancelled unread line fails.
-func TestClaudeCancelledLineFailsOnStop(t *testing.T) {
+// claudeQueuedSteer starts a turn and queues the steer "s"; it returns the
+// steer's uuid.
+func claudeQueuedSteer(t *testing.T) (*Claude, *agentWire, *inputSink, string) {
+	t.Helper()
 	c, w, sink, prompt := claudeStarted(t)
 	w.send(clLifecycle(prompt, "queued"))
 	w.send(clLifecycle(prompt, "started"))
@@ -160,12 +163,74 @@ func TestClaudeCancelledLineFailsOnStop(t *testing.T) {
 	steer := userLine(t, w)
 	w.send(clLifecycle(steer, "queued"))
 	sink.wait(t, "accepted s")
-	c.mu.Lock()
-	c.stopping = true // what Stop sets before its SIGINT
-	c.mu.Unlock()
-	w.send(strings.Replace(clResult, `"completed"`, `"aborted_streaming"`, 1))
-	w.send(clLifecycle(steer, "discarded"))
-	sink.wait(t, "failed s: claude: the message was discarded")
+	return c, w, sink, steer
+}
+
+// failures is the sink's lines for request id id that start with "failed".
+func failures(sink *inputSink, id string) []string {
+	return slices.DeleteFunc(sink.lines(), func(l string) bool { return !strings.HasPrefix(l, "failed "+id+":") })
+}
+
+// When the Run is stopping, a cancelled or discarded unread line fails as
+// unread because of the stop, once, and is not written again.
+func TestClaudeCancelledLineFailsOnStop(t *testing.T) {
+	for _, state := range []string{"discarded", "cancelled"} {
+		t.Run(state, func(t *testing.T) {
+			c, w, sink, steer := claudeQueuedSteer(t)
+			c.mu.Lock()
+			c.stopping = true // what Stop sets before its SIGINT
+			c.mu.Unlock()
+			w.send(strings.Replace(clResult, `"completed"`, `"aborted_streaming"`, 1))
+			w.send(clLifecycle(steer, state))
+			sink.wait(t, "failed s: ")
+			w.exit()
+			if got := failures(sink, "s"); !slices.Equal(got, []string{"failed s: the Run stopped before the agent read it"}) {
+				t.Fatalf("failed %q", got)
+			}
+			if rest := w.rest(); len(rest) != 0 {
+				t.Fatalf("%d lines written after the stop", len(rest))
+			}
+		})
+	}
+}
+
+// On a live Run, a line is written again claudeMaxResends times; the next
+// cancel fails it with a reason saying so, not as a stop.
+func TestClaudeLineCancelledTooOftenFails(t *testing.T) {
+	_, w, sink, steer := claudeQueuedSteer(t)
+	for i := 1; i <= claudeMaxResends; i++ {
+		w.send(clLifecycle(steer, "cancelled"))
+		steer = userLine(t, w)
+		if steer != claudeUUID(fmt.Sprintf("s#%d", i)) {
+			t.Fatalf("resend %d as %s", i, steer)
+		}
+		w.send(clLifecycle(steer, "queued"))
+	}
+	w.send(clLifecycle(steer, "cancelled"))
+	sink.wait(t, "failed s: ")
+	w.exit()
+	want := fmt.Sprintf("failed s: claude: the message was cancelled %d times by interrupts", claudeMaxResends+1)
+	if got := failures(sink, "s"); !slices.Equal(got, []string{want}) {
+		t.Fatalf("failed %q, want %q", got, want)
+	}
+}
+
+// A line Claude Code refuses fails with that reason, Run stopping or not.
+func TestClaudeRefusedLineFails(t *testing.T) {
+	for _, stopping := range []bool{false, true} {
+		t.Run(fmt.Sprint("stopping=", stopping), func(t *testing.T) {
+			c, w, sink, steer := claudeQueuedSteer(t)
+			c.mu.Lock()
+			c.stopping = stopping
+			c.mu.Unlock()
+			w.send(clLifecycle(steer, "refused"))
+			sink.wait(t, "failed s: ")
+			w.exit()
+			if got := failures(sink, "s"); !slices.Equal(got, []string{"failed s: claude: the message was refused"}) {
+				t.Fatalf("failed %q", got)
+			}
+		})
+	}
 }
 
 // A Claude Code without msg_lifecycle_v1: accepted as written, no
