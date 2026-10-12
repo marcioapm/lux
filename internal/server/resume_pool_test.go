@@ -352,6 +352,13 @@ func TestResumeIntoAnotherPoolAllowed(t *testing.T) {
 				execSQL(t, s, context.Background(), `UPDATE placements SET image_platforms = '{linux/amd64}' WHERE run_id = $1`, id)
 				return ec2Pool(t, s, "odd", `{"region":"us-east-1","instanceType":"x9.huge"}`)
 			}},
+		{name: "a built image into arm64 hosts: built on an amd64 host, rebuilt there", unchecked: true,
+			setup: func(t *testing.T, s *Server, id string) string {
+				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{image}', '{"build":{"containerfile":"FROM alpine"}}') WHERE id = $1`, id)
+				execSQL(t, s, context.Background(), `UPDATE placements SET image_platforms = '{linux/amd64}' WHERE run_id = $1`, id)
+				execSQL(t, s, context.Background(), `UPDATE hosts SET arch = 'arm64' WHERE id = 'hb'`)
+				return poolID(t, s, "big", "t1")
+			}},
 		{name: "a multi-arch image on arm64 hosts",
 			setup: func(t *testing.T, s *Server, id string) string {
 				execSQL(t, s, context.Background(), `UPDATE placements SET image_platforms = '{linux/amd64,linux/arm64/v8}' WHERE run_id = $1`, id)

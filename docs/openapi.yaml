@@ -2263,7 +2263,7 @@ components:
           $ref: "#/components/schemas/BoundPool"
           description: The pool the Run left; absent when it was already there.
         platformUnchecked:
-          description: "The Run moved without its platform being checked: lux does not know the platforms its image offers (no placement reported them) or those of the pool's hosts (none registered, and the catalog lacks its template's instance types), or either."
+          description: "The Run moved without its platform being checked: lux does not know the platforms its image offers (no placement reported them, or it is an image.build, rebuilt on each host) or those of the pool's hosts (none registered, and the catalog lacks its template's instance types), or either."
           type: boolean
         pool:
           description: The pool's current name.

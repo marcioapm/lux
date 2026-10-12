@@ -33,7 +33,7 @@ type ResumePlacement struct {
 	Pool              string     `json:"pool" doc:"The pool's current name."`
 	PoolID            string     `json:"poolId"`
 	From              *BoundPool `json:"from,omitempty" doc:"The pool the Run left; absent when it was already there."`
-	PlatformUnchecked bool       `json:"platformUnchecked,omitempty" doc:"The Run moved without its platform being checked: lux does not know the platforms its image offers (no placement reported them) or those of the pool's hosts (none registered, and the catalog lacks its template's instance types), or either."`
+	PlatformUnchecked bool       `json:"platformUnchecked,omitempty" doc:"The Run moved without its platform being checked: lux does not know the platforms its image offers (no placement reported them, or it is an image.build, rebuilt on each host) or those of the pool's hosts (none registered, and the catalog lacks its template's instance types), or either."`
 }
 
 // poolProfile is one kind of host a pool has or will launch: a host of it,
@@ -361,10 +361,16 @@ func (s *Server) rebindPool(ctx context.Context, tx pgx.Tx, tenantID, runID stri
 	if *to.ID == from.ID {
 		return moved, nil
 	}
-	platforms, err := lastImagePlatforms(ctx, tx, runID)
-	if err != nil {
-		return nil, err
+	// A built image is rebuilt on each host, so the platform its last
+	// placement reported is that build host's arch: unknown here.
+	var platforms []string
+	if sp.Image.Build == nil {
+		var err error
+		if platforms, err = lastImagePlatforms(ctx, tx, runID); err != nil {
+			return nil, err
+		}
 	}
+	var err error
 	f.Name = to.Name
 	if moved.PlatformUnchecked, err = checkPlatform(*f, platforms); err != nil {
 		return nil, err

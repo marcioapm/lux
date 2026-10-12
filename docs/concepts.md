@@ -253,7 +253,8 @@ A refusal is 422 and changes nothing (pool, spec, state, secrets):
 - `platform_mismatch`: the image's platforms, as the Run's last placement
   reported them, share none with the pool's: its hosts' (each runner
   reports its arch) and, for an ec2 pool, its template's instance types
-  as the instance-type catalog describes them. When lux knows either side
+  as the instance-type catalog describes them. An `image.build` is rebuilt
+  on each host, so its platform is not known. When lux knows either side
   not at all, it moves the Run and says so: `placement.platformUnchecked:
   true` in the answer and in the event.
 - `pool_unfit`: no host the pool has, or launches, could ever take the
