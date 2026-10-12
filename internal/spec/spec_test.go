@@ -518,6 +518,26 @@ func TestDropRepositoryKeepsACredentialStillUsed(t *testing.T) {
 	}
 }
 
+// A secret the container sees is never dropped with a repository, even one
+// that names it as its credential. AddRepositories refuses that spec, so it
+// is built by hand.
+func TestDropRepositoryKeepsAnEnvSecret(t *testing.T) {
+	s := RunSpec{
+		Git:     &Git{Repositories: []Repository{{Name: "web", URL: "https://x/w.git", Credential: "TOK", AddedBy: "r-1"}}},
+		Secrets: []Secret{{Name: "TOK", As: "env"}},
+	}
+	dropped, cred := s.DropRepository("web", "r-1")
+	if !dropped || cred != "" {
+		t.Fatalf("dropped %v, credential %q; want the repository only", dropped, cred)
+	}
+	if len(s.Secrets) != 1 || s.Secrets[0].Name != "TOK" || s.Secrets[0].As != "env" {
+		t.Errorf("secrets %+v, want TOK as env kept", s.Secrets)
+	}
+	if len(s.Git.DroppedCredentials) != 0 {
+		t.Errorf("droppedCredentials %v, want none", s.Git.DroppedCredentials)
+	}
+}
+
 // A value re-supplied under a dropped credential's name is never declared:
 // not as env by default, refused as env or file; a repository added again
 // with it makes it runner-only again.

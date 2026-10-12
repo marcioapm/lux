@@ -770,11 +770,7 @@ func (s *RunSpec) DropRepository(name, requestID string) (dropped bool, credenti
 	if c == "" || s.onlyCredential(c) || !s.runnerOnly(c) {
 		return true, ""
 	}
-	n := len(s.Secrets)
 	s.Secrets = slices.DeleteFunc(s.Secrets, func(sec Secret) bool { return sec.Name == c })
-	if len(s.Secrets) == n {
-		return true, ""
-	}
 	if !slices.Contains(s.Git.DroppedCredentials, c) {
 		s.Git.DroppedCredentials = append(s.Git.DroppedCredentials, c)
 	}
