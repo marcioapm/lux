@@ -9,6 +9,7 @@ package podman
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -142,6 +145,8 @@ type ImageInfo struct {
 	Size  int64
 	User  string
 	Env   []string
+	// OS and Architecture: the platform of the image itself.
+	OS, Architecture string
 }
 
 // ImageInspect returns what ref names.
@@ -158,12 +163,126 @@ func (p *Podman) ImageInspect(ctx context.Context, ref string) (ImageInfo, error
 			User string   `json:"User"`
 			Env  []string `json:"Env"`
 		} `json:"Config"`
+		OS           string `json:"Os"`
+		Architecture string `json:"Architecture"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil || len(raw) == 0 {
 		return ImageInfo{}, fmt.Errorf("image inspect %s: %v", ref, err)
 	}
 	r := raw[0]
-	return ImageInfo{ID: r.ID, Names: r.RepoTags, Size: r.Size, User: r.Config.User, Env: r.Config.Env}, nil
+	return ImageInfo{ID: r.ID, Names: r.RepoTags, Size: r.Size, User: r.Config.User, Env: r.Config.Env,
+		OS: r.OS, Architecture: r.Architecture}, nil
+}
+
+// ImagesDir is where containers/storage keeps image metadata:
+// <graph root>/<driver>-images, one directory per image id.
+func (p *Podman) ImagesDir(ctx context.Context) (string, error) {
+	out, err := p.Run(ctx, "info", "--format", "{{.Store.GraphRoot}} {{.Store.GraphDriverName}}")
+	if err != nil {
+		return "", err
+	}
+	root, driver, ok := strings.Cut(strings.TrimSpace(string(out)), " ")
+	if !ok || root == "" || driver == "" {
+		return "", fmt.Errorf("podman info: graph root and driver %q", out)
+	}
+	return filepath.Join(root, driver+"-images"), nil
+}
+
+// ImagePlatforms are the platforms (os/arch[/variant]) the reference an
+// image was pulled by offers: every platform of the manifest list or OCI
+// index the pull fetched, which containers/storage keeps beside the image
+// as "manifest-sha256:<digest>" big data (files named "=" + base64 of the
+// key); for an image with no list (single-arch, or built here), its own
+// platform, from its config blob ("sha256:<id>") or else from info. Only
+// local files are read: `podman manifest inspect` would ask the registry.
+// A ref pinned by digest reads only the manifest of that digest; a tag
+// reads every list stored with the image (more than one only when several
+// tags resolved to this same image). Entries for unknown/unknown (build
+// attestations) are not platforms.
+func ImagePlatforms(imagesDir, ref string, info ImageInfo) ([]string, error) {
+	dir := filepath.Join(imagesDir, strings.TrimPrefix(info.ID, "sha256:"))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	_, pinned, _ := strings.Cut(ref, "@")
+	var own *ociPlatform
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range entries {
+		enc, ok := strings.CutPrefix(e.Name(), "=")
+		if !ok {
+			continue
+		}
+		key, err := base64.StdEncoding.DecodeString(enc)
+		if err != nil {
+			continue
+		}
+		switch k := string(key); {
+		case strings.HasPrefix(k, "manifest-sha256:"):
+			if pinned != "" && k != "manifest-"+pinned {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				return nil, err
+			}
+			var list struct {
+				Manifests []struct {
+					Platform *ociPlatform `json:"platform"`
+				} `json:"manifests"`
+			}
+			if json.Unmarshal(b, &list) != nil {
+				continue
+			}
+			for _, m := range list.Manifests {
+				if m.Platform == nil || m.Platform.OS == "unknown" || m.Platform.Architecture == "unknown" {
+					continue
+				}
+				if s := m.Platform.String(); s != "" && !seen[s] {
+					seen[s] = true
+					out = append(out, s)
+				}
+			}
+		case k == "sha256:"+strings.TrimPrefix(info.ID, "sha256:"):
+			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err == nil {
+				var c ociPlatform
+				if json.Unmarshal(b, &c) == nil {
+					own = &c
+				}
+			}
+		}
+	}
+	if len(out) > 0 {
+		slices.Sort(out)
+		return out, nil
+	}
+	if own == nil || own.String() == "" {
+		own = &ociPlatform{OS: info.OS, Architecture: info.Architecture}
+	}
+	if s := own.String(); s != "" {
+		return []string{s}, nil
+	}
+	return nil, fmt.Errorf("image %s: no platform", info.ID)
+}
+
+// ociPlatform is a manifest list entry's platform, or an image config's.
+type ociPlatform struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+	Variant      string `json:"variant"`
+}
+
+func (o ociPlatform) String() string {
+	if o.OS == "" || o.Architecture == "" {
+		return ""
+	}
+	s := o.OS + "/" + o.Architecture
+	if o.Variant != "" {
+		s += "/" + o.Variant
+	}
+	return s
 }
 
 // ContainerImages is the set of image ids any container (running or not)

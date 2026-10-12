@@ -375,6 +375,9 @@ type Status struct {
 	// MemoryLimit is the container's memory limit in bytes, once it has
 	// one: the Run's resources.memory scaled to the host's share.
 	MemoryLimit int64 `json:"memoryLimit,omitempty"`
+	// ImagePlatforms: the platforms (os/arch[/variant]) the image's
+	// reference offers, once the image is ready; absent when unknown.
+	ImagePlatforms []string `json:"imagePlatforms,omitempty"`
 }
 
 // AdapterEvent reports what the adapter learned from the workload.

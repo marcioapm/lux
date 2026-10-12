@@ -2387,6 +2387,13 @@ components:
           type: string
         hostName:
           type: string
+        imagePlatforms:
+          description: "The platforms (os/arch[/variant]) the image's reference offers: every entry of a manifest list or OCI index, a single-arch image's own, an image built on the host the host's. Absent when the runner could not tell, or predates it."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
         imageReadyAt:
           format: date-time
           type: string

@@ -785,6 +785,27 @@ func msToTime(ms int64) *time.Time {
 	return &t
 }
 
+// Bounds on a runner's image platforms: an OCI index lists a few dozen at
+// most, each a short os/arch/variant.
+const (
+	maxImagePlatforms   = 64
+	maxImagePlatformLen = 64
+)
+
+// platforms is a runner's image platform list as stored: NULL (keep what
+// is stored) when it sent none or one outside the bounds above.
+func platforms(ps []string) []string {
+	if len(ps) == 0 || len(ps) > maxImagePlatforms {
+		return nil
+	}
+	for _, p := range ps {
+		if p == "" || len(p) > maxImagePlatformLen {
+			return nil
+		}
+	}
+	return ps
+}
+
 // hostEvicting: the host's provider takes it away soon (a spot
 // interruption). Its Runs are preempted: each stops, snapshots, and resumes
 // on another host (a provisioned pool launches one); nothing new is placed

@@ -84,7 +84,10 @@ type placement struct {
 	netTx        int64
 	cgroup       string
 	cpuPeak      cpuPeak
-	ip           string // the container's address, once looked up
+	// imagePlatforms: what the image's reference offers (learnPlatforms);
+	// nil when unknown.
+	imagePlatforms []string
+	ip             string // the container's address, once looked up
 	// exited: per server, the gen the shim reported exited.
 	exited map[string]int64
 	// srvSet: the servers luxd last sent (servers.go).
@@ -132,7 +135,7 @@ func (p *placement) runningStatus() proto.Status {
 	p.mu.Lock()
 	limit := p.memoryLimit
 	p.mu.Unlock()
-	return proto.Status{State: "running", Times: p.times(), MemoryLimit: limit}
+	return proto.Status{State: "running", Times: p.times(), MemoryLimit: limit, ImagePlatforms: p.platforms()}
 }
 
 // liveState is the state reported in heartbeats; "" when not live. An
@@ -281,7 +284,7 @@ func (p *placement) reportStarting(ctx context.Context) {
 			return
 		case <-p.startingDue:
 		}
-		_ = p.report(ctx, proto.MsgStatus, proto.Status{State: "starting", Times: p.times()})
+		_ = p.report(ctx, proto.MsgStatus, proto.Status{State: "starting", Times: p.times(), ImagePlatforms: p.platforms()})
 	}
 }
 
@@ -434,7 +437,7 @@ func startEnd(state string) (int, string) {
 func (p *placement) reportStartEnd(ctx context.Context, state, msg string) {
 	p.setPhase("exited")
 	code, reason := startEnd(state)
-	for p.report(ctx, proto.MsgStatus, proto.Status{State: state, ExitCode: &code, Reason: reason, Message: msg, Times: p.times()}) != nil {
+	for p.report(ctx, proto.MsgStatus, proto.Status{State: state, ExitCode: &code, Reason: reason, Message: msg, Times: p.times(), ImagePlatforms: p.platforms()}) != nil {
 		if p.isStale() || ctx.Err() != nil {
 			return
 		}
@@ -523,9 +526,11 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	p.state.Image = image
-	p.progress("imageReady")
-
 	info, err := p.r.pm.ImageInspect(startCtx, image)
+	if err == nil {
+		p.learnPlatforms(startCtx, image, sp.Image.Build != nil, info)
+	}
+	p.progress("imageReady")
 	if err != nil {
 		fail("image", err)
 		return
@@ -728,7 +733,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	p.r.uploads.kick()
 
 	st := proto.Status{State: "exited", ExitCode: &exit.Code, Reason: exit.Reason, Message: exit.Message,
-		OutputSeq: exit.OutputSeq, Times: p.times(), Usage: usage}
+		OutputSeq: exit.OutputSeq, Times: p.times(), Usage: usage, ImagePlatforms: p.platforms()}
 	if exit.Failed {
 		st.State = "failed"
 	}

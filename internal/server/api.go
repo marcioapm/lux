@@ -571,6 +571,7 @@ type Placement struct {
 	MemoryFullStallSeconds *float64   `json:"memoryFullStallSeconds,omitempty" doc:"memory.pressure's full total: seconds in which every task stalled on memory."`
 	IOStallSeconds         *float64   `json:"ioStallSeconds,omitempty" doc:"io.pressure's some total, in seconds."`
 	IOFullStallSeconds     *float64   `json:"ioFullStallSeconds,omitempty" doc:"io.pressure's full total, in seconds."`
+	ImagePlatforms         []string   `json:"imagePlatforms,omitempty" doc:"The platforms (os/arch[/variant]) the image's reference offers: every entry of a manifest list or OCI index, a single-arch image's own, an image built on the host the host's. Absent when the runner could not tell, or predates it."`
 }
 
 // RunUsage rolls placements up: peaks are maxima, totals are sums.
@@ -1115,7 +1116,8 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 				p.created_at, p.accepted_at, p.image_ready_at, p.volumes_restored_at, p.repos_ready_at, p.container_started_at, p.workload_started_at,
 				p.stop_requested_at, p.exited_at, p.snapshot_done_at, p.uploaded_at,
 				p.peak_memory_bytes, p.peak_disk_bytes, p.peak_pids, p.cpu_seconds, p.net_rx_bytes, p.net_tx_bytes, p.snapshot_bytes, p.memory_limit,
-				p.peak_cpu_cores, p.cpu_stall_seconds, p.memory_stall_seconds, p.memory_full_stall_seconds, p.io_stall_seconds, p.io_full_stall_seconds
+				p.peak_cpu_cores, p.cpu_stall_seconds, p.memory_stall_seconds, p.memory_full_stall_seconds, p.io_stall_seconds, p.io_full_stall_seconds,
+				p.image_platforms
 			FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = $1 ORDER BY p.epoch`, id)
 		if err != nil {
 			return err
@@ -1128,7 +1130,8 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 				&pl.AssignedAt, &pl.AcceptedAt, &pl.ImageReadyAt, &pl.VolumesRestoredAt, &pl.ReposReadyAt, &pl.ContainerStartedAt, &pl.WorkloadStartedAt,
 				&pl.StopRequestedAt, &pl.ExitedAt, &pl.SnapshotDoneAt, &pl.UploadedAt,
 				&pl.PeakMemoryBytes, &pl.PeakDiskBytes, &pl.PeakPids, &pl.CPUSeconds, &pl.NetRxBytes, &pl.NetTxBytes, &pl.SnapshotBytes, &pl.MemoryLimit,
-				&pl.PeakCPUCores, &pl.CPUStallSeconds, &pl.MemoryStallSeconds, &pl.MemoryFullStallSeconds, &pl.IOStallSeconds, &pl.IOFullStallSeconds); err != nil {
+				&pl.PeakCPUCores, &pl.CPUStallSeconds, &pl.MemoryStallSeconds, &pl.MemoryFullStallSeconds, &pl.IOStallSeconds, &pl.IOFullStallSeconds,
+				&pl.ImagePlatforms); err != nil {
 				return err
 			}
 			run.Placements = append(run.Placements, pl)
