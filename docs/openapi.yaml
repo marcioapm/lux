@@ -7332,6 +7332,12 @@ paths:
             schema:
               $ref: "#/components/schemas/ResumeRequest"
       responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResumeAnswer"
+          description: "validateOnly: the resume would be accepted."
         "202":
           content:
             application/json:

@@ -103,6 +103,7 @@ func (s *Server) routes(api huma.API) {
 			"placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit; nothing changes). " +
 			"validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.",
 		DefaultStatus: http.StatusAccepted,
+		Responses:     map[string]*huma.Response{"200": {Description: "validateOnly: the resume would be accepted.", Content: jsonContent(schemaRef[ResumeAnswer](api))}},
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests},
 	}, "run", s.resumeRun)
 	register(s, api, huma.Operation{
