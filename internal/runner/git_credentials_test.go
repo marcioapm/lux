@@ -117,9 +117,9 @@ func TestPushCredentialsRotate(t *testing.T) {
 	}
 	onlyAuth(t, "push without credentials", remote.took("app"), basicFor(fresh))
 
-	pf.p.syncRunning(context.Background(), proto.Sync{RequestID: "s1", Repos: []proto.SyncRef{{Repo: "app", Ref: "main"}}})
+	pf.syncWith(t, proto.Sync{RequestID: "s1", Repos: []proto.SyncRef{{Repo: "app", Ref: "main"}}})
 	onlyAuth(t, "sync without credentials", remote.took("app"), basicFor(fresh))
-	pf.p.syncRunning(context.Background(), proto.Sync{RequestID: "s2", Repos: []proto.SyncRef{{Repo: "app", Ref: "main"}},
+	pf.syncWith(t, proto.Sync{RequestID: "s2", Repos: []proto.SyncRef{{Repo: "app", Ref: "main"}},
 		Credentials: map[string]string{"app": newer}})
 	onlyAuth(t, "sync with credentials", remote.took("app"), basicFor(newer))
 	pf.pushWith(t, proto.Push{RequestID: "p3", Leases: map[string]string{"app": head}})
@@ -147,13 +147,27 @@ func TestPushCredentialsRotate(t *testing.T) {
 	}
 }
 
-// pushWith runs one push and returns its git.push results by repository.
+// control hands req to the runner as luxd's message of type typ for the
+// fixture's placement, as delivered on the connection.
+func (pf *pushFixture) control(typ string, req any) {
+	r := pf.p.r
+	r.mu.Lock()
+	if r.placements == nil {
+		r.placements = map[string]*placement{}
+	}
+	r.placements[pf.p.runID] = pf.p
+	r.mu.Unlock()
+	r.handleControl(context.Background(), proto.Frame{Type: typ, RunID: pf.p.runID, Epoch: pf.p.epoch, Data: proto.Marshal(req)})
+}
+
+// pushWith runs one push, as luxd's message, and returns its git.push
+// results by repository.
 func (pf *pushFixture) pushWith(t *testing.T, req proto.Push) map[string]map[string]any {
 	t.Helper()
 	pf.mu.Lock()
 	n := len(pf.pushes)
 	pf.mu.Unlock()
-	pf.p.push(context.Background(), req)
+	pf.control(proto.MsgPush, req)
 	var ev map[string]any
 	waitUntil(t, func() bool {
 		pf.mu.Lock()
@@ -169,6 +183,20 @@ func (pf *pushFixture) pushWith(t *testing.T, req proto.Push) map[string]map[str
 		out[r["repo"].(string)] = r
 	}
 	return out
+}
+
+// syncWith runs one sync, as luxd's message, and waits for its sync.done.
+func (pf *pushFixture) syncWith(t *testing.T, req proto.Sync) {
+	t.Helper()
+	pf.mu.Lock()
+	n := len(pf.done)
+	pf.mu.Unlock()
+	pf.control(proto.MsgSync, req)
+	waitUntil(t, func() bool {
+		pf.mu.Lock()
+		defer pf.mu.Unlock()
+		return len(pf.done) > n
+	})
 }
 
 // The Hello of every runner from this tree says it takes credentials on a

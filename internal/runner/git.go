@@ -341,7 +341,6 @@ func chownTree(root string, uid, gid int) error {
 // into the runtime volume; the runner pushes that bundle from a repository
 // it owns, with its credential. One git.push event reports every result.
 func (p *placement) push(ctx context.Context, req proto.Push) {
-	p.rotateGitCreds(req.Credentials)
 	sp := p.assign.Spec
 	if sp.Git == nil || sp.Git.Push == nil {
 		return
