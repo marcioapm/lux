@@ -1906,7 +1906,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			sp.Resources = resize.Applied
 		}
 		if to != nil {
-			if moved, err = s.rebindPool(ctx, tx, p.TenantID, id, sp, curPool, *to, target); err != nil {
+			if moved, err = rebindPool(ctx, tx, id, sp, curPool, *to, *target); err != nil {
 				return err
 			}
 		}

@@ -267,9 +267,10 @@ func lastImagePlatforms(ctx context.Context, tx pgx.Tx, runID string) ([]string,
 	return ps, err
 }
 
-// checkPlatform refuses a move to a pool none of whose platforms the image
-// offers. Unknown on either side is no refusal: unchecked reports it.
-func checkPlatform(f poolFacts, imagePlatforms []string) (unchecked bool, err error) {
+// checkPlatform refuses a move to pool name, of facts f, none of whose
+// platforms the image offers. Unknown on either side is no refusal:
+// unchecked reports it.
+func checkPlatform(f poolFacts, name string, imagePlatforms []string) (unchecked bool, err error) {
 	var imageArchs []string
 	for _, p := range imagePlatforms {
 		parts := strings.Split(p, "/")
@@ -285,26 +286,23 @@ func checkPlatform(f poolFacts, imagePlatforms []string) (unchecked bool, err er
 			return false, nil
 		}
 	}
-	runs := make([]string, len(f.Archs))
-	for i, a := range f.Archs {
-		runs[i] = "linux/" + a
-	}
 	return false, errf(http.StatusUnprocessableEntity, "platform_mismatch", "pool %s runs %s; this Run's image offers only %s",
-		f.Name, strings.Join(runs, ", "), strings.Join(imagePlatforms, ", "))
+		name, strings.Join(f.platforms(), ", "), strings.Join(imagePlatforms, ", "))
 }
 
-// checkPoolFit refuses a move to a pool where no host it has or launches
-// could ever take the Run, empty: hostFit's pool-decided blockers (nested
-// containers, required labels, resources) on each profile. A pool lux
-// knows nothing of (a static pool no host registered in) takes it.
-func checkPoolFit(f poolFacts, poolID, tenantID string, sp spec.RunSpec) error {
+// checkPoolFit refuses a move to pool name, of facts f, where no host it
+// has or launches could ever take the Run, empty: hostFit's pool-decided
+// blockers (nested containers, required labels, resources) on each
+// profile. A pool lux knows nothing of (a static pool no host registered
+// in) takes it.
+func checkPoolFit(f poolFacts, name, poolID string, sp spec.RunSpec) error {
 	if len(f.Profiles) == 0 {
 		return nil
 	}
-	r := pendingRun{TenantID: tenantID, Spec: sp, PoolID: &poolID}
+	r := pendingRun{Spec: sp, PoolID: &poolID}
 	var best []fitBlocker
 	for i, pr := range f.Profiles {
-		h := &candidateHost{ID: fmt.Sprint("profile-", i), PoolID: poolID, Pool: f.Name, Labels: pr.Labels, Capacity: pr.Capacity,
+		h := &candidateHost{ID: fmt.Sprint("profile-", i), PoolID: poolID, Pool: name, Labels: pr.Labels, Capacity: pr.Capacity,
 			Connected: true, Caps: []string{proto.CapSyncModes}}
 		if h.Labels == nil {
 			h.Labels = map[string]string{}
@@ -360,14 +358,15 @@ func checkPoolFit(f poolFacts, poolID, tenantID string, sp spec.RunSpec) error {
 	}
 	slices.Sort(why)
 	why = slices.Compact(why)
-	return errf(http.StatusUnprocessableEntity, "pool_unfit", "pool %s cannot take this Run: %s", f.Name, strings.Join(why, "; "))
+	return errf(http.StatusUnprocessableEntity, "pool_unfit", "pool %s cannot take this Run: %s", name, strings.Join(why, "; "))
 }
 
 // rebindPool moves a resumed Run (its spec sp, resources as this resume
 // sets them) from pool from to pool to, after checking that to can take
-// it: its platform, then its fit. A refusal changes nothing (the caller's
-// transaction rolls back). Already in to: nothing to check or change.
-func (s *Server) rebindPool(ctx context.Context, tx pgx.Tx, tenantID, runID string, sp spec.RunSpec, from BoundPool, to resolvedPool, f *poolFacts) (*ResumePlacement, error) {
+// it: its platform, then its fit, against f, to's facts. A refusal changes
+// nothing (the caller's transaction rolls back). Already in to: nothing to
+// check or change.
+func rebindPool(ctx context.Context, tx pgx.Tx, runID string, sp spec.RunSpec, from BoundPool, to resolvedPool, f poolFacts) (*ResumePlacement, error) {
 	moved := &ResumePlacement{Pool: to.Name, PoolID: *to.ID}
 	if *to.ID == from.ID {
 		return moved, nil
@@ -382,11 +381,10 @@ func (s *Server) rebindPool(ctx context.Context, tx pgx.Tx, tenantID, runID stri
 		}
 	}
 	var err error
-	f.Name = to.Name
-	if moved.PlatformUnchecked, err = checkPlatform(*f, platforms); err != nil {
+	if moved.PlatformUnchecked, err = checkPlatform(f, to.Name, platforms); err != nil {
 		return nil, err
 	}
-	if err := checkPoolFit(*f, *to.ID, tenantID, sp); err != nil {
+	if err := checkPoolFit(f, to.Name, *to.ID, sp); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE runs SET pool_id = $2,
