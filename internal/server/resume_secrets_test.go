@@ -698,7 +698,8 @@ func TestDroppedCredentialSuppliedAgain(t *testing.T) {
 }
 
 // An operator's resume from held values after the drop: the held map still
-// has the dropped value, which no ref asks for, and the resume is accepted.
+// has the dropped value, which no ref asks for; the resume is accepted and
+// trims it.
 func TestOperatorResumeAfterADroppedCredential(t *testing.T) {
 	op := context.WithValue(context.Background(), principalKey, Principal{Operator: true, TenantID: "t1", Scopes: []string{"admin", "operator"}})
 	s := testServer(t)
@@ -710,10 +711,16 @@ func TestOperatorResumeAfterADroppedCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	failClone(t, s, id, "two", "r-1")
+	if vals, _ := s.secrets.get(id); vals["GIT_TOKEN"] != "git-1" {
+		t.Fatalf("held %v before operator resume, want GIT_TOKEN", vals)
+	}
 	if _, err := resumeSecrets(op, s, id, resumeRequest{}); err != nil {
 		t.Fatalf("operator resume: %v", err)
 	}
 	if secs, refs := storedSecrets(t, s, id); len(secs) != 0 || len(refs) != 0 {
 		t.Fatalf("secrets %v / %v", secretNames(secs), refNames(refs))
+	}
+	if vals, _ := s.secrets.get(id); len(vals) != 0 {
+		t.Errorf("held %v after operator resume, want none", vals)
 	}
 }
