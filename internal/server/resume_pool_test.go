@@ -455,6 +455,32 @@ func TestResumeIntoAnotherPoolWhileResuming(t *testing.T) {
 	}
 }
 
+// An operator's chosen host must be in the pool the resume names: a host
+// elsewhere is 422 invalid_spec and changes nothing; one in it moves the Run.
+func TestResumeIntoAnotherPoolChosenHost(t *testing.T) {
+	s := testServer(t)
+	id, big := movedRun(t, s)
+	resume := func(to string) (*resumeOutput, error) {
+		return s.resumeRun(operatorCtx(), &resumeRunInput{RunPath: RunPath{ID: id}, Body: &resumeRequest{
+			To: to, Placement: &resumeTarget{PoolID: big}, Secrets: []spec.Secret{{Name: "TOKEN", Value: "v"}}}})
+	}
+	before := binding(t, s, id)
+	_, err := resume("hc")
+	he := refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "resume --to hc")
+	if want := "the chosen host is in pool default, not big"; he.Message != want {
+		t.Errorf("message %q, want %q", he.Message, want)
+	}
+	if after := binding(t, s, id); after != before {
+		t.Errorf("after the refusal: %+v, want %+v", after, before)
+	}
+	if _, err := resume("hb"); err != nil {
+		t.Fatal(err)
+	}
+	if b := binding(t, s, id); b.PoolID != big || b.State != StateResuming {
+		t.Errorf("after resume --to hb: %+v", b)
+	}
+}
+
 // Through the HTTP API: placement.poolId decodes, the answer carries
 // placement, and GET's pool is the new one.
 func TestResumeIntoAnotherPoolHTTP(t *testing.T) {

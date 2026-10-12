@@ -18,7 +18,7 @@ import (
 )
 
 type resumeTarget struct {
-	PoolID string `json:"poolId" doc:"Move the Run to this pool from this resume on, by id: the same field and rule as a submit's placement.poolId (the tenant's active pool with that id, else the platform's; any other is 422 unknown_pool). The Run's pool (pool and poolId in GET) and its spec's placement.pool and placement.poolId become that pool's, so later resumes, retries and migrations stay there. Checked before anything changes, with resources as this resume sets them: 422 platform_mismatch when the platforms the image offered at its last placement and the pool's hosts' are both known and share none; 422 pool_unfit when no host the pool has or launches can ever take the Run (nested containers, placement.requires labels, cpus, memory or disk beyond a whole host). On a Run already resuming: its own pool, 202; another, 409 not_resumable."`
+	PoolID string `json:"poolId" doc:"Move the Run to this pool from this resume on, by id: the same field and rule as a submit's placement.poolId (the tenant's active pool with that id, else the platform's; any other is 422 unknown_pool). The Run's pool (pool and poolId in GET) and its spec's placement.pool and placement.poolId become that pool's, so later resumes, retries and migrations stay there. Checked before anything changes, with resources as this resume sets them: 422 platform_mismatch when the platforms the image offered at its last placement and the pool's hosts' are both known and share none; 422 pool_unfit when no host the pool has or launches can ever take the Run (nested containers, placement.requires labels, cpus, memory or disk beyond a whole host). On a Run already resuming: its own pool, 202; another, 409 not_resumable. With an operator's to, that host must be in this pool (else 422 invalid_spec)."`
 }
 
 // BoundPool names a pool by its current name and its id.
@@ -242,6 +242,17 @@ func (s *Server) withPoolFacts(ctx context.Context, tx pgx.Tx, pools []Pool, ten
 		pools[i].Capabilities = &PoolCapabilities{NestedContainers: f.nestedContainers()}
 	}
 	return nil
+}
+
+// hostPool is the pool host hostID is in, as the system sees it; its zero
+// value when the host has none.
+func (s *Server) hostPool(ctx context.Context, hostID string) (BoundPool, error) {
+	var b BoundPool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT coalesce(h.pool_id, ''), coalesce(p.name, '') FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id
+			WHERE h.id = $1`, hostID).Scan(&b.ID, &b.Name)
+	})
+	return b, err
 }
 
 // lastImagePlatforms are the image platforms of the Run's latest placement

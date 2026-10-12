@@ -1714,6 +1714,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		return nil, err
 	}
 	var target *poolFacts
+	var placeOnPool BoundPool
 	if req.Placement != nil {
 		if req.Placement.PoolID == "" {
 			return nil, invalidSpec(&spec.ValidationError{Problems: []string{"placement.poolId is required with placement"}})
@@ -1725,6 +1726,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			return nil, err
 		}
 		target = &f
+		if placeOn != nil {
+			if placeOnPool, err = s.hostPool(ctx, *placeOn); err != nil {
+				return nil, err
+			}
+		}
 	}
 	resumed := false
 	var resize *Resize
@@ -1753,6 +1759,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			rp, err := resolvePool(ctx, tx, p.TenantID, "", req.Placement.PoolID)
 			if err != nil {
 				return err
+			}
+			// A chosen host bypasses the pool scope (hostFit): it would run
+			// this placement outside the pool the Run is bound to.
+			if placeOn != nil && placeOnPool.ID != *rp.ID {
+				return errf(http.StatusUnprocessableEntity, "invalid_spec", "the chosen host is in pool %s, not %s", cmp.Or(placeOnPool.Name, "(none)"), rp.Name)
 			}
 			to = &rp
 		}
