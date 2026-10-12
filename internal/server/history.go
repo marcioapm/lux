@@ -284,7 +284,9 @@ func (s *Server) rollupHistory(ctx context.Context) error {
 				}
 			}
 		}
-		return nil
+		// Market samples are hourly figures, kept as long as hours.
+		_, err := tx.Exec(ctx, `DELETE FROM market_samples WHERE sampled_at < now() - $1::interval`, interval(s.cfg.HistoryHours))
+		return err
 	})
 }
 
