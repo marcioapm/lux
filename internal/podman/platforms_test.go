@@ -43,7 +43,7 @@ func TestImagePlatformsFromStoredIndex(t *testing.T) {
 	bigData(t, dir, imgID, "manifest-"+armDig, armManifest)
 	bigData(t, dir, imgID, "manifest", armManifest)
 	bigData(t, dir, imgID, "sha256:"+imgID, armConfig)
-	info := ImageInfo{ID: imgID, OS: "linux", Architecture: "arm64"}
+	info := ImageInfo{ID: imgID, Names: []string{"docker.io/library/alpine:3.20"}, OS: "linux", Architecture: "arm64"}
 
 	for ref, want := range map[string]string{
 		"docker.io/library/alpine:3.20":           "[linux/amd64 linux/arm/v7 linux/arm64/v8]",
@@ -77,6 +77,71 @@ func TestImagePlatformsSingleArch(t *testing.T) {
 
 	if got, err := ImagePlatforms(dir, "quay.io/x/gone:1", ImageInfo{ID: "feed", OS: "linux", Architecture: "amd64"}); err == nil {
 		t.Fatalf("no image directory: %v, want an error", got)
+	}
+}
+
+// One image reached through two indexes: a multi-arch one, then an
+// arm64-only one listing the same arm64 image. Storage keeps both lists and
+// both names on the image (as Podman 5.8 does) without recording which tag
+// came by which list, so either tag's platforms are unknown; a ref pinned
+// to one list's digest still offers exactly that list's.
+func TestImagePlatformsTwoIndexesOneImage(t *testing.T) {
+	const armOnlyDig = "sha256:4ca140bcbc88fa038acf33daab9e205a075cafea017d8ad079ba3bd124692e47"
+	dir := t.TempDir()
+	bigData(t, dir, imgID, "manifest-"+listDig, ociIndex)
+	bigData(t, dir, imgID, "manifest-"+armOnlyDig, `{"schemaVersion":2,"manifests":[{"digest":"`+armDig+`","platform":{"architecture":"arm64","os":"linux","variant":"v8"}}]}`)
+	bigData(t, dir, imgID, "manifest-"+armDig, armManifest)
+	bigData(t, dir, imgID, "manifest", armManifest)
+	bigData(t, dir, imgID, "sha256:"+imgID, armConfig)
+	info := ImageInfo{ID: imgID, Names: []string{"reg/x/armonly:1", "reg/x/multi:1"}, OS: "linux", Architecture: "arm64"}
+
+	for _, ref := range []string{"reg/x/armonly:1", "reg/x/multi:1"} {
+		if got, err := ImagePlatforms(dir, ref, info); got != nil || err == nil {
+			t.Errorf("%s: %v %v, want unknown", ref, got, err)
+		}
+	}
+	for ref, want := range map[string]string{
+		"reg/x/armonly@" + armOnlyDig: "[linux/arm64/v8]",
+		"reg/x/multi@" + listDig:      "[linux/amd64 linux/arm/v7 linux/arm64/v8]",
+	} {
+		if got, err := ImagePlatforms(dir, ref, info); err != nil || fmt.Sprint(got) != want {
+			t.Errorf("%s: %v %v, want %s", ref, got, err, want)
+		}
+	}
+
+	// One name, but its tag moved to a second list holding the same image:
+	// which list it now names is not recorded either.
+	info.Names = []string{"reg/x/multi:1"}
+	if got, err := ImagePlatforms(dir, "reg/x/multi:1", info); got != nil || err == nil {
+		t.Errorf("one name, two lists: %v %v, want unknown", got, err)
+	}
+}
+
+// One list but two names: the image is also reached by a single-arch tag,
+// which stores no list. Which name came by the list is not recorded, so
+// neither tag can claim its platforms.
+func TestImagePlatformsOneListTwoNames(t *testing.T) {
+	dir := t.TempDir()
+	bigData(t, dir, imgID, "manifest-"+listDig, ociIndex)
+	bigData(t, dir, imgID, "manifest-"+armDig, armManifest)
+	bigData(t, dir, imgID, "sha256:"+imgID, armConfig)
+	info := ImageInfo{ID: imgID, Names: []string{"reg/x/multi:1", "reg/x/single:1"}, OS: "linux", Architecture: "arm64"}
+	if got, err := ImagePlatforms(dir, "reg/x/single:1", info); got != nil || err == nil {
+		t.Fatalf("%v %v, want unknown", got, err)
+	}
+}
+
+// A list naming a platform more than once (Windows indexes list one per
+// os.version) offers it once; the platforms come sorted.
+func TestImagePlatformsDedupedSorted(t *testing.T) {
+	dir := t.TempDir()
+	bigData(t, dir, imgID, "manifest-"+listDig, `{"manifests":[`+
+		`{"platform":{"architecture":"amd64","os":"windows","os.version":"10.0.20348.1"}},`+
+		`{"platform":{"architecture":"amd64","os":"linux"}},`+
+		`{"platform":{"architecture":"amd64","os":"windows","os.version":"10.0.17763.1"}},`+
+		`{"platform":{"architecture":"386","os":"linux"}}]}`)
+	if got, err := ImagePlatforms(dir, "x/y:1", ImageInfo{ID: imgID}); err != nil || fmt.Sprint(got) != "[linux/386 linux/amd64 windows/amd64]" {
+		t.Fatalf("%v %v", got, err)
 	}
 }
 

@@ -69,8 +69,11 @@ image's own platform; for an image built on the host (`image.build`), the
 host's. The runner reads what Podman stored when it pulled the image
 (containers/storage keeps the list beside the image) and makes no registry
 call; a reference pinned by the digest of one platform's manifest offers
-that platform only. When the runner cannot tell, the field is absent and
-the start goes on (a debug line in the runner's log).
+that platform only. Storage does not record which tag came by which list:
+when one image is reached through several lists, or through a list and
+other names, a tag's platforms are unknown (a digest-pinned reference
+still offers its own list's). When the runner cannot tell, the field is
+absent and the start goes on (a debug line in the runner's log).
 
 The runner sends these with **every heartbeat** (about every third of the
 lease period, 10 s by default) and once more at exit. So a placement whose

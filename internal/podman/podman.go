@@ -190,15 +190,19 @@ func (p *Podman) ImagesDir(ctx context.Context) (string, error) {
 }
 
 // ImagePlatforms are the platforms (os/arch[/variant]) the reference an
-// image was pulled by offers: every platform of the manifest list or OCI
-// index the pull fetched, which containers/storage keeps beside the image
-// as "manifest-sha256:<digest>" big data (files named "=" + base64 of the
-// key); for an image with no list (single-arch, or built here), its own
-// platform, from its config blob ("sha256:<id>") or else from info. Only
-// local files are read: `podman manifest inspect` would ask the registry.
-// A ref pinned by digest reads only the manifest of that digest; a tag
-// reads every list stored with the image (more than one only when several
-// tags resolved to this same image). Entries for unknown/unknown (build
+// image was pulled by offers, read from what containers/storage keeps
+// beside the image (files named "=" + base64 of the big data key); `podman
+// manifest inspect` would ask the registry. A pull through a manifest list
+// or OCI index stores it as "manifest-sha256:<digest>"; an image with no
+// list (single-arch, loaded, built here) has its own platform, from its
+// config blob ("sha256:<id>") or else from info.
+//
+// A ref pinned by digest reads only the manifest of that digest. Storage
+// records no tag → list association: an image reached by several tags
+// keeps every tag's list and every name, merged. So a tag offers a stored
+// list's platforms only when the image has that one name and one list;
+// with no list it offers the image's own platform; otherwise nil
+// (unknown), never a union of lists. Entries for unknown/unknown (build
 // attestations) are not platforms.
 func ImagePlatforms(imagesDir, ref string, info ImageInfo) ([]string, error) {
 	dir := filepath.Join(imagesDir, strings.TrimPrefix(info.ID, "sha256:"))
@@ -208,8 +212,7 @@ func ImagePlatforms(imagesDir, ref string, info ImageInfo) ([]string, error) {
 	}
 	_, pinned, _ := strings.Cut(ref, "@")
 	var own *ociPlatform
-	seen := map[string]bool{}
-	var out []string
+	var lists [][]string
 	for _, e := range entries {
 		enc, ok := strings.CutPrefix(e.Name(), "=")
 		if !ok {
@@ -228,22 +231,8 @@ func ImagePlatforms(imagesDir, ref string, info ImageInfo) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			var list struct {
-				Manifests []struct {
-					Platform *ociPlatform `json:"platform"`
-				} `json:"manifests"`
-			}
-			if json.Unmarshal(b, &list) != nil {
-				continue
-			}
-			for _, m := range list.Manifests {
-				if m.Platform == nil || m.Platform.OS == "unknown" || m.Platform.Architecture == "unknown" {
-					continue
-				}
-				if s := m.Platform.String(); s != "" && !seen[s] {
-					seen[s] = true
-					out = append(out, s)
-				}
+			if ps := listPlatforms(b); len(ps) > 0 {
+				lists = append(lists, ps)
 			}
 		case k == "sha256:"+strings.TrimPrefix(info.ID, "sha256:"):
 			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
@@ -255,9 +244,11 @@ func ImagePlatforms(imagesDir, ref string, info ImageInfo) ([]string, error) {
 			}
 		}
 	}
-	if len(out) > 0 {
-		slices.Sort(out)
-		return out, nil
+	switch {
+	case len(lists) == 1 && (pinned != "" || len(info.Names) <= 1):
+		return lists[0], nil
+	case len(lists) > 0:
+		return nil, fmt.Errorf("image %s: %d stored lists, %d names: which one %s came by is not recorded", info.ID, len(lists), len(info.Names), ref)
 	}
 	if own == nil || own.String() == "" {
 		own = &ociPlatform{OS: info.OS, Architecture: info.Architecture}
@@ -266,6 +257,31 @@ func ImagePlatforms(imagesDir, ref string, info ImageInfo) ([]string, error) {
 		return []string{s}, nil
 	}
 	return nil, fmt.Errorf("image %s: no platform", info.ID)
+}
+
+// listPlatforms are a manifest list's or OCI index's platforms, sorted,
+// each once (an index may list one platform several times, e.g. Windows
+// images per os.version); none for an image manifest.
+func listPlatforms(b []byte) []string {
+	var list struct {
+		Manifests []struct {
+			Platform *ociPlatform `json:"platform"`
+		} `json:"manifests"`
+	}
+	if json.Unmarshal(b, &list) != nil {
+		return nil
+	}
+	var out []string
+	for _, m := range list.Manifests {
+		if m.Platform == nil || m.Platform.OS == "unknown" || m.Platform.Architecture == "unknown" {
+			continue
+		}
+		if s := m.Platform.String(); s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // ociPlatform is a manifest list entry's platform, or an image config's.
