@@ -871,6 +871,36 @@ fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
   outcomes and exits non-zero unless every repository was pushed or already
   up to date.
 
+A push or a sync can carry a fresh git credential for a repository, for
+credentials that expire (a GitHub App's installation token lasts an hour):
+
+```json
+POST /v1/runs/{id}/push   {"credentials": {"app": "ghs_…"}}
+POST /v1/runs/{id}/sync   {"sync": [{"repo": "app", "ref": "main"}], "credentials": {"app": "ghs_…"}}
+```
+
+- The runner uses the value instead of the repository's `credential`
+  secret, for the mirror's fetch and the push. It keeps the latest value,
+  in memory, for every later fetch and push of that repository by the same
+  placement, so a push or sync without `credentials` uses it too. A
+  repository not named keeps its credential. A new placement (a resume)
+  starts again from the `credential` secret: supply a current value there.
+- It is never stored: not in the spec, events, logs or the database.
+  `push.requested` and `sync.requested` events list the repository names
+  only (`credentials: ["app"]`). luxd holds the values in memory until the
+  runner has the request. If it no longer holds them (it restarted, or
+  another luxd took the runner's connection), the push ends with every
+  repository `failed`, and the sync with failed `git.sync` events and
+  `sync.done`, saying to send it again.
+- 422 `invalid_request` for a name that is not one of the Run's
+  repositories, a repository without a `credential`, or an empty value.
+  409 `push_credentials_unsupported` (`sync_credentials_unsupported`) when
+  the Run's host runs a lux-runner that predates them; without
+  `credentials`, the request goes as before.
+- From the CLI: `lux push <run> --credential app=VALUE` and
+  `lux sync <run> app=main --credential app=VALUE` (repeatable). A VALUE of
+  `${VAR}` is read from the environment, keeping it off the command line.
+
 The workload commits as it likes. The checkout is a normal git repository
 owned by the workload user.
 
