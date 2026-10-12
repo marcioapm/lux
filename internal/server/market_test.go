@@ -347,6 +347,40 @@ func TestSampleMarketStopsWhenLeaseLost(t *testing.T) {
 	}
 }
 
+// A type is marked attempted only when its own calls start: when the
+// first type uses up the pass's deadline, the next pass samples the
+// second, and does not retry the first.
+func TestSampleMarketUntouchedTypeStaysDue(t *testing.T) {
+	f := &marketFake{zones: map[string][]Zone{"us-east-1": {{"us-east-1a", "use1-az1"}}},
+		onDemand: map[string]string{"m7i.large": "0.1", "m7g.large": "0.08"}}
+	s, _ := marketServer(t, f)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider, template) VALUES ('p1', 'burst', 'ec2', '{"region":"us-east-1","instanceType":"m7i.large","fallbackInstanceTypes":["m7g.large"]}')`)
+	f.during = func(c string) {
+		if c == "score us-east-1 m7i.large" {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	passCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	_ = s.sampleMarketPass(passCtx)
+	cancel()
+	if calls := f.takeCalls(); slices.Contains(calls, "score us-east-1 m7g.large") {
+		t.Fatalf("the first pass reached m7g.large: %v", calls)
+	}
+
+	f.during = nil
+	if err := s.sampleMarketPass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.takeCalls()
+	if !slices.Contains(calls, "score us-east-1 m7g.large") || slices.Contains(calls, "score us-east-1 m7i.large") {
+		t.Fatalf("second pass calls %v, want m7g.large sampled and m7i.large not retried", calls)
+	}
+	if rows := marketRows(t, s); len(rows) != 1 || !strings.Contains(rows[0], "m7g.large") {
+		t.Fatalf("rows %v, want one for m7g.large", rows)
+	}
+}
+
 // When the provider cannot list a pool's zones (no ec2:DescribeSubnets),
 // the zones its hosts were launched in are sampled, by name only: prices
 // still come, a placement score cannot be matched without the zone id.

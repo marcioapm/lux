@@ -127,9 +127,10 @@ func (m marketProblems) err() error {
 // sampleMarket writes a market sample for every candidate type of every
 // live pool of a MarketProvider that is due (marketDue), in each zone its
 // pools launch into. Each figure is fetched on its own: one that fails is
-// NULL in the row, never a reason to drop the others. A due type is
-// attempted once per Every whatever the outcome, so a refused call is not
-// repeated each minute. The lease is checked again before each write; once it
+// NULL in the row, never a reason to drop the others. A type is marked
+// attempted just before its own calls, whatever their outcome, so a
+// refused call is not repeated each minute and a type the pass never
+// reached stays due. The lease is checked again before each write; once it
 // is lost the pass stops.
 func (s *Server) sampleMarket(ctx context.Context) (marketProblems, error) {
 	problems := marketProblems{}
@@ -170,7 +171,6 @@ func (s *Server) sampleMarketTargets(ctx context.Context, targets []*marketTarge
 		if len(due) == 0 {
 			continue
 		}
-		s.markMarketAttempt(t, due)
 		// The catalog with the samples: a new candidate is described at
 		// once, and a failing describe is retried no more often than the
 		// due types are.
@@ -181,6 +181,7 @@ func (s *Server) sampleMarketTargets(ctx context.Context, targets []*marketTarge
 			return err
 		}
 		for _, it := range due {
+			s.markMarketAttempt(t, it)
 			if err := s.sampleMarketType(ctx, t, it, problems); err != nil {
 				return err
 			}
@@ -271,15 +272,13 @@ func (s *Server) marketDue(ctx context.Context, t *marketTarget) ([]string, erro
 	return due, nil
 }
 
-func (s *Server) markMarketAttempt(t *marketTarget, types []string) {
+func (s *Server) markMarketAttempt(t *marketTarget, it string) {
 	s.marketMu.Lock()
 	defer s.marketMu.Unlock()
 	if s.marketTried == nil {
 		s.marketTried = map[[3]string]time.Time{}
 	}
-	for _, it := range types {
-		s.marketTried[[3]string{t.provider, t.region, it}] = time.Now()
-	}
+	s.marketTried[[3]string{t.provider, t.region, it}] = time.Now()
 }
 
 // marketZones are the zones t's pools launch into, as the provider lists
