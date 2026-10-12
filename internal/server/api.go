@@ -1710,12 +1710,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			values, cached = v, true
 		}
 	}
-	placeOn, err := s.chooseHost(ctx, p, req.To)
+	placeOn, placeOnPool, err := s.chooseHost(ctx, p, req.To)
 	if err != nil {
 		return nil, err
 	}
 	var target *poolFacts
-	var placeOnPool BoundPool
 	if req.Placement != nil {
 		if req.Placement.PoolID == "" {
 			return nil, invalidSpec(&spec.ValidationError{Problems: []string{"placement.poolId is required with placement"}})
@@ -1727,11 +1726,6 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			return nil, err
 		}
 		target = &f
-		if placeOn != nil {
-			if placeOnPool, err = s.hostPool(ctx, *placeOn); err != nil {
-				return nil, err
-			}
-		}
 	}
 	resumed := false
 	var resize *Resize

@@ -259,17 +259,6 @@ func (s *Server) withPoolFacts(ctx context.Context, tx pgx.Tx, pools []Pool, ten
 	return nil
 }
 
-// hostPool is the pool host hostID is in, as the system sees it; its zero
-// value when the host has none.
-func (s *Server) hostPool(ctx context.Context, hostID string) (BoundPool, error) {
-	var b BoundPool
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT coalesce(h.pool_id, ''), coalesce(p.name, '') FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id
-			WHERE h.id = $1`, hostID).Scan(&b.ID, &b.Name)
-	})
-	return b, err
-}
-
 // lastImagePlatforms are the image platforms of the Run's latest placement
 // that reported any; nil when none did.
 func lastImagePlatforms(ctx context.Context, tx pgx.Tx, runID string) ([]string, error) {
