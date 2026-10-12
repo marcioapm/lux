@@ -81,68 +81,64 @@ func (s *Server) loadPoolFacts(ctx context.Context, poolID, tenantID string) (po
 // instance types in the catalog.
 func (s *Server) poolFactsTx(ctx context.Context, tx pgx.Tx, poolID, tenantID string) (poolFacts, error) {
 	var f poolFacts
-	err := func() error {
-		pl := poolRow{ID: poolID}
-		err := tx.QueryRow(ctx, `SELECT name, provider, tenant_id, template FROM pools WHERE id = $1`, poolID).
-			Scan(&pl.Name, &f.Provider, &pl.TenantID, &pl.Template)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
+	pl := poolRow{ID: poolID}
+	err := tx.QueryRow(ctx, `SELECT name, provider, tenant_id, template FROM pools WHERE id = $1`, poolID).
+		Scan(&pl.Name, &f.Provider, &pl.TenantID, &pl.Template)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return f, nil
+	}
+	if err != nil {
+		return f, err
+	}
+	pl.Provider = f.Provider
+	// Live hosts, then the latest registrations: two index-bounded
+	// branches, so a pool's terminated history is never scanned.
+	rows, err := tx.Query(ctx, `SELECT h.arch, h.labels, h.capacity, h.state IN ('ready', 'draining')
+		FROM pools p CROSS JOIN LATERAL (
+			(SELECT id, arch, labels, capacity, state FROM hosts
+				WHERE pool_id = p.id AND (tenant_id IS NULL OR tenant_id = coalesce(nullif($2, ''), p.tenant_id))
+				  AND registered_at IS NOT NULL AND state IN ('ready', 'draining'))
+			UNION
+			(SELECT id, arch, labels, capacity, state FROM hosts
+				WHERE pool_id = p.id AND (tenant_id IS NULL OR tenant_id = coalesce(nullif($2, ''), p.tenant_id))
+				  AND registered_at IS NOT NULL
+				  AND (p.provider = 'static' OR provision_requested_at IS NOT NULL AND launch_template = p.template)
+				ORDER BY registered_at DESC, id DESC LIMIT $3)) h
+		WHERE p.id = $1`, poolID, tenantID, expectationWindow)
+	if err != nil {
+		return f, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var arch string
+		var labels map[string]string
+		var capacity proto.Capacity
+		var live bool
+		if err := rows.Scan(&arch, &labels, &capacity, &live); err != nil {
+			return f, err
 		}
-		if err != nil {
-			return err
+		if arch != "" && !slices.Contains(f.Archs, arch) {
+			f.Archs = append(f.Archs, arch)
 		}
-		pl.Provider = f.Provider
-		// Live hosts, then the latest registrations: two index-bounded
-		// branches, so a pool's terminated history is never scanned.
-		rows, err := tx.Query(ctx, `SELECT h.arch, h.labels, h.capacity, h.state IN ('ready', 'draining')
-			FROM pools p CROSS JOIN LATERAL (
-				(SELECT id, arch, labels, capacity, state FROM hosts
-					WHERE pool_id = p.id AND (tenant_id IS NULL OR tenant_id = coalesce(nullif($2, ''), p.tenant_id))
-					  AND registered_at IS NOT NULL AND state IN ('ready', 'draining'))
-				UNION
-				(SELECT id, arch, labels, capacity, state FROM hosts
-					WHERE pool_id = p.id AND (tenant_id IS NULL OR tenant_id = coalesce(nullif($2, ''), p.tenant_id))
-					  AND registered_at IS NOT NULL
-					  AND (p.provider = 'static' OR provision_requested_at IS NOT NULL AND launch_template = p.template)
-					ORDER BY registered_at DESC, id DESC LIMIT $3)) h
-			WHERE p.id = $1`, poolID, tenantID, expectationWindow)
-		if err != nil {
-			return err
+		// An ec2 pool's past hosts are not hosts it has: what it
+		// launches next is futureHost's.
+		if live || f.Provider != "ec2" {
+			f.Profiles = append(f.Profiles, poolProfile{Labels: labels, Capacity: capacity, LabelsKnown: true})
 		}
-		for rows.Next() {
-			var arch string
-			var labels map[string]string
-			var capacity proto.Capacity
-			var live bool
-			if err := rows.Scan(&arch, &labels, &capacity, &live); err != nil {
-				rows.Close()
-				return err
-			}
-			if arch != "" && !slices.Contains(f.Archs, arch) {
-				f.Archs = append(f.Archs, arch)
-			}
-			// An ec2 pool's past hosts are not hosts it has: what it
-			// launches next is futureHost's.
-			if live || f.Provider != "ec2" {
-				f.Profiles = append(f.Profiles, poolProfile{Labels: labels, Capacity: capacity, LabelsKnown: true})
-			}
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		if f.Provider != "ec2" {
-			return nil
-		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return f, err
+	}
+	if f.Provider == "ec2" {
 		future, err := s.futureHost(ctx, tx, pl, &f)
 		if err != nil {
-			return err
+			return f, err
 		}
 		f.Profiles = append(f.Profiles, future...)
-		return nil
-	}()
+	}
 	slices.Sort(f.Archs)
-	return f, err
+	return f, nil
 }
 
 // futureHost is the hosts planCapacity would launch for ec2 pool pl. The
@@ -162,10 +158,8 @@ func (s *Server) futureHost(ctx context.Context, tx pgx.Tx, pl poolRow, f *poolF
 	}
 	future := poolProfile{Labels: map[string]string{}}
 	if expected != nil {
-		future = poolProfile{Labels: maps.Clone(expected.Labels), Capacity: expected.Capacity, LabelsKnown: true}
-		if future.Labels == nil {
-			future.Labels = map[string]string{}
-		}
+		maps.Copy(future.Labels, expected.Labels)
+		future.Capacity, future.LabelsKnown = expected.Capacity, true
 	}
 	nested := templateOffersNested(pl)
 	f.NestedMismatch = nested && expected != nil && expected.nestedMismatch
@@ -287,18 +281,12 @@ func lastImagePlatforms(ctx context.Context, tx pgx.Tx, runID string) ([]string,
 // platforms the image offers. Unknown on either side is no refusal:
 // unchecked reports it.
 func checkPlatform(f poolFacts, name string, imagePlatforms []string) (unchecked bool, err error) {
-	var imageArchs []string
-	for _, p := range imagePlatforms {
-		parts := strings.Split(p, "/")
-		if len(parts) >= 2 && parts[0] == "linux" {
-			imageArchs = append(imageArchs, parts[1])
-		}
-	}
 	if len(imagePlatforms) == 0 || len(f.Archs) == 0 {
 		return true, nil
 	}
-	for _, a := range imageArchs {
-		if slices.Contains(f.Archs, a) {
+	for _, p := range imagePlatforms {
+		parts := strings.Split(p, "/")
+		if len(parts) >= 2 && parts[0] == "linux" && slices.Contains(f.Archs, parts[1]) {
 			return false, nil
 		}
 	}
@@ -393,13 +381,12 @@ func rebindPool(ctx context.Context, tx pgx.Tx, runID string, sp spec.RunSpec, f
 	// A built image is rebuilt on each host, so the platform its last
 	// placement reported is that build host's arch: unknown here.
 	var platforms []string
+	var err error
 	if sp.Image.Build == nil {
-		var err error
 		if platforms, err = lastImagePlatforms(ctx, tx, runID); err != nil {
 			return nil, err
 		}
 	}
-	var err error
 	if moved.PlatformUnchecked, err = checkPlatform(f, to.Name, platforms); err != nil {
 		return nil, err
 	}
@@ -415,24 +402,16 @@ func rebindPool(ctx context.Context, tx pgx.Tx, runID string, sp spec.RunSpec, f
 	return moved, nil
 }
 
-// pendingPool is the pool move of the resume a resuming Run waits on
-// (pendingResize's event); nil when it moved none.
+// pendingPool is the pool move of the resume a resuming Run waits on; nil
+// when it moved none.
 func pendingPool(ctx context.Context, tx pgx.Tx, runID string) (*ResumePlacement, error) {
 	var ev *struct {
 		From              BoundPool `json:"from"`
 		To                BoundPool `json:"to"`
 		PlatformUnchecked bool      `json:"platformUnchecked"`
 	}
-	err := tx.QueryRow(ctx, `SELECT data->'pool' FROM run_events
-		WHERE run_id = $1 AND type = 'resume.requested'
-		  AND id > coalesce((SELECT max(id) FROM run_events WHERE run_id = $1 AND type = 'state' AND data->>'state' <> 'resuming'), 0)
-		ORDER BY id DESC LIMIT 1`, runID).Scan(&ev)
-	if errors.Is(err, pgx.ErrNoRows) || ev == nil {
-		return nil, nil
-	}
-	if err != nil {
+	if err := pendingResumeData(ctx, tx, runID, "pool", &ev); err != nil || ev == nil {
 		return nil, err
 	}
-	from := ev.From
-	return &ResumePlacement{Pool: ev.To.Name, PoolID: ev.To.ID, From: &from, PlatformUnchecked: ev.PlatformUnchecked}, nil
+	return &ResumePlacement{Pool: ev.To.Name, PoolID: ev.To.ID, From: &ev.From, PlatformUnchecked: ev.PlatformUnchecked}, nil
 }

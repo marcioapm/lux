@@ -1730,9 +1730,8 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 	resumed := false
 	var resize *Resize
 	var moved *ResumePlacement
-	// stateUnchecked: the live state a validateOnly resume did not check;
-	// "" otherwise.
-	stateUnchecked := ""
+	// The live state a validateOnly resume did not check.
+	var stateUnchecked string
 	attempt := func(tx pgx.Tx) error {
 		var state string
 		var refs []spec.SecretRef
@@ -1967,7 +1966,10 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		return err
 	})
 	if req.ValidateOnly {
-		return s.validatedResume(req.RequestID, err, resize, moved, stateUnchecked)
+		if err != nil && !errors.Is(err, errValidated) {
+			return nil, err
+		}
+		return &resumeOutput{http.StatusOK, req.RequestID, &ResumeAnswer{Valid: true, StateUnchecked: stateUnchecked, Resize: resize, Placement: moved}}, nil
 	}
 	if err != nil {
 		if resumed && !cached {
@@ -1985,17 +1987,6 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 
 // errValidated rolls back a validateOnly resume whose checks all passed.
 var errValidated = errors.New("validated: rolled back")
-
-// validatedResume is a validateOnly resume's answer: 200 valid when its
-// transaction rolled back on errValidated, else the error a resume would
-// have met. The Run's held secrets are as they were: a dry run never
-// reaches secrets.put.
-func (s *Server) validatedResume(requestID string, err error, resize *Resize, moved *ResumePlacement, stateUnchecked string) (*resumeOutput, error) {
-	if err != nil && !errors.Is(err, errValidated) {
-		return nil, err
-	}
-	return &resumeOutput{http.StatusOK, requestID, &ResumeAnswer{Valid: true, StateUnchecked: stateUnchecked, Resize: resize, Placement: moved}}, nil
-}
 
 // Disk headroom a shrink must leave above the measured use: a quarter of
 // it, and at least 1 GiB, so a Run is not stopped for its disk (checkDisk
@@ -2017,14 +2008,24 @@ func diskShrinkFloor(used int64) int64 {
 // resumed the Run itself (a move).
 func pendingResize(ctx context.Context, tx pgx.Tx, runID string) (*Resize, error) {
 	var rz *Resize
-	err := tx.QueryRow(ctx, `SELECT data->'resources' FROM run_events
+	if err := pendingResumeData(ctx, tx, runID, "resources", &rz); err != nil {
+		return nil, err
+	}
+	return rz, nil
+}
+
+// pendingResumeData scans field key of the latest resume.requested event
+// since the Run last entered a state other than resuming into dest; dest
+// is left as it was when there is none.
+func pendingResumeData(ctx context.Context, tx pgx.Tx, runID, key string, dest any) error {
+	err := tx.QueryRow(ctx, `SELECT data->$2::text FROM run_events
 		WHERE run_id = $1 AND type = 'resume.requested'
 		  AND id > coalesce((SELECT max(id) FROM run_events WHERE run_id = $1 AND type = 'state' AND data->>'state' <> 'resuming'), 0)
-		ORDER BY id DESC LIMIT 1`, runID).Scan(&rz)
+		ORDER BY id DESC LIMIT 1`, runID, key).Scan(dest)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+		return nil
 	}
-	return rz, err
+	return err
 }
 
 // resizeRun writes a resume's resources into the Run's stored spec (cur
