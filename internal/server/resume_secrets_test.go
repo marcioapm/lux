@@ -649,6 +649,66 @@ func TestFailedCloneKeepsASharedCredential(t *testing.T) {
 	}
 }
 
+// A repository added back with a dropped credential whose clone fails again:
+// the credential is dropped again, recorded once, and the next resume needs
+// no value for it.
+func TestFailedCloneAgainAfterReAdd(t *testing.T) {
+	s := testServer(t)
+	id := stoppedWith(t, s, noSecretsSpec())
+	addTwo := &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "GIT_TOKEN"}}}
+	tok := []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}}
+	for _, rid := range []string{"r-1", "r-2"} {
+		if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: rid, Secrets: tok, Git: addTwo}); err != nil {
+			t.Fatalf("%s: %v", rid, err)
+		}
+		if ev := failClone(t, s, id, "two", rid); ev["droppedSecret"] != "GIT_TOKEN" {
+			t.Fatalf("%s: git.clone event %v, want droppedSecret GIT_TOKEN", rid, ev)
+		}
+	}
+	if secs, refs := storedSecrets(t, s, id); len(secs) != 0 || len(refs) != 0 {
+		t.Fatalf("declared after the second failed clone: %v / %v", secretNames(secs), refNames(refs))
+	}
+	var raw []byte
+	systemScan(t, s, `SELECT spec->'git'->'droppedCredentials' FROM runs WHERE id = $1`, []any{id}, &raw)
+	var dropped []string
+	if err := json.Unmarshal(raw, &dropped); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(dropped, []string{"GIT_TOKEN"}) {
+		t.Errorf("droppedCredentials %v, want [GIT_TOKEN]", dropped)
+	}
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{}); err != nil {
+		t.Fatalf("resume without secrets: %v", err)
+	}
+}
+
+// A repository's credential that is also the image's registry auth stays
+// when its clone fails: declared, runner-only, and required.
+func TestFailedCloneKeepsARegistryCredential(t *testing.T) {
+	s := testServer(t)
+	sp := noSecretsSpec()
+	sp.Image.RegistryAuth = []spec.RegistryAuth{{Registry: "ghcr.io", Secret: "REG"}}
+	sp.Secrets = []spec.Secret{{Name: "REG", Value: "reg-1"}}
+	id := stoppedWith(t, s, sp)
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: "r-1",
+		Secrets: []spec.Secret{{Name: "REG", Value: "reg-2"}},
+		Git:     &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "REG"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ev := failClone(t, s, id, "two", "r-1"); ev["droppedSecret"] != nil {
+		t.Errorf("git.clone event %v: dropped the registry credential", ev)
+	}
+	secs, refs := storedSecrets(t, s, id)
+	if !reflect.DeepEqual(refNames(refs), []string{"REG"}) || len(secs) != 1 || secs[0].Name != "REG" || !secs[0].RunnerOnly || secs[0].As != "none" {
+		t.Fatalf("after the failed clone: %+v / %v", secs, refNames(refs))
+	}
+	_, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{})
+	if he := refused(t, err, http.StatusUnprocessableEntity, "secrets_required", "resume without the registry credential"); !reflect.DeepEqual(he.Details, []string{"REG"}) {
+		t.Errorf("missing %v", he.Details)
+	}
+}
+
 // After the drop, a client still sending the value never gets it declared
 // as a secret the workload sees, nor held for the placement; re-adding the
 // repository with it makes it a runner-only credential again.
