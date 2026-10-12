@@ -141,9 +141,7 @@ func TestResumeValidateOnlyWhileResuming(t *testing.T) {
 	if after := snapshotRun(t, s, id); after != before {
 		t.Errorf("after the dry runs: %+v, want %+v", after, before)
 	}
-	var events int
-	systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'resume.requested'`, []any{id}, &events)
-	if events != 1 {
+	if events := resumeRequests(t, s, id); events != 1 {
 		t.Errorf("%d resume.requested, want 1", events)
 	}
 }
@@ -215,7 +213,7 @@ func TestResumeValidateOnlyOtherChecks(t *testing.T) {
 			execSQL(t, s, context.Background(), `UPDATE runs SET state = 'terminated' WHERE id = $1`, id)
 		}, resumeRequest{}, http.StatusConflict, "not_resumable"},
 		{"resumePolicy never", func(t *testing.T, s *Server, id string) {
-			execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{resumePolicy}', '"never"') WHERE id = $1`, id)
+			setSpec(t, s, id, "{resumePolicy}", `"never"`)
 		}, resumeRequest{}, http.StatusConflict, "not_resumable"},
 		{"sync of an unknown repository", nil,
 			resumeRequest{Sync: []proto.SyncRef{{Repo: "nope", Ref: "main"}}}, http.StatusUnprocessableEntity, "invalid_request"},

@@ -56,6 +56,20 @@ func binding(t *testing.T, s *Server, id string) runBinding {
 	return b
 }
 
+// setSpec sets the Run's stored spec at path (a jsonb_set path, e.g.
+// "{placement,requires}") to the JSON value.
+func setSpec(t *testing.T, s *Server, id, path, value string) {
+	t.Helper()
+	execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, $2::text::text[], $3::text::jsonb) WHERE id = $1`, id, path, value)
+}
+
+func resumeRequests(t *testing.T, s *Server, id string) int {
+	t.Helper()
+	var n int
+	systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'resume.requested'`, []any{id}, &n)
+	return n
+}
+
 // A resume naming another pool with larger resources rebinds the Run
 // (pool_id, spec.placement.pool and poolId), says so in its answer, its
 // resume.requested event and GET, and places it only on the new pool's
@@ -181,19 +195,19 @@ func TestResumeIntoAnotherPoolRefusals(t *testing.T) {
 		{name: "nested on static hosts without --nested", code: "pool_unfit",
 			says: "pool big cannot take this Run: none of its hosts offers nested containers (lux-runner --nested)",
 			setup: func(t *testing.T, f fixture) string {
-				execSQL(t, f.s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, f.id)
+				setSpec(t, f.s, f.id, "{sandbox}", `{"nestedContainers":true}`)
 				return poolID(t, f.s, "big", "t1")
 			}},
 		{name: "nested on an ec2 template without nestedContainers", code: "pool_unfit",
 			says: "pool burst cannot take this Run: it does not offer nested containers (its template has no nestedContainers, and none of its hosts runs lux-runner --nested)",
 			setup: func(t *testing.T, f fixture) string {
-				execSQL(t, f.s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, f.id)
+				setSpec(t, f.s, f.id, "{sandbox}", `{"nestedContainers":true}`)
 				return ec2Pool(t, f.s, "burst", `{"region":"us-east-1"}`)
 			}},
 		{name: "required labels no host has", code: "pool_unfit",
 			says: "pool big cannot take this Run: none of its hosts has the labels placement.requires names",
 			setup: func(t *testing.T, f fixture) string {
-				execSQL(t, f.s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"gpu":"a100"}') WHERE id = $1`, f.id)
+				setSpec(t, f.s, f.id, "{placement,requires}", `{"gpu":"a100"}`)
 				return poolID(t, f.s, "big", "t1")
 			}},
 		{name: "cpus beyond its largest static host", code: "pool_unfit",
@@ -226,13 +240,13 @@ func TestResumeIntoAnotherPoolRefusals(t *testing.T) {
 				readyHost(t, f.s, "h2", "shared", "", false)
 				execSQL(t, f.s, ctx, `UPDATE hosts SET tenant_id = 't2', labels = '{"nested":"true"}' WHERE id = 'h2'`)
 				execSQL(t, f.s, ctx, `UPDATE hosts SET registered_at = now() WHERE id IN ('h1', 'h2')`)
-				execSQL(t, f.s, ctx, `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, f.id)
+				setSpec(t, f.s, f.id, "{sandbox}", `{"nestedContainers":true}`)
 				return poolID(t, f.s, "shared", "")
 			}},
 		{name: "required labels the ec2 template's registrations lack", code: "pool_unfit",
 			says: "pool burst cannot take this Run: none of its hosts has the labels placement.requires names",
 			setup: func(t *testing.T, f fixture) string {
-				execSQL(t, f.s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"gpu":"a100"}') WHERE id = $1`, f.id)
+				setSpec(t, f.s, f.id, "{placement,requires}", `{"gpu":"a100"}`)
 				pool := ec2Pool(t, f.s, "burst", `{"region":"us-east-1"}`)
 				ec2Host(t, f.s, "e1", pool, "terminated", time.Minute, `{"cpus":16}`, `{"zone":"a"}`)
 				return pool
@@ -255,9 +269,7 @@ func TestResumeIntoAnotherPoolRefusals(t *testing.T) {
 			if before.State != StateStopped || before.PoolID != "default" {
 				t.Errorf("fixture: %+v", before)
 			}
-			var events int
-			systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'resume.requested'`, []any{id}, &events)
-			if events != 0 {
+			if events := resumeRequests(t, s, id); events != 0 {
 				t.Errorf("%d resume.requested after a refusal", events)
 			}
 			if _, held := s.secrets.get(id); held {
@@ -353,7 +365,7 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 		{name: "nested where the template opts in but its hosts registered without",
 			says: "pool nest cannot take this Run: it does not offer nested containers (its template's latest hosts registered without them)",
 			setup: func(t *testing.T, s *Server, id string) string {
-				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, id)
+				setSpec(t, s, id, "{sandbox}", `{"nestedContainers":true}`)
 				pool := ec2Pool(t, s, "nest", `{"region":"us-east-1","nestedContainers":true}`)
 				ec2Host(t, s, "e1", pool, "terminated", time.Minute, `{"cpus":16}`, `{}`)
 				return pool
@@ -375,7 +387,7 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 				addType(t, s, "m7i.8xlarge", 32)
 				pool := ec2Pool(t, s, "intel", `{"region":"us-east-1","instanceType":"m7i.8xlarge","fallbackInstanceTypes":["m7i.4xlarge"]}`)
 				ec2Host(t, s, "e1", pool, "terminated", time.Minute, `{"cpus":16,"memory":68719476736}`, `{"name":"e1"}`)
-				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"name":"e1"}') WHERE id = $1`, id)
+				setSpec(t, s, id, "{placement,requires}", `{"name":"e1"}`)
 				facts, err := s.loadPoolFacts(context.Background(), pool, "t1")
 				if err != nil {
 					t.Fatal(err)
@@ -398,7 +410,7 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 			says: "pool intel cannot take this Run: it needs 24 cpus; its largest host has 32; none of its hosts has the labels placement.requires names",
 			setup: func(t *testing.T, s *Server, id string) string {
 				probeArchPool(t, s)
-				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"arch":"arm64"}') WHERE id = $1`, id)
+				setSpec(t, s, id, "{placement,requires}", `{"arch":"arm64"}`)
 				facts, err := s.loadPoolFacts(context.Background(), "pool_intel", "t1")
 				if err != nil {
 					t.Fatal(err)
@@ -411,14 +423,14 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 		{name: "the probe host's arch is its instance type's: fits the probe host", res: &resumeResources{CPUs: f64(24)},
 			setup: func(t *testing.T, s *Server, id string) string {
 				probeArchPool(t, s)
-				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"arch":"amd64"}') WHERE id = $1`, id)
+				setSpec(t, s, id, "{placement,requires}", `{"arch":"amd64"}`)
 				return "pool_intel"
 			}},
 		{name: "an instance type listing i386 and x86_64: the probe host is amd64", res: &resumeResources{CPUs: f64(24)},
 			setup: func(t *testing.T, s *Server, id string) string {
 				probeArchPool(t, s)
 				execSQL(t, s, context.Background(), `UPDATE instance_types SET architectures = '{i386,x86_64}' WHERE instance_type = 'm7i.8xlarge'`)
-				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"arch":"amd64"}') WHERE id = $1`, id)
+				setSpec(t, s, id, "{placement,requires}", `{"arch":"amd64"}`)
 				return "pool_intel"
 			}},
 		{name: "an instance type with no runnable arch: the probe host keeps no previous host's", res: &resumeResources{CPUs: f64(24)},
@@ -426,7 +438,7 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 			setup: func(t *testing.T, s *Server, id string) string {
 				probeArchPool(t, s)
 				execSQL(t, s, context.Background(), `UPDATE instance_types SET architectures = '{}' WHERE instance_type = 'm7i.8xlarge'`)
-				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"arch":"arm64"}') WHERE id = $1`, id)
+				setSpec(t, s, id, "{placement,requires}", `{"arch":"arm64"}`)
 				return "pool_intel"
 			}},
 		{name: "registrations smaller than the instance type: fits the probe host", res: &resumeResources{CPUs: f64(12)},
@@ -507,7 +519,7 @@ func TestResumeIntoAnotherPoolAllowed(t *testing.T) {
 			}},
 		{name: "a built image into arm64 hosts: built on an amd64 host, rebuilt there", unchecked: true,
 			setup: func(t *testing.T, s *Server, id string) string {
-				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{image}', '{"build":{"containerfile":"FROM alpine"}}') WHERE id = $1`, id)
+				setSpec(t, s, id, "{image}", `{"build":{"containerfile":"FROM alpine"}}`)
 				execSQL(t, s, context.Background(), `UPDATE placements SET image_platforms = '{linux/amd64}' WHERE run_id = $1`, id)
 				execSQL(t, s, context.Background(), `UPDATE hosts SET arch = 'arm64' WHERE id = 'hb'`)
 				return poolID(t, s, "big", "t1")
@@ -525,17 +537,17 @@ func TestResumeIntoAnotherPoolAllowed(t *testing.T) {
 			}},
 		{name: "nested on an opted-in ec2 template", unchecked: true,
 			setup: func(t *testing.T, s *Server, id string) string {
-				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, id)
+				setSpec(t, s, id, "{sandbox}", `{"nestedContainers":true}`)
 				return ec2Pool(t, s, "nest", `{"region":"us-east-1","nestedContainers":true}`)
 			}},
 		{name: "required labels on an ec2 pool that never launched a host", unchecked: true,
 			setup: func(t *testing.T, s *Server, id string) string {
-				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"gpu":"a100"}') WHERE id = $1`, id)
+				setSpec(t, s, id, "{placement,requires}", `{"gpu":"a100"}`)
 				return ec2Pool(t, s, "burst", `{"region":"us-east-1"}`)
 			}},
 		{name: "nested on a static host with --nested", unchecked: true,
 			setup: func(t *testing.T, s *Server, id string) string {
-				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, id)
+				setSpec(t, s, id, "{sandbox}", `{"nestedContainers":true}`)
 				execSQL(t, s, context.Background(), `UPDATE hosts SET labels = '{"nested":"true"}' WHERE id = 'hb'`)
 				return poolID(t, s, "big", "t1")
 			}},
@@ -604,9 +616,7 @@ func TestResumeIntoAnotherPoolWhileResuming(t *testing.T) {
 					t.Errorf("retry without placement answered %+v", pl)
 				}
 			}
-			var events int
-			systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'resume.requested'`, []any{id}, &events)
-			if got := binding(t, s, id); got != want || events != 1 {
+			if got, events := binding(t, s, id), resumeRequests(t, s, id); got != want || events != 1 {
 				t.Errorf("after the retry: %+v and %d resume.requested, want %+v and 1", got, events, want)
 			}
 		})
