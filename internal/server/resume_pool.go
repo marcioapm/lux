@@ -215,8 +215,14 @@ func (s *Server) futureHost(ctx context.Context, tx pgx.Tx, pl poolRow, f *poolF
 		// A new host reports its own name and arch: never a previous host's.
 		delete(probe.Labels, "name")
 		delete(probe.Labels, "arch")
-		if len(archs) == 1 && ec2Archs[archs[0]] != "" {
-			probe.Labels["arch"] = ec2Archs[archs[0]]
+		var runnable []string
+		for _, a := range archs {
+			if g := ec2Archs[a]; slices.Contains(runnerArches, g) && !slices.Contains(runnable, g) {
+				runnable = append(runnable, g)
+			}
+		}
+		if len(runnable) == 1 {
+			probe.Labels["arch"] = runnable[0]
 		}
 		probe.Capacity.CPUs, probe.Capacity.Memory = float64(*vcpus), *mem
 	}
@@ -329,8 +335,11 @@ func checkPoolFit(f poolFacts, name, poolID string, sp spec.RunSpec) error {
 		if len(blockers) == 0 {
 			return nil
 		}
-		if best == nil || len(blockers) < len(best) {
+		switch {
+		case best == nil || len(blockers) < len(best):
 			best = blockers
+		case len(blockers) == len(best):
+			best = append(best, blockers...)
 		}
 	}
 	var why []string

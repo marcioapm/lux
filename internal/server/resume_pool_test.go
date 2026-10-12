@@ -370,7 +370,7 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 				return pool
 			}},
 		{name: "a smaller fallback's identity cannot fit the probe host", res: &resumeResources{CPUs: f64(24)},
-			says: "pool intel cannot take this Run: it needs 24 cpus; its largest host has 32",
+			says: "pool intel cannot take this Run: it needs 24 cpus; its largest host has 32; none of its hosts has the labels placement.requires names",
 			setup: func(t *testing.T, s *Server, id string) string {
 				addType(t, s, "m7i.8xlarge", 32)
 				pool := ec2Pool(t, s, "intel", `{"region":"us-east-1","instanceType":"m7i.8xlarge","fallbackInstanceTypes":["m7i.4xlarge"]}`)
@@ -395,7 +395,7 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 				return pool
 			}},
 		{name: "a smaller arm64 fallback's arch cannot fit the x86_64 probe host", res: &resumeResources{CPUs: f64(24)},
-			says: "pool intel cannot take this Run: it needs 24 cpus; its largest host has 32",
+			says: "pool intel cannot take this Run: it needs 24 cpus; its largest host has 32; none of its hosts has the labels placement.requires names",
 			setup: func(t *testing.T, s *Server, id string) string {
 				probeArchPool(t, s)
 				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"arch":"arm64"}') WHERE id = $1`, id)
@@ -412,6 +412,21 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 			setup: func(t *testing.T, s *Server, id string) string {
 				probeArchPool(t, s)
 				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"arch":"amd64"}') WHERE id = $1`, id)
+				return "pool_intel"
+			}},
+		{name: "an instance type listing i386 and x86_64: the probe host is amd64", res: &resumeResources{CPUs: f64(24)},
+			setup: func(t *testing.T, s *Server, id string) string {
+				probeArchPool(t, s)
+				execSQL(t, s, context.Background(), `UPDATE instance_types SET architectures = '{i386,x86_64}' WHERE instance_type = 'm7i.8xlarge'`)
+				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"arch":"amd64"}') WHERE id = $1`, id)
+				return "pool_intel"
+			}},
+		{name: "an instance type with no runnable arch: the probe host keeps no previous host's", res: &resumeResources{CPUs: f64(24)},
+			says: "pool intel cannot take this Run: it needs 24 cpus; its largest host has 32; none of its hosts has the labels placement.requires names",
+			setup: func(t *testing.T, s *Server, id string) string {
+				probeArchPool(t, s)
+				execSQL(t, s, context.Background(), `UPDATE instance_types SET architectures = '{}' WHERE instance_type = 'm7i.8xlarge'`)
+				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"arch":"arm64"}') WHERE id = $1`, id)
 				return "pool_intel"
 			}},
 		{name: "registrations smaller than the instance type: fits the probe host", res: &resumeResources{CPUs: f64(12)},
