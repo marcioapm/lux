@@ -150,16 +150,16 @@ func TestResumeIntoAnotherPoolRefusals(t *testing.T) {
 		setup func(t *testing.T, f fixture) string // the pool id to resume into
 		res   *resumeResources
 		code  string
-		says  string
+		says  string // the whole message; <id> stands for the pool id setup returns
 	}{
-		{name: "unknown id", code: "unknown_pool", says: "pool_nope",
+		{name: "unknown id", code: "unknown_pool", says: "no pool has id pool_nope",
 			setup: func(t *testing.T, f fixture) string { return "pool_nope" }},
-		{name: "another tenant's pool", code: "unknown_pool",
+		{name: "another tenant's pool", code: "unknown_pool", says: "no pool has id <id>",
 			setup: func(t *testing.T, f fixture) string {
 				execSQL(t, f.s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t2', 't2')`)
 				return poolID(t, f.s, "theirs", "t2")
 			}},
-		{name: "retired pool", code: "unknown_pool",
+		{name: "retired pool", code: "unknown_pool", says: "no pool has id <id>",
 			setup: func(t *testing.T, f fixture) string {
 				id := poolID(t, f.s, "gone", "t1")
 				execSQL(t, f.s, context.Background(), `UPDATE pools SET retired = true WHERE id = $1`, id)
@@ -178,39 +178,47 @@ func TestResumeIntoAnotherPoolRefusals(t *testing.T) {
 				execSQL(t, f.s, context.Background(), `UPDATE placements SET image_platforms = '{linux/amd64,linux/386}' WHERE run_id = $1`, f.id)
 				return ec2Pool(t, f.s, "graviton", `{"region":"us-east-1","instanceType":"m7g.4xlarge"}`)
 			}},
-		{name: "nested on static hosts without --nested", code: "pool_unfit", says: "none of its hosts offers nested containers",
+		{name: "nested on static hosts without --nested", code: "pool_unfit",
+			says: "pool big cannot take this Run: none of its hosts offers nested containers (lux-runner --nested)",
 			setup: func(t *testing.T, f fixture) string {
 				execSQL(t, f.s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, f.id)
 				return poolID(t, f.s, "big", "t1")
 			}},
-		{name: "nested on an ec2 template without nestedContainers", code: "pool_unfit", says: "its template has no nestedContainers",
+		{name: "nested on an ec2 template without nestedContainers", code: "pool_unfit",
+			says: "pool burst cannot take this Run: it does not offer nested containers (its template has no nestedContainers, and none of its hosts runs lux-runner --nested)",
 			setup: func(t *testing.T, f fixture) string {
 				execSQL(t, f.s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, f.id)
 				return ec2Pool(t, f.s, "burst", `{"region":"us-east-1"}`)
 			}},
-		{name: "required labels no host has", code: "pool_unfit", says: "labels placement.requires names",
+		{name: "required labels no host has", code: "pool_unfit",
+			says: "pool big cannot take this Run: none of its hosts has the labels placement.requires names",
 			setup: func(t *testing.T, f fixture) string {
 				execSQL(t, f.s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"gpu":"a100"}') WHERE id = $1`, f.id)
 				return poolID(t, f.s, "big", "t1")
 			}},
-		{name: "cpus beyond its largest static host", code: "pool_unfit", says: "it needs 32 cpus; its largest host has 16",
+		{name: "cpus beyond its largest static host", code: "pool_unfit",
+			says:  "pool big cannot take this Run: it needs 32 cpus; its largest host has 16",
 			res:   &resumeResources{CPUs: f64(32)},
 			setup: func(t *testing.T, f fixture) string { return poolID(t, f.s, "big", "t1") }},
-		{name: "memory beyond its largest static host", code: "pool_unfit", says: "it needs 128.0 GiB of memory; its largest host has 64.0 GiB",
+		{name: "memory beyond its largest static host", code: "pool_unfit",
+			says:  "pool big cannot take this Run: it needs 128.0 GiB of memory; its largest host has 64.0 GiB",
 			res:   &resumeResources{Memory: bytesPtr(128 * gib)},
 			setup: func(t *testing.T, f fixture) string { return poolID(t, f.s, "big", "t1") }},
-		{name: "cpus beyond its template's instance type", code: "pool_unfit", says: "it needs 32 cpus; its largest host has 16",
-			res: &resumeResources{CPUs: f64(32)},
+		{name: "cpus beyond its template's instance type", code: "pool_unfit",
+			says: "pool graviton cannot take this Run: it needs 32 cpus; its largest host has 16",
+			res:  &resumeResources{CPUs: f64(32)},
 			setup: func(t *testing.T, f fixture) string {
 				return ec2Pool(t, f.s, "graviton", `{"region":"us-east-1","instanceType":"m7g.4xlarge"}`)
 			}},
-		{name: "disk beyond its largest static host", code: "pool_unfit", says: "it needs 500.0 GiB of disk; its largest host has 100.0 GiB",
-			res: &resumeResources{Disk: spec.Bytes(500 * gib)},
+		{name: "disk beyond its largest static host", code: "pool_unfit",
+			says: "pool big cannot take this Run: it needs 500.0 GiB of disk; its largest host has 100.0 GiB",
+			res:  &resumeResources{Disk: spec.Bytes(500 * gib)},
 			setup: func(t *testing.T, f fixture) string {
 				execSQL(t, f.s, context.Background(), `UPDATE hosts SET capacity = capacity || '{"disk":107374182400}' WHERE id = 'hb'`)
 				return poolID(t, f.s, "big", "t1")
 			}},
-		{name: "nested where only another tenant's host in a platform pool offers it", code: "pool_unfit", says: "none of its hosts offers nested containers",
+		{name: "nested where only another tenant's host in a platform pool offers it", code: "pool_unfit",
+			says: "pool shared cannot take this Run: none of its hosts offers nested containers (lux-runner --nested)",
 			setup: func(t *testing.T, f fixture) string {
 				ctx := context.Background()
 				execSQL(t, f.s, ctx, `INSERT INTO tenants (id, name) VALUES ('t2', 't2')`)
@@ -221,7 +229,8 @@ func TestResumeIntoAnotherPoolRefusals(t *testing.T) {
 				execSQL(t, f.s, ctx, `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, f.id)
 				return poolID(t, f.s, "shared", "")
 			}},
-		{name: "required labels the ec2 template's registrations lack", code: "pool_unfit", says: "labels placement.requires names",
+		{name: "required labels the ec2 template's registrations lack", code: "pool_unfit",
+			says: "pool burst cannot take this Run: none of its hosts has the labels placement.requires names",
 			setup: func(t *testing.T, f fixture) string {
 				execSQL(t, f.s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"gpu":"a100"}') WHERE id = $1`, f.id)
 				pool := ec2Pool(t, f.s, "burst", `{"region":"us-east-1"}`)
@@ -237,8 +246,8 @@ func TestResumeIntoAnotherPoolRefusals(t *testing.T) {
 			before := binding(t, s, id)
 			_, err := resumeTo(s, id, target, c.res)
 			he := refused(t, err, http.StatusUnprocessableEntity, c.code, "resume")
-			if c.says != "" && !strings.Contains(he.Message, c.says) {
-				t.Errorf("message %q, want it to say %q", he.Message, c.says)
+			if want := strings.ReplaceAll(c.says, "<id>", target); he.Message != want {
+				t.Errorf("message %q, want %q", he.Message, want)
 			}
 			if after := binding(t, s, id); after != before {
 				t.Errorf("after the refusal: %+v, want %+v", after, before)
@@ -306,17 +315,17 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 		name  string
 		setup func(t *testing.T, s *Server, id string) string
 		res   *resumeResources
-		says  string // "": allowed
+		says  string // the whole message; "": allowed
 	}{
 		{name: "beyond the instance type, within a fallback", res: &resumeResources{CPUs: f64(24)},
-			says: "it needs 24 cpus; its largest host has 16",
+			says: "pool intel cannot take this Run: it needs 24 cpus; its largest host has 16",
 			setup: func(t *testing.T, s *Server, id string) string {
 				execSQL(t, s, context.Background(), `INSERT INTO instance_types (provider, region, instance_type, vcpus, memory_bytes, architectures, fetched_at)
 					VALUES ('ec2', 'us-east-1', 'm7i.8xlarge', 32, $1, '{x86_64}', now())`, 128*gib)
 				return ec2Pool(t, s, "intel", `{"region":"us-east-1","instanceType":"m7i.4xlarge","fallbackInstanceTypes":["m7i.8xlarge"]}`)
 			}},
 		{name: "a terminated larger host in the window", res: &resumeResources{CPUs: f64(32)},
-			says: "it needs 32 cpus; its largest host has 16",
+			says: "pool burst cannot take this Run: it needs 32 cpus; its largest host has 16",
 			setup: func(t *testing.T, s *Server, id string) string {
 				pool := ec2Pool(t, s, "burst", `{"region":"us-east-1"}`)
 				ec2Host(t, s, "e-big", pool, "terminated", 2*time.Minute, `{"cpus":64,"memory":274877906944}`, `{}`)
@@ -331,7 +340,8 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 				ec2Host(t, s, "e-cur", pool, "terminated", time.Minute, `{"cpus":16,"memory":68719476736}`, `{}`)
 				return pool
 			}},
-		{name: "nested where the template opts in but its hosts registered without", says: "its template's latest hosts registered without them",
+		{name: "nested where the template opts in but its hosts registered without",
+			says: "pool nest cannot take this Run: it does not offer nested containers (its template's latest hosts registered without them)",
 			setup: func(t *testing.T, s *Server, id string) string {
 				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, id)
 				pool := ec2Pool(t, s, "nest", `{"region":"us-east-1","nestedContainers":true}`)
@@ -391,8 +401,8 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 				return
 			}
 			he := refused(t, err, http.StatusUnprocessableEntity, "pool_unfit", "resume")
-			if !strings.Contains(he.Message, c.says) {
-				t.Errorf("message %q, want it to say %q", he.Message, c.says)
+			if he.Message != c.says {
+				t.Errorf("message %q, want %q", he.Message, c.says)
 			}
 			if after := binding(t, s, id); after != before {
 				t.Errorf("after the refusal: %+v, want %+v", after, before)
