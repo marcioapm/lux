@@ -178,7 +178,9 @@ prints git-style stat lines instead, and `-o json` the whole result
 git credential for that repository in place of its credential secret, such
 as a fresh short-lived token. The runner keeps it for the repository's
 later fetches and pushes; luxd never stores it. `${VAR}` reads VALUE from
-the environment, keeping it off the command line ([git](runspec.md#git)).
+the environment, keeping it off the command line when single-quoted so the
+shell does not expand it: `--credential 'app=${GIT_TOKEN}'`
+([git](runspec.md#git)).
 
 ## Files
 

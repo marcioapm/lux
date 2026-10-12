@@ -904,7 +904,8 @@ POST /v1/runs/{id}/sync   {"sync": [{"repo": "app", "ref": "main"}], "credential
 - From the CLI: `lux push <run> --credential app=VALUE` and
   `lux sync <run> app=main --credential app=VALUE` (repeatable). A VALUE of
   `${VAR}` is read from the environment, keeping it off the command line
-  when single-quoted: `--credential 'app=${GIT_TOKEN}'`.
+  when single-quoted so the shell does not expand it:
+  `--credential 'app=${GIT_TOKEN}'`.
 
 The workload commits as it likes. The checkout is a normal git repository
 owned by the workload user.

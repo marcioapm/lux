@@ -89,7 +89,8 @@ pushed or already up to date.`,
 
 // credentialHelp is lux push's and lux sync's --credential help.
 const credentialHelp = "repo=VALUE: a git credential for the repository in place of its credential secret, " +
-	"kept by the runner for later fetches and pushes; ${VAR} reads it from the environment (repeatable)"
+	"kept by the runner for later fetches and pushes; ${VAR} reads it from the environment, single-quoted so the shell leaves it: " +
+	"--credential 'app=${GIT_TOKEN}' (repeatable)"
 
 // parseCredentials reads --credential repo=VALUE arguments; a VALUE of
 // ${VAR} is that environment variable's. Nil for none. Errors never carry
