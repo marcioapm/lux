@@ -47,7 +47,6 @@ type poolProfile struct {
 
 // poolFacts is what lux knows of the hosts a pool can give a Run.
 type poolFacts struct {
-	Name     string
 	Provider string
 	// Archs: GOARCH names of its hosts' and template's platforms; empty
 	// when none is known.
@@ -85,14 +84,14 @@ func (s *Server) poolFactsTx(ctx context.Context, tx pgx.Tx, poolID, tenantID st
 	err := func() error {
 		pl := poolRow{ID: poolID}
 		err := tx.QueryRow(ctx, `SELECT name, provider, tenant_id, template FROM pools WHERE id = $1`, poolID).
-			Scan(&f.Name, &f.Provider, &pl.TenantID, &pl.Template)
+			Scan(&pl.Name, &f.Provider, &pl.TenantID, &pl.Template)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		pl.Name, pl.Provider = f.Name, f.Provider
+		pl.Provider = f.Provider
 		// Live hosts, then the latest registrations: two index-bounded
 		// branches, so a pool's terminated history is never scanned.
 		rows, err := tx.Query(ctx, `SELECT h.arch, h.labels, h.capacity, h.state IN ('ready', 'draining')
