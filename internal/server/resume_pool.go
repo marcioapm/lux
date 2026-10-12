@@ -212,8 +212,12 @@ func (s *Server) futureHost(ctx context.Context, tx pgx.Tx, pl poolRow, f *poolF
 			continue
 		}
 		probe = &poolProfile{Labels: maps.Clone(future.Labels), Capacity: future.Capacity, LabelsKnown: true}
-		// A new host cannot inherit a previous host's identity.
+		// A new host reports its own name and arch: never a previous host's.
 		delete(probe.Labels, "name")
+		delete(probe.Labels, "arch")
+		if len(archs) == 1 && ec2Archs[archs[0]] != "" {
+			probe.Labels["arch"] = ec2Archs[archs[0]]
+		}
 		probe.Capacity.CPUs, probe.Capacity.Memory = float64(*vcpus), *mem
 	}
 	if err := rows.Err(); err != nil {
