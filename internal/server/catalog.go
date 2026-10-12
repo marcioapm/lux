@@ -44,17 +44,9 @@ func (s *Server) refreshCatalog(ctx context.Context, t *marketTarget, problems m
 	if !ok {
 		return nil
 	}
-	var fresh []string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT instance_type FROM instance_types
+	fresh, err := s.marketStrings(ctx, `SELECT instance_type FROM instance_types
 			WHERE provider = $1 AND region = $2 AND instance_type = ANY($3) AND fetched_at > now() - $4::interval`,
-			t.provider, t.region, t.types, interval(catalogRefresh))
-		if err != nil {
-			return err
-		}
-		fresh, err = pgx.CollectRows(rows, pgx.RowTo[string])
-		return err
-	})
+		t.provider, t.region, t.types, interval(catalogRefresh))
 	if err != nil {
 		return err
 	}

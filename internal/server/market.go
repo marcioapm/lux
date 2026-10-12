@@ -253,17 +253,9 @@ func (s *Server) marketTargets(ctx context.Context, problems marketProblems) ([]
 // A minute's slack keeps a pass a little early from skipping a whole Every.
 func (s *Server) marketDue(ctx context.Context, t *marketTarget) ([]string, error) {
 	within := max(s.cfg.Market.Every-time.Minute, time.Minute)
-	var recent []string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT DISTINCT instance_type FROM market_samples
+	recent, err := s.marketStrings(ctx, `SELECT DISTINCT instance_type FROM market_samples
 			WHERE provider = $1 AND region = $2 AND instance_type = ANY($3) AND sampled_at > now() - $4::interval`,
-			t.provider, t.region, t.types, interval(within))
-		if err != nil {
-			return err
-		}
-		recent, err = pgx.CollectRows(rows, pgx.RowTo[string])
-		return err
-	})
+		t.provider, t.region, t.types, interval(within))
 	if err != nil {
 		return nil, err
 	}
@@ -307,21 +299,26 @@ func (s *Server) marketZones(ctx context.Context, t *marketTarget, problems mark
 	if !failed {
 		return zones, nil
 	}
-	var seen []string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT DISTINCT zone FROM hosts WHERE pool_id = ANY($1) AND zone IS NOT NULL AND zone <> '' ORDER BY zone`, t.pools)
-		if err != nil {
-			return err
-		}
-		seen, err = pgx.CollectRows(rows, pgx.RowTo[string])
-		return err
-	})
+	seen, err := s.marketStrings(ctx, `SELECT DISTINCT zone FROM hosts WHERE pool_id = ANY($1) AND zone IS NOT NULL AND zone <> '' ORDER BY zone`, t.pools)
 	for _, name := range seen {
 		if !slices.ContainsFunc(zones, func(z Zone) bool { return z.Name == name }) {
 			zones = append(zones, Zone{Name: name})
 		}
 	}
 	return zones, err
+}
+
+func (s *Server) marketStrings(ctx context.Context, query string, args ...any) ([]string, error) {
+	var out []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	return out, err
 }
 
 // spotWindow is how far back a spot price is looked for: EC2 answers the
