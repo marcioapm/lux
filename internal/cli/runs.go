@@ -1030,7 +1030,7 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 				return fmt.Errorf("--sync-mode needs --sync")
 			}
 			if pool != "" {
-				id, err := a.poolIDOf(ctx, pool)
+				id, err := a.poolIDOf(ctx, pool, run.Tenant)
 				if err != nil {
 					return err
 				}

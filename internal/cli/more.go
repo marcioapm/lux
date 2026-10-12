@@ -802,13 +802,19 @@ finds this pool. --platform renames the platform's pool of that name
 }
 
 // poolIDOf is the id of the pool ref names, among those GET /v1/pools
-// lists: a pool whose id it is, else the tenant's pool of that name, else
-// the platform's (resolvePool's preference at submit).
-func (a *app) poolIDOf(ctx context.Context, ref string) (string, error) {
+// lists to tenant (the Run's; an operator's key otherwise lists every
+// tenant's): a pool whose id it is, else the tenant's pool of that name,
+// else the platform's (resolvePool's preference at submit).
+func (a *app) poolIDOf(ctx context.Context, ref, tenant string) (string, error) {
 	var resp struct {
 		Pools []server.Pool `json:"pools"`
 	}
-	if err := a.c.Do(ctx, "GET", "/v1/pools", nil, &resp); err != nil {
+	path := "/v1/pools"
+	// --tenant already narrows every request; a tenant key's is ignored.
+	if tenant != "" && a.c.Tenant == "" {
+		path += "?tenant=" + url.QueryEscape(tenant)
+	}
+	if err := a.c.Do(ctx, "GET", path, nil, &resp); err != nil {
 		return "", err
 	}
 	var platform string

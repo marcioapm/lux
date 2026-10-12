@@ -56,6 +56,45 @@ func TestResumePoolFlag(t *testing.T) {
 	}
 }
 
+// For an operator's key, --pool resolves a name among the Run's tenant's
+// pools: another tenant's pool of that name, which an unnarrowed listing
+// shows first, is not chosen.
+func TestResumePoolFlagOperator(t *testing.T) {
+	var posted []map[string]any
+	var listed []string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/runs/run_1":
+			_, _ = w.Write([]byte(`{"id":"run_1","tenant":"t1","state":"stopped"}`))
+		case r.Method == "GET" && r.URL.Path == "/v1/pools":
+			listed = append(listed, r.URL.RawQuery)
+			if r.URL.Query().Get("tenant") == "t1" {
+				_, _ = w.Write([]byte(`{"pools":[{"id":"pool_t1","name":"big","tenant":"t1"}]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"pools":[{"id":"pool_t2","name":"big","tenant":"t2"},{"id":"pool_t1","name":"big","tenant":"t1"}]}`))
+			}
+		case r.Method == "POST" && r.URL.Path == "/v1/runs/run_1/resume":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			posted = append(posted, body)
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"run_1","state":"resuming"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	if _, err := runCLI(t, h, "resume", "run_1", "--pool", "big"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(listed, []string{"tenant=t1"}) {
+		t.Errorf("GET /v1/pools queries %q, want [tenant=t1]", listed)
+	}
+	if len(posted) != 1 || !reflect.DeepEqual(posted[0]["placement"], map[string]any{"poolId": "pool_t1"}) {
+		t.Errorf("POSTed %v, want placement.poolId pool_t1", posted)
+	}
+}
+
 // --dry-run sends validateOnly and prints "valid"; -o json prints the answer.
 func TestResumeDryRun(t *testing.T) {
 	var posted []map[string]any
