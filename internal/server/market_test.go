@@ -31,6 +31,8 @@ type marketFake struct {
 	onDemand map[string]string         // type → price
 	spot     map[[2]string]string      // (zone, type) → price
 	spotErr  map[[2]string]error
+	types    map[string]InstanceTypeInfo
+	typesErr error
 	calls    []string
 }
 
@@ -99,6 +101,20 @@ func (f *marketFake) SpotHistory(_ context.Context, zone, it string, _, to time.
 
 func (f *marketFake) BlockStorage(context.Context, string, string) (BlockStoragePrice, error) {
 	return BlockStoragePrice{}, errors.New("not asked")
+}
+
+func (f *marketFake) InstanceTypes(_ context.Context, region string, names []string) ([]InstanceTypeInfo, error) {
+	f.call("describe " + region + " " + strings.Join(names, ","))
+	if f.typesErr != nil {
+		return nil, f.typesErr
+	}
+	var out []InstanceTypeInfo
+	for _, n := range names {
+		if info, ok := f.types[n]; ok {
+			out = append(out, info)
+		}
+	}
+	return out, nil
 }
 
 func (f *marketFake) takeCalls() []string {
@@ -320,5 +336,103 @@ func TestMarketSamplesRetention(t *testing.T) {
 	}
 	if got := marketRows(t, s); len(got) != 1 || !strings.Contains(got[0], "spot=0.05") {
 		t.Fatalf("after retention: %v, want only the 47h-old row", got)
+	}
+}
+
+// The sampler caches each candidate type's description in instance_types:
+// one describe per region for the types without a fresh row, none again
+// within a day, and again once a row is a day old or a new candidate
+// appears. A failed describe is logged and changes nothing.
+func TestCatalogRefresh(t *testing.T) {
+	two, yes, no := 2, true, false
+	gbps := 12.5
+	f := &marketFake{zones: map[string][]Zone{"us-east-1": {{"us-east-1a", "use1-az1"}}},
+		types: map[string]InstanceTypeInfo{
+			"m7i.large": {Name: "m7i.large", VCPUs: &two, MemoryBytes: 8 << 30, Architectures: []string{"x86_64"},
+				NestedVirtualization: &yes, Burstable: &no, NetworkBaselineGbps: &gbps, NetworkPerformance: "Up to 12.5 Gigabit"},
+			"t4g.small": {Name: "t4g.small", VCPUs: &two, MemoryBytes: 2 << 30, Architectures: []string{"arm64"},
+				NestedVirtualization: &no, Burstable: &yes},
+		}}
+	s, logs := marketServer(t, f)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider, template) VALUES ('p1', 'burst', 'ec2', '{"region":"us-east-1","instanceType":"m7i.large"}')`)
+	catalog := func() []string {
+		t.Helper()
+		var out []string
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `SELECT format('%s %s vcpus=%s mem=%s arch=%s nested=%s burst=%s net=%s/%s', region, instance_type, vcpus,
+					memory_bytes, architectures, nested_virtualization, burstable, network_baseline_gbps, network_performance)
+				FROM instance_types ORDER BY instance_type`)
+			if err != nil {
+				return err
+			}
+			out, err = pgx.CollectRows(rows, pgx.RowTo[string])
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	describes := func() (n []string) {
+		for _, c := range f.takeCalls() {
+			if strings.HasPrefix(c, "describe ") {
+				n = append(n, c)
+			}
+		}
+		return n
+	}
+	pass := func() {
+		t.Helper()
+		if err := s.sampleMarketPass(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ageAttempts := func() {
+		s.marketMu.Lock()
+		for k, at := range s.marketTried {
+			s.marketTried[k] = at.Add(-2 * time.Hour)
+		}
+		s.marketMu.Unlock()
+		execSQL(t, s, ctx, `UPDATE market_samples SET sampled_at = sampled_at - interval '2 hours'`)
+	}
+
+	pass()
+	want := []string{"us-east-1 m7i.large vcpus=2 mem=8589934592 arch={x86_64} nested=t burst=f net=12.5/Up to 12.5 Gigabit"}
+	if got := catalog(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("catalog %v, want %v", got, want)
+	}
+	if d := describes(); fmt.Sprint(d) != "[describe us-east-1 m7i.large]" {
+		t.Fatalf("describes %v", d)
+	}
+
+	// Due again for prices an hour later; the catalog row is still fresh.
+	ageAttempts()
+	pass()
+	if d := describes(); len(d) != 0 {
+		t.Fatalf("a fresh row was described again: %v", d)
+	}
+
+	// A new candidate: described at once, alone.
+	s.cfg.Market.Candidates = []string{"t4g.small"}
+	pass()
+	if d := describes(); fmt.Sprint(d) != "[describe us-east-1 t4g.small]" {
+		t.Fatalf("describes for a new candidate %v", d)
+	}
+	if got := catalog(); len(got) != 2 || !strings.Contains(got[1], "t4g.small vcpus=2 mem=2147483648 arch={arm64} nested=f burst=t net=/") {
+		t.Fatalf("catalog %v", got)
+	}
+
+	// A day later both are refetched; a failure leaves the rows as they were.
+	execSQL(t, s, ctx, `UPDATE instance_types SET fetched_at = fetched_at - interval '25 hours'`)
+	f.typesErr = errors.New("UnauthorizedOperation: ec2:DescribeInstanceTypes")
+	ageAttempts()
+	before := catalog()
+	pass()
+	if d := describes(); fmt.Sprint(d) != "[describe us-east-1 m7i.large,t4g.small]" {
+		t.Fatalf("describes a day later %v", d)
+	}
+	if got := catalog(); fmt.Sprint(got) != fmt.Sprint(before) || !strings.Contains(logs.String(), "DescribeInstanceTypes") {
+		t.Fatalf("after a failed describe: %v (was %v); log:\n%s", got, before, logs)
 	}
 }

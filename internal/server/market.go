@@ -148,6 +148,11 @@ func (s *Server) sampleMarket(ctx context.Context) (marketProblems, error) {
 			continue
 		}
 		s.markMarketAttempt(t, due)
+		// The catalog with the samples: a new candidate is due at once,
+		// and a failing describe is retried no more often than they are.
+		if err := s.refreshCatalog(ctx, t, problems); err != nil {
+			return problems, err
+		}
 		if t.zones, err = s.marketZones(ctx, t, problems); err != nil {
 			return problems, err
 		}
