@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -793,13 +795,15 @@ const (
 )
 
 // platforms is a runner's image platform list as stored: NULL (keep what
-// is stored) when it sent none or one outside the bounds above.
+// is stored) when it sent none, one outside the bounds above, or one with
+// an entry Postgres text cannot hold (a NUL, invalid UTF-8), which would
+// otherwise fail the status it came with.
 func platforms(ps []string) []string {
 	if len(ps) == 0 || len(ps) > maxImagePlatforms {
 		return nil
 	}
 	for _, p := range ps {
-		if p == "" || len(p) > maxImagePlatformLen {
+		if p == "" || len(p) > maxImagePlatformLen || strings.ContainsRune(p, 0) || !utf8.ValidString(p) {
 			return nil
 		}
 	}

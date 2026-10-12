@@ -39,3 +39,27 @@ func TestImagePlatformsOnPlacement(t *testing.T) {
 		}
 	}
 }
+
+// A list with an entry Postgres cannot store as text (a NUL) is dropped
+// whole, and the status it came with still applies.
+func TestImagePlatformsWithNULDropped(t *testing.T) {
+	s, ctx, key := stageFixture(t)
+	t0 := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	reportStatus(t, s, ctx, proto.Status{State: "starting", Times: map[string]int64{"imageReady": ms(t0)},
+		ImagePlatforms: []string{"linux/amd64", "linux/arm64/v8\x00"}})
+	run := getRun(t, s, key)
+	if got := run.Placements[0].ImagePlatforms; got != nil {
+		t.Fatalf("platforms %q, want absent", got)
+	}
+	if run.Placements[0].ImageReadyAt == nil {
+		t.Fatalf("imageReady not applied: %+v", run.Placements[0])
+	}
+}
+
+// JSON decoding already replaces invalid UTF-8, so this one is checked on
+// the filter itself.
+func TestPlatformsInvalidUTF8Dropped(t *testing.T) {
+	if got := platforms([]string{"linux/amd64", "linux/\xff"}); got != nil {
+		t.Fatalf("%q, want nil", got)
+	}
+}

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/marcioapm/lux/internal/hoststat"
 )
@@ -274,6 +275,8 @@ type ociPlatform struct {
 	Variant      string `json:"variant"`
 }
 
+// String is "" for an incomplete platform, or one with a NUL or invalid
+// UTF-8, which luxd could not store.
 func (o ociPlatform) String() string {
 	if o.OS == "" || o.Architecture == "" {
 		return ""
@@ -281,6 +284,9 @@ func (o ociPlatform) String() string {
 	s := o.OS + "/" + o.Architecture
 	if o.Variant != "" {
 		s += "/" + o.Variant
+	}
+	if strings.ContainsRune(s, 0) || !utf8.ValidString(s) {
+		return ""
 	}
 	return s
 }

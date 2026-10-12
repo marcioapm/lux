@@ -79,3 +79,15 @@ func TestImagePlatformsSingleArch(t *testing.T) {
 		t.Fatalf("no image directory: %v, want an error", got)
 	}
 }
+
+// An index entry luxd could not store (a NUL in it) is left out; the
+// others still count.
+func TestImagePlatformsSkipsUnstorable(t *testing.T) {
+	dir := t.TempDir()
+	bigData(t, dir, imgID, "manifest-"+listDig, `{"manifests":[`+
+		`{"platform":{"architecture":"amd64","os":"linux"}},`+
+		`{"platform":{"architecture":"arm64","os":"linux","variant":"v8\u0000"}}]}`)
+	if got, err := ImagePlatforms(dir, "docker.io/library/alpine@"+listDig, ImageInfo{ID: imgID}); err != nil || fmt.Sprint(got) != "[linux/amd64]" {
+		t.Fatalf("%q %v, want [linux/amd64]", got, err)
+	}
+}
