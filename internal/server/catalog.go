@@ -37,7 +37,8 @@ type CatalogProvider interface {
 
 // refreshCatalog fetches, in one call, t's types with no catalog row or
 // one older than catalogRefresh, and stores what the provider answers. The
-// error is the database's; the provider's goes to problems.
+// error is the database's, or errMarketLeaseLost; the provider's goes to
+// problems.
 func (s *Server) refreshCatalog(ctx context.Context, t *marketTarget, problems marketProblems) error {
 	cp, ok := t.mp.(CatalogProvider)
 	if !ok {

@@ -569,7 +569,8 @@ func (r *Runner) relieveDisk(ctx context.Context) []string {
 func (p *placement) learnPlatforms(ctx context.Context, image string, built bool, info podman.ImageInfo) {
 	platforms := []string{runtime.GOOS + "/" + runtime.GOARCH}
 	if !built {
-		dir, err := info.ImagesDir, error(nil)
+		dir := info.ImagesDir
+		var err error
 		if dir == "" {
 			dir, err = p.r.imagesDir(ctx)
 		}

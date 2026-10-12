@@ -156,7 +156,8 @@ func TestImageInspectImagesDir(t *testing.T) {
 		"/var/lib/containers/storage/overlay/" + layer + "/diff": "/var/lib/containers/storage/overlay-images",
 		"/srv/images/overlay/" + layer + "/diff":                 "/srv/images/overlay-images",
 		"/srv/images/vfs/" + layer + "/diff":                     "", // not the driver it names
-		"":                                                       "",
+		"/srv/images/overlay/" + layer + "/merged":               "", // not a layer's diff
+		"": "",
 	} {
 		bin := filepath.Join(t.TempDir(), "podman")
 		inspect := `[{"Id":"` + imgID + `","Os":"linux","Architecture":"arm64","GraphDriver":{"Name":"overlay","Data":{"UpperDir":"` + upper + `"}}}]`

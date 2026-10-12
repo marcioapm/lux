@@ -365,24 +365,25 @@ func TestSampleMarketStopsWhenLeaseLost(t *testing.T) {
 }
 
 // A type is marked attempted only when its own calls start: when the
-// first type uses up the pass's deadline, the next pass samples the
-// second, and does not retry the first.
+// pass ends during the first type, the next pass samples the second, and
+// does not retry the first.
 func TestSampleMarketUntouchedTypeStaysDue(t *testing.T) {
 	f := &marketFake{zones: map[string][]Zone{"us-east-1": {{"us-east-1a", "use1-az1"}}},
 		onDemand: map[string]string{"m7i.large": "0.1", "m7g.large": "0.08"}}
 	s, _ := marketServer(t, f)
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider, template) VALUES ('p1', 'burst', 'ec2', '{"region":"us-east-1","instanceType":"m7i.large","fallbackInstanceTypes":["m7g.large"]}')`)
+	// The pass ends inside m7i.large's score call, as a deadline would,
+	// without depending on how fast the database is.
+	passCtx, cancel := context.WithCancel(ctx)
 	f.during = func(c string) {
 		if c == "score us-east-1 m7i.large" {
-			time.Sleep(300 * time.Millisecond)
+			cancel()
 		}
 	}
-	passCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
 	_ = s.sampleMarketPass(passCtx)
-	cancel()
-	if calls := f.takeCalls(); slices.Contains(calls, "score us-east-1 m7g.large") {
-		t.Fatalf("the first pass reached m7g.large: %v", calls)
+	if calls := f.takeCalls(); slices.Contains(calls, "score us-east-1 m7g.large") || !slices.Contains(calls, "score us-east-1 m7i.large") {
+		t.Fatalf("first pass: %v, want m7i.large reached and m7g.large not", calls)
 	}
 
 	f.during = nil
@@ -416,6 +417,34 @@ func TestSampleMarketNoRowsNotRetried(t *testing.T) {
 	}
 	if calls := f.takeCalls(); len(calls) != 0 {
 		t.Fatalf("second pass: calls %v, want none", calls)
+	}
+}
+
+// A pass that ends while a type writes nothing (no zones) marks no
+// further type: the next one stays due rather than being backed off for
+// calls made on a dead context.
+func TestSampleMarketDeadPassMarksNoMore(t *testing.T) {
+	f := &marketFake{zonesErr: errors.New("UnauthorizedOperation: ec2:DescribeSubnets"),
+		onDemand: map[string]string{"m7i.large": "0.1", "m7g.large": "0.08"}}
+	s, _ := marketServer(t, f)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider, template) VALUES ('p1', 'burst', 'ec2', '{"region":"us-east-1","instanceType":"m7i.large","fallbackInstanceTypes":["m7g.large"]}')`)
+	passCtx, cancel := context.WithCancel(ctx)
+	f.during = func(c string) {
+		if c == "score us-east-1 m7i.large" {
+			cancel()
+		}
+	}
+	_ = s.sampleMarketPass(passCtx)
+	if calls := f.takeCalls(); slices.ContainsFunc(calls, func(c string) bool { return strings.HasSuffix(c, "m7g.large") && !strings.HasPrefix(c, "describe ") }) {
+		t.Fatalf("first pass went on to m7g.large on a dead context: %v", calls)
+	}
+	f.during = nil
+	if err := s.sampleMarketPass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.takeCalls(); !slices.Contains(calls, "score us-east-1 m7g.large") || slices.Contains(calls, "score us-east-1 m7i.large") {
+		t.Fatalf("second pass calls %v, want m7g.large sampled and m7i.large not retried", calls)
 	}
 }
 

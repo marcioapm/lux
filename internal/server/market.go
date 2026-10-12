@@ -162,6 +162,8 @@ func (s *Server) requireProvisionLease(ctx context.Context) error {
 	return err
 }
 
+// sampleMarketTargets samples each target's due types; the error is the
+// database's, the context's, or errMarketLeaseLost.
 func (s *Server) sampleMarketTargets(ctx context.Context, targets []*marketTarget, problems marketProblems) error {
 	for _, t := range targets {
 		due, err := s.marketDue(ctx, t)
@@ -181,6 +183,11 @@ func (s *Server) sampleMarketTargets(ctx context.Context, targets []*marketTarge
 			return err
 		}
 		for _, it := range due {
+			// A pass past its deadline marks nothing more: a type whose
+			// calls would all fail on the dead context stays due.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			s.markMarketAttempt(t, it)
 			if err := s.sampleMarketType(ctx, t, it, problems); err != nil {
 				return err
@@ -323,7 +330,7 @@ func (s *Server) marketZones(ctx context.Context, t *marketTarget, problems mark
 const spotWindow = 24 * time.Hour
 
 // sampleMarketType writes one row per zone of t for instance type it; the
-// error is the database's.
+// error is the database's, or errMarketLeaseLost.
 func (s *Server) sampleMarketType(ctx context.Context, t *marketTarget, it string, problems marketProblems) error {
 	onDemand, err := s.onDemandPrice(ctx, t.provider, t.region, it)
 	problems.add("on-demand price", err)
