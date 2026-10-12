@@ -1877,6 +1877,11 @@ components:
     PushRequest:
       additionalProperties: false
       properties:
+        credentials:
+          additionalProperties:
+            type: string
+          description: "Per repository name, a git credential to use in place of the repository's credential secret: for this push and, kept by the runner in memory, for every later fetch and push of that repository by this placement. luxd never stores it. Each name must be a repository with a credential, each value non-empty: else 422 invalid_request."
+          type: object
         expect:
           additionalProperties:
             type: string
@@ -3129,6 +3134,11 @@ components:
     SyncRunInputBody:
       additionalProperties: false
       properties:
+        credentials:
+          additionalProperties:
+            type: string
+          description: "Per repository name, a git credential to fetch with in place of the repository's credential secret: for this sync and, kept by the runner in memory, for every later fetch and push of that repository by this placement. luxd never stores it. Each name must be a repository with a credential, each value non-empty: else 422 invalid_request."
+          type: object
         requestId:
           type: string
         sync:
@@ -7034,6 +7044,8 @@ paths:
 
         expect: per repository, the commit the push branch must be at for the push to go ahead (a compare-and-swap). Without it, the lease is what this Run last pushed, or, the first time, that the branch does not exist.
 
+        credentials: per repository name, a git credential (e.g. a short-lived installation token) used in place of the repository's credential secret, for this push and every later fetch and push of that repository by the running placement (the runner keeps the latest in memory). luxd never stores it: it holds it in memory until the runner has the push, and a push it no longer holds (it restarted) ends failed. 422 `invalid_request` for a name that is not one of the Run's repositories, a repository without a credential, or an empty value. 409 `push_credentials_unsupported` when the Run's host runs a lux-runner that does not take them.
+
         Needs the `run` scope.
       operationId: pushRun
       parameters:
@@ -7845,6 +7857,8 @@ paths:
         The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume), as its mode allows: each repository is a git.sync event, then sync.done (changed: whether a checkout moved). In modes fast-forward and fetch, a git.sync event's operation names a git operation in progress in the checkout: merge, rebase, am (a git am session), cherry-pick, revert or sequencer (a sequence of picks or reverts between steps); such a checkout never moves. Servers with afterSync run it and restart once a checkout moved; the others keep running.
 
         409 `sync_modes_unsupported` when a mode other than move is asked for and the Run's host runs a lux-runner without sync modes.
+
+        credentials: as on a push: per repository name, a git credential to fetch with in place of the repository's credential secret, kept by the runner for later fetches and pushes; never stored by luxd. 422 `invalid_request` for a name that is not one of the Run's repositories, a repository without a credential, or an empty value; 409 `sync_credentials_unsupported` when the Run's host runs a lux-runner that does not take them.
 
         Needs the `run` scope.
       operationId: syncRun

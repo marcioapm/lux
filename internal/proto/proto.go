@@ -289,6 +289,9 @@ type Sync struct {
 	// Credentials: per repository name, a git credential that replaces the
 	// one the runner holds, from this operation on (see Push).
 	Credentials map[string]string `json:"credentials,omitempty"`
+	// CredentialRepos: luxd's own record of the names in Credentials,
+	// whose values it never stores.
+	CredentialRepos []string `json:"credentialRepos,omitempty"`
 }
 
 // CapGitCredentials is the Hello capability of a runner that takes
@@ -587,11 +590,14 @@ type StreamData struct {
 // Credentials, like Assign.Secrets, are attached by luxd at delivery and
 // never stored by either side: per repository name, a git credential the
 // runner uses for this push and keeps, in memory, for every later fetch
-// and push of that repository.
+// and push of that repository. CredentialRepos is what luxd stores in
+// their place: the names, so a luxd that no longer holds the values
+// refuses the message rather than delivering it without them.
 type Push struct {
-	RequestID   string            `json:"requestId"`
-	Leases      map[string]string `json:"leases"`
-	Credentials map[string]string `json:"credentials,omitempty"`
+	RequestID       string            `json:"requestId"`
+	Leases          map[string]string `json:"leases"`
+	Credentials     map[string]string `json:"credentials,omitempty"`
+	CredentialRepos []string          `json:"credentialRepos,omitempty"`
 }
 
 // PushResult is one repository's outcome, reported in a git.push event.
