@@ -1736,8 +1736,8 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 	resumed := false
 	var resize *Resize
 	var moved *ResumePlacement
-	// stateUnchecked: a validateOnly resume of a live Run, judged as if it
-	// were stopped: its state.
+	// stateUnchecked: the live state a validateOnly resume did not check;
+	// "" otherwise.
 	stateUnchecked := ""
 	attempt := func(tx pgx.Tx) error {
 		var state string
