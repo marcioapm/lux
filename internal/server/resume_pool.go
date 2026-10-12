@@ -93,13 +93,20 @@ func (s *Server) poolFactsTx(ctx context.Context, tx pgx.Tx, poolID, tenantID st
 			return err
 		}
 		pl.Name, pl.Provider = f.Name, f.Provider
+		// Live hosts, then the latest registrations: two index-bounded
+		// branches, so a pool's terminated history is never scanned.
 		rows, err := tx.Query(ctx, `SELECT h.arch, h.labels, h.capacity, h.state IN ('ready', 'draining')
-			FROM hosts h JOIN pools p ON p.id = h.pool_id
-			WHERE h.pool_id = $1 AND (h.tenant_id IS NULL OR h.tenant_id = coalesce(nullif($2, ''), p.tenant_id)) AND h.registered_at IS NOT NULL
-			  AND (h.state IN ('ready', 'draining') OR h.id IN (SELECT r.id FROM hosts r
-					WHERE r.pool_id = $1 AND (r.tenant_id IS NULL OR r.tenant_id = coalesce(nullif($2, ''), p.tenant_id)) AND r.registered_at IS NOT NULL
-					  AND (p.provider = 'static' OR r.provision_requested_at IS NOT NULL AND r.launch_template = p.template)
-					ORDER BY r.registered_at DESC, r.id DESC LIMIT $3))`, poolID, tenantID, expectationWindow)
+			FROM pools p CROSS JOIN LATERAL (
+				(SELECT id, arch, labels, capacity, state FROM hosts
+					WHERE pool_id = p.id AND (tenant_id IS NULL OR tenant_id = coalesce(nullif($2, ''), p.tenant_id))
+					  AND registered_at IS NOT NULL AND state IN ('ready', 'draining'))
+				UNION
+				(SELECT id, arch, labels, capacity, state FROM hosts
+					WHERE pool_id = p.id AND (tenant_id IS NULL OR tenant_id = coalesce(nullif($2, ''), p.tenant_id))
+					  AND registered_at IS NOT NULL
+					  AND (p.provider = 'static' OR provision_requested_at IS NOT NULL AND launch_template = p.template)
+					ORDER BY registered_at DESC, id DESC LIMIT $3)) h
+			WHERE p.id = $1`, poolID, tenantID, expectationWindow)
 		if err != nil {
 			return err
 		}
