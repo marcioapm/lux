@@ -176,6 +176,7 @@ func (p *placement) reportSync(ctx context.Context, res proto.SyncResult, reques
 // syncRunning is MsgSync: move a running placement's checkouts, then tell
 // luxd (sync.done) whether any moved, so servers with afterSync restart.
 func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
+	p.rotateGitCreds(req.Credentials)
 	p.mu.Lock()
 	running := p.phase == "running"
 	user := ""

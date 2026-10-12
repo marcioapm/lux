@@ -160,7 +160,32 @@ func scrubURL(err error, url string) string {
 }
 
 func (p *placement) gitRepo(r spec.Repository) gitws.Repo {
-	return gitws.Repo{Tenant: p.tenantID, Name: r.Name, URL: r.URL, Ref: r.Ref, Token: p.assign.Secrets[r.Credential]}
+	p.mu.Lock()
+	tok, ok := p.gitCreds[r.Name]
+	p.mu.Unlock()
+	if !ok || r.Credential == "" {
+		tok = p.assign.Secrets[r.Credential]
+	}
+	return gitws.Repo{Tenant: p.tenantID, Name: r.Name, URL: r.URL, Ref: r.Ref, Token: tok}
+}
+
+// rotateGitCreds keeps creds (per repository name) as the credentials of
+// every later fetch and push of those repositories. Empty values are
+// ignored: luxd refuses them.
+func (p *placement) rotateGitCreds(creds map[string]string) {
+	if len(creds) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.gitCreds == nil {
+		p.gitCreds = map[string]string{}
+	}
+	for repo, v := range creds {
+		if v != "" {
+			p.gitCreds[repo] = v
+		}
+	}
 }
 
 // hostPath is where a container path on one of the Run's volumes is on the
@@ -316,6 +341,7 @@ func chownTree(root string, uid, gid int) error {
 // into the runtime volume; the runner pushes that bundle from a repository
 // it owns, with its credential. One git.push event reports every result.
 func (p *placement) push(ctx context.Context, req proto.Push) {
+	p.rotateGitCreds(req.Credentials)
 	sp := p.assign.Spec
 	if sp.Git == nil || sp.Git.Push == nil {
 		return

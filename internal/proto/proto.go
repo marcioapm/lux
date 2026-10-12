@@ -286,7 +286,15 @@ const (
 type Sync struct {
 	RequestID string    `json:"requestId"`
 	Repos     []SyncRef `json:"repos"`
+	// Credentials: per repository name, a git credential that replaces the
+	// one the runner holds, from this operation on (see Push).
+	Credentials map[string]string `json:"credentials,omitempty"`
 }
+
+// CapGitCredentials is the Hello capability of a runner that takes
+// Push.Credentials and Sync.Credentials. A runner without it drops them
+// and uses the credential it was assigned.
+const CapGitCredentials = "git-credentials"
 
 // ImageResolution is a built image as its Run's first build made it: the
 // Containerfile with every FROM pinned to a digest, and the image id.
@@ -575,9 +583,15 @@ type StreamData struct {
 // spec's push branch. Leases holds, per repository, the commit this Run
 // last pushed there ("" if never): the branch is replaced only if it is
 // still there.
+//
+// Credentials, like Assign.Secrets, are attached by luxd at delivery and
+// never stored by either side: per repository name, a git credential the
+// runner uses for this push and keeps, in memory, for every later fetch
+// and push of that repository.
 type Push struct {
-	RequestID string            `json:"requestId"`
-	Leases    map[string]string `json:"leases"`
+	RequestID   string            `json:"requestId"`
+	Leases      map[string]string `json:"leases"`
+	Credentials map[string]string `json:"credentials,omitempty"`
 }
 
 // PushResult is one repository's outcome, reported in a git.push event.
