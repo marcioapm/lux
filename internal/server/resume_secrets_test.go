@@ -689,11 +689,16 @@ func TestDroppedCredentialSuppliedAgain(t *testing.T) {
 	if vals, _ := s.secrets.get(id); vals["GIT_TOKEN"] != "git-1" {
 		t.Errorf("held values %v", vals)
 	}
+}
 
-	// Only luxd records a dropped credential.
+// Only luxd records a dropped credential: a submit that sets it is refused.
+func TestSubmitRefusesDroppedCredentials(t *testing.T) {
+	s := testServer(t)
+	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1') ON CONFLICT DO NOTHING`)
+	namedPools(t, s, "default")
 	sp := noSecretsSpec()
 	sp.Git = &spec.Git{DroppedCredentials: []string{"GIT_TOKEN"}}
-	_, err = s.submitRun(tenantCtx("t1"), &submitRunInput{Body: sp})
+	_, err := s.submitRun(tenantCtx("t1"), &submitRunInput{Body: sp})
 	refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "submit with git.droppedCredentials")
 }
 
