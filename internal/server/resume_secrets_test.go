@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -553,5 +554,166 @@ func TestResumeRemovesLastSecret(t *testing.T) {
 	}
 	if out.Body.State != StateResuming {
 		t.Fatalf("state %s", out.Body.State)
+	}
+}
+
+// failClone places a resumed Run on ha at the next epoch and reports the
+// git.clone of repo, added by requestID, as failed; the event's data.
+func failClone(t *testing.T, s *Server, id, repo, requestID string) map[string]any {
+	t.Helper()
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running', current_epoch = current_epoch + 1 WHERE id = $1`, id)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources)
+		SELECT 'p-'||id||'-'||current_epoch, 't1', id, 'ha', current_epoch, 'running', '{}' FROM runs WHERE id = $1`, id)
+	var epoch int
+	systemScan(t, s, `SELECT current_epoch FROM runs WHERE id = $1`, []any{id}, &epoch)
+	f := s.handleReport(ctx, "ha", proto.Frame{Type: proto.MsgRunEvent, ID: 1, RunID: id, Epoch: epoch,
+		Data: proto.Marshal(proto.RunEvent{Type: proto.EvGitClone, Data: map[string]any{"repo": repo, "status": "failed", "requestId": requestID, "error": "not found"}})})
+	if f.Type != proto.MsgAck {
+		t.Fatalf("git.clone report: %s", f.Data)
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
+	var raw []byte
+	systemScan(t, s, `SELECT data FROM run_events WHERE run_id = $1 AND type = 'git.clone' ORDER BY id DESC LIMIT 1`, []any{id}, &raw)
+	var data map[string]any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// noSecretsSpec is secretsSpec with no secrets and no repositories: what a
+// session Run dude links repositories to starts as.
+func noSecretsSpec() spec.RunSpec {
+	sp := secretsSpec()
+	sp.Image.RegistryAuth = nil
+	sp.Workload.Services = nil
+	sp.Git = nil
+	sp.Secrets = nil
+	return sp
+}
+
+// The prod sequence: a resume adds a repository with a new credential, its
+// clone fails, and the credential goes with it: the next resume, with no
+// secrets, is accepted, and the Run declares none.
+func TestFailedCloneDropsItsUnusedCredential(t *testing.T) {
+	s := testServer(t)
+	id := stoppedWith(t, s, noSecretsSpec())
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: "r-1",
+		Secrets: []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}},
+		Git:     &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "GIT_TOKEN"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if secs, refs := storedSecrets(t, s, id); !reflect.DeepEqual(secretNames(secs), []string{"GIT_TOKEN"}) || !reflect.DeepEqual(refNames(refs), []string{"GIT_TOKEN"}) {
+		t.Fatalf("after adding: %v / %v", secretNames(secs), refNames(refs))
+	}
+	if ev := failClone(t, s, id, "two", "r-1"); ev["droppedSecret"] != "GIT_TOKEN" {
+		t.Errorf("git.clone event %v, want droppedSecret GIT_TOKEN", ev)
+	}
+	if secs, refs := storedSecrets(t, s, id); len(secs) != 0 || len(refs) != 0 {
+		t.Fatalf("declared after the failed clone: %v / %v", secretNames(secs), refNames(refs))
+	}
+	out, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{})
+	if err != nil {
+		t.Fatalf("resume without secrets: %v", err)
+	}
+	if out.Body.State != StateResuming {
+		t.Fatalf("state %s", out.Body.State)
+	}
+}
+
+// Two repositories share a credential and one's clone fails: the other
+// still uses it, so it stays declared, runner-only, and required.
+func TestFailedCloneKeepsASharedCredential(t *testing.T) {
+	s := testServer(t)
+	id := stoppedWith(t, s, noSecretsSpec())
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: "r-1",
+		Secrets: []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}},
+		Git: &resumeGit{Repositories: []spec.Repository{
+			{Name: "one", URL: "https://git.example.com/one.git", Credential: "GIT_TOKEN"},
+			{Name: "two", URL: "https://git.example.com/two.git", Credential: "GIT_TOKEN"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ev := failClone(t, s, id, "two", "r-1"); ev["droppedSecret"] != nil {
+		t.Errorf("git.clone event %v: dropped a credential still in use", ev)
+	}
+	secs, refs := storedSecrets(t, s, id)
+	if !reflect.DeepEqual(refNames(refs), []string{"GIT_TOKEN"}) || len(secs) != 1 || !secs[0].RunnerOnly || secs[0].As != "none" {
+		t.Fatalf("after the failed clone: %+v / %v", secs, refNames(refs))
+	}
+	_, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{})
+	if he := refused(t, err, http.StatusUnprocessableEntity, "secrets_required", "resume without the shared credential"); !reflect.DeepEqual(he.Details, []string{"GIT_TOKEN"}) {
+		t.Errorf("missing %v", he.Details)
+	}
+}
+
+// After the drop, a client still sending the value never gets it declared
+// as a secret the workload sees, nor held for the placement; re-adding the
+// repository with it makes it a runner-only credential again.
+func TestDroppedCredentialSuppliedAgain(t *testing.T) {
+	s := testServer(t)
+	id := stoppedWith(t, s, noSecretsSpec())
+	addTwo := &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "GIT_TOKEN"}}}
+	tok := []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}}
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: "r-1", Secrets: tok, Git: addTwo}); err != nil {
+		t.Fatal(err)
+	}
+	failClone(t, s, id, "two", "r-1")
+
+	_, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1", As: "env"}}})
+	refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "as env under a dropped credential's name")
+
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: tok}); err != nil {
+		t.Fatal(err)
+	}
+	if secs, refs := storedSecrets(t, s, id); len(secs) != 0 || len(refs) != 0 {
+		t.Fatalf("a stale value declared: %+v / %v", secs, refNames(refs))
+	}
+	if vals, _ := s.secrets.get(id); len(vals) != 0 {
+		t.Errorf("held values %v, want none", vals)
+	}
+
+	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: "r-3", Secrets: tok, Git: addTwo}); err != nil {
+		t.Fatal(err)
+	}
+	secs, refs := storedSecrets(t, s, id)
+	if len(secs) != 1 || secs[0].Name != "GIT_TOKEN" || !secs[0].RunnerOnly || secs[0].As != "none" {
+		t.Fatalf("re-added credential %+v, want runner-only", secs)
+	}
+	if !reflect.DeepEqual(refNames(refs), []string{"GIT_TOKEN"}) {
+		t.Fatalf("runs.secrets %v", refNames(refs))
+	}
+	if vals, _ := s.secrets.get(id); vals["GIT_TOKEN"] != "git-1" {
+		t.Errorf("held values %v", vals)
+	}
+
+	// Only luxd records a dropped credential.
+	sp := noSecretsSpec()
+	sp.Git = &spec.Git{DroppedCredentials: []string{"GIT_TOKEN"}}
+	_, err = s.submitRun(tenantCtx("t1"), &submitRunInput{Body: sp})
+	refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "submit with git.droppedCredentials")
+}
+
+// An operator's resume from held values after the drop: the held map still
+// has the dropped value, which no ref asks for, and the resume is accepted.
+func TestOperatorResumeAfterADroppedCredential(t *testing.T) {
+	op := context.WithValue(context.Background(), principalKey, Principal{Operator: true, TenantID: "t1", Scopes: []string{"admin", "operator"}})
+	s := testServer(t)
+	id := stoppedWith(t, s, noSecretsSpec())
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: "r-1",
+		Secrets: []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}},
+		Git:     &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "GIT_TOKEN"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failClone(t, s, id, "two", "r-1")
+	if _, err := resumeSecrets(op, s, id, resumeRequest{}); err != nil {
+		t.Fatalf("operator resume: %v", err)
+	}
+	if secs, refs := storedSecrets(t, s, id); len(secs) != 0 || len(refs) != 0 {
+		t.Fatalf("secrets %v / %v", secretNames(secs), refNames(refs))
 	}
 }
