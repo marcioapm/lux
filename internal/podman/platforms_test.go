@@ -1,6 +1,7 @@
 package podman
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -142,6 +143,30 @@ func TestImagePlatformsDedupedSorted(t *testing.T) {
 		`{"platform":{"architecture":"386","os":"linux"}}]}`)
 	if got, err := ImagePlatforms(dir, "x/y:1", ImageInfo{ID: imgID}); err != nil || fmt.Sprint(got) != "[linux/386 linux/amd64 windows/amd64]" {
 		t.Fatalf("%v %v", got, err)
+	}
+}
+
+// An image's metadata directory is that of the store its layers are in:
+// the graph root's by default, the image store's when storage.conf sets
+// `imagestore` (which `podman info` does not show). The UpperDirs are what
+// Podman 5.8 inspects in each case.
+func TestImageInspectImagesDir(t *testing.T) {
+	const layer = "1b349a3334531b575b01d409540dd8aca14ef29abddacd50f36643d7c949db4b"
+	for upper, want := range map[string]string{
+		"/var/lib/containers/storage/overlay/" + layer + "/diff": "/var/lib/containers/storage/overlay-images",
+		"/srv/images/overlay/" + layer + "/diff":                 "/srv/images/overlay-images",
+		"/srv/images/vfs/" + layer + "/diff":                     "", // not the driver it names
+		"":                                                       "",
+	} {
+		bin := filepath.Join(t.TempDir(), "podman")
+		inspect := `[{"Id":"` + imgID + `","Os":"linux","Architecture":"arm64","GraphDriver":{"Name":"overlay","Data":{"UpperDir":"` + upper + `"}}}]`
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat <<'EOF'\n"+inspect+"\nEOF\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		info, err := (&Podman{Bin: bin}).ImageInspect(context.Background(), "alpine:3.24.2")
+		if err != nil || info.ImagesDir != want {
+			t.Errorf("UpperDir %q: images dir %q %v, want %q", upper, info.ImagesDir, err, want)
+		}
 	}
 }
 

@@ -148,6 +148,9 @@ type ImageInfo struct {
 	Env   []string
 	// OS and Architecture: the platform of the image itself.
 	OS, Architecture string
+	// ImagesDir: the image metadata directory of the store this image is
+	// in, "" when its inspect does not tell (then see Podman.ImagesDir).
+	ImagesDir string
 }
 
 // ImageInspect returns what ref names.
@@ -166,17 +169,35 @@ func (p *Podman) ImageInspect(ctx context.Context, ref string) (ImageInfo, error
 		} `json:"Config"`
 		OS           string `json:"Os"`
 		Architecture string `json:"Architecture"`
+		GraphDriver  struct {
+			Name string            `json:"Name"`
+			Data map[string]string `json:"Data"`
+		} `json:"GraphDriver"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil || len(raw) == 0 {
 		return ImageInfo{}, fmt.Errorf("image inspect %s: %v", ref, err)
 	}
 	r := raw[0]
 	return ImageInfo{ID: r.ID, Names: r.RepoTags, Size: r.Size, User: r.Config.User, Env: r.Config.Env,
-		OS: r.OS, Architecture: r.Architecture}, nil
+		OS: r.OS, Architecture: r.Architecture, ImagesDir: storeImagesDir(r.GraphDriver.Name, r.GraphDriver.Data["UpperDir"])}, nil
 }
 
-// ImagesDir is where containers/storage keeps image metadata:
-// <graph root>/<driver>-images, one directory per image id.
+// storeImagesDir is the image metadata directory of the store whose top
+// layer is upperDir (<store>/<driver>/<layer>/diff): <store>/<driver>-images.
+// That store is the graph root, or `imagestore` when storage.conf sets one,
+// which `podman info` does not show. "" when upperDir has another shape.
+func storeImagesDir(driver, upperDir string) string {
+	layer := filepath.Dir(upperDir)
+	drv := filepath.Dir(layer)
+	if driver == "" || !filepath.IsAbs(upperDir) || filepath.Base(upperDir) != "diff" || filepath.Base(drv) != driver {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(drv), driver+"-images")
+}
+
+// ImagesDir is where containers/storage keeps image metadata under the
+// graph root: <graph root>/<driver>-images, one directory per image id. An
+// image in a separate image store says where it is (ImageInfo.ImagesDir).
 func (p *Podman) ImagesDir(ctx context.Context) (string, error) {
 	out, err := p.Run(ctx, "info", "--format", "{{.Store.GraphRoot}} {{.Store.GraphDriverName}}")
 	if err != nil {
