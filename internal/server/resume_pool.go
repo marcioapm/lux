@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -52,8 +53,9 @@ type poolFacts struct {
 	// when none is known.
 	Archs    []string
 	Profiles []poolProfile
-	// TemplateNested: an ec2 template's nestedContainers opt-in.
-	TemplateNested bool
+	// NestedMismatch: an ec2 template opts into nested containers, but its
+	// latest registrations lacked nested=true (hostExpectation).
+	NestedMismatch bool
 }
 
 // ec2Archs maps EC2's architecture names (DescribeInstanceTypes) to Go's,
@@ -66,31 +68,32 @@ func (s *Server) loadPoolFacts(ctx context.Context, poolID, tenantID string) (po
 	var f poolFacts
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var err error
-		f, err = poolFactsTx(ctx, tx, poolID, tenantID)
+		f, err = s.poolFactsTx(ctx, tx, poolID, tenantID)
 		return err
 	})
 	return f, err
 }
 
 // poolFactsTx is what pool poolID offers a Run of tenantID ("": of the
-// pool's owner), in a system transaction: its live hosts and its latest
-// expectationWindow registrations (for ec2 those of its current template,
-// poolHostSizes' rule), and for ec2 the host its template launches, sized
-// and platformed from the instance-type catalog.
-func poolFactsTx(ctx context.Context, tx pgx.Tx, poolID, tenantID string) (poolFacts, error) {
+// pool's owner), in a system transaction. Profiles: a static pool's live
+// hosts and latest expectationWindow registrations; an ec2 pool's live
+// hosts plus the host the planner would launch for it (futureHost).
+// Archs also come from the current template's registrations and its
+// instance types in the catalog.
+func (s *Server) poolFactsTx(ctx context.Context, tx pgx.Tx, poolID, tenantID string) (poolFacts, error) {
 	var f poolFacts
 	err := func() error {
-		var template json.RawMessage
-		var region string
-		err := tx.QueryRow(ctx, `SELECT name, provider, coalesce(template, '{}'), coalesce(template->>'region', '') FROM pools WHERE id = $1`, poolID).
-			Scan(&f.Name, &f.Provider, &template, &region)
+		pl := poolRow{ID: poolID}
+		err := tx.QueryRow(ctx, `SELECT name, provider, tenant_id, template FROM pools WHERE id = $1`, poolID).
+			Scan(&f.Name, &f.Provider, &pl.TenantID, &pl.Template)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT h.arch, h.labels, h.capacity, h.state IN ('ready', 'draining') AND h.launch_template IS DISTINCT FROM p.template
+		pl.Name, pl.Provider = f.Name, f.Provider
+		rows, err := tx.Query(ctx, `SELECT h.arch, h.labels, h.capacity, h.state IN ('ready', 'draining')
 			FROM hosts h JOIN pools p ON p.id = h.pool_id
 			WHERE h.pool_id = $1 AND (h.tenant_id IS NULL OR h.tenant_id = coalesce(nullif($2, ''), p.tenant_id)) AND h.registered_at IS NOT NULL
 			  AND (h.state IN ('ready', 'draining') OR h.id IN (SELECT r.id FROM hosts r
@@ -100,27 +103,22 @@ func poolFactsTx(ctx context.Context, tx pgx.Tx, poolID, tenantID string) (poolF
 		if err != nil {
 			return err
 		}
-		var observed *hostExpectation // the current template's registrations
-		var observedMax proto.Capacity
 		for rows.Next() {
 			var arch string
 			var labels map[string]string
 			var capacity proto.Capacity
-			var olderTemplate bool
-			if err := rows.Scan(&arch, &labels, &capacity, &olderTemplate); err != nil {
+			var live bool
+			if err := rows.Scan(&arch, &labels, &capacity, &live); err != nil {
 				rows.Close()
 				return err
 			}
 			if arch != "" && !slices.Contains(f.Archs, arch) {
 				f.Archs = append(f.Archs, arch)
 			}
-			f.Profiles = append(f.Profiles, poolProfile{Labels: labels, Capacity: capacity, LabelsKnown: true})
-			if f.Provider == "ec2" && !olderTemplate {
-				if observed == nil {
-					observedMax = capacity
-				}
-				observed = observed.observe(capacity, cloneLabels(labels))
-				observedMax = maxCapacity(observedMax, capacity)
+			// An ec2 pool's past hosts are not hosts it has: what it
+			// launches next is futureHost's.
+			if live || f.Provider != "ec2" {
+				f.Profiles = append(f.Profiles, poolProfile{Labels: labels, Capacity: capacity, LabelsKnown: true})
 			}
 		}
 		rows.Close()
@@ -130,69 +128,77 @@ func poolFactsTx(ctx context.Context, tx pgx.Tx, poolID, tenantID string) (poolF
 		if f.Provider != "ec2" {
 			return nil
 		}
-		f.TemplateNested = templateOffersNested(poolRow{Provider: f.Provider, Template: template})
-		future := poolProfile{Labels: map[string]string{}}
-		if observed != nil {
-			future.Labels, future.LabelsKnown, future.Capacity = observed.Labels, true, observedMax
-		}
-		delete(future.Labels, "nested")
-		if f.TemplateNested {
-			future.Labels["nested"] = "true"
-		}
-		var t struct {
-			InstanceType          string   `json:"instanceType"`
-			FallbackInstanceTypes []string `json:"fallbackInstanceTypes"`
-		}
-		_ = json.Unmarshal(template, &t)
-		if t.InstanceType != "" && region != "" {
-			types := append([]string{t.InstanceType}, t.FallbackInstanceTypes...)
-			rows, err := tx.Query(ctx, `SELECT vcpus, memory_bytes, coalesce(architectures, '{}') FROM instance_types
-				WHERE provider = $1 AND region = $2 AND instance_type = ANY($3)`, f.Provider, region, types)
-			if err != nil {
-				return err
-			}
-			var catalogCPUs float64
-			var catalogMem int64
-			sized := 0
-			for rows.Next() {
-				var vcpus *int
-				var mem *int64
-				var archs []string
-				if err := rows.Scan(&vcpus, &mem, &archs); err != nil {
-					rows.Close()
-					return err
-				}
-				for _, a := range archs {
-					if g := ec2Archs[a]; g != "" && !slices.Contains(f.Archs, g) {
-						f.Archs = append(f.Archs, g)
-					}
-				}
-				if vcpus != nil && mem != nil {
-					sized++
-					catalogCPUs, catalogMem = max(catalogCPUs, float64(*vcpus)), max(catalogMem, *mem)
-				}
-			}
-			rows.Close()
-			if err := rows.Err(); err != nil {
-				return err
-			}
-			// The catalog bounds the template's host only when it sizes
-			// every candidate type; disk is never the instance type's. A
-			// registration without a limit (0) keeps none.
-			if sized == len(types) && sized > 0 {
-				if observed == nil || future.Capacity.CPUs != 0 {
-					future.Capacity.CPUs = max(future.Capacity.CPUs, catalogCPUs)
-				}
-				if observed == nil || future.Capacity.Memory != 0 {
-					future.Capacity.Memory = max(future.Capacity.Memory, catalogMem)
-				}
-			}
+		future, err := s.futureHost(ctx, tx, pl, &f)
+		if err != nil {
+			return err
 		}
 		f.Profiles = append(f.Profiles, future)
 		return nil
 	}()
 	slices.Sort(f.Archs)
 	return f, err
+}
+
+// futureHost is the host planCapacity's virtual() would plan for ec2 pool
+// pl: hostExpectation's capacity and shared labels, nested only when the
+// template opts in and its registrations do not contradict it. With no
+// registration, ec2.Launch starts the template's instanceType (fallbacks
+// only on a capacity shortage), so the catalog sizes it from that type
+// alone; a type the catalog lacks leaves the size unknown. It adds the
+// catalog's archs of every candidate type to f.Archs.
+func (s *Server) futureHost(ctx context.Context, tx pgx.Tx, pl poolRow, f *poolFacts) (poolProfile, error) {
+	expected, _, err := s.hostExpectation(ctx, tx, pl)
+	if err != nil {
+		return poolProfile{}, err
+	}
+	future := poolProfile{Labels: map[string]string{}}
+	if expected != nil {
+		future = poolProfile{Labels: maps.Clone(expected.Labels), Capacity: expected.Capacity, LabelsKnown: true}
+		if future.Labels == nil {
+			future.Labels = map[string]string{}
+		}
+	}
+	nested := templateOffersNested(pl)
+	f.NestedMismatch = nested && expected != nil && expected.nestedMismatch
+	delete(future.Labels, "nested")
+	if nested && !f.NestedMismatch {
+		future.Labels["nested"] = "true"
+	}
+	var t struct {
+		Region                string   `json:"region"`
+		InstanceType          string   `json:"instanceType"`
+		FallbackInstanceTypes []string `json:"fallbackInstanceTypes"`
+	}
+	_ = json.Unmarshal(pl.Template, &t)
+	if t.InstanceType == "" || t.Region == "" {
+		return future, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT instance_type, vcpus, memory_bytes, coalesce(architectures, '{}') FROM instance_types
+		WHERE provider = $1 AND region = $2 AND instance_type = ANY($3)`,
+		pl.Provider, t.Region, append([]string{t.InstanceType}, t.FallbackInstanceTypes...))
+	if err != nil {
+		return future, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var vcpus *int
+		var mem *int64
+		var archs []string
+		if err := rows.Scan(&name, &vcpus, &mem, &archs); err != nil {
+			return future, err
+		}
+		for _, a := range archs {
+			if g := ec2Archs[a]; g != "" && !slices.Contains(f.Archs, g) {
+				f.Archs = append(f.Archs, g)
+			}
+		}
+		// Disk is never the instance type's.
+		if expected == nil && name == t.InstanceType && vcpus != nil && mem != nil {
+			future.Capacity.CPUs, future.Capacity.Memory = float64(*vcpus), *mem
+		}
+	}
+	return future, rows.Err()
 }
 
 // platforms are f's archs as os/arch; runners are linux only.
@@ -217,9 +223,9 @@ func (f poolFacts) nestedContainers() *bool {
 
 // withPoolFacts sets each of pools' platforms and capabilities as a resume
 // of tenantID's Run ("": each pool's owner's) would be checked against.
-func withPoolFacts(ctx context.Context, tx pgx.Tx, pools []Pool, tenantID string) error {
+func (s *Server) withPoolFacts(ctx context.Context, tx pgx.Tx, pools []Pool, tenantID string) error {
 	for i := range pools {
-		f, err := poolFactsTx(ctx, tx, pools[i].ID, tenantID)
+		f, err := s.poolFactsTx(ctx, tx, pools[i].ID, tenantID)
 		if err != nil {
 			return err
 		}
@@ -229,26 +235,6 @@ func withPoolFacts(ctx context.Context, tx pgx.Tx, pools []Pool, tenantID string
 		pools[i].Capabilities = &PoolCapabilities{NestedContainers: f.nestedContainers()}
 	}
 	return nil
-}
-
-func cloneLabels(m map[string]string) map[string]string {
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
-}
-
-// maxCapacity is the larger of each resource, 0 (no limit) winning.
-func maxCapacity(a, b proto.Capacity) proto.Capacity {
-	pick := func(x, y float64) float64 {
-		if x == 0 || y == 0 {
-			return 0
-		}
-		return max(x, y)
-	}
-	return proto.Capacity{CPUs: pick(a.CPUs, b.CPUs), Memory: int64(pick(float64(a.Memory), float64(b.Memory))),
-		Disk: int64(pick(float64(a.Disk), float64(b.Disk))), Runs: int(pick(float64(a.Runs), float64(b.Runs)))}
 }
 
 // lastImagePlatforms are the image platforms of the Run's latest placement
@@ -325,9 +311,12 @@ func checkPoolFit(f poolFacts, poolID, tenantID string, sp spec.RunSpec) error {
 	for _, b := range best {
 		switch b.Kind {
 		case kindNested:
-			if f.Provider == "ec2" {
+			switch {
+			case f.NestedMismatch:
+				why = append(why, "it does not offer nested containers (its template's latest hosts registered without them)")
+			case f.Provider == "ec2":
 				why = append(why, "it does not offer nested containers (its template has no nestedContainers, and none of its hosts runs lux-runner --nested)")
-			} else {
+			default:
 				why = append(why, "none of its hosts offers nested containers (lux-runner --nested)")
 			}
 		case kindLabel:

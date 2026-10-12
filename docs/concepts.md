@@ -258,11 +258,16 @@ A refusal is 422 and changes nothing (pool, spec, state, secrets):
   true` in the answer and in the event.
 - `pool_unfit`: no host the pool has, or launches, could ever take the
   Run: one with `sandbox.nestedContainers` in a pool whose hosts lack
-  `lux-runner --nested` (an ec2 template without `nestedContainers`), one
-  whose `placement.requires` labels none of its hosts has, or cpus,
-  memory or disk beyond its largest host (an ec2 template's instance
-  type, from the catalog, when it knows every candidate type). A static
-  pool no host has registered in is not refused.
+  `lux-runner --nested` (an ec2 template without `nestedContainers`, or
+  one whose latest hosts registered without it), one whose
+  `placement.requires` labels none of its hosts has, or cpus, memory or
+  disk beyond every host it has and the host it would launch. For an ec2
+  pool that is the host the capacity planner expects: the smallest of its
+  current template's latest registrations or, before any, the catalog's
+  size of the template's `instanceType` (fallback types are launched only
+  on a capacity shortage, so they do not count); an `instanceType` the
+  catalog lacks is not refused on size. Hosts it no longer has (terminated)
+  do not count. A static pool no host has registered in is not refused.
 
 The answer's `placement` is `{pool, poolId, from: {name, id},
 platformUnchecked}`, and the `resume.requested` event carries `pool:

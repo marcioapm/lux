@@ -3162,7 +3162,7 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 		if err := withHostSizes(ctx, tx, pools); err != nil {
 			return err
 		}
-		return withPoolFacts(ctx, tx, pools, p.TenantID)
+		return s.withPoolFacts(ctx, tx, pools, p.TenantID)
 	})
 	if err != nil {
 		return nil, err

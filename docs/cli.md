@@ -113,7 +113,8 @@ follows, as on any host change, and later resumes stay in the new pool.
 lux refuses, changing nothing, a pool you cannot use (exit 4,
 `unknown_pool`), one whose hosts' platform the image does not offer
 (`platform_mismatch`), or one that can never take the Run (`pool_unfit`:
-nested containers, required labels, or a size beyond its largest host).
+nested containers, required labels, or a size beyond every host it has and
+the host it would launch).
 When lux cannot tell the platform it moves the Run anyway and prints
 `platform unchecked: ...` on stderr.
 

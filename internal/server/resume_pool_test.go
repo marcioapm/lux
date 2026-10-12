@@ -250,6 +250,84 @@ func addCatalog(t *testing.T, s *Server) {
 		('ec2', 'us-east-1', 'm7g.4xlarge', 16, $1, '{arm64}', now()), ('ec2', 'us-east-1', 'm7i.4xlarge', 16, $1, '{x86_64}', now())`, 64*gib)
 }
 
+// ec2Host records a host ec2 pool poolID launched from its current
+// template, registered age ago, in state, with capacity and labels.
+func ec2Host(t *testing.T, s *Server, id, poolID, state string, age time.Duration, capacity, labels string) {
+	t.Helper()
+	execSQL(t, s, context.Background(), `INSERT INTO hosts (id, name, tenant_id, pool_id, state, provider_id, provision_requested_at, registered_at, last_heartbeat, launch_template, capacity, labels, arch)
+		SELECT $1, $1, tenant_id, id, $3, $1, now() - $4::interval, now() - $4::interval, now(), template, $5, $6, 'amd64' FROM pools WHERE id = $2`,
+		id, poolID, state, interval(age), capacity, labels)
+	if state == "ready" {
+		s.hub.polled(id)
+	}
+}
+
+// The ec2 host a move is judged against is the one the planner would
+// launch (planCapacity's virtual()): the smallest of its current
+// template's latest registrations, or with none the catalog's size of its
+// instanceType alone; nested only when the template opts in and those
+// registrations do not lack it. Past hosts are not hosts the pool has.
+func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		setup func(t *testing.T, s *Server, id string) string
+		res   *resumeResources
+		says  string // "": allowed
+	}{
+		{name: "beyond the instance type, within a fallback", res: &resumeResources{CPUs: f64(24)},
+			says: "it needs 24 cpus; its largest host has 16",
+			setup: func(t *testing.T, s *Server, id string) string {
+				execSQL(t, s, context.Background(), `INSERT INTO instance_types (provider, region, instance_type, vcpus, memory_bytes, architectures, fetched_at)
+					VALUES ('ec2', 'us-east-1', 'm7i.8xlarge', 32, $1, '{x86_64}', now())`, 128*gib)
+				return ec2Pool(t, s, "intel", `{"region":"us-east-1","instanceType":"m7i.4xlarge","fallbackInstanceTypes":["m7i.8xlarge"]}`)
+			}},
+		{name: "a terminated larger host in the window", res: &resumeResources{CPUs: f64(32)},
+			says: "it needs 32 cpus; its largest host has 16",
+			setup: func(t *testing.T, s *Server, id string) string {
+				pool := ec2Pool(t, s, "burst", `{"region":"us-east-1"}`)
+				ec2Host(t, s, "e-big", pool, "terminated", 2*time.Minute, `{"cpus":64,"memory":274877906944}`, `{}`)
+				ec2Host(t, s, "e-small", pool, "terminated", time.Minute, `{"cpus":16,"memory":68719476736}`, `{}`)
+				return pool
+			}},
+		{name: "nested where the template opts in but its hosts registered without", says: "its template's latest hosts registered without them",
+			setup: func(t *testing.T, s *Server, id string) string {
+				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, id)
+				pool := ec2Pool(t, s, "nest", `{"region":"us-east-1","nestedContainers":true}`)
+				ec2Host(t, s, "e1", pool, "terminated", time.Minute, `{"cpus":16}`, `{}`)
+				return pool
+			}},
+		{name: "an instance type the catalog lacks, with a fallback it knows", res: &resumeResources{CPUs: f64(64)},
+			setup: func(t *testing.T, s *Server, id string) string {
+				return ec2Pool(t, s, "odd", `{"region":"us-east-1","instanceType":"x9.huge","fallbackInstanceTypes":["m7i.4xlarge"]}`)
+			}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			id, _ := movedRun(t, s)
+			addCatalog(t, s)
+			target := c.setup(t, s, id)
+			before := binding(t, s, id)
+			_, err := resumeTo(s, id, target, c.res)
+			if c.says == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if b := binding(t, s, id); b.PoolID != target {
+					t.Errorf("after the move: %+v", b)
+				}
+				return
+			}
+			he := refused(t, err, http.StatusUnprocessableEntity, "pool_unfit", "resume")
+			if !strings.Contains(he.Message, c.says) {
+				t.Errorf("message %q, want it to say %q", he.Message, c.says)
+			}
+			if after := binding(t, s, id); after != before {
+				t.Errorf("after the refusal: %+v, want %+v", after, before)
+			}
+		})
+	}
+}
+
 // What lux cannot tell it does not refuse on: an unknown image platform or
 // an unknown pool platform moves the Run, saying platformUnchecked; both
 // known and matching moves it checked. An ec2 template that opts into
