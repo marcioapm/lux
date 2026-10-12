@@ -97,6 +97,14 @@ components:
               type: string
             - type: number
       type: object
+    BoundPool:
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      type: object
     Build:
       additionalProperties: false
       properties:
@@ -2073,6 +2081,21 @@ components:
         text:
           type: string
       type: object
+    ResumePlacement:
+      additionalProperties: false
+      properties:
+        from:
+          $ref: "#/components/schemas/BoundPool"
+          description: The pool the Run left; absent when it was already there.
+        platformUnchecked:
+          description: "The Run moved without its platform being checked: lux does not know the platforms its image offers (no placement reported them) or those of the pool's hosts (none registered, and the catalog lacks its template's instance types), or either."
+          type: boolean
+        pool:
+          description: The pool's current name.
+          type: string
+        poolId:
+          type: string
+      type: object
     ResumeRequest:
       additionalProperties: false
       properties:
@@ -2085,6 +2108,9 @@ components:
         input:
           $ref: "#/components/schemas/ResumeInput"
           description: A message for the workload once it is back.
+        placement:
+          $ref: "#/components/schemas/ResumeTarget"
+          description: Move the Run to another pool (poolId) from this resume on, with its saved state, as on any host change.
         removeSecrets:
           description: "Names of the Run's secrets to remove: from this resume on the workload no longer has them and resumes no longer need them. Refused (422 invalid_spec, nothing changed): a name the Run does not have, a git or registry credential, an MCP server's or service's header secret, or a name also in secrets or the credential of a repository this resume adds."
           items:
@@ -2140,6 +2166,13 @@ components:
                 - 8Gi
               type: string
       type: object
+    ResumeTarget:
+      additionalProperties: false
+      properties:
+        poolId:
+          description: "Move the Run to this pool from this resume on, by id: the same field and rule as a submit's placement.poolId (the tenant's active pool with that id, else the platform's; any other is 422 unknown_pool). The Run's pool (pool and poolId in GET) and its spec's placement.pool and placement.poolId become that pool's, so later resumes, retries and migrations stay there. Checked before anything changes, with resources as this resume sets them: 422 platform_mismatch when the platforms the image offered at its last placement and the pool's hosts' are both known and share none; 422 pool_unfit when no host the pool has or launches can ever take the Run (nested containers, placement.requires labels, cpus, memory or disk beyond a whole host). On a Run already resuming: its own pool, 202; another, 409 not_resumable."
+          type: string
+      type: object
     Run:
       additionalProperties: false
       properties:
@@ -2182,6 +2215,9 @@ components:
           type: object
         name:
           type: string
+        placement:
+          $ref: "#/components/schemas/ResumePlacement"
+          description: "In a resume's answer, when it named a pool (placement.poolId): the pool the Run is bound to from now on, the one it left, and whether its platform went unchecked."
         placementSeconds:
           description: "Time spent placing the Run, summed over its placements: for each, from when the Run needed a host (created, or its previous placement ending) until that placement's workload started. A Run still being placed counts up to the time of the response (placing). waitSeconds + startSeconds."
           format: double

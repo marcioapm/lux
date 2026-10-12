@@ -516,10 +516,11 @@ type Run struct {
 	// (stopped, lost, failed, succeeded), what a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
 	// Servers: on GET /v1/runs/{id}, its servers.
-	Servers     []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
-	SubmittedBy *RunSubmitter `json:"submittedBy,omitempty" doc:"On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."`
-	Cost        *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
-	Resize      *Resize       `json:"resize,omitempty" doc:"In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."`
+	Servers     []RunServer      `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
+	SubmittedBy *RunSubmitter    `json:"submittedBy,omitempty" doc:"On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."`
+	Cost        *RunCostBrief    `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
+	Resize      *Resize          `json:"resize,omitempty" doc:"In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."`
+	Placement   *ResumePlacement `json:"placement,omitempty" doc:"In a resume's answer, when it named a pool (placement.poolId): the pool the Run is bound to from now on, the one it left, and whether its platform went unchecked."`
 }
 
 // Resumability says whether a Run can be resumed now, and from what.
@@ -1580,6 +1581,7 @@ type resumeRequest struct {
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost). Older snapshots are deleted once the latest is uploaded: one deleted is 409 snapshot_unavailable."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
 	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over). On a Run already resuming: the same as its resume asked for, 202 with that resume's resize; absent or empty, 202; other values, 409 not_resumable."`
+	Placement    *resumeTarget    `json:"placement,omitempty" doc:"Move the Run to another pool (poolId) from this resume on, with its saved state, as on any host change."`
 	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha; mode: move, fast-forward or fetch) before init, through the host's mirror. Mode move (default): tracked files become the ref's, untracked and ignored ones are kept. fast-forward: only a checkout that loses nothing moves; fetch: none does. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
 }
 
@@ -1700,21 +1702,45 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 	if err != nil {
 		return nil, err
 	}
+	var target *poolFacts
+	if req.Placement != nil {
+		if req.Placement.PoolID == "" {
+			return nil, invalidSpec(&spec.ValidationError{Problems: []string{"placement.poolId is required with placement"}})
+		}
+		// Read as the system (the instance-type catalog is no tenant's);
+		// used only once the tenant's own transaction resolves the id.
+		f, err := s.loadPoolFacts(ctx, req.Placement.PoolID, p.TenantID)
+		if err != nil {
+			return nil, err
+		}
+		target = &f
+	}
 	resumed := false
 	var resize *Resize
+	var moved *ResumePlacement
 	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		var state string
 		var refs []spec.SecretRef
 		var sp spec.RunSpec
 		var noSnapshot bool
-		if err := tx.QueryRow(ctx, `SELECT r.state, r.secrets, r.spec, `+refusedWithoutSnapshot+` FROM runs r WHERE r.id = $1 FOR UPDATE OF r`, id).
-			Scan(&state, &refs, &sp, &noSnapshot); err != nil {
+		var curPool BoundPool
+		if err := tx.QueryRow(ctx, `SELECT r.state, r.secrets, r.spec, `+refusedWithoutSnapshot+`, coalesce(r.pool_id, ''), coalesce(rpool.name, '')
+			FROM runs r`+runPoolJoin+` WHERE r.id = $1 FOR UPDATE OF r`, id).
+			Scan(&state, &refs, &sp, &noSnapshot, &curPool.ID, &curPool.Name); err != nil {
 			return err
 		}
 		// Before anything else: whatever its state, such a Run is never
 		// placed again on request.
 		if spec.RefusesResume(sp.ResumePolicy) {
 			return errNeverResumable()
+		}
+		var to *resolvedPool
+		if req.Placement != nil {
+			rp, err := resolvePool(ctx, tx, p.TenantID, "", req.Placement.PoolID)
+			if err != nil {
+				return err
+			}
+			to = &rp
 		}
 		switch {
 		case resumable(state):
@@ -1725,6 +1751,16 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		case state == StateResuming:
 			if len(adding) > 0 {
 				return errf(http.StatusConflict, "not_resumable", "run is resuming already: repositories can only be added to a Run resume accepts")
+			}
+			if to != nil {
+				if *to.ID != curPool.ID {
+					return errf(http.StatusConflict, "not_resumable", "run is resuming already in pool %s: its pool can only change before it is resumed", curPool.Name)
+				}
+				first, err := pendingPool(ctx, tx, id)
+				if err != nil {
+					return err
+				}
+				moved = cmp.Or(first, &ResumePlacement{Pool: curPool.Name, PoolID: curPool.ID})
 			}
 			if req.Resources != nil {
 				asked, err := req.Resources.check()
@@ -1834,6 +1870,12 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			if resize, err = resizeRun(ctx, tx, id, sp.Resources, *req.Resources); err != nil {
 				return err
 			}
+			sp.Resources = resize.Applied
+		}
+		if to != nil {
+			if moved, err = s.rebindPool(ctx, tx, p.TenantID, id, sp, curPool, *to, target); err != nil {
+				return err
+			}
 		}
 		var in *proto.Input
 		if req.Input != nil && req.Input.Text != "" {
@@ -1867,6 +1909,13 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		if resize != nil {
 			ev["resources"] = resize
 		}
+		if moved != nil && moved.From != nil {
+			pe := map[string]any{"from": moved.From, "to": BoundPool{Name: moved.Pool, ID: moved.PoolID}}
+			if moved.PlatformUnchecked {
+				pe["platformUnchecked"] = true
+			}
+			ev["pool"] = pe
+		}
 		if err := addEvent(ctx, tx, p.TenantID, id, 0, "resume.requested", ev); err != nil {
 			return err
 		}
@@ -1884,6 +1933,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		return nil, err
 	}
 	run.Resize = resize
+	run.Placement = moved
 	return &resumeOutput{http.StatusAccepted, req.RequestID, run}, nil
 }
 
