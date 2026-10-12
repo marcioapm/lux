@@ -237,8 +237,19 @@ func TestCredentialsForAHostElsewhere(t *testing.T) {
 		{"sync", map[string]any{"sync": sync, "credentials": map[string]string{"app": "secret-v"}}},
 	} {
 		w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/"+c.path, c.body)
-		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "host_unreachable") || strings.Contains(w.Body.String(), "secret-v") {
+		var body struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != http.StatusServiceUnavailable || body.Error.Code != "host_unreachable" {
 			t.Fatalf("%s to a host elsewhere: %d %s", c.path, w.Code, w.Body)
+		}
+		if strings.Contains(w.Body.String(), "secret-v") {
+			t.Fatalf("%s to a host elsewhere leaked credentials: %s", c.path, w.Body)
 		}
 	}
 	var queued, events, held int

@@ -163,7 +163,7 @@ func (s *Server) routes(api huma.API) {
 			"for this push and every later fetch and push of that repository by the running placement (the runner keeps the latest in memory). " +
 			"luxd never stores it: it holds it in memory until the runner has the push, so the request must reach the luxd holding the runner's connection " +
 			"(a single luxd, or sticky routing, as interactive streams need): any other luxd answers 503 `host_unreachable` and queues nothing. " +
-			"A queued push whose credentials luxd no longer holds (it restarted) ends failed. " +
+			"A queued push whose credentials luxd no longer holds (it restarted, or the runner reconnected to another luxd first) ends failed. " +
 			"422 `invalid_request` for a name that is not one of the Run's repositories, a repository without a credential, or an empty value. " +
 			"409 `git_credentials_unsupported` when the Run's host runs a lux-runner that does not take them.",
 		DefaultStatus: http.StatusAccepted,
@@ -180,7 +180,7 @@ func (s *Server) routes(api huma.API) {
 			"credentials: as on a push: per repository name, a git credential to fetch with in place of the repository's credential secret, kept by the runner for later fetches and pushes; never stored by luxd. " +
 			"luxd holds it in memory until the runner has the sync, so the request must reach the luxd holding the runner's connection " +
 			"(a single luxd, or sticky routing, as interactive streams need): any other luxd answers 503 `host_unreachable` and queues nothing. " +
-			"A queued sync whose credentials luxd no longer holds (it restarted) ends failed (git.sync and sync.done). " +
+			"A queued sync whose credentials luxd no longer holds (it restarted, or the runner reconnected to another luxd first) ends failed (git.sync and sync.done). " +
 			"422 `invalid_request` for a name that is not one of the Run's repositories, a repository without a credential, or an empty value; " +
 			"409 `git_credentials_unsupported` when the Run's host runs a lux-runner that does not take them.",
 		DefaultStatus: http.StatusAccepted,
