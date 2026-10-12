@@ -130,7 +130,12 @@ draining hosts, what live placements on its hosts hold, its Runs running
 and queued, Runs first started and finished in the sample's window, and the
 launches it requested and the provider refused. A row per tenant holds
 that tenant's part (its Runs, allocation, starts and finishes) and nothing
-of the pool's hosts. They roll up and expire with the other samples. The
+of the pool's hosts. A Run's starts and finishes count under the pool it
+is bound to when the sample is written, not the pool of the host it ran on:
+a Run a resume moved to another pool
+([moving to another pool](concepts.md#moving-to-another-pool)) has its
+finish, and a start whose sample is written after the move, counted under
+its new pool, while its cost stays with each placement's host's pool. They roll up and expire with the other samples. The
 first rows are written when this ships: an older range is a gap, never an
 invented zero (`historyFrom` says where a pool's history starts).
 
