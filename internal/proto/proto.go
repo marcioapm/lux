@@ -142,6 +142,17 @@ type Usage struct {
 	NetTxBytes      int64   `json:"netTxBytes,omitempty"`
 	MemoryBytes     int64   `json:"memoryBytes,omitempty"`
 	Pids            int     `json:"pids,omitempty"`
+	// PeakCPUCores: the highest CPU rate (cores) between two consecutive
+	// readings; CPUCores: the rate over the interval this reading ends, for
+	// history. The stall totals are the cgroup's PSI "some" (and "full")
+	// totals in seconds, absent without PSI. Absent from older runners.
+	PeakCPUCores           *float64 `json:"peakCpuCores,omitempty"`
+	CPUCores               *float64 `json:"cpuCores,omitempty"`
+	CPUStallSeconds        *float64 `json:"cpuStallSeconds,omitempty"`
+	MemoryStallSeconds     *float64 `json:"memoryStallSeconds,omitempty"`
+	MemoryFullStallSeconds *float64 `json:"memoryFullStallSeconds,omitempty"`
+	IOStallSeconds         *float64 `json:"ioStallSeconds,omitempty"`
+	IOFullStallSeconds     *float64 `json:"ioFullStallSeconds,omitempty"`
 }
 
 // HostUsage is the whole host's, on each heartbeat: counters (CPU seconds

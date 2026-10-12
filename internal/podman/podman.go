@@ -445,14 +445,23 @@ type Usage struct {
 	CPUSeconds      float64
 	MemoryBytes     int64
 	Pids            int
+	// Pressure stall totals in seconds (PSI): nil when the kernel has no
+	// *.pressure file, which is not the same as no stall.
+	CPUStall, MemoryStall, MemoryFullStall, IOStall, IOFullStall *float64
 }
 
 func CgroupUsage(cgroupPath string) (Usage, error) {
-	var u Usage
 	if cgroupPath == "" {
-		return u, errors.New("no cgroup")
+		return Usage{}, errors.New("no cgroup")
 	}
-	base := "/sys/fs/cgroup" + cgroupPath
+	return cgroupUsageAt("/sys/fs/cgroup" + cgroupPath), nil
+}
+
+func cgroupUsageAt(base string) Usage {
+	var u Usage
+	u.CPUStall, _ = readPressure(base + "/cpu.pressure")
+	u.MemoryStall, u.MemoryFullStall = readPressure(base + "/memory.pressure")
+	u.IOStall, u.IOFullStall = readPressure(base + "/io.pressure")
 	if n, err := readInt(base + "/memory.peak"); err == nil {
 		u.PeakMemoryBytes = n
 	}
@@ -473,7 +482,42 @@ func CgroupUsage(cgroupPath string) (Usage, error) {
 			}
 		}
 	}
-	return u, nil
+	return u
+}
+
+// readPressure reads a cgroup v2 *.pressure file's "some" and "full"
+// totals (microseconds in the file) as seconds. Either is nil when the file
+// or its line is missing: a kernel without PSI, or cpu.pressure's "full"
+// before Linux 5.13.
+//
+//	some avg10=0.00 avg60=0.00 avg300=0.00 total=12345
+//	full avg10=0.00 avg60=0.00 avg300=0.00 total=6789
+func readPressure(path string) (some, full *float64) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		kind, rest, _ := strings.Cut(strings.TrimSpace(l), " ")
+		for _, f := range strings.Fields(rest) {
+			v, ok := strings.CutPrefix(f, "total=")
+			if !ok {
+				continue
+			}
+			us, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				break
+			}
+			s := float64(us) / 1e6
+			switch kind {
+			case "some":
+				some = &s
+			case "full":
+				full = &s
+			}
+		}
+	}
+	return some, full
 }
 
 // HostUsage is the whole machine's: CPU seconds used since boot (all
