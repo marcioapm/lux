@@ -125,6 +125,11 @@ func TestPushAndSyncCarryCredentials(t *testing.T) {
 	if !slices.Equal(names, []string{"app"}) {
 		t.Fatalf("push.requested names %v", names)
 	}
+	names = nil
+	systemScan(t, s, `SELECT data->'credentials' FROM run_events WHERE run_id = $1 AND type = 'sync.requested'`, []any{r1}, &names)
+	if !slices.Equal(names, []string{"app"}) {
+		t.Fatalf("sync.requested names %v", names)
+	}
 	for _, tok := range []string{pushTok, syncTok} {
 		notStored(t, s, ctx, logs, tok)
 	}
@@ -257,6 +262,48 @@ func TestCredentialsForAHostElsewhere(t *testing.T) {
 	}
 }
 
+// A push whose runner never acks it (its host is lost): luxd forgets its
+// credentials with the Run's secrets, and when the Run is terminated
+// through the API.
+func TestHeldCredentialsGoWithTheRun(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		end  func(t *testing.T, s *Server, ctx context.Context, key string)
+	}{
+		{"secrets dropped", func(t *testing.T, s *Server, _ context.Context, _ string) { s.secrets.drop(r1) }},
+		{"terminated", func(t *testing.T, s *Server, ctx context.Context, key string) {
+			execSQL(t, s, ctx, `UPDATE runs SET state = 'lost' WHERE id = $1`, r1)
+			if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/terminate", nil); w.Code != http.StatusAccepted {
+				t.Fatalf("terminate: %d %s", w.Code, w.Body)
+			}
+			var state string
+			systemScan(t, s, `SELECT state FROM runs WHERE id = $1`, []any{r1}, &state)
+			if state != StateTerminated {
+				t.Fatalf("run %s after terminate", state)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx, key, _ := credsFixture(t)
+			if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/push", map[string]any{"requestId": "p1",
+				"credentials": map[string]string{"app": "v1"}}); w.Code != http.StatusAccepted {
+				t.Fatalf("push: %d %s", w.Code, w.Body)
+			}
+			pushes, _, msgIDs := deliver(t, s, ctx)
+			if len(pushes) != 1 || pushes[0].Credentials["app"] != "v1" {
+				t.Fatalf("delivered: %+v", pushes)
+			}
+			if _, held := s.secrets.getMsg(msgIDs[0]); !held {
+				t.Fatal("credentials not held before the Run ends")
+			}
+			c.end(t, s, ctx, key)
+			if _, held := s.secrets.getMsg(msgIDs[0]); held {
+				t.Fatalf("message %d's credentials held after the Run's end", msgIDs[0])
+			}
+		})
+	}
+}
+
 // A push or sync whose credentials this luxd no longer holds (it
 // restarted), or whose host re-registered without the capability, is never
 // delivered: it ends failed (git.push; git.sync and sync.done), saying why.
@@ -281,9 +328,19 @@ func TestCredentialedMessageRefusedAtDelivery(t *testing.T) {
 				t.Fatalf("sync: %d %s", w.Code, w.Body)
 			}
 			c.lose(s, ctx)
+			var queued []int64
+			systemScan(t, s, `SELECT array_agg(id ORDER BY id) FROM host_messages WHERE type IN ('push', 'sync')`, nil, &queued)
 			for range 2 {
 				if pushes, syncs, _ := deliver(t, s, ctx); len(pushes)+len(syncs) != 0 {
 					t.Fatalf("delivered: %+v %+v", pushes, syncs)
+				}
+			}
+			if len(queued) != 2 {
+				t.Fatalf("queued %v", queued)
+			}
+			for _, id := range queued {
+				if _, held := s.secrets.getMsg(id); held {
+					t.Fatalf("message %d's credentials held after its refusal", id)
 				}
 			}
 			var results []proto.PushResult
