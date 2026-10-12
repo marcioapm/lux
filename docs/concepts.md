@@ -262,13 +262,18 @@ A refusal is 422 and changes nothing (pool, spec, state, secrets):
   `lux-runner --nested` (an ec2 template without `nestedContainers`, or
   one whose latest hosts registered without it), one whose
   `placement.requires` labels none of its hosts has, or cpus, memory or
-  disk beyond every host it has and the host it would launch. For an ec2
-  pool that is the host the capacity planner expects: the smallest of its
-  current template's latest registrations or, before any, the catalog's
-  size of the template's `instanceType` (fallback types are launched only
-  on a capacity shortage, so they do not count); an `instanceType` the
-  catalog lacks is not refused on size. Hosts it no longer has (terminated)
-  do not count. A static pool no host has registered in is not refused.
+  disk beyond every host it has and the hosts it would launch. For an ec2
+  pool those are the planned host or the probe host, never a fallback.
+  The planned host is the one the capacity planner expects: the smallest
+  of its current template's latest registrations. The probe host is the
+  one the planner launches when a Run outgrows that expectation: the
+  catalog's size of the template's `instanceType`, with the planned host's
+  labels. Before any registration there is only the catalog's size of
+  `instanceType`. Fallback types are launched only on a capacity shortage,
+  so they do not count; an `instanceType` the catalog lacks gives no probe
+  host, and before any registration is not refused on size. Hosts it no
+  longer has (terminated) do not count. A static pool no host has
+  registered in is not refused.
 
 The answer's `placement` is `{pool, poolId, from: {name, id},
 platformUnchecked}`, and the `resume.requested` event carries `pool:

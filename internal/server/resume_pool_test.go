@@ -274,6 +274,14 @@ func addCatalog(t *testing.T, s *Server) {
 		('ec2', 'us-east-1', 'm7g.4xlarge', 16, $1, '{arm64}', now()), ('ec2', 'us-east-1', 'm7i.4xlarge', 16, $1, '{x86_64}', now())`, 64*gib)
 }
 
+// addType adds x86_64 instance type name with vcpus and 4 GiB per vCPU to
+// the us-east-1 catalog.
+func addType(t *testing.T, s *Server, name string, vcpus int) {
+	t.Helper()
+	execSQL(t, s, context.Background(), `INSERT INTO instance_types (provider, region, instance_type, vcpus, memory_bytes, architectures, fetched_at)
+		VALUES ('ec2', 'us-east-1', $1, $2, $3, '{x86_64}', now())`, name, vcpus, int64(vcpus)*4*gib)
+}
+
 // ec2Host records a host ec2 pool poolID launched from its current
 // template, registered age ago, in state, with capacity and labels.
 func ec2Host(t *testing.T, s *Server, id, poolID, state string, age time.Duration, capacity, labels string) {
@@ -286,11 +294,13 @@ func ec2Host(t *testing.T, s *Server, id, poolID, state string, age time.Duratio
 	}
 }
 
-// The ec2 host a move is judged against is the one the planner would
-// launch (planCapacity's virtual()): the smallest of its current
-// template's latest registrations, or with none the catalog's size of its
-// instanceType alone; nested only when the template opts in and those
-// registrations do not lack it. Past hosts are not hosts the pool has.
+// The ec2 hosts a move is judged against are those the planner would
+// launch: the planned host (planCapacity's virtual(), the smallest of its
+// current template's latest registrations) and the probe host (the
+// catalog's size of its instanceType alone, never a fallback's); with no
+// registration, the catalog's size of its instanceType. Nested only when
+// the template opts in and those registrations do not lack it. Past hosts
+// are not hosts the pool has.
 func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -331,6 +341,37 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 		{name: "an instance type the catalog lacks, with a fallback it knows", res: &resumeResources{CPUs: f64(64)},
 			setup: func(t *testing.T, s *Server, id string) string {
 				return ec2Pool(t, s, "odd", `{"region":"us-east-1","instanceType":"x9.huge","fallbackInstanceTypes":["m7i.4xlarge"]}`)
+			}},
+		{name: "a smaller fallback's registration: fits the probe host", res: &resumeResources{CPUs: f64(24)},
+			setup: func(t *testing.T, s *Server, id string) string {
+				addType(t, s, "m7i.8xlarge", 32)
+				pool := ec2Pool(t, s, "intel", `{"region":"us-east-1","instanceType":"m7i.8xlarge","fallbackInstanceTypes":["m7i.4xlarge"]}`)
+				ec2Host(t, s, "e1", pool, "terminated", time.Minute, `{"cpus":16,"memory":68719476736}`, `{}`)
+				return pool
+			}},
+		{name: "registrations smaller than the instance type: fits the probe host", res: &resumeResources{CPUs: f64(12)},
+			setup: func(t *testing.T, s *Server, id string) string {
+				addType(t, s, "m7i.2xlarge", 8)
+				pool := ec2Pool(t, s, "intel", `{"region":"us-east-1","instanceType":"m7i.4xlarge","fallbackInstanceTypes":["m7i.2xlarge"]}`)
+				ec2Host(t, s, "e1", pool, "terminated", 2*time.Minute, `{"cpus":8,"memory":68719476736}`, `{}`)
+				ec2Host(t, s, "e2", pool, "terminated", time.Minute, `{"cpus":8,"memory":68719476736}`, `{}`)
+				return pool
+			}},
+		{name: "registrations smaller than the instance type: beyond the probe host too", res: &resumeResources{CPUs: f64(20)},
+			says: "pool intel cannot take this Run: it needs 20 cpus; its largest host has 16",
+			setup: func(t *testing.T, s *Server, id string) string {
+				addType(t, s, "m7i.8xlarge", 32)
+				pool := ec2Pool(t, s, "intel", `{"region":"us-east-1","instanceType":"m7i.4xlarge","fallbackInstanceTypes":["m7i.8xlarge"]}`)
+				ec2Host(t, s, "e1", pool, "terminated", 2*time.Minute, `{"cpus":8,"memory":68719476736}`, `{}`)
+				ec2Host(t, s, "e2", pool, "terminated", time.Minute, `{"cpus":8,"memory":68719476736}`, `{}`)
+				return pool
+			}},
+		{name: "an instance type the catalog lacks: no probe size, the planned host too small", res: &resumeResources{CPUs: f64(12)},
+			says: "pool odd cannot take this Run: it needs 12 cpus; its largest host has 8",
+			setup: func(t *testing.T, s *Server, id string) string {
+				pool := ec2Pool(t, s, "odd", `{"region":"us-east-1","instanceType":"x9.huge","fallbackInstanceTypes":["m7i.4xlarge"]}`)
+				ec2Host(t, s, "e1", pool, "terminated", time.Minute, `{"cpus":8,"memory":68719476736}`, `{}`)
+				return pool
 			}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

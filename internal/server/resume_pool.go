@@ -139,24 +139,27 @@ func (s *Server) poolFactsTx(ctx context.Context, tx pgx.Tx, poolID, tenantID st
 		if err != nil {
 			return err
 		}
-		f.Profiles = append(f.Profiles, future)
+		f.Profiles = append(f.Profiles, future...)
 		return nil
 	}()
 	slices.Sort(f.Archs)
 	return f, err
 }
 
-// futureHost is the host planCapacity's virtual() would plan for ec2 pool
-// pl: hostExpectation's capacity and shared labels, nested only when the
-// template opts in and its registrations do not contradict it. With no
-// registration, ec2.Launch starts the template's instanceType (fallbacks
-// only on a capacity shortage), so the catalog sizes it from that type
-// alone; a type the catalog lacks leaves the size unknown. It adds the
+// futureHost is the hosts planCapacity would launch for ec2 pool pl. The
+// planned host is virtual()'s: hostExpectation's capacity and shared
+// labels, nested only when the template opts in and its registrations do
+// not contradict it. When that host is too small for a Run, the planner
+// probes with one more launch, which ec2.Launch starts as the template's
+// instanceType (fallbacks only on a capacity shortage): the probe host has
+// the planned labels and disk and the catalog's size of instanceType
+// alone. With no registration there is only the bootstrap host, sized the
+// same way; a type the catalog lacks leaves its size unknown. It adds the
 // catalog's archs of every candidate type to f.Archs.
-func (s *Server) futureHost(ctx context.Context, tx pgx.Tx, pl poolRow, f *poolFacts) (poolProfile, error) {
+func (s *Server) futureHost(ctx context.Context, tx pgx.Tx, pl poolRow, f *poolFacts) ([]poolProfile, error) {
 	expected, _, err := s.hostExpectation(ctx, tx, pl)
 	if err != nil {
-		return poolProfile{}, err
+		return nil, err
 	}
 	future := poolProfile{Labels: map[string]string{}}
 	if expected != nil {
@@ -178,34 +181,47 @@ func (s *Server) futureHost(ctx context.Context, tx pgx.Tx, pl poolRow, f *poolF
 	}
 	_ = json.Unmarshal(pl.Template, &t)
 	if t.InstanceType == "" || t.Region == "" {
-		return future, nil
+		return []poolProfile{future}, nil
 	}
 	rows, err := tx.Query(ctx, `SELECT instance_type, vcpus, memory_bytes, coalesce(architectures, '{}') FROM instance_types
 		WHERE provider = $1 AND region = $2 AND instance_type = ANY($3)`,
 		pl.Provider, t.Region, append([]string{t.InstanceType}, t.FallbackInstanceTypes...))
 	if err != nil {
-		return future, err
+		return nil, err
 	}
 	defer rows.Close()
+	var probe *poolProfile
 	for rows.Next() {
 		var name string
 		var vcpus *int
 		var mem *int64
 		var archs []string
 		if err := rows.Scan(&name, &vcpus, &mem, &archs); err != nil {
-			return future, err
+			return nil, err
 		}
 		for _, a := range archs {
 			if g := ec2Archs[a]; g != "" && !slices.Contains(f.Archs, g) {
 				f.Archs = append(f.Archs, g)
 			}
 		}
-		// Disk is never the instance type's.
-		if expected == nil && name == t.InstanceType && vcpus != nil && mem != nil {
-			future.Capacity.CPUs, future.Capacity.Memory = float64(*vcpus), *mem
+		if name != t.InstanceType || vcpus == nil || mem == nil {
+			continue
 		}
+		// Disk is never the instance type's.
+		if expected == nil {
+			future.Capacity.CPUs, future.Capacity.Memory = float64(*vcpus), *mem
+			continue
+		}
+		probe = &poolProfile{Labels: future.Labels, Capacity: future.Capacity, LabelsKnown: true}
+		probe.Capacity.CPUs, probe.Capacity.Memory = float64(*vcpus), *mem
 	}
-	return future, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if probe != nil {
+		return []poolProfile{future, *probe}, nil
+	}
+	return []poolProfile{future}, nil
 }
 
 // platforms are f's archs as os/arch; runners are linux only.
