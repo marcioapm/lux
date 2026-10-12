@@ -197,7 +197,9 @@ func marketRows(t *testing.T, s *Server) []string {
 // subnets are in. Each figure fails on its own: a refused placement score
 // (no IAM permission), a missing on-demand price or a failed spot call
 // leaves that column NULL and keeps the rest; the pass logs one warning.
-// Retired and static pools are not sampled.
+// Retired pools are not sampled, nor p5, whose provider has no
+// MarketProvider here; the zones of a pool's hosts are not added to those
+// its subnets list.
 func TestSampleMarketPartialFailures(t *testing.T) {
 	f := &marketFake{
 		zones: map[string][]Zone{
@@ -222,6 +224,7 @@ func TestSampleMarketPartialFailures(t *testing.T) {
 		('p3', 'eu', 'ec2', '{"region":"eu-west-1"}', false),
 		('p4', 'old', 'ec2', '{"region":"ap-south-1","instanceType":"r7i.large"}', true),
 		('p5', 'static', 'static', '{}', false)`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state, pool_id, zone) VALUES ('h1', 'h1', 'terminated', 'p1', 'us-east-1c')`)
 
 	if err := s.sampleMarketPass(ctx); err != nil {
 		t.Fatal(err)
@@ -265,38 +268,52 @@ func TestSampleMarketPartialFailures(t *testing.T) {
 	}
 }
 
-// Only the provisioner lease's holder samples; a candidate type is sampled
-// again once its last sample is older than Every.
+// Only the provisioner lease's live holder samples; a candidate type is
+// sampled again once its last sample is older than Every, not before.
 func TestSampleMarketLeaseAndCadence(t *testing.T) {
 	f := &marketFake{zones: map[string][]Zone{"us-east-1": {{"us-east-1a", "use1-az1"}}},
 		onDemand: map[string]string{"m7i.large": "0.1"}, spot: map[[2]string]string{{"us-east-1a", "m7i.large"}: "0.04"}}
 	s, _ := marketServer(t, f)
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider, template) VALUES ('p1', 'burst', 'ec2', '{"region":"us-east-1","instanceType":"m7i.large"}')`)
-
-	execSQL(t, s, ctx, `UPDATE leases SET holder = 'other' WHERE name = 'provisioner'`)
-	if err := s.sampleMarketPass(ctx); err != nil {
-		t.Fatal(err)
+	aged := func(by string) {
+		execSQL(t, s, ctx, `UPDATE market_samples SET sampled_at = sampled_at - $1::interval`, by)
+		d, _ := time.ParseDuration(by)
+		s.marketMu.Lock()
+		for k, at := range s.marketTried {
+			s.marketTried[k] = at.Add(-d)
+		}
+		s.marketMu.Unlock()
 	}
-	if calls := f.takeCalls(); len(calls) != 0 || len(marketRows(t, s)) != 0 {
-		t.Fatalf("without the lease: calls %v, rows %v", calls, marketRows(t, s))
+
+	for _, holder := range []struct{ id, expires string }{{"other", "1 minute"}, {instanceID, "-1 second"}} {
+		execSQL(t, s, ctx, `UPDATE leases SET holder = $1, expires_at = now() + $2::interval WHERE name = 'provisioner'`, holder.id, holder.expires)
+		if err := s.sampleMarketPass(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if calls := f.takeCalls(); len(calls) != 0 || len(marketRows(t, s)) != 0 {
+			t.Fatalf("lease held by %s, expiring in %s: calls %v, rows %v", holder.id, holder.expires, calls, marketRows(t, s))
+		}
 	}
 
-	execSQL(t, s, ctx, `UPDATE leases SET holder = $1 WHERE name = 'provisioner'`, instanceID)
+	execSQL(t, s, ctx, `UPDATE leases SET holder = $1, expires_at = now() + interval '1 minute' WHERE name = 'provisioner'`, instanceID)
 	if err := s.sampleMarketPass(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(marketRows(t, s)); n != 1 {
 		t.Fatalf("with the lease: %d rows, want 1", n)
 	}
-	// An hour later (the sample and this process's attempt both aged).
-	execSQL(t, s, ctx, `UPDATE market_samples SET sampled_at = sampled_at - interval '61 minutes'`)
-	s.marketMu.Lock()
-	for k, at := range s.marketTried {
-		s.marketTried[k] = at.Add(-61 * time.Minute)
-	}
-	s.marketMu.Unlock()
+	// Half an hour later: not due.
+	aged("30m")
 	f.takeCalls()
+	if err := s.sampleMarketPass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.takeCalls(); len(calls) != 0 {
+		t.Fatalf("half an hour later: calls %v, want none", calls)
+	}
+	// An hour later (the sample and this process's attempt both aged).
+	aged("31m")
 	if err := s.sampleMarketPass(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -378,6 +395,27 @@ func TestSampleMarketUntouchedTypeStaysDue(t *testing.T) {
 	}
 	if rows := marketRows(t, s); len(rows) != 1 || !strings.Contains(rows[0], "m7g.large") {
 		t.Fatalf("rows %v, want one for m7g.large", rows)
+	}
+}
+
+// A pass that wrote no row (zones refused, no hosts to fall back on) is
+// not repeated a minute later: its types were attempted.
+func TestSampleMarketNoRowsNotRetried(t *testing.T) {
+	f := &marketFake{zonesErr: errors.New("UnauthorizedOperation: ec2:DescribeSubnets"), onDemand: map[string]string{"m7i.large": "0.1"}}
+	s, _ := marketServer(t, f)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider, template) VALUES ('p1', 'burst', 'ec2', '{"region":"us-east-1","instanceType":"m7i.large"}')`)
+	if err := s.sampleMarketPass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.takeCalls(); !slices.Contains(calls, "score us-east-1 m7i.large") || len(marketRows(t, s)) != 0 {
+		t.Fatalf("first pass: calls %v, rows %v", calls, marketRows(t, s))
+	}
+	if err := s.sampleMarketPass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.takeCalls(); len(calls) != 0 {
+		t.Fatalf("second pass: calls %v, want none", calls)
 	}
 }
 
@@ -517,5 +555,30 @@ func TestCatalogRefresh(t *testing.T) {
 	}
 	if got := catalog(); fmt.Sprint(got) != fmt.Sprint(before) || !strings.Contains(logs.String(), "DescribeInstanceTypes") {
 		t.Fatalf("after a failed describe: %v (was %v); log:\n%s", got, before, logs)
+	}
+
+	// Once the describe answers again, the stale rows take its new values
+	// and are fresh again.
+	four := 4
+	info := f.types["m7i.large"]
+	info.VCPUs = &four
+	f.types["m7i.large"] = info
+	f.typesErr = nil
+	ageAttempts()
+	pass()
+	if d := describes(); fmt.Sprint(d) != "[describe us-east-1 m7i.large,t4g.small]" {
+		t.Fatalf("describes after the failure %v", d)
+	}
+	if got := catalog(); !strings.Contains(got[0], "m7i.large vcpus=4 ") {
+		t.Fatalf("catalog %v, want m7i.large's vcpus updated to 4", got)
+	}
+	var fresh int
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM instance_types WHERE fetched_at > now() - interval '1 minute'`).Scan(&fresh)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if fresh != 2 {
+		t.Fatalf("%d rows fetched within the minute, want 2", fresh)
 	}
 }
