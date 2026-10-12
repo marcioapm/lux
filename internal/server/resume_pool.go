@@ -211,7 +211,9 @@ func (s *Server) futureHost(ctx context.Context, tx pgx.Tx, pl poolRow, f *poolF
 			future.Capacity.CPUs, future.Capacity.Memory = float64(*vcpus), *mem
 			continue
 		}
-		probe = &poolProfile{Labels: future.Labels, Capacity: future.Capacity, LabelsKnown: true}
+		probe = &poolProfile{Labels: maps.Clone(future.Labels), Capacity: future.Capacity, LabelsKnown: true}
+		// A new host cannot inherit a previous host's identity.
+		delete(probe.Labels, "name")
 		probe.Capacity.CPUs, probe.Capacity.Memory = float64(*vcpus), *mem
 	}
 	if err := rows.Err(); err != nil {

@@ -359,6 +359,31 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 				ec2Host(t, s, "e1", pool, "terminated", time.Minute, `{"cpus":16,"memory":68719476736}`, `{}`)
 				return pool
 			}},
+		{name: "a smaller fallback's identity cannot fit the probe host", res: &resumeResources{CPUs: f64(24)},
+			says: "pool intel cannot take this Run: it needs 24 cpus; its largest host has 32",
+			setup: func(t *testing.T, s *Server, id string) string {
+				addType(t, s, "m7i.8xlarge", 32)
+				pool := ec2Pool(t, s, "intel", `{"region":"us-east-1","instanceType":"m7i.8xlarge","fallbackInstanceTypes":["m7i.4xlarge"]}`)
+				ec2Host(t, s, "e1", pool, "terminated", time.Minute, `{"cpus":16,"memory":68719476736}`, `{"name":"e1"}`)
+				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"name":"e1"}') WHERE id = $1`, id)
+				facts, err := s.loadPoolFacts(context.Background(), pool, "t1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(facts.Profiles) != 2 {
+					t.Fatalf("profiles: %+v, want planned and probe", facts.Profiles)
+				}
+				if planned := facts.Profiles[0]; planned.Labels["name"] != "e1" || planned.Capacity.CPUs != 16 {
+					t.Errorf("planned profile: %+v, want name=e1 and 16 cpus", planned)
+				}
+				if probe := facts.Profiles[1]; probe.Capacity.CPUs != 32 {
+					t.Errorf("probe profile: %+v, want 32 cpus", probe)
+				}
+				if name, present := facts.Profiles[1].Labels["name"]; present {
+					t.Errorf("probe inherited name=%q", name)
+				}
+				return pool
+			}},
 		{name: "registrations smaller than the instance type: fits the probe host", res: &resumeResources{CPUs: f64(12)},
 			setup: func(t *testing.T, s *Server, id string) string {
 				addType(t, s, "m7i.2xlarge", 8)
