@@ -822,10 +822,10 @@ func (s *RunSpec) normalizeSecret(at string, sec *Secret) []string {
 // declared, checked as at submit and stored without its value, except a
 // name in Git.DroppedCredentials: never declared, and refused with as env
 // or file. Each name in remove leaves the spec. Removing a name the spec
-// lacks, a credential
-// (git, registry or header), a name also supplied, or the credential of a
-// repository in repos (those this resume adds) is refused. Returns the
-// names declared; on any problem, the spec is unchanged.
+// lacks, a credential (git, registry or header), a name also supplied, or
+// the credential of a repository in repos (those this resume adds) is
+// refused. Returns the names declared; on any problem, the spec is
+// unchanged.
 func (s *RunSpec) ResumeSecrets(supplied []Secret, remove []string, repos []Repository, d Defaults) ([]string, error) {
 	has := map[string]bool{}
 	for _, sec := range s.Secrets {
