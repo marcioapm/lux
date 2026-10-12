@@ -99,7 +99,9 @@ func (s *Server) routes(api huma.API) {
 			"A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one, or unless its resumePolicy is restart and it has no session, which restores nothing.\n\n" +
 			"resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller " +
 			"only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). " +
-			"A Run already resuming refuses other sizes (409).",
+			"A Run already resuming refuses other sizes (409).\n\n" +
+			"placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit; nothing changes). " +
+			"validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests},
 	}, "run", s.resumeRun)
@@ -516,11 +518,9 @@ type Run struct {
 	// (stopped, lost, failed, succeeded), what a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
 	// Servers: on GET /v1/runs/{id}, its servers.
-	Servers     []RunServer      `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
-	SubmittedBy *RunSubmitter    `json:"submittedBy,omitempty" doc:"On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."`
-	Cost        *RunCostBrief    `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
-	Resize      *Resize          `json:"resize,omitempty" doc:"In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."`
-	Placement   *ResumePlacement `json:"placement,omitempty" doc:"In a resume's answer, when it named a pool (placement.poolId): the pool the Run is bound to from now on, the one it left, and whether its platform went unchecked."`
+	Servers     []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
+	SubmittedBy *RunSubmitter `json:"submittedBy,omitempty" doc:"On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."`
+	Cost        *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
 }
 
 // Resumability says whether a Run can be resumed now, and from what.
@@ -1582,6 +1582,7 @@ type resumeRequest struct {
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
 	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over). On a Run already resuming: the same as its resume asked for, 202 with that resume's resize; absent or empty, 202; other values, 409 not_resumable."`
 	Placement    *resumeTarget    `json:"placement,omitempty" doc:"Move the Run to another pool (poolId) from this resume on, with its saved state, as on any host change."`
+	ValidateOnly bool             `json:"validateOnly,omitempty" doc:"Run every check this resume would run and change nothing: 200 with valid: true (and the resize and placement it would apply), or the error it would meet. Secret values may be left out: only the names sent are checked. A live Run (scheduled, starting, running, stopping) is judged as if it were stopped, its state given in stateUnchecked."`
 	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha; mode: move, fast-forward or fetch) before init, through the host's mirror. Mode move (default): tracked files become the ref's, untracked and ignored ones are kept. fast-forward: only a checkout that loses nothing moves; fetch: none does. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
 }
 
@@ -1645,11 +1646,21 @@ type resumeRunInput struct {
 	Body *resumeRequest
 }
 
-// resumeOutput is the resumed Run and the id of the request.
+// resumeOutput is the resume's answer and the id of the request.
 type resumeOutput struct {
 	Status    int
 	RequestID string `header:"Lux-Request-Id" doc:"The resume's request id (requestId, or the one generated)."`
-	Body      *Run
+	Body      *ResumeAnswer
+}
+
+// ResumeAnswer is the resumed Run (202), or a validateOnly resume's
+// verdict (200: valid, without the Run), with what the resume changes.
+type ResumeAnswer struct {
+	Valid          bool             `json:"valid,omitempty" doc:"validateOnly: true, the resume would be accepted; the Run's fields are absent, and nothing changed."`
+	StateUnchecked string           `json:"stateUnchecked,omitempty" doc:"validateOnly on a live Run (scheduled, starting, running, stopping): its state, which was not checked; the rest was checked as for a resume once it is stopped, but for the tenant's Run quota, which its own placement counts against until then."`
+	Resize         *Resize          `json:"resize,omitempty" doc:"When it asked to change resources: what it asked for and what the Run has from now on."`
+	Placement      *ResumePlacement `json:"placement,omitempty" doc:"When it named a pool (placement.poolId): the pool the Run is bound to from now on, the one it left, and whether its platform went unchecked."`
+	*Run
 }
 
 // requireSecrets refuses a submit or resume that lacks a value (or has an
@@ -1718,7 +1729,10 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 	resumed := false
 	var resize *Resize
 	var moved *ResumePlacement
-	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	// stateUnchecked: a validateOnly resume of a live Run, judged as if it
+	// were stopped: its state.
+	stateUnchecked := ""
+	attempt := func(tx pgx.Tx) error {
 		var state string
 		var refs []spec.SecretRef
 		var sp spec.RunSpec
@@ -1785,10 +1799,14 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			return nil // idempotent: the first resume's secrets stand
 		case terminal(state):
 			return errf(http.StatusConflict, "not_resumable", "run is %s", state)
+		case req.ValidateOnly && live(state):
+			// Asked before stopping it: would a resume be accepted once
+			// it is stopped. Everything else is checked as for that resume.
+			stateUnchecked = state
 		default:
 			return errf(http.StatusConflict, "not_resumable", "run is %s: stop it first", state)
 		}
-		if p.Operator && len(req.Secrets) == 0 && requireSecrets(refs, values) != nil {
+		if !req.ValidateOnly && p.Operator && len(req.Secrets) == 0 && requireSecrets(refs, values) != nil {
 			return errf(http.StatusUnprocessableEntity, "secrets_required",
 				"luxd no longer holds this Run's secrets: only the tenant can resume it, supplying them")
 		}
@@ -1829,8 +1847,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 				return err
 			}
 		}
-		if err := requireSecrets(refs, values); err != nil {
-			return err
+		// A dry run may leave values out: only the names it sends are checked.
+		if !req.ValidateOnly {
+			if err := requireSecrets(refs, values); err != nil {
+				return err
+			}
 		}
 		// Rotation is allowed: record the new fingerprints.
 		newRefs := make([]spec.SecretRef, 0, len(refs))
@@ -1881,8 +1902,17 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		if req.Input != nil && req.Input.Text != "" {
 			in = &proto.Input{RequestID: ids.New("in"), Text: req.Input.Text}
 		}
-		if err := checkRunQuota(ctx, tx, p.TenantID); err != nil {
-			return err
+		// A live Run's own placement counts against the quota until it
+		// stops, so a dry run on it cannot judge the quota a resume meets.
+		if stateUnchecked == "" {
+			if err := checkRunQuota(ctx, tx, p.TenantID); err != nil {
+				return err
+			}
+		}
+		// A dry run stops before it caches secrets or writes events; its
+		// writes so far are rolled back below.
+		if req.ValidateOnly {
+			return nil
 		}
 		resumed = true
 		// Cached before commit, so the scheduler never sees the Run
@@ -1920,7 +1950,19 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			return err
 		}
 		return s.requestResume(ctx, tx, p.TenantID, id, in, why)
+	}
+	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		err := attempt(tx)
+		// A dry run never commits: errValidated rolls back whatever its
+		// checks wrote.
+		if req.ValidateOnly && err == nil {
+			return errValidated
+		}
+		return err
 	})
+	if req.ValidateOnly {
+		return s.validatedResume(req.RequestID, err, resize, moved, stateUnchecked)
+	}
 	if err != nil {
 		if resumed && !cached {
 			s.secrets.drop(id)
@@ -1932,9 +1974,21 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 	if err != nil {
 		return nil, err
 	}
-	run.Resize = resize
-	run.Placement = moved
-	return &resumeOutput{http.StatusAccepted, req.RequestID, run}, nil
+	return &resumeOutput{http.StatusAccepted, req.RequestID, &ResumeAnswer{Resize: resize, Placement: moved, Run: run}}, nil
+}
+
+// errValidated rolls back a validateOnly resume whose checks all passed.
+var errValidated = errors.New("validated: rolled back")
+
+// validatedResume is a validateOnly resume's answer: 200 valid when its
+// transaction rolled back on errValidated, else the error a resume would
+// have met. The Run's held secrets are as they were: a dry run never
+// reaches secrets.put.
+func (s *Server) validatedResume(requestID string, err error, resize *Resize, moved *ResumePlacement, stateUnchecked string) (*resumeOutput, error) {
+	if err != nil && !errors.Is(err, errValidated) {
+		return nil, err
+	}
+	return &resumeOutput{http.StatusOK, requestID, &ResumeAnswer{Valid: true, StateUnchecked: stateUnchecked, Resize: resize, Placement: moved}}, nil
 }
 
 // Disk headroom a shrink must leave above the measured use: a quarter of

@@ -801,6 +801,33 @@ finds this pool. --platform renames the platform's pool of that name
 	return cmd
 }
 
+// poolIDOf is the id of the pool ref names, among those GET /v1/pools
+// lists: a pool whose id it is, else the tenant's pool of that name, else
+// the platform's (resolvePool's preference at submit).
+func (a *app) poolIDOf(ctx context.Context, ref string) (string, error) {
+	var resp struct {
+		Pools []server.Pool `json:"pools"`
+	}
+	if err := a.c.Do(ctx, "GET", "/v1/pools", nil, &resp); err != nil {
+		return "", err
+	}
+	var platform string
+	for _, pl := range resp.Pools {
+		switch {
+		case pl.ID == ref:
+			return pl.ID, nil
+		case pl.Name == ref && !pl.Platform:
+			return pl.ID, nil
+		case pl.Name == ref:
+			platform = pl.ID
+		}
+	}
+	if platform == "" {
+		return "", fmt.Errorf("no pool %q", ref)
+	}
+	return platform, nil
+}
+
 // poolTarget is the live pool name that pools set would write, nil when
 // there is none; its owner as the operator knows it (the key's tenant,
 // --tenant's, or the platform); and whether that is the platform, which an
