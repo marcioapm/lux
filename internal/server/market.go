@@ -308,6 +308,7 @@ func (s *Server) marketZones(ctx context.Context, t *marketTarget, problems mark
 	return zones, err
 }
 
+// marketStrings runs a one-column text query in the system scope.
 func (s *Server) marketStrings(ctx context.Context, query string, args ...any) ([]string, error) {
 	var out []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
