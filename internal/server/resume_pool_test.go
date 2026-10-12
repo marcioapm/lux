@@ -204,6 +204,30 @@ func TestResumeIntoAnotherPoolRefusals(t *testing.T) {
 			setup: func(t *testing.T, f fixture) string {
 				return ec2Pool(t, f.s, "graviton", `{"region":"us-east-1","instanceType":"m7g.4xlarge"}`)
 			}},
+		{name: "disk beyond its largest static host", code: "pool_unfit", says: "it needs 500.0 GiB of disk; its largest host has 100.0 GiB",
+			res: &resumeResources{Disk: spec.Bytes(500 * gib)},
+			setup: func(t *testing.T, f fixture) string {
+				execSQL(t, f.s, context.Background(), `UPDATE hosts SET capacity = capacity || '{"disk":107374182400}' WHERE id = 'hb'`)
+				return poolID(t, f.s, "big", "t1")
+			}},
+		{name: "nested where only another tenant's host in a platform pool offers it", code: "pool_unfit", says: "none of its hosts offers nested containers",
+			setup: func(t *testing.T, f fixture) string {
+				ctx := context.Background()
+				execSQL(t, f.s, ctx, `INSERT INTO tenants (id, name) VALUES ('t2', 't2')`)
+				readyHost(t, f.s, "h1", "shared", "", false)
+				readyHost(t, f.s, "h2", "shared", "", false)
+				execSQL(t, f.s, ctx, `UPDATE hosts SET tenant_id = 't2', labels = '{"nested":"true"}' WHERE id = 'h2'`)
+				execSQL(t, f.s, ctx, `UPDATE hosts SET registered_at = now() WHERE id IN ('h1', 'h2')`)
+				execSQL(t, f.s, ctx, `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, f.id)
+				return poolID(t, f.s, "shared", "")
+			}},
+		{name: "required labels the ec2 template's registrations lack", code: "pool_unfit", says: "labels placement.requires names",
+			setup: func(t *testing.T, f fixture) string {
+				execSQL(t, f.s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"gpu":"a100"}') WHERE id = $1`, f.id)
+				pool := ec2Pool(t, f.s, "burst", `{"region":"us-east-1"}`)
+				ec2Host(t, f.s, "e1", pool, "terminated", time.Minute, `{"cpus":16}`, `{"zone":"a"}`)
+				return pool
+			}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
@@ -287,6 +311,14 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 				pool := ec2Pool(t, s, "burst", `{"region":"us-east-1"}`)
 				ec2Host(t, s, "e-big", pool, "terminated", 2*time.Minute, `{"cpus":64,"memory":274877906944}`, `{}`)
 				ec2Host(t, s, "e-small", pool, "terminated", time.Minute, `{"cpus":16,"memory":68719476736}`, `{}`)
+				return pool
+			}},
+		{name: "an older template's smaller registration", res: &resumeResources{CPUs: f64(12)},
+			setup: func(t *testing.T, s *Server, id string) string {
+				pool := ec2Pool(t, s, "burst", `{"region":"us-east-1"}`)
+				ec2Host(t, s, "e-old", pool, "terminated", time.Second, `{"cpus":8,"memory":68719476736}`, `{}`)
+				execSQL(t, s, context.Background(), `UPDATE hosts SET launch_template = '{"region":"us-east-1","version":0}' WHERE id = 'e-old'`)
+				ec2Host(t, s, "e-cur", pool, "terminated", time.Minute, `{"cpus":16,"memory":68719476736}`, `{}`)
 				return pool
 			}},
 		{name: "nested where the template opts in but its hosts registered without", says: "its template's latest hosts registered without them",
@@ -374,6 +406,11 @@ func TestResumeIntoAnotherPoolAllowed(t *testing.T) {
 			setup: func(t *testing.T, s *Server, id string) string {
 				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{sandbox}', '{"nestedContainers":true}') WHERE id = $1`, id)
 				return ec2Pool(t, s, "nest", `{"region":"us-east-1","nestedContainers":true}`)
+			}},
+		{name: "required labels on an ec2 pool that never launched a host", unchecked: true,
+			setup: func(t *testing.T, s *Server, id string) string {
+				execSQL(t, s, context.Background(), `UPDATE runs SET spec = jsonb_set(spec, '{placement,requires}', '{"gpu":"a100"}') WHERE id = $1`, id)
+				return ec2Pool(t, s, "burst", `{"region":"us-east-1"}`)
 			}},
 		{name: "nested on a static host with --nested", unchecked: true,
 			setup: func(t *testing.T, s *Server, id string) string {

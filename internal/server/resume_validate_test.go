@@ -24,7 +24,7 @@ type runSnapshot struct {
 	Binding runBinding
 	Spec    string
 	Events  int
-	Held    bool
+	Held    string // the held secret values, as JSON; "" when none are held
 }
 
 func snapshotRun(t *testing.T, s *Server, id string) runSnapshot {
@@ -32,20 +32,30 @@ func snapshotRun(t *testing.T, s *Server, id string) runSnapshot {
 	var r runSnapshot
 	r.Binding = binding(t, s, id)
 	systemScan(t, s, `SELECT spec::text, (SELECT count(*) FROM run_events WHERE run_id = $1) FROM runs WHERE id = $1`, []any{id}, &r.Spec, &r.Events)
-	_, r.Held = s.secrets.get(id)
+	if v, held := s.secrets.get(id); held {
+		r.Held = jsonText(v)
+	}
 	return r
 }
 
 // A dry run on a live Run is 200 valid with what the resume would apply
 // (the move, the resize), names the state it did not check, and changes
-// nothing: pool_id, spec, state, secrets, events, the held secrets.
+// nothing: pool_id, spec, state, secrets, events, the held secrets. Its
+// own placement counts against the tenant's Run limit, so that limit is not
+// checked.
 func TestResumeValidateOnlyOnALiveRun(t *testing.T) {
-	for _, state := range []string{StateRunning, StateStarting} {
+	for _, state := range []string{StateScheduled, StateStarting, StateRunning, StateStopping} {
 		t.Run(state, func(t *testing.T) {
 			s := testServer(t)
+			ctx := context.Background()
 			id, big := movedRun(t, s)
-			execSQL(t, s, context.Background(), `UPDATE runs SET state = $2 WHERE id = $1`, id, state)
+			execSQL(t, s, ctx, `UPDATE runs SET state = $2 WHERE id = $1`, id, state)
+			execSQL(t, s, ctx, `UPDATE tenants SET max_concurrent_runs = 1 WHERE id = 't1'`)
+			s.secrets.put(id, map[string]string{"TOKEN": "live"})
 			before := snapshotRun(t, s, id)
+			if before.Held == "" {
+				t.Fatal("fixture: no secrets held")
+			}
 			out, err := dryRun(s, id, big, &resumeResources{CPUs: f64(8), Memory: bytesPtr(32 * gib)})
 			if err != nil {
 				t.Fatal(err)
@@ -82,6 +92,59 @@ func TestResumeValidateOnlyOnALiveRun(t *testing.T) {
 	}
 	if b := binding(t, s, id); b.PoolID != big || b.State != StateResuming {
 		t.Errorf("the real resume after the dry run: %+v", b)
+	}
+}
+
+// A stopped Run at its tenant's Run limit (another Run running) is refused
+// by the dry run with the status, code and message of the real resume.
+func TestResumeValidateOnlyQuotaOnAStoppedRun(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	id, big := movedRun(t, s)
+	other := submitOnHA(t, s, resizeBase)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = $1`, other)
+	execSQL(t, s, ctx, `UPDATE tenants SET max_concurrent_runs = 1 WHERE id = 't1'`)
+	before := snapshotRun(t, s, id)
+	_, dryErr := dryRun(s, id, big, nil)
+	dry := refused(t, dryErr, http.StatusTooManyRequests, "quota_exceeded", "dry run")
+	if after := snapshotRun(t, s, id); after != before {
+		t.Errorf("after the refused dry run: %+v, want %+v", after, before)
+	}
+	_, realErr := resumeTo(s, id, big, nil)
+	if real := refused(t, realErr, http.StatusTooManyRequests, "quota_exceeded", "resume"); real.Message != dry.Message {
+		t.Errorf("dry run says %q, the resume %q", dry.Message, real.Message)
+	}
+}
+
+// A dry run on a Run already resuming answers as a retry would: the pool
+// its resume moved it to is valid with that resume's placement, the pool
+// it left 409; neither writes an event.
+func TestResumeValidateOnlyWhileResuming(t *testing.T) {
+	s := testServer(t)
+	id, big := movedRun(t, s)
+	first, err := resumeTo(s, id, big, &resumeResources{CPUs: f64(8)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotRun(t, s, id)
+	out, err := dryRun(s, id, big, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, fp := out.Body, first.Body.Placement
+	if out.Status != http.StatusOK || !a.Valid || a.StateUnchecked != "" || a.Placement == nil ||
+		a.Placement.PoolID != fp.PoolID || a.Placement.From == nil || *a.Placement.From != *fp.From || a.Placement.PlatformUnchecked != fp.PlatformUnchecked {
+		t.Errorf("dry run on the same pool: %d %+v, want valid with the first's placement %+v", out.Status, a, fp)
+	}
+	_, err = dryRun(s, id, "default", nil)
+	refused(t, err, http.StatusConflict, "not_resumable", "dry run into the pool it left")
+	if after := snapshotRun(t, s, id); after != before {
+		t.Errorf("after the dry runs: %+v, want %+v", after, before)
+	}
+	var events int
+	systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'resume.requested'`, []any{id}, &events)
+	if events != 1 {
+		t.Errorf("%d resume.requested, want 1", events)
 	}
 }
 

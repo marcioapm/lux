@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 )
 
 // listedPool is one pool of GET /v1/pools as JSON, by name.
@@ -62,6 +63,47 @@ func TestPoolsListPlatformsAndCapabilities(t *testing.T) {
 		if got, present := caps["nestedContainers"]; !present || got != c.nested {
 			t.Errorf("%s: capabilities %v, want nestedContainers %v", c.pool, caps, c.nested)
 		}
+	}
+}
+
+// A platform pool's facts, for a tenant, leave out another tenant's hosts
+// registered into it: their arch and nesting are not the tenant's to use.
+func TestPoolsListIgnoresAnotherTenantsHosts(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	_, _ = movedRun(t, s)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t2', 't2')`)
+	readyHost(t, s, "h1", "shared", "", false)
+	readyHost(t, s, "h2", "shared", "", false)
+	execSQL(t, s, ctx, `UPDATE hosts SET arch = 'amd64', registered_at = now() WHERE id = 'h1'`)
+	execSQL(t, s, ctx, `UPDATE hosts SET tenant_id = 't2', arch = 'arm64', labels = '{"nested":"true"}', registered_at = now() WHERE id = 'h2'`)
+	p := listedPool(t, s, apiKey(t, s, new("t1"), "read"), "shared")
+	caps, _ := p["capabilities"].(map[string]any)
+	if jsonText(p["platforms"]) != `["linux/amd64"]` || caps["nestedContainers"] != false {
+		t.Errorf("t1 sees shared as %v %v, want [linux/amd64] and nestedContainers false", p["platforms"], caps)
+	}
+}
+
+// An ec2 pool's host of an older template counts while it is live (it
+// can take a Run), never as the host the pool launches next.
+func TestPoolsListOlderTemplateHost(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	_, _ = movedRun(t, s)
+	pool := ec2Pool(t, s, "burst", `{"region":"us-east-1"}`)
+	ec2Host(t, s, "old", pool, "ready", time.Minute, `{"cpus":16}`, `{"nested":"true"}`)
+	execSQL(t, s, ctx, `UPDATE hosts SET launch_template = '{"region":"us-east-1","version":0}' WHERE id = 'old'`)
+	key := apiKey(t, s, new("t1"), "read")
+	nested := func() any {
+		caps, _ := listedPool(t, s, key, "burst")["capabilities"].(map[string]any)
+		return caps["nestedContainers"]
+	}
+	if got := nested(); got != true {
+		t.Errorf("with the older template's nested host ready: nestedContainers %v, want true", got)
+	}
+	execSQL(t, s, ctx, `UPDATE hosts SET state = 'terminated' WHERE id = 'old'`)
+	if got := nested(); got != false {
+		t.Errorf("once it has gone: nestedContainers %v, want false", got)
 	}
 }
 

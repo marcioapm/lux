@@ -99,7 +99,7 @@ func TestResumePoolFlagOperator(t *testing.T) {
 func TestResumeDryRun(t *testing.T) {
 	var posted []map[string]any
 	answer := `{"valid":true,"stateUnchecked":"running","placement":{"pool":"big","poolId":"pool_mine","platformUnchecked":true}}`
-	out, err := runCLI(t, poolsAndResume(t, http.StatusOK, answer, &posted), "resume", "run_1", "--pool", "big", "--dry-run")
+	out, errOut, err := runCLIErr(t, poolsAndResume(t, http.StatusOK, answer, &posted), "resume", "run_1", "--pool", "big", "--dry-run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +108,10 @@ func TestResumeDryRun(t *testing.T) {
 	}
 	if out != "valid\n" {
 		t.Errorf("output %q, want valid", out)
+	}
+	if want := "platform unchecked: lux does not know whether pool big runs this Run's image\n" +
+		"state unchecked: the Run is running; checked as if it were stopped\n"; errOut != want {
+		t.Errorf("stderr %q, want %q", errOut, want)
 	}
 	posted = nil
 	out, err = runCLI(t, poolsAndResume(t, http.StatusOK, answer, &posted), "-o", "json", "resume", "run_1", "--dry-run")
