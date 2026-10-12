@@ -582,8 +582,8 @@ func failClone(t *testing.T, s *Server, id, repo, requestID string) map[string]a
 	return data
 }
 
-// noSecretsSpec is secretsSpec with no secrets and no repositories: what a
-// session Run dude links repositories to starts as.
+// noSecretsSpec is secretsSpec with no secrets and no repositories: a Run
+// that only a resume gives repositories.
 func noSecretsSpec() spec.RunSpec {
 	sp := secretsSpec()
 	sp.Image.RegistryAuth = nil
@@ -593,18 +593,25 @@ func noSecretsSpec() spec.RunSpec {
 	return sp
 }
 
+// resumeAddingTwo resumes Run id as requestID, adding repository "two"
+// with the credential GIT_TOKEN, valued git-1.
+func resumeAddingTwo(t *testing.T, s *Server, id, requestID string) {
+	t.Helper()
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: requestID,
+		Secrets: []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}},
+		Git:     &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "GIT_TOKEN"}}},
+	}); err != nil {
+		t.Fatalf("%s: %v", requestID, err)
+	}
+}
+
 // The prod sequence: a resume adds a repository with a new credential, its
 // clone fails, and the credential goes with it: the next resume, with no
 // secrets, is accepted, and the Run declares none.
 func TestFailedCloneDropsItsUnusedCredential(t *testing.T) {
 	s := testServer(t)
 	id := stoppedWith(t, s, noSecretsSpec())
-	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: "r-1",
-		Secrets: []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}},
-		Git:     &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "GIT_TOKEN"}}},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	resumeAddingTwo(t, s, id, "r-1")
 	if secs, refs := storedSecrets(t, s, id); !reflect.DeepEqual(secretNames(secs), []string{"GIT_TOKEN"}) || !reflect.DeepEqual(refNames(refs), []string{"GIT_TOKEN"}) {
 		t.Fatalf("after adding: %v / %v", secretNames(secs), refNames(refs))
 	}
@@ -655,12 +662,8 @@ func TestFailedCloneKeepsASharedCredential(t *testing.T) {
 func TestFailedCloneAgainAfterReAdd(t *testing.T) {
 	s := testServer(t)
 	id := stoppedWith(t, s, noSecretsSpec())
-	addTwo := &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "GIT_TOKEN"}}}
-	tok := []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}}
 	for _, rid := range []string{"r-1", "r-2"} {
-		if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: rid, Secrets: tok, Git: addTwo}); err != nil {
-			t.Fatalf("%s: %v", rid, err)
-		}
+		resumeAddingTwo(t, s, id, rid)
 		if ev := failClone(t, s, id, "two", rid); ev["droppedSecret"] != "GIT_TOKEN" {
 			t.Fatalf("%s: git.clone event %v, want droppedSecret GIT_TOKEN", rid, ev)
 		}
@@ -715,17 +718,13 @@ func TestFailedCloneKeepsARegistryCredential(t *testing.T) {
 func TestDroppedCredentialSuppliedAgain(t *testing.T) {
 	s := testServer(t)
 	id := stoppedWith(t, s, noSecretsSpec())
-	addTwo := &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "GIT_TOKEN"}}}
-	tok := []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}}
-	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: "r-1", Secrets: tok, Git: addTwo}); err != nil {
-		t.Fatal(err)
-	}
+	resumeAddingTwo(t, s, id, "r-1")
 	failClone(t, s, id, "two", "r-1")
 
 	_, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1", As: "env"}}})
 	refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "as env under a dropped credential's name")
 
-	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: tok}); err != nil {
+	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{Secrets: []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if secs, refs := storedSecrets(t, s, id); len(secs) != 0 || len(refs) != 0 {
@@ -736,9 +735,7 @@ func TestDroppedCredentialSuppliedAgain(t *testing.T) {
 	}
 
 	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
-	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: "r-3", Secrets: tok, Git: addTwo}); err != nil {
-		t.Fatal(err)
-	}
+	resumeAddingTwo(t, s, id, "r-3")
 	secs, refs := storedSecrets(t, s, id)
 	if len(secs) != 1 || secs[0].Name != "GIT_TOKEN" || !secs[0].RunnerOnly || secs[0].As != "none" {
 		t.Fatalf("re-added credential %+v, want runner-only", secs)
@@ -769,12 +766,7 @@ func TestOperatorResumeAfterADroppedCredential(t *testing.T) {
 	op := context.WithValue(context.Background(), principalKey, Principal{Operator: true, TenantID: "t1", Scopes: []string{"admin", "operator"}})
 	s := testServer(t)
 	id := stoppedWith(t, s, noSecretsSpec())
-	if _, err := resumeSecrets(tenantCtx("t1"), s, id, resumeRequest{RequestID: "r-1",
-		Secrets: []spec.Secret{{Name: "GIT_TOKEN", Value: "git-1"}},
-		Git:     &resumeGit{Repositories: []spec.Repository{{Name: "two", URL: "https://git.example.com/two.git", Credential: "GIT_TOKEN"}}},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	resumeAddingTwo(t, s, id, "r-1")
 	failClone(t, s, id, "two", "r-1")
 	if vals, _ := s.secrets.get(id); vals["GIT_TOKEN"] != "git-1" {
 		t.Fatalf("held %v before operator resume, want GIT_TOKEN", vals)
