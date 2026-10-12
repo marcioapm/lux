@@ -16,8 +16,8 @@ import (
 )
 
 // credsFixture: wakeFixture with r1's spec pushing app (credential
-// GIT_TOKEN) and lib (no credential), h1's runner taking credentials, and
-// s's log, at debug, in the returned buffer.
+// GIT_TOKEN) and lib (no credential), h1's runner taking credentials and
+// polling this luxd, and s's log, at debug, in the returned buffer.
 func credsFixture(t *testing.T) (*Server, context.Context, string, *syncBuffer) {
 	t.Helper()
 	s, ctx, key, _ := wakeFixture(t)
@@ -27,6 +27,7 @@ func credsFixture(t *testing.T) (*Server, context.Context, string, *syncBuffer) 
 		{"name": "app", "url": "https://x/app.git", "path": "/w/app", "credential": "GIT_TOKEN"},
 		{"name": "lib", "url": "https://x/lib.git", "path": "/w/lib"}]}}'`)
 	execSQL(t, s, ctx, `UPDATE hosts SET capabilities = ARRAY['diff', 'git-credentials']`)
+	s.hub.polled("h1")
 	return s, ctx, key, logs
 }
 
@@ -185,8 +186,7 @@ func countMessages(t *testing.T, s *Server) (n int) {
 }
 
 // A host whose runner predates credentials: a push or sync with them is
-// 409 push_credentials_unsupported / sync_credentials_unsupported, nothing
-// queued; without them it goes.
+// 409 git_credentials_unsupported, nothing queued; without them it goes.
 func TestCredentialsOnAnOldRunner(t *testing.T) {
 	s, ctx, key, _ := credsFixture(t)
 	execSQL(t, s, ctx, `UPDATE hosts SET capabilities = ARRAY['diff', 'sync-modes']`)
@@ -195,8 +195,8 @@ func TestCredentialsOnAnOldRunner(t *testing.T) {
 		path, code string
 		body       map[string]any
 	}{
-		{"push", "push_credentials_unsupported", map[string]any{"credentials": map[string]string{"app": "v"}}},
-		{"sync", "sync_credentials_unsupported", map[string]any{"sync": sync, "credentials": map[string]string{"app": "v"}}},
+		{"push", "git_credentials_unsupported", map[string]any{"credentials": map[string]string{"app": "v"}}},
+		{"sync", "git_credentials_unsupported", map[string]any{"sync": sync, "credentials": map[string]string{"app": "v"}}},
 	} {
 		before := countMessages(t, s)
 		w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/"+c.path, c.body)
@@ -212,6 +212,48 @@ func TestCredentialsOnAnOldRunner(t *testing.T) {
 	}
 	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", map[string]any{"sync": sync}); w.Code != http.StatusAccepted {
 		t.Fatalf("sync without credentials: %d %s", w.Code, w.Body)
+	}
+}
+
+// A host whose runner has no connection to this luxd (it talks to another
+// one): a push or sync with credentials is 503 host_unreachable, with no
+// message queued, no event written and nothing held; without them it goes.
+func TestCredentialsForAHostElsewhere(t *testing.T) {
+	s, _, key, _ := credsFixture(t)
+	s.hub.mu.Lock()
+	delete(s.hub.polls, "h1")
+	s.hub.mu.Unlock()
+	sync := []map[string]string{{"repo": "app", "ref": "main"}}
+	for _, c := range []struct {
+		path string
+		body map[string]any
+	}{
+		{"push", map[string]any{"credentials": map[string]string{"app": "secret-v"}}},
+		{"sync", map[string]any{"sync": sync, "credentials": map[string]string{"app": "secret-v"}}},
+	} {
+		w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/"+c.path, c.body)
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "host_unreachable") || strings.Contains(w.Body.String(), "secret-v") {
+			t.Fatalf("%s to a host elsewhere: %d %s", c.path, w.Code, w.Body)
+		}
+	}
+	var queued, events, held int
+	systemScan(t, s, `SELECT (SELECT count(*) FROM host_messages WHERE type IN ('push', 'sync')),
+		(SELECT count(*) FROM run_events WHERE run_id = $1 AND type IN ('push.requested', 'sync.requested', 'git.push', 'git.sync', 'sync.done'))`,
+		[]any{r1}, &queued, &events)
+	s.secrets.mu.Lock()
+	held = len(s.secrets.msgs)
+	s.secrets.mu.Unlock()
+	if queued != 0 || events != 0 || held != 0 {
+		t.Fatalf("refused requests left %d message(s), %d event(s), %d held", queued, events, held)
+	}
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/push", map[string]any{}); w.Code != http.StatusAccepted {
+		t.Fatalf("push without credentials: %d %s", w.Code, w.Body)
+	}
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", map[string]any{"sync": sync}); w.Code != http.StatusAccepted {
+		t.Fatalf("sync without credentials: %d %s", w.Code, w.Body)
+	}
+	if n := countMessages(t, s); n != 2 {
+		t.Fatalf("%d messages queued without credentials, want 2", n)
 	}
 }
 

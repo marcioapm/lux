@@ -889,17 +889,22 @@ POST /v1/runs/{id}/sync   {"sync": [{"repo": "app", "ref": "main"}], "credential
   `push.requested` and `sync.requested` events list the repository names
   only (`credentials: ["app"]`). luxd holds the values in memory until the
   runner has the request. If it no longer holds them (it restarted, or
-  another luxd took the runner's connection), the push ends with every
-  repository `failed`, and the sync with failed `git.sync` events and
-  `sync.done`, saying to send it again.
+  the runner reconnected to another luxd before taking it), the push ends
+  with every repository `failed`, and the sync with failed `git.sync`
+  events and `sync.done`, saying to send it again.
+- Only the luxd holding the runner's connection can deliver them, so the
+  request must reach it: a single luxd, or routing that sends a Run's
+  requests to the luxd its host is connected to, as interactive streams
+  need. Elsewhere it is 503 `host_unreachable`, nothing queued; send it
+  again. Without `credentials`, any luxd takes the request.
 - 422 `invalid_request` for a name that is not one of the Run's
   repositories, a repository without a `credential`, or an empty value.
-  409 `push_credentials_unsupported` (`sync_credentials_unsupported`) when
-  the Run's host runs a lux-runner that predates them; without
-  `credentials`, the request goes as before.
+  409 `git_credentials_unsupported` when the Run's host runs a lux-runner
+  that predates them; without `credentials`, the request goes as before.
 - From the CLI: `lux push <run> --credential app=VALUE` and
   `lux sync <run> app=main --credential app=VALUE` (repeatable). A VALUE of
-  `${VAR}` is read from the environment, keeping it off the command line.
+  `${VAR}` is read from the environment, keeping it off the command line
+  when single-quoted: `--credential 'app=${GIT_TOKEN}'`.
 
 The workload commits as it likes. The checkout is a normal git repository
 owned by the workload user.

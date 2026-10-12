@@ -161,11 +161,13 @@ func (s *Server) routes(api huma.API) {
 			"Without it, the lease is what this Run last pushed, or, the first time, that the branch does not exist.\n\n" +
 			"credentials: per repository name, a git credential (e.g. a short-lived installation token) used in place of the repository's credential secret, " +
 			"for this push and every later fetch and push of that repository by the running placement (the runner keeps the latest in memory). " +
-			"luxd never stores it: it holds it in memory until the runner has the push, and a push it no longer holds (it restarted) ends failed. " +
+			"luxd never stores it: it holds it in memory until the runner has the push, so the request must reach the luxd holding the runner's connection " +
+			"(a single luxd, or sticky routing, as interactive streams need): any other luxd answers 503 `host_unreachable` and queues nothing. " +
+			"A queued push whose credentials luxd no longer holds (it restarted) ends failed. " +
 			"422 `invalid_request` for a name that is not one of the Run's repositories, a repository without a credential, or an empty value. " +
-			"409 `push_credentials_unsupported` when the Run's host runs a lux-runner that does not take them.",
+			"409 `git_credentials_unsupported` when the Run's host runs a lux-runner that does not take them.",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusServiceUnavailable},
 	}, "run", s.pushRun)
 	register(s, api, huma.Operation{
 		OperationID: "syncRun", Method: http.MethodPost, Path: "/v1/runs/{id}/sync", Tags: []string{"runs"},
@@ -176,10 +178,13 @@ func (s *Server) routes(api huma.API) {
 			"Servers with afterSync run it and restart once a checkout moved; the others keep running.\n\n" +
 			"409 `sync_modes_unsupported` when a mode other than move is asked for and the Run's host runs a lux-runner without sync modes.\n\n" +
 			"credentials: as on a push: per repository name, a git credential to fetch with in place of the repository's credential secret, kept by the runner for later fetches and pushes; never stored by luxd. " +
+			"luxd holds it in memory until the runner has the sync, so the request must reach the luxd holding the runner's connection " +
+			"(a single luxd, or sticky routing, as interactive streams need): any other luxd answers 503 `host_unreachable` and queues nothing. " +
+			"A queued sync whose credentials luxd no longer holds (it restarted) ends failed (git.sync and sync.done). " +
 			"422 `invalid_request` for a name that is not one of the Run's repositories, a repository without a credential, or an empty value; " +
-			"409 `sync_credentials_unsupported` when the Run's host runs a lux-runner that does not take them.",
+			"409 `git_credentials_unsupported` when the Run's host runs a lux-runner that does not take them.",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusServiceUnavailable},
 	}, "run", s.syncRun)
 	register(s, api, huma.Operation{
 		OperationID: "runDiff", Method: http.MethodGet, Path: "/v1/runs/{id}/diff", Tags: []string{"runs"},
@@ -2070,8 +2075,11 @@ func (s *Server) pushRun(ctx context.Context, in *pushRunInput) (*requestIDOutpu
 			return err
 		}
 		if len(req.Credentials) > 0 && !slices.Contains(caps, proto.CapGitCredentials) {
-			return errf(http.StatusConflict, "push_credentials_unsupported",
+			return errf(http.StatusConflict, "git_credentials_unsupported",
 				"the Run's host runs a lux-runner that does not take credentials on a push: push without them, or upgrade the host")
+		}
+		if err := s.deliverableHere(hostID, req.Credentials); err != nil {
+			return err
 		}
 		data := map[string]any{"requestId": msg.RequestID}
 		if len(req.Expect) > 0 {
@@ -2126,6 +2134,16 @@ func placementHost(ctx context.Context, tx pgx.Tx, runID string, epoch int) (str
 	err := tx.QueryRow(ctx, `SELECT p.host_id, coalesce(h.capabilities, '{}') FROM placements p LEFT JOIN hosts h ON h.id = p.host_id
 		WHERE p.run_id = $1 AND p.epoch = $2`, runID, epoch).Scan(&hostID, &caps)
 	return hostID, caps, err
+}
+
+// deliverableHere refuses credentials for a host whose runner does not talk
+// to this luxd: they are held only in this process, so another luxd could
+// not deliver them.
+func (s *Server) deliverableHere(hostID string, creds map[string]string) error {
+	if len(creds) > 0 && !s.hub.Reachable(hostID) {
+		return errf(http.StatusServiceUnavailable, "host_unreachable", "the Run's host has no live connection to this luxd")
+	}
+	return nil
 }
 
 // enqueueWithCredentials queues a push or sync whose credentials luxd
@@ -2216,8 +2234,11 @@ func (s *Server) syncRun(ctx context.Context, in *syncRunInput) (*requestIDOutpu
 		}
 		// An older runner drops the credentials, and fetches with the old one.
 		if len(in.Body.Credentials) > 0 && !slices.Contains(caps, proto.CapGitCredentials) {
-			return errf(http.StatusConflict, "sync_credentials_unsupported",
+			return errf(http.StatusConflict, "git_credentials_unsupported",
 				"the Run's host runs a lux-runner that does not take credentials on a sync: sync without them, or upgrade the host")
+		}
+		if err := s.deliverableHere(hostID, in.Body.Credentials); err != nil {
+			return err
 		}
 		ev := map[string]any{"requestId": msg.RequestID, "by": p.Actor(), "sync": msg.Repos}
 		if len(msg.CredentialRepos) > 0 {
