@@ -333,10 +333,7 @@ func writeFrame(ctx context.Context, ws *websocket.Conn, f proto.Frame) error {
 // sent (whatever order ids committed in). The poll fallback has no
 // connection and asks for every unacked message.
 func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered bool) ([]proto.Frame, error) {
-	if err := s.refuseUnsupportedSyncs(ctx, hostID); err != nil {
-		return nil, err
-	}
-	if err := s.refuseUncredentialed(ctx, hostID); err != nil {
+	if err := s.refuseUndeliverable(ctx, hostID); err != nil {
 		return nil, err
 	}
 	var out []proto.Frame
@@ -390,43 +387,72 @@ const unsupportedSync = `host_messages.type IN ('sync', 'assign')
 // syncModesGone is the outcome of a sync refused at delivery.
 const syncModesGone = "the host's lux-runner no longer supports sync modes"
 
-// refuseUnsupportedSyncs settles every unsupportedSync message of a host
-// in place of delivering it, and acks it. A running Run's sync ends failed:
-// a failed git.sync per repository, then sync.done. An assignment's
-// placement, not yet started, is lost and its Run queued again with its
-// sync, so that hostFit waits for a host with sync modes.
-func (s *Server) refuseUnsupportedSyncs(ctx context.Context, hostID string) error {
+// credentialedMsg is an unacked push or sync naming credentials, and
+// whether its host's latest registration has proto.CapGitCredentials.
+type credentialedMsg struct {
+	id      int64
+	runID   string
+	capable bool
+}
+
+// refuseUndeliverable settles, in place of delivering them, a host's
+// messages that must not reach its runner: unsupportedSync ones
+// (refuseSync) and credentialed ones it cannot deliver as asked
+// (refuseUncredentialed). Both are found in one transaction, since this
+// runs on every delivery pass; each is settled in its own.
+func (s *Server) refuseUndeliverable(ctx context.Context, hostID string) error {
 	type refused struct {
 		id    int64
 		runID string
 	}
-	var found []refused
+	var syncs []refused
+	var creds []credentialedMsg
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, coalesce(run_id, '') FROM host_messages
 			WHERE host_id = $1 AND acked_at IS NULL AND `+unsupportedSync+` ORDER BY id`, hostID)
 		if err != nil {
 			return err
 		}
-		found, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (refused, error) {
+		syncs, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (refused, error) {
 			var m refused
 			return m, r.Scan(&m.id, &m.runID)
+		})
+		if err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, `SELECT m.id, coalesce(m.run_id, ''),
+				EXISTS (SELECT 1 FROM hosts h WHERE h.id = m.host_id AND $4 = ANY(h.capabilities))
+			FROM host_messages m
+			WHERE m.host_id = $1 AND m.acked_at IS NULL AND m.type IN ($2, $3) AND jsonb_array_length(coalesce(m.payload->'credentialRepos', '[]')) > 0
+			ORDER BY m.id`, hostID, proto.MsgPush, proto.MsgSync, proto.CapGitCredentials)
+		if err != nil {
+			return err
+		}
+		creds, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (credentialedMsg, error) {
+			var m credentialedMsg
+			return m, r.Scan(&m.id, &m.runID, &m.capable)
 		})
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	for _, m := range found {
+	for _, m := range syncs {
 		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.refuseSync(ctx, tx, hostID, m.id, m.runID) }); err != nil {
 			return err
 		}
 	}
-	if len(found) > 0 {
+	if len(syncs) > 0 {
 		s.Kick()
 	}
-	return nil
+	return s.refuseUncredentialed(ctx, hostID, creds)
 }
 
+// refuseSync settles an unsupportedSync message in place of delivering it,
+// and acks it. A running Run's sync ends failed: a failed git.sync per
+// repository, then sync.done. An assignment's placement, not yet started,
+// is lost and its Run queued again with its sync, so that hostFit waits
+// for a host with sync modes.
 func (s *Server) refuseSync(ctx context.Context, tx pgx.Tx, hostID string, id int64, runID string) error {
 	// The Run first, then its message: as a report's transaction locks them.
 	var tenantID string
@@ -526,40 +552,16 @@ func (s *Server) attachCredentials(id int64, typ string, data json.RawMessage) j
 
 // credentialsGone is the outcome of a push or sync refused at delivery
 // because this luxd does not hold its credentials.
-const credentialsGone = "luxd no longer holds this request's credentials (it restarted, or another luxd took the request): send it again"
+const credentialsGone = "luxd no longer holds this request's credentials (it restarted, or the runner moved to another luxd): send it again"
 
-// refuseUncredentialed settles, in place of delivering, every unacked push
-// or sync of a host that names credentials (credentialRepos) this luxd
-// does not hold, or whose host re-registered without
-// proto.CapGitCredentials: sent without them, or to a runner that drops
-// them, it would use the credential they were to replace. A push ends with
-// a git.push event, every repository failed; a sync with a failed git.sync
-// per repository, then sync.done.
-func (s *Server) refuseUncredentialed(ctx context.Context, hostID string) error {
-	type msg struct {
-		id      int64
-		runID   string
-		capable bool
-	}
-	var found []msg
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT m.id, coalesce(m.run_id, ''),
-				EXISTS (SELECT 1 FROM hosts h WHERE h.id = m.host_id AND $4 = ANY(h.capabilities))
-			FROM host_messages m
-			WHERE m.host_id = $1 AND m.acked_at IS NULL AND m.type IN ($2, $3) AND jsonb_array_length(coalesce(m.payload->'credentialRepos', '[]')) > 0
-			ORDER BY m.id`, hostID, proto.MsgPush, proto.MsgSync, proto.CapGitCredentials)
-		if err != nil {
-			return err
-		}
-		found, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (msg, error) {
-			var m msg
-			return m, r.Scan(&m.id, &m.runID, &m.capable)
-		})
-		return err
-	})
-	if err != nil {
-		return err
-	}
+// refuseUncredentialed settles, in place of delivering, every message of
+// found that names credentials (credentialRepos) this luxd does not hold,
+// or whose host re-registered without proto.CapGitCredentials: sent
+// without them, or to a runner that drops them, it would use the
+// credential they were to replace. A push ends with a git.push event,
+// every repository failed; a sync with a failed git.sync per repository,
+// then sync.done.
+func (s *Server) refuseUncredentialed(ctx context.Context, hostID string, found []credentialedMsg) error {
 	for _, m := range found {
 		why := credentialsGone
 		if _, held := s.secrets.getMsg(m.id); held {
