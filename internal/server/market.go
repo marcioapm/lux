@@ -72,7 +72,7 @@ func (s *Server) marketLoop(ctx context.Context) {
 
 // sampleMarketPass is one pass: the provider's refusals (throttling, a
 // missing permission) are logged as one warning and do not fail it; the
-// error is the database's.
+// error is the database's or the context's.
 func (s *Server) sampleMarketPass(ctx context.Context) error {
 	problems, err := s.sampleMarket(ctx)
 	if perr := problems.err(); perr != nil && ctx.Err() == nil {

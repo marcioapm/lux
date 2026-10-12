@@ -435,7 +435,9 @@ func TestSampleMarketDeadPassMarksNoMore(t *testing.T) {
 			cancel()
 		}
 	}
-	_ = s.sampleMarketPass(passCtx)
+	if err := s.sampleMarketPass(passCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first pass: %v, want the context's error", err)
+	}
 	if calls := f.takeCalls(); slices.ContainsFunc(calls, func(c string) bool { return strings.HasSuffix(c, "m7g.large") && !strings.HasPrefix(c, "describe ") }) {
 		t.Fatalf("first pass went on to m7g.large on a dead context: %v", calls)
 	}
