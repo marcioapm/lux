@@ -535,28 +535,64 @@ func TestResumeIntoAnotherPoolWhileResuming(t *testing.T) {
 
 // An operator's chosen host must be in the pool the resume names: a host
 // elsewhere is 422 invalid_spec and changes nothing; one in it moves the Run.
+// The host is checked before the Run's state and the pool's fit, so a
+// resuming Run's retry and a resume that pool_unfit would also refuse get
+// invalid_spec too.
 func TestResumeIntoAnotherPoolChosenHost(t *testing.T) {
-	s := testServer(t)
-	id, big := movedRun(t, s)
-	resume := func(to string) (*resumeOutput, error) {
-		return s.resumeRun(operatorCtx(), &resumeRunInput{RunPath: RunPath{ID: id}, Body: &resumeRequest{
-			To: to, Placement: &resumeTarget{PoolID: big}, Secrets: []spec.Secret{{Name: "TOKEN", Value: "v"}}}})
+	setup := func(t *testing.T) (*Server, string, string, func(to string, res *resumeResources) (*resumeOutput, error)) {
+		s := testServer(t)
+		id, big := movedRun(t, s)
+		return s, id, big, func(to string, res *resumeResources) (*resumeOutput, error) {
+			return s.resumeRun(operatorCtx(), &resumeRunInput{RunPath: RunPath{ID: id}, Body: &resumeRequest{
+				To: to, Resources: res, Placement: &resumeTarget{PoolID: big}, Secrets: []spec.Secret{{Name: "TOKEN", Value: "v"}}}})
+		}
 	}
-	before := binding(t, s, id)
-	_, err := resume("hc")
-	he := refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "resume --to hc")
-	if want := "the chosen host is in pool default, not big"; he.Message != want {
-		t.Errorf("message %q, want %q", he.Message, want)
-	}
-	if after := binding(t, s, id); after != before {
-		t.Errorf("after the refusal: %+v, want %+v", after, before)
-	}
-	if _, err := resume("hb"); err != nil {
-		t.Fatal(err)
-	}
-	if b := binding(t, s, id); b.PoolID != big || b.State != StateResuming {
-		t.Errorf("after resume --to hb: %+v", b)
-	}
+	const outside = "the chosen host is in pool default, not big"
+	t.Run("a stopped Run", func(t *testing.T) {
+		s, id, big, resume := setup(t)
+		before := binding(t, s, id)
+		_, err := resume("hc", nil)
+		he := refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "resume --to hc")
+		if he.Message != outside {
+			t.Errorf("message %q, want %q", he.Message, outside)
+		}
+		if after := binding(t, s, id); after != before {
+			t.Errorf("after the refusal: %+v, want %+v", after, before)
+		}
+		if _, err := resume("hb", nil); err != nil {
+			t.Fatal(err)
+		}
+		if b := binding(t, s, id); b.PoolID != big || b.State != StateResuming {
+			t.Errorf("after resume --to hb: %+v", b)
+		}
+	})
+	t.Run("a resuming Run's retry", func(t *testing.T) {
+		s, id, big, resume := setup(t)
+		if _, err := resumeTo(s, id, big, nil); err != nil {
+			t.Fatal(err)
+		}
+		before := binding(t, s, id)
+		_, err := resume("hc", nil)
+		he := refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "retry --to hc")
+		if he.Message != outside {
+			t.Errorf("message %q, want %q", he.Message, outside)
+		}
+		if after := binding(t, s, id); after != before || before.State != StateResuming {
+			t.Errorf("after the refusal: %+v, want %+v, resuming", after, before)
+		}
+	})
+	t.Run("a host outside the pool and resources beyond it", func(t *testing.T) {
+		s, id, _, resume := setup(t)
+		before := binding(t, s, id)
+		_, err := resume("hc", &resumeResources{CPUs: f64(32)})
+		he := refused(t, err, http.StatusUnprocessableEntity, "invalid_spec", "resume --to hc, 32 cpus")
+		if he.Message != outside {
+			t.Errorf("message %q, want %q", he.Message, outside)
+		}
+		if after := binding(t, s, id); after != before {
+			t.Errorf("after the refusal: %+v, want %+v", after, before)
+		}
+	})
 }
 
 // Through the HTTP API: placement.poolId decodes, the answer carries
