@@ -1443,6 +1443,10 @@ components:
     Pool:
       additionalProperties: false
       properties:
+        capabilities:
+          $ref: "#/components/schemas/PoolCapabilities"
+          description: What the pool's hosts offer a Run, as a resume's placement.poolId judges it.
+          readOnly: true
         currency:
           description: The currency of hourlyPrice (ISO 4217); both or neither.
           examples:
@@ -1489,6 +1493,16 @@ components:
           description: A platform pool (no tenant). In a request, true is refused unless the caller acts on the platform's pools (an operator key without a tenant).
           readOnly: true
           type: boolean
+        platforms:
+          description: "The platforms (os/arch) the pool's hosts run: those of its live and latest registered hosts, and for an ec2 pool its template's instance types as the instance-type catalog describes them. Absent when lux knows none; a resume into it is then not refused for its platform."
+          examples:
+            - - linux/arm64
+          items:
+            type: string
+          readOnly: true
+          type:
+            - array
+            - "null"
         provider:
           type: string
         scaleDownAfter:
@@ -1513,6 +1527,15 @@ components:
         warmWhileActive:
           description: Keep warmHosts only while the pool is in use (a Run placed or ended within scaleDownAfter, or one waiting); an idle pool scales down to minHosts.
           type: boolean
+      type: object
+    PoolCapabilities:
+      additionalProperties: false
+      properties:
+        nestedContainers:
+          description: "Whether a Run with sandbox.nestedContainers can run in the pool: an ec2 pool's template nestedContainers, or a host that registered with lux-runner --nested. null for a static pool no host registered in."
+          type:
+            - boolean
+            - "null"
       type: object
     PoolCost:
       additionalProperties: false

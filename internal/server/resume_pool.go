@@ -61,13 +61,25 @@ type poolFacts struct {
 var ec2Archs = map[string]string{"x86_64": "amd64", "arm64": "arm64", "i386": "386"}
 
 // loadPoolFacts reads, as the system (instance_types is no tenant's), what
-// pool poolID offers a Run of tenantID: its live hosts and its latest
-// expectationWindow registrations (for ec2 those of its current template,
-// poolHostSizes' rule), and for ec2 the host its template launches, sized
-// and platformed from the instance-type catalog.
+// pool poolID offers a Run of tenantID (poolFactsTx).
 func (s *Server) loadPoolFacts(ctx context.Context, poolID, tenantID string) (poolFacts, error) {
 	var f poolFacts
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var err error
+		f, err = poolFactsTx(ctx, tx, poolID, tenantID)
+		return err
+	})
+	return f, err
+}
+
+// poolFactsTx is what pool poolID offers a Run of tenantID ("": of the
+// pool's owner), in a system transaction: its live hosts and its latest
+// expectationWindow registrations (for ec2 those of its current template,
+// poolHostSizes' rule), and for ec2 the host its template launches, sized
+// and platformed from the instance-type catalog.
+func poolFactsTx(ctx context.Context, tx pgx.Tx, poolID, tenantID string) (poolFacts, error) {
+	var f poolFacts
+	err := func() error {
 		var template json.RawMessage
 		var region string
 		err := tx.QueryRow(ctx, `SELECT name, provider, coalesce(template, '{}'), coalesce(template->>'region', '') FROM pools WHERE id = $1`, poolID).
@@ -80,9 +92,9 @@ func (s *Server) loadPoolFacts(ctx context.Context, poolID, tenantID string) (po
 		}
 		rows, err := tx.Query(ctx, `SELECT h.arch, h.labels, h.capacity, h.state IN ('ready', 'draining') AND h.launch_template IS DISTINCT FROM p.template
 			FROM hosts h JOIN pools p ON p.id = h.pool_id
-			WHERE h.pool_id = $1 AND (h.tenant_id IS NULL OR h.tenant_id = $2) AND h.registered_at IS NOT NULL
+			WHERE h.pool_id = $1 AND (h.tenant_id IS NULL OR h.tenant_id = coalesce(nullif($2, ''), p.tenant_id)) AND h.registered_at IS NOT NULL
 			  AND (h.state IN ('ready', 'draining') OR h.id IN (SELECT r.id FROM hosts r
-					WHERE r.pool_id = $1 AND (r.tenant_id IS NULL OR r.tenant_id = $2) AND r.registered_at IS NOT NULL
+					WHERE r.pool_id = $1 AND (r.tenant_id IS NULL OR r.tenant_id = coalesce(nullif($2, ''), p.tenant_id)) AND r.registered_at IS NOT NULL
 					  AND (p.provider = 'static' OR r.provision_requested_at IS NOT NULL AND r.launch_template = p.template)
 					ORDER BY r.registered_at DESC, r.id DESC LIMIT $3))`, poolID, tenantID, expectationWindow)
 		if err != nil {
@@ -178,9 +190,45 @@ func (s *Server) loadPoolFacts(ctx context.Context, poolID, tenantID string) (po
 		}
 		f.Profiles = append(f.Profiles, future)
 		return nil
-	})
+	}()
 	slices.Sort(f.Archs)
 	return f, err
+}
+
+// platforms are f's archs as os/arch; runners are linux only.
+func (f poolFacts) platforms() []string {
+	out := make([]string, 0, len(f.Archs))
+	for _, a := range f.Archs {
+		out = append(out, "linux/"+a)
+	}
+	return out
+}
+
+// nestedContainers is whether a nested Run fits a profile of f, as
+// checkPoolFit's nested blocker judges it; nil when f has no profile (a
+// static pool no host registered in), where that check refuses nothing.
+func (f poolFacts) nestedContainers() *bool {
+	if len(f.Profiles) == 0 {
+		return nil
+	}
+	nested := slices.ContainsFunc(f.Profiles, func(p poolProfile) bool { return p.Labels["nested"] == "true" })
+	return &nested
+}
+
+// withPoolFacts sets each of pools' platforms and capabilities as a resume
+// of tenantID's Run ("": each pool's owner's) would be checked against.
+func withPoolFacts(ctx context.Context, tx pgx.Tx, pools []Pool, tenantID string) error {
+	for i := range pools {
+		f, err := poolFactsTx(ctx, tx, pools[i].ID, tenantID)
+		if err != nil {
+			return err
+		}
+		if ps := f.platforms(); len(ps) > 0 {
+			pools[i].Platforms = ps
+		}
+		pools[i].Capabilities = &PoolCapabilities{NestedContainers: f.nestedContainers()}
+	}
+	return nil
 }
 
 func cloneLabels(m map[string]string) map[string]string {

@@ -3034,6 +3034,15 @@ type Pool struct {
 	HostSize     *HostSize `json:"hostSize,omitempty" readOnly:"true" doc:"The capacity the pool's hosts register with, as the scheduler plans new hosts: the minimum of each resource over the latest 8 registrations (for an ec2 pool, of its current template), so a pool scaled to zero still has one. Runs ask in these terms: a Run's resources.memory is a share of hostSize.memory. Absent when no host ever registered in the pool."`
 	HostSizeFrom string    `json:"hostSizeFrom,omitempty" readOnly:"true" enum:"running,history" doc:"running: the pool has at least one ready or draining host now; history: hostSize comes only from hosts that have gone. Absent with hostSize."`
 	InstanceType string    `json:"instanceType,omitempty" readOnly:"true" doc:"The provider's instance type of the latest host hostSize is taken from; absent for static hosts and with hostSize." example:"c7a.8xlarge"`
+	// Platforms and Capabilities: what a resume's placement.poolId checks
+	// against (poolFacts), as the listing tenant would be checked.
+	Platforms    []string          `json:"platforms,omitempty" readOnly:"true" doc:"The platforms (os/arch) the pool's hosts run: those of its live and latest registered hosts, and for an ec2 pool its template's instance types as the instance-type catalog describes them. Absent when lux knows none; a resume into it is then not refused for its platform." example:"[\"linux/arm64\"]"`
+	Capabilities *PoolCapabilities `json:"capabilities,omitempty" readOnly:"true" doc:"What the pool's hosts offer a Run, as a resume's placement.poolId judges it."`
+}
+
+// PoolCapabilities: null is unknown.
+type PoolCapabilities struct {
+	NestedContainers *bool `json:"nestedContainers" doc:"Whether a Run with sandbox.nestedContainers can run in the pool: an ec2 pool's template nestedContainers, or a host that registered with lux-runner --nested. null for a static pool no host registered in." nullable:"true"`
 }
 
 // HostSize is a host's capacity as it registers: CPUs, and bytes of
@@ -3051,7 +3060,7 @@ const (
 )
 
 // poolReadOnly are the Pool fields luxd reports and a request cannot set.
-var poolReadOnly = []string{"platform", "hostSize", "hostSizeFrom", "instanceType"}
+var poolReadOnly = []string{"platform", "hostSize", "hostSizeFrom", "instanceType", "platforms", "capabilities"}
 
 // withHostSizes sets each of pools' host size, from one query.
 func withHostSizes(ctx context.Context, tx pgx.Tx, pools []Pool) error {
@@ -3150,7 +3159,10 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		return withHostSizes(ctx, tx, pools)
+		if err := withHostSizes(ctx, tx, pools); err != nil {
+			return err
+		}
+		return withPoolFacts(ctx, tx, pools, p.TenantID)
 	})
 	if err != nil {
 		return nil, err
