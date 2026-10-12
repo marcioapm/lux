@@ -39,7 +39,22 @@ def test_run_and_host_history(lux, runners, hosts):
     # The text form draws sparklines; CPU in cores, or millicores under one.
     out = lux.run("history", run_id).stdout
     assert re.search(r"^cpu .* (\d+(\.\d+)?m|[\d.]+ cores?)  \(", out, re.M), out
+    # The busy loop's highest rate between two readings, kept on the
+    # placement and in the samples.
+    assert any(s.get("peakCpuCores", 0) > 0.3 for s in lux.json("history", run_id)["samples"])
     lux.run("terminate", run_id)
+    lux.wait_state(run_id, "terminated")
+    [pl] = lux.get(run_id)["placements"]
+    assert pl["peakCpuCores"] > 0.3, pl
+    assert lux.get(run_id)["usage"]["peakCpuCores"] == pl["peakCpuCores"]
+    # The image's platforms: alpine is a multi-arch index; the host's own
+    # architecture is among them.
+    arch = {"x86_64": "amd64", "aarch64": "arm64"}[hosts[0].exec("uname", "-m").strip()]
+    assert any(p.startswith(f"linux/{arch}") for p in pl["imagePlatforms"]), pl
+    # Pressure stall totals where the kernel has PSI: present together, never negative.
+    stalls = [k for k in ("cpuStallSeconds", "memoryStallSeconds", "ioStallSeconds") if k in pl]
+    assert stalls in ([], ["cpuStallSeconds", "memoryStallSeconds", "ioStallSeconds"]), pl
+    assert all(pl[k] >= 0 for k in stalls), pl
 
 
 def test_system_history_is_scoped(tenant_factory, operator, env, hosts):
