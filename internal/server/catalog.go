@@ -71,6 +71,9 @@ func (s *Server) refreshCatalog(ctx context.Context, t *marketTarget, problems m
 		problems.add("instance types", err)
 		return nil
 	}
+	if err := s.requireProvisionLease(ctx); err != nil {
+		return err
+	}
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		for _, in := range infos {
 			if !slices.Contains(stale, in.Name) {

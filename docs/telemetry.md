@@ -473,8 +473,12 @@ again once it is a day old; a failed fetch keeps the old row.
 
 **Cadence.** Every type is sampled once per `[market] every`
 (`LUX_MARKET_EVERY`, default `1h`; `0s` turns the sampler off) by the luxd
-holding the provisioner lease, so one luxd writes; the others' loops find
-they do not hold it and do nothing. It costs per pass one `DescribeSubnets`
+holding the provisioner lease; the others' loops find they do not hold it
+and do nothing. A pass checks the lease when it starts and again before it
+writes each type's rows and the catalog's, and stops once it no longer
+holds it. The lease can still move between that check and the write, so
+around a handover two luxds may both sample a type in the same hour. It
+costs per pass one `DescribeSubnets`
 per pool, and per candidate type one `GetSpotPlacementScores`, one
 `GetProducts` (cached for `LUX_COSTS_PRICES_REFRESH`) and one
 `DescribeSpotPriceHistory` per zone.

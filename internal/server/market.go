@@ -55,7 +55,7 @@ type Zone struct{ Name, ID string }
 const marketPassTimeout = 2 * time.Minute
 
 // marketLoop samples the market while this luxd holds the provisioner
-// lease, so one luxd writes. It checks every minute which types are due.
+// lease (sampleMarket). It checks every minute which types are due.
 func (s *Server) marketLoop(ctx context.Context) {
 	if s.cfg.Market.Every <= 0 || len(s.cfg.Providers) == 0 {
 		return
@@ -129,7 +129,8 @@ func (m marketProblems) err() error {
 // pools launch into. Each figure is fetched on its own: one that fails is
 // NULL in the row, never a reason to drop the others. A due type is
 // attempted once per Every whatever the outcome, so a refused call is not
-// repeated each minute.
+// repeated each minute. The lease is checked again before each write; once it
+// is lost the pass stops.
 func (s *Server) sampleMarket(ctx context.Context) (marketProblems, error) {
 	problems := marketProblems{}
 	if held, err := s.holdsProvisionLease(ctx); err != nil || !held {
@@ -139,30 +140,53 @@ func (s *Server) sampleMarket(ctx context.Context) (marketProblems, error) {
 	if err != nil {
 		return problems, err
 	}
+	err = s.sampleMarketTargets(ctx, targets, problems)
+	if errors.Is(err, errMarketLeaseLost) {
+		err = nil
+	}
+	return problems, err
+}
+
+// errMarketLeaseLost stops a pass whose luxd no longer holds the
+// provisioner lease.
+var errMarketLeaseLost = errors.New("market: provisioner lease lost")
+
+// requireProvisionLease is errMarketLeaseLost unless this luxd still holds
+// the lease, checked before a pass writes what the provider answered.
+func (s *Server) requireProvisionLease(ctx context.Context) error {
+	held, err := s.holdsProvisionLease(ctx)
+	if err == nil && !held {
+		err = errMarketLeaseLost
+	}
+	return err
+}
+
+func (s *Server) sampleMarketTargets(ctx context.Context, targets []*marketTarget, problems marketProblems) error {
 	for _, t := range targets {
 		due, err := s.marketDue(ctx, t)
 		if err != nil {
-			return problems, err
+			return err
 		}
 		if len(due) == 0 {
 			continue
 		}
 		s.markMarketAttempt(t, due)
-		// The catalog with the samples: a new candidate is due at once,
-		// and a failing describe is retried no more often than they are.
+		// The catalog with the samples: a new candidate is described at
+		// once, and a failing describe is retried no more often than the
+		// due types are.
 		if err := s.refreshCatalog(ctx, t, problems); err != nil {
-			return problems, err
+			return err
 		}
 		if t.zones, err = s.marketZones(ctx, t, problems); err != nil {
-			return problems, err
+			return err
 		}
 		for _, it := range due {
 			if err := s.sampleMarketType(ctx, t, it, problems); err != nil {
-				return problems, err
+				return err
 			}
 		}
 	}
-	return problems, nil
+	return nil
 }
 
 // marketTargets are the live pools' providers and regions, with their
@@ -308,6 +332,7 @@ func (s *Server) sampleMarketType(ctx context.Context, t *marketTarget, it strin
 	problems.add("placement score", err)
 	prices := s.cfg.Costs.Prices[t.provider]
 	now := time.Now()
+	var rows []marketRow
 	for _, z := range t.zones {
 		var spot *SpotRate
 		if prices != nil {
@@ -326,6 +351,15 @@ func (s *Server) sampleMarketType(ctx context.Context, t *marketTarget, it strin
 		if sc, ok := scores[z.ID]; ok && z.ID != "" {
 			row.score = &sc
 		}
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	if err := s.requireProvisionLease(ctx); err != nil {
+		return err
+	}
+	for _, row := range rows {
 		if err := s.insertMarketRow(ctx, t, row); err != nil {
 			return err
 		}

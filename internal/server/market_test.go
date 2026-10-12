@@ -34,12 +34,19 @@ type marketFake struct {
 	types    map[string]InstanceTypeInfo
 	typesErr error
 	calls    []string
+	// during, when set, runs inside each call (after it is recorded), as
+	// a provider call that blocks or outlasts the pass.
+	during func(call string)
 }
 
 func (f *marketFake) call(c string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls = append(f.calls, c)
+	during := f.during
+	f.mu.Unlock()
+	if during != nil {
+		during(c)
+	}
 }
 
 func (f *marketFake) MarketScope(raw json.RawMessage) (string, []string, error) {
@@ -295,6 +302,48 @@ func TestSampleMarketLeaseAndCadence(t *testing.T) {
 	}
 	if n := len(marketRows(t, s)); n != 2 {
 		t.Fatalf("an hour later: %d rows, want 2", n)
+	}
+}
+
+// When the provisioner lease moves to another luxd while a provider call
+// is in flight, the pass writes nothing it fetched after that and stops:
+// neither the type's rows nor the catalog's, nor any later type's.
+func TestSampleMarketStopsWhenLeaseLost(t *testing.T) {
+	two := 2
+	for blockOn, wantCatalog := range map[string]int{
+		"score us-east-1 m7i.large":              2, // described before the lease moved
+		"describe us-east-1 m7i.large,m7g.large": 0,
+	} {
+		t.Run(strings.Fields(blockOn)[0], func(t *testing.T) {
+			f := &marketFake{zones: map[string][]Zone{"us-east-1": {{"us-east-1a", "use1-az1"}}},
+				onDemand: map[string]string{"m7i.large": "0.1", "m7g.large": "0.08"},
+				types:    map[string]InstanceTypeInfo{"m7i.large": {Name: "m7i.large", VCPUs: &two}, "m7g.large": {Name: "m7g.large", VCPUs: &two}}}
+			s, _ := marketServer(t, f)
+			ctx := context.Background()
+			execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider, template) VALUES ('p1', 'burst', 'ec2', '{"region":"us-east-1","instanceType":"m7i.large","fallbackInstanceTypes":["m7g.large"]}')`)
+			// The call blocks until another luxd has taken the lease.
+			f.during = func(c string) {
+				if c == blockOn {
+					execSQL(t, s, ctx, `UPDATE leases SET holder = 'other', expires_at = now() + interval '1 minute' WHERE name = 'provisioner'`)
+				}
+			}
+			if err := s.sampleMarketPass(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var catalogRows int
+			if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `SELECT count(*) FROM instance_types`).Scan(&catalogRows)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			calls := f.takeCalls()
+			if rows := marketRows(t, s); len(rows) != 0 || catalogRows != wantCatalog {
+				t.Fatalf("after the lease moved: market rows %v, %d catalog rows, want none and %d", rows, catalogRows, wantCatalog)
+			}
+			if slices.ContainsFunc(calls, func(c string) bool { return !strings.HasPrefix(c, "describe ") && strings.HasSuffix(c, "m7g.large") }) {
+				t.Fatalf("the pass went on to the next type: %v", calls)
+			}
+		})
 	}
 }
 
