@@ -47,10 +47,12 @@ def test_run_and_host_history(lux, runners, hosts):
     [pl] = lux.get(run_id)["placements"]
     assert pl["peakCpuCores"] > 0.3, pl
     assert lux.get(run_id)["usage"]["peakCpuCores"] == pl["peakCpuCores"]
-    # The image's platforms: alpine is a multi-arch index; the host's own
-    # architecture is among them.
-    arch = {"x86_64": "amd64", "aarch64": "arm64"}[hosts[0].exec("uname", "-m").strip()]
-    assert any(p.startswith(f"linux/{arch}") for p in pl["imagePlatforms"]), pl
+    # The image's platforms. The hosts load alpine from a multi-image
+    # `docker save`, which Podman reads as a docker-archive: no index is
+    # stored, so the image's own platform (variant from its config) is all
+    # it offers. The index path is covered by internal/podman's tests.
+    arch = {"x86_64": "amd64", "aarch64": "arm64/v8"}[hosts[0].exec("uname", "-m").strip()]
+    assert pl["imagePlatforms"] == [f"linux/{arch}"], pl
     # Pressure stall totals where the kernel has PSI: present together, never negative.
     stalls = [k for k in ("cpuStallSeconds", "memoryStallSeconds", "ioStallSeconds") if k in pl]
     assert stalls in ([], ["cpuStallSeconds", "memoryStallSeconds", "ioStallSeconds"]), pl
