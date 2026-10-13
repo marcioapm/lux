@@ -45,6 +45,22 @@ func TestShimKnowsReclaim(t *testing.T) {
 	if caps := r.capabilities(); !slices.Contains(caps, proto.CapSpotReclaim) || slices.Contains(caps, proto.CapSyncModes) {
 		t.Fatalf("Hello with a reclaim shim, sync gate kept apart: %v", caps)
 	}
+	// Each capability follows its own gate, disk scaling included.
+	for _, c := range []struct {
+		modes, reclaim, disk bool
+		want                 []string
+	}{
+		{false, false, false, []string{proto.CapDiff, proto.CapGitCredentials}},
+		{false, false, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapDiskScale}},
+		{false, true, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapSpotReclaim, proto.CapDiskScale}},
+		{true, true, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapSyncModes, proto.CapSpotReclaim, proto.CapDiskScale}},
+		{true, false, false, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapSyncModes}},
+	} {
+		r := &Runner{shimSyncModes: c.modes, shimReclaim: c.reclaim, disk: diskScale{on: c.disk}}
+		if got := r.capabilities(); !slices.Equal(got, c.want) {
+			t.Fatalf("modes %v, reclaim %v, disk scaling %v: %v, want %v", c.modes, c.reclaim, c.disk, got, c.want)
+		}
+	}
 }
 
 // The kill instant is fixed at the first notice's receipt: a retried notice,

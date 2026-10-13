@@ -63,7 +63,24 @@ func (f *finishFixture) runEvents() []proto.RunEvent {
 // snapshot (output and artifacts staged as blobs, kept and uploaded), then
 // the removals run, then the end report.
 func TestSpotFinishRemovesDiskBeforeEndReport(t *testing.T) {
+	spotFinishRemovesDisk(t, spotFinishFixture(t))
+}
+
+// With disk scaling on (a shaped pool's runner), the Run's limit is its
+// share of the filesystem, but the volumes released and the order of the
+// end are the same.
+func TestSpotFinishRemovesDiskWithDiskScale(t *testing.T) {
 	f := spotFinishFixture(t)
+	f.r.disk = diskScale{share: newShare(150<<30, 160<<30), on: true, headroom: 10 << 30, fsCapacity: 160 << 30}
+	f.p.assign.Spec.Resources.Disk = spec.Bytes(40 << 30)
+	if l := f.p.diskLimit(); !l.Scaled || l.Effective != 40_265_318_400 {
+		t.Fatalf("disk limit %+v, want 40 GiB scaled by 150/160", l)
+	}
+	spotFinishRemovesDisk(t, f)
+}
+
+func spotFinishRemovesDisk(t *testing.T, f *finishFixture) {
+	t.Helper()
 	f.exitedAsSupervised(context.Background())
 	mustEnd(t, f.p, "the placement never ended")
 	if got := f.types(); len(got) != 2 || got[0] != proto.MsgSnapshotDone || got[1] != proto.MsgStatus {
