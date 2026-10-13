@@ -1015,6 +1015,19 @@ func (s *Server) drainForScaleDown(ctx context.Context, hostID string) (bool, er
 		if err := lockReaperRuns(ctx, tx, runs); err != nil {
 			return err
 		}
+		if err := lockCostHost(ctx, tx, hostID); err != nil {
+			return err
+		}
+		// A placement could arrive during discovery. Do not drain a host
+		// whose newly arrived spot Run was not locked above; retry next tick.
+		var changed bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM placements p JOIN runs r ON r.id=p.run_id
+			WHERE p.host_id=$1 AND p.state IN `+livePlacementStates+` AND `+spotRunSQL+` AND NOT (p.run_id=ANY($2::text[])))`, hostID, runs).Scan(&changed); err != nil {
+			return err
+		}
+		if changed {
+			return nil
+		}
 		var later laterEvents
 		hosts, err = s.drainHostsLater(ctx, tx, &later, "idle: scaling down", causeScaleDown, "", `id = $1 AND state = 'ready'
 			AND NOT EXISTS (SELECT 1 FROM placements p JOIN runs r ON r.id = p.run_id

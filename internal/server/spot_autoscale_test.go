@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -74,6 +75,71 @@ func TestScaleDownTreatsSpotOnlyHostAsIdle(t *testing.T) {
 				t.Fatalf("host after the reclaim: %s", state)
 			}
 		})
+	}
+}
+
+// Discovery can race a new spot placement. While scale-down waits for its
+// host lock, a scheduler adds one: scale-down must retry, not drain a host
+// with a spot Run it never locked and will therefore never signal.
+func TestScaleDownRechecksNewSpotPlacement(t *testing.T) {
+	s, _, _ := scaleDownFixture(t, true)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO runs(id,tenant_id,pool_id,spec,state,current_epoch) VALUES('new','t1','pool1','{"spot":true,"resumePolicy":"never"}','running',1)`)
+	hold, err := s.db.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hold.Rollback(ctx)
+	if _, err := hold.Exec(ctx, `SELECT set_config('lux.system','on',true)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := lockCostHost(ctx, hold, "h"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		drained, err := s.drainForScaleDown(ctx, "h")
+		if drained && err == nil {
+			err = errors.New("drained with a newly discovered spot Run")
+		}
+		done <- err
+	}()
+	// Wait until scale-down has locked the existing spot Run and is
+	// waiting for cost-host. A NOWAIT probe proves its lock was acquired.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		probe, err := s.db.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = probe.Exec(ctx, `SELECT set_config('lux.system','on',true)`)
+		_, err = probe.Exec(ctx, `SELECT 1 FROM runs WHERE id='live' FOR UPDATE NOWAIT`)
+		_ = probe.Rollback(ctx)
+		if err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scale-down did not reach its host lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := hold.Exec(ctx, `INSERT INTO placements(id,tenant_id,run_id,host_id,epoch,state,resources) VALUES('newp','t1','new','h',1,'running','{"cpus":1}')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := hold.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if state := queryOne[string](t, s, `SELECT state FROM hosts WHERE id='h'`); state != "ready" {
+		t.Fatal(state)
+	}
+	if drained, err := s.drainForScaleDown(ctx, "h"); err != nil || !drained {
+		t.Fatalf("retry: drained=%v err=%v", drained, err)
+	}
+	if reason := queryOne[string](t, s, `SELECT stop_reason FROM placements WHERE id='newp'`); reason != stopSpotReclaim {
+		t.Fatal(reason)
 	}
 }
 
