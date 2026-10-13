@@ -199,7 +199,7 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
     exceeded = lux.events(run_id, "disk.exceeded")
     assert exceeded and exceeded[0]["data"]["limitBytes"] == 32 << 20, exceeded
     assert lux.json("snapshots", run_id), "its state was not kept"
-    # Resumed with room to spare: it runs on, its 64 MiB still there. Epoch 1
+    # Resumed with room to spare: it runs on, its /w/big still there. Epoch 1
     # was stopped only once over 32 MiB, nearly all of it /w/big, so the
     # restored volume always holds a non-empty /w/big. Only the resumed
     # placement's own stdout counts: `lux logs` joins every placement's.
@@ -208,7 +208,10 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
     epoch = lux.get(run_id)["placements"][-1]["epoch"]
     assert epoch >= 2, lux.get(run_id)["placements"]
     stdout = lambda: "".join(r.get("data", "") for r in lux.records(run_id) if r.get("epoch") == epoch and r.get("ch") == "stdout")
-    wait_until(lambda: stdout() == "kept\nstart\nwrote\n", 60, 0.5, f"epoch {epoch} did not find its state and write 64 MiB")
+    try:
+        wait_until(lambda: stdout() == "kept\nstart\nwrote\n", 60, 0.5, f"epoch {epoch} did not find its state and write 64 MiB")
+    except AssertionError as e:
+        raise AssertionError(f"{e}; epoch {epoch} stdout {stdout()!r}") from None
     run = lux.get(run_id)
     assert run["state"] == "running" and run["spec"]["resources"]["disk"] == 256 << 20, run
     lux.run("terminate", run_id, "--wait")

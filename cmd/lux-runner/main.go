@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -76,10 +77,13 @@ func config(fs *flag.FlagSet, args []string, getenv func(string) string) (cfg ru
 		return n
 	}
 	// Set from the environment or the flag, 0 included: it turns scaling on.
+	headroomUsage := "bytes of the data directory's filesystem kept from Runs; given with --disk (0 allowed), each Run's disk limit is resources.disk × min(1, (filesystem capacity − this) / --disk). Also LUX_RUNNER_DISK_HEADROOM"
 	if n, set, err := envBytes(getenv, "LUX_RUNNER_DISK_HEADROOM", 0); err != nil {
 		envErr = err
 	} else if set {
 		cfg.DiskHeadroom = &n
+		// flag.Func has no default for -h to print, so name the env's here.
+		headroomUsage += fmt.Sprintf(" (default %d)", n)
 	}
 	cpus, err := envCPUs(getenv)
 	envErr = errors.Join(envErr, err)
@@ -95,7 +99,7 @@ func config(fs *flag.FlagSet, args []string, getenv func(string) string) (cfg ru
 	fs.Int64Var(&cfg.MemoryHeadroom, "memory-headroom", bytesOf("LUX_RUNNER_MEMORY_HEADROOM", runner.DefaultMemoryHeadroom), "bytes of MemTotal kept from Runs for the kernel and the host. Also LUX_RUNNER_MEMORY_HEADROOM")
 	fs.DurationVar(&cfg.UsageEvery, "usage-every", 0, "how often disk use is sampled and the disk limit checked (default 15s)")
 	fs.Int64Var(&cfg.Disk, "disk", bytesOf("LUX_RUNNER_DISK", 0), "bytes of disk to reserve for Runs, from their resources.disk (default: not reserved). With --disk-headroom, the host's nominal disk. Also LUX_RUNNER_DISK")
-	fs.Func("disk-headroom", "bytes of the data directory's filesystem kept from Runs; given with --disk (0 allowed), each Run's disk limit is resources.disk × min(1, (filesystem capacity − this) / --disk). Also LUX_RUNNER_DISK_HEADROOM", func(s string) error {
+	fs.Func("disk-headroom", headroomUsage, func(s string) error {
 		n, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
 			return errors.New("want a number of bytes")
@@ -116,17 +120,28 @@ func config(fs *flag.FlagSet, args []string, getenv func(string) string) (cfg ru
 	if err := fs.Parse(args); err != nil {
 		return cfg, false, err
 	}
+	if showVersion {
+		return cfg, true, nil
+	}
 	if cfg.UsageEvery < 0 || cfg.Disk < 0 || cfg.Memory < 0 || cfg.MemoryHeadroom < 0 || cfg.CPUs < 0 ||
 		cfg.DiskHeadroom != nil && *cfg.DiskHeadroom < 0 {
 		return cfg, false, errors.New("--usage-every, --disk, --disk-headroom, --memory, --memory-headroom and --cpus must not be negative")
 	}
-	return cfg, showVersion, nil
+	return cfg, false, nil
+}
+
+// reportErr writes err to w with every line prefixed, as config joins one
+// error per unusable variable.
+func reportErr(w io.Writer, err error) {
+	for _, l := range strings.Split(err.Error(), "\n") {
+		fmt.Fprintln(w, "lux-runner:", l)
+	}
 }
 
 func main() {
 	cfg, showVersion, err := config(flag.CommandLine, os.Args[1:], os.Getenv)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "lux-runner:", err)
+		reportErr(os.Stderr, err)
 		os.Exit(2)
 	}
 	if showVersion {

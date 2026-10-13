@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -61,21 +62,51 @@ func TestConfigFromTheEnvironment(t *testing.T) {
 // Sizes are plain bytes; an unusable variable or a negative size stops
 // the runner rather than leaving a host unshaped.
 func TestConfigRefuses(t *testing.T) {
+	const negative = "--usage-every, --disk, --disk-headroom, --memory, --memory-headroom and --cpus must not be negative"
 	for _, c := range []struct {
 		name string
 		env  map[string]string
 		args []string
+		want string
 	}{
-		{"suffixed disk", map[string]string{"LUX_RUNNER_DISK": "20Gi"}, nil},
-		{"suffixed headroom", map[string]string{"LUX_RUNNER_DISK_HEADROOM": "10Gi"}, nil},
-		{"cpus not a number", map[string]string{"LUX_RUNNER_CPUS": "eight"}, nil},
-		{"cpus NaN", map[string]string{"LUX_RUNNER_CPUS": "NaN"}, nil},
-		{"suffixed headroom flag", nil, []string{"--disk-headroom", "10Gi"}},
-		{"negative headroom", map[string]string{"LUX_RUNNER_DISK_HEADROOM": "-1"}, nil},
-		{"negative cpus", nil, []string{"--cpus", "-1"}},
+		{"suffixed disk", map[string]string{"LUX_RUNNER_DISK": "20Gi"}, nil, `LUX_RUNNER_DISK="20Gi": want a number of bytes`},
+		{"suffixed headroom", map[string]string{"LUX_RUNNER_DISK_HEADROOM": "10Gi"}, nil, `LUX_RUNNER_DISK_HEADROOM="10Gi": want a number of bytes`},
+		{"cpus not a number", map[string]string{"LUX_RUNNER_CPUS": "eight"}, nil, `LUX_RUNNER_CPUS="eight": want a number of CPUs`},
+		{"cpus NaN", map[string]string{"LUX_RUNNER_CPUS": "NaN"}, nil, `LUX_RUNNER_CPUS="NaN": want a number of CPUs`},
+		{"suffixed headroom flag", nil, []string{"--disk-headroom", "10Gi"}, `invalid value "10Gi" for flag -disk-headroom: want a number of bytes`},
+		{"negative headroom", map[string]string{"LUX_RUNNER_DISK_HEADROOM": "-1"}, nil, negative},
+		{"negative cpus", nil, []string{"--cpus", "-1"}, negative},
 	} {
-		if got, err := parse(t, c.env, c.args...); err == nil {
+		got, err := parse(t, c.env, c.args...)
+		if err == nil {
 			t.Errorf("%s: accepted, %+v", c.name, got)
+		} else if err.Error() != c.want {
+			t.Errorf("%s: %q, want %q", c.name, err, c.want)
 		}
+	}
+}
+
+// Every unusable variable is reported, each on its own prefixed line.
+func TestReportErrPrefixesEveryLine(t *testing.T) {
+	_, err := parse(t, map[string]string{"LUX_RUNNER_CPUS": "x", "LUX_RUNNER_DISK": "20Gi"})
+	if err == nil {
+		t.Fatal("accepted")
+	}
+	var out strings.Builder
+	reportErr(&out, err)
+	want := "lux-runner: LUX_RUNNER_CPUS=\"x\": want a number of CPUs\n" +
+		"lux-runner: LUX_RUNNER_DISK=\"20Gi\": want a number of bytes\n"
+	if out.String() != want {
+		t.Errorf("%q, want %q", out.String(), want)
+	}
+}
+
+// -version prints the version whatever the sizes given with it.
+func TestConfigVersionIgnoresSizes(t *testing.T) {
+	fs := flag.NewFlagSet("lux-runner", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	_, showVersion, err := config(fs, []string{"--cpus", "-1", "-version"}, func(string) string { return "" })
+	if err != nil || !showVersion {
+		t.Errorf("showVersion %v, err %v; want true, nil", showVersion, err)
 	}
 }
