@@ -370,6 +370,14 @@ lists the sizes; `luxd admin create-pool --shape` takes the same value.
 shape`), with `-o json` too; an operator naming a pool several tenants
 have must add `--tenant`.
 
+`--placement spread|pack` chooses how Runs are placed among the hosts
+they fit ([placement](concepts.md#placement-spread-or-pack)): `spread`
+(fewest Runs first) or `pack` (most allocated host first). Omitted, the
+pool has its default: `pack` when shaped, `spread` otherwise. A set that
+leaves out a placement the pool has would remove it (`placement
+pack→-`), refused without `--replace`. Another value is refused before
+anything is sent. `luxd admin create-pool --placement` takes the same.
+
 ## Status and history
 
 ```bash

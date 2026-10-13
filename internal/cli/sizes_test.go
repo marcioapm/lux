@@ -263,6 +263,42 @@ func TestPoolsSetShape(t *testing.T) {
 	}
 }
 
+// pools set --placement sends spread or pack, refuses anything else before
+// sending, prints a change, and treats leaving out a pool's placement as a
+// removal.
+func TestPoolsSetPlacement(t *testing.T) {
+	url, posted := poolsLuxd(t, false)
+	for _, v := range []string{"pack", "spread"} {
+		if code, _, stderr := lux(url, "pools", "set", "m", "--provider", "static", "--placement", v); code != 0 {
+			t.Fatalf("--placement %s: exit %d (%s)", v, code, stderr)
+		}
+		if got := (*posted)[len(*posted)-1]["placement"]; got != v {
+			t.Errorf("--placement %s: posted placement %v", v, got)
+		}
+	}
+	if code, _, _ := lux(url, "pools", "set", "m", "--provider", "static"); code != 0 {
+		t.Fatalf("without --placement: exit %d", code)
+	}
+	if _, sent := (*posted)[len(*posted)-1]["placement"]; sent {
+		t.Errorf("without --placement: posted %v, want no placement", (*posted)[len(*posted)-1])
+	}
+	n := len(*posted)
+	code, _, stderr := lux(url, "pools", "set", "m", "--provider", "static", "--placement", "random")
+	if code == 0 || stderr != "lux: --placement \"random\": want spread or pack\n" || len(*posted) != n {
+		t.Errorf("--placement random: exit %d, stderr %q, posted %d more", code, stderr, len(*posted)-n)
+	}
+
+	url, posted = poolsLuxd(t, false, `{"name":"m","tenant":"t1","provider":"static","placement":"pack"}`)
+	code, stdout, stderr := lux(url, "pools", "set", "m", "--provider", "static")
+	if code != 4 || len(*posted) != 0 || !strings.Contains(stderr, "would remove placement from pool m") || stdout != "placement pack→-\n" {
+		t.Errorf("removal: exit %d, posted %v, stdout %q, stderr %q", code, *posted, stdout, stderr)
+	}
+	code, stdout, _ = lux(url, "pools", "set", "m", "--provider", "static", "--placement", "spread")
+	if code != 0 || len(*posted) != 1 || stdout != "placement pack→spread\n" {
+		t.Errorf("change: exit %d, posted %v, stdout %q", code, *posted, stdout)
+	}
+}
+
 // get prints a shaped Run's size and what its submit asked for; none for
 // an unshaped Run.
 func TestGetPrintsSize(t *testing.T) {

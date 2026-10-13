@@ -633,8 +633,34 @@ limit = disk × min(1, (filesystem capacity − diskHeadroom) / shape disk)
 in whole bytes, rounded down. For a 160 GiB shape on a 160 GiB filesystem
 with 10 GiB of headroom, `m-2-arm64` (40 GiB) is held to 37.5 GiB. The
 grace and the ceiling count from that limit, and `disk.exceeded` says
-both it and the size's disk. Packing and admission on shaped pools are
-otherwise as on any pool, for now.
+both it and the size's disk. A shaped host reserves each Run's size's
+disk alongside its cpus and memory: a Run fits only where all three are
+free. Admission under physical disk pressure is otherwise as on any pool,
+for now.
+
+### Placement: spread or pack
+
+A pool's `placement` says how the scheduler chooses among the hosts a Run
+fits (all of them: pool, tenancy, labels, nested containers, capacity,
+sync modes and, on a shaped pool, the shape):
+
+- `spread`: the host with the fewest Runs, after affinity (the host
+  holding the Run's snapshot, then the image and git mirrors cached, then
+  `placement.prefers` labels). Every unshaped pool's default, as before.
+- `pack`: the most allocated host, measured as the largest share of its
+  cpus, memory or disk already reserved (not its Run count), so whole
+  hosts stay free for the large sizes and idle hosts can scale down. Among
+  hosts allocated alike, affinity as above decides, then the lowest host
+  id. Every shaped pool's default.
+
+Either way a Run whose snapshot only its host holds (not uploaded yet)
+waits for that host, which may be less packed, and a host the Run is
+moving away from comes last. Live Runs are never moved to pack hosts
+tighter. Packing fills hosts first; it does not make every sequence fit:
+two hosts with a quarter free each still cannot take a half-host size, which
+waits for a host or launches one. Set it with `placement` on `POST
+/v1/pools`, `lux pools set --placement` or `luxd admin create-pool
+--placement`.
 
 ### Memory: the host's terms, scaled to what Linux sees
 

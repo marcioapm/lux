@@ -3195,6 +3195,7 @@ type Pool struct {
 	Capabilities *PoolCapabilities `json:"capabilities,omitempty" readOnly:"true" doc:"What the pool's hosts offer a Run, as a resume's placement.poolId judges it."`
 	Shape        *PoolShape        `json:"shape,omitempty" doc:"Makes the pool shaped: the nominal whole host its sizes halve down from. Runs ask for a size (resources.size) or have cpus, memory and disk rounded up to one. Checked at create and update (422 invalid_pool): family a lowercase slug, arch arm64 or amd64, cpus and minCpus powers of two (minCpus at least 0.5), memory and disk dividing exactly down to the smallest size, defaultCpus one of the sizes; for an ec2 pool, the template's instanceType and fallbackInstanceTypes the catalog knows must have its arch and at least its cpus and memory. Absent: unshaped, as every pool before. Like every field, a set without it removes it; Runs already submitted keep their resources."`
 	Sizes        []PoolSize        `json:"sizes,omitempty" readOnly:"true" doc:"A shaped pool's sizes, smallest first: each one's name, cpus, memory, disk and fraction of the whole host. Absent for an unshaped pool."`
+	Placement    string            `json:"placement,omitempty" enum:"spread,pack" doc:"How the scheduler chooses among the hosts a Run fits. spread: the host with the fewest Runs. pack: the most allocated host (the largest of its reserved cpus, memory and disk over its capacity), so whole hosts stay free for large sizes; among equally allocated hosts, today's affinity (the snapshot's host, the image and git mirrors cached, preferred labels), then the lowest host id. Either way a Run whose snapshot only its host holds (not yet uploaded) waits for that host, and a host the Run must avoid comes last. Absent: the pool's default, pack for a shaped pool and spread otherwise. Like every field, a set without it returns it to the default. Other values: 422 invalid_pool."`
 }
 
 // PoolCapabilities: null is unknown.
@@ -3282,14 +3283,15 @@ type listPoolsOutput struct {
 // poolColumns: Select poolColumns FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id.
 const poolColumns = `p.id, p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
 	coalesce(p.scale_down_after_s, 0), p.warm_while_active,
-	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.is_default, p.shape`
+	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.is_default, p.shape,
+	coalesce(p.placement, '')`
 
 func scanPool(row pgx.Row) (Pool, error) {
 	var pl Pool
 	var sda int
 	var isDefault bool
 	err := row.Scan(&pl.ID, &pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault, &pl.Shape)
+		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault, &pl.Shape, &pl.Placement)
 	pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
 	pl.IsDefault = &isDefault
 	if pl.Shape != nil {
@@ -3589,6 +3591,9 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if err := CheckPoolShape(ctx, s.db, pl.Provider, pl.Template, pl.Shape); err != nil {
 		return nil, err
 	}
+	if err := ValidPlacement(pl.Placement); err != nil {
+		return nil, err
+	}
 	if pl.Template == nil {
 		pl.Template = map[string]any{}
 	}
@@ -3608,15 +3613,16 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		err := SavePool(ctx, tx, p.TenantID, pl.Name, pl.IsDefault, func() error {
 			var storedID string
 			err := tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
-					scale_down_after_s, warm_while_active, hourly_price, price_currency, shape)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), $13)
+					scale_down_after_s, warm_while_active, hourly_price, price_currency, shape, placement)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), $13, nullif($14, ''))
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency, shape = EXCLUDED.shape,
+					placement = EXCLUDED.placement,
 					`+PoolRevive+` RETURNING id`,
 				newID, p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency, pl.Shape).Scan(&storedID)
+				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency, pl.Shape, pl.Placement).Scan(&storedID)
 			if err != nil {
 				return err
 			}

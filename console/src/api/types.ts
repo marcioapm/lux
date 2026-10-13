@@ -656,6 +656,8 @@ export interface Pool {
   shape?: PoolShape;
   /** A shaped pool's sizes, smallest first. */
   sizes?: PoolSize[];
+  /** spread: fewest Runs first; pack: most allocated host first. Absent: pack for a shaped pool, spread otherwise. */
+  placement?: "spread" | "pack";
 }
 
 export interface PoolShape {
