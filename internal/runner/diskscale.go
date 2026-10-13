@@ -12,20 +12,18 @@ import (
 // on only when the host offers a nominal disk and was given a headroom;
 // otherwise (the zero value) every limit is resources.disk as asked.
 //
-// fsCapacity is the filesystem's size as an unprivileged writer sees it:
-// its used blocks plus those still available to unprivileged writers, so
-// blocks the filesystem reserves for root count in neither, the same
-// accounting as the heartbeat's free bytes and the image GC. It is read
-// once, at start: free bytes change as Runs write, and must not resize
-// every Run's limit.
+// fsCapacity is hoststat.Disk.Capacity, the same unprivileged accounting
+// as the heartbeat's free bytes and the image GC. It is read once, at
+// start: free bytes change as Runs write, and must not resize every Run's
+// limit.
 type diskScale struct {
 	share
 	on                   bool
 	headroom, fsCapacity int64
 }
 
-// newDiskScale reads the filesystem holding dir with statfs. headroom nil
-// (not given) or a nominal of 0 leaves scaling off.
+// newDiskScale reads the filesystem holding dir with statfs, only when
+// scaling is on.
 func newDiskScale(nominal int64, headroom *int64, dir string, statfs func(string) (hoststat.Disk, error)) (diskScale, error) {
 	if nominal <= 0 || headroom == nil {
 		return diskScale{}, nil

@@ -1548,8 +1548,7 @@ func (p *placement) diskLimit() disklimit.Limit {
 	if p.assign == nil {
 		return disklimit.Limit{}
 	}
-	res := p.assign.Spec.Resources
-	l := disklimit.Unscaled(res)
+	l := disklimit.Unscaled(p.assign.Spec.Resources)
 	if d := p.r.disk; d.on {
 		l.Effective, l.Factor, l.Scaled = d.limit(l.Nominal), d.factor(), true
 	}
