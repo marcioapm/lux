@@ -91,8 +91,10 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 				}
 				sp.Labels[k] = v
 			}
-			if err := fillSecrets(sp.Secrets, secretsFrom); err != nil {
-				return err
+			if !dryRun {
+				if err := fillSecrets(sp.Secrets, secretsFrom); err != nil {
+					return err
+				}
 			}
 			if dryRun {
 				if follow || wait {

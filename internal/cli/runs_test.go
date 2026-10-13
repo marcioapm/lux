@@ -51,6 +51,21 @@ func TestRunDryRunUsesValidateOnly(t *testing.T) {
 	}
 }
 
+func TestRunDryRunDoesNotResolveSecretValues(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "spot.yaml")
+	if err := os.WriteFile(file, []byte("spot: true\nimage: {ref: alpine}\nworkload: {command: [\"true\"]}\nsecrets: [{name: TOKEN, value: '${LUX_TEST_ABSENT_SECRET}'}]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LUX_TEST_ABSENT_SECRET", "")
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"valid":true,"effectivePool":"p","effectiveResources":{"cpus":1,"memory":2,"disk":3}}`))
+	})
+	if _, err := runCLI(t, h, "run", "-f", file, "--dry-run", "--secrets-from", filepath.Join(t.TempDir(), "absent.env")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunSpotFlag(t *testing.T) {
 	body := submitted(t, "run", "--spot", "--image", "alpine", "--", "true")
 	if body["spot"] != true {
