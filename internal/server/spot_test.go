@@ -87,6 +87,9 @@ func TestSpotSchedulerFailsClosed(t *testing.T) {
 	}
 }
 
+// 25 spot Runs ahead of a normal one in the queue, on a host that could
+// take any of them (spot-capable, its space free for long enough): the
+// normal Run, read beyond the scheduler's first 20-Run batch, gets it.
 func TestSpotQueueDoesNotHideNormalBeyondFirstBatch(t *testing.T) {
 	s, _, _ := planningFixture(t, 25)
 	ctx := context.Background()
@@ -94,6 +97,8 @@ func TestSpotQueueDoesNotHideNormalBeyondFirstBatch(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state) VALUES
 		('normal', 't1', 'pool1', '{"resources":{"cpus":1,"memory":10,"disk":10},"placement":{"pool":"burst"}}', 'resuming')`)
 	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 1, Memory: 10, Disk: 10, Runs: 1}, map[string]string{})
+	execSQL(t, s, ctx, `UPDATE hosts SET capabilities = $1 WHERE id = 'h'`, []string{proto.CapSpotReclaim})
+	seedAged(t, s, "h", freeVec{1, 10, 10, 1}, 10*time.Minute)
 	if err := s.scheduleOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +107,9 @@ func TestSpotQueueDoesNotHideNormalBeyondFirstBatch(t *testing.T) {
 	}
 	if n := queryOne[int](t, s, `SELECT count(*) FROM placements`); n != 1 {
 		t.Fatalf("placements = %d, want only normal resume", n)
+	}
+	if reason := queryOne[string](t, s, `SELECT state_reason FROM runs WHERE id = 'r0'`); reason != "waiting for spot capacity: normal Runs are waiting for that capacity" {
+		t.Fatalf("first spot Run's wait %q: want it held back for the normal Run", reason)
 	}
 }
 

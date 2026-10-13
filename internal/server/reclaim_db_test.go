@@ -141,7 +141,9 @@ func TestReclaimRequesterWaitsForAllClaimedVictims(t *testing.T) {
 }
 
 // A runner hello (restart) or the host's loss voids the pledge: its spot
-// placements may be gone and its capacity starts over.
+// placements may be gone and its capacity starts over. A scheduler pass
+// (cleanupPledges, then the batch) drops it, with no Run queued for that
+// host's pool any more, too.
 func TestReclaimPledgeVoidedByHostChange(t *testing.T) {
 	for _, change := range []string{
 		`UPDATE hosts SET capacity_epoch = capacity_epoch + 1 WHERE id = 'h'`,
@@ -151,9 +153,7 @@ func TestReclaimPledgeVoidedByHostChange(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			s := reclaimFixture(t)
 			execSQL(t, s, context.Background(), change)
-			if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
-				return s.dropPledges(context.Background(), tx, nil)
-			}); err != nil {
+			if err := s.scheduleOnce(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			if n := queryOne[int](t, s, `SELECT count(*) FROM spot_pledges`); n != 0 {
@@ -161,6 +161,42 @@ func TestReclaimPledgeVoidedByHostChange(t *testing.T) {
 			}
 		})
 	}
+	// The requester's row is held elsewhere, so no batch takes it up (SKIP
+	// LOCKED) and discovers its host: cleanupPledges alone drops the pledge.
+	t.Run("no batch reaches the host", func(t *testing.T) {
+		s := reclaimFixture(t)
+		ctx := context.Background()
+		execSQL(t, s, ctx, `UPDATE hosts SET capacity_epoch = capacity_epoch + 1 WHERE id = 'h'`)
+		hold, err := s.db.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer hold.Rollback(ctx)
+		if _, err := hold.Exec(ctx, `SELECT set_config('lux.system', 'on', true)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := hold.Exec(ctx, `SELECT 1 FROM runs WHERE id = 'n' FOR UPDATE`); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.scheduleOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if n := queryOne[int](t, s, `SELECT count(*) FROM spot_pledges`); n != 0 {
+			t.Fatal("pledge survived a hello with no batch for its host")
+		}
+	})
+	t.Run("dropPledges directly", func(t *testing.T) {
+		s := reclaimFixture(t)
+		execSQL(t, s, context.Background(), `UPDATE hosts SET capacity_epoch = capacity_epoch + 1 WHERE id = 'h'`)
+		if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
+			return s.dropPledges(context.Background(), tx, nil)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if n := queryOne[int](t, s, `SELECT count(*) FROM spot_pledges`); n != 0 {
+			t.Fatal("pledge survived a hello")
+		}
+	})
 }
 
 // A host whose runner lacks the spot capability never gets a spot
