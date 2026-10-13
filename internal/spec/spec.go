@@ -20,7 +20,7 @@ import (
 )
 
 type RunSpec struct {
-	Spot      bool              `json:"spot,omitempty" yaml:"spot,omitempty" doc:"Opt into opportunistic Run scheduling, independent of the host's EC2 market. Requires resumePolicy never; omitted resumePolicy normalizes to never. Spot demand never launches hosts. Admission is not yet available."`
+	Spot      bool              `json:"spot,omitempty" yaml:"spot,omitempty" doc:"Opt into opportunistic Run scheduling, independent of the host's EC2 market. Requires resumePolicy never; omitted resumePolicy normalizes to never. Spot demand never launches hosts. Admission requires spare capacity continuously free for more than 60s and a compatible runner."`
 	Name      string            `json:"name,omitempty" yaml:"name,omitempty"`
 	Labels    map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 	Image     Image             `json:"image" yaml:"image"`

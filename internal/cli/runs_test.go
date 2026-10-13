@@ -38,6 +38,19 @@ func submitted(t *testing.T, args ...string) map[string]any {
 	return body
 }
 
+func TestRunDryRunUsesValidateOnly(t *testing.T) {
+	var query string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"valid":true,"wouldStartNow":false,"pool":"p","effectiveResources":{"cpus":1,"memory":2,"disk":3},"blockers":[{"code":"space_not_settled","hosts":1,"remainingSeconds":5}]}`))
+	})
+	out, err := runCLI(t, h, "run", "--spot", "--dry-run", "--image", "alpine", "--", "true")
+	if err != nil || query != "validateOnly=true" || !strings.Contains(out, "space_not_settled") || !strings.Contains(out, "5s") {
+		t.Fatalf("query %q output %q err %v", query, out, err)
+	}
+}
+
 func TestRunSpotFlag(t *testing.T) {
 	body := submitted(t, "run", "--spot", "--image", "alpine", "--", "true")
 	if body["spot"] != true {

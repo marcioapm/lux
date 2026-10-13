@@ -714,13 +714,27 @@ func scanRun(row pgx.Row) (*Run, error) {
 }
 
 type submitRunInput struct {
+	ValidateOnly   bool   `query:"validateOnly" doc:"Validate without creating a Run. Reports advisory current admission, not a reservation or workload-success guarantee. Facts can change immediately."`
 	IdempotencyKey string `header:"Idempotency-Key" doc:"Makes the submission safe to retry: another with the same key returns the first Run (200) instead of creating one."`
 	Body           spec.RunSpec
 }
 
 type submitRunOutput struct {
 	Status int
-	Body   *Run
+	Body   *SubmitAnswer
+}
+
+// SubmitAnswer is either a created/replayed Run, or validateOnly's read-only
+// advisory admission result. It never guarantees workload success.
+type SubmitAnswer struct {
+	*Run
+	Valid              bool               `json:"valid,omitempty"`
+	WouldStartNow      bool               `json:"wouldStartNow,omitempty"`
+	EffectiveResources *spec.Resources    `json:"effectiveResources,omitempty"`
+	Pool               string             `json:"pool,omitempty"`
+	PoolID             string             `json:"poolId,omitempty"`
+	EligibleHost       string             `json:"eligibleHost,omitempty"`
+	Blockers           []AdmissionBlocker `json:"blockers,omitempty"`
 }
 
 func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunOutput, error) {
@@ -766,6 +780,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	stored, refs, values := sp.SplitSecrets()
 	if err := requireSecrets(refs, values); err != nil {
 		return nil, err
+	}
+	if in.ValidateOnly {
+		return s.validateSubmit(ctx, p, stored, raw)
 	}
 	idem := in.IdempotencyKey
 
@@ -854,13 +871,13 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		}); err != nil {
 			return nil, err
 		}
-		return &submitRunOutput{http.StatusOK, winner}, nil
+		return &submitRunOutput{http.StatusOK, &SubmitAnswer{Run: winner}}, nil
 	}
 	if created {
 		s.Kick()
-		return &submitRunOutput{http.StatusCreated, run}, nil
+		return &submitRunOutput{http.StatusCreated, &SubmitAnswer{Run: run}}, nil
 	}
-	return &submitRunOutput{http.StatusOK, run}, nil
+	return &submitRunOutput{http.StatusOK, &SubmitAnswer{Run: run}}, nil
 }
 
 // runByIdempotencyKey reads the Run submitted with key, in the tenant the
