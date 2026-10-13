@@ -581,17 +581,23 @@ resizes a Run already submitted: a Run is sized when it is submitted and
 when a resume resizes or moves it.
 
 After a shape is removed or changed, a Run keeps its resources, and its
-`sizing.resolved` is shown only while its pool is shaped and its size is
-still one of that pool's sizes; otherwise it is absent (`sizing.requested`
-stays). Its next resume settles it:
+`sizing.resolved` is shown only while its pool is shaped and that pool
+still has a size of the same name with the Run's cpus, memory and disk;
+otherwise it is absent (`sizing.requested` stays). A change can keep a
+size's name and change its memory or disk (e.g. `m-4-arm64` after the
+shape's memory doubles): the Run's size is then stale too. Its next
+resume settles it:
 
 - into an unshaped pool (its own, its shape removed, or another): the Run
   has no size from then on, and keeps its resources unless the resume
   asks for others;
-- in its own pool whose sizes no longer include the Run's size, asking
-  for no resources: its current cpus, memory and disk are rounded up to
-  one of the pool's sizes, as on a move into a shaped pool (refused like
-  any resize, e.g. 422 `size_too_large` or `size_below_saved_state`);
+- in its own pool whose sizes no longer include the Run's size with its
+  resources, asking for no resources: its current cpus, memory and disk
+  are rounded up to one of the pool's sizes, as on a move into a shaped
+  pool (refused like any resize, e.g. 422 `size_too_large` or
+  `size_below_saved_state`). A Run larger than the new shape's whole
+  host gets `size_too_large` on every such resume, and leaves only by
+  moving to another pool (`lux resume --pool`);
 - asking for resources: those are resolved, as on any resume.
 
 A pool without a shape is unchanged in every way: it takes no `size`, and

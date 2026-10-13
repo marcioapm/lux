@@ -617,7 +617,7 @@ type RunUsage struct {
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, rpool.shape, ` + resumableSQL + `, ` + stageColumns
+	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + resumableSQL + `, ` + stageColumns
 
 // runsFrom: a Run with its tenant, its current placement's host, and its
 // runtime (rr). Runtime is the sum over its placements of started_at
@@ -690,9 +690,9 @@ func scanRun(row pgx.Row) (*Run, error) {
 		&requested, &size, &shape, &r.Resumable},
 		stage.scanTargets()...)...)
 	// resolved_size is shown only while it names a size of the pool's
-	// current ladder: a removed or changed shape leaves it stale until the
-	// next resume re-resolves or clears it.
-	if size != nil && (shape == nil || !shape.hasSize(*size)) {
+	// current ladder with the Run's resources: a removed or changed shape
+	// leaves it stale until the next resume re-resolves or clears it.
+	if size != nil && (shape == nil || !shape.hasSize(*size, r.Spec.Resources)) {
 		size = nil
 	}
 	if requested != nil || size != nil {

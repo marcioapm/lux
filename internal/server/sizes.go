@@ -76,15 +76,18 @@ func (sh PoolShape) sizes() []PoolSize {
 	return out
 }
 
-// hasSize reports whether name is on sh's current ladder.
-func (sh PoolShape) hasSize(name string) bool {
+// hasSize reports whether name is a size of sh's current ladder whose
+// cpus, memory and disk are cur's.
+func (sh PoolShape) hasSize(name string, cur spec.Resources) bool {
 	m, err := sh.model()
-	return err == nil && onLadder(m, name)
+	return err == nil && sizeCurrent(m, name, cur)
 }
 
-func onLadder(m *sizing.Model, name string) bool {
-	_, err := m.Parse(name)
-	return err == nil
+// sizeCurrent: a shape change can keep a size's name and change its
+// memory or disk, so the entry's dimensions must match too.
+func sizeCurrent(m *sizing.Model, name string, cur spec.Resources) bool {
+	e, err := m.Parse(name)
+	return err == nil && e.CPUs == cur.CPUs && e.Memory == cur.Memory && e.Disk == cur.Disk
 }
 
 // shapeKeys are ParseShape's keys, in the order its errors list them.
@@ -261,7 +264,7 @@ type SizeResolved struct {
 // RunSizing is a Run's request and resolution on a shaped pool.
 type RunSizing struct {
 	Requested *SizeRequest  `json:"requested,omitempty" doc:"What its submit asked for in resources.size, cpus, memory and disk, only those given (empty: none, the pool's default size). Absent for a Run submitted to an unshaped pool. A resume's request is in its answer's resize and its resume.requested event."`
-	Resolved  *SizeResolved `json:"resolved,omitempty" doc:"The size the Run has now, and its cpus, memory and disk (as spec.resources). Absent while it is in an unshaped pool, or while its size is not one of its pool's current sizes (the shape changed since): its next resume resolves it again."`
+	Resolved  *SizeResolved `json:"resolved,omitempty" doc:"The size the Run has now, and its cpus, memory and disk (as spec.resources). Absent while it is in an unshaped pool, or while its pool's current sizes have no size of that name with the Run's cpus, memory and disk (the shape changed since, even if the name stayed): its next resume resolves it again."`
 }
 
 // sizeRequestOf is r's size request: its size, cpus, memory and disk
@@ -506,7 +509,7 @@ func resumeSize(ctx context.Context, tx pgx.Tx, z resumeSizing, req *resumeResou
 	switch {
 	case asked != (spec.Resources{}):
 		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, sizeRequestOf(asked).model())
-	case z.moving(), z.resolved != "" && !onLadder(m, z.resolved):
+	case z.moving(), z.resolved != "" && !sizeCurrent(m, z.resolved, z.cur):
 		raw := sizeRequestOf(spec.Resources{CPUs: z.cur.CPUs, Memory: z.cur.Memory, Disk: z.cur.Disk})
 		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, raw.model())
 	case req != nil:
