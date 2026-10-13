@@ -549,9 +549,7 @@ the market sampler) has them: the arch must match, CPUs and memory must be
 at least the shape's. A type the catalog lacks is not checked, so a pool
 set before the sampler has run is checked only on its next set. Disk is
 the shape's own: it comes from the launch template's volume, which no
-instance type describes. Shapes size Runs' reservations only: hosts still
-register and are scheduled on as before, and an existing Run is never
-resized when a shape is set, changed or removed. Rolling back to a luxd
+instance type describes. Rolling back to a luxd
 without shapes leaves the columns in place and ignores them; Runs keep
 the resources they were given.
 

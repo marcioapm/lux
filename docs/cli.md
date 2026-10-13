@@ -360,8 +360,7 @@ template as it is (changing only `--max`, say) is not checked again.
 checks it, and an `ec2` pool's instance types against it, before storing
 it (exit 4, `invalid_pool`). Like the template, a set that leaves out a
 shape the pool has would remove it, each field printed as `shape.cpus
-8→-`, and is refused without `--replace`. Runs already submitted keep
-their resources whatever the shape becomes. `lux pools sizes <pool>`
+8→-`, and is refused without `--replace`. `lux pools sizes <pool>`
 lists the sizes; `luxd admin create-pool --shape` takes the same value.
 `lux pools sizes` on an unshaped pool exits non-zero (`pool <name> has no
 shape`), with `-o json` too; an operator naming a pool several tenants
