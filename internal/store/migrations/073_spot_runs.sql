@@ -1,4 +1,4 @@
--- 072_spot_runs.sql — spot Runs (docs/design/spot-runs.md).
+-- 073_spot_runs.sql — spot Runs (docs/design/spot-runs.md).
 --
 -- hosts.capacity_epoch: bumped on every runner hello (reconnect, restart,
 -- capacity change), so neither aged capacity nor a pledge survives one.

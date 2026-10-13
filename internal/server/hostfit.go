@@ -37,7 +37,14 @@ const (
 	kindScope
 	kindSyncModes
 	kindSpotReclaim
+	// kindShape: a shaped pool's Run, a host not advertising the shape
+	// with disk scaling.
+	kindShape
 )
+
+func shapeText(cpus float64, memory, disk int64) string {
+	return fmt.Sprintf("cpus %g, memory %s, disk %s", cpus, bytesText(memory), bytesText(disk))
+}
 
 // hostFit is independent of snapshot locality and scheduler affinity. A chosen
 // host bypasses pool and required labels, but not isolation or nested support.
@@ -85,6 +92,18 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	if r.Spec.Spot && !slices.Contains(h.Caps, proto.CapSpotReclaim) {
 		constraint(kindSpotReclaim, "host's lux-runner lacks spot reclamation support")
 	}
+	// A shaped pool's sizes are fractions of its nominal host: only a
+	// runner advertising exactly that host, and scaling disk to it, takes
+	// one. A larger host advertises the shape, not its hardware.
+	if sh := r.Shape; sh != nil {
+		if !slices.Contains(h.Caps, proto.CapDiskScale) {
+			constraint(kindShape, "host's lux-runner does not scale disk (no --disk-headroom)")
+		}
+		if c := h.Capacity; c.CPUs != sh.CPUs || c.Memory != int64(sh.Memory) || c.Disk != int64(sh.Disk) {
+			constraint(kindShape, fmt.Sprintf("host advertises %s, not its pool's shape %s",
+				shapeText(c.CPUs, c.Memory, c.Disk), shapeText(sh.CPUs, int64(sh.Memory), int64(sh.Disk))))
+		}
+	}
 	res := r.Spec.Resources
 	resource := func(name string, requested, used, capacity float64, blocked bool) {
 		if blocked {
@@ -119,7 +138,7 @@ type waitCapacity struct {
 }
 
 // waitKinds is the reason's fixed order: the resource kinds, then constraints.
-var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes"}
+var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes", "shape"}
 
 // add counts h's blockers, unless one of them rules h out for this Run on
 // pool, tenancy or chosen-host grounds, or h is not connected to this luxd
@@ -138,6 +157,8 @@ func (w *waitCapacity) add(blockers []fitBlocker) {
 			kind = "nested"
 		case kindSyncModes:
 			kind = "syncModes"
+		case kindShape:
+			kind = "shape"
 		default:
 			return
 		}
@@ -184,6 +205,9 @@ func (w *waitCapacity) reason(r pendingRun) string {
 			what = plural(n, "does", "do") + " not support nested containers"
 		case "syncModes":
 			what = plural(n, "runs a lux-runner", "run lux-runners") + " without sync modes (its sync asks for fast-forward or fetch)"
+		case "shape":
+			sh := r.Shape
+			what = plural(n, "does", "do") + " not advertise its pool's shape (" + shapeText(sh.CPUs, int64(sh.Memory), int64(sh.Disk)) + ") with disk scaling"
 		}
 		// The subject is named once: the first part says which hosts, later
 		// parts only how many (nothing for the chosen host).

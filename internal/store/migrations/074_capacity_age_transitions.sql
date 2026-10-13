@@ -1,5 +1,5 @@
--- 073_capacity_age_transitions.sql — every placement resource transition
--- appends to its host's capacity history (072) in the same transaction, so
+-- 074_capacity_age_transitions.sql — every placement resource transition
+-- appends to its host's capacity history (073) in the same transaction, so
 -- a release between scheduler passes, by any luxd, is recorded when it
 -- happens. The history's row is only ever written under its host's
 -- cost-host advisory lock (infraevents.go's lock order, step 3): every

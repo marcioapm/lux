@@ -78,14 +78,14 @@ moment it returns; it is not a reservation.
 
 ## Capacity ledger
 
-Migration 072 adds host_capacity_age(host_id primary key, key, history). Up to 32
+Migration 073 adds host_capacity_age(host_id primary key, key, history). Up to 32
 transitions carry CPU/memory/disk/slot free vectors and timestamps. Admission takes
 the component-wise minimum of intervals intersecting the last 60s, requiring a
 strictly older boundary. Overflow merges oldest intervals by minimum (understates
 rather than invents capacity). One indexed read per host loads the history.
 Ordinary resources still come from live placements; sampling CPU load is irrelevant.
 
-Migration 073's placement trigger appends a transition on every insert, delete,
+Migration 074's placement trigger appends a transition on every insert, delete,
 resize, or entry/exit of the live states (a WHEN clause skips other updates),
 including releases between scheduler passes, by any luxd. It takes no lock of its
 own. The history row is written only under the host's cost-host advisory lock,
