@@ -873,14 +873,20 @@ func (p *placement) removeWorkloadDisk(ctx context.Context, id string, vols []vo
 
 // finishWithoutContainer ends a placement that never started a workload.
 // Its state volumes are unchanged, so the snapshot is the one it started
-// from.
+// from. A spot placement's end frees its disk at luxd: the volumes made so
+// far and a container created but not started go first. ReleasePending is
+// saved with the exited phase, so a re-adopting finish takes no snapshot.
 func (p *placement) finishWithoutContainer(ctx context.Context, state, msg string) {
 	code, reason := startEnd(state)
 	p.mu.Lock()
 	p.state.Exit = &exitRecord{Code: code, Reason: reason, Message: msg, Failed: state == "failed"}
 	p.state.Phase = "exited"
+	p.state.ReleasePending = p.spot()
 	p.mu.Unlock()
 	_ = p.saveState()
+	if p.spot() && !p.releaseDisk(ctx) {
+		return
+	}
 	p.reportStartEnd(ctx, state, msg)
 }
 
