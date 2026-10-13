@@ -3078,10 +3078,22 @@ components:
         diskBytes:
           format: int64
           type: integer
+        diskFreeBytes:
+          description: "Hosts: bytes unprivileged writers can still use on the filesystem of the runner's data directory. Absent from older runners."
+          format: int64
+          type: integer
+        diskHeadroomBytes:
+          description: "Hosts scaling disk: bytes of that filesystem kept from Runs (lux-runner --disk-headroom). Absent otherwise."
+          format: int64
+          type: integer
         epoch:
           format: int64
           type: integer
         finished:
+          format: int64
+          type: integer
+        fsCapacityBytes:
+          description: "Hosts scaling disk (disk-scale): that filesystem's capacity as the runner read it at start, used plus free. Absent otherwise."
           format: int64
           type: integer
         hosts:

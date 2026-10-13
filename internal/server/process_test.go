@@ -186,3 +186,54 @@ func TestProcessRateSkipsMissing(t *testing.T) {
 		t.Fatalf("after the gap: %+v", p)
 	}
 }
+
+// A heartbeat's filesystem free bytes, and a disk-scaling runner's
+// filesystem capacity and headroom, are stored on the host's sample and
+// read back from its history: raw, and a minute's rollup (free the mean,
+// capacity and headroom the maximum). An older runner's leave them absent.
+func TestHostHistoryCarriesTheFilesystem(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	opKey := ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(opKey))
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h1', 'h1', 'ready'), ('h2', 'h2', 'ready')`)
+	capacity, headroom := int64(155<<30), int64(10<<30)
+	// One transaction per heartbeat, as the hub's: a sample is stamped at
+	// its transaction's now().
+	sample := func(host string, u *proto.HostUsage) {
+		t.Helper()
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return sampleHost(ctx, tx, host, u, nil) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, free := range []int64{100 << 30, 120 << 30} {
+		sample("h1", &proto.HostUsage{DiskBytes: capacity - free, FSFreeBytes: &free, FSCapacityBytes: &capacity, DiskHeadroomBytes: &headroom})
+	}
+	sample("h2", &proto.HostUsage{DiskBytes: 7})
+	q := url.Values{"res": {"0"}, "since": {"1h"}}.Encode()
+	raw := historyRequest(t, s, opKey, "/v1/hosts/h1/history?"+q).Samples
+	if len(raw) != 2 {
+		t.Fatalf("%d raw samples, want 2", len(raw))
+	}
+	for i, free := range []int64{100 << 30, 120 << 30} {
+		sm := raw[i]
+		if sm.DiskFreeBytes == nil || *sm.DiskFreeBytes != free || *sm.FSCapacityBytes != capacity || *sm.DiskHeadroomBytes != headroom {
+			t.Errorf("raw sample %d: free %v capacity %v headroom %v", i, sm.DiskFreeBytes, sm.FSCapacityBytes, sm.DiskHeadroomBytes)
+		}
+	}
+	old := historyRequest(t, s, opKey, "/v1/hosts/h2/history?"+q).Samples
+	if len(old) != 1 || old[0].DiskFreeBytes != nil || old[0].FSCapacityBytes != nil || old[0].DiskHeadroomBytes != nil || *old[0].DiskBytes != 7 {
+		t.Errorf("older runner's sample %+v", old)
+	}
+	// Into a closed minute, keeping their order and distinct times, then
+	// rolled up.
+	execSQL(t, s, ctx, `UPDATE host_samples SET at = date_trunc('minute', now()) - interval '3 minutes' + (at - date_trunc('second', at))`)
+	if err := s.rollupHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	q = url.Values{"res": {"60"}, "since": {"1h"}}.Encode()
+	mins := historyRequest(t, s, opKey, "/v1/hosts/h1/history?"+q).Samples
+	if len(mins) != 1 || *mins[0].DiskFreeBytes != 110<<30 || *mins[0].FSCapacityBytes != capacity || *mins[0].DiskHeadroomBytes != headroom {
+		t.Errorf("minute rollup %+v", mins)
+	}
+}
