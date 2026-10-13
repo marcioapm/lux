@@ -43,8 +43,22 @@ and the shim), and sends the shim ShimStop with killAtUnixMs. The shim SIGTERMs
 the workload's and init's process groups immediately, runs no beforeStop hook,
 ignores workload grace, and schedules SIGKILL to the groups at the same instant.
 Starting/building placements are cancelled through the existing cancelStart and
-still get the container kill. Normal stops are unchanged. Exit snapshots follow
+still get the container kill. A reclamation that lands while the container is
+being started never starts the workload: the shim gets the stop with the first
+deadline, or, if the deadline passed before the container came up, the
+container is killed at once. Normal stops are unchanged. Exit snapshots follow
 the never policy (no state-volume export; output/artifacts kept).
+
+A spot placement's end report frees its disk at luxd, so after reporting its
+snapshot (output and artifacts staged as blobs) the runner removes its
+container and its state, ephemeral and engine volumes first, then reports the
+end. A removal that fails is retried and the end stays unreported: luxd keeps
+the placement live and its disk reserved. runState.releasePending carries
+this across a runner restart (no second snapshot). Normal Runs keep their
+volumes as before.
+
+The runner advertises spot-reclaim-v1 only when its lux-shim answers
+`lux-shim capabilities` with reclaim-v1; sync-mode support is a separate gate.
 
 ## Dry run
 

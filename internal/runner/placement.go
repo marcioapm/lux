@@ -43,8 +43,11 @@ type placement struct {
 	tenantID string
 	epoch    int
 	assign   *proto.Assign // nil when re-adopted after a runner restart
-	// reclaimArmed: this process scheduled the spot reclamation's kill.
+	// reclaimArmed: this process scheduled the spot reclamation's kill;
+	// reclaimAt: its instant (unix ms, 0: none), kept here as well as in
+	// state, which a placement has no copy of before restoreState.
 	reclaimArmed bool
+	reclaimAt    int64
 	dir          string
 	// prev is the Run's earlier placement on this host when this one was
 	// assigned: this one touches nothing of the Run's until prev is done.
@@ -381,6 +384,8 @@ func (p *placement) restoreState() {
 	// The container starts with this runner's --shim mounted.
 	st.ShimSyncModes = p.r.shimSyncModes
 	p.mu.Lock()
+	// A reclamation received while waiting for the previous placement.
+	st.ReclaimKillAt = p.reclaimAt
 	p.state = st
 	p.mu.Unlock()
 	_ = p.saveState()
@@ -619,19 +624,38 @@ func (p *placement) run(ctx context.Context) {
 		p.mu.Unlock()
 	}
 
-	shimErr := p.startShim(ctx, a)
+	// A spot reclamation received while starting: the workload is never
+	// started (no ShimStart); the shim is told to stop with the first
+	// notice's deadline, or, past it, the container is killed outright.
+	reclaiming := p.pendingStop() == stopSpotReclaim
+	var shimErr error
+	switch {
+	case reclaiming && p.reclaimPastDeadline():
+		_ = p.r.pm.Kill(ctx, ctr, "KILL")
+	case reclaiming:
+		shimErr = p.dialShim(ctx)
+	default:
+		shimErr = p.startShim(ctx, a)
+	}
 	// Whatever the starting reports have not delivered rides on the
 	// running report or the end report: both carry every mark.
 	p.endStartingReports()
 	if shimErr != nil {
 		p.logf("shim start failed", "err", shimErr)
 		_ = p.r.pm.Kill(ctx, ctr, "KILL")
+	} else if reclaiming {
+		p.setPhase("stopping")
+		go p.report(ctx, proto.MsgStatus, proto.Status{State: "stopping"})
 	} else {
 		p.setPhase("running")
 		go p.report(ctx, proto.MsgStatus, p.runningStatus())
 	}
-	// A stop that arrived while starting.
-	if why := p.pendingStop(); why != "" {
+	// A stop that arrived while starting. A reclamation always goes with
+	// its deadline: never the ordinary stop's hook and grace.
+	switch why := p.pendingStop(); {
+	case why == stopSpotReclaim:
+		p.reclaim(ctx)
+	case why != "":
 		p.sendStop(ctx, why)
 	}
 	p.supervise(ctx)
@@ -699,6 +723,9 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	p.state.Exit = exit
 	p.state.Phase = "exited"
 	p.state.LastExitAt = time.Now().UnixMilli()
+	// Re-adopted after its snapshot was reported: only its disk release
+	// and its end remain.
+	snapshotReported := p.state.ReleasePending
 	p.mu.Unlock()
 	_ = p.saveState()
 	p.sampleSlow(exportCtx)
@@ -709,35 +736,14 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		p.setPhase("done")
 		return
 	}
-	sd, err := p.snapshot(ctx, exportCtx)
-	p.mu.Lock()
-	p.cancelExport = nil
-	p.mu.Unlock()
-	if err != nil && exportCtx.Err() != nil {
-		p.logf("snapshot abandoned: the Run's next epoch was assigned here", "err", err)
-		p.setPhase("done")
+	if !snapshotReported && !p.reportSnapshot(ctx, exportCtx, exit) {
 		return
 	}
-	if err != nil {
-		p.logf("snapshot failed", "err", err)
-		sd = &proto.SnapshotDone{Error: err.Error(), OutputSeq: exit.OutputSeq}
+	// A spot Run's disk is free for luxd at its end report: its container
+	// and volumes go first. Its output and artifacts are blobs, staged above.
+	if p.spot() && !p.releaseDisk(ctx) {
+		return
 	}
-	var ack proto.Ack
-	for {
-		if ack, err = p.reportAck(ctx, proto.MsgSnapshotDone, sd); err == nil {
-			break
-		}
-		if p.isStale() || ctx.Err() != nil {
-			return
-		}
-		time.Sleep(time.Second)
-	}
-	// luxd has the snapshot (or refused it): its blobs can be uploaded (or
-	// deleted).
-	if sd.Manifest.SnapshotID != "" {
-		p.r.snapshotAcked(sd.Manifest.SnapshotID, ack)
-	}
-	p.r.uploads.kick()
 
 	st := proto.Status{State: "exited", ExitCode: &exit.Code, Reason: exit.Reason, Message: exit.Message,
 		OutputSeq: exit.OutputSeq, Times: p.times(), Usage: usage, ImagePlatforms: p.platforms()}
@@ -773,6 +779,96 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	_ = p.saveState()
 	p.setPhase("done")
 	p.logf("placement ended", "exit", exit.Code, "reason", exit.Reason)
+}
+
+// reportSnapshot exports and reports the exit snapshot; false when finish
+// must stop here (the export was abandoned, or the placement fenced off or
+// the runner stopping before luxd had it).
+func (p *placement) reportSnapshot(ctx, exportCtx context.Context, exit *exitRecord) bool {
+	sd, err := p.snapshot(ctx, exportCtx)
+	p.mu.Lock()
+	p.cancelExport = nil
+	p.mu.Unlock()
+	if err != nil && exportCtx.Err() != nil {
+		p.logf("snapshot abandoned: the Run's next epoch was assigned here", "err", err)
+		p.setPhase("done")
+		return false
+	}
+	if err != nil {
+		p.logf("snapshot failed", "err", err)
+		sd = &proto.SnapshotDone{Error: err.Error(), OutputSeq: exit.OutputSeq}
+	}
+	var ack proto.Ack
+	for {
+		if ack, err = p.reportAck(ctx, proto.MsgSnapshotDone, sd); err == nil {
+			break
+		}
+		if p.isStale() || ctx.Err() != nil {
+			return false
+		}
+		time.Sleep(time.Second)
+	}
+	// luxd has the snapshot (or refused it): its blobs can be uploaded (or
+	// deleted).
+	if sd.Manifest.SnapshotID != "" {
+		p.r.snapshotAcked(sd.Manifest.SnapshotID, ack)
+	}
+	p.r.uploads.kick()
+	return true
+}
+
+func (p *placement) spot() bool { return p.assign != nil && p.assign.Spec.Spot }
+
+// releaseRetry is how long releaseDisk waits between attempts. A variable
+// for tests only.
+var releaseRetry = 5 * time.Second
+
+// releaseDisk removes a spot placement's container and its state,
+// ephemeral and engine volumes (never resumed: nothing to keep), retrying
+// until it has. Until then the end is not reported, so luxd keeps the
+// placement live and its disk reserved; ReleasePending, persisted first,
+// brings a restarted runner back here. The runtime volume (the output
+// file, until its blob is uploaded) stays for the host TTL, as for any
+// Run. false: fenced off or the runner stopping.
+func (p *placement) releaseDisk(ctx context.Context) bool {
+	p.mu.Lock()
+	p.state.ReleasePending = true
+	id := p.state.Container
+	vols := append(slices.Clone(p.state.Volumes), p.state.EngineVolumes...)
+	p.mu.Unlock()
+	_ = p.saveState()
+	for {
+		err := p.removeWorkloadDisk(ctx, id, vols)
+		if err == nil {
+			return true
+		}
+		p.r.log.Warn("releasing a spot Run's disk failed; its end is not reported yet", "run", p.runID, "epoch", p.epoch, "err", err)
+		if p.isStale() || ctx.Err() != nil {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(releaseRetry):
+		}
+	}
+}
+
+func (p *placement) removeWorkloadDisk(ctx context.Context, id string, vols []volumeRef) error {
+	rmCtx, cancel := context.WithTimeout(ctx, removeTimeout)
+	defer cancel()
+	if id != "" {
+		if err := p.r.pm.Remove(rmCtx, id); err != nil {
+			return err
+		}
+	}
+	for _, v := range vols {
+		if err := p.r.pm.VolumeRemove(rmCtx, v.Volume); err != nil {
+			return err
+		}
+		p.r.forgetMountpoint(v.Volume)
+	}
+	return nil
 }
 
 // finishWithoutContainer ends a placement that never started a workload.
@@ -1185,6 +1281,10 @@ func (p *placement) requestStop(ctx context.Context, reason string) {
 		}
 	}
 	phase := p.phase
+	if reason == stopSpotReclaim {
+		// Persisted with the stop reason, before anything is signalled.
+		p.fixReclaimLocked()
+	}
 	if p.state != nil {
 		p.state.StopReason = p.stopWhy
 		_ = p.saveStateLocked()
