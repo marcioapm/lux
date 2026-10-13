@@ -12,7 +12,8 @@ import (
 // CeilingFactor: a Run using this many times its resources.disk is
 // reported at once, its diskGrace notwithstanding. The host's disk is
 // shared, and a write left unbounded for the whole grace could fill it for
-// every other Run on it.
+// every other Run on it. An interim stand-in for a host free-space guard,
+// until disk is reserved (docs/design/sizes.md).
 const CeilingFactor = 2
 
 // Watch is one placement's disk-limit state. A new placement (a resume, a
@@ -39,7 +40,8 @@ type Verdict struct {
 	Grace time.Duration
 	// Remaining: the grace left, for WentOver and StillOver.
 	Remaining time.Duration
-	// Ceiling: Exceeded came from CeilingFactor before the grace ran out.
+	// Ceiling: Exceeded on a sample at CeilingFactor times the limit or
+	// more, whether or not the grace had also run out.
 	Ceiling bool
 }
 
@@ -50,7 +52,7 @@ func (w *Watch) Sample(res spec.Resources, used int64, now time.Time) Verdict {
 		return Verdict{}
 	}
 	limit, grace := int64(res.Disk), res.DiskGrace.Duration.Duration
-	v := w.Observe(used, limit, grace, now)
+	v := w.observe(used, limit, grace, now)
 	v.Limit, v.Grace = limit, grace
 	return v
 }
@@ -60,8 +62,9 @@ func (v Verdict) EventData(used int64) map[string]any {
 	return map[string]any{"usedBytes": used, "limitBytes": v.Limit, "graceSeconds": v.Grace.Seconds(), "ceiling": v.Ceiling}
 }
 
-// Observe takes one sample of used bytes against limit at now.
-func (w *Watch) Observe(used, limit int64, grace time.Duration, now time.Time) Verdict {
+// observe takes one sample of used bytes against limit at now; Sample
+// fills the verdict's Limit and Grace.
+func (w *Watch) observe(used, limit int64, grace time.Duration, now time.Time) Verdict {
 	if w.reported {
 		return Verdict{}
 	}
@@ -76,16 +79,18 @@ func (w *Watch) Observe(used, limit int64, grace time.Duration, now time.Time) V
 	if first {
 		w.overSince = now
 	}
-	over := now.Sub(w.overSince)
-	if over >= grace {
-		w.reported = true
-		return Verdict{Step: Exceeded}
-	}
+	// The ceiling is checked first: it is the stronger reason, and is
+	// reported as such even when the grace has run out too.
 	// used/CeilingFactor >= limit is used >= CeilingFactor×limit without
 	// overflowing int64.
 	if used/CeilingFactor >= limit {
 		w.reported = true
 		return Verdict{Step: Exceeded, Ceiling: true}
+	}
+	over := now.Sub(w.overSince)
+	if over >= grace {
+		w.reported = true
+		return Verdict{Step: Exceeded}
 	}
 	step := StillOver
 	if first {

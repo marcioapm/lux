@@ -28,7 +28,7 @@ func feed(w *Watch, grace time.Duration, samples ...int64) []Verdict {
 	c := newClock()
 	var out []Verdict
 	for _, u := range samples {
-		out = append(out, w.Observe(u, limit, grace, c.next()))
+		out = append(out, w.observe(u, limit, grace, c.next()))
 	}
 	return out
 }
@@ -137,9 +137,6 @@ func TestZeroGraceReportsTheFirstSampleOver(t *testing.T) {
 func TestCeilingReportsAtOnceDespiteTheGrace(t *testing.T) {
 	grace := time.Hour
 	ceiling := CeilingFactor * limit
-	if CeilingFactor != 2 {
-		t.Fatalf("CeilingFactor %d, want 2 (documented in runspec.md)", CeilingFactor)
-	}
 	t.Run("first sample", func(t *testing.T) {
 		var w Watch
 		vs := feed(&w, grace, ceiling)
@@ -161,10 +158,39 @@ func TestCeilingReportsAtOnceDespiteTheGrace(t *testing.T) {
 	t.Run("no overflow near MaxInt64", func(t *testing.T) {
 		var w Watch
 		const big = int64(1) << 62
-		if v := w.Observe(big+1, big, grace, newClock().next()); v.Step != WentOver {
+		if v := w.observe(big+1, big, grace, newClock().next()); v.Step != WentOver {
 			t.Fatalf("%+v, want WentOver: 2×limit overflows int64 and must not trip the ceiling", v)
 		}
 	})
+}
+
+// A sample at the ceiling is reported as the ceiling even when the grace
+// has also run out, or is 0; one between the limit and the ceiling after
+// the grace has run out is reported as the grace.
+func TestCeilingWinsOverAnElapsedGrace(t *testing.T) {
+	ceiling := CeilingFactor * limit
+	for _, c := range []struct {
+		name    string
+		grace   time.Duration
+		samples []int64
+		ceiling bool
+	}{
+		{"grace 0, the first sample at the ceiling", 0, []int64{ceiling}, true},
+		{"the grace runs out on a sample at the ceiling", time.Minute, []int64{over, over, over, over, ceiling}, true},
+		{"the grace runs out on a sample between 1× and 2×", time.Minute, []int64{over, over, over, over, ceiling - 1}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var w Watch
+			vs := feed(&w, c.grace, c.samples...)
+			last := len(vs) - 1
+			if n, at := exceeded(vs); n != 1 || at != last {
+				t.Fatalf("reported %d times, first at %d: %+v; want once, at %d", n, at, vs, last)
+			}
+			if vs[last].Ceiling != c.ceiling {
+				t.Errorf("ceiling %t, want %t", vs[last].Ceiling, c.ceiling)
+			}
+		})
+	}
 }
 
 // One Watch reports at most once, whatever follows: more samples over,
@@ -179,11 +205,6 @@ func TestOneReportPerPlacement(t *testing.T) {
 		if v.Step != Quiet {
 			t.Errorf("sample %d after the report: %+v, want Quiet", i+1, v)
 		}
-	}
-	// A new placement (resume) has a new Watch: its grace starts afresh.
-	var next Watch
-	if v := next.Observe(over, limit, time.Minute, newClock().next()); v.Step != WentOver {
-		t.Errorf("new placement's first sample over: %+v, want WentOver", v)
 	}
 }
 

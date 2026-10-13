@@ -99,8 +99,8 @@ func TestDirSizeCountsHardlinksOnce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(d, "c"), make([]byte, 10), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := dirSize(d); got != 1010 {
-		t.Errorf("dirSize = %d, want 1010", got)
+	if got, err := dirSize(d); got != 1010 || err != nil {
+		t.Errorf("dirSize = %d, %v, want 1010", got, err)
 	}
 }
 

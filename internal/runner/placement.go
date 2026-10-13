@@ -80,10 +80,12 @@ type placement struct {
 	made     []string
 	peakDisk int64
 	disk     disklimit.Watch
-	netRx    int64
-	netTx    int64
-	cgroup   string
-	cpuPeak  cpuPeak
+	// diskProbeFailed: a sample's disk probe failed, logged once.
+	diskProbeFailed bool
+	netRx           int64
+	netTx           int64
+	cgroup          string
+	cpuPeak         cpuPeak
 	// imagePlatforms: what the image's reference offers (learnPlatforms);
 	// nil when unknown.
 	imagePlatforms []string
@@ -1480,24 +1482,37 @@ func (p *placement) sampleSlow(ctx context.Context) {
 		wg      sync.WaitGroup
 		mu      sync.Mutex
 		disk    int64
+		probeOK = true
 		st      podman.Stats
 		statsOK bool
 	)
-	add := func(n int64) { mu.Lock(); disk += n; mu.Unlock() }
+	add := func(n int64, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			probeOK = false
+			return
+		}
+		disk += n
+	}
 	for _, v := range vols {
 		wg.Go(func() {
-			if mp, err := p.r.mountpoint(ctx, v.Volume); err == nil {
-				add(dirSize(mp))
+			mp, err := p.r.mountpoint(ctx, v.Volume)
+			if err != nil {
+				add(0, err)
+				return
 			}
+			add(dirSize(mp))
 		})
 	}
 	if ctr != "" {
 		wg.Go(func() {
-			if out, err := p.r.pm.Run(ctx, "container", "inspect", "--size", "--format", "{{.SizeRw}}", ctr); err == nil {
-				var n int64
-				fmt.Sscan(strings.TrimSpace(string(out)), &n)
-				add(n)
+			out, err := p.r.pm.Run(ctx, "container", "inspect", "--size", "--format", "{{.SizeRw}}", ctr)
+			var n int64
+			if err == nil {
+				_, err = fmt.Sscan(strings.TrimSpace(string(out)), &n)
 			}
+			add(n, err)
 		})
 		wg.Go(func() {
 			var err error
@@ -1506,9 +1521,16 @@ func (p *placement) sampleSlow(ctx context.Context) {
 		})
 	}
 	wg.Wait()
-	p.checkDisk(ctx, disk, time.Now())
+	// A partial sum would read as under the limit and restart the grace.
+	if probeOK {
+		p.checkDisk(ctx, disk, time.Now())
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !probeOK && !p.diskProbeFailed {
+		p.diskProbeFailed = true
+		p.logf("a disk use probe failed; its sample is not checked against the disk limit (logged once per placement)")
+	}
 	p.peakDisk = max(p.peakDisk, disk)
 	if statsOK {
 		p.netRx, p.netTx = max(p.netRx, st.NetInput), max(p.netTx, st.NetOutput)
@@ -1532,8 +1554,8 @@ func (p *placement) checkDisk(ctx context.Context, used int64, now time.Time) {
 	p.mu.Unlock()
 	switch v.Step {
 	case disklimit.WentOver:
-		p.logf(fmt.Sprintf("over its disk limit; stopping in %s unless it drops below", v.Remaining.Round(time.Second)),
-			"used", used, "limit", v.Limit, "grace", v.Grace)
+		p.logf("over its disk limit; stopping it unless it drops back under within its grace",
+			"used", used, "limit", v.Limit, "grace", v.Grace, "remaining", v.Remaining.Round(time.Second))
 	case disklimit.BackUnder:
 		p.logf("back under its disk limit", "used", used, "limit", v.Limit)
 	case disklimit.Exceeded:
@@ -1543,11 +1565,15 @@ func (p *placement) checkDisk(ctx context.Context, used int64, now time.Time) {
 }
 
 // dirSize is the bytes of the regular files under root, a hardlinked file
-// once (image stores hardlink layer files).
-func dirSize(root string) int64 {
+// once (image stores hardlink layer files). The error is root's own: files
+// under it that vanish or cannot be read mid-walk are skipped.
+func dirSize(root string) (int64, error) {
 	var n int64
 	seen := map[uint64]bool{}
-	_ = filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil && path == root {
+			return err
+		}
 		if err == nil && d.Type().IsRegular() {
 			if fi, err := d.Info(); err == nil {
 				if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
@@ -1561,7 +1587,7 @@ func dirSize(root string) int64 {
 		}
 		return nil
 	})
-	return n
+	return n, err
 }
 
 // ---- snapshot -----------------------------------------------------------
