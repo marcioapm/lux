@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -186,22 +187,59 @@ func TestShimReclaimSkipsHookAndGrace(t *testing.T) {
 }
 
 // A reclamation before the workload has started: the wait for the start
-// is released, and no workload is started after it.
+// is released, and no workload is started after it, with or without a
+// terminal.
 func TestShimReclaimBeforeWorkloadStart(t *testing.T) {
+	for _, tty := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tty=%v", tty), func(t *testing.T) {
+			s, conn, dir := reclaimShim(t)
+			s.cfg.TTY = tty
+			sendShim(t, conn, proto.ShimMsg{Type: proto.ShimStop, Reason: "spot-reclaim", KillAtUnixMs: time.Now().Add(300 * time.Millisecond).UnixMilli()})
+			select {
+			case <-s.startCh:
+			case <-time.After(3 * time.Second):
+				t.Fatal("the wait for the start was not released")
+			}
+			marker := filepath.Join(dir, "started")
+			proc, err := s.startWorkload([]string{"sh", "-c", "touch " + marker + "; sleep 60"}, s.env)
+			if proc != nil {
+				t.Cleanup(func() { _ = syscall.Kill(-proc.Cmd.Process.Pid, syscall.SIGKILL) })
+			}
+			if !errors.Is(err, errReclaimed) || proc != nil {
+				t.Fatalf("workload start after a reclamation: %v, %v", proc, err)
+			}
+			time.Sleep(200 * time.Millisecond)
+			if _, err := os.Stat(marker); err == nil {
+				t.Fatal("the workload started after a reclamation")
+			}
+		})
+	}
+}
+
+// A reclamation while an ordinary stop's beforeStop hook runs: the hook's
+// process group, which ignores SIGTERM and would sleep 10s within a 30s
+// timeout, is killed at the reclamation's deadline.
+func TestShimReclaimKillsRunningBeforeStopHook(t *testing.T) {
 	s, conn, dir := reclaimShim(t)
-	sendShim(t, conn, proto.ShimMsg{Type: proto.ShimStop, Reason: "spot-reclaim", KillAtUnixMs: time.Now().Add(300 * time.Millisecond).UnixMilli()})
-	select {
-	case <-s.startCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the wait for the start was not released")
+	s.cfg.BeforeStop = []string{"sh", "-c", "trap '' TERM; touch " + filepath.Join(dir, "hook-ran") + "; sleep 10"}
+	startTrapping(t, s, dir)
+	sendShim(t, conn, proto.ShimMsg{Type: proto.ShimStop, Reason: "stop", GraceSec: 60})
+	quick := func(cond func() bool, what string) {
+		t.Helper()
+		for deadline := time.Now().Add(3 * time.Second); !cond(); time.Sleep(10 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal(what)
+			}
+		}
 	}
-	marker := filepath.Join(dir, "started")
-	proc, err := s.startWorkload([]string{"sh", "-c", "touch " + marker + "; sleep 60"}, s.env)
-	if !errors.Is(err, errReclaimed) || proc != nil {
-		t.Fatalf("workload start after a reclamation: %v, %v", proc, err)
-	}
-	time.Sleep(200 * time.Millisecond)
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("the workload started after a reclamation")
+	quick(func() bool { _, err := os.Stat(filepath.Join(dir, "hook-ran")); return err == nil }, "the hook never started")
+	var hook int
+	quick(func() bool { s.mu.Lock(); hook = s.hookPgid; s.mu.Unlock(); return hook > 0 }, "no hook group")
+	t.Cleanup(func() { _ = syscall.Kill(-hook, syscall.SIGKILL) })
+	killAt := time.UnixMilli(time.Now().Add(300 * time.Millisecond).UnixMilli())
+	sendShim(t, conn, proto.ShimMsg{Type: proto.ShimStop, Reason: "spot-reclaim", KillAtUnixMs: killAt.UnixMilli()})
+	quick(func() bool { return errors.Is(syscall.Kill(-hook, 0), syscall.ESRCH) }, "the hook's group outlived the reclamation's deadline")
+	if now := time.Now(); now.After(killAt.Add(2 * time.Second)) {
+		t.Fatalf("the hook's group died %v after the deadline", now.Sub(killAt))
 	}
 }
