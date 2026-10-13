@@ -313,6 +313,15 @@ func TestPoolsSetPlacement(t *testing.T) {
 	if code != 0 || len(*posted) != 1 || stdout != "placement pack→spread\n" {
 		t.Errorf("change: exit %d, posted %v, stdout %q", code, *posted, stdout)
 	}
+
+	url, posted = poolsLuxd(t, false, `{"name":"m","tenant":"t1","provider":"static","placement":"pack"}`)
+	code, _, stderr = lux(url, "pools", "set", "m", "--provider", "static", "--replace")
+	if code != 0 || len(*posted) != 1 {
+		t.Fatalf("removal with --replace: exit %d (%s), posted %v", code, stderr, *posted)
+	}
+	if _, sent := (*posted)[0]["placement"]; sent {
+		t.Errorf("removal with --replace: posted %v, want no placement", (*posted)[0])
+	}
 }
 
 // get prints a shaped Run's size and what its submit asked for; none for
