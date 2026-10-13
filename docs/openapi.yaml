@@ -129,6 +129,12 @@ components:
         disk:
           format: int64
           type: integer
+        diskHeadroom:
+          format: int64
+          type: integer
+        fsCapacity:
+          format: int64
+          type: integer
         memory:
           format: int64
           type: integer
@@ -1803,6 +1809,14 @@ components:
           type: number
         disk:
           description: Nominal disk of a whole host (from its launch template, not its instance type).
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        diskHeadroom:
+          description: "Bytes of each host's disk kept from Runs, for the OS, tools and image storage (lux-runner --disk-headroom): a Run's disk limit is its size's disk × min(1, (filesystem capacity − diskHeadroom) / disk). At least 0 and less than disk. Absent: 10 GiB."
           oneOf:
             - format: int64
               type: integer
