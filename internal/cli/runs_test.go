@@ -38,6 +38,25 @@ func submitted(t *testing.T, args ...string) map[string]any {
 	return body
 }
 
+func TestRunSpotFlag(t *testing.T) {
+	body := submitted(t, "run", "--spot", "--image", "alpine", "--", "true")
+	if body["spot"] != true {
+		t.Fatalf("spot = %v", body["spot"])
+	}
+	file := filepath.Join(t.TempDir(), "spec.yaml")
+	if err := os.WriteFile(file, []byte("spot: true\nresumePolicy: auto\nimage: {ref: alpine}\nworkload: {command: [\"true\"]}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body = submitted(t, "run", "-f", file)
+	if body["spot"] != true || body["resumePolicy"] != "auto" {
+		t.Fatalf("spec must preserve explicit policy for server validation: %v", body)
+	}
+	body = submitted(t, "run", "-f", file, "--spot=false")
+	if _, exists := body["spot"]; exists || body["resumePolicy"] != "auto" {
+		t.Fatalf("flag override: %v", body)
+	}
+}
+
 func TestRunPoolFlag(t *testing.T) {
 	placement := func(body map[string]any) map[string]any {
 		p, _ := body["placement"].(map[string]any)

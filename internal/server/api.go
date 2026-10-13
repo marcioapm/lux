@@ -1797,7 +1797,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		}
 		// Before anything else: whatever its state, such a Run is never
 		// placed again on request.
-		if spec.RefusesResume(sp.ResumePolicy) {
+		if sp.Spot || spec.RefusesResume(sp.ResumePolicy) {
 			return errNeverResumable()
 		}
 		var to *resolvedPool

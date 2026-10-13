@@ -36,6 +36,7 @@ const (
 	// sharing, another chosen host).
 	kindScope
 	kindSyncModes
+	kindSpotReclaim
 )
 
 // hostFit is independent of snapshot locality and scheduler affinity. A chosen
@@ -80,6 +81,9 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	// An older runner would run a fast-forward or fetch resume as move.
 	if proto.SafeSyncModes(r.PendingSync) && !slices.Contains(h.Caps, proto.CapSyncModes) {
 		constraint(kindSyncModes, "host's lux-runner predates sync modes")
+	}
+	if r.Spec.Spot && !slices.Contains(h.Caps, proto.CapSpotReclaim) {
+		constraint(kindSpotReclaim, "host's lux-runner lacks spot reclamation support")
 	}
 	res := r.Spec.Resources
 	resource := func(name string, requested, used, capacity float64, blocked bool) {

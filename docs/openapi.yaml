@@ -2952,6 +2952,9 @@ components:
           type:
             - array
             - "null"
+        spot:
+          description: Opt into opportunistic Run scheduling, independent of the host's EC2 market. Requires resumePolicy never; omitted resumePolicy normalizes to never. Spot demand never launches hosts. Admission is not yet available.
+          type: boolean
         timeout:
           description: "The most time the Run may spend running, summed over its placements (time stopped, lost, or waiting for a host does not count). Past it, the Run is stopped and fails. Unset: no limit."
           oneOf:

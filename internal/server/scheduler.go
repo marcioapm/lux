@@ -319,6 +319,10 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 //
 // wait is a human-readable reason when no host is chosen.
 func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []*candidateHost) (*candidateHost, string, error) {
+	// Fail closed until aged admission and placement-local reclamation exist.
+	if r.Spec.Spot {
+		return nil, "spot admission is not yet available", nil
+	}
 	// Where is the snapshot we must resume from, and may another host use it?
 	var snapHost string
 	var snapUploaded, snapAvailable, snapHostCopy bool
@@ -439,7 +443,7 @@ func (s *Server) noHost(ctx context.Context, tx pgx.Tx, r pendingRun, wait strin
 		}
 	}
 	var err error
-	if provider != "" && provider != "static" && wait != "waiting for snapshot upload" {
+	if !r.Spec.Spot && provider != "" && provider != "static" && wait != "waiting for snapshot upload" {
 		if r.State != StateProvisioning {
 			return setRunState(ctx, tx, r.TenantID, r.ID, StateProvisioning, wait, r.Epoch)
 		}

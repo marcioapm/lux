@@ -29,7 +29,7 @@ type Run = server.Run
 
 func (a *app) runCmd() *cobra.Command {
 	var file, idem, secretsFrom, pool, size string
-	var follow, wait bool
+	var follow, wait, spot bool
 	var labels []string
 	cmd := &cobra.Command{
 		Use:   "run -f spec.yaml [-- command...]",
@@ -78,6 +78,9 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 			if pool != "" {
 				sp.Placement.Pool = pool
 			}
+			if cmd.Flags().Changed("spot") {
+				sp.Spot = spot
+			}
 			if size != "" {
 				sp.Resources.Size = size
 			}
@@ -123,6 +126,7 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "label key=value (repeatable)")
 	cmd.Flags().StringVar(&idem, "idempotency-key", "", "make the submission safe to retry")
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
+	cmd.Flags().BoolVar(&spot, "spot", false, "opt into opportunistic scheduling (requires resumePolicy never; admission not yet available)")
 	cmd.Flags().BoolVar(&follow, "follow", false, "stream output until the Run ends; exit with its code")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait until the Run ends; exit with its code")
 	return cmd

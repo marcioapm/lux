@@ -689,7 +689,8 @@ func (s *Server) scaleDownAfter(pl poolRow) time.Duration {
 func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolState) error {
 	// Runs waiting for a host in this pool: those bound to it.
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM runs r
-		WHERE r.state = 'provisioning' AND NOT r.terminate_requested AND r.pool_id = $1`, pl.ID).Scan(&st.demand); err != nil {
+		WHERE r.state = 'provisioning' AND NOT r.terminate_requested AND r.pool_id = $1
+		  AND coalesce(r.spec->>'spot', 'false') <> 'true'`, pl.ID).Scan(&st.demand); err != nil {
 		return err
 	}
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM placements p JOIN hosts h ON h.id = p.host_id

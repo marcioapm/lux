@@ -299,6 +299,10 @@ type Sync struct {
 // and uses the credential it was assigned.
 const CapGitCredentials = "git-credentials"
 
+// CapSpotReclaim identifies a runner enforcing a durable first-notice 15s
+// reclamation deadline, independent of workload grace and stop hooks.
+const CapSpotReclaim = "spot-reclaim-v1"
+
 // ImageResolution is a built image as its Run's first build made it: the
 // Containerfile with every FROM pinned to a digest, and the image id.
 // Later placements build from this Containerfile.
