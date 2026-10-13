@@ -519,10 +519,10 @@ func resizeShaped(ctx context.Context, tx pgx.Tx, runID, pool string, cur spec.R
 		}
 	}
 	rz := &Resize{Requested: asked, Applied: cur, Size: e.Name}
-	var raisedFrom, raisedFor *string
+	raisedTo := ""
 	if peak != nil {
 		rz.RaisedFrom, rz.RaisedFor, rz.MeasuredBytes, rz.NeededBytes = got.Resolved.Name, raisedForSavedState, peak, diskShrinkFloor(*peak)
-		raisedFrom, raisedFor = &rz.RaisedFrom, &rz.RaisedFor
+		raisedTo = e.Name
 	}
 	rz.Applied.CPUs, rz.Applied.Memory, rz.Applied.Disk = e.CPUs, e.Memory, e.Disk
 	set := map[string]any{"cpus": e.CPUs, "memory": e.Memory, "disk": e.Disk}
@@ -530,9 +530,10 @@ func resizeShaped(ctx context.Context, tx pgx.Tx, runID, pool string, cur spec.R
 		rz.Applied.DiskGrace = asked.DiskGrace
 		set["diskGrace"] = asked.DiskGrace
 	}
-	if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = $3, size_raised_from = $4, size_raised_for = $5,
+	if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = $3,
+			size_raised_from = nullif($4, ''), size_raised_for = nullif($5, ''), size_raised_to = nullif($6, ''),
 			spec = jsonb_set(spec, '{resources}', coalesce(spec->'resources', '{}') || $2::jsonb) WHERE id = $1`,
-		runID, set, e.Name, raisedFrom, raisedFor); err != nil {
+		runID, set, e.Name, rz.RaisedFrom, rz.RaisedFor, raisedTo); err != nil {
 		return nil, err
 	}
 	return rz, nil
@@ -578,7 +579,7 @@ func resumeSize(ctx context.Context, tx pgx.Tx, z resumeSizing, req *resumeResou
 		// The Run kept a size from a shaped pool: the one it leaves, or its
 		// own before its shape was removed. An unshaped pool has no sizes.
 		if z.resolved != "" {
-			if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = NULL, size_raised_from = NULL, size_raised_for = NULL WHERE id = $1`, z.runID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = NULL, size_raised_from = NULL, size_raised_for = NULL, size_raised_to = NULL WHERE id = $1`, z.runID); err != nil {
 				return nil, err
 			}
 		}

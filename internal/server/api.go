@@ -617,7 +617,13 @@ type RunUsage struct {
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, coalesce(r.size_raised_from, ''), coalesce(r.size_raised_for, ''), CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + resumableSQL + `, ` + stageColumns
+	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + runRaiseColumns + `, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + resumableSQL + `, ` + stageColumns
+
+// runRaiseColumns: a Run's raise (from, for), "" unless it raised to the
+// Run's current resolved_size; a luxd without size_raised_to rewrites
+// resolved_size and leaves the raise behind.
+const runRaiseColumns = `coalesce(CASE WHEN r.size_raised_to = r.resolved_size THEN r.size_raised_from END, ''),
+	coalesce(CASE WHEN r.size_raised_to = r.resolved_size THEN r.size_raised_for END, '')`
 
 // runsFrom: a Run with its tenant, its current placement's host, and its
 // runtime (rr). Runtime is the sum over its placements of started_at

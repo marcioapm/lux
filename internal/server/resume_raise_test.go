@@ -26,7 +26,7 @@ type raiseCase struct {
 // gets size with raisedFrom (none if ""), and GET and the event say so.
 func raiseCheck(t *testing.T, s *Server, id string, req resumeRequest, size, raisedFrom string, peak int64) {
 	t.Helper()
-	const raise = `SELECT coalesce(size_raised_from, '') || '/' || coalesce(size_raised_for, '') FROM runs WHERE id = $1`
+	const raise = `SELECT coalesce(size_raised_from, '') || '/' || coalesce(size_raised_for, '') || '/' || coalesce(size_raised_to, '') FROM runs WHERE id = $1`
 	before := storedResources(t, s, id)
 	_, beforeSize := runSizing(t, s, id)
 	beforeRaise := queryOne[string](t, s, raise, id)
@@ -70,7 +70,13 @@ func raiseCheck(t *testing.T, s *Server, id string, req resumeRequest, size, rai
 		if rz.RaisedFor != "" || rz.MeasuredBytes != nil || rz.NeededBytes != 0 || sz.RaisedFor != "" || ev["raisedFor"] != nil {
 			t.Errorf("not raised, but resize %+v sizing %+v event %v", rz, sz, ev)
 		}
+		if got := queryOne[string](t, s, raise, id); got != "//" {
+			t.Errorf("stored raise %q, want none", got)
+		}
 		return
+	}
+	if got, want := queryOne[string](t, s, raise, id), raisedFrom+"/saved state/"+size; got != want {
+		t.Errorf("stored raise %q, want %q", got, want)
 	}
 	if rz.RaisedFor != "saved state" || rz.MeasuredBytes == nil || *rz.MeasuredBytes != peak || rz.NeededBytes != diskShrinkFloor(peak) {
 		t.Errorf("resize %+v, want raised for saved state, measured %d, needed %d", rz, peak, diskShrinkFloor(peak))
@@ -147,9 +153,48 @@ func TestResumeShapedRaiseCleared(t *testing.T) {
 	}
 }
 
+// A luxd without size_raised_to resizes a raised Run by rewriting its
+// resolved_size and resources alone: GET shows the new size without the
+// raise, which described the old one.
+func TestResumeShapedRaiseHiddenAfterForeignResize(t *testing.T) {
+	s := testServer(t)
+	shapedPool(t, s, "shaped", &testShape)
+	id := stoppedShaped(t, s, "shaped", spec.Resources{Size: "m-4-arm64"}, i64(30*gib))
+	key := apiKey(t, s, new("t1"), "read")
+	raiseCheck(t, s, id, resumeRequest{Resources: &resumeResources{Size: "m-1-arm64"}}, "m-2-arm64", "m-1-arm64", 30*gib)
+	execSQL(t, s, context.Background(), `UPDATE runs SET resolved_size = 'm-8-arm64',
+		spec = jsonb_set(spec, '{resources}', spec->'resources' || $2::jsonb) WHERE id = $1`,
+		id, map[string]any{"cpus": 8, "memory": testShape.Memory, "disk": testShape.Disk})
+	got := getSizing(t, s, key, id)
+	if got == nil || got.Resolved == nil || got.Resolved.Size != "m-8-arm64" {
+		t.Fatalf("GET sizing %+v, want m-8-arm64", got)
+	}
+	if got.RaisedFrom != "" || got.RaisedFor != "" {
+		t.Errorf("GET sizing raised from %q for %q, want no raise on a size it did not raise to", got.RaisedFrom, got.RaisedFor)
+	}
+}
+
+// A raised Run moved to an unshaped pool loses its raise with its size.
+func TestResumeRaisedOutOfShapedPool(t *testing.T) {
+	s := testServer(t)
+	shapedPool(t, s, "plain", nil)
+	shapedPool(t, s, "shaped", &testShape)
+	id := stoppedShaped(t, s, "shaped", spec.Resources{Size: "m-4-arm64"}, i64(30*gib))
+	raiseCheck(t, s, id, resumeRequest{Resources: &resumeResources{Size: "m-1-arm64"}}, "m-2-arm64", "m-1-arm64", 30*gib)
+	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
+	if _, err := resumeReq(s, id, resumeRequest{Placement: &resumeTarget{PoolID: "plain"}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM runs WHERE id = $1 AND resolved_size IS NULL
+			AND size_raised_from IS NULL AND size_raised_for IS NULL AND size_raised_to IS NULL`, id); n != 1 {
+		t.Errorf("after the move: size or raise columns still set")
+	}
+}
+
 // No size holds the saved state: refused with size_below_saved_state
 // naming the largest size, by validateOnly and the resume alike, nothing
-// changed. Without a final measurement a shrink is refused as before.
+// changed. Without a final measurement a shrink is refused
+// (size_below_saved_state).
 func TestResumeShapedRaiseRefused(t *testing.T) {
 	const tail = "; a shaped pool never keeps a larger disk than its size, so choose a size with more disk"
 	for _, c := range []struct {
