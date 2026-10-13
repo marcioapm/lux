@@ -72,7 +72,7 @@ volumes:
   - { name: home, path: /home/agent, kind: state }
   - { name: cache, path: /cache, kind: ephemeral }         # empty on every start
 
-resources: { cpus: 4, memory: 8Gi, disk: 50Gi, pids: 2048 }
+resources: { cpus: 4, memory: 8Gi, disk: 50Gi, pids: 2048, diskGrace: 5m }   # diskGrace: time allowed over disk
 timeout: 4h                     # running time, over all placements; unset: no limit
 resumePolicy: auto              # auto | restart | manual | never: after a drain, preemption or migration (see below)
 
@@ -141,16 +141,33 @@ as `submittedBy` on `GET /v1/runs/{id}`.
   memory and process limits.
 - **Disk is measured, not capped by the filesystem**, so lux needs no
   special storage on hosts. The runner samples each Run's use (every 15s
-  by default, `lux-runner --usage-every`); a Run over its limit gets a
-  `disk.exceeded` event, is stopped and snapshotted as usual, and ends
-  `failed` with reason `disk limit exceeded`. It can write about one
-  sampling interval's worth past the limit before that. Its state is
-  kept: resume it with a larger limit (`lux resume <run> --disk 40Gi`, or
-  `resources.disk` in the resume request), or it is stopped again. tmpfs
-  mounts (with `readOnlyRoot`) count against memory, not disk.
-- **A resume can change cpus, memory and disk** of a stopped Run: cpus
-  and memory larger or smaller, disk larger, or smaller only if its saved
-  state fits with headroom ([resizing on resume](concepts.md#resizing-on-resume)).
+  by default, `lux-runner --usage-every`). `resources.diskGrace` (a
+  duration, `0` to `1h`, e.g. `5m`) is how long a Run may stay over its
+  `disk` before it is stopped: once every sample for that long has been
+  over the limit, the Run gets a `disk.exceeded` event, is stopped and
+  snapshotted as usual, and ends `failed` with reason `disk limit
+  exceeded`. A sample at or under the limit restarts the count, so a
+  brief overshoot (image layers extracted, a large temporary file, a cache
+  restored then cleaned) is not stopped. **At twice its `disk`, a Run is
+  stopped at once, whatever its grace**: the host's disk is shared, and a
+  write left unbounded for the whole grace could fill it for every other
+  Run. With `diskGrace` `0` the Run is stopped on the first sample over.
+  Unset, it is luxd's default (`LUX_DEFAULT_DISK_GRACE`, `0` unless an
+  operator changed it), which luxd writes into the Run's stored spec at
+  submit; an explicit `0s` stands over a non-zero default. Each placement
+  (a resume, a move) starts its grace from zero. A Run can write about
+  one sampling interval's worth past the limit (or the ceiling) before it
+  is stopped. The event's data carries `usedBytes`, `limitBytes`,
+  `graceSeconds` and `ceiling` (`true` when twice the limit stopped it
+  before its grace ran out). Its state is kept: resume it with a larger
+  limit (`lux resume <run> --disk 40Gi`, or `resources.disk` in the
+  resume request) or a longer grace (`--disk-grace`,
+  `resources.diskGrace`), or it is stopped again. tmpfs mounts (with
+  `readOnlyRoot`) count against memory, not disk.
+- **A resume can change cpus, memory, disk and diskGrace** of a stopped
+  Run: cpus and memory larger or smaller, disk larger, or smaller only if
+  its saved state fits with headroom, diskGrace to any value from 0 to 1h
+  ([resizing on resume](concepts.md#resizing-on-resume)).
 - **Disk is reserved only where the host says how much it has**
   (`lux-runner --disk`); otherwise each Run's limit still applies, but
   the scheduler does not add them up.
