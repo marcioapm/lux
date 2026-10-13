@@ -140,11 +140,14 @@ func TestDefaultDiskGrace(t *testing.T) {
 	}
 	os.Unsetenv("LUX_DEFAULT_DISK_GRACE")
 
-	for _, bad := range []struct{ file, env, want string }{
-		{"[defaults]\ndisk_grace = \"-1s\"", "", "defaults.disk_grace (LUX_DEFAULT_DISK_GRACE) must not be negative"},
-		{"[defaults]\ndisk_grace = \"2h\"", "", "defaults.disk_grace (LUX_DEFAULT_DISK_GRACE) must be at most 1h0m0s, got 2h0m0s"},
-		{"", "LUX_DEFAULT_DISK_GRACE=61m", "defaults.disk_grace (LUX_DEFAULT_DISK_GRACE) must be at most 1h0m0s"},
-		{"", "LUX_DEFAULT_DISK_GRACE=soon", "LUX_DEFAULT_DISK_GRACE"},
+	for _, bad := range []struct {
+		file, env, want string
+		whole           bool // want is the whole error, not a part of it
+	}{
+		{"[defaults]\ndisk_grace = \"-1s\"", "", "defaults.disk_grace (LUX_DEFAULT_DISK_GRACE) must not be negative", false},
+		{"[defaults]\ndisk_grace = \"2h\"", "", "defaults.disk_grace (LUX_DEFAULT_DISK_GRACE) must be at most 1h0m0s, got 2h0m0s", false},
+		{"", "LUX_DEFAULT_DISK_GRACE=61m", "defaults.disk_grace (LUX_DEFAULT_DISK_GRACE) must be at most 1h0m0s", false},
+		{"", "LUX_DEFAULT_DISK_GRACE=soon", `LUX_DEFAULT_DISK_GRACE: "soon": time: invalid duration "soon"`, true},
 	} {
 		os.Unsetenv("LUX_DEFAULT_DISK_GRACE")
 		write(bad.file)
@@ -152,7 +155,8 @@ func TestDefaultDiskGrace(t *testing.T) {
 			k, v, _ := strings.Cut(bad.env, "=")
 			t.Setenv(k, v)
 		}
-		if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), bad.want) {
+		_, err := loadConfig(path)
+		if err == nil || !strings.Contains(err.Error(), bad.want) || bad.whole && err.Error() != bad.want {
 			t.Errorf("%q %q: error %v, want %q", bad.file, bad.env, err, bad.want)
 		}
 	}

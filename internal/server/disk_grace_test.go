@@ -89,29 +89,29 @@ func TestAssignCarriesDiskGrace(t *testing.T) {
 }
 
 // A diskGrace submit would refuse is 422 invalid_spec, naming it; a value
-// that is no duration at all is refused before validation.
+// that is no duration at all is refused while decoding the body, 400
+// bad_request.
 func TestSubmitRefusesABadDiskGrace(t *testing.T) {
 	for _, c := range []struct {
 		name, res string
 		status    int
-		detail    string
+		code      string
+		details   []any
+		message   string
 	}{
-		{"negative", `{"diskGrace":"-1s"}`, http.StatusUnprocessableEntity, "resources.diskGrace must not be negative"},
-		{"over an hour", `{"diskGrace":"2h"}`, http.StatusUnprocessableEntity, "resources.diskGrace must be at most 1h0m0s, got 2h0m0s"},
-		{"not a duration", `{"diskGrace":"soon"}`, 0, ""},
+		{"negative", `{"diskGrace":"-1s"}`, http.StatusUnprocessableEntity, "invalid_spec", []any{"resources.diskGrace must not be negative"}, ""},
+		{"over an hour", `{"diskGrace":"2h"}`, http.StatusUnprocessableEntity, "invalid_spec", []any{"resources.diskGrace must be at most 1h0m0s, got 2h0m0s"}, ""},
+		{"not a duration", `{"diskGrace":"soon"}`, http.StatusBadRequest, "bad_request", nil, `invalid JSON body: invalid duration "soon"`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, code, out := submitDiskGrace(t, 0, c.res)
-			if c.status == 0 {
-				if code < 400 || code >= 500 {
-					t.Fatalf("%d %v, want a 4xx", code, out)
-				}
-				return
-			}
 			e, _ := out["error"].(map[string]any)
 			details, _ := e["details"].([]any)
-			if code != c.status || e["code"] != "invalid_spec" || !reflect.DeepEqual(details, []any{c.detail}) {
-				t.Fatalf("%d %v, want %d invalid_spec with %q", code, out, c.status, c.detail)
+			if code != c.status || e["code"] != c.code || !reflect.DeepEqual(details, c.details) {
+				t.Fatalf("%d %v, want %d %s with details %v", code, out, c.status, c.code, c.details)
+			}
+			if c.message != "" && e["message"] != c.message {
+				t.Errorf("message %q, want %q", e["message"], c.message)
 			}
 		})
 	}
@@ -149,6 +149,46 @@ func TestResumeDiskGrace(t *testing.T) {
 			}
 			if got := storedResources(t, s, id).DiskGrace; got != c.want {
 				t.Errorf("stored diskGrace %+v, want %+v", got, c.want)
+			}
+		})
+	}
+}
+
+// A resume of a Run already resuming whose first resume asked for
+// diskGrace 0s: the same 0s is a retry, 202 with the first's resize; any
+// other diskGrace is 409. Neither changes the Run.
+func TestResumeRetryComparesDiskGrace(t *testing.T) {
+	base := resizeBase
+	base.DiskGrace = spec.SetDuration(5 * time.Minute)
+	first := &resumeResources{DiskGrace: &spec.Duration{}}
+	for _, c := range []struct {
+		name   string
+		retry  *resumeResources
+		status int // 0: 202
+	}{
+		{"the same 0s", &resumeResources{DiskGrace: &spec.Duration{}}, 0},
+		{"the Run's earlier 5m", &resumeResources{DiskGrace: &spec.Duration{Duration: 5 * time.Minute}}, http.StatusConflict},
+		{"1s", &resumeResources{DiskGrace: &spec.Duration{Duration: time.Second}}, http.StatusConflict},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			id := stoppedRun(t, s, base, i64(gib))
+			out1, err := resumeWith(s, id, first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out2, err := resumeWith(s, id, c.retry)
+			if c.status != 0 {
+				refused(t, err, c.status, "not_resumable", "retry")
+			} else if err != nil {
+				t.Fatal(err)
+			} else if got := out2.Body.Resize; got == nil || !reflect.DeepEqual(*got, *out1.Body.Resize) {
+				t.Errorf("retry's resize %+v, want the first's %+v", got, out1.Body.Resize)
+			}
+			var events int
+			systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'resume.requested'`, []any{id}, &events)
+			if got := storedResources(t, s, id).DiskGrace; got != spec.SetDuration(0) || events != 1 {
+				t.Errorf("after the retry: diskGrace %+v and %d resume.requested, want 0s and 1", got, events)
 			}
 		})
 	}
