@@ -602,6 +602,9 @@ func Capabilities(w io.Writer) int {
 	return 0
 }
 
+// stopSpotReclaim is the stop reason a reclamation records and reports.
+const stopSpotReclaim = "spot-reclaim"
+
 // reclaim ends a spot placement: SIGTERM to the workload's process groups
 // at once, with no beforeStop hook and no grace, and SIGKILL at killAt.
 // A repeated notice re-sends SIGTERM but never moves killAt later. A
@@ -611,7 +614,7 @@ func (s *Shim) reclaim(killAt time.Time) {
 	first := !s.stopping
 	s.stopping, s.reclaimed = true, true
 	if first {
-		s.stopWhy = "spot-reclaim"
+		s.stopWhy = stopSpotReclaim
 	}
 	if !s.reclaimBy.IsZero() && s.reclaimBy.Before(killAt) {
 		killAt = s.reclaimBy
@@ -620,7 +623,7 @@ func (s *Shim) reclaim(killAt time.Time) {
 	initPid, proc, hook := s.initPid, s.proc, s.hookPgid
 	s.mu.Unlock()
 	if first {
-		s.out.Event(proto.EvStop, map[string]any{"reason": "spot-reclaim"})
+		s.out.Event(proto.EvStop, map[string]any{"reason": stopSpotReclaim})
 	}
 	var groups []int
 	for _, g := range []int{initPid, hook} {
