@@ -141,6 +141,14 @@ func (b blockerSet) classify(blockers []fitBlocker) bool {
 	return false
 }
 
+// byHostID is a copy of hosts in id order, so admission and reclaim plans
+// try hosts deterministically.
+func byHostID(hosts []*candidateHost) []*candidateHost {
+	ordered := slices.Clone(hosts)
+	slices.SortFunc(ordered, func(a, b *candidateHost) int { return strings.Compare(a.ID, b.ID) })
+	return ordered
+}
+
 // spotAdmission decides where spot Run r may start now. It is the single
 // admission rule for the scheduler and for submit's validateOnly: a host
 // that hostFit accepts (constraints, runner capability, current spare),
@@ -149,8 +157,7 @@ func (b blockerSet) classify(blockers []fitBlocker) bool {
 // not modified.
 func spotAdmission(r pendingRun, hosts []*candidateHost, demand []pendingRun, now time.Time) admission {
 	set := blockerSet{}
-	ordered := slices.Clone(hosts)
-	slices.SortFunc(ordered, func(a, b *candidateHost) int { return strings.Compare(a.ID, b.ID) })
+	ordered := byHostID(hosts)
 	res := r.Spec.Resources
 	for _, h := range ordered {
 		if !set.classify(hostFit(r, h)) {
@@ -183,8 +190,7 @@ func spotAdmission(r pendingRun, hosts []*candidateHost, demand []pendingRun, no
 // locality, reclaimable spot placements or hosts a pool could launch.
 func normalAdmission(r pendingRun, hosts []*candidateHost) admission {
 	set := blockerSet{}
-	ordered := slices.Clone(hosts)
-	slices.SortFunc(ordered, func(a, b *candidateHost) int { return strings.Compare(a.ID, b.ID) })
+	ordered := byHostID(hosts)
 	for _, h := range ordered {
 		if set.classify(hostFit(r, h.forRun(r.ID))) {
 			return admission{Host: h}
@@ -509,9 +515,7 @@ func normalDemand(ctx context.Context, tx pgx.Tx, hosts []*candidateHost) ([]pen
 // r fits without is put back. nil when no host's spot placements suffice.
 // One simulation per host: each step releases or restores one victim.
 func reclaimPlan(r pendingRun, hosts []*candidateHost) (*candidateHost, []spotPlacement) {
-	ordered := slices.Clone(hosts)
-	slices.SortFunc(ordered, func(a, b *candidateHost) int { return strings.Compare(a.ID, b.ID) })
-	for _, h := range ordered {
+	for _, h := range byHostID(hosts) {
 		var free []spotPlacement
 		for _, sp := range h.Spots {
 			if sp.ReclaimFor == "" {
