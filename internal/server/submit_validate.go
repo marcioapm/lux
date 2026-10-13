@@ -56,19 +56,18 @@ func (s *Server) validateSubmit(ctx context.Context, p Principal, stored spec.Ru
 			return err
 		}
 		var adm admission
-		switch {
-		case !r.Spec.Spot:
-			adm = normalAdmission(r, hs)
-		default:
+		if r.Spec.Spot {
 			demand, ok, err := normalDemand(ctx, tx, hs)
 			if err != nil {
 				return err
 			}
-			if !ok {
-				adm.Blockers = []AdmissionBlocker{{Code: blockNormalPending, Hosts: len(hs)}}
-			} else {
+			if ok {
 				adm = spotAdmission(r, hs, demand, s.now())
+			} else {
+				adm.Blockers = []AdmissionBlocker{{Code: blockNormalPending, Hosts: len(hs)}}
 			}
+		} else {
+			adm = normalAdmission(r, hs)
 		}
 		answer.Blockers = adm.Blockers
 		if adm.Host != nil {
