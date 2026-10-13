@@ -243,3 +243,30 @@ func TestShimReclaimKillsRunningBeforeStopHook(t *testing.T) {
 		t.Fatalf("the hook's group died %v after the deadline", now.Sub(killAt))
 	}
 }
+
+// A reclamation that lands after an ordinary stop registered its hook (its
+// 30s deadline) but before the hook started: the hook never starts.
+func TestShimReclaimBeforeHookStarts(t *testing.T) {
+	s, _, dir := reclaimShim(t)
+	s.mu.Lock()
+	s.stopping, s.stopWhy = true, "stop"
+	s.hookBy, s.hookMoved = time.Now().Add(30*time.Second), make(chan struct{}, 1)
+	s.mu.Unlock()
+	s.reclaim(time.Now().Add(300 * time.Millisecond))
+	done := make(chan struct{})
+	go func() { defer close(done); s.beforeStop(s.env) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the hook ran after a reclamation")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(dir, "hook-ran")); err == nil {
+		t.Fatal("the hook started after a reclamation")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hookPgid != 0 {
+		t.Fatalf("hook group %d published after a reclamation", s.hookPgid)
+	}
+}

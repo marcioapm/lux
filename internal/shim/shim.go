@@ -680,20 +680,30 @@ func secs(v float64) time.Duration { return time.Duration(v * float64(time.Secon
 // beforeStop runs the spec's beforeStop command once, as the workload user
 // with its environment, its output the Run's. The deadline was registered
 // before starting the goroutine and a later stop may only move it earlier.
+// A reclamation before the hook starts means it never does; after, it
+// signals the hook's group (hookPgid).
 func (s *Shim) beforeStop(env []string) {
 	s.out.Event(proto.EvBeforeStop, map[string]any{"phase": "start"})
 	cmd := s.command(s.cfg.BeforeStop, env)
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
-	exited, err := s.startTracked(cmd.Start, &cmd.Process)
+	// Under the lock reclaim reads hookPgid with: either it signals the
+	// hook's group, or the hook never starts.
+	exited, err := s.startTracked(func() error {
+		if s.reclaimed {
+			return errReclaimed
+		}
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		s.hookPgid = cmd.Process.Pid
+		return nil
+	}, &cmd.Process)
 	if err != nil {
 		s.out.Event(proto.EvBeforeStop, map[string]any{"phase": "done", "exitCode": -1, "error": err.Error()})
 		return
 	}
 	pgid := cmd.Process.Pid
-	s.mu.Lock()
-	s.hookPgid = pgid
-	s.mu.Unlock()
 	ids := []string{"beforeStop:stdout", "beforeStop:stderr"}
 	chans := []string{"stdout", "stderr"}
 	drain := copyOutputs([]io.Reader{stdout, stderr}, func(i int, b []byte) { s.out.WriteAs(ids[i], chans[i], b) })
