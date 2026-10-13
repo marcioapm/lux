@@ -1,0 +1,198 @@
+package server
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/store"
+)
+
+// reclaimFixture: host h (2 cpus) fully used by running spot Run "spot"
+// (placement p), and queued normal Run "n" needing the whole host; one
+// scheduler pass claims p for n and signals it.
+func reclaimFixture(t *testing.T) *Server {
+	t.Helper()
+	s, _, _ := planningFixture(t, 0)
+	ctx := context.Background()
+	s.cfg.LeaseDuration = time.Minute
+	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 2, Memory: 20, Disk: 20, Runs: 2}, map[string]string{})
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state, current_epoch) VALUES
+		('spot', 't1', 'pool1', '{"spot":true,"resumePolicy":"never","resources":{"cpus":2,"memory":20,"disk":20},"placement":{"pool":"burst"}}', 'running', 1),
+		('n', 't1', 'pool1', '{"resources":{"cpus":2,"memory":20,"disk":20},"placement":{"pool":"burst"}}', 'submitted', 0)`)
+	withHostLock(t, s, "h", func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, lease_expires_at)
+			VALUES ('p', 't1', 'spot', 'h', 1, 'running', '{"cpus":2,"memory":20,"disk":20}', now() + interval '1 hour')`)
+		return err
+	})
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := queryOne[string](t, s, `SELECT coalesce(reclaim_for, '') || '/' || stop_reason FROM placements WHERE id = 'p'`); got != "n/"+stopSpotReclaim {
+		t.Fatalf("victim claim/stop %q", got)
+	}
+	return s
+}
+
+func exitReport(t *testing.T, s *Server, host, run string, epoch int) {
+	t.Helper()
+	code := 143
+	f := proto.Frame{Type: proto.MsgStatus, ID: 7, RunID: run, Epoch: epoch,
+		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "stopped"})}
+	if got := s.handleReport(context.Background(), host, f); got.Type != proto.MsgAck {
+		t.Fatalf("exit report: %s %s", got.Type, got.Data)
+	}
+}
+
+// The requester is terminated while its victim drains: the pledge goes on
+// the next pass, but the victim stays claimed and signalled (irreversible)
+// and still ends terminated with the reclaim's reason.
+func TestReclaimRequesterCancelledWhileDraining(t *testing.T) {
+	s := reclaimFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'terminated' WHERE id = 'n'`)
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM spot_pledges`); n != 0 {
+		t.Fatalf("pledge of a cancelled requester kept: %d", n)
+	}
+	if got := queryOne[string](t, s, `SELECT coalesce(reclaim_for, '') || '/' || stop_reason FROM placements WHERE id = 'p'`); got != "n/"+stopSpotReclaim {
+		t.Fatalf("victim after cancel: %q (a notice cannot be withdrawn)", got)
+	}
+	exitReport(t, s, "h", "spot", 1)
+	var state, reason string
+	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'spot'`, nil, &state, &reason)
+	if state != StateTerminated || reason != spotReclaimedReason {
+		t.Fatalf("victim Run %s %q", state, reason)
+	}
+}
+
+// The victim exits by itself (it finished) before its notice is acted on:
+// the requester starts as soon as the release lands, and the victim's own
+// outcome is not rewritten.
+func TestReclaimVictimExitsEarly(t *testing.T) {
+	s := reclaimFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE placements SET stop_reason = '' WHERE id = 'p'`) // as if exiting before the stop landed
+	code := 0
+	f := proto.Frame{Type: proto.MsgStatus, ID: 8, RunID: "spot", Epoch: 1, Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code})}
+	if got := s.handleReport(ctx, "h", f); got.Type != proto.MsgAck {
+		t.Fatalf("exit report: %s", got.Type)
+	}
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state := queryOne[string](t, s, `SELECT state FROM runs WHERE id = 'n'`); state != StateScheduled {
+		t.Fatalf("requester after early exit: %s", state)
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM spot_pledges`); n != 0 {
+		t.Fatalf("pledge left after placement")
+	}
+	var state, reason string
+	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'spot'`, nil, &state, &reason)
+	if state != StateTerminated || reason != "succeeded; resumePolicy never" {
+		t.Fatalf("victim's own outcome rewritten: %s %q", state, reason)
+	}
+}
+
+// A runner hello (restart) or the host's loss voids the pledge: its spot
+// placements may be gone and its capacity starts over.
+func TestReclaimPledgeVoidedByHostChange(t *testing.T) {
+	for _, change := range []string{
+		`UPDATE hosts SET capacity_epoch = capacity_epoch + 1 WHERE id = 'h'`,
+		`UPDATE hosts SET state = 'lost' WHERE id = 'h'`,
+		`UPDATE hosts SET last_heartbeat = now() - interval '1 hour' WHERE id = 'h'`,
+	} {
+		t.Run(change, func(t *testing.T) {
+			s := reclaimFixture(t)
+			execSQL(t, s, context.Background(), change)
+			if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
+				return s.dropPledges(context.Background(), tx, nil)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if n := queryOne[int](t, s, `SELECT count(*) FROM spot_pledges`); n != 0 {
+				t.Fatalf("pledge survived %s", change)
+			}
+		})
+	}
+}
+
+// A host whose runner lacks the spot capability never gets a spot
+// placement, however long its capacity has been free.
+func TestSpotNeverPlacedOnOldRunner(t *testing.T) {
+	s, _, _ := planningFixture(t, 0)
+	ctx := context.Background()
+	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 4, Memory: 40, Disk: 40, Runs: 4}, map[string]string{})
+	execSQL(t, s, ctx, `UPDATE hosts SET capabilities = $1 WHERE id = 'h'`, []string{proto.CapDiff, proto.CapSyncModes})
+	seedAged(t, s, "h", freeVec{4, 40, 40, 4}, 10*time.Minute)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state) VALUES
+		('s', 't1', 'pool1', '{"spot":true,"resumePolicy":"never","resources":{"cpus":1,"memory":10,"disk":10},"placement":{"pool":"burst"}}', 'submitted')`)
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var state, reason string
+	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 's'`, nil, &state, &reason)
+	if state != StateSubmitted || reason != "waiting for spot capacity: 1 host lacks spot support" {
+		t.Fatalf("spot on an old runner: %s %q", state, reason)
+	}
+	execSQL(t, s, ctx, `UPDATE hosts SET capabilities = $1 WHERE id = 'h'`, []string{proto.CapSpotReclaim})
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state := queryOne[string](t, s, `SELECT state FROM runs WHERE id = 's'`); state != StateScheduled {
+		t.Fatalf("with the capability: %s", state)
+	}
+}
+
+// A victim row another transaction holds (the victim's own exit being
+// recorded, say) is skipped, not waited for: the pledge is abandoned for
+// this pass, nothing is claimed, and the scheduler does not block.
+func TestReclaimSkipsLockedVictim(t *testing.T) {
+	s, _, _ := planningFixture(t, 0)
+	ctx := context.Background()
+	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 2, Memory: 20, Disk: 20, Runs: 2}, map[string]string{})
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state, current_epoch) VALUES
+		('spot', 't1', 'pool1', '{"spot":true,"resumePolicy":"never","resources":{"cpus":2,"memory":20,"disk":20},"placement":{"pool":"burst"}}', 'running', 1),
+		('n', 't1', 'pool1', '{"resources":{"cpus":2,"memory":20,"disk":20},"placement":{"pool":"burst"}}', 'submitted', 0)`)
+	withHostLock(t, s, "h", func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources)
+			VALUES ('p', 't1', 'spot', 'h', 1, 'running', '{"cpus":2,"memory":20,"disk":20}')`)
+		return err
+	})
+	hold, err := s.db.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hold.Rollback(ctx)
+	if _, err := hold.Exec(ctx, `SELECT set_config('lux.system', 'on', true)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hold.Exec(ctx, `SELECT 1 FROM placements WHERE id = 'p' FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.scheduleOnce(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("scheduler blocked on a locked victim row")
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM spot_pledges`); n != 0 {
+		t.Fatalf("pledged with an unclaimed victim")
+	}
+	_ = hold.Rollback(ctx)
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := queryOne[string](t, s, `SELECT coalesce(reclaim_for, '') FROM placements WHERE id = 'p'`); got != "n" {
+		t.Fatalf("victim not claimed once free: %q", got)
+	}
+}

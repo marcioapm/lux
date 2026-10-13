@@ -89,6 +89,9 @@ type pendingRun struct {
 // batches walk the queue by (updated_at, id), so Runs that cannot be
 // placed do not hide the ones behind them.
 func (s *Server) scheduleOnce(ctx context.Context) error {
+	if err := s.cleanupPledges(ctx); err != nil {
+		return err
+	}
 	var after cursorPos
 	defer func() {
 		if err := s.signalReclaims(ctx); err != nil && ctx.Err() == nil {

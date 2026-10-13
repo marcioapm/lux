@@ -506,6 +506,32 @@ func (s *Server) dropPledges(ctx context.Context, tx pgx.Tx, hostIDs []string) e
 	return err
 }
 
+// cleanupPledges runs even when the queue is empty: cancelled requesters
+// can leave no batch that would discover their host. It holds sorted host
+// locks in a separate transaction and never takes a Run lock under them.
+func (s *Server) cleanupPledges(ctx context.Context) error {
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT DISTINCT sp.host_id FROM spot_pledges sp
+			WHERE NOT EXISTS (SELECT 1 FROM runs r WHERE r.id=sp.run_id AND r.state IN `+queuedRunStates+` AND NOT r.terminate_requested)
+			OR NOT EXISTS (SELECT 1 FROM hosts h WHERE h.id=sp.host_id AND h.state='ready' AND NOT h.draining
+				AND h.capacity_epoch=sp.host_epoch AND h.last_heartbeat > now()-$1::interval)
+			ORDER BY sp.host_id`, interval(s.cfg.LeaseDuration))
+		if err != nil {
+			return err
+		}
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if err := lockCostHost(ctx, tx, id); err != nil {
+				return err
+			}
+		}
+		return s.dropPledges(ctx, tx, ids)
+	})
+}
+
 // signalReclaims sends the stop for every claimed spot placement not yet
 // told: the Run's row first, then its host's (requestStop), never the other
 // way round. The claim is durable, so a crash between the scheduler's
