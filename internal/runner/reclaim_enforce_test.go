@@ -151,7 +151,15 @@ type reclaimRig struct {
 
 func newReclaimRig(t *testing.T, held bool, flags ...string) *reclaimRig {
 	t.Helper()
-	dir := t.TempDir()
+	// Not t.TempDir: it embeds the test name, and rt/shim.sock must fit a
+	// unix socket path (108 bytes on Linux, 104 on macOS). Registered
+	// first, so it is removed last: after ctx is cancelled and the fake
+	// podman's processes are done.
+	dir, err := os.MkdirTemp("", "lux-rc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
 	bin := filepath.Join(dir, "podman")
 	if err := os.WriteFile(bin, []byte(podmanForReclaim), 0o755); err != nil {
 		t.Fatal(err)

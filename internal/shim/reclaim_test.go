@@ -76,7 +76,13 @@ func TestReclaimKillsNestedProcessGroup(t *testing.T) {
 // 60s workload grace: neither may delay a reclamation.
 func reclaimShim(t *testing.T) (s *Shim, conn net.Conn, dir string) {
 	t.Helper()
-	dir = t.TempDir()
+	// Not t.TempDir: it embeds the test name, and shim.sock must fit a
+	// unix socket path (108 bytes on Linux, 104 on macOS).
+	dir, err := os.MkdirTemp("", "lux-sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
 	o, err := OpenOutput(filepath.Join(dir, "out.jsonl"), NewRedactor(nil))
 	if err != nil {
 		t.Fatal(err)
