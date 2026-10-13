@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -41,6 +42,20 @@ func spotFinishFixture(t *testing.T) *finishFixture {
 func (f *finishFixture) volumeExists(name string) bool {
 	_, err := os.Stat(f.bin + ".vol." + volumeName("run1", name))
 	return err == nil
+}
+
+func (f *finishFixture) runEvents() []proto.RunEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []proto.RunEvent
+	for _, fr := range f.reports {
+		if fr.Type == proto.MsgRunEvent {
+			var ev proto.RunEvent
+			_ = json.Unmarshal(fr.Data, &ev)
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 // A reclaimed spot Run's end frees its disk at luxd, so the runner removes
@@ -105,6 +120,9 @@ func TestSpotFinishKeepsDiskReservedUntilCleanup(t *testing.T) {
 	if n := strings.Count(f.podmanLog(), "volume rm"); n < 3 {
 		t.Fatalf("%d volume removals in 300ms: want retries", n)
 	}
+	if evs := f.runEvents(); len(evs) != 1 || evs[0].Type != proto.EvDiskReleaseFailed || evs[0].Data["error"] == "" || evs[0].Data["error"] == nil {
+		t.Fatalf("run events %+v: want one %s with its error across the failed removals", evs, proto.EvDiskReleaseFailed)
+	}
 	leases, _ := f.heartbeatAfter(t, f.count())
 	if len(leases) != 1 || leases[0].RunID != "run1" || leases[0].State != "stopping" {
 		t.Fatalf("leases %+v: want run1 still held (stopping)", leases)
@@ -136,8 +154,9 @@ func TestSpotFinishKeepsDiskReservedUntilCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustEnd(t, p, "the re-adopted placement never ended")
-	if got := f.types(); !slices.Equal(got, []string{proto.MsgSnapshotDone, proto.MsgStatus}) {
-		t.Fatalf("reports %v, want one snapshot.done, then the end", got)
+	// The restarted runner says once more that the release fails.
+	if got := f.types(); !slices.Equal(got, []string{proto.MsgSnapshotDone, proto.MsgRunEvent, proto.MsgRunEvent, proto.MsgStatus}) {
+		t.Fatalf("reports %v, want one snapshot.done, one release failure per runner, then the end", got)
 	}
 	f.mu.Lock()
 	volAt := slices.Clone(f.volAtStatus)

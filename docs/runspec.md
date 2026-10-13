@@ -134,6 +134,13 @@ the reclamation does not run the beforeStop hook. The Run ends terminated with
 an explicit cause. No state-volume snapshot is exported, but existing output and
 artifacts retain the usual `never` behavior (they are not erased).
 
+A spot Run's end frees its disk for other work, so the runner removes its
+container and its state, ephemeral and engine volumes before reporting the end,
+also when the Run ends while still starting. While that removal fails the runner
+retries it and the Run stays `stopping` with its disk reserved; the first
+failure adds a `disk.release_failed` event to the Run (`data.error`: podman's
+error), once per runner process.
+
 ```yaml
 spot: true
 image: { ref: alpine }

@@ -47,6 +47,35 @@ func exitReport(t *testing.T, s *Server, host, run string, epoch int) {
 	}
 }
 
+// A reclaimed victim whose disk cannot be released yet reports
+// disk.release_failed: luxd records it on the Run, where its events list
+// it, and the placement stays live (stopping) until the end report.
+func TestReclaimDiskReleaseFailedEvent(t *testing.T) {
+	s := reclaimFixture(t)
+	ctx := context.Background()
+	f := s.handleReport(ctx, "h", proto.Frame{Type: proto.MsgRunEvent, ID: 9, RunID: "spot", Epoch: 1,
+		Data: proto.Marshal(proto.RunEvent{Type: proto.EvDiskReleaseFailed, Data: map[string]any{"error": "volume is busy"}})})
+	if f.Type != proto.MsgAck {
+		t.Fatalf("%s report: %s %s", proto.EvDiskReleaseFailed, f.Type, f.Data)
+	}
+	events, err := s.events(ctx, "t1", "spot", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []Event
+	for _, e := range events {
+		if e.Type == proto.EvDiskReleaseFailed {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 1 || got[0].Data["error"] != "volume is busy" || got[0].Epoch == nil || *got[0].Epoch != 1 {
+		t.Fatalf("%s events %+v", proto.EvDiskReleaseFailed, got)
+	}
+	if st := queryOne[string](t, s, `SELECT state FROM placements WHERE id = 'p'`); st != "running" {
+		t.Fatalf("placement %s after the event, want it unchanged", st)
+	}
+}
+
 // The requester is terminated while its victim drains: the pledge goes on
 // the next pass, but the victim stays claimed and signalled (irreversible)
 // and still ends terminated with the reclaim's reason.

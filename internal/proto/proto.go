@@ -472,6 +472,11 @@ type ArtifactPublished struct {
 // on one sample at disklimit.CeilingFactor times the disk. luxd stops it.
 const EvDiskExceeded = "disk.exceeded"
 
+// EvDiskReleaseFailed: a spot placement's container or volumes could not be
+// removed at its end (data: error). Sent once; the runner keeps retrying,
+// and the end stays unreported, its disk reserved, until removal succeeds.
+const EvDiskReleaseFailed = "disk.release_failed"
+
 // EvGitClone is a repository the runner cloned, or failed to:
 // {repo, status: cloned | failed, commit?, error?, requestId?} (requestId:
 // the resume that added it).

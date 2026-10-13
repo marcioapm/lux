@@ -837,12 +837,17 @@ func (p *placement) releaseDisk(ctx context.Context) bool {
 	vols := append(slices.Clone(p.state.Volumes), p.state.EngineVolumes...)
 	p.mu.Unlock()
 	_ = p.saveState()
-	for {
+	for reported := false; ; {
 		err := p.removeWorkloadDisk(ctx, id, vols)
 		if err == nil {
 			return true
 		}
 		p.r.log.Warn("releasing a spot Run's disk failed; its end is not reported yet", "run", p.runID, "epoch", p.epoch, "err", err)
+		if !reported {
+			// Once, so luxd shows why the Run stays stopping.
+			reported = true
+			p.event(ctx, proto.EvDiskReleaseFailed, map[string]any{"error": err.Error()})
+		}
 		if p.isStale() || ctx.Err() != nil {
 			return false
 		}

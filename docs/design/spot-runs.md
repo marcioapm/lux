@@ -56,9 +56,13 @@ A spot placement's end report frees its disk at luxd, so after reporting its
 snapshot (output and artifacts staged as blobs) the runner removes its
 container and its state, ephemeral and engine volumes first, then reports the
 end. A removal that fails is retried and the end stays unreported: luxd keeps
-the placement live and its disk reserved. runState.releasePending carries
-this across a runner restart (no second snapshot). Normal Runs keep their
-volumes as before.
+the placement live and its disk reserved. The first failed attempt sends one
+disk.release_failed run event (data.error), so a Run stuck stopping is visible
+at luxd. runState.releasePending carries
+this across a runner restart (no second snapshot). A spot placement that ends
+while starting (reclaimed, or a start step failed) releases the same way
+before its end report: the volumes made so far and a container created but not
+started. Normal Runs keep their volumes as before.
 
 The runner advertises spot-reclaim-v1 only when its lux-shim answers
 `lux-shim capabilities` with reclaim-v1; sync-mode support is a separate gate.
