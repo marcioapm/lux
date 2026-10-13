@@ -177,6 +177,9 @@ func TestResumeRetryComparesDiskGrace(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if out1.Body.Resize == nil {
+				t.Fatal("first resume: no resize in the answer")
+			}
 			out2, err := resumeWith(s, id, c.retry)
 			if c.status != 0 {
 				refused(t, err, c.status, "not_resumable", "retry")
