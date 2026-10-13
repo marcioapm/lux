@@ -349,8 +349,8 @@ func TestReclaimShimUnreachableTermNowKillAtDeadline(t *testing.T) {
 		t.Fatalf("killed before the deadline: %v", g.signals())
 	}
 	eventually(t, "no SIGKILL", g.killed)
-	if took := time.Since(received); took < 400*time.Millisecond {
-		t.Fatalf("SIGKILL %v after the notice, before the 400ms deadline", took)
+	if now, deadline := time.Now(), time.UnixMilli(p.reclaimAt); now.Before(deadline) || deadline.Before(received.Add(399*time.Millisecond)) {
+		t.Fatalf("SIGKILL %v after the notice, deadline %v after it: want the kill at the 400ms deadline", now.Sub(received), deadline.Sub(received))
 	}
 	if got := g.signals(); !slices.Equal(got, []string{"TERM", "KILL"}) {
 		t.Fatalf("signals %v, want TERM then KILL", got)

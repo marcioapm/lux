@@ -147,7 +147,8 @@ func TestShimReclaimSkipsHookAndGrace(t *testing.T) {
 	s, conn, dir := reclaimShim(t)
 	pg := startTrapping(t, s, dir)
 	notice := time.Now()
-	killAt := notice.Add(300 * time.Millisecond)
+	// The deadline as sent: whole milliseconds.
+	killAt := time.UnixMilli(notice.Add(300 * time.Millisecond).UnixMilli())
 	sendShim(t, conn, proto.ShimMsg{Type: proto.ShimStop, Reason: "spot-reclaim", KillAtUnixMs: killAt.UnixMilli()})
 	waitFor(t, func() bool {
 		b, _ := os.ReadFile(filepath.Join(dir, "term"))
