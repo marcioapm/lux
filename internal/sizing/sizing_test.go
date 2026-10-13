@@ -22,11 +22,7 @@ func shape(cpu float64) Shape {
 
 func model(t *testing.T, cpu float64) *Model {
 	t.Helper()
-	m, err := New(shape(cpu))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return m
+	return mustNew(t, shape(cpu))
 }
 
 func names(m *Model) []string {

@@ -200,21 +200,16 @@ func covers(e Entry, r Request) bool {
 		(!r.Disk.Present || e.Disk >= r.Disk.Value)
 }
 
+func dropOmitted[T any](o Optional[T]) Optional[T] {
+	if !o.Present {
+		return Optional[T]{}
+	}
+	return o
+}
+
 // normalise drops omitted fields' values so they are never retained or compared.
 func normalise(r Request) Request {
-	if !r.Size.Present {
-		r.Size = Optional[string]{}
-	}
-	if !r.CPUs.Present {
-		r.CPUs = Optional[float64]{}
-	}
-	if !r.Memory.Present {
-		r.Memory = Optional[spec.Bytes]{}
-	}
-	if !r.Disk.Present {
-		r.Disk = Optional[spec.Bytes]{}
-	}
-	return r
+	return Request{dropOmitted(r.Size), dropOmitted(r.CPUs), dropOmitted(r.Memory), dropOmitted(r.Disk)}
 }
 
 func (m *Model) Resolve(r Request) (Resolution, error) {
