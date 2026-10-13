@@ -180,7 +180,7 @@ func TestZeroModel(t *testing.T) {
 	if got := m.List(); len(got) != 0 {
 		t.Fatal(got)
 	}
-	if _, err := m.Parse("m-2-arm64"); !errors.Is(err, ErrUnknownSize) {
+	if _, err := m.Parse("m-2-arm64"); !errors.Is(err, ErrInvalidShape) {
 		t.Fatal(err)
 	}
 	for _, r := range []Request{{}, {CPUs: some(1.0)}, {Size: some("m-2-arm64")}} {
@@ -259,6 +259,12 @@ func TestOmittedFieldsIgnored(t *testing.T) {
 			Request{},
 		},
 		{
+			"explicit size with raw junk",
+			Request{Size: some("m-4-arm64"), CPUs: Optional[float64]{Value: 99}, Memory: Optional[spec.Bytes]{Value: -1}, Disk: Optional[spec.Bytes]{Value: math.MaxInt64}},
+			"m-4-arm64",
+			Request{Size: some("m-4-arm64")},
+		},
+		{
 			"all omitted with junk",
 			Request{Size: Optional[string]{Value: "m-8-arm64"}, CPUs: Optional[float64]{Value: math.NaN()}, Memory: Optional[spec.Bytes]{Value: -1}, Disk: Optional[spec.Bytes]{Value: math.MaxInt64}},
 			"m-2-arm64",
@@ -303,6 +309,28 @@ func TestBoundaries(t *testing.T) {
 	}
 }
 
+func TestBytesText(t *testing.T) {
+	for _, c := range []struct {
+		b    spec.Bytes
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{1536, "1536"},
+		{3072, "3Ki"},
+		{1 << 20, "1Mi"},
+		{gib(160), "160Gi"},
+		{1 << 40, "1Ti"},
+		{1 << 62, "4194304Ti"},
+		{160e9, "156250000Ki"},
+		{gib(160) + 1, "171798691841"},
+	} {
+		if got := bytesText(c.b); got != c.want {
+			t.Fatalf("bytesText(%d) = %q, want %q", c.b, got, c.want)
+		}
+	}
+}
+
 func TestOversizedMessage(t *testing.T) {
 	m := model(t, 8)
 	cases := []struct {
@@ -319,6 +347,9 @@ func TestOversizedMessage(t *testing.T) {
 		var big *OversizedError
 		if !errors.As(err, &big) {
 			t.Fatal(c.r, err)
+		}
+		if want := normalise(c.r); big.Requested != want {
+			t.Fatalf("Requested %+v, want %+v", big.Requested, want)
 		}
 		msg := err.Error()
 		requested, maximum, ok := strings.Cut(msg, " exceeds ")

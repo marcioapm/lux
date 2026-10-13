@@ -183,6 +183,9 @@ func (m *Model) List() []Entry { return slices.Clone(m.entries) }
 
 // Parse accepts only canonical names belonging to this nominal pool ladder.
 func (m *Model) Parse(name string) (Entry, error) {
+	if len(m.entries) == 0 {
+		return Entry{}, fmt.Errorf("%w: model was not built with New", ErrInvalidShape)
+	}
 	for _, e := range m.entries {
 		if e.Name == name {
 			return e, nil
