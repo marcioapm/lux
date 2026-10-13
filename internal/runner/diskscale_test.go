@@ -127,7 +127,7 @@ func TestDiskScaleZeroHeadroom(t *testing.T) {
 }
 
 // wantDiskLimit is the contract in arbitrary precision:
-// max(floor(req × min(1, (capacity − headroom) / nominal)), 1).
+// floor(req × min(1, (capacity − headroom) / nominal)).
 func wantDiskLimit(req, nominal, headroom, capacity int64) int64 {
 	alloc := capacity - headroom
 	if alloc >= nominal {
@@ -135,7 +135,7 @@ func wantDiskLimit(req, nominal, headroom, capacity int64) int64 {
 	}
 	n := new(big.Int).Mul(big.NewInt(req), big.NewInt(alloc))
 	n.Quo(n, big.NewInt(nominal)) // both positive: Quo truncates, which is floor
-	return max(n.Int64(), 1)
+	return n.Int64()
 }
 
 // Exact for every size up to MaxInt64, always rounded down, never above
@@ -162,10 +162,10 @@ func TestDiskScaleRoundsDownWithoutOverflow(t *testing.T) {
 			}
 		}
 	}
-	// 3 bytes at 2/3 is exactly 2; 1 byte at 2/3 rounds down to 0, kept at 1.
+	// 3 bytes at 2/3 is exactly 2; 1 byte at 2/3 rounds down to 0.
 	d := mustDiskScale(t, 3, 1, 3)
-	if d.limit(3) != 2 || d.limit(2) != 1 || d.limit(1) != 1 {
-		t.Errorf("2/3: limit(3,2,1) = %d,%d,%d, want 2,1,1", d.limit(3), d.limit(2), d.limit(1))
+	if d.limit(3) != 2 || d.limit(2) != 1 || d.limit(1) != 0 {
+		t.Errorf("2/3: limit(3,2,1) = %d,%d,%d, want 2,1,0", d.limit(3), d.limit(2), d.limit(1))
 	}
 }
 

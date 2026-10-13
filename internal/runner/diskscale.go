@@ -46,11 +46,8 @@ func newDiskScale(nominal int64, headroom *int64, dir string, statfs func(string
 	return diskScale{share: newShare(allocatable, nominal), on: true, nominal: nominal, headroom: *headroom, fsCapacity: fsCapacity}, nil
 }
 
-// limit is the disk a Run asking requested bytes is held to: floor of its
-// share, at least 1 byte, since a limit of 0 is no limit.
+// limit is the disk a Run asking requested bytes is held to, rounded down
+// to whole bytes. A positive nominal request may have a zero-byte limit.
 func (d diskScale) limit(requested int64) int64 {
-	if requested <= 0 || !d.scaled() {
-		return requested
-	}
-	return max(d.of(requested), 1)
+	return d.of(requested)
 }

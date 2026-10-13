@@ -59,10 +59,10 @@ type Verdict struct {
 	Ceiling bool
 }
 
-// Sample holds used bytes, measured at now, to l. No disk limit
-// (Effective 0) is never over.
+// Sample holds used bytes, measured at now, to l. A nominal request of
+// zero has no limit; a positive request scaled to zero is still enforced.
 func (w *Watch) Sample(l Limit, used int64, now time.Time) Verdict {
-	if l.Effective <= 0 {
+	if l.Nominal <= 0 {
 		return Verdict{}
 	}
 	v := w.observe(used, l.Effective, l.Grace, now)

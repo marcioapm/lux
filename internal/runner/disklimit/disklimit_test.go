@@ -250,6 +250,16 @@ func TestScaledLimitHoldsToTheEffective(t *testing.T) {
 	// asked holds to 37.5 GiB.
 	const nominal, effective = 40 * gib, 75 * gib / 2
 	l := Limit{Nominal: nominal, Effective: effective, Factor: 0.9375, Scaled: true, Grace: time.Minute}
+	t.Run("positive nominal scaled to zero", func(t *testing.T) {
+		var w Watch
+		zero := Limit{Nominal: 1, Effective: 0, Factor: 0.5, Scaled: true, Grace: time.Hour}
+		if v := w.Sample(zero, 0, newClock().next()); v.Step != Quiet {
+			t.Fatalf("empty: %+v, want Quiet", v)
+		}
+		if v := w.Sample(zero, 1, newClock().next()); v.Step != Exceeded || !v.Ceiling {
+			t.Fatalf("one byte: %+v, want Exceeded at the zero-byte ceiling", v)
+		}
+	})
 	t.Run("between effective and nominal goes over", func(t *testing.T) {
 		var w Watch
 		if v := w.Sample(l, effective+1, newClock().next()); v.Step != WentOver {

@@ -1525,13 +1525,14 @@ func (p *placement) sampleSlow(ctx context.Context) {
 	wg.Wait()
 	// A partial sum is a lower bound: over the limit it is conclusive, at or
 	// under it would wrongly restart the grace.
-	limit := p.diskLimit().Effective
-	if probeErr == nil || (limit > 0 && disk > limit) {
+	l := p.diskLimit()
+	limit := l.Effective
+	if probeErr == nil || (l.Nominal > 0 && disk > limit) {
 		p.checkDisk(ctx, disk, time.Now())
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if probeErr != nil && limit > 0 && p.phase == "running" && !p.diskProbeFailed {
+	if probeErr != nil && l.Nominal > 0 && p.phase == "running" && !p.diskProbeFailed {
 		p.diskProbeFailed = true
 		p.logf("a disk use probe failed; a sample counts against the disk limit only if what was measured is over it (logged once per placement)",
 			"err", probeErr)
