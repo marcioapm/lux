@@ -199,7 +199,8 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
     assert lux.json("snapshots", run_id), "its state was not kept"
     # Resumed with room to spare: it runs on, its 64 MiB still there.
     lux.run("resume", run_id, "--disk", "256Mi")
-    lux.wait_output(run_id, "start\nwrote\nstart", timeout=60)
+    lux.wait_state(run_id, "running", timeout=60)
+    lux.wait_output(run_id, "start\nwrote", timeout=60)
     run = lux.get(run_id)
     assert run["state"] == "running" and run["spec"]["resources"]["disk"] == 256 << 20, run
     lux.run("terminate", run_id, "--wait")
