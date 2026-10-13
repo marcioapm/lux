@@ -68,6 +68,14 @@ Roll out additive APIs/schema first; deploy compatible runners before enabling s
 
 Cost accounting continues pricing resolved reservations and each actual host/volume, never the user's smaller raw request. Historical telemetry must keep request, nominal reservation and effective limits distinguishable.
 
+## Phase 1 concrete model policies
+
+`internal/sizing` uses `float64` CPUs and `spec.Bytes` (signed `int64`) for nominal memory/disk, matching Run resources. Architecture uses the existing GOARCH string convention, restricted here to `arm64` and `amd64`. Family is an explicit lowercase alphanumeric/hyphen slug, starting and ending alphanumeric; it may contain hyphens and is not interpreted as provider identity. Canonical names are limited to 63 ASCII characters. Parsing is exact membership in the pool ladder, not permissive numeric parsing.
+
+Nominal and minimum CPUs must be exact powers of two, with minimum at least 0.5 and nominal at most 2^53 (exact integer naming). The explicit default CPU must be a ladder entry; the model supplies no implicit default. Nominal byte totals must divide exactly into positive integer bytes at every tier through the minimum: non-divisible totals are rejected rather than rounded. Integer halving avoids multiplication overflow and byte precision loss.
+
+A validated model owns an ascending ladder and returns independent list copies. Each entry includes canonical name, nominal dimensions and whole-host fraction. Request fields use value-plus-presence records, including size, distinguishing omission from explicit invalid zero or empty size; resolution retains the original request by value alongside the resolved entry. Only present CPU/memory/disk dimensions participate in ceil-to-cover comparisons, with no epsilon. Oversized errors carry the original request and maximum entry. Pids and diskGrace are outside this model. Fallback validation accepts only matching architecture and finite CPU/byte capacities covering the shape; larger fallback capacities never change the nominal ladder. Runner capabilities and effective-limit scaling remain later-phase gates.
+
 ## Implementation phases and gates
 
 1. **Pure model and resolution.** Shape types, finite size ladder, parse/name/list, ceil-to-cover resolution, validation. Unit/property tests for all boundaries, fractional CPUs, overflow/precision, oversized requests, missing fields/default size, fallback compatibility. No live normalization changes yet.
