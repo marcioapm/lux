@@ -867,38 +867,24 @@ finds this pool. --platform renames the platform's pool of that name
 		Long: `List the sizes of a shaped pool, smallest first: each one's name (for
 lux run --size and lux resume --size), CPUs, memory, disk and fraction of a
 whole host; * marks the size a Run that asks for no resources gets. The
-tenant's pool of that name, else the platform's; --platform: the
-platform's. An unshaped pool has no sizes.`,
+pool whose id it is, else the tenant's pool of that name, else the
+platform's; --platform: the platform's. An operator's key without --tenant
+sees every tenant's pools: a name more than one tenant uses is refused,
+asking for --tenant.
+
+An unshaped pool has no sizes: lux says so and exits non-zero, with -o json
+too, so a script can tell it from a shaped one.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var resp struct {
-				Pools []server.Pool `json:"pools"`
-			}
-			if err := a.c.Do(ctxOf(cmd), "GET", "/v1/pools", nil, &resp); err != nil {
+			found, err := a.poolOf(ctxOf(cmd), args[0], "", sizesPlatform)
+			if err != nil {
 				return err
-			}
-			var own, platform *server.Pool
-			for i, pl := range resp.Pools {
-				switch {
-				case pl.Name != args[0] && pl.ID != args[0]:
-				case pl.Platform:
-					platform = &resp.Pools[i]
-				default:
-					own = &resp.Pools[i]
-				}
-			}
-			found := own
-			if sizesPlatform || own == nil {
-				found = platform
-			}
-			if found == nil {
-				return fmt.Errorf("no pool %q", args[0])
-			}
-			if a.output == "json" {
-				return a.json(nonNilSizes(found.Sizes))
 			}
 			if found.Shape == nil {
 				return fmt.Errorf("pool %s has no shape, so no sizes: Runs there ask with --cpus, --memory and --disk", found.Name)
+			}
+			if a.output == "json" {
+				return a.json(nonNilSizes(found.Sizes))
 			}
 			var rows [][]string
 			for _, sz := range found.Sizes {
@@ -918,7 +904,8 @@ platform's. An unshaped pool has no sizes.`,
 	return cmd
 }
 
-// nonNilSizes is sizes, empty rather than null for an unshaped pool.
+// nonNilSizes is sizes, empty rather than null for a shaped pool listing
+// none (a stored shape luxd no longer accepts).
 func nonNilSizes(sizes []server.PoolSize) []server.PoolSize {
 	if sizes == nil {
 		return []server.PoolSize{}
@@ -926,11 +913,22 @@ func nonNilSizes(sizes []server.PoolSize) []server.PoolSize {
 	return sizes
 }
 
-// poolIDOf is the id of the pool ref names, among those GET /v1/pools
-// lists to tenant (the Run's; an operator's key otherwise lists every
-// tenant's): a pool whose id it is, else the tenant's pool of that name,
-// else the platform's (resolvePool's preference at submit).
+// poolIDOf is the id of poolOf's pool.
 func (a *app) poolIDOf(ctx context.Context, ref, tenant string) (string, error) {
+	pl, err := a.poolOf(ctx, ref, tenant, false)
+	if err != nil {
+		return "", err
+	}
+	return pl.ID, nil
+}
+
+// poolOf is the pool ref names, among those GET /v1/pools lists to tenant
+// (the Run's; "" for the key's or --tenant's; an operator's key otherwise
+// lists every tenant's): a pool whose id it is, else the tenant's pool of
+// that name, else the platform's (resolvePool's preference at submit).
+// platformOnly: only the platform's pool of that name or id. A name two
+// tenants' pools share in an operator's listing is refused, not guessed.
+func (a *app) poolOf(ctx context.Context, ref, tenant string, platformOnly bool) (*server.Pool, error) {
 	var resp struct {
 		Pools []server.Pool `json:"pools"`
 	}
@@ -940,21 +938,34 @@ func (a *app) poolIDOf(ctx context.Context, ref, tenant string) (string, error) 
 		path += "?tenant=" + url.QueryEscape(tenant)
 	}
 	if err := a.c.Do(ctx, "GET", path, nil, &resp); err != nil {
-		return "", err
+		return nil, err
 	}
-	var platform string
-	for _, pl := range resp.Pools {
+	var own []*server.Pool
+	var platform *server.Pool
+	for i := range resp.Pools {
+		pl := &resp.Pools[i]
 		switch {
-		case pl.ID == ref:
-			return pl.ID, nil
-		case pl.Name == ref && !pl.Platform:
-			return pl.ID, nil
-		case pl.Name == ref:
-			platform = pl.ID
+		case pl.ID == ref && (pl.Platform || !platformOnly):
+			return pl, nil
+		case pl.Name != ref:
+		case pl.Platform:
+			platform = pl
+		default:
+			own = append(own, pl)
 		}
 	}
-	if platform == "" {
-		return "", fmt.Errorf("no pool %q", ref)
+	if len(own) > 1 && !platformOnly {
+		var owners []string
+		for _, pl := range own {
+			owners = append(owners, pl.Tenant)
+		}
+		return nil, fmt.Errorf("pool %q: tenants %s each have one: name one with --tenant", ref, strings.Join(owners, ", "))
+	}
+	if len(own) == 1 && !platformOnly {
+		return own[0], nil
+	}
+	if platform == nil {
+		return nil, fmt.Errorf("no pool %q", ref)
 	}
 	return platform, nil
 }

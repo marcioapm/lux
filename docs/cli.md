@@ -363,6 +363,9 @@ shape the pool has would remove it, each field printed as `shape.cpus
 8→-`, and is refused without `--replace`. Runs already submitted keep
 their resources whatever the shape becomes. `lux pools sizes <pool>`
 lists the sizes; `luxd admin create-pool --shape` takes the same value.
+`lux pools sizes` on an unshaped pool exits non-zero (`pool <name> has no
+shape`), with `-o json` too; an operator naming a pool several tenants
+have must add `--tenant`.
 
 ## Status and history
 

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -44,6 +46,38 @@ func TestRunSizeFlag(t *testing.T) {
 	}
 	if res := posted[0]["resources"]; !reflect.DeepEqual(res, map[string]any{}) {
 		t.Errorf("without --size: resources %v, want none", res)
+	}
+}
+
+// resources.size in a spec file is posted; --size replaces it.
+func TestRunSizeFromSpecFile(t *testing.T) {
+	var posted []map[string]any
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		posted = append(posted, body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"run_1","state":"submitted"}`))
+	})
+	file := filepath.Join(t.TempDir(), "run.yaml")
+	yml := "image: {ref: alpine}\nworkload: {adapter: generic, command: [\"true\"]}\nresources: {size: m-2-arm64}\n"
+	if err := os.WriteFile(file, []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCLI(t, h, "run", "-f", file); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCLI(t, h, "run", "-f", file, "--size", "m-4-arm64"); err != nil {
+		t.Fatal(err)
+	}
+	if len(posted) != 2 {
+		t.Fatalf("posted %d", len(posted))
+	}
+	for i, want := range []string{"m-2-arm64", "m-4-arm64"} {
+		if res := posted[i]["resources"]; !reflect.DeepEqual(res, map[string]any{"size": want}) {
+			t.Errorf("POST %d resources %v, want only size %s", i, res, want)
+		}
 	}
 }
 
@@ -88,14 +122,120 @@ func TestPoolsSizes(t *testing.T) {
 	}
 	out, err = runCLI(t, h, "-o", "json", "pools", "sizes", "pool_m")
 	var sizes []server.PoolSize
-	if err != nil || json.Unmarshal([]byte(out), &sizes) != nil || len(sizes) != 5 || sizes[2].Name != "m-2-arm64" || !sizes[2].Default {
-		t.Errorf("json: %q %v", out, err)
+	if err != nil || json.Unmarshal([]byte(out), &sizes) != nil {
+		t.Fatalf("json: %q %v", out, err)
 	}
-	if _, err := runCLI(t, h, "pools", "sizes", "plain"); err == nil || !strings.Contains(err.Error(), "pool plain has no shape") {
-		t.Errorf("unshaped: %v", err)
+	const g = 1 << 30
+	wantSizes := []server.PoolSize{
+		{Name: "m-05-arm64", CPUs: 0.5, Memory: 2 * g, Disk: 10 * g, Fraction: 0.0625},
+		{Name: "m-1-arm64", CPUs: 1, Memory: 4 * g, Disk: 20 * g, Fraction: 0.125},
+		{Name: "m-2-arm64", CPUs: 2, Memory: 8 * g, Disk: 40 * g, Fraction: 0.25, Default: true},
+		{Name: "m-4-arm64", CPUs: 4, Memory: 16 * g, Disk: 80 * g, Fraction: 0.5},
+		{Name: "m-8-arm64", CPUs: 8, Memory: 32 * g, Disk: 160 * g, Fraction: 1},
 	}
-	if _, err := runCLI(t, h, "pools", "sizes", "nope"); err == nil || !strings.Contains(err.Error(), `no pool "nope"`) {
+	if !reflect.DeepEqual(sizes, wantSizes) {
+		t.Errorf("json sizes %+v, want %+v", sizes, wantSizes)
+	}
+	for _, args := range [][]string{{"pools", "sizes", "plain"}, {"-o", "json", "pools", "sizes", "plain"}} {
+		out, err := runCLI(t, h, args...)
+		if want := "pool plain has no shape, so no sizes: Runs there ask with --cpus, --memory and --disk"; err == nil || err.Error() != want || out != "" {
+			t.Errorf("%v: %q %v, want no output and %q", args, out, err, want)
+		}
+	}
+	if _, err := runCLI(t, h, "pools", "sizes", "nope"); err == nil || err.Error() != `no pool "nope"` {
 		t.Errorf("unknown: %v", err)
+	}
+}
+
+// sizesLuxd lists pools as GET /v1/pools would: those of ?tenant= (by
+// name) and the platform's when it is given, else all of them.
+func sizesLuxd(pools ...string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		tenant := r.URL.Query().Get("tenant")
+		var listed []string
+		for _, p := range pools {
+			var pl struct {
+				Tenant   string `json:"tenant"`
+				Platform bool   `json:"platform"`
+			}
+			_ = json.Unmarshal([]byte(p), &pl)
+			if tenant == "" || pl.Platform || pl.Tenant == tenant {
+				listed = append(listed, p)
+			}
+		}
+		_, _ = w.Write([]byte(`{"pools":[` + strings.Join(listed, ",") + `]}`))
+	})
+}
+
+// sizeNames is the size names of pools sizes -o json's output.
+func sizeNames(t *testing.T, out string) []string {
+	t.Helper()
+	var sizes []server.PoolSize
+	if err := json.Unmarshal([]byte(out), &sizes); err != nil {
+		t.Fatalf("json %q: %v", out, err)
+	}
+	var names []string
+	for _, s := range sizes {
+		names = append(names, s.Name)
+	}
+	return names
+}
+
+// pools sizes picks the tenant's pool of a name over the platform's, the
+// platform's with --platform; an operator listing several tenants' pools
+// of that name is refused until --tenant names one.
+func TestPoolsSizesPicksThePool(t *testing.T) {
+	ladder := func(names ...string) string {
+		var s []string
+		for _, n := range names {
+			s = append(s, `{"name":"`+n+`","cpus":1,"memory":1,"disk":1,"fraction":1}`)
+		}
+		return `"shape":{"family":"x"},"sizes":[` + strings.Join(s, ",") + `]`
+	}
+	tenantM := `{"id":"pool_t1m","name":"m","tenant":"t1",` + ladder("t1-size") + `}`
+	otherM := `{"id":"pool_t2m","name":"m","tenant":"t2",` + ladder("t2-size") + `}`
+	platformM := `{"id":"pool_pm","name":"m","platform":true,` + ladder("platform-size") + `}`
+
+	h := sizesLuxd(tenantM, platformM)
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"pools", "sizes", "m"}, "t1-size"},
+		{[]string{"pools", "sizes", "m", "--platform"}, "platform-size"},
+		{[]string{"pools", "sizes", "pool_t1m"}, "t1-size"},
+		{[]string{"pools", "sizes", "pool_pm"}, "platform-size"},
+	} {
+		out, err := runCLI(t, h, append([]string{"-o", "json"}, c.args...)...)
+		if err != nil {
+			t.Fatalf("%v: %v", c.args, err)
+		}
+		if got := sizeNames(t, out); !reflect.DeepEqual(got, []string{c.want}) {
+			t.Errorf("%v: sizes %v, want [%s]", c.args, got, c.want)
+		}
+	}
+	if _, err := runCLI(t, h, "pools", "sizes", "pool_t1m", "--platform"); err == nil || err.Error() != `no pool "pool_t1m"` {
+		t.Errorf("--platform with a tenant pool's id: %v", err)
+	}
+
+	h = sizesLuxd(tenantM, otherM, platformM)
+	if _, err := runCLI(t, h, "pools", "sizes", "m"); err == nil || err.Error() != `pool "m": tenants t1, t2 each have one: name one with --tenant` {
+		t.Errorf("operator, ambiguous: %v", err)
+	}
+	out, err := runCLI(t, h, "--tenant", "t2", "-o", "json", "pools", "sizes", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sizeNames(t, out); !reflect.DeepEqual(got, []string{"t2-size"}) {
+		t.Errorf("--tenant t2: sizes %v, want t2's", got)
+	}
+	out, err = runCLI(t, h, "-o", "json", "pools", "sizes", "m", "--platform")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sizeNames(t, out); !reflect.DeepEqual(got, []string{"platform-size"}) {
+		t.Errorf("operator --platform: sizes %v", got)
 	}
 }
 
