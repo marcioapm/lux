@@ -206,6 +206,14 @@ placement gets it.
   say what was asked (`requested`), what the Run has now (`applied`),
   and, when a disk was kept, `disk: {requested, kept, reason,
   measuredBytes, neededBytes}`.
+- In a [shaped pool](#shaped-pools) a resume resizes to a whole size:
+  `resources.size` (`lux resume --size`), or cpus, memory and disk
+  rounded up to a size as at submit; `resize.size` names it. Its disk is
+  never kept apart from its cpus and memory: a size with less disk than
+  the Run has is applied only when the saved state fits it with the
+  headroom above (and a final measurement), and otherwise refused with 422
+  `size_below_saved_state`, nothing changed. `size` on an unshaped pool is
+  422 `size_unsupported`.
 - A new size is placed like a submit of that size. The snapshot's host is
   only preferred: if the new size does not fit there, the Run goes to
   another host of its pool that has room, or, in a provisioned pool, a new
@@ -281,6 +289,13 @@ platformUnchecked}`, and the `resume.requested` event carries `pool:
 Run is in already moves nothing. On a Run already resuming, naming the
 pool its resume moved it to is a retry (202, with that resume's
 `placement`); any other pool is 409 `not_resumable`.
+
+A move into a [shaped pool](#shaped-pools) sizes the Run there, before
+the checks above: what the resume asked for in `resources`, or, when it
+asked nothing, the Run's current cpus, memory and disk rounded up to the
+destination's sizes (more than its whole host: 422 `size_too_large`). The
+answer's `resize` says which size. A move out of a shaped pool keeps the
+Run's resources as they are, and it no longer has a size.
 
 `GET /v1/pools` gives each pool's `platforms` and
 `capabilities.nestedContainers` from the same facts, absent or null when
@@ -528,6 +543,47 @@ reservation for sizing only; the scheduler still places each Run on its
 own. See [Telemetry](telemetry.md#capacity-planning). `GET /v1/pools`
 says that size as each pool's `hostSize` (with `hostSizeFrom` and the
 latest host's `instanceType`), also for a pool scaled to zero.
+
+### Shaped pools
+
+A pool may declare a **shape**: the nominal whole host its Runs are sized
+against, set by its operator (`shape` on `POST /v1/pools`, `lux pools set
+--shape`, `luxd admin create-pool --shape`):
+
+```
+family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2
+```
+
+Its **sizes** halve the whole host down to `minCpus`, each named
+`<family>-<cpus>-<arch>` (`05` for half a CPU): here `m-05-arm64` (0.5
+CPU, 2 GiB, 10 GiB), `m-1-arm64`, `m-2-arm64` (the default),
+`m-4-arm64` and `m-8-arm64` (the whole host). `GET /v1/pools` lists them
+as each shaped pool's `sizes`, with `fraction` of the whole host, and
+`lux pools sizes <pool>` prints them. The family is the operator's label,
+never read from the provider; the arch is explicit; the disk is the
+launch template's, not the instance type's. Two pools of one family with
+different disks are told apart by their names.
+
+luxd checks a shape when the pool is set and refuses it with 422
+`invalid_pool`: `cpus` and `minCpus` powers of two (`minCpus` at least
+0.5), `memory` and `disk` that divide exactly down to the smallest size,
+`defaultCpus` one of the sizes, names of at most 63 characters. For an
+ec2 pool, its template's `instanceType` and `fallbackInstanceTypes` that
+the instance-type catalog describes must have the shape's arch and at
+least its CPUs and memory; a larger fallback still offers only the
+shape's sizes. A type the catalog does not know yet is not checked.
+
+A Run on a shaped pool asks for a size, or has its cpus, memory and disk
+rounded up to one ([`resources.size`](runspec.md#rules)); its
+`spec.resources` is that size's, and its `sizing` says what it asked for
+and what it got. Setting, changing or removing a pool's shape never
+resizes a Run already submitted: a Run is sized when it is submitted and
+when a resume resizes or moves it.
+
+A pool without a shape is unchanged in every way: it takes no `size`, and
+cpus, memory and disk as given, with luxd's defaults. Shapes describe
+Runs' reservations only, for now: hosts still register and are scheduled
+on as before.
 
 ### Memory: the host's terms, scaled to what Linux sees
 
