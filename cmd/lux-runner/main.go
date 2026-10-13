@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -50,6 +51,20 @@ func envBytes(name string, def int64) int64 {
 	return n
 }
 
+// envCPUs is --cpus's default: LUX_RUNNER_CPUS, or 0 (all) when unset.
+func envCPUs() float64 {
+	v := os.Getenv("LUX_RUNNER_CPUS")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+		fmt.Fprintf(os.Stderr, "lux-runner: LUX_RUNNER_CPUS=%q: want a number of CPUs\n", v)
+		os.Exit(2)
+	}
+	return n
+}
+
 // optionalBytes is a byte-count flag that records whether it was given:
 // from the command line, or LUX_RUNNER_DISK_HEADROOM. 0 is a value.
 type optionalBytes struct{ v **int64 }
@@ -81,7 +96,7 @@ func main() {
 	flag.StringVar(&cfg.Shim, "shim", hostboot.InstallDir+"/lux-shim", "path to the lux-shim binary")
 	flag.Var(labels(cfg.Labels), "label", "host label key=value (repeatable)")
 	flag.IntVar(&cfg.MaxRuns, "max-runs", 0, "maximum concurrent Runs (default 16)")
-	flag.Float64Var(&cfg.CPUs, "cpus", 0, "CPUs to offer (default: all)")
+	flag.Float64Var(&cfg.CPUs, "cpus", envCPUs(), "CPUs to offer (default: all). Also LUX_RUNNER_CPUS")
 	flag.Int64Var(&cfg.Memory, "memory", envBytes("LUX_RUNNER_MEMORY", 0), "bytes of memory to offer: the machine's gross memory, in which Runs ask; each gets its share of MemTotal less --memory-headroom (default: MemTotal). Also LUX_RUNNER_MEMORY")
 	flag.Int64Var(&cfg.MemoryHeadroom, "memory-headroom", envBytes("LUX_RUNNER_MEMORY_HEADROOM", runner.DefaultMemoryHeadroom), "bytes of MemTotal kept from Runs for the kernel and the host. Also LUX_RUNNER_MEMORY_HEADROOM")
 	flag.DurationVar(&cfg.UsageEvery, "usage-every", 0, "how often disk use is sampled and the disk limit checked (default 15s)")
