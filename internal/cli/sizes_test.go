@@ -100,6 +100,22 @@ func TestResumeSizeFlag(t *testing.T) {
 	}
 }
 
+// A resize raised for the saved state says so on stderr: the size, the one
+// asked for, and the disk the state needs.
+func TestResumeSizeRaised(t *testing.T) {
+	var posted []map[string]any
+	h := poolsAndResume(t, http.StatusAccepted, `{"id":"run_1","state":"resuming","resize":{"requested":{"size":"m-1-arm64"},
+		"applied":{"cpus":4,"memory":17179869184,"disk":85899345920},"size":"m-4-arm64","raisedFrom":"m-1-arm64",
+		"raisedFor":"saved state","measuredBytes":53687091200,"neededBytes":67108864000}}`, &posted)
+	_, errOut, err := runCLIErr(t, h, "resume", "run_1", "--secret", "TOKEN=x", "--size", "m-1-arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "size: m-4-arm64 (raised from m-1-arm64 for its saved state, which needs 62.5 GiB of disk)\n"; !strings.Contains(errOut, want) {
+		t.Errorf("stderr %q, want %q", errOut, want)
+	}
+}
+
 // pools sizes lists a shaped pool's ladder, the default starred; -o json
 // the sizes; an unshaped pool is an error naming it.
 func TestPoolsSizes(t *testing.T) {
@@ -308,6 +324,8 @@ func TestGetPrintsSize(t *testing.T) {
 			"size:      m-4-arm64 (4 cpus, 16.0 GiB memory, 80.0 GiB disk); asked 3 cpus, 10.0 GiB memory\n"},
 		{run + `,"sizing":{"requested":{},"resolved":{"size":"m-2-arm64","cpus":2,"memory":8589934592,"disk":42949672960}}}`,
 			"size:      m-2-arm64 (2 cpus, 8.0 GiB memory, 40.0 GiB disk); asked the pool's default\n"},
+		{run + `,"sizing":{"requested":{"size":"m-8-arm64"},"resolved":{"size":"m-4-arm64","cpus":4,"memory":17179869184,"disk":85899345920},"raisedFrom":"m-1-arm64","raisedFor":"saved state"}}`,
+			"size:      m-4-arm64 (4 cpus, 16.0 GiB memory, 80.0 GiB disk), raised from m-1-arm64 for its saved state; asked m-8-arm64\n"},
 		{run + `}`, ""},
 	} {
 		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

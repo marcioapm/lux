@@ -214,11 +214,18 @@ placement gets it.
 - In a [shaped pool](#shaped-pools) a resume resizes to a whole size:
   `resources.size` (`lux resume --size`), or cpus, memory and disk
   rounded up to a size as at submit; `resize.size` names it. Its disk is
-  never kept apart from its cpus and memory: a size with less disk than
-  the Run has is applied only when the saved state fits it with the
-  headroom above (and a final measurement), and otherwise refused with 422
-  `size_below_saved_state`, nothing changed. `size` on an unshaped pool is
-  422 `size_unsupported`.
+  never kept apart from its cpus and memory. A size with less disk than
+  the Run has must hold the saved state with the headroom above; when it
+  does not, the Run gets the smallest larger size that does, never less
+  than asked in any dimension: `resize.raisedFrom` is the size asked for,
+  `resize.raisedFor` is `saved state`, with `measuredBytes` and
+  `neededBytes`, and the Run's `sizing` keeps `raisedFrom` and
+  `raisedFor` until a later resume sizes it. When no size holds the saved
+  state, or the placement that took it reported no final measurement (as
+  for the unshaped disk rule, nothing then says how large it is), the
+  resume is refused with 422 `size_below_saved_state`, naming the largest
+  size, nothing changed. `validateOnly` answers the same. `size` on an
+  unshaped pool is 422 `size_unsupported`.
 - A new size is placed like a submit of that size. The snapshot's host is
   only preferred: if the new size does not fit there, the Run goes to
   another host of its pool that has room, or, in a provisioned pool, a new
@@ -298,7 +305,8 @@ pool its resume moved it to is a retry (202, with that resume's
 A move into a [shaped pool](#shaped-pools) sizes the Run there, before
 the checks above: what the resume asked for in `resources`, or, when it
 asked nothing, the Run's current cpus, memory and disk rounded up to the
-destination's sizes (more than its whole host: 422 `size_too_large`). The
+destination's sizes (more than its whole host: 422 `size_too_large`); a
+size it asked for is raised there for its saved state as above. The
 answer's `resize` says which size. A move out of a shaped pool keeps the
 Run's resources as they are, and it no longer has a size.
 

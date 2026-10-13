@@ -617,7 +617,7 @@ type RunUsage struct {
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + resumableSQL + `, ` + stageColumns
+	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, coalesce(r.size_raised_from, ''), coalesce(r.size_raised_for, ''), CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + resumableSQL + `, ` + stageColumns
 
 // runsFrom: a Run with its tenant, its current placement's host, and its
 // runtime (rr). Runtime is the sum over its placements of started_at
@@ -683,11 +683,12 @@ func scanRun(row pgx.Row) (*Run, error) {
 	var stage stageInputs
 	var requested *SizeRequest
 	var size *string
+	var raisedFrom, raisedFor string
 	var shape *PoolShape
 	err := row.Scan(append([]any{&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
 		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing,
-		&requested, &size, &shape, &r.Resumable},
+		&requested, &size, &raisedFrom, &raisedFor, &shape, &r.Resumable},
 		stage.scanTargets()...)...)
 	// resolved_size is shown only while it names a size of the pool's
 	// current ladder with the Run's resources: a removed or changed shape
@@ -700,6 +701,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 		if size != nil {
 			res := r.Spec.Resources
 			r.Sizing.Resolved = &SizeResolved{Size: *size, CPUs: res.CPUs, Memory: res.Memory, Disk: res.Disk}
+			r.Sizing.RaisedFrom, r.Sizing.RaisedFor = raisedFrom, raisedFor
 		}
 	}
 	r.PlacementSeconds = r.PlacementWaitSeconds + r.PlacementStartSeconds
@@ -1636,7 +1638,7 @@ type resumeGit struct {
 }
 
 type resumeResources struct {
-	Size      string         `json:"size,omitempty" doc:"A size of the Run's pool (after placement.poolId, the new pool's): its cpus, memory and disk. Not with cpus, memory or disk (422 size_conflict); 422 unknown_size, or size_unsupported on an unshaped pool. In a shaped pool, cpus, memory and disk are rounded up to a size as at submit; a size with less disk than the Run has must hold its saved state with headroom, else 422 size_below_saved_state."`
+	Size      string         `json:"size,omitempty" doc:"A size of the Run's pool (after placement.poolId, the new pool's): its cpus, memory and disk. Not with cpus, memory or disk (422 size_conflict); 422 unknown_size, or size_unsupported on an unshaped pool. In a shaped pool, cpus, memory and disk are rounded up to a size as at submit; a size with less disk than the Run has must hold its saved state with headroom, else it is raised to the smallest larger size that does (resize.raisedFrom, raisedFor), or refused with 422 size_below_saved_state when none does or the saved state has no final measurement."`
 	CPUs      *float64       `json:"cpus,omitempty" doc:"A new CPU quota, larger or smaller (0.5 is half a CPU). Absent: unchanged; 0 or less: 422 invalid_spec."`
 	Memory    *spec.Bytes    `json:"memory,omitempty" doc:"A new memory size, larger or smaller, in its host's terms as at submit. Absent: unchanged; 0 or less: 422 invalid_spec."`
 	Disk      spec.Bytes     `json:"disk,omitempty" doc:"A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if the placement that took the snapshot it resumes from reported its final disk use (it exited, was not lost) and the disk is at least its peak disk use plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."`
@@ -1676,8 +1678,13 @@ func (r resumeResources) check() (spec.Resources, error) {
 type Resize struct {
 	Requested spec.Resources `json:"requested" doc:"The resources the resume asked for; the others are absent."`
 	Applied   spec.Resources `json:"applied" doc:"The Run's resources from this resume on: what the scheduler reserves and its container gets."`
-	Size      string         `json:"size,omitempty" doc:"In a shaped pool: the size applied resolves to (what was asked, rounded up; or, on a move that asked nothing, the Run's resources rounded up). Absent in an unshaped pool."`
+	Size      string         `json:"size,omitempty" doc:"In a shaped pool: the size applied resolves to (what was asked, rounded up; or, on a move that asked nothing, the Run's resources rounded up; or larger, see raisedFor). Absent in an unshaped pool."`
 	Disk      *DiskKept      `json:"disk,omitempty" doc:"Present when a smaller disk was refused and the current one kept (unshaped pools only)."`
+	// The raise fields are set together, only when the size was raised.
+	RaisedFrom    string `json:"raisedFrom,omitempty" doc:"In a shaped pool, when size is larger than the request resolves to: the size it resolves to, whose disk could not hold the Run's saved state."`
+	RaisedFor     string `json:"raisedFor,omitempty" enum:"saved state" doc:"Why size is larger than raisedFrom: saved state, the smallest size from raisedFrom up whose disk holds the Run's saved state (measuredBytes plus max(25%, 1 GiB): neededBytes). Absent when size is what the request resolves to."`
+	MeasuredBytes *int64 `json:"measuredBytes,omitempty" doc:"With raisedFor: the peak disk use of the placement that took the snapshot the Run resumes from."`
+	NeededBytes   int64  `json:"neededBytes,omitempty" doc:"With raisedFor: the least disk that holds the saved state (measuredBytes plus headroom)."`
 }
 
 // DiskKept says why a resume kept a Run's disk limit instead of shrinking it.
