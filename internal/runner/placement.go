@@ -1294,11 +1294,11 @@ func (p *placement) startShim(ctx context.Context, a *proto.Assign) error {
 
 func (p *placement) requestStop(ctx context.Context, reason string) {
 	p.mu.Lock()
-	// A terminate overrides an earlier stop's reason ("cancel" from an older luxd).
-	if p.stopWhy == "" || reason == "terminate" || reason == "cancel" || reason == stopSpotReclaim {
-		if p.stopWhy != stopSpotReclaim {
-			p.stopWhy = reason
-		}
+	// A terminate overrides an earlier stop's reason ("cancel" from an older
+	// luxd); a spot reclamation overrides any and is never overridden.
+	overrides := reason == "terminate" || reason == "cancel" || reason == stopSpotReclaim
+	if p.stopWhy != stopSpotReclaim && (p.stopWhy == "" || overrides) {
+		p.stopWhy = reason
 	}
 	phase := p.phase
 	if reason == stopSpotReclaim {
