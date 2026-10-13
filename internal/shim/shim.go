@@ -62,6 +62,10 @@ type Shim struct {
 	inputMeta map[string][]spec.AttachmentMeta
 	stopping  bool
 	stopWhy   string
+	// reclaimed: a spot reclamation arrived; no workload starts after it.
+	// reclaimBy: its earliest kill instant.
+	reclaimed bool
+	reclaimBy time.Time
 	// hookPgid is a running beforeStop's process group; hookBy is its
 	// deadline, set before the hook starts and only moved earlier by a
 	// shorter stop. hookDone closes when it has ended.
@@ -220,6 +224,9 @@ func (s *Shim) run() int {
 		return s.fail("start-failed", err.Error())
 	}
 	proc, err := s.startWorkload(argv, workloadEnv)
+	if errors.Is(err, errReclaimed) {
+		return s.finish(proto.ExitInfo{ExitCode: 0, Reason: "stopped", Message: "reclaimed before the workload started"})
+	}
 	if err != nil {
 		return s.fail("start-failed", err.Error())
 	}
@@ -597,22 +604,29 @@ func Capabilities(w io.Writer) int {
 
 // reclaim ends a spot placement: SIGTERM to the workload's process groups
 // at once, with no beforeStop hook and no grace, and SIGKILL at killAt.
-// A repeated notice re-sends SIGTERM but never moves killAt later.
+// A repeated notice re-sends SIGTERM but never moves killAt later. A
+// beforeStop hook an earlier ordinary stop started is signalled with them.
 func (s *Shim) reclaim(killAt time.Time) {
 	s.mu.Lock()
 	first := !s.stopping
-	s.stopping = true
+	s.stopping, s.reclaimed = true, true
 	if first {
 		s.stopWhy = "spot-reclaim"
 	}
-	initPid, proc := s.initPid, s.proc
+	if !s.reclaimBy.IsZero() && s.reclaimBy.Before(killAt) {
+		killAt = s.reclaimBy
+	}
+	s.reclaimBy = killAt
+	initPid, proc, hook := s.initPid, s.proc, s.hookPgid
 	s.mu.Unlock()
 	if first {
 		s.out.Event(proto.EvStop, map[string]any{"reason": "spot-reclaim"})
 	}
 	var groups []int
-	if initPid > 0 {
-		groups = append(groups, initPid)
+	for _, g := range []int{initPid, hook} {
+		if g > 0 {
+			groups = append(groups, g)
+		}
 	}
 	if proc != nil && proc.Cmd.Process != nil {
 		groups = append(groups, proc.Cmd.Process.Pid)
@@ -993,6 +1007,9 @@ func (s *Shim) runInit(env []string) (int, error) {
 	return code, nil
 }
 
+// errReclaimed: a spot reclamation arrived before the workload started.
+var errReclaimed = errors.New("reclaimed before start")
+
 func (s *Shim) startWorkload(argv []string, env []string) (*adapter.Process, error) {
 	cmd := s.command(argv, env)
 	if s.cfg.TTY {
@@ -1012,6 +1029,11 @@ func (s *Shim) startWorkload(argv []string, env []string) (*adapter.Process, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Under the lock reclaim reads proc with: either it signals this
+	// process, or this never starts.
+	if s.reclaimed {
+		return nil, errReclaimed
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", argv[0], err)
 	}
@@ -1027,6 +1049,9 @@ func (s *Shim) startWorkloadTTY(cmd *exec.Cmd, argv []string) (*adapter.Process,
 	cmd.SysProcAttr.Setpgid = false // a session leader, as a PTY makes it
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.reclaimed {
+		return nil, errReclaimed
+	}
 	ptmx, err := pty.StartWithSize(cmd, winsize(0, 0))
 	if err != nil {
 		return nil, fmt.Errorf("start %s: %w", argv[0], err)
