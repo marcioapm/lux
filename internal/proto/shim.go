@@ -36,6 +36,16 @@ const (
 func OutputFile(epoch int) string { return "output-" + strconv.Itoa(epoch) + ".jsonl" }
 func ExitFile(epoch int) string   { return "exit-" + strconv.Itoa(epoch) + ".json" }
 
+// `lux-shim capabilities` prints a JSON array of the shim features named
+// below; a shim that predates the subcommand prints none. The runner
+// advertises a feature that needs the shim only on an affirmative answer.
+const (
+	ShimCapabilitiesCmd = "capabilities"
+	// ShimCapReclaim: a ShimStop with KillAtUnixMs SIGTERMs at once, runs no
+	// beforeStop, ignores workload grace, and SIGKILLs at that instant.
+	ShimCapReclaim = "reclaim-v1"
+)
+
 type ShimConfig struct {
 	RunID   string   `json:"runId"`
 	Epoch   int      `json:"epoch"`

@@ -128,6 +128,8 @@ type Runner struct {
 	// shimSyncModes: its --shim applies a sync's mode (shimKnowsSyncModes),
 	// asked once at startup like shimSHA256.
 	shimSyncModes bool
+	// shimReclaim: its --shim answers spot reclamation (shimKnowsReclaim).
+	shimReclaim bool
 	// mem scales a Run's resources.memory to its container's limit.
 	mem memoryScale
 	// handover, when set, replaces handoverWait's bound. Tests only.
@@ -220,6 +222,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	}
 	r.shimSHA256 = sha256File(cfg.Shim)
 	r.shimSyncModes = shimKnowsSyncModes(cfg.Shim)
+	r.shimReclaim = shimKnowsReclaim(cfg.Shim)
 	return r, nil
 }
 
@@ -271,12 +274,17 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-// capabilities are Hello's: sync modes only with a shim that has them.
+// capabilities are Hello's: sync modes only with a shim that has them, spot
+// reclamation only with a shim that answers it (this runner enforces it).
 func (r *Runner) capabilities() []string {
+	caps := []string{proto.CapDiff, proto.CapGitCredentials}
 	if r.shimSyncModes {
-		return []string{proto.CapDiff, proto.CapGitCredentials, proto.CapSyncModes, proto.CapSpotReclaim}
+		caps = append(caps, proto.CapSyncModes)
 	}
-	return []string{proto.CapDiff, proto.CapGitCredentials}
+	if r.shimReclaim {
+		caps = append(caps, proto.CapSpotReclaim)
+	}
+	return caps
 }
 
 func (r *Runner) hello(ctx context.Context) proto.Hello {

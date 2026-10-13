@@ -586,6 +586,15 @@ func (s *Shim) stop(reason string, shorter time.Duration) {
 	}()
 }
 
+// Capabilities prints the shim features the runner probes for
+// (proto.ShimCapabilitiesCmd).
+func Capabilities(w io.Writer) int {
+	if err := json.NewEncoder(w).Encode([]string{proto.ShimCapReclaim}); err != nil {
+		return 1
+	}
+	return 0
+}
+
 // reclaim ends a spot placement: SIGTERM to the workload's process groups
 // at once, with no beforeStop hook and no grace, and SIGKILL at killAt.
 // A repeated notice re-sends SIGTERM but never moves killAt later.

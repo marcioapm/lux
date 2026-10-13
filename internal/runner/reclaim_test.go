@@ -1,9 +1,51 @@
 package runner
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
+
+	"github.com/marcioapm/lux/internal/proto"
 )
+
+// Hello offers spot reclamation only when the --shim says it handles it:
+// this tree's shim does; a shim that knows sync modes but not the
+// capabilities subcommand (the shim before reclamation: it starts as PID 1
+// without a config and exits 125) does not, whatever its sync modes.
+func TestShimKnowsReclaim(t *testing.T) {
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "lux-shim")
+	build := exec.Command("go", "build", "-o", shim, "github.com/marcioapm/lux/cmd/lux-shim")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	if !shimKnowsReclaim(shim) || !shimKnowsSyncModes(shim) {
+		t.Fatal("this tree's lux-shim: no reclaim or no sync modes")
+	}
+	old := filepath.Join(dir, "old-shim")
+	script := "#!/bin/sh\nif [ \"$1\" = sync ]; then echo '[{\"repo\":\"probe\",\"ref\":\"\",\"mode\":\"" + proto.SyncModeProbe + "\",\"status\":\"failed\"}]'; exit 0; fi\n" +
+		"echo 'lux-shim: no config' >&2; exit 125\n"
+	if err := os.WriteFile(old, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !shimKnowsSyncModes(old) {
+		t.Fatal("the old shim's sync probe should pass")
+	}
+	if shimKnowsReclaim(old) || shimKnowsReclaim(filepath.Join(dir, "missing")) {
+		t.Fatal("an old or missing lux-shim: reclaim")
+	}
+	r := &Runner{shimSyncModes: true, shimReclaim: shimKnowsReclaim(old)}
+	if caps := r.capabilities(); slices.Contains(caps, proto.CapSpotReclaim) || !slices.Contains(caps, proto.CapSyncModes) {
+		t.Fatalf("Hello with a sync-mode shim lacking reclaim: %v", caps)
+	}
+	r = &Runner{shimSyncModes: false, shimReclaim: shimKnowsReclaim(shim)}
+	if caps := r.capabilities(); !slices.Contains(caps, proto.CapSpotReclaim) || slices.Contains(caps, proto.CapSyncModes) {
+		t.Fatalf("Hello with a reclaim shim, sync gate kept apart: %v", caps)
+	}
+}
 
 // The kill instant is fixed at the first notice's receipt: a retried notice,
 // a reconnect or a runner restart (re-reading the stored value) never moves
