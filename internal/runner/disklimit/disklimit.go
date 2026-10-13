@@ -13,7 +13,7 @@ import (
 // reported at once, its diskGrace notwithstanding. The host's disk is
 // shared, and a write left unbounded for the whole grace could fill it for
 // every other Run on it. An interim stand-in for a host free-space guard,
-// until disk is reserved (docs/design/sizes.md).
+// until disk is reserved by the scheduler.
 const CeilingFactor = 2
 
 // Watch is one placement's disk-limit state. A new placement (a resume, a
