@@ -187,6 +187,13 @@ func (g *reclaimRig) signals() []string {
 	return strings.Fields(strings.ReplaceAll(strings.TrimSpace(string(b)), " ctr-1", ""))
 }
 
+// killed: the fake podman has finished a KILL (its last write is $0.dead),
+// so nothing of it still writes in the test's directory.
+func (g *reclaimRig) killed() bool {
+	_, err := os.Stat(g.bin + ".dead")
+	return err == nil && slices.Contains(g.signals(), "KILL")
+}
+
 // running is a running spot placement of run1 in container ctr-1 (the
 // fake's: alive until killed), its run state saved.
 func (g *reclaimRig) running(t *testing.T) *placement {
@@ -256,7 +263,7 @@ func TestReclaimNoticeIsPersistedFirstAndNeverMoves(t *testing.T) {
 			t.Fatalf("an ordinary stop reached the shim: %+v", m.m)
 		}
 	}
-	eventually(t, "no kill at the deadline", func() bool { return slices.Contains(g.signals(), "KILL") })
+	eventually(t, "no kill at the deadline", g.killed)
 	if killed := time.Now(); killed.Before(time.UnixMilli(want)) {
 		t.Fatalf("killed at %v, before the deadline %v", killed, time.UnixMilli(want))
 	}
@@ -281,7 +288,7 @@ func TestReclaimReadoptedPastDeadlineKillsAtOnce(t *testing.T) {
 	g.r.placements = map[string]*placement{}
 	start := time.Now()
 	g.r.readopt(g.ctx)
-	eventually(t, "the re-adopted container was not killed", func() bool { return slices.Contains(g.signals(), "KILL") })
+	eventually(t, "the re-adopted container was not killed", g.killed)
 	if took := time.Since(start); took > 2*time.Second {
 		t.Fatalf("killed %v after re-adopting, want at once", took)
 	}
@@ -319,7 +326,7 @@ func TestReclaimReadoptedKeepsStoredDeadline(t *testing.T) {
 	if got := shim.stops()[0].m.KillAtUnixMs; got != stored {
 		t.Fatalf("notice after the restart: kill at %d, want the stored %d", got, stored)
 	}
-	eventually(t, "no kill at the stored deadline", func() bool { return slices.Contains(g.signals(), "KILL") })
+	eventually(t, "no kill at the stored deadline", g.killed)
 	if time.Now().UnixMilli() < stored || time.Now().UnixMilli() > stored+3000 {
 		t.Fatalf("killed at %d, want at %d", time.Now().UnixMilli(), stored)
 	}
@@ -341,7 +348,7 @@ func TestReclaimShimUnreachableTermNowKillAtDeadline(t *testing.T) {
 	if slices.Contains(g.signals(), "KILL") {
 		t.Fatalf("killed before the deadline: %v", g.signals())
 	}
-	eventually(t, "no SIGKILL", func() bool { return slices.Contains(g.signals(), "KILL") })
+	eventually(t, "no SIGKILL", g.killed)
 	if took := time.Since(received); took < 400*time.Millisecond {
 		t.Fatalf("SIGKILL %v after the notice, before the 400ms deadline", took)
 	}
@@ -380,7 +387,7 @@ func TestReclaimOverridesStoppingAndIgnoresLuxd(t *testing.T) {
 	if p.pendingStop() != stopSpotReclaim {
 		t.Fatalf("stop reason %q, want %s", p.pendingStop(), stopSpotReclaim)
 	}
-	eventually(t, "no kill at the deadline", func() bool { return slices.Contains(g.signals(), "KILL") })
+	eventually(t, "no kill at the deadline", g.killed)
 	if time.Now().UnixMilli() < s.KillAtUnixMs {
 		t.Fatal("killed before the deadline")
 	}
@@ -431,7 +438,7 @@ func TestReclaimDuringContainerStart(t *testing.T) {
 			t.Fatalf("stop %+v, want spot-reclaim with kill at %d", m.m, killAt)
 		}
 	}
-	eventually(t, "no kill at the deadline", func() bool { return slices.Contains(g.signals(), "KILL") })
+	eventually(t, "no kill at the deadline", g.killed)
 	if time.Now().UnixMilli() < killAt {
 		t.Fatal("killed before the deadline")
 	}
