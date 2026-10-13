@@ -24,7 +24,10 @@ refuses other resume policies, and retains existing never output/artifact behavi
 Spot placements never keep a host or pool alive. A ready host whose live
 placements are all spot counts as idle (poolState), a spot placement does not
 make a pool active for warm_while_active, and its end does not restart the
-host's idle clock (last_placement_ended_at). The planner treats spot usage as
+host's idle clock (last_placement_ended_at). The activity check is three
+normal-only EXISTS branches (live, recently ended, never ended but recent),
+each on its own index, so a spot-only pool never walks placement history. The
+planner treats spot usage as
 free (reclaimable), so spot work never causes a launch. drainForScaleDown locks
 the host's spot Runs (Runs before hosts), drains the host only if it still has
 no normal placement, and sends each spot placement the spot-reclaim stop: the
@@ -103,10 +106,12 @@ placements.reclaim_for is an irreversible claim (one scalar per placement).
 spot_pledges(run_id primary key, host_id indexed, tenant_id, resources) holds the
 normal Run's promised vector. Extra allocation is component-wise max(0, requested
 minus claimed live victim usage); live victim resources remain counted once.
-A normal cannot start until every claimed live victim releases, even if it could
-otherwise fit. Simulated removals remove one real tenant entry per victim and
-reuse hostFit with shaped effective resources. Youngest-first deterministic greedy
-selection, then redundant-victim pruning, is polynomial, not subset search.
+A normal cannot start on a host while any live victim claimed for it is there,
+even if other releases let it fit. Simulated removals drop one tenant count
+per victim and reuse hostFit with shaped effective resources. Youngest-first
+deterministic greedy selection, then redundant-victim pruning on one simulated
+host (each victim restored and re-removed in turn), is polynomial, not subset
+search.
 
 Scheduler already holds requester Run locks then sorted host advisory locks.
 Victim placement claims use FOR UPDATE SKIP LOCKED, never victim Run locks.
