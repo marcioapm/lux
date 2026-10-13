@@ -429,10 +429,16 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 		}
 	}
 	var waiting waitCapacity
+	claimedLive := false
 	for _, h := range hosts {
-		// forRun: the Run's own pledge is not counted against it, but its
-		// claimed victims' live usage is, so it starts only once they
-		// have released what it needs.
+		// A host still holding a live victim claimed for this Run is not
+		// used until every such victim has released, even if other
+		// releases make the Run fit there now.
+		if slices.ContainsFunc(h.Spots, func(sp spotPlacement) bool { return sp.ReclaimFor == r.ID }) {
+			claimedLive = true
+			continue
+		}
+		// forRun: the Run's own pledge is not counted against it.
 		if blockers := hostFit(r, h.forRun(r.ID)); len(blockers) != 0 {
 			waiting.add(blockers)
 			continue
@@ -483,6 +489,9 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 	if len(ok) == 0 {
 		if w := waiting.reason(r); reason != "waiting for snapshot upload" && w != "" {
 			reason = w
+		}
+		if claimedLive && reason != "waiting for snapshot upload" {
+			reason = reclaimWaitReason
 		}
 		return nil, reason, nil
 	}

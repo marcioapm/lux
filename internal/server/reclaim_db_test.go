@@ -99,6 +99,47 @@ func TestReclaimVictimExitsEarly(t *testing.T) {
 	}
 }
 
+// A requester with two claimed victims (a, b) does not start while b is
+// still live, even when a and an unrelated normal Run c have released
+// enough for it to fit; once b releases, it starts.
+func TestReclaimRequesterWaitsForAllClaimedVictims(t *testing.T) {
+	s, _, _ := planningFixture(t, 0)
+	ctx := context.Background()
+	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 8, Memory: 40, Runs: 8}, map[string]string{})
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state, current_epoch) VALUES
+		('a', 't1', 'pool1', '{"spot":true,"resumePolicy":"never","resources":{"cpus":4,"memory":5},"placement":{"pool":"burst"}}', 'running', 1),
+		('b', 't1', 'pool1', '{"spot":true,"resumePolicy":"never","resources":{"cpus":1,"memory":15},"placement":{"pool":"burst"}}', 'running', 1),
+		('c', 't1', 'pool1', '{"resources":{"cpus":2,"memory":20},"placement":{"pool":"burst"}}', 'running', 1),
+		('n', 't1', 'pool1', '{"resources":{"cpus":6,"memory":20},"placement":{"pool":"burst"}}', 'submitted', 0)`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources) VALUES
+		('pa', 't1', 'a', 'h', 1, 'running', '{"cpus":4,"memory":5}'),
+		('pb', 't1', 'b', 'h', 1, 'running', '{"cpus":1,"memory":15}'),
+		('pc', 't1', 'c', 'h', 1, 'running', '{"cpus":2,"memory":20}')`)
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := queryOne[int](t, s, `SELECT count(*) FROM placements WHERE reclaim_for = 'n'`); got != 2 {
+		t.Fatalf("claimed victims: %d, want 2", got)
+	}
+	exitReport(t, s, "h", "a", 1)
+	exitReport(t, s, "h", "c", 1)
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var state, reason string
+	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'n'`, nil, &state, &reason)
+	if state == StateScheduled || reason != reclaimWaitReason || queryOne[int](t, s, `SELECT count(*) FROM placements WHERE run_id = 'n'`) != 0 {
+		t.Fatalf("requester with victim b live: %s %q (pb %s)", state, reason, queryOne[string](t, s, `SELECT state FROM placements WHERE id = 'pb'`))
+	}
+	exitReport(t, s, "h", "b", 1)
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state := queryOne[string](t, s, `SELECT state FROM runs WHERE id = 'n'`); state != StateScheduled {
+		t.Fatalf("requester after every victim released: %s", state)
+	}
+}
+
 // A runner hello (restart) or the host's loss voids the pledge: its spot
 // placements may be gone and its capacity starts over.
 func TestReclaimPledgeVoidedByHostChange(t *testing.T) {
