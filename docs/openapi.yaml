@@ -1496,7 +1496,7 @@ components:
         name:
           type: string
         placement:
-          description: "How the scheduler chooses among the hosts a Run fits. spread: the host with the fewest Runs. pack: the most allocated host (the largest of its reserved cpus, memory and disk over its capacity), so whole hosts stay free for large sizes; among equally allocated hosts, today's affinity (the snapshot's host, the image and git mirrors cached, preferred labels), then the lowest host id. Either way a Run whose snapshot only its host holds (not yet uploaded) waits for that host, and a host the Run must avoid comes last. Absent: the pool's default, pack for a shaped pool and spread otherwise. Like every field, a set without it returns it to the default. Other values: 422 invalid_pool."
+          description: "How the scheduler chooses among the hosts a Run fits. spread: the host with the fewest Runs. pack: the most allocated host (the largest of its reserved cpus, memory and disk over its capacity), so whole hosts stay free for large sizes; among equally allocated hosts, the spread affinity (the snapshot's host, the image and git mirrors cached, preferred labels), then the lowest host id. Either way a Run whose snapshot only its host holds (not yet uploaded) waits for that host, and a host the Run must avoid comes last. Absent: the pool's default, pack for a shaped pool and spread otherwise. Like every field, a set without it returns it to the default. Other values: 422 invalid_pool."
           enum:
             - spread
             - pack

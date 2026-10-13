@@ -475,9 +475,8 @@ const raisedForSavedState = "saved state"
 // size has more disk than e, so it is larger than e in every dimension
 // (the ladder halves all three together): what the resume asked for is
 // never undercut. Without a final measurement nothing says which size
-// holds the state: refused, as diskShrinkRefusal's unmeasured path always
-// refused a shaped shrink. peak is the measurement a raise was made for
-// (nil: none).
+// holds the state: refused, as diskShrinkRefusal's unmeasured path
+// refuses. peak is the measurement a raise was made for (nil: none).
 func holdSavedState(ctx context.Context, tx pgx.Tx, runID, pool string, m *sizing.Model, e sizing.Entry) (sizing.Entry, *int64, error) {
 	reason, peak, err := diskShrinkRefusal(ctx, tx, runID, e.Disk)
 	if err != nil || reason == "" {
