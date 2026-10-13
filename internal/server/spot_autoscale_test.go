@@ -143,6 +143,56 @@ func TestScaleDownRechecksNewSpotPlacement(t *testing.T) {
 	}
 }
 
+// warm_while_active over a pool's placement history: a live normal
+// placement, a normal one ended within the scale-down time, and one never
+// ended but created within it make the pool active; long-ended normal
+// history and any spot placement (live or recently ended) do not.
+func TestPoolActiveLiveAndRecentHistory(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		spot   bool
+		state  string
+		ended  string // SQL for ended_at
+		active bool
+	}{
+		{"live normal", false, "running", "NULL", true},
+		{"recently ended normal", false, "exited", "now() - interval '10 seconds'", true},
+		{"long-ended normal", false, "exited", "now() - interval '1 day'", false},
+		{"recently ended spot", true, "exited", "now() - interval '10 seconds'", false},
+		{"live spot", true, "running", "NULL", false},
+		{"recent never-ended normal", false, "exited", "NULL", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, pl, _ := planningFixture(t, 0)
+			ctx := context.Background()
+			s.cfg.ScaleDownAfter = time.Minute
+			observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 4, Memory: 40, Disk: 40, Runs: 4}, map[string]string{})
+			sp := `{}`
+			if c.spot {
+				sp = `{"spot":true,"resumePolicy":"never"}`
+			}
+			execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state, current_epoch) VALUES ('r', 't1', 'pool1', $1, 'running', 1)`, sp)
+			// Long-ended normal history on the same host, in every case.
+			execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state, current_epoch) VALUES ('old', 't1', 'pool1', '{}', 'stopped', 1)`)
+			execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, created_at, ended_at)
+				SELECT 'old-'||g, 't1', 'old', 'h', g, 'exited', now() - interval '2 days', now() - interval '2 days' FROM generate_series(1, 20) g`)
+			created := "now() - interval '10 seconds'"
+			if c.name == "long-ended normal" {
+				created = "now() - interval '2 days'"
+			}
+			execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, created_at, ended_at)
+				VALUES ('p', 't1', 'r', 'h', 1, '`+c.state+`', `+created+`, `+c.ended+`)`)
+			var st poolState
+			if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.poolState(ctx, tx, pl, &st) }); err != nil {
+				t.Fatal(err)
+			}
+			if st.active != c.active {
+				t.Fatalf("active %v, want %v", st.active, c.active)
+			}
+		})
+	}
+}
+
 // warm_while_active: a pool whose only placements are spot is not active,
 // and a spot placement's end does not restart its host's idle clock.
 func TestSpotPlacementsDoNotKeepPoolActive(t *testing.T) {

@@ -694,10 +694,18 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 		return err
 	}
 	// Spot placements never make a pool active: a host running only spot
-	// work is as idle as an empty one (docs/design/spot-runs.md).
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM placements p JOIN hosts h ON h.id = p.host_id JOIN runs r ON r.id = p.run_id
-			WHERE h.pool_id = $1 AND NOT `+spotRunSQL+`
-			  AND (p.state IN `+livePlacementStates+` OR coalesce(p.ended_at, p.created_at) > now() - $2::interval))`,
+	// work is as idle as an empty one (docs/design/spot-runs.md). Live and
+	// recently ended placements are separate checks, so each uses its own
+	// index (placements_host_live; placements_host_ended, whose ended_at
+	// IS NULL range holds a placement that never ended) and none walks a
+	// host's whole placement history.
+	if err := tx.QueryRow(ctx, `SELECT
+			EXISTS (SELECT 1 FROM hosts h JOIN placements p ON p.host_id = h.id JOIN runs r ON r.id = p.run_id
+				WHERE h.pool_id = $1 AND p.state IN `+livePlacementStates+` AND NOT `+spotRunSQL+`)
+			OR EXISTS (SELECT 1 FROM hosts h JOIN placements p ON p.host_id = h.id JOIN runs r ON r.id = p.run_id
+				WHERE h.pool_id = $1 AND p.ended_at > now() - $2::interval AND NOT `+spotRunSQL+`)
+			OR EXISTS (SELECT 1 FROM hosts h JOIN placements p ON p.host_id = h.id JOIN runs r ON r.id = p.run_id
+				WHERE h.pool_id = $1 AND p.ended_at IS NULL AND p.created_at > now() - $2::interval AND NOT `+spotRunSQL+`)`,
 		pl.ID, interval(s.scaleDownAfter(pl))).Scan(&st.active); err != nil {
 		return err
 	}
