@@ -4,12 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/spec"
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // testShape is an 8-CPU m pool: m-05 (0.5, 2Gi, 10Gi), m-1 (1, 4Gi, 20Gi),
@@ -155,23 +161,23 @@ func TestShapedSubmitIgnoresGlobalDefaults(t *testing.T) {
 	}
 }
 
-// Each refusal has its own code, and creates no Run.
+// Each refusal has its own code and message, and creates no Run.
 func TestShapedSubmitRefusals(t *testing.T) {
 	for _, c := range []struct {
-		name   string
-		pool   string
-		res    spec.Resources
-		code   string
-		inText string
+		name string
+		pool string
+		res  spec.Resources
+		code string
+		msg  string
 	}{
-		{"size with cpus", "shaped", spec.Resources{Size: "m-2-arm64", CPUs: 2}, "size_conflict", "cannot be combined"},
-		{"size with disk", "shaped", spec.Resources{Size: "m-2-arm64", Disk: spec.Bytes(gib)}, "size_conflict", "cannot be combined"},
-		{"unknown size", "shaped", spec.Resources{Size: "m-3-arm64"}, "unknown_size", `"m-3-arm64" is not in family "m" architecture "arm64" ladder`},
-		{"another arch's size", "shaped", spec.Resources{Size: "m-2-amd64"}, "unknown_size", "m-2-amd64"},
-		{"more cpus than the whole host", "shaped", spec.Resources{CPUs: 16}, "size_too_large", "request cpus=16 exceeds the largest size m-8-arm64 (cpus=8 memory=32Gi disk=160Gi)"},
-		{"more memory than the whole host", "shaped", spec.Resources{CPUs: 1, Memory: spec.Bytes(33 * gib)}, "size_too_large", "request cpus=1 memory=33Gi exceeds"},
-		{"negative cpus", "shaped", spec.Resources{CPUs: -1}, "invalid_spec", "resources must not be negative"},
-		{"size on an unshaped pool", "plain", spec.Resources{Size: "m-2-arm64"}, "size_unsupported", "pool plain has no shape"},
+		{"size with cpus", "shaped", spec.Resources{Size: "m-2-arm64", CPUs: 2}, "size_conflict", "pool shaped: resources.size cannot be combined with cpus, memory or disk"},
+		{"size with disk", "shaped", spec.Resources{Size: "m-2-arm64", Disk: spec.Bytes(gib)}, "size_conflict", "pool shaped: resources.size cannot be combined with cpus, memory or disk"},
+		{"unknown size", "shaped", spec.Resources{Size: "m-3-arm64"}, "unknown_size", `pool shaped: unknown size: "m-3-arm64" is not in family "m" architecture "arm64" ladder`},
+		{"another arch's size", "shaped", spec.Resources{Size: "m-2-amd64"}, "unknown_size", `pool shaped: unknown size: "m-2-amd64" is not in family "m" architecture "arm64" ladder`},
+		{"more cpus than the whole host", "shaped", spec.Resources{CPUs: 16}, "size_too_large", "pool shaped: request cpus=16 exceeds the largest size m-8-arm64 (cpus=8 memory=32Gi disk=160Gi)"},
+		{"more memory than the whole host", "shaped", spec.Resources{CPUs: 1, Memory: spec.Bytes(33 * gib)}, "size_too_large", "pool shaped: request cpus=1 memory=33Gi exceeds the largest size m-8-arm64 (cpus=8 memory=32Gi disk=160Gi)"},
+		{"negative cpus", "shaped", spec.Resources{CPUs: -1}, "invalid_spec", "invalid spec: resources must not be negative"},
+		{"size on an unshaped pool", "plain", spec.Resources{Size: "m-2-arm64"}, "size_unsupported", "pool plain has no shape, so no sizes: ask with resources.cpus, memory and disk"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
@@ -179,8 +185,8 @@ func TestShapedSubmitRefusals(t *testing.T) {
 			shapedPool(t, s, "plain", nil)
 			_, err := submitSized(s, "", c.pool, c.res)
 			he := refused(t, err, http.StatusUnprocessableEntity, c.code, "submit")
-			if !strings.Contains(he.Error(), c.inText) {
-				t.Errorf("message %q, want it to contain %q", he.Error(), c.inText)
+			if he.Error() != c.msg {
+				t.Errorf("message %q, want %q", he.Error(), c.msg)
 			}
 			var n int
 			systemScan(t, s, `SELECT count(*) FROM runs`, nil, &n)
@@ -236,8 +242,23 @@ func TestUnshapedSubmitUnchanged(t *testing.T) {
 		t.Errorf("submitted event keys %v, want %v", evKeys, want)
 	}
 	g := apiCall(t, s, key, http.MethodGet, "/v1/runs/"+id, nil)
-	if g.Code != http.StatusOK || strings.Contains(g.Body.String(), `"sizing"`) || strings.Contains(g.Body.String(), `"size"`) {
-		t.Errorf("GET: %d, want no sizing nor size: %s", g.Code, g.Body)
+	if g.Code != http.StatusOK {
+		t.Fatalf("GET: %d %s", g.Code, g.Body)
+	}
+	var got struct {
+		Sizing json.RawMessage `json:"sizing"`
+		Spec   struct {
+			Resources map[string]any `json:"resources"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(g.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Sizing != nil {
+		t.Errorf("GET sizing %s, want none", got.Sizing)
+	}
+	if _, ok := got.Spec.Resources["size"]; ok || got.Spec.Resources == nil {
+		t.Errorf("GET spec.resources %v, want resources without size", got.Spec.Resources)
 	}
 }
 
@@ -274,6 +295,202 @@ func TestShapedIdempotency(t *testing.T) {
 	if err != nil || again.Body.ID != plain.Body.ID {
 		t.Fatalf("unshaped retry with other resources: %v, want the first Run", err)
 	}
+}
+
+// submitHTTP POSTs body to /v1/runs with an Idempotency-Key.
+func submitHTTP(t *testing.T, s *Server, key, idem string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/runs", strings.NewReader(string(b)))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Idempotency-Key", idem)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// A retry is compared by the values asked, not their spelling: "4Gi" and
+// 4294967296 bytes, 2 and 2.0 CPUs are one request.
+func TestShapedIdempotencyComparesValues(t *testing.T) {
+	s := testServer(t)
+	shapedPool(t, s, "shaped", &testShape)
+	key := apiKey(t, s, new("t1"), "run", "read")
+	body := func(res map[string]any) map[string]any {
+		return map[string]any{"image": map[string]any{"ref": "alpine"}, "workload": map[string]any{"adapter": "generic", "command": []string{"true"}},
+			"placement": map[string]any{"pool": "shaped"}, "resources": res}
+	}
+	first := submitHTTP(t, s, key, "e", body(map[string]any{"cpus": 2, "memory": "4Gi"}))
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first: %d %s", first.Code, first.Body)
+	}
+	// json.Marshal writes 2.0 as 2: the body is spelled by hand.
+	b := `{"image":{"ref":"alpine"},"workload":{"adapter":"generic","command":["true"]},"placement":{"pool":"shaped"},"resources":{"cpus":2.0,"memory":4294967296}}`
+	again := submitHTTP(t, s, key, "e", json.RawMessage(b))
+	if again.Code != http.StatusOK {
+		t.Fatalf("retry spelled differently: %d %s, want 200", again.Code, again.Body)
+	}
+	var a, r struct{ ID string }
+	_ = json.Unmarshal(first.Body.Bytes(), &a)
+	_ = json.Unmarshal(again.Body.Bytes(), &r)
+	if a.ID == "" || a.ID != r.ID {
+		t.Errorf("retry returned %q, want %q", r.ID, a.ID)
+	}
+}
+
+// Submits that miss the replay SELECT (the first Run's INSERT has not
+// committed) and then meet its unique index compare their request with
+// that Run's, as a replay does: another request is 409, the same one is
+// that Run (200).
+func TestConcurrentShapedIdempotency(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		res  spec.Resources
+		code int
+	}{
+		{"another request", spec.Resources{CPUs: 4}, http.StatusConflict},
+		{"the same request", spec.Resources{CPUs: 3}, http.StatusOK},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			ctx := testDeadline(t)
+			shapedPool(t, s, "shaped", &testShape)
+			holder, err := s.db.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { holder.Rollback(context.Background()) })
+			if _, err := holder.Exec(ctx, `SELECT set_config('lux.system', 'on', true)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := holder.Exec(ctx, `INSERT INTO runs (id, tenant_id, spec, state, idempotency_key, pool_id, requested_resources, resolved_size)
+				VALUES ('run_first', 't1', '{"image": {"ref": "alpine"}, "workload": {"adapter": "generic", "command": ["true"]}}', 'submitted', 'k',
+					'shaped', '{"cpus": 3}', 'm-4-arm64')`); err != nil {
+				t.Fatal(err)
+			}
+			var pid int
+			if err := holder.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+				t.Fatal(err)
+			}
+			var out *submitRunOutput
+			done := make(chan error, 1)
+			go func() {
+				var err error
+				out, err = submitSized(s, "k", "shaped", c.res)
+				done <- err
+			}()
+			for {
+				var blocked int
+				if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+					return tx.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+						WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))`, pid).Scan(&blocked)
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if blocked == 1 {
+					break
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("the submit finished before the first Run committed: %v", err)
+				case <-ctx.Done():
+					t.Fatal("the submit never blocked on the first Run")
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			if err := holder.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var err2 error
+			select {
+			case err2 = <-done:
+			case <-ctx.Done():
+				t.Fatal("the submit did not finish")
+			}
+			if c.code == http.StatusConflict {
+				refused(t, err2, http.StatusConflict, "idempotency_conflict", "another request")
+			} else if err2 != nil || out.Status != http.StatusOK || out.Body.ID != "run_first" {
+				t.Fatalf("same request: %v %+v, want 200 with run_first", err2, out)
+			}
+			var n int
+			systemScan(t, s, `SELECT count(*) FROM runs`, nil, &n)
+			if n != 1 {
+				t.Errorf("%d Runs, want 1", n)
+			}
+		})
+	}
+}
+
+// getSizing is GET /v1/runs/{id}'s sizing, nil when absent.
+func getSizing(t *testing.T, s *Server, key, id string) *RunSizing {
+	t.Helper()
+	g := apiCall(t, s, key, http.MethodGet, "/v1/runs/"+id, nil)
+	var r struct {
+		Sizing *RunSizing `json:"sizing"`
+	}
+	if g.Code != http.StatusOK || json.Unmarshal(g.Body.Bytes(), &r) != nil {
+		t.Fatalf("GET: %d %s", g.Code, g.Body)
+	}
+	return r.Sizing
+}
+
+// A Run's sizing.resolved is shown only while its pool is shaped and its
+// size is on that pool's current ladder. With the shape removed, a resume
+// in place clears the size; with the shape changed so the size is gone, a
+// resume asking nothing rounds the Run's resources up to a new size.
+func TestShapeRemovedOrChanged(t *testing.T) {
+	requested := float64(3)
+	asked := &SizeRequest{CPUs: &requested}
+	t.Run("removed", func(t *testing.T) {
+		s := testServer(t)
+		shapedPool(t, s, "shaped", &testShape)
+		key := apiKey(t, s, new("t1"), "read")
+		id := stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 3}, i64(gib))
+		execSQL(t, s, context.Background(), `UPDATE pools SET shape = NULL WHERE id = 'shaped'`)
+		if got := getSizing(t, s, key, id); !reflect.DeepEqual(got, &RunSizing{Requested: asked}) {
+			t.Errorf("GET sizing %+v, want the request alone", got)
+		}
+		out, err := resumeReq(s, id, resumeRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, size := runSizing(t, s, id); size != "" {
+			t.Errorf("resolved_size %q after a resume in the unshaped pool, want none", size)
+		}
+		if got := storedResources(t, s, id); got != sized(4) || out.Body.Resize != nil {
+			t.Errorf("stored %+v resize %+v, want m-4's resources kept", got, out.Body.Resize)
+		}
+	})
+	t.Run("changed", func(t *testing.T) {
+		s := testServer(t)
+		shapedPool(t, s, "shaped", &testShape)
+		key := apiKey(t, s, new("t1"), "read")
+		id := stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 3}, i64(gib))
+		// Family c: m-4-arm64 is no longer a size; c-4 has 4 CPUs, 8 GiB, 40 GiB.
+		c := PoolShape{Family: "c", Arch: "arm64", CPUs: 8, Memory: spec.Bytes(16 * gib), Disk: spec.Bytes(80 * gib), MinCPUs: 0.5, DefaultCPUs: 2}
+		execSQL(t, s, context.Background(), `UPDATE pools SET shape = $1 WHERE id = 'shaped'`, c)
+		if got := getSizing(t, s, key, id); !reflect.DeepEqual(got, &RunSizing{Requested: asked}) {
+			t.Errorf("GET sizing %+v, want the request alone", got)
+		}
+		// m-4's 4 CPUs, 16 GiB, 80 GiB round up to c-8 (8, 16 GiB, 80 GiB).
+		out, err := resumeReq(s, id, resumeRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := spec.Resources{CPUs: 8, Memory: spec.Bytes(16 * gib), Disk: spec.Bytes(80 * gib), Pids: int64(spec.BuiltinDefaults.Pids)}
+		if got := storedResources(t, s, id); got != want {
+			t.Errorf("stored %+v, want c-8's %+v", got, want)
+		}
+		if _, size := runSizing(t, s, id); size != "c-8-arm64" {
+			t.Errorf("resolved_size %q, want c-8-arm64", size)
+		}
+		if rz := out.Body.Resize; rz == nil || rz.Size != "c-8-arm64" || rz.Applied != want {
+			t.Errorf("resize %+v", rz)
+		}
+		wantSizing := &RunSizing{Requested: asked, Resolved: &SizeResolved{Size: "c-8-arm64", CPUs: 8, Memory: spec.Bytes(16 * gib), Disk: spec.Bytes(80 * gib)}}
+		if got := getSizing(t, s, key, id); !reflect.DeepEqual(got, wantSizing) {
+			t.Errorf("GET sizing %+v, want %+v", got, wantSizing)
+		}
+	})
 }
 
 // GET and the list carry each shaped Run's request and resolution; an
@@ -445,35 +662,50 @@ func TestResumeOutOfShapedPool(t *testing.T) {
 // when the saved state still fits its disk with headroom, refused
 // otherwise (never kept at the old disk); refusals change nothing.
 func TestResumeShapedSize(t *testing.T) {
+	const below = "size m-1-arm64 has 20.0 GiB of disk, less than the Run has now: "
+	const tail = "; a shaped pool never keeps a larger disk than its size, so choose a size with more disk"
 	for _, c := range []struct {
-		name   string
-		peak   *int64
-		res    resumeResources
-		code   string
-		size   string
-		want   spec.Resources
-		inText string
+		name      string
+		peak      *int64
+		placement string // the snapshot's placement's state; "": exited
+		res       resumeResources
+		code      string
+		size      string
+		want      spec.Resources
+		msg       string
 	}{
-		{"larger size", i64(gib), resumeResources{Size: "m-8-arm64"}, "", "m-8-arm64", sized(8), ""},
-		{"raw cpus round up", i64(gib), resumeResources{CPUs: f64(3)}, "", "m-4-arm64", sized(4), ""},
-		{"smaller, saved state fits", i64(30 * gib), resumeResources{Size: "m-2-arm64"}, "", "m-2-arm64", sized(2), ""},
-		{"smaller, saved state too large", i64(30 * gib), resumeResources{Size: "m-1-arm64"}, "size_below_saved_state", "", spec.Resources{},
-			"size m-1-arm64 has 20.0 GiB of disk, less than the Run has now: its saved state used up to 30.0 GiB, which needs at least 37.5 GiB"},
-		{"smaller, no measurement", nil, resumeResources{CPUs: f64(1)}, "size_below_saved_state", "", spec.Resources{}, "no disk use is recorded"},
-		{"size with cpus", i64(gib), resumeResources{Size: "m-2-arm64", CPUs: f64(2)}, "size_conflict", "", spec.Resources{}, ""},
-		{"unknown size", i64(gib), resumeResources{Size: "m-16-arm64"}, "unknown_size", "", spec.Resources{}, ""},
-		{"oversized", i64(gib), resumeResources{Memory: bytesPtr(64 * gib)}, "size_too_large", "", spec.Resources{}, "memory=64Gi"},
+		{"larger size", i64(gib), "", resumeResources{Size: "m-8-arm64"}, "", "m-8-arm64", sized(8), ""},
+		{"raw cpus round up", i64(gib), "", resumeResources{CPUs: f64(3)}, "", "m-4-arm64", sized(4), ""},
+		{"smaller, saved state fits", i64(30 * gib), "", resumeResources{Size: "m-2-arm64"}, "", "m-2-arm64", sized(2), ""},
+		{"smaller, saved state too large", i64(30 * gib), "", resumeResources{Size: "m-1-arm64"}, "size_below_saved_state", "", spec.Resources{},
+			below + "its saved state used up to 30.0 GiB, which needs at least 37.5 GiB of disk (that plus max(25%, 1 GiB))" + tail},
+		{"smaller, no measurement", nil, "", resumeResources{CPUs: f64(1)}, "size_below_saved_state", "", spec.Resources{},
+			below + "no disk use is recorded for the snapshot it resumes from" + tail},
+		{"smaller, measurement not final", i64(gib), "lost", resumeResources{Size: "m-1-arm64"}, "size_below_saved_state", "", spec.Resources{},
+			below + "the placement that took the snapshot it resumes from ended without reporting its final disk use" + tail},
+		{"size with cpus", i64(gib), "", resumeResources{Size: "m-2-arm64", CPUs: f64(2)}, "size_conflict", "", spec.Resources{},
+			"pool shaped: resources.size cannot be combined with cpus, memory or disk"},
+		{"unknown size", i64(gib), "", resumeResources{Size: "m-16-arm64"}, "unknown_size", "", spec.Resources{},
+			`pool shaped: unknown size: "m-16-arm64" is not in family "m" architecture "arm64" ladder`},
+		{"oversized", i64(gib), "", resumeResources{Memory: bytesPtr(64 * gib)}, "size_too_large", "", spec.Resources{},
+			"pool shaped: request memory=64Gi exceeds the largest size m-8-arm64 (cpus=8 memory=32Gi disk=160Gi)"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
 			shapedPool(t, s, "shaped", &testShape)
 			id := stoppedShaped(t, s, "shaped", spec.Resources{Size: "m-4-arm64"}, c.peak)
+			if c.placement != "" {
+				execSQL(t, s, context.Background(), `UPDATE placements SET state = $2 WHERE run_id = $1`, id, c.placement)
+			}
 			res := c.res
-			out, err := resumeReq(s, id, resumeRequest{Resources: &res})
 			if c.code != "" {
-				he := refused(t, err, http.StatusUnprocessableEntity, c.code, "resume")
-				if !strings.Contains(he.Error(), c.inText) {
-					t.Errorf("message %q, want %q", he.Error(), c.inText)
+				// validateOnly answers the refusal the resume meets.
+				for _, dry := range []bool{true, false} {
+					_, err := resumeReq(s, id, resumeRequest{Resources: &res, ValidateOnly: dry})
+					he := refused(t, err, http.StatusUnprocessableEntity, c.code, fmt.Sprintf("resume (validateOnly %v)", dry))
+					if he.Error() != c.msg {
+						t.Errorf("validateOnly %v: message %q, want %q", dry, he.Error(), c.msg)
+					}
 				}
 				if got, state := storedResources(t, s, id), storedState(t, s, id); got != sized(4) || state != StateStopped {
 					t.Errorf("after a refusal: %s %+v", state, got)
@@ -483,6 +715,7 @@ func TestResumeShapedSize(t *testing.T) {
 				}
 				return
 			}
+			out, err := resumeReq(s, id, resumeRequest{Resources: &res})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -587,19 +820,68 @@ func TestPoolShapeAPI(t *testing.T) {
 			}
 		}
 	}
-	var changes []byte
-	systemScan(t, s, `SELECT data->'changes' FROM pool_events e JOIN pools p ON p.id = e.pool_id WHERE p.name = 'shaped' ORDER BY e.id DESC LIMIT 1`, nil, &changes)
-	if !strings.Contains(string(changes), `"shape.family": {"new": "m", "old": null}`) {
-		t.Errorf("created event's changes %s, want shape.family", changes)
+	// The latest pool event's shape.* changes: each key's old and new value.
+	shapeChanges := func() map[string]struct{ New, Old any } {
+		t.Helper()
+		var raw []byte
+		systemScan(t, s, `SELECT data->'changes' FROM pool_events e JOIN pools p ON p.id = e.pool_id WHERE p.name = 'shaped' ORDER BY e.id DESC LIMIT 1`, nil, &raw)
+		var all map[string]struct{ New, Old any }
+		if err := json.Unmarshal(raw, &all); err != nil {
+			t.Fatalf("changes %s: %v", raw, err)
+		}
+		out := map[string]struct{ New, Old any }{}
+		for k, v := range all {
+			if strings.HasPrefix(k, "shape.") {
+				out[k] = v
+			}
+		}
+		return out
 	}
+	created := map[string]struct{ New, Old any }{
+		"shape.family": {New: "m"}, "shape.arch": {New: "arm64"}, "shape.cpus": {New: 8.0}, "shape.memory": {New: float64(32 * gib)},
+		"shape.disk": {New: float64(160 * gib)}, "shape.minCpus": {New: 0.5}, "shape.defaultCpus": {New: 2.0},
+	}
+	if got := shapeChanges(); !reflect.DeepEqual(got, created) {
+		t.Errorf("created event's shape changes %v, want %v", got, created)
+	}
+
+	// A pool read back and sent as a marker carries the read-only sizes:
+	// they are ignored, and the shape stays. A marker carrying the shape,
+	// a writable field, is refused.
+	readBack := map[string]any{"name": "shaped", "isDefault": true,
+		"sizes": []map[string]any{{"name": "m-2-arm64", "cpus": 2, "memory": 8 * gib, "disk": 40 * gib, "fraction": 0.25, "default": true}}}
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/pools", readBack); w.Code != http.StatusOK {
+		t.Fatalf("marker with the read-only sizes: %d %s", w.Code, w.Body)
+	}
+	var stored *PoolShape
+	systemScan(t, s, `SELECT shape FROM pools WHERE name = 'shaped'`, nil, &stored)
+	if stored == nil || *stored != testShape {
+		t.Errorf("shape after a marker with sizes: %+v, want %+v", stored, testShape)
+	}
+	withShape := map[string]any{"name": "shaped", "isDefault": true, "shape": shape(func(m map[string]any) { m["defaultCpus"] = 4 })}
+	w = apiCall(t, s, key, http.MethodPost, "/v1/pools", withShape)
+	if code, msg := apiError(t, w.Body.Bytes()); w.Code != http.StatusUnprocessableEntity || !strings.Contains(msg, "shape") {
+		t.Errorf("marker with a shape: %d %s %s, want 422 naming shape", w.Code, code, msg)
+	}
+	systemScan(t, s, `SELECT shape FROM pools WHERE name = 'shaped'`, nil, &stored)
+	if stored == nil || *stored != testShape {
+		t.Errorf("shape after a refused marker: %+v", stored)
+	}
+
 	// A set without the shape removes it.
 	if w := apiCall(t, s, key, http.MethodPost, "/v1/pools", map[string]any{"name": "shaped", "provider": "static"}); w.Code != http.StatusOK {
 		t.Fatalf("POST: %d %s", w.Code, w.Body)
 	}
-	var stored *string
-	systemScan(t, s, `SELECT shape::text FROM pools WHERE name = 'shaped'`, nil, &stored)
+	systemScan(t, s, `SELECT shape FROM pools WHERE name = 'shaped'`, nil, &stored)
 	if stored != nil {
-		t.Errorf("shape after a set without it: %s", *stored)
+		t.Errorf("shape after a set without it: %+v", *stored)
+	}
+	removed := map[string]struct{ New, Old any }{}
+	for k, v := range created {
+		removed[k] = struct{ New, Old any }{Old: v.New}
+	}
+	if got := shapeChanges(); !reflect.DeepEqual(got, removed) {
+		t.Errorf("removal event's shape changes %v, want %v", got, removed)
 	}
 }
 
