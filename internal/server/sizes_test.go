@@ -188,9 +188,7 @@ func TestShapedSubmitRefusals(t *testing.T) {
 			if he.Error() != c.msg {
 				t.Errorf("message %q, want %q", he.Error(), c.msg)
 			}
-			var n int
-			systemScan(t, s, `SELECT count(*) FROM runs`, nil, &n)
-			if n != 0 {
+			if n := queryOne[int](t, s, `SELECT count(*) FROM runs`); n != 0 {
 				t.Errorf("%d Runs after a refusal", n)
 			}
 		})
@@ -282,9 +280,7 @@ func TestShapedIdempotency(t *testing.T) {
 		_, err := submitSized(s, "k", "shaped", other)
 		refused(t, err, http.StatusConflict, "idempotency_conflict", "retry with other resources")
 	}
-	var n int
-	systemScan(t, s, `SELECT count(*) FROM runs`, nil, &n)
-	if n != 1 {
+	if n := queryOne[int](t, s, `SELECT count(*) FROM runs`); n != 1 {
 		t.Fatalf("%d Runs, want 1", n)
 	}
 	plain, err := submitSized(s, "p", "plain", spec.Resources{CPUs: 1})
@@ -411,9 +407,7 @@ func TestConcurrentShapedIdempotency(t *testing.T) {
 			} else if err2 != nil || out.Status != http.StatusOK || out.Body.ID != "run_first" {
 				t.Fatalf("same request: %v %+v, want 200 with run_first", err2, out)
 			}
-			var n int
-			systemScan(t, s, `SELECT count(*) FROM runs`, nil, &n)
-			if n != 1 {
+			if n := queryOne[int](t, s, `SELECT count(*) FROM runs`); n != 1 {
 				t.Errorf("%d Runs, want 1", n)
 			}
 		})
@@ -440,11 +434,20 @@ func getSizing(t *testing.T, s *Server, key, id string) *RunSizing {
 func TestShapeRemovedOrChanged(t *testing.T) {
 	requested := float64(3)
 	asked := &SizeRequest{CPUs: &requested}
-	t.Run("removed", func(t *testing.T) {
+	// Family c: no m size is one of its sizes; its whole host is 8 CPUs,
+	// 16 GiB, 80 GiB, so c-4 has 4 CPUs, 8 GiB, 40 GiB.
+	cShape := PoolShape{Family: "c", Arch: "arm64", CPUs: 8, Memory: spec.Bytes(16 * gib), Disk: spec.Bytes(80 * gib), MinCPUs: 0.5, DefaultCPUs: 2}
+	// stoppedM4 is a stopped Run that asked for 3 CPUs in pool "shaped",
+	// so has m-4-arm64.
+	stoppedM4 := func(t *testing.T) (*Server, string) {
+		t.Helper()
 		s := testServer(t)
 		shapedPool(t, s, "shaped", &testShape)
+		return s, stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 3}, i64(gib))
+	}
+	t.Run("removed", func(t *testing.T) {
+		s, id := stoppedM4(t)
 		key := apiKey(t, s, new("t1"), "read")
-		id := stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 3}, i64(gib))
 		execSQL(t, s, context.Background(), `UPDATE pools SET shape = NULL WHERE id = 'shaped'`)
 		if got := getSizing(t, s, key, id); !reflect.DeepEqual(got, &RunSizing{Requested: asked}) {
 			t.Errorf("GET sizing %+v, want the request alone", got)
@@ -461,13 +464,9 @@ func TestShapeRemovedOrChanged(t *testing.T) {
 		}
 	})
 	t.Run("changed", func(t *testing.T) {
-		s := testServer(t)
-		shapedPool(t, s, "shaped", &testShape)
+		s, id := stoppedM4(t)
 		key := apiKey(t, s, new("t1"), "read")
-		id := stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 3}, i64(gib))
-		// Family c: m-4-arm64 is no longer a size; c-4 has 4 CPUs, 8 GiB, 40 GiB.
-		c := PoolShape{Family: "c", Arch: "arm64", CPUs: 8, Memory: spec.Bytes(16 * gib), Disk: spec.Bytes(80 * gib), MinCPUs: 0.5, DefaultCPUs: 2}
-		execSQL(t, s, context.Background(), `UPDATE pools SET shape = $1 WHERE id = 'shaped'`, c)
+		execSQL(t, s, context.Background(), `UPDATE pools SET shape = $1 WHERE id = 'shaped'`, cShape)
 		if got := getSizing(t, s, key, id); !reflect.DeepEqual(got, &RunSizing{Requested: asked}) {
 			t.Errorf("GET sizing %+v, want the request alone", got)
 		}
@@ -492,10 +491,8 @@ func TestShapeRemovedOrChanged(t *testing.T) {
 		}
 	})
 	t.Run("same names, new dimensions", func(t *testing.T) {
-		s := testServer(t)
-		shapedPool(t, s, "shaped", &testShape)
+		s, id := stoppedM4(t)
 		key := apiKey(t, s, new("t1"), "read")
-		id := stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 3}, i64(gib))
 		// Doubled memory and disk keep every name: m-4-arm64 is now 4 CPUs,
 		// 32 GiB, 160 GiB, while the Run still has 16 GiB, 80 GiB.
 		big := testShape
@@ -531,9 +528,7 @@ func TestShapeRemovedOrChanged(t *testing.T) {
 		}
 	})
 	t.Run("unchanged", func(t *testing.T) {
-		s := testServer(t)
-		shapedPool(t, s, "shaped", &testShape)
-		id := stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 3}, i64(gib))
+		s, id := stoppedM4(t)
 		out, err := resumeReq(s, id, resumeRequest{})
 		if err != nil {
 			t.Fatal(err)
@@ -551,8 +546,7 @@ func TestShapeRemovedOrChanged(t *testing.T) {
 		shapedPool(t, s, "plain", nil)
 		id := stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 8}, i64(gib))
 		// m-8's 32 GiB exceed c's whole 16 GiB host: no c size holds it.
-		c := PoolShape{Family: "c", Arch: "arm64", CPUs: 8, Memory: spec.Bytes(16 * gib), Disk: spec.Bytes(80 * gib), MinCPUs: 0.5, DefaultCPUs: 2}
-		execSQL(t, s, context.Background(), `UPDATE pools SET shape = $1 WHERE id = 'shaped'`, c)
+		execSQL(t, s, context.Background(), `UPDATE pools SET shape = $1 WHERE id = 'shaped'`, cShape)
 		for range 2 {
 			_, err := resumeReq(s, id, resumeRequest{})
 			refused(t, err, http.StatusUnprocessableEntity, "size_too_large", "a plain resume in place")
@@ -867,9 +861,7 @@ func TestPoolShapeAPI(t *testing.T) {
 			}
 		})
 	}
-	var n int
-	systemScan(t, s, `SELECT count(*) FROM pools`, nil, &n)
-	if n != 0 {
+	if n := queryOne[int](t, s, `SELECT count(*) FROM pools`); n != 0 {
 		t.Fatalf("%d pools stored after refusals", n)
 	}
 	w := apiCall(t, s, key, http.MethodPost, "/v1/pools", map[string]any{"name": "shaped", "provider": "static", "shape": shape(nil)})
@@ -936,9 +928,8 @@ func TestPoolShapeAPI(t *testing.T) {
 	if w := apiCall(t, s, key, http.MethodPost, "/v1/pools", readBack); w.Code != http.StatusOK {
 		t.Fatalf("marker with the read-only sizes: %d %s", w.Code, w.Body)
 	}
-	var stored *PoolShape
-	systemScan(t, s, `SELECT shape FROM pools WHERE name = 'shaped'`, nil, &stored)
-	if stored == nil || *stored != testShape {
+	const storedShape = `SELECT shape FROM pools WHERE name = 'shaped'`
+	if stored := queryOne[*PoolShape](t, s, storedShape); stored == nil || *stored != testShape {
 		t.Errorf("shape after a marker with sizes: %+v, want %+v", stored, testShape)
 	}
 	withShape := map[string]any{"name": "shaped", "isDefault": true, "shape": shape(func(m map[string]any) { m["defaultCpus"] = 4 })}
@@ -946,8 +937,7 @@ func TestPoolShapeAPI(t *testing.T) {
 	if code, msg := apiError(t, w.Body.Bytes()); w.Code != http.StatusUnprocessableEntity || code != "invalid_pool" || !strings.Contains(msg, "(got also shape)") {
 		t.Errorf("marker with a shape: %d %s %s, want 422 invalid_pool with (got also shape)", w.Code, code, msg)
 	}
-	systemScan(t, s, `SELECT shape FROM pools WHERE name = 'shaped'`, nil, &stored)
-	if stored == nil || *stored != testShape {
+	if stored := queryOne[*PoolShape](t, s, storedShape); stored == nil || *stored != testShape {
 		t.Errorf("shape after a refused marker: %+v", stored)
 	}
 
@@ -955,8 +945,7 @@ func TestPoolShapeAPI(t *testing.T) {
 	if w := apiCall(t, s, key, http.MethodPost, "/v1/pools", map[string]any{"name": "shaped", "provider": "static"}); w.Code != http.StatusOK {
 		t.Fatalf("POST: %d %s", w.Code, w.Body)
 	}
-	systemScan(t, s, `SELECT shape FROM pools WHERE name = 'shaped'`, nil, &stored)
-	if stored != nil {
+	if stored := queryOne[*PoolShape](t, s, storedShape); stored != nil {
 		t.Errorf("shape after a set without it: %+v", *stored)
 	}
 	removed := map[string]struct{ New, Old any }{}
