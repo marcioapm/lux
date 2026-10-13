@@ -615,7 +615,9 @@ func (p *placement) run(ctx context.Context) {
 		p.kill(ctx)
 	}
 	p.progress("containerStarted")
+	p.mu.Lock()
 	p.state.Phase = "started"
+	p.mu.Unlock()
 	_ = p.saveState()
 	p.mu.Lock()
 	p.memoryLimit = p.r.mem.limit(int64(sp.Resources.Memory))
