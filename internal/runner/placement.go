@@ -1526,8 +1526,7 @@ func (p *placement) sampleSlow(ctx context.Context) {
 	// A partial sum is a lower bound: over the limit it is conclusive, at or
 	// under it would wrongly restart the grace.
 	l := p.diskLimit()
-	limit := l.Effective
-	if probeErr == nil || (l.Nominal > 0 && disk > limit) {
+	if probeErr == nil || (l.Nominal > 0 && disk > l.Effective) {
 		p.checkDisk(ctx, disk, time.Now())
 	}
 	p.mu.Lock()

@@ -21,7 +21,6 @@ import (
 type diskScale struct {
 	share
 	on                   bool
-	nominal              int64
 	headroom, fsCapacity int64
 }
 
@@ -43,7 +42,7 @@ func newDiskScale(nominal int64, headroom *int64, dir string, statfs func(string
 	if allocatable <= 0 {
 		return diskScale{}, fmt.Errorf("--disk-headroom %d leaves no disk for Runs: the filesystem of %s has %d bytes", *headroom, dir, fsCapacity)
 	}
-	return diskScale{share: newShare(allocatable, nominal), on: true, nominal: nominal, headroom: *headroom, fsCapacity: fsCapacity}, nil
+	return diskScale{share: newShare(allocatable, nominal), on: true, headroom: *headroom, fsCapacity: fsCapacity}, nil
 }
 
 // limit is the disk a Run asking requested bytes is held to, rounded down

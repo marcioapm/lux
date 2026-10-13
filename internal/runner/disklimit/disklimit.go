@@ -18,7 +18,7 @@ const CeilingFactor = 2
 
 // Limit is what a placement's disk is held to. Effective is the limit
 // itself: Nominal (resources.disk) on a host that does not scale disk,
-// else the host's share of it (Factor, below 1). Scaled says which.
+// else the host's share of it (Factor, at most 1). Scaled says which.
 type Limit struct {
 	Nominal, Effective int64
 	Factor             float64
