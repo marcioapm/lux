@@ -200,21 +200,36 @@ func normalAdmission(r pendingRun, hosts []*candidateHost) admission {
 // directly or by reclaiming h's spot placements. A Run holding a pledge is
 // already served by it.
 func normalWants(n pendingRun, h *candidateHost) bool {
-	hc := h.clone()
-	for _, sp := range h.Spots {
-		hc.remove(sp)
-	}
-	return len(hostFit(n, hc)) == 0
+	return len(hostFit(n, h.withoutSpots())) == 0
 }
+
+// withoutSpots is h with every spot placement released, simulated once
+// and kept until h changes (changed): spot admission asks it for every
+// queued normal Run.
+func (h *candidateHost) withoutSpots() *candidateHost {
+	if h.noSpots == nil {
+		sim := newHostSim(h)
+		for _, sp := range h.Spots {
+			sim.remove(sp)
+		}
+		h.noSpots = sim.host()
+	}
+	return h.noSpots
+}
+
+// changed drops what was simulated from h's previous usage.
+func (h *candidateHost) changed() { h.noSpots = nil }
 
 func (h *candidateHost) clone() *candidateHost {
 	c := *h
 	c.Tenants = slices.Clone(h.Tenants)
+	c.noSpots = nil
 	return &c
 }
 
 // remove simulates sp's resources and tenancy released from h.
 func (h *candidateHost) remove(sp spotPlacement) {
+	h.changed()
 	h.UsedCPUs -= sp.Res.CPUs
 	h.UsedMem -= int64(sp.Res.Memory)
 	h.UsedDisk -= int64(sp.Res.Disk)
@@ -223,6 +238,56 @@ func (h *candidateHost) remove(sp spotPlacement) {
 		h.Tenants = slices.Delete(h.Tenants, i, i+1)
 	}
 }
+
+// hostSim simulates spot placements released from and restored to a host,
+// each in constant time. Tenancy is a count per tenant: a tenant is
+// present while its count is positive, which is what removing one entry
+// of the tenant list per victim (when it has one left) leaves present.
+type hostSim struct {
+	h       candidateHost
+	tenants map[string]int
+}
+
+func newHostSim(h *candidateHost) *hostSim {
+	s := &hostSim{h: *h, tenants: map[string]int{}}
+	s.h.noSpots = nil
+	for _, t := range h.Tenants {
+		s.tenants[t]++
+	}
+	return s
+}
+
+func (s *hostSim) remove(sp spotPlacement) {
+	s.h.UsedCPUs -= sp.Res.CPUs
+	s.h.UsedMem -= int64(sp.Res.Memory)
+	s.h.UsedDisk -= int64(sp.Res.Disk)
+	s.h.UsedRuns--
+	s.tenants[sp.TenantID]--
+}
+
+func (s *hostSim) restore(sp spotPlacement) {
+	s.h.UsedCPUs += sp.Res.CPUs
+	s.h.UsedMem += int64(sp.Res.Memory)
+	s.h.UsedDisk += int64(sp.Res.Disk)
+	s.h.UsedRuns++
+	s.tenants[sp.TenantID]++
+}
+
+// host is the simulated host for hostFit: its tenants each listed once
+// (hostFit asks only whether another tenant is present), sorted.
+func (s *hostSim) host() *candidateHost {
+	c := s.h
+	c.Tenants = nil
+	for t, n := range s.tenants {
+		if n > 0 {
+			c.Tenants = append(c.Tenants, t)
+		}
+	}
+	slices.Sort(c.Tenants)
+	return &c
+}
+
+func (s *hostSim) fits(r pendingRun) bool { return len(hostFit(r, s.host())) == 0 }
 
 // forRun is h as runID sees it: its own pledge's reservation not counted.
 func (h *candidateHost) forRun(runID string) *candidateHost {
@@ -254,6 +319,7 @@ func pledgeExtra(h *candidateHost, runID string, res spec.Resources) freeVec {
 }
 
 func (h *candidateHost) addPledge(runID string, extra freeVec) {
+	h.changed()
 	if h.Pledges == nil {
 		h.Pledges = map[string]freeVec{}
 	}
@@ -270,6 +336,7 @@ func (h *candidateHost) dropPledge(runID string) {
 		return
 	}
 	delete(h.Pledges, runID)
+	h.changed()
 	h.UsedCPUs -= extra.CPUs
 	h.UsedMem -= extra.Memory
 	h.UsedDisk -= extra.Disk
@@ -304,6 +371,7 @@ func loadPledges(ctx context.Context, tx pgx.Tx, hostIDs []string, byID map[stri
 		if h := byID[p.host]; h != nil {
 			h.addPledge(p.run, pledgeExtra(h, p.run, p.res))
 			h.Tenants = append(h.Tenants, p.tenant)
+			h.changed()
 		}
 	}
 	return nil
@@ -380,6 +448,8 @@ func normalDemand(ctx context.Context, tx pgx.Tx, hosts []*candidateHost) ([]pen
 		pools = append(pools, h.PoolID)
 		ids = append(ids, h.ID)
 	}
+	slices.Sort(pools)
+	pools = slices.Compact(pools)
 	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, pending_sync, coalesce(place_on, ''), pool_id
 		FROM runs r WHERE state IN `+queuedRunStates+` AND NOT terminate_requested
 		  AND coalesce(spec->>'spot', '') <> 'true'
@@ -409,6 +479,7 @@ func normalDemand(ctx context.Context, tx pgx.Tx, hosts []*candidateHost) ([]pen
 // with them removed, tenancy included). Hosts are tried in id order; on
 // each, the youngest placements are removed until r fits, then any victim
 // r fits without is put back. nil when no host's spot placements suffice.
+// One simulation per host: each step releases or restores one victim.
 func reclaimPlan(r pendingRun, hosts []*candidateHost) (*candidateHost, []spotPlacement) {
 	ordered := slices.Clone(hosts)
 	slices.SortFunc(ordered, func(a, b *candidateHost) int { return strings.Compare(a.ID, b.ID) })
@@ -419,37 +490,28 @@ func reclaimPlan(r pendingRun, hosts []*candidateHost) (*candidateHost, []spotPl
 				free = append(free, sp)
 			}
 		}
-		if len(free) == 0 {
-			continue
-		}
-		all := h.clone()
-		for _, sp := range free {
-			all.remove(sp)
-		}
-		if len(hostFit(r, all)) != 0 {
-			continue
-		}
 		// Spots are loaded oldest first: the youngest lose the least work.
 		slices.Reverse(free)
-		sim := h.clone()
-		var chosen []spotPlacement
-		for _, sp := range free {
-			sim.remove(sp)
-			chosen = append(chosen, sp)
-			if len(hostFit(r, sim)) == 0 {
-				break
-			}
+		sim := newHostSim(h)
+		n, fit := 0, false
+		for n < len(free) && !fit {
+			sim.remove(free[n])
+			n++
+			fit = sim.fits(r)
 		}
+		if !fit {
+			continue
+		}
+		chosen := slices.Clone(free[:n])
+		// sim is h without chosen: put each back while r still fits.
 		for i := 0; i < len(chosen); {
-			try := h.clone()
-			for j, sp := range chosen {
-				if j != i {
-					try.remove(sp)
+			if len(chosen) > 1 {
+				sim.restore(chosen[i])
+				if sim.fits(r) {
+					chosen = slices.Delete(chosen, i, i+1)
+					continue
 				}
-			}
-			if len(chosen) > 1 && len(hostFit(r, try)) == 0 {
-				chosen = slices.Delete(chosen, i, i+1)
-				continue
+				sim.remove(chosen[i])
 			}
 			i++
 		}
@@ -490,6 +552,7 @@ func pledge(ctx context.Context, tx pgx.Tx, r pendingRun, h *candidateHost, vict
 	}
 	h.addPledge(r.ID, pledgeExtra(h, r.ID, r.Spec.Resources))
 	h.Tenants = append(h.Tenants, r.TenantID)
+	h.changed()
 	return true, nil
 }
 

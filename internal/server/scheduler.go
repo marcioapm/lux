@@ -62,6 +62,9 @@ type candidateHost struct {
 	// holds beyond its victims' live usage (spot.go).
 	Pledges map[string]freeVec
 	age     *capacityAge
+	// noSpots: this host with every spot placement released, as
+	// withoutSpots last simulated it; nil once any usage changes.
+	noSpots *candidateHost
 }
 
 type pendingRun struct {

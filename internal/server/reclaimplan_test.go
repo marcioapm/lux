@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/proto"
@@ -46,6 +48,87 @@ func victimIDs(v []spotPlacement) []string {
 		ids = append(ids, sp.ID)
 	}
 	return ids
+}
+
+// packedHost is one shared host full of n one-cpu spot placements of one
+// tenant, and a normal Run that needs all of it: every placement is a
+// victim, the pruning's worst case.
+func packedHost(n int) (*candidateHost, pendingRun) {
+	spots := make([]spotPlacement, n)
+	for i := range spots {
+		spots[i] = spotOn(fmt.Sprint(i), "t1", 1)
+	}
+	h := planHost("h", 0, spots...)
+	h.Capacity = proto.Capacity{CPUs: float64(n), Memory: int64(n * 10), Disk: int64(n * 10), Runs: n}
+	return h, normalRun(float64(n))
+}
+
+// Planning on a host packed with n victims, all required, costs a bounded
+// amount of memory per victim: the host is simulated once, each victim
+// released and restored in turn, not the whole host rebuilt per victim
+// (which copied its tenant list each time: quadratic bytes, cubic time).
+// The bound holds at 2,048 victims as at 128.
+func TestReclaimPlanScalesWithVictims(t *testing.T) {
+	for _, n := range []int{128, 1024, 2048} {
+		h, r := packedHost(n)
+		var victims []spotPlacement
+		var host *candidateHost
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		host, victims = reclaimPlan(r, []*candidateHost{h})
+		runtime.ReadMemStats(&after)
+		if host != h || len(victims) != n {
+			t.Fatalf("n=%d: plan host %v, %d victims; want all %d", n, host, len(victims), n)
+		}
+		if perVictim := (after.TotalAlloc - before.TotalAlloc) / uint64(n); perVictim > 4096 {
+			t.Fatalf("n=%d: %d bytes allocated per victim, want a bound independent of n (<= 4096)", n, perVictim)
+		}
+		if !normalWants(r, h) {
+			t.Fatalf("n=%d: the normal Run should fit once every spot is released", n)
+		}
+	}
+}
+
+func BenchmarkReclaimPlanPacked(b *testing.B) {
+	for _, n := range []int{1024, 2048} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			h, r := packedHost(n)
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, v := reclaimPlan(r, []*candidateHost{h}); len(v) != n {
+					b.Fatal(len(v))
+				}
+			}
+		})
+	}
+}
+
+// normalWants reuses one simulation of a host without its spot placements
+// across queued normal Runs, and drops it when the host's usage changes: a
+// Run placed there, or a pledge made or dropped.
+func TestNormalWantsFollowsHostChanges(t *testing.T) {
+	h := planHost("h", 2, spotOn("a", "t1", 1))
+	n := normalRun(2)
+	if !normalWants(n, h) {
+		t.Fatal("2 cpus fit once the 1-cpu spot is released")
+	}
+	other := normalRun(1)
+	other.ID = "o"
+	reserveHost(h, other)
+	if normalWants(n, h) {
+		t.Fatal("after a placement there, 2 cpus no longer fit")
+	}
+	h = planHost("h", 2, spotOn("a", "t1", 1))
+	_ = normalWants(n, h)
+	h.addPledge("p", freeVec{CPUs: 1, Runs: 1})
+	if normalWants(n, h) {
+		t.Fatal("after a pledge there, 2 cpus no longer fit")
+	}
+	h.dropPledge("p")
+	if !normalWants(n, h) {
+		t.Fatal("once the pledge is dropped, 2 cpus fit again")
+	}
 }
 
 func TestReclaimPlan(t *testing.T) {
