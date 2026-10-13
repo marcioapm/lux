@@ -50,13 +50,17 @@ func victimIDs(v []spotPlacement) []string {
 	return ids
 }
 
-// packedHost is one shared host full of n one-cpu spot placements of one
-// tenant, and a normal Run that needs all of it: every placement is a
-// victim, the pruning's worst case.
-func packedHost(n int) (*candidateHost, pendingRun) {
+// packedHost is one shared host full of n one-cpu spot placements, of one
+// tenant or each of its own (distinct), and a normal Run that needs all of
+// it: every placement is a victim, the pruning's worst case.
+func packedHost(n int, distinct bool) (*candidateHost, pendingRun) {
 	spots := make([]spotPlacement, n)
 	for i := range spots {
-		spots[i] = spotOn(fmt.Sprint(i), "t1", 1)
+		tenant := "t1"
+		if distinct {
+			tenant = fmt.Sprint("t-", i)
+		}
+		spots[i] = spotOn(fmt.Sprint(i), tenant, 1)
 	}
 	h := planHost("h", 0, spots...)
 	h.Capacity = proto.Capacity{CPUs: float64(n), Memory: int64(n * 10), Disk: int64(n * 10), Runs: n}
@@ -67,40 +71,46 @@ func packedHost(n int) (*candidateHost, pendingRun) {
 // amount of memory per victim: the host is simulated once, each victim
 // released and restored in turn, not the whole host rebuilt per victim
 // (which copied its tenant list each time: quadratic bytes, cubic time).
-// The bound holds at 2,048 victims as at 128.
+// The bound holds at 2,048 victims as at 128, also when every victim is
+// another tenant's (each fit check then sees the host's tenancy in
+// constant space, not as a list of every tenant present).
 func TestReclaimPlanScalesWithVictims(t *testing.T) {
-	for _, n := range []int{128, 1024, 2048} {
-		h, r := packedHost(n)
-		var victims []spotPlacement
-		var host *candidateHost
-		var before, after runtime.MemStats
-		runtime.GC()
-		runtime.ReadMemStats(&before)
-		host, victims = reclaimPlan(r, []*candidateHost{h})
-		runtime.ReadMemStats(&after)
-		if host != h || len(victims) != n {
-			t.Fatalf("n=%d: plan host %v, %d victims; want all %d", n, host, len(victims), n)
-		}
-		if perVictim := (after.TotalAlloc - before.TotalAlloc) / uint64(n); perVictim > 4096 {
-			t.Fatalf("n=%d: %d bytes allocated per victim, want a bound independent of n (<= 4096)", n, perVictim)
-		}
-		if !normalWants(r, h) {
-			t.Fatalf("n=%d: the normal Run should fit once every spot is released", n)
+	for _, distinct := range []bool{false, true} {
+		for _, n := range []int{128, 1024, 2048} {
+			h, r := packedHost(n, distinct)
+			var victims []spotPlacement
+			var host *candidateHost
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			host, victims = reclaimPlan(r, []*candidateHost{h})
+			runtime.ReadMemStats(&after)
+			if host != h || len(victims) != n {
+				t.Fatalf("n=%d distinct=%v: plan host %v, %d victims; want all %d", n, distinct, host, len(victims), n)
+			}
+			if perVictim := (after.TotalAlloc - before.TotalAlloc) / uint64(n); perVictim > 4096 {
+				t.Fatalf("n=%d distinct=%v: %d bytes allocated per victim, want a bound independent of n (<= 4096)", n, distinct, perVictim)
+			}
+			if !normalWants(r, h) {
+				t.Fatalf("n=%d distinct=%v: the normal Run should fit once every spot is released", n, distinct)
+			}
 		}
 	}
 }
 
 func BenchmarkReclaimPlanPacked(b *testing.B) {
-	for _, n := range []int{1024, 2048} {
-		b.Run(fmt.Sprint(n), func(b *testing.B) {
-			h, r := packedHost(n)
-			b.ReportAllocs()
-			for b.Loop() {
-				if _, v := reclaimPlan(r, []*candidateHost{h}); len(v) != n {
-					b.Fatal(len(v))
+	for _, distinct := range []bool{false, true} {
+		for _, n := range []int{1024, 2048} {
+			b.Run(fmt.Sprintf("%d/distinct=%v", n, distinct), func(b *testing.B) {
+				h, r := packedHost(n, distinct)
+				b.ReportAllocs()
+				for b.Loop() {
+					if _, v := reclaimPlan(r, []*candidateHost{h}); len(v) != n {
+						b.Fatal(len(v))
+					}
 				}
-			}
-		})
+			})
+		}
 	}
 }
 
@@ -201,6 +211,12 @@ func TestReclaimPlan(t *testing.T) {
 				h.Shared = false
 				return []*candidateHost{h}
 			}, "h", []string{"b", "a"}},
+		{"non-shared host: only the other tenant's victims go", func() pendingRun { return normalRun(1) },
+			func() []*candidateHost {
+				h := planHost("h", 0, spotOn("a", "t2", 1), spotOn("b", "t1", 1), spotOn("c", "t2", 1))
+				h.Shared = false
+				return []*candidateHost{h}
+			}, "h", []string{"c", "a"}},
 		{"non-shared host still used by another tenant's normal work", func() pendingRun { return normalRun(1) },
 			func() []*candidateHost {
 				h := planHost("h", 0, spotOn("a", "t1", 3))

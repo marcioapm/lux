@@ -246,13 +246,19 @@ func (h *candidateHost) remove(sp spotPlacement) {
 type hostSim struct {
 	h       candidateHost
 	tenants map[string]int
+	present int // tenants with a positive count
+	// view and its tenant list are reused by fits: hostFit keeps neither.
+	view    candidateHost
+	viewTen [2]string
 }
 
 func newHostSim(h *candidateHost) *hostSim {
 	s := &hostSim{h: *h, tenants: map[string]int{}}
 	s.h.noSpots = nil
 	for _, t := range h.Tenants {
-		s.tenants[t]++
+		if s.tenants[t]++; s.tenants[t] == 1 {
+			s.present++
+		}
 	}
 	return s
 }
@@ -262,7 +268,9 @@ func (s *hostSim) remove(sp spotPlacement) {
 	s.h.UsedMem -= int64(sp.Res.Memory)
 	s.h.UsedDisk -= int64(sp.Res.Disk)
 	s.h.UsedRuns--
-	s.tenants[sp.TenantID]--
+	if s.tenants[sp.TenantID]--; s.tenants[sp.TenantID] == 0 {
+		s.present--
+	}
 }
 
 func (s *hostSim) restore(sp spotPlacement) {
@@ -270,7 +278,9 @@ func (s *hostSim) restore(sp spotPlacement) {
 	s.h.UsedMem += int64(sp.Res.Memory)
 	s.h.UsedDisk += int64(sp.Res.Disk)
 	s.h.UsedRuns++
-	s.tenants[sp.TenantID]++
+	if s.tenants[sp.TenantID]++; s.tenants[sp.TenantID] == 1 {
+		s.present++
+	}
 }
 
 // host is the simulated host for hostFit: its tenants each listed once
@@ -287,7 +297,25 @@ func (s *hostSim) host() *candidateHost {
 	return &c
 }
 
-func (s *hostSim) fits(r pendingRun) bool { return len(hostFit(r, s.host())) == 0 }
+// hostFor is the simulated host as hostFit sees it for tenant's Run, in
+// constant time: tenant if present, then, when any other tenant is, one
+// stand-in for them all (hostFit only compares tenants with tenant).
+func (s *hostSim) hostFor(tenant string) *candidateHost {
+	s.view = s.h
+	ten := s.viewTen[:0]
+	others := s.present
+	if s.tenants[tenant] > 0 {
+		ten = append(ten, tenant)
+		others--
+	}
+	if others > 0 {
+		ten = append(ten, tenant+"\x00")
+	}
+	s.view.Tenants = ten
+	return &s.view
+}
+
+func (s *hostSim) fits(r pendingRun) bool { return len(hostFit(r, s.hostFor(r.TenantID))) == 0 }
 
 // forRun is h as runID sees it: its own pledge's reservation not counted.
 func (h *candidateHost) forRun(runID string) *candidateHost {

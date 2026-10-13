@@ -115,7 +115,9 @@ even if other releases let it fit. Simulated removals drop one tenant count
 per victim and reuse hostFit with shaped effective resources. Youngest-first
 deterministic greedy selection, then redundant-victim pruning on one simulated
 host (each victim restored and re-removed in turn), is polynomial, not subset
-search.
+search. Each fit check sees the simulated tenancy in constant space (the
+requester's tenant if present, plus one stand-in for any other), so the cost
+does not grow with the number of distinct tenants on the host.
 
 Scheduler already holds requester Run locks then sorted host advisory locks.
 Victim placement claims use FOR UPDATE SKIP LOCKED, never victim Run locks.
