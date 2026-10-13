@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -197,7 +198,6 @@ func TestHostHistoryCarriesTheFilesystem(t *testing.T) {
 	opKey := ids.Secret("luxk")
 	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(opKey))
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h1', 'h1', 'ready'), ('h2', 'h2', 'ready')`)
-	capacity, headroom := int64(155<<30), int64(10<<30)
 	// One transaction per heartbeat, as the hub's: a sample is stamped at
 	// its transaction's now().
 	sample := func(host string, u *proto.HostUsage) {
@@ -206,19 +206,29 @@ func TestHostHistoryCarriesTheFilesystem(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, free := range []int64{100 << 30, 120 << 30} {
-		sample("h1", &proto.HostUsage{DiskBytes: capacity - free, FSFreeBytes: &free, FSCapacityBytes: &capacity, DiskHeadroomBytes: &headroom})
+	// Capacity and headroom change between samples, as across runner
+	// restarts on a resized volume; each column's maximum is neither its
+	// minimum, its first, its last nor its mean.
+	type fs struct{ free, capacity, headroom int64 }
+	samples := []fs{
+		{100 << 30, 152 << 30, 10 << 30},
+		{110 << 30, 155 << 30, 12 << 30},
+		{120 << 30, 150 << 30, 9 << 30},
+		{110 << 30, 153 << 30, 11 << 30},
+	}
+	for _, f := range samples {
+		sample("h1", &proto.HostUsage{DiskBytes: f.capacity - f.free, FSFreeBytes: &f.free, FSCapacityBytes: &f.capacity, DiskHeadroomBytes: &f.headroom})
 	}
 	sample("h2", &proto.HostUsage{DiskBytes: 7})
 	q := url.Values{"res": {"0"}, "since": {"1h"}}.Encode()
 	raw := historyRequest(t, s, opKey, "/v1/hosts/h1/history?"+q).Samples
-	if len(raw) != 2 {
-		t.Fatalf("%d raw samples, want 2", len(raw))
+	if len(raw) != len(samples) {
+		t.Fatalf("%d raw samples, want %d", len(raw), len(samples))
 	}
-	for i, free := range []int64{100 << 30, 120 << 30} {
+	for i, f := range samples {
 		sm := raw[i]
-		if sm.DiskFreeBytes == nil || *sm.DiskFreeBytes != free || *sm.FSCapacityBytes != capacity || *sm.DiskHeadroomBytes != headroom {
-			t.Errorf("raw sample %d: free %v capacity %v headroom %v", i, sm.DiskFreeBytes, sm.FSCapacityBytes, sm.DiskHeadroomBytes)
+		if sm.DiskFreeBytes == nil || *sm.DiskFreeBytes != f.free || *sm.FSCapacityBytes != f.capacity || *sm.DiskHeadroomBytes != f.headroom {
+			t.Errorf("raw sample %d: free %v capacity %v headroom %v, want %+v", i, sm.DiskFreeBytes, sm.FSCapacityBytes, sm.DiskHeadroomBytes, f)
 		}
 	}
 	old := historyRequest(t, s, opKey, "/v1/hosts/h2/history?"+q).Samples
@@ -233,7 +243,19 @@ func TestHostHistoryCarriesTheFilesystem(t *testing.T) {
 	}
 	q = url.Values{"res": {"60"}, "since": {"1h"}}.Encode()
 	mins := historyRequest(t, s, opKey, "/v1/hosts/h1/history?"+q).Samples
-	if len(mins) != 1 || *mins[0].DiskFreeBytes != 110<<30 || *mins[0].FSCapacityBytes != capacity || *mins[0].DiskHeadroomBytes != headroom {
-		t.Errorf("minute rollup %+v", mins)
+	if len(mins) != 1 {
+		t.Fatalf("%d minute rollups, want 1", len(mins))
 	}
+	if m := mins[0]; m.DiskFreeBytes == nil || m.FSCapacityBytes == nil || m.DiskHeadroomBytes == nil ||
+		*m.DiskFreeBytes != 110<<30 || *m.FSCapacityBytes != 155<<30 || *m.DiskHeadroomBytes != 12<<30 {
+		t.Errorf("minute rollup free %s capacity %s headroom %s, want 110, 155 and 12 GiB",
+			fmtPtr(m.DiskFreeBytes), fmtPtr(m.FSCapacityBytes), fmtPtr(m.DiskHeadroomBytes))
+	}
+}
+
+func fmtPtr(p *int64) string {
+	if p == nil {
+		return "absent"
+	}
+	return strconv.FormatInt(*p, 10)
 }
