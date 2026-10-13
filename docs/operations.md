@@ -563,6 +563,9 @@ A pool's `placement` (`spread` or `pack`;
 ways (`--placement`) and stored as `pools.placement` (migration 073),
 NULL for the default: `pack` for a shaped pool, `spread` otherwise. A
 luxd without it ignores the column and spreads every pool.
+A resume's raise for saved state (migration 074) is shown only while the
+Run keeps the size it was raised to: after a rollback resizes a raised
+Run, its raise label stays hidden until the next shaped resize.
 
 For a static shaped pool, start each host's runner by hand with the shape's
 nominal capacity. For the shape above:

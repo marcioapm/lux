@@ -654,16 +654,23 @@ sync modes and, on a shaped pool, the shape):
 
 - `spread`: the host with the fewest Runs, after affinity (the host
   holding the Run's snapshot, then the image and git mirrors cached, then
-  `placement.prefers` labels). Every unshaped pool's default, as before.
+  `placement.prefers` labels). Every unshaped pool's default.
 - `pack`: the most allocated host, measured as the largest share of its
   cpus, memory or disk already reserved (not its Run count), so whole
   hosts stay free for the large sizes and idle hosts can scale down. Among
   hosts allocated alike, affinity as above decides, then the lowest host
-  id. Every shaped pool's default.
+  id. Every shaped pool's default. A resource a host does not advertise
+  counts as empty, so pack on hosts that advertise none fills the lowest
+  host id first.
+
+A pool without a placement packs while shaped and spreads otherwise, so
+adding or removing a shape changes how it places.
 
 Either way a Run whose snapshot only its host holds (not uploaded yet)
 waits for that host, which may be less packed, and a host the Run is
-moving away from comes last. Live Runs are never moved to pack hosts
+moving away from comes last. Under pack, an uploaded snapshot's host is
+only a tie-break, so a resume may restore from the blob store instead of
+a host copy. Live Runs are never moved to pack hosts
 tighter. Packing fills hosts first; it does not make every sequence fit:
 two hosts with a quarter free each still cannot take a half-host size, which
 waits for a host or launches one. Set it with `placement` on `POST
