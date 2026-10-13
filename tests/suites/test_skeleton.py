@@ -220,25 +220,29 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
 
 
 def test_a_run_over_its_effective_disk_limit_is_stopped(lux, runners, hosts):
-    """A runner given a nominal --disk and a --disk-headroom holds each Run to
+    """A runner given a nominal disk and a disk headroom (here through its
+    environment, as a provisioned host's) holds each Run to
     its share of the real filesystem. With the nominal disk the filesystem's
     whole capacity and half of it kept back, a Run asking 64 MiB is held to
     about 32 MiB: one writing 48 MiB (over its share, under what it asked)
     is stopped, its event carrying both limits and the factor; one writing
-    16 MiB is left alone. The host advertises what it scaled by."""
+    16 MiB is left alone. The host advertises what it scaled by, and the
+    CPUs LUX_RUNNER_CPUS gives."""
     # Capacity as the runner reads it (Go's statfs: f_bsize units): used
     # plus unprivileged-free blocks, which writes do not change.
     hosts[0].exec("mkdir", "-p", "/var/lib/lux")
     blocks, free, avail, bsize = map(int, hosts[0].exec("stat", "-f", "-c", "%b %f %a %s", "/var/lib/lux").split())
     capacity = (blocks - free + avail) * bsize
     headroom = capacity // 2
-    runners.start(hosts[0], "--usage-every", "1s", "--disk", str(capacity), "--disk-headroom", str(headroom))
+    # Through the environment alone: no size flag.
+    runners.start(hosts[0], "--usage-every", "1s", environ={
+        "LUX_RUNNER_CPUS": "4", "LUX_RUNNER_DISK": str(capacity), "LUX_RUNNER_DISK_HEADROOM": str(headroom)})
     nominal = 64 << 20
     effective = nominal * (capacity - headroom) // capacity
     assert 31 << 20 < effective <= 32 << 20, effective
     host = lux.json("hosts", "get", hosts[0].name)
-    assert host["capacity"]["disk"] == capacity and host["capacity"]["diskHeadroom"] == headroom \
-        and host["capacity"]["fsCapacity"] == capacity, host["capacity"]
+    assert host["capacity"]["cpus"] == 4 and host["capacity"]["disk"] == capacity \
+        and host["capacity"]["diskHeadroom"] == headroom and host["capacity"]["fsCapacity"] == capacity, host["capacity"]
 
     vols = [{"name": "w", "path": "/w", "kind": "state"}]
     over = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "dd if=/dev/zero of=/w/big bs=1M count=48 2>/dev/null; echo wrote; sleep 600",
