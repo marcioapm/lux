@@ -416,7 +416,10 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE hosts SET last_placement_ended_at = now() WHERE id = $1`, hostID); err != nil {
+	// A spot placement's end is not activity: it must not restart the host's
+	// idle clock (scale-down) any more than its life keeps the host busy.
+	if _, err := tx.Exec(ctx, `UPDATE hosts h SET last_placement_ended_at = now() FROM runs r
+		WHERE h.id = $1 AND r.id = $2 AND NOT `+spotRunSQL, hostID, runID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE runs SET exit_code = $2 WHERE id = $1`, runID, st.ExitCode); err != nil {

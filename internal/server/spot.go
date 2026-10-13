@@ -13,6 +13,9 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
+// spotRunSQL, for SQL over runs (as r): the Run is a spot Run.
+const spotRunSQL = `coalesce(r.spec->>'spot', '') = 'true'`
+
 // reclaimWaitReason is a normal Run's state_reason while spot placements
 // it reclaimed release their resources.
 const reclaimWaitReason = "waiting for reclaimed spot capacity to be released"
@@ -307,10 +310,13 @@ func loadPledges(ctx context.Context, tx pgx.Tx, hostIDs []string, byID map[stri
 }
 
 // ageKey identifies what a host's capacity history holds for: a runner
-// hello, a capacity change or a pool move each start it over.
+// hello (capacity_epoch), a capacity change, a pool move or a change of its
+// pool's shape each start it over. It names no luxd: every luxd appends to
+// the same history (a placement trigger records every transition, whoever
+// makes it), so another live luxd's writes keep it, and a restart resumes it.
 func ageKey(h *candidateHost) string {
 	c := h.Capacity
-	return fmt.Sprintf("%d/%g/%d/%d/%d/%s", h.CapEpoch, c.CPUs, c.Memory, c.Disk, c.Runs, h.PoolID)
+	return fmt.Sprintf("%d/%g/%d/%d/%d/%s/%s", h.CapEpoch, c.CPUs, c.Memory, c.Disk, c.Runs, h.PoolID, h.Shape)
 }
 
 // loadCapacityAge reads each host's history (one primary-key read per
@@ -340,7 +346,7 @@ func (s *Server) loadCapacityAge(ctx context.Context, tx pgx.Tx, hostIDs []strin
 		if h.age == nil {
 			h.age = &capacityAge{}
 		}
-		h.age.observe(s.id+"/"+ageKey(h), now, freeOf(h))
+		h.age.observe(ageKey(h), now, freeOf(h))
 	}
 	return nil
 }
@@ -378,7 +384,7 @@ func normalDemand(ctx context.Context, tx pgx.Tx, hosts []*candidateHost) ([]pen
 		FROM runs r WHERE state IN `+queuedRunStates+` AND NOT terminate_requested
 		  AND coalesce(spec->>'spot', '') <> 'true'
 		  AND (pool_id = ANY($1) OR place_on = ANY($2))
-		  AND NOT EXISTS (SELECT 1 FROM spot_pledges sp WHERE sp.run_id = r.id)
+		  AND NOT EXISTS (SELECT 1 FROM spot_pledges sp WHERE sp.run_id = r.id AND sp.host_id = ANY($2))
 		ORDER BY updated_at, id LIMIT $3`, pools, ids, normalDemandLimit+1)
 	if err != nil {
 		return nil, false, err
@@ -473,8 +479,8 @@ func pledge(ctx context.Context, tx pgx.Tx, r pendingRun, h *candidateHost, vict
 	if _, err := tx.Exec(ctx, `UPDATE placements SET reclaim_for = $2 WHERE id = ANY($1)`, ids, r.ID); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO spot_pledges (run_id, host_id, tenant_id, resources) VALUES ($1, $2, $3, $4)`,
-		r.ID, h.ID, r.TenantID, r.Spec.Resources); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO spot_pledges (run_id, host_id, host_epoch, tenant_id, resources) VALUES ($1, $2, $3, $4, $5)`,
+		r.ID, h.ID, h.CapEpoch, r.TenantID, r.Spec.Resources); err != nil {
 		return false, err
 	}
 	for i := range h.Spots {
@@ -487,14 +493,16 @@ func pledge(ctx context.Context, tx pgx.Tx, r pendingRun, h *candidateHost, vict
 	return true, nil
 }
 
-// dropPledges deletes the pledges of Runs no longer waiting for a host, on
-// hosts this transaction holds, and of hosts no longer live.
+// dropPledges deletes the pledges of Runs no longer waiting for a host (on
+// hosts this transaction holds), and every pledge whose host is no longer
+// live or whose runner said hello since (a restart: its spot placements may
+// be gone). No live scheduler can place on such a host, so its pledges are
+// nobody's to read.
 func (s *Server) dropPledges(ctx context.Context, tx pgx.Tx, hostIDs []string) error {
 	_, err := tx.Exec(ctx, `DELETE FROM spot_pledges sp WHERE
-		(sp.host_id = ANY($1) AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.id = sp.run_id
-			AND r.state IN `+queuedRunStates+` AND NOT r.terminate_requested))
-		OR (sp.host_id = ANY($1) AND NOT EXISTS (SELECT 1 FROM hosts h WHERE h.id = sp.host_id AND h.state = 'ready' AND NOT h.draining
-			AND h.last_heartbeat > now() - $2::interval))`, hostIDs, interval(s.cfg.LeaseDuration))
+		(sp.host_id = ANY($1) AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.id = sp.run_id AND r.state IN `+queuedRunStates+` AND NOT r.terminate_requested))
+		OR NOT EXISTS (SELECT 1 FROM hosts h WHERE h.id = sp.host_id AND h.state = 'ready' AND NOT h.draining
+			AND h.capacity_epoch = sp.host_epoch AND h.last_heartbeat > now() - $2::interval)`, hostIDs, interval(s.cfg.LeaseDuration))
 	return err
 }
 

@@ -611,6 +611,12 @@ func (s *Server) readyHosts(ctx context.Context, tx pgx.Tx, runs []pendingRun) (
 	// (required by candidateHosts) is the cluster-wide liveness signal.
 	for _, h := range ready {
 		h.Connected = true
+		// Spot placements are reclaimable on demand: their space is the
+		// pool's for planning, so they never cause a launch.
+		for _, sp := range h.Spots {
+			h.remove(sp)
+		}
+		h.Spots = nil
 	}
 	slices.SortFunc(ready, func(a, b *candidateHost) int { return strings.Compare(a.ID, b.ID) })
 	return ready, nil

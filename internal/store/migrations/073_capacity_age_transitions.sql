@@ -1,70 +1,68 @@
--- Every placement resource transition updates the bounded ledger in the
--- same transaction. The scheduler and lifecycle already hold cost-host;
--- the trigger also fences direct allocation writers with that lock.
+-- 073_capacity_age_transitions.sql — every placement resource transition
+-- appends to its host's capacity history (072) in the same transaction, so
+-- a release between scheduler passes, by any luxd, is recorded when it
+-- happens. The history's row is only ever written under its host's
+-- cost-host advisory lock (infraevents.go's lock order, step 3): every
+-- production writer of a placement's live state or resources takes it first.
+-- This trigger takes no lock of its own; a write without that lock (none in
+-- luxd; tests' fixtures) drops the history instead, which is conservative.
+-- Invalidation (reconnect, capacity, pool, shape) is by the history's key,
+-- which the scheduler compares on read; nothing here locks a host row.
 CREATE FUNCTION lux_capacity_age_transition() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   hid text;
+  k bigint;
   hist jsonb;
-  free jsonb;
   cap jsonb;
   cpu float8;
   mem bigint;
   disk bigint;
   slots bigint;
-  last_free jsonb;
+  free jsonb;
   merged jsonb;
+  at timestamptz := clock_timestamp();
 BEGIN
   hid := CASE WHEN TG_OP = 'DELETE' THEN OLD.host_id ELSE NEW.host_id END;
-  PERFORM pg_advisory_xact_lock(hashtextextended('cost-host:' || hid, 0));
-  SELECT history INTO hist FROM host_capacity_age WHERE host_id = hid FOR UPDATE;
+  k := hashtextextended('cost-host:' || hid, 0);
+  IF NOT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted
+      AND classid::bigint = ((k >> 32) & 4294967295) AND objid::bigint = (k & 4294967295) AND objsubid = 1) THEN
+    -- A writer outside the lock order cannot be serialised with the
+    -- scheduler's read: forget the history, which only delays spot work.
+    DELETE FROM host_capacity_age WHERE host_id = hid;
+    RETURN NULL;
+  END IF;
+  SELECT history INTO hist FROM host_capacity_age WHERE host_id = hid;
   IF hist IS NULL THEN RETURN NULL; END IF;
   SELECT capacity INTO cap FROM hosts WHERE id = hid;
-  SELECT coalesce(sum((resources->>'cpus')::float8), 0),
-         coalesce(sum((resources->>'memory')::bigint), 0),
+  SELECT coalesce(sum((resources->>'cpus')::float8), 0), coalesce(sum((resources->>'memory')::bigint), 0),
          coalesce(sum((resources->>'disk')::bigint), 0), count(*)
     INTO cpu, mem, disk, slots FROM placements
-    WHERE host_id = hid AND state IN ('assigned','starting','running','stopping');
+    WHERE host_id = hid AND state IN ('assigned', 'starting', 'running', 'stopping');
   free := jsonb_build_object(
-    'cpus', CASE WHEN coalesce((cap->>'cpus')::float8,0) > 0 THEN (cap->>'cpus')::float8-cpu ELSE 1152921504606846976 END,
-    'memory', CASE WHEN coalesce((cap->>'memory')::bigint,0) > 0 THEN (cap->>'memory')::bigint-mem ELSE 1152921504606846976 END,
-    'disk', CASE WHEN coalesce((cap->>'disk')::bigint,0) > 0 THEN (cap->>'disk')::bigint-disk ELSE 1152921504606846976 END,
-    'runs', CASE WHEN coalesce((cap->>'runs')::bigint,0) > 0 THEN (cap->>'runs')::bigint-slots ELSE 1152921504606846976 END);
-  last_free := hist->(jsonb_array_length(hist)-1)->'free';
-  IF last_free = free THEN RETURN NULL; END IF;
-  hist := hist || jsonb_build_array(jsonb_build_object('at', clock_timestamp(), 'free', free));
-  -- Remove intervals wholly before the window, retaining its boundary entry.
-  WHILE jsonb_array_length(hist) > 1 AND (hist->1->>'at')::timestamptz < clock_timestamp()-interval '60 seconds' LOOP
+    'cpus',   CASE WHEN coalesce((cap->>'cpus')::float8, 0) > 0 THEN (cap->>'cpus')::float8 - cpu ELSE 1152921504606846976 END,
+    'memory', CASE WHEN coalesce((cap->>'memory')::bigint, 0) > 0 THEN (cap->>'memory')::bigint - mem ELSE 1152921504606846976 END,
+    'disk',   CASE WHEN coalesce((cap->>'disk')::bigint, 0) > 0 THEN (cap->>'disk')::bigint - disk ELSE 1152921504606846976 END,
+    'runs',   CASE WHEN coalesce((cap->>'runs')::bigint, 0) > 0 THEN (cap->>'runs')::bigint - slots ELSE 1152921504606846976 END);
+  IF hist->(jsonb_array_length(hist) - 1)->'free' = free THEN RETURN NULL; END IF;
+  hist := hist || jsonb_build_array(jsonb_build_object('at', at, 'free', free));
+  -- Drop intervals that ended before the window, keeping its boundary entry.
+  WHILE jsonb_array_length(hist) > 1 AND (hist->1->>'at')::timestamptz < at - interval '60 seconds' LOOP
     hist := hist - 0;
   END LOOP;
+  -- Bounded: merge the two oldest by their minimum, which only understates.
   WHILE jsonb_array_length(hist) > 32 LOOP
-    SELECT jsonb_object_agg(k, least((hist->0->'free'->>k)::numeric, (hist->1->'free'->>k)::numeric))
-      INTO merged FROM unnest(ARRAY['cpus','memory','disk','runs']) k;
+    SELECT jsonb_object_agg(f, least((hist->0->'free'->>f)::numeric, (hist->1->'free'->>f)::numeric))
+      INTO merged FROM unnest(ARRAY['cpus', 'memory', 'disk', 'runs']) f;
     hist := jsonb_set(hist, '{1}', jsonb_build_object('at', hist->0->'at', 'free', merged)) - 0;
   END LOOP;
   UPDATE host_capacity_age SET history = hist WHERE host_id = hid;
   RETURN NULL;
 END $$;
-CREATE TRIGGER capacity_age_transition AFTER INSERT OR DELETE OR UPDATE OF resources, state ON placements
+-- Only transitions that change what a host holds: a placement created,
+-- entering or leaving the live states, or resized.
+CREATE TRIGGER capacity_age_transition AFTER INSERT OR DELETE ON placements
   FOR EACH ROW EXECUTE FUNCTION lux_capacity_age_transition();
-
-CREATE FUNCTION lux_capacity_age_invalidate() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF NEW.capacity IS DISTINCT FROM OLD.capacity OR NEW.capacity_epoch <> OLD.capacity_epoch
-     OR NEW.pool_id IS DISTINCT FROM OLD.pool_id OR NEW.state <> OLD.state OR NEW.draining <> OLD.draining THEN
-    DELETE FROM host_capacity_age WHERE host_id = NEW.id;
-    DELETE FROM spot_pledges WHERE host_id = NEW.id;
-  END IF;
-  RETURN NULL;
-END $$;
-CREATE TRIGGER capacity_age_invalidate AFTER UPDATE OF capacity, capacity_epoch, pool_id, state, draining ON hosts
-  FOR EACH ROW EXECUTE FUNCTION lux_capacity_age_invalidate();
-
-CREATE FUNCTION lux_capacity_shape_invalidate() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF NEW.shape IS DISTINCT FROM OLD.shape THEN
-    DELETE FROM host_capacity_age WHERE host_id IN (SELECT id FROM hosts WHERE pool_id = NEW.id);
-  END IF;
-  RETURN NULL;
-END $$;
-CREATE TRIGGER capacity_shape_invalidate AFTER UPDATE OF shape ON pools
-  FOR EACH ROW EXECUTE FUNCTION lux_capacity_shape_invalidate();
+CREATE TRIGGER capacity_age_transition_update AFTER UPDATE OF resources, state ON placements
+  FOR EACH ROW WHEN (OLD.resources IS DISTINCT FROM NEW.resources
+    OR (OLD.state IN ('assigned', 'starting', 'running', 'stopping')) <> (NEW.state IN ('assigned', 'starting', 'running', 'stopping')))
+  EXECUTE FUNCTION lux_capacity_age_transition();

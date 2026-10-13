@@ -54,6 +54,8 @@ type candidateHost struct {
 	Caps []string
 	// CapEpoch: hosts.capacity_epoch, bumped by every runner hello.
 	CapEpoch int64
+	// Shape: its pool's shape as stored (JSON text, "" for none).
+	Shape string
 	// Spots: its live spot placements, oldest first (spot.go).
 	Spots []spotPlacement
 	// Pledges: per normal Run, the extra reservation its spot pledge here
@@ -267,12 +269,12 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 				continue
 			}
 			if h.age != nil {
-				h.age.observe(s.id+"/"+ageKey(h), now, freeOf(h))
+				h.age.observe(ageKey(h), now, freeOf(h))
 			}
 			notify = append(notify, h.ID)
 		}
 		for _, h := range hosts {
-			h.age.observe(s.id+"/"+ageKey(h), now, freeOf(h))
+			h.age.observe(ageKey(h), now, freeOf(h))
 		}
 		return saveCapacityAge(ctx, tx, hosts)
 	})
@@ -320,7 +322,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	rows, err := tx.Query(ctx, `
 		SELECT h.id, h.tenant_id, coalesce(p.name, ''), coalesce(h.pool_id, ''), h.labels, h.capacity, coalesce(h.caches->'images', '[]'),
 			coalesce(h.caches->'gitMirrors', '[]'),
-			coalesce(p.shared AND p.tenant_id IS NULL, false), coalesce(p.retired, false), h.capabilities, h.capacity_epoch
+			coalesce(p.shared AND p.tenant_id IS NULL, false), coalesce(p.retired, false), h.capabilities, h.capacity_epoch, coalesce(p.shape::text, '')
 		FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id
 		WHERE h.id = ANY($2) AND h.state = 'ready' AND NOT h.draining
 		  AND h.last_heartbeat > now() - $1::interval`,
@@ -333,7 +335,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	for rows.Next() {
 		h := &candidateHost{}
 		var images []string
-		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.PoolID, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired, &h.Caps, &h.CapEpoch); err != nil {
+		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.PoolID, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired, &h.Caps, &h.CapEpoch, &h.Shape); err != nil {
 			rows.Close()
 			return nil, err
 		}

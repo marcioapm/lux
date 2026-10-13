@@ -13,10 +13,7 @@ func TestSubmitValidateOnlyReadOnlyAndSpotParity(t *testing.T) {
 	ctx := context.Background()
 	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 4, Memory: 40, Disk: 40, Runs: 4}, map[string]string{})
 	execSQL(t, s, ctx, `UPDATE hosts SET capabilities=$1 WHERE id='h'`, []string{proto.CapSpotReclaim})
-	at := time.Now().Add(-61 * time.Second)
-	c := capacityAge{}
-	c.observe(s.id+"/0/4/40/40/4/pool1", at, freeVec{4, 40, 40, 4})
-	execSQL(t, s, ctx, `INSERT INTO host_capacity_age(host_id,key,history) VALUES('h',$1,$2)`, c.Key, c.marshal())
+	seedAged(t, s, "h", freeVec{4, 40, 40, 4}, 2*time.Minute)
 	sp := baseSpec("burst", spec.Resources{CPUs: 1, Memory: 10, Disk: 10})
 	sp.Spot = true
 	before := queryOne[string](t, s, `SELECT history::text FROM host_capacity_age WHERE host_id='h'`)

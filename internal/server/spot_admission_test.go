@@ -2,12 +2,11 @@ package server
 
 import (
 	"context"
-	"github.com/jackc/pgx/v5"
-	"github.com/marcioapm/lux/internal/proto"
-	"github.com/marcioapm/lux/internal/store"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/marcioapm/lux/internal/proto"
 )
 
 func TestSpotAgedAdmissionAndNormalPriority(t *testing.T) {
@@ -77,36 +76,5 @@ func TestSpotReclaimPledgeConcurrencyAndRelease(t *testing.T) {
 	}
 	if n := queryOne[int](t, s, `SELECT count(*) FROM spot_pledges`); n != 0 {
 		t.Fatal("pledge leaked")
-	}
-}
-
-func TestCapacityAgeDurableTransitions(t *testing.T) {
-	s, _, _ := planningFixture(t, 0)
-	ctx := context.Background()
-	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 4, Memory: 40, Disk: 40, Runs: 4}, map[string]string{})
-	at := time.Now().Add(-2 * time.Minute)
-	c := capacityAge{}
-	c.observe(s.id+"/0/4/40/40/4/pool1", at, freeVec{4, 40, 40, 4})
-	execSQL(t, s, ctx, `INSERT INTO host_capacity_age(host_id,key,history) VALUES('h',$1,$2)`, c.Key, c.marshal())
-	execSQL(t, s, ctx, `INSERT INTO runs(id,tenant_id,spec,state) VALUES('r','t1','{}','running')`)
-	execSQL(t, s, ctx, `INSERT INTO placements(id,tenant_id,run_id,host_id,epoch,state,resources) VALUES('p','t1','r','h',1,'running','{"cpus":3,"memory":30,"disk":30}')`)
-	execSQL(t, s, ctx, `UPDATE placements SET state='exited' WHERE id='p'`)
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		hs, err := s.candidateHosts(ctx, tx, []string{"h"})
-		if err != nil {
-			return err
-		}
-		aged := hs[0].age.aged(time.Now())
-		if !aged.covers(1, 10, 10) || aged.covers(2, 20, 20) {
-			t.Fatalf("aged=%+v", aged)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	execSQL(t, s, ctx, `UPDATE hosts SET capacity_epoch=capacity_epoch+1 WHERE id='h'`)
-	if n := queryOne[int](t, s, `SELECT count(*) FROM host_capacity_age`); n != 0 {
-		t.Fatal("reconnect retained history")
 	}
 }

@@ -1,13 +1,13 @@
 -- 072_spot_runs.sql — spot Runs (docs/design/spot-runs.md).
 --
 -- hosts.capacity_epoch: bumped on every runner hello (reconnect, restart,
--- capacity change). host_capacity_age.key names the epoch, capacity and pool
--- its history was built under; a mismatch discards the history, so a
--- reconnect or shape change never inherits aged free capacity.
+-- capacity change), so neither aged capacity nor a pledge survives one.
 --
 -- host_capacity_age: per host, a bounded history of its free vector (cpus,
 -- memory, disk, run slots) at each change, oldest first. One primary-key read
 -- answers whether a vector has been continuously free for more than 60s.
+-- key names the capacity_epoch, capacity, pool and pool shape the history
+-- holds for; any luxd appends to it, and one reading another key starts over.
 --
 -- placements.reclaim_for: the normal Run a spot placement is being reclaimed
 -- for; set once, never cleared (a signalled reclamation is irreversible).
@@ -30,6 +30,9 @@ CREATE POLICY system_only ON host_capacity_age USING (lux_system()) WITH CHECK (
 CREATE TABLE spot_pledges (
   run_id     text PRIMARY KEY REFERENCES runs (id) ON DELETE CASCADE,
   host_id    text NOT NULL REFERENCES hosts (id) ON DELETE CASCADE,
+  -- host_epoch: the host's capacity_epoch when pledged; a runner hello
+  -- since (its spot placements may be gone) voids the pledge.
+  host_epoch bigint NOT NULL,
   tenant_id  text NOT NULL,
   resources  jsonb NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()

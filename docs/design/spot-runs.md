@@ -16,7 +16,21 @@ refuses other resume policies, and retains existing never output/artifact behavi
 - [x] Runner/shim: immediate SIGTERM, no beforeStop, persisted first-receipt 15s
       deadline, runner-side container SIGKILL; capability advertised (Linux tests
       written, not run on Darwin).
-- [ ] Live spot autoscaler/warm-while-active integration and Linux/full gates.
+- [x] Autoscaler: spot-only hosts are idle; scale-down reclaims their spot Runs.
+- [ ] Linux/full gates (parent).
+
+## Autoscaler
+
+Spot placements never keep a host or pool alive. A ready host whose live
+placements are all spot counts as idle (poolState), a spot placement does not
+make a pool active for warm_while_active, and its end does not restart the
+host's idle clock (last_placement_ended_at). The planner treats spot usage as
+free (reclaimable), so spot work never causes a launch. drainForScaleDown locks
+the host's spot Runs (Runs before hosts), drains the host only if it still has
+no normal placement, and sends each spot placement the spot-reclaim stop: the
+same irreversible SIGTERM/15s-SIGKILL path, ending the Run terminated with
+"spot capacity reclaimed for a normal Run" — never a drain stop that would
+resume it. The drained host is terminated once its placements are gone.
 
 ## Runner enforcement
 
@@ -49,13 +63,24 @@ strictly older boundary. Overflow merges oldest intervals by minimum (understate
 rather than invents capacity). One indexed read per host loads the history.
 Ordinary resources still come from live placements; sampling CPU load is irrelevant.
 
-Migration 073 triggers update the ledger on placement insert/delete/state/resource
-changes, including release between scheduler ticks. Trigger locking uses cost-host.
-Host hello bumps capacity_epoch; capacity, epoch, pool, state/draining and shape
-changes delete history. A process id prefixes the history key, conservatively
-resetting on another luxd process/restart. This can reduce utilization under HA;
-it cannot age unknown capacity. Scheduler applies in-batch allocations immediately
-and persists the minimum-compatible history. Tests inject s.now / pure timestamps.
+Migration 073's placement trigger appends a transition on every insert, delete,
+resize, or entry/exit of the live states (a WHEN clause skips other updates),
+including releases between scheduler passes, by any luxd. It takes no lock of its
+own. The history row is written only under the host's cost-host advisory lock,
+step 3 of the documented order (infraevents.go): every production writer of a
+placement's state or resources already holds it: the scheduler (assign, the
+insert), placementExited and placementLost (the only exits from the live
+states), and the reapers that call them. Transitions within the live states
+(assigned, starting, running, stopping) and stop fields do not fire it. The trigger
+checks pg_locks for that lock; a write without it (no luxd path; test fixtures)
+deletes the history instead, which only delays spot work. Tests run a scheduler
+pass concurrently with exit reports, requestStop and reapLeases on one host.
+
+The history key is capacity_epoch (bumped on every runner hello: reconnect or
+restart), capacity, pool id and the pool's shape. It names no luxd process, so
+several live luxd instances and restarts share and extend one history. A
+mismatched key (hello, capacity, pool or shape change) starts over on read.
+Pledges record the capacity_epoch they were made under; a hello voids them.
 
 ## Claims and pledges
 
