@@ -8,7 +8,7 @@ import time
 import pytest
 
 from conftest import CLIError, generic
-from env import ALPINE_IMAGE
+from env import ALPINE_IMAGE, wait_until
 
 
 def test_echo_hello(lux, runners, hosts):
@@ -188,7 +188,9 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
     """resources.disk bounds what a Run writes (its writable layer and state
     volumes): past it, the Run is stopped and fails, its state kept."""
     runners.start(hosts[0], "--usage-every", "1s")
-    script = "echo start; dd if=/dev/zero of=/w/big bs=1M count=64 2>/dev/null; echo wrote; sleep 600"
+    # "kept": the state volume came back non-empty. "wrote": all 64 MiB are in it.
+    script = ("[ -s /w/big ] && echo kept; echo start; dd if=/dev/zero of=/w/big bs=1M count=64 2>/dev/null && "
+              '[ "$(stat -c %s /w/big)" -eq 67108864 ] && echo wrote; sleep 600')
     run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", script, resources={"disk": "32Mi"},
                                 volumes=[{"name": "w", "path": "/w", "kind": "state"}]))
     run = lux.wait_state(run_id, "failed", timeout=60)
@@ -197,10 +199,16 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
     exceeded = lux.events(run_id, "disk.exceeded")
     assert exceeded and exceeded[0]["data"]["limitBytes"] == 32 << 20, exceeded
     assert lux.json("snapshots", run_id), "its state was not kept"
-    # Resumed with room to spare: it runs on, its 64 MiB still there.
+    # Resumed with room to spare: it runs on, its 64 MiB still there. Epoch 1
+    # was stopped only once over 32 MiB, nearly all of it /w/big, so the
+    # restored volume always holds a non-empty /w/big. Only the resumed
+    # placement's own stdout counts: `lux logs` joins every placement's.
     lux.run("resume", run_id, "--disk", "256Mi")
     lux.wait_state(run_id, "running", timeout=60)
-    lux.wait_output(run_id, "start\nwrote", timeout=60)
+    epoch = lux.get(run_id)["placements"][-1]["epoch"]
+    assert epoch >= 2, lux.get(run_id)["placements"]
+    stdout = lambda: "".join(r.get("data", "") for r in lux.records(run_id) if r.get("epoch") == epoch and r.get("ch") == "stdout")
+    wait_until(lambda: stdout() == "kept\nstart\nwrote\n", 60, 0.5, f"epoch {epoch} did not find its state and write 64 MiB")
     run = lux.get(run_id)
     assert run["state"] == "running" and run["spec"]["resources"]["disk"] == 256 << 20, run
     lux.run("terminate", run_id, "--wait")
