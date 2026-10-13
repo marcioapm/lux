@@ -716,7 +716,9 @@ every key required, and optionally disk-headroom=10Gi (the default): the
 disk each host keeps from Runs. Its sizes halve the whole host down to min-cpus
 (lux pools sizes <name> lists them). luxd checks it, and an ec2 pool's
 instance types against it, before storing it. Omitted on a shaped pool, the
-shape would be removed: refused without --replace, like a template key.
+shape would be removed: refused without --replace, like a template key. A
+pool without a placement packs while shaped and spreads otherwise, so
+adding or removing a shape changes how it places.
 
 --placement chooses how Runs are placed among the hosts they fit: spread
 (the host with the fewest Runs) or pack (the most allocated host, so whole
@@ -869,7 +871,7 @@ finds this pool. --platform renames the platform's pool of that name
 	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs. Like every flag here, it replaces the pool's: omitted, the pool has no default price")
 	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
 	set.Flags().BoolVar(&isDefault, "default", false, "mark it the tenant's default pool, for Runs that name none (--default=false clears it; omitted: unchanged)")
-	set.Flags().BoolVar(&replace, "replace", false, "write even when the set removes template keys, a shape, a scale-down time, warm-while-active or a price the pool has")
+	set.Flags().BoolVar(&replace, "replace", false, "write even when the set removes template keys, a shape, a placement, a scale-down time, warm-while-active or a price the pool has")
 	set.Flags().BoolVar(&dryRun, "dry-run", false, "print what would change and write nothing")
 	var sizesPlatform bool
 	sizes := &cobra.Command{
