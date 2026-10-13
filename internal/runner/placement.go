@@ -25,6 +25,7 @@ import (
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/runner/disklimit"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -78,12 +79,11 @@ type placement struct {
 	env      map[string]string
 	made     []string
 	peakDisk int64
-	// diskReported: this placement was reported over its disk limit.
-	diskReported bool
-	netRx        int64
-	netTx        int64
-	cgroup       string
-	cpuPeak      cpuPeak
+	disk     disklimit.Watch
+	netRx    int64
+	netTx    int64
+	cgroup   string
+	cpuPeak  cpuPeak
 	// imagePlatforms: what the image's reference offers (learnPlatforms);
 	// nil when unknown.
 	imagePlatforms []string
@@ -1506,7 +1506,7 @@ func (p *placement) sampleSlow(ctx context.Context) {
 		})
 	}
 	wg.Wait()
-	p.checkDisk(ctx, disk)
+	p.checkDisk(ctx, disk, time.Now())
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.peakDisk = max(p.peakDisk, disk)
@@ -1516,22 +1516,29 @@ func (p *placement) sampleSlow(ctx context.Context) {
 }
 
 // checkDisk reports a Run over its disk limit (its writable layer and state
-// volumes), once: luxd stops it, and it ends failed, snapshotted as usual.
-func (p *placement) checkDisk(ctx context.Context, used int64) {
-	if p.assign == nil || p.assign.Spec.Resources.Disk <= 0 {
+// volumes) once it has been over for its resources.diskGrace, or at once at
+// disklimit.CeilingFactor times the limit: luxd stops it, and it ends
+// failed, snapshotted as usual. Reported once per placement.
+func (p *placement) checkDisk(ctx context.Context, used int64, now time.Time) {
+	if p.assign == nil {
 		return
 	}
-	limit := int64(p.assign.Spec.Resources.Disk)
 	p.mu.Lock()
-	over := used > limit && !p.diskReported && p.phase == "running"
-	if over {
-		p.diskReported = true
+	if p.phase != "running" {
+		p.mu.Unlock()
+		return
 	}
+	v := p.disk.Sample(p.assign.Spec.Resources, used, now)
 	p.mu.Unlock()
-	if over {
-		p.logf("over its disk limit", "used", used, "limit", limit)
-		go p.reportRetrying(context.WithoutCancel(ctx), proto.RunEvent{Type: proto.EvDiskExceeded,
-			Data: map[string]any{"usedBytes": used, "limitBytes": limit}})
+	switch v.Step {
+	case disklimit.WentOver:
+		p.logf(fmt.Sprintf("over its disk limit; stopping in %s unless it drops below", v.Remaining.Round(time.Second)),
+			"used", used, "limit", v.Limit, "grace", v.Grace)
+	case disklimit.BackUnder:
+		p.logf("back under its disk limit", "used", used, "limit", v.Limit)
+	case disklimit.Exceeded:
+		p.logf("over its disk limit", "used", used, "limit", v.Limit, "grace", v.Grace, "ceiling", v.Ceiling)
+		go p.reportRetrying(context.WithoutCancel(ctx), proto.RunEvent{Type: proto.EvDiskExceeded, Data: v.EventData(used)})
 	}
 }
 
