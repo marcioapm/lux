@@ -233,13 +233,32 @@ func (h *candidateHost) clone() *candidateHost {
 	return &c
 }
 
+// usageOf is what a placement reserving res holds on its host.
+func usageOf(res spec.Resources) freeVec {
+	return freeVec{res.CPUs, int64(res.Memory), int64(res.Disk), 1}
+}
+
+// reserve counts v as used on h.
+func (h *candidateHost) reserve(v freeVec) {
+	h.changed()
+	h.UsedCPUs += v.CPUs
+	h.UsedMem += v.Memory
+	h.UsedDisk += v.Disk
+	h.UsedRuns += v.Runs
+}
+
+// release stops counting v as used on h.
+func (h *candidateHost) release(v freeVec) {
+	h.changed()
+	h.UsedCPUs -= v.CPUs
+	h.UsedMem -= v.Memory
+	h.UsedDisk -= v.Disk
+	h.UsedRuns -= v.Runs
+}
+
 // remove simulates sp's resources and tenancy released from h.
 func (h *candidateHost) remove(sp spotPlacement) {
-	h.changed()
-	h.UsedCPUs -= sp.Res.CPUs
-	h.UsedMem -= int64(sp.Res.Memory)
-	h.UsedDisk -= int64(sp.Res.Disk)
-	h.UsedRuns--
+	h.release(usageOf(sp.Res))
 	if i := slices.Index(h.Tenants, sp.TenantID); i >= 0 {
 		h.Tenants = slices.Delete(h.Tenants, i, i+1)
 	}
@@ -270,20 +289,14 @@ func newHostSim(h *candidateHost) *hostSim {
 }
 
 func (s *hostSim) remove(sp spotPlacement) {
-	s.h.UsedCPUs -= sp.Res.CPUs
-	s.h.UsedMem -= int64(sp.Res.Memory)
-	s.h.UsedDisk -= int64(sp.Res.Disk)
-	s.h.UsedRuns--
+	s.h.release(usageOf(sp.Res))
 	if s.tenants[sp.TenantID]--; s.tenants[sp.TenantID] == 0 {
 		s.present--
 	}
 }
 
 func (s *hostSim) restore(sp spotPlacement) {
-	s.h.UsedCPUs += sp.Res.CPUs
-	s.h.UsedMem += int64(sp.Res.Memory)
-	s.h.UsedDisk += int64(sp.Res.Disk)
-	s.h.UsedRuns++
+	s.h.reserve(usageOf(sp.Res))
 	if s.tenants[sp.TenantID]++; s.tenants[sp.TenantID] == 1 {
 		s.present++
 	}
@@ -330,10 +343,7 @@ func (h *candidateHost) forRun(runID string) *candidateHost {
 		return h
 	}
 	c := h.clone()
-	c.UsedCPUs -= extra.CPUs
-	c.UsedMem -= extra.Memory
-	c.UsedDisk -= extra.Disk
-	c.UsedRuns -= extra.Runs
+	c.release(extra)
 	return c
 }
 
@@ -353,15 +363,11 @@ func pledgeExtra(h *candidateHost, runID string, res spec.Resources) freeVec {
 }
 
 func (h *candidateHost) addPledge(runID string, extra freeVec) {
-	h.changed()
 	if h.Pledges == nil {
 		h.Pledges = map[string]freeVec{}
 	}
 	h.Pledges[runID] = extra
-	h.UsedCPUs += extra.CPUs
-	h.UsedMem += extra.Memory
-	h.UsedDisk += extra.Disk
-	h.UsedRuns += extra.Runs
+	h.reserve(extra)
 }
 
 func (h *candidateHost) dropPledge(runID string) {
@@ -370,11 +376,7 @@ func (h *candidateHost) dropPledge(runID string) {
 		return
 	}
 	delete(h.Pledges, runID)
-	h.changed()
-	h.UsedCPUs -= extra.CPUs
-	h.UsedMem -= extra.Memory
-	h.UsedDisk -= extra.Disk
-	h.UsedRuns -= extra.Runs
+	h.release(extra)
 }
 
 // loadPledges counts each pledge's extra reservation (pledgeExtra) as used

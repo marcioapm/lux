@@ -367,10 +367,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 			return nil, err
 		}
 		if h := byID[hostID]; h != nil {
-			h.UsedCPUs += sp.Res.CPUs
-			h.UsedMem += int64(sp.Res.Memory)
-			h.UsedDisk += int64(sp.Res.Disk)
-			h.UsedRuns++
+			h.reserve(usageOf(sp.Res))
 			h.Tenants = append(h.Tenants, tenantID)
 			if spot {
 				sp.TenantID = tenantID

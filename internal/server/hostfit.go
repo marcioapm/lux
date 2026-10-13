@@ -104,11 +104,7 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 }
 
 func reserveHost(h *candidateHost, r pendingRun) {
-	h.changed()
-	h.UsedCPUs += r.Spec.Resources.CPUs
-	h.UsedMem += int64(r.Spec.Resources.Memory)
-	h.UsedDisk += int64(r.Spec.Resources.Disk)
-	h.UsedRuns++
+	h.reserve(usageOf(r.Spec.Resources))
 	h.Tenants = append(h.Tenants, r.TenantID)
 }
 
