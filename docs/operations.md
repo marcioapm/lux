@@ -405,7 +405,7 @@ curl -fsS https://luxd.example/runner/v1/bootstrap.sh | sudo env \
 | `--memory` | MemTotal | The machine's gross memory, offered to the scheduler: Runs ask in these terms and get their share after headroom ([how](concepts.md#memory-the-hosts-terms-scaled-to-what-linux-sees)). An EC2 host luxd launches gets its instance type's memory. Also `LUX_RUNNER_MEMORY`. |
 | `--memory-headroom` | 512 MiB | Bytes of MemTotal kept from Runs for the kernel and the host. Each Run's container gets `resources.memory × min(1, (MemTotal − headroom) / --memory)`. The runner refuses to start if it leaves nothing. Also `LUX_RUNNER_MEMORY_HEADROOM`. |
 | `--disk` | not reserved | Bytes of disk the scheduler reserves Runs' `resources.disk` from. Without it, disk is not reserved (Runs still stop at their own limit). Set it to the space under `/var/lib/containers`, more to overcommit. With `--disk-headroom`, the host's nominal disk instead (below). Also `LUX_RUNNER_DISK`. |
-| `--disk-headroom` | not given | Bytes of the `--data-dir` filesystem kept from Runs. Given with `--disk` (0 is allowed), `--disk` is nominal and each Run's disk limit is `resources.disk × min(1, (capacity − headroom) / --disk)`, in whole bytes rounded down; the grace and the ceiling count from that limit. Capacity is the filesystem's used plus unprivileged-free blocks (statfs; blocks reserved for root count in neither), read once at start, never the free space. The runner refuses to start if the headroom leaves nothing, and logs the factor. Only such a runner advertises `disk-scale`, which shaped pools require. Not given: limits are `resources.disk` as before. Also `LUX_RUNNER_DISK_HEADROOM`. |
+| `--disk-headroom` | not given | Bytes of the `--data-dir` filesystem kept from Runs. Given with `--disk` (0 is allowed), `--disk` is nominal and each Run's disk limit is `resources.disk × min(1, (capacity − headroom) / --disk)`, in whole bytes rounded down; the grace and the ceiling count from that limit. Capacity is the filesystem's used plus unprivileged-free blocks (statfs; blocks reserved for root count in neither), read once at start, never the free space. A grown volume takes effect only after a runner restart; adopted Runs also use the factor computed at that restart. The runner refuses to start if the headroom leaves nothing, and logs the factor. Only such a runner advertises `disk-scale`, which shaped pools require. Not given: limits are `resources.disk` as before. Also `LUX_RUNNER_DISK_HEADROOM`. |
 | `--usage-every` | `15s` | How often each Run's disk use is sampled, and its disk limit and `diskGrace` checked. The grace is counted in these samples, so a Run over its disk is stopped between `diskGrace` and `diskGrace` plus this interval from the first sample over. |
 | `--host-ttl` | `24h` | How long uploaded local copies are kept, and images lux pulled or built after their last use ([images on hosts](runspec.md#images-on-hosts)). |
 | `--image-disk-high` | `80` | Percent use of the disk holding Podman's storage (its graph root, `/var/lib/containers`) over which lux's unused images are removed, least recently used first, until under it. `0` turns it off. Images the host had before lux are never removed. |
@@ -556,6 +556,20 @@ the shape's own: it comes from the launch template's volume, which no
 instance type describes. Rolling back to a luxd
 without shapes leaves the columns in place and ignores them; Runs keep
 the resources they were given.
+
+For a static shaped pool, start each host's runner by hand with the shape's
+nominal capacity. For the shape above:
+
+```bash
+lux-runner --cpus 8 --memory 34359738368 --disk 171798691840 --disk-headroom 10737418240
+```
+
+Memory, disk and disk headroom are plain byte values, not values with unit
+suffixes. The advertised CPUs, memory and disk must equal the shape exactly;
+a host with different values is skipped for shaped Runs. Use the shape's
+`diskHeadroom` (10 GiB by default), although equality of headroom is not
+enforced on hand-started hosts: any explicit headroom that allows the runner
+to start enables `disk-scale`.
 
 ## EC2 pools
 
