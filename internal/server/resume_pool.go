@@ -305,6 +305,7 @@ func checkPoolFit(f poolFacts, name, poolID string, sp spec.RunSpec) error {
 	}
 	r := pendingRun{Spec: sp, PoolID: &poolID}
 	var best []fitBlocker
+	fewest := 0
 	for i, pr := range f.Profiles {
 		h := &candidateHost{ID: fmt.Sprint("profile-", i), PoolID: poolID, Pool: name, Labels: pr.Labels, Capacity: pr.Capacity,
 			Connected: true, Caps: []string{proto.CapSyncModes}}
@@ -324,9 +325,9 @@ func checkPoolFit(f poolFacts, name, poolID string, sp spec.RunSpec) error {
 			return nil
 		}
 		switch {
-		case best == nil || len(blockers) < len(best):
-			best = blockers
-		case len(blockers) == len(best):
+		case best == nil || len(blockers) < fewest:
+			best, fewest = blockers, len(blockers)
+		case len(blockers) == fewest:
 			best = append(best, blockers...)
 		}
 	}

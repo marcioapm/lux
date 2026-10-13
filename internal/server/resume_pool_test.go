@@ -243,6 +243,23 @@ func TestResumeIntoAnotherPoolRefusals(t *testing.T) {
 				setSpec(t, f.s, f.id, "{sandbox}", `{"nestedContainers":true}`)
 				return poolID(t, f.s, "shared", "")
 			}},
+		{name: "three hosts, each missing a different requirement: every reason", code: "pool_unfit",
+			says: "pool trio cannot take this Run: it needs 24 cpus; its largest host has 32; none of its hosts has the labels placement.requires names; none of its hosts offers nested containers (lux-runner --nested)",
+			res:  &resumeResources{CPUs: f64(24)},
+			setup: func(t *testing.T, f fixture) string {
+				ctx := context.Background()
+				for _, h := range []struct{ id, capacity, labels string }{
+					{"t-cpu", `{"runs":10,"cpus":16,"memory":68719476736}`, `{"gpu":"a100","nested":"true"}`},
+					{"t-gpu", `{"runs":10,"cpus":32,"memory":68719476736}`, `{"nested":"true"}`},
+					{"t-nest", `{"runs":10,"cpus":32,"memory":68719476736}`, `{"gpu":"a100"}`},
+				} {
+					readyHost(t, f.s, h.id, "trio", "t1", false)
+					execSQL(t, f.s, ctx, `UPDATE hosts SET capacity = $2, labels = $3, arch = 'amd64', registered_at = now() WHERE id = $1`, h.id, h.capacity, h.labels)
+				}
+				setSpec(t, f.s, f.id, "{placement,requires}", `{"gpu":"a100"}`)
+				setSpec(t, f.s, f.id, "{sandbox}", `{"nestedContainers":true}`)
+				return poolID(t, f.s, "trio", "t1")
+			}},
 		{name: "required labels the ec2 template's registrations lack", code: "pool_unfit",
 			says: "pool burst cannot take this Run: none of its hosts has the labels placement.requires names",
 			setup: func(t *testing.T, f fixture) string {
@@ -433,12 +450,20 @@ func TestResumeIntoAnotherPoolPlannerHost(t *testing.T) {
 				setSpec(t, s, id, "{placement,requires}", `{"arch":"amd64"}`)
 				return "pool_intel"
 			}},
-		{name: "an instance type with no runnable arch: the probe host keeps no previous host's", res: &resumeResources{CPUs: f64(24)},
+		{name: "an instance type with no architectures: the probe host keeps no previous host's", res: &resumeResources{CPUs: f64(24)},
 			says: "pool intel cannot take this Run: it needs 24 cpus; its largest host has 32; none of its hosts has the labels placement.requires names",
 			setup: func(t *testing.T, s *Server, id string) string {
 				probeArchPool(t, s)
 				execSQL(t, s, context.Background(), `UPDATE instance_types SET architectures = '{}' WHERE instance_type = 'm7i.8xlarge'`)
 				setSpec(t, s, id, "{placement,requires}", `{"arch":"arm64"}`)
+				return "pool_intel"
+			}},
+		{name: "an instance type whose only arch no runner runs: the probe host has none", res: &resumeResources{CPUs: f64(24)},
+			says: "pool intel cannot take this Run: none of its hosts has the labels placement.requires names",
+			setup: func(t *testing.T, s *Server, id string) string {
+				probeArchPool(t, s)
+				execSQL(t, s, context.Background(), `UPDATE instance_types SET architectures = '{i386}' WHERE instance_type = 'm7i.8xlarge'`)
+				setSpec(t, s, id, "{placement,requires}", `{"arch":"386"}`)
 				return "pool_intel"
 			}},
 		{name: "registrations smaller than the instance type: fits the probe host", res: &resumeResources{CPUs: f64(12)},
