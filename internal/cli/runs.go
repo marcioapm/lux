@@ -929,6 +929,8 @@ event; one that fails leaves its checkout as it was.
 memory apply, larger or smaller. A smaller disk applies only if the Run's
 saved state fits it with headroom; otherwise the Run keeps its disk, still
 resumes, and lux says why on stderr ("disk kept: ...").
+--disk-grace sets how long it may stay over its disk before it is stopped
+from now on (0s to 1h; 0s stops it on the first sample over).
 
 --pool moves the Run to another pool (its name, the tenant's pool before the
 platform's, or its id) from this resume on; its saved state follows, as on
@@ -939,10 +941,7 @@ containers, required labels, a size beyond its hosts), changing nothing.
 
 --dry-run runs every check the resume would and changes nothing: "valid", or
 the error the resume would meet. Secret values may be left out. A running
-Run is checked as if it were stopped ("state unchecked" on stderr).
-
---disk-grace sets how long the Run may stay over its disk before it is
-stopped (0 to 1h; 0 stops it on the first sample over).`,
+Run is checked as if it were stopped ("state unchecked" on stderr).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)

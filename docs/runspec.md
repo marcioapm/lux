@@ -148,19 +148,24 @@ as `submittedBy` on `GET /v1/runs/{id}`.
   snapshotted as usual, and ends `failed` with reason `disk limit
   exceeded`. A sample at or under the limit restarts the count, so a
   brief overshoot (image layers extracted, a large temporary file, a cache
-  restored then cleaned) is not stopped. **At twice its `disk`, a Run is
-  stopped at once, whatever its grace**: the host's disk is shared, and a
-  write left unbounded for the whole grace could fill it for every other
-  Run. With `diskGrace` `0` the Run is stopped on the first sample over.
-  Unset, it is luxd's default (`LUX_DEFAULT_DISK_GRACE`, `0` unless an
-  operator changed it), which luxd writes into the Run's stored spec at
-  submit; an explicit `0s` stands over a non-zero default. Each placement
-  (a resume, a move) starts its grace from zero. A Run can write about
-  one sampling interval's worth past the limit (or the ceiling) before it
-  is stopped. The event's data carries `usedBytes`, `limitBytes`,
-  `graceSeconds` and `ceiling` (`true` when twice the limit stopped it
-  before its grace ran out). Its state is kept: resume it with a larger
-  limit (`lux resume <run> --disk 40Gi`, or `resources.disk` in the
+  restored then cleaned) is not stopped. The grace is counted in samples,
+  so a Run over its disk is stopped between `diskGrace` and `diskGrace`
+  plus one interval after it went over; a sample whose measurement failed
+  counts neither way. **At its ceiling, currently twice its `disk`, a Run
+  is stopped at once, whatever its grace**: the host's disk is shared, and
+  a write left unbounded for the whole grace could fill it for every other
+  Run. The ceiling stands in for a guard on the host's free space, and
+  will be replaced by one. With `diskGrace` `0` the Run is stopped on the
+  first sample over. Unset, it is luxd's default
+  (`LUX_DEFAULT_DISK_GRACE`, `0` unless an operator changed it), which
+  luxd writes into the Run's stored spec at submit; an explicit `0s`
+  stands over a non-zero default. Each placement (a resume, a move)
+  starts its grace from zero. Between two samples a Run can write about
+  one interval's worth past its ceiling before it is stopped. The event's
+  data carries `usedBytes`, `limitBytes`, `graceSeconds` and `ceiling`
+  (`true` when the sample that stopped it was at the ceiling, whether or
+  not its grace had also run out). Its state is kept: resume it with a
+  larger limit (`lux resume <run> --disk 40Gi`, or `resources.disk` in the
   resume request) or a longer grace (`--disk-grace`,
   `resources.diskGrace`), or it is stopped again. tmpfs mounts (with
   `readOnlyRoot`) count against memory, not disk.
