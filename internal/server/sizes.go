@@ -471,12 +471,13 @@ const raisedForSavedState = "saved state"
 
 // holdSavedState is the size a shaped resize to e gives a Run whose disk
 // it shrinks: e when the Run's saved state fits e's disk with
-// diskShrinkFloor's headroom, else the smallest larger size whose disk
-// does. Larger sizes cover every dimension e does, so what the resume
-// asked for is never undercut. Without a final measurement nothing says
-// which size holds the state: refused, as diskShrinkRefusal's unmeasured
-// path always refused a shaped shrink. peak is the measurement a raise
-// was made for (nil: none).
+// diskShrinkFloor's headroom, else the smallest size whose disk does. That
+// size has more disk than e, so it is larger than e in every dimension
+// (the ladder halves all three together): what the resume asked for is
+// never undercut. Without a final measurement nothing says which size
+// holds the state: refused, as diskShrinkRefusal's unmeasured path always
+// refused a shaped shrink. peak is the measurement a raise was made for
+// (nil: none).
 func holdSavedState(ctx context.Context, tx pgx.Tx, runID, pool string, m *sizing.Model, e sizing.Entry) (sizing.Entry, *int64, error) {
 	reason, peak, err := diskShrinkRefusal(ctx, tx, runID, e.Disk)
 	if err != nil || reason == "" {
@@ -487,7 +488,7 @@ func holdSavedState(ctx context.Context, tx pgx.Tx, runID, pool string, m *sizin
 	}
 	ladder := m.List()
 	for _, c := range ladder {
-		if c.CPUs > e.CPUs && int64(c.Disk) >= diskShrinkFloor(*peak) {
+		if int64(c.Disk) >= diskShrinkFloor(*peak) {
 			return c, peak, nil
 		}
 	}

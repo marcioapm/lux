@@ -116,6 +116,8 @@ func TestResumeShapedRaise(t *testing.T) {
 		// Exactly the floor: 32 GiB needs 40, m-2's disk.
 		{"state at the floor", "m-4-arm64", 32 * gib, resumeResources{Size: "m-2-arm64"}, "m-2-arm64", ""},
 		{"one byte over the floor", "m-4-arm64", 32*gib + 1, resumeResources{Size: "m-2-arm64"}, "m-4-arm64", "m-2-arm64"},
+		// 32 GiB needs 40: raised past m-1 to m-2, whose disk is exactly that.
+		{"raised to a size at the floor", "m-4-arm64", 32 * gib, resumeResources{Size: "m-1-arm64"}, "m-2-arm64", "m-1-arm64"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
