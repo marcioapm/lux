@@ -21,6 +21,8 @@ export interface SpecResources {
   pids?: number;
   /** A shaped pool's size; resolved at submit, never stored in the spec. */
   size?: string;
+  /** A Go duration ("5m0s"): how long it may stay over disk. */
+  diskGrace?: string;
 }
 
 export interface RunSpec {

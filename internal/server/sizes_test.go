@@ -23,11 +23,10 @@ import (
 var testShape = PoolShape{Family: "m", Arch: "arm64", CPUs: 8, Memory: spec.Bytes(32 * gib), Disk: spec.Bytes(160 * gib), MinCPUs: 0.5, DefaultCPUs: 2}
 
 // sized is the resources of ladder entry cpus of testShape, with the
-// default pids submit adds.
+// default pids and diskGrace submit adds.
 func sized(cpus float64) spec.Resources {
 	f := cpus / testShape.CPUs
-	return spec.Resources{CPUs: cpus, Memory: spec.Bytes(float64(testShape.Memory) * f), Disk: spec.Bytes(float64(testShape.Disk) * f),
-		Pids: int64(spec.BuiltinDefaults.Pids)}
+	return withPids(spec.Resources{CPUs: cpus, Memory: spec.Bytes(float64(testShape.Memory) * f), Disk: spec.Bytes(float64(testShape.Disk) * f)})
 }
 
 // shapedPool adds a platform static pool whose id and name are id, with
@@ -139,7 +138,7 @@ func TestShapedSubmitIgnoresGlobalDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := spec.Resources{CPUs: 1, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib), Pids: 512}
+	want := spec.Resources{CPUs: 1, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib), Pids: 512, DiskGrace: spec.SetDuration(0)}
 	if got := storedResources(t, s, out.Body.ID); got != want {
 		t.Errorf("cpu-only on a shaped pool: %+v, want m-1 %+v", got, want)
 	}
@@ -147,7 +146,7 @@ func TestShapedSubmitIgnoresGlobalDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = spec.Resources{CPUs: 2, Memory: spec.Bytes(8 * gib), Disk: spec.Bytes(40 * gib), Pids: 512}
+	want = spec.Resources{CPUs: 2, Memory: spec.Bytes(8 * gib), Disk: spec.Bytes(40 * gib), Pids: 512, DiskGrace: spec.SetDuration(0)}
 	if got := storedResources(t, s, out.Body.ID); got != want {
 		t.Errorf("nothing on a shaped pool: %+v, want the pool's default m-2 %+v", got, want)
 	}
@@ -155,7 +154,7 @@ func TestShapedSubmitIgnoresGlobalDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = spec.Resources{CPUs: 1, Memory: spec.Bytes(30 * gib), Disk: spec.Bytes(150 * gib), Pids: 512}
+	want = spec.Resources{CPUs: 1, Memory: spec.Bytes(30 * gib), Disk: spec.Bytes(150 * gib), Pids: 512, DiskGrace: spec.SetDuration(0)}
 	if got := storedResources(t, s, out.Body.ID); got != want {
 		t.Errorf("cpu-only on an unshaped pool: %+v, want luxd's defaults %+v", got, want)
 	}
@@ -475,7 +474,7 @@ func TestShapeRemovedOrChanged(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := spec.Resources{CPUs: 8, Memory: spec.Bytes(16 * gib), Disk: spec.Bytes(80 * gib), Pids: int64(spec.BuiltinDefaults.Pids)}
+		want := withPids(spec.Resources{CPUs: 8, Memory: spec.Bytes(16 * gib), Disk: spec.Bytes(80 * gib)})
 		if got := storedResources(t, s, id); got != want {
 			t.Errorf("stored %+v, want c-8's %+v", got, want)
 		}
@@ -501,7 +500,7 @@ func TestShapeRemovedOrChanged(t *testing.T) {
 		if got := getSizing(t, s, key, id); !reflect.DeepEqual(got, &RunSizing{Requested: asked}) {
 			t.Errorf("GET sizing %+v, want the request alone", got)
 		}
-		want := spec.Resources{CPUs: 4, Memory: spec.Bytes(32 * gib), Disk: spec.Bytes(160 * gib), Pids: int64(spec.BuiltinDefaults.Pids)}
+		want := withPids(spec.Resources{CPUs: 4, Memory: spec.Bytes(32 * gib), Disk: spec.Bytes(160 * gib)})
 		dry, err := resumeReq(s, id, resumeRequest{ValidateOnly: true})
 		if err != nil {
 			t.Fatal(err)
@@ -804,6 +803,42 @@ func TestResumeShapedSize(t *testing.T) {
 			}
 			if requested, size := runSizing(t, s, id); size != c.size || requested != `{"size": "m-4-arm64"}` {
 				t.Errorf("stored requested %s size %q: the submit's request stays, the size is the resume's", requested, size)
+			}
+		})
+	}
+}
+
+// A resume's diskGrace in a shaped pool is applied beside a size, and
+// alone keeps the Run's size: the grace is no size dimension.
+func TestResumeShapedDiskGrace(t *testing.T) {
+	grace := spec.SetDuration(5 * time.Minute)
+	for _, c := range []struct {
+		name string
+		res  resumeResources
+		want spec.Resources
+	}{
+		{"alone", resumeResources{DiskGrace: &spec.Duration{Duration: 5 * time.Minute}}, sized(4)},
+		{"with a size", resumeResources{Size: "m-8-arm64", DiskGrace: &spec.Duration{Duration: 5 * time.Minute}}, sized(8)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			shapedPool(t, s, "shaped", &testShape)
+			id := stoppedShaped(t, s, "shaped", spec.Resources{Size: "m-4-arm64"}, i64(gib))
+			res := c.res
+			out, err := resumeReq(s, id, resumeRequest{Resources: &res})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := c.want
+			want.DiskGrace = grace
+			if got := storedResources(t, s, id); got != want {
+				t.Errorf("stored %+v, want %+v", got, want)
+			}
+			if rz := out.Body.Resize; rz == nil || rz.Applied != want {
+				t.Errorf("resize %+v, want applied %+v", rz, want)
+			}
+			if _, size := runSizing(t, s, id); size != fmt.Sprintf("m-%g-arm64", c.want.CPUs) {
+				t.Errorf("size %q, want the size of %+v", size, c.want)
 			}
 		})
 	}

@@ -1636,10 +1636,11 @@ type resumeGit struct {
 }
 
 type resumeResources struct {
-	Size   string      `json:"size,omitempty" doc:"A size of the Run's pool (after placement.poolId, the new pool's): its cpus, memory and disk. Not with cpus, memory or disk (422 size_conflict); 422 unknown_size, or size_unsupported on an unshaped pool. In a shaped pool, cpus, memory and disk are rounded up to a size as at submit; a size with less disk than the Run has must hold its saved state with headroom, else 422 size_below_saved_state."`
-	CPUs   *float64    `json:"cpus,omitempty" doc:"A new CPU quota, larger or smaller (0.5 is half a CPU). Absent: unchanged; 0 or less: 422 invalid_spec."`
-	Memory *spec.Bytes `json:"memory,omitempty" doc:"A new memory size, larger or smaller, in its host's terms as at submit. Absent: unchanged; 0 or less: 422 invalid_spec."`
-	Disk   spec.Bytes  `json:"disk,omitempty" doc:"A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if the placement that took the snapshot it resumes from reported its final disk use (it exited, was not lost) and the disk is at least its peak disk use plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."`
+	Size      string         `json:"size,omitempty" doc:"A size of the Run's pool (after placement.poolId, the new pool's): its cpus, memory and disk. Not with cpus, memory or disk (422 size_conflict); 422 unknown_size, or size_unsupported on an unshaped pool. In a shaped pool, cpus, memory and disk are rounded up to a size as at submit; a size with less disk than the Run has must hold its saved state with headroom, else 422 size_below_saved_state."`
+	CPUs      *float64       `json:"cpus,omitempty" doc:"A new CPU quota, larger or smaller (0.5 is half a CPU). Absent: unchanged; 0 or less: 422 invalid_spec."`
+	Memory    *spec.Bytes    `json:"memory,omitempty" doc:"A new memory size, larger or smaller, in its host's terms as at submit. Absent: unchanged; 0 or less: 422 invalid_spec."`
+	Disk      spec.Bytes     `json:"disk,omitempty" doc:"A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if the placement that took the snapshot it resumes from reported its final disk use (it exited, was not lost) and the disk is at least its peak disk use plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."`
+	DiskGrace *spec.Duration `json:"diskGrace,omitempty" doc:"A new disk grace (resources.diskGrace): how long the Run may stay over its disk before it is stopped, 0 to 1h. Absent: unchanged; 0: stopped on the first sample over; negative or over 1h: 422 invalid_spec. Every placement starts its grace from zero."`
 }
 
 // check refuses what submit would (422 invalid_spec) and returns the
@@ -1661,6 +1662,9 @@ func (r resumeResources) check() (spec.Resources, error) {
 		}
 	}
 	req.Disk = r.Disk
+	if r.DiskGrace != nil {
+		req.DiskGrace = spec.SetDuration(r.DiskGrace.Duration)
+	}
 	if problems = append(problems, req.Problems()...); len(problems) > 0 {
 		return req, invalidSpec(&spec.ValidationError{Problems: problems})
 	}
@@ -2105,6 +2109,9 @@ func resizeRun(ctx context.Context, tx pgx.Tx, runID string, cur spec.Resources,
 	if req.Disk != 0 {
 		rz.Applied.Disk = req.Disk
 	}
+	if req.DiskGrace.Set {
+		rz.Applied.DiskGrace = req.DiskGrace
+	}
 	if req.Disk > 0 && req.Disk < cur.Disk {
 		reason, peak, err := diskShrinkRefusal(ctx, tx, runID, req.Disk)
 		if err != nil {
@@ -2119,8 +2126,12 @@ func resizeRun(ctx context.Context, tx pgx.Tx, runID string, cur spec.Resources,
 		}
 	}
 	if rz.Applied != cur {
+		set := map[string]any{"cpus": rz.Applied.CPUs, "memory": rz.Applied.Memory, "disk": rz.Applied.Disk}
+		if rz.Applied.DiskGrace.Set {
+			set["diskGrace"] = rz.Applied.DiskGrace
+		}
 		if _, err := tx.Exec(ctx, `UPDATE runs SET spec = jsonb_set(spec, '{resources}', coalesce(spec->'resources', '{}') || $2::jsonb) WHERE id = $1`,
-			runID, map[string]any{"cpus": rz.Applied.CPUs, "memory": rz.Applied.Memory, "disk": rz.Applied.Disk}); err != nil {
+			runID, set); err != nil {
 			return nil, err
 		}
 	}

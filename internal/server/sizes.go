@@ -437,6 +437,11 @@ func resizeShaped(ctx context.Context, tx pgx.Tx, runID, pool string, cur spec.R
 	e := got.Resolved
 	rz := &Resize{Requested: asked, Applied: cur, Size: e.Name}
 	rz.Applied.CPUs, rz.Applied.Memory, rz.Applied.Disk = e.CPUs, e.Memory, e.Disk
+	set := map[string]any{"cpus": e.CPUs, "memory": e.Memory, "disk": e.Disk}
+	if asked.DiskGrace.Set {
+		rz.Applied.DiskGrace = asked.DiskGrace
+		set["diskGrace"] = asked.DiskGrace
+	}
 	if e.Disk < cur.Disk {
 		// TODO(sizes phase 4): round up to the smallest size whose disk
 		// fits the saved state, instead of refusing.
@@ -450,7 +455,7 @@ func resizeShaped(ctx context.Context, tx pgx.Tx, runID, pool string, cur spec.R
 	}
 	if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = $3,
 			spec = jsonb_set(spec, '{resources}', coalesce(spec->'resources', '{}') || $2::jsonb) WHERE id = $1`,
-		runID, map[string]any{"cpus": rz.Applied.CPUs, "memory": rz.Applied.Memory, "disk": rz.Applied.Disk}, e.Name); err != nil {
+		runID, set, e.Name); err != nil {
 		return nil, err
 	}
 	return rz, nil
@@ -509,8 +514,10 @@ func resumeSize(ctx context.Context, tx pgx.Tx, z resumeSizing, req *resumeResou
 	if err != nil {
 		return nil, err
 	}
+	// diskGrace is no size dimension: a resume asking only for it keeps
+	// the Run's size.
 	switch {
-	case asked != (spec.Resources{}):
+	case sizeRequestOf(asked) != (SizeRequest{}):
 		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, sizeRequestOf(asked).model())
 	case z.moving(), z.resolved != "" && !sizeCurrent(m, z.resolved, z.cur):
 		held := sizeRequestOf(spec.Resources{CPUs: z.cur.CPUs, Memory: z.cur.Memory, Disk: z.cur.Disk})
