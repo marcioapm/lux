@@ -150,24 +150,22 @@ as `submittedBy` on `GET /v1/runs/{id}`.
   brief overshoot (image layers extracted, a large temporary file, a cache
   restored then cleaned) is not stopped. The grace is counted in samples,
   so a Run over its disk is stopped between `diskGrace` and `diskGrace`
-  plus one interval from the first sample over. A sample whose
-  measurement failed never restarts the count; it still counts if
-  what was measured is already over the limit. While a probe keeps
-  failing, a Run is held to its disk only by what could be measured, so
-  a Run whose disk cannot be measured at all is not stopped for it; the
-  runner logs that once per placement, with the error, and the host-wide
-  backstop is the planned guard on the host's free space.
-  **At its ceiling, currently twice its `disk`, a Run
-  is stopped at once, whatever its grace**: the host's disk is shared, and
-  a write left unbounded for the whole grace could fill it for every other
-  Run. The ceiling stands in for a guard on the host's free space, and
-  will be replaced by one. With `diskGrace` `0` the Run is stopped on the
-  first sample over. Unset, it is luxd's default
+  plus one interval from the first sample over. With `diskGrace` `0` the
+  Run is stopped on the first sample over. Unset, it is luxd's default
   (`LUX_DEFAULT_DISK_GRACE`, `0` unless an operator changed it), which
   luxd writes into the Run's stored spec at submit; an explicit `0s`
   stands over a non-zero default. Each placement (a resume, a move)
-  starts its grace from zero. Between two samples a Run can write about
-  one interval's worth past its ceiling before it is stopped. The event's
+  starts its grace from zero.
+  **At its ceiling, currently twice its `disk`, a Run
+  is stopped at once, whatever its grace**: the host's disk is shared, and
+  a write left unbounded for the whole grace could fill it for every other
+  Run. Between two samples a Run can write about one interval's worth past
+  its ceiling. The ceiling stands in for a guard on the host's free space,
+  and will be replaced by one.
+  A sample whose measurement failed never restarts the count; it still
+  counts if what was measured is already over the limit, so a Run whose
+  disk cannot be measured at all is not stopped for it; the runner logs
+  a failing probe once per placement, with the error. The event's
   data carries `usedBytes`, `limitBytes`, `graceSeconds` and `ceiling`
   (`true` when the sample that stopped it was at the ceiling, whether or
   not its grace had also run out). Its state is kept: resume it with a
