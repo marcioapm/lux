@@ -52,6 +52,14 @@ type candidateHost struct {
 	Connected bool
 	// Caps: the optional features its runner said it has (hosts.capabilities).
 	Caps []string
+	// CapEpoch: hosts.capacity_epoch, bumped by every runner hello.
+	CapEpoch int64
+	// Spots: its live spot placements, oldest first (spot.go).
+	Spots []spotPlacement
+	// Pledges: per normal Run, the extra reservation its spot pledge here
+	// holds beyond its victims' live usage (spot.go).
+	Pledges map[string]freeVec
+	age     *capacityAge
 }
 
 type pendingRun struct {
@@ -80,6 +88,11 @@ type pendingRun struct {
 // placed do not hide the ones behind them.
 func (s *Server) scheduleOnce(ctx context.Context) error {
 	var after cursorPos
+	defer func() {
+		if err := s.signalReclaims(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("spot reclaim", "err", err)
+		}
+	}()
 	for range 50 {
 		next, more, err := s.scheduleBatch(ctx, after)
 		if err != nil || !more {
@@ -164,10 +177,17 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 				return err
 			}
 		}
+		if err := s.dropPledges(ctx, tx, hostIDs); err != nil {
+			return err
+		}
 		hosts, err := s.candidateHosts(ctx, tx, hostIDs)
 		if err != nil {
 			return err
 		}
+		// Queued normal demand, read once for the batch's first spot Run.
+		var demand []pendingRun
+		demandRead, demandOK := false, false
+		now := s.now()
 		for _, it := range items {
 			r := it.r
 			// Secret values live only in memory. If this luxd does not hold
@@ -201,9 +221,37 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 					continue
 				}
 			}
-			h, wait, err := s.pickHost(ctx, tx, r, hosts)
-			if err != nil {
-				return err
+			var h *candidateHost
+			var wait string
+			if r.Spec.Spot {
+				if !demandRead {
+					if demand, demandOK, err = normalDemand(ctx, tx, hosts); err != nil {
+						return err
+					}
+					demandRead = true
+				}
+				if demandOK {
+					adm := spotAdmission(r, hosts, demand, now)
+					h, wait = adm.Host, spotWaitReason(adm.Blockers)
+				} else {
+					wait = spotWaitReason([]AdmissionBlocker{{Code: blockNormalPending}})
+				}
+			} else {
+				h, wait, err = s.pickHost(ctx, tx, r, hosts)
+				if err != nil {
+					return err
+				}
+				if h == nil && reclaimable(wait) && !hasPledge(hosts, r.ID) {
+					if vh, victims := reclaimPlan(r, hosts); vh != nil {
+						ok, err := pledge(ctx, tx, r, vh, victims)
+						if err != nil {
+							return err
+						}
+						if ok {
+							wait = reclaimWaitReason
+						}
+					}
+				}
 			}
 			if h == nil {
 				if err := s.noHost(ctx, tx, r, wait); err != nil {
@@ -218,9 +266,15 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			if failed {
 				continue
 			}
+			if h.age != nil {
+				h.age.observe(s.id+"/"+ageKey(h), now, freeOf(h))
+			}
 			notify = append(notify, h.ID)
 		}
-		return nil
+		for _, h := range hosts {
+			h.age.observe(s.id+"/"+ageKey(h), now, freeOf(h))
+		}
+		return saveCapacityAge(ctx, tx, hosts)
 	})
 	if err != nil {
 		return pos, false, err
@@ -266,7 +320,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	rows, err := tx.Query(ctx, `
 		SELECT h.id, h.tenant_id, coalesce(p.name, ''), coalesce(h.pool_id, ''), h.labels, h.capacity, coalesce(h.caches->'images', '[]'),
 			coalesce(h.caches->'gitMirrors', '[]'),
-			coalesce(p.shared AND p.tenant_id IS NULL, false), coalesce(p.retired, false), h.capabilities
+			coalesce(p.shared AND p.tenant_id IS NULL, false), coalesce(p.retired, false), h.capabilities, h.capacity_epoch
 		FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id
 		WHERE h.id = ANY($2) AND h.state = 'ready' AND NOT h.draining
 		  AND h.last_heartbeat > now() - $1::interval`,
@@ -279,7 +333,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	for rows.Next() {
 		h := &candidateHost{}
 		var images []string
-		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.PoolID, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired, &h.Caps); err != nil {
+		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.PoolID, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired, &h.Caps, &h.CapEpoch); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -289,27 +343,41 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 		byID[h.ID] = h
 	}
 	rows.Close()
-	used, err := tx.Query(ctx, `SELECT host_id, tenant_id, resources FROM placements
-		WHERE host_id = ANY($1) AND state IN `+livePlacementStates+``, lockedIDs)
+	used, err := tx.Query(ctx, `SELECT p.host_id, p.tenant_id, p.resources, p.id, p.run_id, coalesce(r.spec->>'spot', '') = 'true', coalesce(p.reclaim_for, '')
+		FROM placements p JOIN runs r ON r.id = p.run_id
+		WHERE p.host_id = ANY($1) AND p.state IN `+livePlacementStates+`
+		ORDER BY p.created_at, p.id`, lockedIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer used.Close()
 	for used.Next() {
 		var hostID, tenantID string
-		var res spec.Resources
-		if err := used.Scan(&hostID, &tenantID, &res); err != nil {
+		var sp spotPlacement
+		var spot bool
+		if err := used.Scan(&hostID, &tenantID, &sp.Res, &sp.ID, &sp.RunID, &spot, &sp.ReclaimFor); err != nil {
+			used.Close()
 			return nil, err
 		}
 		if h := byID[hostID]; h != nil {
-			h.UsedCPUs += res.CPUs
-			h.UsedMem += int64(res.Memory)
-			h.UsedDisk += int64(res.Disk)
+			h.UsedCPUs += sp.Res.CPUs
+			h.UsedMem += int64(sp.Res.Memory)
+			h.UsedDisk += int64(sp.Res.Disk)
 			h.UsedRuns++
 			h.Tenants = append(h.Tenants, tenantID)
+			if spot {
+				sp.TenantID = tenantID
+				h.Spots = append(h.Spots, sp)
+			}
 		}
 	}
-	return hosts, used.Err()
+	used.Close()
+	if err := used.Err(); err != nil {
+		return nil, err
+	}
+	if err := loadPledges(ctx, tx, lockedIDs, byID); err != nil {
+		return nil, err
+	}
+	return hosts, s.loadCapacityAge(ctx, tx, lockedIDs, byID)
 }
 
 // pickHost chooses where a Run goes. Hard constraints first (tenancy, pool,
@@ -319,10 +387,6 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 //
 // wait is a human-readable reason when no host is chosen.
 func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []*candidateHost) (*candidateHost, string, error) {
-	// Fail closed until aged admission and placement-local reclamation exist.
-	if r.Spec.Spot {
-		return nil, "spot admission is not yet available", nil
-	}
 	// Where is the snapshot we must resume from, and may another host use it?
 	var snapHost string
 	var snapUploaded, snapAvailable, snapHostCopy bool
@@ -361,7 +425,11 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 	}
 	var waiting waitCapacity
 	for _, h := range hosts {
-		if blockers := hostFit(r, h); len(blockers) != 0 {
+		if slices.ContainsFunc(h.Spots, func(sp spotPlacement) bool { return sp.ReclaimFor == r.ID && r.ID != "" }) {
+			reason = reclaimWaitReason
+			continue
+		}
+		if blockers := hostFit(r, h.forRun(r.ID)); len(blockers) != 0 {
 			waiting.add(blockers)
 			continue
 		}
@@ -534,7 +602,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		return err
 	}
 	reserveHost(h, r)
-	return nil
+	return s.releasePledge(ctx, tx, r.ID, h)
 }
 
 // foreignSnapshotReason: why a Run whose snapshot cannot be restored failed.

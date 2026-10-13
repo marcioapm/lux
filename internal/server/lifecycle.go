@@ -77,6 +77,13 @@ var movedStops = []string{"drain", "preempt", "migrate"}
 // stopTerminate is the stop reason of a terminate request.
 const stopTerminate = "terminate"
 
+// stopSpotReclaim is the stop reason of a spot placement reclaimed for a
+// normal Run; spotReclaimedReason is the terminated Run's state_reason.
+const (
+	stopSpotReclaim     = "spot-reclaim"
+	spotReclaimedReason = "spot capacity reclaimed for a normal Run"
+)
+
 // notResumedReason is the state_reason of a Run a move (stop) ended
 // because of its resumePolicy: failed (manual) or terminated (never).
 func notResumedReason(stop, policy string) string {
@@ -428,6 +435,8 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	switch {
 	case terminate || stopReason == stopTerminate:
 		next, reason = StateTerminated, "terminated"
+	case stopReason == stopSpotReclaim:
+		next, reason = StateTerminated, spotReclaimedReason
 	case stopReason == "timeout":
 		next, reason = StateFailed, "timeout"
 	case stopReason == "disk":

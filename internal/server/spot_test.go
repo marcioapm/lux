@@ -79,7 +79,7 @@ func TestSpotSchedulerFailsClosed(t *testing.T) {
 	}
 	var state, reason string
 	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r0'`, nil, &state, &reason)
-	if state != StateSubmitted || reason != "spot admission is not yet available" {
+	if state != StateSubmitted || reason != "waiting for spot capacity: 1 host has spare capacity free for under 60s" {
 		t.Fatalf("spot = %s/%q", state, reason)
 	}
 	if n := queryOne[int](t, s, `SELECT count(*) FROM placements`); n != 0 {

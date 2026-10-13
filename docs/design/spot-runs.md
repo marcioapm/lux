@@ -1,63 +1,59 @@
 # Spot Runs v1
 
-## Contract and staged implementation
+Spot is a Run class independent of host EC2 market. Spot normalizes to never,
+refuses other resume policies, and retains existing never output/artifact behavior.
 
-Spot is a Run scheduling class, independent of the host's EC2 market. A spot
-spec defaults to `resumePolicy: never`; other explicit policies are invalid.
-Output and artifacts retain the existing never-policy behavior.
+## Checklist
 
-This worktree implements a fail-closed foundation, not a usable v1. Spot
-admission remains disabled until capacity aging and placement reclamation are
-implemented together. No runner advertises the spot reclamation capability.
+- [x] Spec/CLI opt-in, persistence, resume refusal, capability gate.
+- [x] Queued spot demand excluded from planner and scale-up/empty-host protection.
+- [x] Durable bounded capacity-age ledger, strict >60s, preserved small holes.
+- [x] Shared spot admission with queued normal priority beyond first batch.
+- [x] Single-host sufficient victim plan, durable claims/pledges, separate signal pass.
+- [x] Targeted real PG concurrent scheduler/release test.
+- [ ] Broader cancellation/host-loss/early-exit and reclamation guard mutations.
+- [ ] Read-only submit validateOnly/CLI dry-run.
+- [ ] Runner immediate SIGTERM, persisted 15s deadline; capability remains unadvertised.
+- [ ] Live spot autoscaler/warm-while-active integration and Linux/full gates.
 
-## Implementation checklist
+## Capacity ledger
 
-- [x] RunSpec `spot`, normalized never policy, useful validation errors.
-- [x] CLI `lux run --spot`, preserving explicit policy for server validation.
-- [x] Server submission persistence and resume refusal tests.
-- [x] Shared hostFit runner-capability refusal, including chosen hosts.
-- [x] Exclude spot demand from fleet planner; verify ordinary demand unchanged.
-- [x] Disable spot placement independently of capability until admission exists.
-- [ ] Durable capacity age and normal-first admission across queue batches.
-- [ ] Placement-local reclamation and atomic requester reservation.
-- [ ] Runner immediate SIGTERM and persisted 15s SIGKILL deadline.
-- [ ] Read-only submit validateOnly and CLI dry-run, effective shaped resources.
-- [x] Targeted real PostgreSQL/race tests and six guard mutations.
-- [ ] Reclamation concurrency, Linux runner and full server gates.
+Migration 072 adds host_capacity_age(host_id primary key, key, history). Up to 32
+transitions carry CPU/memory/disk/slot free vectors and timestamps. Admission takes
+the component-wise minimum of intervals intersecting the last 60s, requiring a
+strictly older boundary. Overflow merges oldest intervals by minimum (understates
+rather than invents capacity). One indexed read per host loads the history.
+Ordinary resources still come from live placements; sampling CPU load is irrelevant.
 
-## Capacity-age representation for the remaining implementation
+Migration 073 triggers update the ledger on placement insert/delete/state/resource
+changes, including release between scheduler ticks. Trigger locking uses cost-host.
+Host hello bumps capacity_epoch; capacity, epoch, pool, state/draining and shape
+changes delete history. A process id prefixes the history key, conservatively
+resetting on another luxd process/restart. This can reduce utilization under HA;
+it cannot age unknown capacity. Scheduler applies in-batch allocations immediately
+and persists the minimum-compatible history. Tests inject s.now / pure timestamps.
 
-Keep ordinary allocation accounting in live placements. Add one durable host-local
-age record containing a generation (runner connection/boot identity, capacity and
-pool shape), an observed free vector (CPU, memory, disk and slots), and a bounded
-transition history. Admission uses the component-wise minimum free vector over a
-strictly greater-than-60s interval, including the current allocation. Every
-allocation/release updates it under the existing sorted host advisory lock.
-Missing observations, reconnect, process restart without continuity proof, shape
-changes and history overflow conservatively invalidate aged capacity. Preserve
-unchanged old holes when unrelated small allocations change the vector. Sampling
-CPU load or dating only the current total free capacity is insufficient.
+## Claims and pledges
 
-## Reclamation reservation for the remaining implementation
+placements.reclaim_for is an irreversible claim (one scalar per placement).
+spot_pledges(run_id primary key, host_id indexed, tenant_id, resources) holds the
+normal Run's promised vector. Extra allocation is component-wise max(0, requested
+minus claimed live victim usage); live victim resources remain counted once.
+A normal cannot start until every claimed live victim releases, even if it could
+otherwise fit. Simulated removals remove one real tenant entry per victim and
+reuse hostFit with shaped effective resources. Youngest-first deterministic greedy
+selection, then redundant-victim pruning, is polynomial, not subset search.
 
-Use a durable host-local pledge keyed by trigger normal Run and a victim ledger
-with a unique placement claim. Victim resource accounting stays in live placements
-until actual release. Pledges subtract only released resources from free admission;
-never subtract a still-live victim twice. Under Run-before-sorted-host lock order,
-recheck hostFit with real tenancy and shaped resources after simulated removals.
-Acquire all required Run locks before host locks, or restart the transaction;
-never acquire victim Run locks while holding host locks.
+Scheduler already holds requester Run locks then sorted host advisory locks.
+Victim placement claims use FOR UPDATE SKIP LOCKED, never victim Run locks.
+After commit a separate signalReclaims transaction acquires each victim Run first
+and reuses requestStop with spot-reclaim. Durable claims recover a crash between
+claim and signal. Reclaim cause/event is placement-local, not host EC2 drain;
+exit terminates with explicit cause. Cancellation deletes stale pledges on the
+next eligible-host pass, but does not unclaim victims or withdraw notices.
+Host state/reconnect changes delete pledges. No claim ever debits victim usage
+before actual release. Broader cleanup/concurrency proof remains required.
 
-Requester cancellation releases/transfers the pledge but cannot withdraw a notice
-already delivered. Host disconnect/restart invalidates pledges and aged capacity;
-reconciliation must wait for actual placement/disk cleanup before admission.
-Runner first-receipt deadline is durable and cannot be extended by retries,
-reconnects, hooks or workload grace. Use the existing stop lifecycle, not host
-EC2 drain. A partial unique index on active victim placement claims and an index
-on active pledges by host are needed; no schema migration is shipped by this
-foundation.
-
-Dry-run must share submit normalization and the eventual admission function,
-perform only reads, report advisory live fit rather than pool-can-ever-fit, and
-explicitly document races. It is not implemented here rather than returning a
-fictional live-admission result.
+Dry-run must use spotAdmission and submit normalization with no writes; normal
+wouldStartNow means current hostFit, not reclaim/autolaunch/workload success.
+Runner deadline enforcement is still outstanding; capability is not advertised.
