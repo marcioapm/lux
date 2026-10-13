@@ -59,3 +59,27 @@ func TestCapacityAgeEachDimensionAndBound(t *testing.T) {
 		t.Fatal("bounded merge lost conservative old gap")
 	}
 }
+
+// Overflow merges keep the component-wise minimum: an old 1-cpu hole
+// (at..at+1ms), followed by 40 transitions between 4 and 5 free cpus,
+// overflows the bound, and the hole's entry is merged into later ones.
+// Asked while the hole is still inside the 60s window, aged must not
+// exceed it: a merge that kept the newer entry would claim 4 cpus.
+func TestCapacityAgeOverflowKeepsMinimum(t *testing.T) {
+	at := time.Now()
+	var c capacityAge
+	c.observe("a", at, freeVec{1, 10, 10, 1})
+	for i := 1; i <= 40; i++ {
+		c.observe("a", at.Add(time.Duration(i)*time.Millisecond), freeVec{float64(4 + i%2), 40, 40, 4})
+	}
+	if len(c.History) != maxAgeHistory {
+		t.Fatalf("history of %d, want it merged to %d", len(c.History), maxAgeHistory)
+	}
+	got := c.aged(at.Add(spotSettle + 500*time.Microsecond))
+	if got.covers(2, 20, 20) {
+		t.Fatalf("aged %+v: the overflow merge forgot the older 1-cpu hole", got)
+	}
+	if !got.covers(1, 10, 10) {
+		t.Fatalf("aged %+v: want the 1-cpu hole", got)
+	}
+}

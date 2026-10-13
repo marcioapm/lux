@@ -206,3 +206,65 @@ func TestCapacityAgeTriggerUnderConcurrentWriters(t *testing.T) {
 		t.Fatalf("history rows %d: a locked writer dropped it", n)
 	}
 }
+
+// seedHistory writes host id's history as entries, under its current key.
+func seedHistory(t *testing.T, s *Server, id string, entries ...ageEntry) {
+	t.Helper()
+	c := capacityAge{Key: ageKeyOf(t, s, id), History: entries}
+	execSQL(t, s, context.Background(), `INSERT INTO host_capacity_age (host_id, key, history) VALUES ($1, $2, $3)
+		ON CONFLICT (host_id) DO UPDATE SET key = excluded.key, history = excluded.history`, id, c.Key, c.marshal())
+}
+
+// The trigger's own overflow merge keeps the component-wise minimum: an
+// old 1-cpu hole, then more than 32 locked transitions within 60s (a
+// 3-cpu placement made and removed, free alternating 5 and 8 cpus), and
+// the hole still bounds what is aged.
+func TestCapacityAgeTriggerOverflowKeepsMinimum(t *testing.T) {
+	s, _, _ := planningFixture(t, 0)
+	ctx := context.Background()
+	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 8, Memory: 80, Disk: 80, Runs: 8}, map[string]string{})
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r', 't1', '{}', 'running')`)
+	now := time.Now()
+	seedHistory(t, s, "h", ageEntry{now.Add(-2 * time.Minute), freeVec{1, 10, 10, 1}}, ageEntry{now.Add(-50 * time.Second), freeVec{8, 80, 80, 8}})
+	for i := range 20 {
+		withHostLock(t, s, "h", func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources)
+				VALUES ($1, 't1', 'r', 'h', $2, 'running', '{"cpus":3,"memory":30,"disk":30}')`, "p"+string(rune('a'+i)), i+1)
+			return err
+		})
+		withHostLock(t, s, "h", func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `DELETE FROM placements WHERE id = $1`, "p"+string(rune('a'+i)))
+			return err
+		})
+	}
+	if n := queryOne[int](t, s, `SELECT jsonb_array_length(history) FROM host_capacity_age WHERE host_id = 'h'`); n != maxAgeHistory {
+		t.Fatalf("history of %d entries, want merged to %d", n, maxAgeHistory)
+	}
+	if aged := agedOn(t, s, "h"); aged.covers(2, 20, 20) || !aged.covers(1, 10, 10) {
+		t.Fatalf("aged %+v: want only the old 1-cpu hole", aged)
+	}
+}
+
+// A transition within the live states (running to stopping) made without
+// the host's lock, as status reports make it, neither rewrites nor drops
+// the history: its old gap stays aged.
+func TestCapacityAgeLiveTransitionKeepsHistory(t *testing.T) {
+	s, _, _ := planningFixture(t, 0)
+	ctx := context.Background()
+	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 4, Memory: 40, Disk: 40, Runs: 4}, map[string]string{})
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r', 't1', '{}', 'running')`)
+	seedAged(t, s, "h", freeVec{4, 40, 40, 4}, 2*time.Minute)
+	withHostLock(t, s, "h", func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources)
+			VALUES ('p', 't1', 'r', 'h', 1, 'running', '{"cpus":1,"memory":10,"disk":10}')`)
+		return err
+	})
+	before := queryOne[string](t, s, `SELECT history::text FROM host_capacity_age WHERE host_id = 'h'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'stopping', stop_reason = 'stop' WHERE id = 'p'`)
+	if after := queryOne[string](t, s, `SELECT coalesce((SELECT history::text FROM host_capacity_age WHERE host_id = 'h'), '<dropped>')`); after != before {
+		t.Fatalf("history after running->stopping:\n%s\nwant unchanged:\n%s", after, before)
+	}
+	if aged := agedOn(t, s, "h"); !aged.covers(3, 30, 30) {
+		t.Fatalf("aged %+v: want the old 3-cpu gap", aged)
+	}
+}
