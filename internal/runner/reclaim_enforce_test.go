@@ -402,14 +402,12 @@ func TestReclaimOverridesStoppingAndIgnoresLuxd(t *testing.T) {
 	g.luxd.release(g.ctx)
 }
 
-// startReclaimed starts a spot placement of run1 through run.
+// start starts a spot placement of run1 through run.
 func (g *reclaimRig) start(t *testing.T) *placement {
 	t.Helper()
 	sp := spec.RunSpec{Spot: true, ResumePolicy: spec.ResumeNever, Image: spec.Image{Ref: "img"}, Network: spec.Network{Unrestricted: true}}
 	sp.Workload.Grace.Duration = time.Minute
-	p := newPlacement(g.r, proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 1, Spec: sp}, nil)
-	g.r.placements["run1"] = p
-	go p.run(g.ctx)
+	p := g.place(g.ctx, sp)
 	t.Cleanup(func() {
 		if !p.waitDone(20 * time.Second) {
 			t.Error("the placement did not end")

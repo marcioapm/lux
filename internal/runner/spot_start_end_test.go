@@ -72,18 +72,19 @@ func (g *reclaimRig) present(volumes ...string) []string {
 	return out
 }
 
+func isEnd(st proto.Status) bool { return st.State == "exited" || st.State == "failed" }
+
 // endStatus waits for a final (exited or failed) status to be sent.
 func (g *reclaimRig) endStatus(t *testing.T) proto.Status {
 	t.Helper()
 	var end proto.Status
 	eventually(t, "no end report", func() bool {
-		for _, st := range g.luxd.statuses() {
-			if st.State == "exited" || st.State == "failed" {
-				end = st
-				return true
-			}
+		sts := g.luxd.statuses()
+		i := slices.IndexFunc(sts, isEnd)
+		if i >= 0 {
+			end = sts[i]
 		}
-		return false
+		return i >= 0
 	})
 	return end
 }
@@ -91,7 +92,7 @@ func (g *reclaimRig) endStatus(t *testing.T) proto.Status {
 func (g *reclaimRig) ends() int {
 	n := 0
 	for _, st := range g.luxd.statuses() {
-		if st.State == "exited" || st.State == "failed" {
+		if isEnd(st) {
 			n++
 		}
 	}
