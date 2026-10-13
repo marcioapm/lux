@@ -50,8 +50,32 @@ func envBytes(name string, def int64) int64 {
 	return n
 }
 
+// optionalBytes is a byte-count flag that records whether it was given:
+// from the command line, or LUX_RUNNER_DISK_HEADROOM. 0 is a value.
+type optionalBytes struct{ v **int64 }
+
+func (o *optionalBytes) String() string {
+	if o.v == nil || *o.v == nil {
+		return ""
+	}
+	return strconv.FormatInt(**o.v, 10)
+}
+
+func (o *optionalBytes) Set(s string) error {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return fmt.Errorf("want a number of bytes")
+	}
+	*o.v = &n
+	return nil
+}
+
 func main() {
 	cfg := runner.Config{Labels: labels{}}
+	if v, ok := os.LookupEnv("LUX_RUNNER_DISK_HEADROOM"); ok && v != "" {
+		n := envBytes("LUX_RUNNER_DISK_HEADROOM", 0)
+		cfg.DiskHeadroom = &n
+	}
 	flag.StringVar(&cfg.Name, "name", "", "host name (default: hostname)")
 	flag.StringVar(&cfg.DataDir, "data-dir", "/var/lib/lux", "where the runner keeps its state and local snapshots")
 	flag.StringVar(&cfg.Shim, "shim", hostboot.InstallDir+"/lux-shim", "path to the lux-shim binary")
@@ -61,7 +85,8 @@ func main() {
 	flag.Int64Var(&cfg.Memory, "memory", envBytes("LUX_RUNNER_MEMORY", 0), "bytes of memory to offer: the machine's gross memory, in which Runs ask; each gets its share of MemTotal less --memory-headroom (default: MemTotal). Also LUX_RUNNER_MEMORY")
 	flag.Int64Var(&cfg.MemoryHeadroom, "memory-headroom", envBytes("LUX_RUNNER_MEMORY_HEADROOM", runner.DefaultMemoryHeadroom), "bytes of MemTotal kept from Runs for the kernel and the host. Also LUX_RUNNER_MEMORY_HEADROOM")
 	flag.DurationVar(&cfg.UsageEvery, "usage-every", 0, "how often disk use is sampled and the disk limit checked (default 15s)")
-	flag.Int64Var(&cfg.Disk, "disk", 0, "bytes of disk to reserve for Runs, from their resources.disk (default: not reserved)")
+	flag.Int64Var(&cfg.Disk, "disk", envBytes("LUX_RUNNER_DISK", 0), "bytes of disk to reserve for Runs, from their resources.disk (default: not reserved). With --disk-headroom, the host's nominal disk. Also LUX_RUNNER_DISK")
+	flag.Var(&optionalBytes{v: &cfg.DiskHeadroom}, "disk-headroom", "bytes of the data directory's filesystem kept from Runs; given with --disk (0 allowed), each Run's disk limit is resources.disk × min(1, (filesystem capacity − this) / --disk). Also LUX_RUNNER_DISK_HEADROOM")
 	flag.StringVar(&cfg.ProviderID, "provider-id", os.Getenv("LUX_PROVIDER_ID"), "cloud instance id, for provisioned hosts")
 	flag.BoolVar(&cfg.ForcePoll, "poll", false, "use HTTP polling instead of a WebSocket")
 	flag.StringVar(&cfg.EC2IMDS, "ec2-imds", os.Getenv("LUX_EC2_IMDS"), "EC2 instance metadata URL to watch for spot interruptions (http://169.254.169.254 on EC2; empty: off)")
@@ -79,9 +104,13 @@ func main() {
 		fmt.Println(version.Version)
 		return
 	}
-	if cfg.UsageEvery < 0 || cfg.Disk < 0 || cfg.Memory < 0 || cfg.MemoryHeadroom < 0 || cfg.CPUs < 0 {
-		fmt.Fprintln(os.Stderr, "lux-runner: --usage-every, --disk, --memory, --memory-headroom and --cpus must not be negative")
+	if cfg.UsageEvery < 0 || cfg.Disk < 0 || cfg.Memory < 0 || cfg.MemoryHeadroom < 0 || cfg.CPUs < 0 ||
+		cfg.DiskHeadroom != nil && *cfg.DiskHeadroom < 0 {
+		fmt.Fprintln(os.Stderr, "lux-runner: --usage-every, --disk, --disk-headroom, --memory, --memory-headroom and --cpus must not be negative")
 		os.Exit(2)
+	}
+	if cfg.DiskHeadroom != nil && cfg.Disk == 0 {
+		fmt.Fprintln(os.Stderr, "lux-runner: --disk-headroom without --disk: the disk is not scaled")
 	}
 	// A provisioned host gets its name from luxd (user data).
 	if cfg.Name == "" {
