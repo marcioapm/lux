@@ -210,6 +210,43 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
     assert run["spec"]["resources"]["disk"] == 20 << 30, run["spec"]["resources"]
 
 
+def test_a_run_over_its_effective_disk_limit_is_stopped(lux, runners, hosts):
+    """A runner given a nominal --disk and a --disk-headroom holds each Run to
+    its share of the real filesystem. With the nominal disk the filesystem's
+    whole capacity and half of it kept back, a Run asking 64 MiB is held to
+    about 32 MiB: one writing 48 MiB (over its share, under what it asked)
+    is stopped, its event carrying both limits and the factor; one writing
+    16 MiB is left alone. The host advertises what it scaled by."""
+    # Capacity as the runner reads it (Go's statfs: f_bsize units): used
+    # plus unprivileged-free blocks, which writes do not change.
+    hosts[0].exec("mkdir", "-p", "/var/lib/lux")
+    blocks, free, avail, bsize = map(int, hosts[0].exec("stat", "-f", "-c", "%b %f %a %s", "/var/lib/lux").split())
+    capacity = (blocks - free + avail) * bsize
+    headroom = capacity // 2
+    runners.start(hosts[0], "--usage-every", "1s", "--disk", str(capacity), "--disk-headroom", str(headroom))
+    nominal = 64 << 20
+    effective = nominal * (capacity - headroom) // capacity
+    assert 31 << 20 < effective <= 32 << 20, effective
+    host = lux.json("hosts", "get", hosts[0].name)
+    assert host["capacity"]["disk"] == capacity and host["capacity"]["diskHeadroom"] == headroom \
+        and host["capacity"]["fsCapacity"] == capacity, host["capacity"]
+
+    vols = [{"name": "w", "path": "/w", "kind": "state"}]
+    over = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "dd if=/dev/zero of=/w/big bs=1M count=48 2>/dev/null; echo wrote; sleep 600",
+                              resources={"disk": "64Mi"}, volumes=vols))
+    run = lux.wait_state(over, "failed", timeout=60)
+    assert run["stateReason"] == "disk limit exceeded", run
+    data = lux.events(over, "disk.exceeded")[0]["data"]
+    assert data["limitBytes"] == effective and data["nominalLimitBytes"] == nominal and data["usedBytes"] > effective \
+        and data["usedBytes"] < nominal and abs(data["limitFactor"] - (capacity - headroom) / capacity) < 1e-9, data
+    assert run["spec"]["resources"]["disk"] == nominal, run["spec"]["resources"]
+
+    under = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "dd if=/dev/zero of=/w/small bs=1M count=16 2>/dev/null; sleep 4",
+                               resources={"disk": "64Mi"}, volumes=vols))
+    lux.wait_state(under, "succeeded", timeout=60)
+    assert not lux.events(under, "disk.exceeded")
+
+
 def test_disk_is_reserved_on_the_host(lux, runners, hosts):
     """The scheduler reserves resources.disk against what the host offers."""
     runners.start(hosts[0], "--disk", str(1 << 30))
