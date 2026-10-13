@@ -537,7 +537,9 @@ func (p *placement) run(ctx context.Context) {
 		fail("image", err)
 		return
 	}
+	p.mu.Lock()
 	p.state.Image = image
+	p.mu.Unlock()
 	info, err := p.r.pm.ImageInspect(startCtx, image)
 	if err == nil {
 		p.learnPlatforms(startCtx, image, sp.Image.Build != nil, info)
@@ -921,8 +923,11 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume 
 	for _, v := range sp.Volumes {
 		refs = append(refs, volumeRef{Name: v.Name, Volume: volumeName(p.runID, v.Name), Path: v.Path, Kind: v.Kind})
 	}
+	// Under p.mu: a stop arriving now saves p.state while the volumes are made.
+	p.mu.Lock()
 	p.state.Volumes = refs
 	p.state.EngineVolumes = nestedVolumes(p.runID, sp, p.user, p.env)
+	p.mu.Unlock()
 
 	// The runtime volume holds the shim's socket, config and output files.
 	// A named volume, because an idmapped mount needs a filesystem that
@@ -986,12 +991,14 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume 
 	if manifest != nil && !local {
 		p.event(ctx, "volumes.restored", map[string]any{"snapshotId": manifest.SnapshotID, "from": "s3"})
 	}
+	p.mu.Lock()
 	if manifest != nil {
 		p.state.VolumesSnapshot, p.state.VolumesEpoch = manifest.SnapshotID, manifest.Epoch
 	}
 	// From here the volumes are this placement's and will diverge from
 	// the snapshot.
 	p.state.VolumesSnapshot = ""
+	p.mu.Unlock()
 	return p.saveState()
 }
 
