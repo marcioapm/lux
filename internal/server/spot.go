@@ -407,7 +407,6 @@ func loadPledges(ctx context.Context, tx pgx.Tx, hostIDs []string, byID map[stri
 		if h := byID[p.host]; h != nil {
 			h.addPledge(p.run, pledgeExtra(h, p.run, p.res))
 			h.Tenants = append(h.Tenants, p.tenant)
-			h.changed()
 		}
 	}
 	return nil
@@ -586,7 +585,6 @@ func pledge(ctx context.Context, tx pgx.Tx, r pendingRun, h *candidateHost, vict
 	}
 	h.addPledge(r.ID, pledgeExtra(h, r.ID, r.Spec.Resources))
 	h.Tenants = append(h.Tenants, r.TenantID)
-	h.changed()
 	return true, nil
 }
 
