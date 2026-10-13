@@ -1207,3 +1207,52 @@ func TestListPoolsHostSize(t *testing.T) {
 		t.Fatalf("a pool without hosts: %+v", got.HostSize)
 	}
 }
+
+// The planner reserves a pack pool's waiting Runs on ready hosts as pack
+// places them, the most allocated fitting host first, and a spread pool's
+// on the first fitting host by id. Ready h0 is empty and h1 holds a
+// sixteenth; arrivals are in sixteenths of testShape, oldest first.
+func TestCapacityPlanPackPool(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		placement string
+		arrivals  []float64
+		ready     int // Runs reserved on h0 and h1
+		launches  int
+	}{
+		// pack: the 1 joins h1, the 16 takes h0. First fit would put the 1
+		// on h0 and launch for the 16.
+		{"pack, 1 then 16", "", []float64{1, 16}, 2, 0},
+		// pack: 8 on h1, 16 on h0, the last two 8s share one new host.
+		// First fit would put 8, 8 on h0 and 8 on h1, and launch for the 16.
+		{"pack, 8 16 8 8", "", []float64{8, 16, 8, 8}, 2, 1},
+		{"spread, 1 then 16", "spread", []float64{1, 16}, 1, 1},
+		{"spread, 8 16 8 8", "spread", []float64{8, 16, 8, 8}, 3, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, pl, p := planningFixture(t, 0)
+			ctx := context.Background()
+			execSQL(t, s, ctx, `UPDATE pools SET shape = $1, placement = nullif($2, '') WHERE id = 'pool1'`, testShape, c.placement)
+			pl.Shape, pl.Placement = &testShape, c.placement
+			for _, h := range []string{"h0", "h1"} {
+				observePlanningHost(t, s, h, "ready", shapeCapacity, map[string]string{})
+				execSQL(t, s, ctx, `UPDATE hosts SET capabilities = ARRAY['diff', 'sync-modes', 'disk-scale'] WHERE id = $1`, h)
+			}
+			occupy(t, s, "h1", sized(0.5))
+			for i, n := range c.arrivals {
+				execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state, updated_at)
+					VALUES ($1, 't1', 'pool1', $2, 'provisioning', now() + $3::int * interval '1 second')`,
+					fmt.Sprintf("r%d", i), map[string]any{"resources": sized(n / 2), "placement": map[string]any{"pool": "burst"}}, i)
+			}
+			planningTick(t, s, pl, p, false)
+			if p.calls != c.launches {
+				t.Errorf("launched %d, want %d", p.calls, c.launches)
+			}
+			if c.launches > 0 {
+				if evs := events(t, s, evScaleUp); len(evs) != 1 || evs[0].Data["ready"] != float64(c.ready) {
+					t.Errorf("scale-up %+v, want %d Runs on ready hosts", evs, c.ready)
+				}
+			}
+		})
+	}
+}
