@@ -274,9 +274,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			if failed {
 				continue
 			}
-			if h.age != nil {
-				h.age.observe(ageKey(h), now, freeOf(h))
-			}
+			h.age.observe(ageKey(h), now, freeOf(h))
 			notify = append(notify, h.ID)
 		}
 		for _, h := range hosts {
