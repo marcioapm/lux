@@ -247,6 +247,12 @@ func TestOmittedFieldsIgnored(t *testing.T) {
 			Request{CPUs: some(1.0)},
 		},
 		{
+			"memory present, cpu and disk oversized junk",
+			Request{CPUs: Optional[float64]{Value: 1 << 40}, Memory: some(gib(4)), Disk: Optional[spec.Bytes]{Value: 1 << 40}},
+			"m-1-arm64",
+			Request{Memory: some(gib(4))},
+		},
+		{
 			"size omitted but named",
 			Request{Size: Optional[string]{Value: "m-8-arm64"}},
 			"m-2-arm64",
@@ -436,14 +442,15 @@ func TestGeneratedCoverAndMonotonicity(t *testing.T) {
 							Memory: Optional[spec.Bytes]{mask&2 != 0, mb},
 							Disk:   Optional[spec.Bytes]{mask&4 != 0, db},
 						}
+						// Junk that every ladder entry fails to cover, so any comparison against it changes the result.
 						if !r.CPUs.Present {
-							r.CPUs.Value = math.NaN()
+							r.CPUs.Value = math.MaxFloat64
 						}
 						if !r.Memory.Present {
 							r.Memory.Value = math.MaxInt64
 						}
 						if !r.Disk.Present {
-							r.Disk.Value = -1
+							r.Disk.Value = math.MaxInt64
 						}
 						want := min(index(r), len(entries))
 						got := resolved(r)
