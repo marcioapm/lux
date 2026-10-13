@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +22,8 @@ import (
 
 // podmanForDiskSamples answers sampleSlow's probes: `container inspect
 // --size` prints $0.size, or fails while $0.failsize exists; `volume
-// inspect` fails while $0.failvolume exists. stats has no network.
+// inspect` fails while $0.failvolume exists, and answers a mountpoint that
+// does not exist while $0.novol exists. stats has no network.
 const podmanForDiskSamples = `#!/bin/sh
 case "$1 $2" in
 "container inspect")
@@ -29,6 +31,7 @@ case "$1 $2" in
   cat "$0.size" ;;
 "volume inspect")
   [ -e "$0.failvolume" ] && { echo "no such volume" >&2; exit 125; }
+  [ -e "$0.novol" ] && { echo "$0.gone"; exit 0; }
   echo "$0.vol" ;;
 *)
   case "$1" in
@@ -44,13 +47,18 @@ const (
 	diskGrace = 5 * time.Minute
 )
 
+const (
+	msgExceeded    = "over its disk limit"
+	msgProbeFailed = "a disk use probe failed; " // a prefix
+)
+
 // diskFixture is a running placement of run1, limited to diskLimit with
 // diskGrace, reporting to a fakeLuxd; logs collects the runner's log.
 type diskFixture struct {
 	r    *Runner
 	bin  string
 	luxd *fakeLuxd
-	logs *bytes.Buffer
+	logs *lockedWriter
 	ctx  context.Context
 }
 
@@ -64,8 +72,8 @@ func newDiskFixture(t *testing.T) *diskFixture {
 	if err := os.MkdirAll(bin+".vol", 0o700); err != nil {
 		t.Fatal(err)
 	}
-	logs := &bytes.Buffer{}
-	r := &Runner{cfg: Config{DataDir: dir}, log: slog.New(slog.NewJSONHandler(&lockedWriter{w: logs}, nil)),
+	logs := &lockedWriter{w: &bytes.Buffer{}}
+	r := &Runner{cfg: Config{DataDir: dir}, log: slog.New(slog.NewJSONHandler(logs, nil)),
 		pm: &podman.Podman{Bin: bin}, placements: map[string]*placement{}, egress: egress.Unloaded()}
 	r.conn = newConn(r)
 	r.conn.polling = true
@@ -87,11 +95,14 @@ func (f *diskFixture) placement(epoch int) *placement {
 	return p
 }
 
-// events is every disk.exceeded event luxd got so far, after a pause long
-// enough for one reported in the background to arrive.
-func (f *diskFixture) events(t *testing.T) []proto.RunEvent {
-	t.Helper()
-	time.Sleep(200 * time.Millisecond)
+// withVolume gives p one state volume, which the fake podman mounts at
+// $bin.vol (empty) unless told otherwise.
+func withVolume(p *placement) {
+	p.state.Volumes = []volumeRef{{Name: "data", Volume: "lux-run1-data", Kind: "state"}}
+}
+
+// events is every disk.exceeded event luxd got so far.
+func (f *diskFixture) events() []proto.RunEvent {
 	f.luxd.mu.Lock()
 	defer f.luxd.mu.Unlock()
 	var out []proto.RunEvent
@@ -104,19 +115,60 @@ func (f *diskFixture) events(t *testing.T) []proto.RunEvent {
 	return out
 }
 
-// wentOver is the "remaining" of every log record of a sample going over,
-// in nanoseconds (slog's JSON encoding of a time.Duration).
-func (f *diskFixture) wentOver(t *testing.T) []time.Duration {
+// wantEvents fails unless exactly n disk.exceeded events have been reported,
+// and returns luxd's. checkDisk logs msgExceeded synchronously before it
+// reports in the background, so the logged count settles "none" and "no
+// more" without waiting; luxd's count is then polled up to a deadline, and
+// drained briefly for an extra one in flight.
+func (f *diskFixture) wantEvents(t *testing.T, what string, n int) []proto.RunEvent {
 	t.Helper()
+	if got := len(f.records(msgExceeded)); got != n {
+		t.Fatalf("%s: %d reports logged, want %d", what, got, n)
+	}
+	for deadline := time.Now().Add(10 * time.Second); len(f.events()) < n && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	evs := f.events()
+	if len(evs) != n {
+		t.Fatalf("%s: luxd got %d events %+v, want %d", what, len(evs), evs, n)
+	}
+	return evs
+}
+
+// records is every runner log record whose message is msg.
+func (f *diskFixture) records(msg string) []map[string]any {
+	return f.matching(func(m string) bool { return m == msg })
+}
+
+func (f *diskFixture) recordsPrefixed(prefix string) []map[string]any {
+	return f.matching(func(m string) bool { return strings.HasPrefix(m, prefix) })
+}
+
+func (f *diskFixture) matching(keep func(msg string) bool) []map[string]any {
+	f.logs.mu.Lock()
+	text := f.logs.w.String()
+	f.logs.mu.Unlock()
+	var out []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(text), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(l), &rec) != nil {
+			continue
+		}
+		if m, _ := rec["msg"].(string); keep(m) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// wentOver is the "remaining" of every log record of a sample going over
+// (slog's JSON encoding of a time.Duration is nanoseconds).
+func (f *diskFixture) wentOver() []time.Duration {
 	var out []time.Duration
-	for _, l := range strings.Split(strings.TrimSpace(f.logs.String()), "\n") {
-		var rec struct {
-			Msg       string        `json:"msg"`
-			Remaining time.Duration `json:"remaining"`
-		}
-		if json.Unmarshal([]byte(l), &rec) == nil && strings.HasPrefix(rec.Msg, "over its disk limit; ") {
-			out = append(out, rec.Remaining)
-		}
+	for _, rec := range f.records("over its disk limit; stopping it unless it drops back under within its grace") {
+		rem, _ := rec["remaining"].(float64)
+		out = append(out, time.Duration(rem))
 	}
 	return out
 }
@@ -131,9 +183,18 @@ func (f *diskFixture) flag(t *testing.T, name string) {
 // size sets what `container inspect --size` answers.
 func (f *diskFixture) size(t *testing.T, n int64) {
 	t.Helper()
-	if err := os.WriteFile(f.bin+".size", []byte(strconv.FormatInt(n, 10)+"\n"), 0o600); err != nil {
+	f.sizeRaw(t, strconv.FormatInt(n, 10))
+}
+
+func (f *diskFixture) sizeRaw(t *testing.T, s string) {
+	t.Helper()
+	if err := os.WriteFile(f.bin+".size", []byte(s+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func eventData(used int64, ceiling bool) map[string]any {
+	return map[string]any{"usedBytes": float64(used), "limitBytes": float64(diskLimit), "graceSeconds": diskGrace.Seconds(), "ceiling": ceiling}
 }
 
 type lockedWriter struct {
@@ -156,23 +217,14 @@ func TestCheckDiskReportsOnceAfterTheGrace(t *testing.T) {
 	t0 := time.Now()
 	p.checkDisk(f.ctx, diskOver, t0)
 	p.checkDisk(f.ctx, diskOver, t0.Add(diskGrace-time.Second))
-	if evs := f.events(t); len(evs) != 0 {
-		t.Fatalf("within the grace: %+v, want no event", evs)
-	}
+	f.wantEvents(t, "within the grace", 0)
 	p.checkDisk(f.ctx, diskOver, t0.Add(diskGrace))
-	evs := f.events(t)
-	if len(evs) != 1 {
-		t.Fatalf("grace elapsed: %d events %+v, want one", len(evs), evs)
-	}
-	want := map[string]any{"usedBytes": float64(diskOver), "limitBytes": float64(diskLimit), "graceSeconds": diskGrace.Seconds(), "ceiling": false}
-	if got := evs[0].Data; len(got) != len(want) || got["usedBytes"] != want["usedBytes"] || got["limitBytes"] != want["limitBytes"] ||
-		got["graceSeconds"] != want["graceSeconds"] || got["ceiling"] != want["ceiling"] {
-		t.Errorf("event data %v, want %v", got, want)
+	evs := f.wantEvents(t, "grace elapsed", 1)
+	if want := eventData(diskOver, false); !reflect.DeepEqual(evs[0].Data, want) {
+		t.Errorf("event data %v, want %v", evs[0].Data, want)
 	}
 	p.checkDisk(f.ctx, 3*diskLimit, t0.Add(diskGrace+15*time.Second))
-	if evs := f.events(t); len(evs) != 1 {
-		t.Errorf("after the report: %d events, want still one", len(evs))
-	}
+	f.wantEvents(t, "after the report", 1)
 }
 
 // A placement that is not running is never sampled against its disk, even
@@ -182,39 +234,36 @@ func TestCheckDiskOnlyWhileRunning(t *testing.T) {
 	p := f.placement(1)
 	p.setPhase("exited")
 	p.checkDisk(f.ctx, 3*diskLimit, time.Now())
-	if evs := f.events(t); len(evs) != 0 {
-		t.Fatalf("exited at 3× its disk: %+v, want no event", evs)
-	}
+	f.wantEvents(t, "exited at 3× its disk", 0)
 }
 
-// A sample whose probe failed reads as under the limit (its sum misses the
-// failed part) and must not restart the grace; a successful sample under
-// the limit does.
+// A sample whose probe failed, its partial sum at or under the limit, must
+// not restart the grace; a successful sample under the limit does.
 func TestFailedDiskProbeKeepsTheGrace(t *testing.T) {
 	for _, c := range []struct {
 		name   string
-		flag   string
+		setup  func(*testing.T, *diskFixture)
 		volume bool
 		peak   int64 // the partial sum: what the probes that answered measured
 	}{
-		{"container inspect --size fails", "failsize", false, 0},
-		{"a volume's mountpoint fails", "failvolume", true, 1},
+		{"container inspect --size fails", func(t *testing.T, f *diskFixture) { f.size(t, 1); f.flag(t, "failsize") }, false, 0},
+		{"inspect --size answers no number", func(t *testing.T, f *diskFixture) { f.sizeRaw(t, "<no value>") }, false, 0},
+		{"inspect --size answers garbage", func(t *testing.T, f *diskFixture) { f.sizeRaw(t, "garbage") }, false, 0},
+		{"a volume's mountpoint fails", func(t *testing.T, f *diskFixture) { f.size(t, 1); f.flag(t, "failvolume") }, true, 1},
+		{"a volume's mountpoint has gone", func(t *testing.T, f *diskFixture) { f.size(t, 1); f.flag(t, "novol") }, true, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newDiskFixture(t)
 			p := f.placement(1)
 			if c.volume {
-				p.state.Volumes = []volumeRef{{Name: "data", Volume: "lux-run1-data", Kind: "state"}}
+				withVolume(p)
 			}
-			f.size(t, 1)
-			f.flag(t, c.flag)
+			c.setup(t, f)
 			t0 := time.Now()
 			p.checkDisk(f.ctx, diskOver, t0)
 			p.sampleSlow(f.ctx)
 			p.checkDisk(f.ctx, diskOver, t0.Add(diskGrace))
-			if evs := f.events(t); len(evs) != 1 {
-				t.Fatalf("over at the grace's end after a failed probe: %d events, want one", len(evs))
-			}
+			f.wantEvents(t, "over at the grace's end after a failed probe", 1)
 			p.mu.Lock()
 			peak := p.peakDisk
 			p.mu.Unlock()
@@ -228,13 +277,84 @@ func TestFailedDiskProbeKeepsTheGrace(t *testing.T) {
 	t.Run("control: all probes succeed", func(t *testing.T) {
 		f := newDiskFixture(t)
 		p := f.placement(1)
+		withVolume(p)
 		f.size(t, 1)
 		t0 := time.Now()
 		p.checkDisk(f.ctx, diskOver, t0)
 		p.sampleSlow(f.ctx)
 		p.checkDisk(f.ctx, diskOver, t0.Add(diskGrace))
-		if evs := f.events(t); len(evs) != 0 {
-			t.Fatalf("%d events, want none: the sample under the limit restarts the grace", len(evs))
+		f.wantEvents(t, "the sample under the limit restarts the grace", 0)
+	})
+}
+
+// A partial sum is a lower bound: while one probe keeps failing, what the
+// others measure over the limit is held to the grace and the ceiling.
+func TestPartialDiskSampleOverTheLimitCounts(t *testing.T) {
+	setup := func(t *testing.T, used int64) (*diskFixture, *placement) {
+		f := newDiskFixture(t)
+		p := f.placement(1)
+		withVolume(p)
+		f.flag(t, "failvolume")
+		f.size(t, used)
+		return f, p
+	}
+	t.Run("within the grace", func(t *testing.T) {
+		f, p := setup(t, diskOver)
+		p.sampleSlow(f.ctx)
+		p.sampleSlow(f.ctx)
+		f.wantEvents(t, "two partial samples over", 0)
+		if got := f.wentOver(); len(got) != 1 || got[0] != diskGrace {
+			t.Errorf("went-over logs' remaining %v, want one of %s: the first partial sample over starts the grace", got, diskGrace)
+		}
+	})
+	t.Run("after the grace", func(t *testing.T) {
+		f, p := setup(t, diskOver)
+		p.checkDisk(f.ctx, diskOver, time.Now().Add(-diskGrace))
+		p.sampleSlow(f.ctx)
+		evs := f.wantEvents(t, "a partial sample over at the grace's end", 1)
+		if want := eventData(diskOver, false); !reflect.DeepEqual(evs[0].Data, want) {
+			t.Errorf("event data %v, want %v", evs[0].Data, want)
+		}
+		p.sampleSlow(f.ctx)
+		f.wantEvents(t, "another partial sample over", 1)
+	})
+	t.Run("at the ceiling", func(t *testing.T) {
+		f, p := setup(t, 2*diskLimit)
+		p.sampleSlow(f.ctx)
+		evs := f.wantEvents(t, "a partial sample at 2× the limit", 1)
+		if want := eventData(2*diskLimit, true); !reflect.DeepEqual(evs[0].Data, want) {
+			t.Errorf("event data %v, want %v", evs[0].Data, want)
+		}
+	})
+}
+
+// A failing probe is logged once per placement, with its error, and only
+// while a disk check would run.
+func TestDiskProbeFailureLoggedOnce(t *testing.T) {
+	t.Run("running", func(t *testing.T) {
+		f := newDiskFixture(t)
+		p := f.placement(1)
+		withVolume(p)
+		f.size(t, 1)
+		f.flag(t, "failvolume")
+		p.sampleSlow(f.ctx)
+		p.sampleSlow(f.ctx)
+		recs := f.recordsPrefixed(msgProbeFailed)
+		if len(recs) != 1 {
+			t.Fatalf("%d probe-failed records %v, want one", len(recs), recs)
+		}
+		if e, _ := recs[0]["err"].(string); !strings.Contains(e, "no such volume") {
+			t.Errorf("probe-failed err %q, want podman's \"no such volume\"", e)
+		}
+	})
+	t.Run("exited", func(t *testing.T) {
+		f := newDiskFixture(t)
+		p := f.placement(1)
+		p.setPhase("exited")
+		f.flag(t, "failsize")
+		p.sampleSlow(f.ctx)
+		if recs := f.recordsPrefixed(msgProbeFailed); len(recs) != 0 {
+			t.Errorf("exited: %d probe-failed records %v, want none", len(recs), recs)
 		}
 	})
 }
@@ -248,21 +368,15 @@ func TestNewPlacementGetsAFreshGrace(t *testing.T) {
 	p1 := f.placement(1)
 	p1.checkDisk(f.ctx, diskOver, t0)
 	p1.checkDisk(f.ctx, diskOver, t0.Add(diskGrace))
-	if evs := f.events(t); len(evs) != 1 {
-		t.Fatalf("first placement: %d events, want one", len(evs))
-	}
+	f.wantEvents(t, "first placement", 1)
 	p2 := f.placement(2)
 	t1 := t0.Add(diskGrace + time.Minute)
 	p2.checkDisk(f.ctx, diskOver, t1)
 	p2.checkDisk(f.ctx, diskOver, t1.Add(diskGrace-time.Second))
-	if evs := f.events(t); len(evs) != 1 {
-		t.Fatalf("second placement within its grace: %d events, want still one", len(evs))
-	}
-	if got := f.wentOver(t); len(got) != 2 || got[1] != diskGrace {
+	f.wantEvents(t, "second placement within its grace", 1)
+	if got := f.wentOver(); len(got) != 2 || got[1] != diskGrace {
 		t.Errorf("went-over logs' remaining %v, want the second %s", got, diskGrace)
 	}
 	p2.checkDisk(f.ctx, diskOver, t1.Add(diskGrace))
-	if evs := f.events(t); len(evs) != 2 {
-		t.Fatalf("second placement past its grace: %d events, want two", len(evs))
-	}
+	f.wantEvents(t, "second placement past its grace", 2)
 }
