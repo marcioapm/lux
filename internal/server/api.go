@@ -725,16 +725,18 @@ type submitRunOutput struct {
 }
 
 // SubmitAnswer is either a created/replayed Run, or validateOnly's read-only
-// advisory admission result. It never guarantees workload success.
+// advisory admission result. It never guarantees workload success. The
+// validateOnly fields carry names of their own: an embedded Run field of the
+// same name (pool, poolId) would be shadowed, in Go and in JSON.
 type SubmitAnswer struct {
 	*Run
-	Valid              bool               `json:"valid,omitempty"`
-	WouldStartNow      bool               `json:"wouldStartNow,omitempty"`
-	EffectiveResources *spec.Resources    `json:"effectiveResources,omitempty"`
-	Pool               string             `json:"pool,omitempty"`
-	PoolID             string             `json:"poolId,omitempty"`
-	EligibleHost       string             `json:"eligibleHost,omitempty"`
-	Blockers           []AdmissionBlocker `json:"blockers,omitempty"`
+	Valid              bool               `json:"valid,omitempty" doc:"validateOnly: the spec would be accepted; no Run was created and nothing changed."`
+	WouldStartNow      bool               `json:"wouldStartNow,omitempty" doc:"validateOnly: a host could take the Run now (spot: settled spare capacity no normal Run is waiting for; normal: a host it fits on now). Advisory: not a reservation, and it may change at once."`
+	EffectiveResources *spec.Resources    `json:"effectiveResources,omitempty" doc:"validateOnly: the resources the Run would reserve, after defaults and a shaped pool's rounding."`
+	EffectivePool      string             `json:"effectivePool,omitempty" doc:"validateOnly: the pool the Run would be bound to."`
+	EffectivePoolID    string             `json:"effectivePoolId,omitempty" doc:"validateOnly: that pool's id."`
+	EligibleHost       string             `json:"eligibleHost,omitempty" doc:"validateOnly: the host it would start on now."`
+	Blockers           []AdmissionBlocker `json:"blockers,omitempty" doc:"validateOnly: why it would not start now, by kind."`
 }
 
 func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunOutput, error) {
@@ -778,11 +780,13 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		return nil, err
 	}
 	stored, refs, values := sp.SplitSecrets()
+	if in.ValidateOnly {
+		// Values are never required for a validation: only names and
+		// references (Normalize checked them), as for resume validateOnly.
+		return s.validateSubmit(ctx, p, stored, raw)
+	}
 	if err := requireSecrets(refs, values); err != nil {
 		return nil, err
-	}
-	if in.ValidateOnly {
-		return s.validateSubmit(ctx, p, stored, raw)
 	}
 	idem := in.IdempotencyKey
 

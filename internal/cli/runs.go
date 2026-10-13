@@ -105,7 +105,7 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 				if a.output == "json" {
 					return a.json(answer)
 				}
-				fmt.Fprintf(a.stdout, "Valid spec; effective pool %s, CPUs %g, memory %d bytes, disk %d bytes\n", answer.Pool, answer.EffectiveResources.CPUs, answer.EffectiveResources.Memory, answer.EffectiveResources.Disk)
+				fmt.Fprintf(a.stdout, "Valid spec; effective pool %s, CPUs %g, memory %d bytes, disk %d bytes\n", answer.EffectivePool, answer.EffectiveResources.CPUs, answer.EffectiveResources.Memory, answer.EffectiveResources.Disk)
 				if answer.WouldStartNow {
 					fmt.Fprintf(a.stdout, "Would start now on %s (advisory; not a reservation or workload-success guarantee).\n", answer.EligibleHost)
 				} else {

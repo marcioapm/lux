@@ -3537,6 +3537,7 @@ components:
         activity:
           type: string
         blockers:
+          description: "validateOnly: why it would not start now, by kind."
           items:
             $ref: "#/components/schemas/AdmissionBlocker"
           type:
@@ -3548,9 +3549,17 @@ components:
         createdAt:
           format: date-time
           type: string
+        effectivePool:
+          description: "validateOnly: the pool the Run would be bound to."
+          type: string
+        effectivePoolId:
+          description: "validateOnly: that pool's id."
+          type: string
         effectiveResources:
           $ref: "#/components/schemas/Resources"
+          description: "validateOnly: the resources the Run would reserve, after defaults and a shaped pool's rounding."
         eligibleHost:
+          description: "validateOnly: the host it would start on now."
           type: string
         epoch:
           format: int64
@@ -3605,8 +3614,10 @@ components:
           description: "The Run is being placed now: waiting for a host, or starting on one; placementSeconds grows from the response's time on."
           type: boolean
         pool:
+          description: The current name of the pool the Run is bound to (spec.placement.pool is the name it was submitted with).
           type: string
         poolId:
+          description: That pool's id.
           type: string
         resumable:
           description: "Whether POST /v1/runs/{id}/resume without fromSnapshot would be accepted: its state is stopped, lost, failed or succeeded, its resumePolicy is not never, and it is not left with only a refused snapshot report. The same test as GET /v1/runs?resumable=true. As of this answer: a Run being stopped is not resumable until it is stopped."
@@ -3682,8 +3693,10 @@ components:
         usage:
           $ref: "#/components/schemas/RunUsage"
         valid:
+          description: "validateOnly: the spec would be accepted; no Run was created and nothing changed."
           type: boolean
         wouldStartNow:
+          description: "validateOnly: a host could take the Run now (spot: settled spare capacity no normal Run is waiting for; normal: a host it fits on now). Advisory: not a reservation, and it may change at once."
           type: boolean
       type: object
     SyncRef:
