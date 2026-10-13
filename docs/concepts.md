@@ -615,13 +615,13 @@ A shaped pool's Runs are placed only on hosts that advertise exactly its
 nominal host (`capacity` cpus, memory and disk equal to the shape's) and
 scale disk to it (the `disk-scale` capability: `lux-runner --disk` with
 `--disk-headroom`). A host luxd launches for the pool is started that way,
-with the shape's `cpus`, `memory` and `disk` and the shape's
-`diskHeadroom` (10 GiB unless set), whatever its instance type: a larger
+with the shape's `cpus`, `memory`, `disk` and `diskHeadroom` (10 GiB
+unless set), whatever its instance type: a larger
 fallback type advertises the shape, not its hardware. Any other host in
 the pool (an older lux-runner, or one started by hand with its own
 capacity) is skipped, and a waiting Run's reason says how many hosts do
 not advertise the shape. A static shaped pool's hosts must be started with
-those flags by hand.
+those flags by hand ([operations](operations.md#shaped-pools)).
 
 On such a host a Run's disk limit is its size's disk scaled to what the
 filesystem really has:

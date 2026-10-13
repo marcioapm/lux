@@ -565,8 +565,8 @@ lux-runner --cpus 8 --memory 34359738368 --disk 171798691840 --disk-headroom 107
 ```
 
 Memory, disk and disk headroom are plain byte values, not values with unit
-suffixes. The advertised CPUs, memory and disk must equal the shape exactly;
-a host with different values is skipped for shaped Runs. Use the shape's
+suffixes. The advertised CPUs, memory and disk must equal the shape exactly
+([concepts](concepts.md#shaped-pools)). Use the shape's
 `diskHeadroom` (10 GiB by default), although equality of headroom is not
 enforced on hand-started hosts: any explicit headroom that allows the runner
 to start enables `disk-scale`.
