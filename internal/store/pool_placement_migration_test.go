@@ -49,3 +49,31 @@ func TestPoolPlacementMigration(t *testing.T) {
 		t.Fatalf("placement 'random': %v, want a check violation", err)
 	}
 }
+
+// 074: a Run from before it has no raise: its three raise columns are NULL.
+func TestRunSizeRaiseMigration(t *testing.T) {
+	owner, _ := emptyDB(t)
+	ctx := context.Background()
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "073_pool_placement"); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pgx.Connect(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO runs (id, tenant_id, spec, state, resolved_size) VALUES ('run_old', 't1', '{}', 'stopped', 'm-2-arm64')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Migrate(ctx, owner, "lux_app"); err != nil {
+		t.Fatal(err)
+	}
+	var from, raisedFor, to *string
+	if err := conn.QueryRow(ctx, `SELECT size_raised_from, size_raised_for, size_raised_to FROM runs WHERE id = 'run_old'`).
+		Scan(&from, &raisedFor, &to); err != nil || from != nil || raisedFor != nil || to != nil {
+		t.Fatalf("legacy run: raised from %v for %v to %v (%v), want all NULL", from, raisedFor, to, err)
+	}
+}
