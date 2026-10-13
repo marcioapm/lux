@@ -409,7 +409,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 			h.Labels = maps.Clone(plan.Expected.Labels)
 		}
 		// A shaped pool's new host is launched advertising the shape, with
-		// disk scaling (shapeEnv), whatever older hosts registered with.
+		// disk scaling ((*PoolShape).runnerEnv), whatever older hosts registered with.
 		if sh := pl.Shape; sh != nil {
 			h.Capacity.CPUs, h.Capacity.Memory, h.Capacity.Disk = sh.CPUs, int64(sh.Memory), int64(sh.Disk)
 			h.Caps = append(h.Caps, proto.CapDiskScale)
