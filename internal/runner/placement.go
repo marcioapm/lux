@@ -43,7 +43,9 @@ type placement struct {
 	tenantID string
 	epoch    int
 	assign   *proto.Assign // nil when re-adopted after a runner restart
-	dir      string
+	// reclaimArmed: this process scheduled the spot reclamation's kill.
+	reclaimArmed bool
+	dir          string
 	// prev is the Run's earlier placement on this host when this one was
 	// assigned: this one touches nothing of the Run's until prev is done.
 	// Set before run starts; cleared under mu once prev is done, because a
@@ -1177,8 +1179,10 @@ func (p *placement) startShim(ctx context.Context, a *proto.Assign) error {
 func (p *placement) requestStop(ctx context.Context, reason string) {
 	p.mu.Lock()
 	// A terminate overrides an earlier stop's reason ("cancel" from an older luxd).
-	if p.stopWhy == "" || reason == "terminate" || reason == "cancel" {
-		p.stopWhy = reason
+	if p.stopWhy == "" || reason == "terminate" || reason == "cancel" || reason == stopSpotReclaim {
+		if p.stopWhy != stopSpotReclaim {
+			p.stopWhy = reason
+		}
 	}
 	phase := p.phase
 	if p.state != nil {
@@ -1190,6 +1194,17 @@ func (p *placement) requestStop(ctx context.Context, reason string) {
 	}
 	p.mu.Unlock()
 	p.wake()
+	if reason == stopSpotReclaim {
+		// Every phase: a starting or building placement is cancelled above,
+		// a running one is signalled now, and the container dies at the
+		// first notice's deadline whatever else happens.
+		if phase == "running" {
+			p.setPhase("stopping")
+			go p.report(ctx, proto.MsgStatus, proto.Status{State: "stopping"})
+		}
+		p.reclaim(ctx)
+		return
+	}
 	switch {
 	case phase == "running":
 		p.setPhase("stopping")

@@ -274,7 +274,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // capabilities are Hello's: sync modes only with a shim that has them.
 func (r *Runner) capabilities() []string {
 	if r.shimSyncModes {
-		return []string{proto.CapDiff, proto.CapGitCredentials, proto.CapSyncModes}
+		return []string{proto.CapDiff, proto.CapGitCredentials, proto.CapSyncModes, proto.CapSpotReclaim}
 	}
 	return []string{proto.CapDiff, proto.CapGitCredentials}
 }

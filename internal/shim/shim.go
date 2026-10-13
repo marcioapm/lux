@@ -454,6 +454,10 @@ func (s *Shim) handleConn(c net.Conn) {
 				}
 			}
 		case proto.ShimStop:
+			if m.KillAtUnixMs > 0 {
+				s.reclaim(time.UnixMilli(m.KillAtUnixMs))
+				break
+			}
 			s.stop(m.Reason, time.Duration(m.GraceSec*float64(time.Second)))
 		case proto.ShimServers:
 			s.setServers(m.Servers)
@@ -580,6 +584,48 @@ func (s *Shim) stop(reason string, shorter time.Duration) {
 		s.beforeStop(env)
 		s.signal(initPid, ad, proc, deadline)
 	}()
+}
+
+// reclaim ends a spot placement: SIGTERM to the workload's process groups
+// at once, with no beforeStop hook and no grace, and SIGKILL at killAt.
+// A repeated notice re-sends SIGTERM but never moves killAt later.
+func (s *Shim) reclaim(killAt time.Time) {
+	s.mu.Lock()
+	first := !s.stopping
+	s.stopping = true
+	if first {
+		s.stopWhy = "spot-reclaim"
+	}
+	initPid, proc := s.initPid, s.proc
+	s.mu.Unlock()
+	if first {
+		s.out.Event(proto.EvStop, map[string]any{"reason": "spot-reclaim"})
+	}
+	var groups []int
+	if initPid > 0 {
+		groups = append(groups, initPid)
+	}
+	if proc != nil && proc.Cmd.Process != nil {
+		groups = append(groups, proc.Cmd.Process.Pid)
+	}
+	reclaimSignals(groups, killAt, time.Now(), func(pid int, sig syscall.Signal) { _ = syscall.Kill(-pid, sig) }, time.AfterFunc)
+	select {
+	case s.startCh <- proto.ShimMsg{Type: proto.ShimStart}:
+	default:
+	}
+}
+
+// reclaimSignals sends SIGTERM to every group now and schedules SIGKILL at
+// killAt (at once when it has passed).
+func reclaimSignals(groups []int, killAt, now time.Time, kill func(int, syscall.Signal), after func(time.Duration, func()) *time.Timer) {
+	for _, g := range groups {
+		kill(g, syscall.SIGTERM)
+	}
+	after(max(0, killAt.Sub(now)), func() {
+		for _, g := range groups {
+			kill(g, syscall.SIGKILL)
+		}
+	})
 }
 
 // signal tells the workload to stop, and kills its group at deadline.

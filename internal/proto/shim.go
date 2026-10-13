@@ -137,6 +137,9 @@ type ShimMsg struct {
 	// GraceSec, when set, shortens the stop's grace (the host is going
 	// away sooner than the workload's own grace allows).
 	GraceSec float64 `json:"graceSec,omitempty"`
+	// KillAtUnixMs, for a spot reclamation: SIGTERM now, skipping
+	// beforeStop, and SIGKILL to the process group at this instant.
+	KillAtUnixMs int64 `json:"killAtUnixMs,omitempty"`
 	// A stream's handshake: the connection then carries StreamData lines.
 	Stream *StreamOpen `json:"stream,omitempty"`
 	// servers: the ones to run now (with a command); any other the shim

@@ -425,10 +425,9 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 	}
 	var waiting waitCapacity
 	for _, h := range hosts {
-		if slices.ContainsFunc(h.Spots, func(sp spotPlacement) bool { return sp.ReclaimFor == r.ID && r.ID != "" }) {
-			reason = reclaimWaitReason
-			continue
-		}
+		// forRun: the Run's own pledge is not counted against it, but its
+		// claimed victims' live usage is, so it starts only once they
+		// have released what it needs.
 		if blockers := hostFit(r, h.forRun(r.ID)); len(blockers) != 0 {
 			waiting.add(blockers)
 			continue

@@ -36,6 +36,9 @@ type runState struct {
 	Exit *exitRecord `json:"exit,omitempty"`
 	// StopReason from luxd, if any.
 	StopReason string `json:"stopReason,omitempty"`
+	// ReclaimKillAt: unix ms when a spot reclamation's SIGKILL is due, set
+	// at the first notice's receipt and never moved.
+	ReclaimKillAt int64 `json:"reclaimKillAt,omitempty"`
 	// Stale: luxd fenced this placement off; do not report or upload.
 	Stale bool `json:"stale,omitempty"`
 	// Egress, as applied: re-applied when a restarted runner re-adopts a
