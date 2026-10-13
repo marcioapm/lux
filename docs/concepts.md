@@ -580,6 +580,20 @@ and what it got. Setting, changing or removing a pool's shape never
 resizes a Run already submitted: a Run is sized when it is submitted and
 when a resume resizes or moves it.
 
+After a shape is removed or changed, a Run keeps its resources, and its
+`sizing.resolved` is shown only while its pool is shaped and its size is
+still one of that pool's sizes; otherwise it is absent (`sizing.requested`
+stays). Its next resume settles it:
+
+- into an unshaped pool (its own, its shape removed, or another): the Run
+  has no size from then on, and keeps its resources unless the resume
+  asks for others;
+- in its own pool whose sizes no longer include the Run's size, asking
+  for no resources: its current cpus, memory and disk are rounded up to
+  one of the pool's sizes, as on a move into a shaped pool (refused like
+  any resize, e.g. 422 `size_too_large` or `size_below_saved_state`);
+- asking for resources: those are resolved, as on any resume.
+
 A pool without a shape is unchanged in every way: it takes no `size`, and
 cpus, memory and disk as given, with luxd's defaults. Shapes describe
 Runs' reservations only, for now: hosts still register and are scheduled

@@ -11,7 +11,12 @@
 -- every Run before this migration. spec.resources stays the resolved
 -- reservation the scheduler and costs read.
 --
--- Nullable columns without defaults: catalog-only, no table rewrite.
+-- Nullable columns without defaults: catalog-only, no table rewrite. The
+-- ALTERs still take ACCESS EXCLUSIVE; lock_timeout fails the migration
+-- (store.migrate runs each file in one transaction, so it rolls back and can
+-- be retried) instead of queueing every later reader of runs behind a long
+-- transaction.
+SET LOCAL lock_timeout = '5s';
 ALTER TABLE pools ADD COLUMN shape jsonb;
 ALTER TABLE runs
   ADD COLUMN requested_resources jsonb,

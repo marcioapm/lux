@@ -617,7 +617,7 @@ type RunUsage struct {
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + resumableSQL + `, ` + stageColumns
+	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, rpool.shape, ` + resumableSQL + `, ` + stageColumns
 
 // runsFrom: a Run with its tenant, its current placement's host, and its
 // runtime (rr). Runtime is the sum over its placements of started_at
@@ -683,11 +683,18 @@ func scanRun(row pgx.Row) (*Run, error) {
 	var stage stageInputs
 	var requested *SizeRequest
 	var size *string
+	var shape *PoolShape
 	err := row.Scan(append([]any{&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
 		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing,
-		&requested, &size, &r.Resumable},
+		&requested, &size, &shape, &r.Resumable},
 		stage.scanTargets()...)...)
+	// resolved_size is shown only while it names a size of the pool's
+	// current ladder: a removed or changed shape leaves it stale until the
+	// next resume re-resolves or clears it.
+	if size != nil && (shape == nil || !shape.hasSize(*size)) {
+		size = nil
+	}
 	if requested != nil || size != nil {
 		r.Sizing = &RunSizing{Requested: requested}
 		if size != nil {
@@ -757,7 +764,6 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		return nil, err
 	}
 	stored, refs, values := sp.SplitSecrets()
-	stored.Resources.Size = ""
 	if err := requireSecrets(refs, values); err != nil {
 		return nil, err
 	}
@@ -1943,7 +1949,8 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		if err != nil {
 			return err
 		}
-		if rz, err := resumeSize(ctx, tx, id, dest.Name, sh, dest.ID != curPool.ID, resolvedSize, sp.Resources, req.Resources); err != nil {
+		z := resumeSizing{runID: id, from: curPool, dest: dest, shape: sh, resolved: resolvedSize, cur: sp.Resources}
+		if rz, err := resumeSize(ctx, tx, z, req.Resources); err != nil {
 			return err
 		} else if rz != nil {
 			resize = rz
@@ -2085,39 +2092,29 @@ func pendingResumeData(ctx context.Context, tx pgx.Tx, runID, key string, dest a
 // disk use of the placement that took the snapshot the Run resumes from
 // (runs.snapshot_id, already moved to fromSnapshot). Without that
 // measurement, a smaller disk is not applied. A disk kept is no error:
-// Resize.Disk says why. Values are checked as submit checks them.
-func resizeRun(ctx context.Context, tx pgx.Tx, runID string, cur spec.Resources, req resumeResources) (*Resize, error) {
-	requested, err := req.check()
-	if err != nil {
-		return nil, err
+// Resize.Disk says why. req is resumeResources.check's, already checked as
+// submit checks resources.
+func resizeRun(ctx context.Context, tx pgx.Tx, runID string, cur spec.Resources, req spec.Resources) (*Resize, error) {
+	rz := &Resize{Requested: req, Applied: cur}
+	if req.CPUs != 0 {
+		rz.Applied.CPUs = req.CPUs
 	}
-	rz := &Resize{Requested: requested, Applied: cur}
-	if req.CPUs != nil {
-		rz.Applied.CPUs = *req.CPUs
-	}
-	if req.Memory != nil {
-		rz.Applied.Memory = *req.Memory
+	if req.Memory != 0 {
+		rz.Applied.Memory = req.Memory
 	}
 	if req.Disk != 0 {
 		rz.Applied.Disk = req.Disk
 	}
 	if req.Disk > 0 && req.Disk < cur.Disk {
-		peak, final, found, err := savedDisk(ctx, tx, runID)
+		reason, peak, err := diskShrinkRefusal(ctx, tx, runID, req.Disk)
 		if err != nil {
 			return nil, err
 		}
-		kept := DiskKept{Requested: req.Disk, Kept: cur.Disk}
-		switch {
-		case found && !final:
-			kept.Reason = "no final measurement: the placement that took the snapshot it resumes from ended without reporting its final disk use, so a smaller disk is not applied"
-		case peak == nil:
-			kept.Reason = "no disk use is recorded for the snapshot it resumes from: a smaller disk is not applied"
-		case int64(req.Disk) < diskShrinkFloor(*peak):
-			kept.Measured, kept.Needed = peak, diskShrinkFloor(*peak)
-			kept.Reason = fmt.Sprintf("its saved state used up to %s; a smaller disk must be at least %s (that plus max(25%%, 1 GiB))",
-				bytesText(*peak), bytesText(kept.Needed))
-		}
-		if kept.Reason != "" {
+		if reason != "" {
+			kept := DiskKept{Requested: req.Disk, Kept: cur.Disk, Reason: reason + ": a smaller disk is not applied"}
+			if peak != nil {
+				kept.Measured, kept.Needed = peak, diskShrinkFloor(*peak)
+			}
 			rz.Disk, rz.Applied.Disk = &kept, cur.Disk
 		}
 	}

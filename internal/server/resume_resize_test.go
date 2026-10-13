@@ -413,8 +413,8 @@ func TestResumeDiskShrinkNeedsTheFinalMeasurement(t *testing.T) {
 		applied int64
 		reason  string
 	}{
-		{"lost before its exit status", 8 * gib, "", 2 * gib, 20 * gib, "no final measurement"},
-		{"lost before its exit status, a shrink its peak admits", 8 * gib, "", 11 * gib, 20 * gib, "no final measurement"},
+		{"lost before its exit status", 8 * gib, "", 2 * gib, 20 * gib, "ended without reporting its final disk use: a smaller disk is not applied"},
+		{"lost before its exit status, a shrink its peak admits", 8 * gib, "", 11 * gib, 20 * gib, "ended without reporting its final disk use: a smaller disk is not applied"},
 		{"exited, its final usage refuses the shrink", 1800 * mib, "exited", 2 * gib, 20 * gib, "its saved state used up to"},
 		{"exited, its final usage admits the shrink", 1800 * mib, "exited", 3 * gib, 3 * gib, ""},
 		{"failed, its final usage admits the shrink", 1800 * mib, "failed", 3 * gib, 3 * gib, ""},

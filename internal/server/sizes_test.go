@@ -662,7 +662,10 @@ func TestParseShape(t *testing.T) {
 		}
 	}
 	var he *HTTPError
-	if err := ValidShape(PoolShape{}); !errors.As(err, &he) || he.Code != "invalid_pool" {
-		t.Errorf("ValidShape of a zero shape: %v", err)
+	if m, err := ValidShape(PoolShape{}); m != nil || !errors.As(err, &he) || he.Code != "invalid_pool" {
+		t.Errorf("ValidShape of a zero shape: %v %v", m, err)
+	}
+	if m, err := ValidShape(testShape); err != nil || m.Default().Name != "m-2-arm64" {
+		t.Errorf("ValidShape of testShape: %v", err)
 	}
 }

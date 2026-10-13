@@ -48,17 +48,43 @@ func (sh PoolShape) model() (*sizing.Model, error) {
 	})
 }
 
-// sizes is sh's ladder, smallest first; nil for a shape New refuses.
+// storedModel is the model of pool's stored shape. Every write checks the
+// shape (CheckPoolShape), so New refuses a stored one only if its rules
+// tightened after it was stored: a 500 pool_shape_invalid naming the pool.
+func (sh PoolShape) storedModel(pool string) (*sizing.Model, error) {
+	m, err := sh.model()
+	if err != nil {
+		return nil, errf(http.StatusInternalServerError, "pool_shape_invalid", "pool %s: stored shape: %v", pool, err)
+	}
+	return m, nil
+}
+
+// sizes is sh's ladder, smallest first. A stored shape New refuses (see
+// storedModel) lists no sizes rather than failing the whole pool listing;
+// submits and resumes into the pool get pool_shape_invalid. scanPool has no
+// logger to report it with.
 func (sh PoolShape) sizes() []PoolSize {
 	m, err := sh.model()
 	if err != nil {
 		return nil
 	}
+	def := m.Default().Name
 	var out []PoolSize
 	for _, e := range m.List() {
-		out = append(out, PoolSize{Name: e.Name, CPUs: e.CPUs, Memory: e.Memory, Disk: e.Disk, Fraction: e.Fraction, Default: e.CPUs == sh.DefaultCPUs})
+		out = append(out, PoolSize{Name: e.Name, CPUs: e.CPUs, Memory: e.Memory, Disk: e.Disk, Fraction: e.Fraction, Default: e.Name == def})
 	}
 	return out
+}
+
+// hasSize reports whether name is on sh's current ladder.
+func (sh PoolShape) hasSize(name string) bool {
+	m, err := sh.model()
+	return err == nil && onLadder(m, name)
+}
+
+func onLadder(m *sizing.Model, name string) bool {
+	_, err := m.Parse(name)
+	return err == nil
 }
 
 // shapeKeys are ParseShape's keys, in the order its errors list them.
@@ -109,12 +135,51 @@ func ParseShape(s string) (*PoolShape, error) {
 	return &sh, nil
 }
 
-// ValidShape is a 422 invalid_pool for a shape sizing.New refuses.
-func ValidShape(sh PoolShape) error {
-	if _, err := sh.model(); err != nil {
-		return errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
+// ValidShape is sh's model, or a 422 invalid_pool for a shape sizing.New
+// refuses.
+func ValidShape(sh PoolShape) (*sizing.Model, error) {
+	m, err := sh.model()
+	if err != nil {
+		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
 	}
-	return nil
+	return m, nil
+}
+
+// catalogType is an instance type as the instance-type catalog describes
+// it. CPUs and Memory are nil when unknown; Archs are Go's names
+// (ec2Archs) of its architectures, in catalog order, those not mapped left
+// out.
+type catalogType struct {
+	CPUs   *int
+	Memory *int64
+	Archs  []string
+}
+
+// catalogTypes are the catalog's entries for types in provider's region;
+// a type it lacks is absent.
+func catalogTypes(ctx context.Context, tx pgx.Tx, provider, region string, types []string) (map[string]catalogType, error) {
+	rows, err := tx.Query(ctx, `SELECT instance_type, vcpus, memory_bytes, coalesce(architectures, '{}') FROM instance_types
+		WHERE provider = $1 AND region = $2 AND instance_type = ANY($3)`, provider, region, types)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]catalogType{}
+	for rows.Next() {
+		var name string
+		var ct catalogType
+		var archs []string
+		if err := rows.Scan(&name, &ct.CPUs, &ct.Memory, &archs); err != nil {
+			return nil, err
+		}
+		for _, a := range archs {
+			if g := ec2Archs[a]; g != "" && !slices.Contains(ct.Archs, g) {
+				ct.Archs = append(ct.Archs, g)
+			}
+		}
+		out[name] = ct
+	}
+	return out, rows.Err()
 }
 
 // CheckPoolShape validates a pool's shape (nil: none) and, for an ec2
@@ -127,13 +192,13 @@ func CheckPoolShape(ctx context.Context, db *store.Store, provider string, templ
 	if sh == nil {
 		return nil
 	}
-	if err := ValidShape(*sh); err != nil {
+	m, err := ValidShape(*sh)
+	if err != nil {
 		return err
 	}
 	if provider != "ec2" {
 		return nil
 	}
-	m, _ := sh.model()
 	region, _ := template["region"].(string)
 	primary, _ := template["instanceType"].(string)
 	types := []string{primary}
@@ -148,47 +213,23 @@ func CheckPoolShape(ctx context.Context, db *store.Store, provider string, templ
 		return nil
 	}
 	return db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT instance_type, vcpus, memory_bytes, coalesce(architectures, '{}') FROM instance_types
-			WHERE provider = $1 AND region = $2 AND instance_type = ANY($3)`, provider, region, types)
+		known, err := catalogTypes(ctx, tx, provider, region, types)
 		if err != nil {
 			return err
 		}
-		known := map[string]sizing.Dimensions{}
-		archs := map[string]string{}
-		for rows.Next() {
-			var name string
-			var vcpus *int
-			var mem *int64
-			var ec2 []string
-			if err := rows.Scan(&name, &vcpus, &mem, &ec2); err != nil {
-				return err
-			}
-			if vcpus == nil || mem == nil {
+		for i, t := range types {
+			ct, ok := known[t]
+			if !ok || ct.CPUs == nil || ct.Memory == nil {
 				continue
 			}
 			// The shape's arch when the type offers it, else the first it
-			// offers; a type the catalog gives no arch is not refused for it.
-			arch := ""
-			for _, a := range ec2 {
-				if g := ec2Archs[a]; g == sh.Arch || arch == "" {
-					arch = g
-				}
+			// offers; a type with no arch lux knows is not refused for it.
+			arch := sh.Arch
+			if !slices.Contains(ct.Archs, sh.Arch) && len(ct.Archs) > 0 {
+				arch = ct.Archs[0]
 			}
-			if len(ec2) == 0 {
-				arch = sh.Arch
-			}
-			known[name] = sizing.Dimensions{CPUs: float64(*vcpus), Memory: spec.Bytes(*mem), Disk: sh.Disk}
-			archs[name] = arch
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		for i, t := range types {
-			d, ok := known[t]
-			if !ok {
-				continue
-			}
-			if err := m.ValidateFallback(archs[t], d); err != nil {
+			d := sizing.Dimensions{CPUs: float64(*ct.CPUs), Memory: spec.Bytes(*ct.Memory), Disk: sh.Disk}
+			if err := m.ValidateFallback(arch, d); err != nil {
 				field := "template.instanceType"
 				if i > 0 {
 					field = fmt.Sprintf("template.fallbackInstanceTypes[%d]", i-1)
@@ -220,7 +261,7 @@ type SizeResolved struct {
 // RunSizing is a Run's request and resolution on a shaped pool.
 type RunSizing struct {
 	Requested *SizeRequest  `json:"requested,omitempty" doc:"What its submit asked for in resources.size, cpus, memory and disk, only those given (empty: none, the pool's default size). Absent for a Run submitted to an unshaped pool. A resume's request is in its answer's resize and its resume.requested event."`
-	Resolved  *SizeResolved `json:"resolved,omitempty" doc:"The size the Run has now, and its cpus, memory and disk (as spec.resources). Absent while it is in an unshaped pool."`
+	Resolved  *SizeResolved `json:"resolved,omitempty" doc:"The size the Run has now, and its cpus, memory and disk (as spec.resources). Absent while it is in an unshaped pool, or while its size is not one of its pool's current sizes (the shape changed since): its next resume resolves it again."`
 }
 
 // sizeRequestOf is r's size request: its size, cpus, memory and disk
@@ -310,7 +351,7 @@ func resolveSubmitSize(ctx context.Context, tx pgx.Tx, rp resolvedPool, raw spec
 		}
 		return nil, nil, nil
 	}
-	m, err := sh.model()
+	m, err := sh.storedModel(rp.Name)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -356,6 +397,25 @@ func savedDisk(ctx context.Context, tx pgx.Tx, runID string) (peak *int64, final
 	return peak, final, err == nil, err
 }
 
+// diskShrinkRefusal says why the Run may not shrink to disk: "" when its
+// saved state fits disk with diskShrinkFloor's headroom. peak is set only
+// when a final measurement refused it (the peak disk use it read).
+func diskShrinkRefusal(ctx context.Context, tx pgx.Tx, runID string, disk spec.Bytes) (reason string, peak *int64, err error) {
+	measured, final, found, err := savedDisk(ctx, tx, runID)
+	switch {
+	case err != nil:
+		return "", nil, err
+	case found && !final:
+		return "the placement that took the snapshot it resumes from ended without reporting its final disk use", nil, nil
+	case measured == nil:
+		return "no disk use is recorded for the snapshot it resumes from", nil, nil
+	case int64(disk) < diskShrinkFloor(*measured):
+		return fmt.Sprintf("its saved state used up to %s, which needs at least %s of disk (that plus max(25%%, 1 GiB))",
+			bytesText(*measured), bytesText(diskShrinkFloor(*measured))), measured, nil
+	}
+	return "", nil, nil
+}
+
 // resizeShaped resolves a resume's request r in the shaped pool (its
 // model m) and writes the size into the Run: its spec's cpus, memory and
 // disk and its resolved_size. cur is what the Run has; asked is what the
@@ -370,22 +430,16 @@ func resizeShaped(ctx context.Context, tx pgx.Tx, runID, pool string, cur spec.R
 	}
 	e := got.Resolved
 	rz := &Resize{Requested: asked, Applied: cur, Size: e.Name}
-	rz.Applied.CPUs, rz.Applied.Memory, rz.Applied.Disk, rz.Applied.Size = e.CPUs, e.Memory, e.Disk, ""
+	rz.Applied.CPUs, rz.Applied.Memory, rz.Applied.Disk = e.CPUs, e.Memory, e.Disk
 	if e.Disk < cur.Disk {
 		// TODO(sizes phase 4): round up to the smallest size whose disk
 		// fits the saved state, instead of refusing.
-		peak, final, found, err := savedDisk(ctx, tx, runID)
+		reason, _, err := diskShrinkRefusal(ctx, tx, runID, e.Disk)
 		if err != nil {
 			return nil, err
 		}
-		switch {
-		case found && !final:
-			return nil, errSizeBelowState(e, "the placement that took the snapshot it resumes from ended without reporting its final disk use")
-		case peak == nil:
-			return nil, errSizeBelowState(e, "no disk use is recorded for the snapshot it resumes from")
-		case int64(e.Disk) < diskShrinkFloor(*peak):
-			return nil, errSizeBelowState(e, fmt.Sprintf("its saved state used up to %s, which needs at least %s of disk (that plus max(25%%, 1 GiB))",
-				bytesText(*peak), bytesText(diskShrinkFloor(*peak))))
+		if reason != "" {
+			return nil, errSizeBelowState(e, reason)
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = $3,
@@ -402,15 +456,26 @@ func errSizeBelowState(e sizing.Entry, why string) error {
 		e.Name, bytesText(int64(e.Disk)), why)
 }
 
+// resumeSizing is what resumeSize sizes a Run against.
+type resumeSizing struct {
+	runID    string
+	from     BoundPool      // the pool the Run is in now
+	dest     BoundPool      // the pool it is in from this resume on
+	shape    *PoolShape     // dest's; nil: unshaped
+	resolved string         // runs.resolved_size; "": none
+	cur      spec.Resources // the Run's stored resources
+}
+
+func (z resumeSizing) moving() bool { return z.dest.ID != z.from.ID }
+
 // resumeSize applies a resume's resources and pool move to a Run's size,
-// against the destination pool dest (its shape sh, nil: unshaped), before
-// the move itself (rebindPool) checks the Run fits there. moving: dest is
-// another pool than the Run's. An unshaped destination keeps today's
-// rules (resizeRun) and drops the Run's size; a shaped one resolves what
-// the resume asked, or on a move that asked nothing the Run's current
-// cpus, memory and disk, rounded up. resolved is the Run's size now ("":
-// none). nil, nil: nothing to change.
-func resumeSize(ctx context.Context, tx pgx.Tx, runID, dest string, sh *PoolShape, moving bool, resolved string, cur spec.Resources, req *resumeResources) (*Resize, error) {
+// before the move itself (rebindPool) checks the Run fits in z.dest. An
+// unshaped destination keeps today's rules (resizeRun) and drops the Run's
+// size. A shaped one resolves what the resume asked; asked nothing, it
+// rounds the Run's current cpus, memory and disk up to one of its sizes on
+// a move, or when the Run's size is no longer on the pool's ladder with
+// those resources (its shape changed). nil, nil: nothing to change.
+func resumeSize(ctx context.Context, tx pgx.Tx, z resumeSizing, req *resumeResources) (*Resize, error) {
 	var asked spec.Resources
 	if req != nil {
 		var err error
@@ -418,32 +483,34 @@ func resumeSize(ctx context.Context, tx pgx.Tx, runID, dest string, sh *PoolShap
 			return nil, err
 		}
 	}
-	if sh == nil {
+	if z.shape == nil {
 		if asked.Size != "" {
-			return nil, errSizeUnsupported(dest)
+			return nil, errSizeUnsupported(z.dest.Name)
 		}
-		if resolved != "" && (moving || asked != (spec.Resources{})) {
-			if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = NULL WHERE id = $1`, runID); err != nil {
+		// The Run kept a size from a shaped pool: the one it leaves, or its
+		// own before its shape was removed. An unshaped pool has no sizes.
+		if z.resolved != "" {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = NULL WHERE id = $1`, z.runID); err != nil {
 				return nil, err
 			}
 		}
 		if req == nil {
 			return nil, nil
 		}
-		return resizeRun(ctx, tx, runID, cur, *req)
+		return resizeRun(ctx, tx, z.runID, z.cur, asked)
 	}
-	m, err := sh.model()
+	m, err := z.shape.storedModel(z.dest.Name)
 	if err != nil {
 		return nil, err
 	}
 	switch {
 	case asked != (spec.Resources{}):
-		return resizeShaped(ctx, tx, runID, dest, cur, m, asked, sizeRequestOf(asked).model())
-	case moving:
-		raw := sizeRequestOf(spec.Resources{CPUs: cur.CPUs, Memory: cur.Memory, Disk: cur.Disk})
-		return resizeShaped(ctx, tx, runID, dest, cur, m, asked, raw.model())
+		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, sizeRequestOf(asked).model())
+	case z.moving(), z.resolved != "" && !onLadder(m, z.resolved):
+		raw := sizeRequestOf(spec.Resources{CPUs: z.cur.CPUs, Memory: z.cur.Memory, Disk: z.cur.Disk})
+		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, raw.model())
 	case req != nil:
-		return resizeRun(ctx, tx, runID, cur, *req)
+		return resizeRun(ctx, tx, z.runID, z.cur, asked)
 	}
 	return nil, nil
 }

@@ -1171,9 +1171,11 @@ func Fingerprint(name, value string) string {
 	return hex.EncodeToString(h[:8])
 }
 
-// SplitSecrets returns the spec without secret values, the stored refs, and
-// the values by name.
+// SplitSecrets returns the stored form of the spec (without secret values,
+// nor resources.size, a request luxd resolves at submit), the stored refs,
+// and the values by name.
 func (s RunSpec) SplitSecrets() (RunSpec, []SecretRef, map[string]string) {
+	s.Resources.Size = ""
 	refs := make([]SecretRef, 0, len(s.Secrets))
 	values := map[string]string{}
 	stripped := make([]Secret, len(s.Secrets))
