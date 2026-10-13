@@ -35,7 +35,12 @@ func (s *Server) validateSubmit(ctx context.Context, p Principal, stored spec.Ru
 		if rp.ID != nil {
 			answer.EffectivePoolID = *rp.ID
 		}
-		r = pendingRun{TenantID: p.TenantID, Spec: stored, PoolID: rp.ID}
+		// Shape: hostFit's shaped-pool gate, as the scheduler sets it.
+		sh, err := poolShape(ctx, tx, rp.ID)
+		if err != nil {
+			return err
+		}
+		r = pendingRun{TenantID: p.TenantID, Spec: stored, PoolID: rp.ID, Shape: sh}
 		return nil
 	})
 	if err != nil {

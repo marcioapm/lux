@@ -485,12 +485,13 @@ func normalDemand(ctx context.Context, tx pgx.Tx, hosts []*candidateHost) ([]pen
 	}
 	slices.Sort(pools)
 	pools = slices.Compact(pools)
-	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, pending_sync, coalesce(place_on, ''), pool_id
-		FROM runs r WHERE state IN `+queuedRunStates+` AND NOT terminate_requested
-		  AND coalesce(spec->>'spot', '') <> 'true'
-		  AND (pool_id = ANY($1) OR place_on = ANY($2))
+	rows, err := tx.Query(ctx, `SELECT r.id, r.tenant_id, r.state, r.spec, r.pending_sync, coalesce(r.place_on, ''), r.pool_id, p.shape
+		FROM runs r LEFT JOIN pools p ON p.id = r.pool_id
+		WHERE r.state IN `+queuedRunStates+` AND NOT r.terminate_requested
+		  AND coalesce(r.spec->>'spot', '') <> 'true'
+		  AND (r.pool_id = ANY($1) OR r.place_on = ANY($2))
 		  AND NOT EXISTS (SELECT 1 FROM spot_pledges sp WHERE sp.run_id = r.id AND sp.host_id = ANY($2))
-		ORDER BY updated_at, id LIMIT $3`, pools, ids, normalDemandLimit+1)
+		ORDER BY r.updated_at, r.id LIMIT $3`, pools, ids, normalDemandLimit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -498,7 +499,7 @@ func normalDemand(ctx context.Context, tx pgx.Tx, hosts []*candidateHost) ([]pen
 	var out []pendingRun
 	for rows.Next() {
 		var r pendingRun
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.PendingSync, &r.PlaceOn, &r.PoolID); err != nil {
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.PendingSync, &r.PlaceOn, &r.PoolID, &r.Shape); err != nil {
 			return nil, false, err
 		}
 		out = append(out, r)
