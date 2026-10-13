@@ -204,6 +204,9 @@ func CheckPoolShape(ctx context.Context, db *store.Store, provider string, templ
 	}
 	region, _ := template["region"].(string)
 	primary, _ := template["instanceType"].(string)
+	if region == "" || primary == "" {
+		return nil
+	}
 	types := []string{primary}
 	if list, ok := template["fallbackInstanceTypes"].([]any); ok {
 		for _, v := range list {
@@ -211,9 +214,6 @@ func CheckPoolShape(ctx context.Context, db *store.Store, provider string, templ
 				types = append(types, t)
 			}
 		}
-	}
-	if region == "" || primary == "" {
-		return nil
 	}
 	return db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		known, err := catalogTypes(ctx, tx, provider, region, types)
@@ -300,9 +300,12 @@ func (q SizeRequest) model() sizing.Request {
 }
 
 func (q SizeRequest) equal(o SizeRequest) bool {
-	eq := func(a, b *float64) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
-	eqb := func(a, b *spec.Bytes) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
-	return q.Size == o.Size && eq(q.CPUs, o.CPUs) && eqb(q.Memory, o.Memory) && eqb(q.Disk, o.Disk)
+	return q.Size == o.Size && samePtr(q.CPUs, o.CPUs) && samePtr(q.Memory, o.Memory) && samePtr(q.Disk, o.Disk)
+}
+
+// samePtr: both nil, or both set to equal values.
+func samePtr[T comparable](a, b *T) bool {
+	return (a == nil) == (b == nil) && (a == nil || *a == *b)
 }
 
 // sizingError is the API error for a sizing.Resolve failure in pool.
@@ -510,8 +513,8 @@ func resumeSize(ctx context.Context, tx pgx.Tx, z resumeSizing, req *resumeResou
 	case asked != (spec.Resources{}):
 		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, sizeRequestOf(asked).model())
 	case z.moving(), z.resolved != "" && !sizeCurrent(m, z.resolved, z.cur):
-		raw := sizeRequestOf(spec.Resources{CPUs: z.cur.CPUs, Memory: z.cur.Memory, Disk: z.cur.Disk})
-		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, raw.model())
+		held := sizeRequestOf(spec.Resources{CPUs: z.cur.CPUs, Memory: z.cur.Memory, Disk: z.cur.Disk})
+		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, held.model())
 	case req != nil:
 		return resizeRun(ctx, tx, z.runID, z.cur, asked)
 	}

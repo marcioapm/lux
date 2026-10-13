@@ -884,7 +884,12 @@ too, so a script can tell it from a shaped one.`,
 				return fmt.Errorf("pool %s has no shape, so no sizes: Runs there ask with --cpus, --memory and --disk", found.Name)
 			}
 			if a.output == "json" {
-				return a.json(nonNilSizes(found.Sizes))
+				// [] rather than null for a shape whose stored ladder luxd
+				// no longer accepts (it lists no sizes).
+				if found.Sizes == nil {
+					found.Sizes = []server.PoolSize{}
+				}
+				return a.json(found.Sizes)
 			}
 			var rows [][]string
 			for _, sz := range found.Sizes {
@@ -902,15 +907,6 @@ too, so a script can tell it from a shaped one.`,
 	sizes.Flags().BoolVar(&sizesPlatform, "platform", false, "the platform's pool of that name")
 	cmd.AddCommand(ls, set, sizes, a.poolEventsCmd())
 	return cmd
-}
-
-// nonNilSizes is sizes, empty rather than null for a shaped pool listing
-// none (a stored shape luxd no longer accepts).
-func nonNilSizes(sizes []server.PoolSize) []server.PoolSize {
-	if sizes == nil {
-		return []server.PoolSize{}
-	}
-	return sizes
 }
 
 // poolIDOf is the id of poolOf's pool.
