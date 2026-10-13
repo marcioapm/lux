@@ -251,6 +251,8 @@ func TestFailedDiskProbeKeepsTheGrace(t *testing.T) {
 		{"inspect --size answers garbage", func(t *testing.T, f *diskFixture) { f.sizeRaw(t, "garbage") }, false, 0},
 		{"a volume's mountpoint fails", func(t *testing.T, f *diskFixture) { f.size(t, 1); f.flag(t, "failvolume") }, true, 1},
 		{"a volume's mountpoint has gone", func(t *testing.T, f *diskFixture) { f.size(t, 1); f.flag(t, "novol") }, true, 1},
+		// At the limit a partial sum is not over it, so it proves nothing.
+		{"a partial sum exactly at the limit", func(t *testing.T, f *diskFixture) { f.size(t, diskLimit); f.flag(t, "failvolume") }, true, diskLimit},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newDiskFixture(t)
@@ -345,6 +347,16 @@ func TestDiskProbeFailureLoggedOnce(t *testing.T) {
 		}
 		if e, _ := recs[0]["err"].(string); !strings.Contains(e, "no such volume") {
 			t.Errorf("probe-failed err %q, want podman's \"no such volume\"", e)
+		}
+	})
+	t.Run("no disk limit", func(t *testing.T) {
+		f := newDiskFixture(t)
+		p := f.placement(1)
+		p.assign.Spec.Resources.Disk = 0
+		f.flag(t, "failsize")
+		p.sampleSlow(f.ctx)
+		if recs := f.recordsPrefixed(msgProbeFailed); len(recs) != 0 {
+			t.Errorf("no disk limit: %d probe-failed records %v, want none", len(recs), recs)
 		}
 	})
 	t.Run("exited", func(t *testing.T) {

@@ -1482,7 +1482,7 @@ func (p *placement) sampleSlow(ctx context.Context) {
 		wg       sync.WaitGroup
 		mu       sync.Mutex
 		disk     int64
-		probeErr error // the first probe's failure
+		probeErr error // the first failing probe's error
 		st       podman.Stats
 		statsOK  bool
 	)

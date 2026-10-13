@@ -152,10 +152,11 @@ as `submittedBy` on `GET /v1/runs/{id}`.
   so a Run over its disk is stopped between `diskGrace` and `diskGrace`
   plus one interval from the first sample over. A sample whose
   measurement failed never restarts the count; it still counts if
-  what was measured is already over the limit, or at the ceiling. A Run
-  whose disk cannot be measured at all is not stopped for its disk until
-  it can be; the runner logs that once per placement, with the error, and
-  the host-wide backstop is the planned guard on the host's free space.
+  what was measured is already over the limit. While a probe keeps
+  failing, a Run is held to its disk only by what could be measured, so
+  a Run whose disk cannot be measured at all is not stopped for it; the
+  runner logs that once per placement, with the error, and the host-wide
+  backstop is the planned guard on the host's free space.
   **At its ceiling, currently twice its `disk`, a Run
   is stopped at once, whatever its grace**: the host's disk is shared, and
   a write left unbounded for the whole grace could fill it for every other
