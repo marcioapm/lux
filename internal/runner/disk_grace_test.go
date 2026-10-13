@@ -193,8 +193,14 @@ func (f *diskFixture) sizeRaw(t *testing.T, s string) {
 	}
 }
 
-func eventData(used int64, ceiling bool) map[string]any {
-	return map[string]any{"usedBytes": float64(used), "limitBytes": float64(diskLimit), "graceSeconds": diskGrace.Seconds(), "ceiling": ceiling}
+// wantEventData fails unless ev reports used bytes against diskLimit and
+// diskGrace, ceiling as given.
+func wantEventData(t *testing.T, ev proto.RunEvent, used int64, ceiling bool) {
+	t.Helper()
+	want := map[string]any{"usedBytes": float64(used), "limitBytes": float64(diskLimit), "graceSeconds": diskGrace.Seconds(), "ceiling": ceiling}
+	if !reflect.DeepEqual(ev.Data, want) {
+		t.Errorf("event data %v, want %v", ev.Data, want)
+	}
 }
 
 type lockedWriter struct {
@@ -220,9 +226,7 @@ func TestCheckDiskReportsOnceAfterTheGrace(t *testing.T) {
 	f.wantEvents(t, "within the grace", 0)
 	p.checkDisk(f.ctx, diskOver, t0.Add(diskGrace))
 	evs := f.wantEvents(t, "grace elapsed", 1)
-	if want := eventData(diskOver, false); !reflect.DeepEqual(evs[0].Data, want) {
-		t.Errorf("event data %v, want %v", evs[0].Data, want)
-	}
+	wantEventData(t, evs[0], diskOver, false)
 	p.checkDisk(f.ctx, 3*diskLimit, t0.Add(diskGrace+15*time.Second))
 	f.wantEvents(t, "after the report", 1)
 }
@@ -314,9 +318,7 @@ func TestPartialDiskSampleOverTheLimitCounts(t *testing.T) {
 		p.checkDisk(f.ctx, diskOver, time.Now().Add(-diskGrace))
 		p.sampleSlow(f.ctx)
 		evs := f.wantEvents(t, "a partial sample over at the grace's end", 1)
-		if want := eventData(diskOver, false); !reflect.DeepEqual(evs[0].Data, want) {
-			t.Errorf("event data %v, want %v", evs[0].Data, want)
-		}
+		wantEventData(t, evs[0], diskOver, false)
 		p.sampleSlow(f.ctx)
 		f.wantEvents(t, "another partial sample over", 1)
 	})
@@ -324,9 +326,7 @@ func TestPartialDiskSampleOverTheLimitCounts(t *testing.T) {
 		f, p := setup(t, 2*diskLimit)
 		p.sampleSlow(f.ctx)
 		evs := f.wantEvents(t, "a partial sample at 2× the limit", 1)
-		if want := eventData(2*diskLimit, true); !reflect.DeepEqual(evs[0].Data, want) {
-			t.Errorf("event data %v, want %v", evs[0].Data, want)
-		}
+		wantEventData(t, evs[0], 2*diskLimit, true)
 	})
 }
 
