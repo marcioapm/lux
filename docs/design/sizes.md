@@ -70,7 +70,7 @@ Cost accounting continues pricing resolved reservations and each actual host/vol
 
 ## Phase 1 concrete model policies
 
-`internal/sizing` uses `float64` CPUs and `spec.Bytes` (signed `int64`) for nominal memory/disk, matching Run resources. Architecture uses the existing GOARCH string convention, restricted here to `arm64` and `amd64`. Family is an explicit lowercase alphanumeric/hyphen slug, starting and ending alphanumeric; it may contain hyphens and is not interpreted as provider identity. Canonical names are limited to 63 ASCII characters. Parsing is exact membership in the pool ladder, not permissive numeric parsing.
+`internal/sizing` uses `float64` CPUs and `spec.Bytes` (signed `int64`) for nominal memory/disk, matching Run resources. Architecture uses the existing GOARCH string convention, restricted here to `arm64` and `amd64`. Family is an explicit lowercase alphanumeric/hyphen slug, starting and ending alphanumeric; it is not interpreted as provider identity. Canonical names are limited to 63 ASCII characters. Parsing is exact membership in the pool ladder, not permissive numeric parsing.
 
 Nominal and minimum CPUs must be exact powers of two, with minimum at least 0.5 and nominal at most 2^53. The 2^53 bound is a policy cap, not a precision requirement: every power of two formats exactly, and int64 byte division already limits ladder depth. The explicit default CPU must be a ladder entry; the model supplies no implicit default. Nominal byte totals must divide exactly into positive integer bytes at every tier through the minimum: non-divisible totals are rejected rather than rounded. Integer halving avoids multiplication overflow and byte precision loss.
 
