@@ -67,7 +67,7 @@ func TestScaleDownTreatsSpotOnlyHostAsIdle(t *testing.T) {
 			}
 			var runState, reason string
 			systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'live'`, nil, &runState, &reason)
-			if runState != StateTerminated || reason != spotReclaimedReason {
+			if runState != StateTerminated || reason != spotScaleDownReason {
 				t.Fatalf("spot Run %s %q", runState, reason)
 			}
 			planningTick(t, s, pl, p, false)

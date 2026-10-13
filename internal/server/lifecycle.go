@@ -77,11 +77,13 @@ var movedStops = []string{"drain", "preempt", "migrate"}
 // stopTerminate is the stop reason of a terminate request.
 const stopTerminate = "terminate"
 
-// stopSpotReclaim is the stop reason of a spot placement reclaimed for a
-// normal Run; spotReclaimedReason is the terminated Run's state_reason.
+// stopSpotReclaim is the stop reason of a reclaimed spot placement;
+// spotReclaimedReason is the terminated Run's state_reason when a normal Run
+// claimed it, spotScaleDownReason when its host was scaled down.
 const (
 	stopSpotReclaim     = "spot-reclaim"
 	spotReclaimedReason = "spot capacity reclaimed for a normal Run"
+	spotScaleDownReason = "spot capacity reclaimed: host scaling down"
 )
 
 // notResumedReason is the state_reason of a Run a move (stop) ended
@@ -396,7 +398,7 @@ func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID
 // resumable once it has.
 func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status, runState string, terminate bool) error {
 	var stopReason, hostID string
-	var snapshotRefused, hasSnapshot bool
+	var snapshotRefused, hasSnapshot, claimed bool
 	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
 		return err
 	}
@@ -408,8 +410,8 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 			lease_expires_at = NULL
 		WHERE run_id = $1 AND epoch = $2 AND state <> 'exited'
 		RETURNING stop_reason, host_id, snapshot_refused,
-			(SELECT snapshot_id IS NOT NULL FROM runs WHERE id = p.run_id)`,
-		runID, epoch, st.ExitCode, st.Reason, st.OutputSeq).Scan(&stopReason, &hostID, &snapshotRefused, &hasSnapshot)
+			(SELECT snapshot_id IS NOT NULL FROM runs WHERE id = p.run_id), reclaim_for IS NOT NULL`,
+		runID, epoch, st.ExitCode, st.Reason, st.OutputSeq).Scan(&stopReason, &hostID, &snapshotRefused, &hasSnapshot, &claimed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // already recorded: a redelivered report
 	}
@@ -438,8 +440,11 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	switch {
 	case terminate || stopReason == stopTerminate:
 		next, reason = StateTerminated, "terminated"
-	case stopReason == stopSpotReclaim:
+	case stopReason == stopSpotReclaim && claimed:
 		next, reason = StateTerminated, spotReclaimedReason
+	case stopReason == stopSpotReclaim:
+		// Unclaimed: drainForScaleDown reclaimed it, not a normal Run.
+		next, reason = StateTerminated, spotScaleDownReason
 	case stopReason == "timeout":
 		next, reason = StateFailed, "timeout"
 	case stopReason == "disk":

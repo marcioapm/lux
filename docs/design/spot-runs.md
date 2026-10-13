@@ -29,8 +29,9 @@ free (reclaimable), so spot work never causes a launch. drainForScaleDown locks
 the host's spot Runs (Runs before hosts), drains the host only if it still has
 no normal placement, and sends each spot placement the spot-reclaim stop: the
 same irreversible SIGTERM/15s-SIGKILL path, ending the Run terminated with
-"spot capacity reclaimed for a normal Run" — never a drain stop that would
-resume it. The drained host is terminated once its placements are gone.
+"spot capacity reclaimed: host scaling down" (a victim a normal Run claimed
+ends with "spot capacity reclaimed for a normal Run") — never a drain stop
+that would resume it. The drained host is terminated once its placements are gone.
 
 ## Runner enforcement
 
@@ -102,4 +103,3 @@ exit terminates with explicit cause. Cancellation deletes stale pledges on the
 next eligible-host pass, but does not unclaim victims or withdraw notices.
 Host state/reconnect changes delete pledges. No claim ever debits victim usage
 before actual release. Broader cleanup/concurrency proof remains required.
-
