@@ -12,9 +12,33 @@ refuses other resume policies, and retains existing never output/artifact behavi
 - [x] Single-host sufficient victim plan, durable claims/pledges, separate signal pass.
 - [x] Targeted real PG concurrent scheduler/release test.
 - [ ] Broader cancellation/host-loss/early-exit and reclamation guard mutations.
-- [ ] Read-only submit validateOnly/CLI dry-run.
-- [ ] Runner immediate SIGTERM, persisted 15s deadline; capability remains unadvertised.
+- [x] Read-only submit validateOnly/CLI dry-run sharing spotAdmission.
+- [x] Runner/shim: immediate SIGTERM, no beforeStop, persisted first-receipt 15s
+      deadline, runner-side container SIGKILL; capability advertised (Linux tests
+      written, not run on Darwin).
 - [ ] Live spot autoscaler/warm-while-active integration and Linux/full gates.
+
+## Runner enforcement
+
+luxd sends the existing stop message with reason spot-reclaim. The runner
+persists runState.reclaimKillAt (first receipt + 15s; retries, reconnects and
+re-adoption after a restart reuse the stored value), arms its own timer that
+SIGKILLs the whole container with Podman at that instant (independent of luxd
+and the shim), and sends the shim ShimStop with killAtUnixMs. The shim SIGTERMs
+the workload's and init's process groups immediately, runs no beforeStop hook,
+ignores workload grace, and schedules SIGKILL to the groups at the same instant.
+Starting/building placements are cancelled through the existing cancelStart and
+still get the container kill. Normal stops are unchanged. Exit snapshots follow
+the never policy (no state-volume export; output/artifacts kept).
+
+## Dry run
+
+POST /v1/runs?validateOnly=true runs the full submit validation and shape
+resolution, then, in a READ ONLY system transaction, the same candidateHosts and
+spotAdmission the scheduler uses (normal Runs: hostFit only, with no reclamation
+or launch promised). It writes nothing: no Run, event, secret cache, capacity
+history, pledge or provider call. The answer is advisory and can be stale the
+moment it returns; it is not a reservation.
 
 ## Capacity ledger
 
@@ -54,6 +78,3 @@ next eligible-host pass, but does not unclaim victims or withdraw notices.
 Host state/reconnect changes delete pledges. No claim ever debits victim usage
 before actual release. Broader cleanup/concurrency proof remains required.
 
-Dry-run must use spotAdmission and submit normalization with no writes; normal
-wouldStartNow means current hostFit, not reclaim/autolaunch/workload success.
-Runner deadline enforcement is still outstanding; capability is not advertised.
