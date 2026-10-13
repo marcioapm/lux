@@ -2,6 +2,7 @@ package server
 
 import (
 	"cmp"
+	"math"
 	"net/http"
 )
 
@@ -53,6 +54,8 @@ type packCandidate struct {
 
 // packOrder puts the host to choose first: hosts the Run need not avoid,
 // then the most allocated, then the highest affinity, then the lowest id.
+// Allocations compare rounded to 1e-9, so float sums that differ only by
+// rounding error (0.1+0.2 against 0.3) tie and affinity decides.
 func packOrder(a, b packCandidate) int {
 	if a.avoid != b.avoid {
 		if a.avoid {
@@ -60,7 +63,7 @@ func packOrder(a, b packCandidate) int {
 		}
 		return -1
 	}
-	if c := cmp.Compare(b.used, a.used); c != 0 {
+	if c := cmp.Compare(math.Round(b.used*1e9), math.Round(a.used*1e9)); c != 0 {
 		return c
 	}
 	if c := cmp.Compare(b.affinity, a.affinity); c != 0 {

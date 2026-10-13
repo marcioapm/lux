@@ -215,9 +215,9 @@ func packRun() pendingRun {
 	return r
 }
 
-// Among hosts allocated alike, pack prefers the cached image, then the
-// lowest id; a more allocated host wins over a cached one. The order the
-// hosts come in never matters.
+// Among hosts allocated alike, pack prefers the cached image, mirror or
+// preferred label, then the lowest id; a more allocated host wins over a
+// cached one. The order the hosts come in never matters.
 func TestPackTieBreaks(t *testing.T) {
 	s := testServer(t)
 	for _, c := range []struct {
@@ -228,6 +228,7 @@ func TestPackTieBreaks(t *testing.T) {
 		{"all alike: lowest id", func(map[string]*candidateHost) {}, "ha"},
 		{"alike, image cached on hc", func(hs map[string]*candidateHost) { hs["hc"].Images = []string{"alpine"} }, "hc"},
 		{"alike, mirror cached on hb", func(hs map[string]*candidateHost) { hs["hb"].Mirrors = []string{"https://example.com/app.git"} }, "hb"},
+		{"alike, preferred label on hc", func(hs map[string]*candidateHost) { hs["hc"].Labels["zone"] = "a" }, "hc"},
 		{"image on hc, hb more allocated", func(hs map[string]*candidateHost) {
 			hs["hc"].Images = []string{"alpine"}
 			hs["hb"].UsedCPUs, hs["hb"].UsedMem, hs["hb"].UsedDisk = 0.5, 2<<30, 10<<30
@@ -245,6 +246,7 @@ func TestPackTieBreaks(t *testing.T) {
 			c.set(byID)
 			r := packRun()
 			r.Spec.Git = &spec.Git{Repositories: []spec.Repository{{Name: "app", URL: "https://example.com/app.git"}}}
+			r.Spec.Placement.Prefers = map[string]string{"zone": "a"}
 			for _, order := range [][]int{{0, 1, 2}, {2, 1, 0}, {1, 2, 0}, {2, 0, 1}} {
 				in := []*candidateHost{hosts[order[0]], hosts[order[1]], hosts[order[2]]}
 				if h, wait := pickHostWith(t, s, r, in); h == nil || h.ID != c.want {
@@ -257,7 +259,8 @@ func TestPackTieBreaks(t *testing.T) {
 
 // A host the Run must avoid comes last however packed it is, and a
 // snapshot only a less packed host holds (not uploaded) sends the Run
-// there; once uploaded, pack chooses by allocation again.
+// there; once uploaded, pack chooses by allocation again, the snapshot's
+// host winning only among hosts allocated alike.
 func TestPackAvoidAndLocalSnapshot(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -283,6 +286,53 @@ func TestPackAvoidAndLocalSnapshot(t *testing.T) {
 	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snap'`)
 	if h, _ := pickHostWith(t, s, r, hosts); h == nil || h.ID != "ha" {
 		t.Fatalf("snapshot uploaded: picked %v, want the packed ha", h)
+	}
+	hosts[0].UsedCPUs, hosts[0].UsedMem, hosts[0].UsedDisk = 0, 0, 0
+	for _, in := range [][]*candidateHost{hosts, {hosts[1], hosts[0]}} {
+		if h, _ := pickHostWith(t, s, r, in); h == nil || h.ID != "hb" {
+			t.Fatalf("uploaded snapshot copy on hb, hosts alike: picked %v, want hb over the lower id", h)
+		}
+	}
+}
+
+// An unshaped pack pool counts a resource a host does not advertise as
+// empty: a host advertising no limits ranks emptiest, so a half-used
+// limited host is chosen over it whatever the order.
+func TestPackUnlimitedHostRanksEmptiest(t *testing.T) {
+	s := testServer(t)
+	limited := &candidateHost{ID: "hb", PoolID: "pool", Connected: true, Labels: map[string]string{},
+		Capacity: proto.Capacity{CPUs: 8, Memory: 32 << 30, Disk: 160 << 30}, UsedCPUs: 4, UsedMem: 16 << 30, UsedDisk: 80 << 30, UsedRuns: 1}
+	unlimited := &candidateHost{ID: "ha", PoolID: "pool", Connected: true, Labels: map[string]string{}}
+	r := packRun()
+	r.Shape = nil
+	r.Spec.Resources = spec.Resources{CPUs: 1, Memory: spec.Bytes(gib), Disk: spec.Bytes(gib)}
+	for _, in := range [][]*candidateHost{{unlimited, limited}, {limited, unlimited}} {
+		if h, wait := pickHostWith(t, s, r, in); h == nil || h.ID != "hb" {
+			t.Fatalf("picked %v (%q), want the half-used hb over the unlimited ha", h, wait)
+		}
+	}
+}
+
+// Float shares that differ only by rounding error tie under pack:
+// 0.1+0.2 cpus against 0.3 on capacity 1, and affinity (the image cached
+// on hb) decides, not the lower id or the last bit.
+func TestPackFloatSharesTie(t *testing.T) {
+	s := testServer(t)
+	tenth, fifth := 0.1, 0.2
+	ha := &candidateHost{ID: "ha", PoolID: "pool", Connected: true, Labels: map[string]string{},
+		Capacity: proto.Capacity{CPUs: 1}, UsedCPUs: tenth + fifth}
+	hb := &candidateHost{ID: "hb", PoolID: "pool", Connected: true, Labels: map[string]string{},
+		Capacity: proto.Capacity{CPUs: 1}, UsedCPUs: 0.3, Images: []string{"alpine"}}
+	if ha.UsedCPUs == hb.UsedCPUs {
+		t.Fatal("0.1+0.2 equals 0.3 here: the case tests nothing")
+	}
+	r := packRun()
+	r.Shape = nil
+	r.Spec.Resources = spec.Resources{CPUs: 0.1}
+	for _, in := range [][]*candidateHost{{ha, hb}, {hb, ha}} {
+		if h, wait := pickHostWith(t, s, r, in); h == nil || h.ID != "hb" {
+			t.Fatalf("picked %v (%q), want hb by its cached image", h, wait)
+		}
 	}
 }
 
@@ -369,7 +419,7 @@ func TestPlacementDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
-// spread is the scheduler's order before pack: snapshot host (+1000),
+// spread orders by: snapshot host (+1000),
 // cached image (+100 each), cached mirrors (+50), preferred labels (+10),
 // minus the Run count, an avoided host last; among equal scores the host
 // listed first. Allocation plays no part.
