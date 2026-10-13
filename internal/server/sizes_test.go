@@ -491,6 +491,89 @@ func TestShapeRemovedOrChanged(t *testing.T) {
 			t.Errorf("GET sizing %+v, want %+v", got, wantSizing)
 		}
 	})
+	t.Run("same names, new dimensions", func(t *testing.T) {
+		s := testServer(t)
+		shapedPool(t, s, "shaped", &testShape)
+		key := apiKey(t, s, new("t1"), "read")
+		id := stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 3}, i64(gib))
+		// Doubled memory and disk keep every name: m-4-arm64 is now 4 CPUs,
+		// 32 GiB, 160 GiB, while the Run still has 16 GiB, 80 GiB.
+		big := testShape
+		big.Memory, big.Disk = 2*testShape.Memory, 2*testShape.Disk
+		execSQL(t, s, context.Background(), `UPDATE pools SET shape = $1 WHERE id = 'shaped'`, big)
+		if got := getSizing(t, s, key, id); !reflect.DeepEqual(got, &RunSizing{Requested: asked}) {
+			t.Errorf("GET sizing %+v, want the request alone", got)
+		}
+		want := spec.Resources{CPUs: 4, Memory: spec.Bytes(32 * gib), Disk: spec.Bytes(160 * gib), Pids: int64(spec.BuiltinDefaults.Pids)}
+		dry, err := resumeReq(s, id, resumeRequest{ValidateOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := storedResources(t, s, id); got != sized(4) {
+			t.Errorf("validateOnly stored %+v, want m-4's old %+v", got, sized(4))
+		}
+		out, err := resumeReq(s, id, resumeRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := storedResources(t, s, id); got != want {
+			t.Errorf("stored %+v, want the new m-4's %+v", got, want)
+		}
+		if _, size := runSizing(t, s, id); size != "m-4-arm64" {
+			t.Errorf("resolved_size %q, want m-4-arm64", size)
+		}
+		rz := out.Body.Resize
+		if rz == nil || rz.Size != "m-4-arm64" || rz.Applied != want {
+			t.Errorf("resize %+v, want m-4-arm64 with %+v", rz, want)
+		}
+		if !reflect.DeepEqual(dry.Body.Resize, rz) {
+			t.Errorf("validateOnly resize %+v, the resume's %+v", dry.Body.Resize, rz)
+		}
+	})
+	t.Run("unchanged", func(t *testing.T) {
+		s := testServer(t)
+		shapedPool(t, s, "shaped", &testShape)
+		id := stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 3}, i64(gib))
+		out, err := resumeReq(s, id, resumeRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := storedResources(t, s, id); got != sized(4) || out.Body.Resize != nil {
+			t.Errorf("stored %+v resize %+v, want m-4's resources and no resize", got, out.Body.Resize)
+		}
+		if _, size := runSizing(t, s, id); size != "m-4-arm64" {
+			t.Errorf("resolved_size %q, want m-4-arm64", size)
+		}
+	})
+	t.Run("larger than the new host", func(t *testing.T) {
+		s := testServer(t)
+		shapedPool(t, s, "shaped", &testShape)
+		shapedPool(t, s, "plain", nil)
+		id := stoppedShaped(t, s, "shaped", spec.Resources{CPUs: 8}, i64(gib))
+		// m-8's 32 GiB exceed c's whole 16 GiB host: no c size holds it.
+		c := PoolShape{Family: "c", Arch: "arm64", CPUs: 8, Memory: spec.Bytes(16 * gib), Disk: spec.Bytes(80 * gib), MinCPUs: 0.5, DefaultCPUs: 2}
+		execSQL(t, s, context.Background(), `UPDATE pools SET shape = $1 WHERE id = 'shaped'`, c)
+		for range 2 {
+			_, err := resumeReq(s, id, resumeRequest{})
+			refused(t, err, http.StatusUnprocessableEntity, "size_too_large", "a plain resume in place")
+		}
+		if got := storedResources(t, s, id); got != sized(8) {
+			t.Errorf("stored %+v after the refusals, want m-8's %+v", got, sized(8))
+		}
+		if _, size := runSizing(t, s, id); size != "m-8-arm64" {
+			t.Errorf("resolved_size %q after the refusals, want m-8-arm64", size)
+		}
+		out, err := resumeReq(s, id, resumeRequest{Placement: &resumeTarget{PoolID: "plain"}})
+		if err != nil {
+			t.Fatalf("leaving with a pool move: %v", err)
+		}
+		if got := storedResources(t, s, id); got != sized(8) || out.Body.Resize != nil {
+			t.Errorf("stored %+v resize %+v, want m-8's resources kept", got, out.Body.Resize)
+		}
+		if _, size := runSizing(t, s, id); size != "" {
+			t.Errorf("resolved_size %q in the unshaped pool, want none", size)
+		}
+	})
 }
 
 // GET and the list carry each shaped Run's request and resolution; an
@@ -860,8 +943,8 @@ func TestPoolShapeAPI(t *testing.T) {
 	}
 	withShape := map[string]any{"name": "shaped", "isDefault": true, "shape": shape(func(m map[string]any) { m["defaultCpus"] = 4 })}
 	w = apiCall(t, s, key, http.MethodPost, "/v1/pools", withShape)
-	if code, msg := apiError(t, w.Body.Bytes()); w.Code != http.StatusUnprocessableEntity || !strings.Contains(msg, "shape") {
-		t.Errorf("marker with a shape: %d %s %s, want 422 naming shape", w.Code, code, msg)
+	if code, msg := apiError(t, w.Body.Bytes()); w.Code != http.StatusUnprocessableEntity || code != "invalid_pool" || !strings.Contains(msg, "(got also shape)") {
+		t.Errorf("marker with a shape: %d %s %s, want 422 invalid_pool with (got also shape)", w.Code, code, msg)
 	}
 	systemScan(t, s, `SELECT shape FROM pools WHERE name = 'shaped'`, nil, &stored)
 	if stored == nil || *stored != testShape {
@@ -895,7 +978,8 @@ func TestPoolShapeChecksInstanceTypes(t *testing.T) {
 		('ec2', 'eu-west-1', 'm8g.2xlarge', 8, $1, '{arm64}', now()),
 		('ec2', 'eu-west-1', 'm8g.4xlarge', 16, $2, '{arm64}', now()),
 		('ec2', 'eu-west-1', 'c8g.2xlarge', 8, $3, '{arm64}', now()),
-		('ec2', 'eu-west-1', 'm7i.2xlarge', 8, $1, '{x86_64}', now())`, 32*gib, 64*gib, 16*gib)
+		('ec2', 'eu-west-1', 'm7i.2xlarge', 8, $1, '{x86_64}', now()),
+		('ec2', 'eu-west-1', 'multi.2xlarge', 8, $1, '{x86_64,arm64}', now())`, 32*gib, 64*gib, 16*gib)
 	key := apiKey(t, s, new("t1"), "admin", "read")
 	shape := map[string]any{"family": "m", "arch": "arm64", "cpus": 8, "memory": "32Gi", "disk": "160Gi", "minCpus": 0.5, "defaultCpus": 2}
 	for _, c := range []struct {
@@ -908,6 +992,7 @@ func TestPoolShapeChecksInstanceTypes(t *testing.T) {
 		{"a type the catalog lacks", "m8g.2xlarge", []string{"x9.huge"}, ""},
 		{"fallback with less memory", "m8g.2xlarge", []string{"c8g.2xlarge"}, "template.fallbackInstanceTypes[0] c8g.2xlarge: fallback capacities"},
 		{"primary of another arch", "m7i.2xlarge", nil, `template.instanceType m7i.2xlarge: fallback architecture "amd64" differs from shape "arm64"`},
+		{"type offering several archs, the shape's among them", "multi.2xlarge", nil, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tmpl := map[string]any{"region": "eu-west-1", "instanceType": c.primary}
