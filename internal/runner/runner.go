@@ -647,8 +647,8 @@ func (r *Runner) shouldExit(ctx context.Context, e proto.ExitHost) bool {
 // on a slower schedule than heartbeats: it walks volumes and forks podman.
 // It is also how the disk limit is enforced: the grace is counted in
 // samples, so a Run is stopped between its diskGrace and diskGrace plus one
-// interval after it went over, having written up to that long's worth past
-// its limit.
+// interval from the first sample over, having written up to that long's
+// worth past its limit.
 func (r *Runner) usageLoop(ctx context.Context) {
 	t := time.NewTicker(r.cfg.UsageEvery)
 	defer t.Stop()

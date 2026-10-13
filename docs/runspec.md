@@ -150,8 +150,13 @@ as `submittedBy` on `GET /v1/runs/{id}`.
   brief overshoot (image layers extracted, a large temporary file, a cache
   restored then cleaned) is not stopped. The grace is counted in samples,
   so a Run over its disk is stopped between `diskGrace` and `diskGrace`
-  plus one interval after it went over; a sample whose measurement failed
-  counts neither way. **At its ceiling, currently twice its `disk`, a Run
+  plus one interval from the first sample over. A sample whose
+  measurement failed never restarts the count; it still counts if
+  what was measured is already over the limit, or at the ceiling. A Run
+  whose disk cannot be measured at all is not stopped for its disk until
+  it can be; the runner logs that once per placement, with the error, and
+  the host-wide backstop is the planned guard on the host's free space.
+  **At its ceiling, currently twice its `disk`, a Run
   is stopped at once, whatever its grace**: the host's disk is shared, and
   a write left unbounded for the whole grace could fill it for every other
   Run. The ceiling stands in for a guard on the host's free space, and

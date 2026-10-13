@@ -12,8 +12,8 @@ import (
 // CeilingFactor: a Run using this many times its resources.disk is
 // reported at once, its diskGrace notwithstanding. The host's disk is
 // shared, and a write left unbounded for the whole grace could fill it for
-// every other Run on it. An interim stand-in for a host free-space guard,
-// until disk is reserved by the scheduler.
+// every other Run on it. An interim stand-in, until the runner guards the
+// host's free space.
 const CeilingFactor = 2
 
 // Watch is one placement's disk-limit state. A new placement (a resume, a

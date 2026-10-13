@@ -80,7 +80,7 @@ type placement struct {
 	made     []string
 	peakDisk int64
 	disk     disklimit.Watch
-	// diskProbeFailed: a sample's disk probe failed, logged once.
+	// diskProbeFailed: a running sample's disk probe failed, logged once.
 	diskProbeFailed bool
 	netRx           int64
 	netTx           int64
@@ -1479,18 +1479,20 @@ func (p *placement) sampleSlow(ctx context.Context) {
 	}
 	p.mu.Unlock()
 	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
-		disk    int64
-		probeOK = true
-		st      podman.Stats
-		statsOK bool
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		disk     int64
+		probeErr error // the first probe's failure
+		st       podman.Stats
+		statsOK  bool
 	)
 	add := func(n int64, err error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if err != nil {
-			probeOK = false
+			if probeErr == nil {
+				probeErr = err
+			}
 			return
 		}
 		disk += n
@@ -1521,15 +1523,21 @@ func (p *placement) sampleSlow(ctx context.Context) {
 		})
 	}
 	wg.Wait()
-	// A partial sum would read as under the limit and restart the grace.
-	if probeOK {
+	// A partial sum is a lower bound: over the limit it is conclusive, at or
+	// under it would wrongly restart the grace.
+	var limit int64
+	if p.assign != nil {
+		limit = int64(p.assign.Spec.Resources.Disk)
+	}
+	if probeErr == nil || (limit > 0 && disk > limit) {
 		p.checkDisk(ctx, disk, time.Now())
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !probeOK && !p.diskProbeFailed {
+	if probeErr != nil && limit > 0 && p.phase == "running" && !p.diskProbeFailed {
 		p.diskProbeFailed = true
-		p.logf("a disk use probe failed; its sample is not checked against the disk limit (logged once per placement)")
+		p.logf("a disk use probe failed; a sample counts against the disk limit only if what was measured is over it (logged once per placement)",
+			"err", probeErr)
 	}
 	p.peakDisk = max(p.peakDisk, disk)
 	if statsOK {
