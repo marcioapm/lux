@@ -84,14 +84,26 @@ test("acp: an OpenCode turn over plain ACP reads as input, thought, plan, tools,
   expect([s.turns, s.records, s.cursor]).toEqual([1, 46, "1.46"]);
 });
 
-test("folding in batches gives the same session as folding at once", () => {
-  const recs = fixture("acp-opencode-1.18.21-todo-task.jsonl");
-  const whole = sessionFromRecords("acp", recs);
-  const p = new SessionProjection("acp");
-  for (let i = 0; i < recs.length; i += 7) p.fold(recs.slice(i, i + 7)).snapshot();
-  const inBatches = p.snapshot();
-  expect(inBatches.threads).toEqual(whole.threads);
-  expect(inBatches.cursor).toBe(whole.cursor);
+test("folding every fixture in batches gives the same session as folding at once", () => {
+  const fixtures = [
+    ["acp", "acp-opencode-1.18.21-todo-task.jsonl"],
+    ["opencode", "opencode-1.18.21-task-child.jsonl"],
+    ["opencode", "opencode-1.18.21-children-permission.jsonl"],
+    ["claude-code", "claude-2.1.207-agent-subagent.jsonl"],
+    ["claude-code", "claude-2.1.207-compact.jsonl"],
+    ["codex", "codex-0.144.1-subagent.jsonl"],
+  ] as const;
+  for (const [adapter, file] of fixtures) {
+    const recs = fixture(file);
+    const whole = sessionFromRecords(adapter, recs);
+    for (const n of [1, 3, 7]) {
+      const p = new SessionProjection(adapter);
+      for (let i = 0; i < recs.length; i += n) p.fold(recs.slice(i, i + n)).snapshot();
+      const inBatches = p.snapshot();
+      expect(inBatches.threads).toEqual(whole.threads);
+      expect([inBatches.cursor, inBatches.turns]).toEqual([whole.cursor, whole.turns]);
+    }
+  }
 });
 
 test("a reply streams with a caret until the next item", () => {
