@@ -199,6 +199,67 @@ func TestPoolFlowResumedIntoAnotherPool(t *testing.T) {
 	wantMap(t, "operator stats", started, map[string]int{"default": 1})
 }
 
+// runs.first_pool_id is written by the first running report only: the pool
+// of the host it ran on (default's ha). A resume into big and a running
+// report on hb leave it, and first_started_at, as they were.
+func TestFirstPoolIDSetOnceAtFirstStart(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	id, big := movedRun(t, s)
+	report := func(epoch int, st proto.Status) {
+		t.Helper()
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return s.applyStatus(ctx, tx, "t1", id, epoch, st)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := func() (pool string, at time.Time) {
+		t.Helper()
+		systemScan(t, s, `SELECT coalesce(first_pool_id, ''), first_started_at FROM runs WHERE id = $1`, []any{id}, &pool, &at)
+		return pool, at
+	}
+	// Placement 1 on ha, not yet running; the Run never started.
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'starting', started_at = NULL WHERE run_id = $1 AND epoch = 1`, id)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'starting', first_started_at = NULL WHERE id = $1`, id)
+	report(1, proto.Status{State: "running"})
+	pool, at := first()
+	if pool != "default" {
+		t.Fatalf("after the first start: first_pool_id %q, want default", pool)
+	}
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE run_id = $1 AND epoch = 1`, id)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
+	if _, err := resumeTo(s, id, big, &resumeResources{CPUs: f64(8), Memory: bytesPtr(32 * gib)}); err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, s)
+	if host, _, reason := placedOn(t, s, id); host != "hb" {
+		t.Fatalf("placed on %q (%s), want hb", host, reason)
+	}
+	report(2, proto.Status{State: "running"})
+	if state := storedState(t, s, id); state != StateRunning {
+		t.Fatalf("state %s after the second start, want running", state)
+	}
+	if pool2, at2 := first(); pool2 != "default" || !at2.Equal(at) {
+		t.Errorf("after a start in big: first_pool_id %q at %v, want default at %v", pool2, at2, at)
+	}
+}
+
+// A Run's recorded first_pool_id is its start's pool, ahead of its
+// placements' hosts and runs.pool_id: started under pc by the record,
+// though its placement ran on pa's host and it is bound to pb.
+func TestPoolFlowReadsFirstPoolID(t *testing.T) {
+	s := testServer(t)
+	keys, now := flowFixture(t, s)
+	m := func(d time.Duration) time.Time { return now.Add(-d * time.Minute) }
+	flowRun(t, s, "recorded", "ta", "pb", m(10), time.Time{}, flowPlacement{"ha", m(10)})
+	execSQL(t, s, context.Background(), `UPDATE runs SET first_pool_id = 'pc' WHERE id = 'recorded'`)
+	sampleNow(t, s)
+	wantMap(t, "samples", flowSamples(t, s), map[string]string{"pc/": "1/0", "pc/ta": "1/0"})
+	wantMap(t, "operator stats", flowStats(t, s, keys["op"]), map[string]int{"pc": 1})
+	wantMap(t, "a's stats", flowStats(t, s, keys["a"]), map[string]int{"pc": 1})
+}
+
 // A Run that never moved counts in its pool for both.
 func TestPoolFlowSamePool(t *testing.T) {
 	s := testServer(t)
