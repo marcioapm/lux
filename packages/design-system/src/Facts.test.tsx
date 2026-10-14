@@ -111,6 +111,24 @@ describe("in a DOM", () => {
     expect([...el.querySelectorAll("dl dt")].map((d) => d.textContent)).toEqual(["app", "a.b", "jervasion.intent-sha256", "jervasion.pr", "jervasion.target"]);
   });
 
+  test("LabelsFact: new labels, or a new `first` for the same labels, on re-render redraw the chips and the list", async () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const root = createRoot(el);
+    mounted.push({ el, root });
+    const chips = () => [...el.querySelectorAll(".label-chip")].map((c) => c.textContent);
+    const keys = () => [...el.querySelectorAll("dl dt")].map((d) => d.textContent);
+    await act(async () => root.render(<LabelsFact labels={{ a: "1" }} defaultOpen />));
+    expect(chips()).toEqual(["a=1"]);
+    const labels = { a: "1", b: "2" };
+    await act(async () => root.render(<LabelsFact labels={labels} first={["b"]} defaultOpen />));
+    expect(chips()).toEqual(["b=2", "a=1"]);
+    expect(keys()).toEqual(["b", "a"]);
+    await act(async () => root.render(<LabelsFact labels={labels} first={["a"]} defaultOpen />));
+    expect(chips()).toEqual(["a=1", "b=2"]);
+    expect(keys()).toEqual(["a", "b"]);
+  });
+
   test("LabelsFact: `label` names the row and its Hide text", async () => {
     const el = await render(<LabelsFact label="Versions" labels={{ runc: "1.2", kernel: "6.8" }} defaultOpen />);
     const group = el.querySelector('[role="group"]')!;
