@@ -118,21 +118,28 @@ test("with a subagent open, a message from the composer goes to the root Run", a
   }
 });
 
-test("the composer's draft belongs to its Run: the same tab drawn for another Run starts empty", async () => {
+test.each([
+  ["RunSession", "claude-code", "Message the agent"],
+  ["RunStdinSession", "generic", "Send to stdin"],
+] as const)("%s: the composer's draft belongs to its Run: the same tab drawn for another Run starts empty", async (component, adapter, label) => {
+  const original = globalThis.fetch;
+  // RunSession reads the output stream: an empty, ended one.
+  globalThis.fetch = (async () => new Response(frame([], true), { headers: { "Content-Type": "text/event-stream" } })) as unknown as typeof fetch;
   const el = document.createElement("div");
   document.body.append(el);
   const root = createRoot(el);
+  const Tab = component === "RunSession" ? RunSession : RunStdinSession;
   const draw = (id: string) =>
     act(async () =>
       root.render(
         <ToastProvider>
-          <RunStdinSession run={{ ...run("generic", "running"), id }} />
+          <Tab run={{ ...run(adapter, "running"), id }} />
         </ToastProvider>,
       ),
     );
   try {
     await draw("r1");
-    const area = () => el.querySelector<HTMLTextAreaElement>('form[aria-label="Send to stdin"] textarea')!;
+    const area = () => el.querySelector<HTMLTextAreaElement>(`form[aria-label="${label}"] textarea`)!;
     await act(async () => {
       area().focus();
       area().dispatchEvent(new Event("focusin", { bubbles: true }));
@@ -148,6 +155,7 @@ test("the composer's draft belongs to its Run: the same tab drawn for another Ru
   } finally {
     await act(async () => root.unmount());
     el.remove();
+    globalThis.fetch = original;
   }
 });
 
