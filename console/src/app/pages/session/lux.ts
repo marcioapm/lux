@@ -111,9 +111,10 @@ export function foldLuxEvent(b: Builder, e: Event) {
   switch (e.type) {
     case "state": {
       const st = str(d.state);
-      if (st === "scheduled" && epoch) hosts.set(epoch, str(d.hostName) ?? str(d.host) ?? "");
+      if (st === "scheduled" && epoch) hosts.set(epoch, str(d.host) ?? "");
       if (st === "running" && epoch) {
-        const host = hosts.get(epoch) || str(d.host);
+        const id = hosts.get(epoch) || str(d.host);
+        const host = (id && b.hostNames.get(id)) || id;
         marker = { kind: "marker", type: "epoch", text: `Epoch ${epoch}${host ? ` · running on ${host}` : " · running"}` };
       }
       if (st === "resuming") marker = { kind: "marker", type: "epoch", text: `Resuming${str(d.reason) ? ` · ${str(d.reason)}` : ""}` };

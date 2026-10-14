@@ -26,6 +26,8 @@ export class Builder {
   private touched = new Set<string>();
   // Adapter-private state the mappers keep between folds.
   readonly memo = new Map<string, unknown>();
+  // Host id -> name, for lifecycle markers (the Run's placements know them).
+  readonly hostNames = new Map<string, string>();
   sessionId?: string;
   model?: string;
   activity?: "busy" | "idle";
@@ -246,6 +248,11 @@ export class SessionProjection {
   foldEvent(e: Event): this {
     this.b.t = Date.parse(e.time);
     foldLuxEvent(this.b, e);
+    return this;
+  }
+
+  hosts(names: Record<string, string>): this {
+    for (const [id, name] of Object.entries(names)) this.b.hostNames.set(id, name);
     return this;
   }
 
