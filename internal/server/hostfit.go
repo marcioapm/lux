@@ -40,6 +40,9 @@ const (
 	// kindShape: a shaped pool's Run, a host not advertising the shape
 	// with disk scaling.
 	kindShape
+	// kindDiskPressure: the host's runner reports disk pressure; it takes
+	// no new placement, whatever the Run, until the pressure ends.
+	kindDiskPressure
 )
 
 func shapeText(cpus float64, memory, disk int64) string {
@@ -55,6 +58,9 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	}
 	if !h.Connected {
 		constraint(kindConnected, "host is not connected")
+	}
+	if h.DiskPressure != nil {
+		constraint(kindDiskPressure, diskPressureReason(h.DiskPressure))
 	}
 	chosen := r.PlaceOn != ""
 	if chosen && h.ID != r.PlaceOn {
@@ -141,7 +147,7 @@ type waitCapacity struct {
 }
 
 // waitKinds is the reason's fixed order: the resource kinds, then constraints.
-var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes", "shape"}
+var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes", "shape", "diskPressure"}
 
 // add counts h's blockers, unless one of them rules h out for this Run on
 // pool, tenancy or chosen-host grounds, or h is not connected to this luxd
@@ -162,6 +168,8 @@ func (w *waitCapacity) add(blockers []fitBlocker) {
 			kind = "syncModes"
 		case kindShape:
 			kind = "shape"
+		case kindDiskPressure:
+			kind = "diskPressure"
 		default:
 			return
 		}
@@ -211,6 +219,8 @@ func (w *waitCapacity) reason(r pendingRun) string {
 		case "shape":
 			sh := r.Shape
 			what = plural(n, "does", "do") + " not advertise its pool's shape (" + shapeText(sh.CPUs, int64(sh.Memory), int64(sh.Disk)) + ") with disk scaling"
+		case "diskPressure":
+			what = plural(n, "is", "are") + " under disk pressure (low free disk)"
 		}
 		// The subject is named once: the first part says which hosts, later
 		// parts only how many (nothing for the chosen host).

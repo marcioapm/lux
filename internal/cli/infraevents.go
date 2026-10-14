@@ -163,6 +163,10 @@ func eventLine(e server.LifecycleEvent) string {
 		if d["evict"] == true {
 			line += ", evicting its Runs"
 		}
+	case "host.disk_pressure":
+		line = s("reason") + "; admissions blocked"
+	case "host.disk_pressure_ended":
+		line = "disk pressure ended: " + s("reason")
 	default:
 		line = s("reason")
 	}

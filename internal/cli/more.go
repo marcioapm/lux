@@ -520,6 +520,9 @@ func hostState(h server.Host) string {
 	if h.Draining && h.State != "draining" {
 		return h.State + " (draining)"
 	}
+	if h.DiskPressure != nil {
+		return h.State + " (disk pressure)"
+	}
 	return h.State
 }
 
