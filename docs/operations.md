@@ -87,10 +87,17 @@ arrive, a few seconds late.
    `ec2:GetSpotPlacementScores` and `ec2:DescribeSubnets` for complete
    [market data](telemetry.md#market-data); without them it is sampled
    without placement scores, or in the zones of the pools' hosts.
-   078 (`runs.first_pool_id`) fills in the column for every started Run in
-   its transaction, about 31 s per million Runs: until it commits, writes
-   to those Runs (runner reports, API changes) wait. Older luxds keep
-   working.
+   078 (`runs.first_pool_id`) adds a column without a default: an ACCESS
+   EXCLUSIVE lock on `runs` (and writes to `pools` held back) for a catalog
+   change only, committed at once. 079 then fills it in for Runs that had
+   already ended (succeeded, failed, terminated), about 31 s per million
+   Runs, in a transaction of its own: it holds the row locks of those
+   ended Runs only, so reads, submits, runner reports and every write to a
+   live Run go on, and only a write to an ended Run (a resume) waits. Live
+   and resting Runs are left NULL and counted by the same rule when read.
+   It then builds `runs_first_pool_started`, holding back writes to `runs`
+   (not reads) for the build, about 0.3 s per 200,000 Runs. Older luxds
+   keep working.
 3. Restart (or roll) every `luxd serve` onto the new binary; for a release
    with 056 and several luxds, start every one of them, all stopped in
    step 2: do not roll.

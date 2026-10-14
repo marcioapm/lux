@@ -144,9 +144,9 @@ bound to (`runs.pool_id`). Running and queued are where the Run is now: the
 pool it is bound to. `runsStarted` in `GET /v1/pools/stats` counts starts
 the same way. Its cost stays with each placement's host's pool. The
 start's pool is recorded once, with `first_started_at`, as
-`runs.first_pool_id` (migration 078, which filled it in for Runs started
-before it; where it could not be told it is NULL and the rule above is
-applied when counting).
+`runs.first_pool_id` (migration 078; 079 filled it in for the Runs that had
+ended before it; for a Run still live or resting then, and where it could
+not be told, it is NULL and the rule above is applied when counting).
 
 Samples written before this rule (lux releases before it) are not
 rewritten: in them, a moved Run's start and finish both count under the
