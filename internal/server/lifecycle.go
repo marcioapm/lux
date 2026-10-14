@@ -99,7 +99,7 @@ func diskPressureStopReason(d map[string]any) string {
 		f, _ := d[k].(float64)
 		return int64(f)
 	}
-	return fmt.Sprintf("stopped: host disk pressure, %s over its %s disk limit", bytesText(num("excessBytes")), bytesText(num("limitBytes")))
+	return fmt.Sprintf("stopped: host disk pressure, %s over its %s disk limit", spec.BytesText(num("excessBytes")), spec.BytesText(num("limitBytes")))
 }
 
 // diskPressureStopped is the state_reason of a Run whose placement epoch

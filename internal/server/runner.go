@@ -654,7 +654,7 @@ func diskPressureData(p *proto.DiskPressure) map[string]any {
 
 // diskPressureReason is e.g. "disk pressure: 4.1 GiB free, below 5%".
 func diskPressureReason(p *proto.DiskPressure) string {
-	r := fmt.Sprintf("disk pressure: %s free, below %s", bytesText(p.FreeBytes), p.LowFree)
+	r := fmt.Sprintf("disk pressure: %s free, below %s", spec.BytesText(p.FreeBytes), p.LowFree)
 	if p.NoRelief {
 		r += "; nothing to reclaim and no Run over its disk limit"
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/marcioapm/lux/internal/server"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // infraEventsCmd is `lux pools events` and `lux hosts events`: newest
@@ -308,9 +309,9 @@ func resourceAmount(resource string, v float64) string {
 		return plainNumber(v)
 	}
 	if v < 0 {
-		return "-" + bytesHuman(int64(-v))
+		return "-" + spec.BytesText(int64(-v))
 	}
-	return bytesHuman(int64(v))
+	return spec.BytesText(int64(v))
 }
 
 // plainNumber prints a JSON number without exponent notation.

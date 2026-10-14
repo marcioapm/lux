@@ -47,7 +47,7 @@ const (
 )
 
 func shapeText(cpus float64, memory, disk int64) string {
-	return fmt.Sprintf("cpus %g, memory %s, disk %s", cpus, bytesText(memory), bytesText(disk))
+	return fmt.Sprintf("cpus %g, memory %s, disk %s", cpus, spec.BytesText(memory), spec.BytesText(disk))
 }
 
 // hostFit is independent of snapshot locality and scheduler affinity. A chosen
@@ -209,9 +209,9 @@ func (w *waitCapacity) reason(r pendingRun) string {
 		case "cpus":
 			what = fmt.Sprintf("%s cpus (requested %g)", lack, res.CPUs)
 		case "memory":
-			what = fmt.Sprintf("%s memory (requested %s)", lack, bytesText(int64(res.Memory)))
+			what = fmt.Sprintf("%s memory (requested %s)", lack, spec.BytesText(int64(res.Memory)))
 		case "disk":
-			what = fmt.Sprintf("%s disk (requested %s)", lack, bytesText(int64(res.Disk)))
+			what = fmt.Sprintf("%s disk (requested %s)", lack, spec.BytesText(int64(res.Disk)))
 		case "runs":
 			what = plural(n, "is at its Run limit", "are at their Run limit")
 		case "labels":
@@ -249,5 +249,3 @@ func plural(n int, one, many string) string {
 	}
 	return many
 }
-
-var bytesText = spec.BytesText

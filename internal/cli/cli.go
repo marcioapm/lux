@@ -21,7 +21,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/marcioapm/lux/internal/client"
-	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/version"
 )
 
@@ -178,5 +177,3 @@ func ago(t *time.Time) string {
 	}
 	return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 }
-
-var bytesHuman = spec.BytesText
