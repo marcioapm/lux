@@ -60,9 +60,6 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	if !h.Connected {
 		constraint(kindConnected, "host is not connected")
 	}
-	if h.DiskPressure != nil {
-		constraint(kindDiskPressure, diskPressureReason(h.DiskPressure))
-	}
 	chosen := r.PlaceOn != ""
 	if chosen && h.ID != r.PlaceOn {
 		constraint(kindScope, "waiting for its chosen host "+r.PlaceOn)
@@ -80,6 +77,12 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	}
 	if h.TenantID == nil && !h.Shared && slices.ContainsFunc(h.Tenants, func(t string) bool { return t != r.TenantID }) {
 		constraint(kindScope, "non-shared host is used by another tenant")
+	}
+	// After the scope checks: spot classification takes the first
+	// non-resource blocker, so a host outside the Run's pool, tenancy or
+	// chosen host reads as a constraint, never as its pressure.
+	if h.DiskPressure != nil {
+		constraint(kindDiskPressure, diskPressureReason(h.DiskPressure))
 	}
 	if !chosen {
 		requires := r.Spec.Placement.Requires

@@ -58,6 +58,28 @@ func TestHostFitDiskPressure(t *testing.T) {
 	if got := hostFit(r, h); len(got) != 0 {
 		t.Fatalf("no pressure: %+v", got)
 	}
+	// A host the Run could not use anyway is a constraint, whatever its
+	// pressure: another pool's, another tenant's, or not its chosen host.
+	for name, scope := range map[string]func(*pendingRun, *candidateHost){
+		"another pool":    func(_ *pendingRun, h *candidateHost) { h.PoolID = "elsewhere" },
+		"another tenant":  func(_ *pendingRun, h *candidateHost) { h.TenantID = new("t2") },
+		"not chosen host": func(r *pendingRun, _ *candidateHost) { r.PlaceOn = "other" },
+	} {
+		r, h := fitFixture()
+		r.Spec.Spot = true
+		h.Caps = []string{proto.CapSpotReclaim}
+		h.DiskPressure = pressureOf(false)
+		scope(&r, h)
+		set := blockerSet{}
+		if set.classify(hostFit(r, h)) || len(set.list()) != 1 || set.list()[0].Code != blockConstraint {
+			t.Errorf("%s under pressure: classified %+v, want only %s", name, set.list(), blockConstraint)
+		}
+		var w waitCapacity
+		w.add(hostFit(r, h))
+		if got := w.reason(r); got != "" {
+			t.Errorf("%s under pressure: wait reason %q, want none", name, got)
+		}
+	}
 }
 
 // pressureHost is planningFixture's pool with one connected ready host h
