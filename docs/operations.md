@@ -87,6 +87,10 @@ arrive, a few seconds late.
    `ec2:GetSpotPlacementScores` and `ec2:DescribeSubnets` for complete
    [market data](telemetry.md#market-data); without them it is sampled
    without placement scores, or in the zones of the pools' hosts.
+   078 (`runs.first_pool_id`) fills in the column for every started Run in
+   its transaction, about 31 s per million Runs: until it commits, writes
+   to those Runs (runner reports, API changes) wait. Older luxds keep
+   working.
 3. Restart (or roll) every `luxd serve` onto the new binary; for a release
    with 056 and several luxds, start every one of them, all stopped in
    step 2: do not roll.
