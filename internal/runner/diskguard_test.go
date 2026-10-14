@@ -474,7 +474,7 @@ func TestDiskGuardReclaimsAPressureStoppedRunsUploadedCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.p.mu.Lock()
-	f.p.pressureStop, f.p.pressureKept = true, 290*mib
+	f.p.pressureStop = true
 	f.p.mu.Unlock()
 	f.release()
 	f.exitedAsSupervised(context.Background())

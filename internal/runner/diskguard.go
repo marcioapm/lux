@@ -115,9 +115,10 @@ const guardIdleRetry = time.Minute
 // writable layer when its container goes; its state volumes stay, beside
 // their new export, as the Run's local copy until that copy's upload ends
 // and step 2 discards it. So a stopping placement counts its writable
-// layer, and a guard-stopped Run no longer live counts its volumes while
-// its upload is pending; once uploaded its copy is reclaimable, and step 2
-// frees it before any other Run is stopped. Neither counts its excess: that
+// layer, and a copy whose volumes' snapshot is uploading counts that
+// snapshot's blob sizes (a lower bound, read from disk, so it survives a
+// runner restart); once uploaded the copy is reclaimable, and step 2 frees
+// it before any other Run is stopped. Neither counts its excess: that
 // would stop too few, the space not coming back until the host TTL.
 //
 // A pass that finds nothing to reclaim, nothing on its way back and none to
@@ -157,8 +158,9 @@ type diskGuard struct {
 }
 
 // diskVictim is a live placement with a disk limit: used bytes at its
-// latest sample against limit, rw of them its writable layer. stopping: it is already on its way out (stopping, reported over its
-// grace, or asked to stop by this guard).
+// latest sample against limit, rw of them its writable layer. stopping: it
+// is already on its way out (stopping, reported over its grace, or asked
+// to stop by this guard).
 type diskVictim struct {
 	runID    string
 	epoch    int
@@ -173,8 +175,8 @@ func (v diskVictim) excess() int64 { return v.used - v.limit.Effective }
 // localCopy is a Run's local state on this host (state volumes, snapshot
 // files), its placement no longer live. reclaimable: S3 holds all of it
 // (every snapshot record reported and uploaded, the volumes' own snapshot
-// among them, or volumes never resumed); else awaiting is the bytes a
-// guard-stopped Run's volumes will free once its upload ends (0 unknown).
+// among them, or volumes never resumed); else awaiting is what its
+// volumes' snapshot's upload, once ended, makes reclaimable (0 none).
 type localCopy struct {
 	runID       string
 	exitAt      int64
@@ -221,7 +223,8 @@ func (g *diskGuard) observe(free int64) (entered, left bool) {
 	switch {
 	case g.pressure == nil && free < g.lowFree:
 		at := g.at(free)
-		g.pressure = &at
+		// A pass racing the previous episode's end may have left idle set.
+		g.pressure, g.idle = &at, false
 		return true, false
 	case g.pressure != nil && free >= g.recovFree:
 		g.pressure, g.idle = nil, false
@@ -300,25 +303,10 @@ func (g *diskGuard) pass(ctx context.Context) {
 		return
 	}
 	relieved := g.reclaim(ctx, g.recovFree-free)
-	if relieved {
-		free = g.remeasure(free)
-	}
-	var pending int64
-	for _, c := range g.copies() {
-		if !c.reclaimable {
-			if c.awaiting > 0 {
-				pending += c.awaiting
-				relieved = true
-			}
-			continue
-		}
-		if g.recovFree-free <= 0 || !g.discard(ctx, c.runID) {
-			continue
-		}
-		g.log.Warn("disk pressure: discarded a local copy S3 holds", "run", c.runID, "free", free)
-		relieved = true
-		free = g.remeasure(free)
-	}
+	// Always: a stopping container's removal may have freed its layer meanwhile.
+	free = g.remeasure(free)
+	free, pending, discarded := g.reclaimCopies(ctx, free)
+	relieved = relieved || discarded
 	var cands []diskVictim
 	for _, v := range overLimit(g.victims()) {
 		if v.stopping {
@@ -356,6 +344,30 @@ func (g *diskGuard) pass(ctx context.Context) {
 		}
 		g.publish(ctx)
 	}
+}
+
+// reclaimCopies discards reclaimable local copies, oldest exit first, while
+// free is short of the recovery mark. pending is what copies awaiting their
+// upload will free; relieved: a copy was discarded or is awaiting.
+func (g *diskGuard) reclaimCopies(ctx context.Context, free int64) (newFree, pending int64, relieved bool) {
+	for _, c := range g.copies() {
+		if !c.reclaimable {
+			if c.awaiting > 0 {
+				pending += c.awaiting
+				relieved = true
+			}
+			continue
+		}
+		// Not gated on pending, unlike a stop: a discard frees space now,
+		// pending only once an upload ends.
+		if g.recovFree-free <= 0 || !g.discard(ctx, c.runID) {
+			continue
+		}
+		g.log.Warn("disk pressure: discarded a local copy S3 holds", "run", c.runID, "free", free)
+		relieved = true
+		free = g.remeasure(free)
+	}
+	return free, pending, relieved
 }
 
 // attachGuard wires g to this runner: free measures the filesystem, and
@@ -475,12 +487,13 @@ func (r *Runner) localCopies() []localCopy {
 			continue
 		}
 		c := localCopy{runID: e.Name(), exitAt: st.LastExitAt, reclaimable: heldInS3(st, records)}
-		if !c.reclaimable && p != nil && st.VolumesSnapshot != "" {
-			p.mu.Lock()
-			if p.pressureStop {
-				c.awaiting = p.pressureKept
+		if rec := records[st.VolumesSnapshot]; !c.reclaimable && rec != nil && rec.RunID == st.RunID && uploading(st.RunID, records) {
+			// Its blobs compress what the volumes and output hold: their sum
+			// is a lower bound of what is freed once uploaded, read from
+			// disk, so it holds across a runner restart.
+			for _, up := range rec.Uploads {
+				c.awaiting += up.Size
 			}
-			p.mu.Unlock()
 		}
 		out = append(out, c)
 	}
@@ -506,12 +519,22 @@ func heldInS3(st *runState, records map[string]*snapshotRecord) bool {
 	return rec != nil && rec.RunID == st.RunID
 }
 
+// uploading: a snapshot record of runID has an upload pending.
+func uploading(runID string, records map[string]*snapshotRecord) bool {
+	for _, rec := range records {
+		if rec.RunID == runID && !allUploaded(rec) {
+			return true
+		}
+	}
+	return false
+}
+
 // pressureStop marks v's placement as stopped by the guard and reports it
 // to luxd, which stops it (and retries until luxd has it).
 func (r *Runner) pressureStop(ctx context.Context, v diskVictim, at proto.DiskPressure) {
 	p := v.p
 	p.mu.Lock()
-	p.pressureStop, p.pressureKept = true, max(v.used-v.rw, 0)
+	p.pressureStop = true
 	p.mu.Unlock()
 	data := map[string]any{"usedBytes": v.used, "limitBytes": v.limit.Effective, "excessBytes": v.excess(),
 		"freeBytes": at.FreeBytes, "lowFreeBytes": at.LowFreeBytes, "recoverFreeBytes": at.RecoverFreeBytes}

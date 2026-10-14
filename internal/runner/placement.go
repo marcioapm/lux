@@ -87,13 +87,12 @@ type placement struct {
 	disk     disklimit.Watch
 	// lastDisk: used bytes at the latest conclusive disk sample, for the
 	// low-free-space guard, 0 after an inconclusive one (unknown is never
-	// over); lastRw: the writable layer's share of it, what a stop frees
-	// at once. pressureStop: the guard asked luxd to stop it, when it held
-	// pressureKept bytes beyond its writable layer (what stays as its copy).
+	// over); lastRw: the writable layer's share of it at its latest
+	// successful probe, what a stop frees at once. pressureStop: the guard
+	// asked luxd to stop it.
 	lastDisk     int64
 	lastRw       int64
 	pressureStop bool
-	pressureKept int64
 	// diskProbeFailed: a running sample's disk probe failed, logged once.
 	diskProbeFailed bool
 	netRx           int64
@@ -251,9 +250,9 @@ const removeTimeout = time.Minute
 // handoverWait bounds how long a placement waits for the Run's previous
 // placement on this host to end. That one is killed, abandoning its volume
 // exports (and finish's last sampleSlow, whose walk stops at the cancel),
-// or past them: its reports outlast a
-// host lease only while the host is cut off from luxd, and its container's
-// removal takes at most removeTimeout plus podman's WaitDelay.
+// or past them: its reports outlast a host lease only while the host is
+// cut off from luxd, and its container's removal takes at most
+// removeTimeout plus podman's WaitDelay.
 func (r *Runner) handoverWait() time.Duration {
 	if r.handover > 0 {
 		return r.handover
@@ -1615,7 +1614,8 @@ func (c *cpuPeak) observe(seconds float64, at time.Time) (last, peak *float64) {
 // sampleSlow measures what costs real work: disk use (walking every mounted
 // volume, engine stores included, and podman sizing the writable layer) and
 // network counters, all at once. Run off the heartbeat path, on its own
-// schedule; a probe ctx ends counts as failed, so the sample is partial.
+// schedule; a probe whose ctx ends counts as failed, so the sample is
+// partial.
 func (p *placement) sampleSlow(ctx context.Context) {
 	p.mu.Lock()
 	var vols []volumeRef
@@ -1628,6 +1628,7 @@ func (p *placement) sampleSlow(ctx context.Context) {
 		wg       sync.WaitGroup
 		mu       sync.Mutex
 		disk, rw int64
+		rwOK     bool  // the writable layer's probe answered
 		probeErr error // the first failing probe's error
 		st       podman.Stats
 		statsOK  bool
@@ -1661,7 +1662,7 @@ func (p *placement) sampleSlow(ctx context.Context) {
 				_, err = fmt.Sscan(strings.TrimSpace(string(out)), &n)
 			}
 			if err == nil {
-				rw = n
+				rw, rwOK = n, true
 			}
 			add(n, err)
 		})
@@ -1681,12 +1682,13 @@ func (p *placement) sampleSlow(ctx context.Context) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if conclusive {
+	if rwOK {
 		p.lastRw = rw
-	} else {
+	}
+	if !conclusive {
 		// Unknown, not the last value: an earlier sample over the limit must
 		// not make a Run that since went under it the guard's victim.
-		p.lastDisk, p.lastRw = 0, 0
+		p.lastDisk = 0
 	}
 	if probeErr != nil && l.Nominal > 0 && p.phase == "running" && !p.diskProbeFailed {
 		p.diskProbeFailed = true

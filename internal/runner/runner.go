@@ -735,10 +735,10 @@ func (r *Runner) usageLoop(ctx context.Context) {
 			if p.finishing() {
 				continue
 			}
-			// Bounded by the interval: a hung podman or a huge walk makes
-			// that placement's sample partial, not the next round late.
+			// Bounded only against a hung podman (sampleBound): a long walk
+			// must conclude, or a large tree is never measured.
 			wg.Go(func() {
-				sctx, cancel := context.WithTimeout(ctx, r.cfg.UsageEvery)
+				sctx, cancel := context.WithTimeout(ctx, sampleBound(r.cfg.UsageEvery))
 				defer cancel()
 				p.sampleSlow(sctx)
 			})
@@ -746,6 +746,12 @@ func (r *Runner) usageLoop(ctx context.Context) {
 		wg.Wait()
 		r.guardPass(ctx)
 	}
+}
+
+// sampleBound cuts off one placement's disk sample. Admissions are blocked
+// on the guard's own ticker, so a round may take longer than every.
+func sampleBound(every time.Duration) time.Duration {
+	return max(4*every, 2*time.Minute)
 }
 
 // localSnapshots lists Runs whose state volumes are on this host.

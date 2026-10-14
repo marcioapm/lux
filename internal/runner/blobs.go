@@ -9,7 +9,6 @@ import (
 	"errors"
 	"io"
 	"maps"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -348,6 +347,7 @@ func (r *Runner) discard(ctx context.Context, runID string, beforeEpoch int) {
 
 // discardIdle is discard for a Run with no live placement here, checked
 // under r.mu: an assignment of the Run arriving meanwhile keeps its copy.
+// The disk guard and gcLoop discard through it alone.
 func (r *Runner) discardIdle(ctx context.Context, runID string) bool {
 	r.mu.Lock()
 	if p := r.placements[runID]; p != nil && p.liveState() != "" {
@@ -424,13 +424,7 @@ func (r *Runner) gcLoop(ctx context.Context) {
 			if time.Since(time.UnixMilli(st.LastExitAt)) < r.cfg.HostTTL {
 				continue
 			}
-			r.mu.Lock()
-			p := r.placements[e.Name()]
-			busy := p != nil && p.liveState() != ""
-			r.mu.Unlock()
-			if !busy {
-				r.discard(ctx, e.Name(), math.MaxInt)
-			}
+			r.discardIdle(ctx, e.Name())
 		}
 	}
 }
