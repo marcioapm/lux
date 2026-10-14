@@ -89,7 +89,10 @@ arrive, a few seconds late.
    without placement scores, or in the zones of the pools' hosts.
    078 (`runs.first_pool_id`) adds a column without a default: an ACCESS
    EXCLUSIVE lock on `runs` (and writes to `pools` held back) for a catalog
-   change only, committed at once. 079 then fills it in for Runs that had
+   change only, committed at once, after waiting up to `lock_timeout`
+   (5 s) for transactions open on `runs`, during which new reads and
+   writes of `runs` queue behind it; on timeout 078 fails and `luxd
+   migrate` is run again. 079 then fills it in for Runs that had
    already ended (succeeded, failed, terminated), in a transaction of its
    own, about 41–51 s per million ended Runs on the test machine and more
    under load. It holds the row locks of those ended Runs until it

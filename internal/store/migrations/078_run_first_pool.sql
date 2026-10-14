@@ -11,8 +11,10 @@
 -- The column only, without a default: a catalog change, no rewrite and no
 -- scan. ADD COLUMN takes an ACCESS EXCLUSIVE lock on runs and the foreign
 -- key a SHARE ROW EXCLUSIVE lock on pools, both until this transaction
--- commits, which is at once: every read and write of runs, and writes to
--- pools, wait only for that. 079 fills it in for Runs that ended before it
+-- commits, which is at once. The ACCESS EXCLUSIVE request first waits up
+-- to lock_timeout (5 s) behind transactions open on runs, and new reads
+-- and writes of runs queue behind it meanwhile; on timeout the migration
+-- fails and is run again. 079 fills it in for Runs that ended before it
 -- and builds its index, in a transaction of its own.
 SET LOCAL lock_timeout = '5s';
 ALTER TABLE runs ADD COLUMN first_pool_id text REFERENCES pools(id);
