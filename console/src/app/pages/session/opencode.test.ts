@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import type { OutputRecord } from "../../../api/index.ts";
-import { agentOf, briefOf, sessionFromRecords, subagentTree } from "./projection.ts";
+import { agentOf, briefOf, sessionFromRecords, SessionProjection, subagentTree } from "./projection.ts";
 import { fixture } from "./fixtures.ts";
+import { subagentCounts } from "./view.ts";
 import type { MessageItem, NoteItem, ToolItem } from "./types.ts";
 
 const CHILD = "ses_ec59a5ecfffeJV2xJIrK0QFXi1";
@@ -83,4 +84,23 @@ test("opencode: a nested task call's grandchild hangs under the child, and brief
   expect([grand.status, grand.parent, grand.title, agentOf(s, grand)]).toEqual(["error", "ses_kid", "Count lines", "explore"]);
   expect(briefOf(s, grand)).toEqual({ text: "Run wc -l on every file under internal/ and report the total, then", cut: true });
   expect(grand.items.map((i) => (i as ToolItem).name)).toEqual(["bash"]);
+});
+
+test("opencode: a parent named only by an orphan task is neutral until adopted", () => {
+  let seq = 0;
+  const ev = (type: string, data: Record<string, unknown>): OutputRecord => ({ cursor: `1.${++seq}`, epoch: 1, seq, t: 1000 + seq, ch: "event", event: { type, data } });
+  const p = new SessionProjection("opencode");
+  p.fold([ev("lux.session", { sessionId: "run" }), ev("opencode.task", { sessionID: "parent", callID: "c", childSessionID: "child", status: "running" })]);
+  let s = p.snapshot();
+  expect([s.threads.parent!.status, subagentCounts(s).running]).toEqual(["idle", 1]);
+  p.fold([ev("opencode.session", { id: "parent", parentID: "run", title: "Parent" }), ev("opencode.task", { sessionID: "parent", callID: "c", childSessionID: "child", status: "completed" })]);
+  s = p.snapshot();
+  expect(subagentTree(s).map((x) => [x.thread.id, x.depth])).toEqual([["parent", 0], ["child", 1]]);
+  expect(subagentCounts(s)).toEqual({ total: 2, running: 0 });
+});
+
+test("opencode: message truncation is kept; the Run's own permission is not duplicated", () => {
+  const s = sessionFromRecords("opencode", [session("run"), { cursor: "1.1", epoch: 1, seq: 1, t: 1, ch: "event", event: { type: "opencode.message", data: { sessionID: "kid", messageID: "m", text: "cut", truncated: true } } }, { cursor: "1.2", epoch: 1, seq: 2, t: 2, ch: "event", event: { type: "opencode.permission", data: { sessionID: "run", answered: "allow", permission: "bash" } } }]);
+  expect((s.threads.kid!.items[0] as MessageItem).truncated).toBe(true);
+  expect(s.threads.root!.items).toHaveLength(0);
 });

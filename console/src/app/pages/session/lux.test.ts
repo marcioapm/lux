@@ -30,6 +30,14 @@ test("a steer is accepted, then consumed; a lost one says why", () => {
   expect(s.turns).toBe(3);
 });
 
+test("cut input and compacted summary keep their truncation flags", () => {
+  const p = new SessionProjection("acp");
+  p.fold([rec(1, "lux.input", { requestId: "cut", text: "abc", truncated: true }), rec(2, "lux.compacted", { summary: "sum", summaryTruncated: true })]);
+  const items = p.snapshot().threads.root!.items;
+  expect((items[0] as InputItem).truncated).toBe(true);
+  expect((items[1] as MarkerItem).summaryTruncated).toBe(true);
+});
+
 test("lifecycle events become epoch and end markers in time order, between the records they fall among", () => {
   const recs = fixture("acp-opencode-1.18.21-todo-task.jsonl");
   const p = new SessionProjection("acp").hosts({ host_7f2: "gp-eu-west-1-c4" });

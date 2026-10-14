@@ -73,7 +73,7 @@ export class Builder {
 
   // Links child under parent once, in first-seen order.
   adopt(parent: string, child: string) {
-    const p = this.thread(parent);
+    const p = this.thread(parent, { status: "idle" });
     const c = this.thread(child);
     if (c.parent && c.parent !== parent) return;
     if (!c.parent) {

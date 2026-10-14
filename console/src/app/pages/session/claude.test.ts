@@ -59,4 +59,15 @@ test("claude-code: streamed deltas show a caret until the whole message replaces
   const after = done.threads[done.root]!.items;
   expect(after).toHaveLength(2);
   expect([(after[1] as MessageItem).text, (after[1] as MessageItem).streaming]).toEqual(["Fixed it.", false]);
+  const thought = (thinking: string) => ev("claude.stream_event", { event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking } }, parent_tool_use_id: null });
+  const steps = sessionFromRecords("claude-code", [
+    thought("plan A"),
+    ev("claude.assistant", { message: { content: [{ type: "thinking", thinking: "plan A" }, { type: "tool_use", id: "shell", name: "Bash", input: { command: "ls" } }] } }),
+    ev("claude.user", { message: { content: [{ type: "tool_result", tool_use_id: "shell", content: "ok" }] } }),
+    thought("plan B"),
+    ev("claude.assistant", { message: { content: [{ type: "thinking", thinking: "plan B" }, { type: "text", text: "done" }] } }),
+  ]).threads.root!.items;
+  expect(steps.map((i) => i.kind)).toEqual(["thought", "tool", "thought", "message"]);
+  expect(steps.filter((i) => i.kind === "thought").map((i) => i.text)).toEqual(["plan A", "plan B"]);
+  expect((steps[1] as ToolItem).status).toBe("completed");
 });

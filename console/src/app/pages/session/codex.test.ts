@@ -60,3 +60,23 @@ test("codex: file changes carry their diff; reasoning folds into a thought; the 
   expect([patch.name, patch.title, patch.status, patch.diff]).toEqual(["patch", "retry.go", "completed", "@@ retry.go\n-a\n+b"]);
   expect((items[3] as MarkerItem).text).toBe("turn ended · 6s · 1 tool call");
 });
+
+test("codex: a child turn reopens its spawn row; nonzero exit fails; new turn gets a new plan", () => {
+  let seq = 0;
+  const ev = (type: string, data: Record<string, unknown>): OutputRecord => ({ cursor: `1.${++seq}`, epoch: 1, seq, t: 1000 * seq, ch: "event", event: { type, data } });
+  const th = "root";
+  const s = sessionFromRecords("codex", [
+    ev("lux.session", { sessionId: th }),
+    ev("codex.item/started", { threadId: th, item: { type: "subAgentActivity", id: "spawn", kind: "started", agentThreadId: "child", agentPath: "/root/child" } }),
+    ev("codex.turn/completed", { threadId: "child", turn: { status: "completed" } }),
+    ev("codex.turn/started", { threadId: "child" }),
+    ev("codex.item/completed", { threadId: th, item: { type: "commandExecution", id: "cmd", command: "false", status: "completed", exitCode: 2 } }),
+    ev("codex.turn/plan/updated", { threadId: th, turnId: "one", plan: [{ step: "one", status: "completed" }] }),
+    ev("codex.turn/completed", { threadId: th, turn: { status: "completed" } }),
+    ev("codex.turn/plan/updated", { threadId: th, turnId: "two", plan: [{ step: "two", status: "inProgress" }] }),
+  ]);
+  const root = s.threads.root!.items;
+  expect([(root[0] as ToolItem).status, (root[0] as ToolItem).end, s.threads.child!.status]).toEqual(["running", undefined, "running"]);
+  expect([(root[1] as ToolItem).status, (root[1] as ToolItem).error]).toEqual(["error", "exit 2"]);
+  expect(root.filter((i): i is PlanItem => i.kind === "plan").map((p) => p.steps[0]!.text)).toEqual(["one", "two"]);
+});

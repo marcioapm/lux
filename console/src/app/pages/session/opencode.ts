@@ -43,6 +43,7 @@ export function foldOpenCode(b: Builder, type: string, d: Obj): boolean {
       const child = str(d.childSessionID);
       const callId = str(d.callID);
       if (!parent || !child || !callId) return true;
+      b.thread(parent, { status: "idle" });
       b.thread(child);
       const model = modelName(d.model);
       if (model) b.setThread(child, { model });

@@ -90,6 +90,9 @@ function assistant(b: Builder, d: Obj) {
     const th = b.thread(thread);
     if (!th.model) b.setThread(thread, { model: str(msg?.model) });
   }
+  const key = `claude:stream:${thread}`;
+  const n = (b.memo.get(key) as number | undefined) ?? 0;
+  const settledStream = b.item(thread, `message:stream:${thread}:${n}`) || b.item(thread, `thought:stream:${thread}:${n}`);
   for (const block of arr(msg?.content)) {
     const o = obj(block);
     if (!o) continue;
@@ -98,12 +101,9 @@ function assistant(b: Builder, d: Obj) {
         const text = str(o.text) ?? "";
         if (!text) break;
         // The whole message replaces what streamed of it (deltas, if any).
-        const key = `claude:stream:${thread}`;
-        const n = (b.memo.get(key) as number | undefined) ?? 0;
         const streamed = b.item<MessageItem>(thread, `message:stream:${thread}:${n}`);
         if (streamed) {
           b.update<MessageItem>(thread, streamed.id, { text, streaming: false });
-          b.memo.set(key, n + 1);
         } else {
           b.settle(thread);
           b.push(thread, { kind: "message", id: `message:${str(d.uuid) ?? b.at}`, t: b.t, text, streaming: false });
@@ -112,7 +112,6 @@ function assistant(b: Builder, d: Obj) {
       }
       case "thinking": {
         const text = str(o.thinking) ?? "";
-        const n = (b.memo.get(`claude:stream:${thread}`) as number | undefined) ?? 0;
         if (text && !b.item(thread, `thought:stream:${thread}:${n}`)) b.push(thread, { kind: "thought", id: `thought:${str(d.uuid) ?? b.at}`, t: b.t, end: b.t, text });
         break;
       }
@@ -121,6 +120,7 @@ function assistant(b: Builder, d: Obj) {
         break;
     }
   }
+  if (settledStream) b.memo.set(key, n + 1);
 }
 
 function toolUse(b: Builder, thread: string, o: Obj) {

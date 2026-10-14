@@ -109,7 +109,11 @@ export function foldCodex(b: Builder, type: string, d: Obj): boolean {
     }
     case "codex.turn/started": {
       const thread = threadOf(b, str(d.threadId));
-      if (thread !== ROOT && b.has(thread)) b.setThread(thread, { status: "running", endedAt: undefined });
+      if (thread !== ROOT && b.has(thread)) {
+        const child = b.thread(thread);
+        b.setThread(thread, { status: "running", endedAt: undefined });
+        if (child.parent && child.callId) b.update<ToolItem>(child.parent, child.callId, { status: "running", end: undefined });
+      }
       return true;
     }
     case "codex.thread/tokenUsage/updated": {
