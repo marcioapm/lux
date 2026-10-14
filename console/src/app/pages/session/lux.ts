@@ -59,7 +59,8 @@ export function foldLux(b: Builder, type: string, d: Obj): boolean {
       b.push(ROOT, { kind: "note", id: `warn:${b.at}`, t: b.t, tone: "warning", text: str(d.message) ?? "warning" });
       return true;
   }
-  if (type.endsWith(".turn_end")) {
+  // codex.turn_end is written for a subagent thread's turn too: codex.ts ends turns by thread.
+  if (type.endsWith(".turn_end") && type !== "codex.turn_end") {
     turnEnd(b, ROOT);
     return true;
   }
