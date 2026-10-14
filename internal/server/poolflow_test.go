@@ -391,7 +391,10 @@ func TestPoolFlowFallbacks(t *testing.T) {
 // its finish only; one started before the stats range counts there nowhere.
 // The window is (since, until]: a start or finish at exactly since, the
 // previous sample's window_end, was the previous sample's and is not
-// counted again; one a microsecond after it is.
+// counted again; one a microsecond after it is. A Run started and finished
+// 30 s ago, after until (a minute before the sample), is the next sample's,
+// though within the stats range; one started 30 s from now, after the
+// stats' to, counts nowhere.
 func TestPoolFlowWindowEdges(t *testing.T) {
 	s := testServer(t)
 	keys, now := flowFixture(t, s)
@@ -406,11 +409,15 @@ func TestPoolFlowWindowEdges(t *testing.T) {
 	flowRun(t, s, "startjustin", "ta", "pb", in, time.Time{}, flowPlacement{"ha", in})
 	flowRun(t, s, "finishatsince", "ta", "pa", m(60), since, flowPlacement{"ha", m(60)}, flowPlacement{"hb", m(50)})
 	flowRun(t, s, "finishjustin", "ta", "pa", m(60), in, flowPlacement{"ha", m(60)}, flowPlacement{"hb", m(50)})
+	recent := now.Add(-30 * time.Second)
+	flowRun(t, s, "afteruntil", "ta", "pb", recent, recent, flowPlacement{"hb", recent})
+	future := now.Add(30 * time.Second)
+	flowRun(t, s, "afterto", "ta", "pc", future, future, flowPlacement{"hc", future})
 	sampleNow(t, s)
 	wantMap(t, "samples", flowSamples(t, s), map[string]string{"pa/": "2/0", "pa/ta": "2/0", "pb/": "0/2", "pb/ta": "0/2"})
-	wantMap(t, "operator stats", flowStats(t, s, keys["op"]), map[string]int{"pa": 6})
+	wantMap(t, "operator stats", flowStats(t, s, keys["op"]), map[string]int{"pa": 6, "pb": 1})
 	wantMap(t, "b's stats", flowStats(t, s, keys["b"]), map[string]int{})
-	wantMap(t, "operator stats with starts at from", statsWithStartsAtFrom(t, s), map[string]int{"pa": 6, "pc": 2})
+	wantMap(t, "operator stats with starts at from", statsWithStartsAtFrom(t, s), map[string]int{"pa": 6, "pb": 1, "pc": 2})
 }
 
 // statsWithStartsAtFrom is runsStarted per pool from GET /v1/pools/stats
