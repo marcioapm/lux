@@ -16,8 +16,8 @@ import (
 )
 
 // flowFixture: tenants ta and tb with read keys (a, b) and an operator key
-// (op); platform pools pa, pb and pc with hosts ha (pa), hb (pb), and hn
-// with no pool. The sampler's next window is (now - 20m, now - 1m].
+// (op); platform pools pa, pb and pc with hosts ha (pa), hb (pb), hc (pc),
+// and hn with no pool. The sampler's next window is (now - 20m, now - 1m].
 func flowFixture(t *testing.T, s *Server) (map[string]string, time.Time) {
 	t.Helper()
 	ctx := context.Background()
@@ -30,7 +30,7 @@ func flowFixture(t *testing.T, s *Server) (map[string]string, time.Time) {
 		('pa', NULL, 'a', 'static', true), ('pb', NULL, 'b', 'static', true), ('pc', NULL, 'c', 'static', true)`)
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, capacity) VALUES
 		('ha', NULL, 'ha', 'pa', 'ready', '{"cpus": 4}'), ('hb', NULL, 'hb', 'pb', 'ready', '{"cpus": 4}'),
-		('hn', NULL, 'hn', NULL, 'ready', '{"cpus": 4}')`)
+		('hc', NULL, 'hc', 'pc', 'ready', '{"cpus": 4}'), ('hn', NULL, 'hn', NULL, 'ready', '{"cpus": 4}')`)
 	execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, window_end) VALUES ('', 0, now() - interval '1 hour', now() - interval '20 minutes')`)
 	var now time.Time
 	systemScan(t, s, `SELECT now()`, nil, &now)
@@ -197,6 +197,46 @@ func TestPoolFlowResumedIntoAnotherPool(t *testing.T) {
 		}
 	}
 	wantMap(t, "operator stats", started, map[string]int{"default": 1})
+}
+
+// A Run moved twice, first run on pa's ha, then on pb's hb, then placed on
+// pc's hc where it never reached running and finished bound to pc: its
+// start counts under pa and its finish under pc, the last placement's
+// pool, not the last one that ran.
+func TestPoolFlowMovedTwice(t *testing.T) {
+	s := testServer(t)
+	keys, now := flowFixture(t, s)
+	m := func(d time.Duration) time.Time { return now.Add(-d * time.Minute) }
+	flowRun(t, s, "twice", "ta", "pc", m(15), m(3), flowPlacement{"ha", m(15)}, flowPlacement{"hb", m(10)}, flowPlacement{"hc", time.Time{}})
+	sampleNow(t, s)
+	wantMap(t, "samples", flowSamples(t, s), map[string]string{"pa/": "1/0", "pa/ta": "1/0", "pc/": "0/1", "pc/ta": "0/1"})
+	wantMap(t, "operator stats", flowStats(t, s, keys["op"]), map[string]int{"pa": 1})
+	wantMap(t, "a's stats", flowStats(t, s, keys["a"]), map[string]int{"pa": 1})
+}
+
+// A Run that last ran on default's ha, resumed into big and terminated
+// before it was placed again finishes bound to big; its finish counts
+// under default, its last placement's pool, not runs.pool_id.
+func TestPoolFlowTerminatedBeforePlacement(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	id, big := movedRun(t, s)
+	// Started before the sampler's window: only the finish is in it.
+	execSQL(t, s, ctx, `UPDATE placements SET started_at = now() - interval '30 minutes' WHERE run_id = $1 AND epoch = 1`, id)
+	execSQL(t, s, ctx, `UPDATE runs SET first_started_at = now() - interval '30 minutes' WHERE id = $1`, id)
+	if _, err := resumeTo(s, id, big, &resumeResources{CPUs: f64(8), Memory: bytesPtr(32 * gib)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.terminateRun(tenantCtx("t1"), &RunPath{ID: id}); err != nil {
+		t.Fatal(err)
+	}
+	if b := binding(t, s, id); b.State != StateTerminated || b.PoolID != big {
+		t.Fatalf("state %s bound to %s, want terminated bound to %s", b.State, b.PoolID, big)
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET finished_at = finished_at - interval '2 minutes' WHERE id = $1`, id)
+	execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, window_end) VALUES ('', 0, now() - interval '1 hour', now() - interval '20 minutes')`)
+	sampleNow(t, s)
+	wantMap(t, "samples", flowSamples(t, s), map[string]string{"default/": "0/1", "default/t1": "0/1"})
 }
 
 // runs.first_pool_id is written by the first running report only: the pool
