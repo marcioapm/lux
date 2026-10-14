@@ -6,7 +6,7 @@
 -- (lifecycle.go), and never rewritten: a later resume into another pool
 -- leaves it. Pool history and GET /v1/pools/stats count a Run's first start
 -- under it, without reading placements per Run. NULL for a Run never
--- started.
+-- started, and where 079 left it (see 079).
 --
 -- The column only, without a default: a catalog change, no rewrite and no
 -- scan. ADD COLUMN takes an ACCESS EXCLUSIVE lock on runs and the foreign
