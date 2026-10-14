@@ -142,7 +142,9 @@ each, in the pool's row and in its tenant's. A Run with no placement, or
 whose placement's host has no pool or is gone, counts under the pool it is
 bound to (`runs.pool_id`). Running and queued are where the Run is now: the
 pool it is bound to. `runsStarted` in `GET /v1/pools/stats` counts starts
-the same way. Its cost stays with each placement's host's pool. The
+the same way. Its cost stays with each placement's host's pool. A retired
+pool's starts stay in its history (its samples), but `GET /v1/pools/stats`
+lists live pools only, so they are in no pool's current stats. The
 start's pool is recorded once, with `first_started_at`, as
 `runs.first_pool_id` (migration 078; 079 filled it in for the Runs that had
 ended before it; for a Run still live or resting then, and where it could
