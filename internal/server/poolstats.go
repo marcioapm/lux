@@ -65,7 +65,7 @@ type PoolStats struct {
 	Hosts          map[string]int `json:"hosts" doc:"Hosts not terminated, by state."`
 	CapacityCPUs   float64        `json:"capacityCpus" doc:"Cores of its ready and draining hosts."`
 	AllocatedCPUs  float64        `json:"allocatedCpus" doc:"Cores its live placements hold (a tenant: its own)."`
-	RunsStarted    int            `json:"runsStarted" doc:"Runs first started in the range on its hosts (a tenant: its own): a Run counts under the pool of the host it first ran on, wherever it was moved since."`
+	RunsStarted    int            `json:"runsStarted" doc:"Runs first started in the range (a tenant: its own), under the pool of the host each first ran on, or the pool it is bound to without one."`
 	RunsHourly     []int          `json:"runsHourly" doc:"The same per hour of the range, oldest first."`
 	LaunchFailures int            `json:"launchFailures" doc:"Launches the provider refused in the range."`
 	Cost           []MoneyAmount  `json:"cost" doc:"The cost of the Runs on its machines (compute and block storage) in the range, per currency; empty: none reported."`
@@ -222,8 +222,8 @@ type PoolSample struct {
 	AllocatedMem   int64          `json:"allocatedMemory"`
 	Running        int            `json:"running"`
 	Queued         int            `json:"queued"`
-	Started        int            `json:"started"`
-	Finished       int            `json:"finished"`
+	Started        int            `json:"started" doc:"Runs first started in the sample's window, under the pool of the host each first ran on, or the pool it is bound to without one."`
+	Finished       int            `json:"finished" doc:"Runs finished in the sample's window, under the pool of the host of each one's last placement, or the pool it is bound to without one."`
 	Launches       int            `json:"launches"`
 	LaunchFailures int            `json:"launchFailures"`
 }
