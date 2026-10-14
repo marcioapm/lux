@@ -204,6 +204,8 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 // (and that lookup returns NULL again), or where a luxd older than 078
 // wrote the first start during an upgrade: the lookup is for those, and is
 // planned as a subplan run only when first_pool_id is NULL.
+// Migration 079's backfill is a frozen copy of this lookup: a change to the
+// rule here does not reach the rows 079 already wrote.
 const runStartPool = `coalesce(r.first_pool_id, (SELECT h.pool_id FROM (SELECT pl.host_id FROM placements pl
 		WHERE pl.run_id = r.id AND pl.started_at IS NOT NULL
 		ORDER BY pl.started_at IS DISTINCT FROM r.first_started_at, pl.started_at, pl.epoch LIMIT 1) pl

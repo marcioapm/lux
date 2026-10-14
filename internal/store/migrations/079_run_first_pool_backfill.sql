@@ -1,8 +1,8 @@
 -- 079_run_first_pool_backfill.sql — runs.first_pool_id (078) for the Runs
 -- that ended before it, and its index.
 --
--- The rule is runStartPool's lookup in internal/server/history.go: the
--- placement whose started_at is the Run's
+-- The rule is a frozen copy of runStartPool's lookup in
+-- internal/server/history.go: the placement whose started_at is the Run's
 -- first_started_at, else its earliest started one; its host's pool. Left
 -- NULL where it cannot be told (no started placement, or its host has no
 -- pool or is gone).
