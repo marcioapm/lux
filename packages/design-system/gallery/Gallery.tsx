@@ -29,6 +29,9 @@ import {
   EmptyState,
   fadedCss,
   EventTable,
+  FactRow,
+  ImageRef,
+  LabelsFact,
   bandColor,
   familyColor,
   familySlot,
@@ -1686,9 +1689,31 @@ function Servers() {
   );
 }
 
+const JERVASION_IMAGE = "ghcr.io/acme/jervasion-agent@sha256:2c567002fb22e0d9c1b7a4f35e6d2c8b90a1f4e7d3c2b1a09f8e7d6cd76856cf";
+const JERVASION_LABELS = {
+  app: "jervasion",
+  "jervasion.creation-key": "jervasion-5ddba459581876385ba3aef0a67a678d7bc0bcdb36a390d8",
+  "jervasion.deployment": "acme/aiverse@jervasion-acme",
+  "jervasion.intent-sha256": "c90e477bbaff488659e553c23aea3e860c7e5422c5515df7ac6657bec23e5cde",
+  "jervasion.pr": "45",
+  "jervasion.repository": "acme/aiverse",
+  "jervasion.sizingrepository": "large",
+  "jervasion.target": "pr:PR_kwDOQUrH8Es8AAAABIcOqGg",
+};
+const RUN_FACTS = [
+  { key: "Created", value: `${formatTimestamp(NOW - 2_760_000)} · 46m ago` },
+  { key: "First started", value: `${formatTimestamp(NOW - 2_748_000)} · queued 12s` },
+  { key: "Finished", value: null },
+  { key: "Resources", value: "2 cpus · 4 GiB · 20 GiB disk" },
+  { key: "Usage", value: "CPU 2m · peak mem 921.6 MiB · 1 placement" },
+  { key: "Submitted by", value: "ada@example.com" },
+  { key: "Session", value: <IdChip value="ses_9v2qd4h7mock" truncate={24} /> },
+  { key: "Snapshot", value: null },
+];
+
 function KeyValueDemo() {
   return (
-    <Section id="keyvalue" title="KeyValue, IdChip, Code" note="Ids are quiet: plain mono in the muted colour, with a copy affordance on hover or focus. Names lead everywhere; ids support.">
+    <Section id="keyvalue" title="KeyValue, IdChip, Code, long facts" note="Ids are quiet: plain mono in the muted colour, with a copy affordance on hover or focus. Names lead everywhere; ids support. A value that can be long (an image reference, labels, hashes) never sits in a multi-column grid cell: it gets a full-width row under the grid, one line, the full value on hover and copy or behind a disclosure.">
       <Card title="Run" subtitle="detail header">
         <KeyValue
           columns={2}
@@ -1697,7 +1722,6 @@ function KeyValueDemo() {
             { key: "State", value: <StatePill kind="run" state="running" activity="busy" /> },
             { key: "Tenant", value: "acme" },
             { key: "Adapter", value: <Badge outline>acp</Badge> },
-            { key: "Image", value: "ghcr.io/acme/agent:1.14", mono: true },
             { key: "Host", value: <IdChip value="i-0a1b2c3d4e5f60718" href="#host" /> },
             { key: "Epoch", value: "3", mono: true },
             { key: "Created", value: `${formatTimestamp(NOW - 3_600_000)} (${formatRelative(NOW - 3_600_000, NOW)})` },
@@ -1706,6 +1730,22 @@ function KeyValueDemo() {
           ]}
         />
       </Card>
+      <h3 className="sg-h3">Long facts: full-width rows under the grid (FactRow, ImageRef, LabelsFact), collapsed and expanded</h3>
+      {[false, true].map((open) => (
+        <KeyValue key={String(open)} columns={3} items={RUN_FACTS}>
+          <FactRow label="Image">
+            <ImageRef value={JERVASION_IMAGE} />
+          </FactRow>
+          <LabelsFact labels={JERVASION_LABELS} first={["app"]} defaultOpen={open} />
+        </KeyValue>
+      ))}
+      <h3 className="sg-h3">A built image, and a Run with no labels</h3>
+      <KeyValue columns={3} items={RUN_FACTS.slice(0, 3)}>
+        <FactRow label="Image">
+          <span className="mono">built from Containerfile</span>
+        </FactRow>
+        <LabelsFact labels={{}} />
+      </KeyValue>
       <div className="sg-row">
         <IdChip value="run_4h2kq7m3xw5ybzta" />
         <IdChip value="run_4h2kq7m3xw5ybzta" truncate={10} prefix="run" />
