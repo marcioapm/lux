@@ -1,4 +1,4 @@
--- 073_pool_placement.sql — a pool's placement policy (docs/design/sizes.md, phase 4).
+-- 075_pool_placement.sql — a pool's placement policy (docs/design/sizes.md, phase 4).
 --
 -- pools.placement: how the scheduler chooses among the hosts a Run fits:
 -- 'spread' (fewest Runs first, every pool before this migration) or

@@ -560,10 +560,10 @@ the resources they were given.
 
 A pool's `placement` (`spread` or `pack`;
 [concepts](concepts.md#placement-spread-or-pack)) is set the same three
-ways (`--placement`) and stored as `pools.placement` (migration 073),
+ways (`--placement`) and stored as `pools.placement` (migration 075),
 NULL for the default: `pack` for a shaped pool, `spread` otherwise. A
 luxd without it ignores the column and spreads every pool.
-A resume's raise for saved state (migration 074) is shown only while the
+A resume's raise for saved state (migration 076) is shown only while the
 Run keeps the size it was raised to: after a rollback resizes a raised
 Run, its raise label stays hidden until the next shaped resize.
 

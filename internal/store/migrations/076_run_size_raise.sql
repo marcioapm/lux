@@ -1,4 +1,4 @@
--- 074_run_size_raise.sql — why a Run's size is larger than its resume asked (docs/design/sizes.md, phase 4).
+-- 076_run_size_raise.sql — why a Run's size is larger than its resume asked (docs/design/sizes.md, phase 4).
 --
 -- runs.size_raised_from, size_raised_for and size_raised_to: set when a
 -- resume in a shaped pool asked for a size (size_raised_from: the one its

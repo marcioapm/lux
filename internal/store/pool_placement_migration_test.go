@@ -11,12 +11,12 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// 073: a pool from before it has no placement (its default); spread and
+// 075: a pool from before it has no placement (its default); spread and
 // pack round-trip; any other value is refused by the CHECK.
 func TestPoolPlacementMigration(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "072_host_disk_samples"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "074_capacity_age_transitions"); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := pgx.Connect(ctx, owner)
@@ -50,11 +50,11 @@ func TestPoolPlacementMigration(t *testing.T) {
 	}
 }
 
-// 074: a Run from before it has no raise: its three raise columns are NULL.
+// 076: a Run from before it has no raise: its three raise columns are NULL.
 func TestRunSizeRaiseMigration(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "073_pool_placement"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "075_pool_placement"); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := pgx.Connect(ctx, owner)
