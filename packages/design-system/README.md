@@ -360,7 +360,7 @@ first 12 + `…` + last 8 hex (`shortDigest`, `splitImageRef`; tags whole),
 the full reference in its title and copied by its copy affordance, wrapping
 instead of truncating on a phone; `LabelsFact({labels, label?, first?, max?, defaultOpen?})`,
 "Labels n" (or `label`, for Versions or a Template), a `LabelChips` preview
-and a Show all / Hide labels toggle, a ghost `Button` (`aria-expanded`; its
+and a Show all / Hide toggle (the same text whatever the `label`), a ghost `Button` (`aria-expanded`; its
 accessible name is its visible text, so tests find it by `aria-expanded` and that text) that opens every pair, key over a
 complete, selectable mono value with a copy affordance; collapsed by
 default (`defaultOpen` for the gallery), "Labels –" and no toggle when there are none), IdChip, Code, PageHeader (with optional breadcrumbs; CrumbSep),

@@ -86,7 +86,7 @@ describe("in a DOM", () => {
 
     await act(async () => toggle.click());
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(toggle.textContent).toBe("Hide labels");
+    expect(toggle.textContent).toBe("Hide");
     const list = el.querySelector(`#${CSS.escape(toggle.getAttribute("aria-controls")!)}`)!;
     const pairs = [...list.querySelectorAll("dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]);
     expect(pairs).toEqual([
@@ -129,11 +129,18 @@ describe("in a DOM", () => {
     expect(keys()).toEqual(["a", "b"]);
   });
 
-  test("LabelsFact: `label` names the row and its Hide text", async () => {
-    const el = await render(<LabelsFact label="Versions" labels={{ runc: "1.2", kernel: "6.8" }} defaultOpen />);
+  test("LabelsFact: `label` names the row, empty or not; the toggle reads Show all / Hide whatever the label", async () => {
+    const el = await render(<LabelsFact label="Versions" labels={{ runc: "1.2", kernel: "6.8" }} />);
     const group = el.querySelector('[role="group"]')!;
     expect(el.querySelector(`#${CSS.escape(group.getAttribute("aria-labelledby")!)}`)?.textContent).toBe("Versions 2");
-    expect(toggleOf(el).textContent).toBe("Hide versions");
+    expect(toggleOf(el).textContent).toBe("Show all");
+    await act(async () => toggleOf(el).click());
+    expect(toggleOf(el).textContent).toBe("Hide");
+    const node = await render(<LabelsFact label={<span>Template</span>} labels={{ a: "1" }} />);
+    expect(toggleOf(node).textContent).toBe("Show all");
+    await act(async () => toggleOf(node).click());
+    expect(toggleOf(node).textContent).toBe("Hide");
+    expect((await render(<LabelsFact label="Versions" labels={{}} />)).textContent).toBe("Versions–");
   });
 
   test("LabelsFact: no labels reads Labels – with no toggle", async () => {

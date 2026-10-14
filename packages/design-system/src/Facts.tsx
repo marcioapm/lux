@@ -138,7 +138,7 @@ export function LabelsFact({ labels, label = "Labels", first, max = 3, defaultOp
       className="labels-fact"
       aside={
         <Button variant="ghost" size="sm" className="fact-toggle" aria-expanded={open} aria-controls={open ? listId : undefined} onClick={() => setOpen(!open)}>
-          {open ? (typeof label === "string" ? `Hide ${label.toLowerCase()}` : "Hide") : "Show all"}
+          {open ? "Hide" : "Show all"}
           {open ? <IconChevronUp size={12} /> : <IconChevronDown size={12} />}
         </Button>
       }

@@ -239,7 +239,7 @@ test("the facts: the grid in its order, Image and Labels as full-width rows outs
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     await act(async () => toggle.click());
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(toggle.textContent).toBe("Hide labels");
+    expect(toggle.textContent).toBe("Hide");
     expect([...rows[1]!.querySelectorAll("dl dt")].map((d) => d.textContent)).toEqual(["app", "a.b", "jervasion.pr", "jervasion.repository", "jervasion.target"]);
     expect(rows[1]!.querySelector("dl")?.textContent).toContain("pr:PR_kwDOQUrH8Es8AAAABIcOqGg");
   } finally {
