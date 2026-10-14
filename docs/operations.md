@@ -452,7 +452,12 @@ filesystem depends on whether it scales disk:
 
 The guard measures the free space of that filesystem with statfs (what an
 unprivileged writer can still use: blocks reserved for root are not free)
-after every round of disk samples (`--usage-every`, 15s by default). Keep
+every 2 seconds (`--usage-every` when shorter), apart from the disk
+samples, and once at start, before the first heartbeat: a slow disk walk
+never delays blocking admissions, and a runner restarted under pressure
+never reports none. Reclaiming and stopping happen after each round of
+disk samples (`--usage-every`, 15s by default), each placement's sample
+bounded by that interval. Keep
 `--data-dir` and Podman's storage (`/var/lib/containers`) on the same
 filesystem, as a stock host has them: the guard sees only the one holding
 `--data-dir`.
@@ -461,7 +466,8 @@ Pressure starts when free space falls below `--disk-low-free` (default
 5% of the capacity), and ends only once it is at or above
 `--disk-recover-free` (default 10%). Between the two marks nothing
 changes. Both defaults are conservative: no shaped host has measured them
-yet. When pressure starts, and on every pass while it lasts, the runner:
+yet. When pressure starts, and after every round of samples while it
+lasts, the runner:
 
 1. **Blocks admissions.** Its next heartbeat (sent at once) carries
    `diskPressure`. luxd places no new Run on the host, normal, spot or
@@ -469,29 +475,52 @@ yet. When pressure starts, and on every pass while it lasts, the runner:
    pressure (low free disk)` (a spot Run's: `1 host is under disk
    pressure`), and the capacity planner counts no room on the host, so a
    pool that may launch hosts launches one as it would for a full host.
-   Runs already on the host keep running.
+   Runs already on the host keep running. A heartbeat without usage (the
+   runner could not read its host's) leaves the state luxd has as it is.
 2. **Reclaims caches.** It removes lux's unused images, least recently
    used first, toward the recovery mark, with the protections of
    `--image-disk-high`: never an image a container uses, one a local copy
-   waiting for a resume needs, or one used in the last 10 minutes. Other
-   local state (a stopped Run's local copy, snapshots not yet uploaded,
-   git mirrors) is not touched: the runner cannot prove another host or
-   S3 holds it. A local copy still goes after `--host-ttl`, as always.
+   waiting for a resume needs, or one used in the last 10 minutes. Then
+   it discards the local copies of Runs no longer live on the host that
+   S3 holds, oldest exit first, until the recovery mark: a copy goes only
+   once every snapshot of its Run is reported and uploaded and no upload
+   is pending (what `--host-ttl` waits for, without the wait; the rule
+   luxd uses to discard a copy when a Run resumes elsewhere). Its state
+   volumes and snapshot files go, and the next heartbeat tells luxd. A
+   copy still uploading, snapshots not yet uploaded and git mirrors are
+   never touched.
 3. **Stops Runs over their disk limit.** Only placements whose latest
    sample is over their effective disk limit (within their grace)
-   qualify, the largest excess first. Before each, the runner counts the
-   excess of placements already stopping (over their grace, or asked to
-   stop) against what is missing to the recovery mark, and measures the
-   filesystem again after each, so it stops no more than it needs. A
-   stopped Run gets a `disk.pressure_stop` event and ends `failed`,
-   snapshotted as usual, its reason e.g. `stopped: host disk pressure,
+   qualify, the largest excess first; a placement whose latest sample
+   was inconclusive (a probe failed) does not. Before each, the runner
+   counts what is already on its way back against what is missing to the
+   recovery mark, and measures the filesystem again after each, so it
+   stops no more than it needs. A stopped Run gets a `disk.pressure_stop`
+   event and ends `failed`, its reason e.g. `stopped: host disk pressure,
    12.3 GiB over its 37.5 GiB disk limit`. **A Run at or under its limit
    is never stopped.**
 
-If a pass finds nothing to reclaim, no Run stopping and none over its
-limit, the host stays under pressure, admissions blocked, and says so
-(`noRelief`). It clears when space comes back: Runs ending, a local copy
-expiring, or an operator freeing space by hand.
+What a stop gives back, and when: the Run's container goes as soon as its
+end is reported, which frees its writable layer. Its state volumes stay,
+as for any stop, as the Run's local copy, and the stop first exports them
+(zstd) for upload, which briefly uses more of the filesystem. So the
+runner counts a stopping Run's writable layer as on its way back, then,
+once it has ended, its volumes until their upload finishes; at the next
+round after that, step 2 discards the copy. Recovery after a stop
+therefore waits for that Run's upload, then the discard. The export is
+kept under pressure, since skipping it would lose the Run's state. If it
+fails for want of space (ENOSPC), the snapshot is reported failed
+(`snapshot.failed`, its error) as for any failed export, the volumes stay
+as the Run's only copy and are never discarded by the guard, and the Run
+still ends `failed` with the disk-pressure reason.
+
+If a pass finds nothing to reclaim, nothing on its way back and no Run
+over its limit, the host stays under pressure, admissions blocked, and
+says so (`noRelief`). It clears when space comes back: Runs ending, an
+operator freeing space by hand, or a copy's upload finishing. Until an
+image, a placement, a snapshot record or a sample crossing its limit
+changes, or a minute passes, the runner does not look again: no podman
+calls for images and no scan of local copies on every round.
 
 An operator sees it:
 
@@ -505,13 +534,15 @@ An operator sees it:
   changes, and `host.disk_pressure_ended` when it ends.
 - The capacity planner's `host.capacity_decision` names `disk pressure`.
 - The runner logs `disk pressure: admissions blocked`, each image it
-  removes and each Run it stops, and `disk pressure ended`. History keeps
-  the filesystem's free bytes on every host sample.
+  removes, each local copy it discards (`disk pressure: discarded a local
+  copy S3 holds`) and each Run it stops, and `disk pressure ended`.
+  History keeps the filesystem's free bytes on every host sample.
 
 Tuning: the marks are a percentage of the filesystem's capacity or a
 size; use a size on a small filesystem where 5% is too little for an image
-pull. The low mark should leave room for what can be written between two
-passes (every Run writing for one `--usage-every`), and the gap to the
+pull. The low mark should leave room for what can be written before the
+watch sees it (every Run writing for 2 seconds) plus a stopped Run's
+export, and the gap to the
 recovery mark keeps a host from flapping in and out of pressure. The
 runner refuses to start unless 0 < low < recover < the filesystem's
 capacity, as resolved at start, and refuses a same-unit pair with low not

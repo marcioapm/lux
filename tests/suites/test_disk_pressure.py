@@ -42,9 +42,11 @@ def _pressure(lux, host) -> dict | None:
 def test_disk_pressure_stops_the_run_over_its_limit_and_blocks_admissions(lux, runners, hosts):
     """Below the low mark the host takes no new Run, and the Run over its
     disk limit is stopped with the reason, while the Run under its own runs
-    on. Once the stopped Run's local copy goes (its host TTL) free space is
-    back over the recovery mark: the pressure ends, and the waiting Run is
-    placed. The host's events record the pressure's start and end."""
+    on. The guard then discards the stopped Run's local copy once its
+    snapshot is uploaded (the default host TTL, 24h, plays no part): free
+    space is back over the recovery mark, the pressure ends, and the
+    waiting Run is placed. The host's events record the pressure's start
+    and end."""
     host = hosts[0]
     _mount_small_fs(host)
     try:
@@ -53,9 +55,9 @@ def test_disk_pressure_stops_the_run_over_its_limit_and_blocks_admissions(lux, r
         capacity = (blocks - free + avail) * bsize
         assert capacity == FS_MIB << 20, capacity
         # Nominal disk the whole filesystem, no headroom: limits as asked.
-        # Low 40% (~205 MiB free), recover 50% (256 MiB). A 10s host TTL
-        # frees a stopped Run's local copy soon after it ends.
-        runners.start(host, "--usage-every", "1s", "--host-ttl", "10s", "--disk", str(capacity), "--disk-headroom", "0",
+        # Low 40% (~205 MiB free), recover 50% (256 MiB). The host TTL is
+        # the default: only the guard can free the stopped Run's copy.
+        runners.start(host, "--usage-every", "1s", "--disk", str(capacity), "--disk-headroom", "0",
                       "--disk-low-free", "40%", "--disk-recover-free", "50%")
         assert _pressure(lux, host) is None
 
@@ -83,9 +85,12 @@ def test_disk_pressure_stops_the_run_over_its_limit_and_blocks_admissions(lux, r
         wait_until(lambda: "under disk pressure" in lux.get(waiting).get("stateReason", ""), 30, 0.5, "the new Run is not held for disk pressure")
         assert lux.get(waiting)["state"] not in ("scheduled", "running", "succeeded"), lux.get(waiting)
 
-        # The stopped Run's local copy goes after its host TTL; the guard
-        # sees free space back and the pressure ends.
+        # The guard discards the stopped Run's local copy once S3 holds it
+        # (no host TTL: the default is 24h); free space comes back and the
+        # pressure ends.
         wait_until(lambda: _pressure(lux, host) is None, 90, 1, "disk pressure did not end")
+        assert over not in host.podman("volume", "ls", "--format", "{{.Name}}"), "the stopped Run's volume is still on the host"
+        assert not lux.json("snapshots", over)[0].get("onHost"), "luxd still lists the stopped Run's local copy"
         lux.wait_state(waiting, "succeeded", timeout=60)
         assert lux.get(under)["state"] == "running", "the Run under its limit was stopped"
         assert not lux.events(under, "disk.pressure_stop")

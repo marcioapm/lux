@@ -654,10 +654,12 @@ grace). The two kinds of host guard against that differently:
 - **A host that scales disk** (every shaped pool's) has no fixed
   ceiling. Its runner's low-free-space guard watches the filesystem's
   free space: below the low mark (5% of the capacity by default) the host
-  takes no new Run, normal, spot or resumed; unused images are removed;
-  then Runs over their limit, largest excess first, are stopped with a
-  `disk.pressure_stop` event and end `failed`. A Run at or under its
-  limit is never stopped for it. The host takes Runs again once free
+  takes no new Run, normal, spot or resumed; unused images are removed,
+  and the local copies of ended Runs that S3 already holds; then Runs
+  over their limit, largest excess first, are stopped with a
+  `disk.pressure_stop` event and end `failed`. A stopped Run's copy goes
+  once its snapshot is uploaded. A Run at or under its limit is never
+  stopped for it. The host takes Runs again once free
   space is back at the recovery mark (10% by default). Stopped Runs and
   retained snapshots count only through the free space they take, never
   as cpu or memory reservations.

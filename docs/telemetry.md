@@ -392,7 +392,8 @@ A host's disk pressure ([operations](operations.md#disk-pressure)) is
 recorded as host events, not samples: `host.disk_pressure` when its runner
 reports it (with `freeBytes`, `lowFreeBytes`, `recoverFreeBytes` and
 `noRelief`, and again when `noRelief` changes) and
-`host.disk_pressure_ended` when a heartbeat no longer carries it. The free
+`host.disk_pressure_ended` when a heartbeat with usage no longer carries
+it (one without usage changes nothing). The free
 bytes over time are the host samples' `disk_free`. A Run the guard stopped
 has a `disk.pressure_stop` event and its placement's stop reason
 `disk-pressure`.
