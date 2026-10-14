@@ -1395,9 +1395,7 @@ function SessionDemo() {
             The <b>acp</b> adapter doesn't report subagents: ACP shows only the Run's own session.
           </span>
         </RailCard>
-        <SessionTranscript itemCount={0} subtitle="waiting for the agent" empty={<EmptyState compact icon={<Spinner size={18} />} title="No session yet" description="The agent's conversation appears here once lux has its first record." />}>
-          {null}
-        </SessionTranscript>
+        <SessionTranscript itemCount={0} subtitle="waiting for the agent" empty={<EmptyState compact icon={<Spinner size={18} />} title="No session yet" description="The agent's conversation appears here once lux has its first record." />} />
       </div>
       <h3 className="sg-h3">SessionComposer: enabled, sending, a failed send keeps its draft, a stopped Run, stdin</h3>
       <div className="grid-2">
@@ -1422,9 +1420,7 @@ function SessionDemo() {
           subtitle="generic"
           empty={<EmptyState compact title="No agent conversation" description="This workload is not an agent: its output is on the Output tab and input goes to its stdin." />}
           composer={<SessionComposer label="Send to stdin" placeholder="A line for the workload's stdin…" hint="Written to stdin with a newline; read when the workload next reads" onSend={() => new Promise((r) => setTimeout(r, 600))} onInterrupt={() => undefined} />}
-        >
-          {null}
-        </SessionTranscript>
+        />
       </div>
       <h3 className="sg-h3">Turns on their own</h3>
       <div className="turns" style={{ margin: 0 }}>
@@ -1746,6 +1742,17 @@ function KeyValueDemo() {
         </FactRow>
         <LabelsFact labels={{}} />
       </KeyValue>
+      <h3 className="sg-h3">A tag-only image and a bare name, inside a Card (surface off: no second frame)</h3>
+      <Card>
+        <KeyValue columns={3} items={RUN_FACTS.slice(0, 3)} surface={false}>
+          <FactRow label="Image">
+            <ImageRef value="ghcr.io/acme/agent:1.14" />
+          </FactRow>
+          <FactRow label="Base">
+            <ImageRef value="alpine" />
+          </FactRow>
+        </KeyValue>
+      </Card>
       <div className="sg-row">
         <IdChip value="run_4h2kq7m3xw5ybzta" />
         <IdChip value="run_4h2kq7m3xw5ybzta" truncate={10} prefix="run" />
