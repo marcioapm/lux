@@ -200,8 +200,10 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 // else of its earliest started one. runFinishPool joins, as fp, that of the
 // host of its last placement (highest epoch). sp.pool_id and fp.pool_id are
 // NULL when there is no such placement, or its host is gone or has no pool:
-// read them as coalesce(sp.pool_id, r.pool_id). A lateral join per Run, so
-// the cost follows the Runs in range (placements_run_id_epoch_key).
+// read them as coalesce(sp.pool_id, r.pool_id). The host is looked up inside
+// the lateral: per Run in range, one placements_run_id_epoch_key and one
+// hosts_pkey probe, never a scan of hosts, whatever the planner guesses of
+// the sampler's window.
 const runStartPool = ` LEFT JOIN LATERAL (SELECT h.pool_id FROM (SELECT pl.host_id FROM placements pl
 		WHERE pl.run_id = r.id AND pl.started_at IS NOT NULL
 		ORDER BY pl.started_at IS DISTINCT FROM r.first_started_at, pl.started_at, pl.epoch LIMIT 1) pl
