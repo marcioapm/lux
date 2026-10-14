@@ -29,14 +29,8 @@ func TestReclaimPlanPackAgreesWithPlanner(t *testing.T) {
 	for _, id := range []string{"ha", "hb"} {
 		observePlanningHost(t, s, id, "ready", proto.Capacity{CPUs: 4, Memory: 40, Disk: 40, Runs: 8}, map[string]string{})
 	}
-	for _, sp := range []struct {
-		id, host string
-		cpus     float64
-	}{{"s1", "ha", 4}, {"s2", "hb", 2}} {
-		execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ($1, 't1', '{"spot": true}', 'running', 1)`, "run-"+sp.id)
-		execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources)
-			VALUES ($1, 't1', $2, $3, 1, 'running', $4)`, sp.id, "run-"+sp.id, sp.host, res(sp.cpus))
-	}
+	spotOnHost(t, s, "s1", "ha", res(4))
+	spotOnHost(t, s, "s2", "hb", res(2))
 	occupy(t, s, "hb", res(2))
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state) VALUES ('n', 't1', 'pool1', $1, 'provisioning')`,
 		map[string]any{"resources": res(2), "placement": map[string]any{"pool": "burst"}})
@@ -50,7 +44,7 @@ func TestReclaimPlanPackAgreesWithPlanner(t *testing.T) {
 	}
 	schedule(t, s)
 	for id, want := range map[string]string{"s1": "", "s2": "n"} {
-		if got := queryOne[string](t, s, `SELECT coalesce(reclaim_for, '') FROM placements WHERE id = $1`, id); got != want {
+		if got := reclaimFor(t, s, id); got != want {
 			t.Errorf("scheduler: %s reclaim_for %q, want %q", id, got, want)
 		}
 	}
@@ -84,6 +78,13 @@ func normalRun(cpus float64) pendingRun {
 	r := pendingRun{ID: "n", TenantID: "t1", PoolID: new("pool")}
 	r.Spec.Placement.Pool = "pool"
 	r.Spec.Resources = spec.Resources{CPUs: cpus, Memory: spec.Bytes(cpus * 10), Disk: spec.Bytes(cpus * 10)}
+	return r
+}
+
+// packNormalRun is normalRun(cpus) in a pack pool, avoiding avoidHost ("": none).
+func packNormalRun(cpus float64, avoidHost string) pendingRun {
+	r := normalRun(cpus)
+	r.Pack, r.AvoidHost = true, avoidHost
 	return r
 }
 
@@ -274,27 +275,18 @@ func TestReclaimPlan(t *testing.T) {
 			func() []*candidateHost { return []*candidateHost{planHost("h", 2, spotOn("a", "t1", 2))} }, "h", []string{"a"}},
 		// ha (only spot work) comes first by id; pack ranks hb, half full of
 		// normal work, first and reclaims only its 2-cpu spot.
-		{"pack: the fullest host by normal work first", func() pendingRun {
-			r := normalRun(2)
-			r.Pack = true
-			return r
-		}, func() []*candidateHost {
-			return []*candidateHost{planHost("ha", 0, spotOn("s1", "t1", 4)), planHost("hb", 2, spotOn("s2", "t1", 2))}
-		}, "hb", []string{"s2"}},
-		{"pack: normal allocation tied, the lower id, not the most spot work", func() pendingRun {
-			r := normalRun(3)
-			r.Pack = true
-			return r
-		}, func() []*candidateHost {
-			return []*candidateHost{planHost("hb", 0, spotOn("s2", "t1", 4)), planHost("ha", 0, spotOn("s1", "t1", 2))}
-		}, "ha", []string{"s1"}},
-		{"pack: the avoided host last", func() pendingRun {
-			r := normalRun(2)
-			r.Pack, r.AvoidHost = true, "hb"
-			return r
-		}, func() []*candidateHost {
-			return []*candidateHost{planHost("ha", 0, spotOn("s1", "t1", 4)), planHost("hb", 2, spotOn("s2", "t1", 2))}
-		}, "ha", []string{"s1"}},
+		{"pack: the fullest host by normal work first", func() pendingRun { return packNormalRun(2, "") },
+			func() []*candidateHost {
+				return []*candidateHost{planHost("ha", 0, spotOn("s1", "t1", 4)), planHost("hb", 2, spotOn("s2", "t1", 2))}
+			}, "hb", []string{"s2"}},
+		{"pack: normal allocation tied, the lower id, not the most spot work", func() pendingRun { return packNormalRun(3, "") },
+			func() []*candidateHost {
+				return []*candidateHost{planHost("hb", 0, spotOn("s2", "t1", 4)), planHost("ha", 0, spotOn("s1", "t1", 2))}
+			}, "ha", []string{"s1"}},
+		{"pack: the avoided host last", func() pendingRun { return packNormalRun(2, "hb") },
+			func() []*candidateHost {
+				return []*candidateHost{planHost("ha", 0, spotOn("s1", "t1", 4)), planHost("hb", 2, spotOn("s2", "t1", 2))}
+			}, "ha", []string{"s1"}},
 		{"spread: the same hosts in id order", func() pendingRun { return normalRun(2) },
 			func() []*candidateHost {
 				return []*candidateHost{planHost("hb", 2, spotOn("s2", "t1", 2)), planHost("ha", 0, spotOn("s1", "t1", 4))}
