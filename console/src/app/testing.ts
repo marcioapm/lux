@@ -23,11 +23,11 @@ export interface FakeApi {
 }
 
 /**
- * Replace fetch: /v1/events streams, other paths answer answer(path) as
- * JSON. An answer may be a promise (a request that is still pending), and
+ * Replace fetch: /v1/events streams, other paths answer answer(path, method,
+ * body) as JSON. An answer may be a promise (a request that is still pending), and
  * a Response is returned as is (an error status).
  */
-export function fakeApi(answer: (path: string, method: string) => unknown): FakeApi {
+export function fakeApi(answer: (path: string, method: string, body: unknown) => unknown): FakeApi {
   const calls: string[] = [];
   const posts: FakeApi["posts"] = [];
   // API URLs are built on the page's origin (happy-dom starts at about:blank).
@@ -36,14 +36,15 @@ export function fakeApi(answer: (path: string, method: string) => unknown): Fake
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = typeof input === "string" ? input : input instanceof URL ? input.pathname + input.search : input.url;
     const method = init?.method ?? "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
     calls.push(path);
-    if (method !== "GET") posts.push({ path, method, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
+    if (method !== "GET") posts.push({ path, method, body });
     if (path.startsWith("/v1/events")) {
       // A first message: the connection counts as open.
-      const body = new ReadableStream<Uint8Array>({ start: (c) => c.enqueue(new TextEncoder().encode("event: ping\ndata: x\n\n")) });
-      return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      const stream = new ReadableStream<Uint8Array>({ start: (c) => c.enqueue(new TextEncoder().encode("event: ping\ndata: x\n\n")) });
+      return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
     }
-    const a = await answer(path, method);
+    const a = await answer(path, method, body);
     if (a instanceof Response) return a;
     return new Response(JSON.stringify(a), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;

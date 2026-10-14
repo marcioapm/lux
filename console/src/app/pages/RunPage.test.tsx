@@ -26,11 +26,11 @@ afterAll(async () => {
 const IMAGE = "ghcr.io/acme/jervasion-agent@sha256:2c567002fb22e0d9c1b7a4f35e6d2c8b90a1f4e7d3c2b1a09f8e7d6cd76856cf";
 const run = (adapter: string, extra: Record<string, unknown> = {}) => ({ id: "run_1", tenant: "t", state: "succeeded", epoch: 1, labels: {}, createdAt: new Date(0).toISOString(), spec: { image: { ref: IMAGE }, resources: {}, workload: { adapter } }, ...extra });
 
-async function render(adapter: string, url: string, extra: Record<string, unknown> = {}, input?: () => unknown) {
+async function render(adapter: string, url: string, extra: Record<string, unknown> = {}, input?: (body: unknown) => unknown) {
   api.signIn("k");
-  const fake = fakeApi((path, method) => {
+  const fake = fakeApi((path, method, body) => {
     if (path.startsWith("/v1/runs/run_1/output")) return new Response("event: end\ndata: {}\n\n", { headers: { "Content-Type": "text/event-stream" } });
-    if (path === "/v1/runs/run_1/input" && method === "POST") return input ? input() : { requestId: "in_1" };
+    if (path === "/v1/runs/run_1/input" && method === "POST") return input ? input(body) : { requestId: "in_1" };
     if (path.startsWith("/v1/runs/run_1")) return run(adapter, extra);
     return {};
   });
@@ -76,6 +76,10 @@ async function type(area: HTMLTextAreaElement, value: string) {
 }
 
 const button = (scope: Element, name: string) => [...scope.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === name);
+const conflict = () => new Response(JSON.stringify({ error: { code: "not_running", message: "run is stopping: not started yet" } }), { status: 409, headers: { "Content-Type": "application/json" } });
+const toasts = (el: Element) => [...el.ownerDocument.querySelectorAll('.toasts [role="status"]')].map((t) => t.textContent);
+// The texts that describe a field, through its aria-describedby ids.
+const described = (n: Element) => (n.getAttribute("aria-describedby") ?? "").split(" ").filter(Boolean).map((id) => document.getElementById(id)?.textContent);
 
 test("a generic Run opens on Output, and its Session tab comes after it: no conversation, input to stdin, Interrupt", async () => {
   const r = await render("generic", "http://localhost/runs/run_1?tab=session", { state: "running" });
@@ -90,6 +94,26 @@ test("a generic Run opens on Output, and its Session tab comes after it: no conv
     await act(async () => button(form, "Send")!.click());
     await until(() => r.fake.posts.length > 0, "the input POST");
     expect(r.fake.posts).toEqual([{ path: "/v1/runs/run_1/input", method: "POST", body: { text: "later" } }]);
+
+    await act(async () => button(form, "Interrupt")!.click());
+    await until(() => r.fake.posts.length === 2, "the interrupt POST");
+    expect(r.fake.posts[1]).toEqual({ path: "/v1/runs/run_1/input", method: "POST", body: { interrupt: true } });
+    await until(() => toasts(r.el).length > 0, "the toast");
+    expect(toasts(r.el)).toEqual(["Interrupt sent"]);
+  } finally {
+    await r.done();
+  }
+});
+
+test("an Interrupt the server refuses toasts Interrupt failed with the server's reason", async () => {
+  const r = await render("opencode", "http://localhost/runs/run_1", { state: "running" }, (body) => ((body as { interrupt?: boolean }).interrupt ? conflict() : { requestId: "in_1" }));
+  try {
+    const form = r.el.querySelector<HTMLFormElement>('form[aria-label="Message the agent"]')!;
+    await act(async () => button(form, "Interrupt")!.click());
+    await until(() => toasts(r.el).length > 0, "the toast");
+    expect(r.fake.posts).toEqual([{ path: "/v1/runs/run_1/input", method: "POST", body: { interrupt: true } }]);
+    expect(toasts(r.el)).toEqual(["Interrupt failedrun is stopping: not started yet"]);
+    expect(form.querySelector('[role="alert"]')).toBeNull();
   } finally {
     await r.done();
   }
@@ -127,6 +151,9 @@ test("the Output tab is read-only: no input form, field, Send or Interrupt", asy
     expect(panel.flatMap((n) => [...n.querySelectorAll("form, textarea, input")])).toEqual([]);
     expect(panel.flatMap((n) => [...n.querySelectorAll("button")]).map((b) => b.textContent)).not.toContain("Send");
     expect(panel.flatMap((n) => [...n.querySelectorAll("button")]).map((b) => b.textContent)).not.toContain("Interrupt");
+    // And no pointer back to Session: no link, no text naming it.
+    expect(panel.flatMap((n) => [...n.querySelectorAll("a")])).toEqual([]);
+    expect(panel.map((n) => n.textContent).join("")).not.toContain("Session");
   } finally {
     await r.done();
   }
@@ -134,7 +161,6 @@ test("the Output tab is read-only: no input form, field, Send or Interrupt", asy
 
 test("an agent Run's Session composer posts to /v1/runs/{id}/input and clears the draft; a refusal keeps the draft and shows why", async () => {
   let refuse = false;
-  const conflict = () => new Response(JSON.stringify({ error: { code: "not_running", message: "run is stopping: not started yet" } }), { status: 409, headers: { "Content-Type": "application/json" } });
   const r = await render("opencode", "http://localhost/runs/run_1", { state: "running" }, () => (refuse ? conflict() : { requestId: "in_1" }));
   try {
     const form = r.el.querySelector<HTMLFormElement>('section[aria-label="Agent session"] form[aria-label="Message the agent"]')!;
@@ -150,6 +176,10 @@ test("an agent Run's Session composer posts to /v1/runs/{id}/input and clears th
     await until(() => form.querySelector('[role="alert"]') != null, "the alert");
     expect(form.querySelector('[role="alert"]')!.textContent).toBe("run is stopping: not started yet");
     expect(area.value).toBe("keep me");
+    expect(r.fake.posts).toEqual([
+      { path: "/v1/runs/run_1/input", method: "POST", body: { text: "also add jitter" } },
+      { path: "/v1/runs/run_1/input", method: "POST", body: { text: "keep me" } },
+    ]);
   } finally {
     await r.done();
   }
@@ -161,6 +191,7 @@ test("a stopped, resumable agent Run: the composer is off and points to Resume",
     const form = r.el.querySelector<HTMLFormElement>('form[aria-label="Message the agent"]')!;
     expect(form.querySelector("textarea")!.disabled).toBe(true);
     expect(form.querySelector("textarea")!.placeholder).toBe("Resume this Run to send a message");
+    expect(described(form.querySelector("textarea")!)).toEqual(["Run stopped · Resume is in the page actions"]);
     expect(button(form, "Send")!.disabled).toBe(true);
     expect(button(form, "Interrupt")!.disabled).toBe(true);
   } finally {
@@ -168,19 +199,48 @@ test("a stopped, resumable agent Run: the composer is off and points to Resume",
   }
 });
 
+test("a starting agent Run whose adapter reads input at the turn's end: the composer is on and says so", async () => {
+  const r = await render("opencode", "http://localhost/runs/run_1", { state: "starting", steer: { lands: "next_turn" } });
+  try {
+    const area = r.el.querySelector<HTMLTextAreaElement>('form[aria-label="Message the agent"] textarea')!;
+    expect(area.disabled).toBe(false);
+    expect(described(area)).toEqual(["Root session · read when the agent's current turn ends"]);
+  } finally {
+    await r.done();
+  }
+});
+
+test("a Run built from a Containerfile: the Image row says so", async () => {
+  const r = await render("generic", "http://localhost/runs/run_1", { spec: { image: { build: { containerfile: "Containerfile" } }, resources: {}, workload: { adapter: "generic" } } });
+  try {
+    const image = [...r.el.querySelectorAll('.kv-facts > [role="group"]')].find((g) => r.el.querySelector(`#${CSS.escape(g.getAttribute("aria-labelledby")!)}`)?.textContent === "Image")!;
+    expect(image.querySelector(".fact-value")?.textContent).toBe("built from Containerfile");
+  } finally {
+    await r.done();
+  }
+});
+
 test("the facts: the grid in its order, Image and Labels as full-width rows outside it", async () => {
-  const labels = { app: "jervasion", "jervasion.pr": "45", "jervasion.repository": "acme/aiverse", "jervasion.target": "pr:PR_kwDOQUrH8Es8AAAABIcOqGg" };
+  const labels = { app: "jervasion", "a.b": "x", "jervasion.pr": "45", "jervasion.repository": "acme/aiverse", "jervasion.target": "pr:PR_kwDOQUrH8Es8AAAABIcOqGg" };
   const r = await render("opencode", "http://localhost/runs/run_1", { labels });
   try {
-    const grid = r.el.querySelector("dl")!;
+    // The facts card: the grid and its full-width rows, found through the Image row's group.
+    const facts = r.el.querySelector('[role="group"]')!.parentElement!;
+    expect(facts.classList.contains("kv-facts")).toBe(true);
+    const grid = facts.querySelector(":scope > dl")!;
     expect([...grid.querySelectorAll(":scope > div > dt")].map((d) => d.textContent)).toEqual(["Created", "First started", "Finished", "Resources", "Usage", "Submitted by", "Session", "Snapshot"]);
-    const rows = [...grid.parentElement!.querySelectorAll(':scope > [role="group"]')];
-    expect(rows.map((g) => r.el.querySelector(`#${CSS.escape(g.getAttribute("aria-labelledby")!)}`)?.textContent)).toEqual(["Image", "Labels 4"]);
+    const rows = [...facts.querySelectorAll(':scope > [role="group"]')];
+    expect(rows.map((g) => r.el.querySelector(`#${CSS.escape(g.getAttribute("aria-labelledby")!)}`)?.textContent)).toEqual(["Image", "Labels 5"]);
     expect(rows[0]!.querySelector(`[title="${IMAGE}"]`)?.textContent).toBe("ghcr.io/acme/jervasion-agent@sha256:2c567002fb22…d76856cf");
-    const toggle = rows[1]!.querySelector<HTMLButtonElement>('button[aria-label="Labels"]')!;
+    // app leads the preview and the list, ahead of a key that sorts before it.
+    expect([...rows[1]!.querySelectorAll(".label-chip")].map((c) => c.textContent?.split("=")[0])).toEqual(["app", "a.b", "jervasion.pr", "+2"]);
+    const toggle = rows[1]!.querySelector<HTMLButtonElement>("button[aria-expanded]")!;
+    expect(toggle.textContent).toBe("Show all");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     await act(async () => toggle.click());
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.textContent).toBe("Hide labels");
+    expect([...rows[1]!.querySelectorAll("dl dt")].map((d) => d.textContent)).toEqual(["app", "a.b", "jervasion.pr", "jervasion.repository", "jervasion.target"]);
     expect(rows[1]!.querySelector("dl")?.textContent).toContain("pr:PR_kwDOQUrH8Es8AAAABIcOqGg");
   } finally {
     await r.done();

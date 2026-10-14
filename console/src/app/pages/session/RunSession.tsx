@@ -307,7 +307,7 @@ export function RunSession({ run }: { run: Run }) {
         actions={<SegmentedControl<Filter> label="Show" value={filter} onChange={setFilter} options={[{ value: "all", label: "Everything" }, { value: "messages", label: "Messages" }]} />}
         itemCount={shown.length}
         contentKey={lastItem}
-        composer={<RunComposer run={run} />}
+        composer={<RunComposer key={run.id} run={run} />}
         status={
           <span className="num">
             {s.turns} {s.turns === 1 ? "turn" : "turns"} · {tools} tool {tools === 1 ? "call" : "calls"}
@@ -357,9 +357,7 @@ export function RunStdinSession({ run }: { run: Run }) {
           <EmptyState compact title="No agent conversation" description="This workload is not an agent: its output is on the Output tab and input goes to its stdin." />
         </div>
       }
-      composer={<RunComposer run={run} stdin />}
-    >
-      {null}
-    </SessionTranscript>
+      composer={<RunComposer key={run.id} run={run} stdin />}
+    />
   );
 }

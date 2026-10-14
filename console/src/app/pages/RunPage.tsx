@@ -77,7 +77,6 @@ export function RunPage({ id }: { id: string }) {
 
       <KeyValue
         columns={3}
-        className="run-facts"
         items={[
           { key: "Created", value: `${formatTimestamp(run.createdAt)} · ${formatRelative(run.createdAt, now)}` },
           { key: "First started", value: run.firstStartedAt ? `${formatTimestamp(run.firstStartedAt)} · queued ${formatDuration(run.usage?.queueSeconds)}` : DASH },

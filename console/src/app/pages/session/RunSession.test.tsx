@@ -7,10 +7,11 @@ import { fixture } from "./fixtures.ts";
 
 // RunSession's router import touches window at load: register the DOM first.
 let RunSession: typeof import("./RunSession.tsx").RunSession;
+let RunStdinSession: typeof import("./RunSession.tsx").RunStdinSession;
 let ToastProvider: typeof import("@lux/design-system").ToastProvider;
 beforeAll(async () => {
   GlobalRegistrator.register({ url: "http://localhost/runs/r1", width: 1600 });
-  ({ RunSession } = await import("./RunSession.tsx"));
+  ({ RunSession, RunStdinSession } = await import("./RunSession.tsx"));
   ({ ToastProvider } = await import("@lux/design-system"));
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -31,8 +32,14 @@ async function waitFor(check: () => boolean, timeout = 2000) {
 async function render(adapter: string, records: OutputRecord[], end = true, state?: string) {
   const original = globalThis.fetch;
   const urls: string[] = [];
+  const posts: { path: string; method: string; body: unknown }[] = [];
   let controller!: ReadableStreamDefaultController<Uint8Array>;
-  globalThis.fetch = (async (url) => {
+  globalThis.fetch = (async (url, init) => {
+    const method = init?.method ?? "GET";
+    if (method !== "GET") {
+      posts.push({ path: new URL(String(url), "http://localhost").pathname, method, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
+      return new Response(JSON.stringify({ requestId: "in_1" }), { headers: { "Content-Type": "application/json" } });
+    }
     urls.push(String(url));
     return new Response(new ReadableStream<Uint8Array>({ start(c) { controller = c; c.enqueue(new TextEncoder().encode(frame(records, end))); } }), { headers: { "Content-Type": "text/event-stream" } });
   }) as typeof fetch;
@@ -49,6 +56,7 @@ async function render(adapter: string, records: OutputRecord[], end = true, stat
   return {
     el,
     urls,
+    posts,
     send: async (more: OutputRecord[]) => act(async () => controller.enqueue(new TextEncoder().encode(frame(more)))),
     done: async () => {
       await act(async () => root.unmount());
@@ -82,6 +90,64 @@ test("the tab reads the Run's output stream and shows its subagent in the transc
     expect(v.el.querySelector('form[aria-label="Message the agent"]')).toBe(composer);
   } finally {
     await v.done();
+  }
+});
+
+test("with a subagent open, a message from the composer goes to the root Run", async () => {
+  const v = await render("claude-code", fixture("claude-2.1.207-agent-subagent.jsonl"), false, "running");
+  try {
+    const stub = () => v.el.querySelector<HTMLElement>('[aria-label="Open subagent Read /etc/hosts first line"]');
+    await waitFor(() => stub() != null);
+    await act(async () => stub()!.click());
+    await waitFor(() => v.el.querySelector(".subpanel") != null);
+    const form = v.el.querySelector<HTMLFormElement>('section[aria-label="Agent session"] form[aria-label="Message the agent"]')!;
+    const area = form.querySelector("textarea")!;
+    // A typed change as a browser delivers it: React tracks the value, so set it through the native setter.
+    await act(async () => {
+      area.focus();
+      area.dispatchEvent(new Event("focusin", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(area), "value")!.set!.call(area, "check the root");
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+      area.dispatchEvent(new KeyboardEvent("keyup", { key: "x", bubbles: true }));
+    });
+    await act(async () => [...form.querySelectorAll("button")].find((b) => b.textContent === "Send")!.click());
+    await waitFor(() => v.posts.length > 0 && area.value === "");
+    expect(v.posts).toEqual([{ path: "/v1/runs/r1/input", method: "POST", body: { text: "check the root" } }]);
+  } finally {
+    await v.done();
+  }
+});
+
+test("the composer's draft belongs to its Run: the same tab drawn for another Run starts empty", async () => {
+  const el = document.createElement("div");
+  document.body.append(el);
+  const root = createRoot(el);
+  const draw = (id: string) =>
+    act(async () =>
+      root.render(
+        <ToastProvider>
+          <RunStdinSession run={{ ...run("generic", "running"), id }} />
+        </ToastProvider>,
+      ),
+    );
+  try {
+    await draw("r1");
+    const area = () => el.querySelector<HTMLTextAreaElement>('form[aria-label="Send to stdin"] textarea')!;
+    await act(async () => {
+      area().focus();
+      area().dispatchEvent(new Event("focusin", { bubbles: true }));
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(area()), "value")!.set!.call(area(), "half typed for r1");
+      area().dispatchEvent(new Event("input", { bubbles: true }));
+      area().dispatchEvent(new KeyboardEvent("keyup", { key: "x", bubbles: true }));
+    });
+    expect(area().value).toBe("half typed for r1");
+    // React holds the draft: Send is on.
+    expect([...el.querySelectorAll("button")].find((b) => b.textContent === "Send")!.disabled).toBe(false);
+    await draw("r2");
+    expect(area().value).toBe("");
+  } finally {
+    await act(async () => root.unmount());
+    el.remove();
   }
 });
 
