@@ -655,7 +655,7 @@ type HistoryQuery struct {
 	Since string `query:"since" doc:"How far back from now: a Go duration or a number of days (7d). Default 1h." example:"24h"`
 	From  string `query:"from" doc:"The start (RFC 3339), instead of since."`
 	To    string `query:"to" doc:"The end (RFC 3339); default now."`
-	Res   string `query:"res" doc:"Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range, from the host's, Run's or pool's creation when that is later."`
+	Res   string `query:"res" doc:"Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."`
 }
 
 // historyRange resolves a HistoryQuery: since (default 1h) or from/to, and
