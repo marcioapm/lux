@@ -29,19 +29,28 @@ func packs(p string, shaped bool) bool {
 	return p == PlacementPack || p == "" && shaped
 }
 
-// allocated is the share of h's tightest resource already reserved: the
-// largest of used/capacity over the cpus, memory and disk it advertises
+// allocated is the share of h's tightest resource reserved by normal work:
+// the largest of used/capacity over the cpus, memory and disk it advertises
 // (a resource it does not limit counts 0). Run counts are not resources.
+// Spot placements (h.Spots) count as free, as in the planner's readyHosts:
+// a host holding only spot work is idle to scale-down, so pack must not
+// rank it full and keep it alive with normal Runs. hostFit still counts them.
 func (h *candidateHost) allocated() float64 {
+	cpus, mem, disk := h.UsedCPUs, h.UsedMem, h.UsedDisk
+	for _, sp := range h.Spots {
+		cpus -= sp.Res.CPUs
+		mem -= int64(sp.Res.Memory)
+		disk -= int64(sp.Res.Disk)
+	}
 	share := func(used, capacity float64) float64 {
 		if capacity <= 0 {
 			return 0
 		}
 		return used / capacity
 	}
-	return max(share(h.UsedCPUs, h.Capacity.CPUs),
-		share(float64(h.UsedMem), float64(h.Capacity.Memory)),
-		share(float64(h.UsedDisk), float64(h.Capacity.Disk)))
+	return max(share(cpus, h.Capacity.CPUs),
+		share(float64(mem), float64(h.Capacity.Memory)),
+		share(float64(disk), float64(h.Capacity.Disk)))
 }
 
 // packCandidate is a host a Run fits, as pack orders it.

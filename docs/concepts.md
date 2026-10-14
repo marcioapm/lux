@@ -661,7 +661,11 @@ sync modes and, on a shaped pool, the shape):
   hosts allocated alike, affinity as above decides, then the lowest host
   id. Every shaped pool's default. A resource a host does not advertise
   counts as empty, so pack on hosts that advertise none fills the lowest
-  host id first.
+  host id first. Spot Runs' reservations count as free here, as they do
+  for scale-down: a host running only spot work ranks empty, so normal
+  Runs fill hosts that already have normal work and spot-only hosts can
+  still scale down. Spot Runs themselves are placed by spot admission,
+  not by `placement`.
 
 A pool without a placement packs while shaped and spreads otherwise, so
 adding or removing a shape changes how it places.

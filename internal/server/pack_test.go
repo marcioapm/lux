@@ -160,6 +160,30 @@ func TestPackByFractionNotRunCount(t *testing.T) {
 	}
 }
 
+// pack ranks hosts by normal work only: a spot half on ha is spare
+// capacity, so a normal quarter on hb makes hb the fuller host. The
+// normal Run goes there and ha's spot Run is neither claimed nor stopped,
+// leaving ha spot-only (idle to scale-down).
+func TestPackIgnoresSpotAllocation(t *testing.T) {
+	s := packFixture(t, "ha", "hb")
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('spot', 't1', '{"spot": true}', 'running', 1)`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources)
+		VALUES ('p-spot', 't1', 'spot', 'ha', 1, 'running', $1)`, sized(4))
+	occupy(t, s, "hb", sized(2))
+	ids := submitSizes(t, s, "shaped", "m-1-arm64")
+	schedule(t, s)
+	if got := runHosts(t, s, ids); got[0] != "hb" {
+		t.Fatalf("placed on %q, want hb: ha holds only spot work", got[0])
+	}
+	var claimed bool
+	var state string
+	systemScan(t, s, `SELECT reclaim_for IS NOT NULL, state FROM placements WHERE id = 'p-spot'`, nil, &claimed, &state)
+	if claimed || state != "running" {
+		t.Fatalf("spot placement claimed %v, state %s; want untouched", claimed, state)
+	}
+}
+
 // allocated is the largest of reserved/capacity over cpus, memory and
 // disk; a resource a host does not limit counts nothing.
 func TestCandidateHostAllocated(t *testing.T) {
@@ -175,6 +199,9 @@ func TestCandidateHostAllocated(t *testing.T) {
 			UsedCPUs: 2, UsedMem: 2 << 30, UsedDisk: 40 << 30}, 0.5},
 		{"no disk limit", candidateHost{Capacity: proto.Capacity{CPUs: 4, Memory: 8 << 30},
 			UsedCPUs: 1, UsedMem: 1 << 30, UsedDisk: 1 << 40, UsedRuns: 30}, 0.25},
+		{"spot work counts free", candidateHost{Capacity: proto.Capacity{CPUs: 8, Memory: 32 << 30, Disk: 160 << 30},
+			UsedCPUs: 4, UsedMem: 16 << 30, UsedDisk: 80 << 30, UsedRuns: 2,
+			Spots: []spotPlacement{{Res: spec.Resources{CPUs: 2, Memory: 8 << 30, Disk: 40 << 30}}}}, 0.25},
 	} {
 		if got := c.h.allocated(); got != c.want {
 			t.Errorf("%s: allocated %g, want %g", c.name, got, c.want)
