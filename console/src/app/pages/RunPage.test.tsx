@@ -148,11 +148,11 @@ test("the Output tab is read-only: no input form, field, Send or Interrupt", asy
     const panel = [...tablist.parentElement!.children].slice([...tablist.parentElement!.children].indexOf(tablist) + 1);
     expect(panel.length).toBeGreaterThan(0);
     expect(panel.some((n) => n.contains(r.el.querySelector(".logview")))).toBe(true);
-    expect(panel.flatMap((n) => [...n.querySelectorAll("form, textarea, input")])).toEqual([]);
+    expect(panel.flatMap((n) => [...n.querySelectorAll("form, textarea, input")]).map((x) => x.outerHTML)).toEqual([]);
     expect(panel.flatMap((n) => [...n.querySelectorAll("button")]).map((b) => b.textContent)).not.toContain("Send");
     expect(panel.flatMap((n) => [...n.querySelectorAll("button")]).map((b) => b.textContent)).not.toContain("Interrupt");
     // And no pointer back to Session: no link, no text naming it.
-    expect(panel.flatMap((n) => [...n.querySelectorAll("a")])).toEqual([]);
+    expect(panel.flatMap((n) => [...n.querySelectorAll("a")]).map((a) => a.outerHTML)).toEqual([]);
     expect(panel.map((n) => n.textContent).join("")).not.toContain("Session");
   } finally {
     await r.done();
