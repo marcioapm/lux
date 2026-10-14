@@ -96,6 +96,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The harness publishes Postgres and S3 on fixed host ports (55432 and
+      # 59000, tests/env.py), both inside Linux's ephemeral port range: an
+      # outgoing connection earlier in the job (an image pull, a download)
+      # can hold one, and Docker then cannot bind it. Reserve them first.
+      - name: Keep the shared services' ports out of the ephemeral range
+        run: sudo sysctl -w net.ipv4.ip_local_reserved_ports=55432,59000
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
