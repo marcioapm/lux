@@ -170,18 +170,16 @@ func (s *Server) poolStats(ctx context.Context, in *poolStatsInput) (*poolStatsO
 		}); err != nil {
 			return err
 		}
-		// The pool is the one each Run first started in (runStartPool), not
-		// runs.pool_id. Both arms are ranges of runs_first_pool_started: the
-		// Runs whose first_pool_id is one of ids, and the few without one
-		// (first_pool_id IS NULL), resolved as runStartPool does. OFFSET 0
-		// keeps the pool filter out of the NULL arm, so its lookup runs once
-		// per Run rather than once for the filter and once for the result.
+		// Counted under each Run's start pool (runStartPool), not runs.pool_id:
+		// the recorded first_pool_id arm, and the few NULL ones resolved at
+		// read time. OFFSET 0 keeps the pool filter out of the NULL arm, so
+		// its lookup runs once per Run, not again for the filter.
 		rows, err = tx.Query(ctx, `SELECT x.pool, floor(extract(epoch FROM x.at - $2) / 3600)::int, count(*)
 			FROM (SELECT r.first_pool_id AS pool, r.first_started_at AS at FROM runs r
 					WHERE r.first_pool_id = ANY($1) AND r.first_started_at > $2 AND r.first_started_at <= $3
 				UNION ALL
-				SELECT n.pool, n.at FROM (SELECT `+runStartPool+` AS pool, r.first_started_at AS at FROM runs r
-					WHERE r.first_pool_id IS NULL AND r.first_started_at > $2 AND r.first_started_at <= $3 OFFSET 0) n) x
+				(SELECT `+runStartPool+`, r.first_started_at FROM runs r
+					WHERE r.first_pool_id IS NULL AND r.first_started_at > $2 AND r.first_started_at <= $3 OFFSET 0)) x
 			WHERE x.pool = ANY($1)
 			GROUP BY 1, 2`, ids, out.Body.From, out.Body.To)
 		if err != nil {
