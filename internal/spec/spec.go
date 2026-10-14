@@ -480,6 +480,14 @@ func (b *Bytes) UnmarshalYAML(unmarshal func(any) error) error {
 
 var bytesRe = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*([KMGT]i?)?B?$`)
 
+// ParseBytes reads a size as Bytes does: "8Gi", "8GiB", "512Mi", "1G", or
+// a plain number of bytes.
+func ParseBytes(s string) (Bytes, error) {
+	var b Bytes
+	err := b.parse(s)
+	return b, err
+}
+
 func (b *Bytes) parse(s string) error {
 	m := bytesRe.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {

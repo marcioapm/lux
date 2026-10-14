@@ -85,6 +85,10 @@ type placement struct {
 	made     []string
 	peakDisk int64
 	disk     disklimit.Watch
+	// lastDisk: used bytes at the latest conclusive disk sample, for the
+	// low-free-space guard; pressureStop: the guard asked luxd to stop it.
+	lastDisk     int64
+	pressureStop bool
 	// diskProbeFailed: a running sample's disk probe failed, logged once.
 	diskProbeFailed bool
 	netRx           int64
@@ -1691,15 +1695,17 @@ func (p *placement) diskLimit() disklimit.Limit {
 }
 
 // checkDisk reports a Run over its disk limit (its writable layer and state
-// volumes) once it has been over for its resources.diskGrace, or at once at
-// disklimit.CeilingFactor times the limit: luxd stops it, and it ends
-// failed, snapshotted as usual. Reported once per placement.
+// volumes) once it has been over for its resources.diskGrace, or, on a host
+// that does not scale disk, at once at disklimit.CeilingFactor times the
+// limit: luxd stops it, and it ends failed, snapshotted as usual. Reported
+// once per placement. Every conclusive sample is kept for the disk guard.
 func (p *placement) checkDisk(ctx context.Context, used int64, now time.Time) {
 	if p.assign == nil {
 		return
 	}
 	limit := p.diskLimit()
 	p.mu.Lock()
+	p.lastDisk = used
 	if p.phase != "running" {
 		p.mu.Unlock()
 		return
