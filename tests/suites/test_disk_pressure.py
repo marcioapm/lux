@@ -84,7 +84,8 @@ def test_disk_pressure_stops_the_run_over_its_limit_and_blocks_admissions(lux, r
         wait_until(lambda: _pressure(lux, host) is None, 90, 1, "disk pressure did not end")
         assert not any(over in v for v in host.podman("volume", "ls", "--format", "{{.Name}}").split()), \
             "the stopped Run's volume is still on the host"
-        wait_until(lambda: not lux.json("snapshots", over)[0].get("onHost"), 30, 1, "luxd still lists the stopped Run's local copy")
+        wait_until(lambda: (s := lux.json("snapshots", over)) and not s[0].get("onHost"), 30, 1,
+                   "luxd still lists the stopped Run's local copy, or no snapshot of it")
         types = [e["type"] for e in lux.json("hosts", "events", host.name)]
         assert "host.disk_pressure" in types and "host.disk_pressure_ended" in types, types
 

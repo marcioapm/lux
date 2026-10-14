@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -626,5 +627,225 @@ func TestNoGuardWithoutDiskScale(t *testing.T) {
 	u := on.hostUsage(podmanUsage())
 	if u.DiskPressure == nil || u.DiskPressure.FreeBytes != gib || u.DiskPressure.LowFree != "5%" || u.DiskPressure.RecoverFree != "10%" {
 		t.Fatalf("pressure %+v", u.DiskPressure)
+	}
+}
+
+// copyRun writes a reported Run's state, exited at exitAt, whose volumes
+// hold volSnap ("" none) under resume policy policy.
+func copyRun(t *testing.T, r *Runner, runID string, exitAt int64, volSnap, policy string) {
+	t.Helper()
+	st := &runState{RunID: runID, Epoch: 1, Phase: "reported", LastExitAt: exitAt, VolumesSnapshot: volSnap,
+		Spec: &spec.RunSpec{ResumePolicy: policy}}
+	if err := writeRunState(r.runDir(runID), st); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func saveRecord(t *testing.T, r *Runner, snapID string, rec *snapshotRecord) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(r.cfg.DataDir, "snapshots"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.saveSnapshotRecord(snapID, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A local copy is reclaimable only when S3 holds everything it has: its
+// volumes are the snapshot of a record of its own Run, and every record of
+// the Run is reported and uploaded; or its Run is never resumed. Volumes
+// whose export failed are the Run's only copy. A copy whose volumes'
+// snapshot is uploading awaits that snapshot's blob sizes.
+func TestLocalCopiesHeldInS3(t *testing.T) {
+	done := []pendingUpload{{BlobID: "b1", Size: 3 * mib, Done: true}}
+	for _, c := range []struct {
+		name        string
+		volSnap     string
+		policy      string
+		records     map[string]*snapshotRecord
+		reclaimable bool
+		awaiting    int64
+	}{
+		{name: "resumable, export failed, no records", policy: spec.ResumeAuto},
+		{name: "never resumed, no volumes snapshot", policy: spec.ResumeNever, reclaimable: true},
+		{name: "reported and uploaded", volSnap: "s1", policy: spec.ResumeAuto, reclaimable: true,
+			records: map[string]*snapshotRecord{"s1": {RunID: "run1", Reported: true, Uploads: done}}},
+		{name: "uploaded, report not acked", volSnap: "s1", policy: spec.ResumeAuto,
+			records: map[string]*snapshotRecord{"s1": {RunID: "run1", Uploads: done}}},
+		{name: "another Run's record", volSnap: "s2", policy: spec.ResumeAuto,
+			records: map[string]*snapshotRecord{"s1": {RunID: "run1", Reported: true, Uploads: done},
+				"s2": {RunID: "run2", Reported: true, Uploads: done}}},
+		{name: "missing record", volSnap: "s9", policy: spec.ResumeAuto,
+			records: map[string]*snapshotRecord{"s1": {RunID: "run1", Reported: true, Uploads: done}}},
+		{name: "uploading", volSnap: "s1", policy: spec.ResumeAuto, awaiting: 7 * mib,
+			records: map[string]*snapshotRecord{"s1": {RunID: "run1", Reported: true,
+				Uploads: []pendingUpload{{BlobID: "b1", Size: 3 * mib, Done: true}, {BlobID: "b2", Size: 4 * mib}}}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newDiskFixture(t)
+			copyRun(t, f.r, "run1", 1, c.volSnap, c.policy)
+			for id, rec := range c.records {
+				saveRecord(t, f.r, id, rec)
+			}
+			got := f.r.localCopies()
+			if len(got) != 1 || got[0].runID != "run1" || got[0].reclaimable != c.reclaimable || got[0].awaiting != c.awaiting {
+				t.Fatalf("copies %+v, want run1 reclaimable %v awaiting %d", got, c.reclaimable, c.awaiting)
+			}
+		})
+	}
+	t.Run("oldest exit first", func(t *testing.T) {
+		f := newDiskFixture(t)
+		copyRun(t, f.r, "run-a", 2, "", spec.ResumeNever)
+		copyRun(t, f.r, "run-b", 1, "", spec.ResumeNever)
+		var order []string
+		for _, c := range f.r.localCopies() {
+			order = append(order, c.runID)
+		}
+		if !slices.Equal(order, []string{"run-b", "run-a"}) {
+			t.Fatalf("copies %v, want [run-b run-a]", order)
+		}
+	})
+}
+
+// discardIdle never discards a Run with a live placement here: an
+// assignment that arrived after the guard listed the copy keeps it. Once
+// the placement is no longer live, it discards.
+func TestDiscardIdleKeepsALivePlacement(t *testing.T) {
+	f := newFinishFixture(t)
+	f.p.setPhase("running")
+	if f.r.discardIdle(context.Background(), "run1") {
+		t.Fatal("discarded a Run with a running placement")
+	}
+	if log := f.podmanLog(); strings.Contains(log, "volume rm") {
+		t.Fatalf("podman removed a volume of a running placement:\n%s", log)
+	}
+	if f.r.placements["run1"] != f.p {
+		t.Fatal("the running placement was dropped")
+	}
+	f.p.setPhase("done")
+	if !f.r.discardIdle(context.Background(), "run1") || f.r.placements["run1"] != nil {
+		t.Fatal("an idle Run's copy was not discarded")
+	}
+}
+
+// After a runner restart, a copy whose snapshot is still uploading counts
+// its blobs as pending, though the readopted placement has no pressure
+// flag: no other over-limit placement is stopped for space it will free.
+func TestDiskGuardCountsAnUploadingCopyAfterARestart(t *testing.T) {
+	f := newFinishFixture(t)
+	f.release()
+	f.exitedAsSupervised(context.Background())
+	mustEnd(t, f.p, "the placement never ended")
+
+	// Restart: the placements are rebuilt from disk.
+	f.r.mu.Lock()
+	f.r.placements = map[string]*placement{}
+	f.r.mu.Unlock()
+	f.r.readopt(context.Background())
+	if p := f.r.placements["run1"]; p == nil || p.pressureStop || p.liveState() != "" {
+		t.Fatalf("readopted placement %+v, want run1 ended and not flagged", p)
+	}
+	st, err := readRunState(f.r.runDir("run1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := f.r.snapshotRecords()[st.VolumesSnapshot]
+	if rec == nil || allUploaded(rec) {
+		t.Fatalf("record %+v of the volumes' snapshot %q, want one uploading", rec, st.VolumesSnapshot)
+	}
+	var blobs int64
+	for _, up := range rec.Uploads {
+		blobs += up.Size
+	}
+	if blobs < 2 {
+		t.Fatalf("blobs of %d bytes", blobs)
+	}
+
+	// Over its limit, its stop would free 1 byte: the guard would stop it
+	// unless run1's blobs count. The shortfall is half of them.
+	sp := spec.RunSpec{Resources: spec.Resources{Disk: spec.Bytes(10 * mib)}}
+	other := newPlacement(f.r, proto.Assign{RunID: "run2", TenantID: "t1", Epoch: 1, Spec: sp}, nil)
+	other.state = &runState{RunID: "run2", Epoch: 1}
+	other.phase, other.lastDisk, other.lastRw = "running", 20*mib, 1
+	f.r.mu.Lock()
+	f.r.placements["run2"] = other
+	f.r.mu.Unlock()
+
+	const recov = 1 << 30
+	g, err := newDiskGuard(f.r.log, FreeMark{Bytes: recov - blobs/2}, FreeMark{Bytes: recov}, 2*recov)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.r.attachGuard(g, func() (int64, error) { return recov - blobs/2 - 1, nil })
+	f.r.guardPass(context.Background())
+	if g.state() == nil || g.state().NoRelief {
+		t.Fatalf("state %+v, want pressure relieved by the uploading copy", g.state())
+	}
+	other.mu.Lock()
+	stopped := other.pressureStop
+	other.mu.Unlock()
+	if stopped {
+		t.Fatal("stopped run2 although run1's uploading copy covers the shortfall")
+	}
+}
+
+// A pass that found nothing, racing the end of one pressure episode, does
+// not carry its idle flag into the next: the first pass under the new
+// pressure reclaims.
+func TestDiskGuardNewPressureForgetsIdle(t *testing.T) {
+	f := &fakeFS{frees: []int64{49 * mib}}
+	g := f.guard(t)
+	g.observe(49 * mib)
+	g.setIdle(true, f.gen)
+	g.observe(100 * mib)
+	g.setIdle(true, f.gen)
+	g.observe(49 * mib)
+	g.pass(context.Background())
+	if !slices.Contains(f.calls, "reclaim 51 MiB") {
+		t.Fatalf("calls %v, want the first pass under new pressure to reclaim", f.calls)
+	}
+}
+
+// A disk sample is cut off only against a hung podman, not at
+// --usage-every: a probe that outlasts the interval still concludes, and
+// the guard sees the placement over its limit.
+func TestUsageLoopSampleOutlastsTheInterval(t *testing.T) {
+	f := newDiskFixture(t)
+	f.r.cfg.UsageEvery = 50 * time.Millisecond
+	slow := strings.Replace(podmanForDiskSamples, `  cat "$0.size" ;;`, `  sleep 0.3; cat "$0.size" ;;`, 1)
+	writeFile(t, f.bin, slow)
+	f.size(t, diskOver)
+	p := f.placement(1)
+	f.r.placements["run1"] = p
+	ctx, cancel := context.WithCancel(f.ctx)
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	wg.Go(func() { f.r.usageLoop(ctx) })
+	waitFor(t, "a sample longer than --usage-every never concluded", func() bool {
+		vs := overLimit(f.r.diskVictims())
+		return len(vs) == 1 && vs[0].used == diskOver
+	})
+}
+
+// When only the writable layer's probe fails and the volumes alone are
+// over the limit, the sample is conclusive and keeps the last known
+// writable layer: a stop is not counted as freeing nothing.
+func TestFailedLayerProbeKeepsTheLastLayer(t *testing.T) {
+	f := newDiskFixture(t)
+	p := f.placement(1)
+	withVolume(p)
+	f.r.placements["run1"] = p
+	big := filepath.Join(f.bin+".vol", "big")
+	writeFile(t, big, "")
+	if err := os.Truncate(big, diskOver); err != nil {
+		t.Fatal(err)
+	}
+	f.size(t, 5*mib)
+	p.sampleSlow(f.ctx)
+	f.flag(t, "failsize")
+	p.sampleSlow(f.ctx)
+	vs := overLimit(f.r.diskVictims())
+	if len(vs) != 1 || vs[0].used != diskOver || vs[0].rw != 5*mib {
+		t.Fatalf("victims %+v, want run1 at %d with its last layer %d", vs, diskOver, 5*mib)
 	}
 }
