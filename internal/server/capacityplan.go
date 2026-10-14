@@ -449,9 +449,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 				}
 				continue
 			}
-			// A planned host has no id, so it is never the avoided host.
-			if chosen == nil || packOrder(packCandidate{h: h, avoid: h.ID != "" && h.ID == r.AvoidHost, used: h.allocated()},
-				packCandidate{h: chosen, avoid: chosen.ID != "" && chosen.ID == r.AvoidHost, used: chosen.allocated()}) < 0 {
+			if chosen == nil || packOrder(packCandidateOf(h, r.AvoidHost, 0), packCandidateOf(chosen, r.AvoidHost, 0)) < 0 {
 				chosen = h
 			}
 			if !pack {

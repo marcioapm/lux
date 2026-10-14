@@ -52,6 +52,12 @@ type packCandidate struct {
 	affinity int     // snapshot copy, cached image and mirrors, preferred labels
 }
 
+// packCandidateOf is h as pack orders it for a Run avoiding avoidHost
+// ("": none, so a planned host without an id is never avoided).
+func packCandidateOf(h *candidateHost, avoidHost string, affinity int) packCandidate {
+	return packCandidate{h: h, avoid: avoidHost != "" && h.ID == avoidHost, used: h.allocated(), affinity: affinity}
+}
+
 // packOrder puts the host to choose first: hosts the Run need not avoid,
 // then the most allocated, then the highest affinity, then the lowest id.
 // Allocations compare as math.Round(used*1e9), one key per host so the

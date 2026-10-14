@@ -520,7 +520,8 @@ func resizeShaped(ctx context.Context, tx pgx.Tx, runID, pool string, cur spec.R
 	rz := &Resize{Requested: asked, Applied: cur, Size: e.Name}
 	raisedTo := ""
 	if peak != nil {
-		rz.RaisedFrom, rz.RaisedFor, rz.MeasuredBytes, rz.NeededBytes = got.Resolved.Name, raisedForSavedState, peak, diskShrinkFloor(*peak)
+		rz.RaisedFrom, rz.RaisedFor = got.Resolved.Name, raisedForSavedState
+		rz.MeasuredBytes, rz.NeededBytes = peak, diskShrinkFloor(*peak)
 		raisedTo = e.Name
 	}
 	rz.Applied.CPUs, rz.Applied.Memory, rz.Applied.Disk = e.CPUs, e.Memory, e.Disk

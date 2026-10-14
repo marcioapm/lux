@@ -441,7 +441,7 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 			}
 		}
 		if r.Pack {
-			packed = append(packed, packCandidate{h: h, avoid: h.ID == r.AvoidHost, used: h.allocated(), affinity: sc})
+			packed = append(packed, packCandidateOf(h, r.AvoidHost, sc))
 			continue
 		}
 		// Spread: fewer running Runs first.
