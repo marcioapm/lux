@@ -57,7 +57,7 @@ func (m FreeMark) String() string {
 	if m.Percent > 0 {
 		return strconv.FormatFloat(m.Percent, 'f', -1, 64) + "%"
 	}
-	return bytesText(m.Bytes)
+	return spec.BytesText(m.Bytes)
 }
 
 // of is the mark in bytes of a filesystem of capacity bytes, rounded down.
@@ -78,19 +78,6 @@ func CheckFreeMarks(low, rec FreeMark) error {
 		return fmt.Errorf("--disk-low-free %s must be below --disk-recover-free %s", low, rec)
 	}
 	return nil
-}
-
-func bytesText(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit; m /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // diskGuard is the low-free-space guard of a runner that scales disk. Each
