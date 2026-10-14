@@ -386,6 +386,18 @@ func TestPoolFlowFallbacks(t *testing.T) {
 	wantMap(t, "a's stats", flowStats(t, s, keys["a"]), map[string]int{"pc": 1})
 }
 
+// A Run whose epoch 1 on pc's hc never started and whose epoch 2 ran on
+// pa's ha finishes under pa, its last placement's pool, even though the
+// unstarted placement has no started_at.
+func TestPoolFlowFinishAfterUnstartedPlacement(t *testing.T) {
+	s := testServer(t)
+	_, now := flowFixture(t, s)
+	m := func(d time.Duration) time.Time { return now.Add(-d * time.Minute) }
+	flowRun(t, s, "lateran", "ta", "pa", m(15), m(4), flowPlacement{"hc", time.Time{}}, flowPlacement{"ha", m(15)})
+	sampleNow(t, s)
+	wantMap(t, "samples", flowSamples(t, s), map[string]string{"pa/": "1/1", "pa/ta": "1/1"})
+}
+
 // A moved Run whose start is in the sample's window and finish after it
 // counts its start only; one started before the window and finished in it,
 // its finish only; one started before the stats range counts there nowhere.
