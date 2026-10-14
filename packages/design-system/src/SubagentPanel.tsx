@@ -3,7 +3,8 @@ import { AgentMark } from "./AgentMark.tsx";
 import { IconChevronLeft, IconClose, IconInfo } from "./icons.tsx";
 import { IdChip } from "./IdChip.tsx";
 import { Spinner } from "./Spinner.tsx";
-import { agentLabel, plural, SubagentStatusBadge, subagentSpan, type SubagentSummary } from "./SubagentStub.tsx";
+import { plural } from "./plural.ts";
+import { agentLabel, SubagentStatusBadge, subagentSpan, type SubagentSummary } from "./SubagentStub.tsx";
 
 export interface SubagentPanelProps extends SubagentSummary {
   /** The parent subagent to go back to; none for the Run's own session. */

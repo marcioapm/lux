@@ -121,7 +121,7 @@ export interface SessionThread {
   tokens?: number;
 }
 
-// How the adapter reports subagents: "tree" if it can, else why not.
+// Whether the adapter reports subagents.
 export type SubagentSupport = "reported" | "unsupported";
 
 export interface Session {

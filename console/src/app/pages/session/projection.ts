@@ -326,10 +326,3 @@ export function subagentTree(s: Session): { thread: SessionThread; depth: number
   }
   return out;
 }
-
-// The chain from the root's first child down to a thread (the panel's back link).
-export function pathTo(s: Session, id: string): string[] {
-  const path: string[] = [];
-  for (let cur: string | undefined = id; cur && cur !== s.root && path.length < 64; cur = s.threads[cur]?.parent) path.unshift(cur);
-  return path;
-}

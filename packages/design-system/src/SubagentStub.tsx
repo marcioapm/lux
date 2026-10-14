@@ -3,6 +3,7 @@ import { AgentMark } from "./AgentMark.tsx";
 import { Badge } from "./Badge.tsx";
 import { formatDuration } from "./format.ts";
 import { IconChevronRight } from "./icons.tsx";
+import { plural } from "./plural.ts";
 
 export type SubagentStatus = "running" | "completed" | "error" | "idle";
 
@@ -12,8 +13,6 @@ export function SubagentStatusBadge({ status }: { status: SubagentStatus }) {
   if (status === "error") return <Badge tone="danger">failed</Badge>;
   return <Badge tone="success">done</Badge>;
 }
-
-export const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 /** How long a subagent has run: to its end, or to now while it runs. */
 export function subagentSpan(start?: number, end?: number, now?: number): string {

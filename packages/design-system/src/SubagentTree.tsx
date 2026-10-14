@@ -1,6 +1,7 @@
 import type { CSSProperties } from "react";
 import { AgentMark } from "./AgentMark.tsx";
-import { agentLabel, plural, SubagentStatusBadge, subagentSpan, type SubagentSummary } from "./SubagentStub.tsx";
+import { plural } from "./plural.ts";
+import { agentLabel, SubagentStatusBadge, subagentSpan, type SubagentSummary } from "./SubagentStub.tsx";
 
 export interface SubagentTreeProps {
   rows: (SubagentSummary & { depth: number })[];
