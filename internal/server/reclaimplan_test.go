@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"runtime"
@@ -12,6 +13,50 @@ import (
 
 func spotOn(id, tenant string, cpus float64) spotPlacement {
 	return spotPlacement{ID: id, RunID: "run-" + id, TenantID: tenant, Res: spec.Resources{CPUs: cpus, Memory: spec.Bytes(cpus * 10), Disk: spec.Bytes(cpus * 10)}}
+}
+
+// In a pack pool where no host fits without a reclaim, the scheduler
+// reclaims on the host the planner reserves: hb, half full of normal work,
+// losing its 2-cpu spot s2, not ha's 4-cpu spot s1 (lower id, spot only).
+func TestReclaimPlanPackAgreesWithPlanner(t *testing.T) {
+	s, _, p := planningFixture(t, 0)
+	ctx := context.Background()
+	s.cfg.Providers = map[string]Provider{"ec2": p}
+	execSQL(t, s, ctx, `UPDATE pools SET placement = 'pack' WHERE id = 'pool1'`)
+	res := func(cpus float64) spec.Resources {
+		return spec.Resources{CPUs: cpus, Memory: spec.Bytes(cpus * 10), Disk: spec.Bytes(cpus * 10)}
+	}
+	for _, id := range []string{"ha", "hb"} {
+		observePlanningHost(t, s, id, "ready", proto.Capacity{CPUs: 4, Memory: 40, Disk: 40, Runs: 8}, map[string]string{})
+	}
+	for _, sp := range []struct {
+		id, host string
+		cpus     float64
+	}{{"s1", "ha", 4}, {"s2", "hb", 2}} {
+		execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ($1, 't1', '{"spot": true}', 'running', 1)`, "run-"+sp.id)
+		execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources)
+			VALUES ($1, 't1', $2, $3, 1, 'running', $4)`, sp.id, "run-"+sp.id, sp.host, res(sp.cpus))
+	}
+	occupy(t, s, "hb", res(2))
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state) VALUES ('n', 't1', 'pool1', $1, 'provisioning')`,
+		map[string]any{"resources": res(2), "placement": map[string]any{"pool": "burst"}})
+
+	provisionPass(t, s)
+	if p.calls != 0 {
+		t.Fatalf("launched %d, want 0: spot space is the pool's", p.calls)
+	}
+	if got := hostDecisions(t, s, "hb"); len(got) != 1 || got[0]["decision"] != "reserved" {
+		t.Fatalf("planner: hb decisions %+v, want reserved", got)
+	}
+	schedule(t, s)
+	for id, want := range map[string]string{"s1": "", "s2": "n"} {
+		if got := queryOne[string](t, s, `SELECT coalesce(reclaim_for, '') FROM placements WHERE id = $1`, id); got != want {
+			t.Errorf("scheduler: %s reclaim_for %q, want %q", id, got, want)
+		}
+	}
+	if host := queryOne[string](t, s, `SELECT host_id FROM spot_pledges WHERE run_id = 'n'`); host != "hb" {
+		t.Errorf("scheduler pledged on %s, want hb", host)
+	}
 }
 
 // planHost is a 4-cpu host in pool "pool" whose live placements are spots
@@ -227,6 +272,19 @@ func TestReclaimPlan(t *testing.T) {
 			}, "", nil},
 		{"old runner is still a valid host for a normal Run", func() pendingRun { return normalRun(2) },
 			func() []*candidateHost { return []*candidateHost{planHost("h", 2, spotOn("a", "t1", 2))} }, "h", []string{"a"}},
+		// ha (only spot work) comes first by id; pack ranks hb, half full of
+		// normal work, first and reclaims only its 2-cpu spot.
+		{"pack: the fullest host by normal work first", func() pendingRun {
+			r := normalRun(2)
+			r.Pack = true
+			return r
+		}, func() []*candidateHost {
+			return []*candidateHost{planHost("ha", 0, spotOn("s1", "t1", 4)), planHost("hb", 2, spotOn("s2", "t1", 2))}
+		}, "hb", []string{"s2"}},
+		{"spread: the same hosts in id order", func() pendingRun { return normalRun(2) },
+			func() []*candidateHost {
+				return []*candidateHost{planHost("hb", 2, spotOn("s2", "t1", 2)), planHost("ha", 0, spotOn("s1", "t1", 4))}
+			}, "ha", []string{"s1"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			hosts := c.hosts()

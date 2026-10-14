@@ -160,27 +160,63 @@ func TestPackByFractionNotRunCount(t *testing.T) {
 	}
 }
 
+// spotOnHost puts a running spot Run of res on host as placement id.
+func spotOnHost(t *testing.T, s *Server, id, host string, res spec.Resources) {
+	t.Helper()
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ($1, 't1', '{"spot": true}', 'running', 1)`, "run-"+id)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources)
+		VALUES ($1, 't1', $2, $3, 1, 'running', $4)`, id, "run-"+id, host, res)
+}
+
+// reclaimFor is the normal Run a placement is claimed for ("": none).
+func reclaimFor(t *testing.T, s *Server, placement string) string {
+	t.Helper()
+	return queryOne[string](t, s, `SELECT coalesce(reclaim_for, '') FROM placements WHERE id = $1`, placement)
+}
+
 // pack ranks hosts by normal work only: a spot half on ha is spare
 // capacity, so a normal quarter on hb makes hb the fuller host. The
-// normal Run goes there and ha's spot Run is neither claimed nor stopped,
-// leaving ha spot-only (idle to scale-down).
+// normal Run goes there, leaving ha spot-only (idle to scale-down); a
+// whole-host Run, which then fits only ha, reclaims its spot work.
 func TestPackIgnoresSpotAllocation(t *testing.T) {
 	s := packFixture(t, "ha", "hb")
-	ctx := context.Background()
-	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('spot', 't1', '{"spot": true}', 'running', 1)`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources)
-		VALUES ('p-spot', 't1', 'spot', 'ha', 1, 'running', $1)`, sized(4))
+	spotOnHost(t, s, "p-spot", "ha", sized(4))
 	occupy(t, s, "hb", sized(2))
 	ids := submitSizes(t, s, "shaped", "m-1-arm64")
 	schedule(t, s)
 	if got := runHosts(t, s, ids); got[0] != "hb" {
 		t.Fatalf("placed on %q, want hb: ha holds only spot work", got[0])
 	}
-	var claimed bool
-	var state string
-	systemScan(t, s, `SELECT reclaim_for IS NOT NULL, state FROM placements WHERE id = 'p-spot'`, nil, &claimed, &state)
-	if claimed || state != "running" {
-		t.Fatalf("spot placement claimed %v, state %s; want untouched", claimed, state)
+	whole := submitSizes(t, s, "shaped", "m-8-arm64")
+	schedule(t, s)
+	if _, state, reason := placedOn(t, s, whole[0]); state != StateSubmitted || reason != reclaimWaitReason {
+		t.Fatalf("whole-host Run %s %q, want it waiting for the reclaimed spot", state, reason)
+	}
+	if got := reclaimFor(t, s, "p-spot"); got != whole[0] {
+		t.Fatalf("ha's spot claimed for %q, want the whole-host Run %s", got, whole[0])
+	}
+}
+
+// Among hosts with the same normal allocation, pack shares the one already
+// holding spot work: the quarter joins hb's spot half, so ha stays empty
+// and a whole-host Run takes it with no reclaim.
+func TestPackSharesSpotHostOverEmpty(t *testing.T) {
+	s := packFixture(t, "ha", "hb")
+	execSQL(t, s, context.Background(), `UPDATE hosts SET capabilities = capabilities || $1::text[]`, []string{proto.CapSpotReclaim})
+	spotOnHost(t, s, "p-spot", "hb", sized(4))
+	quarter := submitSizes(t, s, "shaped", "m-2-arm64")
+	schedule(t, s)
+	if got := runHosts(t, s, quarter); got[0] != "hb" {
+		t.Fatalf("quarter on %q, want hb beside the spot work", got[0])
+	}
+	whole := submitSizes(t, s, "shaped", "m-8-arm64")
+	schedule(t, s)
+	if got, state, reason := placedOn(t, s, whole[0]); got != "ha" {
+		t.Fatalf("whole-host Run on %q (%s %q), want the empty ha", got, state, reason)
+	}
+	if got := reclaimFor(t, s, "p-spot"); got != "" {
+		t.Fatalf("spot claimed for %q, want no reclaim", got)
 	}
 }
 
@@ -202,6 +238,9 @@ func TestCandidateHostAllocated(t *testing.T) {
 		{"spot work counts free", candidateHost{Capacity: proto.Capacity{CPUs: 8, Memory: 32 << 30, Disk: 160 << 30},
 			UsedCPUs: 4, UsedMem: 16 << 30, UsedDisk: 80 << 30, UsedRuns: 2,
 			Spots: []spotPlacement{{Res: spec.Resources{CPUs: 2, Memory: 8 << 30, Disk: 40 << 30}}}}, 0.25},
+		{"claimed spot work counts", candidateHost{Capacity: proto.Capacity{CPUs: 8, Memory: 32 << 30, Disk: 160 << 30},
+			UsedCPUs: 4, UsedMem: 16 << 30, UsedDisk: 80 << 30, UsedRuns: 2,
+			Spots: []spotPlacement{{Res: spec.Resources{CPUs: 2, Memory: 8 << 30, Disk: 40 << 30}, ReclaimFor: "n"}}}, 0.5},
 	} {
 		if got := c.h.allocated(); got != c.want {
 			t.Errorf("%s: allocated %g, want %g", c.name, got, c.want)

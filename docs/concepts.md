@@ -664,8 +664,12 @@ sync modes and, on a shaped pool, the shape):
   host id first. Spot Runs' reservations count as free here, as they do
   for scale-down: a host running only spot work ranks empty, so normal
   Runs fill hosts that already have normal work and spot-only hosts can
-  still scale down. Spot Runs themselves are placed by spot admission,
-  not by `placement`.
+  still scale down. Among hosts allocated alike, the one already holding
+  spot work comes first (before affinity), so a fully empty host stays
+  free for a whole-host Run without reclaiming spot work. When a normal
+  Run fits nowhere without reclaiming, pack reclaims on the most allocated
+  host whose spot work suffices; spread tries hosts by id. Spot Runs
+  themselves are placed by spot admission, not by `placement`.
 
 A pool without a placement packs while shaped and spreads otherwise, so
 adding or removing a shape changes how it places.

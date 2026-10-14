@@ -1253,12 +1253,14 @@ func provisionPass(t *testing.T, s *Server) {
 // The planner reserves a pack pool's waiting Runs on ready hosts as pack
 // places them, the most allocated fitting host first and the host a Run
 // avoids last, and a spread pool's on the first fitting host by id. Ready
-// h0 is empty and h1 holds h1Used sixteenths; arrivals are in sixteenths
+// h0 is empty but for h0Spot sixteenths of spot work, which the planner
+// counts free, and h1 holds h1Used sixteenths; arrivals are in sixteenths
 // of testShape, oldest first.
 func TestCapacityPlanPackPool(t *testing.T) {
 	for _, c := range []struct {
 		name      string
 		placement string
+		h0Spot    float64
 		h1Used    float64
 		arrivals  []float64
 		avoid     map[string]string // Run id to the host it avoids
@@ -1267,19 +1269,25 @@ func TestCapacityPlanPackPool(t *testing.T) {
 	}{
 		// pack: the 1 joins h1, the 16 takes h0. First fit would put the 1
 		// on h0 and launch for the 16.
-		{"pack, 1 then 16", "", 1, []float64{1, 16}, nil, 2, 0},
+		{"pack, 1 then 16", "", 0, 1, []float64{1, 16}, nil, 2, 0},
+		// pack: as above with spot work on h0: its space is free to the
+		// planner, so the 16 is reserved there and nothing launches.
+		{"pack, spot on h0, 1 then 16", "", 8, 1, []float64{1, 16}, nil, 2, 0},
 		// pack: 8 on h1, 16 on h0, the last two 8s share one new host.
 		// First fit would put 8, 8 on h0 and 8 on h1, and launch for the 16.
-		{"pack, 8 16 8 8", "", 1, []float64{8, 16, 8, 8}, nil, 2, 1},
+		{"pack, 8 16 8 8", "", 0, 1, []float64{8, 16, 8, 8}, nil, 2, 1},
 		// pack: the 8 avoids h1, so pickHost puts it on h0 and the 16 fits
 		// neither host.
-		{"pack, 8 avoiding h1 then 16", "", 8, []float64{8, 16}, map[string]string{"r0": "h1"}, 1, 1},
-		{"spread, 1 then 16", "spread", 1, []float64{1, 16}, nil, 1, 1},
-		{"spread, 8 16 8 8", "spread", 1, []float64{8, 16, 8, 8}, nil, 3, 1},
+		{"pack, 8 avoiding h1 then 16", "", 0, 8, []float64{8, 16}, map[string]string{"r0": "h1"}, 1, 1},
+		{"spread, 1 then 16", "spread", 0, 1, []float64{1, 16}, nil, 1, 1},
+		{"spread, 8 16 8 8", "spread", 0, 1, []float64{8, 16, 8, 8}, nil, 3, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, p := shapedPlanningFixture(t, c.placement)
 			shapedReadyHost(t, s, "h0", 0)
+			if c.h0Spot > 0 {
+				spotOnHost(t, s, "p-spot", "h0", sized(c.h0Spot/2))
+			}
 			shapedReadyHost(t, s, "h1", c.h1Used)
 			waitShaped(t, s, c.arrivals...)
 			for id, host := range c.avoid {
@@ -1292,6 +1300,13 @@ func TestCapacityPlanPackPool(t *testing.T) {
 			if c.launches > 0 {
 				if evs := events(t, s, evScaleUp); len(evs) != 1 || evs[0].Data["ready"] != float64(c.ready) {
 					t.Errorf("scale-up %+v, want %d Runs on ready hosts", evs, c.ready)
+				}
+			}
+			if c.h0Spot > 0 {
+				for _, h := range []string{"h0", "h1"} {
+					if got := hostDecisions(t, s, h); len(got) != 1 || got[0]["decision"] != "reserved" {
+						t.Errorf("%s decisions %+v, want reserved", h, got)
+					}
 				}
 			}
 		})
