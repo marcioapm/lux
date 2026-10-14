@@ -1,5 +1,5 @@
 // Test helpers: a stubbed fetch that answers by path, with a /v1/events
-// stream that goes live at once and stays open; a bounded wait.
+// stream that goes live at once and stays open; a bounded wait; typing.
 import { act } from "react";
 
 /**
@@ -12,6 +12,17 @@ export async function until(done: () => boolean, what: string, timeoutMs = 1000)
     if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
     await act(() => new Promise<void>((r) => setTimeout(r, 5)));
   }
+}
+
+// A typed change as a browser delivers it: React tracks the value, so set it through the native setter.
+export async function type(area: HTMLTextAreaElement, value: string): Promise<void> {
+  await act(async () => {
+    area.focus();
+    area.dispatchEvent(new Event("focusin", { bubbles: true }));
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(area), "value")!.set!.call(area, value);
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+    area.dispatchEvent(new KeyboardEvent("keyup", { key: "x", bubbles: true }));
+  });
 }
 
 export interface FakeApi {

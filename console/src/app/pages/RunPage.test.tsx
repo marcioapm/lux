@@ -9,13 +9,14 @@ let ScopeProvider: typeof import("../scope.tsx").ScopeProvider;
 let ToastProvider: typeof import("@lux/design-system").ToastProvider;
 let fakeApi: typeof import("../testing.ts").fakeApi;
 let until: typeof import("../testing.ts").until;
+let type: typeof import("../testing.ts").type;
 let api: typeof import("../../api/index.ts");
 beforeAll(async () => {
   GlobalRegistrator.register();
   ({ RunPage } = await import("./RunPage.tsx"));
   ({ ScopeProvider } = await import("../scope.tsx"));
   ({ ToastProvider } = await import("@lux/design-system"));
-  ({ fakeApi, until } = await import("../testing.ts"));
+  ({ fakeApi, until, type } = await import("../testing.ts"));
   api = await import("../../api/index.ts");
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -62,17 +63,6 @@ async function render(adapter: string, url: string, extra: Record<string, unknow
       api.signOut();
     },
   };
-}
-
-// A typed change as a browser delivers it: React tracks the value, so set it through the native setter.
-async function type(area: HTMLTextAreaElement, value: string) {
-  await act(async () => {
-    area.focus();
-    area.dispatchEvent(new Event("focusin", { bubbles: true }));
-    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(area), "value")!.set!.call(area, value);
-    area.dispatchEvent(new Event("input", { bubbles: true }));
-    area.dispatchEvent(new KeyboardEvent("keyup", { key: "x", bubbles: true }));
-  });
 }
 
 const button = (scope: Element, name: string) => [...scope.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === name);

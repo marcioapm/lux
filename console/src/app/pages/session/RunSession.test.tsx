@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { OutputRecord, Run } from "../../../api/index.ts";
 import { fixture } from "./fixtures.ts";
+import { type } from "../../testing.ts";
 
 // RunSession's router import touches window at load: register the DOM first.
 let RunSession: typeof import("./RunSession.tsx").RunSession;
@@ -102,14 +103,7 @@ test("with a subagent open, a message from the composer goes to the root Run", a
     await waitFor(() => v.el.querySelector(".subpanel") != null);
     const form = v.el.querySelector<HTMLFormElement>('section[aria-label="Agent session"] form[aria-label="Message the agent"]')!;
     const area = form.querySelector("textarea")!;
-    // A typed change as a browser delivers it: React tracks the value, so set it through the native setter.
-    await act(async () => {
-      area.focus();
-      area.dispatchEvent(new Event("focusin", { bubbles: true }));
-      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(area), "value")!.set!.call(area, "check the root");
-      area.dispatchEvent(new Event("input", { bubbles: true }));
-      area.dispatchEvent(new KeyboardEvent("keyup", { key: "x", bubbles: true }));
-    });
+    await type(area, "check the root");
     await act(async () => [...form.querySelectorAll("button")].find((b) => b.textContent === "Send")!.click());
     await waitFor(() => v.posts.length > 0 && area.value === "");
     expect(v.posts).toEqual([{ path: "/v1/runs/r1/input", method: "POST", body: { text: "check the root" } }]);
@@ -140,13 +134,7 @@ test.each([
   try {
     await draw("r1");
     const area = () => el.querySelector<HTMLTextAreaElement>(`form[aria-label="${label}"] textarea`)!;
-    await act(async () => {
-      area().focus();
-      area().dispatchEvent(new Event("focusin", { bubbles: true }));
-      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(area()), "value")!.set!.call(area(), "half typed for r1");
-      area().dispatchEvent(new Event("input", { bubbles: true }));
-      area().dispatchEvent(new KeyboardEvent("keyup", { key: "x", bubbles: true }));
-    });
+    await type(area(), "half typed for r1");
     expect(area().value).toBe("half typed for r1");
     // React holds the draft: Send is on.
     expect([...el.querySelectorAll("button")].find((b) => b.textContent === "Send")!.disabled).toBe(false);
