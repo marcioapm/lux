@@ -25,6 +25,7 @@ export * from "./RelativeTime.tsx";
 export * from "./SegmentedControl.tsx";
 export * from "./Select.tsx";
 export * from "./ServerList.tsx";
+export * from "./SessionComposer.tsx";
 export * from "./SessionMarker.tsx";
 export * from "./SessionRail.tsx";
 export * from "./SessionTranscript.tsx";

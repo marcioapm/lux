@@ -107,6 +107,7 @@ import {
   PlanTurn,
   RailCard,
   RailFacts,
+  SessionComposer,
   SessionMarker,
   SessionRail,
   SessionTranscript,
@@ -1297,12 +1298,8 @@ function SessionDemo() {
           }
           actions={<SegmentedControl label="Show" value={filter} onChange={setFilter} options={[{ value: "all", label: "Everything" }, { value: "messages", label: "Messages" }]} />}
           itemCount={12}
-          note={
-            <>
-              Read-only · input and interrupt are on <a href="#logs">Output</a>
-            </>
-          }
           status={<span className="num">14 turns · 23 tool calls · cursor 3.1502</span>}
+          composer={<SessionComposer label="Message the agent" placeholder="Send a message to this Run…" hint="Root session · read at the agent's next step" onSend={() => new Promise((r) => setTimeout(r, 600))} onInterrupt={() => new Promise((r) => setTimeout(r, 400))} />}
         >
           <SessionMarker type="epoch" t={at(0.3)}>
             <b>Epoch 1</b> · started on <b>gp-eu-west-1-a2</b>
@@ -1399,6 +1396,33 @@ function SessionDemo() {
           {null}
         </SessionTranscript>
       </div>
+      <h3 className="sg-h3">SessionComposer: enabled, sending, a failed send keeps its draft, a stopped Run, stdin</h3>
+      <div className="grid-2">
+        <div className="transcript">
+          <SessionComposer label="Message the agent" placeholder="Send a message to this Run…" hint="Root session · read at the agent's next step" onSend={() => new Promise((r) => setTimeout(r, 600))} onInterrupt={() => undefined} />
+        </div>
+        <div className="transcript">
+          <AutoSend>
+            <SessionComposer label="Message the agent" defaultValue="Also add jitter, and make the max delay configurable." hint="Root session · read at the agent's next step" onSend={() => new Promise(() => undefined)} onInterrupt={() => undefined} />
+          </AutoSend>
+        </div>
+        <div className="transcript">
+          <AutoSend>
+            <SessionComposer label="Message the agent" defaultValue="Keep the public API unchanged and add a cancellation test." hint="Root session · read at the agent's next step" onSend={() => Promise.reject(new Error("run is stopping: not running"))} onInterrupt={() => undefined} />
+          </AutoSend>
+        </div>
+        <div className="transcript">
+          <SessionComposer label="Message the agent" disabled placeholder="Resume this Run to send a message" hint="Run stopped · Resume is in the page actions" onSend={async () => undefined} onInterrupt={() => undefined} />
+        </div>
+        <SessionTranscript
+          itemCount={0}
+          subtitle="generic"
+          empty={<EmptyState compact title="No agent conversation" description="This workload is not an agent: its output is on the Output tab and input goes to its stdin." />}
+          composer={<SessionComposer label="Send to stdin" placeholder="A line for the workload's stdin…" hint="Written to stdin with a newline; read when the workload next reads" onSend={() => new Promise((r) => setTimeout(r, 600))} onInterrupt={() => undefined} />}
+        >
+          {null}
+        </SessionTranscript>
+      </div>
       <h3 className="sg-h3">Turns on their own</h3>
       <div className="turns" style={{ margin: 0 }}>
         <InputTurn sender="ci" phase="failed" steer text="Add a screenshot of the dashboard" attachments={1} error="the agent does not take images" />
@@ -1421,6 +1445,15 @@ function SessionDemo() {
       </div>
     </Section>
   );
+}
+
+// Presses its composer's Send once on mount, to show the sending and failed states without a click.
+function AutoSend({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.querySelector<HTMLButtonElement>('button[type="submit"]')?.click();
+  }, []);
+  return <div ref={ref}>{children}</div>;
 }
 
 function Logs() {

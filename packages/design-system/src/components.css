@@ -2578,6 +2578,8 @@ a.idchip-text:hover {
   border-bottom: 1px solid var(--border-soft);
 }
 .transcript-head .card-titles { flex: 1; }
+/* The scroller and its "N new" pill: the pill sits over the scroller's foot, above the bar and composer. */
+.transcript-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .transcript-scroll {
   flex: 1;
   min-height: 0;
@@ -2603,7 +2605,7 @@ a.idchip-text:hover {
 .transcript-jump {
   position: absolute;
   left: 50%;
-  bottom: 48px;
+  bottom: var(--sp-6);
   transform: translateX(-50%);
   display: inline-flex;
   align-items: center;
@@ -2619,6 +2621,38 @@ a.idchip-text:hover {
   cursor: pointer;
 }
 .transcript-empty { padding: var(--sp-9) var(--sp-7); text-align: center; color: var(--fg-muted); }
+
+/* SessionComposer: under the transcript bar, the input to the Run's root session. */
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  flex: none;
+  padding: var(--sp-5) var(--pad-card);
+  border-top: 1px solid var(--border-soft);
+}
+.composer-input {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: calc(2lh + 2 * var(--sp-4));
+  max-height: 160px;
+  padding: var(--sp-4);
+  font-family: var(--font-sans);
+  line-height: var(--leading-normal);
+  resize: vertical;
+  field-sizing: content;
+}
+.composer-input:disabled { background: var(--bg-subtle); color: var(--fg-muted); cursor: not-allowed; }
+.composer-input:read-only:not(:disabled) { color: var(--fg-secondary); }
+.composer-actions { display: flex; align-items: center; gap: var(--sp-4); }
+.composer-actions .grow { flex: 1; }
+.composer-hint { min-width: 0; font-size: var(--text-xs); color: var(--fg-muted); }
+.composer-error { margin: 0; font-size: var(--text-sm); color: var(--danger-fg); overflow-wrap: anywhere; }
+@media (max-width: 767px) {
+  .composer-actions { flex-wrap: wrap; }
+  .composer-hint { flex-basis: 100%; }
+}
 
 .turns { display: flex; flex-direction: column; gap: var(--turn-gap); max-width: var(--measure); margin: 0 auto; }
 .turn { position: relative; min-width: 0; }
