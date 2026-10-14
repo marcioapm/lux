@@ -410,7 +410,7 @@ curl -fsS https://luxd.example/runner/v1/bootstrap.sh | sudo env \
 | `--disk-headroom` | not given | Bytes of the `--data-dir` filesystem kept from Runs. Given with `--disk` (0 is allowed), `--disk` is nominal and each Run's disk limit is `resources.disk × min(1, (capacity − headroom) / --disk)`, in whole bytes rounded down; the grace counts from that limit, and there is no 2× ceiling: the [low-free-space guard](#disk-pressure) bounds the host instead. Capacity is the filesystem's used plus unprivileged-free blocks (statfs; blocks reserved for root count in neither), read once at start, never the free space. A grown volume takes effect only after a runner restart; adopted Runs also use the factor computed at that restart. The runner refuses to start if the headroom leaves nothing, and logs the factor. Only such a runner advertises `disk-scale`, which shaped pools require. Not given: limits are `resources.disk` as before, with the 2× ceiling. Also `LUX_RUNNER_DISK_HEADROOM`. |
 | `--disk-low-free` | `5%` | With `--disk-headroom`: free space of the `--data-dir` filesystem under which the host is under [disk pressure](#disk-pressure). A percentage of the filesystem's capacity (`5%`) or a size (`8GiB`, `8Gi`, bytes). Also `LUX_RUNNER_DISK_LOW_FREE`. |
 | `--disk-recover-free` | `10%` | With `--disk-headroom`: free space at which disk pressure ends. Must be above `--disk-low-free` and below the capacity. Also `LUX_RUNNER_DISK_RECOVER_FREE`. |
-| `--usage-every` | `15s` | How often each Run's disk use is sampled, and its disk limit and `diskGrace` checked. The grace is counted in these samples, so a Run over its disk is stopped between `diskGrace` and `diskGrace` plus this interval from the first sample over. |
+| `--usage-every` | `15s` | How often each Run's disk use is sampled, and its disk limit and `diskGrace` checked. The grace is counted in these samples, so a Run over its disk is stopped between `diskGrace` and `diskGrace` plus this interval from the first sample over. A sample of a large tree may take longer than this; such a round's next sample starts when it ends. |
 | `--host-ttl` | `24h` | How long uploaded local copies are kept, and images lux pulled or built after their last use ([images on hosts](runspec.md#images-on-hosts)). |
 | `--image-disk-high` | `80` | Percent use of the disk holding Podman's storage (its graph root, `/var/lib/containers`) over which lux's unused images are removed, least recently used first, until under it. `0` turns it off. Images the host had before lux are never removed. |
 | `--provider-id` | | The cloud instance id, for provisioned hosts. Also `LUX_PROVIDER_ID`. |
@@ -456,8 +456,10 @@ every 2 seconds (`--usage-every` when shorter), apart from the disk
 samples, and once at start, before the first heartbeat: a slow disk walk
 never delays blocking admissions, and a runner restarted under pressure
 never reports none. Reclaiming and stopping happen after each round of
-disk samples (`--usage-every`, 15s by default), each placement's sample
-bounded by that interval. Keep
+disk samples (`--usage-every`, 15s by default). Each placement's sample is
+cut off only after 4 times that interval or 2 minutes, whichever is
+longer, so a slow walk of a large tree still concludes and only a hung
+Podman is given up on. Keep
 `--data-dir` and Podman's storage (`/var/lib/containers`) on the same
 filesystem, as a stock host has them: the guard sees only the one holding
 `--data-dir`.
@@ -505,8 +507,11 @@ end is reported, which frees its writable layer. Its state volumes stay,
 as for any stop, as the Run's local copy, and the stop first exports them
 (zstd) for upload, which briefly uses more of the filesystem. So the
 runner counts a stopping Run's writable layer as on its way back, then,
-once it has ended, its volumes until their upload finishes; at the next
-round after that, step 2 discards the copy. Recovery after a stop
+once it has ended, its snapshot's blob sizes (a lower bound of its
+volumes, read from disk, so it holds across a runner restart) until their
+upload finishes. The same goes for any ended Run's copy that is still
+uploading. At the next round after that, step 2 discards the copy.
+Recovery after a stop
 therefore waits for that Run's upload, then the discard. The export is
 kept under pressure, since skipping it would lose the Run's state. If it
 fails for want of space (ENOSPC), the snapshot is reported failed
