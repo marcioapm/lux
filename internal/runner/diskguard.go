@@ -306,32 +306,8 @@ func (g *diskGuard) pass(ctx context.Context) {
 	// Always: a stopping container's removal may have freed its layer meanwhile.
 	free = g.remeasure(free)
 	free, pending, discarded := g.reclaimCopies(ctx, free)
-	relieved = relieved || discarded
-	var cands []diskVictim
-	for _, v := range overLimit(g.victims()) {
-		if v.stopping {
-			pending += v.rw
-			relieved = true
-			continue
-		}
-		cands = append(cands, v)
-	}
-	slices.SortFunc(cands, func(a, b diskVictim) int {
-		return cmp.Or(cmp.Compare(b.excess(), a.excess()), strings.Compare(a.runID, b.runID))
-	})
-	for _, v := range cands {
-		if g.recovFree-free-pending <= 0 {
-			break
-		}
-		g.log.Warn("disk pressure: stopping a placement over its disk limit", "run", v.runID, "epoch", v.epoch,
-			"used", v.used, "writableLayer", v.rw, "limit", v.limit.Effective, "excess", v.excess(), "free", free)
-		g.stop(ctx, v, g.at(free))
-		relieved = true
-		// What its stop frees at once; its volumes count once its copy
-		// awaits its upload, and are freed once that copy is reclaimable.
-		pending += v.rw
-		free = g.remeasure(free)
-	}
+	free, stopping := g.stopOverLimit(ctx, free, pending)
+	relieved = relieved || discarded || stopping
 	g.setIdle(!relieved, gen)
 	if free >= g.recovFree {
 		// Back at the recovery mark: end the pressure now, not a tick later.
@@ -368,6 +344,38 @@ func (g *diskGuard) reclaimCopies(ctx context.Context, free int64) (newFree, pen
 		free = g.remeasure(free)
 	}
 	return free, pending, relieved
+}
+
+// stopOverLimit stops over-limit placements, largest excess first, until
+// pending plus what their stops free covers what free lacks of the
+// recovery mark. relieved: a placement is stopping, already or now.
+func (g *diskGuard) stopOverLimit(ctx context.Context, free, pending int64) (newFree int64, relieved bool) {
+	var cands []diskVictim
+	for _, v := range overLimit(g.victims()) {
+		if v.stopping {
+			pending += v.rw
+			relieved = true
+			continue
+		}
+		cands = append(cands, v)
+	}
+	slices.SortFunc(cands, func(a, b diskVictim) int {
+		return cmp.Or(cmp.Compare(b.excess(), a.excess()), strings.Compare(a.runID, b.runID))
+	})
+	for _, v := range cands {
+		if g.recovFree-free-pending <= 0 {
+			break
+		}
+		g.log.Warn("disk pressure: stopping a placement over its disk limit", "run", v.runID, "epoch", v.epoch,
+			"used", v.used, "writableLayer", v.rw, "limit", v.limit.Effective, "excess", v.excess(), "free", free)
+		g.stop(ctx, v, g.at(free))
+		relieved = true
+		// What its stop frees at once; its volumes count once its copy
+		// awaits its upload, and are freed once that copy is reclaimable.
+		pending += v.rw
+		free = g.remeasure(free)
+	}
+	return free, relieved
 }
 
 // attachGuard wires g to this runner: free measures the filesystem, and

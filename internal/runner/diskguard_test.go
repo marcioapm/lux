@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -51,7 +50,7 @@ func (f *fakeFS) free() (int64, error) {
 // MiB, acting on f.
 func (f *fakeFS) guard(t *testing.T) *diskGuard {
 	t.Helper()
-	g, err := newDiskGuard(slog.New(slog.NewTextHandler(io.Discard, nil)), FreeMark{Bytes: 50 * mib}, FreeMark{Bytes: 100 * mib}, 1000*mib)
+	g, err := newDiskGuard(slog.New(slog.DiscardHandler), FreeMark{Bytes: 50 * mib}, FreeMark{Bytes: 100 * mib}, 1000*mib)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +331,7 @@ func TestDiskGuardNeverStopsConformingAndReportsNoRelief(t *testing.T) {
 // Watermarks are refused unless 0 < low < recover < capacity, as resolved
 // against the filesystem; same-unit marks are checked before it is read.
 func TestDiskGuardMarks(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	for _, c := range []struct {
 		low, rec string
 		capacity int64
@@ -629,7 +628,7 @@ func TestNoGuardWithoutDiskScale(t *testing.T) {
 	}
 	off.guardPass(context.Background()) // no guard: nothing to do, no panic
 	on := &Runner{cfg: Config{Disk: 160 * gib}, disk: mustDiskScale(t, 160*gib, 10*gib, 160*gib)}
-	g, err := newDiskGuard(slog.New(slog.NewTextHandler(io.Discard, nil)), DefaultDiskLowFree, DefaultDiskRecoverFree, 160*gib)
+	g, err := newDiskGuard(slog.New(slog.DiscardHandler), DefaultDiskLowFree, DefaultDiskRecoverFree, 160*gib)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -333,24 +333,21 @@ func (r *Runner) staleEpoch(runID string) int {
 // elsewhere from an uploaded snapshot, its host TTL passed, or the disk
 // guard needs the space and S3 holds the copy.
 func (r *Runner) discard(ctx context.Context, runID string, beforeEpoch int) {
-	r.mu.Lock()
-	p := r.placements[runID]
-	if p != nil && p.epoch >= beforeEpoch {
-		r.mu.Unlock()
-		return
-	}
-	delete(r.placements, runID)
-	r.mu.Unlock()
-	r.diskChanged()
-	r.removeRunLocal(ctx, runID)
+	r.discardUnless(ctx, runID, func(p *placement) bool { return p.epoch >= beforeEpoch })
 }
 
 // discardIdle is discard for a Run with no live placement here, checked
 // under r.mu: an assignment of the Run arriving meanwhile keeps its copy.
 // The disk guard and gcLoop discard through it alone.
 func (r *Runner) discardIdle(ctx context.Context, runID string) bool {
+	return r.discardUnless(ctx, runID, func(p *placement) bool { return p.liveState() != "" })
+}
+
+// discardUnless deletes runID's local copy unless keep, called under r.mu,
+// holds for its placement here; whether it did.
+func (r *Runner) discardUnless(ctx context.Context, runID string, keep func(*placement) bool) bool {
 	r.mu.Lock()
-	if p := r.placements[runID]; p != nil && p.liveState() != "" {
+	if p := r.placements[runID]; p != nil && keep(p) {
 		r.mu.Unlock()
 		return false
 	}
