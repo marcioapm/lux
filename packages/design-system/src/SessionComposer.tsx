@@ -19,7 +19,6 @@ export interface SessionComposerProps {
   hint?: ReactNode;
   /** Turns a rejected send into the alert's text. */
   errorText?: (err: unknown) => string;
-  className?: string;
 }
 
 const defaultErrorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -28,7 +27,7 @@ const defaultErrorText = (err: unknown) => (err instanceof Error ? err.message :
  * The input form under a SessionTranscript: a labelled textarea, a hint, Interrupt
  * and Send. Ctrl/⌘+Enter in the textarea sends; Enter is a newline.
  */
-export function SessionComposer({ label, onSend, onInterrupt, interruptTitle = "Interrupt the agent's current turn", disabled = false, placeholder, defaultValue = "", hint, errorText = defaultErrorText, className }: SessionComposerProps) {
+export function SessionComposer({ label, onSend, onInterrupt, interruptTitle = "Interrupt the agent's current turn", disabled = false, placeholder, defaultValue = "", hint, errorText = defaultErrorText }: SessionComposerProps) {
   const id = useId();
   const [draft, setDraft] = useState(defaultValue);
   const [sending, setSending] = useState(false);
@@ -74,7 +73,7 @@ export function SessionComposer({ label, onSend, onInterrupt, interruptTitle = "
   };
 
   return (
-    <form className={["composer", className ?? ""].join(" ").trim()} aria-label={label} onSubmit={onSubmit}>
+    <form className="composer" aria-label={label} onSubmit={onSubmit}>
       <label htmlFor={id} className="field-label">
         {label}
       </label>
