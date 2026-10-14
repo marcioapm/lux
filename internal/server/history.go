@@ -212,8 +212,8 @@ const runStartPool = `coalesce(r.first_pool_id, (SELECT h.pool_id FROM (SELECT p
 // has no pool; read it as coalesce(fp.pool_id, r.pool_id). r.pool_id alone
 // is not that pool: a stopped Run resumed into another pool and terminated
 // before it was placed again is bound to the new pool. The host lookup
-// inside the lateral keeps it to one index probe each per finished Run,
-// never a scan of hosts.
+// inside the lateral keeps it to one placements_run_id_epoch_key and one
+// hosts_pkey probe per finished Run, never a scan of hosts.
 const runFinishPool = ` LEFT JOIN LATERAL (SELECT h.pool_id FROM (SELECT pl.host_id FROM placements pl
 		WHERE pl.run_id = r.id ORDER BY pl.epoch DESC LIMIT 1) pl
 	JOIN hosts h ON h.id = pl.host_id) fp ON true`

@@ -19,7 +19,8 @@
 --
 -- Then runs_first_pool_started, built as 041 built runs_pool_started: a
 -- plain CREATE INDEX, whose SHARE lock on runs holds back writes to runs
--- (reads go on) for the build until this transaction commits right after.
+-- (reads go on) for the build (its duration: docs/operations.md, upgrading,
+-- step 2) until this transaction commits right after.
 -- It waits for writes in progress first, up to lock_timeout.
 SET LOCAL lock_timeout = '5s';
 
