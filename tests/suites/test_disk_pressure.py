@@ -40,13 +40,14 @@ def _pressure(lux, host) -> dict | None:
 
 
 def test_disk_pressure_stops_the_run_over_its_limit_and_blocks_admissions(lux, runners, hosts):
-    """Below the low mark the host takes no new Run, and the Run over its
-    disk limit is stopped with the reason, while the Run under its own runs
-    on. The guard then discards the stopped Run's local copy once its
-    snapshot is uploaded (the default host TTL, 24h, plays no part): free
-    space is back over the recovery mark, the pressure ends, and the
-    waiting Run is placed. The host's events record the pressure's start
-    and end."""
+    """Below the low mark the Run over its disk limit is stopped with the
+    reason, while the Run under its own runs on. The guard then discards
+    the stopped Run's local copy once its snapshot is uploaded (the default
+    host TTL, 24h, plays no part): free space is back over the recovery
+    mark and the pressure ends. Then space the guard cannot reclaim (an
+    operator's file) holds the host under pressure with no relief: a new
+    Run waits, saying why, until the file goes. The host's events record
+    each pressure's start and end."""
     host = hosts[0]
     _mount_small_fs(host)
     try:
@@ -77,28 +78,37 @@ def test_disk_pressure_stops_the_run_over_its_limit_and_blocks_admissions(lux, r
         assert len(stop) == 1 and stop[0]["data"]["limitBytes"] == 64 << 20 and stop[0]["data"]["excessBytes"] > 0, stop
         assert not lux.events(over, "disk.exceeded"), "stopped by the grace or a ceiling, not the guard"
 
-        # Admissions stay blocked while free space is under the recovery
-        # mark: a new Run waits, saying why.
-        pressure = _pressure(lux, host)
-        assert pressure and pressure["lowFree"] == "40%" and pressure["freeBytes"] < pressure["recoverFreeBytes"], pressure
-        waiting = lux.submit(generic(ALPINE_IMAGE, "true", resources={"disk": "8Mi"}))
-        wait_until(lambda: "under disk pressure" in lux.get(waiting).get("stateReason", ""), 30, 0.5, "the new Run is not held for disk pressure")
-        assert lux.get(waiting)["state"] not in ("scheduled", "running", "succeeded"), lux.get(waiting)
-
         # The guard discards the stopped Run's local copy once S3 holds it
         # (no host TTL: the default is 24h); free space comes back and the
         # pressure ends.
         wait_until(lambda: _pressure(lux, host) is None, 90, 1, "disk pressure did not end")
-        assert over not in host.podman("volume", "ls", "--format", "{{.Name}}"), "the stopped Run's volume is still on the host"
-        assert not lux.json("snapshots", over)[0].get("onHost"), "luxd still lists the stopped Run's local copy"
+        assert not any(over in v for v in host.podman("volume", "ls", "--format", "{{.Name}}").split()), \
+            "the stopped Run's volume is still on the host"
+        wait_until(lambda: not lux.json("snapshots", over)[0].get("onHost"), 30, 1, "luxd still lists the stopped Run's local copy")
+        types = [e["type"] for e in lux.json("hosts", "events", host.name)]
+        assert "host.disk_pressure" in types and "host.disk_pressure_ended" in types, types
+
+        # 300 MiB of an operator's own: nothing the guard may reclaim, and
+        # the Run left is under its limit. Pressure holds, unrelieved.
+        host.exec("dd", "if=/dev/zero", "of=/var/lib/lux/ballast", "bs=1M", "count=300")
+        wait_until(lambda: (_pressure(lux, host) or {}).get("noRelief"), 60, 1, "no unrelieved disk pressure")
+        pressure = _pressure(lux, host)
+        assert pressure and pressure["lowFree"] == "40%" and pressure["freeBytes"] < pressure["lowFreeBytes"], pressure
+        waiting = lux.submit(generic(ALPINE_IMAGE, "true", resources={"disk": "8Mi"}))
+        wait_until(lambda: "under disk pressure" in lux.get(waiting).get("stateReason", ""), 30, 0.5, "the new Run is not held for disk pressure")
+        assert lux.get(waiting)["state"] not in ("scheduled", "running", "succeeded"), lux.get(waiting)
+        assert lux.get(under)["state"] == "running", "the Run under its limit was stopped"
+
+        host.exec("rm", "-f", "/var/lib/lux/ballast")
+        wait_until(lambda: _pressure(lux, host) is None, 60, 1, "disk pressure did not end once the file went")
         lux.wait_state(waiting, "succeeded", timeout=60)
         assert lux.get(under)["state"] == "running", "the Run under its limit was stopped"
         assert not lux.events(under, "disk.pressure_stop")
-
-        types = [e["type"] for e in lux.json("hosts", "events", host.name)]
-        assert "host.disk_pressure" in types and "host.disk_pressure_ended" in types, types
+        ended = [e["type"] for e in lux.json("hosts", "events", host.name)].count("host.disk_pressure_ended")
+        assert ended == 2, ended
         lux.run("terminate", under, "--wait")
     finally:
+        host.exec("rm", "-f", "/var/lib/lux/ballast", check=False)
         runners.stop(host)
         cleanup_host(host)
         _unmount_small_fs(host)
