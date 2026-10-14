@@ -20,7 +20,7 @@ func TestHistoryResolutionFromCreation(t *testing.T) {
 	key := ids.Secret("luxk")
 	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(key))
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	ages := map[string]string{"young": "40 minutes", "old": "8 days"}
+	ages := map[string]string{"young": "40 minutes", "minute": "24 hours", "old": "8 days"}
 	for id, age := range ages {
 		execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state, created_at) VALUES ($1, $1, 'ready', now() - $2::interval)`, id, age)
 		execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, created_at) VALUES ($1, 't1', '{}', 'running', now() - $2::interval)`, id, age)
@@ -30,6 +30,11 @@ func TestHistoryResolutionFromCreation(t *testing.T) {
 			execSQL(t, s, ctx, `INSERT INTO host_samples (host_id, res, at, cpu_seconds) VALUES ($1, 0, now() - $2::interval, 1)`, id, ago)
 			execSQL(t, s, ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds) VALUES ($1, 1, 't1', 0, now() - $2::interval, 1)`, id, ago)
 			execSQL(t, s, ctx, `INSERT INTO pool_samples (pool_id, tenant_id, res, at, running) VALUES ($1, '', 0, now() - $2::interval, 1)`, id, ago)
+		}
+		for _, ago := range []string{"3 hours", "2 hours", "1 hour"} {
+			execSQL(t, s, ctx, `INSERT INTO host_samples (host_id, res, at, cpu_seconds) VALUES ($1, 60, now() - $2::interval, 1)`, id, ago)
+			execSQL(t, s, ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds) VALUES ($1, 1, 't1', 60, now() - $2::interval, 1)`, id, ago)
+			execSQL(t, s, ctx, `INSERT INTO pool_samples (pool_id, tenant_id, res, at, running) VALUES ($1, '', 60, now() - $2::interval, 1)`, id, ago)
 		}
 	}
 	type answer struct {
@@ -55,6 +60,13 @@ func TestHistoryResolutionFromCreation(t *testing.T) {
 		}
 		if d := young.To.Sub(young.From); d != 7*24*time.Hour {
 			t.Errorf("%s: from..to %v, want the 7d asked for", kind, d)
+		}
+		minute := at("minute", "")
+		if minute.Resolution != 60 || len(minute.Samples) != 3 {
+			t.Errorf("%s created 24h ago at 7d: resolution %d, %d samples; want 60 and 3", kind, minute.Resolution, len(minute.Samples))
+		}
+		if d := minute.To.Sub(minute.From); d != 7*24*time.Hour {
+			t.Errorf("%s minute: from..to %v, want the 7d asked for", kind, d)
 		}
 		if old := at("old", ""); old.Resolution != 3600 {
 			t.Errorf("%s created 8d ago at 7d: resolution %d, want 3600", kind, old.Resolution)
