@@ -8,7 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/marcioapm/lux/internal/ids"
+	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // flowFixture: tenants ta and tb with read keys (a, b) and an operator key
@@ -147,6 +151,52 @@ func TestPoolFlowFirstRunningPlacement(t *testing.T) {
 	}
 	wantMap(t, "operator stats", flowStats(t, s, keys["op"]), map[string]int{"pa": 2})
 	wantMap(t, "b's stats", flowStats(t, s, keys["b"]), map[string]int{"pa": 1})
+}
+
+// The same through lux's own paths: a Run that first ran on default's host
+// ha, resumed into t1's pool big, placed on hb by the scheduler, reported
+// running and then exited 0 there, counts its start under default and its
+// finish under big, for the pool and for t1.
+func TestPoolFlowResumedIntoAnotherPool(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	id, big := movedRun(t, s)
+	execSQL(t, s, ctx, `UPDATE placements SET started_at = now() - interval '10 minutes' WHERE run_id = $1 AND epoch = 1`, id)
+	execSQL(t, s, ctx, `UPDATE runs SET first_started_at = now() - interval '10 minutes' WHERE id = $1`, id)
+	if _, err := resumeTo(s, id, big, &resumeResources{CPUs: f64(8), Memory: bytesPtr(32 * gib)}); err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, s)
+	if host, _, reason := placedOn(t, s, id); host != "hb" {
+		t.Fatalf("placed on %q (%s), want hb", host, reason)
+	}
+	code := 0
+	for _, st := range []proto.Status{{State: "running"}, {State: "exited", ExitCode: &code, Reason: "exited"}} {
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return s.applyStatus(ctx, tx, "t1", id, 2, st)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if state := storedState(t, s, id); state != StateSucceeded {
+		t.Fatalf("state %s, want succeeded", state)
+	}
+	// Into the sampler's window, which ends a minute ago.
+	execSQL(t, s, ctx, `UPDATE runs SET finished_at = finished_at - interval '2 minutes' WHERE id = $1`, id)
+	execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, window_end) VALUES ('', 0, now() - interval '1 hour', now() - interval '20 minutes')`)
+	sampleNow(t, s)
+	wantMap(t, "samples", flowSamples(t, s), map[string]string{"default/": "1/0", "default/t1": "1/0", big + "/": "0/1", big + "/t1": "0/1"})
+	out, err := s.poolStats(context.WithValue(ctx, principalKey, Principal{Operator: true, Scopes: []string{"read"}}), &poolStatsInput{Since: "2h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := map[string]int{}
+	for _, p := range out.Body.Pools {
+		if p.RunsStarted != 0 {
+			started[p.ID] = p.RunsStarted
+		}
+	}
+	wantMap(t, "operator stats", started, map[string]int{"default": 1})
 }
 
 // A Run that never moved counts in its pool for both.
