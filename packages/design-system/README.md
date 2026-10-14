@@ -413,7 +413,8 @@ Parts of a whole, ratios and page notes (gallery section "parts"):
 Session: an agent Run as a conversation (gallery section "session"; the
 console's Run page Session tab). Layout: `.session-layout` puts the
 transcript beside a `SessionRail` of `--session-rail-w`; under 1000px of
-content the rail is not drawn and a subagent opens in a `Dialog`.
+content the rail is not drawn and a subagent opens in a modal `<dialog>`
+with the `Dialog` frame (`.dialog`), its `SubagentPanel` `bare`.
 `.session-pane-h` gives transcript and panel the page's height.
 
 | Export | What |
