@@ -178,7 +178,6 @@ export function sessionRun(id: string): MockSessionRun | undefined {
 /** The Run object GET /v1/runs/{id} returns for a session Run; `liveState` replaces "running" for a live one (MOCK_STATE). */
 export function sessionRunJson(r: MockSessionRun, host: { id: string; name: string }, liveState = "running") {
   const state = r.live ? liveState : "succeeded";
-  const running = state === "running";
   return {
     id: r.id,
     tenant: "acme",
@@ -186,7 +185,7 @@ export function sessionRunJson(r: MockSessionRun, host: { id: string; name: stri
     labels: r.labels ?? { demo: "session" },
     state,
     resumable: state === "stopped",
-    activity: running ? "busy" : undefined,
+    activity: state === "running" ? "busy" : undefined,
     epoch: 1,
     sessionId: r.sessionId,
     host: host.name,
