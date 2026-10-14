@@ -574,23 +574,27 @@
 
 /* ---------- KeyValue with full-width facts: FactRow, ImageRef, LabelsFact ----------
    A value that can be long sits under the grid on a full-width row, one
-   line, never in a grid cell. The whole is one card surface. */
+   line, never in a grid cell. With `surface` (the default) the whole is one
+   card; without it (inside a Card) the rows draw on the parent's padding. */
 .kv-facts {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
   min-width: 0;
   container-type: inline-size;
 }
-.kv-facts > .kv { padding: var(--sp-2) var(--pad-card) 0; }
+.kv-facts-surface {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+}
+.kv-facts-surface > .kv { padding: var(--sp-2) var(--pad-card) 0; }
 /* The row's hairline lies over the last grid row's own. */
 .fact-row {
   margin-top: -1px;
-  padding: var(--sp-3) var(--pad-card);
+  padding: var(--sp-3) 0;
   border-top: 1px solid var(--border-soft);
   min-width: 0;
 }
-.fact-row:last-child { padding-bottom: var(--sp-4); }
+.kv-facts-surface > .fact-row { padding-inline: var(--pad-card); }
+.kv-facts-surface > .fact-row:last-child { padding-bottom: var(--sp-4); }
 .fact-line {
   display: flex;
   align-items: center;
@@ -633,20 +637,8 @@
 }
 .imageref-path { color: var(--fg-muted); }
 .imageref-name { color: var(--fg); font-weight: var(--weight-medium); }
-.fact-toggle {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-2);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--accent-text);
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-.fact-toggle:hover { background: var(--bg-subtle); }
+/* The disclosure is a ghost Button in the link colour. */
+.btn-ghost.fact-toggle { flex: none; color: var(--accent-text); }
 .labels-fact .label-chip { max-width: 40ch; }
 .label-list { margin: var(--sp-3) 0 0; }
 .label-pair {
@@ -729,6 +721,16 @@ a.idchip-text:hover {
 }
 .idchip.is-copied .idchip-copy {
   color: var(--success-fg);
+}
+/* No hover on touch screens: the copy affordance is always shown, at a 24px target. */
+@media (hover: none) {
+  .idchip-copy,
+  .fact-copy {
+    opacity: 1;
+    min-width: 24px;
+    min-height: 24px;
+    justify-content: center;
+  }
 }
 .code {
   padding: 1px var(--sp-2);
@@ -2661,7 +2663,7 @@ a.idchip-text:hover {
   .session-layout > .session-rail { display: none; }
 }
 /* The transcript card holds its composer too: sized so the composer stays in view under a Run page's facts and tabs. */
-.session-pane-h { height: clamp(420px, calc(100vh - 600px), 860px); }
+.session-pane-h { height: clamp(420px, calc(100vh - var(--session-pane-offset)), 860px); }
 
 .transcript {
   display: flex;

@@ -1,4 +1,5 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
+import { Button } from "./Button.tsx";
 import { sortLabels, LabelChips } from "./CostPanel.tsx";
 import { useCopy } from "./IdChip.tsx";
 import { IconCheck, IconChevronDown, IconChevronUp, IconCopy } from "./icons.tsx";
@@ -64,7 +65,7 @@ export function splitImageRef(ref: string): ImageRefParts {
   };
 }
 
-/** "sha256:" + the first 12 and last 8 hex digits of a digest; a short or unrecognised one whole. */
+/** The algorithm + the first 12 and last 8 hex digits of a digest; a short or unrecognised one whole. */
 export function shortDigest(digest: string): string {
   const m = /^([a-z0-9+._-]+):([0-9a-f]+)$/i.exec(digest);
   if (!m || m[2]!.length <= 24) return digest;
@@ -102,6 +103,8 @@ export function ImageRef({ value }: { value: string }) {
 
 export interface LabelsFactProps {
   labels: Record<string, string> | undefined;
+  /** The row's name, for other key/value sets (Versions, Template); default "Labels". */
+  label?: ReactNode;
   /** Keys shown first, in the preview and the list (LabelChips' `first`). */
   first?: string[];
   /** Chips in the collapsed preview. */
@@ -115,27 +118,29 @@ export interface LabelsFactProps {
  * opens every pair, key over a complete, selectable value with a copy affordance.
  * Starts collapsed; no labels reads "–" with no toggle.
  */
-export function LabelsFact({ labels, first, max = 3, defaultOpen = false }: LabelsFactProps) {
+export function LabelsFact({ labels, label = "Labels", first, max = 3, defaultOpen = false }: LabelsFactProps) {
   const [open, setOpen] = useState(defaultOpen);
   const listId = useId();
-  const pairs = sortLabels(labels, first);
+  // `first` is usually an inline array literal: key the memo on its contents.
+  const firstKey = first?.join("\0");
+  const pairs = useMemo(() => sortLabels(labels, first), [labels, firstKey]);
   if (pairs.length === 0) {
     return (
-      <FactRow label="Labels" className="labels-fact">
+      <FactRow label={label} className="labels-fact">
         <span className="muted">–</span>
       </FactRow>
     );
   }
   return (
     <FactRow
-      label="Labels"
+      label={label}
       count={pairs.length}
       className="labels-fact"
       aside={
-        <button type="button" className="fact-toggle" aria-label="Labels" aria-expanded={open} aria-controls={open ? listId : undefined} onClick={() => setOpen(!open)}>
-          {open ? "Hide labels" : "Show all"}
+        <Button variant="ghost" size="sm" className="fact-toggle" aria-expanded={open} aria-controls={open ? listId : undefined} onClick={() => setOpen(!open)}>
+          {open ? (typeof label === "string" ? `Hide ${label.toLowerCase()}` : "Hide") : "Show all"}
           {open ? <IconChevronUp size={12} /> : <IconChevronDown size={12} />}
-        </button>
+        </Button>
       }
       detail={
         open && (
@@ -153,7 +158,7 @@ export function LabelsFact({ labels, first, max = 3, defaultOpen = false }: Labe
         )
       }
     >
-      <LabelChips labels={labels} first={first} max={max} />
+      <LabelChips entries={pairs} max={max} />
     </FactRow>
   );
 }
