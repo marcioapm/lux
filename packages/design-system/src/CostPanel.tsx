@@ -169,9 +169,13 @@ export function sortLabels(labels: Record<string, string> | undefined, first?: s
   });
 }
 
-/** A Run's labels as key=value chips, the first `max` and a count of the rest; each in full in its title. `entries` takes pairs already in `sortLabels` order instead of `labels`. */
-export function LabelChips({ labels, entries: sorted, max = 3, first }: { labels?: Record<string, string> | undefined; entries?: [string, string][]; max?: number; first?: string[] }) {
-  const entries = sorted ?? sortLabels(labels, first);
+/** `labels` sorted by `first`, or `entries` already in `sortLabels` order; never both. */
+export type LabelChipsProps = ({ labels: Record<string, string> | undefined; first?: string[]; entries?: never } | { entries: [string, string][]; labels?: never; first?: never }) & { max?: number };
+
+/** A Run's labels as key=value chips, the first `max` and a count of the rest; each in full in its title. */
+export function LabelChips(props: LabelChipsProps) {
+  const max = props.max ?? 3;
+  const entries = props.entries ?? sortLabels(props.labels, props.first);
   if (entries.length === 0) return <span className="muted">–</span>;
   const shown = entries.slice(0, max);
   const rest = entries.length - shown.length;
