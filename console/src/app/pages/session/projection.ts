@@ -46,7 +46,7 @@ export class Builder {
   thread(id: string, init?: Partial<SessionThread>): SessionThread {
     let th = this.threads.get(id);
     if (!th) {
-      th = { id, title: "Subagent", status: "running", items: [], children: [], tools: 0, ...init };
+      th = { id, title: "Subagent", status: "running", items: [], children: [], tools: 0, startedAt: this.t, ...init };
       this.threads.set(id, th);
       this.index.set(id, new Map());
       this.touch(id);
@@ -74,10 +74,35 @@ export class Builder {
     const p = this.thread(parent);
     const c = this.thread(child);
     if (c.parent && c.parent !== parent) return;
-    c.parent = parent;
+    if (!c.parent) {
+      c.parent = parent;
+      this.touch(child);
+    }
     if (!p.children.includes(child)) {
       p.children = [...p.children, child];
       this.touch(parent);
+    }
+  }
+
+  // A tool call of parent runs child: the call row gets its stub, the child
+  // its place in the tree.
+  linkCall(parent: string, callItemId: string, child: string) {
+    this.adopt(parent, child);
+    const call = this.item<ToolItem>(parent, callItemId);
+    if (call && call.child !== child) this.update<ToolItem>(parent, callItemId, { child });
+    if (!this.threads.get(child)!.callId) this.setThread(child, { callId: callItemId });
+  }
+
+  // Ends a child: its status, and its call row in the parent if still open.
+  endChild(child: string, status: "completed" | "error") {
+    const th = this.threads.get(child);
+    if (!th) return;
+    this.settle(child);
+    this.setThread(child, { status, endedAt: th.endedAt ?? this.t });
+    if (th.parent && th.callId) {
+      const call = this.item<ToolItem>(th.parent, th.callId);
+      if (call && (call.status === "running" || call.status === "pending"))
+        this.update<ToolItem>(th.parent, th.callId, { status: status === "error" ? "error" : "completed", end: call.end ?? this.t });
     }
   }
 
@@ -233,4 +258,63 @@ export class SessionProjection {
 // The whole of a Run's records at once (tests, a settled Run).
 export function sessionFromRecords(adapter: Adapter, records: OutputRecord[]): Session {
   return new SessionProjection(adapter).fold(records).snapshot();
+}
+
+// The tool call in the parent that runs a subagent.
+export function callOf(s: Session, th: SessionThread): ToolItem | undefined {
+  if (!th.parent || !th.callId) return undefined;
+  const call = s.threads[th.parent]?.items.find((i) => i.id === th.callId);
+  return call?.kind === "tool" ? call : undefined;
+}
+
+// What a subagent was briefed with: the task's prompt, from its call's input.
+// cut: lux cut the input it came in (an OpenCode child's call, at 300 bytes).
+export function briefOf(s: Session, th: SessionThread): { text: string; cut: boolean } | undefined {
+  if (th.brief) return { text: th.brief, cut: th.briefTruncated === true };
+  const call = callOf(s, th);
+  if (!call) return undefined;
+  const prompt = (call.input as { prompt?: unknown } | undefined)?.prompt;
+  if (typeof prompt === "string") return { text: prompt, cut: false };
+  if (call.inputText) {
+    const m = /"prompt"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(call.inputText);
+    return { text: m ? m[1]!.replace(/\\n/g, "\n").replace(/\\"/g, '"') : call.inputText, cut: call.truncated === true };
+  }
+  return undefined;
+}
+
+// A subagent's type (opencode/claude subagent_type), from the thread or its call.
+export function agentOf(s: Session, th: SessionThread): string | undefined {
+  if (th.agent) return th.agent;
+  const input = callOf(s, th)?.input as { subagent_type?: unknown } | undefined;
+  return typeof input?.subagent_type === "string" ? input.subagent_type : undefined;
+}
+
+// Every subagent in tree order (depth first), with its depth; threads whose
+// parent never arrived (OpenCode's bus does not replay) are listed at the top.
+export function subagentTree(s: Session): { thread: SessionThread; depth: number }[] {
+  const out: { thread: SessionThread; depth: number }[] = [];
+  const seen = new Set<string>();
+  const walk = (id: string, depth: number) => {
+    for (const c of s.threads[id]?.children ?? []) {
+      if (seen.has(c)) continue;
+      seen.add(c);
+      out.push({ thread: s.threads[c]!, depth });
+      walk(c, depth + 1);
+    }
+  };
+  walk(s.root, 0);
+  for (const th of Object.values(s.threads)) {
+    if (th.id === s.root || seen.has(th.id) || (th.parent && s.threads[th.parent])) continue;
+    seen.add(th.id);
+    out.push({ thread: th, depth: 0 });
+    walk(th.id, 1);
+  }
+  return out;
+}
+
+// The chain from the root's first child down to a thread (the panel's back link).
+export function pathTo(s: Session, id: string): string[] {
+  const path: string[] = [];
+  for (let cur: string | undefined = id; cur && cur !== s.root && path.length < 64; cur = s.threads[cur]?.parent) path.unshift(cur);
+  return path;
 }

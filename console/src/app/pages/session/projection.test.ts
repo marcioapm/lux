@@ -1,16 +1,7 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import type { OutputRecord } from "../../../api/index.ts";
+import { fixture } from "./fixtures.ts";
 import { sessionFromRecords, SessionProjection } from "./projection.ts";
 import type { InputItem, MessageItem, PlanItem, SessionItem, ThoughtItem, ToolItem } from "./types.ts";
-
-// Records lux wrote for a real run, recorded on this repo's host (testdata/).
-export function fixture(name: string): OutputRecord[] {
-  return readFileSync(new URL(`./testdata/${name}`, import.meta.url), "utf8")
-    .split("\n")
-    .filter((l) => l.trim() !== "")
-    .map((l) => JSON.parse(l) as OutputRecord);
-}
 
 const kinds = (items: SessionItem[]) => items.map((i) => (i.kind === "marker" ? `marker:${i.type}` : i.kind));
 
