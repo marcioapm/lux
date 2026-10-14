@@ -532,9 +532,12 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		}
 	}
 	var outdatedDrained []string
+	// A heartbeat without usage (the runner could not read its host's) says
+	// nothing about pressure: the stored state stands until one with usage.
 	var pressure *proto.DiskPressure
+	pressureKnown := hb.Usage != nil
 	pressureEnded := false
-	if hb.Usage != nil {
+	if pressureKnown {
 		pressure = hb.Usage.DiskPressure
 	}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -546,17 +549,19 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 			UPDATE hosts SET last_heartbeat = now(),
 			state = CASE WHEN hosts.state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE hosts.state END,
 			caches = jsonb_set(caches, '{gitMirrors}', $2),
-			disk_pressure = $3
+			disk_pressure = CASE WHEN $4 THEN $3 ELSE hosts.disk_pressure END
 			FROM old WHERE hosts.id = old.id
-			RETURNING old.state = 'lost' AND hosts.state = 'ready', old.disk_pressure`, hostID, nonNil(hb.GitMirrors), pressure).Scan(&back, &was); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			RETURNING old.state = 'lost' AND hosts.state = 'ready', old.disk_pressure`, hostID, nonNil(hb.GitMirrors), pressure, pressureKnown).Scan(&back, &was); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 		// Back from lost (a network blip longer than the lease).
 		if back {
 			later.host(ctx, tx, hostID, evReady, map[string]any{"from": "lost"})
 		}
-		diskPressureEvents(ctx, tx, &later, hostID, was, pressure)
-		pressureEnded = was != nil && pressure == nil
+		if pressureKnown {
+			diskPressureEvents(ctx, tx, &later, hostID, was, pressure)
+			pressureEnded = was != nil && pressure == nil
+		}
 		if err := forgetMissingCopies(ctx, tx, hostID, hb.LocalSnapshots); err != nil {
 			return err
 		}

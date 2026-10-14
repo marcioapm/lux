@@ -94,11 +94,11 @@ func pressureHost(t *testing.T) (*Server, context.Context, poolRow, *planningPro
 }
 
 // beat sends h's heartbeat with pressure p (nil: none), with Usage nil when
-// old is set, as a runner that predates the field or has no usage.
-func beat(t *testing.T, s *Server, ctx context.Context, p *proto.DiskPressure, old bool) {
+// noUsage is set, as a runner that could not read its host's usage.
+func beat(t *testing.T, s *Server, ctx context.Context, p *proto.DiskPressure, noUsage bool) {
 	t.Helper()
 	hb := proto.Heartbeat{}
-	if !old {
+	if !noUsage {
 		free := int64(1 << 30)
 		hb.Usage = &proto.HostUsage{FSFreeBytes: &free, DiskPressure: p}
 	}
@@ -117,13 +117,13 @@ func runWaitReason(t *testing.T, s *Server, id string) (string, string) {
 // A heartbeat reporting disk pressure blocks the host for normal, spot and
 // resuming Runs alike, each waiting with a reason naming it; the host's
 // events record when it started and ended, and GET /v1/hosts shows it.
-// Once a heartbeat carries no pressure, from a current runner or one that
-// predates the field, the same Runs are placed.
+// A heartbeat without usage (the runner could not read it) keeps the
+// pressure; once one with usage carries none, the same Runs are placed.
 func TestDiskPressureBlocksAdmissionsUntilItEnds(t *testing.T) {
-	for _, old := range []bool{false, true} {
-		name := "cleared by a current runner"
-		if old {
-			name = "cleared by a heartbeat without the field"
+	for _, noUsage := range []bool{false, true} {
+		name := "cleared by a heartbeat without pressure"
+		if noUsage {
+			name = "kept by a heartbeat without usage, then cleared"
 		}
 		t.Run(name, func(t *testing.T) {
 			s, ctx, _, _ := pressureHost(t)
@@ -170,7 +170,23 @@ func TestDiskPressureBlocksAdmissionsUntilItEnds(t *testing.T) {
 				t.Fatalf("GET /v1/hosts/h: %d diskPressure %+v", code, host.DiskPressure)
 			}
 
-			beat(t, s, ctx, nil, old)
+			if noUsage {
+				beat(t, s, ctx, nil, true)
+				if got := queryOne[*proto.DiskPressure](t, s, `SELECT disk_pressure FROM hosts WHERE id = 'h'`); !reflect.DeepEqual(got, pressureOf(true)) {
+					t.Fatalf("pressure %+v after a heartbeat without usage, want it kept", got)
+				}
+				if evs := events(t, s, evDiskPressureEnded); len(evs) != 0 {
+					t.Fatalf("host.disk_pressure_ended events %+v after a heartbeat without usage", evs)
+				}
+				execSQL(t, s, ctx, `UPDATE runs SET updated_at = now()`)
+				if err := s.scheduleOnce(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if n := queryOne[int](t, s, `SELECT count(*) FROM placements`); n != 0 {
+					t.Fatalf("%d placements after a heartbeat without usage", n)
+				}
+			}
+			beat(t, s, ctx, nil, false)
 			if got := queryOne[*proto.DiskPressure](t, s, `SELECT disk_pressure FROM hosts WHERE id = 'h'`); got != nil {
 				t.Fatalf("pressure %+v after a heartbeat without it", got)
 			}
