@@ -164,6 +164,17 @@ func TestDiskGuardReclaimEnoughStopsNothing(t *testing.T) {
 	}
 }
 
+// Free space is measured again after the image reclaim even when it
+// removed nothing: a stopping container's removal may have freed enough
+// meanwhile, and then nothing is stopped.
+func TestDiskGuardRemeasuresAfterAFruitlessReclaim(t *testing.T) {
+	f := &fakeFS{frees: []int64{40 * mib, 120 * mib}, victims: []diskVictim{victim("over", 300, 300, 100)}}
+	f.guard(t).pass(context.Background())
+	if len(f.stopped) != 0 {
+		t.Fatalf("stopped %v on a stale measurement", f.stopped)
+	}
+}
+
 // Local copies go oldest exit first, only those S3 holds, and only while
 // the filesystem lacks space: a copy whose upload is pending is never
 // discarded, however low the disk.
