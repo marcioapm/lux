@@ -7,9 +7,11 @@ import { fixture } from "./fixtures.ts";
 
 // RunSession's router import touches window at load: register the DOM first.
 let RunSession: typeof import("./RunSession.tsx").RunSession;
+let ToastProvider: typeof import("@lux/design-system").ToastProvider;
 beforeAll(async () => {
   GlobalRegistrator.register({ url: "http://localhost/runs/r1", width: 1600 });
   ({ RunSession } = await import("./RunSession.tsx"));
+  ({ ToastProvider } = await import("@lux/design-system"));
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
 afterAll(() => GlobalRegistrator.unregister());
@@ -37,7 +39,13 @@ async function render(adapter: string, records: OutputRecord[], end = true, stat
   const el = document.createElement("div");
   document.body.append(el);
   const root = createRoot(el);
-  await act(async () => root.render(<RunSession run={run(adapter, state)} />));
+  await act(async () =>
+    root.render(
+      <ToastProvider>
+        <RunSession run={run(adapter, state)} />
+      </ToastProvider>,
+    ),
+  );
   return {
     el,
     urls,
@@ -57,7 +65,11 @@ test("the tab reads the Run's output stream and shows its subagent in the transc
     expect(v.urls[0]).toContain("/runs/r1/output");
     expect(v.urls[0]).toContain("events=true");
     const text = v.el.textContent ?? "";
-    expect(text).toContain("Read-only · input and interrupt are on Output");
+    expect(text).not.toContain("Read-only");
+    // A finished Run: the composer is there, off, and says why.
+    const composer = v.el.querySelector<HTMLFormElement>('section[aria-label="Agent session"] form[aria-label="Message the agent"]')!;
+    expect(composer.querySelector("textarea")!.disabled).toBe(true);
+    expect(composer.querySelector("textarea")!.placeholder).toBe("Input needs a starting or running Run");
     expect(v.el.querySelector('[role="tree"]')?.textContent).toContain("Read /etc/hosts first line");
     const stub = v.el.querySelector<HTMLElement>('[aria-label="Open subagent Read /etc/hosts first line"]')!;
     await act(async () => stub.click());
@@ -66,6 +78,8 @@ test("the tab reads the Run's output stream and shows its subagent in the transc
     expect(panel.querySelector(".subpanel-title")?.textContent).toBe("Read /etc/hosts first line");
     expect(panel.querySelector(".subpanel-brief")?.textContent).toBe("Read the file /etc/hosts and report only its first line. Do not read anything else.");
     expect(panel.querySelector(".toolcall-name")?.textContent).toBe("Read");
+    // The composer stays while a subagent is open.
+    expect(v.el.querySelector('form[aria-label="Message the agent"]')).toBe(composer);
   } finally {
     await v.done();
   }

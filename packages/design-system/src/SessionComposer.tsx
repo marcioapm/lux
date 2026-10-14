@@ -8,6 +8,8 @@ export interface SessionComposerProps {
   onSend: (text: string) => Promise<unknown>;
   /** Interrupt the current turn; omitted, no Interrupt button. */
   onInterrupt?: () => Promise<unknown> | void;
+  /** What Interrupt does, as its title. */
+  interruptTitle?: string;
   /** Textarea, Send and Interrupt are all off (the Run cannot take input). */
   disabled?: boolean;
   placeholder?: string;
@@ -26,7 +28,7 @@ const defaultErrorText = (err: unknown) => (err instanceof Error ? err.message :
  * The input form under a SessionTranscript: a labelled textarea, a hint, Interrupt
  * and Send. Ctrl/⌘+Enter in the textarea sends; Enter is a newline.
  */
-export function SessionComposer({ label, onSend, onInterrupt, disabled = false, placeholder, defaultValue = "", hint, errorText = defaultErrorText, className }: SessionComposerProps) {
+export function SessionComposer({ label, onSend, onInterrupt, interruptTitle = "Interrupt the agent's current turn", disabled = false, placeholder, defaultValue = "", hint, errorText = defaultErrorText, className }: SessionComposerProps) {
   const id = useId();
   const [draft, setDraft] = useState(defaultValue);
   const [sending, setSending] = useState(false);
@@ -95,7 +97,7 @@ export function SessionComposer({ label, onSend, onInterrupt, disabled = false, 
         )}
         <span className="grow" />
         {onInterrupt && (
-          <Button disabled={disabled} loading={interrupting} onClick={() => void interrupt()} title="Interrupt the current turn">
+          <Button disabled={disabled} loading={interrupting} onClick={() => void interrupt()} title={interruptTitle}>
             Interrupt
           </Button>
         )}
