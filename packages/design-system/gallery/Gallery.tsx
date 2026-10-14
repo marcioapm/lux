@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Badge,
   BreakdownTable,
@@ -1289,9 +1289,9 @@ function SessionDemo() {
     <Section
       id="session"
       title="Session: transcript, turns, tool calls, subagents"
-      note="An agent Run read as a conversation, beside the raw Output: the same records, each view linking to the other. Inputs carry their sender and phase in words; replies are a safe subset of markdown, with a caret while they stream; thoughts fold to one line; tool calls fold to one row with their status as an icon and a word for screen readers, and an error line shows even folded. lux's own events are hairline markers. A subagent's colour is its agent type's, first-seen order from the chart palette (--agent-1…5), always beside its name; its mark pulses only while it runs. The rail drops under 1000px of content."
+      note="An agent Run read as a conversation, beside the raw Output: the same records, each view linking to the other. Inputs carry their sender and phase in words; replies are a safe subset of markdown, with a caret while they stream; thoughts fold to one line; tool calls fold to one row with their status as an icon and a word for screen readers, and an error line shows even folded. lux's own events are hairline markers. A subagent's colour is its agent type's, first-seen order from the chart palette (--agent-1…5), always beside its name; its mark pulses only while it runs. The rail drops under 1000px of content. This pane sets --session-pane-offset: 320px (the gallery has less above it than a Run page's 600px), so .session-pane-h gives it clamp(420px, 100vh − 320px, 860px)."
     >
-      <div className="session-layout">
+      <div className="session-layout" style={{ "--session-pane-offset": "320px" } as CSSProperties}>
         <SessionTranscript
           className="session-pane-h"
           subtitle={
