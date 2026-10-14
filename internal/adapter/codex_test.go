@@ -196,7 +196,13 @@ func TestCodexSubagentThreadIsNotTheRuns(t *testing.T) {
 	if str(p, "expectedTurnId") != cxSubRootTurn || str(p, "threadId") != cxSubRoot {
 		t.Fatalf("turn/steer params %v", p)
 	}
+	// Synthetic, not in the capture: a child's compaction is not the Run's
+	// (TestCodexCompactionIsReported covers the root's). exit joins every read.
+	w.send(`{"method":"item/completed","params":{"threadId":"` + cxSubChild + `","turnId":"child-turn","item":{"type":"contextCompaction","id":"cc-child"}}}`)
 	w.exit()
+	if got := log.compactions(); len(got) != 0 {
+		t.Fatalf("a child compaction reported as the Run's: %q", got)
+	}
 }
 
 // lineAfter is the line right after the first one starting with prefix, or

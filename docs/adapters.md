@@ -29,18 +29,18 @@ on another host with its conversation intact.
 
 ## Input: accepted and consumed
 
+Before delivery, `POST /v1/runs/{id}/input` writes an `input` event with
+`requestId`, `by` (the caller's email when authenticated as a person,
+otherwise the API key id), `interrupt`, `text`, `rawBytes`, and optional
+`attachments` metadata. Join delivery records to this event on `requestId`
+to identify the sender; `by` is not carried in shim records.
+
 An input sent while the agent works reaches it at its **next model step**
 where the adapter can: after the tool call running now (which is not
 cancelled), within the same turn. The shim reports each input's first
 answer as exactly one `lux.input` record, and what happens to it after it
 was accepted as records of their own, each at most once per request id
 (redelivery after a reconnect included). luxd records each as an event:
-
-Before delivery, `POST /v1/runs/{id}/input` writes an `input` event with
-`requestId`, `by` (the caller's email when authenticated as a person,
-otherwise the API key id), `interrupt`, `text`, `rawBytes`, and optional
-`attachments` metadata. Join delivery records to this event on `requestId`
-to identify the sender; `by` is not carried in shim records.
 
 | Record | Event | When |
 | --- | --- | --- |
