@@ -2705,7 +2705,8 @@ a.idchip-text:hover {
   color: var(--fg-muted);
   white-space: nowrap;
 }
-.transcript-bar .grow { flex: 1; }
+.transcript-bar .grow,
+.composer-actions .grow { flex: 1; }
 .transcript-bar a { color: var(--accent-text); }
 .transcript-readonly { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .transcript-jump {
@@ -2752,7 +2753,6 @@ a.idchip-text:hover {
 .composer-input:disabled { background: var(--bg-subtle); color: var(--fg-muted); cursor: not-allowed; }
 .composer-input:read-only:not(:disabled) { color: var(--fg-secondary); }
 .composer-actions { display: flex; align-items: center; gap: var(--sp-4); }
-.composer-actions .grow { flex: 1; }
 .composer-hint { min-width: 0; font-size: var(--text-xs); color: var(--fg-muted); }
 .composer-error { margin: 0; font-size: var(--text-sm); color: var(--danger-fg); overflow-wrap: anywhere; }
 @media (max-width: 767px) {
