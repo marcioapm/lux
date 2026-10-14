@@ -8,28 +8,19 @@
 -- pool or is gone).
 --
 -- Only ended Runs (succeeded, failed, terminated: endedRunStates in
--- internal/server/lifecycle.go). This UPDATE holds their row locks until
--- commit (41-51 s per million ended Runs on the test machine), so a write
--- to an ended Run, such as a resume or a late report, waits for 079. So
--- does a live Run's runner report, for the rest of 079, behind the cost
--- drainer of any luxd, old or new: writeComputeChunk
--- (internal/server/costqueue.go) locks a chunk of Runs, live and ended
--- mixed, in id order, waits at the first ended one held here, and keeps
--- the live Runs before it locked. That host's heartbeats queue behind the
--- report, so past the lease (30 s by default) the host is lost; above
--- 300,000 ended Runs docs/operations.md has every luxd stopped, or its
--- cost drainer off, until 079 commits. Live and resting Runs are not
--- touched: their first_pool_id stays NULL and the readers resolve it with
--- the same lookup at read time. The UPDATE takes ROW EXCLUSIVE on runs,
--- which blocks no read, no insert (a submit) and no write to a single
--- live Run; pools only get the KEY SHARE row locks of the foreign-key
--- checks.
+-- internal/server/lifecycle.go); live and resting Runs stay NULL and the
+-- readers resolve them with the same lookup. The UPDATE takes ROW
+-- EXCLUSIVE on runs (no read, submit or write to a single live Run is
+-- blocked) and holds the ended Runs' row locks until commit; pools only
+-- get the foreign-key checks' KEY SHARE row locks. Its duration, what
+-- waits on it (through writeComputeChunk in internal/server/costqueue.go,
+-- also live Runs' reports and their hosts' heartbeats) and the procedure
+-- above 300,000 ended Runs: docs/operations.md (upgrading, step 2).
 --
 -- Then runs_first_pool_started, built as 041 built runs_pool_started: a
 -- plain CREATE INDEX, whose SHARE lock on runs holds back writes to runs
--- (reads go on) for the build, about 0.3 s per 200,000 Runs, until this
--- transaction commits right after. It waits for writes in progress first,
--- up to lock_timeout.
+-- (reads go on) for the build until this transaction commits right after.
+-- It waits for writes in progress first, up to lock_timeout.
 SET LOCAL lock_timeout = '5s';
 
 UPDATE runs r SET first_pool_id = x.pool_id
