@@ -267,6 +267,35 @@ func TestDiskPressureStopFailsTheRunWithItsReason(t *testing.T) {
 	}
 }
 
+// A Run the guard stopped whose export then ran out of space (its
+// snapshot.done carries the error) still ends failed for the disk pressure:
+// the snapshot failure is its own event, not its reason.
+func TestDiskPressureStopWithAFailedExportKeepsItsReason(t *testing.T) {
+	s, ctx, _ := stageFixture(t)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE run_id = $1`, r1)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = $1`, r1)
+	gib := float64(1 << 30)
+	ev := proto.RunEvent{Type: proto.EvDiskPressureStop, Data: map[string]any{"usedBytes": 49.8 * gib, "limitBytes": 37.5 * gib,
+		"excessBytes": 12.3 * gib, "freeBytes": 0, "lowFreeBytes": 8 * gib, "recoverFreeBytes": 16 * gib}}
+	if reply := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgRunEvent, RunID: r1, Epoch: 1, Data: proto.Marshal(ev)}); reply.Type != proto.MsgAck {
+		t.Fatalf("report: %s %s", reply.Type, reply.Data)
+	}
+	const enospc = "export data: write /var/lib/lux/snapshots/blob.zst.tmp: no space left on device"
+	sd := proto.SnapshotDone{Error: enospc}
+	if reply := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgSnapshotDone, RunID: r1, Epoch: 1, Data: proto.Marshal(sd)}); reply.Type != proto.MsgAck {
+		t.Fatalf("snapshot.done: %s %s", reply.Type, reply.Data)
+	}
+	code := 143
+	reportStatus(t, s, ctx, proto.Status{State: "exited", ExitCode: &code, Reason: "stopped"})
+	const why = "stopped: host disk pressure, 12.3 GiB over its 37.5 GiB disk limit"
+	if state, reason := runWaitReason(t, s, r1); state != StateFailed || reason != why {
+		t.Fatalf("Run %s %q, want failed with %q", state, reason, why)
+	}
+	if got := queryOne[string](t, s, `SELECT data->>'error' FROM run_events WHERE run_id = $1 AND type = 'snapshot.failed'`, r1); got != enospc {
+		t.Fatalf("snapshot.failed error %q, want %q", got, enospc)
+	}
+}
+
 // A resume onto a chosen host under pressure waits for it, saying so.
 func TestDiskPressureBlocksAResumeOntoItsChosenHost(t *testing.T) {
 	s, ctx, _, _ := pressureHost(t)
