@@ -251,10 +251,12 @@ func samplePools(ctx context.Context, tx pgx.Tx, from time.Time) error {
 			GROUP BY GROUPING SETS ((pool_id, tenant_id), (pool_id))
 		),
 		flow AS (
+			-- OFFSET 0: the start pool is computed once per Run, not again
+			-- for the pool_id IS NOT NULL filter pushed into the arm.
 			SELECT e.pool_id, coalesce(e.tenant_id, '') AS id,
 				count(*) FILTER (WHERE e.start) AS started, count(*) FILTER (WHERE NOT e.start) AS finished
-			FROM (SELECT `+runStartPool+` AS pool_id, r.tenant_id, true AS start
-					FROM w, runs r WHERE r.first_started_at > w.since AND r.first_started_at <= w.until
+			FROM ((SELECT `+runStartPool+` AS pool_id, r.tenant_id, true AS start
+					FROM w, runs r WHERE r.first_started_at > w.since AND r.first_started_at <= w.until OFFSET 0)
 				UNION ALL
 				SELECT coalesce(fp.pool_id, r.pool_id), r.tenant_id, false
 					FROM w, runs r`+runFinishPool+` WHERE r.finished_at > w.since AND r.finished_at <= w.until) e
