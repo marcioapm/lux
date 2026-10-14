@@ -8,14 +8,22 @@
 -- pool or is gone).
 --
 -- Only ended Runs (succeeded, failed, terminated: endedRunStates in
--- internal/server/lifecycle.go): no runner reports for them, so the row
--- locks this UPDATE holds until commit (about 31 s per million Runs on the
--- test machine) hold back only writes to an ended Run, such as a resume or a
--- late report. Live and resting Runs are not touched: their first_pool_id
--- stays NULL and the readers resolve it with the same lookup at read time.
--- The UPDATE takes ROW EXCLUSIVE on runs, which blocks no read, no insert
--- (a submit) and no write to another Run; pools only get the KEY SHARE row
--- locks of the foreign-key checks.
+-- internal/server/lifecycle.go). This UPDATE holds their row locks until
+-- commit (41-51 s per million ended Runs on the test machine), so a write
+-- to an ended Run, such as a resume or a late report, waits for 079. So
+-- does a live Run's runner report, for the rest of 079, behind the cost
+-- drainer of any luxd, old or new: writeComputeChunk
+-- (internal/server/costqueue.go) locks a chunk of Runs, live and ended
+-- mixed, in id order, waits at the first ended one held here, and keeps
+-- the live Runs before it locked. That host's heartbeats queue behind the
+-- report, so past the lease (30 s by default) the host is lost; above
+-- 300,000 ended Runs docs/operations.md has every luxd stopped, or its
+-- cost drainer off, until 079 commits. Live and resting Runs are not
+-- touched: their first_pool_id stays NULL and the readers resolve it with
+-- the same lookup at read time. The UPDATE takes ROW EXCLUSIVE on runs,
+-- which blocks no read, no insert (a submit) and no write to a single
+-- live Run; pools only get the KEY SHARE row locks of the foreign-key
+-- checks.
 --
 -- Then runs_first_pool_started, built as 041 built runs_pool_started: a
 -- plain CREATE INDEX, whose SHARE lock on runs holds back writes to runs
