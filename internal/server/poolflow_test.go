@@ -320,6 +320,32 @@ func TestFirstPoolIDOfChosenHost(t *testing.T) {
 	}
 }
 
+// A Run first started on pa's ha and now on pb, with pa retired and ha
+// terminated before the sample: pa's start is in its history (its rows
+// come from that start alone), and GET /v1/pools/stats, which lists live
+// pools only, does not list pa.
+func TestPoolFlowRetiredPool(t *testing.T) {
+	s := testServer(t)
+	keys, now := flowFixture(t, s)
+	m := func(d time.Duration) time.Time { return now.Add(-d * time.Minute) }
+	flowRun(t, s, "leftpa", "ta", "pb", m(12), time.Time{}, flowPlacement{"ha", m(12)}, flowPlacement{"hb", m(8)})
+	execSQL(t, s, context.Background(), `UPDATE pools SET retired = true WHERE id = 'pa'`)
+	execSQL(t, s, context.Background(), `UPDATE hosts SET state = 'terminated' WHERE id = 'ha'`)
+	sampleNow(t, s)
+	wantMap(t, "samples", flowSamples(t, s), map[string]string{"pa/": "1/0", "pa/ta": "1/0"})
+	var list struct{ Pools []PoolStats }
+	if code := getJSON(t, s, keys["op"], "/v1/pools/stats?since=2h", &list); code != http.StatusOK {
+		t.Fatalf("GET /v1/pools/stats: %d", code)
+	}
+	var listed []string
+	for _, p := range list.Pools {
+		listed = append(listed, fmt.Sprintf("%s=%d", p.ID, p.RunsStarted))
+	}
+	if got := strings.Join(listed, " "); got != "pb=0 pc=0" {
+		t.Errorf("stats pools %q, want pb=0 pc=0", got)
+	}
+}
+
 // A Run's recorded first_pool_id is its start's pool, ahead of its
 // placements' hosts and runs.pool_id: started under pc by the record,
 // though its placement ran on pa's host and it is bound to pb.
