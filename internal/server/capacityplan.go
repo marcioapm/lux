@@ -433,31 +433,29 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	bootstrap := false
 	pack := packs(pl.Placement, pl.Shape != nil)
 	// reserve fits r on one of hosts it fits: the first, or in a pack pool
-	// the one pickHost's pack order ranks first by allocation. hosts are at
-	// stage, or "planned" for a new host (no id).
+	// the one pickHost's pack order ranks first (avoided host last, then by
+	// allocation). hosts are at stage, or "planned" for a new host (no id).
 	reserve := func(hosts []*candidateHost, r pendingRun, stage string) bool {
 		var chosen *candidateHost
-		chosenAt := len(hosts)
-		blocked := make([][]fitBlocker, len(hosts))
-		for i, h := range hosts {
-			if blocked[i] = hostFit(r, h); len(blocked[i]) != 0 {
+		for _, h := range hosts {
+			if blockers := hostFit(r, h); len(blockers) != 0 {
+				// Evidence is each host listed before the first one r fits
+				// (every host when none fits), whatever the placement.
+				// Another host's chosen-host wait is not evidence about this
+				// host, nor is a host outside the pool (a candidate only
+				// because another Run chose it) evidence for a Run that did not.
+				if chosen == nil && h.ID != "" && (r.PlaceOn == "" && h.PoolID == pl.ID || r.PlaceOn == h.ID) {
+					hostBlocked(r, h.ID, stage, blockers)
+				}
 				continue
 			}
-			if chosen == nil || pack && packOrder(packCandidate{h: h, used: h.allocated()}, packCandidate{h: chosen, used: chosen.allocated()}) < 0 {
-				chosen, chosenAt = h, i
+			// A planned host has no id, so it is never the avoided host.
+			if chosen == nil || packOrder(packCandidate{h: h, avoid: h.ID != "" && h.ID == r.AvoidHost, used: h.allocated()},
+				packCandidate{h: chosen, avoid: chosen.ID != "" && chosen.ID == r.AvoidHost, used: chosen.allocated()}) < 0 {
+				chosen = h
 			}
 			if !pack {
 				break
-			}
-		}
-		// Evidence is each host listed before the one reserved that r does
-		// not fit (every such host when none fits). Another host's
-		// chosen-host wait is not evidence about this host, nor is a host
-		// outside the pool (a candidate only because another Run chose it)
-		// evidence for a Run that did not.
-		for i, h := range hosts[:chosenAt] {
-			if len(blocked[i]) != 0 && h.ID != "" && (r.PlaceOn == "" && h.PoolID == pl.ID || r.PlaceOn == h.ID) {
-				hostBlocked(r, h.ID, stage, blocked[i])
 			}
 		}
 		if chosen == nil {
