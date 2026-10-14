@@ -87,6 +87,7 @@ func (c *countWriter) Write(p []byte) (int, error) {
 }
 
 func (r *Runner) saveSnapshotRecord(snapID string, rec *snapshotRecord) error {
+	r.diskChanged()
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -330,7 +331,8 @@ func (r *Runner) staleEpoch(runID string) int {
 }
 
 // discard deletes the local copy of a Run's state: luxd says it resumed
-// elsewhere from an uploaded snapshot.
+// elsewhere from an uploaded snapshot, its host TTL passed, or the disk
+// guard needs the space and S3 holds the copy.
 func (r *Runner) discard(ctx context.Context, runID string, beforeEpoch int) {
 	r.mu.Lock()
 	p := r.placements[runID]
@@ -340,7 +342,23 @@ func (r *Runner) discard(ctx context.Context, runID string, beforeEpoch int) {
 	}
 	delete(r.placements, runID)
 	r.mu.Unlock()
+	r.diskChanged()
 	r.removeRunLocal(ctx, runID)
+}
+
+// discardIdle is discard for a Run with no live placement here, checked
+// under r.mu: an assignment of the Run arriving meanwhile keeps its copy.
+func (r *Runner) discardIdle(ctx context.Context, runID string) bool {
+	r.mu.Lock()
+	if p := r.placements[runID]; p != nil && p.liveState() != "" {
+		r.mu.Unlock()
+		return false
+	}
+	delete(r.placements, runID)
+	r.mu.Unlock()
+	r.diskChanged()
+	r.removeRunLocal(ctx, runID)
+	return true
 }
 
 func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
@@ -374,6 +392,7 @@ func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
 }
 
 func removeSnapshotFiles(r *Runner, snapID string, rec *snapshotRecord) {
+	r.diskChanged()
 	for _, up := range rec.Uploads {
 		os.Remove(up.Path)
 	}

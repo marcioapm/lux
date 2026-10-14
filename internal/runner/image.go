@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -389,6 +390,8 @@ type imageUse struct {
 	path2 string
 	// pinned: images a starting placement is about to use, never GC'd.
 	pinned map[string]int
+	// gen counts changes to last and by: the disk guard's diskGen.
+	gen atomic.Uint64
 }
 
 func newImageUse(dataDir string) *imageUse {
@@ -481,6 +484,7 @@ func (u *imageUse) snapshot() map[string]int64 {
 }
 
 func (u *imageUse) saveLocked() {
+	u.gen.Add(1)
 	b, _ := json.Marshal(u.last)
 	_ = writeFileAtomic(u.path, b, 0o600)
 	b, _ = json.Marshal(u.by)

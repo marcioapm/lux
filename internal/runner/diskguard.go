@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -82,22 +84,43 @@ func CheckFreeMarks(low, rec FreeMark) error {
 	return nil
 }
 
-// diskGuard is the low-free-space guard of a runner that scales disk. Each
-// pass measures the free bytes of the filesystem holding the data
-// directory. Pressure starts when they fall below the low mark and ends
-// only once they are at or above the recovery mark. Under pressure a pass:
+// guardEvery bounds how often the guard measures the filesystem, apart
+// from the disk samples: --usage-every when shorter.
+const guardEvery = 2 * time.Second
+
+// guardIdleRetry bounds how long a pass under pressure that found nothing
+// to act on is trusted: until then, with nothing changed (gen), the next
+// passes neither fork podman for images nor scan copies and placements.
+const guardIdleRetry = time.Minute
+
+// diskGuard is the low-free-space guard of a runner that scales disk. It
+// measures the free bytes of the filesystem holding the data directory
+// (watch, every guardEvery). Pressure starts when they fall below the low
+// mark and ends only once they are at or above the recovery mark; each
+// change is published at once. After each round of disk samples, a pass
+// under pressure:
 //
 //  1. blocks admissions: the heartbeat carries the pressure, and luxd
-//     places nothing more here (published at once when pressure starts);
-//  2. reclaims caches: lux's unused images, as --image-disk-high does, up
-//     to the recovery mark;
+//     places nothing more here;
+//  2. reclaims caches toward the recovery mark: lux's unused images, as
+//     --image-disk-high does, then the local copies of Runs no longer live
+//     here that S3 holds (every snapshot reported and uploaded), oldest
+//     exit first;
 //  3. asks luxd to stop placements over their effective disk limit (within
-//     their grace), largest excess first, until the excess of those
-//     already stopping covers what the filesystem lacks of the recovery
-//     mark, measured again after each one. A placement at or under its
-//     limit is never stopped.
+//     their grace), largest excess first, until what is on its way back
+//     covers what the filesystem lacks of the recovery mark, measured again
+//     after each one. A placement at or under its limit is never stopped.
 //
-// A pass that finds nothing to reclaim, no placement stopping and none to
+// What is on its way back (pending): a stop frees only the placement's
+// writable layer when its container goes; its state volumes stay, beside
+// their new export, as the Run's local copy until that copy's upload ends
+// and step 2 discards it. So a stopping placement counts its writable
+// layer, and a guard-stopped Run no longer live counts its volumes while
+// its upload is pending; once uploaded its copy is reclaimable, and step 2
+// frees it before any other Run is stopped. Neither counts its excess: that
+// would stop too few, the space not coming back until the host TTL.
+//
+// A pass that finds nothing to reclaim, nothing on its way back and none to
 // stop reports the pressure as unrelieved.
 type diskGuard struct {
 	log                *slog.Logger
@@ -106,33 +129,58 @@ type diskGuard struct {
 
 	// free measures the filesystem's free bytes (unprivileged).
 	free func() (int64, error)
-	// publish sends a heartbeat now, carrying state().
+	// publish sends a heartbeat carrying state() soon, without waiting.
 	publish func(ctx context.Context)
-	// reclaim removes unused caches toward freeing need bytes; whether it
-	// removed anything.
+	// reclaim removes unused images toward freeing need bytes; whether it
+	// removed any.
 	reclaim func(ctx context.Context, need int64) bool
-	// victims are the placements over their effective disk limit.
+	// copies are the local copies of Runs not live here, oldest exit first.
+	copies func() []localCopy
+	// discard removes one reclaimable local copy, unless its Run became
+	// live here meanwhile; whether it did.
+	discard func(ctx context.Context, runID string) bool
+	// victims are the live placements with a disk limit (overLimit picks
+	// those over it).
 	victims func() []diskVictim
-	// stop asks luxd to stop v, under pressure with free bytes left.
-	stop func(ctx context.Context, v diskVictim, free int64)
+	// stop asks luxd to stop v; at is the filesystem's state then.
+	stop func(ctx context.Context, v diskVictim, at proto.DiskPressure)
+	// gen changes whenever what a pass acts on may have: images,
+	// placements, snapshot records, a sample going over its limit.
+	gen func() uint64
 
 	mu       sync.Mutex
 	pressure *proto.DiskPressure
+	// idle: the last pass under pressure found nothing, at idleGen.
+	idle      bool
+	idleGen   uint64
+	idleSince time.Time
 }
 
-// diskVictim is a placement over its effective disk limit: used bytes at
-// its latest sample against limit. stopping: it is already on its way out
-// (stopping, reported over its grace, or asked to stop by this guard).
+// diskVictim is a live placement with a disk limit: used bytes at its
+// latest sample against limit, rw of them its writable layer. stopping: it is already on its way out (stopping, reported over its
+// grace, or asked to stop by this guard).
 type diskVictim struct {
 	runID    string
 	epoch    int
-	used     int64
+	used, rw int64
 	limit    disklimit.Limit
 	stopping bool
 	p        *placement
 }
 
 func (v diskVictim) excess() int64 { return v.used - v.limit.Effective }
+
+// localCopy is a Run's local state on this host (state volumes, snapshot
+// files), its placement no longer live. reclaimable: S3 holds all of it
+// (every snapshot record reported and uploaded, the volumes' own snapshot
+// among them, or volumes never resumed); else awaiting is the bytes a
+// guard-stopped Run's volumes will free once its upload ends (0 unknown).
+type localCopy struct {
+	runID       string
+	exitAt      int64
+	reclaimable bool
+	awaiting    int64
+}
 
 // newDiskGuard resolves low and rec against the filesystem's capacity and
 // refuses marks that are not 0 < low < recover < capacity.
@@ -159,6 +207,12 @@ func (g *diskGuard) state() *proto.DiskPressure {
 	return &c
 }
 
+// at is the filesystem's state with free bytes, for a stop's report.
+func (g *diskGuard) at(free int64) proto.DiskPressure {
+	return proto.DiskPressure{FreeBytes: free, LowFreeBytes: g.lowFree, RecoverFreeBytes: g.recovFree,
+		LowFree: g.lowMark.String(), RecoverFree: g.recMark.String()}
+}
+
 // observe applies one measurement to the hysteresis: entered when free
 // fell below the low mark, left when it is back at the recovery mark.
 func (g *diskGuard) observe(free int64) (entered, left bool) {
@@ -166,11 +220,11 @@ func (g *diskGuard) observe(free int64) (entered, left bool) {
 	defer g.mu.Unlock()
 	switch {
 	case g.pressure == nil && free < g.lowFree:
-		g.pressure = &proto.DiskPressure{FreeBytes: free, LowFreeBytes: g.lowFree, RecoverFreeBytes: g.recovFree,
-			LowFree: g.lowMark.String(), RecoverFree: g.recMark.String()}
+		at := g.at(free)
+		g.pressure = &at
 		return true, false
 	case g.pressure != nil && free >= g.recovFree:
-		g.pressure = nil
+		g.pressure, g.idle = nil, false
 		return false, true
 	case g.pressure != nil:
 		g.pressure.FreeBytes = free
@@ -192,41 +246,83 @@ func (g *diskGuard) setNoRelief(free int64, none bool) bool {
 	return changed
 }
 
-// pass measures the filesystem and, under pressure, acts as diskGuard
-// says.
-func (g *diskGuard) pass(ctx context.Context) {
+// watch measures the filesystem and publishes a start or end of pressure.
+// ok: free is a measurement.
+func (g *diskGuard) watch(ctx context.Context) (free int64, ok bool) {
 	free, err := g.free()
 	if err != nil {
 		g.log.Warn("disk guard: measuring the filesystem failed", "err", err)
-		return
+		return 0, false
 	}
-	entered, left := g.observe(free)
-	switch {
+	switch entered, left := g.observe(free); {
 	case left:
 		g.log.Info("disk pressure ended", "free", free, "recoverFree", g.recovFree)
 		g.publish(ctx)
-		return
 	case entered:
 		g.log.Warn("disk pressure: admissions blocked", "free", free, "lowFree", g.lowFree, "recoverFree", g.recovFree)
 		g.publish(ctx)
-	case g.state() == nil:
+	}
+	return free, true
+}
+
+// stillIdle: the last pass found nothing, nothing has changed since and it
+// is recent, so this one would find nothing either.
+func (g *diskGuard) stillIdle(gen uint64) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.idle && gen == g.idleGen && time.Since(g.idleSince) < guardIdleRetry
+}
+
+func (g *diskGuard) setIdle(idle bool, gen uint64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.idle, g.idleGen, g.idleSince = idle, gen, time.Now()
+}
+
+// remeasure is free measured again, or free when that fails.
+func (g *diskGuard) remeasure(free int64) int64 {
+	if f, err := g.free(); err == nil {
+		return f
+	}
+	return free
+}
+
+// pass measures the filesystem and, under pressure, acts as diskGuard
+// says. Run after a round of disk samples: victims are as fresh as they get.
+func (g *diskGuard) pass(ctx context.Context) {
+	free, ok := g.watch(ctx)
+	if !ok || g.state() == nil {
+		return
+	}
+	gen := g.gen()
+	if g.stillIdle(gen) {
+		g.setNoRelief(free, true)
 		return
 	}
 	relieved := g.reclaim(ctx, g.recovFree-free)
 	if relieved {
-		if free, err = g.free(); err != nil {
-			g.log.Warn("disk guard: measuring the filesystem failed", "err", err)
-			return
-		}
+		free = g.remeasure(free)
 	}
 	var pending int64
-	var cands []diskVictim
-	for _, v := range g.victims() {
-		if v.excess() <= 0 {
+	for _, c := range g.copies() {
+		if !c.reclaimable {
+			if c.awaiting > 0 {
+				pending += c.awaiting
+				relieved = true
+			}
 			continue
 		}
+		if g.recovFree-free <= 0 || !g.discard(ctx, c.runID) {
+			continue
+		}
+		g.log.Warn("disk pressure: discarded a local copy S3 holds", "run", c.runID, "free", free)
+		relieved = true
+		free = g.remeasure(free)
+	}
+	var cands []diskVictim
+	for _, v := range overLimit(g.victims()) {
 		if v.stopping {
-			pending += v.excess()
+			pending += v.rw
 			relieved = true
 			continue
 		}
@@ -240,13 +336,19 @@ func (g *diskGuard) pass(ctx context.Context) {
 			break
 		}
 		g.log.Warn("disk pressure: stopping a placement over its disk limit", "run", v.runID, "epoch", v.epoch,
-			"used", v.used, "limit", v.limit.Effective, "excess", v.excess(), "free", free)
-		g.stop(ctx, v, free)
+			"used", v.used, "writableLayer", v.rw, "limit", v.limit.Effective, "excess", v.excess(), "free", free)
+		g.stop(ctx, v, g.at(free))
 		relieved = true
-		pending += v.excess()
-		if f, err := g.free(); err == nil {
-			free = f
-		}
+		// What its stop frees at once; its volumes count once its copy
+		// awaits its upload, and are freed once that copy is reclaimable.
+		pending += v.rw
+		free = g.remeasure(free)
+	}
+	g.setIdle(!relieved, gen)
+	if free >= g.recovFree {
+		// Back at the recovery mark: end the pressure now, not a tick later.
+		g.watch(ctx)
+		return
 	}
 	if g.setNoRelief(free, !relieved) {
 		if !relieved {
@@ -257,10 +359,11 @@ func (g *diskGuard) pass(ctx context.Context) {
 }
 
 // attachGuard wires g to this runner: free measures the filesystem, and
-// the rest acts on the runner's images, placements and heartbeat.
+// the rest acts on the runner's images, local copies, placements and
+// heartbeat.
 func (r *Runner) attachGuard(g *diskGuard, free func() (int64, error)) {
 	g.free = free
-	g.publish = r.sendHeartbeat
+	g.publish = func(context.Context) { r.kickHeartbeat() }
 	g.reclaim = func(ctx context.Context, need int64) bool {
 		removed := r.reclaimImages(ctx, need)
 		if len(removed) > 0 {
@@ -268,21 +371,68 @@ func (r *Runner) attachGuard(g *diskGuard, free func() (int64, error)) {
 		}
 		return len(removed) > 0
 	}
+	g.copies = r.localCopies
+	// The next heartbeat's LocalSnapshots tells luxd the copy is gone.
+	g.discard = r.discardIdle
 	g.victims = r.diskVictims
 	g.stop = r.pressureStop
+	g.gen = r.diskGen
 	r.guard = g
 }
 
-// guardPass runs the guard, if on: usageLoop calls it after each round of
-// disk samples.
+// startGuard measures the filesystem once, so the first heartbeat after a
+// restart already carries a pressure that holds, then watches it every
+// guardEvery (--usage-every when shorter), apart from the disk samples:
+// a slow sample never delays blocking admissions.
+func (r *Runner) startGuard(ctx context.Context) {
+	if r.guard == nil {
+		return
+	}
+	r.guard.watch(ctx)
+	every := cmp.Or(r.guardTick, guardEvery)
+	if r.cfg.UsageEvery > 0 {
+		every = min(every, r.cfg.UsageEvery)
+	}
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			r.guard.watch(ctx)
+		}
+	}()
+}
+
+// guardPass runs the guard's pass, if on: usageLoop calls it after each
+// round of disk samples.
 func (r *Runner) guardPass(ctx context.Context) {
 	if r.guard != nil {
 		r.guard.pass(ctx)
 	}
 }
 
-// diskVictims are the live placements whose latest conclusive disk sample
-// was over their effective limit.
+// diskGen changes whenever what the guard acts on may have changed.
+func (r *Runner) diskGen() uint64 {
+	n := r.diskChanges.Load()
+	if r.images != nil {
+		n += r.images.gen.Load()
+	}
+	return n
+}
+
+// diskChanged records a change diskGen must see.
+func (r *Runner) diskChanged() {
+	if r != nil {
+		r.diskChanges.Add(1)
+	}
+}
+
+// diskVictims are the live placements with a disk limit, at their latest
+// conclusive disk sample (0 when unknown); overLimit picks the guard's.
 func (r *Runner) diskVictims() []diskVictim {
 	var out []diskVictim
 	for _, p := range r.livePlacements() {
@@ -291,37 +441,98 @@ func (r *Runner) diskVictims() []diskVictim {
 			continue
 		}
 		p.mu.Lock()
-		v := diskVictim{runID: p.runID, epoch: p.epoch, used: p.lastDisk, limit: l, p: p,
-			stopping: p.phase != "running" || p.stopWhy != "" || p.pressureStop || p.disk.Reported()}
+		out = append(out, diskVictim{runID: p.runID, epoch: p.epoch, used: p.lastDisk, rw: p.lastRw, limit: l, p: p,
+			stopping: p.phase != "running" || p.stopWhy != "" || p.pressureStop || p.disk.Reported()})
 		p.mu.Unlock()
-		if v.excess() > 0 {
-			out = append(out, v)
-		}
 	}
 	return out
 }
 
+// overLimit keeps the placements over their effective limit: the only
+// ones the guard counts or stops. At or under it, never.
+func overLimit(vs []diskVictim) []diskVictim {
+	return slices.DeleteFunc(slices.Clone(vs), func(v diskVictim) bool { return v.excess() <= 0 })
+}
+
+// localCopies are the local copies of Runs whose placement here is not
+// live and whose state says reported, oldest exit first: gcLoop's
+// candidates, without its TTL. A copy is reclaimable only when no upload
+// of the Run is pending and S3 holds what its volumes hold, as luxd's own
+// rule for discarding a host's copy (uploaded and host_copy).
+func (r *Runner) localCopies() []localCopy {
+	records := r.snapshotRecords()
+	entries, _ := os.ReadDir(filepath.Join(r.cfg.DataDir, "runs"))
+	var out []localCopy
+	for _, e := range entries {
+		st, err := readRunState(r.runDir(e.Name()))
+		if err != nil || st.LastExitAt == 0 || st.Phase != "reported" {
+			continue
+		}
+		r.mu.Lock()
+		p := r.placements[e.Name()]
+		r.mu.Unlock()
+		if p != nil && p.liveState() != "" {
+			continue
+		}
+		c := localCopy{runID: e.Name(), exitAt: st.LastExitAt, reclaimable: heldInS3(st, records)}
+		if !c.reclaimable && p != nil && st.VolumesSnapshot != "" {
+			p.mu.Lock()
+			if p.pressureStop {
+				c.awaiting = p.pressureKept
+			}
+			p.mu.Unlock()
+		}
+		out = append(out, c)
+	}
+	slices.SortFunc(out, func(a, b localCopy) int {
+		return cmp.Or(cmp.Compare(a.exitAt, b.exitAt), strings.Compare(a.runID, b.runID))
+	})
+	return out
+}
+
+// heldInS3: every snapshot record of st's Run is reported and uploaded,
+// and its local volumes are either the recorded snapshot's or never
+// resumed. Volumes whose export failed hold the Run's only copy.
+func heldInS3(st *runState, records map[string]*snapshotRecord) bool {
+	for _, rec := range records {
+		if rec.RunID == st.RunID && (!rec.Reported || !allUploaded(rec)) {
+			return false
+		}
+	}
+	if st.VolumesSnapshot == "" {
+		return st.Spec != nil && spec.RefusesResume(st.Spec.ResumePolicy)
+	}
+	rec := records[st.VolumesSnapshot]
+	return rec != nil && rec.RunID == st.RunID
+}
+
 // pressureStop marks v's placement as stopped by the guard and reports it
 // to luxd, which stops it (and retries until luxd has it).
-func (r *Runner) pressureStop(ctx context.Context, v diskVictim, free int64) {
+func (r *Runner) pressureStop(ctx context.Context, v diskVictim, at proto.DiskPressure) {
 	p := v.p
 	p.mu.Lock()
-	p.pressureStop = true
+	p.pressureStop, p.pressureKept = true, max(v.used-v.rw, 0)
 	p.mu.Unlock()
-	g := r.guard
 	data := map[string]any{"usedBytes": v.used, "limitBytes": v.limit.Effective, "excessBytes": v.excess(),
-		"freeBytes": free, "lowFreeBytes": g.lowFree, "recoverFreeBytes": g.recovFree}
+		"freeBytes": at.FreeBytes, "lowFreeBytes": at.LowFreeBytes, "recoverFreeBytes": at.RecoverFreeBytes}
 	if v.limit.Scaled {
 		data["nominalLimitBytes"], data["limitFactor"] = v.limit.Nominal, v.limit.Factor
 	}
 	go p.reportRetrying(context.WithoutCancel(ctx), proto.RunEvent{Type: proto.EvDiskPressureStop, Data: data})
 }
 
-// sendHeartbeat sends one heartbeat now. Heartbeats are serialized: the
-// guard publishes a change of pressure between the loop's beats.
+// kickHeartbeat has heartbeatLoop send its next heartbeat now. Never
+// blocks: kicks while one is due coalesce.
+func (r *Runner) kickHeartbeat() {
+	select {
+	case r.hbNow <- struct{}{}:
+	default:
+	}
+}
+
+// sendHeartbeat sends one heartbeat now: heartbeatLoop's, on its interval
+// or when kicked (the guard publishing a change of pressure).
 func (r *Runner) sendHeartbeat(ctx context.Context) {
-	r.hbMu.Lock()
-	defer r.hbMu.Unlock()
 	hb := proto.Heartbeat{LocalSnapshots: r.localSnapshots(), GitMirrors: r.git.Mirrors(),
 		RunnerSHA256: r.runnerSHA256, ShimSHA256: r.shimSHA256}
 	if hu, err := podman.ReadHostUsage(r.cfg.DataDir); err == nil {

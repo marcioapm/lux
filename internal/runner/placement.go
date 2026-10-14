@@ -86,9 +86,14 @@ type placement struct {
 	peakDisk int64
 	disk     disklimit.Watch
 	// lastDisk: used bytes at the latest conclusive disk sample, for the
-	// low-free-space guard; pressureStop: the guard asked luxd to stop it.
+	// low-free-space guard, 0 after an inconclusive one (unknown is never
+	// over); lastRw: the writable layer's share of it, what a stop frees
+	// at once. pressureStop: the guard asked luxd to stop it, when it held
+	// pressureKept bytes beyond its writable layer (what stays as its copy).
 	lastDisk     int64
+	lastRw       int64
 	pressureStop bool
+	pressureKept int64
 	// diskProbeFailed: a running sample's disk probe failed, logged once.
 	diskProbeFailed bool
 	netRx           int64
@@ -207,6 +212,7 @@ func (p *placement) saveStateLocked() error {
 	if p.stale || p.state == nil {
 		return nil
 	}
+	p.r.diskChanged()
 	return writeRunState(p.dir, p.state)
 }
 
@@ -236,6 +242,7 @@ func (p *placement) setPhase(ph string) {
 	p.mu.Lock()
 	p.phase = ph
 	p.mu.Unlock()
+	p.r.diskChanged()
 }
 
 // removeTimeout bounds finish's removal of its container.
@@ -243,8 +250,8 @@ const removeTimeout = time.Minute
 
 // handoverWait bounds how long a placement waits for the Run's previous
 // placement on this host to end. That one is killed, abandoning its volume
-// exports (sampleSlow's walk of the volumes ignores the cancel, so on very
-// many files this is not immediate), or past them: its reports outlast a
+// exports (and finish's last sampleSlow, whose walk stops at the cancel),
+// or past them: its reports outlast a
 // host lease only while the host is cut off from luxd, and its container's
 // removal takes at most removeTimeout plus podman's WaitDelay.
 func (r *Runner) handoverWait() time.Duration {
@@ -1608,7 +1615,7 @@ func (c *cpuPeak) observe(seconds float64, at time.Time) (last, peak *float64) {
 // sampleSlow measures what costs real work: disk use (walking every mounted
 // volume, engine stores included, and podman sizing the writable layer) and
 // network counters, all at once. Run off the heartbeat path, on its own
-// schedule.
+// schedule; a probe ctx ends counts as failed, so the sample is partial.
 func (p *placement) sampleSlow(ctx context.Context) {
 	p.mu.Lock()
 	var vols []volumeRef
@@ -1620,7 +1627,7 @@ func (p *placement) sampleSlow(ctx context.Context) {
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
-		disk     int64
+		disk, rw int64
 		probeErr error // the first failing probe's error
 		st       podman.Stats
 		statsOK  bool
@@ -1643,7 +1650,7 @@ func (p *placement) sampleSlow(ctx context.Context) {
 				add(0, err)
 				return
 			}
-			add(dirSize(mp))
+			add(dirSize(ctx, mp))
 		})
 	}
 	if ctr != "" {
@@ -1652,6 +1659,9 @@ func (p *placement) sampleSlow(ctx context.Context) {
 			var n int64
 			if err == nil {
 				_, err = fmt.Sscan(strings.TrimSpace(string(out)), &n)
+			}
+			if err == nil {
+				rw = n
 			}
 			add(n, err)
 		})
@@ -1665,11 +1675,19 @@ func (p *placement) sampleSlow(ctx context.Context) {
 	// A partial sum is a lower bound: over the limit it is conclusive, at or
 	// under it would wrongly restart the grace.
 	l := p.diskLimit()
-	if probeErr == nil || (l.Nominal > 0 && disk > l.Effective) {
+	conclusive := probeErr == nil || (l.Nominal > 0 && disk > l.Effective)
+	if conclusive {
 		p.checkDisk(ctx, disk, time.Now())
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if conclusive {
+		p.lastRw = rw
+	} else {
+		// Unknown, not the last value: an earlier sample over the limit must
+		// not make a Run that since went under it the guard's victim.
+		p.lastDisk, p.lastRw = 0, 0
+	}
 	if probeErr != nil && l.Nominal > 0 && p.phase == "running" && !p.diskProbeFailed {
 		p.diskProbeFailed = true
 		p.logf("a disk use probe failed; a sample counts against the disk limit only if what was measured is over it (logged once per placement)",
@@ -1705,6 +1723,9 @@ func (p *placement) checkDisk(ctx context.Context, used int64, now time.Time) {
 	}
 	limit := p.diskLimit()
 	p.mu.Lock()
+	if (p.lastDisk > limit.Effective) != (used > limit.Effective) {
+		p.r.diskChanged()
+	}
 	p.lastDisk = used
 	if p.phase != "running" {
 		p.mu.Unlock()
@@ -1727,14 +1748,18 @@ func (p *placement) checkDisk(ctx context.Context, used int64, now time.Time) {
 }
 
 // dirSize is the bytes of the regular files under root, a hardlinked file
-// once (image stores hardlink layer files). The error is root's own: files
-// under it that vanish or cannot be read mid-walk are skipped.
-func dirSize(root string) (int64, error) {
+// once (image stores hardlink layer files). The error is root's own, or
+// ctx's once it ends mid-walk: files under it that vanish or cannot be
+// read mid-walk are skipped.
+func dirSize(ctx context.Context, root string) (int64, error) {
 	var n int64
 	seen := map[uint64]bool{}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil && path == root {
 			return err
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
 		}
 		if err == nil && d.Type().IsRegular() {
 			if fi, err := d.Info(); err == nil {

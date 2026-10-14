@@ -145,10 +145,15 @@ type Runner struct {
 	disk diskScale
 	// guard is the low-free-space guard; nil without disk scaling.
 	guard *diskGuard
-	// hbMu serializes heartbeats: the loop's and the guard's.
-	hbMu sync.Mutex
+	// diskChanges counts changes the guard acts on (placements, snapshot
+	// records, a sample crossing its limit): diskGen.
+	diskChanges atomic.Uint64
+	// hbNow asks heartbeatLoop for a heartbeat now (kickHeartbeat).
+	hbNow chan struct{}
 	// handover, when set, replaces handoverWait's bound. Tests only.
 	handover time.Duration
+	// guardTick, when set, replaces guardEvery. Tests only.
+	guardTick time.Duration
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -229,6 +234,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		git:        gitws.New(cfg.DataDir),
 		mem:        mem,
 		disk:       disk,
+		hbNow:      make(chan struct{}, 1),
 	}
 	if guard != nil {
 		r.attachGuard(guard, func() (int64, error) {
@@ -298,6 +304,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.nestedAppArmor = appArmorRestrictsUserns(appArmorSysctl)
 	}
 	r.readopt(ctx)
+	// Before the first heartbeat: a restart under pressure must not report
+	// none until the next sample round.
+	r.startGuard(ctx)
 	go r.uploads.loop(ctx)
 	go r.heartbeatLoop(ctx)
 	go r.usageLoop(ctx)
@@ -552,6 +561,7 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	p := newPlacement(r, a, old)
 	r.placements[a.RunID] = p
 	r.mu.Unlock()
+	r.diskChanged()
 	if old != nil {
 		// p touches nothing of the Run's until old is done (waitPrevious).
 		// An old one whose workload may still run is one luxd gave up on:
@@ -627,6 +637,8 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 	for {
 		// The interval is re-read every second: the first wait starts before
 		// luxd's Welcome says the lease, and must not outlast a shorter one.
+		// A kick (kickHeartbeat) ends the wait at once.
+	wait:
 		for start := time.Now(); ; {
 			left := time.Until(start.Add(r.heartbeatEvery()))
 			if left <= 0 {
@@ -635,6 +647,8 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
+			case <-r.hbNow:
+				break wait
 			case <-time.After(min(left, time.Second)):
 			}
 		}
@@ -703,7 +717,8 @@ func (r *Runner) shouldExit(ctx context.Context, e proto.ExitHost) bool {
 // samples, so a Run is stopped between its diskGrace and diskGrace plus one
 // interval from the first sample over, having written up to that long's
 // worth past its limit. After each round the low-free-space guard, if on,
-// measures the filesystem against those samples.
+// reclaims and stops against those samples (its watch of the filesystem
+// runs on its own ticker, startGuard).
 func (r *Runner) usageLoop(ctx context.Context) {
 	t := time.NewTicker(r.cfg.UsageEvery)
 	defer t.Stop()
@@ -720,7 +735,13 @@ func (r *Runner) usageLoop(ctx context.Context) {
 			if p.finishing() {
 				continue
 			}
-			wg.Go(func() { p.sampleSlow(ctx) })
+			// Bounded by the interval: a hung podman or a huge walk makes
+			// that placement's sample partial, not the next round late.
+			wg.Go(func() {
+				sctx, cancel := context.WithTimeout(ctx, r.cfg.UsageEvery)
+				defer cancel()
+				p.sampleSlow(sctx)
+			})
 		}
 		wg.Wait()
 		r.guardPass(ctx)
