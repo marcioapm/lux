@@ -199,10 +199,11 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 // r.first_pool_id, written with first_started_at (migration 078). For a Run
 // without it, the pool of the host of the placement whose started_at is
 // r.first_started_at, else of its earliest started one; then r.pool_id.
-// first_pool_id is NULL only where 078 could not resolve it (and that lookup
-// returns NULL again) or where a luxd older than 078 wrote the first start
-// during an upgrade: the lookup is for those, and is planned as a subplan
-// run only when first_pool_id is NULL.
+// first_pool_id is NULL only for a Run started before 078 that had not
+// ended when 079 backfilled the ended ones, where 079 could not resolve it
+// (and that lookup returns NULL again), or where a luxd older than 078
+// wrote the first start during an upgrade: the lookup is for those, and is
+// planned as a subplan run only when first_pool_id is NULL.
 const runStartPool = `coalesce(r.first_pool_id, (SELECT h.pool_id FROM (SELECT pl.host_id FROM placements pl
 		WHERE pl.run_id = r.id AND pl.started_at IS NOT NULL
 		ORDER BY pl.started_at IS DISTINCT FROM r.first_started_at, pl.started_at, pl.epoch LIMIT 1) pl
