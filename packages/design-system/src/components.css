@@ -2660,7 +2660,8 @@ a.idchip-text:hover {
   .session-layout { grid-template-columns: minmax(0, 1fr); }
   .session-layout > .session-rail { display: none; }
 }
-.session-pane-h { height: clamp(420px, calc(100vh - 360px), 1100px); }
+/* The transcript card holds its composer too: sized so the composer stays in view under a Run page's facts and tabs. */
+.session-pane-h { height: clamp(420px, calc(100vh - 600px), 860px); }
 
 .transcript {
   display: flex;
