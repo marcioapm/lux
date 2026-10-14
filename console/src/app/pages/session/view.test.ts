@@ -14,6 +14,8 @@ test("a folded call's summary is its title, else what its input says it did", ()
   expect(toolSummary(read)).toBe("/etc/hosts");
   expect(lastActivity(s.threads["toolu_01GJFr24BVyX5H76UdYzZuQa"]!)).toBe("Read /etc/hosts");
   expect(lastActivity(s.threads.root!)).toBe("The first line of /etc/hosts is ## (a comment line with two hash marks).");
+  const oc = sessionFromRecords("opencode", fixture("opencode-1.18.21-task-child.jsonl"));
+  expect(lastActivity(oc.threads["ses_ec59a5ecfffeJV2xJIrK0QFXi1"]!)).toMatch(/directly and read the file: \(a\) wc -l notes\.txt output: 3/);
 });
 
 test("Messages hides tool calls and thoughts; Everything shows all", () => {

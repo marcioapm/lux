@@ -50,7 +50,12 @@ export function visible(items: SessionItem[], filter: "all" | "messages"): Sessi
 export function lastActivity(th: SessionThread): string | undefined {
   for (let i = th.items.length - 1; i >= 0; i--) {
     const x = th.items[i]!;
-    if (x.kind === "message" && x.text.trim()) return x.text.replace(/\s+/g, " ").replace(/[`*]/g, "").trim();
+    if (x.kind === "message" && x.text.trim())
+      return x.text
+        .replace(/^\s*([-*]|\d+\.)\s+/gm, "")
+        .replace(/\s+/g, " ")
+        .replace(/[`*]/g, "")
+        .trim();
     if (x.kind === "tool") return `${x.name} ${toolSummary(x)}`.trim();
   }
   return undefined;

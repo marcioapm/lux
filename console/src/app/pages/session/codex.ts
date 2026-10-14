@@ -84,7 +84,8 @@ export function foldCodex(b: Builder, type: string, d: Obj): boolean {
     }
     case "codex.item/started":
     case "codex.item/completed":
-      item(b, threadOf(b, str(d.threadId)), obj(d.item) ?? {}, type === "codex.item/completed", num(d.startedAtMs) ?? num(d.completedAtMs));
+      // Times are the records' (lux's clock), not Codex's startedAtMs, so a turn's items and lux's markers share one clock.
+      item(b, threadOf(b, str(d.threadId)), obj(d.item) ?? {}, type === "codex.item/completed");
       return true;
     case "codex.item/agentMessage/delta":
       appendText(b, threadOf(b, str(d.threadId)), "message", str(d.itemId) ?? b.at, str(d.delta) ?? "");
@@ -123,9 +124,9 @@ export function foldCodex(b: Builder, type: string, d: Obj): boolean {
   return type === "codex.turn_end";
 }
 
-function item(b: Builder, thread: string, it: Obj, completed: boolean, at: number | undefined) {
+function item(b: Builder, thread: string, it: Obj, completed: boolean) {
   const id = str(it.id) ?? b.at;
-  const t = at ?? b.t;
+  const t = b.t;
   switch (str(it.type)) {
     case "userMessage":
     case "contextCompaction":
