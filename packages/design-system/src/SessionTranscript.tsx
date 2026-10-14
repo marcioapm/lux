@@ -19,7 +19,7 @@ export interface SessionTranscriptProps {
   /** A SessionComposer under the bar; with one, the bar drops its read-only note. */
   composer?: ReactNode;
   className?: string;
-  children: ReactNode;
+  children?: ReactNode;
 }
 
 /**
@@ -36,6 +36,17 @@ export function SessionTranscript({ title = "Session", subtitle, actions, itemCo
     const n = el.current;
     if (n && follow) n.scrollTop = n.scrollHeight;
   }, [follow, itemCount, contentKey]);
+
+  // A growing composer shrinks the scroller without new content; keep the tail pinned while following.
+  useLayoutEffect(() => {
+    const n = el.current;
+    if (!n || !follow) return;
+    const ro = new ResizeObserver(() => {
+      n.scrollTop = n.scrollHeight;
+    });
+    ro.observe(n);
+    return () => ro.disconnect();
+  }, [follow]);
 
   const onScroll = () => {
     const n = el.current;

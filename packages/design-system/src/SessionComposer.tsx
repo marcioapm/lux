@@ -6,7 +6,7 @@ export interface SessionComposerProps {
   label: string;
   /** Delivers the trimmed text. Resolving clears the draft; rejecting keeps it and shows the error. */
   onSend: (text: string) => Promise<unknown>;
-  /** Interrupt the current turn; omitted, no Interrupt button. */
+  /** Interrupt the current turn; omitted, no Interrupt button. A rejection is swallowed: report it yourself. */
   onInterrupt?: () => Promise<unknown> | void;
   /** What Interrupt does, as its title. */
   interruptTitle?: string;
@@ -54,6 +54,8 @@ export function SessionComposer({ label, onSend, onInterrupt, interruptTitle = "
     void send();
   };
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // An IME confirming a candidate with the chord reports isComposing (keyCode 229 in older engines).
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       void send();
@@ -64,6 +66,8 @@ export function SessionComposer({ label, onSend, onInterrupt, interruptTitle = "
     setInterrupting(true);
     try {
       await onInterrupt();
+    } catch {
+      // Feedback for a failed interrupt is the caller's (the console toasts it).
     } finally {
       setInterrupting(false);
     }
@@ -82,7 +86,9 @@ export function SessionComposer({ label, onSend, onInterrupt, interruptTitle = "
         placeholder={placeholder}
         disabled={disabled}
         readOnly={sending}
-        aria-describedby={hint ? `${id}-hint` : undefined}
+        aria-describedby={[hint ? `${id}-hint` : "", error ? `${id}-error` : ""].filter(Boolean).join(" ") || undefined}
+        aria-invalid={error ? true : undefined}
+        aria-keyshortcuts="Control+Enter Meta+Enter"
         onChange={(e) => {
           setDraft(e.target.value);
           setError(null);
@@ -106,7 +112,7 @@ export function SessionComposer({ label, onSend, onInterrupt, interruptTitle = "
         </Button>
       </div>
       {error && (
-        <p className="composer-error" role="alert">
+        <p id={`${id}-error`} className="composer-error" role="alert">
           {error}
         </p>
       )}

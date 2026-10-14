@@ -64,6 +64,7 @@ describe("SessionComposer", () => {
       alert: () => form.querySelector('[role="alert"]'),
     };
   };
+  const described = (n: Element) => (n.getAttribute("aria-describedby") ?? "").split(" ").filter(Boolean).map((id) => document.getElementById(id)?.textContent);
 
   test("the textarea is labelled; Send is off until the trimmed draft has text", async () => {
     const el = await render(<SessionComposer label="Message the agent" onSend={async () => {}} />);
@@ -88,33 +89,75 @@ describe("SessionComposer", () => {
     expect(p.alert()).toBeNull();
   });
 
-  test("while sending the draft is read-only and Send is loading; a failure keeps the draft and says why in an alert", async () => {
+  test("while sending the draft is read-only and Send is loading; Ctrl+Enter then does not send again; a failure keeps the draft and says why in an alert", async () => {
     let reject!: (e: Error) => void;
-    const el = await render(<SessionComposer label="Message the agent" onSend={() => new Promise((_, r) => (reject = r))} />);
+    let calls = 0;
+    const el = await render(
+      <SessionComposer
+        label="Message the agent"
+        hint="Root session"
+        onSend={() => {
+          calls++;
+          return new Promise((_, r) => (reject = r));
+        }}
+      />,
+    );
     const p = parts(el);
     await type(p.area, "keep me");
     await act(async () => p.send.click());
     expect(p.area.readOnly).toBe(true);
     expect(p.send.getAttribute("aria-busy")).toBe("true");
+    await key(p.area, { key: "Enter", ctrlKey: true });
+    expect(calls).toBe(1);
+    expect(p.area.hasAttribute("aria-invalid")).toBe(false);
     await act(async () => reject(new Error("run is stopped")));
     await settle();
     expect(p.area.value).toBe("keep me");
     expect(p.area.readOnly).toBe(false);
     expect(p.alert()?.textContent).toBe("run is stopped");
+    // The field is described by its hint and the error, and marked invalid.
+    expect(described(p.area)).toEqual(["Root session", "run is stopped"]);
+    expect(p.area.getAttribute("aria-invalid")).toBe("true");
     // The next edit clears the error.
     await type(p.area, "keep me!");
     expect(p.alert()).toBeNull();
+    expect(described(p.area)).toEqual(["Root session"]);
+    expect(p.area.hasAttribute("aria-invalid")).toBe(false);
   });
 
-  test("disabled: textarea, Send and Interrupt are off, and the placeholder says why", async () => {
+  test("a successful retry after a failure clears the alert and the draft", async () => {
+    let fail = true;
+    const el = await render(
+      <SessionComposer
+        label="Message the agent"
+        onSend={async () => {
+          if (fail) throw new Error("run is stopped");
+        }}
+      />,
+    );
+    const p = parts(el);
+    await type(p.area, "again");
+    await act(async () => p.send.click());
+    await settle();
+    expect(p.alert()?.textContent).toBe("run is stopped");
+    fail = false;
+    await act(async () => p.send.click());
+    await settle();
+    expect(p.alert()).toBeNull();
+    expect(p.area.value).toBe("");
+  });
+
+  test("disabled: textarea, Send and Interrupt are off, the placeholder says why, and Ctrl+Enter sends nothing even with a draft", async () => {
     let calls = 0;
-    const el = await render(<SessionComposer label="Message the agent" disabled placeholder="Resume this Run to send a message" hint="Run stopped" onSend={async () => void calls++} onInterrupt={() => void calls++} />);
+    const el = await render(<SessionComposer label="Message the agent" disabled defaultValue="restored draft" placeholder="Resume this Run to send a message" hint="Run stopped" onSend={async () => void calls++} onInterrupt={() => void calls++} />);
     const p = parts(el);
     expect(p.area.disabled).toBe(true);
+    expect(p.area.value).toBe("restored draft");
     expect(p.area.placeholder).toBe("Resume this Run to send a message");
     expect(p.send.disabled).toBe(true);
     expect(p.interrupt?.disabled).toBe(true);
     await key(p.area, { key: "Enter", ctrlKey: true });
+    await settle();
     expect(calls).toBe(0);
   });
 
@@ -122,6 +165,7 @@ describe("SessionComposer", () => {
     const sent: string[] = [];
     const el = await render(<SessionComposer label="Message the agent" onSend={async (t) => void sent.push(t)} />);
     const p = parts(el);
+    expect(p.area.getAttribute("aria-keyshortcuts")).toBe("Control+Enter Meta+Enter");
     await type(p.area, "line one");
     const plain = await key(p.area, { key: "Enter" });
     expect(plain.defaultPrevented).toBe(false);
@@ -135,25 +179,102 @@ describe("SessionComposer", () => {
     expect(sent).toEqual(["line one", "two"]);
   });
 
-  test("Interrupt calls onInterrupt; without one there is no Interrupt button", async () => {
-    let n = 0;
-    const el = await render(<SessionComposer label="Message the agent" onSend={async () => {}} onInterrupt={async () => void n++} />);
-    await act(async () => parts(el).interrupt!.click());
+  test("Ctrl/⌘+Enter that confirms an IME candidate (isComposing, or keyCode 229) is left to the IME and sends nothing", async () => {
+    const sent: string[] = [];
+    const el = await render(<SessionComposer label="Message the agent" onSend={async (t) => void sent.push(t)} />);
+    const p = parts(el);
+    await type(p.area, "にほん");
+    const composing = await key(p.area, { key: "Enter", ctrlKey: true, isComposing: true });
+    const legacy = await key(p.area, { key: "Enter", metaKey: true, keyCode: 229 });
     await settle();
+    expect(sent).toEqual([]);
+    expect(composing.defaultPrevented).toBe(false);
+    expect(legacy.defaultPrevented).toBe(false);
+    expect(p.area.value).toBe("にほん");
+  });
+
+  test("Interrupt calls onInterrupt and is loading while in flight; without one there is no Interrupt button", async () => {
+    let n = 0;
+    let done!: () => void;
+    const el = await render(<SessionComposer label="Message the agent" onSend={async () => {}} onInterrupt={() => (n++, new Promise<void>((r) => (done = r)))} />);
+    const interrupt = parts(el).interrupt!;
+    await act(async () => interrupt.click());
     expect(n).toBe(1);
+    expect(interrupt.getAttribute("aria-busy")).toBe("true");
+    await act(async () => done());
+    await settle();
+    expect(interrupt.hasAttribute("aria-busy")).toBe(false);
     const bare = await render(<SessionComposer label="Send to stdin" onSend={async () => {}} />);
     expect([...bare.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Send"]);
+  });
+
+  test("a rejecting onInterrupt is caught: no unhandled rejection, and Interrupt is usable again", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const el = await render(<SessionComposer label="Message the agent" onSend={async () => {}} onInterrupt={() => Promise.reject(new Error("nope"))} />);
+      const interrupt = parts(el).interrupt!;
+      await act(async () => interrupt.click());
+      await settle();
+      await act(async () => Bun.sleep(20));
+      expect(unhandled).toEqual([]);
+      expect(interrupt.disabled).toBe(false);
+      expect(parts(el).alert()).toBeNull();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  test("SessionTranscript: while following, a scroller resized by a growing composer stays pinned to the bottom; off, it is left; unmount disconnects", async () => {
+    // happy-dom's ResizeObserver never fires: stand one in that the test triggers.
+    const observers: { cb: () => void; targets: Element[]; live: boolean }[] = [];
+    const Real = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      o: { cb: () => void; targets: Element[]; live: boolean };
+      constructor(cb: () => void) {
+        this.o = { cb, targets: [], live: true };
+        observers.push(this.o);
+      }
+      observe(t: Element) {
+        this.o.targets.push(t);
+      }
+      unobserve() {}
+      disconnect() {
+        this.o.live = false;
+      }
+    } as unknown as typeof ResizeObserver;
+    try {
+      const el = await render(<SessionTranscript itemCount={3} composer={<SessionComposer label="Message the agent" onSend={async () => {}} />} />);
+      const scroller = el.querySelector<HTMLElement>(".transcript-scroll")!;
+      Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 900 });
+      const resize = () => act(async () => observers.filter((o) => o.live && o.targets.includes(scroller)).forEach((o) => o.cb()));
+      scroller.scrollTop = 500;
+      await resize();
+      expect(scroller.scrollTop).toBe(900);
+
+      const follow = el.querySelector<HTMLButtonElement>("button[aria-pressed]")!;
+      await act(async () => follow.click());
+      expect(follow.getAttribute("aria-pressed")).toBe("false");
+      scroller.scrollTop = 400;
+      await resize();
+      expect(scroller.scrollTop).toBe(400);
+
+      await act(async () => follow.click());
+      expect(observers.filter((o) => o.live && o.targets.includes(scroller))).toHaveLength(1);
+      const { root } = mounted.pop()!;
+      await act(async () => root.unmount());
+      expect(observers.filter((o) => o.live)).toEqual([]);
+    } finally {
+      globalThis.ResizeObserver = Real;
+    }
   });
 });
 
 test("SessionTranscript: the read-only note is the default, and a composer replaces it", () => {
-  const plain = renderToStaticMarkup(<SessionTranscript itemCount={0}>{null}</SessionTranscript>);
+  const plain = renderToStaticMarkup(<SessionTranscript itemCount={0} />);
   expect(plain).toContain("Read-only");
-  const withComposer = renderToStaticMarkup(
-    <SessionTranscript itemCount={0} composer={<SessionComposer label="Message the agent" onSend={async () => {}} />}>
-      {null}
-    </SessionTranscript>,
-  );
+  const withComposer = renderToStaticMarkup(<SessionTranscript itemCount={0} composer={<SessionComposer label="Message the agent" onSend={async () => {}} />} />);
   expect(withComposer).not.toContain("Read-only");
   expect(withComposer).toContain('aria-label="Message the agent"');
 });
