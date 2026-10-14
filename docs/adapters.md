@@ -393,6 +393,17 @@ gets its own `opencode.task`.
   runs it (its metadata names the child), teaches lux its parent; from
   then on it is relayed. What the bus said of it before is not recorded.
 
+## Codex subagents
+
+Codex (0.144 on) runs a subagent as a **child thread** on the Run's
+app-server connection: its notifications carry the child's `threadId`.
+They are relayed as `codex.<method>` records like the Run's own thread's
+(the parent's `item/*` of type `subAgentActivity` and
+`collabAgentToolCall` name the child), but they do not start or end the
+Run's turn (no `codex.turn_end`, no idle), do not carry its usage, do not
+consume its inputs, and the child's `agentMessage` text does not reach
+stdout. Notifications with no `threadId` are the Run's.
+
 ## State paths
 
 An agent keeps its session in files, and those files must be on a
