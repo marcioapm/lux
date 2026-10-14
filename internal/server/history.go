@@ -195,20 +195,27 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 	return err
 }
 
-// runStartPool joins to runs r, as sp, the pool the Run first started in:
-// that of the host of the placement whose started_at is r.first_started_at,
-// else of its earliest started one. runFinishPool joins, as fp, that of the
-// host of its last placement (highest epoch). sp.pool_id and fp.pool_id are
-// NULL when there is no such placement, or its host is gone or has no pool:
-// read them as coalesce(sp.pool_id, r.pool_id). The host is looked up inside
-// the lateral: per Run in range, one placements_run_id_epoch_key and one
-// hosts_pkey probe, never a scan of hosts, whatever the planner guesses of
-// the sampler's window.
-const runStartPool = ` LEFT JOIN LATERAL (SELECT h.pool_id FROM (SELECT pl.host_id FROM placements pl
+// runStartPool is the pool a Run (runs r) first started in:
+// r.first_pool_id, written with first_started_at (migration 078). For a Run
+// without it, the pool of the host of the placement whose started_at is
+// r.first_started_at, else of its earliest started one; then r.pool_id.
+// first_pool_id is NULL only where 078 could not resolve it (and that lookup
+// returns NULL again) or where a luxd older than 078 wrote the first start
+// during an upgrade: the lookup is for those, and is planned as a subplan
+// run only when first_pool_id is NULL.
+const runStartPool = `coalesce(r.first_pool_id, (SELECT h.pool_id FROM (SELECT pl.host_id FROM placements pl
 		WHERE pl.run_id = r.id AND pl.started_at IS NOT NULL
 		ORDER BY pl.started_at IS DISTINCT FROM r.first_started_at, pl.started_at, pl.epoch LIMIT 1) pl
-	JOIN hosts h ON h.id = pl.host_id) sp ON true`
+	JOIN hosts h ON h.id = pl.host_id), r.pool_id)`
 
+// runFinishPool joins to runs r, as fp, the pool of the host of its last
+// placement (highest epoch); read it as coalesce(fp.pool_id, r.pool_id).
+// NULL when there is no placement, or its host is gone or has no pool.
+// r.pool_id alone is not that pool: a stopped Run resumed into another pool
+// and terminated before it was placed again finishes bound to the new pool,
+// its last placement in the old one. The host is looked up inside the
+// lateral: one placements_run_id_epoch_key and one hosts_pkey probe per
+// finished Run, never a scan of hosts.
 const runFinishPool = ` LEFT JOIN LATERAL (SELECT h.pool_id FROM (SELECT pl.host_id FROM placements pl
 		WHERE pl.run_id = r.id ORDER BY pl.epoch DESC LIMIT 1) pl
 	JOIN hosts h ON h.id = pl.host_id) fp ON true`
@@ -245,8 +252,8 @@ func samplePools(ctx context.Context, tx pgx.Tx, from time.Time) error {
 		flow AS (
 			SELECT e.pool_id, coalesce(e.tenant_id, '') AS id,
 				count(*) FILTER (WHERE e.start) AS started, count(*) FILTER (WHERE NOT e.start) AS finished
-			FROM (SELECT coalesce(sp.pool_id, r.pool_id) AS pool_id, r.tenant_id, true AS start
-					FROM w, runs r`+runStartPool+` WHERE r.first_started_at > w.since AND r.first_started_at <= w.until
+			FROM (SELECT `+runStartPool+` AS pool_id, r.tenant_id, true AS start
+					FROM w, runs r WHERE r.first_started_at > w.since AND r.first_started_at <= w.until
 				UNION ALL
 				SELECT coalesce(fp.pool_id, r.pool_id), r.tenant_id, false
 					FROM w, runs r`+runFinishPool+` WHERE r.finished_at > w.since AND r.finished_at <= w.until) e

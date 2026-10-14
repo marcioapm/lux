@@ -170,11 +170,16 @@ func (s *Server) poolStats(ctx context.Context, in *poolStatsInput) (*poolStatsO
 		}); err != nil {
 			return err
 		}
-		// The pool is the one each Run first started in, not runs.pool_id,
-		// so every Run started in range is read, not only those bound to ids.
+		// The pool is the one each Run first started in (runStartPool), not
+		// runs.pool_id. Both arms are ranges of runs_first_pool_started: the
+		// Runs whose first_pool_id is one of ids, and the few without one
+		// (first_pool_id IS NULL), resolved as runStartPool does.
 		rows, err = tx.Query(ctx, `SELECT x.pool, floor(extract(epoch FROM x.at - $2) / 3600)::int, count(*)
-			FROM (SELECT coalesce(sp.pool_id, r.pool_id) AS pool, r.first_started_at AS at
-				FROM runs r`+runStartPool+` WHERE r.first_started_at > $2 AND r.first_started_at <= $3) x
+			FROM (SELECT r.first_pool_id AS pool, r.first_started_at AS at FROM runs r
+					WHERE r.first_pool_id = ANY($1) AND r.first_started_at > $2 AND r.first_started_at <= $3
+				UNION ALL
+				SELECT `+runStartPool+`, r.first_started_at FROM runs r
+					WHERE r.first_pool_id IS NULL AND r.first_started_at > $2 AND r.first_started_at <= $3) x
 			WHERE x.pool = ANY($1)
 			GROUP BY 1, 2`, ids, out.Body.From, out.Body.To)
 		if err != nil {

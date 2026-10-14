@@ -395,7 +395,13 @@ func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID
 			return err
 		}
 		if hostID != "" {
-			if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()) WHERE id = $1`, runID); err != nil {
+			// first_pool_id with first_started_at, on the first start only:
+			// gated on first_started_at, so a later start never fills or
+			// overwrites it. A host with no pool: the pool it is bound to.
+			if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()),
+					first_pool_id = CASE WHEN first_started_at IS NULL
+						THEN coalesce((SELECT h.pool_id FROM hosts h WHERE h.id = $2), pool_id) ELSE first_pool_id END
+				WHERE id = $1`, runID, hostID); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE hosts SET first_placement_at = coalesce(first_placement_at, now()) WHERE id = $1`, hostID); err != nil {
