@@ -328,15 +328,95 @@ func TestPoolFlowFallbacks(t *testing.T) {
 // A moved Run whose start is in the sample's window and finish after it
 // counts its start only; one started before the window and finished in it,
 // its finish only; one started before the stats range counts there nowhere.
+// The window is (since, until]: a start or finish at exactly since, the
+// previous sample's window_end, was the previous sample's and is not
+// counted again; one a microsecond after it is.
 func TestPoolFlowWindowEdges(t *testing.T) {
 	s := testServer(t)
 	keys, now := flowFixture(t, s)
 	m := func(d time.Duration) time.Time { return now.Add(-d * time.Minute) }
+	var since time.Time
+	systemScan(t, s, `SELECT window_end FROM system_samples WHERE res = 0 AND tenant_id = ''`, nil, &since)
+	in := since.Add(time.Microsecond)
 	flowRun(t, s, "startin", "ta", "pb", m(11), now.Add(time.Minute), flowPlacement{"ha", m(11)}, flowPlacement{"hb", m(5)})
 	flowRun(t, s, "finishin", "ta", "pb", m(30), m(6), flowPlacement{"ha", m(30)}, flowPlacement{"hb", m(25)})
 	flowRun(t, s, "old", "tb", "pb", m(180), m(90), flowPlacement{"ha", m(180)}, flowPlacement{"hb", m(150)})
+	flowRun(t, s, "startatsince", "ta", "pb", since, time.Time{}, flowPlacement{"ha", since})
+	flowRun(t, s, "startjustin", "ta", "pb", in, time.Time{}, flowPlacement{"ha", in})
+	flowRun(t, s, "finishatsince", "ta", "pa", m(60), since, flowPlacement{"ha", m(60)}, flowPlacement{"hb", m(50)})
+	flowRun(t, s, "finishjustin", "ta", "pa", m(60), in, flowPlacement{"ha", m(60)}, flowPlacement{"hb", m(50)})
 	sampleNow(t, s)
-	wantMap(t, "samples", flowSamples(t, s), map[string]string{"pa/": "1/0", "pa/ta": "1/0", "pb/": "0/1", "pb/ta": "0/1"})
-	wantMap(t, "operator stats", flowStats(t, s, keys["op"]), map[string]int{"pa": 2})
+	wantMap(t, "samples", flowSamples(t, s), map[string]string{"pa/": "2/0", "pa/ta": "2/0", "pb/": "0/2", "pb/ta": "0/2"})
+	wantMap(t, "operator stats", flowStats(t, s, keys["op"]), map[string]int{"pa": 6})
 	wantMap(t, "b's stats", flowStats(t, s, keys["b"]), map[string]int{})
+	wantMap(t, "operator stats with starts at from", statsWithStartsAtFrom(t, s), map[string]int{"pa": 6, "pc": 2})
+}
+
+// statsWithStartsAtFrom is runsStarted per pool from GET /v1/pools/stats
+// (as an operator, since=2h) with four Runs on pc's hc added at its from,
+// now() - since in the read's first transaction, and a microsecond after
+// it: one of each with first_pool_id recorded and one resolved at read
+// time. That transaction is held at its pools read while they are written;
+// its start is read from pg_stat_activity.
+func statsWithStartsAtFrom(t *testing.T, s *Server) map[string]int {
+	t.Helper()
+	ctx := context.Background()
+	type result struct {
+		out *poolStatsOutput
+		err error
+	}
+	done := make(chan result, 1)
+	var from time.Time
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `LOCK TABLE pools IN ACCESS EXCLUSIVE MODE`); err != nil {
+			return err
+		}
+		go func() {
+			out, err := s.poolStats(context.WithValue(ctx, principalKey, Principal{Operator: true, Scopes: []string{"read"}}), &poolStatsInput{Since: "2h"})
+			done <- result{out, err}
+		}()
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			var found bool
+			systemScan(t, s, `SELECT count(*) = 1, coalesce(max(xact_start), 'epoch') - interval '2 hours' FROM pg_stat_activity
+				WHERE wait_event_type = 'Lock' AND query LIKE '%FROM pools p WHERE%'`, nil, &found, &from)
+			if found {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("the stats read never waited on pools")
+			}
+		}
+		in := from.Add(time.Microsecond)
+		for _, r := range []struct {
+			id    string
+			at    time.Time
+			first any
+		}{{"recordedat", from, "pc"}, {"recordedin", in, "pc"}, {"resolvedat", from, nil}, {"resolvedin", in, nil}} {
+			if _, err := tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, spec, state, pool_id, current_epoch, first_started_at, first_pool_id)
+				VALUES ($1, 'ta', '{}', 'running', 'pb', 1, $2, $3)`, r.id, r.at, r.first); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, started_at, resources)
+				VALUES ($1, 'ta', $1, 'hc', 1, 'running', $2, '{"cpus": 1}')`, r.id, r.at); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := <-done
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if !res.out.Body.From.Equal(from) {
+		t.Fatalf("from %v, want the held transaction's %v", res.out.Body.From, from)
+	}
+	started := map[string]int{}
+	for _, p := range res.out.Body.Pools {
+		if p.RunsStarted != 0 {
+			started[p.ID] = p.RunsStarted
+		}
+	}
+	return started
 }
