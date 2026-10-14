@@ -63,4 +63,21 @@ func TestHistoryResolutionFromCreation(t *testing.T) {
 			t.Errorf("%s created 40m ago with res=3600: resolution %d, want 3600", kind, explicit.Resolution)
 		}
 	}
+	tenantKey := ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('kt', 't1', 'reader', $1, ARRAY['read'])`, ids.Hash(tenantKey))
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t2', 't2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, state, created_at) VALUES ('own', 'own', 't1', 'ready', now() - interval '40 minutes'), ('foreign', 'foreign', 't2', 'ready', now() - interval '40 minutes')`)
+	execSQL(t, s, ctx, `INSERT INTO host_samples (host_id, res, at, cpu_seconds) VALUES ('own', 0, now() - interval '10 minutes', 1)`)
+	for _, c := range []struct {
+		id   string
+		code int
+	}{{"own", http.StatusOK}, {"young", http.StatusForbidden}, {"foreign", http.StatusNotFound}} {
+		var a answer
+		if code := getJSON(t, s, tenantKey, "/v1/hosts/"+c.id+"/history?since=7d", &a); code != c.code {
+			t.Errorf("tenant reading %s: status %d, want %d", c.id, code, c.code)
+		}
+		if c.code == http.StatusOK && (a.Resolution != 0 || len(a.Samples) != 1) {
+			t.Errorf("tenant reading own young host: resolution %d, %d samples; want 0 and 1", a.Resolution, len(a.Samples))
+		}
+	}
 }
