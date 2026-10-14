@@ -23,6 +23,9 @@ test("plain ACP keeps turns and thoughts separated by tools", () => {
   expect(kinds(items)).toEqual(["input", "message", "marker:turn", "input", "message", "marker:turn", "thought", "tool", "thought"]);
   expect(items.filter((i) => i.kind === "message").map((i) => i.text)).toEqual(["first reply", "second reply"]);
   expect(items.filter((i) => i.kind === "thought").map((i) => i.text)).toEqual(["plan A", "plan B more"]);
+  // Settled by idle with nothing after it: the next chunk is a new message.
+  const after = sessionFromRecords("acp", [record(1, 1, "lux.input", { requestId: "prompt", text: "one" }), record(1, 2, "acp.agent_message_chunk", chunk("first")), record(1, 3, "lux.activity", { activity: "idle" }), record(1, 4, "acp.agent_message_chunk", chunk("unsolicited"))]).threads.root!.items;
+  expect(after.filter((i) => i.kind === "message").map((i) => i.text)).toEqual(["first", "unsolicited"]);
 });
 
 test("ACP initial history is retained; later epoch replay stops at lux.session", () => {

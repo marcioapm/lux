@@ -11,6 +11,8 @@ export type SubagentStatus = "running" | "completed" | "error" | "idle";
 export function SubagentStatusBadge({ status }: { status: SubagentStatus }) {
   if (status === "running") return <Badge tone="info">running</Badge>;
   if (status === "error") return <Badge tone="danger">failed</Badge>;
+  // idle: known only as a parent, its own status not reported yet.
+  if (status === "idle") return <Badge>idle</Badge>;
   return <Badge tone="success">done</Badge>;
 }
 

@@ -97,6 +97,11 @@ test("opencode: a parent named only by an orphan task is neutral until adopted",
   s = p.snapshot();
   expect(subagentTree(s).map((x) => [x.thread.id, x.depth])).toEqual([["parent", 0], ["child", 1]]);
   expect(subagentCounts(s)).toEqual({ total: 2, running: 0 });
+  // A child's session announced before its parent's (adopt): the parent is a placeholder, not running.
+  const q = new SessionProjection("opencode");
+  q.fold([ev("lux.session", { sessionId: "run" }), ev("opencode.session", { id: "kid", parentID: "dad", title: "Kid" }), ev("opencode.task", { sessionID: "dad", callID: "d", childSessionID: "kid", status: "completed" })]);
+  expect(q.snapshot().threads.dad!.status).toBe("idle");
+  expect(subagentCounts(q.snapshot())).toEqual({ total: 2, running: 0 });
 });
 
 test("opencode: message truncation is kept; the Run's own permission is not duplicated", () => {

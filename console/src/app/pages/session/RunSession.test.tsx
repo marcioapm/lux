@@ -91,6 +91,7 @@ test("finished rows keep their rendered props while live rows and child stubs up
   try {
     await waitFor(() => v.el.querySelector(".turn-msg") != null);
     const message = v.el.querySelector(".turn-msg")!;
+    // React DOM's internal props key: its identity is unchanged only if the row did not re-render.
     const propsKey = Object.keys(message).find((k) => k.startsWith("__reactProps$"))!;
     const props = (message as unknown as Record<string, unknown>)[propsKey];
     const duration = () => v.el.querySelector(".toolcall-dur")?.textContent;

@@ -81,7 +81,9 @@ export function foldACP(b: Builder, type: string, d: Obj, thread = ROOT): boolea
       if (text == null) return true;
       const kind = type === "acp.agent_message_chunk" ? "message" : "thought";
       const last = b.last(thread);
-      const key = str(d.messageId) ?? (last?.kind === kind && (last.kind !== "message" || last.streaming) ? last.id.slice(kind.length + 1) : b.at);
+      // Without a messageId a chunk extends the thread's last item of its kind while that is still open, else starts at this record.
+      const open = last?.kind === kind && (last.kind !== "message" || last.streaming);
+      const key = str(d.messageId) ?? (open ? last.id.slice(kind.length + 1) : b.at);
       appendText(b, thread, kind, key, text);
       return true;
     }
