@@ -285,6 +285,41 @@ func TestFirstPoolIDSetOnceAtFirstStart(t *testing.T) {
 	}
 }
 
+// A first start on a host outside the Run's pool (its chosen host, place_on,
+// as a resume to a host or a migration sets it) records the host's pool; on
+// a chosen host with no pool, the pool the Run is bound to.
+func TestFirstPoolIDOfChosenHost(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	s.cfg.LeaseDuration = time.Minute
+	elsewhere := submitOnHA(t, s, resizeBase)
+	poolless := submitOnHA(t, s, resizeBase)
+	execSQL(t, s, ctx, `UPDATE hosts SET last_heartbeat = now() - interval '1 hour' WHERE id = 'ha'`)
+	readyHost(t, s, "hb", "big", "t1", false)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, tenant_id, state, capacity, last_heartbeat)
+		VALUES ('hn', 'hn', NULL, 't1', 'ready', '{"runs":10}', now())`)
+	s.hub.polled("hn")
+	execSQL(t, s, ctx, `UPDATE hosts SET capacity = '{"cpus":16,"memory":68719476736,"runs":10}', registered_at = now() WHERE id IN ('hb', 'hn')`)
+	execSQL(t, s, ctx, `UPDATE runs SET place_on = CASE id WHEN $1 THEN 'hb' ELSE 'hn' END WHERE id IN ($1, $2)`, elsewhere, poolless)
+	schedule(t, s)
+	for id, want := range map[string]struct{ host, pool string }{elsewhere: {"hb", poolID(t, s, "big", "t1")}, poolless: {"hn", "default"}} {
+		host, _, reason := placedOn(t, s, id)
+		if host != want.host {
+			t.Fatalf("%s placed on %q (%s), want %s", id, host, reason, want.host)
+		}
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return s.applyStatus(ctx, tx, "t1", id, 1, proto.Status{State: "running"})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var bound, first string
+		systemScan(t, s, `SELECT pool_id, coalesce(first_pool_id, '') FROM runs WHERE id = $1`, []any{id}, &bound, &first)
+		if bound != "default" || first != want.pool {
+			t.Errorf("first start on %s: bound to %s, first_pool_id %q; want bound to default, first_pool_id %q", want.host, bound, first, want.pool)
+		}
+	}
+}
+
 // A Run's recorded first_pool_id is its start's pool, ahead of its
 // placements' hosts and runs.pool_id: started under pc by the record,
 // though its placement ran on pa's host and it is bound to pb.
