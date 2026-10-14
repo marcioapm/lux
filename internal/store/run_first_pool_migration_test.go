@@ -65,19 +65,12 @@ func TestRunFirstPoolMigration(t *testing.T) {
 	}
 	want := map[string]string{"moved": "pa", "earliest": "pa", "never": "", "unplaced": "", "poolless": "", "resting": "", "live": ""}
 	for id, pool := range want {
-		var got *string
-		if err := conn.QueryRow(ctx, `SELECT first_pool_id FROM runs WHERE id = $1`, id).Scan(&got); err != nil {
+		var got string
+		if err := conn.QueryRow(ctx, `SELECT coalesce(first_pool_id, '') FROM runs WHERE id = $1`, id).Scan(&got); err != nil {
 			t.Fatal(err)
 		}
-		if g := deref(got); g != pool {
-			t.Errorf("%s: first_pool_id %q, want %q", id, g, pool)
+		if got != pool {
+			t.Errorf("%s: first_pool_id %q, want %q", id, got, pool)
 		}
 	}
-}
-
-func deref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
 }
