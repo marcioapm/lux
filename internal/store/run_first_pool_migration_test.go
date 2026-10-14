@@ -2,17 +2,10 @@ package store_test
 
 import (
 	"context"
-	"encoding/json"
-	"io"
-	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/marcioapm/lux/internal/ids"
-	"github.com/marcioapm/lux/internal/server"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -21,10 +14,10 @@ import (
 // first_started_at, else the earliest), even when bound to another pool
 // since; it stays NULL for a Run never started, one without a started
 // placement, one whose first host has no pool, and every Run not ended
-// (running or resting). GET /v1/pools/stats still counts a live Run left
-// NULL under the pool of the host it first ran on.
+// (running or resting). How readers count a NULL is tested in
+// internal/server (TestPoolFlowMovedRun and the other TestPoolFlow tests).
 func TestRunFirstPoolMigration(t *testing.T) {
-	owner, app := emptyDB(t)
+	owner, _ := emptyDB(t)
 	ctx := context.Background()
 	if _, err := store.MigrateTo(ctx, owner, "lux_app", "077_host_disk_pressure"); err != nil {
 		t.Fatal(err)
@@ -34,7 +27,6 @@ func TestRunFirstPoolMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close(ctx)
-	key := ids.Secret("luxk")
 	for _, q := range []string{
 		`INSERT INTO tenants (id, name) VALUES ('t1', 't1')`,
 		`INSERT INTO pools (id, name, provider) VALUES ('pa', 'a', 'static'), ('pb', 'b', 'static')`,
@@ -80,33 +72,6 @@ func TestRunFirstPoolMigration(t *testing.T) {
 		if g := deref(got); g != pool {
 			t.Errorf("%s: first_pool_id %q, want %q", id, g, pool)
 		}
-	}
-
-	if _, err := conn.Exec(ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(key)); err != nil {
-		t.Fatal(err)
-	}
-	db, err := store.Open(ctx, app)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	req := httptest.NewRequest(http.MethodGet, "/v1/pools/stats?since=2h", nil)
-	req.Header.Set("Authorization", "Bearer "+key)
-	w := httptest.NewRecorder()
-	server.New(server.Config{}, db, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("GET /v1/pools/stats: %d %s", w.Code, w.Body)
-	}
-	var stats struct{ Pools []server.PoolStats }
-	if err := json.Unmarshal(w.Body.Bytes(), &stats); err != nil {
-		t.Fatal(err)
-	}
-	started := map[string]int{}
-	for _, p := range stats.Pools {
-		started[p.ID] = p.RunsStarted
-	}
-	if started["pa"] != 1 || started["pb"] != 0 {
-		t.Errorf("runsStarted %v, want the live Run under pa only", started)
 	}
 }
 
