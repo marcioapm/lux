@@ -238,7 +238,7 @@ func TestDiskGuardMarks(t *testing.T) {
 		{"10%", "5%", 100 * gib, false},
 		{"5%", "5%", 100 * gib, false},
 		{"8GiB", "8GiB", 100 * gib, false},
-		{"8GiB", "5%", 100 * gib, false},    // 8 GiB is above 5 GiB
+		{"8GiB", "5%", 100 * gib, false},     // 8 GiB is above 5 GiB
 		{"1GiB", "200GiB", 100 * gib, false}, // recover past the capacity
 		{"5%", "10%", 10, false},             // 0 bytes low
 	} {

@@ -504,8 +504,9 @@ type ArtifactPublished struct {
 }
 
 // EvDiskExceeded: a placement was over its resources.disk (its writable
-// layer and state volumes) on every sample for its resources.diskGrace, or
-// on one sample at disklimit.CeilingFactor times the disk. luxd stops it.
+// layer and state volumes) on every sample for its resources.diskGrace, or,
+// on a host that does not scale disk, on one sample at
+// disklimit.CeilingFactor times the disk. luxd stops it.
 const EvDiskExceeded = "disk.exceeded"
 
 // EvDiskReleaseFailed: a spot placement's container or volumes could not be
