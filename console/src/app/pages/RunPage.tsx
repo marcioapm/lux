@@ -100,7 +100,6 @@ export function RunPage({ id }: { id: string }) {
         items={[
           ...(session ? [{ key: "session" as const, label: "Session" }] : []),
           { key: "output", label: "Output" },
-          // A generic workload has no conversation: its Session tab, after Output, is only its stdin.
           ...(session ? [] : [{ key: "session" as const, label: "Session" }]),
           { key: "servers", label: "Servers", count: run.servers?.length || undefined },
           { key: "timeline", label: "Timeline", count: run.placements?.length },
