@@ -439,7 +439,8 @@ func statsWithStartsAtFrom(t *testing.T, s *Server) map[string]int {
 		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 			var found bool
 			systemScan(t, s, `SELECT count(*) = 1, coalesce(max(xact_start), 'epoch') - interval '2 hours' FROM pg_stat_activity
-				WHERE wait_event_type = 'Lock' AND query LIKE '%FROM pools p WHERE%'`, nil, &found, &from)
+				WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+				AND query LIKE 'SELECT p.id FROM pools p WHERE % AND NOT p.retired ORDER BY p.id'`, nil, &found, &from)
 			if found {
 				break
 			}
