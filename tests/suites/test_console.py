@@ -206,7 +206,7 @@ def test_generic_run_takes_stdin_from_its_session_tab_and_output_is_read_only(pa
     expect(composer.get_by_role("alert")).to_have_count(0)
     # Interrupt from the composer is SIGINT to the workload.
     composer.get_by_role("button", name="Interrupt", exact=True).click()
-    expect(page.get_by_role("status").filter(has_text="Interrupt sent")).to_be_visible(timeout=3_000)
+    expect(page.get_by_role("status").get_by_text("Interrupt sent", exact=True)).to_be_visible(timeout=3_000)
     lux.wait_output(run_id, "got-console-int")
     assert not page.errors, page.errors
     lux.run("terminate", run_id)
