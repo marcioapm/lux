@@ -54,8 +54,9 @@ type packCandidate struct {
 
 // packOrder puts the host to choose first: hosts the Run need not avoid,
 // then the most allocated, then the highest affinity, then the lowest id.
-// Allocations compare rounded to 1e-9, so float sums that differ only by
-// rounding error (0.1+0.2 against 0.3) tie and affinity decides.
+// Allocations compare as math.Round(used*1e9), one key per host so the
+// order stays total; float sums such as 0.1+0.2 and 0.3 tie and affinity
+// decides.
 func packOrder(a, b packCandidate) int {
 	if a.avoid != b.avoid {
 		if a.avoid {
