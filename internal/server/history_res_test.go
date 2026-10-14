@@ -93,3 +93,65 @@ func TestHistoryResolutionFromCreation(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryResolutionHistoricalWindows(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	key := ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(key))
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	now := time.Now().UTC().Truncate(time.Second)
+	created := now.Add(-5 * 24 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state, created_at) VALUES ('past', 'past', 'ready', $1)`, created)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, created_at) VALUES ('past', 't1', '{}', 'running', $1)`, created)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider, created_at) VALUES ('past', 'past', 'static', $1)`, created)
+	to := now.Add(-3 * 24 * time.Hour)
+	from := to.Add(-time.Hour)
+	var sampleTimes []time.Time
+	for _, offset := range []time.Duration{10 * time.Minute, 30 * time.Minute, 50 * time.Minute} {
+		at := from.Add(offset)
+		sampleTimes = append(sampleTimes, at)
+		// Only minute samples remain for this window; raw retention is 48h.
+		execSQL(t, s, ctx, `INSERT INTO host_samples (host_id, res, at, cpu_seconds) VALUES ('past', 60, $1, 1)`, at)
+		execSQL(t, s, ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds) VALUES ('past', 1, 't1', 60, $1, 1)`, at)
+		execSQL(t, s, ctx, `INSERT INTO pool_samples (pool_id, tenant_id, res, at, running) VALUES ('past', '', 60, $1, 1)`, at)
+	}
+	for kind, path := range map[string]string{
+		"host": "/v1/hosts/past/history?",
+		"run":  "/v1/runs/past/history?tenant=t1&",
+		"pool": "/v1/pools/past/metrics?",
+	} {
+		for _, window := range []struct {
+			name     string
+			from, to time.Time
+			res      int
+			samples  []time.Time
+		}{
+			{"before creation", created.Add(-2 * time.Hour), created.Add(-time.Hour), 60, nil},
+			{"retained minutes", from, to, 60, sampleTimes},
+		} {
+			t.Run(kind+"/"+window.name, func(t *testing.T) {
+				var a struct {
+					From, To   time.Time
+					Resolution int
+					Samples    []struct{ At time.Time }
+				}
+				query := "from=" + window.from.Format(time.RFC3339) + "&to=" + window.to.Format(time.RFC3339)
+				if code := getJSON(t, s, key, path+query, &a); code != http.StatusOK {
+					t.Fatalf("status %d, want 200", code)
+				}
+				if !a.From.Equal(window.from) || !a.To.Equal(window.to) {
+					t.Errorf("bounds %v..%v, want %v..%v", a.From, a.To, window.from, window.to)
+				}
+				if a.Resolution != window.res || len(a.Samples) != len(window.samples) {
+					t.Fatalf("resolution %d, %d samples; want %d and %d", a.Resolution, len(a.Samples), window.res, len(window.samples))
+				}
+				for i, at := range window.samples {
+					if !a.Samples[i].At.Equal(at) {
+						t.Errorf("sample %d at %v, want %v", i, a.Samples[i].At, at)
+					}
+				}
+			})
+		}
+	}
+}
