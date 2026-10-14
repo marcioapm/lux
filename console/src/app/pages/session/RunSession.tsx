@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Badge,
   EmptyState,
@@ -57,13 +57,17 @@ interface Ctx {
   filter: Filter;
 }
 
-function summaryOf(ctx: Ctx, th: SessionThread) {
+function summaryOf(ctx: Pick<Ctx, "s" | "colors">, th: SessionThread) {
+  return childSummary(th, agentOf(ctx.s, th), ctx.colors.get(th.id));
+}
+
+function childSummary(th: SessionThread, agent: string | undefined, color: string | undefined) {
   return {
     id: th.id,
     title: th.title,
-    agent: agentOf(ctx.s, th),
+    agent,
     model: th.model,
-    color: ctx.colors.get(th.id) ?? "var(--fg-faint)",
+    color: color ?? "var(--fg-faint)",
     status: th.status,
     startedAt: th.startedAt,
     endedAt: th.endedAt,
@@ -72,10 +76,24 @@ function summaryOf(ctx: Ctx, th: SessionThread) {
   };
 }
 
-function Tool({ ctx, thread, t }: { ctx: Ctx; thread: SessionThread; t: ToolItem }) {
-  const child = t.child ? ctx.s.threads[t.child] : undefined;
-  // Output cannot scroll to a record yet: the link opens the tab and names the record.
-  const record = { label: `record ${t.cursor} in Output`, onClick: () => setSearchParams({ tab: "output" }, { replace: false }) };
+// Output cannot scroll to a record yet: the link opens the tab and names the record.
+const openOutput = () => setSearchParams({ tab: "output" }, { replace: false });
+
+interface ItemProps {
+  item: SessionItem;
+  cutNote?: string;
+  child?: SessionThread;
+  agent?: string;
+  color?: string;
+  selected: boolean;
+  // Defined only for rows whose duration still moves.
+  now?: number;
+  open: (id: string) => void;
+}
+
+function Tool({ t, cutNote, child, agent, color, selected, now, open }: ItemProps & { t: ToolItem }) {
+  const record = useMemo(() => ({ label: `record ${t.cursor} in Output`, onClick: openOutput }), [t.cursor]);
+  const onOpen = useCallback(() => child && open(child.id), [child, open]);
   return (
     <ToolCall
       name={t.name}
@@ -84,20 +102,21 @@ function Tool({ ctx, thread, t }: { ctx: Ctx; thread: SessionThread; t: ToolItem
       status={t.status}
       start={t.t}
       end={t.end}
-      now={ctx.now}
+      now={now}
       input={toolInputText(t)}
       diff={t.diff}
       output={t.output}
       error={t.error}
-      cutNote={toolCutNote(ctx.s.adapter, thread, t)}
+      cutNote={cutNote}
       record={record}
     >
-      {child && <SubagentStub {...summaryOf(ctx, child)} last={lastActivity(child)} selected={ctx.selected === child.id} now={ctx.now} onOpen={() => ctx.open(child.id)} />}
+      {child && <SubagentStub {...childSummary(child, agent, color)} last={lastActivity(child)} selected={selected} now={now} onOpen={onOpen} />}
     </ToolCall>
   );
 }
 
-function Item({ ctx, thread, item }: { ctx: Ctx; thread: SessionThread; item: SessionItem }) {
+const Item = memo(function Item(props: ItemProps) {
+  const { item } = props;
   switch (item.kind) {
     case "input":
       return <InputTurn t={item.t} text={item.text} sender={item.sender} steer={item.steer} phase={item.phase} error={item.error} truncated={item.truncated} attachments={item.attachments} />;
@@ -108,7 +127,7 @@ function Item({ ctx, thread, item }: { ctx: Ctx; thread: SessionThread; item: Se
     case "plan":
       return <PlanTurn t={item.t} steps={item.steps} />;
     case "tool":
-      return <Tool ctx={ctx} thread={thread} t={item} />;
+      return <Tool {...props} t={item} />;
     case "note":
       return (
         <Note t={item.t} tone={item.tone} detail={item.detail}>
@@ -133,12 +152,28 @@ function Item({ ctx, thread, item }: { ctx: Ctx; thread: SessionThread; item: Se
       );
     }
   }
-}
+});
 
 const fmtTokens = (n: number | undefined) => (n == null ? "–" : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
 function Items({ ctx, thread }: { ctx: Ctx; thread: SessionThread }): ReactNode {
-  return visible(thread.items, ctx.filter).map((i) => <Item key={i.id} ctx={ctx} thread={thread} item={i} />);
+  return visible(thread.items, ctx.filter).map((item) => {
+    const child = item.kind === "tool" && item.child ? ctx.s.threads[item.child] : undefined;
+    const live = item.kind === "tool" && (item.status === "running" || item.status === "pending" || child?.status === "running");
+    return (
+      <Item
+        key={item.id}
+        item={item}
+        cutNote={item.kind === "tool" ? toolCutNote(ctx.s.adapter, thread, item) : undefined}
+        child={child}
+        agent={child ? agentOf(ctx.s, child) : undefined}
+        color={child ? ctx.colors.get(child.id) : undefined}
+        selected={!!child && ctx.selected === child.id}
+        now={live ? ctx.now : undefined}
+        open={ctx.open}
+      />
+    );
+  });
 }
 
 function Panel({ ctx, id, bare, onClose }: { ctx: Ctx; id: string; bare?: boolean; onClose: () => void }) {
