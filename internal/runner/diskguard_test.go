@@ -841,7 +841,7 @@ func TestUsageLoopSampleOutlastsTheInterval(t *testing.T) {
 // When only the writable layer's probe fails and the volumes alone are
 // over the limit, the sample is conclusive and keeps the last known
 // writable layer: a stop is not counted as freeing nothing.
-func TestFailedLayerProbeKeepsTheLastLayer(t *testing.T) {
+func TestDiskVictimsKeepTheLastLayerWhenItsProbeFails(t *testing.T) {
 	f := newDiskFixture(t)
 	p := f.placement(1)
 	withVolume(p)
