@@ -135,14 +135,22 @@ func TestResumeShapedRaise(t *testing.T) {
 	}
 }
 
+// raisedRun is a Run in pool "shaped" (testShape) of m-4-arm64 with 30 GiB
+// of saved state, resumed asking for m-1-arm64 and raised to m-2-arm64.
+func raisedRun(t *testing.T, s *Server) string {
+	t.Helper()
+	shapedPool(t, s, "shaped", &testShape)
+	id := stoppedShaped(t, s, "shaped", spec.Resources{Size: "m-4-arm64"}, i64(30*gib))
+	raiseCheck(t, s, id, resumeRequest{Resources: &resumeResources{Size: "m-1-arm64"}}, "m-2-arm64", "m-1-arm64", 30*gib)
+	return id
+}
+
 // A raise is the Run's until a later resume sizes it: one that gets what
 // it asks for clears it.
 func TestResumeShapedRaiseCleared(t *testing.T) {
 	s := testServer(t)
-	shapedPool(t, s, "shaped", &testShape)
-	id := stoppedShaped(t, s, "shaped", spec.Resources{Size: "m-4-arm64"}, i64(30*gib))
+	id := raisedRun(t, s)
 	key := apiKey(t, s, new("t1"), "read")
-	raiseCheck(t, s, id, resumeRequest{Resources: &resumeResources{Size: "m-1-arm64"}}, "m-2-arm64", "m-1-arm64", 30*gib)
 	if got := getSizing(t, s, key, id); got == nil || got.RaisedFrom != "m-1-arm64" || got.RaisedFor != "saved state" {
 		t.Errorf("GET sizing %+v, want raised from m-1-arm64 for saved state", got)
 	}
@@ -158,10 +166,8 @@ func TestResumeShapedRaiseCleared(t *testing.T) {
 // raise, which described the old one.
 func TestResumeShapedRaiseHiddenAfterForeignResize(t *testing.T) {
 	s := testServer(t)
-	shapedPool(t, s, "shaped", &testShape)
-	id := stoppedShaped(t, s, "shaped", spec.Resources{Size: "m-4-arm64"}, i64(30*gib))
+	id := raisedRun(t, s)
 	key := apiKey(t, s, new("t1"), "read")
-	raiseCheck(t, s, id, resumeRequest{Resources: &resumeResources{Size: "m-1-arm64"}}, "m-2-arm64", "m-1-arm64", 30*gib)
 	execSQL(t, s, context.Background(), `UPDATE runs SET resolved_size = 'm-8-arm64',
 		spec = jsonb_set(spec, '{resources}', spec->'resources' || $2::jsonb) WHERE id = $1`,
 		id, map[string]any{"cpus": 8, "memory": testShape.Memory, "disk": testShape.Disk})
@@ -178,9 +184,7 @@ func TestResumeShapedRaiseHiddenAfterForeignResize(t *testing.T) {
 func TestResumeRaisedOutOfShapedPool(t *testing.T) {
 	s := testServer(t)
 	shapedPool(t, s, "plain", nil)
-	shapedPool(t, s, "shaped", &testShape)
-	id := stoppedShaped(t, s, "shaped", spec.Resources{Size: "m-4-arm64"}, i64(30*gib))
-	raiseCheck(t, s, id, resumeRequest{Resources: &resumeResources{Size: "m-1-arm64"}}, "m-2-arm64", "m-1-arm64", 30*gib)
+	id := raisedRun(t, s)
 	execSQL(t, s, context.Background(), `UPDATE runs SET state = 'stopped' WHERE id = $1`, id)
 	if _, err := resumeReq(s, id, resumeRequest{Placement: &resumeTarget{PoolID: "plain"}}); err != nil {
 		t.Fatal(err)
