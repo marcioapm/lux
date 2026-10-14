@@ -3,6 +3,7 @@ package runner
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -34,19 +35,20 @@ var (
 )
 
 // ParseFreeMark reads "5%" (a percentage of capacity, above 0 and below
-// 100) or a size ("8GiB", "8Gi", a number of bytes, above 0).
+// 100) or a size ("8GiB", "8Gi", a number of bytes, above 0). Its error
+// does not repeat s: the caller names the flag or variable and the value.
 func ParseFreeMark(s string) (FreeMark, error) {
 	s = strings.TrimSpace(s)
 	if pct, ok := strings.CutSuffix(s, "%"); ok {
 		p, err := strconv.ParseFloat(strings.TrimSpace(pct), 64)
 		if err != nil || math.IsNaN(p) || p <= 0 || p >= 100 {
-			return FreeMark{}, fmt.Errorf("%q: want a percentage above 0%% and below 100%%", s)
+			return FreeMark{}, errors.New("want a percentage above 0% and below 100%")
 		}
 		return FreeMark{Percent: p}, nil
 	}
 	b, err := spec.ParseBytes(s)
 	if err != nil || b <= 0 {
-		return FreeMark{}, fmt.Errorf("%q: want a percentage (5%%) or a size above 0 (8GiB)", s)
+		return FreeMark{}, errors.New("want a percentage (5%) or a size above 0 (8GiB)")
 	}
 	return FreeMark{Bytes: int64(b)}, nil
 }

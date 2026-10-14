@@ -94,7 +94,7 @@ func config(fs *flag.FlagSet, args []string, getenv func(string) string) (cfg ru
 		if v := getenv(name); v != "" {
 			m, err := runner.ParseFreeMark(v)
 			if err != nil {
-				err = fmt.Errorf("%s=%w", name, err)
+				err = fmt.Errorf("%s=%q: %w", name, v, err)
 			}
 			envErr = errors.Join(envErr, err)
 			*into = m
@@ -102,11 +102,12 @@ func config(fs *flag.FlagSet, args []string, getenv func(string) string) (cfg ru
 	}
 	markOf("LUX_RUNNER_DISK_LOW_FREE", &cfg.DiskLowFree)
 	markOf("LUX_RUNNER_DISK_RECOVER_FREE", &cfg.DiskRecoverFree)
+	// flag names the flag and the value itself.
 	markFlag := func(into *runner.FreeMark) func(string) error {
 		return func(s string) error {
 			m, err := runner.ParseFreeMark(s)
 			if err != nil {
-				return errors.New(strings.TrimPrefix(err.Error(), fmt.Sprintf("%q: ", strings.TrimSpace(s))))
+				return err
 			}
 			*into = m
 			return nil
