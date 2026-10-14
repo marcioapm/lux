@@ -195,6 +195,22 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 	return err
 }
 
+// runStartPool joins to runs r, as sp, the pool the Run first started in:
+// that of the host of the placement whose started_at is r.first_started_at,
+// else of its earliest started one. runFinishPool joins, as fp, that of the
+// host of its last placement (highest epoch). sp.pool_id and fp.pool_id are
+// NULL when there is no such placement, or its host is gone or has no pool:
+// read them as coalesce(sp.pool_id, r.pool_id). A lateral join per Run, so
+// the cost follows the Runs in range (placements_run_id_epoch_key).
+const runStartPool = ` LEFT JOIN LATERAL (SELECT h.pool_id FROM (SELECT pl.host_id FROM placements pl
+		WHERE pl.run_id = r.id AND pl.started_at IS NOT NULL
+		ORDER BY pl.started_at IS DISTINCT FROM r.first_started_at, pl.started_at, pl.epoch LIMIT 1) pl
+	JOIN hosts h ON h.id = pl.host_id) sp ON true`
+
+const runFinishPool = ` LEFT JOIN LATERAL (SELECT h.pool_id FROM (SELECT pl.host_id FROM placements pl
+		WHERE pl.run_id = r.id ORDER BY pl.epoch DESC LIMIT 1) pl
+	JOIN hosts h ON h.id = pl.host_id) fp ON true`
+
 // samplePools writes, in sampleSystem's transaction and at its instant and
 // window, one sample per pool (tenant ”) and one per tenant with Runs or
 // placements on it. Each table is read once, grouped by pool (and tenant):
@@ -225,12 +241,15 @@ func samplePools(ctx context.Context, tx pgx.Tx, from time.Time) error {
 			GROUP BY GROUPING SETS ((pool_id, tenant_id), (pool_id))
 		),
 		flow AS (
-			SELECT r.pool_id, coalesce(r.tenant_id, '') AS id,
-				count(*) FILTER (WHERE r.first_started_at > w.since AND r.first_started_at <= w.until) AS started,
-				count(*) FILTER (WHERE r.finished_at > w.since AND r.finished_at <= w.until) AS finished
-			FROM runs r, w
-			WHERE r.pool_id IS NOT NULL AND (r.first_started_at > w.since AND r.first_started_at <= w.until OR r.finished_at > w.since AND r.finished_at <= w.until)
-			GROUP BY GROUPING SETS ((r.pool_id, r.tenant_id), (r.pool_id))
+			SELECT e.pool_id, coalesce(e.tenant_id, '') AS id,
+				count(*) FILTER (WHERE e.start) AS started, count(*) FILTER (WHERE NOT e.start) AS finished
+			FROM (SELECT coalesce(sp.pool_id, r.pool_id) AS pool_id, r.tenant_id, true AS start
+					FROM w, runs r`+runStartPool+` WHERE r.first_started_at > w.since AND r.first_started_at <= w.until
+				UNION ALL
+				SELECT coalesce(fp.pool_id, r.pool_id), r.tenant_id, false
+					FROM w, runs r`+runFinishPool+` WHERE r.finished_at > w.since AND r.finished_at <= w.until) e
+			WHERE e.pool_id IS NOT NULL
+			GROUP BY GROUPING SETS ((e.pool_id, e.tenant_id), (e.pool_id))
 		),
 		-- Launches requested in the last day: hosts_launch_requested bounds
 		-- the scan; a failure answered in the window was requested within it.

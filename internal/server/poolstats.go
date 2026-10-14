@@ -65,7 +65,7 @@ type PoolStats struct {
 	Hosts          map[string]int `json:"hosts" doc:"Hosts not terminated, by state."`
 	CapacityCPUs   float64        `json:"capacityCpus" doc:"Cores of its ready and draining hosts."`
 	AllocatedCPUs  float64        `json:"allocatedCpus" doc:"Cores its live placements hold (a tenant: its own)."`
-	RunsStarted    int            `json:"runsStarted" doc:"Runs first started in the range (a tenant: its own)."`
+	RunsStarted    int            `json:"runsStarted" doc:"Runs first started in the range on its hosts (a tenant: its own): a Run counts under the pool of the host it first ran on, wherever it was moved since."`
 	RunsHourly     []int          `json:"runsHourly" doc:"The same per hour of the range, oldest first."`
 	LaunchFailures int            `json:"launchFailures" doc:"Launches the provider refused in the range."`
 	Cost           []MoneyAmount  `json:"cost" doc:"The cost of the Runs on its machines (compute and block storage) in the range, per currency; empty: none reported."`
@@ -170,8 +170,12 @@ func (s *Server) poolStats(ctx context.Context, in *poolStatsInput) (*poolStatsO
 		}); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT pool_id, floor(extract(epoch FROM first_started_at - $2) / 3600)::int, count(*)
-			FROM runs WHERE pool_id = ANY($1) AND first_started_at > $2 AND first_started_at <= $3
+		// The pool is the one each Run first started in, not runs.pool_id,
+		// so every Run started in range is read, not only those bound to ids.
+		rows, err = tx.Query(ctx, `SELECT x.pool, floor(extract(epoch FROM x.at - $2) / 3600)::int, count(*)
+			FROM (SELECT coalesce(sp.pool_id, r.pool_id) AS pool, r.first_started_at AS at
+				FROM runs r`+runStartPool+` WHERE r.first_started_at > $2 AND r.first_started_at <= $3) x
+			WHERE x.pool = ANY($1)
 			GROUP BY 1, 2`, ids, out.Body.From, out.Body.To)
 		if err != nil {
 			return err
