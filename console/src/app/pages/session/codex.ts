@@ -18,7 +18,17 @@ function threadOf(b: Builder, threadId: string | undefined): string {
   return threadId;
 }
 
-const status = (s: string | undefined): ToolStatus => (s === "completed" ? "completed" : s === "failed" || s === "declined" ? "error" : "running");
+function status(s: string | undefined): ToolStatus {
+  switch (s) {
+    case "completed":
+      return "completed";
+    case "failed":
+    case "declined":
+      return "error";
+    default:
+      return "running";
+  }
+}
 
 function tool(item: Obj): Omit<ToolItem, "id" | "t" | "cursor"> | null {
   const st = status(str(item.status));

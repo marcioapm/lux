@@ -154,7 +154,11 @@ const Item = memo(function Item(props: ItemProps) {
   }
 });
 
-const fmtTokens = (n: number | undefined) => (n == null ? "–" : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+function fmtTokens(n: number | undefined): string {
+  if (n == null) return "–";
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
 
 function Items({ ctx, thread }: { ctx: Ctx; thread: SessionThread }): ReactNode {
   return visible(thread.items, ctx.filter).map((item) => {

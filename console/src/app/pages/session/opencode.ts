@@ -24,7 +24,16 @@ function modelName(m: unknown): string | undefined {
   return str(o?.providerID) ? `${str(o?.providerID)}/${id}` : id;
 }
 
-const partStatus = (s: string | undefined): ToolStatus => (s === "completed" ? "completed" : s === "error" ? "error" : s === "running" ? "running" : "pending");
+function partStatus(s: string | undefined): ToolStatus {
+  switch (s) {
+    case "completed":
+    case "error":
+    case "running":
+      return s;
+    default:
+      return "pending";
+  }
+}
 
 export function foldOpenCode(b: Builder, type: string, d: Obj): boolean {
   switch (type) {
