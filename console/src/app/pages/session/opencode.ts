@@ -82,7 +82,7 @@ export function foldOpenCode(b: Builder, type: string, d: Obj): boolean {
         b.update<ToolItem>(thread, id, patch);
       } else {
         b.thread(thread);
-        b.push(thread, { kind: "tool", id, t: num(time?.start) ?? b.t, name: str(d.tool) ?? "tool", cursor: b.at, ...patch });
+        b.push(thread, { kind: "tool", id, t: num(time?.start) ?? b.t, name: str(d.tool) ?? "tool", cursor: b.at, ...patch, status });
       }
       return true;
     }
