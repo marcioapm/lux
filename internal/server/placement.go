@@ -46,7 +46,8 @@ func (h *candidateHost) share(cpus float64, mem, disk int64) float64 {
 
 // allocated is the share of h reserved by normal work. Unclaimed spot
 // placements count as free, so pickHost and the planner's reserve (whose
-// readyHosts drops spot usage) rank by the same normal-only allocation.
+// readyHosts drops spot usage) rank by the same normal-only allocation,
+// claimed spot space aside.
 // They need not pick the same host: the planner's fit set treats spot space
 // as free, pickHost's does not. A host holding only spot work is idle to
 // scale-down, so pack must not rank it full and keep it alive with normal

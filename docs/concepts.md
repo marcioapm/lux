@@ -668,7 +668,8 @@ sync modes and, on a shaped pool, the shape):
   spot work comes first (before affinity), so a fully empty host stays
   free for a whole-host Run without reclaiming spot work. When a normal
   Run fits nowhere without reclaiming, pack reclaims on the most allocated
-  host whose spot work suffices; spread tries hosts by id. Spot Runs
+  host whose spot work suffices, ties by id (not by spot work, which would
+  kill more of it); spread tries hosts by id. Spot Runs
   themselves are placed by spot admission, not by `placement`.
 
 A pool without a placement packs while shaped and spreads otherwise, so

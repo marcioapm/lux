@@ -513,17 +513,22 @@ func normalDemand(ctx context.Context, tx pgx.Tx, hosts []*candidateHost) ([]pen
 // reclaimPlan picks, on one host, a deterministic small set of unclaimed
 // spot placements whose release makes normal Run r fit (hostFit on the host
 // with them removed, tenancy included). Hosts are tried in id order, or
-// for a pack Run in pack order (the fullest by normal work first, as the
-// planner reserves); on each, the youngest placements are removed until r
+// for a pack Run the fullest by normal work first, ties by id, as the
+// planner reserves. Pack's occupancy tie-break is left out: every host here
+// needs a reclaim, and the most occupied one has the most spot work to
+// kill. On each host the youngest placements are removed until r
 // fits, then any victim r fits without is put back. nil when no host's spot
 // placements suffice. One simulation per host: each step releases or
 // restores one victim.
 func reclaimPlan(r pendingRun, hosts []*candidateHost) (*candidateHost, []spotPlacement) {
 	ordered := byHostID(hosts)
 	if r.Pack {
-		slices.SortFunc(ordered, func(a, b *candidateHost) int {
-			return packOrder(packCandidateOf(a, r.AvoidHost, 0), packCandidateOf(b, r.AvoidHost, 0))
-		})
+		rank := func(h *candidateHost) packCandidate {
+			c := packCandidateOf(h, r.AvoidHost, 0)
+			c.occupied = c.used
+			return c
+		}
+		slices.SortFunc(ordered, func(a, b *candidateHost) int { return packOrder(rank(a), rank(b)) })
 	}
 	for _, h := range ordered {
 		var free []spotPlacement

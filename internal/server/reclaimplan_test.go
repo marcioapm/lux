@@ -281,6 +281,20 @@ func TestReclaimPlan(t *testing.T) {
 		}, func() []*candidateHost {
 			return []*candidateHost{planHost("ha", 0, spotOn("s1", "t1", 4)), planHost("hb", 2, spotOn("s2", "t1", 2))}
 		}, "hb", []string{"s2"}},
+		{"pack: normal allocation tied, the lower id, not the most spot work", func() pendingRun {
+			r := normalRun(3)
+			r.Pack = true
+			return r
+		}, func() []*candidateHost {
+			return []*candidateHost{planHost("hb", 0, spotOn("s2", "t1", 4)), planHost("ha", 0, spotOn("s1", "t1", 2))}
+		}, "ha", []string{"s1"}},
+		{"pack: the avoided host last", func() pendingRun {
+			r := normalRun(2)
+			r.Pack, r.AvoidHost = true, "hb"
+			return r
+		}, func() []*candidateHost {
+			return []*candidateHost{planHost("ha", 0, spotOn("s1", "t1", 4)), planHost("hb", 2, spotOn("s2", "t1", 2))}
+		}, "ha", []string{"s1"}},
 		{"spread: the same hosts in id order", func() pendingRun { return normalRun(2) },
 			func() []*candidateHost {
 				return []*candidateHost{planHost("hb", 2, spotOn("s2", "t1", 2)), planHost("ha", 0, spotOn("s1", "t1", 4))}
