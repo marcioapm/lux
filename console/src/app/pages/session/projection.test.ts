@@ -1,9 +1,52 @@
 import { expect, test } from "bun:test";
 import { fixture } from "./fixtures.ts";
 import { sessionFromRecords, SessionProjection } from "./projection.ts";
-import type { InputItem, MessageItem, PlanItem, SessionItem, ThoughtItem, ToolItem } from "./types.ts";
+import type { InputItem, MessageItem, NoteItem, OutputRecord, PlanItem, SessionItem, ThoughtItem, ToolItem } from "./types.ts";
 
 const kinds = (items: SessionItem[]) => items.map((i) => (i.kind === "marker" ? `marker:${i.type}` : i.kind));
+const record = (epoch: number, seq: number, type: string, data: Record<string, unknown> = {}): OutputRecord => ({ epoch, seq, cursor: `${epoch}.${seq}`, t: seq * 1000, ch: "event", event: { type, data } });
+const chunk = (text: string, messageId?: string) => ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text }, ...(messageId ? { messageId } : {}) });
+
+// Plain chunks use lux-fake's session/update shape, without messageId.
+test("plain ACP keeps turns and thoughts separated by tools", () => {
+  const events: [string, Record<string, unknown>][] = [
+    ["lux.input", { requestId: "prompt", text: "one" }],
+    ["acp.agent_message_chunk", chunk("first ")], ["acp.agent_message_chunk", chunk("reply")],
+    ["acp.turn_end", {}], ["lux.input", { requestId: "two", text: "two" }],
+    ["acp.agent_message_chunk", chunk("second reply")], ["acp.turn_end", {}],
+    ["acp.agent_thought_chunk", { ...chunk("plan A"), sessionUpdate: "agent_thought_chunk" }],
+    ["acp.tool_call", { toolCallId: "call", title: "shell", status: "completed" }],
+    ["acp.agent_thought_chunk", { ...chunk("plan B"), sessionUpdate: "agent_thought_chunk" }],
+    ["acp.agent_thought_chunk", { ...chunk(" more"), sessionUpdate: "agent_thought_chunk" }],
+  ];
+  const items = sessionFromRecords("acp", events.map(([type, data], i) => record(1, i + 1, type, data))).threads.root!.items;
+  expect(kinds(items)).toEqual(["input", "message", "marker:turn", "input", "message", "marker:turn", "thought", "tool", "thought"]);
+  expect(items.filter((i) => i.kind === "message").map((i) => i.text)).toEqual(["first reply", "second reply"]);
+  expect(items.filter((i) => i.kind === "thought").map((i) => i.text)).toEqual(["plan A", "plan B more"]);
+});
+
+test("ACP initial history is retained; later epoch replay stops at lux.session", () => {
+  const p = new SessionProjection("opencode");
+  p.fold([record(1, 1, "acp.agent_message_chunk", chunk("history", "m")), record(1, 2, "acp.tool_call", { toolCallId: "t", title: "shell", status: "completed" }), record(1, 3, "lux.session", { sessionId: "s" })]);
+  p.fold([record(2, 1, "acp.agent_message_chunk", chunk("history", "m")), record(2, 2, "acp.tool_call", { toolCallId: "t", title: "shell", status: "in_progress" }), record(2, 3, "lux.warning", { message: "resuming" }), record(2, 4, "opencode.message", { sessionID: "child", role: "assistant", id: "child-message", text: "child history" }), record(2, 5, "lux.session", { sessionId: "s" }), record(2, 6, "lux.input", { requestId: "next", text: "next" }), record(2, 7, "acp.agent_message_chunk", chunk("genuine", "m2"))]);
+  const s = p.snapshot();
+  expect(s.threads.root!.items.filter((i) => i.kind === "message").map((i) => i.text)).toEqual(["history", "genuine"]);
+  expect(s.threads.root!.items.find((i) => i.kind === "tool")?.status).toBe("completed");
+  expect(s.threads.root!.items.some((i) => i.kind === "note" && i.text === "resuming")).toBe(true);
+  expect(s.threads.child!.items.some((i) => i.kind === "message" && i.text === "child history")).toBe(true);
+  p.fold([record(3, 1, "lux.session", { sessionId: "s" }), record(3, 2, "acp.agent_message_chunk", chunk("no replay", "m3"))]);
+  expect(p.snapshot().threads.root!.items.at(-1)?.kind).toBe("message");
+  expect((p.snapshot().threads.root!.items.at(-1) as MessageItem).text).toBe("no replay");
+});
+
+test("ACP permission wording follows selected option kind", () => {
+  for (const kind of ["allow_once", "allow_always", "reject_once", "reject_always"]) {
+    const items = sessionFromRecords("acp", [record(1, 1, "acp.permission", { selected: "choice", request: { toolCall: { title: "shell" }, options: [{ optionId: "choice", kind }] } })]).threads.root!.items;
+    const note = items[0] as NoteItem;
+    expect(note.tone).toBe(kind.startsWith("allow_") ? "permission" : "warning");
+    expect(note.text).toBe(`lux ${kind.startsWith("allow_") ? "allowed" : "had to reject"} shell`);
+  }
+});
 
 test("acp: an OpenCode turn over plain ACP reads as input, thought, plan, tools, reply, turn end", () => {
   const s = sessionFromRecords("acp", fixture("acp-opencode-1.18.21-todo-task.jsonl"));

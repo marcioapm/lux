@@ -79,7 +79,10 @@ export function foldACP(b: Builder, type: string, d: Obj, thread = ROOT): boolea
     case "acp.agent_thought_chunk": {
       const text = str(obj(d.content)?.text);
       if (text == null) return true;
-      appendText(b, thread, type === "acp.agent_message_chunk" ? "message" : "thought", str(d.messageId) ?? `${type}:${b.memo.get("acpTurn") ?? 0}`, text);
+      const kind = type === "acp.agent_message_chunk" ? "message" : "thought";
+      const last = b.last(thread);
+      const key = str(d.messageId) ?? (last?.kind === kind && (last.kind !== "message" || last.streaming) ? last.id.slice(kind.length + 1) : b.at);
+      appendText(b, thread, kind, key, text);
       return true;
     }
     case "acp.tool_call":
@@ -93,7 +96,9 @@ export function foldACP(b: Builder, type: string, d: Obj, thread = ROOT): boolea
       const req = obj(d.request);
       const tc = obj(req?.toolCall);
       const what = str(tc?.title) ?? "a tool call";
-      b.push(thread, { kind: "note", id: `perm:${b.at}`, t: b.t, tone: "permission", text: `lux allowed ${what}`, detail: d.selected ? "allowed once, by policy" : "no allow option: not allowed" });
+      const selected = arr(req?.options).map(obj).find((option) => option?.optionId === d.selected);
+      const allowed = str(selected?.kind)?.startsWith("allow_") === true;
+      b.push(thread, { kind: "note", id: `perm:${b.at}`, t: b.t, tone: allowed ? "permission" : "warning", text: `lux ${allowed ? "allowed" : "had to reject"} ${what}`, detail: allowed ? "allowed by policy" : "no allow option: not allowed" });
       return true;
     }
   }

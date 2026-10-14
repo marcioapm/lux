@@ -60,6 +60,15 @@ one fixture per adapter.
 - **Subagents started before a resume can be missing** until OpenCode's
   bus mentions them again (the bus doesn't replay). Show what arrives;
   don't invent a gap marker the data cannot back.
+- **ACP replay boundary:** retain historical output in the first observed
+  epoch. In later epochs, ignore `acp.*` records before `lux.session`;
+  `internal/adapter/acp.go` emits that signal after `session/load` or
+  `session/new` completes and before queued input drains. Keep lux markers
+  and OpenCode child records during that interval. An epoch without replay
+  still emits `lux.session` before genuine replies. This boundary assumes
+  the agent finishes its load notifications before the load RPC returns;
+  notifications sent after that response cannot be distinguished from live
+  output with the existing records.
 - **Cost per subagent** exists for OpenCode (`opencode.message.cost`,
   tokens). Show it per subagent; the Run's total stays on Resources & cost.
 

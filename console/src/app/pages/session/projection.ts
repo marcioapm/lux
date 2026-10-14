@@ -211,6 +211,8 @@ export function eventOf(r: OutputRecord): { type: string; data: Record<string, u
 export class SessionProjection {
   private readonly b: Builder;
   private last?: Session;
+  private epoch?: number;
+  private replaying = false;
 
   constructor(adapter: Adapter) {
     this.b = new Builder(adapter);
@@ -223,8 +225,14 @@ export class SessionProjection {
       b.cursor = r.cursor;
       b.t = r.t;
       b.at = r.cursor;
+      if (this.epoch !== r.epoch) {
+        this.replaying = this.epoch != null;
+        this.epoch = r.epoch;
+      }
       const ev = eventOf(r);
       if (!ev) continue;
+      if (ev.type === "lux.session") this.replaying = false;
+      if (this.replaying && ev.type.startsWith("acp.")) continue;
       if (foldLux(b, ev.type, ev.data)) continue;
       switch (b.adapter) {
         case "acp":
