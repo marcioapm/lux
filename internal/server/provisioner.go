@@ -46,10 +46,11 @@ type Provider interface {
 // every subnet of its network with its zone, and its billable public IPv4
 // addresses (every distinct one on any of its interfaces).
 type HostNetwork struct {
-	SubnetCIDRs []string        `json:"subnetCidrs"`
-	Zone        string          `json:"zone"`
-	VPCSubnets  []NetworkSubnet `json:"vpcSubnets"`
-	PublicIPv4  int             `json:"publicIPv4"`
+	SubnetsUnavailable bool            `json:"-"`
+	SubnetCIDRs        []string        `json:"subnetCidrs"`
+	Zone               string          `json:"zone"`
+	VPCSubnets         []NetworkSubnet `json:"vpcSubnets"`
+	PublicIPv4         int             `json:"publicIPv4"`
 }
 
 type NetworkSubnet struct {

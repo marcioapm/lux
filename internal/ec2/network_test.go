@@ -57,7 +57,7 @@ func TestNetworkDiscoveryPaginationAndCache(t *testing.T) {
 	p.now = func() time.Time { return now }
 	template := json.RawMessage(`{"region":"eu-north-1"}`)
 	want := map[string]server.HostNetwork{"i-a": {SubnetCIDRs: []string{"10.0.0.0/24", "2001:db8::/64"}, Zone: "eu-north-1a", PublicIPv4: 3,
-		VPCSubnets: []server.NetworkSubnet{{CIDR: "10.0.0.0/24", Zone: "eu-north-1a"}, {CIDR: "2001:db8::/64", Zone: "eu-north-1a"}, {CIDR: "10.0.1.0/24", Zone: "eu-north-1b"}}}}
+		VPCSubnets: []server.NetworkSubnet{{CIDR: "10.0.0.0/24", Zone: "eu-north-1a"}, {CIDR: "10.0.1.0/24", Zone: "eu-north-1b"}, {CIDR: "2001:db8::/64", Zone: "eu-north-1a"}}}}
 	for range 2 {
 		got, err := p.Network(context.Background(), template, []string{"i-a", "i-missing"})
 		if err != nil || !reflect.DeepEqual(got, want) {
@@ -70,7 +70,7 @@ func TestNetworkDiscoveryPaginationAndCache(t *testing.T) {
 	now = now.Add(server.DefaultProviderCheckEvery)
 	failSubnets = true
 	got, err := p.Network(context.Background(), template, []string{"i-a"})
-	if err == nil || got != nil {
+	if err != nil || !got["i-a"].SubnetsUnavailable || got["i-a"].PublicIPv4 != 3 {
 		t.Fatalf("failed refresh = %v, %v", got, err)
 	}
 	failSubnets = false
@@ -151,7 +151,7 @@ func TestPrefixesClassificationCacheConditionalAndFallback(t *testing.T) {
 		check()
 		check()
 	}
-	if calls != 4 {
+	if calls != 6 {
 		t.Fatalf("refresh fetches = %d", calls)
 	}
 	other, err := p.Prefixes(context.Background(), json.RawMessage(`{"region":"us-east-1"}`))

@@ -120,12 +120,35 @@ func (s *Server) recordNetwork(ctx context.Context) {
 				if !ok {
 					continue
 				}
-				if err := s.storeNetwork(ctx, h.ID, n, networkClasses(n, prefixes)); err != nil && ctx.Err() == nil {
+				if err := s.storeNetworkRefresh(ctx, h.ID, n, prefixes); err != nil && ctx.Err() == nil {
 					s.log.Warn("network: store", "host", h.ID, "err", err)
 				}
 			}
 		}
 	}
+}
+
+func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostNetwork, prefixes ProviderPrefixes) error {
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var old *HostNetwork
+		var previous *proto.NetworkClasses
+		if err := tx.QueryRow(ctx, `SELECT network, net_classes FROM hosts WHERE id=$1 FOR UPDATE`, hostID).Scan(&old, &previous); err != nil {
+			return err
+		}
+		if n.SubnetsUnavailable && old != nil {
+			n.SubnetCIDRs, n.VPCSubnets = old.SubnetCIDRs, old.VPCSubnets
+		}
+		if prefixes.Source == "" && previous != nil && previous.Catalog() {
+			prefixes.Source, prefixes.RegionService, prefixes.RegionPublic, prefixes.ProviderGlobal, prefixes.Provider = previous.Source, previous.RegionService, previous.RegionPublic, previous.ProviderGlobal, previous.Provider
+			if previous.FetchedAt != nil {
+				prefixes.FetchedAt = *previous.FetchedAt
+			}
+		}
+		n.SubnetCIDRs, n.VPCSubnets = nonNil(n.SubnetCIDRs), nonNil(n.VPCSubnets)
+		nc := networkClasses(n, prefixes)
+		_, err := tx.Exec(ctx, `UPDATE hosts SET network=$2, net_classes=$3 WHERE id=$1 AND (network IS DISTINCT FROM $2::jsonb OR net_classes IS DISTINCT FROM $3::jsonb)`, hostID, n, nc)
+		return err
+	})
 }
 
 // storeNetwork writes a host's network and classes only when either changed.

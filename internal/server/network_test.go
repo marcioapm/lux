@@ -148,6 +148,31 @@ func TestRecordNetworkRefreshesLiveProviderHosts(t *testing.T) {
 }
 
 // Unchanged answers write nothing: the row's xmin stays.
+func TestRecordNetworkColdFailureAndPartialSubnets(t *testing.T) {
+	s, _, p := networkFixture(t)
+	ctx := context.Background()
+	s.recordNetwork(ctx)
+	var before proto.NetworkClasses
+	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id='h1'`, nil, &before)
+	fresh := &networkProvider{nets: map[string]HostNetwork{"i-1": {Zone: "eu-west-1a", PublicIPv4: 4, SubnetsUnavailable: true}, "i-2": hostA()}, prefixErr: errors.New("unavailable")}
+	s.cfg.Providers["ec2"] = fresh
+	s.recordNetwork(ctx)
+	var n HostNetwork
+	var after proto.NetworkClasses
+	systemScan(t, s, `SELECT network,net_classes FROM hosts WHERE id='h1'`, nil, &n, &after)
+	if n.PublicIPv4 != 4 || !slices.Equal(n.SubnetCIDRs, p.nets["i-1"].SubnetCIDRs) || len(n.VPCSubnets) != 4 {
+		t.Fatal(n)
+	}
+	if after.Version != before.Version || !after.Catalog() {
+		t.Fatalf("lost last-good catalog: %+v", after)
+	}
+	var other HostNetwork
+	systemScan(t, s, `SELECT network FROM hosts WHERE id='h2'`, nil, &other)
+	if len(other.VPCSubnets) != 4 {
+		t.Fatal(other)
+	}
+}
+
 func TestRecordNetworkWritesOnlyChanges(t *testing.T) {
 	s, _, _ := networkFixture(t)
 	ctx := context.Background()

@@ -62,14 +62,11 @@ func (p *Provider) Network(ctx context.Context, template json.RawMessage, provid
 					continue
 				}
 				entry, err := p.vpcSubnets(ctx, c, t.Region, aws.ToString(inst.VpcId))
-				if err != nil {
-					return nil, err
+				n := server.HostNetwork{SubnetsUnavailable: err != nil}
+				if err == nil {
+					n.SubnetCIDRs = slices.Clone(entry.subnets[aws.ToString(inst.SubnetId)])
+					n.VPCSubnets = slices.Clone(entry.all)
 				}
-				cidrs, ok := entry.subnets[aws.ToString(inst.SubnetId)]
-				if !ok || len(cidrs) == 0 {
-					continue
-				}
-				n := server.HostNetwork{SubnetCIDRs: slices.Clone(cidrs), VPCSubnets: slices.Clone(entry.all)}
 				if inst.Placement != nil {
 					n.Zone = aws.ToString(inst.Placement.AvailabilityZone)
 				}
@@ -128,12 +125,28 @@ func (p *Provider) vpcSubnets(ctx context.Context, c *awsec2.Client, region, vpc
 					}
 				}
 			}
+			slices.Sort(cidrs)
 			e.subnets[aws.ToString(sn.SubnetId)] = cidrs
 			for _, cidr := range cidrs {
 				e.all = append(e.all, server.NetworkSubnet{CIDR: cidr, Zone: aws.ToString(sn.AvailabilityZone)})
 			}
 		}
 	}
+	slices.SortFunc(e.all, func(a, b server.NetworkSubnet) int {
+		if a.CIDR < b.CIDR {
+			return -1
+		}
+		if a.CIDR > b.CIDR {
+			return 1
+		}
+		if a.Zone < b.Zone {
+			return -1
+		}
+		if a.Zone > b.Zone {
+			return 1
+		}
+		return 0
+	})
 	e.at = p.now()
 	if p.subnetCache == nil {
 		p.subnetCache = map[[2]string]subnetEntry{}
@@ -208,8 +221,6 @@ func uniquePrefixes(in []string) []string {
 }
 
 func (p *Provider) fetchPrefixes(ctx context.Context) error {
-	// Failed refreshes also wait 24h, retaining the last validated catalog.
-	p.prefixChecked = p.now()
 	url := os.Getenv("LUX_IPRANGES_URL")
 	if url == "" {
 		url = "https://ip-ranges.amazonaws.com/ip-ranges.json"
@@ -228,6 +239,7 @@ func (p *Provider) fetchPrefixes(ctx context.Context) error {
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusNotModified && p.prefixGood {
+		p.prefixChecked = p.now()
 		return nil
 	}
 	if res.StatusCode != http.StatusOK {
@@ -259,5 +271,6 @@ func (p *Provider) fetchPrefixes(ctx context.Context) error {
 	}
 	p.prefixCatalog, p.prefixETag, p.prefixGood = catalog, res.Header.Get("ETag"), true
 	p.prefixFetched = p.now()
+	p.prefixChecked = p.now()
 	return nil
 }
