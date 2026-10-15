@@ -5,7 +5,10 @@
 // terminal and see its screen, as tmux does, rather than a tail of bytes.
 //
 // Memory is bounded by the size: two screens of rows×cols cells and at
-// most the history limit of main-screen lines, each at most cols cells.
+// most the history limit of main-screen lines, each at most cols cells,
+// at 20 bytes a cell. With a 2000-line history that is about 3.3 MB at
+// 24×80 and 24 MB at the largest size, 200×500 (MaxRows×MaxCols), plus at
+// most 4096 interned grapheme clusters of up to 32 bytes.
 // The alternate screen has no history. A Terminal is not safe for
 // concurrent use.
 //
@@ -23,10 +26,13 @@ import (
 )
 
 // Size limits: a resize beyond them is clamped, so a client cannot make
-// the emulator allocate without bound.
+// the emulator allocate without bound. 200×500 is more than a 4K display
+// shows at a small font. A snapshot whose screen part alone is over its
+// limit is not made (Snapshot returns nil), which only colour-heavy
+// screens near these sizes reach.
 const (
-	MaxRows = 500
-	MaxCols = 1000
+	MaxRows = 200
+	MaxCols = 500
 )
 
 // Color is a cell's colour: 0 the terminal's default, else Indexed or RGB.

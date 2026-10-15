@@ -15,44 +15,93 @@ import (
 // scrollback, which a person attaching keeps.
 //
 // With limit > 0, the oldest history lines are left out as needed to keep
-// it within limit bytes; the screen itself is always sent whole.
+// it within limit bytes. If the screen part alone (main, and alternate when
+// shown) is over limit, there is no snapshot: Snapshot returns nil, and a
+// client goes on without one. Work and allocation are bounded by limit:
+// the screen part is rendered first, then history from the newest line
+// back while it fits.
 func (t *Terminal) Snapshot(limit int) []byte {
-	b := make([]byte, 0, (t.hist.n+2*t.rows)*(t.cols+16)+256)
+	prefix := t.appendPrefix(make([]byte, 0, 256))
+	screens := 1
+	if t.scr == &t.alt {
+		screens = 2
+	}
+	hint := screens*t.rows*(t.cols+16) + 512
+	room := 0 // the screen part's bound; 0 none
+	if limit > 0 {
+		if room = limit - len(prefix); room <= 0 {
+			return nil
+		}
+		hint = min(hint, room)
+	}
+	scr, ok := t.appendScreen(make([]byte, 0, hint), room)
+	if !ok {
+		return nil
+	}
+
+	first, size := 0, 0
+	if limit > 0 {
+		// Newest to oldest: how many lines fit, measured one at a time.
+		budget := room - len(scr)
+		var line []byte
+		first = t.hist.n
+		for i := t.hist.n - 1; i >= 0; i-- {
+			line = t.appendLine(line[:0], t.HistoryLine(i), true)
+			if size+len(line)+2 > budget {
+				break
+			}
+			size += len(line) + 2
+			first = i
+		}
+	} else {
+		size = t.hist.n * (t.cols + 16)
+	}
+	b := make([]byte, 0, len(prefix)+size+len(scr))
+	b = append(b, prefix...)
+	for i := first; i < t.hist.n; i++ {
+		b = t.appendLine(b, t.HistoryLine(i), true)
+		b = append(b, "\r\n"...)
+	}
+	return append(b, scr...)
+}
+
+// appendPrefix resets what Snapshot later sets and clears the screen.
+func (t *Terminal) appendPrefix(b []byte) []byte {
 	b = append(b, "\x1b[?25l\x1b[?1049l\x1b[r\x1b[m\x1b[?6l\x1b[?7h\x1b[4l\x1b[20l\x1b>\x1b(B\x1b)B\x0f\x1b[0 q"...)
 	for _, n := range replayModes {
 		b = csiMode(b, n, false)
 	}
-	b = append(b, "\x1b[H\x1b[2J"...)
-
-	histStart := len(b)
-	ends := make([]int, 0, t.hist.n)
-	for i := 0; i < t.hist.n; i++ {
-		b = t.appendLine(b, t.HistoryLine(i), true)
-		b = append(b, "\r\n"...)
-		ends = append(ends, len(b))
-	}
-	b = t.appendScreen(b)
-	if limit > 0 && len(b) > limit {
-		// Drop whole lines, oldest first, until it fits or none is left.
-		cut := histStart
-		for _, e := range ends {
-			cut = e
-			if len(b)-(e-histStart) <= limit {
-				break
-			}
-		}
-		b = append(b[:histStart], b[cut:]...)
-	}
-	return b
+	return append(b, "\x1b[H\x1b[2J"...)
 }
 
-// appendScreen is the part of Snapshot after the history.
-func (t *Terminal) appendScreen(b []byte) []byte {
+// appendScreen is the part of Snapshot after the history. With room > 0
+// it gives up (false) once it would be over room bytes, and never grows
+// its buffer past room.
+func (t *Terminal) appendScreen(b []byte, room int) ([]byte, bool) {
+	over := func() bool { return room > 0 && len(b) > room }
+	var line []byte
+	// putLine appends l, rendered, failing when it does not fit.
+	putLine := func(l []Cell, trim bool) bool {
+		line = t.appendLine(line[:0], l, trim)
+		n := len(b) + len(line)
+		if room > 0 && n > room {
+			return false
+		}
+		if n > cap(b) && room > 0 {
+			nb := make([]byte, len(b), min(max(2*cap(b), n), room))
+			copy(nb, b)
+			b = nb
+		}
+		b = append(b, line...)
+		return true
+	}
 	for y, l := range t.main.lines {
 		if y > 0 {
 			b = append(b, "\r\n"...)
 		}
-		b = t.appendLine(b, l, true)
+		if !putLine(l, true) {
+			return nil, false
+		}
 	}
 
 	if t.scr == &t.alt {
@@ -71,7 +120,9 @@ func (t *Terminal) appendScreen(b []byte) []byte {
 		b = append(b, "\x1b[m\x1b[H\x1b[2J"...)
 		for y, l := range t.alt.lines {
 			b = cup(b, y, 0)
-			b = t.appendLine(b, l, false)
+			if !putLine(l, false) {
+				return nil, false
+			}
 		}
 		b = t.appendSaved(b, t.alt.saved)
 	} else {
@@ -150,7 +201,11 @@ func (t *Terminal) appendScreen(b []byte) []byte {
 	if !t.cursorHidden {
 		b = append(b, "\x1b[?25h"...)
 	}
-	return append(b, t.pending()...)
+	b = append(b, t.pending()...)
+	if over() {
+		return nil, false
+	}
+	return b, true
 }
 
 // appendTabs sets the tab stops, when they are not the default every 8

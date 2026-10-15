@@ -376,11 +376,21 @@ func TestSnapshotLimit(t *testing.T) {
 	if len(h) == 0 || len(h) >= len(all) || h[len(h)-1] != all[len(all)-1] || h[0] != all[len(all)-len(h)] {
 		t.Fatalf("history kept %d of %d lines, from %q", len(h), len(all), h[0])
 	}
-	// A limit below the screen itself keeps no history, never less screen.
+	// As much history as fits: the next older line would not have.
+	older := term.appendLine(nil, term.HistoryLine(term.HistoryLen()-len(h)-1), true)
+	if len(limited)+len(older)+2 <= len(full)/2 {
+		t.Fatalf("%d bytes of %d: the next older line (%d bytes) would have fit", len(limited), len(full)/2, len(older)+2)
+	}
+	// A limit that fits the screen and no history line keeps no history,
+	// never less screen; one below the screen itself gives no snapshot.
+	screenOnly := len(restored(term, 0).Snapshot(0))
 	r = New(4, 20, 1000)
-	r.Write(term.Snapshot(1))
+	r.Write(term.Snapshot(screenOnly))
 	if r.HistoryLen() != 0 || screenText(r) != screenText(term) {
-		t.Fatalf("tiny limit: history %d, screen %q", r.HistoryLen(), screenText(r))
+		t.Fatalf("screen-sized limit: history %d, screen %q", r.HistoryLen(), screenText(r))
+	}
+	if s := term.Snapshot(screenOnly - 1); s != nil {
+		t.Fatalf("a %d-byte snapshot over a limit of %d", len(s), screenOnly-1)
 	}
 }
 
