@@ -526,10 +526,13 @@ type BlobUploadResponse struct {
 }
 
 // BlobCompleteRequest is POST /runner/v1/blobs/{id}/complete; UploadID and
-// Parts are empty after a single PutObject.
+// Parts are empty after a single PutObject. Abort drops multipart upload
+// UploadID instead (the runner gave up on it): luxd answers
+// {"aborted": true} and records nothing.
 type BlobCompleteRequest struct {
 	UploadID string         `json:"uploadId,omitempty"`
 	Parts    []UploadedPart `json:"parts,omitempty"`
+	Abort    bool           `json:"abort,omitempty"`
 }
 
 type UploadedPart struct {

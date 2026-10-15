@@ -33,6 +33,14 @@ type directS3 struct {
 	deleted []string
 	next    int
 	onHead  func() // called before answering a HeadObject
+	// completeErr, when set, is CompleteMultipartUpload's answer: a status
+	// and an S3 error code.
+	completeErr *s3Err
+}
+
+type s3Err struct {
+	status int
+	code   string
 }
 
 func useDirectS3(t *testing.T, s *Server) *directS3 {
@@ -103,6 +111,11 @@ func (f *directS3) serve(w http.ResponseWriter, r *http.Request) {
 		f.parts[id] = map[string]int64{}
 		fmt.Fprintf(w, `<InitiateMultipartUploadResult><Bucket>b</Bucket><Key>%s</Key><UploadId>%s</UploadId></InitiateMultipartUploadResult>`, key, id)
 	case "CompleteMultipartUpload":
+		if e := f.completeErr; e != nil {
+			w.WriteHeader(e.status)
+			fmt.Fprintf(w, `<Error><Code>%s</Code></Error>`, e.code)
+			return
+		}
 		up, ok := f.parts[q.Get("uploadId")]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -419,18 +432,72 @@ func TestDirectUploadCompleteChecksSize(t *testing.T) {
 	}
 }
 
-// A multipart /complete that S3 refuses aborts the upload.
+// A multipart /complete that S3 refuses (a 4xx) aborts the upload; one S3
+// fails (a 5xx) answers 502 and leaves the upload for the runner's retry
+// or abort. The blob stays on its host either way.
 func TestDirectUploadCompleteFailureAborts(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		err       *s3Err
+		code      int
+		wantAbort bool
+	}{
+		{"unknown upload", nil, http.StatusInternalServerError, true},
+		{"InvalidPart", &s3Err{http.StatusBadRequest, "InvalidPart"}, http.StatusInternalServerError, true},
+		{"S3 500", &s3Err{http.StatusInternalServerError, "InternalError"}, http.StatusBadGateway, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, _ := reportFixture(t)
+			f := useDirectS3(t, s)
+			setBlob(t, s, "bA-art", []byte("artifact bytes"))
+			f.completeErr = c.err
+			code, body := runnerPost(t, s, "ha", "bA-art", "complete", proto.BlobCompleteRequest{UploadID: "up-unknown",
+				Parts: []proto.UploadedPart{{Number: 1, ETag: `"x"`, SHA256: b64sum(nil)}}})
+			if code != c.code {
+				t.Fatalf("complete: %d %s, want %d", code, body, c.code)
+			}
+			if got := slices.Contains(f.Calls(), "DELETE AbortMultipartUpload "+blob.Key("t1", "ra", "bA-art")); got != c.wantAbort {
+				t.Fatalf("aborted %v, want %v: %q", got, c.wantAbort, f.Calls())
+			}
+			if loc := blobLocations(t, s, "ra")["bA-art"]; loc != "host" {
+				t.Fatalf("bA-art: %s, want host", loc)
+			}
+		})
+	}
+}
+
+// /complete with abort drops that upload id's parts for the blob's key and
+// records nothing.
+func TestDirectUploadAbort(t *testing.T) {
 	s, _ := reportFixture(t)
 	f := useDirectS3(t, s)
-	setBlob(t, s, "bA-art", []byte("artifact bytes"))
-	code, _ := runnerPost(t, s, "ha", "bA-art", "complete", proto.BlobCompleteRequest{UploadID: "up-unknown",
-		Parts: []proto.UploadedPart{{Number: 1, ETag: `"x"`, SHA256: b64sum(nil)}}})
-	if code/100 == 2 {
-		t.Fatalf("complete of an unknown upload: %d", code)
+	vol := bytes.Repeat([]byte("v"), proto.BlobPartSize+5)
+	setBlob(t, s, "bA-vol", vol)
+	code, raw := runnerPost(t, s, "ha", "bA-vol", "upload", uploadRequest(vol))
+	if code != http.StatusOK {
+		t.Fatalf("upload: %d %s", code, raw)
 	}
-	if !slices.Contains(f.Calls(), "DELETE AbortMultipartUpload "+blob.Key("t1", "ra", "bA-art")) {
+	var out proto.BlobUploadResponse
+	_ = json.Unmarshal([]byte(raw), &out)
+	if code, _ := putPresigned(t, out.Parts[0].PresignedRequest, vol[:proto.BlobPartSize]); code != http.StatusOK {
+		t.Fatalf("PUT part 1: %d", code)
+	}
+	code, body := runnerPost(t, s, "ha", "bA-vol", "complete", proto.BlobCompleteRequest{UploadID: out.UploadID, Abort: true})
+	if code != http.StatusOK || strings.TrimSpace(body) != `{"aborted":true}` {
+		t.Fatalf("abort: %d %s", code, body)
+	}
+	key := blob.Key("t1", "ra", "bA-vol")
+	if !slices.Contains(f.Calls(), "DELETE AbortMultipartUpload "+key) {
 		t.Fatalf("not aborted: %q", f.Calls())
+	}
+	f.mu.Lock()
+	_, open := f.parts[out.UploadID]
+	f.mu.Unlock()
+	if open {
+		t.Fatalf("upload %s still open", out.UploadID)
+	}
+	if loc := blobLocations(t, s, "ra")["bA-vol"]; loc != "host" {
+		t.Fatalf("bA-vol: %s, want host", loc)
 	}
 }
 

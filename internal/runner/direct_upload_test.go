@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -30,7 +32,10 @@ type directFake struct {
 	luxd, s3  *httptest.Server
 	upload    func(w http.ResponseWriter) bool                  // overrides /upload when it returns true
 	complete  func(w http.ResponseWriter, r *http.Request) bool // overrides /complete when it returns true
-	failPart  int                                               // S3 answers 500 to this part number
+	failPart  int                                               // S3 answers failCode (500 by default) to this part number
+	failCode  int                                               //
+	failTimes int                                               // that many times; 0 is always
+	attempts  map[string]int                                    // part number or "single" → PUTs received
 	requests  []proto.BlobUploadRequest
 	completes []proto.BlobCompleteRequest
 	puts      []string // "<part number or single>:<bytes>"
@@ -40,7 +45,10 @@ type directFake struct {
 }
 
 func newDirectFake(t *testing.T) *directFake {
-	f := &directFake{bodies: map[string][]byte{}}
+	delays := partRetryDelays
+	partRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { partRetryDelays = delays })
+	f := &directFake{bodies: map[string][]byte{}, attempts: map[string]int{}}
 	f.s3 = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
@@ -50,8 +58,9 @@ func newDirectFake(t *testing.T) *directFake {
 		if part == "" {
 			part = "single"
 		}
-		if part == strconv.Itoa(f.failPart) {
-			w.WriteHeader(http.StatusInternalServerError)
+		f.attempts[part]++
+		if part == strconv.Itoa(f.failPart) && (f.failTimes == 0 || f.attempts[part] <= f.failTimes) {
+			w.WriteHeader(cmp.Or(f.failCode, http.StatusInternalServerError))
 			return
 		}
 		sum := sha256.Sum256(body)
@@ -212,19 +221,54 @@ func TestUploadDirectSingle(t *testing.T) {
 	}
 }
 
-// S3 failing part 2 is an upload error (the uploader retries the blob
-// later), not luxd's "deleted": /complete is not called.
+// S3 failing part 2 for good is an upload error (the uploader retries the
+// blob later), not luxd's "deleted": after its retries (a 5xx) or at once
+// (a 4xx), the runner has luxd abort the upload id and never completes it.
 func TestUploadDirectPartFailureIsAnError(t *testing.T) {
-	fk := newDirectFake(t)
-	fk.failPart = 2
-	file, content := blobFile(t, proto.BlobPartSize+10)
-	err := fk.api().uploadDirect(context.Background(), "blob1", file, int64(len(content)))
-	var he *httpError
-	if err == nil || errors.As(err, &he) || errors.Is(err, errNoDirectUpload) {
-		t.Fatalf("err %v, want a plain upload error", err)
+	for _, c := range []struct {
+		status, attempts int
+	}{{http.StatusInternalServerError, 3}, {http.StatusForbidden, 1}} {
+		t.Run(strconv.Itoa(c.status), func(t *testing.T) {
+			fk := newDirectFake(t)
+			fk.failPart, fk.failCode = 2, c.status
+			file, content := blobFile(t, proto.BlobPartSize+10)
+			err := fk.api().uploadDirect(context.Background(), "blob1", file, int64(len(content)))
+			var he *httpError
+			if err == nil || errors.As(err, &he) || errors.Is(err, errNoDirectUpload) {
+				t.Fatalf("err %v, want a plain upload error", err)
+			}
+			if fk.attempts["2"] != c.attempts {
+				t.Fatalf("part 2 attempted %d times, want %d", fk.attempts["2"], c.attempts)
+			}
+			want := []proto.BlobCompleteRequest{{UploadID: "up-1", Abort: true}}
+			if len(fk.completes) != 1 || !equalComplete(fk.completes[0], want[0]) {
+				t.Fatalf("/complete %+v, want %+v", fk.completes, want)
+			}
+		})
 	}
-	if len(fk.completes) != 0 {
-		t.Fatalf("/complete called: %+v", fk.completes)
+}
+
+// A part S3 fails once is retried in place: the blob uploads in one pass,
+// with one /upload.
+func TestUploaderRetriesAPartInPlace(t *testing.T) {
+	fk := newDirectFake(t)
+	fk.failPart, fk.failTimes = 2, 1
+	r, id := uploadRunner(t, fk, false)
+	_, content := blobFile(t, proto.BlobPartSize+10)
+	if err := os.WriteFile(r.blobPath("blob1"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.uploads.pass(context.Background())
+	if !uploadDone(t, r, id) {
+		t.Fatal("not done after one pass")
+	}
+	fk.mu.Lock()
+	defer fk.mu.Unlock()
+	if fk.attempts["2"] != 2 || len(fk.requests) != 1 || len(fk.completes) != 1 || fk.completes[0].Abort {
+		t.Fatalf("part 2 attempts %d, /upload %d, /complete %+v", fk.attempts["2"], len(fk.requests), fk.completes)
+	}
+	if !bytes.Equal(fk.bodies["2"], content[proto.BlobPartSize:]) {
+		t.Fatal("part 2's body")
 	}
 }
 

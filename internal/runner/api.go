@@ -137,7 +137,7 @@ func (a *api) uploadDirect(ctx context.Context, blobID string, f io.ReaderAt, si
 	case out.Uploaded:
 		return nil
 	case out.Single != nil:
-		if _, err := putPresigned(ctx, *out.Single, io.NewSectionReader(f, 0, size), size); err != nil {
+		if _, err := putPart(ctx, *out.Single, func() io.Reader { return io.NewSectionReader(f, 0, size) }, size); err != nil {
 			return fmt.Errorf("upload %s: %w", blobID, err)
 		}
 	default:
@@ -147,8 +147,11 @@ func (a *api) uploadDirect(ctx context.Context, blobID string, f io.ReaderAt, si
 		done.UploadID = out.UploadID
 		for i, p := range out.Parts {
 			n := partLen(size, i)
-			etag, err := putPresigned(ctx, p.PresignedRequest, io.NewSectionReader(f, int64(i)*proto.BlobPartSize, n), n)
+			off := int64(i) * proto.BlobPartSize
+			etag, err := putPart(ctx, p.PresignedRequest, func() io.Reader { return io.NewSectionReader(f, off, n) }, n)
 			if err != nil {
+				// Best effort: the runner's error is the part's either way.
+				_ = a.blobPost(ctx, blobID, "complete", proto.BlobCompleteRequest{UploadID: out.UploadID, Abort: true}, &struct{}{})
 				return fmt.Errorf("upload %s part %d: %w", blobID, p.Number, err)
 			}
 			done.Parts = append(done.Parts, proto.UploadedPart{Number: p.Number, ETag: etag, SHA256: in.Parts[i]})
@@ -169,9 +172,40 @@ func partLen(size int64, i int) int64 {
 	return max(0, min(proto.BlobPartSize, size-int64(i)*proto.BlobPartSize))
 }
 
+// partRetryDelays are the waits before a part's second and third
+// attempts. A var so tests need not wait.
+var partRetryDelays = []time.Duration{200 * time.Millisecond, time.Second}
+
+// putPart is putPresigned with retries on a network error or an S3 5xx,
+// each attempt with a fresh body from body(). A 4xx (an expired URL, a
+// refused checksum) is final.
+func putPart(ctx context.Context, p proto.PresignedRequest, body func() io.Reader, n int64) (string, error) {
+	for attempt := 0; ; attempt++ {
+		etag, err := putPresigned(ctx, p, body(), n)
+		var se *s3Error
+		if err == nil || attempt == len(partRetryDelays) || errors.As(err, &se) && se.status/100 == 4 || ctx.Err() != nil {
+			return etag, err
+		}
+		select {
+		case <-ctx.Done():
+			return "", err
+		case <-time.After(partRetryDelays[attempt]):
+		}
+	}
+}
+
+// s3Error is S3's error answer to a presigned request.
+type s3Error struct {
+	status int
+	msg    string
+}
+
+func (e *s3Error) Error() string { return e.msg }
+
 // putPresigned PUTs n bytes of body to a presigned S3 URL with exactly the
 // headers signed into it, and never the host token. Returns the ETag. S3's
-// errors are plain errors: a 404 from S3 is not luxd deleting the blob.
+// errors are *s3Error, never *httpError: a 404 from S3 is not luxd
+// deleting the blob.
 func putPresigned(ctx context.Context, p proto.PresignedRequest, body io.Reader, n int64) (string, error) {
 	r, err := http.NewRequestWithContext(ctx, http.MethodPut, p.URL, body)
 	if err != nil {
@@ -199,7 +233,7 @@ func putPresigned(ctx context.Context, p proto.PresignedRequest, body io.Reader,
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("S3 PUT: %s: %s", resp.Status, bytes.TrimSpace(msg))
+		return "", &s3Error{status: resp.StatusCode, msg: fmt.Sprintf("S3 PUT: %s: %s", resp.Status, bytes.TrimSpace(msg))}
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.Header.Get("ETag"), nil

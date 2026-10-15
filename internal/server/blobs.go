@@ -195,6 +195,16 @@ func (s *Server) serveBlobUploadComplete(w http.ResponseWriter, r *http.Request)
 		return err
 	}
 	key := b.key()
+	// The runner gave up on this upload id: drop its parts, whatever the
+	// blob's state.
+	if in.Abort {
+		if in.UploadID == "" {
+			return errf(http.StatusBadRequest, "bad_request", "abort needs an uploadId")
+		}
+		s.abortUpload(r.Context(), key, in.UploadID)
+		writeJSON(w, http.StatusOK, map[string]any{"aborted": true})
+		return nil
+	}
 	if err := b.uploadable(); err != nil {
 		if in.UploadID != "" {
 			s.abortUpload(r.Context(), key, in.UploadID)
@@ -212,8 +222,15 @@ func (s *Server) serveBlobUploadComplete(w http.ResponseWriter, r *http.Request)
 			parts[i] = blob.Part{Number: p.Number, ETag: p.ETag, SHA256: p.SHA256}
 		}
 		if err := s.blobs.CompleteMultipart(r.Context(), key, in.UploadID, parts); err != nil {
-			s.abortUpload(r.Context(), key, in.UploadID)
-			return err
+			// S3 refused the parts (InvalidPart, EntityTooSmall, BadDigest…):
+			// they can never complete. A 5xx or network error may be
+			// transient, or even have completed: the runner retries or aborts.
+			var se interface{ HTTPStatusCode() int }
+			if errors.As(err, &se) && se.HTTPStatusCode()/100 == 4 {
+				s.abortUpload(r.Context(), key, in.UploadID)
+				return err
+			}
+			return errf(http.StatusBadGateway, "s3_unavailable", "complete multipart upload: %v", err)
 		}
 	}
 	size, err := s.blobs.Size(r.Context(), key)
