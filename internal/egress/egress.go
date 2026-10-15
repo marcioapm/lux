@@ -558,7 +558,8 @@ func (f *Firewall) Remove(iface string) map[string]proto.NetBytes {
 }
 
 func (f *Firewall) remove(iface string, counters bool) map[string]proto.NetBytes {
-	f.opMu.Lock()
+	// The final read stays outside opMu: a full counter dump must not delay
+	// other Runs' lifecycle transactions.
 	var final map[string]proto.NetBytes
 	f.mu.Lock()
 	counted := f.acct.counted[iface]
@@ -568,7 +569,9 @@ func (f *Firewall) remove(iface string, counters bool) map[string]proto.NetBytes
 			final = c.Runs[iface]
 		}
 	}
+	f.opMu.Lock()
 	f.mu.Lock()
+	counted = f.acct.counted[iface]
 	r := f.runs[iface]
 	old := f.acct
 	f.acct = old.staged()

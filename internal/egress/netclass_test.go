@@ -536,6 +536,41 @@ func TestRemoveFailureRetainsRegistry(t *testing.T) {
 	}
 }
 
+func TestRemoveFinalReadDoesNotBlockApply(t *testing.T) {
+	k := newKernel()
+	f := setupRun(t, k, nil, true)
+	k.send(out("8.8.8.8", 41), false)
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.list = func() ([]byte, error) {
+		close(entered)
+		<-release
+		return k.list()
+	}
+	final := make(chan map[string]proto.NetBytes, 1)
+	go func() { final <- f.Remove(runIface) }()
+	<-entered
+	other := "luxbbbbbbbbbbbb"
+	applied := make(chan error, 1)
+	go func() {
+		applied <- f.Apply(context.Background(), other, netip.MustParseAddr("10.89.1.1"), true, nil, nil)
+	}()
+	select {
+	case err := <-applied:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("Apply blocked behind Remove's final read")
+	}
+	close(release)
+	if got := <-final; got["unknown"].Tx != 41 {
+		t.Fatalf("final read: %v, want 41", got)
+	}
+	f.list = k.list
+	f.Remove(other)
+}
+
 func TestLifecycleCatalogBarriers(t *testing.T) {
 	for _, mode := range []string{"apply", "remove", "remove-failure"} {
 		t.Run(mode, func(t *testing.T) {
