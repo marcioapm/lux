@@ -129,15 +129,18 @@ func (s *Server) serveBlobUploadStart(w http.ResponseWriter, r *http.Request) er
 		s.dropDeletedUpload(r.Context(), b)
 		return err
 	}
-	if b.sha256 != "" && in.SHA256 != b.sha256 {
-		return errf(http.StatusBadRequest, "checksum_mismatch", "sha256 %s, expected %s", in.SHA256, b.sha256)
-	}
-	if b.size > 0 && in.Size != b.size {
-		return errf(http.StatusBadRequest, "size_mismatch", "size %d, expected %d", in.Size, b.size)
-	}
 	whole, err := hex.DecodeString(in.SHA256)
 	if err != nil || len(whole) != sha256.Size || in.Size < 0 {
 		return errf(http.StatusBadRequest, "bad_request", "sha256 must be a hex SHA-256 and size non-negative")
+	}
+	// Unconditional, as the streaming PUT: a row without a sha256 never
+	// reaches s3.
+	if in.SHA256 != b.sha256 {
+		return errf(http.StatusBadRequest, "checksum_mismatch", "sha256 %s, expected %s", in.SHA256, b.sha256)
+	}
+	// Size 0 is also an empty blob's; the signed checksum pins its bytes.
+	if b.size > 0 && in.Size != b.size {
+		return errf(http.StatusBadRequest, "size_mismatch", "size %d, expected %d", in.Size, b.size)
 	}
 	if n := proto.BlobParts(in.Size); len(in.Parts) != n {
 		return errf(http.StatusBadRequest, "bad_request", "%d parts for %d bytes, expected %d", len(in.Parts), in.Size, n)
@@ -221,6 +224,8 @@ func (s *Server) serveBlobUploadComplete(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		return err
 	}
+	// A size-0 row has no length to check: /upload's signed checksum
+	// already pinned the bytes.
 	if b.size > 0 && size != b.size {
 		_ = s.blobs.Delete(context.WithoutCancel(r.Context()), key)
 		return errf(http.StatusBadRequest, "size_mismatch", "%d bytes in S3, expected %d", size, b.size)

@@ -337,6 +337,8 @@ func TestDirectUploadRefusals(t *testing.T) {
 	noParts.Parts = nil
 	twoParts := uploadRequest(content)
 	twoParts.Parts = append(twoParts.Parts, twoParts.Parts[0])
+	badSum := uploadRequest(content)
+	badSum.SHA256 = "zz" + badSum.SHA256[2:]
 	for _, c := range []struct {
 		name, host string
 		in         proto.BlobUploadRequest
@@ -345,6 +347,7 @@ func TestDirectUploadRefusals(t *testing.T) {
 	}{
 		{"another host", "hb", uploadRequest(content), http.StatusNotFound, "not_found"},
 		{"wrong sha256", "ha", wrongSum, http.StatusBadRequest, "checksum_mismatch"},
+		{"malformed sha256", "ha", badSum, http.StatusBadRequest, "bad_request"},
 		{"wrong size", "ha", wrongSize, http.StatusBadRequest, "size_mismatch"},
 		{"no parts", "ha", noParts, http.StatusBadRequest, "bad_request"},
 		{"two parts", "ha", twoParts, http.StatusBadRequest, "bad_request"},
@@ -371,6 +374,24 @@ func TestDirectUploadRefusals(t *testing.T) {
 	}
 	if loc := blobLocations(t, s, "ra")["bA-art"]; loc != "host" {
 		t.Fatalf("bA-art: %s", loc)
+	}
+}
+
+// A row with no sha256 (and size 0) is refused, as by the streaming PUT:
+// the runner's own digest is never taken in its place.
+func TestDirectUploadRefusesRowWithoutSHA256(t *testing.T) {
+	s, _ := reportFixture(t)
+	f := useDirectS3(t, s)
+	execSQL(t, s, context.Background(), `UPDATE blobs SET size = 0, sha256 = '' WHERE id = 'bA-art'`)
+	code, body := runnerPost(t, s, "ha", "bA-art", "upload", uploadRequest([]byte("artifact bytes")))
+	if code != http.StatusBadRequest || !strings.Contains(body, `"code":"checksum_mismatch"`) {
+		t.Fatalf("upload: %d %s, want 400 checksum_mismatch", code, body)
+	}
+	if loc := blobLocations(t, s, "ra")["bA-art"]; loc != "host" {
+		t.Fatalf("bA-art: %s, want host", loc)
+	}
+	if calls := f.Calls(); len(calls) != 0 {
+		t.Fatalf("S3 called: %q", calls)
 	}
 }
 
