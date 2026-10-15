@@ -573,18 +573,15 @@ It is still in its own user namespace (an unprivileged uid range on the
 host). The containers it starts use the Run's network, so they have its
 egress rules and hard blocks, and nothing more.
 
-**Limits of nested containers.** Rootless Podman inside a nested Run
-enforces `-m`, `--cpus` and `--pids-limit` on what it starts, within the
-Run's own limits, which nothing inside can raise. For that the shim
-splits the Run's cgroup: the workload starts in `/workload/main` (its
-`/proc/self/cgroup` says `0::/workload/main`). For non-root workload users,
-`/workload` is bounded to 1024 descendants including `main`; root workloads
-can change this bound, but remain under the Run's host-owned limits.
-Engines create siblings of `main`, whose controllers cannot be enabled by
-a non-root workload. Where delegation cannot be done, the Run gets a
-`lux.warning` saying why and nested limits are not enforced. Docker inside
-a Run does not enforce per-container limits: rootless `dockerd`'s cgroup
-driver is `none`. Details: [Podman](podman.md#limits-of-nested-containers).
+**Limits of nested containers.** Rootless Podman enforces `-m`, `--cpus`
+and `--pids-limit` within the Run's host-owned limits. The workload starts
+in `/workload/main`; engines create siblings under `/workload`, bounded
+to 1024 descendants including `main` for non-root workload users. Root
+workloads can change that bound, but cannot raise the Run's limits.
+Delegation failures emit `lux.warning`; nested limits may then be unenforced.
+Rootless Docker uses cgroup driver `none` and does not enforce per-container
+limits. See [Podman](podman.md#limits-of-nested-containers) for the layout,
+ownership boundary and fallback behavior.
 
 A placement's `oom` attribution uses cumulative Run-limit pressure over
 that placement and an exited workload's SIGKILL/137, not a nested limit's

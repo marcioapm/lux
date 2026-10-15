@@ -18,26 +18,18 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 )
 
-// The Run's cgroup, as the shim sees it: the container has a private
-// cgroup namespace, so /sys/fs/cgroup is the Run's own cgroup, whose
-// memory.max, cpu.max and pids.max are the Run's limits.
-//
-// For a Run with nested containers (ShimConfig.DelegateCgroup) the shim
-// splits it, so a container engine in the workload can give its containers
-// limits of their own (docs/podman.md#limits-of-nested-containers):
+// A private cgroup namespace makes /sys/fs/cgroup the Run's root.
+// Nested Runs split it before tenant processes start:
 //
 //	/                 Run limits; no processes; controllers enabled below
 //	├── lux.shim/     the shim (PID 1) and its own helpers
 //	└── workload/     no processes; controllers enabled below; delegated
 //	    └── main/     delegated; every tenant process starts here
 //
-// cgroup v2 allows controllers to be enabled only in a cgroup with no
-// processes of its own, hence the shim's leaf, and workload/ holding none
-// (an engine makes its containers' cgroups beside main/). Delegated means
-// the directory and its cgroup.procs, cgroup.threads and
-// cgroup.subtree_control of workload/ belong to the workload user; main's
-// subtree_control and all resource files stay Run-root owned. A non-root
-// workload cannot raise those limits or the descendant bound.
+// cgroup v2 requires internal groups to have no processes. Engines create
+// siblings of main, whose subtree_control stays Run-root owned to keep it
+// a leaf. Only workload's subtree_control is delegated; resource files and
+// the descendant bound remain Run-root owned. See docs/podman.md.
 const (
 	cgroupRoot     = "/sys/fs/cgroup"
 	shimCgroup     = "lux.shim"
@@ -262,26 +254,16 @@ func probeCloneInto(fd int) error {
 	return cmd.Run()
 }
 
-// delegate splits the Run's cgroup when its config asks, and keeps the
-// workload/main descriptor tenant processes are started into. When it
-// cannot, it warns once and tenant processes start beside the shim.
-// Partial changes are rolled back best-effort.
-func (s *Shim) delegate() {
-	s.delegateAt(cgroupRoot, probeCloneInto)
-}
-
+// delegateAt keeps the workload/main descriptor for tenant starts, or
+// warns once and falls back to the shim's cgroup on failure.
 func (s *Shim) delegateAt(root string, probe func(int) error) {
 	if !s.cfg.DelegateCgroup {
 		return
 	}
-	uid, gid := 0, 0
 	u, err := lookupUser(s.cfg.User)
 	if err == nil {
-		uid, gid = u.uid, u.gid
-	}
-	if err == nil {
 		var fd int
-		if fd, err = delegateCgroup(root, uid, gid, probe); err == nil {
+		if fd, err = delegateCgroup(root, u.uid, u.gid, probe); err == nil {
 			s.workCgroup = os.NewFile(uintptr(fd), filepath.Join(root, mainCgroup))
 		}
 	}
@@ -289,15 +271,6 @@ func (s *Shim) delegateAt(root string, probe func(int) error) {
 		msg := "nested containers: the Run's cgroup is not delegated, so limits given to nested containers may not be enforced: " + err.Error()
 		fmt.Fprintln(os.Stderr, "lux-shim:", msg)
 		s.out.Event(proto.EvWarning, map[string]any{"message": msg})
-	}
-}
-
-// intoWorkloadCgroup makes cmd start in workload/main when the Run's
-// cgroup is delegated.
-func (s *Shim) intoWorkloadCgroup(cmd *exec.Cmd) {
-	if s.workCgroup != nil {
-		cmd.SysProcAttr.UseCgroupFD = true
-		cmd.SysProcAttr.CgroupFD = int(s.workCgroup.Fd())
 	}
 }
 

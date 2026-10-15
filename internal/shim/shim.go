@@ -142,7 +142,7 @@ func (s *Shim) run() int {
 	}
 	s.out = out
 	// Before the reaper: delegating waits for a probe process of its own.
-	s.delegate()
+	s.delegateAt(cgroupRoot, probeCloneInto)
 
 	// PID 1 must reap: orphans reparent to us.
 	go s.reap(nil)
@@ -981,7 +981,10 @@ func (s *Shim) command(argv []string, env []string) *exec.Cmd {
 		cmd.Dir = "/"
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	s.intoWorkloadCgroup(cmd)
+	if s.workCgroup != nil {
+		cmd.SysProcAttr.UseCgroupFD = true
+		cmd.SysProcAttr.CgroupFD = int(s.workCgroup.Fd())
+	}
 	if s.user.uid != 0 || s.user.gid != 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(s.user.uid), Gid: uint32(s.user.gid), Groups: s.user.groups}
 	}

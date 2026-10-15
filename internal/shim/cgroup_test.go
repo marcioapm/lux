@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -91,10 +90,12 @@ func TestDelegableControllers(t *testing.T) {
 // the probe was given before any of it was written.
 func TestDelegateCgroupLayout(t *testing.T) {
 	root := withChildren(t, fakeCgroup(t, "cpuset cpu io memory pids"))
-	var probed os.FileInfo
+	var probed unix.Stat_t
 	var subtreeAtProbe string
 	fd, err := delegateCgroup(root, os.Getuid(), os.Getgid(), func(fd int) error {
-		probed, _ = os.Stat("/proc/self/fd/" + strconv.Itoa(fd))
+		if err := unix.Fstat(fd, &probed); err != nil {
+			t.Fatal(err)
+		}
 		subtreeAtProbe = readTrim(t, filepath.Join(root, "cgroup.subtree_control"))
 		return nil
 	})
@@ -124,10 +125,10 @@ func TestDelegateCgroupLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	main, _ := os.Stat(filepath.Join(root, mainCgroup))
-	if ms := main.Sys().(*syscall.Stat_t); ms.Ino != st.Ino {
+	if ms := main.Sys().(*syscall.Stat_t); ms.Dev != st.Dev || ms.Ino != st.Ino {
 		t.Errorf("descriptor is not workload/main's")
 	}
-	if probed == nil || !os.SameFile(probed, main) || subtreeAtProbe != "" {
+	if probed.Dev != st.Dev || probed.Ino != st.Ino || subtreeAtProbe != "" {
 		t.Errorf("probe: got %v, subtree_control then %q", probed, subtreeAtProbe)
 	}
 }
@@ -387,7 +388,7 @@ func TestDelegateRollbackAfterMove(t *testing.T) {
 	want := []string{filepath.Base(root) + ">lux.shim", filepath.Base(root) + ":+", "workload:+",
 		"workload:-", filepath.Base(root) + ":-", "lux.shim>" + filepath.Base(root),
 		"remove:workload/main", "remove:workload", "remove:lux.shim"}
-	if strings.Join(operations, ",") != strings.Join(want, ",") {
+	if !slices.Equal(operations, want) {
 		t.Errorf("operations %v, want %v", operations, want)
 	}
 	if len(groups) != 1 || len(groups[root].controllers) != 0 || !slices.Equal(groups[root].pids, []int{1, 2}) {

@@ -734,17 +734,10 @@ func exitFrom(code int, b []byte, err error) *exitRecord {
 	return e
 }
 
-// ranOutOfMemory: the Run's own memory limit ended it. Podman's OOMKilled
-// says only that the kernel's OOM killer killed some process in the
-// container's cgroup tree, a nested container's included, whatever the
-// workload did after. So when the shim reports the oom count of the Run's
-// own cgroup (memory.events.local), the Run ran out of memory only if that
-// limit was reached and the workload died by SIGKILL: killed itself, or
-// exiting 128+9 as a shell does whose command was killed (`sh -c`
-// workloads). A workload that exits otherwise, 0 included, is reported by
-// its exit code. Without that count (no exit file: the shim itself was
-// killed; a shim that predates it; no memory.events.local) OOMKilled
-// decides, as it is the only account there is.
+// Podman's OOMKilled includes nested containers. Prefer the shim's local
+// Run-limit pressure count plus an exited workload's SIGKILL/137; without
+// that count, retain Podman's fallback. Cumulative pressure cannot tie a
+// specific kill to the limit (docs/podman.md#out-of-memory).
 func ranOutOfMemory(e *exitRecord, podmanOOMKilled bool) bool {
 	if !e.shimReported || e.memoryOOM == nil {
 		return podmanOOMKilled
