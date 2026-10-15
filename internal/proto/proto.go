@@ -158,6 +158,99 @@ type Usage struct {
 	MemoryFullStallSeconds *float64 `json:"memoryFullStallSeconds,omitempty"`
 	IOStallSeconds         *float64 `json:"ioStallSeconds,omitempty"`
 	IOFullStallSeconds     *float64 `json:"ioFullStallSeconds,omitempty"`
+	// Net: bytes forwarded for the placement's bridge per billing class,
+	// cumulative over the placement (NetRxBytes/NetTxBytes stay the
+	// container's own totals). Absent from older runners and when nothing
+	// was counted.
+	Net map[NetClass]NetBytes `json:"net,omitempty"`
+}
+
+// NetClass is a billing class of network transfer, provider-neutral: the
+// runner never knows which cloud it is on, only which addresses fall in
+// which class (NetworkClasses).
+type NetClass string
+
+const (
+	// NetLocal: same zone, private network (AWS: same-AZ private IP).
+	NetLocal NetClass = "local"
+	// NetZone: another zone of the same region, private network (AWS:
+	// cross-AZ).
+	NetZone NetClass = "zone"
+	// NetRegionPublic: the provider's public addresses in the same region
+	// that are not free services (AWS: EC2 and Elastic IP public addresses).
+	NetRegionPublic NetClass = "region-public"
+	// NetRegionService: the provider's services in the same region that are
+	// free to reach (AWS: S3, DynamoDB).
+	NetRegionService NetClass = "region-service"
+	// NetProvider: the provider's addresses in any other region.
+	NetProvider NetClass = "provider"
+	// NetInternet: everything else.
+	NetInternet NetClass = "internet"
+)
+
+// NetClasses are every class, in classification precedence: an address in
+// several lists takes the first. Narrower before wider: a private subnet is
+// never also a public prefix, and a free service's prefixes are listed
+// inside the provider's broader in-region ranges (AWS's AMAZON entries
+// contain S3's), so the free service must win over region-public.
+var NetClasses = []NetClass{NetLocal, NetZone, NetRegionService, NetRegionPublic, NetProvider, NetInternet}
+
+// NetBytes is one class's bytes: Rx received from peers in the class, Tx
+// sent to them. Both are billed by most providers (AWS bills cross-AZ and
+// in-region public traffic in each direction).
+type NetBytes struct {
+	Rx int64 `json:"rx"`
+	Tx int64 `json:"tx"`
+}
+
+// MaxNet is the per-class, per-direction maximum of a and b: how a
+// cumulative counter that may restart from zero is merged. nil when both
+// are empty.
+func MaxNet(a, b map[NetClass]NetBytes) map[NetClass]NetBytes {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make(map[NetClass]NetBytes, max(len(a), len(b)))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		o := out[k]
+		out[k] = NetBytes{Rx: max(o.Rx, v.Rx), Tx: max(o.Tx, v.Tx)}
+	}
+	return out
+}
+
+// AddNet is a + b per class and direction; nil when both are empty.
+func AddNet(a, b map[NetClass]NetBytes) map[NetClass]NetBytes {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make(map[NetClass]NetBytes, max(len(a), len(b)))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		o := out[k]
+		out[k] = NetBytes{Rx: o.Rx + v.Rx, Tx: o.Tx + v.Tx}
+	}
+	return out
+}
+
+// NetworkClasses are the address lists a runner classifies traffic by,
+// built by luxd from what the host's provider says about it. CIDRs, IPv4
+// or IPv6. Precedence is NetClasses' order; an address in no list is
+// internet. Empty (an older luxd, a host luxd knows nothing about): the
+// runner's own interface subnets are Local and everything else internet,
+// which is right for a host on a LAN whose every other byte is transit.
+type NetworkClasses struct {
+	// Version changes whenever any list does; "" with no lists.
+	Version       string   `json:"version"`
+	Local         []string `json:"local,omitempty"`
+	Zone          []string `json:"zone,omitempty"`
+	RegionPublic  []string `json:"regionPublic,omitempty"`
+	RegionService []string `json:"regionService,omitempty"`
+	Provider      []string `json:"provider,omitempty"`
 }
 
 // HostUsage is the whole host's, on each heartbeat: counters (CPU seconds
@@ -177,6 +270,11 @@ type HostUsage struct {
 	// host under pressure (disk-scale runners only). Absent otherwise, and
 	// from older runners: luxd reads absent as no pressure.
 	DiskPressure *DiskPressure `json:"diskPressure,omitempty"`
+	// Net: the host's own traffic per billing class (the runner's link to
+	// luxd, image pulls, git fetches, snapshot uploads), cumulative; never a
+	// Run's forwarded traffic, which its Usage.Net counts. Absent from
+	// older runners.
+	Net map[NetClass]NetBytes `json:"net,omitempty"`
 }
 
 // DiskPressure is a host under disk pressure: free bytes of the data
@@ -212,6 +310,14 @@ type Welcome struct {
 	// Epochs luxd considers live on this host; the runner stops anything else
 	// it finds running.
 	Live []LivePlacement `json:"live"`
+	// Network: the address lists this host classifies traffic by; nil from
+	// an older luxd. A heartbeat's Ack.NetworkVersion tells the runner when
+	// they change (it fetches GET /runner/v1/network).
+	Network *NetworkClasses `json:"network,omitempty"`
+	// HostNet: the host's own traffic as luxd last recorded it: what a
+	// runner whose counters were lost with the nftables table (a reboot)
+	// counts on from.
+	HostNet map[NetClass]NetBytes `json:"hostNet,omitempty"`
 }
 
 type Heartbeat struct {
@@ -735,6 +841,9 @@ type Ack struct {
 	// will not be asked for: the runner does not upload them and may delete
 	// them.
 	Refused bool `json:"refused,omitempty"`
+	// NetworkVersion, on a heartbeat's ack only: the version of the host's
+	// NetworkClasses now. A runner holding another fetches them.
+	NetworkVersion string `json:"networkVersion,omitempty"`
 }
 
 type Nack struct {
