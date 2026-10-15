@@ -154,7 +154,14 @@ func (a *api) uploadDirect(ctx context.Context, blobID string, f io.ReaderAt, si
 			done.Parts = append(done.Parts, proto.UploadedPart{Number: p.Number, ETag: etag, SHA256: in.Parts[i]})
 		}
 	}
-	return a.blobPost(ctx, blobID, "complete", done, &struct{}{})
+	err := a.blobPost(ctx, blobID, "complete", done, &struct{}{})
+	// The mux's own 404 (an older luxd, or a proxy) did not record the
+	// upload: a plain error, retried, never the uploader's "deleted".
+	var he *httpError
+	if errors.As(err, &he) && he.Status == http.StatusNotFound && he.Code == "" {
+		return fmt.Errorf("complete %s: %s", blobID, he.Msg)
+	}
+	return err
 }
 
 // partLen is the length of part i (0-based) of a blob of size bytes.

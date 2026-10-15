@@ -28,8 +28,9 @@ import (
 type directFake struct {
 	mu        sync.Mutex
 	luxd, s3  *httptest.Server
-	upload    func(w http.ResponseWriter) bool // overrides /upload when it returns true
-	failPart  int                              // S3 answers 500 to this part number
+	upload    func(w http.ResponseWriter) bool                  // overrides /upload when it returns true
+	complete  func(w http.ResponseWriter, r *http.Request) bool // overrides /complete when it returns true
+	failPart  int                                               // S3 answers 500 to this part number
 	requests  []proto.BlobUploadRequest
 	completes []proto.BlobCompleteRequest
 	puts      []string // "<part number or single>:<bytes>"
@@ -105,7 +106,11 @@ func newDirectFake(t *testing.T) *directFake {
 			_ = json.NewDecoder(r.Body).Decode(&in)
 			f.mu.Lock()
 			f.completes = append(f.completes, in)
+			override := f.complete
 			f.mu.Unlock()
+			if override != nil && override(w, r) {
+				return
+			}
 			_, _ = io.WriteString(w, `{"uploaded":true}`)
 		default:
 			w.WriteHeader(http.StatusTeapot)
@@ -309,6 +314,28 @@ func TestUploaderDirectAndFallback(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A /complete answered by the mux's own 404 (no luxd error code) recorded
+// nothing: the blob is not done, and a later pass completes it.
+func TestUploaderCompletePlain404IsRetried(t *testing.T) {
+	fk := newDirectFake(t)
+	r, id := uploadRunner(t, fk, false)
+	fk.complete = func(w http.ResponseWriter, r *http.Request) bool {
+		http.NotFound(w, r)
+		return true
+	}
+	r.uploads.pass(context.Background())
+	if uploadDone(t, r, id) {
+		t.Fatal("done though /complete answered a plain 404")
+	}
+	fk.mu.Lock()
+	fk.complete = nil
+	fk.mu.Unlock()
+	r.uploads.pass(context.Background())
+	if !uploadDone(t, r, id) || len(fk.completes) != 2 {
+		t.Fatalf("done %v after %d /complete requests", uploadDone(t, r, id), len(fk.completes))
 	}
 }
 
