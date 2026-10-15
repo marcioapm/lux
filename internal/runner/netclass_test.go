@@ -183,6 +183,45 @@ func TestSamplerPresentZeroIsAReset(t *testing.T) {
 	}
 }
 
+// A seed that cannot be persisted is not reported: the runner stays
+// unseeded, and the next Welcome seeds once, durably.
+func TestUnpersistedSeedIsUndone(t *testing.T) {
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "data")
+	// A regular file where the data directory should be: every write fails.
+	if err := os.WriteFile(dataDir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{cfg: Config{DataDir: dataDir}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), egress: egress.Unloaded(), placements: map[string]*placement{}}
+	if err := r.restoreHostNetwork("boot-1"); err == nil {
+		t.Fatal("reading state under a file succeeded")
+	}
+	r.hostNetBoot = "boot-1"
+	recorded := map[string]proto.NetBytes{"internet": {Tx: 1000}}
+	r.welcomeNetwork(proto.Welcome{HostNet: recorded})
+	if r.hostNetSeeded || r.hostNet.value() != nil {
+		t.Fatalf("unpersisted seed reported: seeded=%t value=%v", r.hostNetSeeded, r.hostNet.value())
+	}
+	if err := os.Remove(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r.welcomeNetwork(proto.Welcome{HostNet: recorded})
+	r.welcomeNetwork(proto.Welcome{HostNet: recorded})
+	if got := r.hostNet.value(); !maps.Equal(got, recorded) || !r.hostNetSeeded {
+		t.Fatalf("after a writable Welcome: %v seeded=%t, want %v once", got, r.hostNetSeeded, recorded)
+	}
+	restarted := &Runner{cfg: Config{DataDir: dataDir}, log: r.log, egress: egress.Unloaded(), placements: map[string]*placement{}}
+	if err := restarted.restoreHostNetwork("boot-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.hostNet.value(); !maps.Equal(got, recorded) || !restarted.hostNetSeeded {
+		t.Fatalf("restored %v seeded=%t", got, restarted.hostNetSeeded)
+	}
+}
+
 func TestUsageNetCompatibility(t *testing.T) {
 	raw, err := json.Marshal(proto.Usage{})
 	if err != nil {

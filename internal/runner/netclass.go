@@ -124,9 +124,9 @@ func (r *Runner) restoreHostNetwork(boot string) error {
 	return nil
 }
 
-func (r *Runner) saveHostNetwork() {
+func (r *Runner) saveHostNetwork() error {
 	if r.cfg.DataDir == "" {
-		return
+		return nil
 	}
 	raw, err := json.Marshal(hostNetworkState{r.hostNetBoot, r.hostNetSeeded, r.hostNet})
 	if err == nil {
@@ -135,12 +135,19 @@ func (r *Runner) saveHostNetwork() {
 	if err != nil {
 		r.log.Error("save host network baseline", "err", err)
 	}
+	return err
+}
+
+func (n netBaseline) clone() netBaseline {
+	return netBaseline{Base: maps.Clone(n.Base), Last: maps.Clone(n.Last)}
 }
 
 // welcomeNetwork loads luxd's classes and takes its records as floors: the
 // host's traffic (seeded once if the host rebooted, else a floor) and each
 // re-adopted placement's. Every Welcome (each reconnect) comes here; only
-// the first may seed, since a seed adds.
+// the first may seed, since a seed adds. A seed whose state cannot be
+// written is undone: reported without its offset on disk, a runner restart
+// in the same boot would seed it again on top of luxd's floor.
 func (r *Runner) welcomeNetwork(w proto.Welcome) {
 	if err := r.egress.SetClasses(w.Network); err != nil {
 		r.log.Warn("network classes", "err", err)
@@ -149,12 +156,17 @@ func (r *Runner) welcomeNetwork(w proto.Welcome) {
 	defer r.netMu.Unlock()
 	r.sampleNetworkLocked()
 	if !r.hostNetSeeded && !r.egress.HostCountersKept() {
+		unseeded := r.hostNet.clone()
 		r.hostNet.seed(w.HostNet)
+		r.hostNetSeeded = true
+		if r.saveHostNetwork() != nil {
+			r.hostNet, r.hostNetSeeded = unseeded, false
+		}
 	} else {
 		r.hostNet.reconcile(w.HostNet)
+		r.hostNetSeeded = true
+		_ = r.saveHostNetwork()
 	}
-	r.hostNetSeeded = true
-	r.saveHostNetwork()
 	for _, l := range w.Live {
 		if p := r.placement(l.RunID, l.Epoch); p != nil && l.Usage != nil {
 			p.mu.Lock()
@@ -205,7 +217,7 @@ func (r *Runner) sampleNetworkLocked() {
 		return
 	}
 	r.hostNet.observe(c.Host)
-	r.saveHostNetwork()
+	_ = r.saveHostNetwork()
 	for _, p := range r.livePlacements() {
 		if current, ok := c.Runs[bridgeName(p.runID)]; ok {
 			p.observeNet(current)
