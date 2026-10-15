@@ -543,6 +543,41 @@ func TestStalledRestoreAttachTinyWrites(t *testing.T) {
 	}
 }
 
+// A restore attach that gets no snapshot (the marker comes first) is as
+// lossless as one that does: past its budget it is ended, not continued
+// with a gap.
+func TestRestoreAttachWithoutSnapshotFallenBehindIsEnded(t *testing.T) {
+	term, tty, _ := ptyTerminal(t, 24, 80, historyLines, nil)
+	term.mu.Lock()
+	term.screen = nil
+	term.mu.Unlock()
+	snap, sub := term.join(true, 0, 0)
+	defer term.leave(sub)
+	if snap != nil {
+		t.Fatalf("a snapshot without an emulator: %q", snap)
+	}
+	line := strings.Repeat("q", 79) + "\r\n"
+	for written := 0; written <= restoreBudget+(1<<20); written += len(line) {
+		io.WriteString(tty, line)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		term.mu.Lock()
+		_, joined := term.subs[sub]
+		term.mu.Unlock()
+		if !joined {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("still joined after its budget was written")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if b, err := sub.next(); !errors.Is(err, errFellBehind) {
+		t.Fatalf("next: %d bytes, %v; want errFellBehind", len(b), err)
+	}
+}
+
 // A plain attach is as before: one that does not read misses what
 // overflows its queue of reads and goes on with later output, never ended.
 func TestPlainAttachMissesOverflow(t *testing.T) {

@@ -256,7 +256,8 @@ const plainQueue = 256
 //
 // A plain attach has a channel of plainQueue reads and misses what
 // overflows it. A restore attach's client has a screen built from the
-// snapshot, which a gap would leave wrong for good, so its queue is
+// snapshot (or, without one, from live output after the marker), which a
+// gap would leave wrong for good, so its queue is
 // bounded in bytes (restoreBudget, as much as the snapshot it may still
 // be sending) and on overflow it is removed and ended with errFellBehind:
 // the client attaches again rather than going on from a wrong screen.
@@ -359,9 +360,9 @@ func (s *subscriber) next() ([]byte, error) {
 
 // join subscribes to the terminal's output. With restore, it first
 // resizes to rows×cols (if given) and returns the snapshot the output
-// continues from; nil if the terminal has no emulator. A subscriber that
-// was sent a snapshot is strict (see subscriber); one that was not
-// continues live as a plain attach does.
+// continues from; nil if the terminal has no emulator or the snapshot is
+// over snapshotLimit. Every restore subscriber is strict (see subscriber),
+// snapshot or not: its client may build a screen from live output alone.
 func (t *terminal) join(restore bool, rows, cols int) ([]byte, *subscriber) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -372,7 +373,7 @@ func (t *terminal) join(restore bool, rows, cols int) ([]byte, *subscriber) {
 		}
 		t.withScreen(func(s screenState) { snap = s.Snapshot(snapshotLimit) })
 	}
-	sub := newSubscriber(snap != nil)
+	sub := newSubscriber(restore)
 	t.subs[sub] = true
 	return snap, sub
 }
