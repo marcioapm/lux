@@ -659,10 +659,22 @@ func TestDeleteArtifactsDuringDirectUpload(t *testing.T) {
 			if code, _ := putPresigned(t, *out.Single, content); code != http.StatusOK {
 				t.Fatalf("PUT: %d", code)
 			}
-			if during {
-				f.onHead = del
-			} else {
+			key := blob.Key("t1", "ra", "bA-art")
+			// After the delete (and its own key delete), the object is
+			// written again, as a PUT racing the claim would: only
+			// /complete's cleanup deletes it.
+			before := -1
+			delAndRewrite := func() {
 				del()
+				f.mu.Lock()
+				f.objects[key] = int64(len(content))
+				before = len(f.deleted)
+				f.mu.Unlock()
+			}
+			if during {
+				f.onHead = delAndRewrite
+			} else {
+				delAndRewrite()
 			}
 			if code, body := runnerPost(t, s, "ha", "bA-art", "complete", proto.BlobCompleteRequest{}); code != http.StatusGone {
 				t.Fatalf("complete: %d %s, want 410", code, body)
@@ -670,14 +682,13 @@ func TestDeleteArtifactsDuringDirectUpload(t *testing.T) {
 			if loc := blobLocations(t, s, "ra")["bA-art"]; loc != "deleted" {
 				t.Fatalf("bA-art: %s, want deleted", loc)
 			}
-			// deleteArtifacts deletes the key, and /complete again.
-			key := blob.Key("t1", "ra", "bA-art")
-			if got := f.Deleted(); len(got) == 0 || slices.ContainsFunc(got, func(k string) bool { return k != key }) {
-				t.Fatalf("S3 deletes %v, want the uploaded object", got)
-			}
 			f.mu.Lock()
 			_, left := f.objects[key]
+			after := slices.Clone(f.deleted[max(before, 0):])
 			f.mu.Unlock()
+			if before < 0 || !slices.Equal(after, []string{key}) {
+				t.Fatalf("S3 deletes after the delete %v (from %d), want %s", after, before, key)
+			}
 			if left {
 				t.Fatalf("%s left in S3", key)
 			}
