@@ -516,6 +516,24 @@ func TestStubFailureIdenticalRetry(t *testing.T) {
 	}
 }
 
+func TestRemoveFailureRetainsRegistry(t *testing.T) {
+	k := newKernel()
+	f := setupRun(t, k, nil, true)
+	k.send(out("8.8.8.8", 30), false)
+	k.failOn = "delete chain"
+	if final := f.Remove(runIface); final["unknown"].Tx != 30 {
+		t.Fatalf("failed Remove final: %v, want 30", final)
+	}
+	k.failOn = ""
+	k.send(out("8.8.8.8", 5), false)
+	if final := f.Remove(runIface); final["unknown"].Tx != 35 {
+		t.Fatalf("retried Remove final: %v, want 35", final)
+	}
+	if got := k.counter(tx(runIface, "unknown")); got != -1 {
+		t.Fatalf("counter remains after Remove: %d", got)
+	}
+}
+
 func TestLifecycleCatalogBarriers(t *testing.T) {
 	for _, removing := range []bool{false, true} {
 		t.Run(fmt.Sprint(removing), func(t *testing.T) {

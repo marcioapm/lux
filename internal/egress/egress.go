@@ -38,6 +38,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net"
 	"net/netip"
@@ -586,6 +587,7 @@ func (f *Firewall) remove(iface string, counters bool) map[string]proto.NetBytes
 	}
 	if script+counting != "" {
 		if err := f.nft(script + counting); err != nil {
+			slog.Warn("remove egress", "iface", iface, "err", err)
 			f.acct = old
 			f.mu.Unlock()
 			f.opMu.Unlock()
