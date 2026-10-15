@@ -30,6 +30,8 @@ const presignTTL = 15 * time.Minute
 // at once and PUT in turn, so it must outlast the whole upload.
 const uploadPresignTTL = time.Hour
 
+const maxUploadParts = 10000
+
 // runnerBlob is a blob as its uploading host sees it.
 type runnerBlob struct {
 	id, tenantID, runID, sha256, location, kind string
@@ -141,6 +143,10 @@ func (s *Server) serveBlobUploadStart(w http.ResponseWriter, r *http.Request) er
 	// Size 0 is also an empty blob's; the signed checksum pins its bytes.
 	if b.size > 0 && in.Size != b.size {
 		return errf(http.StatusBadRequest, "size_mismatch", "size %d, expected %d", in.Size, b.size)
+	}
+	// S3's own limit; also bounds the presigning a size-0 row would allow.
+	if len(in.Parts) > maxUploadParts {
+		return errf(http.StatusBadRequest, "bad_request", "%d parts, at most %d", len(in.Parts), maxUploadParts)
 	}
 	if n := proto.BlobParts(in.Size); len(in.Parts) != n {
 		return errf(http.StatusBadRequest, "bad_request", "%d parts for %d bytes, expected %d", len(in.Parts), in.Size, n)

@@ -383,6 +383,19 @@ func TestDirectUploadRefusals(t *testing.T) {
 	if calls := f.Calls(); len(calls) != 0 {
 		t.Fatalf("S3 called: %q", calls)
 	}
+	// More parts than S3 allows, on a row without a size (no size check):
+	// refused before any presigning.
+	execSQL(t, s, context.Background(), `UPDATE blobs SET size = 0 WHERE id = 'bA-art'`)
+	tooMany := uploadRequest(content)
+	tooMany.Size = 10001 * proto.BlobPartSize
+	tooMany.Parts = slices.Repeat([]string{b64sum(nil)}, 10001)
+	if code, body := runnerPost(t, s, "ha", "bA-art", "upload", tooMany); code != http.StatusBadRequest || !strings.Contains(body, "at most 10000") {
+		t.Fatalf("10001 parts: %d %s", code, body)
+	}
+	if calls := f.Calls(); len(calls) != 0 {
+		t.Fatalf("S3 called: %q", calls)
+	}
+	setBlob(t, s, "bA-art", content)
 	// A body other than the one presigned is refused by S3.
 	code, raw := runnerPost(t, s, "ha", "bA-art", "upload", uploadRequest(content))
 	if code != http.StatusOK {

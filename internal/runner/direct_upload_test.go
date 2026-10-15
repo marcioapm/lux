@@ -383,6 +383,34 @@ func TestUploaderCompletePlain404IsRetried(t *testing.T) {
 	}
 }
 
+// The fallback to the streaming PUT is logged once per process, not once
+// per blob.
+func TestUploaderFallbackWarnsOnce(t *testing.T) {
+	fallbackWarning = sync.Once{}
+	t.Cleanup(func() { fallbackWarning = sync.Once{} })
+	fk := newDirectFake(t)
+	fk.upload = func(w http.ResponseWriter) bool {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "404 page not found\n")
+		return true
+	}
+	r, _ := uploadRunner(t, fk, false)
+	var logs bytes.Buffer
+	r.log = slog.New(slog.NewTextHandler(&logs, nil))
+	up := pendingUpload{BlobID: "blob1", Path: r.blobPath("blob1"), Size: 10}
+	for range 2 {
+		if err := r.uploads.upload(context.Background(), up); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(fk.streamed) != 2 {
+		t.Fatalf("streamed %v, want 2 PUTs through luxd", fk.streamed)
+	}
+	if n := strings.Count(logs.String(), "no direct upload route"); n != 1 {
+		t.Fatalf("%d fallback warnings, want 1:\n%s", n, logs.String())
+	}
+}
+
 // A retry after a failed part starts a fresh /upload.
 func TestUploaderRetryStartsAFreshUpload(t *testing.T) {
 	fk := newDirectFake(t)
