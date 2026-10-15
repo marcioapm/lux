@@ -36,6 +36,7 @@ type directFake struct {
 	failCode  int                                               //
 	failTimes int                                               // that many times; 0 is always
 	attempts  map[string]int                                    // part number or "single" → PUTs received
+	at        map[string][]time.Time                            // part number or "single" → when each PUT arrived
 	requests  []proto.BlobUploadRequest
 	completes []proto.BlobCompleteRequest
 	puts      []string // "<part number or single>:<bytes>"
@@ -49,7 +50,7 @@ func newDirectFake(t *testing.T) *directFake {
 	delays := partRetryDelays
 	partRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	t.Cleanup(func() { partRetryDelays = delays })
-	f := &directFake{bodies: map[string][]byte{}, attempts: map[string]int{}, signed: map[string]map[string]string{}}
+	f := &directFake{bodies: map[string][]byte{}, attempts: map[string]int{}, at: map[string][]time.Time{}, signed: map[string]map[string]string{}}
 	f.s3 = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
@@ -60,6 +61,7 @@ func newDirectFake(t *testing.T) *directFake {
 			part = "single"
 		}
 		f.attempts[part]++
+		f.at[part] = append(f.at[part], time.Now())
 		if part == strconv.Itoa(f.failPart) && (f.failTimes == 0 || f.attempts[part] <= f.failTimes) {
 			w.WriteHeader(cmp.Or(f.failCode, http.StatusInternalServerError))
 			return
@@ -139,6 +141,12 @@ func newDirectFake(t *testing.T) *directFake {
 			f.completes = append(f.completes, in)
 			override := f.complete
 			f.mu.Unlock()
+			// luxd's answer: an abort names the upload id it drops.
+			if in.Abort && in.UploadID == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":{"code":"bad_request","message":"abort needs an uploadId"}}`)
+				return
+			}
 			if override != nil && override(w, r) {
 				return
 			}
@@ -237,7 +245,7 @@ func TestUploadDirectSingle(t *testing.T) {
 		if len(fk.requests[0].Parts) != 1 || fk.requests[0].Parts[0] != b64(content) || !bytes.Equal(fk.bodies["single"], content) {
 			t.Fatalf("size %d: request %+v puts %q", size, fk.requests[0], fk.puts)
 		}
-		if len(fk.completes) != 1 || fk.completes[0].UploadID != "" || len(fk.completes[0].Parts) != 0 {
+		if len(fk.completes) != 1 || !equalComplete(fk.completes[0], proto.BlobCompleteRequest{}) {
 			t.Fatalf("size %d: /complete %+v", size, fk.completes)
 		}
 	}
@@ -253,6 +261,8 @@ func TestUploadDirectPartFailureIsAnError(t *testing.T) {
 		t.Run(strconv.Itoa(c.status), func(t *testing.T) {
 			fk := newDirectFake(t)
 			fk.failPart, fk.failCode = 2, c.status
+			delays := []time.Duration{30 * time.Millisecond, 60 * time.Millisecond}
+			partRetryDelays = delays
 			file, content := blobFile(t, proto.BlobPartSize+10)
 			err := fk.api().uploadDirect(context.Background(), "blob1", file, int64(len(content)))
 			var he *httpError
@@ -261,6 +271,12 @@ func TestUploadDirectPartFailureIsAnError(t *testing.T) {
 			}
 			if fk.attempts["2"] != c.attempts {
 				t.Fatalf("part 2 attempted %d times, want %d", fk.attempts["2"], c.attempts)
+			}
+			// Each retry waits its delay after the attempt before.
+			for i := 1; i < len(fk.at["2"]); i++ {
+				if gap := fk.at["2"][i].Sub(fk.at["2"][i-1]); gap < delays[i-1] {
+					t.Fatalf("attempt %d came %v after the one before, want ≥ %v", i+1, gap, delays[i-1])
+				}
 			}
 			want := []proto.BlobCompleteRequest{{UploadID: "up-1", Abort: true}}
 			if len(fk.completes) != 1 || !equalComplete(fk.completes[0], want[0]) {

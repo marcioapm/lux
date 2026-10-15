@@ -24,11 +24,15 @@ def luxd_debug(env):
     see which upload routes the runners used; through extra["luxd_env"],
     so a luxd another fixture restarts keeps it."""
     luxd_env = env.extra.setdefault("luxd_env", {})
+    prev = luxd_env.get("LUX_DEBUG")
     luxd_env["LUX_DEBUG"] = "1"
     env.stop_luxd()
     env.start_luxd()
     yield
-    luxd_env.pop("LUX_DEBUG", None)
+    if prev is None:
+        luxd_env.pop("LUX_DEBUG", None)
+    else:
+        luxd_env["LUX_DEBUG"] = prev
     env.stop_luxd()
     env.start_luxd()
 
