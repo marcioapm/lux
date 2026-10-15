@@ -645,8 +645,8 @@ says when they start).
   whenever the server starts after a [sync](#syncing-checkouts) (an
   install when the lockfile changed, a migration); the command runs only if
   it succeeds.
-- `inject` (optional): HTML added to every HTML page its preview serves,
-  right after the page's `<head>` tag: a `<script>`, `<link>` or `<meta>`
+- `inject` (optional): HTML added right after the `<head>` tag of the HTML
+  pages a browser navigates to: a `<script>`, `<link>` or `<meta>`
   (a preview banner, a third-party widget, a debug tool). Not secret: it is
   stored with the Run and visible to anyone who can read the page. At most
   8 KiB of UTF-8, no NUL; lux does not otherwise check the HTML. Empty: off.
@@ -663,17 +663,20 @@ snippet). Assets, API calls, `HEAD`, WebSockets, other statuses, and lux's
 own pages (`/.lux/…`, its status pages) pass untouched, as do the pages of
 a server without `inject`.
 
-lux does not parse the page: it looks at most at its first 32 KiB for the
-first `<head` tag (case-insensitive; `<header>` is not one) and adds the
-snippet after its `>`. Without one there, it goes right before the first
-`<body` tag; without either, after a leading `<!doctype …>`, else at the
-very start. lux does not parse HTML: a `<head` or `<body` inside a
-comment or script before the real tag is taken for it. The rest of the
-page streams as it comes. A page the server compresses anyway
-(`Content-Encoding` other than `identity`) passes untouched: lux never
-decompresses. An injected page loses its
-`Content-Length`, `ETag`, `Content-MD5`, `Digest` and `Last-Modified`;
-`Cache-Control` stays as the server sent it.
+lux looks at most at the page's first 32 KiB for the first complete
+`<head …>` or `<body …>` tag (case-insensitive; `<header>` is not one),
+skipping `<!-- … -->` comments; the first of the two wins, as a browser
+ignores a `<head>` after `<body>`. The snippet goes right after a
+`<head …>` tag's `>`, or right before a `<body …>` tag; without either,
+after a leading `<!doctype …>`, else at the very start. The result does not
+depend on how the page's bytes arrive. lux does not parse HTML: a `<head` or
+`<body` inside an earlier tag's attribute value or a script is taken for the
+tag. The rest of the page streams as it comes. A page the server compresses
+anyway (`Content-Encoding` other than `identity`) passes untouched: lux
+never decompresses. An injected page loses its
+`Content-Length`, `ETag`, `Content-MD5`, `Digest` and `Last-Modified`,
+and gains `Vary: Sec-Fetch-Dest, Accept`; `Cache-Control` stays as the
+server sent it.
 
 lux does not rewrite `Content-Security-Policy`: a page whose policy
 forbids the snippet's script blocks it. A change to `inject`
