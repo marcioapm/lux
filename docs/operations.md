@@ -299,10 +299,16 @@ reach S3 in the background:
    S3. Runners never hold S3 credentials, but need network egress to S3
    (which downloads already use). luxd still accepts the older
    `PUT /runner/v1/blobs/{id}`, streaming the body into S3 and verifying
-   its sha256 on the way, for runners that predate direct uploads. A failed
-   upload is retried from the start; a multipart upload left incomplete is
-   aborted by luxd when it can, and by the bucket's lifecycle rule after 7
-   days otherwise. A snapshot report is validated against its Run's blob
+   its sha256 on the way, for runners that predate direct uploads. A part
+   that fails on the network or with an S3 5xx is retried up to three
+   times; a blob whose part still fails is retried from the start, and the
+   runner first has luxd abort the multipart upload it gave up on. luxd also
+   aborts one S3 refuses to complete; the bucket's lifecycle rule, after 7
+   days, is the backstop for the rest. A multipart upload is checked part by
+   part as it arrives; the whole blob's sha256 is checked again when a
+   snapshot is restored. A presigned URL really lasts as long as the
+   shorter of its hour and the credentials luxd signed it with (an instance
+   role's session). A snapshot report is validated against its Run's blob
    records; a report that does not match is refused whole (a
    `snapshot.failed` event on the Run, which keeps its previous snapshot
    and is not resumed automatically, even when the same placement
