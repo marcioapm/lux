@@ -586,12 +586,26 @@ func TestAttachStreamSendsSnapshotFrames(t *testing.T) {
 	dec := json.NewDecoder(runnerSide)
 	var frames []proto.StreamData
 	var out []byte
-	sent := false
+	marker := -1 // index in frames of the Restored marker
 	for !bytes.Contains(out, []byte("after")) {
 		var d proto.StreamData
 		runnerSide.SetReadDeadline(time.Now().Add(10 * time.Second))
 		if err := dec.Decode(&d); err != nil {
 			t.Fatalf("after %d frames: %v", len(frames), err)
+		}
+		if d.Restored {
+			if marker >= 0 || len(d.Data) > 0 || d.Channel != "" {
+				t.Fatalf("marker %+v (an earlier one at frame %d)", d, marker)
+			}
+			if len(out) != snapLen {
+				t.Fatalf("the marker after %d bytes, the snapshot is %d", len(out), snapLen)
+			}
+			marker = len(frames)
+			frames = append(frames, d)
+			// Live output only now, so it cannot land before the marker
+			// by being written early.
+			fmt.Fprint(tty, " after")
+			continue
 		}
 		if d.Channel != "stdout" || d.Error != "" {
 			t.Fatalf("frame %+v", d)
@@ -601,24 +615,15 @@ func TestAttachStreamSendsSnapshotFrames(t *testing.T) {
 		}
 		frames = append(frames, d)
 		out = append(out, d.Data...)
-		if !sent && len(out) >= snapLen {
-			sent = true
-			fmt.Fprint(tty, " after")
-		}
 	}
-	// The snapshot's frames: all full but the last.
-	n := 0
-	for i, f := range frames {
-		n += len(f.Data)
-		if n >= snapLen {
-			if n != snapLen {
-				t.Fatalf("snapshot frame %d ends at byte %d, the snapshot at %d", i, n, snapLen)
-			}
-			if i < 2 {
-				t.Fatalf("the snapshot in %d frames", i+1)
-			}
-			break
-		}
+	if marker < 0 {
+		t.Fatal("no end-of-snapshot marker")
+	}
+	// The snapshot's frames, before the marker: all full but the last.
+	if marker < 3 {
+		t.Fatalf("the snapshot in %d frames", marker)
+	}
+	for i, f := range frames[:marker-1] {
 		if len(f.Data) != streamChunk {
 			t.Fatalf("snapshot frame %d of %d bytes, want %d", i, len(f.Data), streamChunk)
 		}
@@ -626,6 +631,106 @@ func TestAttachStreamSendsSnapshotFrames(t *testing.T) {
 	v := replay(30, 200, historyLines, out)
 	if !bytes.Equal(v.Snapshot(0), screenOf(term)) {
 		t.Fatal("the stream does not reproduce the terminal")
+	}
+}
+
+// A restore attach that gets no snapshot (the emulator was dropped, or the
+// screen alone is over the limit) still gets the marker, first, then live
+// output; a plain attach gets no marker.
+func TestRestoreMarkerWithoutSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		restore bool
+		setup   func(*terminal, *os.File)
+	}{
+		{"emulator dropped", true, func(term *terminal, _ *os.File) {
+			term.mu.Lock()
+			term.screen = nil
+			term.mu.Unlock()
+		}},
+		{"screen over the limit", true, func(term *terminal, tty *os.File) {
+			// Every cell of a 200x500 screen in its own truecolour pen.
+			term.resize(vterm.MaxRows, vterm.MaxCols)
+			w := bufio.NewWriterSize(tty, 64<<10)
+			for y := range vterm.MaxRows {
+				fmt.Fprintf(w, "\x1b[%dH", y+1)
+				for x := range vterm.MaxCols - 1 {
+					fmt.Fprintf(w, "\x1b[1;3;9;38;2;%d;%d;%d;48;2;%d;%d;%dmx", x%256, y%256, (x+y)%256, y%256, x%256, (x*y)%256)
+				}
+			}
+			fmt.Fprint(w, "\x1b[m\x1b[HREADY")
+			ferr := w.Flush()
+			// Polled cheaply: a whole snapshot of this screen per poll
+			// would hold the lock the reader needs.
+			deadline := time.Now().Add(30 * time.Second)
+			for {
+				term.mu.Lock()
+				v := term.screen.(*vterm.Terminal)
+				x, y, _ := v.Cursor()
+				done := x == 5 && y == 0 && v.Text(v.Cell(4, 0)) == "Y"
+				term.mu.Unlock()
+				if done {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the terminal never showed READY: cursor %d,%d, flush %v", x, y, ferr)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			term.mu.Lock()
+			defer term.mu.Unlock()
+			if s := term.screen.Snapshot(snapshotLimit); s != nil {
+				t.Fatalf("a %d-byte snapshot: the screen is within the limit", len(s))
+			}
+		}},
+		{"plain attach", false, func(*terminal, *os.File) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			term, tty, _ := ptyTerminal(t, 24, 80, historyLines, nil)
+			tc.setup(term, tty)
+			s := &Shim{term: term}
+			runnerSide, shimSide := net.Pipe()
+			defer runnerSide.Close()
+			go func() {
+				defer shimSide.Close()
+				s.handleStream(bufio.NewScanner(shimSide), json.NewEncoder(shimSide), proto.StreamOpen{Kind: "attach", Restore: tc.restore})
+			}()
+			dec := json.NewDecoder(runnerSide)
+			read := func() proto.StreamData {
+				var d proto.StreamData
+				runnerSide.SetReadDeadline(time.Now().Add(10 * time.Second))
+				if err := dec.Decode(&d); err != nil {
+					t.Fatal(err)
+				}
+				return d
+			}
+			if tc.restore {
+				if d := read(); !d.Restored || len(d.Data) > 0 {
+					t.Fatalf("first frame %+v, want the marker", d)
+				}
+			} else {
+				// Joined once the stream has subscribed; then live output.
+				deadline := time.Now().Add(10 * time.Second)
+				for {
+					term.mu.Lock()
+					n := len(term.subs)
+					term.mu.Unlock()
+					if n == 1 || time.Now().After(deadline) {
+						break
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			fmt.Fprint(tty, "LIVE")
+			var out []byte
+			for !bytes.Contains(out, []byte("LIVE")) {
+				d := read()
+				if d.Restored {
+					t.Fatalf("a marker %+v", d)
+				}
+				out = append(out, d.Data...)
+			}
+		})
 	}
 }
 

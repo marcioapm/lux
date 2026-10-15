@@ -151,6 +151,10 @@ func (s *Shim) attachStream(sc *bufio.Scanner, out *streamConn, open proto.Strea
 		for b := range chunks(snapshot, streamChunk) {
 			_ = out.send(proto.StreamData{Channel: "stdout", Data: b})
 		}
+		if open.Restore {
+			// Where live output starts, with or without a snapshot.
+			_ = out.send(proto.StreamData{Restored: true})
+		}
 		for {
 			b, err := sub.next()
 			if errors.Is(err, errFellBehind) {

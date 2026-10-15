@@ -504,8 +504,12 @@ lux port-forward <run> <port-name> <local-port> [--address 127.0.0.1]
   (4 MiB queued), the attach is ended with `attach fell behind; attach
   again` rather than continued with a gap; attach again to redraw. The
   redraw is ordinary output (StreamOpen `restore`; on the API,
-  `GET /v1/runs/{id}/attach?restore=true&rows=R&cols=C`): a host whose
-  lux-shim predates it sends none, and attach just continues live.
+  `GET /v1/runs/{id}/attach?restore=true&rows=R&cols=C`), followed by
+  one `{"restored": true}` message with no data where live output
+  starts; it comes first when the host sends no redraw (its emulator
+  failed, or the screen alone is over the 4 MiB budget). A host whose
+  lux-shim predates it sends neither redraw nor marker, and attach just
+  continues live.
 - **shell** opens a login shell on a terminal: `bash -l` where bash is
   on the workload's PATH, `sh -l` otherwise (`lux exec -t <run> --
   /bin/sh -c 'command -v bash >/dev/null && exec bash -l; exec /bin/sh -l'`).

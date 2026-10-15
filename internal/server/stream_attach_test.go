@@ -47,6 +47,7 @@ func TestAttachStreamOpenRestore(t *testing.T) {
 				_ = json.Unmarshal(f.Data, &o)
 				opens <- o
 				s.hub.route(f.Stream, proto.Frame{Type: proto.MsgStreamData, Stream: f.Stream, Data: proto.Marshal(proto.StreamData{Channel: "stdout", Data: []byte("snapshot")})})
+				s.hub.route(f.Stream, proto.Frame{Type: proto.MsgStreamData, Stream: f.Stream, Data: []byte(`{"restored":true}`)})
 				s.hub.route(f.Stream, proto.Frame{Type: proto.MsgStreamClose, Stream: f.Stream, Data: proto.Marshal(proto.StreamData{Error: "the workload exited"})})
 			}
 		}
@@ -85,6 +86,11 @@ func TestAttachStreamOpenRestore(t *testing.T) {
 		var d proto.StreamData
 		if err := wsjson.Read(wctx, ws, &d); err != nil || string(d.Data) != "snapshot" {
 			t.Fatalf("%q: first message %+v %v", tc.query, d, err)
+		}
+		// The host's end-of-snapshot marker reaches the client as sent.
+		var raw json.RawMessage
+		if err := wsjson.Read(wctx, ws, &raw); err != nil || string(raw) != `{"restored":true}` {
+			t.Fatalf("%q: second message %s %v", tc.query, raw, err)
 		}
 		ws.CloseNow()
 		cancel()

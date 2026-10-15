@@ -636,6 +636,9 @@ type StreamData struct {
 	// Credit, luxd → runner only: this many more output frames may be sent
 	// (StreamOpen.Window). A runner from before takes it as empty input.
 	Credit int `json:"credit,omitempty" doc:"luxd to runner only (tunnel flow control); a client that sends it ends its stream."`
+	// Restored, attach with restore only, host to client: the snapshot
+	// (if any) is over and live output follows. Sent once, with no data.
+	Restored bool `json:"restored,omitempty" doc:"attach with restore only, host to client: sent once, with no data, after the snapshot's last output message (or first, when the host sends no snapshot); live output follows. A host from before sends neither snapshot nor this."`
 }
 
 // Push asks the runner to push each repository's current commit to the
