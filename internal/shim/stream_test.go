@@ -409,6 +409,19 @@ func TestRestoreAttachFallenBehindIsEnded(t *testing.T) {
 		defer shimSide.Close()
 		s.handleStream(bufio.NewScanner(shimSide), json.NewEncoder(shimSide), proto.StreamOpen{Kind: "attach", Restore: true})
 	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		term.mu.Lock()
+		joined := len(term.subs)
+		term.mu.Unlock()
+		if joined == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stream never joined")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	// The stream's sender is blocked on its first snapshot frame (net.Pipe
 	// is unbuffered) while the workload writes past the budget.
 	line := strings.Repeat("z", 79) + "\r\n"
@@ -539,16 +552,22 @@ func TestEmulatorFailureKeepsStream(t *testing.T) {
 	term.resize(10, 10) // no emulator: just the PTY
 }
 
-// The shim's attach stream sends the snapshot as stdout StreamData,
-// chunked, then live output.
+// The shim's attach stream sends the snapshot as stdout StreamData in
+// frames of exactly streamChunk (the last one shorter), then live output.
 func TestAttachStreamSendsSnapshotFrames(t *testing.T) {
 	term, tty, _ := ptyTerminal(t, 30, 200, historyLines, nil)
-	// A screen whose snapshot is over one chunk.
-	for i := range 29 {
+	// History and a screen whose snapshot is over two chunks.
+	for i := range 500 {
 		fmt.Fprintf(tty, "\x1b[3%dm%s\x1b[m\r\n", i%8, strings.Repeat(fmt.Sprint(i%10), 199))
 	}
 	fmt.Fprint(tty, "ready")
 	waitScreen(t, term, "ready")
+	term.mu.Lock()
+	snapLen := len(term.screen.Snapshot(snapshotLimit))
+	term.mu.Unlock()
+	if snapLen <= 2*streamChunk {
+		t.Fatalf("a snapshot of %d bytes: not over two chunks", snapLen)
+	}
 	s := &Shim{term: term}
 
 	runnerSide, shimSide := net.Pipe()
@@ -576,16 +595,82 @@ func TestAttachStreamSendsSnapshotFrames(t *testing.T) {
 		}
 		frames = append(frames, d)
 		out = append(out, d.Data...)
-		if !sent && bytes.Contains(out, []byte("ready")) {
+		if !sent && len(out) >= snapLen {
 			sent = true
 			fmt.Fprint(tty, " after")
 		}
 	}
-	if len(frames) < 2 {
-		t.Fatalf("%d frames", len(frames))
+	// The snapshot's frames: all full but the last.
+	n := 0
+	for i, f := range frames {
+		n += len(f.Data)
+		if n >= snapLen {
+			if n != snapLen {
+				t.Fatalf("snapshot frame %d ends at byte %d, the snapshot at %d", i, n, snapLen)
+			}
+			if i < 2 {
+				t.Fatalf("the snapshot in %d frames", i+1)
+			}
+			break
+		}
+		if len(f.Data) != streamChunk {
+			t.Fatalf("snapshot frame %d of %d bytes, want %d", i, len(f.Data), streamChunk)
+		}
 	}
 	v := replay(30, 200, historyLines, out)
 	if !bytes.Equal(v.Snapshot(0), screenOf(term)) {
 		t.Fatal("the stream does not reproduce the terminal")
 	}
+}
+
+// join's snapshot is within snapshotLimit even when the whole terminal
+// is not, and replays to the shim's screen with the newest history.
+func TestJoinSnapshotWithinLimit(t *testing.T) {
+	const rows, cols = 50, 200
+	term, tty, _ := ptyTerminal(t, rows, cols, historyLines, nil)
+	var line strings.Builder
+	for x := range cols - 1 {
+		fmt.Fprintf(&line, "\x1b[38;2;%d;%d;%d;48;2;%d;%d;%dm%c", x, 255-x, x/2, 255-x/2, x, x, 'a'+x%26)
+	}
+	line.WriteString("\x1b[m")
+	w := bufio.NewWriterSize(tty, 64<<10)
+	for i := range historyLines + rows {
+		fmt.Fprintf(w, "%05d%s\r\n", i, line.String())
+	}
+	fmt.Fprint(w, "ready")
+	w.Flush()
+	waitScreen(t, term, "ready")
+	full := screenOf(term)
+	if len(full) <= snapshotLimit {
+		t.Fatalf("the whole terminal is %d bytes, within the limit: nothing to test", len(full))
+	}
+
+	snap, sub := term.join(true, 0, 0)
+	term.leave(sub)
+	if len(snap) > snapshotLimit {
+		t.Fatalf("a snapshot of %d bytes, over the limit %d", len(snap), snapshotLimit)
+	}
+	v := replay(rows, cols, historyLines, snap)
+	term.mu.Lock()
+	shim := term.screen.(*vterm.Terminal)
+	wantScreen, wantHist := screenText(shim), shim.HistoryLen()
+	wantNewest := lineText(shim, shim.HistoryLine(wantHist-1))
+	term.mu.Unlock()
+	if got := screenText(v); got != wantScreen {
+		t.Fatalf("replayed screen differs:\n%q\nwant\n%q", got, wantScreen)
+	}
+	if n := v.HistoryLen(); n == 0 || n >= wantHist {
+		t.Fatalf("replayed history %d lines of %d", n, wantHist)
+	}
+	if got := lineText(v, v.HistoryLine(v.HistoryLen()-1)); got != wantNewest {
+		t.Fatalf("newest history line %q, want %q", got, wantNewest)
+	}
+}
+
+func lineText(v *vterm.Terminal, l []vterm.Cell) string {
+	var s strings.Builder
+	for _, c := range l {
+		s.WriteString(v.Text(c))
+	}
+	return s.String()
 }
