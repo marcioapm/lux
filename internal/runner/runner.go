@@ -113,6 +113,7 @@ type Runner struct {
 	netMu         sync.Mutex
 	hostNet       netBaseline
 	hostNetSeeded bool
+	hostNetKnown  bool
 	hostNetBoot   string
 	images        *imageUse
 	graph         string // Podman's graph root, once asked

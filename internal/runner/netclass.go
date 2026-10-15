@@ -120,6 +120,7 @@ func (r *Runner) restoreHostNetwork(boot string) error {
 	}
 	if state.Boot == boot {
 		r.hostNet, r.hostNetSeeded = state.Net, state.Seeded
+		r.hostNetKnown = true
 	}
 	return nil
 }
@@ -155,7 +156,7 @@ func (r *Runner) welcomeNetwork(w proto.Welcome) {
 	r.netMu.Lock()
 	defer r.netMu.Unlock()
 	r.sampleNetworkLocked()
-	if !r.hostNetSeeded && !r.egress.HostCountersKept() {
+	if !r.hostNetSeeded && (r.hostNetKnown || !r.egress.HostCountersKept()) {
 		unseeded := r.hostNet.clone()
 		r.hostNet.seed(w.HostNet)
 		r.hostNetSeeded = true

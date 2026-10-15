@@ -222,6 +222,55 @@ func TestUnpersistedSeedIsUndone(t *testing.T) {
 	}
 }
 
+func TestSampleBeforeWelcomeThenRestartSeedsOnce(t *testing.T) {
+	r, _, _ := fakeNftRunner(t)
+	dir := t.TempDir()
+	r.cfg.DataDir = dir
+	if err := r.restoreHostNetwork("boot-1"); err != nil {
+		t.Fatal(err)
+	}
+	// The firewall's preserved host counter is available before Welcome.
+	counters := filepath.Join(filepath.SplitList(os.Getenv("PATH"))[0], "counters.json")
+	if err := os.WriteFile(counters, []byte(`{"nftables":[{"counter":{"family":"inet","table":"lux","name":"lux_host_internet_tx","bytes":50}}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := egress.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.egress = fw
+	r.sampleNetwork()
+	if got := r.hostNet.value()["internet"].Tx; got != 50 {
+		t.Fatalf("before Welcome: %d, want 50", got)
+	}
+	restart := func() *Runner {
+		t.Helper()
+		fw, err := egress.New(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next := &Runner{cfg: Config{DataDir: dir}, log: r.log, egress: fw, placements: map[string]*placement{}}
+		if err := next.restoreHostNetwork("boot-1"); err != nil {
+			t.Fatal(err)
+		}
+		return next
+	}
+	r = restart()
+	if !r.egress.HostCountersKept() {
+		t.Fatal("same-boot restart did not preserve host counters")
+	}
+	w := proto.Welcome{HostNet: map[string]proto.NetBytes{"internet": {Tx: 1000}}}
+	r.welcomeNetwork(w)
+	r.welcomeNetwork(w)
+	if got := r.hostNet.value()["internet"].Tx; got != 1050 {
+		t.Fatalf("after Welcome twice: %d, want 1050", got)
+	}
+	r = restart()
+	if got := r.hostNet.value()["internet"].Tx; got != 1050 || !r.hostNetSeeded {
+		t.Fatalf("restored %d seeded=%t, want 1050 seeded=true", got, r.hostNetSeeded)
+	}
+}
+
 func TestUsageNetCompatibility(t *testing.T) {
 	raw, err := json.Marshal(proto.Usage{})
 	if err != nil {
