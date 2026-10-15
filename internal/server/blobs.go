@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -12,10 +13,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/jackc/pgx/v5"
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/marcioapm/lux/internal/blob"
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -23,80 +26,265 @@ import (
 // large snapshot, short enough that a leaked URL is soon useless.
 const presignTTL = 15 * time.Minute
 
-// serveBlobUpload is PUT /runner/v1/blobs/{id}: a runner uploading a blob it
-// reported in snapshot.done. luxd streams it to S3, verifying its sha256 on
-// the way; runners never hold S3 credentials.
-func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
+// uploadPresignTTL bounds an upload URL: every part of a blob is presigned
+// at once and PUT in turn, so it must outlast the whole upload.
+const uploadPresignTTL = time.Hour
+
+// runnerBlob is a blob as its uploading host sees it.
+type runnerBlob struct {
+	id, tenantID, runID, sha256, location, kind string
+	epoch                                       int
+	size                                        int64
+}
+
+func (b *runnerBlob) key() string { return blob.Key(b.tenantID, b.runID, b.id) }
+
+// hostBlob is the blob {id} reported by the asking host: 404 for any other.
+func (s *Server) hostBlob(r *http.Request) (*runnerBlob, error) {
 	tok, err := s.authHostToken(r)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	id := r.PathValue("id")
-	hostName := r.URL.Query().Get("host")
-	var tenantID, runID, want, location, hostID, kind string
-	var epoch int
+	b := &runnerBlob{id: r.PathValue("id")}
 	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(), `SELECT b.tenant_id, b.run_id, b.epoch, b.sha256, b.location, coalesce(b.host_id, ''), b.kind
+		return tx.QueryRow(r.Context(), `SELECT b.tenant_id, b.run_id, b.epoch, b.sha256, b.size, b.location, b.kind
 			FROM blobs b JOIN hosts h ON h.id = b.host_id
-			WHERE b.id = $1 AND h.token_id = $2 AND h.name = $3`, id, tok.ID, hostName).
-			Scan(&tenantID, &runID, &epoch, &want, &location, &hostID, &kind)
+			WHERE b.id = $1 AND h.token_id = $2 AND h.name = $3`, b.id, tok.ID, r.URL.Query().Get("host")).
+			Scan(&b.tenantID, &b.runID, &b.epoch, &b.sha256, &b.size, &b.location, &b.kind)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return errf(http.StatusNotFound, "not_found", "no blob %s from this host", id)
+		return nil, errf(http.StatusNotFound, "not_found", "no blob %s from this host", b.id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// uploadable is nil for a blob still on its host: S3 already having it is
+// errAlreadyUploaded, a deleted one 410.
+func (b *runnerBlob) uploadable() error {
+	switch b.location {
+	case "host":
+		return nil
+	case "s3":
+		return errAlreadyUploaded
+	}
+	return errf(http.StatusGone, "gone", "blob %s was deleted", b.id)
+}
+
+var errAlreadyUploaded = errors.New("already uploaded")
+
+// serveBlobUpload is PUT /runner/v1/blobs/{id}: a runner uploading a blob it
+// reported in snapshot.done through luxd, which streams it to S3, verifying
+// its sha256 on the way. Runners that upload straight to S3 use
+// serveBlobUploadStart instead; this stays for those that predate it.
+func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
+	b, err := s.hostBlob(r)
+	if err != nil {
+		return err
+	}
+	if err := b.uploadable(); err != nil {
+		if errors.Is(err, errAlreadyUploaded) {
+			writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
+			return nil
+		}
+		return err
+	}
+	key := b.key()
+	h := sha256.New()
+	body := io.TeeReader(r.Body, h)
+	if err := s.blobs.Put(r.Context(), key, body, r.ContentLength, b.sha256); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != b.sha256 {
+		_ = s.blobs.Delete(context.WithoutCancel(r.Context()), key)
+		return errf(http.StatusBadRequest, "checksum_mismatch", "sha256 %s, expected %s", got, b.sha256)
+	}
+	if err := s.blobUploaded(r.Context(), b); err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
+	return nil
+}
+
+// serveBlobUploadStart is POST /runner/v1/blobs/{id}/upload: presigned URLs
+// for the runner to upload the blob straight to S3, one PutObject or one
+// UploadPart per proto.BlobPartSize part, each with its SHA-256 signed in so
+// S3 refuses any other bytes. The runner holds no S3 credentials.
+func (s *Server) serveBlobUploadStart(w http.ResponseWriter, r *http.Request) error {
+	b, err := s.hostBlob(r)
+	if err != nil {
+		return err
+	}
+	var in proto.BlobUploadRequest
+	if err := readJSON(r, &in); err != nil {
+		return err
+	}
+	if err := b.uploadable(); err != nil {
+		if errors.Is(err, errAlreadyUploaded) {
+			writeJSON(w, http.StatusOK, proto.BlobUploadResponse{Uploaded: true})
+			return nil
+		}
+		s.dropDeletedUpload(r.Context(), b)
+		return err
+	}
+	if b.sha256 != "" && in.SHA256 != b.sha256 {
+		return errf(http.StatusBadRequest, "checksum_mismatch", "sha256 %s, expected %s", in.SHA256, b.sha256)
+	}
+	if b.size > 0 && in.Size != b.size {
+		return errf(http.StatusBadRequest, "size_mismatch", "size %d, expected %d", in.Size, b.size)
+	}
+	whole, err := hex.DecodeString(in.SHA256)
+	if err != nil || len(whole) != sha256.Size || in.Size < 0 {
+		return errf(http.StatusBadRequest, "bad_request", "sha256 must be a hex SHA-256 and size non-negative")
+	}
+	if n := proto.BlobParts(in.Size); len(in.Parts) != n {
+		return errf(http.StatusBadRequest, "bad_request", "%d parts for %d bytes, expected %d", len(in.Parts), in.Size, n)
+	}
+	for i, p := range in.Parts {
+		if d, err := base64.StdEncoding.DecodeString(p); err != nil || len(d) != sha256.Size {
+			return errf(http.StatusBadRequest, "bad_request", "part %d: not a base64 SHA-256", i+1)
+		}
+	}
+	key := b.key()
+	if len(in.Parts) == 1 {
+		wholeB64 := base64.StdEncoding.EncodeToString(whole)
+		if in.Parts[0] != wholeB64 {
+			return errf(http.StatusBadRequest, "checksum_mismatch", "a single part's sha256 must be the file's")
+		}
+		p, err := s.blobs.PresignPut(r.Context(), key, in.Size, in.SHA256, wholeB64, uploadPresignTTL)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, http.StatusOK, proto.BlobUploadResponse{Single: &proto.PresignedRequest{URL: p.URL, Headers: p.Headers}})
+		return nil
+	}
+	uploadID, err := s.blobs.CreateMultipart(r.Context(), key, in.SHA256)
+	if err != nil {
+		return err
+	}
+	out := proto.BlobUploadResponse{UploadID: uploadID}
+	for i, sum := range in.Parts {
+		size := min(int64(proto.BlobPartSize), in.Size-int64(i)*proto.BlobPartSize)
+		p, err := s.blobs.PresignUploadPart(r.Context(), key, uploadID, int32(i+1), size, sum, uploadPresignTTL)
+		if err != nil {
+			s.abortUpload(r.Context(), key, uploadID)
+			return err
+		}
+		out.Parts = append(out.Parts, proto.PresignedPart{Number: int32(i + 1), PresignedRequest: proto.PresignedRequest{URL: p.URL, Headers: p.Headers}})
+	}
+	writeJSON(w, http.StatusOK, out)
+	return nil
+}
+
+// serveBlobUploadComplete is POST /runner/v1/blobs/{id}/complete: the
+// runner's direct upload is done. luxd completes a multipart upload, checks
+// the object's length, and records the blob uploaded as serveBlobUpload
+// does.
+func (s *Server) serveBlobUploadComplete(w http.ResponseWriter, r *http.Request) error {
+	b, err := s.hostBlob(r)
+	if err != nil {
+		return err
+	}
+	var in proto.BlobCompleteRequest
+	if err := readJSON(r, &in); err != nil {
+		return err
+	}
+	key := b.key()
+	if err := b.uploadable(); err != nil {
+		if in.UploadID != "" {
+			s.abortUpload(r.Context(), key, in.UploadID)
+		}
+		if errors.Is(err, errAlreadyUploaded) {
+			writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
+			return nil
+		}
+		s.dropDeletedUpload(r.Context(), b)
+		return err
+	}
+	if in.UploadID != "" {
+		parts := make([]blob.Part, len(in.Parts))
+		for i, p := range in.Parts {
+			parts[i] = blob.Part{Number: p.Number, ETag: p.ETag, SHA256: p.SHA256}
+		}
+		if err := s.blobs.CompleteMultipart(r.Context(), key, in.UploadID, parts); err != nil {
+			s.abortUpload(r.Context(), key, in.UploadID)
+			return err
+		}
+	}
+	size, err := s.blobs.Size(r.Context(), key)
+	var nf *types.NotFound
+	if errors.As(err, &nf) {
+		return errf(http.StatusConflict, "not_uploaded", "blob %s is not in S3", b.id)
 	}
 	if err != nil {
 		return err
 	}
-	if location == "s3" {
-		writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
-		return nil
+	if b.size > 0 && size != b.size {
+		_ = s.blobs.Delete(context.WithoutCancel(r.Context()), key)
+		return errf(http.StatusBadRequest, "size_mismatch", "%d bytes in S3, expected %d", size, b.size)
 	}
-	if location != "host" {
-		return errf(http.StatusGone, "gone", "blob %s was deleted", id)
-	}
-	key := blob.Key(tenantID, runID, id)
-	h := sha256.New()
-	body := io.TeeReader(r.Body, h)
-	if err := s.blobs.Put(r.Context(), key, body, r.ContentLength, want); err != nil {
+	if err := s.blobUploaded(r.Context(), b); err != nil {
 		return err
 	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != want {
-		_ = s.blobs.Delete(context.WithoutCancel(r.Context()), key)
-		return errf(http.StatusBadRequest, "checksum_mismatch", "sha256 %s, expected %s", got, want)
+	writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
+	return nil
+}
+
+// dropDeletedUpload deletes a deleted blob's object: a direct upload's PUT
+// can reach S3 after deleteArtifacts claimed the blob on its host, so the
+// claim had no key to delete.
+func (s *Server) dropDeletedUpload(ctx context.Context, b *runnerBlob) {
+	if b.location == "deleted" {
+		s.deleteObjects(context.WithoutCancel(ctx), "direct upload of a deleted blob", []string{b.key()})
 	}
+}
+
+// abortUpload drops a multipart upload's parts. Best effort: the bucket's
+// lifecycle rule aborts incomplete uploads after 7 days.
+func (s *Server) abortUpload(ctx context.Context, key, uploadID string) {
+	if err := s.blobs.AbortMultipart(context.WithoutCancel(ctx), key, uploadID); err != nil {
+		s.log.Warn("abort multipart upload", "key", key, "err", err)
+	}
+}
+
+// blobUploaded records that b's object is in S3, after either upload
+// route. A blob deleted while it uploaded is 410, its object deleted.
+func (s *Server) blobUploaded(ctx context.Context, b *runnerBlob) error {
+	key := b.key()
 	var gone bool
-	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-		tag, err := tx.Exec(r.Context(), `UPDATE blobs SET location = 's3', s3_key = $2, uploaded_at = now()
-			WHERE id = $1 AND location = 'host'`, id, key)
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE blobs SET location = 's3', s3_key = $2, uploaded_at = now()
+			WHERE id = $1 AND location = 'host'`, b.id, key)
 		if err != nil {
 			return err
 		}
 		// Deleted while it uploaded (deleteArtifacts claims blobs still on
 		// their host): the object just written is nobody's.
 		if tag.RowsAffected() == 0 {
-			if err := tx.QueryRow(r.Context(), `SELECT location = 'deleted' FROM blobs WHERE id = $1`, id).Scan(&gone); err != nil || gone {
+			if err := tx.QueryRow(ctx, `SELECT location = 'deleted' FROM blobs WHERE id = $1`, b.id).Scan(&gone); err != nil || gone {
 				return err
 			}
 		}
-		if err := markUploaded(r.Context(), tx, runID, epoch); err != nil {
+		if err := markUploaded(ctx, tx, b.runID, b.epoch); err != nil {
 			return err
 		}
 		// Only the upload that moved the blob to s3 adds the event, and
 		// last: event streams come after every row lock.
-		if tag.RowsAffected() == 0 || kind != "artifact" {
+		if tag.RowsAffected() == 0 || b.kind != "artifact" {
 			return nil
 		}
-		return artifactUploaded(r.Context(), tx, id)
+		return artifactUploaded(ctx, tx, b.id)
 	})
 	if err != nil {
 		return err
 	}
 	if gone {
-		s.deleteObjects(context.WithoutCancel(r.Context()), "upload of a deleted blob", []string{key})
-		return errf(http.StatusGone, "gone", "blob %s was deleted", id)
+		s.deleteObjects(context.WithoutCancel(ctx), "upload of a deleted blob", []string{key})
+		return errf(http.StatusGone, "gone", "blob %s was deleted", b.id)
 	}
 	s.Kick() // a resume elsewhere may have been waiting for this upload
-	writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
 	return nil
 }
 
