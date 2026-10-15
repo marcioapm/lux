@@ -1156,6 +1156,9 @@ var graphics = [...]rune{
 }
 
 func runeWidth(r rune) int {
+	if r >= 0x80 && r < 0xa0 {
+		return 0 // C1 controls
+	}
 	if r < 0x300 {
 		return 1
 	}
@@ -1170,6 +1173,10 @@ func runeWidth(r rune) int {
 }
 
 func (t *Terminal) print(r rune) {
+	if r >= 0x80 && r < 0xa0 {
+		// A UTF-8-encoded C1 control: neither shown nor acted on, as tmux.
+		return
+	}
 	if r < 0x80 && t.g[t.gl] == csGraphics && r >= 0x5f && r <= 0x7e {
 		r = graphics[r-0x5f]
 	}

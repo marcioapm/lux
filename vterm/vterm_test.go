@@ -158,6 +158,19 @@ func TestScrollbackMemoryBounded(t *testing.T) {
 
 type writer struct{ t *Terminal }
 
+// UTF-8-encoded C1 controls (U+0080–U+009F) take no cell, as in tmux.
+func TestC1ZeroWidth(t *testing.T) {
+	term := New(3, 10, 10)
+	feed(term, "ab\u0085cd\u009b31mX")
+	if got := screenText(term); got != "abcd31mX\n\n\n" {
+		t.Fatalf("screen %q", got)
+	}
+	if x, y, _ := term.Cursor(); x != 8 || y != 0 || term.cur.wrapNext {
+		t.Fatalf("cursor %d,%d wrap %v, want 8,0", x, y, term.cur.wrapNext)
+	}
+	sameState(t, term, restored(term, 10))
+}
+
 // A combining mark whose cluster is already interned allocates nothing.
 func TestCombiningKnownClusterNoAlloc(t *testing.T) {
 	term := New(24, 80, 100)
