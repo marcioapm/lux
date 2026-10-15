@@ -16,8 +16,8 @@ import (
 // a counter recreated) into totals that only grow: reported = Base + Last,
 // and a reading below Last folds Last into Base first. A maximum alone
 // would hide the bytes after a reset until the counter passed its old
-// value. Kept in the run state (and, for the host, rebuilt from luxd's
-// Welcome), so a restarted runner continues from it.
+// value. Kept in the run state (and, for the host, in boot-scoped
+// DataDir/network.json), so a restarted runner continues from it.
 type netBaseline struct {
 	Base map[string]proto.NetBytes `json:"base,omitempty"`
 	Last map[string]proto.NetBytes `json:"last,omitempty"`

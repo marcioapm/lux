@@ -158,17 +158,6 @@ func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostN
 	})
 }
 
-// storeNetwork writes a host's network and classes only when either changed.
-func (s *Server) storeNetwork(ctx context.Context, hostID string, n HostNetwork, nc proto.NetworkClasses) error {
-	n.SubnetCIDRs = nonNil(n.SubnetCIDRs)
-	n.VPCSubnets = nonNil(n.VPCSubnets)
-	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE hosts SET network = $2, net_classes = $3 WHERE id = $1
-			AND (network IS DISTINCT FROM $2::jsonb OR net_classes IS DISTINCT FROM $3::jsonb)`, hostID, n, nc)
-		return err
-	})
-}
-
 // hostNetwork is a host's stored classes (nil: none known, the runner
 // derives Local itself) and its own traffic as last recorded.
 func (s *Server) hostNetwork(ctx context.Context, tx pgx.Tx, hostID string) (*proto.NetworkClasses, map[string]proto.NetBytes, error) {
@@ -176,15 +165,6 @@ func (s *Server) hostNetwork(ctx context.Context, tx pgx.Tx, hostID string) (*pr
 	var net map[string]proto.NetBytes
 	err := tx.QueryRow(ctx, `SELECT net_classes, host_net_classes FROM hosts WHERE id = $1`, hostID).Scan(&nc, &net)
 	return nc, net, err
-}
-
-// networkVersion is the Version of a host's stored classes, "" for none.
-func (s *Server) networkVersion(ctx context.Context, hostID string) string {
-	var v string
-	_ = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT coalesce(net_classes->>'version', '') FROM hosts WHERE id = $1`, hostID).Scan(&v)
-	})
-	return v
 }
 
 // serveNetwork is GET /runner/v1/network?name=<host>: the host's classes,

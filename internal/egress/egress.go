@@ -104,7 +104,10 @@ type Lookup struct {
 
 // Firewall is the runner's view of the nftables table and the DNS stubs.
 type Firewall struct {
-	opMu     sync.Mutex // lifecycle kernel transactions and accounting publication
+	// opMu serializes lifecycle kernel transactions and accounting
+	// publication. Take before mu; never hold across resolution, callbacks
+	// or stub close.
+	opMu     sync.Mutex
 	mu       sync.Mutex
 	lookup   func(ctx context.Context, host string) ([]netip.Addr, error) // IPv4 addresses of host
 	nft      func(script string) error
