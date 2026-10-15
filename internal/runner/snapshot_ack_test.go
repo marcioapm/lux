@@ -26,9 +26,10 @@ func ackRunner(t *testing.T) (*Runner, *[]string) {
 	var mu sync.Mutex
 	uploads := []string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// A luxd without the direct upload routes: blobs come by PUT.
+		// A luxd without the direct upload routes (its mux's own 404):
+		// blobs come by PUT.
 		if r.Method == http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
+			http.NotFound(w, r)
 			return
 		}
 		mu.Lock()

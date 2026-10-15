@@ -401,6 +401,8 @@ func TestDirectUploadRefusals(t *testing.T) {
 	twoParts.Parts = append(twoParts.Parts, twoParts.Parts[0])
 	badSum := uploadRequest(content)
 	badSum.SHA256 = "zz" + badSum.SHA256[2:]
+	otherPart := uploadRequest(content)
+	otherPart.Parts = []string{b64sum([]byte("other bytes!!!"))}
 	for _, c := range []struct {
 		name, host string
 		in         proto.BlobUploadRequest
@@ -410,6 +412,7 @@ func TestDirectUploadRefusals(t *testing.T) {
 		{"another host", "hb", uploadRequest(content), http.StatusNotFound, "not_found"},
 		{"wrong sha256", "ha", wrongSum, http.StatusBadRequest, "checksum_mismatch"},
 		{"malformed sha256", "ha", badSum, http.StatusBadRequest, "bad_request"},
+		{"single part with another checksum", "ha", otherPart, http.StatusBadRequest, "checksum_mismatch"},
 		{"wrong size", "ha", wrongSize, http.StatusBadRequest, "size_mismatch"},
 		{"no parts", "ha", noParts, http.StatusBadRequest, "bad_request"},
 		{"two parts", "ha", twoParts, http.StatusBadRequest, "bad_request"},
