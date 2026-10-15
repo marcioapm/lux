@@ -574,9 +574,9 @@ func (f *Firewall) remove(iface string, counters bool) map[string]proto.NetBytes
 	counted = f.acct.counted[iface]
 	r := f.runs[iface]
 	old := f.acct
-	f.acct = old.staged()
 	var counting string
 	if counters && counted {
+		f.acct = old.staged()
 		counting = f.removeCountingScript(iface)
 		delete(f.acct.counted, iface)
 	}

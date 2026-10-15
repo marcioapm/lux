@@ -132,7 +132,9 @@ func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostN
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var old *HostNetwork
 		var previous *proto.NetworkClasses
-		if err := tx.QueryRow(ctx, `SELECT network, net_classes FROM hosts WHERE id=$1 FOR UPDATE`, hostID).Scan(&old, &previous); err != nil {
+		// The stored catalog is only needed to stand in for a failed prefix fetch.
+		if err := tx.QueryRow(ctx, `SELECT network, CASE WHEN $2 THEN net_classes END FROM hosts WHERE id=$1 FOR NO KEY UPDATE`,
+			hostID, prefixes.Source == "").Scan(&old, &previous); err != nil {
 			return err
 		}
 		if n.SubnetsUnavailable {
