@@ -621,6 +621,9 @@ func TestLifecycleCatalogBarriers(t *testing.T) {
 			scriptsMu.Unlock()
 			if mode == "remove-failure" {
 				f.Remove(runIface)
+				if got := k.counter(tx(runIface, "unknown")); got != -1 {
+					t.Fatalf("retried Remove left counter: %d", got)
+				}
 			}
 			if removing {
 				if err := apply(); err != nil {
