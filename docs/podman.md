@@ -151,6 +151,19 @@ container. Under `--userns=auto` that needed more than the commonly cited
   Run's own user namespace still bound them. A narrower profile (the
   default plus `userns`) is a possible follow-up. Fedora hosts have no
   AppArmor, so the e2e suite does not see this.
+- **AppArmor attaches by executable path, and Ubuntu has two pasta
+  profiles.** Ubuntu's passt package loads `passt` for
+  `/usr/bin/passt{,.avx2}` and `pasta` for `/usr/bin/pasta{,.avx2}`; they
+  apply inside a Run too, against the path the Run sees. Alpine ships
+  `pasta` as a symlink to `passt`, so the kernel execs `passt.avx2` and
+  attaches the `passt` profile, which may write only `owner /tmp/**` and
+  cannot open the network namespace Podman bind-mounts under
+  `$XDG_RUNTIME_DIR/netns`. Every inner container with a network then
+  fails with "pasta failed with exit code 1: Couldn't open network
+  namespace … Permission denied" (kernel audit: `profile="passt"
+  comm="passt.avx2"`). A hard link keeps the pasta path, so the `pasta`
+  profile applies; `tests/images/nested` makes one. Images that ship pasta
+  as its own file are not affected.
 - **Rootless Docker** (`dockerd-rootless`, RootlessKit) works with the
   same grants, including BuildKit and compose; `tests/images/docker` is an
   example. `docker run --privileged` inside is refused (it cannot mount

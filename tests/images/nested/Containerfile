@@ -4,6 +4,7 @@
 FROM docker.io/library/alpine:3.24.2
 RUN apk add --no-cache podman fuse-overlayfs shadow-uidmap libcap-setcap \
  && setcap cap_setuid=ep /usr/bin/newuidmap && setcap cap_setgid=ep /usr/bin/newgidmap \
+ && ln -f /usr/bin/passt /usr/bin/pasta && ln -f /usr/bin/passt.avx2 /usr/bin/pasta.avx2 \
  && adduser -D -u 1000 agent \
  && printf 'agent:1:999\nagent:1001:64535\n' > /etc/subuid && cp /etc/subuid /etc/subgid \
  && mkdir -p /home/agent/.config/containers \
