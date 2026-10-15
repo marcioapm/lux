@@ -1380,8 +1380,9 @@ func (t *Terminal) extColor(i int) (Color, int) {
 }
 
 // Resize changes the size: lines are cut or padded on the right; rows
-// leave from the top (to the history, on the main screen) while the cursor
-// is below the new last row, else from the bottom.
+// leave a screen from the top (to the history, on the main screen) while
+// its cursor row (see resizeOffset) is below the new last row, else from
+// the bottom. Saved cursors move with their screen's rows.
 func (t *Terminal) Resize(rows, cols int) {
 	rows, cols = clampSize(rows, cols)
 	if rows == t.rows && cols == t.cols {
@@ -1401,16 +1402,19 @@ func (t *Terminal) Resize(rows, cols int) {
 		}
 	}
 	if rows < t.rows {
-		off := max(t.cur.y-(rows-1), 0)
 		for _, s := range []*screen{&t.main, &t.alt} {
+			off := t.resizeOffset(s, rows)
 			if s == &t.main {
 				for _, l := range s.lines[:off] {
 					_ = t.hist.push(l)
 				}
 			}
 			s.lines = s.lines[off : off+rows]
+			s.saved.y = max(s.saved.y-off, 0)
+			if s == t.scr {
+				t.cur.y -= off
+			}
 		}
-		t.cur.y -= off
 	} else {
 		for _, s := range []*screen{&t.main, &t.alt} {
 			s.lines = append(s.lines, blankLines(rows-t.rows, cols)...)
@@ -1425,6 +1429,39 @@ func (t *Terminal) Resize(rows, cols int) {
 	tabs := t.tabs
 	t.resetTabs()
 	copy(t.tabs, tabs)
+}
+
+// resizeOffset is how many rows leave the top of s when it shrinks to
+// rows: enough to keep its cursor's row. That is the cursor for the screen
+// shown; for the main screen behind the alternate one, its saved cursor
+// (1049 saves it), else its last non-blank row. The hidden alternate
+// screen is cleared before it is shown again, so nothing leaves its top.
+func (t *Terminal) resizeOffset(s *screen, rows int) int {
+	y := 0
+	switch {
+	case s == t.scr:
+		y = t.cur.y
+	case s == &t.alt:
+		return 0
+	case s.saved.valid:
+		y = s.saved.y
+	default:
+		for y = len(s.lines) - 1; y > 0; y-- {
+			if !blankLine(s.lines[y]) {
+				break
+			}
+		}
+	}
+	return max(y-(rows-1), 0)
+}
+
+func blankLine(l []Cell) bool {
+	for _, c := range l {
+		if c != (Cell{}) {
+			return false
+		}
+	}
+	return true
 }
 
 // history is a ring of at most limit lines. A line scrolled off the

@@ -338,6 +338,69 @@ func TestResize(t *testing.T) {
 	}
 }
 
+// Shrinking while a full-screen program is up keeps the main screen's
+// rows around its saved cursor, as tmux does: the rows above go to the
+// history, and leaving the alternate screen puts the cursor back on its
+// own line.
+func TestResizeOnAltScreen(t *testing.T) {
+	term := New(10, 20, 100)
+	for i := range 9 {
+		fmt.Fprintf(writer{term}, "out %d\r\n", i)
+	}
+	feed(term, "$ vim")
+	feed(term, "\x1b[?1049h\x1b[H\x1b[2Jeditor")
+	term.Resize(5, 20)
+	if got := screenText(term); got != "editor\n\n\n\n\n" {
+		t.Fatalf("alternate screen %q", got)
+	}
+	if x, y, _ := term.Cursor(); x != 6 || y != 0 {
+		t.Fatalf("cursor on the alternate screen %d,%d", x, y)
+	}
+	feed(term, "\x1b[?1049l")
+	if got := screenText(term); got != "out 5\nout 6\nout 7\nout 8\n$ vim\n" {
+		t.Fatalf("main screen %q", got)
+	}
+	if got := strings.Join(historyText(term), "|"); got != "out 0|out 1|out 2|out 3|out 4" {
+		t.Fatalf("history %q", got)
+	}
+	if x, y, _ := term.Cursor(); x != 5 || y != 4 {
+		t.Fatalf("cursor %d,%d, want 5,4", x, y)
+	}
+
+	// Without a saved cursor (47), the main screen keeps its last
+	// non-blank row.
+	term = New(10, 20, 100)
+	for i := range 7 {
+		fmt.Fprintf(writer{term}, "out %d\r\n", i)
+	}
+	feed(term, "\x1b[?47h")
+	term.Resize(4, 20)
+	feed(term, "\x1b[?47l")
+	if got := screenText(term); got != "out 3\nout 4\nout 5\nout 6\n" {
+		t.Fatalf("main screen (47) %q", got)
+	}
+	if got := strings.Join(historyText(term), "|"); got != "out 0|out 1|out 2" {
+		t.Fatalf("history (47) %q", got)
+	}
+}
+
+// A DECSC-saved cursor moves with the rows a shrink takes off the top.
+func TestResizeShiftsSavedCursor(t *testing.T) {
+	term := New(10, 20, 100)
+	feed(term, "\x1b[7;3H\x1b7")
+	for i := range 10 {
+		fmt.Fprintf(writer{term}, "\x1b[%d;1Hrow %d", i+1, i)
+	}
+	term.Resize(6, 20) // the cursor is on row 9: rows 0–3 leave
+	feed(term, "\x1b8X")
+	if got := screenText(term); got != "row 4\nrow 5\nroX 6\nrow 7\nrow 8\nrow 9\n" {
+		t.Fatalf("screen %q", got)
+	}
+	if x, y, _ := term.Cursor(); x != 3 || y != 2 {
+		t.Fatalf("cursor %d,%d, want 3,2", x, y)
+	}
+}
+
 // Random output, including escape sequences cut anywhere, never panics,
 // and its snapshot always reproduces it.
 func TestRandomOutputRoundTrips(t *testing.T) {
