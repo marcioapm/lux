@@ -154,9 +154,131 @@ func TestScrollbackMemoryBounded(t *testing.T) {
 			t.Fatalf("history line %d holds %d cells", i, c)
 		}
 	}
+	// With the ring full, scrolling reuses the lines it evicts.
+	if n := testing.AllocsPerRun(10, func() { term.Write(line) }); n != 0 {
+		t.Fatalf("%v allocations per scrolled line", n)
+	}
 }
 
 type writer struct{ t *Terminal }
+
+// The emulator's own behaviour, against literal expectations (xterm's, and
+// tmux's where they agree): what the round-trip tests cannot catch, since
+// they compare the emulator with itself.
+func TestBehaviour(t *testing.T) {
+	type cur struct {
+		x, y int
+		wrap bool
+	}
+	for _, tc := range []struct {
+		name       string
+		rows, cols int
+		in         string
+		resize     [2]int // after in, when set
+		screen     string
+		cursor     cur
+		history    []string
+		check      func(*Terminal) string
+	}{
+		{name: "LF at the region's bottom scrolls the region only", rows: 4, cols: 10,
+			in:     "r0\r\nr1\r\nr2\r\nr3\x1b[2;3r\x1b[3;1Ha\nb",
+			screen: "r0\na2\n b\nr3\n", cursor: cur{2, 2, false}},
+		{name: "a one-line region is refused", rows: 3, cols: 5,
+			in:     "a\r\nb\r\nc\x1b[2;2r",
+			screen: "a\nb\nc\n", cursor: cur{1, 2, false}},
+		{name: "ASCII to the last column waits to wrap", rows: 3, cols: 5,
+			in:     "abcde",
+			screen: "abcde\n\n\n", cursor: cur{4, 0, true}},
+		{name: "the next character after a pending wrap goes to the next line", rows: 3, cols: 5,
+			in:     "abcdef",
+			screen: "abcde\nf\n\n", cursor: cur{1, 1, false}},
+		{name: "pending wrap for non-ASCII", rows: 3, cols: 5,
+			in:     "abcd\u00e9\u00fc",
+			screen: "abcd\u00e9\n\u00fc\n\n", cursor: cur{1, 1, false}},
+		{name: "a wide character ending at the last column waits to wrap", rows: 2, cols: 5,
+			in:     "abc宽",
+			screen: "abc宽\n\n", cursor: cur{4, 0, true}},
+		{name: "a wide character at the last column blanks it and wraps", rows: 2, cols: 5,
+			in:     "abcde\x1b[1;5H宽",
+			screen: "abcd\n宽\n", cursor: cur{2, 1, false}},
+		{name: "RI at the region's top scrolls the region down", rows: 4, cols: 5,
+			in:     "r0\r\nr1\r\nr2\r\nr3\x1b[2;3r\x1b[2;1H\x1bM",
+			screen: "r0\n\nr1\nr3\n", cursor: cur{0, 1, false}},
+		{name: "erase uses the pen's background (BCE)", rows: 2, cols: 5,
+			in:     "abc\x1b[41m\x1b[1K\x1b[m",
+			screen: "\n\n", cursor: cur{3, 0, false},
+			check: func(term *Terminal) string {
+				for x := range 4 {
+					if c := term.Cell(x, 0); c.Style != (Style{Bg: Indexed(1)}) {
+						return fmt.Sprintf("cell %d: %+v", x, c)
+					}
+				}
+				if c := term.Cell(4, 0); c != (Cell{}) {
+					return fmt.Sprintf("cell 4: %+v", c)
+				}
+				return ""
+			}},
+		{name: "DECSC saves the pen", rows: 2, cols: 5,
+			in:     "\x1b[1;31m\x1b7\x1b[m\x1b[2;3H\x1b8x",
+			screen: "x\n\n", cursor: cur{1, 0, false},
+			check: func(term *Terminal) string {
+				if c := term.Cell(0, 0); c.Style != (Style{Fg: Indexed(1), Attr: AttrBold}) {
+					return fmt.Sprintf("cell %+v", c)
+				}
+				return ""
+			}},
+		{name: "DECRC in origin mode stays in the region", rows: 6, cols: 10,
+			in:     "\x1b[2;5r\x1b[?6h\x1b[4;1H\x1b7\x1b[1;2r\x1b8",
+			screen: "\n\n\n\n\n\n", cursor: cur{0, 1, false}},
+		{name: "ED 3 clears the history", rows: 2, cols: 5,
+			in:     "a\r\nb\r\nc\r\nd\x1b[3J",
+			screen: "c\nd\n", cursor: cur{1, 1, false}},
+		{name: "a region not at the top scrolls nothing into the history", rows: 4, cols: 5,
+			in:     "r0\r\nr1\r\nr2\r\nr3\x1b[2;3r\x1b[3;1H\n\n",
+			screen: "r0\n\n\nr3\n", cursor: cur{0, 2, false}},
+		{name: "a region at the top scrolls into the history", rows: 4, cols: 5,
+			in:     "r0\r\nr1\r\nr2\r\nr3\x1b[1;2r\x1b[2;1H\n",
+			screen: "r1\n\nr2\nr3\n", cursor: cur{0, 1, false}, history: []string{"r0"}},
+		{name: "the alternate screen has no history", rows: 2, cols: 5,
+			in:     "m\x1b[?1049h1\r\n2\r\n3\r\n4",
+			screen: "3\n4\n", cursor: cur{1, 1, false}},
+		{name: "DL at row 0 does not go to the history", rows: 3, cols: 5,
+			in:     "a\r\nb\r\nc\x1b[H\x1b[M",
+			screen: "b\nc\n\n", cursor: cur{0, 0, false}},
+		{name: "a shrink sends the rows above the cursor to the history", rows: 5, cols: 10,
+			in:     "row 0\r\nrow 1\r\nrow 2\r\nrow 3\r\nrow 4\r\nlast",
+			resize: [2]int{3, 6},
+			screen: "row 3\nrow 4\nlast\n", cursor: cur{4, 2, false},
+			history: []string{"row 0", "row 1", "row 2"}},
+		{name: "a shrink with the cursor high cuts the bottom", rows: 5, cols: 10,
+			in:     "top\r\nx\x1b[5;1Hbottom\x1b[1;1H",
+			resize: [2]int{3, 10},
+			screen: "top\nx\n\n", cursor: cur{0, 0, false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			term := New(tc.rows, tc.cols, 100)
+			feed(term, tc.in)
+			if tc.resize != [2]int{} {
+				term.Resize(tc.resize[0], tc.resize[1])
+			}
+			if got := screenText(term); got != tc.screen {
+				t.Errorf("screen %q, want %q", got, tc.screen)
+			}
+			x, y, _ := term.Cursor()
+			if got := (cur{x, y, term.cur.wrapNext}); got != tc.cursor {
+				t.Errorf("cursor %+v, want %+v", got, tc.cursor)
+			}
+			if got := historyText(term); strings.Join(got, "|") != strings.Join(tc.history, "|") {
+				t.Errorf("history %q, want %q", got, tc.history)
+			}
+			if tc.check != nil {
+				if msg := tc.check(term); msg != "" {
+					t.Error(msg)
+				}
+			}
+		})
+	}
+}
 
 // UTF-8-encoded C1 controls (U+0080–U+009F) take no cell, as in tmux.
 func TestC1ZeroWidth(t *testing.T) {
@@ -401,69 +523,123 @@ func TestResizeShiftsSavedCursor(t *testing.T) {
 	}
 }
 
-// Random output, including escape sequences cut anywhere, never panics,
-// and its snapshot always reproduces it.
-func TestRandomOutputRoundTrips(t *testing.T) {
-	pieces := []string{
-		"a", "xy", "宽", "e\u0301", "\r", "\n", "\t", "\b", "\x1b[", "31m", "\x1b[m", "\x1b[1;4;7m",
-		"\x1b[2J", "\x1b[K", "\x1b[1K", "\x1b[3;4H", "\x1b[5A", "\x1b[2B", "\x1b[3C", "\x1b[D",
-		"\x1b[2L", "\x1b[M", "\x1b[2@", "\x1b[P", "\x1b[X", "\x1b[S", "\x1b[T", "\x1b[2;5r", "\x1b[r",
-		"\x1b[?1049h", "\x1b[?1049l", "\x1b[?47h", "\x1b[?47l", "\x1b[?1h", "\x1b[?2004h", "\x1b[?7l", "\x1b[?7h",
-		"\x1b[?6h", "\x1b[?6l", "\x1b[4h", "\x1b[4l", "\x1b7", "\x1b8", "\x1bM", "\x1bD", "\x1bE",
-		"\x1b]0;title\x07", "\x1b]2;t2\x1b\\", "\x1bP1$r\x1b\\", "\x1b(0", "\x1b(B", "lqqk", "\x0e", "\x0f",
-		"\x1b[38;5;123m", "\x1b[48;2;9;8;7m", "\x1b[?25l", "\x1b[?25h", "\x1bc", "\x1b[3J", "\x1b[!p",
-		"\xff", "\xe5\xae", "\x1b[3g", "\x1bH", "\x1b[Z", "\x1b[20h", "\x1b[20l",
+// roundTripPieces are what the round-trip tests build output from.
+// Not here: REP (CSI b), which repeats the last character printed; a
+// snapshot does not carry that character. New pieces go at the end, so
+// the committed fuzz corpus keeps its meaning.
+var roundTripPieces = []string{
+	"a", "xy", "宽", "e\u0301", "\r", "\n", "\t", "\b", "\x1b[", "31m", "\x1b[m", "\x1b[1;4;7m",
+	"\x1b[2J", "\x1b[K", "\x1b[1K", "\x1b[3;4H", "\x1b[5A", "\x1b[2B", "\x1b[3C", "\x1b[D",
+	"\x1b[2L", "\x1b[M", "\x1b[2@", "\x1b[P", "\x1b[X", "\x1b[S", "\x1b[T", "\x1b[2;5r", "\x1b[r",
+	"\x1b[?1049h", "\x1b[?1049l", "\x1b[?47h", "\x1b[?47l", "\x1b[?1h", "\x1b[?2004h", "\x1b[?7l", "\x1b[?7h",
+	"\x1b[?6h", "\x1b[?6l", "\x1b[4h", "\x1b[4l", "\x1b7", "\x1b8", "\x1bM", "\x1bD", "\x1bE",
+	"\x1b]0;title\x07", "\x1b]2;t2\x1b\\", "\x1bP1$r\x1b\\", "\x1b(0", "\x1b(B", "lqqk", "\x0e", "\x0f",
+	"\x1b[38;5;123m", "\x1b[48;2;9;8;7m", "\x1b[?25l", "\x1b[?25h", "\x1bc", "\x1b[3J", "\x1b[!p",
+	"\xff", "\xe5\xae", "\x1b[3g", "\x1bH", "\x1b[Z", "\x1b[20h", "\x1b[20l",
+	// 68:
+	"\x1b)0", "\x1b=", "\x1b>", "\x1b[4 q", "\x1b[?1047h", "\x1b[?1047l", "\x1b[?1048h", "\x1b[?1048l",
+	"\x1b[?1000h", "\x1b[?1006h", "\x1b[?1002h", "\x1b[?1000l", "\x1b[999C宽", "\x1b[5;2r", "\x1b#8",
+	"\x1b[s", "\x1b[u", "\x1b[5G", "\x1b[2d", "\x1b[2I", "\x1b[E", "\x1b[F", "\u0085", "\x1b[41m",
+}
+
+// roundTrip feeds the pieces to a rows×cols terminal in uneven writes; at
+// byte cut (maybe mid-sequence) it resizes to resize (when set), as attach
+// does, and takes a snapshot into a fresh terminal. Both are then fed the
+// rest, and must end in the same state.
+func roundTrip(t *testing.T, rows, cols int, idx []byte, cut int, resize [2]int) {
+	t.Helper()
+	var all []byte
+	for _, i := range idx {
+		all = append(all, roundTripPieces[int(i)%len(roundTripPieces)]...)
 	}
-	// Not here: REP (CSI b), which repeats the last character printed;
-	// a snapshot does not carry that character.
-	seed := uint64(1)
-	if s, err := strconv.ParseUint(os.Getenv("VTERM_SEED"), 10, 64); err == nil {
-		seed = s
+	cut = min(cut, len(all))
+	term := New(rows, cols, 20)
+	var r *Terminal
+	take := func() {
+		if resize != [2]int{} {
+			term.Resize(resize[0], resize[1])
+		}
+		r = restored(term, 20)
 	}
-	rng := rand.New(rand.NewPCG(seed, 2))
-	for iter := range 300 {
-		rows, cols := 2+rng.IntN(10), 2+rng.IntN(30)
-		term := New(rows, cols, 20)
-		var all []byte
-		for range 200 {
-			all = append(all, pieces[rng.IntN(len(pieces))]...)
+	step := 1
+	for done := 0; done < len(all); {
+		if r == nil && done == cut {
+			take()
 		}
-		// Fed in random cuts: sequences split across writes, and the
-		// snapshot taken at a random cut, maybe mid-sequence. The output
-		// after it, fed to both, leaves them the same.
-		cut := rng.IntN(len(all) + 1)
-		var r *Terminal
-		for rest := all; len(rest) > 0; {
-			n := 1 + rng.IntN(min(len(rest), 17))
-			if done := len(all) - len(rest); done < cut && done+n > cut {
-				n = cut - done
-			}
-			term.Write(rest[:n])
-			if r != nil {
-				r.Write(rest[:n])
-			}
-			rest = rest[n:]
-			if r == nil && len(all)-len(rest) >= cut {
-				r = restored(term, 20)
-			}
+		step = step*5%17 + 1
+		n := min(step, len(all)-done)
+		if r == nil && done < cut && done+n > cut {
+			n = cut - done
 		}
-		if r == nil {
-			r = restored(term, 20)
+		term.Write(all[done : done+n])
+		if r != nil {
+			r.Write(all[done : done+n])
 		}
-		// Both end the same way, so that a sequence left open does not
-		// hide a difference.
-		term.Write([]byte("\x18\x1b\\ "))
-		r.Write([]byte("\x18\x1b\\ "))
-		func() {
-			defer func() {
-				if t.Failed() {
-					t.Logf("iteration %d, %dx%d, input %q", iter, rows, cols, all)
-				}
-			}()
-			sameState(t, term, r)
-		}()
+		done += n
+	}
+	if r == nil {
+		take()
+	}
+	// Both end the same way, so that a sequence left open does not hide a
+	// difference.
+	term.Write([]byte("\x18\x1b\\ "))
+	r.Write([]byte("\x18\x1b\\ "))
+	defer func() {
 		if t.Failed() {
+			t.Logf("%dx%d, cut %d, resize %v, input %q", rows, cols, cut, resize, all)
+		}
+	}()
+	sameState(t, term, r)
+}
+
+// FuzzSnapshotRoundTrip: data is rows, cols, the cut (2 bytes, big
+// endian), the resize (rows, cols; 0 none), then piece indices.
+//
+//	go test -fuzz FuzzSnapshotRoundTrip ./vterm/
+func FuzzSnapshotRoundTrip(f *testing.F) {
+	f.Add([]byte{3, 8, 0, 4, 0, 0, 0, 1, 2})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) < 6 {
 			return
+		}
+		rows, cols := 2+int(data[0])%10, 2+int(data[1])%30
+		cut := int(data[2])<<8 | int(data[3])
+		var resize [2]int
+		if data[4] != 0 && data[5] != 0 {
+			resize = [2]int{1 + int(data[4])%12, 1 + int(data[5])%32}
+		}
+		roundTrip(t, rows, cols, data[6:], cut, resize)
+	})
+}
+
+// Random output, including escape sequences cut anywhere, never panics,
+// and its snapshot (after a resize, sometimes) always reproduces it: seeds
+// 1..20, or VTERM_SEED.
+func TestRandomOutputRoundTrips(t *testing.T) {
+	seeds := []uint64{}
+	if s, err := strconv.ParseUint(os.Getenv("VTERM_SEED"), 10, 64); err == nil {
+		seeds = append(seeds, s)
+	} else {
+		for s := range uint64(20) {
+			seeds = append(seeds, s+1)
+		}
+	}
+	for _, seed := range seeds {
+		rng := rand.New(rand.NewPCG(seed, 2))
+		for iter := range 300 {
+			rows, cols := 2+rng.IntN(10), 2+rng.IntN(30)
+			idx := make([]byte, 200)
+			for i := range idx {
+				idx[i] = byte(rng.IntN(len(roundTripPieces)))
+			}
+			var resize [2]int
+			if rng.IntN(3) == 0 {
+				resize = [2]int{1 + rng.IntN(12), 1 + rng.IntN(32)}
+			}
+			roundTrip(t, rows, cols, idx, rng.IntN(1500), resize)
+			if t.Failed() {
+				t.Fatalf("seed %d, iteration %d", seed, iter)
+			}
 		}
 	}
 }
