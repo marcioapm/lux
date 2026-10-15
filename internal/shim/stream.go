@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -148,7 +149,7 @@ func (s *Shim) attachStream(sc *bufio.Scanner, out *streamConn, open proto.Strea
 	defer term.leave(sub)
 	behind := make(chan struct{})
 	go func() {
-		for b := range chunks(snapshot, streamChunk) {
+		for b := range slices.Chunk(snapshot, streamChunk) {
 			_ = out.send(proto.StreamData{Channel: "stdout", Data: b})
 		}
 		if open.Restore {
@@ -190,18 +191,6 @@ func (s *Shim) attachStream(sc *bufio.Scanner, out *streamConn, open proto.Strea
 
 // streamChunk: the most output one StreamData carries, as a PTY read does.
 const streamChunk = 32 << 10
-
-func chunks(b []byte, n int) func(func([]byte) bool) {
-	return func(yield func([]byte) bool) {
-		for len(b) > 0 {
-			k := min(n, len(b))
-			if !yield(b[:k]) {
-				return
-			}
-			b = b[k:]
-		}
-	}
-}
 
 // historyLines is how much main-screen scrollback a terminal keeps for
 // attach's restore, as tmux's default history-limit.
