@@ -71,8 +71,8 @@ type injectBody struct {
 	buf     []byte // held while undecided
 	from    int    // where the <head search resumes in buf
 	decided bool
-	pending []byte // decided bytes not yet returned
-	err     error  // src's error, returned once pending is out
+	pending io.Reader // decided bytes not yet returned
+	err     error     // src's error, returned once pending is out
 }
 
 func newInjectBody(src io.ReadCloser, snippet []byte) *injectBody {
@@ -88,18 +88,19 @@ func (b *injectBody) Read(p []byte) (int, error) {
 		var ok bool
 		at, b.from, ok = findInjectAt(b.buf, b.from, final)
 		if ok {
-			b.pending = make([]byte, 0, len(b.buf)+len(b.snippet))
-			b.pending = append(append(append(b.pending, b.buf[:at]...), b.snippet...), b.buf[at:]...)
+			b.pending = io.MultiReader(bytes.NewReader(b.buf[:at]), bytes.NewReader(b.snippet), bytes.NewReader(b.buf[at:]))
 			b.buf, b.decided = nil, true
 		}
 		if err != nil {
 			b.err = err
 		}
 	}
-	if len(b.pending) > 0 {
-		n := copy(p, b.pending)
-		b.pending = b.pending[n:]
-		return n, nil
+	if b.pending != nil {
+		n, err := b.pending.Read(p)
+		if err != io.EOF {
+			return n, err
+		}
+		b.pending = nil
 	}
 	if b.err != nil {
 		return 0, b.err
