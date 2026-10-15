@@ -136,11 +136,19 @@ type accounting struct {
 
 type keptCounter struct{ packets, bytes int64 }
 
-func (a accounting) staged() accounting {
-	a.counted = maps.Clone(a.counted)
-	a.names = maps.Clone(a.names)
-	a.kept = maps.Clone(a.kept)
-	return a
+// transact runs the script build makes, letting build change a copy of
+// f.acct that is kept only if nft accepts the script. Call with opMu and
+// mu held.
+func (f *Firewall) transact(build func() string) error {
+	old := f.acct
+	f.acct.counted = maps.Clone(old.counted)
+	f.acct.names = maps.Clone(old.names)
+	f.acct.kept = maps.Clone(old.kept)
+	if err := f.nft(build()); err != nil {
+		f.acct = old
+		return err
+	}
+	return nil
 }
 
 func newAccounting() accounting {
@@ -292,11 +300,7 @@ func globMatch(glob, name string) bool {
 func setsScript(cl classLists) string {
 	var b strings.Builder
 	fill := func(name string, v6 bool, ps []netip.Prefix) {
-		typ := "ipv4_addr"
-		if v6 {
-			typ = "ipv6_addr"
-		}
-		fmt.Fprintf(&b, "add set inet lux %s { type %s; flags interval; }\nflush set inet lux %s\n", name, typ, name)
+		fmt.Fprintf(&b, "add set inet lux %s { type ipv%s_addr; flags interval; }\nflush set inet lux %s\n", name, family(v6), name)
 		var elems []string
 		for _, p := range ps {
 			if p.Addr().Is6() == v6 {
@@ -325,29 +329,22 @@ func setsScript(cl classLists) string {
 // rx) into owner's counter, then the fall-through counter.
 func classifyRules(l layout, chain, regionChain, owner, field, dir string) string {
 	var b strings.Builder
-	rule := func(ch string, v6 bool, set, key string) {
-		ipf := "ip"
-		if v6 {
-			ipf = "ip6"
-		}
-		fmt.Fprintf(&b, "add rule inet lux %s %s %s @%s counter name %s accept\n", ch, ipf, field, set, counterName(owner, key, dir))
+	match := func(ch, set4, set6, action string) {
+		fmt.Fprintf(&b, "add rule inet lux %s ip %s @%s %s\n", ch, field, set4, action)
+		fmt.Fprintf(&b, "add rule inet lux %s ip6 %s @%s %s\n", ch, field, set6, action)
 	}
+	count := func(key string) string { return "counter name " + counterName(owner, key, dir) + " accept" }
 	for _, c := range beforeProvider {
-		rule(chain, false, classSet(c, false), string(c))
-		rule(chain, true, classSet(c, true), string(c))
+		match(chain, classSet(c, false), classSet(c, true), count(string(c)))
 	}
-	fmt.Fprintf(&b, "add rule inet lux %s ip %s @%s jump %s\n", chain, field, classSet(proto.NetProvider, false), regionChain)
-	fmt.Fprintf(&b, "add rule inet lux %s ip6 %s @%s jump %s\n", chain, field, classSet(proto.NetProvider, true), regionChain)
+	match(chain, classSet(proto.NetProvider, false), classSet(proto.NetProvider, true), "jump "+regionChain)
 	for _, r := range l.regions {
-		k := proto.NetKey(proto.NetProvider, r)
-		rule(regionChain, false, regionSet(r, false), k)
-		rule(regionChain, true, regionSet(r, true), k)
+		match(regionChain, regionSet(r, false), regionSet(r, true), count(proto.NetKey(proto.NetProvider, r)))
 	}
 	for _, c := range afterProvider {
-		rule(chain, false, classSet(c, false), string(c))
-		rule(chain, true, classSet(c, true), string(c))
+		match(chain, classSet(c, false), classSet(c, true), count(string(c)))
 	}
-	fmt.Fprintf(&b, "add rule inet lux %s counter name %s accept\n", chain, counterName(owner, string(l.unlisted()), dir))
+	fmt.Fprintf(&b, "add rule inet lux %s %s\n", chain, count(string(l.unlisted())))
 	return b.String()
 }
 
@@ -357,21 +354,14 @@ func classifyRules(l layout, chain, regionChain, owner, field, dir string) strin
 // f.mu held.
 func (f *Firewall) countersScript(owner string) string {
 	var b strings.Builder
+	prefix := "lux_" + owner + "_"
 	for n := range f.acct.kept {
-		prefix := "lux_" + owner + "_"
 		if !strings.HasPrefix(n, prefix) {
 			continue
 		}
-		keydir := strings.TrimPrefix(n, prefix)
-		key, dir, ok := strings.Cut(keydir, "_tx")
-		if !ok || dir != "" {
-			key, dir, ok = strings.Cut(keydir, "_rx")
-			if !ok || dir != "" {
-				continue
-			}
-			dir = "rx"
-		} else {
-			dir = "tx"
+		key, dir, ok := cutDir(strings.TrimPrefix(n, prefix))
+		if !ok {
+			continue
 		}
 		if strings.HasPrefix(key, "provider_") && key != "provider_global" {
 			key = "provider:" + strings.ReplaceAll(strings.TrimPrefix(key, "provider_"), "_", "-")
@@ -398,8 +388,24 @@ func (f *Firewall) countersScript(owner string) string {
 	return b.String()
 }
 
+// cutDir splits a counter name's "<key>_<dir>" tail; ok only if the first
+// "_tx" or "_rx" in s ends it.
+func cutDir(s string) (key, dir string, ok bool) {
+	for _, d := range []string{"tx", "rx"} {
+		if k, rest, found := strings.Cut(s, "_"+d); found && rest == "" {
+			return k, d, true
+		}
+	}
+	return "", "", false
+}
+
 func txChain(iface string) string { return "tx_" + iface }
 func rxChain(iface string) string { return "rx_" + iface }
+
+// runChainNames are a Run's counting chains and their per-region parts.
+func runChainNames(iface string) []string {
+	return []string{txChain(iface), "txp_" + iface, rxChain(iface), "rxp_" + iface}
+}
 
 // runChains are a Run's counting chains' rules (the chains exist).
 func runChains(l layout, iface string) string {
@@ -416,7 +422,7 @@ func (f *Firewall) runCountingScript(iface string) string {
 	f.acct.counted[iface] = true
 	var b strings.Builder
 	b.WriteString(f.countersScript(iface))
-	for _, c := range []string{txChain(iface), "txp_" + iface, rxChain(iface), "rxp_" + iface} {
+	for _, c := range runChainNames(iface) {
 		fmt.Fprintf(&b, "add chain inet lux %s\n", c)
 	}
 	b.WriteString(runChains(f.acct.layout, iface))
@@ -488,45 +494,48 @@ func (f *Firewall) SetClasses(nc *proto.NetworkClasses) error {
 	if err != nil {
 		return err
 	}
-	previous := f.acct
-	f.acct = previous.staged()
-	old := previous.layout
-	var b strings.Builder
-	if !cl.layout.equal(old) {
-		// Counters for the new layout before the rules naming them; then
-		// every counting chain's rules replaced.
-		f.acct.layout = cl.layout
-		b.WriteString(f.countersScript("host"))
-		ifaces := slices.Sorted(maps.Keys(f.acct.counted))
-		for _, iface := range ifaces {
-			b.WriteString(f.countersScript(iface))
-		}
-		b.WriteString(setsScript(cl))
-		for _, c := range []string{"host_out", "host_outp", "host_in", "host_inp"} {
-			fmt.Fprintf(&b, "flush chain inet lux %s\n", c)
-		}
-		b.WriteString(hostChains(cl.layout))
-		for _, iface := range ifaces {
-			for _, c := range []string{txChain(iface), "txp_" + iface, rxChain(iface), "rxp_" + iface} {
-				fmt.Fprintf(&b, "flush chain inet lux %s\n", c)
-			}
-			b.WriteString(runChains(cl.layout, iface))
-		}
-		// Sets of regions no longer listed: no rule names them now.
-		for _, r := range old.regions {
-			if !slices.Contains(cl.layout.regions, r) {
-				fmt.Fprintf(&b, "delete set inet lux %s\ndelete set inet lux %s\n", regionSet(r, false), regionSet(r, true))
-			}
-		}
-	} else {
-		b.WriteString(setsScript(cl))
-	}
-	if err := f.nft(b.String()); err != nil {
-		f.acct = previous
+	if err := f.transact(func() string { return f.classesScript(cl) }); err != nil {
 		return fmt.Errorf("nftables network classes: %w", err)
 	}
 	f.acct.version, f.acct.loaded = version, true
 	return nil
+}
+
+// classesScript loads cl into the sets and, on a layout change, makes the
+// new layout's counters and replaces every counting chain's rules. Call
+// with f.mu held.
+func (f *Firewall) classesScript(cl classLists) string {
+	old := f.acct.layout
+	if cl.layout.equal(old) {
+		return setsScript(cl)
+	}
+	// Counters for the new layout before the rules naming them; then
+	// every counting chain's rules replaced.
+	var b strings.Builder
+	f.acct.layout = cl.layout
+	b.WriteString(f.countersScript("host"))
+	ifaces := slices.Sorted(maps.Keys(f.acct.counted))
+	for _, iface := range ifaces {
+		b.WriteString(f.countersScript(iface))
+	}
+	b.WriteString(setsScript(cl))
+	for _, c := range []string{"host_out", "host_outp", "host_in", "host_inp"} {
+		fmt.Fprintf(&b, "flush chain inet lux %s\n", c)
+	}
+	b.WriteString(hostChains(cl.layout))
+	for _, iface := range ifaces {
+		for _, c := range runChainNames(iface) {
+			fmt.Fprintf(&b, "flush chain inet lux %s\n", c)
+		}
+		b.WriteString(runChains(cl.layout, iface))
+	}
+	// Sets of regions no longer listed: no rule names them now.
+	for _, r := range old.regions {
+		if !slices.Contains(cl.layout.regions, r) {
+			fmt.Fprintf(&b, "delete set inet lux %s\ndelete set inet lux %s\n", regionSet(r, false), regionSet(r, true))
+		}
+	}
+	return b.String()
 }
 
 // HostCountersKept: New found the host's counters in the table it replaced
@@ -550,7 +559,7 @@ func (f *Firewall) ClassesVersion() string {
 func (f *Firewall) removeCountingScript(iface string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "delete element inet lux runs_tx { %q }\ndelete element inet lux runs_rx { %q }\n", iface, iface)
-	for _, c := range []string{txChain(iface), "txp_" + iface, rxChain(iface), "rxp_" + iface} {
+	for _, c := range runChainNames(iface) {
 		fmt.Fprintf(&b, "delete chain inet lux %s\n", c)
 	}
 	for _, n := range slices.Sorted(maps.Keys(f.acct.names)) {

@@ -236,23 +236,18 @@ func (f *Firewall) Apply(ctx context.Context, iface string, gateway netip.Addr, 
 	}
 	f.opMu.Lock()
 	f.mu.Lock()
-	old := f.acct
-	f.acct = old.staged()
-	var b strings.Builder
-	b.WriteString(egressScript(iface, unrestricted, r.cidrs))
-	b.WriteString(f.runCountingScript(iface))
-	if err := f.nft(b.String()); err != nil {
-		f.acct = old
-		f.mu.Unlock()
-		f.opMu.Unlock()
+	err = f.transact(func() string { return egressScript(iface, unrestricted, r.cidrs) + f.runCountingScript(iface) })
+	if err == nil {
+		f.runs[iface] = r
+	}
+	f.mu.Unlock()
+	f.opMu.Unlock()
+	if err != nil {
 		if r.stub != nil {
 			r.stub.close()
 		}
 		return fmt.Errorf("nftables for %s: %w", iface, err)
 	}
-	f.runs[iface] = r
-	f.mu.Unlock()
-	f.opMu.Unlock()
 	f.resolveRun(ctx, iface, r)
 	return nil
 }
@@ -576,13 +571,6 @@ func (f *Firewall) remove(iface string, counters bool) map[string]proto.NetBytes
 	f.mu.Lock()
 	counted = f.acct.counted[iface]
 	r := f.runs[iface]
-	old := f.acct
-	var counting string
-	if counters && counted {
-		f.acct = old.staged()
-		counting = f.removeCountingScript(iface)
-		delete(f.acct.counted, iface)
-	}
 	var script string
 	if r != nil {
 		script = fmt.Sprintf("delete element inet lux runs { %q }\ndelete chain inet lux %s\n", iface, chainName(iface))
@@ -591,14 +579,21 @@ func (f *Firewall) remove(iface string, counters bool) map[string]proto.NetBytes
 				fmt.Sprintf("delete set inet lux %s\n", setName(iface))
 		}
 	}
-	if script+counting != "" {
-		if err := f.nft(script + counting); err != nil {
-			slog.Warn("remove egress", "iface", iface, "err", err)
-			f.acct = old
-			f.mu.Unlock()
-			f.opMu.Unlock()
-			return final
-		}
+	var err error
+	if counters && counted {
+		err = f.transact(func() string {
+			counting := f.removeCountingScript(iface)
+			delete(f.acct.counted, iface)
+			return script + counting
+		})
+	} else if script != "" {
+		err = f.nft(script)
+	}
+	if err != nil {
+		slog.Warn("remove egress", "iface", iface, "err", err)
+		f.mu.Unlock()
+		f.opMu.Unlock()
+		return final
 	}
 	delete(f.runs, iface)
 	if r != nil {
