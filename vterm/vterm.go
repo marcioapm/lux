@@ -1412,9 +1412,11 @@ func (t *Terminal) Resize(rows, cols int) {
 
 // history is a ring of at most limit lines. A line scrolled off the
 // screen is moved in, not copied; the line it evicts is handed back to be
-// the screen's new blank line.
+// the screen's new blank line. ED 3 empties it but keeps its lines as
+// spare, handed back the same way until the ring is full again.
 type history struct {
 	lines    [][]Cell
+	spare    [][]Cell
 	start, n int
 	limit    int
 }
@@ -1427,6 +1429,12 @@ func (h *history) push(l []Cell) []Cell {
 	if h.n < h.limit {
 		h.lines = append(h.lines, l)
 		h.n++
+		if k := len(h.spare); k > 0 {
+			s := h.spare[k-1]
+			h.spare[k-1] = nil
+			h.spare = h.spare[:k-1]
+			return s
+		}
 		return nil
 	}
 	old := h.lines[h.start]
@@ -1449,5 +1457,8 @@ func (h *history) line(i int) []Cell {
 }
 
 func (h *history) clear() {
-	h.lines, h.start, h.n = nil, 0, 0
+	// The ring's order does not matter to spare lines.
+	h.spare = append(h.spare, h.lines...)
+	clear(h.lines)
+	h.lines, h.start, h.n = h.lines[:0], 0, 0
 }

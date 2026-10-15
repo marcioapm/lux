@@ -158,6 +158,30 @@ func TestScrollbackMemoryBounded(t *testing.T) {
 
 type writer struct{ t *Terminal }
 
+// ED 3 (what clear sends) empties the history but keeps its lines: a
+// clear-and-redraw loop scrolls without allocating, and memory stays
+// within the history limit.
+func TestClearHistoryReusesLines(t *testing.T) {
+	term := New(24, 80, 100)
+	var redraw []byte
+	redraw = append(redraw, "\x1b[H\x1b[2J\x1b[3J"...)
+	for i := range 60 {
+		redraw = fmt.Appendf(redraw, "status %d\r\n", i)
+	}
+	for range 5 {
+		term.Write(redraw)
+	}
+	if n := testing.AllocsPerRun(20, func() { term.Write(redraw) }); n != 0 {
+		t.Fatalf("%v allocations per redraw", n)
+	}
+	if n := len(term.hist.lines) + len(term.hist.spare); n > 100 {
+		t.Fatalf("%d history lines held, over the limit of 100", n)
+	}
+	if got := term.HistoryLen(); got != 60-23 {
+		t.Fatalf("history %d lines after a redraw, want 37", got)
+	}
+}
+
 func (w writer) Write(p []byte) (int, error) { w.t.Write(p); return len(p), nil }
 
 func TestAltScreen(t *testing.T) {
