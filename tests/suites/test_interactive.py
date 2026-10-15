@@ -3,6 +3,7 @@ forwarding, all through luxd (the client never reaches the host)."""
 
 from __future__ import annotations
 
+import os
 import shutil
 import socket
 import subprocess
@@ -101,6 +102,8 @@ def test_attach_restore_redraws_the_terminal(lux, runners, hosts, tmp_path):
     the main screen it covered comes back, with the lines that scrolled
     off it in the terminal's history."""
     if shutil.which("tmux") is None:
+        if os.environ.get("CI"):
+            pytest.fail("needs tmux, as the attaching terminal: CI installs it, so this must run there")
         pytest.skip("needs tmux, as the attaching terminal")
     runners.start(hosts[0])
     script = (
@@ -142,9 +145,13 @@ def test_attach_restore_redraws_the_terminal(lux, runners, hosts, tmp_path):
                    "leaving the full screen did not bring the main screen back")
         visible = screen()
         assert "line-40" in visible and "FULLSCREEN-APP" not in visible, visible
+        assert visible.count("line-40\n") == 1, visible
         # 40 lines and more on a 30-row screen: the first went to history.
+        # Each line once: the snapshot's and the live output do not overlap.
         history = tmux("capture-pane", "-p", "-t", "0", "-S", "-", "-E", "-")
         assert "line-1\n" in history and "line-2\n" in history, history
+        for n in (1, 20, 40):
+            assert history.count(f"line-{n}\n") == 1, (n, history)
     finally:
         subprocess.run(["tmux", "-S", sock, "kill-server"], capture_output=True)
     lux.run("terminate", run_id)
