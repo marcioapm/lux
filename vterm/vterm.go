@@ -1234,15 +1234,25 @@ func (t *Terminal) combine(r rune) {
 	if c.Ch == 0 {
 		return
 	}
-	s := t.Text(*c) + string(r)
-	if len(s) > maxClusterLen {
+	// The key is built on the stack; a map lookup with string(key) does
+	// not allocate, so only a new cluster does.
+	var key [maxClusterLen]byte
+	n := 0
+	if c.Ch >= clusterBase {
+		n = copy(key[:], t.Text(*c))
+	} else {
+		n = utf8.EncodeRune(key[:], c.Ch)
+	}
+	if n+utf8.RuneLen(r) > maxClusterLen {
 		return
 	}
-	id, ok := t.clusterID[s]
+	n += utf8.EncodeRune(key[n:], r)
+	id, ok := t.clusterID[string(key[:n])]
 	if !ok {
 		if len(t.clusters) >= maxClusters {
 			return
 		}
+		s := string(key[:n])
 		id = clusterBase + rune(len(t.clusters))
 		t.clusters = append(t.clusters, s)
 		t.clusterID[s] = id

@@ -158,6 +158,19 @@ func TestScrollbackMemoryBounded(t *testing.T) {
 
 type writer struct{ t *Terminal }
 
+// A combining mark whose cluster is already interned allocates nothing.
+func TestCombiningKnownClusterNoAlloc(t *testing.T) {
+	term := New(24, 80, 100)
+	line := []byte(strings.Repeat("e\u0301a\u0308\u0301", 10) + "\r\n")
+	term.Write(line)
+	if n := testing.AllocsPerRun(50, func() { term.Write(line) }); n != 0 {
+		t.Fatalf("%v allocations per line", n)
+	}
+	if got := term.Text(term.Cell(1, 22)); got != "a\u0308\u0301" {
+		t.Fatalf("cluster %q", got)
+	}
+}
+
 // ED 3 (what clear sends) empties the history but keeps its lines: a
 // clear-and-redraw loop scrolls without allocating, and memory stays
 // within the history limit.
