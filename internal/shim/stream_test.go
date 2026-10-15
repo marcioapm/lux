@@ -464,6 +464,12 @@ func TestRestoreAttachFallenBehindIsEnded(t *testing.T) {
 	if bytes.Contains(out, []byte("zzz")) || !bytes.Contains(out, []byte("before")) {
 		t.Fatalf("stream before the error: %q", out)
 	}
+	// Then the stream is closed: nothing more, not even from the client.
+	var d proto.StreamData
+	runnerSide.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if err := dec.Decode(&d); !errors.Is(err, io.EOF) {
+		t.Fatalf("after the error: %+v, %v; want the stream closed", d, err)
+	}
 }
 
 // The most 1-byte reads a restore subscriber may hold: each is charged
@@ -575,6 +581,44 @@ func TestRestoreAttachWithoutSnapshotFallenBehindIsEnded(t *testing.T) {
 	}
 	if b, err := sub.next(); !errors.Is(err, errFellBehind) {
 		t.Fatalf("next: %d bytes, %v; want errFellBehind", len(b), err)
+	}
+}
+
+// A restore subscriber holds the 4 MiB the API documents, counting each
+// read as 64 bytes more than its length: 128 reads of 32 KiB less 64,
+// or 64527 reads of 1 byte, and not one byte more.
+func TestRestoreSubscriberHoldsFourMiB(t *testing.T) {
+	for _, size := range []int{32<<10 - 64, 1} {
+		s := newSubscriber(true)
+		chunk := make([]byte, size)
+		n := (4 << 20) / (size + 64)
+		for i := range n {
+			if !s.offer(chunk) {
+				t.Fatalf("%d-byte reads: ended after %d of %d", size, i, n)
+			}
+		}
+		if s.offer([]byte{1}) {
+			t.Fatalf("%d-byte reads: one byte over 4 MiB accepted", size)
+		}
+	}
+}
+
+// After leave, a restore subscriber's reader gets what was queued, in
+// order, then errLeft.
+func TestRestoreSubscriberDrainsAfterLeave(t *testing.T) {
+	term := &terminal{subs: map[*subscriber]bool{}}
+	sub := newSubscriber(true)
+	term.subs[sub] = true
+	sub.offer([]byte("a"))
+	sub.offer([]byte("b"))
+	term.leave(sub)
+	for _, want := range []string{"a", "b"} {
+		if b, err := sub.next(); err != nil || string(b) != want {
+			t.Fatalf("next: %q, %v; want %q", b, err, want)
+		}
+	}
+	if b, err := sub.next(); !errors.Is(err, errLeft) {
+		t.Fatalf("next after the queue: %q, %v; want errLeft", b, err)
 	}
 }
 
