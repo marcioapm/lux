@@ -264,7 +264,10 @@ func TestResizeClampedForPTYAndEmulator(t *testing.T) {
 // after it, replayed, are exactly the shim's terminal at the end — no
 // output lost or repeated between them.
 func TestAttachRestoreNoGapNoDuplicate(t *testing.T) {
-	const rows, cols, history = 8, 40, 1 << 20
+	// A history whose full snapshot (at most ~70 bytes a line) stays under
+	// snapshotLimit however long the writer runs, so every snapshot is
+	// whole and comparable byte for byte with the shim's.
+	const rows, cols, history = 8, 40, 20000
 	term, tty, _ := ptyTerminal(t, rows, cols, history, nil)
 
 	type attached struct {
@@ -331,6 +334,9 @@ func TestAttachRestoreNoGapNoDuplicate(t *testing.T) {
 		term.leave(a.sub)
 	}
 	final := screenOf(term)
+	if len(final) > snapshotLimit {
+		t.Fatalf("the full terminal is %d bytes, over snapshotLimit: snapshots would leave history out", len(final))
+	}
 	ended := 0
 	for i, a := range all {
 		<-a.done
