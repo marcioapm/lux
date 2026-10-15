@@ -174,9 +174,8 @@ availability immediately. See [CLI](cli.md#runs).
   `beforeStop`, servers and `lux exec`. lux sets no other sizing variable
   (`OMP_NUM_THREADS` and the like are the spec's to set). Nested
   containers do not inherit them: pass them on (`docker run -e
-  LUX_CPUS`). They take precedence over the image's environment; what the
-  spec gives the workload (`env`, an `env` secret of the same name) takes
-  precedence over them.
+  LUX_CPUS`). They take precedence over the image's environment; an `env`
+  secret of the same name overrides them. Spec `env` cannot use `LUX_` names.
 - Secrets are `env` (the default) or `file` (placed on a tmpfs and linked
   at `path`). A file secret is never in a snapshot. Every resume must
   supply every secret again.
@@ -578,15 +577,18 @@ egress rules and hard blocks, and nothing more.
 enforces `-m`, `--cpus` and `--pids-limit` on what it starts, within the
 Run's own limits, which nothing inside can raise. For that the shim
 splits the Run's cgroup: the workload starts in `/workload/main` (its
-`/proc/self/cgroup` says `0::/workload/main`), and may make up to 1024
-cgroups below `/workload`. Where that cannot be done, the Run gets a
+`/proc/self/cgroup` says `0::/workload/main`). For non-root workload users,
+`/workload` is bounded to 1024 descendants including `main`; root workloads
+can change this bound, but remain under the Run's host-owned limits.
+Engines create siblings of `main`, whose controllers cannot be enabled by
+a non-root workload. Where delegation cannot be done, the Run gets a
 `lux.warning` saying why and nested limits are not enforced. Docker inside
 a Run does not enforce per-container limits: rootless `dockerd`'s cgroup
 driver is `none`. Details: [Podman](podman.md#limits-of-nested-containers).
 
-A placement ends with reason `oom` only when the Run's own memory limit
-killed its workload, never because a nested container ran out of its own
-([out of memory](podman.md#out-of-memory)).
+A placement's `oom` attribution uses cumulative Run-limit pressure over
+that placement and an exited workload's SIGKILL/137, not a nested limit's
+own count; see the attribution caveats in [out of memory](podman.md#out-of-memory).
 
 ## Images with the prompt
 

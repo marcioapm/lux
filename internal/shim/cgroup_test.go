@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"golang.org/x/sys/unix"
 )
 
@@ -19,7 +22,7 @@ func fakeCgroup(t *testing.T, ctl string) string {
 	root := t.TempDir()
 	for name, content := range map[string]string{
 		"cgroup.controllers": ctl + "\n", "cgroup.subtree_control": "", "cgroup.procs": "",
-		"memory.max": "268435456\n",
+		"memory.max": "268435456\n", "cpu.max": "200000 100000\n", "memory.swap.max": "0\n",
 	} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
@@ -36,7 +39,7 @@ func withChildren(t *testing.T, root string) string {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		for _, f := range append([]string{"cgroup.max.descendants"}, delegationFiles...) {
+		for _, f := range append([]string{"cgroup.max.descendants", "cgroup.subtree_control", "cpu.max", "memory.max", "memory.swap.max", "pids.max"}, delegationFiles...) {
 			if err := os.WriteFile(filepath.Join(root, d, f), nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -170,9 +173,192 @@ func TestCommandStartsInTheWorkloadCgroup(t *testing.T) {
 	}
 	defer dir.Close()
 	s.workCgroup = dir
+	if cmd := s.syncCommand(proto.SyncArgs{}, nil); cmd.SysProcAttr.UseCgroupFD {
+		t.Fatal("sync cloned into workload cgroup")
+	}
 	cmd := s.command([]string{"/bin/true"}, nil)
 	if !cmd.SysProcAttr.UseCgroupFD || cmd.SysProcAttr.CgroupFD != int(dir.Fd()) {
 		t.Fatalf("delegated: %+v", cmd.SysProcAttr)
+	}
+}
+
+func TestDelegateFallbackStartsCommand(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	out, err := OpenOutput(path, NewRedactor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Shim{cfg: proto.ShimConfig{DelegateCgroup: true}, out: out, user: &userInfo{home: "/"}}
+	s.delegateAt(fakeCgroup(t, "cpu pids"), func(int) error { t.Fatal("unexpected probe"); return nil })
+	out.Close()
+	if s.workCgroup != nil {
+		t.Fatal("fallback retained cgroup fd")
+	}
+	cmd := s.command([]string{"/bin/true"}, nil)
+	if cmd.SysProcAttr.UseCgroupFD {
+		t.Fatal("fallback uses cgroup fd")
+	}
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	warnings := 0
+	for _, line := range lines {
+		var ev struct {
+			Event struct {
+				Type string `json:"type"`
+			} `json:"event"`
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.Event.Type == "lux.warning" {
+			warnings++
+		}
+	}
+	if warnings != 1 || !strings.Contains(string(b), "not delegated") {
+		t.Fatalf("warnings %d: %s", warnings, b)
+	}
+}
+
+func TestDelegateExactOwnershipAndLeafLimits(t *testing.T) {
+	root := withChildren(t, fakeCgroup(t, "cpu memory pids"))
+	old := giveCgroup
+	t.Cleanup(func() { giveCgroup = old })
+	var targets []string
+	giveCgroup = func(dir string, uid, gid int) error {
+		if uid != 1234 || gid != 1234 {
+			t.Fatalf("owner %d:%d", uid, gid)
+		}
+		targets = append(targets, filepath.Base(dir))
+		if os.Geteuid() == 0 {
+			return old(dir, uid, gid)
+		}
+		return nil
+	}
+	fd, err := delegateCgroup(root, 1234, 1234, func(int) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if strings.Join(targets, ",") != "workload,main" {
+		t.Fatal(targets)
+	}
+	for _, name := range []string{"cpu.max", "memory.max", "memory.swap.max"} {
+		if got, want := readTrim(t, filepath.Join(root, mainCgroup, name)), readTrim(t, filepath.Join(root, name)); got != want {
+			t.Fatalf("%s: %q != %q", name, got, want)
+		}
+	}
+	// Stat every control/resource file after the actual delegation chowns.
+	if os.Geteuid() != 0 {
+		t.Skip("ownership stat requires root; copy and delegation targets checked")
+	}
+	for _, d := range []string{workloadCgroup, mainCgroup} {
+		entries, err := os.ReadDir(filepath.Join(root, d))
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := []string{"."}
+		for _, e := range entries {
+			if !e.IsDir() {
+				names = append(names, e.Name())
+			}
+		}
+		for _, name := range names {
+			fi, err := os.Lstat(filepath.Join(root, d, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := uint32(0)
+			if name == "." || name == "cgroup.procs" || name == "cgroup.threads" || d == workloadCgroup && name == "cgroup.subtree_control" {
+				want = 1234
+			}
+			st := fi.Sys().(*syscall.Stat_t)
+			if st.Uid != want || st.Gid != want {
+				t.Errorf("%s/%s owner %d:%d want %d", d, name, st.Uid, st.Gid, want)
+			}
+		}
+	}
+}
+
+func TestDelegateRollbackAfterMove(t *testing.T) {
+	root := withChildren(t, fakeCgroup(t, "cpu memory pids"))
+	oldMove, oldRemove, oldGive := moveCgroupProcs, removeCgroup, giveCgroup
+	t.Cleanup(func() { moveCgroupProcs, removeCgroup, giveCgroup = oldMove, oldRemove, oldGive })
+	var moves []string
+	moveCgroupProcs = func(from, to string) error {
+		moves = append(moves, filepath.Base(from)+">"+filepath.Base(to))
+		if len(moves) == 2 {
+			for _, d := range []string{"", workloadCgroup} {
+				if got := readTrim(t, filepath.Join(root, d, "cgroup.subtree_control")); got != "-cpu -memory -pids" {
+					t.Errorf("rollback controllers: %q", got)
+				}
+			}
+		}
+		return nil
+	}
+	giveCgroup = func(string, int, int) error { return syscall.EPERM }
+	var removed []string
+	removeCgroup = func(path string) error {
+		removed = append(removed, strings.TrimPrefix(path, root+"/"))
+		return os.RemoveAll(path)
+	}
+	fd, err := delegateCgroup(root, 1234, 1234, func(int) error { return nil })
+	if fd != -1 || !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("fd %d err %v", fd, err)
+	}
+	if len(moves) != 2 || moves[1] != "lux.shim>"+filepath.Base(root) {
+		t.Fatalf("moves %v", moves)
+	}
+	if strings.Join(removed, ",") != "workload/main,workload,lux.shim" {
+		t.Fatal(removed)
+	}
+	for _, d := range []string{workloadCgroup, shimCgroup} {
+		if _, err := os.Stat(filepath.Join(root, d)); !os.IsNotExist(err) {
+			t.Fatalf("left %s: %v", d, err)
+		}
+	}
+}
+
+func TestPlacementMemoryOOM(t *testing.T) {
+	root := withChildren(t, fakeCgroup(t, "cpu memory pids"))
+	for d, count := range map[string]string{"": "2", mainCgroup: "3"} {
+		if err := os.WriteFile(filepath.Join(root, d, "memory.events.local"), []byte("oom "+count+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &Shim{}
+	if n := s.placementMemoryOOM(root); n == nil || *n != 2 {
+		t.Fatal(n)
+	}
+	f, err := os.Open(filepath.Join(root, mainCgroup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	s.workCgroup = f
+	if n := s.placementMemoryOOM(root); n == nil || *n != 5 {
+		t.Fatal(n)
+	}
+}
+
+func TestSizeEnvironmentSecretOverride(t *testing.T) {
+	s := &Shim{user: &userInfo{home: "/"}, cfg: proto.ShimConfig{
+		Env:     map[string]string{"LUX_CPUS": "2"},
+		Secrets: []spec.Secret{{Name: "LUX_CPUS", As: "env"}},
+	}}
+	var got string
+	for _, kv := range s.environment(map[string]string{"LUX_CPUS": "8"}) {
+		if v, ok := strings.CutPrefix(kv, "LUX_CPUS="); ok {
+			got = v
+		}
+	}
+	if got != "8" {
+		t.Fatalf("secret override %q", got)
 	}
 }
 

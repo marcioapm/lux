@@ -35,9 +35,9 @@ import (
 // processes of its own, hence the shim's leaf, and workload/ holding none
 // (an engine makes its containers' cgroups beside main/). Delegated means
 // the directory and its cgroup.procs, cgroup.threads and
-// cgroup.subtree_control belong to the workload user; resource files
-// (memory.max, cgroup.max.descendants, …) stay the Run root's, so nothing
-// the workload does can raise a limit lux set.
+// cgroup.subtree_control of workload/ belong to the workload user; main's
+// subtree_control and all resource files stay Run-root owned. A non-root
+// workload cannot raise those limits or the descendant bound.
 const (
 	cgroupRoot     = "/sys/fs/cgroup"
 	shimCgroup     = "lux.shim"
@@ -58,12 +58,17 @@ var (
 	requiredControllers  = []string{"cpu", "memory", "pids"}
 )
 
-// delegationFiles are what the workload user is given of workload/ and
-// workload/main, beside the directory itself.
-var delegationFiles = []string{"cgroup.procs", "cgroup.threads", "cgroup.subtree_control"}
+// workload/main keeps cgroup.subtree_control Run-root owned so it remains
+// a leaf. Engines enable controllers in siblings under workload/.
+var delegationFiles = []string{"cgroup.procs", "cgroup.threads"}
 
-// errNotDelegable: the Run's cgroup cannot be split here; the Run goes on
-// in one cgroup.
+var (
+	moveCgroupProcs = moveProcs
+	removeCgroup    = unix.Rmdir
+	giveCgroup      = chownDelegated
+)
+
+// errNotDelegable means the Run's cgroup cannot be split here.
 var errNotDelegable = errors.New("cgroup not delegable")
 
 // delegableControllers checks that the cgroup at root can be split: its
@@ -124,8 +129,8 @@ func cgroupPids(path string) ([]int, error) {
 // uid:gid and returns an open descriptor of workload/main, for
 // CLONE_INTO_CGROUP. probe starts and waits for a process cloned into a
 // cgroup by descriptor: one that fails means this kernel or seccomp
-// profile refuses it, and nothing is changed. Any error leaves the shim
-// where it was, or in lux.shim, and tenant processes start beside it.
+// profile refuses it, and nothing is changed. Errors trigger best-effort
+// rollback; tenant processes always fall back to the shim's cgroup.
 func delegateCgroup(root string, uid, gid int, probe func(fd int) error) (int, error) {
 	enable, err := delegableControllers(root)
 	if err != nil {
@@ -140,17 +145,29 @@ func delegateCgroup(root string, uid, gid int, probe func(fd int) error) (int, e
 	if err != nil {
 		return -1, fmt.Errorf("open %s: %w", mainCgroup, err)
 	}
+	var enabled []string
+	moved := false
+	rollback := func() {
+		for i := len(enabled) - 1; i >= 0; i-- {
+			_ = os.WriteFile(filepath.Join(enabled[i], "cgroup.subtree_control"), []byte(strings.ReplaceAll(subtreeControl(enable), "+", "-")), 0o644)
+		}
+		if moved {
+			_ = moveCgroupProcs(filepath.Join(root, shimCgroup), root)
+		}
+		for _, d := range []string{mainCgroup, workloadCgroup, shimCgroup} {
+			_ = removeCgroup(filepath.Join(root, d))
+		}
+	}
 	fail := func(err error) (int, error) {
 		unix.Close(fd)
+		rollback()
 		return -1, err
 	}
 	if err := probe(fd); err != nil {
-		for _, d := range []string{mainCgroup, workloadCgroup, shimCgroup} {
-			_ = unix.Rmdir(filepath.Join(root, d))
-		}
 		return fail(fmt.Errorf("starting a process into %s: %w", mainCgroup, err))
 	}
-	if err := moveProcs(root, filepath.Join(root, shimCgroup)); err != nil {
+	moved = true // A failed move can still have moved some processes.
+	if err := moveCgroupProcs(root, filepath.Join(root, shimCgroup)); err != nil {
 		return fail(err)
 	}
 	ctl := subtreeControl(enable)
@@ -158,14 +175,24 @@ func delegateCgroup(root string, uid, gid int, probe func(fd int) error) (int, e
 		if err := os.WriteFile(filepath.Join(d, "cgroup.subtree_control"), []byte(ctl), 0o644); err != nil {
 			return fail(fmt.Errorf("enabling %q: %w", ctl, err))
 		}
+		enabled = append(enabled, d)
 	}
 	max := strconv.Itoa(maxWorkloadDescendants)
 	if err := os.WriteFile(filepath.Join(root, workloadCgroup, "cgroup.max.descendants"), []byte(max), 0o644); err != nil {
 		return fail(fmt.Errorf("%s/cgroup.max.descendants: %w", workloadCgroup, err))
 	}
+	for _, name := range []string{"cpu.max", "memory.max", "memory.swap.max"} {
+		b, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			return fail(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, mainCgroup, name), b, 0o644); err != nil {
+			return fail(err)
+		}
+	}
 	if uid != 0 || gid != 0 {
 		for _, d := range []string{workloadCgroup, mainCgroup} {
-			if err := chownDelegated(filepath.Join(root, d), uid, gid); err != nil {
+			if err := giveCgroup(filepath.Join(root, d), uid, gid); err != nil {
 				return fail(err)
 			}
 		}
@@ -191,6 +218,13 @@ func moveProcs(from, to string) error {
 				return fmt.Errorf("moving %d to %s: %w", pid, filepath.Base(to), err)
 			}
 		}
+		remaining, err := cgroupPids(filepath.Join(from, "cgroup.procs"))
+		if err != nil {
+			return err
+		}
+		if len(remaining) == 0 {
+			return nil
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	return fmt.Errorf("processes keep appearing in %s", from)
@@ -207,7 +241,11 @@ func chownDelegated(dir string, uid, gid int) error {
 	if err := unix.Fchown(fd, uid, gid); err != nil {
 		return fmt.Errorf("chown %s: %w", dir, err)
 	}
-	for _, f := range delegationFiles {
+	files := slices.Clone(delegationFiles)
+	if filepath.Base(dir) == workloadCgroup {
+		files = append(files, "cgroup.subtree_control")
+	}
+	for _, f := range files {
 		if err := unix.Fchownat(fd, f, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return fmt.Errorf("chown %s/%s: %w", dir, f, err)
 		}
@@ -225,9 +263,13 @@ func probeCloneInto(fd int) error {
 
 // delegate splits the Run's cgroup when its config asks, and keeps the
 // workload/main descriptor tenant processes are started into. When it
-// cannot, it says so once and the Run goes on in one cgroup, as one
-// without nested containers.
+// cannot, it warns once and tenant processes start beside the shim.
+// Partial changes are rolled back best-effort.
 func (s *Shim) delegate() {
+	s.delegateAt(cgroupRoot, probeCloneInto)
+}
+
+func (s *Shim) delegateAt(root string, probe func(int) error) {
 	if !s.cfg.DelegateCgroup {
 		return
 	}
@@ -238,12 +280,12 @@ func (s *Shim) delegate() {
 	}
 	if err == nil {
 		var fd int
-		if fd, err = delegateCgroup(cgroupRoot, uid, gid, probeCloneInto); err == nil {
-			s.workCgroup = os.NewFile(uintptr(fd), filepath.Join(cgroupRoot, mainCgroup))
+		if fd, err = delegateCgroup(root, uid, gid, probe); err == nil {
+			s.workCgroup = os.NewFile(uintptr(fd), filepath.Join(root, mainCgroup))
 		}
 	}
 	if err != nil {
-		msg := "nested containers: the Run's cgroup is not delegated, so limits given to nested containers are not enforced: " + err.Error()
+		msg := "nested containers: the Run's cgroup is not delegated, so limits given to nested containers may not be enforced: " + err.Error()
 		fmt.Fprintln(os.Stderr, "lux-shim:", msg)
 		s.out.Event(proto.EvWarning, map[string]any{"message": msg})
 	}
@@ -258,9 +300,19 @@ func (s *Shim) intoWorkloadCgroup(cmd *exec.Cmd) {
 	}
 }
 
-// memoryOOM is the oom count in a memory.events.local file: how often
-// that cgroup's own memory.max was reached with nothing left to reclaim.
-// nil when the file cannot be read or has no such key.
+func (s *Shim) placementMemoryOOM(root string) *int64 {
+	n := memoryOOM(filepath.Join(root, "memory.events.local"))
+	if s.workCgroup != nil {
+		leaf := memoryOOM(filepath.Join(root, mainCgroup, "memory.events.local"))
+		if n == nil || leaf == nil {
+			return nil
+		}
+		*n += *leaf
+	}
+	return n
+}
+
+// memoryOOM reads the cumulative local oom count, or nil if unavailable.
 func memoryOOM(path string) *int64 {
 	f, err := os.Open(path)
 	if err != nil {

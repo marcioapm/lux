@@ -236,18 +236,24 @@ of the tenant's runs:
 
 - The shim makes the three cgroups, moves itself into `lux.shim`, then
   enables the controllers in the root and in `workload`.
-- It gives `workload` and `workload/main` (each directory and its
-  `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control`) to the
-  workload user. Their resource files (`memory.max`,
-  `cgroup.max.descendants`, …) stay the Run root's: the workload can limit
-  what it starts, never raise what lux set.
-- `cgroup.max.descendants` on `workload` is 1024: an engine makes one or
-  two cgroups per container, and the bound keeps a workload from making
-  them without end.
+- It gives both directories and their `cgroup.procs` and `cgroup.threads`
+  to the workload user, plus `workload/cgroup.subtree_control` only.
+  `main/cgroup.subtree_control` stays Run-root owned: `main` remains a
+  leaf, and engines must create siblings under `workload`, not evacuate
+  into children of `main`. Resource files stay Run-root owned.
+- The shim copies the root's `cpu.max`, `memory.max` and `memory.swap.max`
+  to `main`, so runtimes reading only their leaf see the Run's limits.
+- `cgroup.max.descendants` on `workload` is 1024, including `main`: an
+  engine makes one or two cgroups per container. This bounds non-root
+  workload users; a root workload is the Run's root and can remove the
+  descendant bound or create siblings of `workload`, but remains bounded
+  by the Run's host-owned resource limits.
 - Every tenant process is started directly in `workload/main` (clone3
   with `CLONE_INTO_CGROUP`), so none is ever, even briefly, in a cgroup
   that must stay empty. The engine makes its containers' cgroups beside
-  `main`, under `workload`.
+  `main`, under `workload`. If the workload moves all processes out and
+  removes `main` itself, subsequent tenant starts fail; the shim does not
+  recreate a workload-deleted leaf.
 - `podman exec` from the runner (`lux diff`, a push's bundle) lands in
   PID 1's cgroup, `lux.shim`: crun and runc put an exec'd process there
   when the container's root has controllers enabled. It is still inside
@@ -264,8 +270,11 @@ to 1 GiB. `tests/suites/test_nested.py` checks each.
 When the Run's cgroup cannot be split (it is not writable, it lacks the
 `cpu`, `memory` or `pids` controller, or the kernel or seccomp profile
 refuses `CLONE_INTO_CGROUP`), the shim writes one `lux.warning` saying
-why, and the Run goes on in one cgroup, as before: nested containers run
-with the Run's limits and their own are not enforced. A Run without
+why. On partial failure it best-effort disables the enabled controllers,
+returns the shim's processes to the root, and removes the new directories.
+Tenant starts fall back to the shim's cgroup even if rollback is incomplete:
+nested containers retain the Run's limits, but their own may not be enforced.
+A Run without
 `sandbox.nestedContainers` is never split; its cgroup filesystem is
 read-only.
 
@@ -277,10 +286,16 @@ containers have the Run's limits.
 
 ### Out of memory
 
-A placement's exit reason is `oom` only when the Run's own memory limit
-ended it: the oom count in the Run's `memory.events.local` (which the shim
-reads as it exits) is above 0, and the workload died by SIGKILL (or
-exited 137, as a shell does whose command was killed). Podman's
+A placement's `oom` attribution uses the cumulative `oom` count over the
+placement, summed from the root's and (when delegated) `workload/main`'s
+`memory.events.local`. Both enforce the Run's memory limit. The shim reads
+these at exit; the runner reports `oom` when the count is above zero,
+the shim's reason is `exited`, and the workload died by SIGKILL (or exited
+137, as a shell does whose command was killed). Stops and spot reclaims
+keep their reasons. The count is not tied to that kill: earlier recovered
+pressure followed by an unrelated SIGKILL or a passed-through nested 137
+can be attributed to `oom`; a supervisor masking the kill with exit 1 is
+not. Podman's
 `.State.OOMKilled` is true when the OOM killer killed any process in the
 container's cgroup tree, a nested container's included, even if the
 workload carried on and exited 0, so it is not used when the shim has

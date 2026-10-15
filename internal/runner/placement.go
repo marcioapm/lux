@@ -750,7 +750,7 @@ func ranOutOfMemory(e *exitRecord, podmanOOMKilled bool) bool {
 		return podmanOOMKilled
 	}
 	killed := e.signal == syscall.SIGKILL.String() || e.Code == 128+int(syscall.SIGKILL)
-	return *e.memoryOOM > 0 && killed
+	return e.Reason == "exited" && *e.memoryOOM > 0 && killed
 }
 
 // finish snapshots the state volumes and reports: snapshot first, so that
@@ -1177,8 +1177,7 @@ func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Net
 // withSizeEnv is the spec's env with the Run's size added for the
 // workload: LUX_CPUS, its cpus as asked (cpu.max is that many CPUs' time),
 // and LUX_MEMORY_LIMIT, memoryLimit in bytes down to whole pages, as
-// cgroup v2 keeps memory.max. A name the spec's env sets keeps the spec's
-// value. Neither is set when zero.
+// cgroup v2 keeps memory.max. Neither is set when zero.
 func withSizeEnv(env map[string]string, cpus float64, memoryLimit int64) map[string]string {
 	out := make(map[string]string, len(env)+2)
 	if cpus > 0 {
@@ -1218,7 +1217,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 		Workdir:      sp.Workload.Workdir,
 		User:         user,
 		TTY:          sp.Workload.TTY,
-		Env:          withSizeEnv(sp.Env, sp.Resources.CPUs, p.r.mem.limit(int64(sp.Resources.Memory))),
+		Env:          withSizeEnv(sp.Env, sp.Resources.CPUs, p.memoryLimit),
 		GraceSec:     sp.Workload.Grace.Seconds(),
 		Secrets:      sp.Secrets,
 		ArtifactsDir: proto.ShimRunDir + "/" + stagingDir,

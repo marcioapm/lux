@@ -155,11 +155,15 @@ def test_inner_limits_are_enforced(lux, runners, hosts):
     show = ("echo inner-cgroup=$(cat /proc/self/cgroup) mem=$(cat /sys/fs/cgroup/memory.max) "
             "cpu=$(cat /sys/fs/cgroup/cpu.max | tr \" \" _) pids=$(cat /sys/fs/cgroup/pids.max)")
     run_id = lux.submit(nested(
-        f"echo cgroup=$(cat /proc/self/cgroup); {OFFLINE} --rm -m 64m --cpus 0.5 --pids-limit 50 {ALPINE_IMAGE} sh -c '{show}'",
+        "leaf=$(cut -d: -f3 /proc/self/cgroup); "
+        "for f in cpu.max memory.max; do "
+        "[ \"$(cat /sys/fs/cgroup$leaf/$f)\" = \"$(cat /sys/fs/cgroup/$f)\" ] || exit 1; done; "
+        f"echo leaf-limits-match cgroup=$(cat /proc/self/cgroup); {OFFLINE} --rm -m 64m --cpus 0.5 --pids-limit 50 {ALPINE_IMAGE} sh -c '{show}'",
         resources={"cpus": 2, "memory": "1Gi"}))
     run = lux.wait_state(run_id, "succeeded", "failed", timeout=180)
     out = lux.logs(run_id).split()
     assert run["state"] == "succeeded", (run.get("stateReason"), out)
+    assert "leaf-limits-match" in out, out
     assert "cgroup=0::/workload/main" in out, out
     assert ["inner-cgroup=0::/", "mem=67108864", "cpu=50000_100000", "pids=50"] == [w for w in out if w.startswith(("inner-cgroup=", "mem=", "cpu=", "pids="))], out
 
@@ -210,6 +214,20 @@ def test_inner_limits_cannot_raise_the_runs(lux, runners, hosts):
     assert f"root={limit}" in out.split() and "descendants=1024" in out.split(), out
     assert "rc=137" in out.split(), out
     assert run["state"] == "succeeded" and run["placements"][0]["exitReason"] == "exited", (run, out)
+
+
+def test_main_cannot_become_internal_and_exec_still_works(lux, runners, hosts):
+    runners.start(hosts[0], "--nested")
+    run_id = lux.submit(nested(
+        "mkdir /sys/fs/cgroup/workload/main/x || exit 1; "
+        "echo $$ > /sys/fs/cgroup/workload/main/x/cgroup.procs || exit 1; "
+        "if echo +memory > /sys/fs/cgroup/workload/main/cgroup.subtree_control; "
+        "then echo MAIN-INTERNAL; else echo MAIN-LEAF; fi; sleep 600"))
+    out = lux.wait_output(run_id, "MAIN-LEAF", timeout=120)
+    assert "MAIN-INTERNAL" not in out, out
+    out = lux.run("exec", run_id, "-T", "--", "cat", "/proc/self/cgroup", input="").stdout
+    assert out.strip() == "0::/workload/main", out
+    lux.run("terminate", run_id, "--wait")
 
 
 def test_exec_and_diff_work_in_a_delegated_run(lux, runners, hosts, fake_image, git_server):

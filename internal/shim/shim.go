@@ -316,7 +316,7 @@ func (s *Shim) finish(info proto.ExitInfo) int {
 	// Close first: it records what was still held.
 	s.out.Close()
 	info.LastSeq = s.out.Seq()
-	info.MemoryOOM = memoryOOM(filepath.Join(cgroupRoot, "memory.events.local"))
+	info.MemoryOOM = s.placementMemoryOOM(cgroupRoot)
 	b, _ := json.Marshal(info)
 	path := filepath.Join(proto.ShimRunDir, proto.ExitFile(s.cfg.Epoch))
 	_ = os.WriteFile(path+".tmp", b, 0o644)

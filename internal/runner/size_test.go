@@ -44,6 +44,10 @@ func TestOutOfMemoryIsTheRunsOwnLimit(t *testing.T) {
 			exitFile(proto.ExitInfo{ExitCode: 137, Signal: "killed", Reason: "exited", MemoryOOM: n(0)}), nil, true, false},
 		{"the Run's limit fired, the workload failed otherwise",
 			exitFile(proto.ExitInfo{ExitCode: 1, Reason: "exited", MemoryOOM: n(2)}), nil, true, false},
+		{"stop wins after earlier memory pressure",
+			exitFile(proto.ExitInfo{ExitCode: 137, Signal: "killed", Reason: "stopped", MemoryOOM: n(3)}), nil, true, false},
+		{"spot reclaim wins after earlier memory pressure",
+			exitFile(proto.ExitInfo{ExitCode: 137, Signal: "killed", Reason: "spot-reclaim", MemoryOOM: n(3)}), nil, true, false},
 		// Without the shim's count, podman's account is the only one.
 		{"a shim that predates the count; podman says OOM",
 			[]byte(`{"exitCode":0,"reason":"exited","lastSeq":4}`), nil, true, true},
@@ -71,8 +75,8 @@ func TestOutOfMemoryIsTheRunsOwnLimit(t *testing.T) {
 }
 
 // LUX_CPUS is the spec's cpus as written; LUX_MEMORY_LIMIT the limit the
-// container is given, scaled to the host's share, in whole pages; a spec
-// env naming either keeps its value; nothing else is added.
+// container is given, scaled to the host's share, in whole pages;
+// nothing else is added.
 func TestSizeEnv(t *testing.T) {
 	page := int64(os.Getpagesize())
 	scale, err := newMemoryScale(32<<30+512<<20, 512<<20, 64<<30) // half
@@ -96,10 +100,6 @@ func TestSizeEnv(t *testing.T) {
 	// An unscaled limit not on a page: memory.max holds whole pages.
 	if got := withSizeEnv(nil, 1, 3*page+5)["LUX_MEMORY_LIMIT"]; got != strconv.FormatInt(3*page, 10) {
 		t.Errorf("unaligned: %q", got)
-	}
-	spec := map[string]string{"LUX_CPUS": "8", "LUX_MEMORY_LIMIT": "1"}
-	if got := withSizeEnv(spec, 0.5, 1<<30); !maps.Equal(got, spec) {
-		t.Errorf("spec env lost: %v", got)
 	}
 	if got := withSizeEnv(nil, 0, 0); len(got) != 0 {
 		t.Errorf("zero size: %v", got)
