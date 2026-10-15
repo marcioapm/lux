@@ -504,6 +504,25 @@ func TestResizeOnAltScreen(t *testing.T) {
 	if got := strings.Join(historyText(term), "|"); got != "out 0|out 1|out 2" {
 		t.Fatalf("history (47) %q", got)
 	}
+
+	// 1049 with the saved cursor (row 3) above the last non-blank row (9):
+	// the main screen keeps the rows around the saved cursor.
+	term = New(10, 20, 100)
+	for i := range 10 {
+		fmt.Fprintf(writer{term}, "\x1b[%d;1Hout %d", i+1, i)
+	}
+	feed(term, "\x1b[4;1H\x1b[?1049h")
+	term.Resize(5, 20)
+	feed(term, "\x1b[?1049l")
+	if got := screenText(term); got != "out 0\nout 1\nout 2\nout 3\nout 4\n" {
+		t.Fatalf("main screen (saved cursor) %q", got)
+	}
+	if x, y, _ := term.Cursor(); x != 0 || y != 3 {
+		t.Fatalf("cursor (saved cursor) %d,%d, want 0,3", x, y)
+	}
+	if n := term.HistoryLen(); n != 0 {
+		t.Fatalf("history (saved cursor) %d lines, want none", n)
+	}
 }
 
 // A DECSC-saved cursor moves with the rows a shrink takes off the top.
@@ -680,6 +699,57 @@ func TestSnapshotLimit(t *testing.T) {
 	}
 	if s := term.Snapshot(screenOnly - 1); s != nil {
 		t.Fatalf("a %d-byte snapshot over a limit of %d", len(s), screenOnly-1)
+	}
+}
+
+// A limited snapshot's history is the newest lines as one unbroken run:
+// a long line that does not fit ends it, older short ones are not kept.
+func TestSnapshotHistoryIsNewestContiguous(t *testing.T) {
+	term := New(4, 60, 1000)
+	for i := range 300 {
+		if i%3 == 0 {
+			fmt.Fprintf(writer{term}, "\x1b[38;2;1;2;3m%s %d\x1b[m\r\n", strings.Repeat("L", 50), i)
+		} else {
+			fmt.Fprintf(writer{term}, "s%d\r\n", i)
+		}
+	}
+	all := historyText(term)
+	full := len(term.Snapshot(0))
+	for limit := full / 3; limit < full; limit += 7 {
+		r := New(4, 60, 1000)
+		r.Write(term.Snapshot(limit))
+		h := historyText(r)
+		if strings.Join(h, "|") != strings.Join(all[len(all)-len(h):], "|") {
+			t.Fatalf("limit %d: not the newest %d lines, contiguous", limit, len(h))
+		}
+	}
+}
+
+// With the alternate screen shown, a limit the screens do not fit gives
+// no snapshot, never one with part of the alternate screen.
+func TestSnapshotLimitOnAltScreen(t *testing.T) {
+	term := New(10, 80, 0)
+	feed(term, "main\r\n\x1b[?1049h")
+	for y := range 10 {
+		fmt.Fprintf(writer{term}, "\x1b[%dH", y+1)
+		for x := range 79 {
+			fmt.Fprintf(writer{term}, "\x1b[38;2;%d;%d;1mx", x, y)
+		}
+	}
+	full := len(term.Snapshot(0))
+	none := 0
+	for limit := full / 2; limit < full; limit += 13 {
+		s := term.Snapshot(limit)
+		if s == nil {
+			none++
+			continue
+		}
+		r := New(10, 80, 0)
+		r.Write(s)
+		sameState(t, term, r)
+	}
+	if none == 0 {
+		t.Fatal("every limit fitted: nothing tested")
 	}
 }
 

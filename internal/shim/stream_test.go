@@ -746,60 +746,71 @@ func TestAttachStreamSendsSnapshotFrames(t *testing.T) {
 	}
 }
 
+// fillOverLimit resizes term to the emulator's largest size, writes first,
+// then gives every cell of the screen then shown its own truecolour pen:
+// a screen part over snapshotLimit.
+func fillOverLimit(t *testing.T, term *terminal, tty *os.File, first string) {
+	t.Helper()
+	term.resize(vterm.MaxRows, vterm.MaxCols)
+	w := bufio.NewWriterSize(tty, 64<<10)
+	fmt.Fprint(w, first)
+	for y := range vterm.MaxRows {
+		fmt.Fprintf(w, "\x1b[%dH", y+1)
+		for x := range vterm.MaxCols - 1 {
+			fmt.Fprintf(w, "\x1b[1;3;9;38;2;%d;%d;%d;48;2;%d;%d;%dmx", x%256, y%256, (x+y)%256, y%256, x%256, (x*y)%256)
+		}
+	}
+	fmt.Fprint(w, "\x1b[m\x1b[HREADY")
+	ferr := w.Flush()
+	// Polled cheaply: a whole snapshot of this screen per poll would hold
+	// the lock the reader needs.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		term.mu.Lock()
+		v := term.screen.(*vterm.Terminal)
+		x, y, _ := v.Cursor()
+		done := x == 5 && y == 0 && v.Text(v.Cell(4, 0)) == "Y"
+		term.mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the terminal never showed READY: cursor %d,%d, flush %v", x, y, ferr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	term.mu.Lock()
+	defer term.mu.Unlock()
+	if want := first != ""; term.screen.(*vterm.Terminal).AltScreen() != want {
+		t.Fatalf("alternate screen shown: %v, want %v", !want, want)
+	}
+}
+
 // A restore attach that gets no snapshot (the emulator was dropped, or the
-// screen alone is over the limit) still gets the marker, first, then live
-// output; a plain attach gets no marker.
+// screen part, main or alternate, is over the limit) still gets the
+// marker, first, then live output; a plain attach gets no marker.
 func TestRestoreMarkerWithoutSnapshot(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		restore bool
-		setup   func(*terminal, *os.File)
+		setup   func(*testing.T, *terminal, *os.File)
 	}{
-		{"emulator dropped", true, func(term *terminal, _ *os.File) {
+		{"emulator dropped", true, func(_ *testing.T, term *terminal, _ *os.File) {
 			term.mu.Lock()
 			term.screen = nil
 			term.mu.Unlock()
 		}},
-		{"screen over the limit", true, func(term *terminal, tty *os.File) {
-			// Every cell of a 200x500 screen in its own truecolour pen.
-			term.resize(vterm.MaxRows, vterm.MaxCols)
-			w := bufio.NewWriterSize(tty, 64<<10)
-			for y := range vterm.MaxRows {
-				fmt.Fprintf(w, "\x1b[%dH", y+1)
-				for x := range vterm.MaxCols - 1 {
-					fmt.Fprintf(w, "\x1b[1;3;9;38;2;%d;%d;%d;48;2;%d;%d;%dmx", x%256, y%256, (x+y)%256, y%256, x%256, (x*y)%256)
-				}
-			}
-			fmt.Fprint(w, "\x1b[m\x1b[HREADY")
-			ferr := w.Flush()
-			// Polled cheaply: a whole snapshot of this screen per poll
-			// would hold the lock the reader needs.
-			deadline := time.Now().Add(30 * time.Second)
-			for {
-				term.mu.Lock()
-				v := term.screen.(*vterm.Terminal)
-				x, y, _ := v.Cursor()
-				done := x == 5 && y == 0 && v.Text(v.Cell(4, 0)) == "Y"
-				term.mu.Unlock()
-				if done {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatalf("the terminal never showed READY: cursor %d,%d, flush %v", x, y, ferr)
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			term.mu.Lock()
-			defer term.mu.Unlock()
-			if s := term.screen.Snapshot(snapshotLimit); s != nil {
-				t.Fatalf("a %d-byte snapshot: the screen is within the limit", len(s))
-			}
+		{"screen over the limit", true, func(t *testing.T, term *terminal, tty *os.File) {
+			fillOverLimit(t, term, tty, "")
 		}},
-		{"plain attach", false, func(*terminal, *os.File) {}},
+		{"alternate screen over the limit", true, func(t *testing.T, term *terminal, tty *os.File) {
+			fillOverLimit(t, term, tty, "main\r\n\x1b[?1049h")
+		}},
+		{"plain attach", false, func(*testing.T, *terminal, *os.File) {}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			term, tty, _ := ptyTerminal(t, 24, 80, historyLines, nil)
-			tc.setup(term, tty)
+			tc.setup(t, term, tty)
 			s := &Shim{term: term}
 			runnerSide, shimSide := net.Pipe()
 			defer runnerSide.Close()
@@ -818,7 +829,7 @@ func TestRestoreMarkerWithoutSnapshot(t *testing.T) {
 			}
 			if tc.restore {
 				if d := read(); !d.Restored || len(d.Data) > 0 {
-					t.Fatalf("first frame %+v, want the marker", d)
+					t.Fatalf("first frame: restored %v, %d bytes of data; want the marker", d.Restored, len(d.Data))
 				}
 			} else {
 				// Joined once the stream has subscribed; then live output.
