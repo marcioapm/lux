@@ -591,7 +591,7 @@ func (s *Server) heartbeatVersion(ctx context.Context, hostID string, hb proto.H
 			state = CASE WHEN hosts.state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE hosts.state END,
 			caches = jsonb_set(caches, '{gitMirrors}', $2),
 			disk_pressure = CASE WHEN $4 THEN $3 ELSE hosts.disk_pressure END,
-			host_net_classes = lux_net_max(hosts.host_net_classes, $5::jsonb)
+			host_net_classes = CASE WHEN $5::jsonb IS NULL OR $5::jsonb = '{}' THEN hosts.host_net_classes ELSE lux_net_max(hosts.host_net_classes, $5::jsonb) END
 			FROM old WHERE hosts.id = old.id
 			RETURNING old.state = 'lost' AND hosts.state = 'ready', old.disk_pressure, coalesce(hosts.net_classes->>'version', '')`, hostID, nonNil(hb.GitMirrors), pressure, pressureKnown, hostNet).Scan(&back, &was, version); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
@@ -623,7 +623,7 @@ func (s *Server) heartbeatVersion(ctx context.Context, hostID string, hb proto.H
 		if n > 0 {
 			// Leases renewed and usage peaks raised for every placement at once.
 			_, err := tx.Exec(ctx, `UPDATE placements p SET
-					net_classes       = lux_net_max(p.net_classes, u.net),
+					net_classes       = CASE WHEN u.net = '{}' THEN p.net_classes ELSE lux_net_max(p.net_classes, u.net) END,
 					lease_expires_at  = now() + $2::interval,
 					peak_memory_bytes = greatest(p.peak_memory_bytes, nullif(u.mem, 0)),
 					peak_disk_bytes   = greatest(p.peak_disk_bytes, nullif(u.disk, 0)),
