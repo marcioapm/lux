@@ -235,6 +235,31 @@ func TestAttachRestoreResizesFirst(t *testing.T) {
 	}
 }
 
+// A size over the emulator's limits is clamped before the PTY is resized,
+// on join and in-band, so the PTY and the emulator agree.
+func TestResizeClampedForPTYAndEmulator(t *testing.T) {
+	term, _, _ := ptyTerminal(t, 24, 80, historyLines, nil)
+	check := func(what string) {
+		t.Helper()
+		ws, err := pty.GetsizeFull(term.ptmx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		term.mu.Lock()
+		r, c := term.screen.(*vterm.Terminal).Size()
+		term.mu.Unlock()
+		if int(ws.Rows) != vterm.MaxRows || int(ws.Cols) != vterm.MaxCols || r != vterm.MaxRows || c != vterm.MaxCols {
+			t.Fatalf("%s: pty %dx%d, emulator %dx%d, want both %dx%d", what, ws.Rows, ws.Cols, r, c, vterm.MaxRows, vterm.MaxCols)
+		}
+	}
+	_, sub := term.join(true, 70000, 70000)
+	term.leave(sub)
+	check("join")
+	term.resize(24, 80)
+	term.resize(1000, 100000)
+	check("in-band")
+}
+
 // Attaches during a fast writer: each one's snapshot and the live output
 // after it, replayed, are exactly the shim's terminal at the end — no
 // output lost or repeated between them.

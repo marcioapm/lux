@@ -6792,6 +6792,7 @@ paths:
           schema:
             description: "With restore: the client's terminal size, which the Run's terminal is resized to before the snapshot (with cols)."
             format: int64
+            maximum: 200
             minimum: 0
             type: integer
         - description: "With restore: see rows."
@@ -6801,6 +6802,7 @@ paths:
           schema:
             description: "With restore: see rows."
             format: int64
+            maximum: 500
             minimum: 0
             type: integer
       responses:

@@ -385,7 +385,12 @@ func (t *terminal) resize(rows, cols int) {
 	t.resizeLocked(rows, cols)
 }
 
+// resizeLocked resizes the PTY and the emulator to the same size: within
+// the emulator's limits, so the two always agree.
 func (t *terminal) resizeLocked(rows, cols int) {
+	if rows > 0 && cols > 0 {
+		rows, cols = min(rows, vterm.MaxRows), min(cols, vterm.MaxCols)
+	}
 	ws := winsize(rows, cols)
 	_ = pty.Setsize(t.ptmx, ws)
 	t.withScreen(func(s screenState) { s.Resize(int(ws.Rows), int(ws.Cols)) })

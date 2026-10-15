@@ -17,6 +17,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/vterm"
 )
 
 func (a *app) execCmd() *cobra.Command {
@@ -61,8 +62,9 @@ continues live. A host too old to restore just continues live.`,
 				q := url.Values{"restore": {"true"}}
 				if raw {
 					if c, r, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
-						q.Set("rows", strconv.Itoa(r))
-						q.Set("cols", strconv.Itoa(c))
+						// luxd refuses a size over the Run's terminal limits.
+						q.Set("rows", strconv.Itoa(min(r, vterm.MaxRows)))
+						q.Set("cols", strconv.Itoa(min(c, vterm.MaxCols)))
 					}
 				}
 				path += "?" + q.Encode()
