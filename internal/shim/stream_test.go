@@ -60,7 +60,7 @@ func ptyTerminal(t *testing.T, rows, cols, history int, read func([]byte)) (*ter
 func screenOf(term *terminal) []byte {
 	term.mu.Lock()
 	defer term.mu.Unlock()
-	return term.screen.Snapshot()
+	return term.screen.Snapshot(0)
 }
 
 // waitScreen waits until the emulator shows want: all written before it
@@ -188,7 +188,7 @@ func TestAttachRestoresAltScreen(t *testing.T) {
 	if got := screenText(v); !strings.HasPrefix(got, "$ make\nbuilt ok\n$ top\n$\n") {
 		t.Fatalf("main screen after leaving %q", got)
 	}
-	if !bytes.Equal(v.Snapshot(), screenOf(term)) {
+	if !bytes.Equal(v.Snapshot(0), screenOf(term)) {
 		t.Fatal("the client's terminal and the shim's differ")
 	}
 }
@@ -207,7 +207,7 @@ func TestAttachRestoreResizesFirst(t *testing.T) {
 		t.Fatalf("pty %dx%d, want 10x30", ws.Rows, ws.Cols)
 	}
 	v := replay(10, 30, historyLines, snap)
-	if !bytes.Equal(v.Snapshot(), screenOf(term)) {
+	if !bytes.Equal(v.Snapshot(0), screenOf(term)) {
 		t.Fatal("snapshot not of the new size")
 	}
 	term.resize(12, 50)
@@ -263,40 +263,47 @@ func TestAttachRestoreNoGapNoDuplicate(t *testing.T) {
 		mu.Unlock()
 	}
 
+	// The writer goes on until every attach has happened, so all of them
+	// land while output is flowing.
+	const attaches = 40
+	attachesDone := make(chan struct{})
 	writerDone := make(chan struct{})
+	written := 0
 	go func() {
 		defer close(writerDone)
-		for i := range 4000 {
+		for i := 0; ; i++ {
+			select {
+			case <-attachesDone:
+				fmt.Fprint(tty, "THE END")
+				return
+			default:
+			}
 			// Colours and cursor movement too, so a byte out of place shows.
 			fmt.Fprintf(tty, "\x1b[3%dm%05d\x1b[m %s\r\n", i%8, i, strings.Repeat("x", i%30))
 			if i%500 == 0 {
 				fmt.Fprint(tty, "\x1b[2;3H\x1b[K*\x1b[8;1H")
 			}
+			written = i
 		}
-		fmt.Fprint(tty, "THE END")
 	}()
-	for i := 0; ; i++ {
-		select {
-		case <-writerDone:
-		default:
-			attach()
-			time.Sleep(time.Duration(i%3) * time.Millisecond)
-			continue
-		}
-		break
+	for i := range attaches {
+		attach()
+		time.Sleep(time.Duration(i%3) * time.Millisecond)
 	}
+	close(attachesDone)
+	<-writerDone
 	waitScreen(t, term, "THE END")
 	close(stop)
 	final := screenOf(term)
 	for i, a := range all {
 		<-a.done
 		v := replay(rows, cols, history, a.snap, a.live.Bytes())
-		if got := v.Snapshot(); !bytes.Equal(got, final) {
+		if got := v.Snapshot(0); !bytes.Equal(got, final) {
 			t.Fatalf("attach %d of %d (snapshot %d bytes, live %d): replayed terminal differs from the shim's", i, len(all), len(a.snap), a.live.Len())
 		}
 	}
-	if len(all) < 10 {
-		t.Fatalf("only %d attaches during the writer", len(all))
+	if written < 100 {
+		t.Fatalf("only %d lines written during the attaches", written)
 	}
 }
 
@@ -345,7 +352,7 @@ func (f *failingScreen) Write(p []byte) {
 	}
 }
 func (f *failingScreen) Resize(rows, cols int) {}
-func (f *failingScreen) Snapshot() []byte      { return []byte("snap") }
+func (f *failingScreen) Snapshot(int) []byte   { return []byte("snap") }
 
 // An emulator that fails is dropped: output and attach go on, without
 // restore.
@@ -450,7 +457,7 @@ func TestAttachStreamSendsSnapshotFrames(t *testing.T) {
 		t.Fatalf("%d frames", len(frames))
 	}
 	v := replay(30, 200, historyLines, out)
-	if !bytes.Equal(v.Snapshot(), screenOf(term)) {
+	if !bytes.Equal(v.Snapshot(0), screenOf(term)) {
 		t.Fatal("the stream does not reproduce the terminal")
 	}
 }

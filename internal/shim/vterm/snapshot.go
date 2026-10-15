@@ -13,7 +13,10 @@ import (
 //
 // It does not send RIS (ESC c): on many terminals that also wipes their
 // scrollback, which a person attaching keeps.
-func (t *Terminal) Snapshot() []byte {
+//
+// With limit > 0, the oldest history lines are left out as needed to keep
+// it within limit bytes; the screen itself is always sent whole.
+func (t *Terminal) Snapshot(limit int) []byte {
 	b := make([]byte, 0, (t.hist.n+2*t.rows)*(t.cols+16)+256)
 	b = append(b, "\x1b[?25l\x1b[?1049l\x1b[r\x1b[m\x1b[?6l\x1b[?7h\x1b[4l\x1b[20l\x1b>\x1b(B\x1b)B\x0f\x1b[0 q"...)
 	for _, n := range replayModes {
@@ -21,10 +24,30 @@ func (t *Terminal) Snapshot() []byte {
 	}
 	b = append(b, "\x1b[H\x1b[2J"...)
 
+	histStart := len(b)
+	ends := make([]int, 0, t.hist.n)
 	for i := 0; i < t.hist.n; i++ {
 		b = t.appendLine(b, t.HistoryLine(i), true)
 		b = append(b, "\r\n"...)
+		ends = append(ends, len(b))
 	}
+	b = t.appendScreen(b)
+	if limit > 0 && len(b) > limit {
+		// Drop whole lines, oldest first, until it fits or none is left.
+		cut := histStart
+		for _, e := range ends {
+			cut = e
+			if len(b)-(e-histStart) <= limit {
+				break
+			}
+		}
+		b = append(b[:histStart], b[cut:]...)
+	}
+	return b
+}
+
+// appendScreen is the part of Snapshot after the history.
+func (t *Terminal) appendScreen(b []byte) []byte {
 	for y, l := range t.main.lines {
 		if y > 0 {
 			b = append(b, "\r\n"...)

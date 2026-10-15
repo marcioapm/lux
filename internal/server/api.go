@@ -252,8 +252,8 @@ func (s *Server) routes(api huma.API) {
 		"The client's first message is a StreamOpen: `{\"command\": [...], \"tty\": true, \"rows\": 24, \"cols\": 80}`. "),
 		"run", streamed(s, s.runStream("exec")))
 	register(s, api, s.streamOp(api, "attachRun", "/v1/runs/{id}/attach", "attach", "Attach to a running Run's terminal",
-		"Needs a generic workload with workload.tty. "),
-		"run", streamed(s, s.runStream("attach")))
+		"Needs a generic workload with workload.tty. Without `?restore=true` the output is what the terminal writes from now on; with it, it starts with a snapshot of the terminal's screen (see restore). "),
+		"run", streamed(s, s.attachStream()))
 	register(s, api, s.streamOp(api, "portForward", "/v1/runs/{id}/ports/{name}", "tunnel", "Reach one of a running Run's ports",
 		"A TCP connection to a port the spec declares in network.ports, or to one of the Run's servers (by its name), carried as StreamData. "),
 		"run", streamed(s, s.streamHandler("tunnel")))

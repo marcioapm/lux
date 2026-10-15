@@ -6757,7 +6757,7 @@ paths:
   /v1/runs/{id}/attach:
     get:
       description: |-
-        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. Needs a generic workload with workload.tty. A browser authenticates with `?ticket=` (POST /v1/runs/{id}/tickets, kind exec) instead of a header; a page of another origin than luxd's is refused (403 bad_origin). Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
+        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. Needs a generic workload with workload.tty. Without `?restore=true` the output is what the terminal writes from now on; with it, it starts with a snapshot of the terminal's screen (see restore). A browser authenticates with `?ticket=` (POST /v1/runs/{id}/tickets, kind exec) instead of a header; a page of another origin than luxd's is refused (403 bad_origin). Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
 
         Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
 
@@ -6778,6 +6778,31 @@ paths:
           schema:
             description: A stream ticket (kind exec), instead of an Authorization header.
             type: string
+        - description: "Start the output with a snapshot that redraws the terminal as it is: reset, scrollback lines, the screen (main or alternate) with its attributes, then modes, cursor and title. Live output follows with nothing lost or repeated in between. Sent as ordinary output messages; a host from before sends none, so a client must cope with its absence."
+          explode: false
+          in: query
+          name: restore
+          schema:
+            description: "Start the output with a snapshot that redraws the terminal as it is: reset, scrollback lines, the screen (main or alternate) with its attributes, then modes, cursor and title. Live output follows with nothing lost or repeated in between. Sent as ordinary output messages; a host from before sends none, so a client must cope with its absence."
+            type: boolean
+        - description: "With restore: the client's terminal size, which the Run's terminal is resized to before the snapshot (with cols)."
+          explode: false
+          in: query
+          name: rows
+          schema:
+            description: "With restore: the client's terminal size, which the Run's terminal is resized to before the snapshot (with cols)."
+            format: int64
+            minimum: 0
+            type: integer
+        - description: "With restore: see rows."
+          explode: false
+          in: query
+          name: cols
+          schema:
+            description: "With restore: see rows."
+            format: int64
+            minimum: 0
+            type: integer
       responses:
         "101":
           description: Switching to the WebSocket.

@@ -192,12 +192,17 @@ func chunks(b []byte, n int) func(func([]byte) bool) {
 // attach's restore, as tmux's default history-limit.
 const historyLines = 2000
 
+// snapshotLimit bounds a snapshot (its oldest history lines go first):
+// 128 frames of streamChunk, half of what luxd buffers for a stream
+// before it drops it as fallen behind.
+const snapshotLimit = 128 * streamChunk
+
 // screenState is a terminal emulator fed the workload's output: what an
 // attach with restore starts from.
 type screenState interface {
 	Write(p []byte)
 	Resize(rows, cols int)
-	Snapshot() []byte
+	Snapshot(limit int) []byte
 }
 
 // terminal is a workload's PTY, read for the output file and copied to
@@ -234,7 +239,7 @@ func (t *terminal) join(restore bool, rows, cols int) ([]byte, chan []byte) {
 		if rows > 0 && cols > 0 {
 			t.resizeLocked(rows, cols)
 		}
-		t.withScreen(func(s screenState) { snap = s.Snapshot() })
+		t.withScreen(func(s screenState) { snap = s.Snapshot(snapshotLimit) })
 	}
 	t.subs[ch] = true
 	return snap, ch

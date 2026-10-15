@@ -43,7 +43,7 @@ func feed(t *Terminal, s string) { t.Write([]byte(s)) }
 // snapshot.
 func restored(t *Terminal, history int) *Terminal {
 	r := New(t.rows, t.cols, history)
-	r.Write(t.Snapshot())
+	r.Write(t.Snapshot(0))
 	return r
 }
 
@@ -352,6 +352,35 @@ func TestRandomOutputRoundTrips(t *testing.T) {
 		if t.Failed() {
 			return
 		}
+	}
+}
+
+// A snapshot over its byte limit leaves out the oldest history lines,
+// whole, and still reproduces the screen.
+func TestSnapshotLimit(t *testing.T) {
+	term := New(4, 20, 1000)
+	for i := range 500 {
+		fmt.Fprintf(writer{term}, "\x1b[3%dmline %d\x1b[m\r\n", i%8, i)
+	}
+	full := term.Snapshot(0)
+	limited := term.Snapshot(len(full) / 2)
+	if len(limited) > len(full)/2 {
+		t.Fatalf("%d bytes over the limit %d", len(limited), len(full)/2)
+	}
+	r := New(4, 20, 1000)
+	r.Write(limited)
+	if got := screenText(r); got != screenText(term) {
+		t.Fatalf("screen %q", got)
+	}
+	h, all := historyText(r), historyText(term)
+	if len(h) == 0 || len(h) >= len(all) || h[len(h)-1] != all[len(all)-1] || h[0] != all[len(all)-len(h)] {
+		t.Fatalf("history kept %d of %d lines, from %q", len(h), len(all), h[0])
+	}
+	// A limit below the screen itself keeps no history, never less screen.
+	r = New(4, 20, 1000)
+	r.Write(term.Snapshot(1))
+	if r.HistoryLen() != 0 || screenText(r) != screenText(term) {
+		t.Fatalf("tiny limit: history %d, screen %q", r.HistoryLen(), screenText(r))
 	}
 }
 

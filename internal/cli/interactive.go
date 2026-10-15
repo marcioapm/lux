@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/coder/websocket"
@@ -38,23 +40,43 @@ it off).`,
 }
 
 func (a *app) attachCmd() *cobra.Command {
-	return &cobra.Command{
+	var restore bool
+	cmd := &cobra.Command{
 		Use:   "attach <run>",
 		Short: "Attach to a generic workload's terminal",
 		Long: `Attach to the terminal of a generic workload started with workload.tty:
 see its output from now on and type into it. Detach with Ctrl-] (the
-workload keeps running).`,
+workload keeps running).
+
+With --restore, the terminal is first redrawn as it is now — its screen
+(a full-screen program's included), recent scrollback, modes, cursor and
+title — at this terminal's size, as tmux does on attach; then output
+continues live. A host too old to restore just continues live.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
-			ws, err := a.c.Dial(ctx, "/v1/runs/"+args[0]+"/attach")
+			raw := a.stdinTerminal()
+			path := "/v1/runs/" + args[0] + "/attach"
+			if restore {
+				q := url.Values{"restore": {"true"}}
+				if raw {
+					if c, r, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+						q.Set("rows", strconv.Itoa(r))
+						q.Set("cols", strconv.Itoa(c))
+					}
+				}
+				path += "?" + q.Encode()
+			}
+			ws, err := a.c.Dial(ctx, path)
 			if err != nil {
 				return err
 			}
 			defer ws.CloseNow()
-			return a.interact(ctx, ws, a.stdinTerminal())
+			return a.interact(ctx, ws, raw)
 		},
 	}
+	cmd.Flags().BoolVar(&restore, "restore", false, "redraw the terminal's current screen and recent scrollback first")
+	return cmd
 }
 
 // exec runs open's command in a Run and interacts with it (raw: stdin as
