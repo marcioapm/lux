@@ -108,24 +108,29 @@ func (b *blockingReader) Read(p []byte) (int, error) {
 // A page that has not ended streams what it has once the snippet is
 // placed: nothing waits for its end.
 func TestInjectStreamsBeforeEOF(t *testing.T) {
-	head := "<!doctype html><html><head><title>t</title>"
-	src := &blockingReader{data: []byte(head), release: make(chan struct{})}
-	defer close(src.release)
-	b := newInjectBody(io.NopCloser(src), []byte(snip))
-	want := "<!doctype html><html><head>" + snip + "<title>t</title>"
-	got := make(chan []byte, 1)
-	go func() {
-		buf := make([]byte, len(want))
-		n, _ := io.ReadFull(b, buf)
-		got <- buf[:n]
-	}()
-	select {
-	case g := <-got:
-		if string(g) != want {
-			t.Fatalf("got %q, want %q", g, want)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the first bytes waited for the end of the page")
+	for _, c := range []struct{ name, data, want string }{
+		{"head", "<!doctype html><html><head><title>t</title>", "<!doctype html><html><head>" + snip + "<title>t</title>"},
+		{"body, no head", "<!doctype html><body><p>step 1</p>", "<!doctype html>" + snip + "<body><p>step 1</p>"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			src := &blockingReader{data: []byte(c.data), release: make(chan struct{})}
+			defer close(src.release)
+			b := newInjectBody(io.NopCloser(src), []byte(snip))
+			got := make(chan []byte, 1)
+			go func() {
+				buf := make([]byte, len(c.want))
+				n, _ := io.ReadFull(b, buf)
+				got <- buf[:n]
+			}()
+			select {
+			case g := <-got:
+				if string(g) != c.want {
+					t.Fatalf("got %q, want %q", g, c.want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the first bytes waited for the end of the page")
+			}
+		})
 	}
 }
 

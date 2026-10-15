@@ -56,6 +56,10 @@ func injectResponse(resp *http.Response, snippet string) {
 	for _, h := range []string{"Content-Length", "ETag", "Content-MD5", "Digest", "Last-Modified"} {
 		resp.Header.Del(h)
 	}
+	// The same URL answers fetches without the snippet: caches must key on
+	// what tells a navigation apart (isNavigation).
+	resp.Header.Add("Vary", "Sec-Fetch-Dest")
+	resp.Header.Add("Vary", "Accept")
 }
 
 func isHTML(contentType string) bool {
@@ -111,26 +115,32 @@ func (b *injectBody) Read(p []byte) (int, error) {
 func (b *injectBody) Close() error { return b.src.Close() }
 
 // findInjectAt is where the snippet goes in the start of a page: right
-// after the first <head tag; without one in the window, right before the
-// first <body tag; without either, after a leading <!doctype …> (never
-// before it: the page would render in quirks mode), else at the start.
+// after the first <head tag; without one before the first <body tag (or in
+// the window), right before that <body tag; without either, after a
+// leading <!doctype …> (never before it: the page would render in quirks
+// mode), else at the start.
 // ok is false while it cannot tell yet (more of the window may hold a
 // <head); final says no more is coming. from is where a <head can still
 // start (nothing before it can), returned for the next call.
 func findInjectAt(buf []byte, from int, final bool) (at, next int, ok bool) {
 	end, partial := findTag(buf, from, "<head", true)
-	switch {
-	case end >= 0:
+	if end >= 0 {
 		return end, 0, true
-	case !final && partial >= 0:
+	}
+	body, _ := findTag(buf, 0, "<body", false)
+	switch {
+	case final && body >= 0:
+		return body, 0, true
+	case final:
+		return afterDoctype(buf), 0, true
+	// A <head after <body> is ignored by the HTML parser, so a complete
+	// <body tag ahead of any <head candidate settles it before the end.
+	case body >= 0 && (partial < 0 || body < partial) && tagEnd(buf, body+len("<body")) >= 0:
+		return body, 0, true
+	case partial >= 0:
 		return 0, partial, false
-	case !final:
-		return 0, len(buf), false
 	}
-	if i, _ := findTag(buf, 0, "<body", false); i >= 0 {
-		return i, 0, true
-	}
-	return afterDoctype(buf), 0, true
+	return 0, len(buf), false
 }
 
 // findTag finds the first tag named by name ("<head"), case-insensitive,

@@ -143,6 +143,9 @@ func TestPreviewInjectNavigation(t *testing.T) {
 	if h.Get("Cache-Control") != "max-age=60" || h.Get("Content-Security-Policy") != "script-src 'self'" {
 		t.Errorf("cache-control or CSP changed: %v", h)
 	}
+	if v := h.Values("Vary"); !slices.Equal(v, []string{"Sec-Fetch-Dest", "Accept"}) {
+		t.Errorf("Vary: %q", v)
+	}
 	up := seen()
 	if up.Get("Accept-Encoding") != "identity" || up.Get("If-None-Match") != "" || up.Get("If-Modified-Since") != "" {
 		t.Fatalf("upstream saw: %v", up)
@@ -190,7 +193,7 @@ func TestPreviewInjectPassThrough(t *testing.T) {
 			if w.Code != direct.StatusCode || !bytes.Equal(w.Body.Bytes(), direct.body) {
 				t.Fatalf("body changed: %d %q, want %d %q", w.Code, w.Body, direct.StatusCode, direct.body)
 			}
-			for _, k := range []string{"Content-Length", "ETag", "Last-Modified", "Content-Type", "Content-Encoding", "Cache-Control", "Content-Security-Policy"} {
+			for _, k := range []string{"Content-Length", "ETag", "Last-Modified", "Content-Type", "Content-Encoding", "Cache-Control", "Content-Security-Policy", "Vary"} {
 				if got, want := w.Header().Values(k), direct.Header.Values(k); !slices.Equal(got, want) {
 					t.Errorf("%s: %q, want %q", k, got, want)
 				}
