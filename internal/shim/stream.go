@@ -271,8 +271,16 @@ type subscriber struct {
 	err    error
 }
 
-// restoreBudget is the most output a restore attach may have queued.
+// restoreBudget is the most a restore attach may have queued, counting
+// each queued read as its length plus entryCost.
 const restoreBudget = snapshotLimit
+
+// entryCost is the heap a queued read takes besides its bytes: its slice
+// header in queue (24), at most as much again of append's spare capacity,
+// and the smallest size class of its copy (8). Charging it bounds a
+// stalled queue's memory by restoreBudget however small the reads are,
+// as when a workload writes a byte at a time.
+const entryCost = 64
 
 func newSubscriber(strict bool) *subscriber {
 	if strict {
@@ -293,13 +301,13 @@ func (s *subscriber) offer(b []byte) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.queued+len(b) > restoreBudget {
+	if s.queued+len(b)+entryCost > restoreBudget {
 		s.queue, s.queued = nil, 0
 		s.endLocked(errFellBehind)
 		return false
 	}
 	s.queue = append(s.queue, b)
-	s.queued += len(b)
+	s.queued += len(b) + entryCost
 	s.signal()
 	return true
 }
@@ -335,7 +343,7 @@ func (s *subscriber) next() ([]byte, error) {
 			b := s.queue[0]
 			s.queue[0] = nil
 			s.queue = s.queue[1:]
-			s.queued -= len(b)
+			s.queued -= len(b) + entryCost
 			s.mu.Unlock()
 			return b, nil
 		}

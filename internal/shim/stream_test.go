@@ -466,6 +466,83 @@ func TestRestoreAttachFallenBehindIsEnded(t *testing.T) {
 	}
 }
 
+// The most 1-byte reads a restore subscriber may hold: each is charged
+// entryCost on top of its byte.
+const maxTinyEntries = restoreBudget / (entryCost + 1)
+
+// A restore subscriber holds maxTinyEntries 1-byte reads, not
+// restoreBudget of them; reading them frees their whole charge.
+func TestRestoreSubscriberChargesEachRead(t *testing.T) {
+	s := newSubscriber(true)
+	for round := range 2 {
+		for i := range maxTinyEntries {
+			if !s.offer([]byte{'x'}) {
+				t.Fatalf("round %d: ended after %d 1-byte reads, want %d", round, i, maxTinyEntries)
+			}
+		}
+		if round == 0 {
+			for range maxTinyEntries {
+				if _, err := s.next(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if s.offer([]byte{'x'}) {
+		t.Fatalf("a read past %d accepted", maxTinyEntries)
+	}
+	if _, err := s.next(); !errors.Is(err, errFellBehind) {
+		t.Fatalf("next after the overflow: %v", err)
+	}
+}
+
+// A stalled restore attach on a workload writing a byte at a time holds
+// at most maxTinyEntries reads at any moment, and is ended.
+func TestStalledRestoreAttachTinyWrites(t *testing.T) {
+	term, tty, _ := ptyTerminal(t, 24, 80, historyLines, nil)
+	snap, sub := term.join(true, 0, 0)
+	defer term.leave(sub)
+	if snap == nil || !sub.strict {
+		t.Fatal("not a strict restore subscriber")
+	}
+	stop := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		b := []byte("x")
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := tty.Write(b); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { close(stop); <-writerDone }()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		sub.mu.Lock()
+		n, err := len(sub.queue), sub.err
+		sub.mu.Unlock()
+		if n > maxTinyEntries {
+			t.Fatalf("%d reads queued, over %d", n, maxTinyEntries)
+		}
+		if err != nil {
+			if !errors.Is(err, errFellBehind) {
+				t.Fatalf("ended with %v", err)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("not ended after 60s, %d reads queued", n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // A plain attach is as before: one that does not read misses what
 // overflows its queue of reads and goes on with later output, never ended.
 func TestPlainAttachMissesOverflow(t *testing.T) {
