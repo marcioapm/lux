@@ -38,7 +38,7 @@ func networkClasses(n HostNetwork, p ProviderPrefixes) proto.NetworkClasses {
 	for _, sn := range n.VPCSubnets {
 		if sn.Zone == n.Zone {
 			nc.Local = append(nc.Local, sn.CIDR)
-		} else {
+		} else if !n.SubnetsUnavailable {
 			nc.Zone = append(nc.Zone, sn.CIDR)
 		}
 	}
@@ -139,9 +139,6 @@ func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostN
 			if old != nil {
 				n.SubnetCIDRs, n.VPCSubnets = old.SubnetCIDRs, old.VPCSubnets
 			}
-			if previous == nil {
-				prefixes = ProviderPrefixes{}
-			}
 		}
 		if prefixes.Source == "" && previous != nil && previous.Catalog() {
 			prefixes.Source, prefixes.RegionService, prefixes.RegionPublic, prefixes.ProviderGlobal, prefixes.Provider = previous.Source, previous.RegionService, previous.RegionPublic, previous.ProviderGlobal, previous.Provider
@@ -150,10 +147,6 @@ func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostN
 			}
 		}
 		n.SubnetCIDRs, n.VPCSubnets = nonNil(n.SubnetCIDRs), nonNil(n.VPCSubnets)
-		if n.SubnetsUnavailable && previous != nil {
-			_, err := tx.Exec(ctx, `UPDATE hosts SET network=$2 WHERE id=$1 AND network IS DISTINCT FROM $2::jsonb`, hostID, n)
-			return err
-		}
 		if n.SubnetsUnavailable {
 			prefixes = ProviderPrefixes{}
 		}

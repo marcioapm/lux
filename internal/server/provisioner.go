@@ -46,7 +46,7 @@ type Provider interface {
 // every subnet of its network with its zone, and its billable public IPv4
 // addresses (every distinct one on any of its interfaces).
 type HostNetwork struct {
-	SubnetsUnavailable bool            `json:"-"`
+	SubnetsUnavailable bool            `json:"partial,omitempty" doc:"Subnet discovery is incomplete; unlisted traffic is classified as unknown."`
 	SubnetCIDRs        []string        `json:"subnetCidrs"`
 	Zone               string          `json:"zone"`
 	VPCSubnets         []NetworkSubnet `json:"vpcSubnets"`

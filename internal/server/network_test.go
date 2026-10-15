@@ -149,9 +149,8 @@ func TestRecordNetworkRefreshesLiveProviderHosts(t *testing.T) {
 	}
 }
 
-// Unchanged answers write nothing: the row's xmin stays.
 func TestRecordNetworkColdFailureAndPartialSubnets(t *testing.T) {
-	s, _, p := networkFixture(t)
+	s, keys, p := networkFixture(t)
 	ctx := context.Background()
 	s.recordNetwork(ctx)
 	var before proto.NetworkClasses
@@ -165,8 +164,12 @@ func TestRecordNetworkColdFailureAndPartialSubnets(t *testing.T) {
 	if n.PublicIPv4 != 4 || !slices.Equal(n.SubnetCIDRs, p.nets["i-1"].SubnetCIDRs) || len(n.VPCSubnets) != 4 {
 		t.Fatal(n)
 	}
-	if after.Version != before.Version || !after.Catalog() {
-		t.Fatalf("lost last-good catalog: %+v", after)
+	if after.Version == before.Version || after.Catalog() || len(after.Zone) != 0 || !slices.Equal(after.Local, before.Local) {
+		t.Fatalf("partial discovery must retain only known Local: %+v", after)
+	}
+	var h Host
+	if code := getJSON(t, s, keys["t1"], "/v1/hosts/h1", &h); code != http.StatusOK || h.Network == nil || !h.Network.SubnetsUnavailable {
+		t.Fatalf("partial network not visible: %d %+v", code, h.Network)
 	}
 	var other HostNetwork
 	systemScan(t, s, `SELECT network FROM hosts WHERE id='h2'`, nil, &other)
@@ -175,6 +178,18 @@ func TestRecordNetworkColdFailureAndPartialSubnets(t *testing.T) {
 	}
 }
 
+func TestRecordNetworkColdPartialHasNoCatalog(t *testing.T) {
+	s, _, p := networkFixture(t)
+	p.nets = map[string]HostNetwork{"i-1": {SubnetsUnavailable: true, PublicIPv4: 1}}
+	s.recordNetwork(context.Background())
+	var nc proto.NetworkClasses
+	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id='h1'`, nil, &nc)
+	if nc.Catalog() || len(nc.Local) != 0 || len(nc.Zone) != 0 {
+		t.Fatalf("cold partial discovery installed classes: %+v", nc)
+	}
+}
+
+// Unchanged answers write nothing: the row's xmin stays.
 func TestRecordNetworkWritesOnlyChanges(t *testing.T) {
 	s, _, _ := networkFixture(t)
 	ctx := context.Background()
