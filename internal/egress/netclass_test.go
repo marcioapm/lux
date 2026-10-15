@@ -2,7 +2,9 @@ package egress
 
 import (
 	"context"
+	"fmt"
 	"maps"
+	"net"
 	"net/netip"
 	"slices"
 	"strings"
@@ -405,6 +407,151 @@ func TestFailedApplyLeavesNoCountingState(t *testing.T) {
 		t.Error("the retried Apply did not count")
 	}
 	f.Remove(runIface)
+}
+
+func TestFailedLayoutIdenticalRetry(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprint(restart), func(t *testing.T) {
+			k := newKernel()
+			f := setupRun(t, k, nil, true)
+			k.send(out("8.8.8.8", 11), false)
+			if restart {
+				if err := f.SetClasses(catalog("old")); err != nil {
+					t.Fatal(err)
+				}
+				k.send(out("34.241.0.1", 7), false)
+				var err error
+				f, err = k.firewall()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.Apply(context.Background(), runIface, netip.MustParseAddr("10.89.0.1"), true, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			k.failOn = "flush chain"
+			if err := f.SetClasses(catalog("new")); err == nil {
+				t.Fatal("expected rejected transaction")
+			}
+			k.failOn = ""
+			if err := f.SetClasses(catalog("new")); err != nil {
+				t.Fatal(err)
+			}
+			k.send(out("34.241.0.1", 23), false)
+			got, err := f.Counters()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := int64(23)
+			if restart {
+				want += 7
+			}
+			if got.Runs[runIface]["provider:eu-west-1"].Tx != want || got.Runs[runIface]["unknown"].Tx != 11 {
+				t.Fatalf("retry counts: %v", got.Runs[runIface])
+			}
+		})
+	}
+}
+
+func TestStubFailureIdenticalRetry(t *testing.T) {
+	k := newKernel()
+	f, err := k.firewall()
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := netip.MustParseAddr("127.0.0.1")
+	occupied, err := net.ListenPacket("udp4", "127.0.0.1:15353")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := []spec.EgressRule{{CIDR: "8.8.8.0/24"}}
+	if err := f.Apply(context.Background(), runIface, addr, false, rules, nil); err == nil {
+		t.Fatal("expected stub bind failure")
+	}
+	if err := occupied.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Apply(context.Background(), runIface, addr, false, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	defer f.Remove(runIface)
+	if v := k.send(out("8.8.8.8", 23), false); v != "accept" {
+		t.Fatal(v)
+	}
+	got, err := f.Counters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Runs[runIface]["unknown"].Tx != 23 {
+		t.Fatal(got)
+	}
+}
+
+func TestLifecycleCatalogBarriers(t *testing.T) {
+	for _, removing := range []bool{false, true} {
+		t.Run(fmt.Sprint(removing), func(t *testing.T) {
+			k := newKernel()
+			f, err := k.firewall()
+			if err != nil {
+				t.Fatal(err)
+			}
+			apply := func() error {
+				return f.Apply(context.Background(), runIface, netip.MustParseAddr("10.89.0.1"), true, nil, nil)
+			}
+			if removing {
+				if err := apply(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			entered, release := make(chan struct{}), make(chan struct{})
+			nft := f.nft
+			first := true
+			f.nft = func(s string) error {
+				if first {
+					first = false
+					close(entered)
+					<-release
+				}
+				return nft(s)
+			}
+			done := make(chan error, 1)
+			go func() {
+				if removing {
+					f.Remove(runIface)
+					done <- nil
+				} else {
+					done <- apply()
+				}
+			}()
+			<-entered
+			started, updated := make(chan struct{}), make(chan error, 1)
+			go func() { close(started); updated <- f.SetClasses(catalog("v1")) }()
+			<-started
+			close(release)
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if err := <-updated; err != nil {
+				t.Fatal(err)
+			}
+			if removing {
+				if err := apply(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if v := k.send(out("34.241.0.1", 23), false); v != "accept" {
+				t.Fatal(v)
+			}
+			got, err := f.Counters()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Runs[runIface]["provider:eu-west-1"].Tx != 23 {
+				t.Fatal(got)
+			}
+			f.Remove(runIface)
+		})
+	}
 }
 
 func TestInvalidRegionRefused(t *testing.T) {

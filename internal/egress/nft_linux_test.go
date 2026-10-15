@@ -37,6 +37,12 @@ func TestRealNft(t *testing.T) {
 	if err := f.Apply(ctx, "luxrestricted01", gw, false, nil, nil); err != nil {
 		t.Fatalf("restricted Apply before classes: %v", err)
 	}
+	realNft := f.nft
+	f.nft = func(s string) error { return realNft(s + "add rule inet lux nonexistent accept\n") }
+	if err := f.SetClasses(catalog("v1")); err == nil {
+		t.Fatal("invalid layout transaction succeeded")
+	}
+	f.nft = realNft
 	if err := f.SetClasses(catalog("v1")); err != nil {
 		t.Fatalf("SetClasses (layout change): %v", err)
 	}

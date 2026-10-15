@@ -135,6 +135,13 @@ type accounting struct {
 
 type keptCounter struct{ packets, bytes int64 }
 
+func (a accounting) staged() accounting {
+	a.counted = maps.Clone(a.counted)
+	a.names = maps.Clone(a.names)
+	a.kept = maps.Clone(a.kept)
+	return a
+}
+
 func newAccounting() accounting {
 	return accounting{counted: map[string]bool{}, names: map[string]counterRef{}, kept: map[string]keptCounter{},
 		ifaceSubnets: interfaceSubnets}
@@ -391,8 +398,6 @@ func runChains(l layout, iface string) string {
 // runCountingScript makes a Run's counters and chains and the map entries
 // reaching them; "" if it has them (a re-applied Run keeps its counts).
 func (f *Firewall) runCountingScript(iface string) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.acct.counted[iface] {
 		return ""
 	}
@@ -406,19 +411,6 @@ func (f *Firewall) runCountingScript(iface string) string {
 	fmt.Fprintf(&b, "add element inet lux runs_tx { %q : jump %s }\n", iface, txChain(iface))
 	fmt.Fprintf(&b, "add element inet lux runs_rx { %q : jump %s }\n", iface, rxChain(iface))
 	return b.String()
-}
-
-// forgetCounting drops iface's counting state after its script failed to
-// load.
-func (f *Firewall) forgetCounting(iface string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.acct.counted, iface)
-	for n, ref := range f.acct.names {
-		if ref.owner == iface {
-			delete(f.acct.names, n)
-		}
-	}
 }
 
 // hostChains are host_out's and host_in's rules (the chains exist).
@@ -473,6 +465,8 @@ func (f *Firewall) SetClasses(nc *proto.NetworkClasses) error {
 	if nc != nil {
 		version = nc.Version
 	}
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.acct.loaded && version == f.acct.version {
@@ -482,7 +476,9 @@ func (f *Firewall) SetClasses(nc *proto.NetworkClasses) error {
 	if err != nil {
 		return err
 	}
-	old := f.acct.layout
+	previous := f.acct
+	f.acct = previous.staged()
+	old := previous.layout
 	var b strings.Builder
 	if !cl.layout.equal(old) {
 		// Counters for the new layout before the rules naming them; then
@@ -514,7 +510,7 @@ func (f *Firewall) SetClasses(nc *proto.NetworkClasses) error {
 		b.WriteString(setsScript(cl))
 	}
 	if err := f.nft(b.String()); err != nil {
-		f.acct.layout = old
+		f.acct = previous
 		return fmt.Errorf("nftables network classes: %w", err)
 	}
 	f.acct.version, f.acct.loaded = version, true

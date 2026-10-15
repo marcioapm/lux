@@ -102,6 +102,7 @@ type Lookup struct {
 
 // Firewall is the runner's view of the nftables table and the DNS stubs.
 type Firewall struct {
+	opMu     sync.Mutex // lifecycle kernel transactions and accounting publication
 	mu       sync.Mutex
 	lookup   func(ctx context.Context, host string) ([]netip.Addr, error) // IPv4 addresses of host
 	nft      func(script string) error
@@ -219,10 +220,6 @@ func (f *Firewall) Apply(ctx context.Context, iface string, gateway netip.Addr, 
 	if err != nil {
 		return err
 	}
-	var b strings.Builder
-	b.WriteString(egressScript(iface, unrestricted, r.cidrs))
-	counting := f.runCountingScript(iface)
-	b.WriteString(counting)
 	if !unrestricted {
 		st, err := startStub(gateway, f, iface)
 		if err != nil {
@@ -230,16 +227,26 @@ func (f *Firewall) Apply(ctx context.Context, iface string, gateway netip.Addr, 
 		}
 		r.stub = st
 	}
+	f.opMu.Lock()
+	f.mu.Lock()
+	old := f.acct
+	f.acct = old.staged()
+	var b strings.Builder
+	b.WriteString(egressScript(iface, unrestricted, r.cidrs))
+	b.WriteString(f.runCountingScript(iface))
 	if err := f.nft(b.String()); err != nil {
+		f.acct = old
+		f.mu.Unlock()
+		f.opMu.Unlock()
 		if r.stub != nil {
 			r.stub.close()
 		}
-		if counting != "" {
-			f.forgetCounting(iface)
-		}
 		return fmt.Errorf("nftables for %s: %w", iface, err)
 	}
-	f.install(ctx, iface, r)
+	f.runs[iface] = r
+	f.mu.Unlock()
+	f.opMu.Unlock()
+	f.resolveRun(ctx, iface, r)
 	return nil
 }
 
@@ -274,6 +281,12 @@ func egressScript(iface string, unrestricted bool, cidrs []netip.Prefix) string 
 func (f *Firewall) install(ctx context.Context, iface string, r *run) {
 	f.mu.Lock()
 	f.runs[iface] = r
+	f.mu.Unlock()
+	f.resolveRun(ctx, iface, r)
+}
+
+func (f *Firewall) resolveRun(ctx context.Context, iface string, r *run) {
+	f.mu.Lock()
 	hosts := slices.Collect(maps.Keys(r.hosts))
 	f.mu.Unlock()
 	for _, h := range hosts {
@@ -541,6 +554,7 @@ func (f *Firewall) Remove(iface string) map[string]proto.NetBytes {
 }
 
 func (f *Firewall) remove(iface string, counters bool) map[string]proto.NetBytes {
+	f.opMu.Lock()
 	var final map[string]proto.NetBytes
 	f.mu.Lock()
 	counted := f.acct.counted[iface]
@@ -552,27 +566,15 @@ func (f *Firewall) remove(iface string, counters bool) map[string]proto.NetBytes
 	}
 	f.mu.Lock()
 	r := f.runs[iface]
-	delete(f.runs, iface)
-	// A name no remaining Run allows is no longer refreshed; dropping its
-	// addresses keeps f.resolved bounded by the live Runs' hosts.
-	if r != nil {
-		for h := range r.hosts {
-			if !f.listed(h) {
-				delete(f.resolved, h)
-			}
-		}
-	}
+	old := f.acct
+	f.acct = old.staged()
 	var counting string
 	if counters && counted {
 		counting = f.removeCountingScript(iface)
 		delete(f.acct.counted, iface)
 	}
-	f.mu.Unlock()
 	var script string
 	if r != nil {
-		if r.stub != nil {
-			r.stub.close()
-		}
 		script = fmt.Sprintf("delete element inet lux runs { %q }\ndelete chain inet lux %s\n", iface, chainName(iface))
 		if !r.unrestricted {
 			script = fmt.Sprintf("delete element inet lux run_ifaces { %q }\n", iface) + script +
@@ -580,7 +582,25 @@ func (f *Firewall) remove(iface string, counters bool) map[string]proto.NetBytes
 		}
 	}
 	if script+counting != "" {
-		_ = f.nft(script + counting)
+		if err := f.nft(script + counting); err != nil {
+			f.acct = old
+			f.mu.Unlock()
+			f.opMu.Unlock()
+			return final
+		}
+	}
+	delete(f.runs, iface)
+	if r != nil {
+		for h := range r.hosts {
+			if !f.listed(h) {
+				delete(f.resolved, h)
+			}
+		}
+	}
+	f.mu.Unlock()
+	f.opMu.Unlock()
+	if r != nil && r.stub != nil {
+		r.stub.close()
 	}
 	return final
 }
