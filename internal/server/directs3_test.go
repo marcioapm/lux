@@ -358,7 +358,7 @@ func TestDirectUploadRecordsLikeStreamingUpload(t *testing.T) {
 	if got != want {
 		t.Fatalf("direct upload records\n%s\nstreaming records\n%s", got, want)
 	}
-	if got == before || !strings.Contains(got, "snapshot uploaded true; placements uploaded 1; blobs with uploaded_at 3") {
+	if got == before || !strings.Contains(got, "snapshot uploaded true; placements uploaded 1; blobs with uploaded_at 3; events [/out/a.txt]") {
 		t.Fatalf("not recorded as uploaded: %s", got)
 	}
 	var keys []string
@@ -591,6 +591,39 @@ func TestDeleteArtifactsDeletesUncompletedDirectUpload(t *testing.T) {
 	f.mu.Unlock()
 	if left {
 		t.Fatalf("%s left in S3", key)
+	}
+}
+
+// An artifact deleted after its presigned PUT, then the runner's retry
+// asks /upload again: 410 gone, and the object the PUT wrote is deleted.
+func TestDirectUploadStartOfDeletedBlob(t *testing.T) {
+	s, ctx, _ := retentionFixture(t, StateTerminated, StateTerminated, 1, 1)
+	f := useDirectS3(t, s)
+	content := []byte("artifact bytes")
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL, sha256 = $1, size = $2 WHERE id = 'bA-art'`, sha(string(content)), len(content))
+	code, raw := runnerPost(t, s, "ha", "bA-art", "upload", uploadRequest(content))
+	if code != http.StatusOK {
+		t.Fatalf("upload: %d %s", code, raw)
+	}
+	var out proto.BlobUploadResponse
+	_ = json.Unmarshal([]byte(raw), &out)
+	if code, _ := putPresigned(t, *out.Single, content); code != http.StatusOK {
+		t.Fatalf("PUT: %d", code)
+	}
+	if code, _ := callJSON(t, s, apiKey(t, s, new("t1"), "run"), http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusOK {
+		t.Fatalf("delete: %d", code)
+	}
+	key := blob.Key("t1", "ra", "bA-art")
+	before := len(f.Deleted())
+	// The object written again after the delete's own key delete, as a
+	// PUT racing the claim would.
+	f.setObject(key, int64(len(content)))
+	code, body := runnerPost(t, s, "ha", "bA-art", "upload", uploadRequest(content))
+	if code != http.StatusGone || !strings.Contains(body, `"code":"gone"`) {
+		t.Fatalf("upload again: %d %s, want 410 gone", code, body)
+	}
+	if got := f.Deleted()[before:]; !slices.Equal(got, []string{key}) {
+		t.Fatalf("S3 deletes after /upload %v, want %s", got, key)
 	}
 }
 
