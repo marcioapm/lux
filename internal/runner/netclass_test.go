@@ -92,6 +92,30 @@ func TestHostRebootReportGrowthRestart(t *testing.T) {
 	}
 }
 
+func TestNewBootIgnoresOldOffset(t *testing.T) {
+	dir := t.TempDir()
+	makeRunner := func(boot string) *Runner {
+		t.Helper()
+		r := &Runner{cfg: Config{DataDir: dir}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), egress: egress.Unloaded(), placements: map[string]*placement{}}
+		if err := r.restoreHostNetwork(boot); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	r := makeRunner("old")
+	r.hostNet.observe(map[string]proto.NetBytes{"internet": {Tx: 100}})
+	r.hostNetSeeded = true
+	if err := r.saveHostNetwork(); err != nil {
+		t.Fatal(err)
+	}
+	r = makeRunner("new")
+	r.hostNet.observe(map[string]proto.NetBytes{"internet": {Tx: 150}})
+	r.welcomeNetwork(proto.Welcome{HostNet: map[string]proto.NetBytes{"internet": {Tx: 100}}})
+	if got := r.hostNet.value()["internet"].Tx; got != 250 {
+		t.Fatalf("new boot: %d, want 250", got)
+	}
+}
+
 func TestWelcomeFloorPersistedWithoutGrowth(t *testing.T) {
 	r := &Runner{log: slog.New(slog.NewTextHandler(io.Discard, nil)), egress: egress.Unloaded(), placements: map[string]*placement{}}
 	p := &placement{r: r, runID: "run1", epoch: 2, phase: "running", dir: t.TempDir(), state: &runState{RunID: "run1", Epoch: 2}}
