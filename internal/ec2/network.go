@@ -1,6 +1,7 @@
 package ec2
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -58,15 +59,35 @@ func (p *Provider) Network(ctx context.Context, template json.RawMessage, provid
 		for _, reservation := range page.Reservations {
 			for _, inst := range reservation.Instances {
 				id := aws.ToString(inst.InstanceId)
-				if !want[id] || aws.ToString(inst.VpcId) == "" || aws.ToString(inst.SubnetId) == "" {
+				if !want[id] {
 					continue
 				}
-				entry, err := p.vpcSubnets(ctx, c, t.Region, aws.ToString(inst.VpcId))
-				n := server.HostNetwork{SubnetsUnavailable: err != nil}
-				if err == nil {
-					n.SubnetCIDRs = slices.Clone(entry.subnets[aws.ToString(inst.SubnetId)])
-					n.VPCSubnets = slices.Clone(entry.all)
+				pairs := map[[2]string]bool{}
+				for _, eni := range inst.NetworkInterfaces {
+					vpc, subnet := aws.ToString(eni.VpcId), aws.ToString(eni.SubnetId)
+					if vpc != "" && subnet != "" {
+						pairs[[2]string{vpc, subnet}] = true
+					}
 				}
+				if len(pairs) == 0 {
+					vpc, subnet := aws.ToString(inst.VpcId), aws.ToString(inst.SubnetId)
+					if vpc != "" && subnet != "" {
+						pairs[[2]string{vpc, subnet}] = true
+					}
+				}
+				n := server.HostNetwork{SubnetsUnavailable: len(pairs) == 0}
+				for pair := range pairs {
+					entry, err := p.vpcSubnets(ctx, c, t.Region, pair[0])
+					if err != nil {
+						n.SubnetsUnavailable = true
+						continue
+					}
+					n.SubnetCIDRs = append(n.SubnetCIDRs, entry.subnets[pair[1]]...)
+					n.VPCSubnets = append(n.VPCSubnets, entry.all...)
+				}
+				n.SubnetCIDRs = uniquePrefixes(n.SubnetCIDRs)
+				slices.SortFunc(n.VPCSubnets, compareSubnets)
+				n.VPCSubnets = slices.Compact(n.VPCSubnets)
 				if inst.Placement != nil {
 					n.Zone = aws.ToString(inst.Placement.AvailabilityZone)
 				}
@@ -132,27 +153,17 @@ func (p *Provider) vpcSubnets(ctx context.Context, c *awsec2.Client, region, vpc
 			}
 		}
 	}
-	slices.SortFunc(e.all, func(a, b server.NetworkSubnet) int {
-		if a.CIDR < b.CIDR {
-			return -1
-		}
-		if a.CIDR > b.CIDR {
-			return 1
-		}
-		if a.Zone < b.Zone {
-			return -1
-		}
-		if a.Zone > b.Zone {
-			return 1
-		}
-		return 0
-	})
+	slices.SortFunc(e.all, compareSubnets)
 	e.at = p.now()
 	if p.subnetCache == nil {
 		p.subnetCache = map[[2]string]subnetEntry{}
 	}
 	p.subnetCache[key] = e
 	return e, nil
+}
+
+func compareSubnets(a, b server.NetworkSubnet) int {
+	return cmp.Or(cmp.Compare(a.CIDR, b.CIDR), cmp.Compare(a.Zone, b.Zone))
 }
 
 type ipRange struct {

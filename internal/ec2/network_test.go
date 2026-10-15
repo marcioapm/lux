@@ -89,6 +89,55 @@ func TestNetworkDiscoveryPaginationAndCache(t *testing.T) {
 	}
 }
 
+func TestNetworkAttachedENIUnion(t *testing.T) {
+	awsTestEnv(t)
+	attached, fail := false, false
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "text/xml")
+		if r.Form.Get("Action") == "DescribeInstances" {
+			extra := ""
+			if attached {
+				extra = `<item><vpcId>vpc-b</vpcId><subnetId>sub-b</subnetId></item><item><vpcId>vpc-b</vpcId><subnetId>sub-b</subnetId></item>`
+			}
+			fmt.Fprintf(w, `<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>i-a</instanceId><vpcId>vpc-a</vpcId><subnetId>sub-a</subnetId><placement><availabilityZone>zone-a</availabilityZone></placement><networkInterfaceSet><item><vpcId>vpc-a</vpcId><subnetId>sub-a</subnetId></item>%s</networkInterfaceSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`, extra)
+			return
+		}
+		if r.Form.Get("Filter.1.Value.1") == "vpc-b" {
+			if fail {
+				ec2Error(w, 403, "UnauthorizedOperation", "denied")
+				return
+			}
+			fmt.Fprint(w, `<DescribeSubnetsResponse><subnetSet><item><subnetId>sub-b</subnetId><cidrBlock>10.2.0.0/24</cidrBlock><availabilityZone>zone-a</availabilityZone></item><item><subnetId>sub-c</subnetId><cidrBlock>10.2.1.0/24</cidrBlock><availabilityZone>zone-b</availabilityZone></item></subnetSet></DescribeSubnetsResponse>`)
+		} else {
+			fmt.Fprint(w, `<DescribeSubnetsResponse><subnetSet><item><subnetId>sub-a</subnetId><cidrBlock>10.1.0.0/24</cidrBlock><availabilityZone>zone-a</availabilityZone></item></subnetSet></DescribeSubnetsResponse>`)
+		}
+	}))
+	defer fake.Close()
+	t.Setenv("AWS_MAX_ATTEMPTS", "1")
+	p := New(fake.URL, discard)
+	p.CacheNetworkFor(0)
+	get := func() server.HostNetwork {
+		t.Helper()
+		got, err := p.Network(context.Background(), json.RawMessage(`{"region":"eu-west-1"}`), []string{"i-a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got["i-a"]
+	}
+	if n := get(); len(n.SubnetCIDRs) != 1 {
+		t.Fatal(n)
+	}
+	attached = true
+	if n := get(); len(n.SubnetCIDRs) != 2 || len(n.VPCSubnets) != 3 || n.SubnetsUnavailable {
+		t.Fatal(n)
+	}
+	fail = true
+	if n := get(); !n.SubnetsUnavailable || len(n.SubnetCIDRs) != 1 {
+		t.Fatal(n)
+	}
+}
+
 func TestNetworkEmptyAndInstanceFailure(t *testing.T) {
 	awsTestEnv(t)
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { ec2Error(w, 403, "UnauthorizedOperation", "denied") }))
