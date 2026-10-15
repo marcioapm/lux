@@ -42,13 +42,14 @@ type directFake struct {
 	s3Auth    []string
 	streamed  []string // blob ids PUT to luxd
 	bodies    map[string][]byte
+	signed    map[string]map[string]string // part number or "single" → headers presigned for it
 }
 
 func newDirectFake(t *testing.T) *directFake {
 	delays := partRetryDelays
 	partRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	t.Cleanup(func() { partRetryDelays = delays })
-	f := &directFake{bodies: map[string][]byte{}, attempts: map[string]int{}}
+	f := &directFake{bodies: map[string][]byte{}, attempts: map[string]int{}, signed: map[string]map[string]string{}}
 	f.s3 = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
@@ -68,6 +69,19 @@ func newDirectFake(t *testing.T) *directFake {
 			r.Header.Get("Content-Length") != strconv.Itoa(len(body)) && r.ContentLength != int64(len(body)) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
+		}
+		// Every header presigned for this URL, unchanged, or the signature
+		// does not hold.
+		for k, v := range f.signed[part] {
+			got := r.Header.Get(k)
+			if k == "Content-Length" {
+				got = strconv.FormatInt(r.ContentLength, 10)
+			}
+			if got != v {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = io.WriteString(w, "SignatureDoesNotMatch: "+k)
+				return
+			}
 		}
 		f.puts = append(f.puts, part+":"+strconv.Itoa(len(body)))
 		f.bodies[part] = body
@@ -96,19 +110,27 @@ func newDirectFake(t *testing.T) *directFake {
 			if override != nil && override(w) {
 				return
 			}
+			// Signed like luxd's: the checksum, the length, the whole file's
+			// sha256 metadata, and a header the runner knows nothing of.
+			signed := func(sum string, n int64) map[string]string {
+				return map[string]string{"X-Amz-Checksum-Sha256": sum, "Content-Length": strconv.FormatInt(n, 10),
+					"X-Amz-Meta-Sha256": in.SHA256, "X-Amz-Foo": "bar"}
+			}
 			var out proto.BlobUploadResponse
+			f.mu.Lock()
 			if len(in.Parts) == 1 {
-				out.Single = &proto.PresignedRequest{URL: f.s3.URL + "/b/" + id + "?X-Amz-Signature=x",
-					Headers: map[string]string{"X-Amz-Checksum-Sha256": in.Parts[0], "Content-Length": strconv.FormatInt(in.Size, 10)}}
+				out.Single = &proto.PresignedRequest{URL: f.s3.URL + "/b/" + id + "?X-Amz-Signature=x", Headers: signed(in.Parts[0], in.Size)}
+				f.signed["single"] = out.Single.Headers
 			} else {
 				out.UploadID = "up-1"
 				for i, sum := range in.Parts {
-					n := partLen(in.Size, i)
-					out.Parts = append(out.Parts, proto.PresignedPart{Number: int32(i + 1), PresignedRequest: proto.PresignedRequest{
-						URL:     f.s3.URL + "/b/" + id + "?uploadId=up-1&partNumber=" + strconv.Itoa(i+1),
-						Headers: map[string]string{"X-Amz-Checksum-Sha256": sum, "Content-Length": strconv.FormatInt(n, 10)}}})
+					p := proto.PresignedRequest{URL: f.s3.URL + "/b/" + id + "?uploadId=up-1&partNumber=" + strconv.Itoa(i+1),
+						Headers: signed(sum, partLen(in.Size, i))}
+					out.Parts = append(out.Parts, proto.PresignedPart{Number: int32(i + 1), PresignedRequest: p})
+					f.signed[strconv.Itoa(i+1)] = p.Headers
 				}
 			}
+			f.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(out)
 		case strings.HasSuffix(r.URL.Path, "/complete"):
 			var in proto.BlobCompleteRequest
