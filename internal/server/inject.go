@@ -22,12 +22,9 @@ func isNavigation(r *http.Request) bool {
 	if r.Method != http.MethodGet || r.Header.Get("Upgrade") != "" {
 		return false
 	}
-	if dest, ok := r.Header["Sec-Fetch-Dest"]; ok {
-		d := ""
-		if len(dest) > 0 {
-			d = strings.ToLower(strings.TrimSpace(dest[0]))
-		}
-		return d == "document" || d == "iframe"
+	if _, ok := r.Header["Sec-Fetch-Dest"]; ok {
+		dest := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Dest")))
+		return dest == "document" || dest == "iframe"
 	}
 	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html")
 }
@@ -88,16 +85,12 @@ func (b *injectBody) Read(p []byte) (int, error) {
 		n, err := b.src.Read(b.buf[len(b.buf):cap(b.buf)])
 		b.buf = b.buf[:len(b.buf)+n]
 		final := err != nil || len(b.buf) == cap(b.buf)
-		var at int
-		var ok bool
-		at, b.from, ok = findInjectAt(b.buf, b.from, final)
+		at, from, ok := findInjectAt(b.buf, b.from, final)
 		if ok {
 			b.pending = io.MultiReader(bytes.NewReader(b.buf[:at]), bytes.NewReader(b.snippet), bytes.NewReader(b.buf[at:]))
 			b.buf, b.decided = nil, true
 		}
-		if err != nil {
-			b.err = err
-		}
+		b.from, b.err = from, err
 	}
 	if b.pending != nil {
 		n, err := b.pending.Read(p)
@@ -160,7 +153,7 @@ func firstTag(buf []byte, from int) (at, partial int) {
 			continue
 		}
 		if len(rest) <= n {
-			if bytes.HasPrefix([]byte(open), rest) || prefixFold(rest, "<head") || prefixFold(rest, "<body") {
+			if prefixFold(rest, open) || prefixFold(rest, "<head") || prefixFold(rest, "<body") {
 				return -1, i
 			}
 			continue
@@ -169,24 +162,29 @@ func firstTag(buf []byte, from int) (at, partial int) {
 		if (name != "<head" && name != "<body") || !tagBoundary(rest[n]) {
 			continue
 		}
-		end := tagEnd(buf, i+n)
-		switch {
+		switch end := tagEnd(buf, i+n); {
 		case end < 0:
 			return -1, i
 		case name == "<head":
 			return end, -1
+		default:
+			return i, -1
 		}
-		return i, -1
 	}
 	return -1, -1
 }
 
+// prefixFold: b is a case-insensitive prefix of s.
 func prefixFold(b []byte, s string) bool {
 	return len(b) <= len(s) && strings.EqualFold(string(b), s[:len(b)])
 }
 
 func tagBoundary(c byte) bool {
-	return c == '>' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+	return c == '>' || htmlSpace(c)
+}
+
+func htmlSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
 }
 
 // tagEnd is the index after the '>' closing a tag whose attributes start at
@@ -216,7 +214,7 @@ func afterDoctype(buf []byte) int {
 	if bytes.HasPrefix(buf, []byte("\xef\xbb\xbf")) {
 		i = 3
 	}
-	for i < len(buf) && (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\n' || buf[i] == '\r' || buf[i] == '\f') {
+	for i < len(buf) && htmlSpace(buf[i]) {
 		i++
 	}
 	const dt = "<!doctype"
