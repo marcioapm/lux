@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -261,6 +262,65 @@ func TestRunnerNetworkEndpoint(t *testing.T) {
 // Placement and host classes merge per key and direction by maximum, from
 // heartbeats and exit statuses alike; absent keys are kept; the Run's usage
 // sums its placements; and GET shows them.
+func TestHostNetworkTotalsVisibility(t *testing.T) {
+	s := testServer(t)
+	keys := poolFixture(t, s, context.Background())
+	execSQL(t, s, context.Background(), `UPDATE hosts SET host_net_classes='{"internet":{"tx":123}}' WHERE id IN ('hp','ha')`)
+	for _, c := range []struct {
+		key, query string
+		platform   bool
+	}{{"a", "", false}, {"b", "", false}, {"op", "", true}, {"op", "tenant=a", false}} {
+		for _, endpoint := range []string{"/v1/hosts/hp", "/v1/hosts", "/v1/hosts?limit=100"} {
+			path := endpoint
+			if c.query != "" {
+				if strings.Contains(path, "?") {
+					path += "&"
+				} else {
+					path += "?"
+				}
+				path += c.query
+			}
+			var raw json.RawMessage
+			if code := getJSON(t, s, keys[c.key], path, &raw); code != 200 {
+				t.Fatalf("%s: %d", path, code)
+			}
+			var hosts []Host
+			if endpoint == "/v1/hosts/hp" {
+				var h Host
+				if err := json.Unmarshal(raw, &h); err != nil {
+					t.Fatal(err)
+				}
+				hosts = []Host{h}
+			} else {
+				var page struct {
+					Items []Host `json:"hosts"`
+				}
+				if err := json.Unmarshal(raw, &hosts); err != nil {
+					if err := json.Unmarshal(raw, &page); err != nil {
+						t.Fatal(err)
+					}
+					hosts = page.Items
+				}
+			}
+			seen := false
+			for _, h := range hosts {
+				if h.ID == "hp" {
+					seen = true
+					if (h.NetClasses["internet"].Tx == 123) != c.platform {
+						t.Fatalf("%s %s leaked/omitted: %v", c.key, path, h.NetClasses)
+					}
+				}
+				if h.ID == "ha" && h.NetClasses["internet"].Tx != 123 {
+					t.Fatal("owner totals missing")
+				}
+			}
+			if !seen {
+				t.Fatalf("platform host not found: %s %s", path, raw)
+			}
+		}
+	}
+}
+
 func TestNetworkConcurrentReportsAndExit(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
