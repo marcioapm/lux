@@ -163,11 +163,12 @@ container. Under `--userns=auto` that needed more than the commonly cited
   only write `owner /tmp/**` and `owner @{HOME}/**`. Every inner container
   with a network then fails with "pasta failed with exit code 1: Couldn't
   open network namespace … Permission denied" (kernel audit:
-  `profile="passt" comm="passt.avx2"`). Hard links keep the pasta paths, so
-  the `pasta` profile applies, which allows the namespace under `/tmp` or
-  `/run/user/<n>`; `tests/images/nested` makes them. Link `pasta.avx2` too
-  where it exists: pasta re-execs `<its own path>.avx2`, and through the
-  symlink that is `passt.avx2`, which the `pasta` profile runs unconfined.
+  `profile="passt" comm="passt.avx2"`). `tests/images/nested` hard-links
+  pasta instead: the exec path stays `pasta`, so the `pasta` profile
+  applies, and it allows the namespace under `/tmp` or `/run/user/<n>`.
+  Link `pasta.avx2` too where it exists: pasta re-execs
+  `<its own path>.avx2`, and through the symlink that is `passt.avx2`,
+  which the `pasta` profile runs unconfined.
   An `apk upgrade` of passt in a later layer restores the symlinks.
 - **Rootless Docker** (`dockerd-rootless`, RootlessKit) works with the
   same grants, including BuildKit and compose; `tests/images/docker` is an

@@ -130,7 +130,7 @@ jobs:
       # that. Its passt and pasta AppArmor profiles stay enforced:
       # tests/images/nested hard-links pasta so the pasta profile, not
       # passt, attaches (docs/podman.md, Nested containers). The nested
-      # suite guards that link only while both are enforced, so check.
+      # suite only tests that link while both are enforced, so fail if not.
       - name: Allow unprivileged user namespaces; keep pasta confined
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
