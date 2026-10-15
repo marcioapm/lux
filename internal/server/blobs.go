@@ -63,19 +63,21 @@ func (s *Server) hostBlob(r *http.Request) (*runnerBlob, error) {
 	return b, nil
 }
 
-// uploadable is nil for a blob still on its host: S3 already having it is
-// errAlreadyUploaded, a deleted one 410.
-func (b *runnerBlob) uploadable() error {
+// uploadable: done for a blob S3 already has, an error (410) for a deleted
+// one, neither for a blob still on its host.
+func (b *runnerBlob) uploadable() (done bool, err error) {
 	switch b.location {
 	case "host":
-		return nil
+		return false, nil
 	case "s3":
-		return errAlreadyUploaded
+		return true, nil
 	}
-	return errf(http.StatusGone, "gone", "blob %s was deleted", b.id)
+	return false, errf(http.StatusGone, "gone", "blob %s was deleted", b.id)
 }
 
-var errAlreadyUploaded = errors.New("already uploaded")
+// uploaded is every upload route's answer once S3 has the blob:
+// {"uploaded":true}.
+var uploaded = proto.BlobUploadResponse{Uploaded: true}
 
 // serveBlobUpload is PUT /runner/v1/blobs/{id}: a runner uploading a blob it
 // reported in snapshot.done through luxd, which streams it to S3, verifying
@@ -86,10 +88,9 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if err := b.uploadable(); err != nil {
-		if errors.Is(err, errAlreadyUploaded) {
-			writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
-			return nil
+	if done, err := b.uploadable(); done || err != nil {
+		if done {
+			writeJSON(w, http.StatusOK, uploaded)
 		}
 		return err
 	}
@@ -106,7 +107,7 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 	if err := s.blobUploaded(r.Context(), b); err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
+	writeJSON(w, http.StatusOK, uploaded)
 	return nil
 }
 
@@ -123,9 +124,9 @@ func (s *Server) serveBlobUploadStart(w http.ResponseWriter, r *http.Request) er
 	if err := readJSON(r, &in); err != nil {
 		return err
 	}
-	if err := b.uploadable(); err != nil {
-		if errors.Is(err, errAlreadyUploaded) {
-			writeJSON(w, http.StatusOK, proto.BlobUploadResponse{Uploaded: true})
+	if done, err := b.uploadable(); done || err != nil {
+		if done {
+			writeJSON(w, http.StatusOK, uploaded)
 			return nil
 		}
 		s.dropDeletedUpload(r.Context(), b)
@@ -166,7 +167,7 @@ func (s *Server) serveBlobUploadStart(w http.ResponseWriter, r *http.Request) er
 		if err != nil {
 			return err
 		}
-		writeJSON(w, http.StatusOK, proto.BlobUploadResponse{Single: &proto.PresignedRequest{URL: p.URL, Headers: p.Headers}})
+		writeJSON(w, http.StatusOK, proto.BlobUploadResponse{Single: &p})
 		return nil
 	}
 	uploadID, err := s.blobs.CreateMultipart(r.Context(), key, in.SHA256)
@@ -181,7 +182,7 @@ func (s *Server) serveBlobUploadStart(w http.ResponseWriter, r *http.Request) er
 			s.abortUpload(r.Context(), key, uploadID)
 			return err
 		}
-		out.Parts = append(out.Parts, proto.PresignedPart{Number: int32(i + 1), PresignedRequest: proto.PresignedRequest{URL: p.URL, Headers: p.Headers}})
+		out.Parts = append(out.Parts, proto.PresignedPart{Number: int32(i + 1), PresignedRequest: p})
 	}
 	writeJSON(w, http.StatusOK, out)
 	return nil
@@ -211,12 +212,12 @@ func (s *Server) serveBlobUploadComplete(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, map[string]any{"aborted": true})
 		return nil
 	}
-	if err := b.uploadable(); err != nil {
+	if done, err := b.uploadable(); done || err != nil {
 		if in.UploadID != "" {
 			s.abortUpload(r.Context(), key, in.UploadID)
 		}
-		if errors.Is(err, errAlreadyUploaded) {
-			writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
+		if done {
+			writeJSON(w, http.StatusOK, uploaded)
 			return nil
 		}
 		s.dropDeletedUpload(r.Context(), b)
@@ -256,7 +257,7 @@ func (s *Server) serveBlobUploadComplete(w http.ResponseWriter, r *http.Request)
 	if err := s.blobUploaded(r.Context(), b); err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
+	writeJSON(w, http.StatusOK, uploaded)
 	return nil
 }
 

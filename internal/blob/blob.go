@@ -24,6 +24,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+
+	"github.com/marcioapm/lux/internal/proto"
 )
 
 type Config struct {
@@ -118,14 +120,9 @@ func (s *Store) PresignGet(ctx context.Context, key string, ttl time.Duration) (
 	return req.URL, nil
 }
 
-// Presigned is a presigned request: its URL and every header the client
+// presigned is a presigned request: its URL and every header the client
 // must send unchanged for the signature to hold.
-type Presigned struct {
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers"`
-}
-
-func presigned(url string, signed http.Header) Presigned {
+func presigned(url string, signed http.Header) proto.PresignedRequest {
 	h := map[string]string{}
 	for k, v := range signed {
 		// Host is the URL's; Go's client sends it from there.
@@ -133,13 +130,13 @@ func presigned(url string, signed http.Header) Presigned {
 			h[http.CanonicalHeaderKey(k)] = strings.Join(v, ",")
 		}
 	}
-	return Presigned{URL: url, Headers: h}
+	return proto.PresignedRequest{URL: url, Headers: h}
 }
 
 // PresignPut presigns a PutObject of exactly size bytes whose SHA-256 is
 // sha256hex (sha256b64 the same digest in base64): the checksum, the
 // sha256 metadata and the length are signed, so S3 refuses any other body.
-func (s *Store) PresignPut(ctx context.Context, key string, size int64, sha256hex, sha256b64 string, ttl time.Duration) (Presigned, error) {
+func (s *Store) PresignPut(ctx context.Context, key string, size int64, sha256hex, sha256b64 string, ttl time.Duration) (proto.PresignedRequest, error) {
 	req, err := s.presign.PresignPutObject(ctx, &s3.PutObjectInput{
 		Bucket:         aws.String(s.bucket),
 		Key:            aws.String(key),
@@ -148,7 +145,7 @@ func (s *Store) PresignPut(ctx context.Context, key string, size int64, sha256he
 		Metadata:       map[string]string{"sha256": sha256hex},
 	}, s3.WithPresignExpires(ttl))
 	if err != nil {
-		return Presigned{}, err
+		return proto.PresignedRequest{}, err
 	}
 	return presigned(req.URL, req.SignedHeader), nil
 }
@@ -170,7 +167,7 @@ func (s *Store) CreateMultipart(ctx context.Context, key, sha256hex string) (str
 
 // PresignUploadPart presigns part number (1-based) of a multipart upload:
 // size bytes whose SHA-256 is sha256b64 (base64), both signed.
-func (s *Store) PresignUploadPart(ctx context.Context, key, uploadID string, number int32, size int64, sha256b64 string, ttl time.Duration) (Presigned, error) {
+func (s *Store) PresignUploadPart(ctx context.Context, key, uploadID string, number int32, size int64, sha256b64 string, ttl time.Duration) (proto.PresignedRequest, error) {
 	req, err := s.presign.PresignUploadPart(ctx, &s3.UploadPartInput{
 		Bucket:         aws.String(s.bucket),
 		Key:            aws.String(key),
@@ -180,7 +177,7 @@ func (s *Store) PresignUploadPart(ctx context.Context, key, uploadID string, num
 		ChecksumSHA256: aws.String(sha256b64),
 	}, s3.WithPresignExpires(ttl))
 	if err != nil {
-		return Presigned{}, err
+		return proto.PresignedRequest{}, err
 	}
 	return presigned(req.URL, req.SignedHeader), nil
 }
