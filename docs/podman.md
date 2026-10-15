@@ -209,6 +209,84 @@ container. Under `--userns=auto` that needed more than the commonly cited
     says why. A placement kills, stops and waits on only the container it
     created, by its ID, never by the Run's name.
 
+### Limits of nested containers
+
+A Run's container has a private cgroup namespace, so its
+`/sys/fs/cgroup` is the Run's own cgroup, with the Run's `memory.max`,
+`cpu.max` and `pids.max`. Those files belong to host root, outside the
+Run's user namespace, so nothing in the Run can raise them. The cgroup's
+delegation files (`cgroup.procs`, `cgroup.subtree_control`,
+`cgroup.threads`) and the directory belong to the Run's root: crun and
+runc both chown them.
+
+An engine inside cannot use that cgroup as it is: cgroup v2 enables
+controllers for children only in a cgroup with no processes of its own,
+and the shim (PID 1) and the workload are in it. Without more, rootless
+Podman inside ignores `-m`, `--cpus` and `--pids-limit` and its containers
+have the Run's limits, with no error. So for a Run with
+`sandbox.nestedContainers`, the shim splits the cgroup before anything
+of the tenant's runs:
+
+```
+/                 the Run's limits; no processes; +cpu +memory +pids +io below
+├── lux.shim/     the shim, and its own work (a resume's sync)
+└── workload/     no processes; +cpu +memory +pids +io below; cgroup.max.descendants 1024
+    └── main/     the workload, init, beforeStop, servers, lux exec
+```
+
+- The shim makes the three cgroups, moves itself into `lux.shim`, then
+  enables the controllers in the root and in `workload`.
+- It gives `workload` and `workload/main` (each directory and its
+  `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control`) to the
+  workload user. Their resource files (`memory.max`,
+  `cgroup.max.descendants`, …) stay the Run root's: the workload can limit
+  what it starts, never raise what lux set.
+- `cgroup.max.descendants` on `workload` is 1024: an engine makes one or
+  two cgroups per container, and the bound keeps a workload from making
+  them without end.
+- Every tenant process is started directly in `workload/main` (clone3
+  with `CLONE_INTO_CGROUP`), so none is ever, even briefly, in a cgroup
+  that must stay empty. The engine makes its containers' cgroups beside
+  `main`, under `workload`.
+- `podman exec` from the runner (`lux diff`, a push's bundle) lands in
+  PID 1's cgroup, `lux.shim`: crun and runc put an exec'd process there
+  when the container's root has controllers enabled. It is still inside
+  the Run's limits.
+- The runner's accounting reads the container's cgroup from the host,
+  whose counters (`memory.peak`, `cpu.stat`, `pids.current`, pressure)
+  include every cgroup below it.
+
+With it, rootless Podman in a Run enforces `-m`, `--cpus` and
+`--pids-limit`, and OOM-kills a container over its `-m`, all within the
+Run's own limits: a container given `-m 4g` in a 1 GiB Run is still held
+to 1 GiB. `tests/suites/test_nested.py` checks each.
+
+When the Run's cgroup cannot be split (it is not writable, it lacks the
+`cpu`, `memory` or `pids` controller, or the kernel or seccomp profile
+refuses `CLONE_INTO_CGROUP`), the shim writes one `lux.warning` saying
+why, and the Run goes on in one cgroup, as before: nested containers run
+with the Run's limits and their own are not enforced. A Run without
+`sandbox.nestedContainers` is never split; its cgroup filesystem is
+read-only.
+
+**Docker inside a Run does not enforce per-container limits.** Rootless
+`dockerd` uses the cgroup driver `none` whenever it runs rootless without
+systemd, whatever `--exec-opt native.cgroupdriver` or `daemon.json` say,
+so `docker run -m`, `--cpus` and `--pids-limit` have no effect: its
+containers have the Run's limits.
+
+### Out of memory
+
+A placement's exit reason is `oom` only when the Run's own memory limit
+ended it: the oom count in the Run's `memory.events.local` (which the shim
+reads as it exits) is above 0, and the workload died by SIGKILL (or
+exited 137, as a shell does whose command was killed). Podman's
+`.State.OOMKilled` is true when the OOM killer killed any process in the
+container's cgroup tree, a nested container's included, even if the
+workload carried on and exited 0, so it is not used when the shim has
+reported the count. It still decides when there is no count: the shim was
+killed before it wrote its exit file, or predates the count.
+
 ## Exec, attach, ports
 
 These go through the shim, not `podman exec`, so they run as the

@@ -165,6 +165,18 @@ availability immediately. See [CLI](cli.md#runs).
   Code's `~/.claude`). A spec that leaves them off is rejected, because it
   would lose its conversation on the first resume.
 - `env` names must be valid variable names and must not start with `LUX_`.
+- **The Run's size is in the workload's environment**, for tools that
+  size their parallelism or heap: `LUX_CPUS` is `resources.cpus` as
+  given (`0.5`, `2`), and `LUX_MEMORY_LIMIT` is the container's memory
+  limit in bytes, the value of its `/sys/fs/cgroup/memory.max` (the
+  placement's `memoryLimit`: `resources.memory` scaled to the host's
+  share, in whole pages). They are set for the workload, init,
+  `beforeStop`, servers and `lux exec`. lux sets no other sizing variable
+  (`OMP_NUM_THREADS` and the like are the spec's to set). Nested
+  containers do not inherit them: pass them on (`docker run -e
+  LUX_CPUS`). They take precedence over the image's environment; what the
+  spec gives the workload (`env`, an `env` secret of the same name) takes
+  precedence over them.
 - Secrets are `env` (the default) or `file` (placed on a tmpfs and linked
   at `path`). A file secret is never in a snapshot. Every resume must
   supply every secret again.
@@ -561,6 +573,20 @@ A host started without `--nested` refuses nested Runs.
 It is still in its own user namespace (an unprivileged uid range on the
 host). The containers it starts use the Run's network, so they have its
 egress rules and hard blocks, and nothing more.
+
+**Limits of nested containers.** Rootless Podman inside a nested Run
+enforces `-m`, `--cpus` and `--pids-limit` on what it starts, within the
+Run's own limits, which nothing inside can raise. For that the shim
+splits the Run's cgroup: the workload starts in `/workload/main` (its
+`/proc/self/cgroup` says `0::/workload/main`), and may make up to 1024
+cgroups below `/workload`. Where that cannot be done, the Run gets a
+`lux.warning` saying why and nested limits are not enforced. Docker inside
+a Run does not enforce per-container limits: rootless `dockerd`'s cgroup
+driver is `none`. Details: [Podman](podman.md#limits-of-nested-containers).
+
+A placement ends with reason `oom` only when the Run's own memory limit
+killed its workload, never because a nested container ran out of its own
+([out of memory](podman.md#out-of-memory)).
 
 ## Images with the prompt
 

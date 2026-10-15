@@ -342,6 +342,8 @@ func (s *Shim) awaitSyncRetry(wait time.Duration) *proto.SyncArgs {
 func (s *Shim) runSync(a proto.SyncArgs, env []string) []proto.SyncResult {
 	cmd := s.command([]string{proto.ShimBinary, "sync", string(proto.Marshal(a))}, env)
 	cmd.Dir = "/"
+	// The shim's own work: it stays in the shim's cgroup.
+	cmd.SysProcAttr.UseCgroupFD = false
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	// The reaper reaps every child: it hands this one's exit over.

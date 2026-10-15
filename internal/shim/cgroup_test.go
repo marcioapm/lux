@@ -1,0 +1,201 @@
+package shim
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+
+	"golang.org/x/sys/unix"
+)
+
+// fakeCgroup makes a directory shaped like a cgroup v2 root (its files as
+// plain files) with controllers ctl and no processes.
+func fakeCgroup(t *testing.T, ctl string) string {
+	t.Helper()
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"cgroup.controllers": ctl + "\n", "cgroup.subtree_control": "", "cgroup.procs": "",
+		"memory.max": "268435456\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// withChildren adds the cgroups delegateCgroup makes, with the files the
+// kernel gives a new cgroup (plain files here).
+func withChildren(t *testing.T, root string) string {
+	t.Helper()
+	for _, d := range []string{shimCgroup, workloadCgroup, mainCgroup} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range append([]string{"cgroup.max.descendants"}, delegationFiles...) {
+			if err := os.WriteFile(filepath.Join(root, d, f), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return root
+}
+
+func readTrim(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func TestDelegableControllers(t *testing.T) {
+	got, err := delegableControllers(fakeCgroup(t, "cpuset cpu io memory hugetlb pids rdma misc"))
+	if err != nil || strings.Join(got, " ") != "cpu memory pids io" {
+		t.Fatalf("all controllers: %v, %v", got, err)
+	}
+	// io is enabled only when the Run's cgroup has it.
+	got, err = delegableControllers(fakeCgroup(t, "cpu memory pids"))
+	if err != nil || strings.Join(got, " ") != "cpu memory pids" {
+		t.Fatalf("without io: %v, %v", got, err)
+	}
+	if _, err := delegableControllers(fakeCgroup(t, "cpu io pids")); !errors.Is(err, errNotDelegable) || !strings.Contains(err.Error(), "memory") {
+		t.Fatalf("without memory: %v", err)
+	}
+	if _, err := delegableControllers(t.TempDir()); !errors.Is(err, errNotDelegable) {
+		t.Fatalf("not a cgroup: %v", err)
+	}
+	if os.Geteuid() != 0 {
+		ro := fakeCgroup(t, "cpu memory pids io")
+		if err := os.Chmod(filepath.Join(ro, "cgroup.subtree_control"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := delegableControllers(ro); !errors.Is(err, errNotDelegable) || !strings.Contains(err.Error(), "subtree_control") {
+			t.Fatalf("read-only subtree_control: %v", err)
+		}
+	}
+}
+
+// The layout delegateCgroup leaves: the three cgroups, controllers enabled
+// at the root and in workload/, the descendants bound on workload/, the Run's
+// limits untouched, and the descriptor it returns is workload/main's, which
+// the probe was given before any of it was written.
+func TestDelegateCgroupLayout(t *testing.T) {
+	root := withChildren(t, fakeCgroup(t, "cpuset cpu io memory pids"))
+	var probed os.FileInfo
+	var subtreeAtProbe string
+	fd, err := delegateCgroup(root, os.Getuid(), os.Getgid(), func(fd int) error {
+		probed, _ = os.Stat("/proc/self/fd/" + strconv.Itoa(fd))
+		subtreeAtProbe = readTrim(t, filepath.Join(root, "cgroup.subtree_control"))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	for _, d := range []string{shimCgroup, workloadCgroup, mainCgroup} {
+		if fi, err := os.Stat(filepath.Join(root, d)); err != nil || !fi.IsDir() {
+			t.Fatalf("%s: %v", d, err)
+		}
+	}
+	if got := readTrim(t, filepath.Join(root, "cgroup.subtree_control")); got != "+cpu +memory +pids +io" {
+		t.Errorf("root subtree_control %q", got)
+	}
+	if got := readTrim(t, filepath.Join(root, workloadCgroup, "cgroup.subtree_control")); got != "+cpu +memory +pids +io" {
+		t.Errorf("workload subtree_control %q", got)
+	}
+	if got := readTrim(t, filepath.Join(root, workloadCgroup, "cgroup.max.descendants")); got != "1024" {
+		t.Errorf("workload cgroup.max.descendants %q", got)
+	}
+	if got := readTrim(t, filepath.Join(root, "memory.max")); got != "268435456" {
+		t.Errorf("the Run's memory.max changed: %q", got)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		t.Fatal(err)
+	}
+	main, _ := os.Stat(filepath.Join(root, mainCgroup))
+	if ms := main.Sys().(*syscall.Stat_t); ms.Ino != st.Ino {
+		t.Errorf("descriptor is not workload/main's")
+	}
+	if probed == nil || !os.SameFile(probed, main) || subtreeAtProbe != "" {
+		t.Errorf("probe: got %v, subtree_control then %q", probed, subtreeAtProbe)
+	}
+}
+
+// A kernel or seccomp profile that refuses CLONE_INTO_CGROUP: nothing is
+// left changed, and the error says what failed.
+func TestDelegateCgroupProbeFailsChangesNothing(t *testing.T) {
+	root := fakeCgroup(t, "cpu io memory pids")
+	fd, err := delegateCgroup(root, os.Getuid(), os.Getgid(), func(int) error { return syscall.ENOSYS })
+	if err == nil || fd != -1 || !errors.Is(err, syscall.ENOSYS) {
+		t.Fatalf("fd %d, err %v", fd, err)
+	}
+	for _, d := range []string{shimCgroup, workloadCgroup} {
+		if _, err := os.Stat(filepath.Join(root, d)); !os.IsNotExist(err) {
+			t.Errorf("%s left behind: %v", d, err)
+		}
+	}
+	if got := readTrim(t, filepath.Join(root, "cgroup.subtree_control")); got != "" {
+		t.Errorf("subtree_control written: %q", got)
+	}
+}
+
+func TestDelegateCgroupRefusesWithoutControllers(t *testing.T) {
+	root := fakeCgroup(t, "cpu io")
+	called := false
+	if _, err := delegateCgroup(root, 1000, 1000, func(int) error { called = true; return nil }); !errors.Is(err, errNotDelegable) {
+		t.Fatalf("err %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, workloadCgroup)); !os.IsNotExist(err) || called {
+		t.Fatalf("touched the cgroup: %v, probe %v", err, called)
+	}
+}
+
+// Tenant processes start in workload/main once delegated; the shim's own
+// sync stays where the shim is; without delegation nothing is set.
+func TestCommandStartsInTheWorkloadCgroup(t *testing.T) {
+	s := &Shim{user: &userInfo{home: "/"}}
+	if cmd := s.command([]string{"/bin/true"}, nil); cmd.SysProcAttr.UseCgroupFD {
+		t.Fatal("undelegated: cloned into a cgroup")
+	}
+	dir, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	s.workCgroup = dir
+	cmd := s.command([]string{"/bin/true"}, nil)
+	if !cmd.SysProcAttr.UseCgroupFD || cmd.SysProcAttr.CgroupFD != int(dir.Fd()) {
+		t.Fatalf("delegated: %+v", cmd.SysProcAttr)
+	}
+}
+
+func TestMemoryOOM(t *testing.T) {
+	dir := t.TempDir()
+	write := func(s string) string {
+		p := filepath.Join(dir, "memory.events.local")
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if n := memoryOOM(write("low 0\nhigh 0\nmax 6854\noom 1\noom_kill 0\noom_group_kill 0\n")); n == nil || *n != 1 {
+		t.Fatalf("got %v", n)
+	}
+	if n := memoryOOM(write("low 0\nhigh 0\nmax 19\noom 0\noom_kill 0\n")); n == nil || *n != 0 {
+		t.Fatalf("got %v", n)
+	}
+	// oom_kill is not oom.
+	if n := memoryOOM(write("oom_kill 3\n")); n != nil {
+		t.Fatalf("no oom key: got %d", *n)
+	}
+	if n := memoryOOM(filepath.Join(dir, "missing")); n != nil {
+		t.Fatalf("missing file: got %d", *n)
+	}
+}
