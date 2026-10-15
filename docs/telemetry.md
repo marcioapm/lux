@@ -127,10 +127,12 @@ classify (a host luxd knows no provider for, or a runner whose luxd sent no
 catalog yet). It is never priced.
 
 **What counts.** The runner counts in nftables (`table inet lux`), in base
-chains of their own at priority 100 that only count and accept, after
-every filter: a packet the Run's egress rules (or anything else) drop never
-leaves the host and is not counted. Replies count too (providers bill
-them). A Run's counters see only forwarded packets, so its traffic to its
+chains of their own at priority 100 that only count and accept, after the
+known lux (priority -10) and netavark (priority 0) filters. This measures
+accepted L3 traffic at these hooks, **not invoice-complete transfer**.
+Inbound bytes dropped locally may already be provider-billed; outbound
+bytes counted here may still be dropped by later chains, postrouting or
+network failures. Replies count too. A Run's counters see only forwarded packets, so its traffic to its
 own host (its DNS stub, the gateway) and to other containers on the host
 is not counted. The host's own counters (input and output) leave out
 loopback and container bridges: those bytes stay on the host, and a Run's
@@ -153,15 +155,31 @@ change of lists only refills nftables sets, in one transaction: no counter
 is reset. With no lists from luxd, the runner's own interface subnets are
 `local` and everything else `unknown`.
 
-**Values only grow.** Counters live in the kernel: a runner restart reads
-and recreates them, so a re-adopted placement counts on. A reboot loses
-them; the runner keeps each placement's total in its run state, and a
-counter that goes back is added to that total rather than starting over.
-A Run's counters are read a last time just before they are deleted at
-exit, so nothing is lost after the last sample. luxd keeps, per class and
-direction, the greatest value reported (`placements.net_classes`,
-`hosts.host_net_classes`), and sends them back in the Welcome as the floor a
-restarted runner continues from.
+**Continuity and limits.** A runner restart preserves named kernel counters,
+including removed regions. Host offsets and last observations are atomically
+stored in the runner data directory with Linux boot identity. A same-boot
+restart restores that offset; a new boot seeds server-known history once,
+then adds current-boot bytes. Welcome floors are persisted. Without a saved
+offset, a maximum cannot recover the historical/current-boot split.
+Placement baselines are stored in run state; host reboot ends running
+placements, so no placement continuity across that lifecycle is promised.
+A successful present-zero observation detects a reset; missing owners and
+failed reads are not zero observations. Arbitrary external nft resets are
+unsupported: a reset whose first value exceeds the last sample cannot be
+inferred from values alone.
+
+Final counters are sampled before deletion, not atomically with it. Traffic
+between that read and deletion can be lost. A host crash/reboot can lose the
+tail since its last durable report; there is no byte bound without a traffic
+rate bound. Table replacement preserves its snapshot but host traffic between
+snapshot and replacement can be lost. Accounting remains separate from
+filtering. Provider-billable reception would require an additional measurement
+boundary before local drops, with provider-specific exclusions, attribution and
+invoice reconciliation; that boundary is not implemented here.
+
+luxd keeps per-class/direction maxima in `placements.net_classes` and
+`hosts.host_net_classes`. Neither network transfer nor public-IP allocation
+has prices, rate periods, or allocated/unallocated cost families yet.
 
 ### Operational state and launch outcome
 

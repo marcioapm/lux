@@ -68,6 +68,21 @@ func TestRealNft(t *testing.T) {
 	if err := nftScript("delete counter inet lux " + tx("host", "internet") + "\n"); err == nil {
 		t.Fatal("deleting a counter a rule uses succeeded")
 	}
+	conn, err := net.Dial("udp", "34.241.0.1:9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(make([]byte, 123)); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	measured, err := f.Counters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if measured.Host["provider:eu-west-1"].Tx != 151 {
+		t.Fatal(measured)
+	}
 	f.Remove("luxrestricted01")
 	f2 := newReal()
 	if _, ok := f2.acct.kept[tx("luxunrestrict01", "internet")]; !ok {
@@ -83,6 +98,13 @@ func TestRealNft(t *testing.T) {
 		t.Fatalf("re-adopt Apply: %v", err)
 	}
 	f2.PruneCounters()
+	restored, err := f2.Counters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Host["provider:eu-west-1"].Tx != 151 {
+		t.Fatal(restored)
+	}
 	// Real packets from this process: the output hook, host counters.
 	send := func(dst string, n int) {
 		conn, err := net.Dial("udp", dst+":9")
@@ -90,7 +112,9 @@ func TestRealNft(t *testing.T) {
 			t.Fatalf("dial %s: %v", dst, err)
 		}
 		defer conn.Close()
-		_, _ = conn.Write(make([]byte, n))
+		if _, err := conn.Write(make([]byte, n)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	before, err := f2.Counters()
 	if err != nil {

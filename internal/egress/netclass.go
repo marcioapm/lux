@@ -16,8 +16,9 @@ package egress
 //     (forward hook, priority 100, policy accept) sends packets from the
 //     Run's bridge to the first and packets routed to it to the second.
 //     Running after the egress chain and netavark's (priority 0) it sees
-//     only what every filter accepted: a packet some rule drops never
-//     leaves the host and is not billed. Its only verdicts are accept and
+//     accepted L3 traffic after those known filters, not invoice-complete
+//     transfer. Later hooks can drop outbound; locally dropped inbound may
+//     already be provider-billed. Its only verdicts are accept and
 //     jumps into these chains, so it can never change what is filtered: an
 //     accept ends this base chain only. Replies count both ways: providers
 //     bill them. Only the forward path counts: a Run's traffic to its own

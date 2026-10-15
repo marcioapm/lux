@@ -83,16 +83,21 @@ func TestClassificationPrecedenceAndDirection(t *testing.T) {
 		{"2a05:d018::1", "provider:eu-west-1"},
 		{"2606:4700::1", "internet"},
 	}
+	expected := map[string]proto.NetBytes{}
 	for i, c := range cases {
 		n := int64(1000 * (i + 1))
+		b := expected[c.key]
+		b.Tx += n
+		b.Rx += n + 1
+		expected[c.key] = b
 		k.send(out(c.peer, n), false)
 		k.send(in(c.peer, n+1), false)
 		got, err := f.Counters()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if b := got.Runs[runIface][c.key]; b.Tx < n || b.Rx < n+1 {
-			t.Errorf("%s: want tx %d rx %d in %s, got %+v (all %v)", c.peer, n, n+1, c.key, b, got.Runs[runIface])
+		if !maps.Equal(got.Runs[runIface], expected) {
+			t.Fatalf("%s: got %v want %v", c.peer, got.Runs[runIface], expected)
 		}
 	}
 	got, _ := f.Counters()
@@ -156,6 +161,30 @@ func TestDroppedAndHostTrafficIsNotCounted(t *testing.T) {
 	}
 	if len(got.Host) != 0 {
 		t.Errorf("host counted a Run's traffic: %v", got.Host)
+	}
+}
+
+func TestAcceptedInterbridgeExcludedBothDirections(t *testing.T) {
+	k := newKernel()
+	f := setupRun(t, k, catalog("v1"), true)
+	for _, bridge := range []string{"podman0", "cni-test", "docker0", "virbr0"} {
+		p := out("8.8.8.8", 3200)
+		p.oif = bridge
+		if v := k.send(p, false); v != "accept" {
+			t.Fatal(v)
+		}
+		p = in("8.8.8.8", 3600)
+		p.iif = bridge
+		if v := k.send(p, false); v != "accept" {
+			t.Fatal(v)
+		}
+	}
+	got, err := f.Counters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Runs[runIface]) != 0 || len(got.Host) != 0 {
+		t.Fatal(got)
 	}
 }
 
