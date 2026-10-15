@@ -77,11 +77,22 @@ func (p *Provider) Network(ctx context.Context, template json.RawMessage, provid
 					}
 				}
 				n := server.HostNetwork{SubnetsUnavailable: len(pairs) == 0}
+				refreshed := map[string]bool{}
 				for pair := range pairs {
 					entry, err := p.vpcSubnets(ctx, c, t.Region, pair[0])
+					if err == nil && len(entry.subnets[pair[1]]) == 0 && !refreshed[pair[0]] {
+						refreshed[pair[0]] = true
+						p.networkMu.Lock()
+						delete(p.subnetCache, [2]string{t.Region, pair[0]})
+						p.networkMu.Unlock()
+						entry, err = p.vpcSubnets(ctx, c, t.Region, pair[0])
+					}
 					if err != nil {
 						n.SubnetsUnavailable = true
 						continue
+					}
+					if len(entry.subnets[pair[1]]) == 0 {
+						n.SubnetsUnavailable = true
 					}
 					n.SubnetCIDRs = append(n.SubnetCIDRs, entry.subnets[pair[1]]...)
 					n.VPCSubnets = append(n.VPCSubnets, entry.all...)

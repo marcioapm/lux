@@ -92,14 +92,18 @@ func TestNetworkDiscoveryPaginationAndCache(t *testing.T) {
 
 func TestNetworkAttachedENIUnion(t *testing.T) {
 	awsTestEnv(t)
-	attached, fail := false, false
+	attached, fail, missing, empty := false, false, false, false
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		w.Header().Set("Content-Type", "text/xml")
 		if r.Form.Get("Action") == "DescribeInstances" {
+			if empty {
+				fmt.Fprint(w, `<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>i-a</instanceId></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`)
+				return
+			}
 			extra := ""
 			if attached {
-				extra = `<item><vpcId>vpc-b</vpcId><subnetId>sub-b</subnetId></item><item><vpcId>vpc-b</vpcId><subnetId>sub-b</subnetId></item>`
+				extra = `<item><vpcId>vpc-a</vpcId><subnetId>sub-a2</subnetId></item><item><vpcId>vpc-b</vpcId><subnetId>sub-b</subnetId></item><item><vpcId>vpc-b</vpcId><subnetId>sub-b</subnetId></item>`
 			}
 			fmt.Fprintf(w, `<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>i-a</instanceId><vpcId>vpc-a</vpcId><subnetId>sub-a</subnetId><placement><availabilityZone>zone-a</availabilityZone></placement><networkInterfaceSet><item><vpcId>vpc-a</vpcId><subnetId>sub-a</subnetId></item>%s</networkInterfaceSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`, extra)
 			return
@@ -111,32 +115,38 @@ func TestNetworkAttachedENIUnion(t *testing.T) {
 			}
 			fmt.Fprint(w, `<DescribeSubnetsResponse><subnetSet><item><subnetId>sub-b</subnetId><cidrBlock>10.2.0.0/24</cidrBlock><availabilityZone>zone-a</availabilityZone></item><item><subnetId>sub-c</subnetId><cidrBlock>10.2.1.0/24</cidrBlock><availabilityZone>zone-b</availabilityZone></item></subnetSet></DescribeSubnetsResponse>`)
 		} else {
-			fmt.Fprint(w, `<DescribeSubnetsResponse><subnetSet><item><subnetId>sub-a</subnetId><cidrBlock>10.1.0.0/24</cidrBlock><availabilityZone>zone-a</availabilityZone></item></subnetSet></DescribeSubnetsResponse>`)
+			extra := ""
+			if attached && !missing {
+				extra = `<item><subnetId>sub-a2</subnetId><cidrBlock>10.1.1.0/24</cidrBlock><availabilityZone>zone-b</availabilityZone></item>`
+			}
+			fmt.Fprintf(w, `<DescribeSubnetsResponse><subnetSet><item><subnetId>sub-a</subnetId><cidrBlock>10.1.0.0/24</cidrBlock><availabilityZone>zone-a</availabilityZone></item>%s</subnetSet></DescribeSubnetsResponse>`, extra)
 		}
 	}))
 	defer fake.Close()
 	t.Setenv("AWS_MAX_ATTEMPTS", "1")
 	p := New(fake.URL, discard)
-	p.CacheNetworkFor(0)
-	get := func() server.HostNetwork {
+	p.CacheNetworkFor(time.Hour)
+	check := func(want server.HostNetwork) {
 		t.Helper()
 		got, err := p.Network(context.Background(), json.RawMessage(`{"region":"eu-west-1"}`), []string{"i-a"})
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || !reflect.DeepEqual(got["i-a"], want) {
+			t.Fatalf("network = %+v, %v; want %+v", got["i-a"], err, want)
 		}
-		return got["i-a"]
 	}
-	if n := get(); len(n.SubnetCIDRs) != 1 {
-		t.Fatal(n)
-	}
+	a := server.NetworkSubnet{CIDR: "10.1.0.0/24", Zone: "zone-a"}
+	a2 := server.NetworkSubnet{CIDR: "10.1.1.0/24", Zone: "zone-b"}
+	b := server.NetworkSubnet{CIDR: "10.2.0.0/24", Zone: "zone-a"}
+	c := server.NetworkSubnet{CIDR: "10.2.1.0/24", Zone: "zone-b"}
+	check(server.HostNetwork{SubnetCIDRs: []string{a.CIDR}, VPCSubnets: []server.NetworkSubnet{a}, Zone: "zone-a"})
 	attached = true
-	if n := get(); len(n.SubnetCIDRs) != 2 || len(n.VPCSubnets) != 3 || n.SubnetsUnavailable {
-		t.Fatal(n)
-	}
+	check(server.HostNetwork{SubnetCIDRs: []string{a.CIDR, a2.CIDR, b.CIDR}, VPCSubnets: []server.NetworkSubnet{a, a2, b, c}, Zone: "zone-a"})
+	p.CacheNetworkFor(0)
 	fail = true
-	if n := get(); !n.SubnetsUnavailable || len(n.SubnetCIDRs) != 1 {
-		t.Fatal(n)
-	}
+	check(server.HostNetwork{SubnetCIDRs: []string{a.CIDR, a2.CIDR}, VPCSubnets: []server.NetworkSubnet{a, a2}, Zone: "zone-a", SubnetsUnavailable: true})
+	fail, missing = false, true
+	check(server.HostNetwork{SubnetCIDRs: []string{a.CIDR, b.CIDR}, VPCSubnets: []server.NetworkSubnet{a, b, c}, Zone: "zone-a", SubnetsUnavailable: true})
+	empty = true
+	check(server.HostNetwork{SubnetsUnavailable: true})
 }
 
 func TestNetworkEmptyAndInstanceFailure(t *testing.T) {
