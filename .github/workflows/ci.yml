@@ -126,12 +126,15 @@ jobs:
         working-directory: tests
         run: uv run playwright install --with-deps chromium
 
-      # The runner restricts unprivileged user namespaces. The passt and
-      # pasta AppArmor profiles stay loaded: tests/images/nested hard-links
-      # pasta, so the pasta profile applies and nested networking passes
-      # under it (docs/podman.md, Nested containers).
-      - name: Allow unprivileged user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The GitHub runner image restricts unprivileged user namespaces; lift
+      # that. Its passt and pasta AppArmor profiles stay enforced:
+      # tests/images/nested hard-links pasta so the pasta profile, not
+      # passt, attaches (docs/podman.md, Nested containers). The nested
+      # suite guards that link only while both are enforced, so check.
+      - name: Allow unprivileged user namespaces; keep pasta confined
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo aa-status --json | jq -e '.profiles.passt == "enforce" and .profiles.pasta == "enforce"'
 
       # lux attach --restore's suite attaches from a real terminal, tmux;
       # it fails rather than skips without it under CI.
