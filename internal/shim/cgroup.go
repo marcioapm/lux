@@ -63,9 +63,10 @@ var (
 var delegationFiles = []string{"cgroup.procs", "cgroup.threads"}
 
 var (
-	moveCgroupProcs = moveProcs
-	removeCgroup    = unix.Rmdir
-	giveCgroup      = chownDelegated
+	moveCgroupProcs    = moveProcs
+	removeCgroup       = unix.Rmdir
+	giveCgroup         = chownDelegated
+	writeCgroupControl = os.WriteFile
 )
 
 // errNotDelegable means the Run's cgroup cannot be split here.
@@ -149,7 +150,7 @@ func delegateCgroup(root string, uid, gid int, probe func(fd int) error) (int, e
 	moved := false
 	rollback := func() {
 		for i := len(enabled) - 1; i >= 0; i-- {
-			_ = os.WriteFile(filepath.Join(enabled[i], "cgroup.subtree_control"), []byte(strings.ReplaceAll(subtreeControl(enable), "+", "-")), 0o644)
+			_ = writeCgroupControl(filepath.Join(enabled[i], "cgroup.subtree_control"), []byte(strings.ReplaceAll(subtreeControl(enable), "+", "-")), 0o644)
 		}
 		if moved {
 			_ = moveCgroupProcs(filepath.Join(root, shimCgroup), root)
@@ -172,7 +173,7 @@ func delegateCgroup(root string, uid, gid int, probe func(fd int) error) (int, e
 	}
 	ctl := subtreeControl(enable)
 	for _, d := range []string{root, filepath.Join(root, workloadCgroup)} {
-		if err := os.WriteFile(filepath.Join(d, "cgroup.subtree_control"), []byte(ctl), 0o644); err != nil {
+		if err := writeCgroupControl(filepath.Join(d, "cgroup.subtree_control"), []byte(ctl), 0o644); err != nil {
 			return fail(fmt.Errorf("enabling %q: %w", ctl, err))
 		}
 		enabled = append(enabled, d)

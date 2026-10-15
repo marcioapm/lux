@@ -1217,7 +1217,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 		Workdir:      sp.Workload.Workdir,
 		User:         user,
 		TTY:          sp.Workload.TTY,
-		Env:          withSizeEnv(sp.Env, sp.Resources.CPUs, p.memoryLimit),
+		Env:          withSizeEnv(sp.Env, sp.Resources.CPUs, p.r.mem.limit(int64(sp.Resources.Memory))),
 		GraceSec:     sp.Workload.Grace.Seconds(),
 		Secrets:      sp.Secrets,
 		ArtifactsDir: proto.ShimRunDir + "/" + stagingDir,

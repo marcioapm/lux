@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -39,7 +40,7 @@ func withChildren(t *testing.T, root string) string {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		for _, f := range append([]string{"cgroup.max.descendants", "cgroup.subtree_control", "cpu.max", "memory.max", "memory.swap.max", "pids.max"}, delegationFiles...) {
+		for _, f := range []string{"cgroup.procs", "cgroup.threads", "cgroup.max.descendants", "cgroup.subtree_control", "cpu.max", "memory.max", "memory.swap.max", "pids.max"} {
 			if err := os.WriteFile(filepath.Join(root, d, f), nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -287,35 +288,110 @@ func TestDelegateExactOwnershipAndLeafLimits(t *testing.T) {
 
 func TestDelegateRollbackAfterMove(t *testing.T) {
 	root := withChildren(t, fakeCgroup(t, "cpu memory pids"))
-	oldMove, oldRemove, oldGive := moveCgroupProcs, removeCgroup, giveCgroup
-	t.Cleanup(func() { moveCgroupProcs, removeCgroup, giveCgroup = oldMove, oldRemove, oldGive })
-	var moves []string
-	moveCgroupProcs = func(from, to string) error {
-		moves = append(moves, filepath.Base(from)+">"+filepath.Base(to))
-		if len(moves) == 2 {
-			for _, d := range []string{"", workloadCgroup} {
-				if got := readTrim(t, filepath.Join(root, d, "cgroup.subtree_control")); got != "-cpu -memory -pids" {
-					t.Errorf("rollback controllers: %q", got)
+	oldMove, oldRemove, oldGive, oldWrite := moveCgroupProcs, removeCgroup, giveCgroup, writeCgroupControl
+	t.Cleanup(func() {
+		moveCgroupProcs, removeCgroup, giveCgroup, writeCgroupControl = oldMove, oldRemove, oldGive, oldWrite
+	})
+	type group struct {
+		controllers map[string]bool
+		pids        []int
+	}
+	groups := map[string]*group{}
+	for _, d := range []string{"", shimCgroup, workloadCgroup, mainCgroup} {
+		groups[filepath.Join(root, d)] = &group{controllers: map[string]bool{}}
+	}
+	groups[root].pids = []int{1, 2}
+	var operations []string
+	writeCgroupControl = func(path string, data []byte, mode os.FileMode) error {
+		dir := filepath.Dir(path)
+		g := groups[dir]
+		for _, token := range strings.Fields(string(data)) {
+			controller := token[1:]
+			if token[0] == '+' {
+				if len(g.pids) != 0 || dir != root && !groups[filepath.Dir(dir)].controllers[controller] {
+					t.Errorf("cannot enable %s in populated group or without parent controller: %s", controller, dir)
+					return syscall.EBUSY
+				}
+			} else {
+				for child, state := range groups {
+					if strings.HasPrefix(child, dir+"/") && state.controllers[controller] {
+						t.Errorf("cannot disable %s while child %s has it enabled", controller, child)
+						return syscall.EBUSY
+					}
 				}
 			}
 		}
+		for _, token := range strings.Fields(string(data)) {
+			if token[0] == '+' {
+				g.controllers[token[1:]] = true
+			} else {
+				delete(g.controllers, token[1:])
+			}
+		}
+		operations = append(operations, filepath.Base(dir)+":"+string(data[:1]))
 		return nil
 	}
-	giveCgroup = func(string, int, int) error { return syscall.EPERM }
-	var removed []string
+	moveCgroupProcs = func(from, to string) error {
+		if len(groups[to].controllers) != 0 {
+			t.Errorf("cannot move processes into internal group %s", to)
+			return syscall.EBUSY
+		}
+		groups[to].pids = append(groups[to].pids, groups[from].pids...)
+		groups[from].pids = nil
+		operations = append(operations, filepath.Base(from)+">"+filepath.Base(to))
+		return nil
+	}
+	giveCgroup = func(string, int, int) error {
+		for _, d := range []string{root, filepath.Join(root, workloadCgroup)} {
+			if len(groups[d].controllers) != 3 {
+				t.Errorf("late failure before controllers enabled: %s", d)
+			}
+		}
+		if len(groups[filepath.Join(root, shimCgroup)].pids) != 2 {
+			t.Error("late failure before processes moved")
+		}
+		return syscall.EPERM
+	}
 	removeCgroup = func(path string) error {
-		removed = append(removed, strings.TrimPrefix(path, root+"/"))
-		return os.RemoveAll(path)
+		if len(groups[path].pids) != 0 {
+			t.Errorf("cannot remove populated group %s", path)
+			return syscall.EBUSY
+		}
+		for child := range groups {
+			if filepath.Dir(child) == path {
+				t.Errorf("cannot remove group %s with child %s", path, child)
+				return syscall.ENOTEMPTY
+			}
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		// Kernel control files disappear with rmdir; ordinary fixture files do not.
+		for _, entry := range entries {
+			if err := os.Remove(filepath.Join(path, entry.Name())); err != nil {
+				return err
+			}
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		delete(groups, path)
+		operations = append(operations, "remove:"+strings.TrimPrefix(path, root+"/"))
+		return nil
 	}
 	fd, err := delegateCgroup(root, 1234, 1234, func(int) error { return nil })
 	if fd != -1 || !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("fd %d err %v", fd, err)
 	}
-	if len(moves) != 2 || moves[1] != "lux.shim>"+filepath.Base(root) {
-		t.Fatalf("moves %v", moves)
+	want := []string{filepath.Base(root) + ">lux.shim", filepath.Base(root) + ":+", "workload:+",
+		"workload:-", filepath.Base(root) + ":-", "lux.shim>" + filepath.Base(root),
+		"remove:workload/main", "remove:workload", "remove:lux.shim"}
+	if strings.Join(operations, ",") != strings.Join(want, ",") {
+		t.Errorf("operations %v, want %v", operations, want)
 	}
-	if strings.Join(removed, ",") != "workload/main,workload,lux.shim" {
-		t.Fatal(removed)
+	if len(groups) != 1 || len(groups[root].controllers) != 0 || !slices.Equal(groups[root].pids, []int{1, 2}) {
+		t.Fatalf("rollback state: %v, root %+v", groups, groups[root])
 	}
 	for _, d := range []string{workloadCgroup, shimCgroup} {
 		if _, err := os.Stat(filepath.Join(root, d)); !os.IsNotExist(err) {
