@@ -117,7 +117,7 @@ type runStreamInput struct {
 type attachStreamInput struct {
 	RunPath
 	Ticket  string `query:"ticket" doc:"A stream ticket (kind exec), instead of an Authorization header."`
-	Restore bool   `query:"restore" doc:"Start the output with a snapshot that redraws the terminal as it is: reset, scrollback lines, the screen (main or alternate) with its attributes, then modes, cursor and title. Live output follows with nothing lost or repeated in between. Sent as ordinary output messages; a host from before sends none, so a client must cope with its absence."`
+	Restore bool   `query:"restore" doc:"Start the output with a snapshot that redraws the terminal as it is: reset, scrollback lines, the screen (main or alternate) with its attributes, then modes, cursor and title. Live output follows with nothing lost or repeated in between: a client that falls behind by more than 4 MiB of queued output is ended with {\"error\": \"attach fell behind; attach again\"} rather than continued with a gap, and attaches again. Sent as ordinary output messages; a host from before sends none, so a client must cope with its absence."`
 	Rows    int    `query:"rows" minimum:"0" doc:"With restore: the client's terminal size, which the Run's terminal is resized to before the snapshot (with cols)."`
 	Cols    int    `query:"cols" minimum:"0" doc:"With restore: see rows."`
 }

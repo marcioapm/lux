@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -84,6 +85,30 @@ func replay(rows, cols, history int, chunks ...[]byte) *vterm.Terminal {
 		v.Write(c)
 	}
 	return v
+}
+
+// liveUntil reads sub until what it read contains want.
+func liveUntil(t *testing.T, sub *subscriber, want string) []byte {
+	t.Helper()
+	type res struct {
+		b   []byte
+		err error
+	}
+	var live []byte
+	for !bytes.Contains(live, []byte(want)) {
+		ch := make(chan res, 1)
+		go func() { b, err := sub.next(); ch <- res{b, err} }()
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				t.Fatalf("live output %q, then %v", live, r.err)
+			}
+			live = append(live, r.b...)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("live output %q", live)
+		}
+	}
+	return live
 }
 
 func screenText(v *vterm.Terminal) string {
@@ -171,16 +196,7 @@ func TestAttachRestoresAltScreen(t *testing.T) {
 	// The program exits the full screen: the client, fed only the live
 	// output after its snapshot, is back on the main screen.
 	fmt.Fprint(tty, "\x1b[?1000l\x1b[?1006l\x1b[?1l\x1b>\x1b[?1049l$ ")
-	var live []byte
-	deadline := time.After(10 * time.Second)
-	for !bytes.Contains(live, []byte("1049l$ ")) {
-		select {
-		case b := <-sub:
-			live = append(live, b...)
-		case <-deadline:
-			t.Fatalf("live output %q", live)
-		}
-	}
+	live := liveUntil(t, sub, "1049l$ ")
 	v.Write(live)
 	if v.AltScreen() || v.Mode(1000) || v.Mode(1) {
 		t.Fatal("still on the alternate screen, or its modes")
@@ -227,35 +243,26 @@ func TestAttachRestoreNoGapNoDuplicate(t *testing.T) {
 	term, tty, _ := ptyTerminal(t, rows, cols, history, nil)
 
 	type attached struct {
-		snap []byte
-		live bytes.Buffer
-		done chan struct{}
+		snap   []byte
+		sub    *subscriber
+		live   bytes.Buffer
+		behind bool
+		done   chan struct{}
 	}
 	var mu sync.Mutex
 	var all []*attached
-	stop := make(chan struct{})
 	attach := func() {
 		a := &attached{done: make(chan struct{})}
-		snap, sub := term.join(true, 0, 0)
-		a.snap = snap
+		a.snap, a.sub = term.join(true, 0, 0)
 		go func() {
 			defer close(a.done)
 			for {
-				select {
-				case b := <-sub:
-					a.live.Write(b)
-				case <-stop:
-					// Drain what was sent before the stop.
-					for {
-						select {
-						case b := <-sub:
-							a.live.Write(b)
-						default:
-							term.leave(sub)
-							return
-						}
-					}
+				b, err := a.sub.next()
+				if err != nil {
+					a.behind = errors.Is(err, errFellBehind)
+					return
 				}
+				a.live.Write(b)
 			}
 		}()
 		mu.Lock()
@@ -293,53 +300,158 @@ func TestAttachRestoreNoGapNoDuplicate(t *testing.T) {
 	close(attachesDone)
 	<-writerDone
 	waitScreen(t, term, "THE END")
-	close(stop)
+	// Everything read has been queued to every subscriber still joined:
+	// leaving now ends each one after what it was sent.
+	for _, a := range all {
+		term.leave(a.sub)
+	}
 	final := screenOf(term)
+	ended := 0
 	for i, a := range all {
 		<-a.done
+		if a.behind {
+			// Ended rather than continued with a gap: a client attaches again.
+			ended++
+			continue
+		}
 		v := replay(rows, cols, history, a.snap, a.live.Bytes())
 		if got := v.Snapshot(0); !bytes.Equal(got, final) {
 			t.Fatalf("attach %d of %d (snapshot %d bytes, live %d): replayed terminal differs from the shim's", i, len(all), len(a.snap), a.live.Len())
 		}
 	}
+	if ended == len(all) {
+		t.Fatalf("all %d attaches fell behind: nothing was compared", ended)
+	}
 	if written < 100 {
 		t.Fatalf("only %d lines written during the attaches", written)
 	}
+	t.Logf("%d attaches, %d ended as fallen behind", len(all), ended)
 }
 
 // A subscriber that never reads holds up neither the workload's output
-// nor the reader that feeds the output file and the emulator.
+// nor the reader that feeds the output file and the emulator, plain or
+// restore, past a restore subscriber's budget.
 func TestSlowSubscriberNeverBlocks(t *testing.T) {
-	var n int64
-	var nmu sync.Mutex
-	term, tty, _ := ptyTerminal(t, 24, 80, historyLines, func(b []byte) {
-		nmu.Lock()
-		n += int64(len(b))
-		nmu.Unlock()
-	})
-	_, sub := term.join(true, 0, 0)
-	defer term.leave(sub)
-	line := strings.Repeat("y", 79) + "\n"
-	total := 0
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for range 20000 { // ~1.6 MB: thousands of reads past the subscriber's buffer
-			io.WriteString(tty, line)
-			total += len(line) + 1 // ONLCR: \n goes out as \r\n
-		}
-		io.WriteString(tty, "DONE")
-	}()
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the workload's writes blocked")
+	for _, restore := range []bool{false, true} {
+		t.Run(fmt.Sprint("restore=", restore), func(t *testing.T) {
+			var n int64
+			var nmu sync.Mutex
+			term, tty, _ := ptyTerminal(t, 24, 80, historyLines, func(b []byte) {
+				nmu.Lock()
+				n += int64(len(b))
+				nmu.Unlock()
+			})
+			_, sub := term.join(restore, 0, 0)
+			defer term.leave(sub)
+			line := strings.Repeat("y", 79) + "\n"
+			total := 0
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for total <= restoreBudget+(1<<20) {
+					io.WriteString(tty, line)
+					total += len(line) + 1 // ONLCR: \n goes out as \r\n
+				}
+				io.WriteString(tty, "DONE")
+			}()
+			select {
+			case <-done:
+			case <-time.After(60 * time.Second):
+				t.Fatal("the workload's writes blocked")
+			}
+			waitScreen(t, term, "DONE")
+			nmu.Lock()
+			defer nmu.Unlock()
+			if n != int64(total+4) {
+				t.Fatalf("output read %d bytes, want %d", n, total+4)
+			}
+		})
 	}
+}
+
+// A restore attach whose client does not read while more than its budget
+// is written is ended with the fell-behind error once its snapshot is
+// sent, not continued with a gap.
+func TestRestoreAttachFallenBehindIsEnded(t *testing.T) {
+	term, tty, _ := ptyTerminal(t, 24, 80, historyLines, nil)
+	fmt.Fprint(tty, "before")
+	waitScreen(t, term, "before")
+	s := &Shim{term: term}
+
+	runnerSide, shimSide := net.Pipe()
+	defer runnerSide.Close()
+	go func() {
+		defer shimSide.Close()
+		s.handleStream(bufio.NewScanner(shimSide), json.NewEncoder(shimSide), proto.StreamOpen{Kind: "attach", Restore: true})
+	}()
+	// The stream's sender is blocked on its first snapshot frame (net.Pipe
+	// is unbuffered) while the workload writes past the budget.
+	line := strings.Repeat("z", 79) + "\r\n"
+	for written := 0; written <= restoreBudget+(1<<20); written += len(line) {
+		io.WriteString(tty, line)
+	}
+	fmt.Fprint(tty, "DONE")
 	waitScreen(t, term, "DONE")
-	nmu.Lock()
-	defer nmu.Unlock()
-	if n != int64(total+4) {
-		t.Fatalf("output read %d bytes, want %d", n, total+4)
+	term.mu.Lock()
+	joined := len(term.subs)
+	term.mu.Unlock()
+	if joined != 0 {
+		t.Fatalf("%d subscribers still joined", joined)
+	}
+
+	dec := json.NewDecoder(runnerSide)
+	var out []byte
+	for {
+		var d proto.StreamData
+		runnerSide.SetReadDeadline(time.Now().Add(10 * time.Second))
+		if err := dec.Decode(&d); err != nil {
+			t.Fatalf("the stream ended without an error, after %d bytes: %v", len(out), err)
+		}
+		if d.Error != "" {
+			if d.Error != "attach fell behind; attach again" {
+				t.Fatalf("error %q", d.Error)
+			}
+			break
+		}
+		out = append(out, d.Data...)
+	}
+	// What came before the error is the snapshot only: nothing written
+	// after the join, which would be a screen with a gap.
+	if bytes.Contains(out, []byte("zzz")) || !bytes.Contains(out, []byte("before")) {
+		t.Fatalf("stream before the error: %q", out)
+	}
+}
+
+// A plain attach is as before: one that does not read misses what
+// overflows its queue of reads and goes on with later output, never ended.
+func TestPlainAttachMissesOverflow(t *testing.T) {
+	term, tty, _ := ptyTerminal(t, 24, 80, historyLines, nil)
+	snap, sub := term.join(false, 0, 0)
+	defer term.leave(sub)
+	if snap != nil || sub.strict {
+		t.Fatalf("plain join: snapshot %q, strict %v", snap, sub.strict)
+	}
+	line := strings.Repeat("p", 79) + "\r\n"
+	for written := 0; written <= restoreBudget+(1<<20); written += len(line) {
+		io.WriteString(tty, line)
+	}
+	fmt.Fprint(tty, "DONE")
+	waitScreen(t, term, "DONE")
+	term.mu.Lock()
+	_, joined := term.subs[sub]
+	term.mu.Unlock()
+	if !joined {
+		t.Fatal("a plain subscriber was removed")
+	}
+	if n := len(sub.ch); n != plainQueue {
+		t.Fatalf("%d reads queued, want the queue full (%d)", n, plainQueue)
+	}
+	for range plainQueue {
+		<-sub.ch
+	}
+	fmt.Fprint(tty, "MORE")
+	if live := liveUntil(t, sub, "MORE"); !bytes.HasSuffix(live, []byte("MORE")) {
+		t.Fatalf("after the overflow %q", live)
 	}
 }
 
@@ -390,16 +502,7 @@ func TestEmulatorFailureKeepsStream(t *testing.T) {
 	io.WriteString(tty, "three")
 	waitOutput("three")
 
-	var live []byte
-	deadline := time.After(10 * time.Second)
-	for !bytes.Contains(live, []byte("three")) {
-		select {
-		case b := <-sub:
-			live = append(live, b...)
-		case <-deadline:
-			t.Fatalf("subscriber got %q", live)
-		}
-	}
+	live := liveUntil(t, sub, "three")
 	if string(live) != "onetwothree" {
 		t.Fatalf("subscriber got %q", live)
 	}

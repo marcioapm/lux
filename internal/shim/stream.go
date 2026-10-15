@@ -146,11 +146,21 @@ func (s *Shim) attachStream(sc *bufio.Scanner, out *streamConn, open proto.Strea
 	}
 	snapshot, sub := term.join(open.Restore, open.Rows, open.Cols)
 	defer term.leave(sub)
+	behind := make(chan struct{})
 	go func() {
 		for b := range chunks(snapshot, streamChunk) {
 			_ = out.send(proto.StreamData{Channel: "stdout", Data: b})
 		}
-		for b := range sub {
+		for {
+			b, err := sub.next()
+			if errors.Is(err, errFellBehind) {
+				out.fail("attach fell behind; attach again")
+				close(behind)
+				return
+			}
+			if err != nil {
+				return
+			}
 			_ = out.send(proto.StreamData{Channel: "stdout", Data: b})
 		}
 	}()
@@ -168,6 +178,7 @@ func (s *Shim) attachStream(sc *bufio.Scanner, out *streamConn, open proto.Strea
 	}()
 	select {
 	case <-inputDone: // detached
+	case <-behind:
 	case <-term.gone: // the workload exited
 		_ = out.send(proto.StreamData{Error: "the workload exited"})
 	}
@@ -206,8 +217,9 @@ type screenState interface {
 }
 
 // terminal is a workload's PTY, read for the output file and copied to
-// whoever is attached. An attached client that cannot keep up misses
-// output; it never holds up the workload or its output file.
+// whoever is attached. It never holds up the workload or its output file:
+// a plain attach that cannot keep up misses output; a restore attach that
+// cannot keep up is ended (see subscriber).
 //
 // What is read is also fed to an emulator (screen) under the same lock as
 // the copy to subscribers, so a snapshot taken under it and a subscriber
@@ -216,22 +228,129 @@ type screenState interface {
 type terminal struct {
 	ptmx     *os.File
 	mu       sync.Mutex
-	subs     map[chan []byte]bool
+	subs     map[*subscriber]bool
 	screen   screenState
 	gone     chan struct{}
 	goneOnce sync.Once
 }
 
 func newTerminal(ptmx *os.File, rows, cols int) *terminal {
-	return &terminal{ptmx: ptmx, subs: map[chan []byte]bool{}, gone: make(chan struct{}),
+	return &terminal{ptmx: ptmx, subs: map[*subscriber]bool{}, gone: make(chan struct{}),
 		screen: vterm.New(rows, cols, historyLines)}
+}
+
+var (
+	errFellBehind = errors.New("attach fell behind")
+	errLeft       = errors.New("attach left")
+)
+
+// plainQueue is how many reads a plain attach's queue holds; past it,
+// reads are dropped for that subscriber.
+const plainQueue = 256
+
+// subscriber is one attach's copy of the terminal's output.
+//
+// A plain attach has a channel of plainQueue reads and misses what
+// overflows it. A restore attach's client has a screen built from the
+// snapshot, which a gap would leave wrong for good, so its queue is
+// bounded in bytes (restoreBudget, as much as the snapshot it may still
+// be sending) and on overflow it is removed and ended with errFellBehind:
+// the client attaches again rather than going on from a wrong screen.
+type subscriber struct {
+	ch chan []byte // plain
+
+	strict bool
+	mu     sync.Mutex
+	queue  [][]byte
+	queued int
+	wake   chan struct{} // capacity 1
+	err    error
+}
+
+// restoreBudget is the most output a restore attach may have queued.
+const restoreBudget = snapshotLimit
+
+func newSubscriber(strict bool) *subscriber {
+	if strict {
+		return &subscriber{strict: true, wake: make(chan struct{}, 1)}
+	}
+	return &subscriber{ch: make(chan []byte, plainQueue)}
+}
+
+// offer queues b without blocking. It reports false when a strict
+// subscriber has fallen behind; the caller removes it.
+func (s *subscriber) offer(b []byte) bool {
+	if !s.strict {
+		select {
+		case s.ch <- b:
+		default:
+		}
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.queued+len(b) > restoreBudget {
+		s.queue, s.queued = nil, 0
+		s.endLocked(errFellBehind)
+		return false
+	}
+	s.queue = append(s.queue, b)
+	s.queued += len(b)
+	s.signal()
+	return true
+}
+
+func (s *subscriber) signal() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *subscriber) endLocked(err error) {
+	if s.err == nil {
+		s.err = err
+	}
+	s.signal()
+}
+
+// next blocks for the next output. Once a strict subscriber has left it
+// returns what was queued before, then errLeft; one that fell behind
+// returns errFellBehind (its queue is dropped).
+func (s *subscriber) next() ([]byte, error) {
+	if !s.strict {
+		b, ok := <-s.ch
+		if !ok {
+			return nil, errLeft
+		}
+		return b, nil
+	}
+	for {
+		s.mu.Lock()
+		if len(s.queue) > 0 {
+			b := s.queue[0]
+			s.queue[0] = nil
+			s.queue = s.queue[1:]
+			s.queued -= len(b)
+			s.mu.Unlock()
+			return b, nil
+		}
+		if s.err != nil {
+			err := s.err
+			s.mu.Unlock()
+			return nil, err
+		}
+		s.mu.Unlock()
+		<-s.wake
+	}
 }
 
 // join subscribes to the terminal's output. With restore, it first
 // resizes to rows×cols (if given) and returns the snapshot the output
-// continues from; nil if the terminal has no emulator.
-func (t *terminal) join(restore bool, rows, cols int) ([]byte, chan []byte) {
-	ch := make(chan []byte, 256)
+// continues from; nil if the terminal has no emulator. A subscriber that
+// was sent a snapshot is strict (see subscriber); one that was not
+// continues live as a plain attach does.
+func (t *terminal) join(restore bool, rows, cols int) ([]byte, *subscriber) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var snap []byte
@@ -241,15 +360,22 @@ func (t *terminal) join(restore bool, rows, cols int) ([]byte, chan []byte) {
 		}
 		t.withScreen(func(s screenState) { snap = s.Snapshot(snapshotLimit) })
 	}
-	t.subs[ch] = true
-	return snap, ch
+	sub := newSubscriber(snap != nil)
+	t.subs[sub] = true
+	return snap, sub
 }
 
-func (t *terminal) leave(ch chan []byte) {
+func (t *terminal) leave(sub *subscriber) {
 	t.mu.Lock()
-	delete(t.subs, ch)
+	delete(t.subs, sub)
 	t.mu.Unlock()
-	close(ch)
+	if !sub.strict {
+		close(sub.ch)
+		return
+	}
+	sub.mu.Lock()
+	sub.endLocked(errLeft)
+	sub.mu.Unlock()
 }
 
 // resize resizes the PTY and the emulator.
@@ -289,10 +415,9 @@ func (t *terminal) Read(p []byte) (int, error) {
 		t.withScreen(func(s screenState) { s.Write(p[:n]) })
 		if len(t.subs) > 0 {
 			b := append([]byte{}, p[:n]...)
-			for ch := range t.subs {
-				select {
-				case ch <- b:
-				default:
+			for sub := range t.subs {
+				if !sub.offer(b) {
+					delete(t.subs, sub)
 				}
 			}
 		}

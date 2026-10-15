@@ -499,7 +499,10 @@ lux port-forward <run> <port-name> <local-port> [--address 127.0.0.1]
   land in your terminal's own history; the cursor, title, scroll region
   and the modes a program sets (application cursor and keypad, bracketed
   paste, mouse reporting). The Run's terminal is resized to yours first.
-  Live output follows with nothing lost or repeated in between. The
+  Live output follows with nothing lost or repeated in between. If your
+  side falls behind the workload by more than the redraw's own budget
+  (4 MiB queued), the attach is ended with `attach fell behind; attach
+  again` rather than continued with a gap; attach again to redraw. The
   redraw is ordinary output (StreamOpen `restore`; on the API,
   `GET /v1/runs/{id}/attach?restore=true&rows=R&cols=C`): a host whose
   lux-shim predates it sends none, and attach just continues live.
