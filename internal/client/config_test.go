@@ -17,7 +17,13 @@ func TestLoadConfig(t *testing.T) {
 	if c := LoadConfig(); c != (Config{}) {
 		t.Fatalf("no file, no env: %+v", c)
 	}
-	dir := filepath.Join(home, ".config", "lux")
+	// Where LoadConfig reads it on this platform (darwin ignores
+	// XDG_CONFIG_HOME), now that HOME is the temporary one.
+	cfgDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(cfgDir, "lux")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -34,5 +40,10 @@ func TestLoadConfig(t *testing.T) {
 	t.Setenv("LUX_TENANT", "")
 	if c := LoadConfig(); c != (Config{URL: "https://env", APIKey: "kfile"}) {
 		t.Fatalf("env: %+v", c)
+	}
+	// A non-empty LUX_API_KEY beats the file's key.
+	t.Setenv("LUX_API_KEY", "kenv")
+	if c := LoadConfig(); c.APIKey != "kenv" {
+		t.Fatalf("env key: %+v", c)
 	}
 }
