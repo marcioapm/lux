@@ -384,6 +384,21 @@ func TestSnapshotLimit(t *testing.T) {
 	}
 }
 
+// BenchmarkSnapshot is a full terminal's snapshot: what attach holds the
+// terminal's lock for.
+func BenchmarkSnapshot(b *testing.B) {
+	term := New(24, 80, 2000)
+	line := []byte("\x1b[1;32m" + strings.Repeat("colour", 6) + "\x1b[m plain text to fill the rest of the line out.\r\n")
+	for range 3000 {
+		term.Write(line)
+	}
+	var n int
+	for b.Loop() {
+		n = len(term.Snapshot(0))
+	}
+	b.ReportMetric(float64(n), "bytes")
+}
+
 func BenchmarkWrite(b *testing.B) {
 	for _, tc := range []struct {
 		name string
