@@ -316,6 +316,13 @@ func (u *uploader) upload(ctx context.Context, up pendingUpload) error {
 	if err != nil {
 		return err
 	}
+	err = u.r.api.uploadDirect(ctx, up.BlobID, f, fi.Size())
+	if !errors.Is(err, errNoDirectUpload) {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	return u.r.api.upload(ctx, up.BlobID, f, fi.Size())
 }
 
