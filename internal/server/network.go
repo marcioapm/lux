@@ -137,21 +137,22 @@ func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostN
 			hostID, prefixes.Source == "").Scan(&old, &previous); err != nil {
 			return err
 		}
-		if n.SubnetsUnavailable {
+		switch {
+		case n.SubnetsUnavailable:
+			// Partial discovery: the last known subnets, and no catalog, so
+			// unlisted traffic is unknown rather than internet.
 			if old != nil {
 				n.SubnetCIDRs, n.VPCSubnets = old.SubnetCIDRs, old.VPCSubnets
 			}
-		}
-		if prefixes.Source == "" && previous != nil && previous.Catalog() {
-			prefixes.Source, prefixes.RegionService, prefixes.RegionPublic, prefixes.ProviderGlobal, prefixes.Provider = previous.Source, previous.RegionService, previous.RegionPublic, previous.ProviderGlobal, previous.Provider
+			prefixes = ProviderPrefixes{}
+		case prefixes.Source == "" && previous != nil && previous.Catalog():
+			prefixes.Source, prefixes.RegionService, prefixes.RegionPublic = previous.Source, previous.RegionService, previous.RegionPublic
+			prefixes.ProviderGlobal, prefixes.Provider = previous.ProviderGlobal, previous.Provider
 			if previous.FetchedAt != nil {
 				prefixes.FetchedAt = *previous.FetchedAt
 			}
 		}
 		n.SubnetCIDRs, n.VPCSubnets = nonNil(n.SubnetCIDRs), nonNil(n.VPCSubnets)
-		if n.SubnetsUnavailable {
-			prefixes = ProviderPrefixes{}
-		}
 		nc := networkClasses(n, prefixes)
 		_, err := tx.Exec(ctx, `UPDATE hosts SET network=$2, net_classes=$3 WHERE id=$1 AND (network IS DISTINCT FROM $2::jsonb OR net_classes IS DISTINCT FROM $3::jsonb)`, hostID, n, nc)
 		return err
