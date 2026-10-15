@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -260,6 +261,58 @@ func TestRunnerNetworkEndpoint(t *testing.T) {
 // Placement and host classes merge per key and direction by maximum, from
 // heartbeats and exit statuses alike; absent keys are kept; the Run's usage
 // sums its placements; and GET shows them.
+func TestNetworkConcurrentReportsAndExit(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	serversFixture(t, s, ctx)
+	start := make(chan struct{})
+	done := make(chan error, 3)
+	for _, net := range []map[string]proto.NetBytes{{"zone": {Rx: 10}, "internet": {Tx: 4}}, {"zone": {Tx: 20}, "provider:us-east-1": {Rx: 7}}} {
+		go func() {
+			<-start
+			var err error
+			for range 3 {
+				err = s.heartbeat(ctx, "h1", proto.Heartbeat{Usage: &proto.HostUsage{Net: net}, Leases: []proto.LivePlacement{{RunID: r1, Epoch: 1, Usage: &proto.Usage{Net: net}}}})
+				var pgerr *pgconn.PgError
+				if !errors.As(err, &pgerr) || pgerr.Code != "40P01" {
+					break
+				}
+			}
+			done <- err
+		}()
+	}
+	go func() {
+		<-start
+		var err error
+		for range 3 {
+			err = reportUsageStatus(s, ctx, proto.Status{State: "exited", Usage: &proto.Usage{Net: map[string]proto.NetBytes{"zone": {Rx: 10, Tx: 20}, "internet": {Tx: 4}, "provider:us-east-1": {Rx: 7}, "unknown": {Tx: 23}}}})
+			var pgerr *pgconn.PgError
+			if !errors.As(err, &pgerr) || pgerr.Code != "40P01" {
+				break
+			}
+		}
+		done <- err
+	}()
+	close(start)
+	for range 3 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var host, placement map[string]proto.NetBytes
+	var state string
+	systemScan(t, s, `SELECT host_net_classes FROM hosts WHERE id='h1'`, nil, &host)
+	systemScan(t, s, `SELECT net_classes,state FROM placements WHERE run_id=$1 AND epoch=1`, []any{r1}, &placement, &state)
+	want := map[string]proto.NetBytes{"zone": {Rx: 10, Tx: 20}, "internet": {Tx: 4}, "provider:us-east-1": {Rx: 7}}
+	if !maps.Equal(host, want) {
+		t.Fatal(host)
+	}
+	want["unknown"] = proto.NetBytes{Tx: 23}
+	if !maps.Equal(placement, want) || state != "exited" {
+		t.Fatalf("%s %v", state, placement)
+	}
+}
+
 func TestNetClassesMergeAndExposure(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
