@@ -8,7 +8,9 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -535,8 +537,9 @@ func TestRemoveFailureRetainsRegistry(t *testing.T) {
 }
 
 func TestLifecycleCatalogBarriers(t *testing.T) {
-	for _, removing := range []bool{false, true} {
-		t.Run(fmt.Sprint(removing), func(t *testing.T) {
+	for _, mode := range []string{"apply", "remove", "remove-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			removing := mode != "apply"
 			k := newKernel()
 			f, err := k.firewall()
 			if err != nil {
@@ -551,13 +554,24 @@ func TestLifecycleCatalogBarriers(t *testing.T) {
 				}
 			}
 			entered, release := make(chan struct{}), make(chan struct{})
+			setEntered := make(chan struct{}, 1)
 			nft := f.nft
-			first := true
+			var scriptsMu sync.Mutex
+			var scripts []string
 			f.nft = func(s string) error {
+				scriptsMu.Lock()
+				first := len(scripts) == 0
+				scripts = append(scripts, s)
+				scriptsMu.Unlock()
+				if strings.Contains(s, "flush set") {
+					setEntered <- struct{}{}
+				}
 				if first {
-					first = false
 					close(entered)
 					<-release
+					if mode == "remove-failure" {
+						return fmt.Errorf("rejected Remove")
+					}
 				}
 				return nft(s)
 			}
@@ -574,12 +588,39 @@ func TestLifecycleCatalogBarriers(t *testing.T) {
 			started, updated := make(chan struct{}), make(chan error, 1)
 			go func() { close(started); updated <- f.SetClasses(catalog("v1")) }()
 			<-started
+			interleaved := false
+			select {
+			case <-setEntered:
+				interleaved = true
+			case <-time.After(50 * time.Millisecond):
+			}
+			if interleaved {
+				if err := <-updated; err != nil {
+					t.Error(err)
+				}
+			}
 			close(release)
 			if err := <-done; err != nil {
 				t.Fatal(err)
 			}
-			if err := <-updated; err != nil {
-				t.Fatal(err)
+			if !interleaved {
+				if err := <-updated; err != nil {
+					t.Fatal(err)
+				}
+			}
+			if f.ClassesVersion() != "v1" {
+				t.Fatalf("lifecycle rollback lost committed catalog: %q", f.ClassesVersion())
+			}
+			if interleaved {
+				t.Fatal("SetClasses ran inside held lifecycle transaction")
+			}
+			scriptsMu.Lock()
+			if len(scripts) != 2 || !strings.Contains(scripts[1], "flush set") {
+				t.Errorf("transaction order: %v", scripts)
+			}
+			scriptsMu.Unlock()
+			if mode == "remove-failure" {
+				f.Remove(runIface)
 			}
 			if removing {
 				if err := apply(); err != nil {
