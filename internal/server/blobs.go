@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/jackc/pgx/v5"
 	"github.com/klauspost/compress/zstd"
 
@@ -229,11 +230,10 @@ func (s *Server) serveBlobUploadComplete(w http.ResponseWriter, r *http.Request)
 			parts[i] = blob.Part{Number: p.Number, ETag: p.ETag, SHA256: p.SHA256}
 		}
 		if err := s.blobs.CompleteMultipart(r.Context(), key, in.UploadID, parts); err != nil {
-			// S3 refused the parts (InvalidPart, EntityTooSmall, BadDigest…):
-			// they can never complete. A 5xx or network error may be
-			// transient, or even have completed: the runner retries or aborts.
-			var se interface{ HTTPStatusCode() int }
-			if errors.As(err, &se) && se.HTTPStatusCode()/100 == 4 {
+			// S3 refused the parts: they can never complete. A 5xx or
+			// network error may be transient, or even have completed: the
+			// runner retries, then aborts.
+			if permanentCompleteError(err) {
 				s.abortUpload(r.Context(), key, in.UploadID)
 				return err
 			}
@@ -259,6 +259,21 @@ func (s *Server) serveBlobUploadComplete(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, http.StatusOK, uploaded)
 	return nil
+}
+
+// permanentCompleteError: S3 refused a CompleteMultipartUpload for good.
+// By error code first: S3 can send such a refusal inside a 200 answer,
+// which the SDK reports as a 500. Then any 4xx.
+func permanentCompleteError(err error) bool {
+	var ae smithy.APIError
+	if errors.As(err, &ae) {
+		switch ae.ErrorCode() {
+		case "InvalidPart", "InvalidPartOrder", "EntityTooSmall", "BadDigest", "NoSuchUpload", "InvalidRequest":
+			return true
+		}
+	}
+	var se interface{ HTTPStatusCode() int }
+	return errors.As(err, &se) && se.HTTPStatusCode()/100 == 4
 }
 
 // dropDeletedUpload deletes a deleted blob's object: a direct upload's PUT

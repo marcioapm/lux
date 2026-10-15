@@ -497,9 +497,10 @@ func TestDirectUploadCompleteChecksSize(t *testing.T) {
 	}
 }
 
-// A multipart /complete that S3 refuses (a 4xx) aborts the upload; one S3
-// fails (a 5xx) answers 502 and leaves the upload for the runner's retry
-// or abort. The blob stays on its host either way.
+// A multipart /complete that S3 refuses (a permanent error code, or else a
+// 4xx) aborts the upload; one S3 fails (a 5xx) answers 502 and leaves the
+// upload for the runner's retry or abort. The blob stays on its host
+// either way.
 func TestDirectUploadCompleteFailureAborts(t *testing.T) {
 	for _, c := range []struct {
 		name      string
@@ -510,6 +511,8 @@ func TestDirectUploadCompleteFailureAborts(t *testing.T) {
 		{"unknown upload", nil, http.StatusInternalServerError, true},
 		{"InvalidPart", &s3Err{http.StatusBadRequest, "InvalidPart"}, http.StatusInternalServerError, true},
 		{"S3 500", &s3Err{http.StatusInternalServerError, "InternalError"}, http.StatusBadGateway, false},
+		// An error in a 200 answer, which the SDK reports as a 500.
+		{"embedded InvalidPart", &s3Err{http.StatusOK, "InvalidPart"}, http.StatusInternalServerError, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, _ := reportFixture(t)
