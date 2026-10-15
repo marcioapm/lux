@@ -39,6 +39,11 @@ func historyText(t *Terminal) []string {
 
 func feed(t *Terminal, s string) { t.Write([]byte(s)) }
 
+// writer is t as an io.Writer, for fmt.Fprintf.
+type writer struct{ t *Terminal }
+
+func (w writer) Write(p []byte) (int, error) { w.t.Write(p); return len(p), nil }
+
 // restored is a fresh terminal of t's size that has been sent t's
 // snapshot.
 func restored(t *Terminal, history int) *Terminal {
@@ -159,8 +164,6 @@ func TestScrollbackMemoryBounded(t *testing.T) {
 		t.Fatalf("%v allocations per scrolled line", n)
 	}
 }
-
-type writer struct{ t *Terminal }
 
 // The emulator's own behaviour, against literal expectations (xterm's, and
 // tmux's where they agree): what the round-trip tests cannot catch, since
@@ -329,8 +332,6 @@ func TestClearHistoryReusesLines(t *testing.T) {
 		t.Fatalf("history %d lines after a redraw, want 37", got)
 	}
 }
-
-func (w writer) Write(p []byte) (int, error) { w.t.Write(p); return len(p), nil }
 
 func TestAltScreen(t *testing.T) {
 	for _, mode := range []int{1049, 1047, 47} {

@@ -1,8 +1,6 @@
 package vterm
 
-import (
-	"strconv"
-)
+import "strconv"
 
 // Snapshot is a byte sequence that, written to a blank terminal of the
 // same size, reproduces this one: it resets the modes Snapshot restores,
@@ -92,7 +90,6 @@ func (t *Terminal) appendPrefix(b []byte) []byte {
 // it gives up (false) once it would be over room bytes, and never grows
 // its buffer past room.
 func (t *Terminal) appendScreen(b []byte, room int) ([]byte, bool) {
-	over := func() bool { return room > 0 && len(b) > room }
 	var line []byte
 	// putLine appends l, rendered, failing when it does not fit.
 	putLine := func(l []Cell, trim bool) bool {
@@ -117,7 +114,7 @@ func (t *Terminal) appendScreen(b []byte, room int) ([]byte, bool) {
 		if t.altMode == 1049 {
 			// 1049 saves the main screen's cursor itself, as it was then.
 			if ms.valid {
-				b = appendCursorState(t, b, ms)
+				b = t.appendCursorState(b, ms)
 			}
 			b = append(b, "\x1b[?1049h"...)
 			b = resetCursorState(b)
@@ -161,11 +158,9 @@ func (t *Terminal) appendScreen(b []byte, room int) ([]byte, bool) {
 	// character going to the next line) is reproduced by writing that
 	// column's character again.
 	b = append(b, "\x1b[m"...)
-	if t.origin {
-		b = csiMode(b, 6, true)
-	}
 	y := t.cur.y
 	if t.origin {
+		b = csiMode(b, 6, true)
 		y -= t.top
 	}
 	if t.cur.wrapNext {
@@ -186,15 +181,7 @@ func (t *Terminal) appendScreen(b []byte, room int) ([]byte, bool) {
 	if t.newline {
 		b = append(b, "\x1b[20h"...)
 	}
-	if t.g[0] == csGraphics {
-		b = append(b, "\x1b(0"...)
-	}
-	if t.g[1] == csGraphics {
-		b = append(b, "\x1b)0"...)
-	}
-	if t.gl == 1 {
-		b = append(b, 0x0e)
-	}
+	b = appendCharsets(b, t.g, t.gl)
 	b = t.appendSGR(b, t.cur.pen)
 	if t.cursorStyle != 0 {
 		b = append(b, "\x1b["...)
@@ -210,7 +197,7 @@ func (t *Terminal) appendScreen(b []byte, room int) ([]byte, bool) {
 		b = append(b, "\x1b[?25h"...)
 	}
 	b = append(b, t.pending()...)
-	if over() {
+	if room > 0 && len(b) > room {
 		return nil, false
 	}
 	return b, true
@@ -245,7 +232,7 @@ func (t *Terminal) appendSaved(b []byte, s savedCursor) []byte {
 	if !s.valid {
 		return b
 	}
-	b = appendCursorState(t, b, s)
+	b = t.appendCursorState(b, s)
 	b = append(b, "\x1b7"...)
 	return resetCursorState(b)
 }
@@ -253,21 +240,28 @@ func (t *Terminal) appendSaved(b []byte, s savedCursor) []byte {
 // appendCursorState sets what DECSC saves to s. The scroll region is the
 // whole screen when it is called, so origin mode leaves positions as
 // they are.
-func appendCursorState(t *Terminal, b []byte, s savedCursor) []byte {
+func (t *Terminal) appendCursorState(b []byte, s savedCursor) []byte {
 	if s.origin {
 		b = csiMode(b, 6, true)
 	}
-	if s.g[0] == csGraphics {
-		b = append(b, "\x1b(0"...)
-	}
-	if s.g[1] == csGraphics {
-		b = append(b, "\x1b)0"...)
-	}
-	if s.gl == 1 {
-		b = append(b, 0x0e)
-	}
+	b = appendCharsets(b, s.g, s.gl)
 	b = cup(b, s.y, s.x)
 	return t.appendSGR(b, s.pen)
+}
+
+// appendCharsets designates G0 and G1 and shifts to gl, from the defaults
+// (both ASCII, G0 shifted in).
+func appendCharsets(b []byte, g [2]charset, gl int) []byte {
+	if g[0] == csGraphics {
+		b = append(b, "\x1b(0"...)
+	}
+	if g[1] == csGraphics {
+		b = append(b, "\x1b)0"...)
+	}
+	if gl == 1 {
+		b = append(b, 0x0e)
+	}
+	return b
 }
 
 func resetCursorState(b []byte) []byte {

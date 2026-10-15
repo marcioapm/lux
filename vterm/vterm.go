@@ -642,8 +642,7 @@ func (t *Terminal) raw(i int) int {
 
 func (t *Terminal) dispatchCSI(final byte) {
 	if t.prefix == '?' {
-		switch {
-		case t.inter == 0 && (final == 'h' || final == 'l'):
+		if t.inter == 0 && (final == 'h' || final == 'l') {
 			for i := 0; i < t.np; i++ {
 				t.setDECMode(t.raw(i), final == 'h')
 			}
@@ -653,19 +652,13 @@ func (t *Terminal) dispatchCSI(final byte) {
 	if t.prefix != 0 {
 		return // CSI > and CSI = sequences: not kept
 	}
-	switch t.inter {
-	case ' ':
-		if final == 'q' { // DECSCUSR
+	if t.inter != 0 {
+		switch {
+		case t.inter == ' ' && final == 'q': // DECSCUSR
 			t.cursorStyle = t.raw(0)
-		}
-		return
-	case '!':
-		if final == 'p' { // DECSTR
+		case t.inter == '!' && final == 'p': // DECSTR
 			t.softReset()
 		}
-		return
-	case 0:
-	default:
 		return
 	}
 	switch final {
@@ -1156,9 +1149,6 @@ var graphics = [...]rune{
 }
 
 func runeWidth(r rune) int {
-	if r >= 0x80 && r < 0xa0 {
-		return 0 // C1 controls
-	}
 	if r < 0x300 {
 		return 1
 	}
