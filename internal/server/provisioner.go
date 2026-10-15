@@ -33,6 +33,31 @@ type Provider interface {
 	// them. A host absent from the answer has no attachment yet; an empty
 	// slice: attachments, none deleted with it.
 	Volumes(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string][]HostVolume, error)
+	Network(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string]HostNetwork, error)
+	Prefixes(ctx context.Context, template json.RawMessage) (ProviderPrefixes, error)
+}
+
+// HostNetwork holds provider-discovered placement and billable IPv4 count.
+type HostNetwork struct {
+	SubnetCIDRs []string        `json:"subnetCidrs"`
+	Zone        string          `json:"zone"`
+	VPCSubnets  []NetworkSubnet `json:"vpcSubnets"`
+	PublicIPv4  int             `json:"publicIPv4"`
+}
+
+type NetworkSubnet struct {
+	CIDR string `json:"cidr"`
+	Zone string `json:"zone"`
+}
+
+// ProviderPrefixes preserves destination region and catalog provenance.
+type ProviderPrefixes struct {
+	Source         string
+	FetchedAt      time.Time
+	RegionService  []string
+	RegionPublic   []string
+	ProviderGlobal []string
+	Provider       map[string][]string
 }
 
 // HostVolume is one block-storage volume of a host: its type, provisioned size,
