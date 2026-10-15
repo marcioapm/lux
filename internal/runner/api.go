@@ -111,12 +111,12 @@ var errNoDirectUpload = errors.New("luxd has no direct upload route")
 // presigned URLs luxd hands out, then has luxd record it. f is read once to
 // hash it, then once per part to send it.
 func (a *api) uploadDirect(ctx context.Context, blobID string, f io.ReaderAt, size int64) error {
+	part := func(i int) io.Reader { return io.NewSectionReader(f, int64(i)*proto.BlobPartSize, partLen(size, i)) }
 	in := proto.BlobUploadRequest{Size: size}
 	whole := sha256.New()
 	for i := range proto.BlobParts(size) {
-		off := int64(i) * proto.BlobPartSize
 		h := sha256.New()
-		if _, err := io.Copy(io.MultiWriter(whole, h), io.NewSectionReader(f, off, partLen(size, i))); err != nil {
+		if _, err := io.Copy(io.MultiWriter(whole, h), part(i)); err != nil {
 			return err
 		}
 		in.Parts = append(in.Parts, base64.StdEncoding.EncodeToString(h.Sum(nil)))
@@ -124,10 +124,10 @@ func (a *api) uploadDirect(ctx context.Context, blobID string, f io.ReaderAt, si
 	in.SHA256 = hex.EncodeToString(whole.Sum(nil))
 	var out proto.BlobUploadResponse
 	if err := a.blobPost(ctx, blobID, "upload", in, &out); err != nil {
-		// A luxd without the route: the mux's own 404 (no lux error body)
-		// or 405. A lux not_found is the blob's, and keeps its meaning.
+		// A luxd without the route answers 405 or the mux's 404; a lux
+		// not_found is the blob's, and keeps its meaning.
 		var he *httpError
-		if errors.As(err, &he) && (he.Status == http.StatusMethodNotAllowed || he.Status == http.StatusNotFound && he.Code == "") {
+		if errors.As(err, &he) && (he.Status == http.StatusMethodNotAllowed || he.muxNotFound()) {
 			return errNoDirectUpload
 		}
 		return err
@@ -146,50 +146,40 @@ func (a *api) uploadDirect(ctx context.Context, blobID string, f io.ReaderAt, si
 		}
 		done.UploadID = out.UploadID
 		for i, p := range out.Parts {
-			n := partLen(size, i)
-			off := int64(i) * proto.BlobPartSize
-			etag, err := putPart(ctx, p.PresignedRequest, func() io.Reader { return io.NewSectionReader(f, off, n) }, n)
+			etag, err := putPart(ctx, p.PresignedRequest, func() io.Reader { return part(i) }, partLen(size, i))
 			if err != nil {
-				// Best effort: the runner's error is the part's either way.
-				_ = a.blobPost(ctx, blobID, "complete", proto.BlobCompleteRequest{UploadID: out.UploadID, Abort: true}, &struct{}{})
+				a.abortUpload(ctx, blobID, out.UploadID)
 				return fmt.Errorf("upload %s part %d: %w", blobID, p.Number, err)
 			}
 			done.Parts = append(done.Parts, proto.UploadedPart{Number: p.Number, ETag: etag, SHA256: in.Parts[i]})
 		}
 	}
-	err := a.blobPost(ctx, blobID, "complete", done, &struct{}{})
-	if done.UploadID != "" {
-		// The same parts complete the same upload id: a network error, a
-		// 5xx or the mux's 404 is retried in place, and an upload id given
-		// up on is aborted so its parts are not left in S3.
-		for attempt := 0; err != nil && retryableComplete(err) && attempt < len(partRetryDelays) && ctx.Err() == nil; attempt++ {
-			select {
-			case <-ctx.Done():
-			case <-time.After(partRetryDelays[attempt]):
-				err = a.blobPost(ctx, blobID, "complete", done, &struct{}{})
-			}
-		}
-		if err != nil {
-			_ = a.blobPost(ctx, blobID, "complete", proto.BlobCompleteRequest{UploadID: done.UploadID, Abort: true}, &struct{}{})
-		}
+	complete := func() error { return a.blobPost(ctx, blobID, "complete", done, &struct{}{}) }
+	var err error
+	if done.UploadID == "" {
+		err = complete()
+	} else if err = withRetries(ctx, retryableComplete, complete); err != nil {
+		a.abortUpload(ctx, blobID, done.UploadID)
 	}
-	// The mux's own 404 (an older luxd, or a proxy) did not record the
-	// upload: a plain error, retried, never the uploader's "deleted".
+	// The mux's own 404 did not record the upload: a plain error, retried,
+	// never the uploader's "deleted".
 	var he *httpError
-	if errors.As(err, &he) && he.Status == http.StatusNotFound && he.Code == "" {
+	if errors.As(err, &he) && he.muxNotFound() {
 		return fmt.Errorf("complete %s: %s", blobID, he.Msg)
 	}
 	return err
+}
+
+// abortUpload has luxd drop the parts of an upload id given up on; best effort.
+func (a *api) abortUpload(ctx context.Context, blobID, uploadID string) {
+	_ = a.blobPost(ctx, blobID, "complete", proto.BlobCompleteRequest{UploadID: uploadID, Abort: true}, &struct{}{})
 }
 
 // retryableComplete: luxd did not answer, answered a 5xx (S3 unavailable),
 // or the answer was the mux's own 404 rather than luxd's.
 func retryableComplete(err error) bool {
 	var he *httpError
-	if !errors.As(err, &he) {
-		return true
-	}
-	return he.Status/100 == 5 || he.Status == http.StatusNotFound && he.Code == ""
+	return !errors.As(err, &he) || he.Status/100 == 5 || he.muxNotFound()
 }
 
 // partLen is the length of part i (0-based) of a blob of size bytes.
@@ -197,26 +187,40 @@ func partLen(size int64, i int) int64 {
 	return max(0, min(proto.BlobPartSize, size-int64(i)*proto.BlobPartSize))
 }
 
-// partRetryDelays are the waits before a part's second and third
-// attempts. A var so tests need not wait.
+// partRetryDelays precede a second and third attempt; a var so tests need not wait.
 var partRetryDelays = []time.Duration{200 * time.Millisecond, time.Second}
+
+// withRetries calls do until it succeeds, fails with an error retryable
+// refuses, ctx ends, or partRetryDelays run out.
+func withRetries(ctx context.Context, retryable func(error) bool, do func() error) error {
+	err := do()
+	for _, d := range partRetryDelays {
+		if err == nil || !retryable(err) || ctx.Err() != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(d):
+		}
+		err = do()
+	}
+	return err
+}
 
 // putPart is putPresigned with retries on a network error or an S3 5xx,
 // each attempt with a fresh body from body(). A 4xx (an expired URL, a
 // refused checksum) is final.
 func putPart(ctx context.Context, p proto.PresignedRequest, body func() io.Reader, n int64) (string, error) {
-	for attempt := 0; ; attempt++ {
-		etag, err := putPresigned(ctx, p, body(), n)
+	var etag string
+	err := withRetries(ctx, func(err error) bool {
 		var se *s3Error
-		if err == nil || attempt == len(partRetryDelays) || errors.As(err, &se) && se.status/100 == 4 || ctx.Err() != nil {
-			return etag, err
-		}
-		select {
-		case <-ctx.Done():
-			return "", err
-		case <-time.After(partRetryDelays[attempt]):
-		}
-	}
+		return !errors.As(err, &se) || se.status/100 != 4
+	}, func() (err error) {
+		etag, err = putPresigned(ctx, p, body(), n)
+		return err
+	})
+	return etag, err
 }
 
 // s3Error is S3's error answer to a presigned request.
@@ -341,3 +345,6 @@ type httpError struct {
 }
 
 func (e *httpError) Error() string { return e.Msg }
+
+// muxNotFound: a 404 without luxd's error body, from a mux (an older luxd, or a proxy).
+func (e *httpError) muxNotFound() bool { return e.Status == http.StatusNotFound && e.Code == "" }

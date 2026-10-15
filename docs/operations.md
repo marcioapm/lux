@@ -300,7 +300,7 @@ reach S3 in the background:
    (which downloads already use). luxd still accepts the older
    `PUT /runner/v1/blobs/{id}`, streaming the body into S3 and verifying
    its sha256 on the way, for runners that predate direct uploads. A part
-   that fails on the network or with an S3 5xx is retried up to three
+   that fails on the network or with an S3 5xx is tried up to three
    times; a blob whose part still fails is retried from the start, and the
    runner first has luxd abort the multipart upload it gave up on. luxd also
    aborts one S3 refuses to complete; the bucket's lifecycle rule, after 7

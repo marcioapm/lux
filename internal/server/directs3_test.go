@@ -267,6 +267,37 @@ func putPresigned(t *testing.T, p proto.PresignedRequest, body []byte) (int, str
 	return resp.StatusCode, resp.Header.Get("ETag")
 }
 
+// startUpload asks ha's /upload for blob id's URLs, failing the test on
+// anything but 200.
+func startUpload(t *testing.T, s *Server, id string, content []byte) proto.BlobUploadResponse {
+	t.Helper()
+	code, raw := runnerPost(t, s, "ha", id, "upload", uploadRequest(content))
+	if code != http.StatusOK {
+		t.Fatalf("upload: %d %s", code, raw)
+	}
+	var out proto.BlobUploadResponse
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// putSingle starts ha's upload of a single-part blob id and PUTs content
+// to its presigned URL, without /complete.
+func putSingle(t *testing.T, s *Server, id string, content []byte) {
+	t.Helper()
+	out := startUpload(t, s, id, content)
+	if code, _ := putPresigned(t, *out.Single, content); code != http.StatusOK {
+		t.Fatalf("PUT: %d", code)
+	}
+}
+
+// hostArtifact puts bA-art back on its host with content's sha256 and size.
+func hostArtifact(t *testing.T, s *Server, ctx context.Context, content []byte) {
+	t.Helper()
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL, sha256 = $1, size = $2 WHERE id = 'bA-art'`, sha(string(content)), len(content))
+}
+
 // directUpload uploads content to blob id from host through /upload, the
 // presigned PUTs and /complete. Returns /complete's status and body.
 func directUpload(t *testing.T, s *Server, host, id string, content []byte) (int, string) {
@@ -441,12 +472,7 @@ func TestDirectUploadRefusals(t *testing.T) {
 	}
 	setBlob(t, s, "bA-art", content)
 	// A body other than the one presigned is refused by S3.
-	code, raw := runnerPost(t, s, "ha", "bA-art", "upload", uploadRequest(content))
-	if code != http.StatusOK {
-		t.Fatalf("upload: %d %s", code, raw)
-	}
-	var out proto.BlobUploadResponse
-	_ = json.Unmarshal([]byte(raw), &out)
+	out := startUpload(t, s, "bA-art", content)
 	if code, _ := putPresigned(t, *out.Single, []byte("other bytes!!!")); code == http.StatusOK {
 		t.Fatal("S3 accepted another body")
 	}
@@ -541,12 +567,7 @@ func TestDirectUploadAbort(t *testing.T) {
 	f := useDirectS3(t, s)
 	vol := bytes.Repeat([]byte("v"), proto.BlobPartSize+5)
 	setBlob(t, s, "bA-vol", vol)
-	code, raw := runnerPost(t, s, "ha", "bA-vol", "upload", uploadRequest(vol))
-	if code != http.StatusOK {
-		t.Fatalf("upload: %d %s", code, raw)
-	}
-	var out proto.BlobUploadResponse
-	_ = json.Unmarshal([]byte(raw), &out)
+	out := startUpload(t, s, "bA-vol", vol)
 	if code, _ := putPresigned(t, out.Parts[0].PresignedRequest, vol[:proto.BlobPartSize]); code != http.StatusOK {
 		t.Fatalf("PUT part 1: %d", code)
 	}
@@ -575,16 +596,8 @@ func TestDeleteArtifactsDeletesUncompletedDirectUpload(t *testing.T) {
 	s, ctx, _ := retentionFixture(t, StateTerminated, StateTerminated, 1, 1)
 	f := useDirectS3(t, s)
 	content := []byte("artifact bytes")
-	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL, sha256 = $1, size = $2 WHERE id = 'bA-art'`, sha(string(content)), len(content))
-	code, raw := runnerPost(t, s, "ha", "bA-art", "upload", uploadRequest(content))
-	if code != http.StatusOK {
-		t.Fatalf("upload: %d %s", code, raw)
-	}
-	var out proto.BlobUploadResponse
-	_ = json.Unmarshal([]byte(raw), &out)
-	if code, _ := putPresigned(t, *out.Single, content); code != http.StatusOK {
-		t.Fatalf("PUT: %d", code)
-	}
+	hostArtifact(t, s, ctx, content)
+	putSingle(t, s, "bA-art", content)
 	if code, _ := callJSON(t, s, apiKey(t, s, new("t1"), "run"), http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusOK {
 		t.Fatalf("delete: %d", code)
 	}
@@ -606,16 +619,8 @@ func TestDirectUploadStartOfDeletedBlob(t *testing.T) {
 	s, ctx, _ := retentionFixture(t, StateTerminated, StateTerminated, 1, 1)
 	f := useDirectS3(t, s)
 	content := []byte("artifact bytes")
-	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL, sha256 = $1, size = $2 WHERE id = 'bA-art'`, sha(string(content)), len(content))
-	code, raw := runnerPost(t, s, "ha", "bA-art", "upload", uploadRequest(content))
-	if code != http.StatusOK {
-		t.Fatalf("upload: %d %s", code, raw)
-	}
-	var out proto.BlobUploadResponse
-	_ = json.Unmarshal([]byte(raw), &out)
-	if code, _ := putPresigned(t, *out.Single, content); code != http.StatusOK {
-		t.Fatalf("PUT: %d", code)
-	}
+	hostArtifact(t, s, ctx, content)
+	putSingle(t, s, "bA-art", content)
 	if code, _ := callJSON(t, s, apiKey(t, s, new("t1"), "run"), http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusOK {
 		t.Fatalf("delete: %d", code)
 	}
@@ -643,22 +648,14 @@ func TestDeleteArtifactsDuringDirectUpload(t *testing.T) {
 			s, ctx, _ := retentionFixture(t, StateTerminated, StateTerminated, 1, 1)
 			f := useDirectS3(t, s)
 			content := []byte("artifact bytes")
-			execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL, sha256 = $1, size = $2 WHERE id = 'bA-art'`, sha(string(content)), len(content))
+			hostArtifact(t, s, ctx, content)
 			apiK := apiKey(t, s, new("t1"), "run")
 			del := func() {
 				if code, _ := callJSON(t, s, apiK, http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusOK {
 					t.Errorf("delete: %d", code)
 				}
 			}
-			code, raw := runnerPost(t, s, "ha", "bA-art", "upload", uploadRequest(content))
-			if code != http.StatusOK {
-				t.Fatalf("upload: %d %s", code, raw)
-			}
-			var out proto.BlobUploadResponse
-			_ = json.Unmarshal([]byte(raw), &out)
-			if code, _ := putPresigned(t, *out.Single, content); code != http.StatusOK {
-				t.Fatalf("PUT: %d", code)
-			}
+			putSingle(t, s, "bA-art", content)
 			key := blob.Key("t1", "ra", "bA-art")
 			// After the delete (and its own key delete), the object is
 			// written again, as a PUT racing the claim would: only

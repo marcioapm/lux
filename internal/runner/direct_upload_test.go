@@ -219,8 +219,7 @@ func TestUploadDirectMultipart(t *testing.T) {
 	if !bytes.Equal(fk.bodies["1"], p1) || !bytes.Equal(fk.bodies["2"], p2) {
 		t.Fatalf("S3 parts: %q", fk.puts)
 	}
-	want := proto.BlobCompleteRequest{UploadID: "up-1", Parts: []proto.UploadedPart{
-		{Number: 1, ETag: `"etag-1"`, SHA256: b64(p1)}, {Number: 2, ETag: `"etag-2"`, SHA256: b64(p2)}}}
+	want := twoPartDone(content)
 	if len(fk.completes) != 1 || !equalComplete(fk.completes[0], want) {
 		t.Fatalf("/complete %+v, want %+v", fk.completes, want)
 	}
@@ -230,6 +229,13 @@ func equalComplete(a, b proto.BlobCompleteRequest) bool {
 	ja, _ := json.Marshal(a)
 	jb, _ := json.Marshal(b)
 	return bytes.Equal(ja, jb)
+}
+
+// twoPartDone is the /complete of content's two-part upload through fk.
+func twoPartDone(content []byte) proto.BlobCompleteRequest {
+	p1, p2 := content[:proto.BlobPartSize], content[proto.BlobPartSize:]
+	return proto.BlobCompleteRequest{UploadID: "up-1", Parts: []proto.UploadedPart{
+		{Number: 1, ETag: `"etag-1"`, SHA256: b64(p1)}, {Number: 2, ETag: `"etag-2"`, SHA256: b64(p2)}}}
 }
 
 // A small blob is one PutObject with the whole file's checksum; an empty
@@ -343,9 +349,7 @@ func TestUploaderRetriesCompleteInPlace(t *testing.T) {
 	}
 	fk.mu.Lock()
 	defer fk.mu.Unlock()
-	want := proto.BlobCompleteRequest{UploadID: "up-1", Parts: []proto.UploadedPart{
-		{Number: 1, ETag: `"etag-1"`, SHA256: b64(content[:proto.BlobPartSize])},
-		{Number: 2, ETag: `"etag-2"`, SHA256: b64(content[proto.BlobPartSize:])}}}
+	want := twoPartDone(content)
 	if len(fk.requests) != 1 || len(fk.completes) != 2 || !equalComplete(fk.completes[0], want) || !equalComplete(fk.completes[1], want) {
 		t.Fatalf("/upload %d, /complete %+v, want twice %+v", len(fk.requests), fk.completes, want)
 	}
@@ -369,12 +373,9 @@ func TestUploadDirectCompleteFailureAborts(t *testing.T) {
 			if !errors.As(err, &he) || he.Status != c.status || he.Code != c.code {
 				t.Fatalf("err %v, want luxd's %d %s", err, c.status, c.code)
 			}
-			done := proto.BlobCompleteRequest{UploadID: "up-1", Parts: []proto.UploadedPart{
-				{Number: 1, ETag: `"etag-1"`, SHA256: b64(content[:proto.BlobPartSize])},
-				{Number: 2, ETag: `"etag-2"`, SHA256: b64(content[proto.BlobPartSize:])}}}
 			var want []proto.BlobCompleteRequest
 			for range c.attempts {
-				want = append(want, done)
+				want = append(want, twoPartDone(content))
 			}
 			want = append(want, proto.BlobCompleteRequest{UploadID: "up-1", Abort: true})
 			ja, _ := json.Marshal(fk.completes)
