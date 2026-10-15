@@ -68,8 +68,17 @@ func injectProxyFixture(t *testing.T) (appURL string, s *Server, do func(host, m
 			case <-r.Context().Done():
 			case <-time.After(10 * time.Second):
 			}
+		case "/xhtml":
+			h.Set("Content-Type", "application/xhtml+xml")
+			_, _ = w.Write([]byte(injectPage))
+		case "/identity":
+			h.Set("Content-Type", "text/html")
+			h.Set("Content-Encoding", "identity")
+			_, _ = w.Write([]byte(injectPage))
 		default:
 			h.Set("Content-Type", "text/html; charset=utf-8")
+			h.Set("Content-MD5", "Q2hlY2sgSW50ZWdyaXR5IQ==")
+			h.Set("Digest", "sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=")
 			_, _ = w.Write([]byte(injectPage))
 		}
 	}))
@@ -135,7 +144,7 @@ func TestPreviewInjectNavigation(t *testing.T) {
 		t.Fatalf("navigation: %d %q", w.Code, w.Body)
 	}
 	h := w.Header()
-	for _, k := range []string{"Content-Length", "ETag", "Last-Modified"} {
+	for _, k := range []string{"Content-Length", "ETag", "Last-Modified", "Content-MD5", "Digest"} {
 		if v := h.Get(k); v != "" {
 			t.Errorf("%s kept: %q", k, v)
 		}
@@ -158,6 +167,10 @@ func TestPreviewInjectNavigation(t *testing.T) {
 	if w := do("web", http.MethodGet, "/", http.Header{"Sec-Fetch-Dest": {"iframe"}}); w.Body.String() != want {
 		t.Fatalf("iframe: %q", w.Body)
 	}
+	// Content-Encoding: identity is no encoding.
+	if w := do("web", http.MethodGet, "/identity", navHeaders()); w.Body.String() != want {
+		t.Fatalf("identity: %q", w.Body)
+	}
 }
 
 // Everything that is not an HTML 200 for a document navigation of a server
@@ -178,6 +191,8 @@ func TestPreviewInjectPassThrough(t *testing.T) {
 		{"404", "web", "GET", "/missing", nav, false},
 		{"json", "web", "GET", "/api", nav, false},
 		{"gzip anyway", "web", "GET", "/gz", nav, false},
+		{"xhtml", "web", "GET", "/xhtml", nav, false},
+		{"lux path", "web", "GET", "/.lux/page", nav, true},
 		{"no inject", "plain", "GET", "/", nav, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -193,7 +208,7 @@ func TestPreviewInjectPassThrough(t *testing.T) {
 			if w.Code != direct.StatusCode || !bytes.Equal(w.Body.Bytes(), direct.body) {
 				t.Fatalf("body changed: %d %q, want %d %q", w.Code, w.Body, direct.StatusCode, direct.body)
 			}
-			for _, k := range []string{"Content-Length", "ETag", "Last-Modified", "Content-Type", "Content-Encoding", "Cache-Control", "Content-Security-Policy", "Vary"} {
+			for _, k := range []string{"Content-Length", "ETag", "Last-Modified", "Content-Type", "Content-Encoding", "Cache-Control", "Content-Security-Policy", "Vary", "Content-MD5", "Digest"} {
 				if got, want := w.Header().Values(k), direct.Header.Values(k); !slices.Equal(got, want) {
 					t.Errorf("%s: %q, want %q", k, got, want)
 				}

@@ -63,6 +63,13 @@ func TestServerInjectCarried(t *testing.T) {
 	if w := apiCall(t, s, key, http.MethodPut, "/v1/runs/"+r1+"/servers/api", map[string]any{"port": 3000, "inject": "a\x00"}); w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("put NUL: %d %s", w.Code, w.Body)
 	}
+	// PUT replaces the whole server: leaving inject out clears it.
+	w = apiCall(t, s, key, http.MethodPut, "/v1/runs/"+r1+"/servers/api", map[string]any{"port": 3000})
+	rs = RunServer{}
+	_ = json.Unmarshal(w.Body.Bytes(), &rs)
+	if w.Code != http.StatusOK || rs.Inject != "" {
+		t.Fatalf("put without inject: %d %s", w.Code, w.Body)
+	}
 
 	// The tenant's servers: POST, PATCH sets and clears, a PATCH without
 	// it keeps it.
