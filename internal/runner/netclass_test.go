@@ -295,6 +295,41 @@ func TestSampleBeforeWelcomeThenRestartSeedsOnce(t *testing.T) {
 	}
 }
 
+func TestCorruptHostNetworkStateRefused(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "network.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{cfg: Config{DataDir: dir}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), egress: egress.Unloaded(), placements: map[string]*placement{}}
+	if err := r.restoreHostNetwork("boot-1"); err == nil {
+		t.Fatal("corrupt network.json accepted")
+	}
+}
+
+func TestHostSamplePersistsResetFold(t *testing.T) {
+	r, _, _ := fakeNftRunner(t)
+	dir := t.TempDir()
+	r.cfg.DataDir = dir
+	if err := r.restoreHostNetwork("boot-1"); err != nil {
+		t.Fatal(err)
+	}
+	counters := filepath.Join(filepath.SplitList(os.Getenv("PATH"))[0], "counters.json")
+	for _, v := range []int64{100, 0, 40} {
+		doc := fmt.Sprintf(`{"nftables":[{"counter":{"family":"inet","table":"lux","name":"lux_host_internet_tx","bytes":%d}}]}`, v)
+		if err := os.WriteFile(counters, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r.sampleNetwork()
+	}
+	restarted := &Runner{cfg: Config{DataDir: dir}, log: r.log, egress: egress.Unloaded(), placements: map[string]*placement{}}
+	if err := restarted.restoreHostNetwork("boot-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.hostNet.value()["internet"].Tx; got != 140 {
+		t.Fatalf("restored %d, want 140", got)
+	}
+}
+
 func TestUsageNetCompatibility(t *testing.T) {
 	raw, err := json.Marshal(proto.Usage{})
 	if err != nil {
