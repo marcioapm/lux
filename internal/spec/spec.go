@@ -110,7 +110,7 @@ type Server struct {
 	Workdir   string            `json:"workdir,omitempty" yaml:"workdir,omitempty" doc:"Where the command runs; a relative path is against the workload's workdir (default: the workload's workdir)."`
 	Env       map[string]string `json:"env,omitempty" yaml:"env,omitempty" doc:"More environment for the command (not secret: it is stored with the Run)."`
 	AfterSync []string          `json:"afterSync,omitempty" yaml:"afterSync,omitempty" doc:"argv run before the command whenever it starts after a repository sync (a resume with sync, POST /v1/runs/{id}/sync), e.g. an install. Without it a sync of a running Run leaves the server running (hot reload)."`
-	Inject    string            `json:"inject,omitempty" yaml:"inject,omitempty" doc:"HTML added to every HTML page its preview serves, right after the page's <head> tag: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page."`
+	Inject    string            `json:"inject,omitempty" yaml:"inject,omitempty" doc:"HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."`
 }
 
 // MaxServerInject bounds a server's inject, in bytes.

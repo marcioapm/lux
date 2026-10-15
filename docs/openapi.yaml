@@ -472,7 +472,7 @@ components:
               type: string
             - type: number
         inject:
-          description: "HTML added to every HTML page its preview serves, right after the page's <head> tag: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."
+          description: "HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."
           type: string
         labels:
           additionalProperties:
@@ -3321,7 +3321,7 @@ components:
           description: "More environment for the command (not secret: it is stored with the Run)."
           type: object
         inject:
-          description: "HTML added to every HTML page its preview serves, right after the page's <head> tag: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page."
+          description: "HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."
           type: string
         name:
           description: "Unique: 1-30 lowercase letters, digits and -, starting with a letter, not ending in -. Its preview URL is <name>-<8 characters of its id>.<preview domain>."
@@ -3357,7 +3357,7 @@ components:
           description: More environment for its command (not secret).
           type: object
         inject:
-          description: "HTML added to every HTML page its preview serves, right after the page's <head> tag: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."
+          description: "HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."
           type: string
         labels:
           additionalProperties:
@@ -8117,7 +8117,7 @@ paths:
         - servers
     put:
       description: |-
-        Its port, command, workdir and env. A running one keeps what it was started with until it is started again.
+        Its port, command, workdir, env, afterSync and inject: what the body leaves out is cleared. A running one keeps what it was started with until it is started again.
 
         Needs the `run` scope.
       operationId: putServer

@@ -175,7 +175,7 @@ type CreateServerInput struct {
 	Workdir     string            `json:"workdir,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 	AfterSync   []string          `json:"afterSync,omitempty" doc:"argv run before the command when it starts after a repository sync."`
-	Inject      string            `json:"inject,omitempty" doc:"HTML added to every HTML page its preview serves, right after the page's <head> tag: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."`
+	Inject      string            `json:"inject,omitempty" doc:"HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Hostname    string            `json:"hostname,omitempty" doc:"Its unique preview host name: a full name under the preview domain (any number of labels), or one DNS label without a dot (1-63 characters), to which lux appends the domain. Default: <name>-<8 characters of its id>.<domain>."`
 	Wake        string            `json:"wake,omitempty" enum:"request,never" doc:"request: a signed-in request while no running Run serves it asks its owner for one (server.wake_requested on GET /v1/events). Default never."`

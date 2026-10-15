@@ -667,9 +667,11 @@ lux does not parse the page: it looks at most at its first 32 KiB for the
 first `<head` tag (case-insensitive; `<header>` is not one) and adds the
 snippet after its `>`. Without one there, it goes right before the first
 `<body` tag; without either, after a leading `<!doctype …>`, else at the
-very start. The rest of the page streams as it comes. A page the server
-compresses anyway (`Content-Encoding` other than `identity`) passes
-untouched: lux never decompresses. An injected page loses its
+very start. lux does not parse HTML: a `<head` or `<body` inside a
+comment or script before the real tag is taken for it. The rest of the
+page streams as it comes. A page the server compresses anyway
+(`Content-Encoding` other than `identity`) passes untouched: lux never
+decompresses. An injected page loses its
 `Content-Length`, `ETag`, `Content-MD5`, `Digest` and `Last-Modified`;
 `Cache-Control` stays as the server sent it.
 

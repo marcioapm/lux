@@ -124,7 +124,7 @@ type serverFlags struct {
 
 func (f *serverFlags) add(cmd *cobra.Command, create bool) {
 	cmd.Flags().StringVar(&f.workdir, "workdir", "", "where the command runs (relative: to the workload's workdir)")
-	cmd.Flags().StringVar(&f.inject, "inject", "", "HTML its preview adds right after <head> on every HTML page (\"\": none; not secret)")
+	cmd.Flags().StringVar(&f.inject, "inject", "", "HTML added right after the <head> tag of the HTML pages a browser navigates to (\"\": none; not secret)")
 	cmd.Flags().StringArrayVar(&f.envs, "env", nil, "K=V for its command (repeatable)")
 	cmd.Flags().StringArrayVarP(&f.labels, "label", "l", nil, "K=V label (repeatable)")
 	cmd.Flags().StringVar(&f.wake, "wake", "", "request: a request while nothing serves it asks its owner for a Run (server.wake_requested); never")
@@ -371,7 +371,7 @@ must be running) unless --no-start.`,
 	}
 	cmd.Flags().StringVar(&workdir, "workdir", "", "where the command runs (relative: to the workload's workdir)")
 	cmd.Flags().StringArrayVar(&envs, "env", nil, "K=V for its command (repeatable)")
-	cmd.Flags().StringVar(&inject, "inject", "", "HTML its preview adds right after <head> on every HTML page (not secret)")
+	cmd.Flags().StringVar(&inject, "inject", "", "HTML added right after the <head> tag of the HTML pages a browser navigates to (not secret)")
 	cmd.Flags().BoolVar(&noStart, "no-start", false, "add it without starting it")
 	return cmd
 }

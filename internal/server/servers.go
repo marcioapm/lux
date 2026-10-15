@@ -710,7 +710,7 @@ type ServerInput struct {
 	Workdir   string            `json:"workdir,omitempty" doc:"Where the command runs; relative: against the workload's workdir."`
 	Env       map[string]string `json:"env,omitempty" doc:"More environment for its command (not secret)."`
 	AfterSync []string          `json:"afterSync,omitempty" doc:"argv run before the command when it starts after a repository sync."`
-	Inject    string            `json:"inject,omitempty" doc:"HTML added to every HTML page its preview serves, right after the page's <head> tag: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."`
+	Inject    string            `json:"inject,omitempty" doc:"HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."`
 	Start     *bool             `json:"start,omitempty" doc:"POST: start it now (the Run must be running). Default: true when it has a command."`
 	Lifetime  string            `json:"lifetime,omitempty" enum:"run,owner" doc:"POST: run (default): deleted when the Run finishes for good; owner: kept, detached, until deleted (DELETE /v1/servers/{id})."`
 	Labels    map[string]string `json:"labels,omitempty" doc:"POST: free-form labels (GET /v1/servers?label=k=v)."`
