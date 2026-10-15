@@ -37,6 +37,13 @@ func TestInjectPlacement(t *testing.T) {
 		{"head after the window, doctype", "<!doctype html>" + big + "<head>z", "<!doctype html>" + snip + big + "<head>z"},
 		{"head unclosed in the window, body", "<body>" + "<head " + big, snip + "<body>" + "<head " + big},
 		{"head straddles the window's end", big[:injectWindow-3] + "<head>z", snip + big[:injectWindow-3] + "<head>z"},
+		{"body in a comment before head", "<!doctype html><!-- <body> --><html><head><title>", "<!doctype html><!-- <body> --><html><head>" + snip + "<title>"},
+		{"head in a comment", "<!-- <head> --><head>x", "<!-- <head> --><head>" + snip + "x"},
+		{"comment unclosed through the window", "<!doctype html><!-- <head> " + big + "--><head>z", "<!doctype html>" + snip + "<!-- <head> " + big + "--><head>z"},
+		{"body before head", "<body>a<head>b", snip + "<body>a<head>b"},
+		{"body inside head's attribute", `<head data-x="<body>">x`, `<head data-x="<body>">` + snip + "x"},
+		// Documented limitation: a scan, not a parser, takes this <body for the tag.
+		{"body inside an earlier tag's attribute", `<html data-x="<body>"><head>x`, `<html data-x="` + snip + `<body>"><head>x`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for _, wrap := range []struct {

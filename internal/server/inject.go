@@ -73,7 +73,7 @@ type injectBody struct {
 	src     io.ReadCloser
 	snippet []byte
 	buf     []byte // held while undecided
-	from    int    // where the <head search resumes in buf
+	from    int    // where the scan (firstTag) resumes in buf
 	decided bool
 	pending io.Reader // decided bytes not yet returned
 	err     error     // src's error, returned once pending is out
@@ -114,66 +114,75 @@ func (b *injectBody) Read(p []byte) (int, error) {
 
 func (b *injectBody) Close() error { return b.src.Close() }
 
-// findInjectAt is where the snippet goes in the start of a page: right
-// after the first <head tag; without one before the first <body tag (or in
-// the window), right before that <body tag; without either, after a
-// leading <!doctype …> (never before it: the page would render in quirks
-// mode), else at the start.
-// ok is false while it cannot tell yet (more of the window may hold a
-// <head); final says no more is coming. from is where a <head can still
-// start (nothing before it can), returned for the next call.
+// findInjectAt is where the snippet goes in the start of a page. The first
+// complete <head…> or <body…> tag wins, as in the HTML parser (a <head>
+// after <body> is ignored): right after a <head…> tag, right before a
+// <body…> tag. Without either in the window, after a leading <!doctype …>
+// (never before it: the page would render in quirks mode), else at the
+// start. A <head or <body inside an earlier tag's attribute value or a
+// script is taken for the tag: this is a scan, not an HTML parser.
+// ok is false while it cannot tell yet; final says no more is coming. from
+// is where the scan resumes (nothing before it can matter), returned for
+// the next call.
 func findInjectAt(buf []byte, from int, final bool) (at, next int, ok bool) {
-	end, partial := findTag(buf, from, "<head", true)
-	if end >= 0 {
-		return end, 0, true
-	}
-	body, _ := findTag(buf, 0, "<body", false)
+	at, partial := firstTag(buf, from)
 	switch {
-	case final && body >= 0:
-		return body, 0, true
+	case at >= 0:
+		return at, 0, true
 	case final:
 		return afterDoctype(buf), 0, true
-	// A <head after <body> is ignored by the HTML parser, so a complete
-	// <body tag ahead of any <head candidate settles it before the end.
-	case body >= 0 && (partial < 0 || body < partial) && tagEnd(buf, body+len("<body")) >= 0:
-		return body, 0, true
 	case partial >= 0:
 		return 0, partial, false
 	}
 	return 0, len(buf), false
 }
 
-// findTag finds the first tag named by name ("<head"), case-insensitive,
-// whose name ends there (then '>' or whitespace: "<header>" is not one).
-// closed: at is the index after the tag's '>' (quoted attribute values
-// skipped); otherwise the index of its '<'. -1 when there is none; partial
-// is then the index of a candidate the buffer ends inside, or -1. Every
-// '<' before partial (or the buffer's end) is ruled out for good.
-func findTag(buf []byte, from int, name string, closed bool) (at, partial int) {
-	n := len(name)
+// firstTag scans buf from from for the first complete <head…> or <body…>
+// tag (case-insensitive; the name ends with '>' or whitespace, so
+// "<header>" is not one; '>' in quoted values skipped), stepping over
+// <!-- … --> comments. at is the index after a <head…> tag's '>' or the '<'
+// of a <body…> tag, else -1. partial is then the '<' of a tag or comment
+// the buffer ends inside, else -1; everything after it is inside it, so no
+// complete tag can follow.
+func firstTag(buf []byte, from int) (at, partial int) {
+	const open, n = "<!--", len("<head")
 	for i := from; i < len(buf); i++ {
 		if buf[i] != '<' {
 			continue
 		}
 		rest := buf[i:]
+		if bytes.HasPrefix(rest, []byte(open)) {
+			j := bytes.Index(rest[len(open):], []byte("-->"))
+			if j < 0 {
+				return -1, i
+			}
+			i += len(open) + j + len("--")
+			continue
+		}
 		if len(rest) <= n {
-			if strings.EqualFold(string(rest), name[:len(rest)]) {
+			if bytes.HasPrefix([]byte(open), rest) || prefixFold(rest, "<head") || prefixFold(rest, "<body") {
 				return -1, i
 			}
 			continue
 		}
-		if !strings.EqualFold(string(rest[:n]), name) || !tagBoundary(rest[n]) {
+		name := strings.ToLower(string(rest[:n]))
+		if (name != "<head" && name != "<body") || !tagBoundary(rest[n]) {
 			continue
 		}
-		if !closed {
-			return i, -1
+		end := tagEnd(buf, i+n)
+		switch {
+		case end < 0:
+			return -1, i
+		case name == "<head":
+			return end, -1
 		}
-		if j := tagEnd(buf, i+n); j >= 0 {
-			return j, -1
-		}
-		return -1, i
+		return i, -1
 	}
 	return -1, -1
+}
+
+func prefixFold(b []byte, s string) bool {
+	return len(b) <= len(s) && strings.EqualFold(string(b), s[:len(b)])
 }
 
 func tagBoundary(c byte) bool {

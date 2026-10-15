@@ -79,6 +79,7 @@ func injectProxyFixture(t *testing.T) (appURL string, s *Server, do func(host, m
 			h.Set("Content-Type", "text/html; charset=utf-8")
 			h.Set("Content-MD5", "Q2hlY2sgSW50ZWdyaXR5IQ==")
 			h.Set("Digest", "sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=")
+			h.Set("Vary", "Origin")
 			_, _ = w.Write([]byte(injectPage))
 		}
 	}))
@@ -152,7 +153,7 @@ func TestPreviewInjectNavigation(t *testing.T) {
 	if h.Get("Cache-Control") != "max-age=60" || h.Get("Content-Security-Policy") != "script-src 'self'" {
 		t.Errorf("cache-control or CSP changed: %v", h)
 	}
-	if v := h.Values("Vary"); !slices.Equal(v, []string{"Sec-Fetch-Dest", "Accept"}) {
+	if v := h.Values("Vary"); !slices.Equal(v, []string{"Origin", "Sec-Fetch-Dest", "Accept"}) {
 		t.Errorf("Vary: %q", v)
 	}
 	up := seen()
