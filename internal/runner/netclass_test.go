@@ -2,9 +2,12 @@ package runner
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"maps"
 	"testing"
 
+	"github.com/marcioapm/lux/internal/egress"
 	"github.com/marcioapm/lux/internal/proto"
 )
 
@@ -78,5 +81,37 @@ func TestUsageNetCompatibility(t *testing.T) {
 	}
 	if !maps.Equal(got.Net, want.Net) {
 		t.Fatal(got.Net)
+	}
+}
+
+// A host that rebooted (Unloaded keeps no counters, as after a reboot)
+// starts its total from what luxd recorded; a reconnect does not add it
+// again.
+func TestWelcomeSeedsHostTrafficOnce(t *testing.T) {
+	r := &Runner{log: slog.New(slog.NewTextHandler(io.Discard, nil)), egress: egress.Unloaded(), placements: map[string]*placement{}}
+	recorded := map[string]proto.NetBytes{"internet": {Rx: 500, Tx: 70}}
+	r.welcomeNetwork(proto.Welcome{HostNet: recorded})
+	r.welcomeNetwork(proto.Welcome{HostNet: recorded})
+	if got := r.hostNet.value(); !maps.Equal(got, recorded) {
+		t.Errorf("after a reboot and a reconnect: %v, want %v", got, recorded)
+	}
+}
+
+// A placement re-adopted from Live continues from what luxd recorded when
+// that is more than the kernel's counters hold.
+func TestWelcomeRaisesReadoptedPlacement(t *testing.T) {
+	r := &Runner{log: slog.New(slog.NewTextHandler(io.Discard, nil)), egress: egress.Unloaded(), placements: map[string]*placement{}}
+	p := &placement{r: r, runID: "run1", epoch: 2, phase: "running"}
+	p.netClasses.observe(map[string]proto.NetBytes{"zone": {Tx: 10}})
+	r.placements["run1"] = p
+	r.welcomeNetwork(proto.Welcome{Live: []proto.LivePlacement{{RunID: "run1", Epoch: 2, State: "running",
+		Usage: &proto.Usage{Net: map[string]proto.NetBytes{"zone": {Tx: 40}, "provider:eu-west-1": {Rx: 3}}}}}})
+	want := map[string]proto.NetBytes{"zone": {Tx: 40}, "provider:eu-west-1": {Rx: 3}}
+	if got := p.usage().Net; !maps.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	p.netClasses.observe(map[string]proto.NetBytes{"zone": {Tx: 15}})
+	if got := p.usage().Net["zone"].Tx; got != 45 {
+		t.Errorf("after 5 more bytes: %d, want 45", got)
 	}
 }

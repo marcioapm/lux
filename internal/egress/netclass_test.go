@@ -330,6 +330,7 @@ func TestRunnerRestartKeepsKernelCounters(t *testing.T) {
 	k := newKernel()
 	f1 := setupRun(t, k, catalog("v1"), true)
 	k.send(out("8.8.8.8", 100), false)
+	k.send(out("34.241.0.1", 30), false)
 	k.send(packet{hook: "output", oif: "eth0", src: "10.0.0.9", dst: "8.8.8.8", proto: "tcp", bytes: 50}, false)
 	const gone = "luxgonegonegone"
 	if err := f1.Apply(context.Background(), gone, netip.MustParseAddr("10.89.3.1"), true, nil, nil); err != nil {
@@ -343,23 +344,28 @@ func TestRunnerRestartKeepsKernelCounters(t *testing.T) {
 	if v := k.send(out("8.8.8.8", 1), false); v != "drop" {
 		t.Fatalf("a Run whose rules are not loaded yet is open: %s", v)
 	}
-	if err := f2.SetClasses(catalog("v1")); err != nil {
-		t.Fatal(err)
-	}
+	// The runner's order: re-adopt (Apply), prune, then luxd's classes in
+	// its Welcome.
 	if err := f2.Apply(context.Background(), runIface, netip.MustParseAddr("10.89.0.1"), true, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	f2.PruneCounters()
+	if err := f2.SetClasses(catalog("v1")); err != nil {
+		t.Fatal(err)
+	}
 	k.send(out("8.8.8.8", 5), false)
 	got, err := f2.Counters()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Runs[runIface]["internet"].Tx != 105 {
-		t.Errorf("re-adopted Run: %v, want 105 internet tx", got.Runs[runIface])
+	if got.Runs[runIface]["internet"].Tx != 105 || got.Runs[runIface]["provider:eu-west-1"].Tx != 30 {
+		t.Errorf("re-adopted Run: %v, want 105 internet and 30 provider:eu-west-1 tx", got.Runs[runIface])
 	}
 	if got.Host["internet"].Tx != 50 {
 		t.Errorf("host after restart: %v", got.Host)
+	}
+	if !f2.HostCountersKept() {
+		t.Error("a restart on the same kernel reported its host counters lost")
 	}
 	if k.counter(tx(gone, "internet")) != -1 {
 		t.Error("counters of a Run not re-adopted survived PruneCounters")
@@ -375,8 +381,8 @@ func TestRebootStartsFromZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := f.Counters()
-	if len(got.Runs) != 0 || len(got.Host) != 0 {
-		t.Errorf("a fresh kernel has counts: %+v", got)
+	if len(got.Runs) != 0 || len(got.Host) != 0 || f.HostCountersKept() {
+		t.Errorf("a fresh kernel has counts: %+v kept %t", got, f.HostCountersKept())
 	}
 }
 

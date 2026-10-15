@@ -33,11 +33,18 @@ type Provider interface {
 	// them. A host absent from the answer has no attachment yet; an empty
 	// slice: attachments, none deleted with it.
 	Volumes(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string][]HostVolume, error)
+	// Network is, per provider id (all in template's region), the host's
+	// network placement. A host absent from the answer is not known yet.
 	Network(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string]HostNetwork, error)
+	// Prefixes is the provider's published address catalog, classified for
+	// template's region. It may answer from a cached copy; with none, an
+	// error.
 	Prefixes(ctx context.Context, template json.RawMessage) (ProviderPrefixes, error)
 }
 
-// HostNetwork holds provider-discovered placement and billable IPv4 count.
+// HostNetwork is a host's network placement: its own subnets and zone,
+// every subnet of its network with its zone, and its billable public IPv4
+// addresses (every distinct one on any of its interfaces).
 type HostNetwork struct {
 	SubnetCIDRs []string        `json:"subnetCidrs"`
 	Zone        string          `json:"zone"`
@@ -50,7 +57,10 @@ type NetworkSubnet struct {
 	Zone string `json:"zone"`
 }
 
-// ProviderPrefixes preserves destination region and catalog provenance.
+// ProviderPrefixes is a provider's address catalog for one region. Provider
+// is keyed by the other region: inter-region rates differ per destination.
+// ProviderGlobal is what the catalog publishes with no region (AWS GLOBAL:
+// CloudFront, Route 53): neither in-region nor inter-region.
 type ProviderPrefixes struct {
 	Source         string
 	FetchedAt      time.Time
@@ -210,6 +220,7 @@ func (s *Server) provision(ctx context.Context) error {
 			return err
 		}
 		s.recordVolumes(ctx)
+		s.recordNetwork(ctx)
 	}
 	return nil
 }

@@ -24,6 +24,7 @@ import (
 func (s *Server) runnerRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /runner/v1/ws", s.wrap(s.serveRunnerWS))
 	mux.Handle("POST /runner/v1/poll", s.wrap(s.servePoll))
+	mux.Handle("GET /runner/v1/network", s.wrap(s.serveNetwork))
 	mux.Handle("PUT /runner/v1/blobs/{id}", s.wrap(s.serveBlobUpload))
 	mux.Handle("POST /runner/v1/blobs/{id}/upload", s.wrap(s.serveBlobUploadStart))
 	mux.Handle("POST /runner/v1/blobs/{id}/complete", s.wrap(s.serveBlobUploadComplete))
@@ -196,6 +197,9 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			}
 		}
 		w.HostID = hostID
+		if w.Network, w.HostNet, err = s.hostNetwork(ctx, tx, hostID); err != nil {
+			return err
+		}
 		return later.write()
 	})
 	if err == nil {
@@ -261,7 +265,7 @@ func retryHostPlacements(ctx context.Context, fn func() error) error {
 func (s *Server) reconcileHostPlacements(ctx context.Context, tx pgx.Tx, hostID string, reported []proto.LivePlacement, runs []string, w *proto.Welcome) error {
 	// A new assignment after discovery has no Run lock. Retry discovery
 	// without taking a Run lock after a host lock.
-	rows, err := tx.Query(ctx, `SELECT run_id, epoch, state FROM placements
+	rows, err := tx.Query(ctx, `SELECT run_id, epoch, state, net_classes FROM placements
 		WHERE host_id = $1 AND state IN `+livePlacementStates+` ORDER BY run_id`, hostID)
 	if err != nil {
 		return err
@@ -269,9 +273,15 @@ func (s *Server) reconcileHostPlacements(ctx context.Context, tx pgx.Tx, hostID 
 	live := []proto.LivePlacement{}
 	for rows.Next() {
 		var lp proto.LivePlacement
-		if err := rows.Scan(&lp.RunID, &lp.Epoch, &lp.State); err != nil {
+		// Usage carries only the classes luxd recorded: the floor a
+		// re-adopted placement's counters continue from.
+		var net map[string]proto.NetBytes
+		if err := rows.Scan(&lp.RunID, &lp.Epoch, &lp.State, &net); err != nil {
 			rows.Close()
 			return err
+		}
+		if len(net) > 0 {
+			lp.Usage = &proto.Usage{Net: net}
 		}
 		live = append(live, lp)
 	}
@@ -360,8 +370,13 @@ func (s *Server) handleReport(ctx context.Context, hostID string, f proto.Frame)
 			Data: proto.Marshal(proto.Nack{Error: err.Error()})}
 	}
 	ack := proto.Frame{Type: proto.MsgAck, ID: f.ID, RunID: f.RunID, Epoch: f.Epoch}
-	if refused {
-		ack.Data = proto.Marshal(proto.Ack{Refused: true})
+	var a proto.Ack
+	if f.Type == proto.MsgHeartbeat {
+		a.NetworkVersion = s.networkVersion(ctx, hostID)
+	}
+	a.Refused = refused
+	if a != (proto.Ack{}) {
+		ack.Data = proto.Marshal(a)
 	}
 	return ack
 }
@@ -524,8 +539,14 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 	// Absent from older runners and without PSI: NULL, never 0.
 	peakCPU, cpuNow := make([]*float64, n), make([]*float64, n)
 	cpuStall, memStall, memFull, ioStall, ioFull := make([]*float64, n), make([]*float64, n), make([]*float64, n), make([]*float64, n), make([]*float64, n)
+	var netRuns []string
+	var netEpochs []int
+	var nets []map[string]proto.NetBytes
 	for i, l := range hb.Leases {
 		runs[i], epochs[i] = l.RunID, l.Epoch
+		if l.Usage != nil && len(l.Usage.Net) > 0 {
+			netRuns, netEpochs, nets = append(netRuns, l.RunID), append(netEpochs, l.Epoch), append(nets, l.Usage.Net)
+		}
 		if u := l.Usage; u != nil {
 			mem[i], disk[i], pids[i], cpu[i], rx[i], tx_[i] = u.PeakMemoryBytes, u.PeakDiskBytes, u.PeakPids, u.CPUSeconds, u.NetRxBytes, u.NetTxBytes
 			curMem[i], curPids[i] = u.MemoryBytes, u.Pids
@@ -604,6 +625,22 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 				hostID, interval(s.cfg.LeaseDuration), runs, epochs, mem, disk, pids, cpu, rx, tx_,
 				peakCPU, cpuStall, memStall, memFull, ioStall, ioFull)
 			if err != nil {
+				return err
+			}
+		}
+		// Network transfer: per key and direction, the greatest report
+		// (runners report monotonic values: they fold counter resets in).
+		if hb.Usage != nil && len(hb.Usage.Net) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE hosts SET host_net_classes = lux_net_max(host_net_classes, $2::jsonb) WHERE id = $1`,
+				hostID, hb.Usage.Net); err != nil {
+				return err
+			}
+		}
+		if len(nets) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE placements p SET net_classes = lux_net_max(p.net_classes, u.net)
+				FROM unnest($2::text[], $3::int[], $4::jsonb[]) AS u(run_id, epoch, net)
+				WHERE p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1 AND p.state IN `+livePlacementStates,
+				hostID, netRuns, netEpochs, nets); err != nil {
 				return err
 			}
 		}
@@ -772,10 +809,11 @@ func recordUsage(ctx context.Context, tx pgx.Tx, runID string, epoch int, u *pro
 			memory_stall_seconds      = greatest(memory_stall_seconds, $11::float8),
 			memory_full_stall_seconds = greatest(memory_full_stall_seconds, $12::float8),
 			io_stall_seconds          = greatest(io_stall_seconds, $13::float8),
-			io_full_stall_seconds     = greatest(io_full_stall_seconds, $14::float8)
+			io_full_stall_seconds     = greatest(io_full_stall_seconds, $14::float8),
+			net_classes               = lux_net_max(net_classes, $15::jsonb)
 		WHERE run_id = $1 AND epoch = $2`,
 		runID, epoch, u.PeakMemoryBytes, u.PeakDiskBytes, u.PeakPids, u.CPUSeconds, u.NetRxBytes, u.NetTxBytes,
-		u.PeakCPUCores, u.CPUStallSeconds, u.MemoryStallSeconds, u.MemoryFullStallSeconds, u.IOStallSeconds, u.IOFullStallSeconds)
+		u.PeakCPUCores, u.CPUStallSeconds, u.MemoryStallSeconds, u.MemoryFullStallSeconds, u.IOStallSeconds, u.IOFullStallSeconds, u.Net)
 	return err
 }
 

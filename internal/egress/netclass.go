@@ -129,6 +129,7 @@ type accounting struct {
 	// kept are counters of the table New replaced, recreated with their
 	// values, that no owner has taken up yet.
 	kept         map[string]keptCounter
+	hostKept     bool
 	ifaceSubnets func() []netip.Prefix
 }
 
@@ -520,6 +521,15 @@ func (f *Firewall) SetClasses(nc *proto.NetworkClasses) error {
 	return nil
 }
 
+// HostCountersKept: New found the host's counters in the table it replaced
+// (the runner restarted, the kernel did not), so they still count every
+// byte since the host booted. False after a reboot: they start from zero.
+func (f *Firewall) HostCountersKept() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.acct.hostKept
+}
+
 // ClassesVersion is the version of the lists the sets hold.
 func (f *Firewall) ClassesVersion() string {
 	f.mu.Lock()
@@ -633,19 +643,27 @@ func (f *Firewall) keepCounters() {
 	for n, c := range byName {
 		if strings.HasPrefix(n, "lux_") {
 			f.acct.kept[n] = keptCounter{c.Packets, c.Bytes}
+			f.acct.hostKept = f.acct.hostKept || strings.HasPrefix(n, "lux_host_")
 		}
 	}
 }
 
-// PruneCounters deletes the counters kept from before a restart that no
-// re-adopted Run took up. Call it once re-adoption is done.
+// PruneCounters deletes the counters kept from before a restart whose Run
+// was not re-applied (call it once re-adoption is done). A re-applied Run's
+// and the host's stay kept even if the current layout does not name them
+// yet: the provider:<region> counters are taken up when luxd's classes
+// arrive, after re-adoption.
 func (f *Firewall) PruneCounters() {
 	f.mu.Lock()
 	var b strings.Builder
 	for _, n := range slices.Sorted(maps.Keys(f.acct.kept)) {
+		owner, _, _ := strings.Cut(strings.TrimPrefix(n, "lux_"), "_")
+		if owner == "host" || f.acct.counted[owner] {
+			continue
+		}
 		fmt.Fprintf(&b, "delete counter inet lux %s\n", n)
+		delete(f.acct.kept, n)
 	}
-	f.acct.kept = map[string]keptCounter{}
 	f.mu.Unlock()
 	if b.Len() > 0 {
 		_ = f.nft(b.String())

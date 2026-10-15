@@ -107,11 +107,15 @@ type Runner struct {
 	uploads    *uploader
 	control    *serialQueues
 	egress     *egress.Firewall
-	netMu      sync.Mutex // serializes samples, final reads and host baseline
-	hostNet    netBaseline
-	images     *imageUse
-	graph      string // Podman's graph root, once asked
-	graphOnce  sync.Once
+	// netMu serializes counter readings (a sample, a Run's final reading
+	// before its counters go) and guards hostNet: a reading taken before a
+	// final one must not land after it and look like a reset.
+	netMu         sync.Mutex
+	hostNet       netBaseline
+	hostNetSeeded bool
+	images        *imageUse
+	graph         string // Podman's graph root, once asked
+	graphOnce     sync.Once
 	// imagesDirPath: containers/storage's image metadata directory, once
 	// Podman has said (imagesDir).
 	imagesDirMu   sync.Mutex
@@ -306,6 +310,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.nestedAppArmor = appArmorRestrictsUserns(appArmorSysctl)
 	}
 	r.readopt(ctx)
+	r.egress.PruneCounters()
 	// Before the first heartbeat: a restart under pressure must not report
 	// none until the next sample round.
 	r.startGuard(ctx)
@@ -383,20 +388,7 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 // stale (its Run moved on while this host was away) and is stopped.
 func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
 	if r.egress != nil {
-		if err := r.egress.SetClasses(w.Network); err != nil {
-			r.log.Warn("network classes", "err", err)
-		}
-		r.netMu.Lock()
-		r.sampleNetworkLocked()
-		r.hostNet.reconcile(w.HostNet)
-		for _, l := range w.Live {
-			if p := r.placement(l.RunID, l.Epoch); p != nil && l.Usage != nil {
-				p.mu.Lock()
-				p.netClasses.reconcile(l.Usage.Net)
-				p.mu.Unlock()
-			}
-		}
-		r.netMu.Unlock()
+		r.welcomeNetwork(w)
 	}
 	if w.LeaseSeconds > 0 {
 		r.lease.Store(int64(w.LeaseSeconds * float64(time.Second)))

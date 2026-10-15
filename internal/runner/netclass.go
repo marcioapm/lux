@@ -8,9 +8,12 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 )
 
-// netBaseline survives a runner restart along with the kernel counters.
-// A decrease folds the last kernel value into Base; max alone would hide
-// traffic until the new counter overtook its old high-water mark.
+// netBaseline turns kernel counters that may restart from zero (a reboot,
+// a counter recreated) into totals that only grow: reported = Base + Last,
+// and a reading below Last folds Last into Base first. A maximum alone
+// would hide the bytes after a reset until the counter passed its old
+// value. Kept in the run state (and, for the host, rebuilt from luxd's
+// Welcome), so a restarted runner continues from it.
 type netBaseline struct {
 	Base map[string]proto.NetBytes `json:"base,omitempty"`
 	Last map[string]proto.NetBytes `json:"last,omitempty"`
@@ -64,8 +67,10 @@ func (n *netBaseline) value() map[string]proto.NetBytes {
 	return out
 }
 
-// reconcile raises the reported floor from Live without adding the same
-// surviving kernel counter twice. Called after a current kernel reading.
+// reconcile raises the total to at least what luxd recorded (a Welcome's
+// Live usage, or its HostNet): a host that rebooted lost its counters and
+// the runner's in-memory baseline with them. Call it after a reading, so
+// Last is the kernel's now and is not counted twice.
 func (n *netBaseline) reconcile(reported map[string]proto.NetBytes) {
 	if n.Base == nil {
 		n.Base = map[string]proto.NetBytes{}
@@ -78,9 +83,53 @@ func (n *netBaseline) reconcile(reported map[string]proto.NetBytes) {
 	}
 }
 
+// seed adds what luxd recorded to the total: after a reboot, every byte
+// luxd knows of was counted by counters that no longer exist.
+func (n *netBaseline) seed(reported map[string]proto.NetBytes) {
+	if n.Base == nil {
+		n.Base = map[string]proto.NetBytes{}
+	}
+	for k, v := range reported {
+		b := n.Base[k]
+		n.Base[k] = proto.NetBytes{Rx: b.Rx + v.Rx, Tx: b.Tx + v.Tx}
+	}
+}
+
+// welcomeNetwork loads luxd's classes and takes its records as floors: the
+// host's traffic (seeded once if the host rebooted, else a floor) and each
+// re-adopted placement's. Every Welcome (each reconnect) comes here; only
+// the first may seed, since a seed adds.
+func (r *Runner) welcomeNetwork(w proto.Welcome) {
+	if err := r.egress.SetClasses(w.Network); err != nil {
+		r.log.Warn("network classes", "err", err)
+	}
+	r.netMu.Lock()
+	defer r.netMu.Unlock()
+	r.sampleNetworkLocked()
+	if !r.hostNetSeeded && !r.egress.HostCountersKept() {
+		r.hostNet.seed(w.HostNet)
+	} else {
+		r.hostNet.reconcile(w.HostNet)
+	}
+	r.hostNetSeeded = true
+	for _, l := range w.Live {
+		if p := r.placement(l.RunID, l.Epoch); p != nil && l.Usage != nil {
+			p.mu.Lock()
+			p.netClasses.reconcile(l.Usage.Net)
+			p.mu.Unlock()
+		}
+	}
+}
+
+// observeNet takes a kernel reading of the placement's counters, and keeps
+// the baseline in its run state (written only when the reading changed): a
+// restarted runner continues from it.
 func (p *placement) observeNet(current map[string]proto.NetBytes) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if maps.Equal(p.netClasses.Last, current) {
+		return
+	}
 	p.netClasses.observe(current)
 	if p.state != nil {
 		p.state.Net = p.netClasses
@@ -115,6 +164,9 @@ func (r *Runner) sampleNetworkLocked() {
 	}
 }
 
+// removeNetwork removes the Run's egress and counters, taking their final
+// reading first: the bytes since the last sample, which the exit status
+// then carries.
 func (p *placement) removeNetwork() {
 	r := p.r
 	r.netMu.Lock()
@@ -127,14 +179,14 @@ func (p *placement) removeNetwork() {
 	}
 }
 
-// Welcome carries the full catalog; a changed heartbeat version triggers
-// one host-token-authenticated GET, never a provider call in hello.
+// refreshNetwork fetches the host's classes when a heartbeat's ack names a
+// version other than the one loaded (its Welcome carried the first).
 func (r *Runner) refreshNetwork(ctx context.Context, version string) {
 	if r.egress == nil || r.api == nil || r.egress.ClassesVersion() == version {
 		return
 	}
 	var nc proto.NetworkClasses
-	if err := r.api.getJSON(ctx, "/runner/v1/network?host="+url.QueryEscape(r.cfg.Name), &nc); err != nil {
+	if err := r.api.getJSON(ctx, "/runner/v1/network?name="+url.QueryEscape(r.cfg.Name), &nc); err != nil {
 		r.log.Warn("network catalog", "err", err)
 		return
 	}
