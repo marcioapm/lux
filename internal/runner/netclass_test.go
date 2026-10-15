@@ -1,10 +1,15 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
+	"net/netip"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/egress"
@@ -99,6 +104,82 @@ func TestWelcomeFloorPersistedWithoutGrowth(t *testing.T) {
 	}
 	if state.Net.value()["zone"].Tx != 40 {
 		t.Fatal(state.Net.value())
+	}
+}
+
+// fakeNftRunner is a Runner whose firewall is egress.New against an nft on
+// PATH that accepts every script and lists counters from a file: the
+// production read path, with counter values the test sets.
+func fakeNftRunner(t *testing.T) (*Runner, *placement, func(unknownTx int64)) {
+	t.Helper()
+	dir := t.TempDir()
+	counters := filepath.Join(dir, "counters.json")
+	script := "#!/bin/sh\ncase \"$*\" in\n*list*counters*) cat " + counters + " ;;\n*) cat >/dev/null ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(counters, []byte(`{"nftables":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fw, err := egress.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{log: slog.New(slog.NewTextHandler(io.Discard, nil)), egress: fw, placements: map[string]*placement{}}
+	p := &placement{r: r, runID: "run1", epoch: 1, phase: "running", dir: t.TempDir(), state: &runState{RunID: "run1", Epoch: 1}}
+	r.placements["run1"] = p
+	iface := bridgeName("run1")
+	if err := fw.Apply(context.Background(), iface, netip.Addr{}, true, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	set := func(tx int64) {
+		t.Helper()
+		doc := fmt.Sprintf(`{"nftables":[{"counter":{"family":"inet","table":"lux","name":"lux_%s_unknown_tx","packets":1,"bytes":%d}}]}`, iface, tx)
+		if err := os.WriteFile(counters, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return r, p, set
+}
+
+// The exit status carries p.usage(): it must hold the final reading taken
+// at removal, once, however often cleanup runs.
+func TestExitUsageConsumesFinalReadOnce(t *testing.T) {
+	r, p, set := fakeNftRunner(t)
+	set(100)
+	r.sampleNetwork()
+	if got := p.usage().Net["unknown"].Tx; got != 100 {
+		t.Fatalf("sampled %d, want 100", got)
+	}
+	set(123) // 23 bytes after the last sample
+	p.removeNetwork()
+	if got := p.usage().Net["unknown"].Tx; got != 123 {
+		t.Fatalf("exit usage %d, want 123", got)
+	}
+	p.removeNetwork()
+	r.sampleNetwork()
+	if got := p.usage().Net["unknown"].Tx; got != 123 {
+		t.Fatalf("repeated cleanup: %d, want 123", got)
+	}
+	st, err := readRunState(p.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Net.value()["unknown"].Tx; got != 123 {
+		t.Fatalf("persisted %d, want 123", got)
+	}
+}
+
+// A successful read of a present owner whose counters are zero is a reset.
+func TestSamplerPresentZeroIsAReset(t *testing.T) {
+	r, p, set := fakeNftRunner(t)
+	for _, v := range []int64{100, 0, 150} {
+		set(v)
+		r.sampleNetwork()
+	}
+	if got := p.usage().Net["unknown"].Tx; got != 250 {
+		t.Fatalf("100 -> 0 -> 150: %d, want 250", got)
 	}
 }
 
