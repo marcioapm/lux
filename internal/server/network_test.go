@@ -321,6 +321,9 @@ func TestHostNetworkTotalsVisibility(t *testing.T) {
 	}
 }
 
+// Heartbeat locks hosts then placements; an exit status locks the run, then
+// the placement, then the host. That inverse order deadlocks on main too, so
+// 40P01 is retried here; it is not a production retry.
 func TestNetworkConcurrentReportsAndExit(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
