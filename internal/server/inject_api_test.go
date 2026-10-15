@@ -18,6 +18,11 @@ const testSnippet = `<meta name="t" content="1">`
 // (POST, PATCH); and it is validated on each.
 func TestServerInjectCarried(t *testing.T) {
 	s, ctx, key, _ := wakeFixture(t)
+	capability := apiCall(t, s, key, http.MethodGet, "/v1/whoami", nil)
+	var who Whoami
+	if err := json.Unmarshal(capability.Body.Bytes(), &who); err != nil || capability.Code != http.StatusOK || !who.ServerInject {
+		t.Fatalf("capability: %d %s (%v)", capability.Code, capability.Body, err)
+	}
 
 	w := apiCall(t, s, key, http.MethodPost, "/v1/runs", map[string]any{
 		"image": map[string]any{"ref": "alpine"}, "workload": map[string]any{"command": []string{"sleep", "infinity"},

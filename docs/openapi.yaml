@@ -4170,6 +4170,9 @@ components:
           type:
             - array
             - "null"
+        serverInject:
+          description: "Whether servers support inject: HTML the preview listener adds to their HTML pages. Always true on releases supporting server-inject."
+          type: boolean
         tenant:
           description: The key's tenant's name; empty for an operator key.
           type: string
