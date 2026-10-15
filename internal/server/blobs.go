@@ -437,9 +437,10 @@ type deleteArtifactsOutput struct {
 // deleteArtifacts deletes every artifact of a terminated Run:
 // retention never does. The claim is reapRetention's: the Run locked and
 // its state checked, the blobs marked deleted in one transaction, the S3
-// objects deleted after commit. Blobs still on their host are claimed too:
-// serveBlobUpload and serveBlobUploadComplete drop an object that arrives
-// for a deleted blob.
+// objects deleted after commit. Blobs still on their host are claimed too,
+// and their keys deleted (a direct PUT may already be in S3);
+// serveBlobUploadStart and serveBlobUploadComplete drop an object that
+// arrives later.
 func (s *Server) deleteArtifacts(ctx context.Context, in *RunPath) (*deleteArtifactsOutput, error) {
 	p := principal(ctx)
 	var keys []string
@@ -455,20 +456,31 @@ func (s *Server) deleteArtifacts(ctx context.Context, in *RunPath) (*deleteArtif
 		if !terminal(state) {
 			return errf(http.StatusConflict, "not_terminal", "run is %s: only a terminated Run's artifacts can be deleted", state)
 		}
+		// A blob still on its host may have its object in S3 already (a
+		// direct PUT not yet /complete'd, its runner gone): its key is
+		// deterministic, and deleting an absent key is harmless.
+		// o is the row before this UPDATE: its location.
 		rows, err := tx.Query(ctx, `UPDATE blobs b SET location = 'deleted', deleted_at = now()
-			FROM artifacts a WHERE a.run_id = $1 AND b.id = a.blob_id AND b.location <> 'deleted'
-			RETURNING coalesce(b.s3_key, '')`, in.ID)
+			FROM artifacts a, blobs o WHERE a.run_id = $1 AND b.id = a.blob_id AND o.id = b.id AND b.location <> 'deleted'
+			RETURNING b.id, b.tenant_id, b.run_id, coalesce(b.s3_key, ''), o.location`, in.ID)
 		if err != nil {
 			return err
 		}
-		claimed, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		type claim struct{ id, tenantID, runID, key, location string }
+		claimed, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (claim, error) {
+			var c claim
+			return c, r.Scan(&c.id, &c.tenantID, &c.runID, &c.key, &c.location)
+		})
 		if err != nil {
 			return err
 		}
 		deleted = len(claimed)
-		for _, k := range claimed {
-			if k != "" {
-				keys = append(keys, k)
+		for _, c := range claimed {
+			switch {
+			case c.key != "":
+				keys = append(keys, c.key)
+			case c.location == "host":
+				keys = append(keys, blob.Key(c.tenantID, c.runID, c.id))
 			}
 		}
 		if deleted == 0 {

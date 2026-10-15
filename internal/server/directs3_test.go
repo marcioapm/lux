@@ -32,7 +32,7 @@ type directS3 struct {
 	parts   map[string]map[string]int64 // upload id → part number → size
 	deleted []string
 	next    int
-	onHead  func() // called before answering a HeadObject
+	onHead  func() // called after a HeadObject's lookup, before its answer
 	// completeErr, when set, is CompleteMultipartUpload's answer: a status
 	// and an S3 error code.
 	completeErr *s3Err
@@ -60,8 +60,23 @@ func (f *directS3) serve(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/b/")
 	q := r.URL.Query()
 	body, _ := io.ReadAll(r.Body)
-	if r.Method == http.MethodHead && f.onHead != nil {
-		f.onHead()
+	if r.Method == http.MethodHead {
+		// Looked up first, then onHead: a delete there lands after S3
+		// answered, before luxd records the upload.
+		f.mu.Lock()
+		f.calls = append(f.calls, "HEAD HeadObject "+key)
+		size, ok := f.objects[key]
+		hook := f.onHead
+		f.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		return
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -135,13 +150,6 @@ func (f *directS3) serve(w http.ResponseWriter, r *http.Request) {
 		delete(f.objects, key)
 		f.deleted = append(f.deleted, key)
 		w.WriteHeader(http.StatusNoContent)
-	case "HeadObject":
-		size, ok := f.objects[key]
-		if !ok {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	default:
 		w.WriteHeader(http.StatusNotImplemented)
 	}
@@ -501,6 +509,37 @@ func TestDirectUploadAbort(t *testing.T) {
 	}
 }
 
+// An artifact PUT straight to S3 whose /complete never comes (its runner
+// gone) and then deleted: deleteArtifacts deletes its key.
+func TestDeleteArtifactsDeletesUncompletedDirectUpload(t *testing.T) {
+	s, ctx, _ := retentionFixture(t, StateTerminated, StateTerminated, 1, 1)
+	f := useDirectS3(t, s)
+	content := []byte("artifact bytes")
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL, sha256 = $1, size = $2 WHERE id = 'bA-art'`, sha(string(content)), len(content))
+	code, raw := runnerPost(t, s, "ha", "bA-art", "upload", uploadRequest(content))
+	if code != http.StatusOK {
+		t.Fatalf("upload: %d %s", code, raw)
+	}
+	var out proto.BlobUploadResponse
+	_ = json.Unmarshal([]byte(raw), &out)
+	if code, _ := putPresigned(t, *out.Single, content); code != http.StatusOK {
+		t.Fatalf("PUT: %d", code)
+	}
+	if code, _ := callJSON(t, s, apiKey(t, s, new("t1"), "run"), http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusOK {
+		t.Fatalf("delete: %d", code)
+	}
+	key := blob.Key("t1", "ra", "bA-art")
+	if !slices.Contains(f.Deleted(), key) {
+		t.Fatalf("S3 deletes %v, want %s", f.Deleted(), key)
+	}
+	f.mu.Lock()
+	_, left := f.objects[key]
+	f.mu.Unlock()
+	if left {
+		t.Fatalf("%s left in S3", key)
+	}
+}
+
 // An artifact deleted during its direct upload, after the bytes reached
 // S3: /complete answers 410, the object is deleted, the blob stays
 // deleted. Both orders: the delete before /complete, and during it (after
@@ -538,8 +577,16 @@ func TestDeleteArtifactsDuringDirectUpload(t *testing.T) {
 			if loc := blobLocations(t, s, "ra")["bA-art"]; loc != "deleted" {
 				t.Fatalf("bA-art: %s, want deleted", loc)
 			}
-			if got := f.Deleted(); !slices.Equal(got, []string{blob.Key("t1", "ra", "bA-art")}) {
+			// deleteArtifacts deletes the key, and /complete again.
+			key := blob.Key("t1", "ra", "bA-art")
+			if got := f.Deleted(); len(got) == 0 || slices.ContainsFunc(got, func(k string) bool { return k != key }) {
 				t.Fatalf("S3 deletes %v, want the uploaded object", got)
+			}
+			f.mu.Lock()
+			_, left := f.objects[key]
+			f.mu.Unlock()
+			if left {
+				t.Fatalf("%s left in S3", key)
 			}
 		})
 	}
