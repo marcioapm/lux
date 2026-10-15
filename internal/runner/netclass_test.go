@@ -58,6 +58,50 @@ func TestNetWelcomeFloorDoesNotDoubleCount(t *testing.T) {
 	}
 }
 
+func TestHostRebootReportGrowthRestart(t *testing.T) {
+	dir := t.TempDir()
+	makeRunner := func(boot string) *Runner {
+		r := &Runner{cfg: Config{DataDir: dir}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), egress: egress.Unloaded(), placements: map[string]*placement{}}
+		if err := r.restoreHostNetwork(boot); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	r := makeRunner("old")
+	r.hostNet.observe(map[string]proto.NetBytes{"internet": {Tx: 100}})
+	r.hostNetSeeded = true
+	r.saveHostNetwork()
+	r = makeRunner("new")
+	r.welcomeNetwork(proto.Welcome{HostNet: map[string]proto.NetBytes{"internet": {Tx: 100}}})
+	r.hostNet.observe(map[string]proto.NetBytes{"internet": {Tx: 20}})
+	r.saveHostNetwork()
+	if r.hostNet.value()["internet"].Tx != 120 {
+		t.Fatal(r.hostNet.value())
+	}
+	// Ten unsent bytes survive in the kernel; only the prior sample is durable.
+	r = makeRunner("new")
+	r.hostNet.observe(map[string]proto.NetBytes{"internet": {Tx: 30}})
+	r.hostNet.reconcile(map[string]proto.NetBytes{"internet": {Tx: 120}})
+	if r.hostNet.value()["internet"].Tx != 130 {
+		t.Fatal(r.hostNet.value())
+	}
+}
+
+func TestWelcomeFloorPersistedWithoutGrowth(t *testing.T) {
+	r := &Runner{log: slog.New(slog.NewTextHandler(io.Discard, nil)), egress: egress.Unloaded(), placements: map[string]*placement{}}
+	p := &placement{r: r, runID: "run1", epoch: 2, phase: "running", dir: t.TempDir(), state: &runState{RunID: "run1", Epoch: 2}}
+	p.observeNet(map[string]proto.NetBytes{"zone": {Tx: 10}})
+	r.placements["run1"] = p
+	r.welcomeNetwork(proto.Welcome{Live: []proto.LivePlacement{{RunID: "run1", Epoch: 2, Usage: &proto.Usage{Net: map[string]proto.NetBytes{"zone": {Tx: 40}}}}}})
+	state, err := readRunState(p.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Net.value()["zone"].Tx != 40 {
+		t.Fatal(state.Net.value())
+	}
+}
+
 func TestUsageNetCompatibility(t *testing.T) {
 	raw, err := json.Marshal(proto.Usage{})
 	if err != nil {

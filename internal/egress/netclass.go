@@ -369,6 +369,30 @@ func classifyRules(l layout, chain, regionChain, owner, field, dir string) strin
 // f.mu held.
 func (f *Firewall) countersScript(owner string) string {
 	var b strings.Builder
+	for n := range f.acct.kept {
+		prefix := "lux_" + owner + "_"
+		if !strings.HasPrefix(n, prefix) {
+			continue
+		}
+		keydir := strings.TrimPrefix(n, prefix)
+		key, dir, ok := strings.Cut(keydir, "_tx")
+		if !ok || dir != "" {
+			key, dir, ok = strings.Cut(keydir, "_rx")
+			if !ok || dir != "" {
+				continue
+			}
+			dir = "rx"
+		} else {
+			dir = "tx"
+		}
+		if strings.HasPrefix(key, "provider_") && key != "provider_global" {
+			key = "provider:" + strings.ReplaceAll(strings.TrimPrefix(key, "provider_"), "_", "-")
+		} else {
+			key = strings.ReplaceAll(key, "_", "-")
+		}
+		f.acct.names[n] = counterRef{owner, key, dir}
+		delete(f.acct.kept, n)
+	}
 	for _, k := range f.acct.layout.keys() {
 		for _, dir := range []string{"tx", "rx"} {
 			n := counterName(owner, k, dir)
@@ -601,7 +625,7 @@ func (f *Firewall) Counters() (Counts, error) {
 	defer f.mu.Unlock()
 	for name, c := range byName {
 		ref, ok := f.acct.names[name]
-		if !ok || c.Bytes == 0 {
+		if !ok {
 			continue
 		}
 		m := out.Host
@@ -610,6 +634,9 @@ func (f *Firewall) Counters() (Counts, error) {
 				out.Runs[ref.owner] = map[string]proto.NetBytes{}
 			}
 			m = out.Runs[ref.owner]
+		}
+		if c.Bytes == 0 {
+			continue
 		}
 		nb := m[ref.key]
 		if ref.dir == "tx" {
@@ -625,14 +652,14 @@ func (f *Firewall) Counters() (Counts, error) {
 // keepCounters reads the counters of the table New is about to replace,
 // for countingSetup to recreate. No table (a first start, a reboot) keeps
 // none.
-func (f *Firewall) keepCounters() {
+func (f *Firewall) keepCounters() error {
 	raw, err := f.list()
 	if err != nil {
-		return
+		return err
 	}
 	byName, err := parseCounters(raw)
 	if err != nil {
-		return
+		return err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -642,6 +669,7 @@ func (f *Firewall) keepCounters() {
 			f.acct.hostKept = f.acct.hostKept || strings.HasPrefix(n, "lux_host_")
 		}
 	}
+	return nil
 }
 
 // PruneCounters deletes the counters kept from before a restart whose Run

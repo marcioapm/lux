@@ -2,8 +2,12 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"maps"
 	"net/url"
+	"os"
+	"path/filepath"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -95,6 +99,44 @@ func (n *netBaseline) seed(reported map[string]proto.NetBytes) {
 	}
 }
 
+type hostNetworkState struct {
+	Boot   string      `json:"boot"`
+	Seeded bool        `json:"seeded"`
+	Net    netBaseline `json:"net"`
+}
+
+func (r *Runner) restoreHostNetwork(boot string) error {
+	r.hostNetBoot = boot
+	raw, err := os.ReadFile(filepath.Join(r.cfg.DataDir, "network.json"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var state hostNetworkState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return fmt.Errorf("host network state: %w", err)
+	}
+	if state.Boot == boot {
+		r.hostNet, r.hostNetSeeded = state.Net, state.Seeded
+	}
+	return nil
+}
+
+func (r *Runner) saveHostNetwork() {
+	if r.cfg.DataDir == "" {
+		return
+	}
+	raw, err := json.Marshal(hostNetworkState{r.hostNetBoot, r.hostNetSeeded, r.hostNet})
+	if err == nil {
+		err = writeFileAtomic(filepath.Join(r.cfg.DataDir, "network.json"), raw, 0o600)
+	}
+	if err != nil {
+		r.log.Error("save host network baseline", "err", err)
+	}
+}
+
 // welcomeNetwork loads luxd's classes and takes its records as floors: the
 // host's traffic (seeded once if the host rebooted, else a floor) and each
 // re-adopted placement's. Every Welcome (each reconnect) comes here; only
@@ -112,10 +154,12 @@ func (r *Runner) welcomeNetwork(w proto.Welcome) {
 		r.hostNet.reconcile(w.HostNet)
 	}
 	r.hostNetSeeded = true
+	r.saveHostNetwork()
 	for _, l := range w.Live {
 		if p := r.placement(l.RunID, l.Epoch); p != nil && l.Usage != nil {
 			p.mu.Lock()
 			p.netClasses.reconcile(l.Usage.Net)
+			p.saveNetLocked()
 			p.mu.Unlock()
 		}
 	}
@@ -131,6 +175,10 @@ func (p *placement) observeNet(current map[string]proto.NetBytes) {
 		return
 	}
 	p.netClasses.observe(current)
+	p.saveNetLocked()
+}
+
+func (p *placement) saveNetLocked() {
 	if p.state != nil {
 		p.state.Net = p.netClasses
 		if err := p.saveStateLocked(); err != nil {
@@ -157,6 +205,7 @@ func (r *Runner) sampleNetworkLocked() {
 		return
 	}
 	r.hostNet.observe(c.Host)
+	r.saveHostNetwork()
 	for _, p := range r.livePlacements() {
 		if current, ok := c.Runs[bridgeName(p.runID)]; ok {
 			p.observeNet(current)

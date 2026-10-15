@@ -36,6 +36,7 @@ package egress
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net"
@@ -153,7 +154,9 @@ func New(extra []netip.Prefix) (*Firewall, error) {
 
 // setup replaces the table, keeping the counters of the one it replaces.
 func (f *Firewall) setup() error {
-	f.keepCounters()
+	if err := f.keepCounters(); err != nil {
+		return err
+	}
 	// One transaction: create-if-missing, delete, recreate. There is never
 	// a moment without the table, so a Run is never open.
 	var b strings.Builder
@@ -618,6 +621,27 @@ func nftListCounters() ([]byte, error) {
 	c := exec.Command("nft", "-j", "list", "counters", "table", "inet", "lux")
 	c.Stdout, c.Stderr = &out, &errb
 	if err := c.Run(); err != nil {
+		// Listing all tables distinguishes absence without interpreting localized diagnostics.
+		tables, listErr := exec.Command("nft", "-j", "list", "tables").Output()
+		if listErr == nil {
+			var doc struct {
+				Nftables []struct {
+					Table struct {
+						Family string `json:"family"`
+						Name   string `json:"name"`
+					} `json:"table"`
+				} `json:"nftables"`
+			}
+			if json.Unmarshal(tables, &doc) == nil {
+				found := false
+				for _, item := range doc.Nftables {
+					found = found || item.Table.Family == "inet" && item.Table.Name == "lux"
+				}
+				if !found {
+					return []byte(`{"nftables":[]}`), nil
+				}
+			}
+		}
 		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(errb.String()))
 	}
 	return out.Bytes(), nil

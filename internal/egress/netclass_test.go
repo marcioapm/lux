@@ -554,6 +554,85 @@ func TestLifecycleCatalogBarriers(t *testing.T) {
 	}
 }
 
+func TestPreservationReadFailureDoesNotReplaceTable(t *testing.T) {
+	k := newKernel()
+	f := setupRun(t, k, nil, true)
+	k.send(out("8.8.8.8", 123), false)
+	for _, invalid := range []bool{false, true} {
+		broken := newFirewall(nil, f.lookup, k.nft, func() ([]byte, error) {
+			if invalid {
+				return []byte("invalid"), nil
+			}
+			return nil, fmt.Errorf("read failed")
+		})
+		if err := broken.setup(); err == nil {
+			t.Fatal("read failure replaced table")
+		}
+		if k.counter(tx(runIface, "unknown")) != 123 {
+			t.Fatal("existing bytes destroyed")
+		}
+	}
+}
+
+func TestRemovedRegionRestartFinalAndReadded(t *testing.T) {
+	k := newKernel()
+	f := setupRun(t, k, catalog("v1"), true)
+	k.send(out("34.241.0.1", 30), false)
+	k.send(packet{hook: "output", oif: "eth0", dst: "34.241.0.1", src: "10.0.0.9", bytes: 40}, false)
+	nc := catalog("reduced")
+	delete(nc.Provider, "eu-west-1")
+	if err := f.SetClasses(nc); err != nil {
+		t.Fatal(err)
+	}
+	f, err := k.firewall()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Apply(context.Background(), runIface, netip.Addr{}, true, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.PruneCounters()
+	if err := f.SetClasses(nc); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.Counters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Host["provider:eu-west-1"].Tx != 40 || got.Runs[runIface]["provider:eu-west-1"].Tx != 30 {
+		t.Fatal(got)
+	}
+	if err := f.SetClasses(catalog("again")); err != nil {
+		t.Fatal(err)
+	}
+	k.send(out("34.241.0.1", 7), false)
+	if final := f.Remove(runIface); final["provider:eu-west-1"].Tx != 37 {
+		t.Fatal(final)
+	}
+}
+
+func TestPresentZeroOwnerSnapshot(t *testing.T) {
+	k := newKernel()
+	f := setupRun(t, k, nil, true)
+	got, err := f.Counters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := got.Runs[runIface]; !ok || m == nil || len(m) != 0 {
+		t.Fatal(got)
+	}
+	if final := f.Remove(runIface); final == nil || len(final) != 0 {
+		t.Fatal(final)
+	}
+	got, err = f.Counters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Runs[runIface]; ok {
+		t.Fatal(got)
+	}
+}
+
 func TestInvalidRegionRefused(t *testing.T) {
 	k := newKernel()
 	f, err := k.firewall()

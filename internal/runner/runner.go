@@ -113,6 +113,7 @@ type Runner struct {
 	netMu         sync.Mutex
 	hostNet       netBaseline
 	hostNetSeeded bool
+	hostNetBoot   string
 	images        *imageUse
 	graph         string // Podman's graph root, once asked
 	graphOnce     sync.Once
@@ -247,6 +248,13 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 			d, err := hoststat.ReadDisk(cfg.DataDir)
 			return d.Free, err
 		})
+	}
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return nil, fmt.Errorf("network boot identity: %w", err)
+	}
+	if err := r.restoreHostNetwork(strings.TrimSpace(string(boot))); err != nil {
+		return nil, err
 	}
 	r.api = newAPI(cfg.URL, cfg.Token, cfg.Name)
 	r.conn = newConn(r)

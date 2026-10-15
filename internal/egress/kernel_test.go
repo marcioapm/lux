@@ -423,7 +423,7 @@ func (k *kernel) list() ([]byte, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if !k.st.exists {
-		return nil, fmt.Errorf("Error: No such file or directory")
+		return []byte(`{"nftables":[]}`), nil
 	}
 	objs := []map[string]any{{"metainfo": map[string]any{"version": "1.0.9", "json_schema_version": 1}}}
 	for _, n := range slices.Sorted(maps.Keys(k.st.counters)) {
