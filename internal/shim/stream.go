@@ -246,10 +246,10 @@ const plainQueue = 256
 // A plain attach has a channel of plainQueue reads and misses what
 // overflows it. A restore attach's client has a screen built from the
 // snapshot (or, without one, from live output after the marker), which a
-// gap would leave wrong for good, so its queue is
-// bounded in bytes (restoreBudget, as much as the snapshot it may still
-// be sending) and on overflow it is removed and ended with errFellBehind:
-// the client attaches again rather than going on from a wrong screen.
+// gap would leave wrong for good, so its queue is bounded in bytes
+// (restoreBudget, as much as the snapshot it may still be sending) and on
+// overflow it is removed and ended with errFellBehind: the client attaches
+// again rather than going on from a wrong screen.
 type subscriber struct {
 	ch chan []byte // plain
 
@@ -390,10 +390,7 @@ func (t *terminal) resize(rows, cols int) {
 // resizeLocked resizes the PTY and the emulator to the same size: within
 // the emulator's limits, so the two always agree.
 func (t *terminal) resizeLocked(rows, cols int) {
-	if rows > 0 && cols > 0 {
-		rows, cols = min(rows, vterm.MaxRows), min(cols, vterm.MaxCols)
-	}
-	ws := winsize(rows, cols)
+	ws := winsize(min(rows, vterm.MaxRows), min(cols, vterm.MaxCols))
 	_ = pty.Setsize(t.ptmx, ws)
 	t.withScreen(func(s screenState) { s.Resize(int(ws.Rows), int(ws.Cols)) })
 }
