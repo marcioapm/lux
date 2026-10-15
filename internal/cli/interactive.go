@@ -57,19 +57,13 @@ continues live. A host too old to restore just continues live.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
 			raw := a.stdinTerminal()
-			path := "/v1/runs/" + args[0] + "/attach"
-			if restore {
-				q := url.Values{"restore": {"true"}}
-				if raw {
-					if c, r, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
-						// luxd refuses a size over the Run's terminal limits.
-						q.Set("rows", strconv.Itoa(min(r, vterm.MaxRows)))
-						q.Set("cols", strconv.Itoa(min(c, vterm.MaxCols)))
-					}
+			rows, cols := 0, 0
+			if raw {
+				if c, r, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+					rows, cols = r, c
 				}
-				path += "?" + q.Encode()
 			}
-			ws, err := a.c.Dial(ctx, path)
+			ws, err := a.c.Dial(ctx, attachPath(args[0], restore, rows, cols))
 			if err != nil {
 				return err
 			}
@@ -79,6 +73,22 @@ continues live. A host too old to restore just continues live.`,
 	}
 	cmd.Flags().BoolVar(&restore, "restore", false, "redraw the terminal's current screen and recent scrollback first")
 	return cmd
+}
+
+// attachPath is the attach request for a run: with restore, at rows×cols
+// when known (> 0), clamped to the Run's terminal limits, which luxd
+// refuses to exceed.
+func attachPath(run string, restore bool, rows, cols int) string {
+	path := "/v1/runs/" + run + "/attach"
+	if !restore {
+		return path
+	}
+	q := url.Values{"restore": {"true"}}
+	if rows > 0 && cols > 0 {
+		q.Set("rows", strconv.Itoa(min(rows, vterm.MaxRows)))
+		q.Set("cols", strconv.Itoa(min(cols, vterm.MaxCols)))
+	}
+	return path + "?" + q.Encode()
 }
 
 // exec runs open's command in a Run and interacts with it (raw: stdin as
