@@ -178,6 +178,26 @@ func TestRecordNetworkColdFailureAndPartialSubnets(t *testing.T) {
 	}
 }
 
+func TestRecordNetworkColdPrefixFailureCompleteHost(t *testing.T) {
+	s, keys, _ := networkFixture(t)
+	ctx := context.Background()
+	s.recordNetwork(ctx)
+	var before, after proto.NetworkClasses
+	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id='h1'`, nil, &before)
+	n := hostA()
+	n.PublicIPv4 = 9
+	s.cfg.Providers["ec2"] = &networkProvider{nets: map[string]HostNetwork{"i-1": n}, prefixErr: errors.New("unavailable")}
+	s.recordNetwork(ctx)
+	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id='h1'`, nil, &after)
+	if after.Version != before.Version || !after.Catalog() {
+		t.Fatalf("cold prefix failure lost catalog: before=%+v after=%+v", before, after)
+	}
+	var h Host
+	if code := getJSON(t, s, keys["t1"], "/v1/hosts/h1", &h); code != http.StatusOK || h.Network == nil || h.Network.PublicIPv4 != 9 {
+		t.Fatalf("host facts not refreshed: %d %+v", code, h.Network)
+	}
+}
+
 func TestRecordNetworkColdPartialHasNoCatalog(t *testing.T) {
 	s, _, p := networkFixture(t)
 	p.nets = map[string]HostNetwork{"i-1": {SubnetsUnavailable: true, PublicIPv4: 1}}
