@@ -24,17 +24,11 @@ type netBaseline struct {
 }
 
 func (n *netBaseline) observe(current map[string]proto.NetBytes) map[string]proto.NetBytes {
-	if n.Base == nil {
-		n.Base = map[string]proto.NetBytes{}
-	}
+	n.initBase()
 	// Missing zero counters still participate in reset detection.
-	keys := maps.Clone(n.Last)
-	if keys == nil {
-		keys = map[string]proto.NetBytes{}
-	}
-	for k, v := range current {
-		keys[k] = v
-	}
+	keys := map[string]proto.NetBytes{}
+	maps.Copy(keys, n.Last)
+	maps.Copy(keys, current)
 	for k := range keys {
 		c, last, b := current[k], n.Last[k], n.Base[k]
 		if c.Rx < last.Rx {
@@ -47,6 +41,12 @@ func (n *netBaseline) observe(current map[string]proto.NetBytes) map[string]prot
 	}
 	n.Last = maps.Clone(current)
 	return n.value()
+}
+
+func (n *netBaseline) initBase() {
+	if n.Base == nil {
+		n.Base = map[string]proto.NetBytes{}
+	}
 }
 
 func (n *netBaseline) value() map[string]proto.NetBytes {
@@ -76,9 +76,7 @@ func (n *netBaseline) value() map[string]proto.NetBytes {
 // the runner's in-memory baseline with them. Call it after a reading, so
 // Last is the kernel's now and is not counted twice.
 func (n *netBaseline) reconcile(reported map[string]proto.NetBytes) {
-	if n.Base == nil {
-		n.Base = map[string]proto.NetBytes{}
-	}
+	n.initBase()
 	for k, v := range reported {
 		b, c := n.Base[k], n.Last[k]
 		b.Rx = max(b.Rx, v.Rx-c.Rx)
@@ -90,9 +88,7 @@ func (n *netBaseline) reconcile(reported map[string]proto.NetBytes) {
 // seed adds what luxd recorded to the total: after a reboot, every byte
 // luxd knows of was counted by counters that no longer exist.
 func (n *netBaseline) seed(reported map[string]proto.NetBytes) {
-	if n.Base == nil {
-		n.Base = map[string]proto.NetBytes{}
-	}
+	n.initBase()
 	for k, v := range reported {
 		b := n.Base[k]
 		n.Base[k] = proto.NetBytes{Rx: b.Rx + v.Rx, Tx: b.Tx + v.Tx}
