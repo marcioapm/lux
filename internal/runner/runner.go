@@ -107,6 +107,8 @@ type Runner struct {
 	uploads    *uploader
 	control    *serialQueues
 	egress     *egress.Firewall
+	netMu      sync.Mutex // serializes samples, final reads and host baseline
+	hostNet    netBaseline
 	images     *imageUse
 	graph      string // Podman's graph root, once asked
 	graphOnce  sync.Once
@@ -380,6 +382,22 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 // onWelcome reconciles with what luxd thinks runs here: anything else is
 // stale (its Run moved on while this host was away) and is stopped.
 func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
+	if r.egress != nil {
+		if err := r.egress.SetClasses(w.Network); err != nil {
+			r.log.Warn("network classes", "err", err)
+		}
+		r.netMu.Lock()
+		r.sampleNetworkLocked()
+		r.hostNet.reconcile(w.HostNet)
+		for _, l := range w.Live {
+			if p := r.placement(l.RunID, l.Epoch); p != nil && l.Usage != nil {
+				p.mu.Lock()
+				p.netClasses.reconcile(l.Usage.Net)
+				p.mu.Unlock()
+			}
+		}
+		r.netMu.Unlock()
+	}
 	if w.LeaseSeconds > 0 {
 		r.lease.Store(int64(w.LeaseSeconds * float64(time.Second)))
 	}
@@ -660,6 +678,9 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 // filesystem capacity and headroom, and the guard's pressure, when it is on.
 func (r *Runner) hostUsage(hu podman.HostUsage) *proto.HostUsage {
 	u := &proto.HostUsage{CPUSeconds: hu.CPUSeconds, MemoryBytes: hu.MemoryBytes, DiskBytes: hu.DiskBytes}
+	r.netMu.Lock()
+	u.Net = r.hostNet.value()
+	r.netMu.Unlock()
 	if hu.DiskOK {
 		u.FSFreeBytes = &hu.DiskFree
 	}
@@ -728,6 +749,7 @@ func (r *Runner) usageLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		r.sampleNetwork()
 		var wg sync.WaitGroup
 		for _, p := range r.livePlacements() {
 			// A finishing one was sampled by finish, and its volumes are
