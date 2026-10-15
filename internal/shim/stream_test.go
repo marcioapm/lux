@@ -111,6 +111,67 @@ func liveUntil(t *testing.T, sub *subscriber, want string) []byte {
 	return live
 }
 
+// attachOverPipe runs the shim's attach stream on term, as the runner
+// opens it, and returns the runner's end of it.
+func attachOverPipe(t *testing.T, term *terminal, restore bool) (net.Conn, *json.Decoder) {
+	t.Helper()
+	s := &Shim{term: term}
+	runnerSide, shimSide := net.Pipe()
+	t.Cleanup(func() { runnerSide.Close() })
+	go func() {
+		defer shimSide.Close()
+		s.handleStream(bufio.NewScanner(shimSide), json.NewEncoder(shimSide), proto.StreamOpen{Kind: "attach", Restore: restore})
+	}()
+	return runnerSide, json.NewDecoder(runnerSide)
+}
+
+// readFrame decodes the next StreamData from the runner's end of a stream.
+func readFrame(conn net.Conn, dec *json.Decoder) (proto.StreamData, error) {
+	var d proto.StreamData
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	err := dec.Decode(&d)
+	return d, err
+}
+
+func subscriberCount(term *terminal) int {
+	term.mu.Lock()
+	defer term.mu.Unlock()
+	return len(term.subs)
+}
+
+// waitJoined waits until term has one subscriber: the stream has joined.
+func waitJoined(t *testing.T, term *terminal) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for subscriberCount(term) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the stream never joined")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// writePastBudget writes lines of c to tty until more than a restore
+// subscriber's budget, and 1 MiB more, has been written.
+func writePastBudget(tty *os.File, c string) {
+	line := strings.Repeat(c, 79) + "\r\n"
+	for written := 0; written <= restoreBudget+(1<<20); written += len(line) {
+		io.WriteString(tty, line)
+	}
+}
+
+func isJoined(term *terminal, sub *subscriber) bool {
+	term.mu.Lock()
+	defer term.mu.Unlock()
+	return term.subs[sub]
+}
+
+func emulatorSize(term *terminal) (rows, cols int) {
+	term.mu.Lock()
+	defer term.mu.Unlock()
+	return term.screen.(*vterm.Terminal).Size()
+}
+
 func screenText(v *vterm.Terminal) string {
 	rows, cols := v.Size()
 	var b strings.Builder
@@ -163,14 +224,10 @@ func TestAttachRestoreScrollbackBounded(t *testing.T) {
 	if n := v.HistoryLen(); n != 100 {
 		t.Fatalf("history %d lines, want the limit, 100", n)
 	}
-	first := v.HistoryLine(0)
-	var s strings.Builder
-	for _, c := range first {
-		s.WriteString(v.Text(c))
-	}
+	first := lineText(v, v.HistoryLine(0))
 	// 1000 lines then "end": 996–999 and "end" on screen, 100 before.
-	if s.String() != "line 896" {
-		t.Fatalf("oldest history line %q", s.String())
+	if first != "line 896" {
+		t.Fatalf("oldest history line %q", first)
 	}
 }
 
@@ -227,10 +284,7 @@ func TestAttachRestoreResizesFirst(t *testing.T) {
 		t.Fatal("snapshot not of the new size")
 	}
 	term.resize(12, 50)
-	term.mu.Lock()
-	r, c := term.screen.(*vterm.Terminal).Size()
-	term.mu.Unlock()
-	if r != 12 || c != 50 {
+	if r, c := emulatorSize(term); r != 12 || c != 50 {
 		t.Fatalf("emulator %dx%d after a resize, want 12x50", r, c)
 	}
 }
@@ -245,9 +299,7 @@ func TestResizeClampedForPTYAndEmulator(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		term.mu.Lock()
-		r, c := term.screen.(*vterm.Terminal).Size()
-		term.mu.Unlock()
+		r, c := emulatorSize(term)
 		if int(ws.Rows) != vterm.MaxRows || int(ws.Cols) != vterm.MaxCols || r != vterm.MaxRows || c != vterm.MaxCols {
 			t.Fatalf("%s: pty %dx%d, emulator %dx%d, want both %dx%d", what, ws.Rows, ws.Cols, r, c, vterm.MaxRows, vterm.MaxCols)
 		}
@@ -407,48 +459,21 @@ func TestRestoreAttachFallenBehindIsEnded(t *testing.T) {
 	term, tty, _ := ptyTerminal(t, 24, 80, historyLines, nil)
 	fmt.Fprint(tty, "before")
 	waitScreen(t, term, "before")
-	s := &Shim{term: term}
-
-	runnerSide, shimSide := net.Pipe()
-	defer runnerSide.Close()
-	go func() {
-		defer shimSide.Close()
-		s.handleStream(bufio.NewScanner(shimSide), json.NewEncoder(shimSide), proto.StreamOpen{Kind: "attach", Restore: true})
-	}()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		term.mu.Lock()
-		joined := len(term.subs)
-		term.mu.Unlock()
-		if joined == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the stream never joined")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	runnerSide, dec := attachOverPipe(t, term, true)
+	waitJoined(t, term)
 	// The stream's sender is blocked on its first snapshot frame (net.Pipe
 	// is unbuffered) while the workload writes past the budget.
-	line := strings.Repeat("z", 79) + "\r\n"
-	for written := 0; written <= restoreBudget+(1<<20); written += len(line) {
-		io.WriteString(tty, line)
-	}
+	writePastBudget(tty, "z")
 	fmt.Fprint(tty, "DONE")
 	waitScreen(t, term, "DONE")
-	term.mu.Lock()
-	joined := len(term.subs)
-	term.mu.Unlock()
-	if joined != 0 {
+	if joined := subscriberCount(term); joined != 0 {
 		t.Fatalf("%d subscribers still joined", joined)
 	}
 
-	dec := json.NewDecoder(runnerSide)
 	var out []byte
 	for {
-		var d proto.StreamData
-		runnerSide.SetReadDeadline(time.Now().Add(10 * time.Second))
-		if err := dec.Decode(&d); err != nil {
+		d, err := readFrame(runnerSide, dec)
+		if err != nil {
 			t.Fatalf("the stream ended without an error, after %d bytes: %v", len(out), err)
 		}
 		if d.Error != "" {
@@ -465,9 +490,7 @@ func TestRestoreAttachFallenBehindIsEnded(t *testing.T) {
 		t.Fatalf("stream before the error: %q", out)
 	}
 	// Then the stream is closed: nothing more, not even from the client.
-	var d proto.StreamData
-	runnerSide.SetReadDeadline(time.Now().Add(10 * time.Second))
-	if err := dec.Decode(&d); !errors.Is(err, io.EOF) {
+	if d, err := readFrame(runnerSide, dec); !errors.Is(err, io.EOF) {
 		t.Fatalf("after the error: %+v, %v; want the stream closed", d, err)
 	}
 }
@@ -562,18 +585,9 @@ func TestRestoreAttachWithoutSnapshotFallenBehindIsEnded(t *testing.T) {
 	if snap != nil {
 		t.Fatalf("a snapshot without an emulator: %q", snap)
 	}
-	line := strings.Repeat("q", 79) + "\r\n"
-	for written := 0; written <= restoreBudget+(1<<20); written += len(line) {
-		io.WriteString(tty, line)
-	}
+	writePastBudget(tty, "q")
 	deadline := time.Now().Add(30 * time.Second)
-	for {
-		term.mu.Lock()
-		_, joined := term.subs[sub]
-		term.mu.Unlock()
-		if !joined {
-			break
-		}
+	for isJoined(term, sub) {
 		if time.Now().After(deadline) {
 			t.Fatal("still joined after its budget was written")
 		}
@@ -631,16 +645,10 @@ func TestPlainAttachMissesOverflow(t *testing.T) {
 	if snap != nil || sub.strict {
 		t.Fatalf("plain join: snapshot %q, strict %v", snap, sub.strict)
 	}
-	line := strings.Repeat("p", 79) + "\r\n"
-	for written := 0; written <= restoreBudget+(1<<20); written += len(line) {
-		io.WriteString(tty, line)
-	}
+	writePastBudget(tty, "p")
 	fmt.Fprint(tty, "DONE")
 	waitScreen(t, term, "DONE")
-	term.mu.Lock()
-	_, joined := term.subs[sub]
-	term.mu.Unlock()
-	if !joined {
+	if !isJoined(term, sub) {
 		t.Fatal("a plain subscriber was removed")
 	}
 	if n := len(sub.ch); n != plainQueue {
@@ -730,23 +738,13 @@ func TestAttachStreamSendsSnapshotFrames(t *testing.T) {
 	if snapLen <= 2*streamChunk {
 		t.Fatalf("a snapshot of %d bytes: not over two chunks", snapLen)
 	}
-	s := &Shim{term: term}
-
-	runnerSide, shimSide := net.Pipe()
-	defer runnerSide.Close()
-	go func() {
-		defer shimSide.Close()
-		sc := bufio.NewScanner(shimSide)
-		s.handleStream(sc, json.NewEncoder(shimSide), proto.StreamOpen{Kind: "attach", Restore: true})
-	}()
-	dec := json.NewDecoder(runnerSide)
+	runnerSide, dec := attachOverPipe(t, term, true)
 	var frames []proto.StreamData
 	var out []byte
 	marker := -1 // index in frames of the Restored marker
 	for !bytes.Contains(out, []byte("after")) {
-		var d proto.StreamData
-		runnerSide.SetReadDeadline(time.Now().Add(10 * time.Second))
-		if err := dec.Decode(&d); err != nil {
+		d, err := readFrame(runnerSide, dec)
+		if err != nil {
 			t.Fatalf("after %d frames: %v", len(frames), err)
 		}
 		if d.Restored {
@@ -855,18 +853,10 @@ func TestRestoreMarkerWithoutSnapshot(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			term, tty, _ := ptyTerminal(t, 24, 80, historyLines, nil)
 			tc.setup(t, term, tty)
-			s := &Shim{term: term}
-			runnerSide, shimSide := net.Pipe()
-			defer runnerSide.Close()
-			go func() {
-				defer shimSide.Close()
-				s.handleStream(bufio.NewScanner(shimSide), json.NewEncoder(shimSide), proto.StreamOpen{Kind: "attach", Restore: tc.restore})
-			}()
-			dec := json.NewDecoder(runnerSide)
+			runnerSide, dec := attachOverPipe(t, term, tc.restore)
 			read := func() proto.StreamData {
-				var d proto.StreamData
-				runnerSide.SetReadDeadline(time.Now().Add(10 * time.Second))
-				if err := dec.Decode(&d); err != nil {
+				d, err := readFrame(runnerSide, dec)
+				if err != nil {
 					t.Fatal(err)
 				}
 				return d
@@ -878,13 +868,7 @@ func TestRestoreMarkerWithoutSnapshot(t *testing.T) {
 			} else {
 				// Joined once the stream has subscribed; then live output.
 				deadline := time.Now().Add(10 * time.Second)
-				for {
-					term.mu.Lock()
-					n := len(term.subs)
-					term.mu.Unlock()
-					if n == 1 || time.Now().After(deadline) {
-						break
-					}
+				for subscriberCount(term) != 1 && time.Now().Before(deadline) {
 					time.Sleep(time.Millisecond)
 				}
 			}
