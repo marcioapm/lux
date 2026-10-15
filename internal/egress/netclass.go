@@ -199,7 +199,7 @@ func (f *Firewall) effective(nc *proto.NetworkClasses) (classLists, error) {
 		var all []netip.Prefix
 		for r, list := range in.Provider {
 			// A region becomes part of set and counter names.
-			if !validRegion(r) {
+			if !proto.ValidNetworkRegion(r) {
 				return cl, fmt.Errorf("network class provider: region %q", r)
 			}
 			ps, err := parsePrefixes(proto.NetKey(proto.NetProvider, r), list)
@@ -214,19 +214,6 @@ func (f *Firewall) effective(nc *proto.NetworkClasses) (classLists, error) {
 		cl.provider = disjoint(all)
 	}
 	return cl, nil
-}
-
-// validRegion: lowercase letters, digits and '-', as provider regions are.
-func validRegion(r string) bool {
-	if r == "" || len(r) > 40 {
-		return false
-	}
-	for _, c := range r {
-		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
-			return false
-		}
-	}
-	return true
 }
 
 // disjoint is ps without duplicates and without prefixes inside another.

@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/server"
 )
 
@@ -276,7 +277,7 @@ func (p *Provider) fetchPrefixes(ctx context.Context) error {
 		if cidr == "" {
 			cidr = r.IPv6
 		}
-		if _, err := netip.ParsePrefix(cidr); err != nil || r.Region == "" || r.Service == "" {
+		if _, err := netip.ParsePrefix(cidr); err != nil || (r.Region != "GLOBAL" && !proto.ValidNetworkRegion(r.Region)) || r.Service == "" {
 			return fmt.Errorf("AWS IP ranges: invalid entry %q", cidr)
 		}
 	}

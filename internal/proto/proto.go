@@ -239,6 +239,18 @@ func MaxNet(a, b map[string]NetBytes) map[string]NetBytes {
 	return out
 }
 
+func ValidNetworkRegion(r string) bool {
+	if r == "" || len(r) > 40 {
+		return false
+	}
+	for _, c := range r {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 // Catalog sources (NetworkClasses.Source).
 const (
 	NetSourceEC2    = "ec2-ip-ranges" // AWS's published ip-ranges.json

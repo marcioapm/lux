@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -206,6 +207,42 @@ func TestPrefixesClassificationCacheConditionalAndFallback(t *testing.T) {
 	other, err := p.Prefixes(context.Background(), json.RawMessage(`{"region":"us-east-1"}`))
 	if err != nil || !reflect.DeepEqual(other.RegionService, []string{"203.0.113.0/24"}) || len(other.Provider["eu-north-1"]) != 3 {
 		t.Fatalf("other region = %+v, %v", other, err)
+	}
+}
+
+func TestPrefixesInvalidRegionRetainsCatalogAndRetries(t *testing.T) {
+	region := "eu-west-1"
+	calls := 0
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		fmt.Fprintf(w, `{"prefixes":[{"ip_prefix":"192.0.2.0/24","region":%q,"service":"EC2"}]}`, region)
+	}))
+	defer fake.Close()
+	t.Setenv("LUX_IPRANGES_URL", fake.URL)
+	p := New("", discard)
+	now := time.Now()
+	p.now = func() time.Time { return now }
+	template := json.RawMessage(`{"region":"us-east-1"}`)
+	good, err := p.Prefixes(context.Background(), template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(24 * time.Hour)
+	for _, invalid := range []string{"eu-west-1 ", strings.Repeat("a", 41)} {
+		region = invalid
+		for range 2 {
+			got, err := p.Prefixes(context.Background(), template)
+			if err != nil || !reflect.DeepEqual(got, good) {
+				t.Fatalf("%+v %v", got, err)
+			}
+		}
+		cold := New("", discard)
+		if _, err := cold.Prefixes(context.Background(), template); err == nil {
+			t.Fatal("cold malformed region accepted")
+		}
+	}
+	if calls != 7 {
+		t.Fatal(calls)
 	}
 }
 
