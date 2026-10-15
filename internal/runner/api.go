@@ -158,6 +158,21 @@ func (a *api) uploadDirect(ctx context.Context, blobID string, f io.ReaderAt, si
 		}
 	}
 	err := a.blobPost(ctx, blobID, "complete", done, &struct{}{})
+	if done.UploadID != "" {
+		// The same parts complete the same upload id: a network error, a
+		// 5xx or the mux's 404 is retried in place, and an upload id given
+		// up on is aborted so its parts are not left in S3.
+		for attempt := 0; err != nil && retryableComplete(err) && attempt < len(partRetryDelays) && ctx.Err() == nil; attempt++ {
+			select {
+			case <-ctx.Done():
+			case <-time.After(partRetryDelays[attempt]):
+				err = a.blobPost(ctx, blobID, "complete", done, &struct{}{})
+			}
+		}
+		if err != nil {
+			_ = a.blobPost(ctx, blobID, "complete", proto.BlobCompleteRequest{UploadID: done.UploadID, Abort: true}, &struct{}{})
+		}
+	}
 	// The mux's own 404 (an older luxd, or a proxy) did not record the
 	// upload: a plain error, retried, never the uploader's "deleted".
 	var he *httpError
@@ -165,6 +180,16 @@ func (a *api) uploadDirect(ctx context.Context, blobID string, f io.ReaderAt, si
 		return fmt.Errorf("complete %s: %s", blobID, he.Msg)
 	}
 	return err
+}
+
+// retryableComplete: luxd did not answer, answered a 5xx (S3 unavailable),
+// or the answer was the mux's own 404 rather than luxd's.
+func retryableComplete(err error) bool {
+	var he *httpError
+	if !errors.As(err, &he) {
+		return true
+	}
+	return he.Status/100 == 5 || he.Status == http.StatusNotFound && he.Code == ""
 }
 
 // partLen is the length of part i (0-based) of a blob of size bytes.

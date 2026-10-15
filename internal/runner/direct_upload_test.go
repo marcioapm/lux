@@ -294,6 +294,82 @@ func TestUploaderRetriesAPartInPlace(t *testing.T) {
 	}
 }
 
+// failCompletes makes fk answer the first n multipart /complete requests
+// (not aborts) with status and luxd's code; n < 0 is every one.
+func (f *directFake) failCompletes(n, status int, code string) {
+	f.complete = func(w http.ResponseWriter, _ *http.Request) bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		last := f.completes[len(f.completes)-1]
+		if last.Abort || n == 0 {
+			return false
+		}
+		n--
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{"error":{"code":"`+code+`","message":"complete multipart upload failed"}}`)
+		return true
+	}
+}
+
+// A multipart /complete luxd fails once with 502 s3_unavailable is sent
+// again, unchanged, in the same pass: one /upload, no abort.
+func TestUploaderRetriesCompleteInPlace(t *testing.T) {
+	fk := newDirectFake(t)
+	fk.failCompletes(1, http.StatusBadGateway, "s3_unavailable")
+	r, id := uploadRunner(t, fk, false)
+	_, content := blobFile(t, proto.BlobPartSize+10)
+	if err := os.WriteFile(r.blobPath("blob1"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.uploads.pass(context.Background())
+	if !uploadDone(t, r, id) {
+		t.Fatal("not done after one pass")
+	}
+	fk.mu.Lock()
+	defer fk.mu.Unlock()
+	want := proto.BlobCompleteRequest{UploadID: "up-1", Parts: []proto.UploadedPart{
+		{Number: 1, ETag: `"etag-1"`, SHA256: b64(content[:proto.BlobPartSize])},
+		{Number: 2, ETag: `"etag-2"`, SHA256: b64(content[proto.BlobPartSize:])}}}
+	if len(fk.requests) != 1 || len(fk.completes) != 2 || !equalComplete(fk.completes[0], want) || !equalComplete(fk.completes[1], want) {
+		t.Fatalf("/upload %d, /complete %+v, want twice %+v", len(fk.requests), fk.completes, want)
+	}
+}
+
+// A multipart /complete that keeps failing (a 5xx, three attempts) or is
+// refused (a 4xx, one attempt) is luxd's error, after which the runner has
+// luxd abort that upload id.
+func TestUploadDirectCompleteFailureAborts(t *testing.T) {
+	for _, c := range []struct {
+		status   int
+		code     string
+		attempts int
+	}{{http.StatusBadGateway, "s3_unavailable", 3}, {http.StatusBadRequest, "invalid", 1}} {
+		t.Run(strconv.Itoa(c.status), func(t *testing.T) {
+			fk := newDirectFake(t)
+			fk.failCompletes(-1, c.status, c.code)
+			file, content := blobFile(t, proto.BlobPartSize+10)
+			err := fk.api().uploadDirect(context.Background(), "blob1", file, int64(len(content)))
+			var he *httpError
+			if !errors.As(err, &he) || he.Status != c.status || he.Code != c.code {
+				t.Fatalf("err %v, want luxd's %d %s", err, c.status, c.code)
+			}
+			done := proto.BlobCompleteRequest{UploadID: "up-1", Parts: []proto.UploadedPart{
+				{Number: 1, ETag: `"etag-1"`, SHA256: b64(content[:proto.BlobPartSize])},
+				{Number: 2, ETag: `"etag-2"`, SHA256: b64(content[proto.BlobPartSize:])}}}
+			var want []proto.BlobCompleteRequest
+			for range c.attempts {
+				want = append(want, done)
+			}
+			want = append(want, proto.BlobCompleteRequest{UploadID: "up-1", Abort: true})
+			ja, _ := json.Marshal(fk.completes)
+			jb, _ := json.Marshal(want)
+			if !bytes.Equal(ja, jb) {
+				t.Fatalf("/complete %s, want %s", ja, jb)
+			}
+		})
+	}
+}
+
 // uploadRunner is a Runner whose uploader talks to fk, with one reported
 // record holding blob1.
 func uploadRunner(t *testing.T, fk *directFake, published bool) (*Runner, string) {
