@@ -8,6 +8,11 @@
 // most the history limit of main-screen lines, each at most cols cells.
 // The alternate screen has no history. A Terminal is not safe for
 // concurrent use.
+//
+// lux-shim feeds every tty workload through one; clients outside this
+// module (a multiplexer repainting a window it switches to) can use the
+// same package so both sides agree on what a screen is. It follows lux
+// releases.
 package vterm
 
 import (

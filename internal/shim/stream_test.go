@@ -16,7 +16,7 @@ import (
 	"github.com/creack/pty"
 
 	"github.com/marcioapm/lux/internal/proto"
-	"github.com/marcioapm/lux/internal/shim/vterm"
+	"github.com/marcioapm/lux/vterm"
 )
 
 // ptyTerminal is a terminal on a fresh PTY pair: what is written to the
