@@ -411,6 +411,36 @@ func TestUploaderFallbackWarnsOnce(t *testing.T) {
 	}
 }
 
+// partLen over the same sizes as proto's BlobParts table: every part but
+// the last is BlobPartSize, the last of an exact multiple is BlobPartSize
+// too (never 0), and the lengths add up to the size.
+func TestPartLen(t *testing.T) {
+	const p = proto.BlobPartSize
+	for _, c := range []struct {
+		size int64
+		last int64
+	}{
+		{0, 0}, {1, 1}, {p - 1, p - 1}, {p, p}, {p + 1, 1}, {2 * p, p}, {2*p + 1, 1},
+		{7_300_000_000, 7_300_000_000 - 108*p}, {114*p + 1, 1}, {115 * p, p},
+	} {
+		n := proto.BlobParts(c.size)
+		var total int64
+		for i := range n {
+			l := partLen(c.size, i)
+			if i < n-1 && l != p {
+				t.Errorf("size %d: part %d is %d bytes, want %d", c.size, i+1, l, p)
+			}
+			total += l
+		}
+		if got := partLen(c.size, n-1); got != c.last {
+			t.Errorf("size %d: last part (%d of %d) is %d bytes, want %d", c.size, n, n, got, c.last)
+		}
+		if total != c.size {
+			t.Errorf("size %d: parts add up to %d", c.size, total)
+		}
+	}
+}
+
 // A retry after a failed part starts a fresh /upload.
 func TestUploaderRetryStartsAFreshUpload(t *testing.T) {
 	fk := newDirectFake(t)
