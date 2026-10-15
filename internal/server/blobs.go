@@ -416,7 +416,8 @@ type deleteArtifactsOutput struct {
 // retention never does. The claim is reapRetention's: the Run locked and
 // its state checked, the blobs marked deleted in one transaction, the S3
 // objects deleted after commit. Blobs still on their host are claimed too:
-// serveBlobUpload drops an object that arrives for a deleted blob.
+// serveBlobUpload and serveBlobUploadComplete drop an object that arrives
+// for a deleted blob.
 func (s *Server) deleteArtifacts(ctx context.Context, in *RunPath) (*deleteArtifactsOutput, error) {
 	p := principal(ctx)
 	var keys []string

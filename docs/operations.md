@@ -288,9 +288,21 @@ Every placement ends with a **snapshot** of its state volumes, its
 **output**, and its **artifacts**, all written to the host's disk. They
 reach S3 in the background:
 
-1. The runner uploads each blob with `PUT /runner/v1/blobs/{id}`. luxd streams
-   it into S3 and verifies its sha256 on the way. Runners never hold S3
-   credentials. A snapshot report is validated against its Run's blob
+1. The runner uploads each blob straight to S3. It asks
+   `POST /runner/v1/blobs/{id}/upload` with the blob's size, its sha256 and
+   the sha256 of each 64 MiB part; luxd checks them against the blob's
+   record and answers presigned URLs (valid for an hour): one `PutObject`,
+   or a multipart upload with one `UploadPart` per part. Each URL has the
+   body's SHA-256 signed in, so S3 refuses any other bytes. The runner then
+   calls `POST /runner/v1/blobs/{id}/complete`; luxd completes the
+   multipart upload, checks the object's length, and records the blob in
+   S3. Runners never hold S3 credentials, but need network egress to S3
+   (which downloads already use). luxd still accepts the older
+   `PUT /runner/v1/blobs/{id}`, streaming the body into S3 and verifying
+   its sha256 on the way, for runners that predate direct uploads. A failed
+   upload is retried from the start; a multipart upload left incomplete is
+   aborted by luxd when it can, and by the bucket's lifecycle rule after 7
+   days otherwise. A snapshot report is validated against its Run's blob
    records; a report that does not match is refused whole (a
    `snapshot.failed` event on the Run, which keeps its previous snapshot
    and is not resumed automatically, even when the same placement
