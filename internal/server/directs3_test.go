@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,19 +24,27 @@ import (
 
 // directS3 is an S3 endpoint for direct uploads: PutObject, UploadPart,
 // the multipart calls, HeadObject and DeleteObject on bucket b. Like S3,
-// it refuses a body whose x-amz-checksum-sha256 does not match. It keeps
-// object sizes only, and logs every call as "METHOD op key".
+// it refuses a body whose x-amz-checksum-sha256 does not match, a
+// presigned PUT without that header (luxd always signs it in), and a
+// CompleteMultipartUpload whose parts are not uploaded ones, in ascending
+// order, with their ETags and checksums. It keeps object sizes only, and
+// logs every call as "METHOD op key".
 type directS3 struct {
 	mu      sync.Mutex
 	calls   []string
-	objects map[string]int64            // key → size
-	parts   map[string]map[string]int64 // upload id → part number → size
+	objects map[string]int64                // key → size
+	parts   map[string]map[int32]uploadedS3 // upload id → part number → part
 	deleted []string
 	next    int
 	onHead  func() // called after a HeadObject's lookup, before its answer
 	// completeErr, when set, is CompleteMultipartUpload's answer: a status
 	// and an S3 error code.
 	completeErr *s3Err
+}
+
+type uploadedS3 struct {
+	size           int64
+	etag, checksum string
 }
 
 type s3Err struct {
@@ -45,7 +54,7 @@ type s3Err struct {
 
 func useDirectS3(t *testing.T, s *Server) *directS3 {
 	t.Helper()
-	f := &directS3{objects: map[string]int64{}, parts: map[string]map[string]int64{}}
+	f := &directS3{objects: map[string]int64{}, parts: map[string]map[int32]uploadedS3{}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	bs, err := blob.New(context.Background(), blob.Config{Endpoint: srv.URL, Bucket: "b", AccessKey: "k", SecretKey: "s"})
@@ -98,11 +107,13 @@ func (f *directS3) serve(w http.ResponseWriter, r *http.Request) {
 		op = "HeadObject"
 	}
 	f.calls = append(f.calls, r.Method+" "+op+" "+key)
+	checksum := r.Header.Get("X-Amz-Checksum-Sha256")
 	if op == "PutObject" || op == "UploadPart" {
-		// Checked when sent, as S3 does; a presigned URL signs it in, so a
-		// runner cannot omit it.
+		// Checked when sent, as S3 does. A presigned URL has it signed in,
+		// so S3 refuses the request without it; luxd's own streaming
+		// uploads (the SDK) may carry another checksum instead.
 		sum := sha256.Sum256(body)
-		if c := r.Header.Get("X-Amz-Checksum-Sha256"); c != "" && c != base64.StdEncoding.EncodeToString(sum[:]) {
+		if checksum == "" && q.Has("X-Amz-Signature") || checksum != "" && checksum != base64.StdEncoding.EncodeToString(sum[:]) {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(w, `<Error><Code>BadDigest</Code></Error>`)
 			return
@@ -114,16 +125,18 @@ func (f *directS3) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"put"`)
 	case "UploadPart":
 		up, ok := f.parts[q.Get("uploadId")]
-		if !ok {
+		n, err := strconv.ParseInt(q.Get("partNumber"), 10, 32)
+		if !ok || err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		up[q.Get("partNumber")] = int64(len(body))
-		w.Header().Set("ETag", `"part-`+q.Get("partNumber")+`"`)
+		etag := `"part-` + q.Get("partNumber") + `-` + strconv.Itoa(len(body)) + `"`
+		up[int32(n)] = uploadedS3{size: int64(len(body)), etag: etag, checksum: checksum}
+		w.Header().Set("ETag", etag)
 	case "CreateMultipartUpload":
 		f.next++
 		id := fmt.Sprintf("up-%d", f.next)
-		f.parts[id] = map[string]int64{}
+		f.parts[id] = map[int32]uploadedS3{}
 		fmt.Fprintf(w, `<InitiateMultipartUploadResult><Bucket>b</Bucket><Key>%s</Key><UploadId>%s</UploadId></InitiateMultipartUploadResult>`, key, id)
 	case "CompleteMultipartUpload":
 		if e := f.completeErr; e != nil {
@@ -134,11 +147,35 @@ func (f *directS3) serve(w http.ResponseWriter, r *http.Request) {
 		up, ok := f.parts[q.Get("uploadId")]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `<Error><Code>NoSuchUpload</Code></Error>`)
+			return
+		}
+		var done struct {
+			Parts []struct {
+				PartNumber     int32
+				ETag           string
+				ChecksumSHA256 string
+			} `xml:"Part"`
+		}
+		if err := xml.Unmarshal(body, &done); err != nil || len(done.Parts) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `<Error><Code>MalformedXML</Code></Error>`)
 			return
 		}
 		var n int64
-		for _, size := range up {
-			n += size
+		for i, p := range done.Parts {
+			got, ok := up[p.PartNumber]
+			if !ok || p.ETag != got.etag || p.ChecksumSHA256 != got.checksum {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `<Error><Code>InvalidPart</Code></Error>`)
+				return
+			}
+			if i > 0 && p.PartNumber <= done.Parts[i-1].PartNumber {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `<Error><Code>InvalidPartOrder</Code></Error>`)
+				return
+			}
+			n += got.size
 		}
 		f.objects[key] = n
 		delete(f.parts, q.Get("uploadId"))
@@ -204,7 +241,8 @@ func uploadRequest(content []byte) proto.BlobUploadRequest {
 }
 
 // putPresigned PUTs body to a presigned request with exactly its headers,
-// as the runner does. Returns the status and ETag.
+// as the runner does. Returns the status and ETag. A signed Content-Length
+// other than the body's fails the test: S3 would refuse the signature.
 func putPresigned(t *testing.T, p proto.PresignedRequest, body []byte) (int, string) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPut, p.URL, bytes.NewReader(body))
@@ -213,6 +251,9 @@ func putPresigned(t *testing.T, p proto.PresignedRequest, body []byte) (int, str
 	}
 	for k, v := range p.Headers {
 		if k == "Content-Length" {
+			if v != strconv.Itoa(len(body)) {
+				t.Fatalf("presigned Content-Length %s, body %d bytes", v, len(body))
+			}
 			continue // the body's; Go sets it
 		}
 		req.Header.Set(k, v)
