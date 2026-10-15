@@ -17,9 +17,9 @@ import (
 // With limit > 0, the oldest history lines are left out as needed to keep
 // it within limit bytes. If the screen part alone (main, and alternate when
 // shown) is over limit, there is no snapshot: Snapshot returns nil, and a
-// client goes on without one. Work and allocation are bounded by limit:
-// the screen part is rendered first, then history from the newest line
-// back while it fits.
+// client goes on without one. Work and allocation are bounded by a small
+// multiple of limit, however long the history: the screen part is
+// rendered first, then history from the newest line back while it fits.
 func (t *Terminal) Snapshot(limit int) []byte {
 	prefix := t.appendPrefix(make([]byte, 0, 256))
 	screens := 1
@@ -39,30 +39,44 @@ func (t *Terminal) Snapshot(limit int) []byte {
 		return nil
 	}
 
-	first, size := 0, 0
+	// History newest to oldest, each line rendered once into hist while
+	// it fits; ends[i] is where the i-th newest line ends in it.
+	budget := room - len(scr)
+	var hist, line []byte
 	if limit > 0 {
-		// Newest to oldest: how many lines fit, measured one at a time.
-		budget := room - len(scr)
-		var line []byte
-		first = t.hist.n
-		for i := t.hist.n - 1; i >= 0; i-- {
-			line = t.appendLine(line[:0], t.HistoryLine(i), true)
-			if size+len(line)+2 > budget {
-				break
-			}
-			size += len(line) + 2
-			first = i
-		}
-	} else {
-		size = t.hist.n * (t.cols + 16)
+		hist = make([]byte, 0, min(budget, t.hist.n*(t.cols+16)))
 	}
-	b := make([]byte, 0, len(prefix)+size+len(scr))
+	ends := make([]int, 0, min(t.hist.n, 1024))
+	for i := t.hist.n - 1; i >= 0; i-- {
+		line = t.appendLine(line[:0], t.HistoryLine(i), true)
+		line = append(line, "\r\n"...)
+		if limit > 0 && len(hist)+len(line) > budget {
+			break
+		}
+		hist = appendCapped(hist, line, budget)
+		ends = append(ends, len(hist))
+	}
+	b := make([]byte, 0, len(prefix)+len(hist)+len(scr))
 	b = append(b, prefix...)
-	for i := first; i < t.hist.n; i++ {
-		b = t.appendLine(b, t.HistoryLine(i), true)
-		b = append(b, "\r\n"...)
+	for k := len(ends) - 1; k >= 0; k-- {
+		start := 0
+		if k > 0 {
+			start = ends[k-1]
+		}
+		b = append(b, hist[start:ends[k]]...)
 	}
 	return append(b, scr...)
+}
+
+// appendCapped appends p to b, growing b no further than limit (when
+// limit > 0) so a snapshot's allocation stays within its limit.
+func appendCapped(b, p []byte, limit int) []byte {
+	if n := len(b) + len(p); limit > 0 && n > cap(b) {
+		nb := make([]byte, len(b), min(max(2*cap(b), n), max(limit, n)))
+		copy(nb, b)
+		b = nb
+	}
+	return append(b, p...)
 }
 
 // appendPrefix resets what Snapshot later sets and clears the screen.
@@ -83,16 +97,10 @@ func (t *Terminal) appendScreen(b []byte, room int) ([]byte, bool) {
 	// putLine appends l, rendered, failing when it does not fit.
 	putLine := func(l []Cell, trim bool) bool {
 		line = t.appendLine(line[:0], l, trim)
-		n := len(b) + len(line)
-		if room > 0 && n > room {
+		if room > 0 && len(b)+len(line) > room {
 			return false
 		}
-		if n > cap(b) && room > 0 {
-			nb := make([]byte, len(b), min(max(2*cap(b), n), room))
-			copy(nb, b)
-			b = nb
-		}
-		b = append(b, line...)
+		b = appendCapped(b, line, room)
 		return true
 	}
 	for y, l := range t.main.lines {
