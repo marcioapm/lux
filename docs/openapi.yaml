@@ -3600,6 +3600,9 @@ components:
         port:
           format: int64
           type: integer
+        restore:
+          description: "attach only, luxd to runner (a client asks with attach's restore, rows and cols query parameters): start the output with a snapshot of the terminal, then live output."
+          type: boolean
         rows:
           format: int64
           type: integer

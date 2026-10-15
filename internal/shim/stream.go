@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/creack/pty"
 
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/shim/vterm"
 )
 
 // Interactive streams: exec and attach.
@@ -47,7 +49,7 @@ func (s *Shim) handleStream(sc *bufio.Scanner, enc *json.Encoder, open proto.Str
 	case "exec":
 		s.execStream(sc, out, open)
 	case "attach":
-		s.attachStream(sc, out)
+		s.attachStream(sc, out, open)
 	default:
 		out.fail("unknown stream kind " + open.Kind)
 	}
@@ -131,8 +133,10 @@ func (s *Shim) execStream(sc *bufio.Scanner, out *streamConn, open proto.StreamO
 }
 
 // attachStream joins the workload's terminal (a generic workload started
-// with workload.tty): its output from now on, and input into it.
-func (s *Shim) attachStream(sc *bufio.Scanner, out *streamConn) {
+// with workload.tty): its output from now on, and input into it. With
+// open.Restore, the output starts with a snapshot of the terminal's screen
+// (at open.Rows×open.Cols, when given).
+func (s *Shim) attachStream(sc *bufio.Scanner, out *streamConn, open proto.StreamOpen) {
 	s.mu.Lock()
 	term := s.term
 	s.mu.Unlock()
@@ -140,9 +144,12 @@ func (s *Shim) attachStream(sc *bufio.Scanner, out *streamConn) {
 		out.fail("the workload has no terminal: attach needs workload.tty (generic workloads)")
 		return
 	}
-	sub := term.join()
+	snapshot, sub := term.join(open.Restore, open.Rows, open.Cols)
 	defer term.leave(sub)
 	go func() {
+		for b := range chunks(snapshot, streamChunk) {
+			_ = out.send(proto.StreamData{Channel: "stdout", Data: b})
+		}
 		for b := range sub {
 			_ = out.send(proto.StreamData{Channel: "stdout", Data: b})
 		}
@@ -153,7 +160,7 @@ func (s *Shim) attachStream(sc *bufio.Scanner, out *streamConn) {
 		readStreamInput(sc, func(d proto.StreamData) {
 			switch {
 			case d.Rows > 0:
-				_ = pty.Setsize(term.ptmx, winsize(d.Rows, d.Cols))
+				term.resize(d.Rows, d.Cols)
 			case len(d.Data) > 0:
 				_, _ = term.ptmx.Write(d.Data)
 			}
@@ -166,27 +173,71 @@ func (s *Shim) attachStream(sc *bufio.Scanner, out *streamConn) {
 	}
 }
 
+// streamChunk: the most output one StreamData carries, as a PTY read does.
+const streamChunk = 32 << 10
+
+func chunks(b []byte, n int) func(func([]byte) bool) {
+	return func(yield func([]byte) bool) {
+		for len(b) > 0 {
+			k := min(n, len(b))
+			if !yield(b[:k]) {
+				return
+			}
+			b = b[k:]
+		}
+	}
+}
+
+// historyLines is how much main-screen scrollback a terminal keeps for
+// attach's restore, as tmux's default history-limit.
+const historyLines = 2000
+
+// screenState is a terminal emulator fed the workload's output: what an
+// attach with restore starts from.
+type screenState interface {
+	Write(p []byte)
+	Resize(rows, cols int)
+	Snapshot() []byte
+}
+
 // terminal is a workload's PTY, read for the output file and copied to
 // whoever is attached. An attached client that cannot keep up misses
 // output; it never holds up the workload or its output file.
+//
+// What is read is also fed to an emulator (screen) under the same lock as
+// the copy to subscribers, so a snapshot taken under it and a subscriber
+// joined with it see every byte exactly once. An emulator that fails is
+// dropped: attach goes on without restore.
 type terminal struct {
 	ptmx     *os.File
 	mu       sync.Mutex
 	subs     map[chan []byte]bool
+	screen   screenState
 	gone     chan struct{}
 	goneOnce sync.Once
 }
 
-func newTerminal(ptmx *os.File) *terminal {
-	return &terminal{ptmx: ptmx, subs: map[chan []byte]bool{}, gone: make(chan struct{})}
+func newTerminal(ptmx *os.File, rows, cols int) *terminal {
+	return &terminal{ptmx: ptmx, subs: map[chan []byte]bool{}, gone: make(chan struct{}),
+		screen: vterm.New(rows, cols, historyLines)}
 }
 
-func (t *terminal) join() chan []byte {
+// join subscribes to the terminal's output. With restore, it first
+// resizes to rows×cols (if given) and returns the snapshot the output
+// continues from; nil if the terminal has no emulator.
+func (t *terminal) join(restore bool, rows, cols int) ([]byte, chan []byte) {
 	ch := make(chan []byte, 256)
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	var snap []byte
+	if restore {
+		if rows > 0 && cols > 0 {
+			t.resizeLocked(rows, cols)
+		}
+		t.withScreen(func(s screenState) { snap = s.Snapshot() })
+	}
 	t.subs[ch] = true
-	t.mu.Unlock()
-	return ch
+	return snap, ch
 }
 
 func (t *terminal) leave(ch chan []byte) {
@@ -196,11 +247,41 @@ func (t *terminal) leave(ch chan []byte) {
 	close(ch)
 }
 
-// Read reads the PTY and copies what it read to everyone attached.
+// resize resizes the PTY and the emulator.
+func (t *terminal) resize(rows, cols int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.resizeLocked(rows, cols)
+}
+
+func (t *terminal) resizeLocked(rows, cols int) {
+	ws := winsize(rows, cols)
+	_ = pty.Setsize(t.ptmx, ws)
+	t.withScreen(func(s screenState) { s.Resize(int(ws.Rows), int(ws.Cols)) })
+}
+
+// withScreen calls fn with the emulator, if there still is one; one that
+// panics is dropped. Called with mu held.
+func (t *terminal) withScreen(fn func(screenState)) {
+	if t.screen == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.screen = nil
+			fmt.Fprintln(os.Stderr, "lux-shim: terminal emulator failed, attach restore is off:", r)
+		}
+	}()
+	fn(t.screen)
+}
+
+// Read reads the PTY, feeds the emulator and copies what it read to
+// everyone attached.
 func (t *terminal) Read(p []byte) (int, error) {
 	n, err := t.ptmx.Read(p)
 	if n > 0 {
 		t.mu.Lock()
+		t.withScreen(func(s screenState) { s.Write(p[:n]) })
 		if len(t.subs) > 0 {
 			b := append([]byte{}, p[:n]...)
 			for ch := range t.subs {

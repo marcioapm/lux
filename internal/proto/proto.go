@@ -608,6 +608,9 @@ type StreamOpen struct {
 	Port     int      `json:"port,omitempty"`
 	Rows     int      `json:"rows,omitempty"`
 	Cols     int      `json:"cols,omitempty"`
+	// Restore, attach only: the output starts with a snapshot of the
+	// terminal (sized Rows×Cols when given), then continues live.
+	Restore bool `json:"restore,omitempty" doc:"attach only, luxd to runner (a client asks with attach's restore, rows and cols query parameters): start the output with a snapshot of the terminal, then live output."`
 	// Window is flow control for the stream's output: the runner sends at
 	// most this many output StreamData frames ahead of luxd, which grants
 	// more (StreamData.Credit) as its reader takes them. 0 (a luxd from
