@@ -502,8 +502,9 @@ lux port-forward <run> <port-name> <local-port> [--address 127.0.0.1]
   Live output follows with nothing lost or repeated in between. If your
   side falls behind the workload by more than the redraw's own budget
   (4 MiB queued, each read counted as 64 bytes more than its length,
-  so many tiny writes reach it sooner), the attach is ended with `attach fell behind; attach
-  again` rather than continued with a gap; attach again to redraw. The
+  so many tiny writes reach it sooner), the attach is ended with
+  `attach fell behind; attach again` rather than continued with a gap;
+  attach again to redraw. The
   redraw is ordinary output (StreamOpen `restore`; on the API,
   `GET /v1/runs/{id}/attach?restore=true&rows=R&cols=C`), followed by
   one `{"restored": true}` message with no data where live output
