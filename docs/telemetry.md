@@ -13,7 +13,7 @@ every Run, placement and host. The API returns all of it, and
 | `firstStartedAt` | First reached `running`. |
 | `finishedAt` | Reached a terminal state. |
 | `stage`, `stageSince` | Where it is now and since when ([stages](concepts.md#stages)); `stageReason` while stopping. |
-| `usage` | Rolled up over placements: peak memory, disk and PIDs (maxima), CPU seconds and network bytes (sums), placement count, and `queueSeconds` (requested → first workload start). `peakCpuCores` is the placements' maximum and the `*StallSeconds` their sum, each absent when no placement reported it. |
+| `usage` | Rolled up over placements: peak memory, disk and PIDs (maxima), CPU seconds, network bytes and `netClasses` (sums), placement count, and `queueSeconds` (requested → first workload start). `peakCpuCores` is the placements' maximum and the `*StallSeconds` their sum, each absent when no placement reported it. |
 
 ## Placements
 
@@ -53,6 +53,7 @@ Resource figures are read from the container's cgroup (v2):
 | `ioStallSeconds`, `ioFullStallSeconds` | `io.pressure` `some` and `full` `total`, for I/O. |
 | `peakDiskBytes` | The largest sampled size of the state volumes plus the writable layer. |
 | `netRxBytes`, `netTxBytes` | Network I/O of the container's network namespace. |
+| `netClasses` | Network transfer by billing class: see [Network transfer](#network-transfer). |
 | `snapshotBytes` | Compressed size of its final snapshot. |
 
 The stall figures are absent, never 0, where the kernel has no PSI (no
@@ -96,7 +97,71 @@ reordered report cannot lower a peak.
 | `terminated` | The provider confirmed. |
 | `lost` | It missed heartbeats for a whole lease period (not counting time no luxd could hear it: see `LUX_LEASE` in [operations](operations.md)). |
 
-Plus `lastHeartbeat`, which is updated with every heartbeat.
+Plus `lastHeartbeat`, which is updated with every heartbeat, and, for a
+host its pool's provider launched, `network` (its zone, its own subnets,
+every subnet of its network with its zone, and `publicIPv4`, how many
+public IPv4 addresses it holds, which providers bill by the hour), and
+`netClasses`, the host's own traffic: see [Network transfer](#network-transfer).
+
+## Network transfer
+
+Providers bill bytes by where they go and in which direction, not all
+bytes alike. Per placement (`placements[].netClasses`, summed in the Run's
+`usage.netClasses`) and per host (`netClasses` on `GET /v1/hosts`), lux
+counts cumulative bytes per **class**, `rx` (received from a peer in it)
+and `tx` (sent to one):
+
+| Class | Peer | AWS example |
+| --- | --- | --- |
+| `local` | Same zone, private network | Same-AZ private IP: free |
+| `zone` | Another zone of the region, private network | Cross-AZ: billed each direction |
+| `region-service` | The provider's free services in the region | S3, DynamoDB in-region |
+| `region-public` | The provider's other public addresses in the region | EC2/Elastic IP public addresses: billed each direction |
+| `provider:<region>` | The provider's addresses in another region, per region | Inter-region, which is priced per destination |
+| `provider-global` | Provider prefixes published with no region | CloudFront, Route 53 (`GLOBAL` in ip-ranges.json) |
+| `internet` | Anything else, when a provider catalog is known | Internet out |
+| `unknown` | Anything off the host's own subnets with **no** catalog | — |
+
+`unknown` is not `internet` and not free: it is traffic lux could not
+classify (a host luxd knows no provider for, or a runner whose luxd sent no
+catalog yet). It is never priced.
+
+**What counts.** The runner counts in nftables (`table inet lux`), in base
+chains of their own at priority 100 that only count and accept, after
+every filter: a packet the Run's egress rules (or anything else) drop never
+leaves the host and is not counted. Replies count too (providers bill
+them). A Run's counters see only forwarded packets, so its traffic to its
+own host (its DNS stub, the gateway) and to other containers on the host
+is not counted. The host's own counters (input and output) leave out
+loopback and container bridges: those bytes stay on the host, and a Run's
+are its own. Unrestricted Runs are counted the same way.
+
+**Classification.** luxd builds each provider host's lists on every
+provider check (EC2: `DescribeInstances` and `DescribeSubnets` for the
+host's VPC, and `https://ip-ranges.amazonaws.com/ip-ranges.json`, fetched at
+most once a day with `If-None-Match`, the last good copy kept on failure;
+`LUX_IPRANGES_URL` overrides it): `local` is the subnets of the host's zone,
+`zone` the rest of its VPC's; in-region `S3` and `DYNAMODB` prefixes are
+`region-service`, other in-region ones `region-public`, every other
+region's `provider:<region>`, `GLOBAL` ones `provider-global`. An address
+in several lists takes the first in that table's order. The lists, their
+source (`ec2-ip-ranges`, or `none` when no catalog could be fetched yet;
+`static`, for operator-configured lists, is reserved and not produced
+yet) and when the catalog was fetched reach the runner in its Welcome; a heartbeat's ack carries their
+version, and a runner holding another fetches `GET /runner/v1/network`. A
+change of lists only refills nftables sets, in one transaction: no counter
+is reset. With no lists from luxd, the runner's own interface subnets are
+`local` and everything else `unknown`.
+
+**Values only grow.** Counters live in the kernel: a runner restart reads
+and recreates them, so a re-adopted placement counts on. A reboot loses
+them; the runner keeps each placement's total in its run state, and a
+counter that goes back is added to that total rather than starting over.
+A Run's counters are read a last time just before they are deleted at
+exit, so nothing is lost after the last sample. luxd keeps, per class and
+direction, the greatest value reported (`placements.net_classes`,
+`hosts.host_net_classes`), and sends them back in the Welcome as the floor a
+restarted runner continues from.
 
 ### Operational state and launch outcome
 
