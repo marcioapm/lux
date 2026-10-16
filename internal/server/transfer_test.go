@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -140,6 +141,8 @@ func TestTransferUnpriced(t *testing.T) {
 			transferHost(t, s, partial)
 			cacheTransfer(t, s)
 			placeRun(t, s, "t1", "A", StateStopping, "nh", place("A", 2, 8, "10:00", "11:00"))
+			execSQL(t, s, context.Background(), `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, net_classes) VALUES ('A', 1, 't1', 0, $1, $2)`,
+				at("10:20"), map[string]proto.NetBytes{"internet": {Tx: gb / 2}})
 			setNet(t, s, "p-A", map[string]proto.NetBytes{"unknown": {Tx: 4 * gb, Rx: 1, RxDelivered: 6}, "internet": {Tx: gb}, "local": {Tx: gb}})
 			finish(t, s, "t1", "A", StateSucceeded)
 			drain(t, s)
@@ -160,6 +163,28 @@ func TestTransferUnpriced(t *testing.T) {
 				if src.Source == "compute" && src.Status != "final" {
 					t.Errorf("source %s", src.Status)
 				}
+			}
+			// The hourly rows and the summary agree with the lines: the
+			// internet bytes in their hours, or nothing on a partial host.
+			var hours string
+			systemScan(t, s, `SELECT coalesce(string_agg(to_char(hour AT TIME ZONE 'UTC', 'HH24') || '=' || trim_scale(amount)::text, ' ' ORDER BY hour), '')
+				FROM cost_hourly WHERE run_id = 'A' AND family = 'data-transfer'`, nil, &hours)
+			var summary CostSummaryBody
+			path := "/v1/costs?from=" + url.QueryEscape(at("09:00").Format(time.RFC3339)) + "&to=" + url.QueryEscape(at("13:00").Format(time.RFC3339)) +
+				"&family=data-transfer&interval=hour"
+			if code := getJSON(t, s, keys["t1"], path, &summary); code != http.StatusOK {
+				t.Fatalf("GET /v1/costs: %d", code)
+			}
+			var totals []string
+			for _, r := range summary.Totals {
+				totals = append(totals, r.Amount)
+			}
+			wantHours, wantTotals, wantSeries := "10=0.045 11=0.045", []string{"0.09"}, 2
+			if partial {
+				wantHours, wantTotals, wantSeries = "", nil, 0
+			}
+			if hours != wantHours || !slices.Equal(totals, wantTotals) || len(summary.Series) != wantSeries {
+				t.Errorf("cost_hourly %q totals %v series %v; want %q %v %d series", hours, totals, summary.Series, wantHours, wantTotals, wantSeries)
 			}
 		})
 	}
@@ -244,7 +269,7 @@ func TestTransferHoursSumToTotal(t *testing.T) {
 			Net: map[string]proto.NetBytes{"zone": {Tx: int64(i+1) * 333_333_333, RxDelivered: int64(i) * 111_111_111}}})
 	}
 	final := map[string]proto.NetBytes{"zone": {Tx: 7*333_333_333 + 5, RxDelivered: 6*111_111_111 + 9}}
-	hours := transferHours(samples, final, at("16:00"), &p)
+	hours := transferHours(samples, final, at("16:00"), &p, false)
 	sum := new(big.Rat)
 	for _, h := range hours {
 		sum.Add(sum, mustRat(h.Amount))

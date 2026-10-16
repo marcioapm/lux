@@ -187,8 +187,9 @@ type netSample struct {
 // bytes moved in: the difference of its cumulative counters between
 // samples, at p's prices; whatever the last sample did not see (final's
 // excess) goes to end's hour. Each hour is rounded cumulatively, so the
-// hours add up to the placement's rounded amount.
-func transferHours(samples []netSample, final map[string]proto.NetBytes, end time.Time, p *DataTransferPrices) []transferHour {
+// hours add up to the placement's rounded amount. partial is priceTransfer's:
+// a partial host's hours price nothing, as its lines do.
+func transferHours(samples []netSample, final map[string]proto.NetBytes, end time.Time, p *DataTransferPrices, partial bool) []transferHour {
 	if p == nil {
 		return nil
 	}
@@ -206,7 +207,7 @@ func transferHours(samples []netSample, final map[string]proto.NetBytes, end tim
 			}
 			cum[k] = proto.NetBytes{Tx: max(c.Tx, v.Tx), Rx: max(billedRx(c), billedRx(v))}
 		}
-		_, _, amount := priceTransfer(delta, p, false)
+		_, _, amount := priceTransfer(delta, p, partial)
 		if amount.Sign() == 0 {
 			return
 		}
@@ -335,7 +336,7 @@ func writeTransferSnapshots(ctx context.Context, tx pgx.Tx, runID string, e *com
 			if err != nil {
 				return nil, err
 			}
-			v.hours = transferHours(samples, v.net, end, prices)
+			v.hours = transferHours(samples, v.net, end, prices, v.partial)
 		}
 		v.final = v.to != nil && !missing
 		if _, err := tx.Exec(ctx, `INSERT INTO cost_transfer_snapshots
