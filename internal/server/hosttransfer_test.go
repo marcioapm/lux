@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"math/big"
+	"slices"
 	"testing"
 	"time"
 
@@ -48,8 +49,9 @@ func TestHeartbeatSamplesNetOnChange(t *testing.T) {
 }
 
 // The host's own transfer becomes unallocated data-transfer rows, each
-// hour its counters' growth in that hour at the host's prices; over the
-// host's life they add up to its cumulative counters priced at once.
+// hour its counters' growth in that hour at the host's prices. The first
+// hour with a sample has nothing to measure from and gets no row; the
+// rows after it add up to the growth from that hour's last reading.
 func TestHostTransferHours(t *testing.T) {
 	s, _ := costFixture(t)
 	ctx := context.Background()
@@ -61,41 +63,80 @@ func TestHostTransferHours(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, registered_at, terminated_at,
 			capacity, volumes, launch_template, network)
 		VALUES ('ht', 't1', 'ht', 'ec2p', 'terminated', $1, $1, $2, '{"cpus":8,"memory":34359738368}', '[]', '{"region":"eu-north-1"}', '{"publicIPv4":0}')`,
-		hour, hour.Add(3*time.Hour))
-	// Cumulative: hour 0 reaches 2 GB zone tx; hour 1 nothing new; hour 2
-	// reaches 5 GB zone tx and 1 GB internet tx, 3 GB delivered from zone.
-	// The first hour's last reading is also in a minute rollup: the same
-	// counters at another resolution add nothing.
+		hour, hour.Add(4*time.Hour))
+	// Cumulative: hour 0 reaches 2 GB zone tx (its first sample, at 10
+	// minutes, already shows 1 GB: the hour is not priced); hour 1 reaches
+	// 3 GB; hour 2 nothing new; hour 3 reaches 5 GB zone tx and 1 GB
+	// internet tx, 3 GB delivered from zone. Hour 1's last reading is also
+	// in a minute rollup: the same counters at another resolution add
+	// nothing.
 	for _, smp := range []struct {
 		min, res int
 		net      map[string]proto.NetBytes
 	}{
 		{10, 0, map[string]proto.NetBytes{"zone": {Tx: gb}}},
 		{50, 0, map[string]proto.NetBytes{"zone": {Tx: 2 * gb}}},
-		{50, 60, map[string]proto.NetBytes{"zone": {Tx: 2 * gb}}},
-		{130, 0, map[string]proto.NetBytes{"zone": {Tx: 4 * gb}, "internet": {Tx: gb}}},
-		{170, 0, map[string]proto.NetBytes{"zone": {Tx: 5 * gb, Rx: gb, RxDelivered: 3 * gb}, "internet": {Tx: gb}, "local": {Tx: 50 * gb}}},
+		{110, 0, map[string]proto.NetBytes{"zone": {Tx: 3 * gb}}},
+		{110, 60, map[string]proto.NetBytes{"zone": {Tx: 3 * gb}}},
+		{190, 0, map[string]proto.NetBytes{"zone": {Tx: 4 * gb}, "internet": {Tx: gb}}},
+		{230, 0, map[string]proto.NetBytes{"zone": {Tx: 5 * gb, Rx: gb, RxDelivered: 3 * gb}, "internet": {Tx: gb}, "local": {Tx: 50 * gb}}},
 	} {
 		execSQL(t, s, ctx, `INSERT INTO host_samples (host_id, res, at, net_classes) VALUES ('ht', $1, $2, $3)`,
 			smp.res, hour.Add(time.Duration(smp.min)*time.Minute), smp.net)
 	}
-	for range 4 {
+	for range 5 {
 		if err := s.updateHostHours(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
-	var rows []string
-	systemScan(t, s, `SELECT coalesce(array_agg(extract(hour FROM hour - $1::timestamptz)::text || '=' || trim_scale(unallocated)::text || '/' || trim_scale(allocated)::text ORDER BY hour), '{}')
-		FROM cost_hourly WHERE host_id = 'ht' AND run_id IS NULL AND family = 'data-transfer'`, []any{hour}, &rows)
-	// Hour 0: 2 GB zone tx × 0.01. Hour 2: 3 GB zone tx × 0.01 + 3 GB zone
+	// Hour 1: 1 GB zone tx × 0.01. Hour 3: 2 GB zone tx × 0.01 + 3 GB zone
 	// delivered × 0.01 + 1 GB internet × 0.09. Local is free.
-	want := []string{"0=0.02/0", "2=0.15/0"}
-	if len(rows) != len(want) || rows[0] != want[0] || rows[1] != want[1] {
+	want := []string{"1=0.01/0", "3=0.14/0"}
+	if rows := hostTransferRows(t, s, "ht", hour); !slices.Equal(rows, want) {
 		t.Fatalf("rows %v, want %v", rows, want)
 	}
 	p := eun1TransferTrimmed()
-	_, _, total := priceTransfer(map[string]proto.NetBytes{"zone": {Tx: 5 * gb, Rx: gb, RxDelivered: 3 * gb}, "internet": {Tx: gb}, "local": {Tx: 50 * gb}}, &p, false)
-	if sum := new(big.Rat).Add(mustRat("0.02"), mustRat("0.15")); sum.Cmp(total) != 0 {
-		t.Errorf("hours sum %s, cumulative priced %s", sum.FloatString(9), total.FloatString(9))
+	_, _, total := priceTransfer(map[string]proto.NetBytes{"zone": {Tx: 3 * gb, Rx: gb, RxDelivered: 3 * gb}, "internet": {Tx: gb}, "local": {Tx: 50 * gb}}, &p, false)
+	if sum := new(big.Rat).Add(mustRat("0.01"), mustRat("0.14")); sum.Cmp(total) != 0 {
+		t.Errorf("hours sum %s, growth after the first hour priced %s", sum.FloatString(9), total.FloatString(9))
 	}
+}
+
+// A host live when luxd started sampling its counters (an upgrade): its
+// first sample already holds everything since boot. That hour gets no row,
+// not the whole cumulative; the next hour is its growth only.
+func TestHostTransferFirstSampleAfterUpgrade(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	cacheTransfer(t, s)
+	s.cfg.Costs.Batch = 10
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('ec2p', 't1', 'ec2p', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, registered_at, terminated_at,
+			capacity, volumes, launch_template, network)
+		VALUES ('hu', 't1', 'hu', 'ec2p', 'terminated', $1, $1, $2, '{"cpus":8,"memory":34359738368}', '[]', '{"region":"eu-north-1"}', '{"publicIPv4":0}')`,
+		hour.Add(-30*24*time.Hour), hour.Add(2*time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO cost_host_refresh (host_id, next_hour) VALUES ('hu', $1)`, hour)
+	execSQL(t, s, ctx, `INSERT INTO host_samples (host_id, res, at, net_classes) VALUES
+		('hu', 0, $1, '{"internet":{"tx":5000000000}}'), ('hu', 0, $2, '{"internet":{"tx":5200000000}}')`,
+		hour.Add(20*time.Minute), hour.Add(80*time.Minute))
+	for range 3 {
+		if err := s.updateHostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Hour 1: 0.2 GB × 0.09.
+	if rows, want := hostTransferRows(t, s, "hu", hour), []string{"1=0.018/0"}; !slices.Equal(rows, want) {
+		t.Errorf("rows %v, want %v", rows, want)
+	}
+}
+
+// hostTransferRows: host's data-transfer rows as "<hours after since>=unallocated/allocated".
+func hostTransferRows(t *testing.T, s *Server, host string, since time.Time) []string {
+	t.Helper()
+	var rows []string
+	systemScan(t, s, `SELECT coalesce(array_agg(extract(hour FROM hour - $2::timestamptz)::text || '=' || trim_scale(unallocated)::text || '/' || trim_scale(allocated)::text ORDER BY hour), '{}')
+		FROM cost_hourly WHERE host_id = $1 AND run_id IS NULL AND family = 'data-transfer'`, []any{host, since}, &rows)
+	return rows
 }

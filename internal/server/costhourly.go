@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -370,18 +371,22 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 			return err
 		}
 	}
-	return writeHostTransferHour(ctx, tx, id, hour)
+	return s.writeHostTransferHour(ctx, tx, id, hour)
 }
+
+// loggedHostTransferBaseline: hosts whose unpriced first transfer hour was
+// logged by this process.
+var loggedHostTransferBaseline sync.Map
 
 // writeHostTransferHour writes the unallocated data-transfer row of a
 // host's own traffic in hour (the runner's link to luxd, pulls, uploads;
 // never a Run's): its counters' growth from the last sample before the
 // hour to the last within it, at the host's prices. With no earlier
-// sample the host's counters start from zero (they count from boot), so
-// the rows over its life add up to its cumulative counters, as long as
-// history keeps a sample before each hour rebuilt (history.hours). No
-// price, or nothing billable: no row.
-func writeHostTransferHour(ctx context.Context, tx pgx.Tx, id string, hour time.Time) error {
+// sample the growth is unknown (the counters ran since boot, or since
+// before luxd sampled them), so the hour gets no row: the first hour with
+// a sample is never priced, the next one is. No price, or nothing
+// billable: no row.
+func (s *Server) writeHostTransferHour(ctx context.Context, tx pgx.Tx, id string, hour time.Time) error {
 	var last, before map[string]proto.NetBytes
 	err := tx.QueryRow(ctx, `SELECT
 			(SELECT net_classes FROM host_samples WHERE host_id = $1 AND net_classes IS NOT NULL AND at >= $2 AND at < $3 ORDER BY at DESC, res LIMIT 1),
@@ -389,6 +394,12 @@ func writeHostTransferHour(ctx context.Context, tx pgx.Tx, id string, hour time.
 		id, hour, hour.Add(time.Hour)).Scan(&last, &before)
 	if err != nil || last == nil {
 		return err
+	}
+	if before == nil {
+		if _, logged := loggedHostTransferBaseline.LoadOrStore(id, struct{}{}); !logged {
+			s.log.Info("costs: host transfer hour not priced: no earlier sample to measure it from", "host", id, "hour", hour)
+		}
+		return nil
 	}
 	delta := map[string]proto.NetBytes{}
 	for k, v := range last {

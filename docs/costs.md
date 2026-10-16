@@ -505,7 +505,13 @@ shows transfer when it happened, not spread over the placement nor all at
 its end. The host-hour refresh does the same with the host's own counters
 (`host_samples.net_classes`), writing **unallocated** `data-transfer` rows
 per host: runner↔luxd across zones shows up as that host's cost, hour by
-hour.
+hour. **The first host transfer hour after an upgrade or reboot is not
+priced**: a host hour is the growth from the last sample before it, and the
+first hour with a sample has none (its counters ran since boot, or since
+before luxd sampled them), so it gets no row rather than everything since
+boot. The next hour is the first priced one. The same holds for a rebuilt
+hour (a public-ip or block-storage rewind) whose earlier samples have
+passed `history.hours`.
 
 **Missing today.** No free tier (account-wide, and spent by any real
 account; list price). Tiered internet pricing is taken at its first
