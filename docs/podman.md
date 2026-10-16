@@ -383,8 +383,11 @@ read-only, as in a Run that is not split) runc's mkdir fails, the
 container stays in dockerd's cgroup and sees its limits (measured, by
 remounting `/sys/fs/cgroup` read-only in dockerd's mount namespace).
 `docker run --cgroupns=host` (or `default-cgroupns-mode: host` in the
-workload's `daemon.json`) shows the Run's limits at `/sys/fs/cgroup`, at
-the cost of showing the container the Run's whole cgroup tree. This is
+workload's `daemon.json`) is not a way round it: the container is still
+in `workload/<id>`, whose `memory.max` is `max`, and ClickHouse stops at
+the first `memory.max` it finds walking up from its own cgroup, so it
+still sees no limit. Only a reader that takes the minimum over all
+ancestors (the JVM from 21.0.9 / 24) would find the Run's. This is
 open: `test_run_size.py::test_inner_docker_containers_see_the_runs_size`
 expects the Run's limits and is marked as an expected failure until then.
 
