@@ -212,6 +212,66 @@ func TestPublicIPLateAddresses(t *testing.T) {
 	assertPublicIPSince(t, s, keys["t1"], "B")
 }
 
+// Where a provider host's first public-ip period starts, by the order in
+// which its registration, its address count and its region's price became
+// known: from registration only when the addresses were recorded by then,
+// otherwise from the first recording of addresses, not a later count.
+func TestPublicIPPeriodStart(t *testing.T) {
+	refresh := func(t *testing.T, s *Server, addresses int) time.Time {
+		t.Helper()
+		n := hostA()
+		n.Zone, n.PublicIPv4 = "eu-north-1a", addresses
+		recorded := time.Now()
+		if err := s.storeNetworkRefresh(context.Background(), "nh", "ec2", "eu-north-1", n, catalogEU(at("09:00"))); err != nil {
+			t.Fatal(err)
+		}
+		return recorded
+	}
+	for _, c := range []struct {
+		name string
+		// run sets the host up and returns the expected period start's
+		// bounds and address count.
+		run func(t *testing.T, s *Server) (from, to time.Time, addresses int)
+	}{
+		{"network first recorded after registration", func(t *testing.T, s *Server) (time.Time, time.Time, int) {
+			execSQL(t, s, context.Background(), `UPDATE hosts SET network = NULL WHERE id = 'nh'`)
+			cacheTransfer(t, s)
+			recorded := refresh(t, s, 1)
+			return recorded, time.Now(), 1
+		}},
+		{"network recorded before registration", func(t *testing.T, s *Server) (time.Time, time.Time, int) {
+			ctx := context.Background()
+			execSQL(t, s, ctx, `UPDATE hosts SET network = NULL, registered_at = NULL WHERE id = 'nh'`)
+			cacheTransfer(t, s)
+			refresh(t, s, 1)
+			registered := time.Now().Add(time.Second).UTC().Truncate(time.Microsecond)
+			execSQL(t, s, ctx, `UPDATE hosts SET registered_at = $1 WHERE id = 'nh'`, registered)
+			s.refreshPublicIP(ctx)
+			return registered, registered, 1
+		}},
+		{"count changed before a price was cached", func(t *testing.T, s *Server) (time.Time, time.Time, int) {
+			first := refresh(t, s, 1)
+			firstDone := time.Now()
+			time.Sleep(10 * time.Millisecond)
+			refresh(t, s, 2)
+			cacheTransfer(t, s)
+			s.refreshPublicIP(context.Background())
+			return first, firstDone, 2
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, _ := costFixture(t)
+			s.cfg.Costs.Hourly = 100 * 365 * 24 * time.Hour
+			transferHost(t, s, false, 0)
+			from, to, addresses := c.run(t, s)
+			got := publicIPRates(t, s, "nh")
+			if len(got) != 1 || got[0].From.Before(from) || got[0].From.After(to) || got[0].Addresses != addresses {
+				t.Fatalf("periods %+v, want one from [%s, %s] with %d addresses", got, from.UTC(), to.UTC(), addresses)
+			}
+		})
+	}
+}
+
 // assertPublicIPSince: live Run runID, placed weeks before its host's
 // public-ip period opened a moment ago, is charged from the period's start
 // only, so its public-ip line is under a nanodollar-scale bound rather
