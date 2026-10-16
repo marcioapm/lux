@@ -190,6 +190,23 @@ func TestTransferUnpriced(t *testing.T) {
 	}
 }
 
+// A provider host's inter-region destination the price list lacks is
+// unpriced (no-price), not billed at zero; the class is final all the same.
+func TestTransferProviderDestinationWithoutPrice(t *testing.T) {
+	s, keys := costFixture(t)
+	transferHost(t, s, false)
+	cacheTransfer(t, s)
+	placeRun(t, s, "t1", "A", StateStopping, "nh", place("A", 2, 8, "10:00", "11:00"))
+	setNet(t, s, "p-A", map[string]proto.NetBytes{"provider:eu-west-1": {Tx: gb}, "provider:ap-east-9": {Tx: 2 * gb}})
+	finish(t, s, "t1", "A", StateSucceeded)
+	drain(t, s)
+	lines, c := transferLinesOf(t, s, keys["t1"], "A")
+	if !slices.Equal(lines, []string{"provider:eu-west-1:tx 0.02 true"}) || len(c.Unpriced) != 1 ||
+		fmt.Sprintf("%+v", c.Unpriced[0]) != fmt.Sprintf("%+v", Unpriced{Class: "provider:ap-east-9", Reason: unpricedNoPrice, Tx: 2 * gb}) {
+		t.Errorf("lines %v unpriced %+v", lines, c.Unpriced)
+	}
+}
+
 // No price cached for the host's region: billable bytes are missing, the
 // source incomplete and retried, never zero; once the price is cached the
 // retry prices and freezes it, and a later price change does not reprice.

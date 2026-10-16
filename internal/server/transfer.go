@@ -82,7 +82,10 @@ func transferClassFree(class string) bool {
 }
 
 // transferPerGB is the per-GB price of key (a proto.NetKey) in direction
-// dir ("rx" or "tx"); ok false when p has none for it. "0": not charged.
+// dir ("rx" or "tx"); ok false when p has none for the class (a static
+// host's operator priced other classes only, an inter-region destination
+// the price list lacks). Within a priced class a missing direction, or
+// "0", is not charged.
 func transferPerGB(p DataTransferPrices, key, dir string) (string, bool) {
 	class, region, _ := strings.Cut(key, ":")
 	var g PerGB
@@ -98,14 +101,11 @@ func transferPerGB(p DataTransferPrices, key, dir string) (string, bool) {
 	case proto.NetProviderGlobal, proto.NetInternet:
 		g = p.Internet
 	case proto.NetProvider:
-		var ok bool
-		if g, ok = p.Provider[region]; !ok {
-			return "", false
-		}
+		g = p.Provider[region]
 	default:
 		return "", false
 	}
-	if p.Currency == "" {
+	if p.Currency == "" || g == (PerGB{}) {
 		return "", false
 	}
 	v := g.Tx

@@ -73,7 +73,9 @@ func TestStaticHostNetworkSettings(t *testing.T) {
 // A static host's transfer is priced at its operator's prices; one with no
 // catalog has only local and unknown traffic, so nothing is priced and the
 // unknown bytes are listed as unpriced; one without prices lists its
-// billable classes as unpriced (no-price) without holding up finality.
+// billable classes as unpriced (no-price) without holding up finality,
+// and so does one whose operator priced some classes but not others: the
+// unpriced class is listed, never billed at zero.
 func TestStaticHostTransferPricing(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -91,6 +93,12 @@ func TestStaticHostTransferPricing(t *testing.T) {
 		{"no prices", nil,
 			map[string]proto.NetBytes{"internet": {Tx: gb}},
 			nil, []string{"internet no-price 0 1000000000"}},
+		{"class without a price", &DataTransferPrices{Currency: "EUR", Internet: PerGB{Tx: "0.001"}},
+			map[string]proto.NetBytes{"internet": {Tx: gb}, "zone": {Tx: 7 * gb, RxDelivered: 3 * gb}},
+			[]string{"internet:tx 0.001 true"}, []string{"zone no-price 3000000000 7000000000"}},
+		{"explicit zero is free", &DataTransferPrices{Currency: "EUR", Internet: PerGB{Tx: "0.001"}, Zone: PerGB{Tx: "0"}},
+			map[string]proto.NetBytes{"internet": {Tx: gb}, "zone": {Tx: 7 * gb, RxDelivered: 3 * gb}},
+			[]string{"internet:tx 0.001 true"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, keys := costFixture(t)
