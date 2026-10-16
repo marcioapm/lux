@@ -180,10 +180,16 @@ availability immediately. See [CLI](cli.md#runs).
   secret of the same name overrides them. Spec `env` cannot use `LUX_` names.
 - **On a host whose runner pins Runs (`lux-runner --cpuset`)**, a Run is
   also confined to `ceil(resources.cpus)` of the host's CPUs: `nproc`,
-  its affinity and its cgroup's `cpuset.cpus.effective` show that many
-  (a `0.5` Run gets one CPU, shared with as few Runs as the host allows),
+  its affinity and its cgroup's `cpuset.cpus.effective` show that many,
   and `LUX_CPUSET` holds them in cpu-list form (`4-5`). `cpu.max` still
-  holds `resources.cpus` of CPU time. A resume may be pinned to other CPUs.
+  holds `resources.cpus` of CPU time. The runner places by demand (each
+  pinned Run's `cpus` spread over its set): a fractional Run joins a CPU
+  other fractions already use, as long as their sum stays within one CPU,
+  and whole-CPU Runs take CPUs nothing else uses, then the least used
+  ones. A set is chosen when the container is created and never moved:
+  CPUs a Run frees go to later Runs, not to Runs already running, so a
+  host whose Runs come and go can have pinned Runs sharing CPUs while
+  others are idle. A resume may be pinned to other CPUs.
 - **Containers a nested Run starts with Podman default to the Run's
   size.** One started without `-m` has the Run's memory limit as its
   `memory.max` (and `memory.swap.max`), and one without `--cpus` the

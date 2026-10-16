@@ -7,30 +7,71 @@ import (
 	"strings"
 )
 
-// cpusetFor picks ceil(cpus) of the host's CPUs for a Run, given the sets
-// the host's other Runs hold. It prefers the CPUs held by the fewest Runs,
-// lowest number first, so whole-CPU Runs get disjoint sets while capacity
-// allows, a fractional Run gets the least-shared CPU, and an oversubscribed
-// host shares its least-loaded CPUs. It never fails: with no CPUs (or cpus
-// <= 0) it returns nil, and the Run is not pinned.
-func cpusetFor(host []int, held [][]int, cpus float64) []int {
+// holding is a pinned container's set and the CPUs of time it was given
+// (resources.cpus), spread evenly over the set as its demand.
+type holding struct {
+	set  []int
+	cpus float64
+}
+
+// demandEpsilon absorbs float rounding in sums of fractional demands
+// (0.1 + 0.9 is a full CPU).
+const demandEpsilon = 1e-9
+
+// cpusetFor picks ceil(cpus) of the host's CPUs for a Run, given what the
+// host's pinned containers hold. Each CPU's demand is the sum, over the
+// holdings containing it, of cpus/len(set). A fractional Run (cpus < 1)
+// goes to the CPU whose demand is highest yet still fits it within one CPU
+// (best fit), so fractions pack together and leave free CPUs to whole-CPU
+// Runs; with no such CPU it takes the least-demand one. Any other Run takes
+// the least-demand CPUs: entirely free ones first, then the least loaded.
+// Ties go to the lowest CPU number. Sets are chosen at placement only and
+// never moved after (no re-pinning), so a released set is only reused by
+// later placements. Never fails: with no CPUs (or cpus <= 0) it returns
+// nil, and the Run is not pinned.
+func cpusetFor(host []int, held []holding, cpus float64) []int {
 	n := int(math.Ceil(cpus))
 	if n <= 0 || len(host) == 0 {
 		return nil
 	}
 	n = min(n, len(host))
-	load := make(map[int]int, len(host))
-	for _, set := range held {
-		for _, c := range set {
-			load[c]++
+	demand := make(map[int]float64, len(host))
+	for _, h := range held {
+		if len(h.set) == 0 {
+			continue
+		}
+		for _, c := range h.set {
+			demand[c] += h.cpus / float64(len(h.set))
 		}
 	}
 	order := slices.Clone(host)
 	slices.Sort(order)
-	slices.SortStableFunc(order, func(a, b int) int { return load[a] - load[b] })
-	out := order[:n]
+	slices.SortStableFunc(order, func(a, b int) int { return cmpDemand(demand[a], demand[b]) })
+	if cpus < 1 {
+		best := -1
+		for _, c := range order {
+			d := demand[c]
+			if d > demandEpsilon && d+cpus <= 1+demandEpsilon && (best < 0 || d > demand[best]+demandEpsilon) {
+				best = c
+			}
+		}
+		if best >= 0 {
+			return []int{best}
+		}
+	}
+	out := slices.Clone(order[:n])
 	slices.Sort(out)
 	return out
+}
+
+func cmpDemand(a, b float64) int {
+	switch {
+	case a < b-demandEpsilon:
+		return -1
+	case a > b+demandEpsilon:
+		return 1
+	}
+	return 0
 }
 
 // cpuList is a set in the kernel's cpu-list form ("0-3,6"), as
@@ -100,13 +141,22 @@ func (r *Runner) allocateCpuset(p *placement, cpus float64) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var held [][]int
+	var held []holding
 	for _, o := range r.placements {
 		if o == p || o.liveState() == "" {
 			continue
 		}
-		if set := parseCPUList(o.cpuset()); set != nil {
-			held = append(held, set)
+		h := holding{set: parseCPUList(o.cpuset())}
+		o.mu.Lock()
+		if o.state != nil && o.state.Spec != nil {
+			h.cpus = o.state.Spec.Resources.CPUs
+		}
+		o.mu.Unlock()
+		if h.set != nil {
+			if h.cpus <= 0 {
+				h.cpus = float64(len(h.set))
+			}
+			held = append(held, h)
 		}
 	}
 	set := cpuList(cpusetFor(r.hostCPUs, held, cpus))

@@ -16,86 +16,114 @@ func cpus(n int) []int {
 	return out
 }
 
-// Whole-CPU Runs get disjoint sets while the host has free CPUs.
-func TestCpusetWholeRunsAreDisjoint(t *testing.T) {
-	host := cpus(8)
-	var held [][]int
-	for _, c := range []float64{2, 2, 3} {
-		held = append(held, cpusetFor(host, held, c))
+// place runs cpusetFor for each request in turn, each set held by the
+// next, as a host placing them one after another does.
+func place(host []int, reqs ...float64) [][]int {
+	var held []holding
+	var sets [][]int
+	for _, c := range reqs {
+		s := cpusetFor(host, held, c)
+		held = append(held, holding{s, c})
+		sets = append(sets, s)
 	}
-	want := [][]int{{0, 1}, {2, 3}, {4, 5, 6}}
-	if !slices.EqualFunc(held, want, slices.Equal) {
-		t.Fatalf("sets %v, want %v", held, want)
-	}
+	return sets
 }
 
-// A fractional Run gets one CPU: the one the fewest Runs hold.
-func TestCpusetFractionalSharesTheLeastShared(t *testing.T) {
-	host := cpus(4)
-	held := [][]int{{0, 1}, {2}, {0}, {3}, {3}}
-	if got := cpusetFor(host, held, 0.5); !slices.Equal(got, []int{1}) && !slices.Equal(got, []int{2}) {
-		t.Fatalf("0.5 cpus: %v, want one of the CPUs held once (1 or 2)", got)
+// demandOf sums each CPU's demand over sets placed for reqs.
+func demandOf(sets [][]int, reqs []float64) map[int]float64 {
+	d := map[int]float64{}
+	for i, s := range sets {
+		for _, c := range s {
+			d[c] += reqs[i] / float64(len(s))
+		}
 	}
-	if got := cpusetFor(host, held, 0.5); !slices.Equal(got, []int{1}) {
-		t.Fatalf("ties go to the lowest CPU: %v", got)
-	}
-	if got := cpusetFor(host, held, 1.5); len(got) != 2 {
-		t.Fatalf("1.5 cpus: %v, want 2 CPUs", got)
-	}
+	return d
 }
 
-// An oversubscribed host shares its least-loaded CPUs and never fails; a
-// Run asking more CPUs than the host has gets them all.
-func TestCpusetOversubscriptionShares(t *testing.T) {
-	host := cpus(4)
-	held := [][]int{{0, 1, 2}, {3}, {0}}
-	if got := cpusetFor(host, held, 2); !slices.Equal(got, []int{1, 2}) {
-		t.Fatalf("oversubscribed: %v, want [1 2] (each held once)", got)
+// The allocator's placements, request by request, with exact sets.
+func TestCpusetPlacesByDemand(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		host []int
+		reqs []float64
+		want [][]int
+	}{
+		{"whole-CPU Runs are disjoint while CPUs are free", cpus(8), []float64{2, 2, 3}, [][]int{{0, 1}, {2, 3}, {4, 5, 6}}},
+		// 0.9 joins 0.1 on CPU 1 (1.0); CPU 0 keeps the whole Run alone.
+		{"1, 0.1, 0.9 on 2 CPUs: no CPU above 1", cpus(2), []float64{1, 0.1, 0.9}, [][]int{{0}, {1}, {1}}},
+		// The fractions pack two to a CPU; the 2-CPU Run gets the two
+		// CPUs with no fractional demand.
+		{"4×0.5 then 2 on 4 CPUs", cpus(4), []float64{0.5, 0.5, 0.5, 0.5, 2}, [][]int{{0}, {0}, {1}, {1}, {2, 3}}},
+		{"a fraction that fits nowhere takes a free CPU", cpus(3), []float64{0.6, 0.6, 1}, [][]int{{0}, {1}, {2}}},
+		// Best fit: 0.3 fits beside 0.6 (0.9) and beside 0.5 (0.8); it
+		// takes the fuller CPU.
+		{"best fit packs the fullest CPU that still fits", cpus(4), []float64{0.6, 0.5, 0.3}, [][]int{{0}, {1}, {0}}},
+		{"1.5 takes free CPUs first", cpus(4), []float64{0.5, 1.5}, [][]int{{0}, {1, 2}}},
+		{"a non-contiguous affinity mask", []int{2, 3, 6, 7}, []float64{2, 1, 0.5}, [][]int{{2, 3}, {6}, {7}}},
+		// Oversubscribed: the 2-CPU Run takes the least-demand CPUs, never fails.
+		{"full host: least demand", cpus(4), []float64{2, 2, 0.5, 2}, [][]int{{0, 1}, {2, 3}, {0}, {1, 2}}},
+		{"more CPUs than the host has", cpus(4), []float64{16}, [][]int{{0, 1, 2, 3}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := place(c.host, c.reqs...)
+			if !slices.EqualFunc(got, c.want, slices.Equal) {
+				t.Fatalf("sets %v, want %v", got, c.want)
+			}
+		})
 	}
-	if got := cpusetFor(host, held, 16); !slices.Equal(got, host) {
-		t.Fatalf("more than the host: %v", got)
+	// The reviewers' cases, as demand: no CPU above one CPU of time.
+	for _, reqs := range [][]float64{{1, 0.1, 0.9}, {0.5, 0.5, 0.5, 0.5, 2}} {
+		for c, d := range demandOf(place(cpus(len(reqs)), reqs...), reqs) {
+			if d > 1+demandEpsilon {
+				t.Errorf("%v: CPU %d has demand %g", reqs, c, d)
+			}
+		}
 	}
-	if got := cpusetFor(nil, held, 2); got != nil {
+	if got := cpusetFor(nil, nil, 2); got != nil {
 		t.Fatalf("no CPUs: %v", got)
 	}
-	if got := cpusetFor(host, nil, 0); got != nil {
+	if got := cpusetFor(cpus(4), nil, 0); got != nil {
 		t.Fatalf("no cpus asked: %v", got)
 	}
 }
 
-// What re-adoption does: the sets read back from run state are the held
-// sets, so the next Run gets what it would have got before the restart.
-func TestCpusetRebuiltFromStateMatches(t *testing.T) {
-	host := cpus(6)
-	var held []string
-	var sets [][]int
-	for _, c := range []float64{2, 1, 0.5} {
-		s := cpusetFor(host, sets, c)
-		sets = append(sets, s)
-		held = append(held, cpuList(s)) // as persisted
-	}
-	var rebuilt [][]int
-	for _, s := range held {
-		rebuilt = append(rebuilt, parseCPUList(s))
-	}
-	if !slices.EqualFunc(rebuilt, sets, slices.Equal) {
-		t.Fatalf("rebuilt %v, want %v", rebuilt, sets)
-	}
-	if a, b := cpusetFor(host, sets, 2), cpusetFor(host, rebuilt, 2); !slices.Equal(a, b) || !slices.Equal(a, []int{4, 5}) {
-		t.Fatalf("next Run: %v before restart, %v after", a, b)
+// Held CPUs outside the runner's current mask (a restart under a narrower
+// affinity) count for nothing: only the mask is placed from.
+func TestCpusetIgnoresHeldCPUsOutsideTheMask(t *testing.T) {
+	if got := cpusetFor([]int{2, 3, 6, 7}, []holding{{[]int{0, 1}, 2}, {[]int{2}, 1}}, 2); !slices.Equal(got, []int{3, 6}) {
+		t.Fatalf("%v, want [3 6]", got)
 	}
 }
 
-// A released set is free again.
-func TestCpusetReleaseFrees(t *testing.T) {
+// Sets are never moved once chosen: three 2-CPU Runs on 4 CPUs get 0-1,
+// 2-3, 0-1; when the middle one ends, the other two still share 0-1 and
+// 2-3 sits idle until the next placement takes it (documented in
+// docs/runspec.md).
+func TestCpusetReleaseIsReusedByTheNextPlacementOnly(t *testing.T) {
 	host := cpus(4)
-	a := cpusetFor(host, nil, 2)
-	b := cpusetFor(host, [][]int{a}, 2)
-	if got := cpusetFor(host, [][]int{a, b}, 2); !slices.Equal(got, []int{0, 1}) {
-		t.Fatalf("full host shares from the start: %v", got)
+	sets := place(host, 2, 2, 2)
+	if want := [][]int{{0, 1}, {2, 3}, {0, 1}}; !slices.EqualFunc(sets, want, slices.Equal) {
+		t.Fatalf("sets %v, want %v", sets, want)
 	}
-	if got := cpusetFor(host, [][]int{b}, 2); !slices.Equal(got, a) {
-		t.Fatalf("after releasing %v: %v", a, got)
+	left := []holding{{sets[0], 2}, {sets[2], 2}}
+	if got := cpusetFor(host, left, 2); !slices.Equal(got, []int{2, 3}) {
+		t.Fatalf("after releasing 2-3: %v, want [2 3]", got)
+	}
+}
+
+// What re-adoption does: the sets read back from run state, in cpu-list
+// form, give the next Run what it would have got before the restart.
+func TestCpusetRebuiltFromStateMatches(t *testing.T) {
+	host := cpus(6)
+	reqs := []float64{2, 1, 0.5}
+	sets := place(host, reqs...)
+	var before, after []holding
+	for i, s := range sets {
+		before = append(before, holding{s, reqs[i]})
+		after = append(after, holding{parseCPUList(cpuList(s)), reqs[i]})
+	}
+	if a, b := cpusetFor(host, before, 2), cpusetFor(host, after, 2); !slices.Equal(a, b) || !slices.Equal(a, []int{4, 5}) {
+		t.Fatalf("next Run: %v before restart, %v after", a, b)
 	}
 }
 
