@@ -496,13 +496,19 @@ host's network discovery was partial (`hosts.network.partial`), so its
 classes cannot be trusted and **none** of its billable transfer is priced.
 `no-price`: a billable class with no price (an inter-region destination the
 price list lacks, a static host without that class's price). Unpriced
-bytes do not hold up finality: no retry could price them.
+bytes do not hold up finality: no retry could price them. A static host
+whose operator priced some classes but not others lists the others as
+`no-price`; an explicit `0` is free.
 
 **Hours.** Heartbeat samples carry a placement's cumulative counters when
 they changed; a Run's hourly rows place each sample's growth in its hour
 (the rest of the final reading in the end's hour), so `GET /v1/costs`
 shows transfer when it happened, not spread over the placement nor all at
-its end. The host-hour refresh does the same with the host's own counters
+its end. Only each hour's last reading counts. Each hour is rounded
+cumulatively to the placement's exact total, so the hours sum to the
+snapshot amount; the Run's line sums per-item amounts each rounded to
+1e-9, so hours and line can differ by at most 0.5e-9 per (class,
+direction). The host-hour refresh does the same with the host's own counters
 (`host_samples.net_classes`), writing **unallocated** `data-transfer` rows
 per host: runner↔luxd across zones shows up as that host's cost, hour by
 hour. **The first host transfer hour after an upgrade or reboot is not
@@ -512,6 +518,26 @@ before luxd sampled them), so it gets no row rather than everything since
 boot. The next hour is the first priced one. The same holds for a rebuilt
 hour (a public-ip or block-storage rewind) whose earlier samples have
 passed `history.hours`.
+
+**Prices have no rate periods.** Unlike compute, block storage and public
+IPv4 (`host_rates`), per-GB transfer prices are not kept as periods. A
+placement is priced at the prices cached (provider) or set (static) when
+it is evaluated, and frozen at its end. A price change while a placement
+is live therefore reprices all of its bytes, those moved before the change
+included, and its past hourly rows with them; a rebuilt host hour is
+priced at the price of the day it is rebuilt. This is a known deviation
+from `host_rates`: harmless for AWS list prices, which rarely change, but
+a static host's operator who changes a price mid-placement sees the new
+price on all of it.
+
+**Cross-AZ.** AWS publishes both `DataTransfer-Regional-Bytes` ($0.01) and
+`DataTransfer-xAZ-*` ($0) usage types with the same description; lux
+prices cross-AZ at the regional rate; confirm against your CUR.
+
+**Runners older than `provider-global-free`** do not count that class:
+they count CloudFront's prefixes as `internet`, which is priced, so their
+CloudFront traffic is overcharged at the internet rate until the runner is
+upgraded.
 
 **Missing today.** No free tier (account-wide, and spent by any real
 account; list price). Tiered internet pricing is taken at its first
@@ -530,11 +556,21 @@ block storage: a `host_rates` period (`family = 'public-ip'`) with
 per_hour = PublicIPv4PerHour × hosts.network.publicIPv4
 ```
 
-(`$0.005` an address-hour in every region at the time of writing). The
-first period opens from the host's registration once its addresses are
-known and the region's price is cached (re-queuing Runs already final on
-it, as block storage does); a provider check that records another count
-closes the open period and opens one at the new count (none at zero). The
+(`$0.005` an address-hour in every region at the time of writing).
+
+**When the first period starts.** A provider host's first period starts at
+its `registered_at` if its address count was already recorded when it
+registered; otherwise from when a provider check first recorded addresses
+on it (`hosts.public_ip_from`: an address attached after launch, a count
+of 0 that became n, a network recorded late). A static host's first period
+starts at its registration when its charge came with it (its pool's
+default, on its first hello); a `--price-public-ip` set later starts from
+when it is set, never backdated. Opening a first period rewinds the host's
+hourly cursor to its start and re-queues the host's Runs placed after it,
+final ones included, as block storage does; a placement that started
+before the period is charged from the period's start. A provider check
+that records another count closes the open period and opens one at the new
+count (none at zero). The
 same `computeCost` occupancy formula splits it, so allocated + unallocated
 = the addresses' cost, in `GET /v1/hosts/{id}/cost`, pool cost and the
 `unallocated`/`hosts` rows of `GET /v1/costs`. Run lines: item `ipv4`.
@@ -554,7 +590,7 @@ static pool's defaults with `lux pools set --price-transfer
 traffic outside the listed subnets is `internet`; without one, only
 `local` and `unknown` exist and nothing is priced. `--price-public-ip` is
 the host's whole charge per hour; 0 or unset opens no period, and a change
-opens a new one. `lux hosts get` prints the price table.
+opens a new one. Transfer prices have no periods (see "Data transfer"). `lux hosts get` prints the price table.
 
 ## 3. Prices
 
