@@ -353,7 +353,10 @@ OCI configuration and returns it: `lux-shim oci-defaults` (the shim
 binary every Run already has, read-only) sets `linux.resources.memory`
 (limit and swap) to the Run's limit and `cpu` to the Run's quota, only
 where the configuration has none and `unified` sets no `memory.max` or
-`cpu.max`. crun runs as usual; nothing wraps it.
+`cpu.max`. An explicit `-m` or `--cpus` larger than the Run's (or
+unlimited, `-1`) is lowered to the Run's: the Run's cgroup caps it
+anyway, and a container reading `4g` would size itself to memory it
+cannot have. crun runs as usual; nothing wraps it.
 
 `containers.conf`'s own `cgroup_conf` is not used: Podman puts it in
 `unified`, which crun writes after `memory`, so it overrides an explicit

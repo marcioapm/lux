@@ -117,7 +117,8 @@ def test_without_cpuset_nothing_is_pinned(lux, runners, hosts):
 
 def test_inner_containers_default_to_the_runs_size(lux, runners, hosts):
     """An inner Podman container without -m or --cpus has the Run's
-    memory.max and CPU quota, and the Run's CPUs; explicit limits win."""
+    memory.max and CPU quota, and the Run's CPUs; explicit limits within the
+    Run's win, larger ones are lowered to the Run's."""
     runners.start(hosts[0], "--nested", "--cpuset")
     limit = hosts[0].memory_limit(GIB)
     out = run_to_end(lux, nested(
@@ -125,12 +126,14 @@ def test_inner_containers_default_to_the_runs_size(lux, runners, hosts):
         "echo \"run: $(sh /tmp/show.sh)\"; "
         f"echo \"none: $({INNER} {SHOW_INNER})\"; "
         f"echo \"flags: $(podman run --rm --network=none -m 512m --cpus 1 {SHOW_INNER})\"; "
+        f"echo \"over: $(podman run --rm --network=none -m 4g --cpus 4 {SHOW_INNER})\"; "
         f"echo \"info: cpus=$(podman info --format '{{{{.Host.CPUs}}}}')\""))
-    run, none, flags = fields(out, "run:"), fields(out, "none:"), fields(out, "flags:")
+    run, none, flags, over = fields(out, "run:"), fields(out, "none:"), fields(out, "flags:"), fields(out, "over:")
     assert run["mem"] == str(limit) and run["nproc"] == "2", out
     assert none["mem"] == str(limit) and none["cpu"] == "200000_100000" and none["nproc"] == "2", out
     assert none["aff"] == run["aff"], out
     assert flags["mem"] == str(512 << 20) and flags["cpu"] == "100000_100000", out
+    assert over["mem"] == str(limit) and over["cpu"] == "200000_100000", out
     assert fields(out, "info:")["cpus"] == "2", out
 
 

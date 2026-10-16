@@ -187,7 +187,8 @@ availability immediately. See [CLI](cli.md#runs).
 - **Containers a nested Run starts with Podman default to the Run's
   size.** One started without `-m` has the Run's memory limit as its
   `memory.max` (and `memory.swap.max`), and one without `--cpus` the
-  Run's `resources.cpus` as its `cpu.max`; its own `-m`, `--cpus` or
+  Run's `resources.cpus` as its `cpu.max`; its own `-m` or `--cpus` win
+  up to the Run's and are lowered to the Run's above it, and
   `--cgroup-conf memory.max=`/`cpu.max=` win, still capped by the Run's
   limits. Programs that size themselves from their cgroup (ClickHouse, the
   JVM) then size to the Run, not the host ([why](podman.md#limits-of-nested-containers)).
