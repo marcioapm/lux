@@ -178,6 +178,23 @@ availability immediately. See [CLI](cli.md#runs).
   containers do not inherit them: pass them on (`docker run -e
   LUX_CPUS`). They take precedence over the image's environment; an `env`
   secret of the same name overrides them. Spec `env` cannot use `LUX_` names.
+- **On a host whose runner pins Runs (`lux-runner --cpuset`)**, a Run is
+  also confined to `ceil(resources.cpus)` of the host's CPUs: `nproc`,
+  its affinity and its cgroup's `cpuset.cpus.effective` show that many
+  (a `0.5` Run gets one CPU, shared with as few Runs as the host allows),
+  and `LUX_CPUSET` holds them in cpu-list form (`4-5`). `cpu.max` still
+  holds `resources.cpus` of CPU time. A resume may be pinned to other CPUs.
+- **Containers a nested Run starts with Podman default to the Run's
+  size.** One started without `-m` has the Run's memory limit as its
+  `memory.max` (and `memory.swap.max`), and one without `--cpus` the
+  Run's `resources.cpus` as its `cpu.max`; its own `-m`, `--cpus` or
+  `--cgroup-conf memory.max=`/`cpu.max=` win, still capped by the Run's
+  limits. Programs that size themselves from their cgroup (ClickHouse, the
+  JVM) then size to the Run, not the host ([why](podman.md#limits-of-nested-containers)).
+  lux does it with a Podman `precreate` hook registered through
+  `CONTAINERS_CONF_OVERRIDE`; a spec that sets `CONTAINERS_CONF_OVERRIDE`
+  itself opts out. Rootless Docker needs nothing: its containers stay in
+  the Run's cgroup and see the Run's limits.
 - Secrets are `env` (the default) or `file` (placed on a tmpfs and linked
   at `path`). A file secret is never in a snapshot. Every resume must
   supply every secret again.

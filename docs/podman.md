@@ -324,6 +324,52 @@ memory and CPU limits. With delegation, ClickHouse and JVM 21 then size
 to the Run (measured); JVM 17, which reads only its own cgroup, still does
 not. It does not make Docker enforce `-m` or `--cpus`.
 
+### Default limits of nested containers
+
+A Podman container in a nested Run has its own cgroup namespace rooted at
+its own cgroup, under `workload/`. Without `-m` its `memory.max` is
+`max`, and the Run's limit above it is out of its sight. Programs that
+size themselves from their cgroup then size to the host:
+
+- ClickHouse (`base/base/getMemoryAmount.cpp`) takes the smaller of
+  physical RAM and the first `memory.max` it finds walking up from its own
+  cgroup, where a literal `max` means "no limit". At its namespace's root
+  that is `max`: it sizes `max_server_memory_usage` to the host's RAM and
+  is OOM-killed at the Run's limit. Its CPUs
+  (`getNumberOfCPUCoresToUse`) are the host's online CPUs capped by the
+  visible `cpu.max` and `cpuset.cpus.effective`; it ignores the affinity
+  mask (measured: under `taskset -c 4,5` it used 32 cores).
+- The JVM sizes its default heap (a quarter) from its cgroup's
+  `memory.max` (it walks to parents only from JDK 24 / 21.0.9) and
+  `availableProcessors()` from the affinity mask capped by `cpu.max`.
+
+So every inner container defaults to the Run's limits. The runner writes,
+into the runtime volume, a `containers.conf` with
+`[engine] hooks_dir = ["/.lux/run/oci/hooks.d", {append=true}]` and gives
+the workload `CONTAINERS_CONF_OVERRIDE` pointing at it. That directory
+holds one [OCI hook](https://github.com/containers/common/blob/main/pkg/hooks/docs/oci-hooks.5.md)
+for Podman's `precreate` stage, which receives the container's proposed
+OCI configuration and returns it: `lux-shim oci-defaults` (the shim
+binary every Run already has, read-only) sets `linux.resources.memory`
+(limit and swap) to the Run's limit and `cpu` to the Run's quota, only
+where the configuration has none and `unified` sets no `memory.max` or
+`cpu.max`. crun runs as usual; nothing wraps it.
+
+`containers.conf`'s own `cgroup_conf` is not used: Podman puts it in
+`unified`, which crun writes after `memory`, so it overrides an explicit
+`-m` (measured: `-m 512m` and `-m 4g` both got the Run's limit). The
+limit cannot go on the delegated parent instead: the container cannot see
+above its namespace's root.
+
+With `--cpuset`, inner containers inherit the Run's CPUs as their
+affinity and see that many with `nproc`; the default `cpu.max` makes
+ClickHouse, which ignores affinity, agree.
+`tests/suites/test_run_size.py` checks both, with real ClickHouse and JVMs.
+
+Rootless Docker's containers stay in the Run's cgroup (driver `none`):
+at their namespace's root they see the Run's `memory.max` and `cpu.max`,
+so they need no default.
+
 ### Out of memory
 
 A placement's `oom` attribution uses the cumulative `oom` count over the
