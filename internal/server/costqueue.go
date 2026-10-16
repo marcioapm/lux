@@ -576,12 +576,17 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 		return err
 	}
 	b := newComputeLines(now)
-	for _, family := range hostFamilies {
+	for _, family := range sharedFamilies {
 		if err := writeFamilySnapshots(ctx, tx, runID, family, &e, b, now); err != nil {
 			return err
 		}
 	}
 	e.Lines = b.lines(runID)
+	transfer, err := writeTransferSnapshots(ctx, tx, runID, &e, now)
+	if err != nil {
+		return err
+	}
+	e.Lines = append(e.Lines, transfer...)
 	if len(e.Missing) > 0 {
 		for i := range e.Lines {
 			e.Lines[i].Details["missingRate"] = true
@@ -617,7 +622,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 	if err := replaceComputeHours(ctx, tx, e.TenantID, runID, e.Hours, s.cfg.Costs.Hourly); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error)
+	_, err = tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error)
 		VALUES ($1,$2,'compute',$3,now(),$4,$5,NULL,$6)
 		ON CONFLICT (run_id, source) DO UPDATE SET status=EXCLUDED.status, answered_at=EXCLUDED.answered_at,
 		attempts=EXCLUDED.attempts, next_at=EXCLUDED.next_at, settles_left=NULL, last_error=EXCLUDED.last_error`,

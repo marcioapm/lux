@@ -655,15 +655,22 @@ func (s *Server) heartbeatVersion(ctx context.Context, hostID string, hb proto.H
 				return err
 			}
 			_, err := tx.Exec(ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx,
-					peak_cpu_cores, cpu_stall, mem_stall, mem_full_stall, io_stall, io_full_stall)
+					peak_cpu_cores, cpu_stall, mem_stall, mem_full_stall, io_stall, io_full_stall, net_classes)
 				SELECT p.run_id, p.epoch, p.tenant_id, 0, now(), nullif(u.cpu, 0), nullif(u.mem, 0), nullif(u.disk, 0), nullif(u.pids, 0),
-					nullif(u.rx, 0), nullif(u.tx, 0), u.cpu_now, u.cpu_stall, u.mem_stall, u.mem_full, u.io_stall, u.io_full
+					nullif(u.rx, 0), nullif(u.tx, 0), u.cpu_now, u.cpu_stall, u.mem_stall, u.mem_full, u.io_stall, u.io_full,
+					CASE WHEN p.net_classes IS DISTINCT FROM p.net_sampled THEN p.net_classes END
 				FROM unnest($2::text[], $3::int[], $4::bigint[], $5::bigint[], $6::int[], $7::float8[], $8::bigint[], $9::bigint[],
 						$10::float8[], $11::float8[], $12::float8[], $13::float8[], $14::float8[], $15::float8[])
 					AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx, cpu_now, cpu_stall, mem_stall, mem_full, io_stall, io_full)
 				JOIN placements p ON p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1 AND p.state IN `+livePlacementStates+`
 				ON CONFLICT DO NOTHING`,
 				hostID, runs, epochs, curMem, disk, curPids, cpu, rx, tx_, cpuNow, cpuStall, memStall, memFull, ioStall, ioFull)
+			if err != nil {
+				return err
+			}
+			// The counters just sampled are the baseline for the next sample.
+			_, err = tx.Exec(ctx, `UPDATE placements SET net_sampled = net_classes
+				WHERE host_id = $1 AND run_id = ANY($2) AND state IN `+livePlacementStates+` AND net_classes IS DISTINCT FROM net_sampled`, hostID, runs)
 			return err
 		})
 		return later.write()

@@ -349,7 +349,7 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 	if _, err := tx.Exec(ctx, `DELETE FROM cost_hourly WHERE host_id = $1 AND run_id IS NULL AND hour = $2`, id, hour); err != nil {
 		return err
 	}
-	for _, family := range hostFamilies {
+	for _, family := range sharedFamilies {
 		in, err := loadHostCompute(ctx, tx, id, family, hour, to)
 		if err != nil {
 			return err
