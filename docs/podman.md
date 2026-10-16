@@ -356,7 +356,11 @@ where the configuration has none and `unified` sets no `memory.max` or
 `cpu.max`. An explicit `-m` or `--cpus` larger than the Run's (or
 unlimited, `-1`) is lowered to the Run's: the Run's cgroup caps it
 anyway, and a container reading `4g` would size itself to memory it
-cannot have. crun runs as usual; nothing wraps it.
+cannot have. crun runs as usual; nothing wraps it. The runner registers
+the hook only when its `--shim` lists `oci-defaults-v1` in
+`lux-shim capabilities`; with an older or custom shim, nested Runs get
+no hook (their inner containers see `max`, as before) and the runner
+logs one warning.
 
 `containers.conf`'s own `cgroup_conf` is not used: Podman puts it in
 `unified`, which crun writes after `memory`, so it overrides an explicit

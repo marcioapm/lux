@@ -1,10 +1,14 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -14,6 +18,7 @@ import (
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/shim"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -215,70 +220,163 @@ func TestMadeParents(t *testing.T) {
 }
 
 // A nested Run's shim config points Podman inside at a containers.conf in
-// the runtime volume, whose hooks_dir registers lux-shim oci-defaults with
-// the Run's memory limit and CPU quota; a plain Run gets none of it, and a
-// spec's own CONTAINERS_CONF_OVERRIDE is kept.
+// the runtime volume whose hooks_dir registers lux-shim oci-defaults; a
+// plain Run gets none of it, and a spec's own CONTAINERS_CONF_OVERRIDE is
+// kept. The hook is run here, in process, with the arguments it was
+// registered with: an inner container without limits gets the Run's
+// scaled memory limit and its CPU quota. That Podman reads containers.conf
+// and hooks_dir is covered end to end by test_run_size.py's "none:" row.
 func TestNestedRunsGetInnerDefaults(t *testing.T) {
 	const gib = int64(1 << 30)
+	// Half the requested memory is allocatable: the hook must get the
+	// scaled limit, not resources.memory.
+	scale, err := newMemoryScale(32*gib+512<<20, 512<<20, 64*gib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scale.limit(gib) >= gib {
+		t.Fatalf("scale.limit(1GiB) = %d: the test needs a scaled host", scale.limit(gib))
+	}
 	for _, c := range []struct {
-		name    string
-		nested  bool
-		specEnv map[string]string
-		want    string
+		name      string
+		nested    bool
+		cpus      float64
+		specEnv   map[string]string
+		wantEnv   string
+		wantQuota string
 	}{
-		{"nested", true, nil, proto.ShimOCIConf},
-		{"nested, spec's own", true, map[string]string{"CONTAINERS_CONF_OVERRIDE": "/mine.conf"}, "/mine.conf"},
-		{"plain", false, nil, ""},
+		{"nested", true, 1.5, nil, proto.ShimOCIConf, "150000"},
+		// As podman --cpus 0.29 sets the Run's own cpu.max (measured:
+		// 28999): truncated, so the default is never above the Run's.
+		{"nested, 0.29 CPUs", true, 0.29, nil, proto.ShimOCIConf, "28999"},
+		{"nested, spec's own", true, 1.5, map[string]string{"CONTAINERS_CONF_OVERRIDE": "/mine.conf"}, "/mine.conf", "150000"},
+		{"plain", false, 1.5, nil, "", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			rt := t.TempDir()
-			scale, err := newMemoryScale(64*gib+512<<20, 512<<20, 64*gib)
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := &Runner{mem: scale}
+			r := &Runner{mem: scale, shimOCIDefaults: true, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 			r.mounts.Store(runtimeVolume("run_1"), rt)
 			p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
-			sp := spec.RunSpec{Env: c.specEnv, Resources: spec.Resources{CPUs: 1.5, Memory: spec.Bytes(gib)},
+			sp := spec.RunSpec{Env: c.specEnv, Resources: spec.Resources{CPUs: c.cpus, Memory: spec.Bytes(gib)},
 				Sandbox: spec.Sandbox{NestedContainers: c.nested}}
 			if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
 				t.Fatal(err)
 			}
-			var cfg proto.ShimConfig
-			b, _ := os.ReadFile(filepath.Join(rt, "config.json"))
-			if err := json.Unmarshal(b, &cfg); err != nil {
-				t.Fatal(err)
+			if got := shimConfigEnv(t, rt)["CONTAINERS_CONF_OVERRIDE"]; got != c.wantEnv {
+				t.Fatalf("CONTAINERS_CONF_OVERRIDE %q, want %q", got, c.wantEnv)
 			}
-			if got := cfg.Env["CONTAINERS_CONF_OVERRIDE"]; got != c.want {
-				t.Fatalf("CONTAINERS_CONF_OVERRIDE %q, want %q", got, c.want)
-			}
-			conf, err := os.ReadFile(filepath.Join(rt, "oci", "containers.conf"))
+			b, err := os.ReadFile(filepath.Join(rt, "oci", "hooks.d", "lux-run-limits.json"))
 			if !c.nested {
 				if err == nil {
-					t.Fatal("a plain Run got a containers.conf")
+					t.Fatal("a plain Run got the hook")
 				}
 				return
 			}
-			if err != nil || !strings.Contains(string(conf), `hooks_dir = ["`+proto.ShimOCIHooksDir+`", {append=true}]`) {
-				t.Fatalf("containers.conf %q, %v", conf, err)
-			}
 			var hook struct {
-				Version string
-				Hook    struct {
+				Hook struct {
 					Path string
 					Args []string
 				}
+				When   struct{ Always bool }
 				Stages []string
 			}
-			b, _ = os.ReadFile(filepath.Join(rt, "oci", "hooks.d", "lux-run-limits.json"))
 			if err := json.Unmarshal(b, &hook); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"lux-shim", "oci-defaults", strconv.FormatInt(gib, 10), "150000", "100000"}
-			if hook.Version != "1.0.0" || hook.Hook.Path != proto.ShimBinary || !slices.Equal(hook.Hook.Args, want) ||
-				!slices.Equal(hook.Stages, []string{"precreate"}) {
-				t.Fatalf("hook %+v, want args %v", hook, want)
+			// Podman runs a hook only when its when matches, at its stages.
+			if !hook.When.Always || !slices.Equal(hook.Stages, []string{"precreate"}) || hook.Hook.Path != proto.ShimBinary ||
+				len(hook.Hook.Args) < 2 || hook.Hook.Args[1] != proto.ShimOCIDefaultsCmd {
+				t.Fatalf("hook %+v", hook)
+			}
+			var out bytes.Buffer
+			if code := shim.OCIDefaults(hook.Hook.Args[2:], strings.NewReader(`{"linux":{"resources":{}}}`), &out); code != 0 {
+				t.Fatalf("the hook exited %d on %v", code, hook.Hook.Args)
+			}
+			var got struct {
+				Linux struct {
+					Resources struct {
+						Memory struct{ Limit, Swap json.Number }
+						CPU    struct{ Quota, Period json.Number }
+					}
+				}
+			}
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			res := got.Linux.Resources
+			want := strconv.FormatInt(scale.limit(gib), 10)
+			if res.Memory.Limit.String() != want || res.Memory.Swap.String() != want ||
+				res.CPU.Quota.String() != c.wantQuota || res.CPU.Period.String() != "100000" {
+				t.Fatalf("an inner container without limits got %+v, want memory %s, quota %s/100000", res, want, c.wantQuota)
 			}
 		})
+	}
+}
+
+func shimConfigEnv(t *testing.T, rt string) map[string]string {
+	t.Helper()
+	var cfg proto.ShimConfig
+	b, _ := os.ReadFile(filepath.Join(rt, "config.json"))
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	return cfg.Env
+}
+
+// With a --shim that does not list oci-defaults-v1 (an older or custom
+// one), a nested Run gets no hook and no CONTAINERS_CONF_OVERRIDE: its
+// inner containers behave as before the hook. The runner warns once.
+func TestNestedRunsWithoutTheShimsOCIDefaults(t *testing.T) {
+	var logs bytes.Buffer
+	r := &Runner{log: slog.New(slog.NewTextHandler(&logs, nil))}
+	sp := spec.RunSpec{Resources: spec.Resources{CPUs: 2, Memory: 1 << 30}, Sandbox: spec.Sandbox{NestedContainers: true}}
+	for i := range 2 {
+		rt := t.TempDir()
+		r.mounts.Store(runtimeVolume("run_1"), rt)
+		p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
+		if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
+			t.Fatal(err)
+		}
+		if env, ok := shimConfigEnv(t, rt)["CONTAINERS_CONF_OVERRIDE"]; ok {
+			t.Fatalf("placement %d: CONTAINERS_CONF_OVERRIDE %q without the shim's hook", i, env)
+		}
+		if _, err := os.Stat(filepath.Join(rt, "oci")); err == nil {
+			t.Fatalf("placement %d: hook written for a shim without it", i)
+		}
+	}
+	if n := strings.Count(logs.String(), proto.ShimCapOCIDefaults); n != 1 {
+		t.Fatalf("%d warnings, want 1:\n%s", n, logs.String())
+	}
+}
+
+// The runner registers the hook only for a --shim that lists it among its
+// capabilities: this tree's shim does; an older one (no capabilities
+// subcommand: it starts as PID 1 without a config and exits 125), one
+// listing only reclaim-v1, and a missing one do not.
+func TestShimKnowsOCIDefaults(t *testing.T) {
+	dir := t.TempDir()
+	built := filepath.Join(dir, "lux-shim")
+	if out, err := exec.Command("go", "build", "-o", built, "github.com/marcioapm/lux/cmd/lux-shim").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v: %s", err, out)
+	}
+	if !shimKnowsOCIDefaults(built) {
+		t.Fatal("this tree's lux-shim: no oci-defaults")
+	}
+	old := filepath.Join(dir, "old-shim")
+	writeFile(t, old, "#!/bin/sh\necho 'lux-shim: no config' >&2; exit 125\n")
+	reclaimOnly := filepath.Join(dir, "reclaim-shim")
+	writeFile(t, reclaimOnly, "#!/bin/sh\n[ \"$1\" = capabilities ] && echo '[\""+proto.ShimCapReclaim+"\"]'\n")
+	for _, f := range []string{old, reclaimOnly} {
+		if err := os.Chmod(f, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, s := range []string{old, reclaimOnly, filepath.Join(dir, "missing")} {
+		if shimKnowsOCIDefaults(s) {
+			t.Errorf("%s: oci-defaults", filepath.Base(s))
+		}
+	}
+	if !shimKnowsReclaim(reclaimOnly) {
+		t.Error("the reclaim-only shim's reclaim-v1 was not seen")
 	}
 }

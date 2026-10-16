@@ -200,7 +200,8 @@ availability immediately. See [CLI](cli.md#runs).
   JVM) then size to the Run, not the host ([why](podman.md#limits-of-nested-containers)).
   lux does it with a Podman `precreate` hook registered through
   `CONTAINERS_CONF_OVERRIDE`; a spec that sets `CONTAINERS_CONF_OVERRIDE`
-  itself opts out. Rootless Docker's containers get the Run's CPUs but
+  itself opts out, and a runner whose `--shim` predates the hook registers
+  none. Rootless Docker's containers get the Run's CPUs but
   not yet its memory limit ([open](podman.md#default-limits-of-nested-containers)).
 - Secrets are `env` (the default) or `file` (placed on a tmpfs and linked
   at `path`). A file secret is never in a snapshot. Every resume must

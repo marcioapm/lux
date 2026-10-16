@@ -44,6 +44,9 @@ const (
 	// ShimCapReclaim: a ShimStop with KillAtUnixMs SIGTERMs at once, runs no
 	// beforeStop, ignores workload grace, and SIGKILLs at that instant.
 	ShimCapReclaim = "reclaim-v1"
+	// ShimCapOCIDefaults: the shim has ShimOCIDefaultsCmd, so the runner
+	// may register it as nested Runs' precreate hook.
+	ShimCapOCIDefaults = "oci-defaults-v1"
 )
 
 // ShimOCIDefaultsCmd is `lux-shim oci-defaults MEMORY CPU_QUOTA CPU_PERIOD`,
