@@ -413,20 +413,27 @@ func cutDir(s string) (key, dir string, ok bool) {
 	return "", "", false
 }
 
-func txChain(iface string) string  { return "tx_" + iface }
-func rxChain(iface string) string  { return "rx_" + iface }
-func rxdChain(iface string) string { return "rxd_" + iface }
+// runCounts are a Run's counting directions: chain <dir>_<iface> (and
+// <dir>p_<iface> per region), reached through map runs_<dir>, classifying
+// by addr.
+var runCounts = []struct{ dir, addr string }{{"tx", "daddr"}, {"rx", "saddr"}, {"rxd", "saddr"}}
 
 // runChainNames are a Run's counting chains and their per-region parts.
 func runChainNames(iface string) []string {
-	return []string{txChain(iface), "txp_" + iface, rxChain(iface), "rxp_" + iface, rxdChain(iface), "rxdp_" + iface}
+	var out []string
+	for _, c := range runCounts {
+		out = append(out, c.dir+"_"+iface, c.dir+"p_"+iface)
+	}
+	return out
 }
 
 // runChains are a Run's counting chains' rules (the chains exist).
 func runChains(l layout, iface string) string {
-	return classifyRules(l, txChain(iface), "txp_"+iface, iface, "daddr", "tx") +
-		classifyRules(l, rxChain(iface), "rxp_"+iface, iface, "saddr", "rx") +
-		classifyRules(l, rxdChain(iface), "rxdp_"+iface, iface, "saddr", "rxd")
+	var b strings.Builder
+	for _, c := range runCounts {
+		b.WriteString(classifyRules(l, c.dir+"_"+iface, c.dir+"p_"+iface, iface, c.addr, c.dir))
+	}
+	return b.String()
 }
 
 // runCountingScript makes a Run's counters and chains and the map entries
@@ -442,9 +449,9 @@ func (f *Firewall) runCountingScript(iface string) string {
 		fmt.Fprintf(&b, "add chain inet lux %s\n", c)
 	}
 	b.WriteString(runChains(f.acct.layout, iface))
-	fmt.Fprintf(&b, "add element inet lux runs_tx { %q : jump %s }\n", iface, txChain(iface))
-	fmt.Fprintf(&b, "add element inet lux runs_rx { %q : jump %s }\n", iface, rxChain(iface))
-	fmt.Fprintf(&b, "add element inet lux runs_rxd { %q : jump %s }\n", iface, rxdChain(iface))
+	for _, c := range runCounts {
+		fmt.Fprintf(&b, "add element inet lux runs_%s { %q : jump %s_%s }\n", c.dir, iface, c.dir, iface)
+	}
 	return b.String()
 }
 
@@ -601,7 +608,9 @@ func (f *Firewall) ClassesVersion() string {
 // made for iface, map entries first. Call with f.mu held.
 func (f *Firewall) removeCountingScript(iface string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "delete element inet lux runs_tx { %q }\ndelete element inet lux runs_rx { %q }\ndelete element inet lux runs_rxd { %q }\n", iface, iface, iface)
+	for _, c := range runCounts {
+		fmt.Fprintf(&b, "delete element inet lux runs_%s { %q }\n", c.dir, iface)
+	}
 	for _, c := range runChainNames(iface) {
 		fmt.Fprintf(&b, "delete chain inet lux %s\n", c)
 	}
