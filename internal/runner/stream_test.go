@@ -197,17 +197,28 @@ func streamData(t *testing.T, f proto.Frame) proto.StreamData {
 	return d
 }
 
-// feed sends d into the stream's input; false if the stream ended first.
-func feed(t *testing.T, st *stream, ended <-chan struct{}, d proto.StreamData) bool {
+// feed sends each of ds into the stream's input in turn, stopping early if
+// the stream ends.
+func feed(t *testing.T, st *stream, ended <-chan struct{}, ds []proto.StreamData) {
 	t.Helper()
-	select {
-	case st.input <- d:
-		return true
-	case <-ended:
-		return false
-	case <-time.After(10 * time.Second):
-		t.Fatal("the stream's input goroutine stopped taking input")
-		return false
+	for _, d := range ds {
+		select {
+		case st.input <- d:
+		case <-ended:
+			return
+		case <-time.After(10 * time.Second):
+			t.Fatal("the stream's input goroutine stopped taking input")
+		}
+	}
+}
+
+func wantOneExitZeroClose(t *testing.T, closes []proto.StreamData) {
+	t.Helper()
+	if len(closes) != 1 {
+		t.Fatalf("%d stream.close frames %+v, want 1", len(closes), closes)
+	}
+	if c := closes[0]; c.Error != "" || c.ExitCode == nil || *c.ExitCode != 0 {
+		t.Fatalf("stream.close %+v, want exit code 0 and no error", c)
 	}
 }
 
@@ -227,23 +238,13 @@ func TestStreamExecExitsBeforeItsInput(t *testing.T) {
 	}
 	// The second feed returns once the first frame's write has failed; the
 	// third, once the second's has.
-	for _, d := range []proto.StreamData{{EOF: true}, {Data: []byte("late")}, {Data: []byte("later")}} {
-		if !feed(t, st, ended, d) {
-			break
-		}
-	}
+	feed(t, st, ended, []proto.StreamData{{EOF: true}, {Data: []byte("late")}, {Data: []byte("later")}})
 	if _, err := shim.Write([]byte(`{"exitCode":0}` + "\n")); err != nil {
 		t.Fatalf("the runner closed the shim connection before the exit line: %v", err)
 	}
 	shim.Close()
 
-	closes := g.closes(t, ended)
-	if len(closes) != 1 {
-		t.Fatalf("%d stream.close frames %+v, want 1", len(closes), closes)
-	}
-	if c := closes[0]; c.Error != "" || c.ExitCode == nil || *c.ExitCode != 0 {
-		t.Fatalf("stream.close %+v, want exit code 0 and no error", c)
-	}
+	wantOneExitZeroClose(t, g.closes(t, ended))
 }
 
 // The same with the real shim's order: the exit line written and the
@@ -255,19 +256,9 @@ func TestStreamExecExitedAndClosedBeforeItsInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	shim.Close()
-	for _, d := range []proto.StreamData{{EOF: true}, {Data: []byte("late")}} {
-		if !feed(t, st, ended, d) {
-			break
-		}
-	}
+	feed(t, st, ended, []proto.StreamData{{EOF: true}, {Data: []byte("late")}})
 
-	closes := g.closes(t, ended)
-	if len(closes) != 1 {
-		t.Fatalf("%d stream.close frames %+v, want 1", len(closes), closes)
-	}
-	if c := closes[0]; c.Error != "" || c.ExitCode == nil || *c.ExitCode != 0 {
-		t.Fatalf("stream.close %+v, want exit code 0 and no error", c)
-	}
+	wantOneExitZeroClose(t, g.closes(t, ended))
 }
 
 // A shim that goes away mid-stream, with no exit line, still ends the
@@ -280,11 +271,7 @@ func TestStreamShimGoneMidStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	shim.Close()
-	for _, d := range []proto.StreamData{{Data: []byte("more")}, {EOF: true}} {
-		if !feed(t, st, ended, d) {
-			break
-		}
-	}
+	feed(t, st, ended, []proto.StreamData{{Data: []byte("more")}, {EOF: true}})
 
 	frames := g.received(t, ended)
 	if len(frames) != 2 || frames[0].Type != proto.MsgStreamData || frames[1].Type != proto.MsgStreamClose {
@@ -307,11 +294,7 @@ func TestStreamAttachWorkloadExitedBeforeItsInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	shim.Close()
-	for _, d := range []proto.StreamData{{Data: []byte("ls\n")}, {Data: []byte("late")}} {
-		if !feed(t, st, ended, d) {
-			break
-		}
-	}
+	feed(t, st, ended, []proto.StreamData{{Data: []byte("ls\n")}, {Data: []byte("late")}})
 
 	closes := g.closes(t, ended)
 	if len(closes) != 1 || closes[0].Error != "the workload exited" || closes[0].ExitCode != nil {
@@ -375,11 +358,5 @@ func TestStreamExecInputPastTheBufferAfterItsTargetStopped(t *testing.T) {
 	}
 	shim.Close()
 
-	closes := g.closes(t, ended)
-	if len(closes) != 1 {
-		t.Fatalf("%d stream.close frames %+v, want 1", len(closes), closes)
-	}
-	if c := closes[0]; c.Error != "" || c.ExitCode == nil || *c.ExitCode != 0 {
-		t.Fatalf("stream.close %+v, want exit code 0 and no error", c)
-	}
+	wantOneExitZeroClose(t, g.closes(t, ended))
 }
