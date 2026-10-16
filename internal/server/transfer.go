@@ -266,12 +266,6 @@ func placementTransferPrices(ctx context.Context, tx pgx.Tx, v *transferSnapshot
 	return &p, nil
 }
 
-// staticTransferPrices is a static host's operator-supplied transfer
-// prices; nil when it has none.
-func staticTransferPrices(ctx context.Context, tx pgx.Tx, hostID string) (*DataTransferPrices, error) {
-	return nil, nil
-}
-
 // needsPrice: net has bytes in a class that a price list prices.
 func needsPrice(net map[string]proto.NetBytes) bool {
 	for k, b := range net {

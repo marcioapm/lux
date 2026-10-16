@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/apitypes"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -23,29 +25,17 @@ type PriceProvider interface {
 	DataTransfer(context.Context, string) (DataTransferPrices, error)                      // region
 }
 
-// PerGB is a transfer price per decimal gigabyte (1e9 bytes, the unit
-// providers bill transfer in) for bytes received (Rx) and sent (Tx), as
-// decimal strings; "0" or empty: that direction is not charged.
-type PerGB struct {
-	Rx string `json:"rx,omitempty"`
-	Tx string `json:"tx,omitempty"`
-}
-
-// DataTransferPrices are a region's list prices for network transfer out
-// of the provider's compute, by billing class (proto.NetClass), and its
-// public IPv4 address charge. Internet is the first non-zero tier of the
-// outbound-to-internet price (list price, no free tier: the free tier is
-// account-wide and spent by any real account); inbound from the internet
-// is free. Zone and RegionPublic bill both directions. Provider is keyed by
-// destination region and bills outbound only.
-type DataTransferPrices struct {
-	Currency          string           `json:"currency"`
-	Internet          PerGB            `json:"internet"`
-	Zone              PerGB            `json:"zone"`
-	RegionPublic      PerGB            `json:"regionPublic"`
-	Provider          map[string]PerGB `json:"provider,omitempty"`
-	PublicIPv4PerHour string           `json:"publicIPv4PerHour,omitempty"`
-}
+// PerGB and DataTransferPrices are network transfer prices by billing class
+// (proto.NetClass) and direction, and the public IPv4 charge
+// (apitypes.TransferPrices). A provider region's: Internet the first
+// non-zero tier of outbound to the internet (list price, no free tier: it
+// is account-wide and spent by any real account), inbound from the
+// internet free; Zone and RegionPublic both directions; Provider by
+// destination region, outbound only; PublicIPv4PerHour per in-use address.
+type (
+	PerGB              = apitypes.PerGB
+	DataTransferPrices = apitypes.TransferPrices
+)
 
 // BlockStoragePrice is a volume type's monthly list prices per unit, as
 // decimal strings: provisioned storage per GiB-month, provisioned IOPS per

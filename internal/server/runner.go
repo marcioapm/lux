@@ -107,11 +107,11 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 						return err
 					}
 				}
-				// A static pool's default price, if it has one, is the new
-				// host's own from now on (changing the default later does
-				// not reprice it).
-				if _, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool_id, token_id, name, state, hourly_price, price_currency)
-					SELECT $1, $2, $3, $4, $5, 'ready', p.hourly_price, p.price_currency
+				// A static pool's default prices, if it has them, are the
+				// new host's own from now on (changing the defaults later
+				// does not reprice it).
+				if _, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool_id, token_id, name, state, hourly_price, price_currency, transfer_prices)
+					SELECT $1, $2, $3, $4, $5, 'ready', p.hourly_price, p.price_currency, p.transfer_prices
 					FROM (VALUES (1)) v LEFT JOIN pools p ON p.id = $3 AND NOT p.retired`,
 					hostID, tok.TenantID, tok.PoolID, tok.ID, h.Name); err != nil {
 					return err
@@ -166,6 +166,9 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			}
 		}
 		if err := syncProviderCapacity(ctx, tx, hostID, registering); err != nil {
+			return err
+		}
+		if err := syncStaticPublicIP(ctx, tx, hostID); err != nil {
 			return err
 		}
 		if registering {

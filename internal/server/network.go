@@ -52,10 +52,16 @@ func networkClasses(n HostNetwork, p ProviderPrefixes) proto.NetworkClasses {
 	}
 	slices.Sort(nc.Local)
 	slices.Sort(nc.Zone)
+	nc.Version = netClassesVersion(nc)
+	return nc
+}
+
+// netClassesVersion hashes nc's lists and provenance (not its Version).
+func netClassesVersion(nc proto.NetworkClasses) string {
+	nc.Version = ""
 	raw, _ := json.Marshal(nc)
 	sum := sha256.Sum256(raw)
-	nc.Version = hex.EncodeToString(sum[:12])
-	return nc
+	return hex.EncodeToString(sum[:12])
 }
 
 // recordNetwork asks each provider, once per region, for the network of

@@ -24,8 +24,8 @@ const transferCacheOS = "TRANSFER"
 
 const transferAnchor = "internet:tx"
 
-// rows are p as price_cache rows: instance_type to price.
-func (p DataTransferPrices) rows() map[string]string {
+// transferRows are p as price_cache rows: instance_type to price.
+func transferRows(p DataTransferPrices) map[string]string {
 	out := map[string]string{}
 	put := func(key string, g PerGB) {
 		if g.Rx != "" {
@@ -47,8 +47,8 @@ func (p DataTransferPrices) rows() map[string]string {
 	return out
 }
 
-// set is rows' inverse for one row.
-func (p *DataTransferPrices) set(key, v string) {
+// setTransferRow is transferRows' inverse for one row.
+func setTransferRow(p *DataTransferPrices, key, v string) {
 	if key == "public-ipv4:hour" {
 		p.PublicIPv4PerHour = v
 		return
@@ -89,7 +89,7 @@ func validDataTransfer(p DataTransferPrices) error {
 	if p.Currency == "" || p.Internet.Tx == "" {
 		return errors.New("no internet transfer price")
 	}
-	for k, v := range p.rows() {
+	for k, v := range transferRows(p) {
 		if err := validPrice(v, p.Currency); err != nil {
 			return fmt.Errorf("%s: %w", k, err)
 		}
@@ -99,8 +99,8 @@ func validDataTransfer(p DataTransferPrices) error {
 
 func trimmedDataTransfer(p DataTransferPrices) DataTransferPrices {
 	out := DataTransferPrices{Currency: p.Currency}
-	for k, v := range p.rows() {
-		out.set(k, trimmedDecimal(v))
+	for k, v := range transferRows(p) {
+		setTransferRow(&out, k, trimmedDecimal(v))
 	}
 	return out
 }
@@ -116,7 +116,7 @@ func cachedDataTransfer(ctx context.Context, tx pgx.Tx, provider, region string)
 	var key, v, currency string
 	var at time.Time
 	_, err = pgx.ForEachRow(rows, []any{&key, &v, &currency, &at}, func() error {
-		price.set(key, v)
+		setTransferRow(&price, key, v)
 		if key == transferAnchor {
 			price.Currency, fetched = currency, at
 		}
@@ -197,7 +197,7 @@ func (s *Server) dataTransferPrice(ctx context.Context, provider, region string)
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		// Keys in sorted order, so two luxds refreshing one region take the
 		// row locks alike; keys the new answer lacks are deleted.
-		rows := price.rows()
+		rows := transferRows(price)
 		if _, err := tx.Exec(ctx, `DELETE FROM price_cache WHERE provider = $1 AND region = $2 AND os = $3 AND instance_type <> ALL($4)`,
 			provider, region, transferCacheOS, slices.Sorted(maps.Keys(rows))); err != nil {
 			return err
