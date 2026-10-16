@@ -353,12 +353,14 @@ func writeTransferSnapshots(ctx context.Context, tx pgx.Tx, runID string, e *com
 	return transferLines(entries, e, now), nil
 }
 
-// placementNetSamples are a placement's sampled counters, every
-// resolution still kept, oldest first (cumulative: a coarser sample of
-// the same instant only repeats what a finer one said).
+// placementNetSamples is a placement's last sampled counters in each UTC
+// hour, oldest first: the counters are cumulative, so an hour's growth is
+// its last reading less the previous hour's, and earlier readings or
+// coarser rollups of the same hour add nothing.
 func placementNetSamples(ctx context.Context, tx pgx.Tx, runID string, epoch int) ([]netSample, error) {
-	rows, err := tx.Query(ctx, `SELECT at, net_classes FROM placement_samples
-		WHERE run_id = $1 AND epoch = $2 AND net_classes IS NOT NULL ORDER BY at, res`, runID, epoch)
+	rows, err := tx.Query(ctx, `SELECT DISTINCT ON (date_trunc('hour', at)) at, net_classes FROM placement_samples
+		WHERE run_id = $1 AND epoch = $2 AND net_classes IS NOT NULL
+		ORDER BY date_trunc('hour', at), at DESC, res`, runID, epoch)
 	if err != nil {
 		return nil, err
 	}

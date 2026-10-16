@@ -388,9 +388,14 @@ var loggedHostTransferBaseline sync.Map
 // billable: no row.
 func (s *Server) writeHostTransferHour(ctx context.Context, tx pgx.Tx, id string, hour time.Time) error {
 	var last, before map[string]proto.NetBytes
+	// The last sample before the hour: one backward scan of the primary key
+	// (host_id, res, at) per resolution, not a sort of the host's history.
 	err := tx.QueryRow(ctx, `SELECT
 			(SELECT net_classes FROM host_samples WHERE host_id = $1 AND net_classes IS NOT NULL AND at >= $2 AND at < $3 ORDER BY at DESC, res LIMIT 1),
-			(SELECT net_classes FROM host_samples WHERE host_id = $1 AND net_classes IS NOT NULL AND at < $2 ORDER BY at DESC, res LIMIT 1)`,
+			(SELECT x.net_classes FROM unnest('{0,60,3600}'::int[]) r(res),
+				LATERAL (SELECT at, net_classes FROM host_samples
+					WHERE host_id = $1 AND res = r.res AND at < $2 AND net_classes IS NOT NULL ORDER BY at DESC LIMIT 1) x
+				ORDER BY x.at DESC, r.res LIMIT 1)`,
 		id, hour, hour.Add(time.Hour)).Scan(&last, &before)
 	if err != nil || last == nil {
 		return err

@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // transferHost adds t1's provider host "nh" in eu-north-1 (pool "ec2p" of
@@ -246,7 +249,8 @@ func TestTransferMissingThenFinal(t *testing.T) {
 
 // The placement's transfer goes to the hours its bytes moved in (sample
 // deltas), not spread evenly over its window nor all in its last hour; the
-// hours add up to the line.
+// hours add up to the line. Within an hour only its last reading counts:
+// an earlier one, or a coarser rollup of the hour, adds nothing.
 func TestTransferHourlyFromSamples(t *testing.T) {
 	s, keys := costFixture(t)
 	ctx := context.Background()
@@ -256,12 +260,32 @@ func TestTransferHourlyFromSamples(t *testing.T) {
 	placeRun(t, s, "t1", "A", StateStopping, "nh", place("A", 2, 8, "10:00", "13:30"))
 	// 1 GB in the 10:00 hour, none in 11:00, 3 GB in 12:00, 1 GB unsampled
 	// before the end (13:30).
+	// The 12:00 hour's readings are 2 GB then 4 GB, and its minute rollup at
+	// 12:00 repeats 2 GB: only the later 4 GB reading sets the hour.
 	for _, smp := range []struct {
-		at string
-		tx int64
-	}{{"10:20", gb}, {"10:50", gb}, {"12:10", 2 * gb}, {"12:40", 4 * gb}} {
-		execSQL(t, s, ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, net_classes) VALUES ('A', 1, 't1', 0, $1, $2)`,
-			at(smp.at), map[string]proto.NetBytes{"internet": {Tx: smp.tx}})
+		at  string
+		res int
+		tx  int64
+	}{{"10:20", 0, gb}, {"10:50", 0, gb}, {"12:10", 0, 2 * gb}, {"12:00", 60, 2 * gb}, {"12:40", 0, 4 * gb}} {
+		execSQL(t, s, ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, net_classes) VALUES ('A', 1, 't1', $1, $2, $3)`,
+			smp.res, at(smp.at), map[string]proto.NetBytes{"internet": {Tx: smp.tx}})
+	}
+	samples, err := func() (out []netSample, err error) {
+		err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			out, err = placementNetSamples(ctx, tx, "A", 1)
+			return err
+		})
+		return out, err
+	}()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var read []string
+	for _, smp := range samples {
+		read = append(read, fmt.Sprintf("%s=%d", smp.At.UTC().Format("15:04"), smp.Net["internet"].Tx/gb))
+	}
+	if want := []string{"10:50=1", "12:40=4"}; !slices.Equal(read, want) {
+		t.Errorf("samples read %v, want each hour's last %v", read, want)
 	}
 	setNet(t, s, "p-A", map[string]proto.NetBytes{"internet": {Tx: 5 * gb}})
 	finish(t, s, "t1", "A", StateSucceeded)
