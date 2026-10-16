@@ -130,17 +130,17 @@ func syncPublicIPRate(ctx context.Context, tx pgx.Tx, hostID, perAddress, curren
 	hourly := new(big.Rat).Mul(mustRat(perAddress), big.NewRat(int64(*count), 1))
 	perHour := moneyString(hourly)
 	details := map[string]any{"addresses": *count, "perAddressHour": trimmedDecimal(perAddress)}
-	var known, openRate bool
-	var openPerHour, openCurrency string
+	var known bool
+	var openPerHour, openCurrency *string
 	var openAddresses *int
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM host_rates WHERE host_id = $1 AND family = 'public-ip'),
-			EXISTS (SELECT 1 FROM host_rates WHERE host_id = $1 AND family = 'public-ip' AND valid_to IS NULL),
-			coalesce((SELECT trim_scale(per_hour)::text FROM host_rates WHERE host_id = $1 AND family = 'public-ip' AND valid_to IS NULL), ''),
-			coalesce((SELECT currency FROM host_rates WHERE host_id = $1 AND family = 'public-ip' AND valid_to IS NULL), ''),
-			(SELECT (details->>'addresses')::int FROM host_rates WHERE host_id = $1 AND family = 'public-ip' AND valid_to IS NULL)`, hostID).
-		Scan(&known, &openRate, &openPerHour, &openCurrency, &openAddresses); err != nil {
+			o.per_hour, o.currency, o.addresses
+		FROM (SELECT 1) one LEFT JOIN (SELECT trim_scale(per_hour)::text AS per_hour, currency, (details->>'addresses')::int AS addresses
+			FROM host_rates WHERE host_id = $1 AND family = 'public-ip' AND valid_to IS NULL) o ON true`, hostID).
+		Scan(&known, &openPerHour, &openCurrency, &openAddresses); err != nil {
 		return nil, err
 	}
+	openRate := openPerHour != nil
 	if !known {
 		if *count == 0 || (terminated != nil && !terminated.After(*registered)) {
 			return nil, nil
@@ -155,7 +155,7 @@ func syncPublicIPRate(ctx context.Context, tx pgx.Tx, hostID, perAddress, curren
 	if terminated != nil {
 		return nil, nil
 	}
-	same := openRate && openPerHour == perHour && openCurrency == currency && openAddresses != nil && *openAddresses == *count
+	same := openRate && *openPerHour == perHour && *openCurrency == currency && openAddresses != nil && *openAddresses == *count
 	if same || (!openRate && *count == 0) {
 		return nil, nil
 	}
