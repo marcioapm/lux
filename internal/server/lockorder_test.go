@@ -376,13 +376,8 @@ func TestStatusReportsLockTheHostFirst(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("heartbeat: %v", err)
 			}
-			select {
-			case err := <-reported:
-				if err != nil {
-					t.Fatalf("report: %v", err)
-				}
-			case <-ctx.Done():
-				t.Fatal("the report never finished")
+			if err := await(t, ctx, reported, 1)[0]; err != nil {
+				t.Fatalf("report: %v", err)
 			}
 			var wrote bool
 			systemScan(t, s, `SELECT `+c.wrote+` FROM hosts WHERE id = 'h1'`, nil, &wrote)
