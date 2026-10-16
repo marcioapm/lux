@@ -191,10 +191,10 @@ func (r *Runner) allocateCpuset(p *placement, cpus float64) {
 	p.mu.Unlock()
 }
 
-// withCpusetEnv adds LUX_CPUSET, the set in cpu-list form, unless the
-// spec's env sets it.
-func withCpusetEnv(env map[string]string, set string, specEnv map[string]string) map[string]string {
-	if _, ok := specEnv["LUX_CPUSET"]; set == "" || ok {
+// withCpusetEnv adds LUX_CPUSET, the set in cpu-list form. A spec cannot
+// set it: validation reserves the LUX_ prefix (internal/spec/spec.go).
+func withCpusetEnv(env map[string]string, set string) map[string]string {
+	if set == "" {
 		return env
 	}
 	env["LUX_CPUSET"] = set

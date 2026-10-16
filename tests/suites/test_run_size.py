@@ -268,10 +268,10 @@ def assert_sized(out: str, label: str, limit: int, cpus: int, wrong: int) -> Non
     the one it would see if sized from the wrong source (what the Run
     asked, or the Run's limit for an explicit -m). The tolerances (1% of
     limit for ClickHouse, 4 MiB for the heap's alignment) must tell them
-    apart, or the row proves nothing and the test is skipped."""
+    apart, or the row proves nothing and the test fails."""
     ch_tol, heap_tol = 0.01 * limit, 4 << 20
-    if abs(0.9 * wrong - 0.9 * limit) <= ch_tol or abs(wrong // 4 - limit // 4) <= heap_tol:
-        pytest.skip(f"{label}: limit {limit} and {wrong} are within the tolerances on this host")
+    assert abs(0.9 * wrong - 0.9 * limit) > ch_tol and abs(wrong // 4 - limit // 4) > heap_tol, \
+        f"{label}: limit {limit} and {wrong} are within the tolerances: the row would prove nothing"
     print(*(l for l in out.splitlines() if l.startswith(f"{label}-")), sep="\n")
     ch = fields(out, f"{label}-ch:")
     assert "mem" in ch and abs(int(ch["mem"]) - 0.9 * limit) < ch_tol and ch["threads"] == str(cpus), \

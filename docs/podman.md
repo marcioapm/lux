@@ -382,8 +382,10 @@ count to the Run's `cpus`.
 ClickHouse and JVMs.
 
 Rootless Docker does not read containers.conf, so the hook does not apply
-to it. Its containers inherit the Run's CPUs (affinity; `docker info`
-NCPU is the Run's). What they see of its memory depends on delegation, as
+to it. With `--cpuset`, its containers inherit the Run's CPUs (affinity;
+`docker info` NCPU is the Run's); without it they see the host's CPUs,
+held to the Run's `cpu.max` only when they stay in the Run's cgroup.
+What they see of its memory depends on delegation, as
 [above](#limits-of-nested-containers): without it they stay in the Run's
 cgroup and read its limits there
 (`test_run_size.py::test_inner_docker_containers_see_the_runs_size`).

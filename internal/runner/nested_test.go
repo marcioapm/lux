@@ -329,19 +329,31 @@ func shimConfigEnv(t *testing.T, rt string) map[string]string {
 
 // With a --shim that does not list oci-defaults-v1 (an older or custom
 // one), a delegated nested Run gets no hook and no CONTAINERS_CONF_OVERRIDE: its
-// inner containers behave as before the hook. The runner warns once.
+// inner containers behave as before the hook. The runner warns once, and
+// only for a delegated Run: plain and non-delegated nested Runs never use
+// the hook, so they do not warn.
 func TestNestedRunsWithoutTheShimsOCIDefaults(t *testing.T) {
 	var logs bytes.Buffer
 	r := &Runner{log: slog.New(slog.NewTextHandler(&logs, nil))}
-	sp := spec.RunSpec{Resources: spec.Resources{CPUs: 2, Memory: 1 << 30},
-		Sandbox: spec.Sandbox{NestedContainers: true, CgroupDelegation: true}}
-	for i := range 2 {
+	write := func(sp spec.RunSpec) string {
+		t.Helper()
 		rt := t.TempDir()
 		r.mounts.Store(runtimeVolume("run_1"), rt)
 		p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
 		if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
 			t.Fatal(err)
 		}
+		return rt
+	}
+	res := spec.Resources{CPUs: 2, Memory: 1 << 30}
+	write(spec.RunSpec{Resources: res})
+	write(spec.RunSpec{Resources: res, Sandbox: spec.Sandbox{NestedContainers: true}})
+	if n := strings.Count(logs.String(), proto.ShimCapOCIDefaults); n != 0 {
+		t.Fatalf("%d warnings for Runs without cgroup delegation, want 0:\n%s", n, logs.String())
+	}
+	sp := spec.RunSpec{Resources: res, Sandbox: spec.Sandbox{NestedContainers: true, CgroupDelegation: true}}
+	for i := range 2 {
+		rt := write(sp)
 		if env, ok := shimConfigEnv(t, rt)["CONTAINERS_CONF_OVERRIDE"]; ok {
 			t.Fatalf("placement %d: CONTAINERS_CONF_OVERRIDE %q without the shim's hook", i, env)
 		}

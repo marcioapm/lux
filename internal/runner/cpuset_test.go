@@ -164,11 +164,8 @@ func TestPlacementsArePinnedBesideLiveOnes(t *testing.T) {
 	if i := slices.Index(args, "--cpuset-cpus"); i < 0 || args[i+1] != "2-3" {
 		t.Fatalf("create args %v", args)
 	}
-	if env := withCpusetEnv(map[string]string{}, p.cpuset(), nil); env["LUX_CPUSET"] != "2-3" {
+	if env := withCpusetEnv(map[string]string{}, p.cpuset()); env["LUX_CPUSET"] != "2-3" {
 		t.Fatalf("env %v", env)
-	}
-	if env := withCpusetEnv(map[string]string{"LUX_CPUSET": "x"}, p.cpuset(), map[string]string{"LUX_CPUSET": "x"}); env["LUX_CPUSET"] != "x" {
-		t.Fatalf("the spec's own LUX_CPUSET lost: %v", env)
 	}
 
 	off := &Runner{placements: map[string]*placement{}}
@@ -177,7 +174,7 @@ func TestPlacementsArePinnedBesideLiveOnes(t *testing.T) {
 	if args := q.createArgs(sp, "img", podman.Network{}); slices.Contains(args, "--cpuset-cpus") || q.cpuset() != "" {
 		t.Fatalf("without --cpuset: %v", args)
 	}
-	if env := withCpusetEnv(map[string]string{}, "", nil); len(env) != 0 {
+	if env := withCpusetEnv(map[string]string{}, ""); len(env) != 0 {
 		t.Fatalf("without --cpuset: env %v", env)
 	}
 }
@@ -246,14 +243,15 @@ func TestCpusetOfAReplacedEpochHeldUntilItExits(t *testing.T) {
 	mustEnd(t, p2, "epoch 2 never ended")
 }
 
-// Re-adoption through the run state file: a started placement's set is
-// saved as JSON, read back by readopt after a restart, and held, so the
-// next placement is pinned beside it.
+// Re-adoption through the run state file: a started placement's set and
+// its spec's CPUs are saved as JSON, read back by readopt after a restart,
+// and held as that demand, so the next 0.5-CPU placement packs beside it
+// (as a whole CPU held, it would take CPU 1).
 func TestCpusetReadoptedFromRunState(t *testing.T) {
 	g := newReclaimRig(t, false)
 	p := g.running(t)
-	p.state.Cpuset = "0-1"
-	p.state.Spec.Resources.CPUs = 2
+	p.state.Cpuset = "0"
+	p.state.Spec.Resources.CPUs = 0.5
 	p.state.Egress = &egressState{Unrestricted: true, Interface: "lux0", Gateway: "10.88.0.1"}
 	if err := p.saveState(); err != nil {
 		t.Fatal(err)
@@ -266,11 +264,25 @@ func TestCpusetReadoptedFromRunState(t *testing.T) {
 		t.Fatal("run1 was not re-adopted from its run state")
 	}
 	next := &placement{r: g.r, runID: "run2", phase: "starting", state: &runState{}}
-	g.r.allocateCpuset(next, 2)
+	g.r.allocateCpuset(next, 0.5)
 	got := next.cpuset()
 	q.kill(g.ctx)
 	mustEnd(t, q, "the re-adopted placement never ended")
-	if got != "2-3" {
-		t.Fatalf("beside the re-adopted 0-1: %q, want 2-3", got)
+	if got != "0" {
+		t.Fatalf("beside the re-adopted 0.5 on CPU 0: %q, want 0 (packed)", got)
+	}
+}
+
+// A live fractional Run holds its spec's demand, not its whole set: the
+// next fraction packs beside it.
+func TestCpusetPacksBesideALiveFractionalRun(t *testing.T) {
+	r := &Runner{hostCPUs: cpus(2), placements: map[string]*placement{}}
+	half := &spec.RunSpec{Resources: spec.Resources{CPUs: 0.5}}
+	r.placements["a"] = &placement{r: r, runID: "a", phase: "running", state: &runState{Cpuset: "0", Spec: half}}
+	p := &placement{r: r, runID: "b", phase: "starting", state: &runState{}}
+	r.placements["b"] = p
+	r.allocateCpuset(p, 0.5)
+	if got := p.cpuset(); got != "0" {
+		t.Fatalf("a 0.5 Run beside a live 0.5 on CPU 0: %q, want 0 (packed)", got)
 	}
 }
