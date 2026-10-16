@@ -201,13 +201,20 @@ func realDroppedInbound(t *testing.T, f *Firewall) {
 	if err := unix.Sendto(fd, frame, 0, &unix.SockaddrLinklayer{Ifindex: src.Index, Halen: 6}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond)
-	after, err := f.Counters()
-	if err != nil {
-		t.Fatal(err)
+	// An injected frame is received in softirq, after Sendto returns: poll
+	// rxDelivered (counted first, at -300) until it moves, for at most 5s.
+	var d, r int64
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		after, err := f.Counters()
+		if err != nil {
+			t.Fatal(err)
+		}
+		d = after.Host["internet"].RxDelivered - before.Host["internet"].RxDelivered
+		r = after.Host["internet"].Rx - before.Host["internet"].Rx
+		if d != 0 || time.Now().After(deadline) {
+			break
+		}
 	}
-	d := after.Host["internet"].RxDelivered - before.Host["internet"].RxDelivered
-	r := after.Host["internet"].Rx - before.Host["internet"].Rx
 	if d != payload+28 || r != 0 {
 		t.Fatalf("dropped inbound: rxDelivered grew %d (want %d), rx grew %d (want 0)", d, payload+28, r)
 	}
