@@ -30,7 +30,8 @@ import (
 // provenance) does.
 func networkClasses(n HostNetwork, p ProviderPrefixes) proto.NetworkClasses {
 	nc := proto.NetworkClasses{Source: cmp.Or(p.Source, proto.NetSourceNone),
-		RegionService: p.RegionService, RegionPublic: p.RegionPublic, ProviderGlobal: p.ProviderGlobal, Provider: p.Provider}
+		RegionService: p.RegionService, RegionPublic: p.RegionPublic, ProviderGlobal: p.ProviderGlobal,
+		ProviderGlobalFree: p.ProviderGlobalFree, Provider: p.Provider}
 	if !p.FetchedAt.IsZero() {
 		at := p.FetchedAt.UTC()
 		nc.FetchedAt = &at
@@ -147,7 +148,7 @@ func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostN
 			prefixes = ProviderPrefixes{}
 		case prefixes.Source == "" && previous != nil && previous.Catalog():
 			prefixes.Source, prefixes.RegionService, prefixes.RegionPublic = previous.Source, previous.RegionService, previous.RegionPublic
-			prefixes.ProviderGlobal, prefixes.Provider = previous.ProviderGlobal, previous.Provider
+			prefixes.ProviderGlobal, prefixes.ProviderGlobalFree, prefixes.Provider = previous.ProviderGlobal, previous.ProviderGlobalFree, previous.Provider
 			if previous.FetchedAt != nil {
 				prefixes.FetchedAt = *previous.FetchedAt
 			}

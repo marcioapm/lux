@@ -1147,7 +1147,7 @@ func addNet(acc, v map[string]proto.NetBytes) map[string]proto.NetBytes {
 	}
 	for k, b := range v {
 		a := acc[k]
-		acc[k] = proto.NetBytes{Rx: a.Rx + b.Rx, Tx: a.Tx + b.Tx}
+		acc[k] = proto.NetBytes{Rx: a.Rx + b.Rx, Tx: a.Tx + b.Tx, RxDelivered: a.RxDelivered + b.RxDelivered}
 	}
 	return acc
 }

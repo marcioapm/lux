@@ -1368,6 +1368,9 @@ components:
         rx:
           format: int64
           type: integer
+        rxDelivered:
+          format: int64
+          type: integer
         tx:
           format: int64
           type: integer
@@ -2897,7 +2900,7 @@ components:
         netClasses:
           additionalProperties:
             $ref: "#/components/schemas/NetBytes"
-          description: "Bytes the placement's network forwarded, per billing class and direction (rx from, tx to): local, zone, region-service, region-public, provider:<region>, provider-global, internet, unknown. Only what every firewall rule let through counts. unknown: off the host's subnets with no provider catalog to classify it; never priced. Absent from runners that predate it."
+          description: "Bytes the placement's network forwarded, per billing class and direction (rx from, tx to): local, zone, region-service, region-public, provider:<region>, provider-global-free, provider-global, internet, unknown. rx and tx count only what every firewall rule let through; rxDelivered counts inbound ahead of every filter, as the provider delivered (and bills) it, dropped packets included, and is what transfer is priced by. unknown: off the host's subnets with no provider catalog to classify it; never priced. Absent from runners that predate it."
           type: object
         netRxBytes:
           format: int64
