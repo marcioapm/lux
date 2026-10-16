@@ -1122,6 +1122,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 	if err := p.r.pm.Remove(ctx, containerName(p.runID)); err != nil {
 		return err
 	}
+	p.r.allocateCpuset(p, sp.Resources.CPUs)
 	if err := p.writeShimConfig(ctx, sp, prompt); err != nil {
 		return err
 	}
@@ -1157,6 +1158,9 @@ func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Net
 		"--memory-swap", memory,
 		"--pids-limit", fmt.Sprintf("%d", sp.Resources.Pids),
 	)
+	if set := p.cpuset(); set != "" {
+		args = append(args, "--cpuset-cpus", set)
+	}
 	if sp.Sandbox.ReadOnlyRoot {
 		args = append(args, "--read-only", "--read-only-tmpfs")
 	}
@@ -1211,7 +1215,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 		Workdir:      sp.Workload.Workdir,
 		User:         user,
 		TTY:          sp.Workload.TTY,
-		Env:          withSizeEnv(sp.Env, sp.Resources.CPUs, p.r.mem.limit(int64(sp.Resources.Memory))),
+		Env:          withCpusetEnv(withSizeEnv(sp.Env, sp.Resources.CPUs, p.r.mem.limit(int64(sp.Resources.Memory))), p.cpuset(), sp.Env),
 		GraceSec:     sp.Workload.Grace.Seconds(),
 		Secrets:      sp.Secrets,
 		ArtifactsDir: proto.ShimRunDir + "/" + stagingDir,

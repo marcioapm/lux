@@ -82,6 +82,9 @@ type Config struct {
 	// is labelled nested=true, and such Runs get what rootless Podman
 	// inside them needs (see nested.go).
 	Nested bool
+	// Cpuset pins each Run's container to ceil(resources.cpus) CPUs of
+	// the runner's own affinity mask (cpusetFor).
+	Cpuset bool
 	// AssignHold is test-only (LUX_TEST_ASSIGN_HOLD): while the file it
 	// names exists, each assignment is held before it is taken up and
 	// acked. See holdAssignment and noteUnknownEpoch.
@@ -162,6 +165,8 @@ type Runner struct {
 	handover time.Duration
 	// guardTick, when set, replaces guardEvery. Tests only.
 	guardTick time.Duration
+	// hostCPUs: the CPUs Runs are pinned within (--cpuset); nil: not pinned.
+	hostCPUs []int
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -243,6 +248,12 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		mem:        mem,
 		disk:       disk,
 		hbNow:      make(chan struct{}, 1),
+	}
+	if cfg.Cpuset {
+		if r.hostCPUs, err = affinityCPUs(); err != nil {
+			return nil, fmt.Errorf("--cpuset: %w", err)
+		}
+		log.Info("cpuset", "cpus", cpuList(r.hostCPUs))
 	}
 	if guard != nil {
 		r.attachGuard(guard, func() (int64, error) {

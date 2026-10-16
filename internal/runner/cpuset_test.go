@@ -3,6 +3,9 @@ package runner
 import (
 	"slices"
 	"testing"
+
+	"github.com/marcioapm/lux/internal/podman"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 func cpus(n int) []int {
@@ -110,5 +113,42 @@ func TestCPUList(t *testing.T) {
 		if got := parseCPUList(bad); got != nil {
 			t.Errorf("parse %q: %v", bad, got)
 		}
+	}
+}
+
+// With --cpuset, each new placement is pinned beside the host's live ones,
+// those re-adopted from run state included, and its container is created
+// with --cpuset-cpus and LUX_CPUSET; without it nothing is pinned.
+func TestPlacementsArePinnedBesideLiveOnes(t *testing.T) {
+	r := &Runner{hostCPUs: cpus(4), placements: map[string]*placement{}}
+	// As readopt leaves a running one: its state as saved.
+	r.placements["old"] = &placement{r: r, runID: "old", phase: "running", state: &runState{Cpuset: "0-1"}}
+	r.placements["gone"] = &placement{r: r, runID: "gone", phase: "done", state: &runState{Cpuset: "2-3"}}
+	p := &placement{r: r, runID: "new", phase: "starting", state: &runState{}}
+	r.placements["new"] = p
+	r.allocateCpuset(p, 2)
+	if got := p.cpuset(); got != "2-3" {
+		t.Fatalf("pinned to %q, want 2-3 (0-1 is held; a done placement holds nothing)", got)
+	}
+	sp := spec.RunSpec{Resources: spec.Resources{CPUs: 2, Memory: 1 << 30, Pids: 64}}
+	args := p.createArgs(sp, "img", podman.Network{})
+	if i := slices.Index(args, "--cpuset-cpus"); i < 0 || args[i+1] != "2-3" {
+		t.Fatalf("create args %v", args)
+	}
+	if env := withCpusetEnv(map[string]string{}, p.cpuset(), nil); env["LUX_CPUSET"] != "2-3" {
+		t.Fatalf("env %v", env)
+	}
+	if env := withCpusetEnv(map[string]string{"LUX_CPUSET": "x"}, p.cpuset(), map[string]string{"LUX_CPUSET": "x"}); env["LUX_CPUSET"] != "x" {
+		t.Fatalf("the spec's own LUX_CPUSET lost: %v", env)
+	}
+
+	off := &Runner{placements: map[string]*placement{}}
+	q := &placement{r: off, runID: "q", state: &runState{}}
+	off.allocateCpuset(q, 2)
+	if args := q.createArgs(sp, "img", podman.Network{}); slices.Contains(args, "--cpuset-cpus") || q.cpuset() != "" {
+		t.Fatalf("without --cpuset: %v", args)
+	}
+	if env := withCpusetEnv(map[string]string{}, "", nil); len(env) != 0 {
+		t.Fatalf("without --cpuset: env %v", env)
 	}
 }

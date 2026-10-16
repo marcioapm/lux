@@ -78,3 +78,49 @@ func parseCPUList(s string) []int {
 	slices.Sort(out)
 	return slices.Compact(out)
 }
+
+// cpuset is the set this placement's container is pinned to; "" if none.
+func (p *placement) cpuset() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state == nil {
+		return ""
+	}
+	return p.state.Cpuset
+}
+
+// allocateCpuset pins p, about to get a container, to its share of the
+// host's CPUs, given what the host's other live placements hold (their run
+// state, so a re-adopted placement counts as before the restart). Under
+// r.mu, so two placements starting at once do not pick from the same view.
+// The choice is saved with the container's id (createContainer).
+func (r *Runner) allocateCpuset(p *placement, cpus float64) {
+	if r.hostCPUs == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var held [][]int
+	for _, o := range r.placements {
+		if o == p || o.liveState() == "" {
+			continue
+		}
+		if set := parseCPUList(o.cpuset()); set != nil {
+			held = append(held, set)
+		}
+	}
+	set := cpuList(cpusetFor(r.hostCPUs, held, cpus))
+	p.mu.Lock()
+	p.state.Cpuset = set
+	p.mu.Unlock()
+}
+
+// withCpusetEnv adds LUX_CPUSET, the set in cpu-list form, unless the
+// spec's env sets it.
+func withCpusetEnv(env map[string]string, set string, specEnv map[string]string) map[string]string {
+	if _, ok := specEnv["LUX_CPUSET"]; set == "" || ok {
+		return env
+	}
+	env["LUX_CPUSET"] = set
+	return env
+}
