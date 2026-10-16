@@ -36,46 +36,71 @@ func TestCgroupDelegationValidationAndSerialization(t *testing.T) {
 	for _, nested := range []bool{false, true} {
 		for _, delegation := range []string{"", `,"cgroupDelegation":false`, `,"cgroupDelegation":true`} {
 			input := fmt.Sprintf(`{"image":{"ref":"alpine"},"workload":{"command":["true"]},"sandbox":{"nestedContainers":%t%s}}`, nested, delegation)
-			var s RunSpec
-			if err := json.Unmarshal([]byte(input), &s); err != nil {
-				t.Fatal(err)
-			}
-			err := s.Normalize(BuiltinDefaults)
-			wantDelegation := delegation == `,"cgroupDelegation":true`
-			if wantDelegation && !nested {
-				if err == nil || !strings.Contains(err.Error(), "sandbox.cgroupDelegation requires sandbox.nestedContainers") {
-					t.Fatalf("%s: expected delegation validation error, got %v", input, err)
+			t.Run(input, func(t *testing.T) {
+				var s RunSpec
+				if err := json.Unmarshal([]byte(input), &s); err != nil {
+					t.Fatal(err)
 				}
-				continue
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, codec := range []struct {
-				marshal   func(any) ([]byte, error)
-				unmarshal func([]byte, any) error
-			}{
-				{json.Marshal, json.Unmarshal},
-				{yaml.Marshal, yaml.Unmarshal},
-			} {
-				b, err := codec.marshal(s)
+				err := s.Normalize(BuiltinDefaults)
+				wantDelegation := delegation == `,"cgroupDelegation":true`
+				if wantDelegation && !nested {
+					if err == nil || !strings.Contains(err.Error(), "sandbox.cgroupDelegation: requires sandbox.nestedContainers: true") {
+						t.Fatalf("expected delegation validation error, got %v", err)
+					}
+					return
+				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				var decoded struct {
-					Sandbox struct {
-						CgroupDelegation bool `json:"cgroupDelegation" yaml:"cgroupDelegation"`
-					} `json:"sandbox" yaml:"sandbox"`
+				for _, codec := range []struct {
+					marshal   func(any) ([]byte, error)
+					unmarshal func([]byte, any) error
+				}{
+					{json.Marshal, json.Unmarshal},
+					{yaml.Marshal, yaml.Unmarshal},
+				} {
+					b, err := codec.marshal(s)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var decoded struct {
+						Sandbox struct {
+							CgroupDelegation bool `json:"cgroupDelegation" yaml:"cgroupDelegation"`
+						} `json:"sandbox" yaml:"sandbox"`
+					}
+					if err := codec.unmarshal(b, &decoded); err != nil {
+						t.Fatal(err)
+					}
+					if decoded.Sandbox.CgroupDelegation != wantDelegation {
+						t.Fatalf("delegation roundtrip = %t, want %t", decoded.Sandbox.CgroupDelegation, wantDelegation)
+					}
 				}
-				if err := codec.unmarshal(b, &decoded); err != nil {
-					t.Fatal(err)
-				}
-				if decoded.Sandbox.CgroupDelegation != wantDelegation {
-					t.Fatalf("%s: delegation roundtrip = %t, want %t", input, decoded.Sandbox.CgroupDelegation, wantDelegation)
-				}
-			}
+			})
 		}
 	}
+	// runspec.md documents YAML specs; the key must decode from YAML input too.
+	t.Run("yaml", func(t *testing.T) {
+		for _, c := range []struct {
+			input   string
+			wantErr bool
+		}{
+			{"image: {ref: alpine}\nworkload: {command: [\"true\"]}\nsandbox: {cgroupDelegation: true}\n", true},
+			{"image: {ref: alpine}\nworkload: {command: [\"true\"]}\nsandbox: {nestedContainers: true, cgroupDelegation: true}\n", false},
+		} {
+			var s RunSpec
+			if err := yaml.Unmarshal([]byte(c.input), &s); err != nil {
+				t.Fatal(err)
+			}
+			if !s.Sandbox.CgroupDelegation {
+				t.Fatalf("%q: cgroupDelegation not decoded", c.input)
+			}
+			err := s.Normalize(BuiltinDefaults)
+			rejected := err != nil && strings.Contains(err.Error(), "sandbox.cgroupDelegation: requires sandbox.nestedContainers: true")
+			if c.wantErr && !rejected || !c.wantErr && err != nil {
+				t.Fatalf("%q: Normalize = %v, wantErr %t", c.input, err, c.wantErr)
+			}
+		}
+	})
 }
 
 func TestNormalizeExample(t *testing.T) {

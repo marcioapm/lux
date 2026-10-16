@@ -23,10 +23,17 @@ def nested(script: str, *, cgroup_delegation: bool = False, **extra) -> dict:
 
 
 def test_a_run_runs_containers_inside(lux, runners, hosts):
+    """Without sandbox.cgroupDelegation the Run's cgroup is not split: the
+    workload is at its cgroup root and there is no workload/."""
     runners.start(hosts[0], "--nested")
-    run_id = lux.submit(nested(f"{INNER} echo inner-ok"))
+    run_id = lux.submit(nested(
+        "echo run-cgroup=$(cat /proc/self/cgroup); "
+        "[ -e /sys/fs/cgroup/workload ] && echo SPLIT || echo NO-SPLIT; "
+        f"{INNER} echo inner-ok"))
     run = lux.wait_state(run_id, "succeeded", "failed", timeout=120)
-    assert run["state"] == "succeeded" and "inner-ok" in lux.logs(run_id), (run.get("stateReason"), lux.logs(run_id))
+    out = lux.logs(run_id).split()
+    assert run["state"] == "succeeded" and "inner-ok" in out, (run.get("stateReason"), out)
+    assert "run-cgroup=0::/" in out and "NO-SPLIT" in out, out
 
 
 def test_only_on_hosts_that_offer_it(lux, runners, hosts):

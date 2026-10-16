@@ -561,7 +561,7 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	fail := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
 
 	if s.Sandbox.CgroupDelegation && !s.Sandbox.NestedContainers {
-		fail("sandbox.cgroupDelegation requires sandbox.nestedContainers=true")
+		fail("sandbox.cgroupDelegation: requires sandbox.nestedContainers: true")
 	}
 	if (s.Image.Ref == "") == (s.Image.Build == nil) {
 		fail("image: exactly one of ref or build is required")

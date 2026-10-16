@@ -295,18 +295,21 @@ returns the shim's processes to the root, and removes the new directories.
 Tenant starts fall back to the shim's cgroup even if rollback is incomplete:
 nested containers retain the Run's limits, but their own may not be enforced.
 A Run without explicit `sandbox.cgroupDelegation: true` is never split,
-including when nested containers are enabled: the workload cannot create
-cgroups, so its engines' containers stay in the Run's cgroup and see its
-limits at their cgroup root. Delegation requires nested containers and adds
-no host permissions.
+including when nested containers are enabled: a non-root workload cannot
+create cgroups (the Run's cgroup belongs to the Run's root), so its engines'
+containers stay in the Run's cgroup and see its limits at their cgroup root.
+A root workload in a nested Run can create cgroups; lux does not split or
+delegate its cgroup when the flag is off. Delegation requires nested
+containers and adds no host permissions.
 
 **Docker inside a Run does not enforce per-container limits.** Rootless
 `dockerd` uses the cgroup driver `none` whenever it runs rootless without
 systemd, whatever `--exec-opt native.cgroupdriver` or `daemon.json` say,
 so `docker run -m`, `--cpus` and `--pids-limit` have no effect: its
 containers remain bounded by the Run's limits. Without delegation they stay
-in the Run's cgroup and read its limits (measured: ClickHouse 26.8, JVM 21
-and 17 size to the Run). With delegation, rootless runc can make each
+in the non-root Run's cgroup and read its limits (measured with ClickHouse
+version 26.8: 920 MB / 2 threads; JVM 21 and 17: heap 256 MB / 2 CPUs in a
+2 CPU / 1 GiB Run). With delegation, rootless runc can make each
 container its own cgroup with no limits (`/workload/<id>`); in Docker's
 private cgroup namespace that is the root, so ClickHouse and the JVM size
 themselves to the physical host's memory, still enforced by the Run.
@@ -314,10 +317,12 @@ themselves to the physical host's memory, still enforced by the Run.
 `tests/images/docker` ships the agent's `~/.config/docker/daemon.json` with
 `{"default-cgroupns-mode":"host"}`. "host" is the enclosing **Run**'s cgroup
 namespace, not the physical host's: inner containers see the Run's cgroup
-tree (read-only for them) and no more. It is for delegated Runs: measured
-with delegation, ClickHouse and JVM 21 then size to the Run; JVM 17, which
-reads only its own cgroup, still does not. It does not make Docker enforce
-`-m` or `--cpus`.
+tree (read-only for them) and no more. The delegated-Docker test pins that
+rootlesskit does not unshare that namespace: the inner process's cgroup
+path starts with `/workload/`, and walking up from it finds the Run's
+memory and CPU limits. With delegation, ClickHouse and JVM 21 then size
+to the Run (measured); JVM 17, which reads only its own cgroup, still does
+not. It does not make Docker enforce `-m` or `--cpus`.
 
 ### Out of memory
 
