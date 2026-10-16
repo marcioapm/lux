@@ -250,55 +250,87 @@ func TestTransferMissingThenFinal(t *testing.T) {
 // The placement's transfer goes to the hours its bytes moved in (sample
 // deltas), not spread evenly over its window nor all in its last hour; the
 // hours add up to the line. Within an hour only its last reading counts:
-// an earlier one, or a coarser rollup of the hour, adds nothing.
+// an earlier one, or a coarser rollup of the hour, adds nothing. Hours are
+// UTC hours whatever the session's time zone, including a half-hour offset.
 func TestTransferHourlyFromSamples(t *testing.T) {
-	s, keys := costFixture(t)
-	ctx := context.Background()
-	transferHost(t, s, false)
-	cacheTransfer(t, s)
-	s.cfg.Costs.Hourly = 100 * 365 * 24 * time.Hour
-	placeRun(t, s, "t1", "A", StateStopping, "nh", place("A", 2, 8, "10:00", "13:30"))
-	// 1 GB in the 10:00 hour, none in 11:00, 3 GB in 12:00, 1 GB unsampled
-	// before the end (13:30).
-	// The 12:00 hour's readings are 2 GB then 4 GB, and its minute rollup at
-	// 12:00 repeats 2 GB: only the later 4 GB reading sets the hour.
-	for _, smp := range []struct {
-		at  string
-		res int
-		tx  int64
-	}{{"10:20", 0, gb}, {"10:50", 0, gb}, {"12:10", 0, 2 * gb}, {"12:00", 60, 2 * gb}, {"12:40", 0, 4 * gb}} {
-		execSQL(t, s, ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, net_classes) VALUES ('A', 1, 't1', $1, $2, $3)`,
-			smp.res, at(smp.at), map[string]proto.NetBytes{"internet": {Tx: smp.tx}})
-	}
-	samples, err := func() (out []netSample, err error) {
-		err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			out, err = placementNetSamples(ctx, tx, "A", 1)
-			return err
+	for _, tz := range append(slices.Clone(dailyTimeZones), "Asia/Kolkata") {
+		t.Run(tz, func(t *testing.T) {
+			s, keys := costFixture(t)
+			sessionTimeZone(t, s, tz)
+			transferHost(t, s, false)
+			cacheTransfer(t, s)
+			s.cfg.Costs.Hourly = 100 * 365 * 24 * time.Hour
+			placeRun(t, s, "t1", "A", StateStopping, "nh", place("A", 2, 8, "10:00", "13:30"))
+			// 1 GB in the 10:00 hour, 1 GB in 11:00, 2 GB in 12:00, 1 GB
+			// unsampled before the end (13:30). 10:50 and 11:20 share a
+			// Kolkata (+5:30) hour but not a UTC one.
+			// The 12:00 hour's readings are 2 GB then 4 GB, and its minute
+			// rollup at 12:00 repeats 2 GB: only the later 4 GB reading sets
+			// the hour.
+			insertNetSamples(t, s, "A", []netSampleRow{{"10:20", 0, gb}, {"10:50", 0, gb}, {"11:20", 0, 2 * gb},
+				{"12:10", 0, 2 * gb}, {"12:00", 60, 2 * gb}, {"12:40", 0, 4 * gb}})
+			if read, want := readNetSamples(t, s, "A"), []string{"10:50=1", "11:20=2", "12:40=4"}; !slices.Equal(read, want) {
+				t.Errorf("samples read %v, want each hour's last %v", read, want)
+			}
+			setNet(t, s, "p-A", map[string]proto.NetBytes{"internet": {Tx: 5 * gb}})
+			finish(t, s, "t1", "A", StateSucceeded)
+			drain(t, s)
+			if lines, _ := transferLinesOf(t, s, keys["t1"], "A"); !slices.Equal(lines, []string{"internet:tx 0.45 true"}) {
+				t.Fatalf("line %v", lines)
+			}
+			var hours string
+			systemScan(t, s, `SELECT string_agg(to_char(hour AT TIME ZONE 'UTC', 'HH24') || '=' || trim_scale(amount)::text, ' ' ORDER BY hour)
+				FROM cost_hourly WHERE run_id = 'A' AND family = 'data-transfer'`, nil, &hours)
+			if hours != "10=0.09 11=0.09 12=0.18 13=0.09" {
+				t.Errorf("hours %s", hours)
+			}
 		})
-		return out, err
-	}()
-	if err != nil {
+	}
+}
+
+// A rolled-up hour is read from its hour rollup alone: raw or minute rows
+// of that hour still in retention are not read again, and the hours after
+// the newest rollup come from raw and minute rows.
+func TestTransferSamplesFromHourRollups(t *testing.T) {
+	s, _ := costFixture(t)
+	insertNetSamples(t, s, "A", []netSampleRow{{"09:00", 3600, gb}, {"09:10", 0, gb / 2}, {"10:00", 3600, 2 * gb},
+		{"10:20", 0, gb}, {"10:50", 60, 2 * gb}, {"11:10", 0, 3 * gb}, {"11:40", 0, 4 * gb}})
+	if read, want := readNetSamples(t, s, "A"), []string{"09:00=1", "10:00=2", "11:40=4"}; !slices.Equal(read, want) {
+		t.Errorf("samples read %v, want %v", read, want)
+	}
+}
+
+type netSampleRow struct {
+	at  string
+	res int
+	tx  int64
+}
+
+func insertNetSamples(t *testing.T, s *Server, runID string, rows []netSampleRow) {
+	t.Helper()
+	for _, r := range rows {
+		execSQL(t, s, context.Background(), `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, net_classes) VALUES ($1, 1, 't1', $2, $3, $4)`,
+			runID, r.res, at(r.at), map[string]proto.NetBytes{"internet": {Tx: r.tx}})
+	}
+}
+
+// readNetSamples is placementNetSamples for the Run's epoch 1 as
+// "HH:MM=GB" in UTC.
+func readNetSamples(t *testing.T, s *Server, runID string) []string {
+	t.Helper()
+	ctx := context.Background()
+	var samples []netSample
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
+		samples, err = placementNetSamples(ctx, tx, runID, 1)
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
 	var read []string
 	for _, smp := range samples {
 		read = append(read, fmt.Sprintf("%s=%d", smp.At.UTC().Format("15:04"), smp.Net["internet"].Tx/gb))
 	}
-	if want := []string{"10:50=1", "12:40=4"}; !slices.Equal(read, want) {
-		t.Errorf("samples read %v, want each hour's last %v", read, want)
-	}
-	setNet(t, s, "p-A", map[string]proto.NetBytes{"internet": {Tx: 5 * gb}})
-	finish(t, s, "t1", "A", StateSucceeded)
-	drain(t, s)
-	if lines, _ := transferLinesOf(t, s, keys["t1"], "A"); !slices.Equal(lines, []string{"internet:tx 0.45 true"}) {
-		t.Fatalf("line %v", lines)
-	}
-	var hours string
-	systemScan(t, s, `SELECT string_agg(to_char(hour AT TIME ZONE 'UTC', 'HH24') || '=' || trim_scale(amount)::text, ' ' ORDER BY hour)
-		FROM cost_hourly WHERE run_id = 'A' AND family = 'data-transfer'`, nil, &hours)
-	if hours != "10=0.09 12=0.27 13=0.09" {
-		t.Errorf("hours %s", hours)
-	}
+	return read
 }
 
 // transferHours' rounding keeps the hours' sum equal to the rounded total.

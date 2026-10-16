@@ -357,10 +357,24 @@ func writeTransferSnapshots(ctx context.Context, tx pgx.Tx, runID string, e *com
 // hour, oldest first: the counters are cumulative, so an hour's growth is
 // its last reading less the previous hour's, and earlier readings or
 // coarser rollups of the same hour add nothing.
+//
+// A rolled-up hour is its res=3600 row: the rollup keeps the hour's last
+// reading (history.go lastNetClasses), and rollups run in order with one
+// table-wide cutoff, so every hour before the placement's newest res=3600
+// row has one. Only the hours after it are read from raw and minute rows,
+// one per UTC hour (transferHours buckets in UTC, not the session zone).
+// The tail's bound is an uncorrelated (SELECT coalesce(max(..))) so it is
+// an index condition on the primary key, as rollupSince's is.
 func placementNetSamples(ctx context.Context, tx pgx.Tx, runID string, epoch int) ([]netSample, error) {
-	rows, err := tx.Query(ctx, `SELECT DISTINCT ON (date_trunc('hour', at)) at, net_classes FROM placement_samples
-		WHERE run_id = $1 AND epoch = $2 AND net_classes IS NOT NULL
-		ORDER BY date_trunc('hour', at), at DESC, res`, runID, epoch)
+	rows, err := tx.Query(ctx, `SELECT at, net_classes FROM placement_samples
+			WHERE run_id = $1 AND epoch = $2 AND res = 3600 AND net_classes IS NOT NULL
+		UNION ALL
+		(SELECT DISTINCT ON (date_trunc('hour', at, 'UTC')) at, net_classes FROM placement_samples
+			WHERE run_id = $1 AND epoch = $2 AND res IN (0, 60) AND net_classes IS NOT NULL
+				AND at >= (SELECT coalesce(max(at) + interval '1 hour', '-infinity') FROM placement_samples
+					WHERE run_id = $1 AND epoch = $2 AND res = 3600)
+			ORDER BY date_trunc('hour', at, 'UTC'), at DESC, res)
+		ORDER BY 1`, runID, epoch)
 	if err != nil {
 		return nil, err
 	}
