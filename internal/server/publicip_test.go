@@ -309,3 +309,33 @@ func TestPublicIPRunLine(t *testing.T) {
 		t.Errorf("priced: %v %s", lines, src)
 	}
 }
+
+// A placement that started before its host's first public-ip period is
+// priced from that first period (the next after its start), not from the
+// latest: with periods from 11:00 (1 address) and 12:00 (3 addresses), a
+// placement from 10:00 to 13:00 is charged from 11:00, at the first
+// period's rate (the latest from 12:00 would be 0.015 × 1 h × ¼).
+func TestPublicIPFirstPeriodAfterStart(t *testing.T) {
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	transferHost(t, s, false, 2)
+	cacheTransfer(t, s)
+	s.cfg.Costs.Hourly = 100 * 365 * 24 * time.Hour
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, family, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source, details) VALUES
+		('nh', 'public-ip', $1, $2, 0.005, 'USD', 8, $3, 'ec2-vpc-pricing', '{"addresses":1}'),
+		('nh', 'public-ip', $2, NULL, 0.015, 'USD', 8, $3, 'ec2-vpc-pricing', '{"addresses":3}')`, at("11:00"), at("12:00"), 32*gib)
+	placeRun(t, s, "t1", "A", StateStopping, "nh", place("A", 2, 8, "10:00", "13:00"))
+	finish(t, s, "t1", "A", StateSucceeded)
+	drain(t, s)
+	_, c := getCost(t, s, keys["t1"], "A")
+	var got []string
+	for _, l := range c.Lines {
+		if l.Family == familyPublicIP {
+			got = append(got, l.Amount)
+		}
+	}
+	// 0.005 × 2 h × a quarter share.
+	if want := []string{"0.0025"}; !slices.Equal(got, want) {
+		t.Errorf("public-ip lines %v, want %v", got, want)
+	}
+}

@@ -193,6 +193,44 @@ func TestTransferUnpriced(t *testing.T) {
 	}
 }
 
+// A live placement's partial treatment follows its host's network at each
+// evaluation: priced while the host is not partial, then, once the host's
+// discovery turns partial, its line becomes unpriced (partial-network) and
+// its hourly rows are removed with it, so lines and hours agree.
+func TestTransferPartialFlipWhileLive(t *testing.T) {
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	transferHost(t, s, false)
+	cacheTransfer(t, s)
+	s.cfg.Costs.Hourly = 100 * 365 * 24 * time.Hour
+	placeRun(t, s, "t1", "A", StateRunning, "nh", place("A", 2, 8, "10:00", ""))
+	insertNetSamples(t, s, "A", []netSampleRow{{"10:20", 0, gb}})
+	setNet(t, s, "p-A", map[string]proto.NetBytes{"internet": {Tx: gb}})
+	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('A', 'retry')`)
+	drain(t, s)
+	hours := func() string {
+		t.Helper()
+		var h string
+		systemScan(t, s, `SELECT coalesce(string_agg(to_char(hour AT TIME ZONE 'UTC', 'HH24') || '=' || trim_scale(amount)::text, ' ' ORDER BY hour), '')
+			FROM cost_hourly WHERE run_id = 'A' AND family = 'data-transfer'`, nil, &h)
+		return h
+	}
+	if lines, c := transferLinesOf(t, s, keys["t1"], "A"); !slices.Equal(lines, []string{"internet:tx 0.09 false"}) || len(c.Unpriced) != 0 || hours() != "10=0.09" {
+		t.Fatalf("live, not partial: lines %v unpriced %v hours %q", lines, c.Unpriced, hours())
+	}
+	execSQL(t, s, ctx, `UPDATE hosts SET network = network || '{"partial":true}' WHERE id = 'nh'`)
+	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('A', 'retry')`)
+	drain(t, s)
+	lines, c := transferLinesOf(t, s, keys["t1"], "A")
+	var unpriced []string
+	for _, u := range c.Unpriced {
+		unpriced = append(unpriced, fmt.Sprintf("%s %s tx%d", u.Class, u.Reason, u.Tx))
+	}
+	if len(lines) != 0 || !slices.Equal(unpriced, []string{"internet partial-network tx1000000000"}) || hours() != "" {
+		t.Errorf("after the flip: lines %v unpriced %v hours %q; want none, internet partial-network, none", lines, unpriced, hours())
+	}
+}
+
 // A provider host's inter-region destination the price list lacks is
 // unpriced (no-price), not billed at zero; the class is final all the same.
 func TestTransferProviderDestinationWithoutPrice(t *testing.T) {

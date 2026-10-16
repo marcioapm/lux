@@ -168,3 +168,30 @@ func hostTransferRows(t *testing.T, s *Server, host string, since time.Time) []s
 		FROM cost_hourly WHERE host_id = $1 AND run_id IS NULL AND family = 'data-transfer'`, []any{host, since}, &rows)
 	return rows
 }
+
+// A host whose network discovery is partial prices none of its own
+// transfer, as its placements' (priceTransfer's partial): no rows.
+func TestHostTransferPartialHost(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	cacheTransfer(t, s)
+	s.cfg.Costs.Batch = 10
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('ec2p', 't1', 'ec2p', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, registered_at, terminated_at,
+			capacity, volumes, launch_template, network)
+		VALUES ('hp', 't1', 'hp', 'ec2p', 'terminated', $1, $1, $2, '{"cpus":8,"memory":34359738368}', '[]', '{"region":"eu-north-1"}', '{"partial":true,"publicIPv4":0}')`,
+		hour, hour.Add(2*time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO host_samples (host_id, res, at, net_classes) VALUES
+		('hp', 0, $1, '{"internet":{"tx":5000000000}}'), ('hp', 0, $2, '{"internet":{"tx":5200000000}}')`,
+		hour.Add(20*time.Minute), hour.Add(80*time.Minute))
+	for range 3 {
+		if err := s.updateHostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rows := hostTransferRows(t, s, "hp", hour); len(rows) != 0 {
+		t.Errorf("partial host rows %v, want none", rows)
+	}
+}
