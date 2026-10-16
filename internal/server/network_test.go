@@ -366,6 +366,39 @@ func TestHostNetworkTotalsVisibility(t *testing.T) {
 	}
 }
 
+// A platform static pool's default transfer prices and public IPv4 charge
+// are operator-only, like its hosts'; a tenant's own pool shows its own.
+func TestPoolTransferPricesVisibility(t *testing.T) {
+	s := testServer(t)
+	keys := poolFixture(t, s, context.Background())
+	execSQL(t, s, context.Background(), `UPDATE pools SET transfer_prices = '{"currency":"USD","internet":{"tx":"0.001"},"publicIPv4PerHour":"0.004"}'
+		WHERE id IN ('p-shared', 'p-a')`)
+	for _, c := range []struct {
+		key, query string
+		platform   bool
+	}{{"a", "", false}, {"b", "", false}, {"op", "", true}, {"op", "?tenant=a", false}} {
+		var list PoolList
+		if code := getJSON(t, s, keys[c.key], "/v1/pools"+c.query, &list); code != 200 {
+			t.Fatalf("%s: %d", c.key, code)
+		}
+		seen := false
+		for _, pl := range list.Pools {
+			switch {
+			case pl.ID == "p-shared":
+				seen = true
+				if got := pl.TransferPrices != nil; got != c.platform {
+					t.Errorf("%s%s: platform pool transferPrices %+v, want shown %v", c.key, c.query, pl.TransferPrices, c.platform)
+				}
+			case pl.ID == "p-a" && (pl.TransferPrices == nil || pl.TransferPrices.PublicIPv4PerHour != "0.004"):
+				t.Errorf("%s%s: own pool transferPrices %+v", c.key, c.query, pl.TransferPrices)
+			}
+		}
+		if !seen {
+			t.Fatalf("%s%s: platform pool not listed", c.key, c.query)
+		}
+	}
+}
+
 // Heartbeat locks hosts then placements; an exit status locks the run, then
 // the placement, then the host. That inverse order deadlocks on main too, so
 // 40P01 is retried here; it is not a production retry.

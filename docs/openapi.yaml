@@ -1696,7 +1696,7 @@ components:
           type: string
         transferPrices:
           $ref: "#/components/schemas/TransferPrices"
-          description: "Static pools: the default network transfer prices (per GB, by class and direction) and public IPv4 charge of hosts registering into the pool. Copied to each host when it first registers; changing it does not reprice existing hosts (PUT /v1/hosts/{id}/network does, one host). Refused for ec2 pools, which the provider prices. Like every field, a set without it removes it."
+          description: "Static pools: the default network transfer prices (per GB, by class and direction) and public IPv4 charge of hosts registering into the pool. Copied to each host when it first registers; changing it does not reprice existing hosts (PUT /v1/hosts/{id}/network does, one host). Refused for ec2 pools, which the provider prices. Like every field, a set without it removes it. Absent for a tenant viewing a platform pool."
         warmHosts:
           format: int64
           type: integer

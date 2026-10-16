@@ -3137,11 +3137,13 @@ type listPoolsOutput struct {
 	Body PoolList `nameHint:"PoolList"`
 }
 
-// poolColumns: Select poolColumns FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id.
+// poolColumns: Select poolColumns FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id,
+// with $1 the reader's tenant ("" for an operator): a platform pool's
+// default transfer prices are operator-only, as its hosts' are (hostColumns).
 const poolColumns = `p.id, p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
 	coalesce(p.scale_down_after_s, 0), p.warm_while_active,
 	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.is_default, p.shape,
-	coalesce(p.placement, ''), p.transfer_prices`
+	coalesce(p.placement, ''), CASE WHEN $1 = '' OR p.tenant_id = $1 THEN p.transfer_prices END`
 
 func scanPool(row pgx.Row) (Pool, error) {
 	var pl Pool
