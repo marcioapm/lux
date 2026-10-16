@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"slices"
 	"testing"
 
@@ -178,5 +179,93 @@ func TestPlacementsArePinnedBesideLiveOnes(t *testing.T) {
 	}
 	if env := withCpusetEnv(map[string]string{}, "", nil); len(env) != 0 {
 		t.Fatalf("without --cpuset: env %v", env)
+	}
+}
+
+// Which placements hold their CPUs: any whose container may still run
+// (starting with a set, running, stopping, fenced off as stale), and none
+// whose container is known to have exited (exited, done).
+func TestCpusetHeldUntilTheContainerExits(t *testing.T) {
+	for _, c := range []struct {
+		phase string
+		stale bool
+		want  string // the next 2-CPU Run's set on 4 CPUs, beside 0-1
+	}{
+		{"starting", false, "2-3"},
+		{"running", false, "2-3"},
+		{"stopping", false, "2-3"},
+		{"running", true, "2-3"},
+		{"exited", false, "0-1"},
+		{"exited", true, "0-1"},
+		{"done", false, "0-1"},
+	} {
+		r := &Runner{hostCPUs: cpus(4), placements: map[string]*placement{}}
+		r.placements["a"] = &placement{r: r, runID: "a", phase: c.phase, stale: c.stale, state: &runState{Cpuset: "0-1"}}
+		p := &placement{r: r, runID: "b", phase: "starting", state: &runState{}}
+		r.placements["b"] = p
+		r.allocateCpuset(p, 2)
+		if got := p.cpuset(); got != c.want {
+			t.Errorf("beside a %s placement (stale %v) on 0-1: %q, want %q", c.phase, c.stale, got, c.want)
+		}
+	}
+}
+
+// The handover: epoch 2 of run1 replaces epoch 1, which is fenced off and
+// killed, but whose container has not exited (the kill pending or failed).
+// Its CPUs stay held through the new placement's prev until that container
+// exits; only then does another Run get them.
+func TestCpusetOfAReplacedEpochHeldUntilItExits(t *testing.T) {
+	f := newFinishFixture(t)
+	f.r.hostCPUs = cpus(4)
+	f.p.mu.Lock()
+	f.p.phase = "running"
+	f.p.state.Cpuset = "0-1"
+	f.p.mu.Unlock()
+	p2 := f.assignEpoch(t, 2)
+	if !f.p.isStale() || p2.prev != f.p {
+		t.Fatalf("epoch 1 stale %v, epoch 2's prev %p, want it fenced and linked", f.p.isStale(), p2.prev)
+	}
+	other := func() string {
+		q := &placement{r: f.r, runID: "run2", phase: "starting", state: &runState{}}
+		f.r.allocateCpuset(q, 2)
+		return q.cpuset()
+	}
+	if got := other(); got != "2-3" {
+		t.Fatalf("while epoch 1's container may still run: %q, want 2-3", got)
+	}
+	// As supervise does once podman wait returns.
+	f.release()
+	f.exitedAsSupervised(context.Background())
+	if got := other(); got != "0-1" {
+		t.Fatalf("after epoch 1's container exited: %q, want 0-1", got)
+	}
+}
+
+// Re-adoption through the run state file: a started placement's set is
+// saved as JSON, read back by readopt after a restart, and held, so the
+// next placement is pinned beside it.
+func TestCpusetReadoptedFromRunState(t *testing.T) {
+	g := newReclaimRig(t, false)
+	p := g.running(t)
+	p.state.Cpuset = "0-1"
+	p.state.Spec.Resources.CPUs = 2
+	p.state.Egress = &egressState{Unrestricted: true, Interface: "lux0", Gateway: "10.88.0.1"}
+	if err := p.saveState(); err != nil {
+		t.Fatal(err)
+	}
+	g.r.placements = map[string]*placement{}
+	g.r.hostCPUs = cpus(4)
+	g.r.readopt(g.ctx)
+	q := g.r.placements["run1"]
+	if q == nil || q == p {
+		t.Fatal("run1 was not re-adopted from its run state")
+	}
+	next := &placement{r: g.r, runID: "run2", phase: "starting", state: &runState{}}
+	g.r.allocateCpuset(next, 2)
+	got := next.cpuset()
+	q.kill(g.ctx)
+	mustEnd(t, q, "the re-adopted placement never ended")
+	if got != "2-3" {
+		t.Fatalf("beside the re-adopted 0-1: %q, want 2-3", got)
 	}
 }

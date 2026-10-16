@@ -130,8 +130,52 @@ func (p *placement) cpuset() string {
 	return p.state.Cpuset
 }
 
+// pinnedHolding is what p's container holds of the host's CPUs: its set
+// while that container may still run, whether or not the placement is
+// fenced off (stale) or replaced by a later epoch. A placement holds
+// nothing once its container is known to have exited (phase exited or
+// done: supervise saw podman wait return, or none ever started).
+func (p *placement) pinnedHolding() (holding, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state == nil || p.phase == "exited" || p.phase == "done" {
+		return holding{}, false
+	}
+	set := parseCPUList(p.state.Cpuset)
+	if set == nil {
+		return holding{}, false
+	}
+	cpus := float64(len(set))
+	if p.state.Spec != nil && p.state.Spec.Resources.CPUs > 0 {
+		cpus = p.state.Spec.Resources.CPUs
+	}
+	return holding{set: set, cpus: cpus}, true
+}
+
+// pinnedHoldings is every pinned container's holding but p's: the
+// placements in r.placements and, through prev, the earlier epochs they
+// replaced whose containers have not exited yet (a kill pending or
+// failed). r.mu must be held.
+func (r *Runner) pinnedHoldings(p *placement) []holding {
+	var held []holding
+	seen := map[*placement]bool{}
+	for _, o := range r.placements {
+		for o != nil && !seen[o] {
+			seen[o] = true
+			if h, ok := o.pinnedHolding(); ok && o != p {
+				held = append(held, h)
+			}
+			o.mu.Lock()
+			next := o.prev
+			o.mu.Unlock()
+			o = next
+		}
+	}
+	return held
+}
+
 // allocateCpuset pins p, about to get a container, to its share of the
-// host's CPUs, given what the host's other live placements hold (their run
+// host's CPUs, given what the host's pinned containers hold (their run
 // state, so a re-adopted placement counts as before the restart). Under
 // r.mu, so two placements starting at once do not pick from the same view.
 // The choice is saved with the container's id (createContainer).
@@ -141,25 +185,7 @@ func (r *Runner) allocateCpuset(p *placement, cpus float64) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var held []holding
-	for _, o := range r.placements {
-		if o == p || o.liveState() == "" {
-			continue
-		}
-		h := holding{set: parseCPUList(o.cpuset())}
-		o.mu.Lock()
-		if o.state != nil && o.state.Spec != nil {
-			h.cpus = o.state.Spec.Resources.CPUs
-		}
-		o.mu.Unlock()
-		if h.set != nil {
-			if h.cpus <= 0 {
-				h.cpus = float64(len(h.set))
-			}
-			held = append(held, h)
-		}
-	}
-	set := cpuList(cpusetFor(r.hostCPUs, held, cpus))
+	set := cpuList(cpusetFor(r.hostCPUs, r.pinnedHoldings(p), cpus))
 	p.mu.Lock()
 	p.state.Cpuset = set
 	p.mu.Unlock()
