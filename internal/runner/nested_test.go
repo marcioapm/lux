@@ -2,14 +2,18 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/podman"
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -205,6 +209,75 @@ func TestMadeParents(t *testing.T) {
 			}
 			if !slices.Equal(got, c.want) {
 				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// A nested Run's shim config points Podman inside at a containers.conf in
+// the runtime volume, whose hooks_dir registers lux-shim oci-defaults with
+// the Run's memory limit and CPU quota; a plain Run gets none of it, and a
+// spec's own CONTAINERS_CONF_OVERRIDE is kept.
+func TestNestedRunsGetInnerDefaults(t *testing.T) {
+	const gib = int64(1 << 30)
+	for _, c := range []struct {
+		name    string
+		nested  bool
+		specEnv map[string]string
+		want    string
+	}{
+		{"nested", true, nil, proto.ShimOCIConf},
+		{"nested, spec's own", true, map[string]string{"CONTAINERS_CONF_OVERRIDE": "/mine.conf"}, "/mine.conf"},
+		{"plain", false, nil, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rt := t.TempDir()
+			scale, err := newMemoryScale(64*gib+512<<20, 512<<20, 64*gib)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := &Runner{mem: scale}
+			r.mounts.Store(runtimeVolume("run_1"), rt)
+			p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
+			sp := spec.RunSpec{Env: c.specEnv, Resources: spec.Resources{CPUs: 1.5, Memory: spec.Bytes(gib)},
+				Sandbox: spec.Sandbox{NestedContainers: c.nested}}
+			if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
+				t.Fatal(err)
+			}
+			var cfg proto.ShimConfig
+			b, _ := os.ReadFile(filepath.Join(rt, "config.json"))
+			if err := json.Unmarshal(b, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Env["CONTAINERS_CONF_OVERRIDE"]; got != c.want {
+				t.Fatalf("CONTAINERS_CONF_OVERRIDE %q, want %q", got, c.want)
+			}
+			conf, err := os.ReadFile(filepath.Join(rt, "oci", "containers.conf"))
+			if !c.nested {
+				if err == nil {
+					t.Fatal("a plain Run got a containers.conf")
+				}
+				return
+			}
+			if err != nil || !strings.Contains(string(conf), `hooks_dir = ["`+proto.ShimOCIHooksDir+`", {append=true}]`) {
+				t.Fatalf("containers.conf %q, %v", conf, err)
+			}
+			var hook struct {
+				Version string
+				Hook    struct {
+					Path string
+					Args []string
+				}
+				Stages []string
+			}
+			b, _ = os.ReadFile(filepath.Join(rt, "oci", "hooks.d", "lux-run-limits.json"))
+			if err := json.Unmarshal(b, &hook); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"lux-shim", "oci-defaults", strconv.FormatInt(gib, 10), "150000", "100000"}
+			if hook.Version != "1.0.0" || hook.Hook.Path != proto.ShimBinary || !slices.Equal(hook.Hook.Args, want) ||
+				!slices.Equal(hook.Stages, []string{"precreate"}) {
+				t.Fatalf("hook %+v, want args %v", hook, want)
 			}
 		})
 	}

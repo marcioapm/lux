@@ -1233,6 +1233,15 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 	cfg.InputsDir, cfg.InputsRoot = sp.InputsDir(p.user.Home)
 	cfg.Sync = p.sync
 	cfg.DelegateCgroup = sp.Sandbox.NestedContainers && sp.Sandbox.CgroupDelegation
+	// Inner-container defaults need the delegated cgroup: without it inner
+	// engines cannot make cgroups and their containers already sit in the
+	// Run's, reading its limits (#119).
+	if cfg.DelegateCgroup {
+		if err := writeInnerDefaults(rt, p.r.mem.limit(int64(sp.Resources.Memory)), sp.Resources.CPUs); err != nil {
+			return err
+		}
+		cfg.Env = innerDefaultsEnv(cfg.Env, sp.Env)
+	}
 	if b := sp.Workload.BeforeStop; b != nil {
 		cfg.BeforeStop = b.Command
 		cfg.BeforeStopTimeoutSec = b.Timeout.Seconds()

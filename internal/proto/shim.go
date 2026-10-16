@@ -46,6 +46,17 @@ const (
 	ShimCapReclaim = "reclaim-v1"
 )
 
+// ShimOCIDefaultsCmd is `lux-shim oci-defaults MEMORY CPU_QUOTA CPU_PERIOD`,
+// a Podman precreate hook. A nested Run's workload gets
+// CONTAINERS_CONF_OVERRIDE=ShimOCIConf, whose hooks_dir (ShimOCIHooksDir)
+// registers it, so containers it starts default to the Run's limits.
+const (
+	ShimOCIDefaultsCmd = "oci-defaults"
+	ShimOCIDir         = ShimRunDir + "/oci"
+	ShimOCIConf        = ShimOCIDir + "/containers.conf"
+	ShimOCIHooksDir    = ShimOCIDir + "/hooks.d"
+)
+
 type ShimConfig struct {
 	RunID   string   `json:"runId"`
 	Epoch   int      `json:"epoch"`
