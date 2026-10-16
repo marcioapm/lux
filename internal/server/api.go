@@ -2387,8 +2387,8 @@ type Host struct {
 	Volumes        *[]HostVolume             `json:"volumes,omitempty" doc:"The block-storage volumes deleted with it, as the provider reported them (assumed: supplied by an operator for a host from before luxd recorded them); absent while not known, and for a host that registered itself."`
 	Network        *HostNetwork              `json:"network,omitempty" doc:"Its network placement as the provider reports it: its own subnets and zone, every subnet of its network with its zone, and its billable public IPv4 addresses. Refreshed on each provider check; absent while not known, and for a host that registered itself."`
 	NetClasses     map[string]proto.NetBytes `json:"netClasses,omitempty" doc:"The host's own network transfer (outside any Run), cumulative bytes per billing class and direction: local, zone, region-service, region-public, provider:<region>, provider-global-free, provider-global, internet, unknown. rxDelivered: inbound ahead of every filter, what transfer is priced by. unknown is traffic off the host's subnets with no provider catalog to classify it: not priced. Absent from runners that predate it."`
-	StaticNetwork  *StaticNetwork            `json:"staticNetwork,omitempty" doc:"A static host's network catalog, as its operator set it (PUT /v1/hosts/{id}/network)."`
-	TransferPrices *DataTransferPrices       `json:"transferPrices,omitempty" doc:"A static host's network transfer prices and public IPv4 charge, as its operator set them or its pool's default when it registered."`
+	StaticNetwork  *StaticNetwork            `json:"staticNetwork,omitempty" doc:"A static host's network catalog, as its operator set it (PUT /v1/hosts/{id}/network). Absent for a tenant viewing a platform host."`
+	TransferPrices *DataTransferPrices       `json:"transferPrices,omitempty" doc:"A static host's network transfer prices and public IPv4 charge, as its operator set them or its pool's default when it registered. Absent for a tenant viewing a platform host."`
 	LastHeartbeat  *time.Time                `json:"lastHeartbeat,omitempty"`
 	Times          map[string]*time.Time     `json:"times" doc:"Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."`
 	Launch         *HostLaunch               `json:"launch,omitempty" doc:"How luxd's launch of it went; absent for a host that registered itself, or one from before launches were recorded."`
@@ -2435,14 +2435,16 @@ const visiblePlacements = "($1 = '' OR pl.tenant_id = $1)"
 
 // Select hostColumns FROM hostsFrom ($1: the principal's tenant id, for
 // which of its placements count).
+// A platform host's own traffic, catalog and prices are its operator's:
+// a tenant that sees the host does not see them.
 const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''), coalesce(h.pool_id, ''), h.state, ` + hostStateReason + `,
 	h.draining, h.labels, h.capacity, h.versions, h.tenant_id IS NULL,
 	hl.n, jsonb_build_object('cpus', hl.cpus, 'memory', hl.mem, 'disk', hl.disk),
 	h.provider_id, h.instance_type, h.zone, h.market, h.last_heartbeat,
 	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at,
-	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + `, h.volumes, h.disk_pressure, h.network, CASE WHEN $1 = '' OR h.tenant_id = $1 THEN h.host_net_classes ELSE NULL END,
-	h.network_static, h.transfer_prices`
+	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + `, h.volumes, h.disk_pressure, h.network, CASE WHEN $1 = '' OR h.tenant_id = $1 THEN h.host_net_classes END,
+	CASE WHEN $1 = '' OR h.tenant_id = $1 THEN h.network_static END, CASE WHEN $1 = '' OR h.tenant_id = $1 THEN h.transfer_prices END`
 
 // hostSeesProviderError, for SQL on hosts h with $1 as visibleHosts: a
 // platform host's provider error (account ids, role ARNs) is only for a

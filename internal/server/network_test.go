@@ -297,11 +297,20 @@ func TestRunnerNetworkEndpoint(t *testing.T) {
 
 // Placement and host classes merge per key and direction by maximum, from
 // heartbeats and exit statuses alike; absent keys are kept; the Run's usage
-// sums its placements; and GET shows them.
+// sums its placements; and GET shows them. A platform host's own traffic,
+// static catalog and transfer prices are shown to operators only, on each
+// of the three read paths; a tenant's own host shows its own.
 func TestHostNetworkTotalsVisibility(t *testing.T) {
 	s := testServer(t)
 	keys := poolFixture(t, s, context.Background())
-	execSQL(t, s, context.Background(), `UPDATE hosts SET host_net_classes='{"internet":{"tx":123}}' WHERE id IN ('hp','ha')`)
+	execSQL(t, s, context.Background(), `UPDATE hosts SET host_net_classes='{"internet":{"tx":123}}',
+		network_static = '{"local":["10.9.0.0/24"]}', transfer_prices = '{"currency":"USD","internet":{"tx":"0.001"}}' WHERE id IN ('hp','ha')`)
+	operatorOnly := func(h Host) bool {
+		return h.NetClasses["internet"].Tx == 123 && h.StaticNetwork != nil && h.TransferPrices != nil
+	}
+	hidden := func(h Host) bool {
+		return h.NetClasses == nil && h.StaticNetwork == nil && h.TransferPrices == nil
+	}
 	for _, c := range []struct {
 		key, query string
 		platform   bool
@@ -342,12 +351,12 @@ func TestHostNetworkTotalsVisibility(t *testing.T) {
 			for _, h := range hosts {
 				if h.ID == "hp" {
 					seen = true
-					if (h.NetClasses["internet"].Tx == 123) != c.platform {
-						t.Fatalf("%s %s leaked/omitted: %v", c.key, path, h.NetClasses)
+					if c.platform && !operatorOnly(h) || !c.platform && !hidden(h) {
+						t.Fatalf("%s %s leaked/omitted: %v %+v %+v", c.key, path, h.NetClasses, h.StaticNetwork, h.TransferPrices)
 					}
 				}
-				if h.ID == "ha" && h.NetClasses["internet"].Tx != 123 {
-					t.Fatal("owner totals missing")
+				if h.ID == "ha" && !operatorOnly(h) {
+					t.Fatalf("owner's own network missing: %v %+v %+v", h.NetClasses, h.StaticNetwork, h.TransferPrices)
 				}
 			}
 			if !seen {

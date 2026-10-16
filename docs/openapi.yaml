@@ -794,7 +794,7 @@ components:
           type: string
         staticNetwork:
           $ref: "#/components/schemas/StaticNetwork"
-          description: A static host's network catalog, as its operator set it (PUT /v1/hosts/{id}/network).
+          description: A static host's network catalog, as its operator set it (PUT /v1/hosts/{id}/network). Absent for a tenant viewing a platform host.
         tenant:
           description: The owning tenant's name; empty for a platform host.
           type: string
@@ -808,7 +808,7 @@ components:
           type: object
         transferPrices:
           $ref: "#/components/schemas/TransferPrices"
-          description: A static host's network transfer prices and public IPv4 charge, as its operator set them or its pool's default when it registered.
+          description: A static host's network transfer prices and public IPv4 charge, as its operator set them or its pool's default when it registered. Absent for a tenant viewing a platform host.
         versions:
           additionalProperties: {}
           type: object
