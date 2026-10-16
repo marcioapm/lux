@@ -366,9 +366,12 @@ affinity and see that many with `nproc`; the default `cpu.max` makes
 ClickHouse, which ignores affinity, agree.
 `tests/suites/test_run_size.py` checks both, with real ClickHouse and JVMs.
 
-Rootless Docker's containers stay in the Run's cgroup (driver `none`):
-at their namespace's root they see the Run's `memory.max` and `cpu.max`,
-so they need no default.
+Rootless Docker does not read containers.conf. Its containers inherit the
+Run's CPUs (affinity; `docker info` NCPU is the Run's), but in a nested
+Run they read `memory.max` and `cpu.max` as `max` at their namespace's
+root (measured), so ClickHouse and the JVM in them still size memory to
+the host. This is open: `test_run_size.py::test_inner_docker_containers_see_the_runs_size`
+expects the Run's limits and is marked as an expected failure until then.
 
 ### Out of memory
 

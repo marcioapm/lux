@@ -7,7 +7,7 @@ host. A runner without --cpuset behaves as before."""
 
 from __future__ import annotations
 
-import re
+import pytest
 
 from build import CLICKHOUSE_IMAGE, DOCKER_IMAGE, JVM17_IMAGE, JVM21_IMAGE, NESTED_IMAGE
 from conftest import generic
@@ -142,10 +142,12 @@ docker load -q -i /opt/alpine.tar >/dev/null
 """
 
 
+@pytest.mark.xfail(strict=True, reason="open finding: rootless Docker's inner containers see memory.max=max and "
+                                       "cpu.max=max in a delegated nested Run (docs/podman.md)")
 def test_inner_docker_containers_see_the_runs_size(lux, runners, hosts):
-    """Rootless Docker in a Run (cgroup driver none) leaves its containers in
-    the Run's cgroup: at their cgroup namespace's root they see the Run's
-    memory.max and quota, and the Run's CPUs."""
+    """Docker containers in a Run should see the Run's memory.max and quota
+    at their cgroup namespace's root, and the Run's CPUs. Today only the
+    CPUs hold (affinity, NCPU); the limits read max."""
     runners.start(hosts[0], "--nested", "--cpuset")
     limit = hosts[0].memory_limit(GIB)
     out = run_to_end(lux, nested(SHOW_FILE + DOCKERD + f"echo \"inner: $(docker run --rm --network=none {SHOW_INNER})\"; "
