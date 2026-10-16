@@ -29,7 +29,42 @@ FROM = f"FROM {ALPINE_IMAGE}"
 
 
 def docker(script: str, **extra) -> dict:
-    return generic(DOCKER_IMAGE, "sh", "-c", DOCKERD + script, sandbox={"nestedContainers": True}, **extra)
+    sandbox = extra.pop("sandbox", {"nestedContainers": True})
+    return generic(DOCKER_IMAGE, "sh", "-c", DOCKERD + script, sandbox=sandbox, **extra)
+
+
+def test_default_cgroups_show_run_limits(lux, runners, hosts):
+    """Without sandbox.cgroupDelegation the workload cannot make cgroups, so
+    rootless runc leaves Docker's containers in the Run's cgroup: they and
+    the Run read the Run's memory.max and cpu.max at their cgroup root, which
+    is what ClickHouse and the JVM size themselves from (#113 regression)."""
+    runners.start(hosts[0], "--nested")
+    script = f"""
+set -eu
+cat > /tmp/cgroup-probe.sh <<'PROBE'
+set -eu
+echo cgroup=$(cat /proc/self/cgroup)
+echo memory=$(cat /sys/fs/cgroup/memory.max)
+echo cpu=$(tr ' ' _ < /sys/fs/cgroup/cpu.max)
+echo nproc=$(nproc)
+if mkdir /sys/fs/cgroup/lux-write-probe 2>/dev/null; then
+    rmdir /sys/fs/cgroup/lux-write-probe; echo CGROUP-WRITABLE; exit 1
+fi
+echo CGROUP-NOT-WRITABLE
+PROBE
+sh /tmp/cgroup-probe.sh
+docker run --rm -v /tmp/cgroup-probe.sh:/probe:ro {ALPINE_IMAGE} sh /probe
+"""
+    run_id = lux.submit(docker(script, resources={"cpus": 2, "memory": "1Gi"}))
+    run = lux.wait_state(run_id, "succeeded", "failed", timeout=180)
+    out = lux.logs(run_id)
+    print(out)
+    assert run["state"] == "succeeded", (run, out)
+    assert out.split().count("CGROUP-NOT-WRITABLE") == 2, out
+    assert out.split().count(f"memory={hosts[0].memory_limit(1 << 30)}") == 2, out
+    assert out.split().count("cpu=200000_100000") == 2, out
+    assert out.split().count("cgroup=0::/") == 2, out
+
 
 
 def test_docker_runs_builds_and_composes(lux, runners, hosts):
