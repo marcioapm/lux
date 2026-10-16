@@ -1,0 +1,25 @@
+#!/bin/sh
+# Spike only (.spike/lxcfs.md). OCI hook: for a container annotated
+# io.lux.spike.hidden=proc[,sys], mounts a fresh procfs (in the container's
+# pid namespace) at /dev/.lux/proc and a fresh sysfs (its network
+# namespace) at /dev/.lux/sys, as LXD does at /dev/.lxc/{proc,sys}.
+# Runs as root on the host; the mount is made from the host's user
+# namespace, so the kernel's "already visible" check does not apply to it.
+log=/var/log/lux-spike-hook.log
+state=$(cat)
+field() { printf '%s' "$state" | python3 -c "import json,sys;s=json.load(sys.stdin);print($1)"; }
+pid=$(field 's["pid"]')
+what=$(field 's.get("annotations",{}).get("io.lux.spike.hidden","")')
+echo "$(date +%T.%N) stage=$1 pid=$pid what=$what" >>$log
+for w in $(echo "$what" | tr , ' '); do
+  case $w in proc) fs=proc ns=-p ;; sys) fs=sysfs ns=-n ;; *) continue ;; esac
+  # The mountpoint is the runner's (--tmpfs): host root is not mapped in
+  # the Run's user namespace, so it cannot mkdir on its /dev (EOVERFLOW).
+  ls -ld /proc/$pid/root/dev/.lux/$w >>$log 2>&1
+  # -p forks into the pid namespace (procfs belongs to the mounter's);
+  # mount -N switches to the container's mount namespace just before
+  # mount(2), so this is the host's mount binary.
+  nsenter -t "$pid" $ns -- mount -N /proc/$pid/ns/mnt -t $fs -o rw,nosuid,nodev,noexec $fs /dev/.lux/$w >>$log 2>&1 \
+    && echo "mounted $w" >>$log || echo "FAILED $w" >>$log
+done
+exit 0

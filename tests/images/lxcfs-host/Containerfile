@@ -1,0 +1,8 @@
+# Spike only (.spike/lxcfs.md): the simulated host with LXCFS installed from
+# Fedora's package, and an OCI hook that adds a clean procfs/sysfs at
+# /dev/.lux in annotated containers. Tests start LXCFS themselves, and
+# pick the hook's stage by writing hooks.d/lux-spike.json from the template.
+FROM quay.io/podman/stable:v5.8.7
+RUN dnf -y -q --setopt=install_weak_deps=False install lxcfs procps-ng && dnf clean all
+COPY --chmod=755 lux-spike-hidden lxcfs-reader.sh /usr/local/bin/
+COPY hook.json.in /usr/local/share/lux-spike-hook.json.in

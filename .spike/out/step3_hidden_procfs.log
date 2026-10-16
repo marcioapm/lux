@@ -1,0 +1,221 @@
+pid1 cgroup=/init controllers there=cpuset cpu io memory hugetlb pids rdma misc dmem
+229 lxcfs --enable-cfs -l /var/lib/lxcfs
+  0: fd:   8: cpuset,cpu,io,memory,hugetlb,pids,rdma,misc,dmem
+
+## nested + overmounts + hidden proc: podman: succeeded
+P:run:meminfo.MemTotal=998352kB
+P:run:meminfo.MemAvailable=997660kB
+P:run:free.total=998352kB
+P:run:cpuinfo.processors=2
+P:run:stat.cpuN=2
+P:run:uptime=0.22
+P:run:loadavg=0.00_0.00_0.00
+P:run:swaps.lines=1
+P:run:sys.cpu.online=0-1
+P:run:nproc=32
+P:run:getconf.NPROCESSORS_ONLN=32
+P:run:cgroup=0::/workload/main
+P:run:cgroup.memory.max=1022312448
+P:run:cgroup.cpu.max=200000_100000
+P:run:cgroup.cpuset.effective=0-31
+P:run:python.cpu_count=32
+P:run:python.sched_getaffinity=32
+P:run:python.process_cpu_count=32
+P:run:node.cpus=2
+P:run:node.availableParallelism=2
+P:run:node.totalmem=1022312448
+P:run:proc.mounts=/proc/loadavg(lxcfs) /proc/swaps(lxcfs) /proc/diskstats(lxcfs) /proc/uptime(lxcfs) /proc/meminfo(lxcfs) /proc/cpuinfo(lxcfs) /proc/stat(lxcfs) /sys/devices/system/cpu/online(lxcfs) /proc(proc) /sys(sysfs) /dev/.lux/proc(tmpfs) /sys/fs/cgroup(cgroup2) /dev/.lux/proc(proc) 
+P:hidden:mount=5035 5029 0:804 / /dev/.lux/proc ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=4k,mode=555,uid=2147483647,gid=2147483647,inode64|4904 5035 0:745 / /dev/.lux/proc rw,nosuid,nodev,noexec,relatime - proc proc rw|
+P:hidden:proc.meminfo=64418888kB
+P:hidden:proc.cpuinfo=32
+P:hidden:proc.pid1=lux-shim entries=5
+P:hidden:kcore proc=no hidden=no
+P:hidden:keys proc=readable hidden=readable
+P:hidden:timer_list proc=no hidden=no
+P:hidden:sched_debug proc=no hidden=no
+P:hidden:sysrq-trigger proc=no hidden=no
+P:hidden:acpi proc=no hidden=no
+P:hidden:scsi proc=no hidden=no
+P:hidden:latency_stats proc=readable hidden=readable
+sh: can't create /dev/.lux/proc/sys/kernel/hostname: Permission denied
+P:hidden:proc.sys.rw proc= hidden-write-hostname=refused
+P:hidden:sys.firmware proc=acpi dmi efi  hidden=ls: cannot access '/dev/.lux/sys/firmware': No such file or directory 
+P:hidden:sys.cpu.online=cat: /dev/.lux/sys/devices/system/cpu/online: No such file or directory
+P:hidden:sys.fs.cgroup=ls: cannot access '/dev/.lux/sys/fs/cgroup': No such file or directory 
+P:podman-info:cpus_mem=32_1022312448
+Error: runc: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/14, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted: OCI permission denied
+INNER-PODMAN-FAILED
+Error: runc: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/14, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted: OCI permission denied
+INNER-PODMAN-LIMITED-FAILED
+
+## nested + overmounts + hidden proc: docker: succeeded
+P:docker-info:NCPU_MemTotal=32_1022312448
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/14, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+
+Run 'docker run --help' for more information
+INNER-DOCKER-FAILED
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/14, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+
+Run 'docker run --help' for more information
+INNER-DOCKER-LIMITED-FAILED
+DOCKERD-LOG: time="2026-10-16T02:56:05.766331291Z" level=warning msg="warnings while cleaning up dead shim" id=bfe545a6427bd0b9e2279e3cc34ce06acdc0ce96ff711d8f48c122c4734803b5 namespace=moby warnings="time=\"2026-10-16T02:56:05Z\" level=warning msg=\"failed to read init pid file\" error=\"open /tmp/xdg/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/bfe545a6427bd0b9e2279e3cc34ce06acdc0ce96ff711d8f48c122c4734803b5/init.pid: no such file or directory\" runtime=io.containerd.runc.v2\n"
+DOCKERD-LOG: time="2026-10-16T02:56:05.767946671Z" level=error msg="copy shim log" error="read /proc/self/fd/19: file already closed" namespace=moby
+DOCKERD-LOG: time="2026-10-16T02:56:05.769135398Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stdout
+DOCKERD-LOG: time="2026-10-16T02:56:05.769243329Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stderr
+DOCKERD-LOG: time="2026-10-16T02:56:06.362943950Z" level=error msg="Handler for POST /containers/{name:.*}/start returned error" error-response="failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting \"sysfs\" to rootfs at \"/sys\": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/14, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted" method=POST module=api request-url=/v1.56/containers/bfe545a6427bd0b9e2279e3cc34ce06acdc0ce96ff711d8f48c122c4734803b5/start status=500 vars="map[name:bfe545a6427bd0b9e2279e3cc34ce06acdc0ce96ff711d8f48c122c4734803b5 version:1.56]"
+
+## nested + overmounts + hidden proc+sys: podman: succeeded
+P:run:meminfo.MemTotal=998352kB
+P:run:meminfo.MemAvailable=997684kB
+P:run:free.total=998352kB
+P:run:cpuinfo.processors=2
+P:run:stat.cpuN=2
+P:run:uptime=0.26
+P:run:loadavg=0.00_0.00_0.00
+P:run:swaps.lines=1
+P:run:sys.cpu.online=0-1
+P:run:nproc=32
+P:run:getconf.NPROCESSORS_ONLN=32
+P:run:cgroup=0::/workload/main
+P:run:cgroup.memory.max=1022312448
+P:run:cgroup.cpu.max=200000_100000
+P:run:cgroup.cpuset.effective=0-31
+P:run:python.cpu_count=32
+P:run:python.sched_getaffinity=32
+P:run:python.process_cpu_count=32
+P:run:node.cpus=2
+P:run:node.availableParallelism=2
+P:run:node.totalmem=1022312448
+P:run:proc.mounts=/proc/loadavg(lxcfs) /proc/uptime(lxcfs) /proc/meminfo(lxcfs) /proc/cpuinfo(lxcfs) /proc/diskstats(lxcfs) /proc/swaps(lxcfs) /proc/stat(lxcfs) /sys/devices/system/cpu/online(lxcfs) /proc(proc) /sys(sysfs) /dev/.lux/proc(tmpfs) /dev/.lux/sys(tmpfs) /sys/fs/cgroup(cgroup2) /dev/.lux/proc(proc) /dev/.lux/sys(sysfs) 
+P:hidden:mount=5038 5032 0:804 / /dev/.lux/proc ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=4k,mode=555,uid=2147483647,gid=2147483647,inode64|5039 5032 0:805 / /dev/.lux/sys ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=4k,mode=555,uid=2147483647,gid=2147483647,inode64|4906 5038 0:745 / /dev/.lux/proc rw,nosuid,nodev,noexec,relatime - proc proc rw|4911 5039 0:789 / /dev/.lux/sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw|
+P:hidden:proc.meminfo=64418888kB
+P:hidden:proc.cpuinfo=32
+P:hidden:proc.pid1=lux-shim entries=5
+P:hidden:kcore proc=no hidden=no
+P:hidden:keys proc=readable hidden=readable
+P:hidden:timer_list proc=no hidden=no
+P:hidden:sched_debug proc=no hidden=no
+P:hidden:sysrq-trigger proc=no hidden=no
+P:hidden:acpi proc=no hidden=no
+P:hidden:scsi proc=no hidden=no
+P:hidden:latency_stats proc=readable hidden=readable
+sh: can't create /dev/.lux/proc/sys/kernel/hostname: Permission denied
+P:hidden:proc.sys.rw proc= hidden-write-hostname=refused
+P:hidden:sys.firmware proc=acpi dmi efi  hidden=acpi dmi efi 
+P:hidden:sys.cpu.online=0-31
+P:hidden:sys.fs.cgroup=
+P:podman-info:cpus_mem=32_1022312448
+P:podman-inner:meminfo.MemTotal=64418888kB
+P:podman-inner:meminfo.MemAvailable=25798752kB
+P:podman-inner:free.total=64418888kB
+P:podman-inner:cpuinfo.processors=32
+P:podman-inner:stat.cpuN=32
+P:podman-inner:uptime=7553229.78
+P:podman-inner:loadavg=23.00_23.27_22.31
+P:podman-inner:swaps.lines=2
+P:podman-inner:sys.cpu.online=0-31
+P:podman-inner:nproc=32
+P:podman-inner:getconf.NPROCESSORS_ONLN=32
+P:podman-inner:cgroup=0::/
+P:podman-inner:cgroup.memory.max=max
+P:podman-inner:cgroup.cpu.max=max_100000
+P:podman-inner:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:podman-inner:proc.mounts=/proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) 
+P:podman-inner-limited:meminfo.MemTotal=64418888kB
+P:podman-inner-limited:meminfo.MemAvailable=25934976kB
+P:podman-inner-limited:free.total=64418888kB
+P:podman-inner-limited:cpuinfo.processors=32
+P:podman-inner-limited:stat.cpuN=32
+P:podman-inner-limited:uptime=7553230.45
+P:podman-inner-limited:loadavg=23.00_23.27_22.31
+P:podman-inner-limited:swaps.lines=2
+P:podman-inner-limited:sys.cpu.online=0-31
+P:podman-inner-limited:nproc=32
+P:podman-inner-limited:getconf.NPROCESSORS_ONLN=32
+P:podman-inner-limited:cgroup=0::/
+P:podman-inner-limited:cgroup.memory.max=268435456
+P:podman-inner-limited:cgroup.cpu.max=100000_100000
+P:podman-inner-limited:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:podman-inner-limited:proc.mounts=/proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) 
+
+## nested + overmounts + hidden proc+sys: docker: succeeded
+P:docker-info:NCPU_MemTotal=32_1022312448
+P:docker-inner:meminfo.MemTotal=64418888kB
+P:docker-inner:meminfo.MemAvailable=25659404kB
+P:docker-inner:free.total=64418888kB
+P:docker-inner:cpuinfo.processors=32
+P:docker-inner:stat.cpuN=32
+P:docker-inner:uptime=7553241.15
+P:docker-inner:loadavg=22.61_23.17_22.30
+P:docker-inner:swaps.lines=2
+P:docker-inner:sys.cpu.online=0-31
+P:docker-inner:nproc=32
+P:docker-inner:getconf.NPROCESSORS_ONLN=32
+P:docker-inner:cgroup=0::/
+P:docker-inner:cgroup.memory.max=max
+P:docker-inner:cgroup.cpu.max=max_100000
+P:docker-inner:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:docker-inner:proc.mounts=/proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/interrupts(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) 
+P:docker-inner-limited:meminfo.MemTotal=64418888kB
+P:docker-inner-limited:meminfo.MemAvailable=25538568kB
+P:docker-inner-limited:free.total=64418888kB
+P:docker-inner-limited:cpuinfo.processors=32
+P:docker-inner-limited:stat.cpuN=32
+P:docker-inner-limited:uptime=7553245.32
+P:docker-inner-limited:loadavg=22.61_23.17_22.30
+P:docker-inner-limited:swaps.lines=2
+P:docker-inner-limited:sys.cpu.online=0-31
+P:docker-inner-limited:nproc=32
+P:docker-inner-limited:getconf.NPROCESSORS_ONLN=32
+P:docker-inner-limited:cgroup=0::/
+P:docker-inner-limited:cgroup.memory.max=max
+P:docker-inner-limited:cgroup.cpu.max=max_100000
+P:docker-inner-limited:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:docker-inner-limited:proc.mounts=/proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/interrupts(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) 
+DOCKERD-LOG: time="2026-10-16T02:56:18.192527988Z" level=warning msg="failed check for fsverity support" error="enable fsverity failed: operation not supported" path=/home/agent/.local/share/docker/plugins/storage
+DOCKERD-LOG: time="2026-10-16T02:56:18.285600009Z" level=warning msg="Failed to find nft tool" error="exec: \"nft\": executable file not found in $PATH"
+DOCKERD-LOG: time="2026-10-16T02:56:18.285645030Z" level=info msg="Deleting nftables IPv4 rules" error="failed to find nft tool: exec: \"nft\": executable file not found in $PATH"
+DOCKERD-LOG: time="2026-10-16T02:56:18.285652690Z" level=info msg="Deleting nftables IPv6 rules" error="failed to find nft tool: exec: \"nft\": executable file not found in $PATH"
+DOCKERD-LOG: time="2026-10-16T02:56:18.980961155Z" level=warning msg="git source cannot be enabled: failed to find git binary: exec: \"git\": executable file not found in $PATH"
+
+## NOT nested + hidden proc+sys (exposure check): succeeded
+P:hidden:mount=5037 5031 0:803 / /dev/.lux/proc ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=4k,mode=555,uid=2147483647,gid=2147483647,inode64|5038 5031 0:804 / /dev/.lux/sys ro,nosuid,nodev,relatime - tmpfs tmpfs rw,size=4k,mode=555,uid=2147483647,gid=2147483647,inode64|4906 5037 0:745 / /dev/.lux/proc rw,nosuid,nodev,noexec,relatime - proc proc rw|4911 5038 0:786 / /dev/.lux/sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw|
+P:hidden:proc.meminfo=64418888kB
+P:hidden:proc.cpuinfo=32
+P:hidden:proc.pid1=lux-shim entries=5
+P:hidden:kcore proc=readable hidden=no
+P:hidden:keys proc=readable hidden=readable
+P:hidden:timer_list proc=readable hidden=no
+P:hidden:sched_debug proc=no hidden=no
+P:hidden:sysrq-trigger proc=no hidden=no
+P:hidden:acpi proc=no hidden=no
+P:hidden:scsi proc=no hidden=no
+P:hidden:latency_stats proc=readable hidden=readable
+sh: can't create /dev/.lux/proc/sys/kernel/hostname: Permission denied
+P:hidden:proc.sys.rw proc=ro,nosuid,nodev,noexec,relatime hidden-write-hostname=refused
+P:hidden:sys.firmware proc= hidden=acpi dmi efi 
+P:hidden:sys.cpu.online=0-31
+P:hidden:sys.fs.cgroup=
+
+## hook log
+02:55:43.351497135 stage=poststart pid=632 what=proc
+dr-xr-xr-x 2 2147483647 2147483647 40 Oct 16 02:55 /proc/632/root/dev/.lux/proc
+mounted proc
+02:55:51.784212258 stage=poststart pid=1373 what=proc
+dr-xr-xr-x 2 2147483647 2147483647 40 Oct 16 02:55 /proc/1373/root/dev/.lux/proc
+mounted proc
+02:56:09.927407268 stage=poststart pid=2537 what=proc,sys
+dr-xr-xr-x 2 2147483647 2147483647 40 Oct 16 02:56 /proc/2537/root/dev/.lux/proc
+mounted proc
+dr-xr-xr-x 2 2147483647 2147483647 40 Oct 16 02:56 /proc/2537/root/dev/.lux/sys
+mounted sys
+02:56:16.839127175 stage=poststart pid=3348 what=proc,sys
+dr-xr-xr-x 2 2147483647 2147483647 40 Oct 16 02:56 /proc/3348/root/dev/.lux/proc
+mounted proc
+dr-xr-xr-x 2 2147483647 2147483647 40 Oct 16 02:56 /proc/3348/root/dev/.lux/sys
+mounted sys
+02:56:32.564291740 stage=poststart pid=4494 what=proc,sys
+dr-xr-xr-x 2 2147483647 2147483647 40 Oct 16 02:56 /proc/4494/root/dev/.lux/proc
+mounted proc
+dr-xr-xr-x 2 2147483647 2147483647 40 Oct 16 02:56 /proc/4494/root/dev/.lux/sys
+mounted sys

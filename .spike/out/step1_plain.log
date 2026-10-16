@@ -1,0 +1,98 @@
+## baseline (no LXCFS)
+P:run:meminfo.MemTotal=64418888kB
+P:run:meminfo.MemAvailable=26997012kB
+P:run:free.total=64418888kB
+P:run:cpuinfo.processors=32
+P:run:stat.cpuN=32
+P:run:uptime=7552750.42
+P:run:loadavg=25.78_21.78_21.47
+P:run:swaps.lines=2
+P:run:sys.cpu.online=0-31
+P:run:nproc=32
+P:run:getconf.NPROCESSORS_ONLN=32
+P:run:cgroup=0::/
+P:run:cgroup.memory.max=1022312448
+P:run:cgroup.cpu.max=200000_100000
+P:run:cgroup.cpuset.effective=0-31
+P:run:python.cpu_count=32
+P:run:python.sched_getaffinity=32
+P:run:python.process_cpu_count=32
+P:run:node.cpus=32
+P:run:node.availableParallelism=2
+P:run:node.totalmem=65964941312
+P:run:proc.mounts=/proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup2) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) 
+
+## lxcfs
+pid1 cgroup=/init controllers there=cpuset cpu io memory hugetlb pids rdma misc dmem
+732 lxcfs --enable-cfs -l /var/lib/lxcfs
+  0: fd:   8: cpuset,cpu,io,memory,hugetlb,pids,rdma,misc,dmem
+P:simhost-after-lxcfs:meminfo.MemTotal=64418888kB
+P:simhost-after-lxcfs:meminfo.MemAvailable=27155032kB
+P:simhost-after-lxcfs:free.total=64418888kB
+P:simhost-after-lxcfs:cpuinfo.processors=32
+P:simhost-after-lxcfs:stat.cpuN=32
+P:simhost-after-lxcfs:uptime=7552754.46
+P:simhost-after-lxcfs:loadavg=25.78_21.78_21.47
+P:simhost-after-lxcfs:swaps.lines=2
+P:simhost-after-lxcfs:sys.cpu.online=0-31
+P:simhost-after-lxcfs:nproc=32
+P:simhost-after-lxcfs:getconf.NPROCESSORS_ONLN=32
+P:simhost-after-lxcfs:cgroup=0::/init
+P:simhost-after-lxcfs:cgroup.memory.max=max
+P:simhost-after-lxcfs:cgroup.cpu.max=max_100000
+P:simhost-after-lxcfs:cgroup.cpuset.effective=0-31
+P:simhost-after-lxcfs:python.cpu_count=32
+P:simhost-after-lxcfs:python.sched_getaffinity=32
+P:simhost-after-lxcfs:python.process_cpu_count=32
+P:simhost-after-lxcfs:proc.mounts=/proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup) 
+32
+MemTotal:       64418888 kB
+MemFree:        64410788 kB
+
+## overmounts, sys=online: state=succeeded 
+P:run:meminfo.MemTotal=998352kB
+P:run:meminfo.MemAvailable=994096kB
+P:run:free.total=998352kB
+P:run:cpuinfo.processors=2
+P:run:stat.cpuN=2
+P:run:uptime=0.14
+P:run:loadavg=0.00_0.00_0.00
+P:run:swaps.lines=1
+P:run:sys.cpu.online=0-1
+P:run:nproc=32
+P:run:getconf.NPROCESSORS_ONLN=32
+P:run:cgroup=0::/
+P:run:cgroup.memory.max=1022312448
+P:run:cgroup.cpu.max=200000_100000
+P:run:cgroup.cpuset.effective=0-31
+P:run:python.cpu_count=32
+P:run:python.sched_getaffinity=32
+P:run:python.process_cpu_count=32
+P:run:node.cpus=2
+P:run:node.availableParallelism=2
+P:run:node.totalmem=1022312448
+P:run:proc.mounts=/proc/uptime(lxcfs) /proc/diskstats(lxcfs) /proc/swaps(lxcfs) /proc/cpuinfo(lxcfs) /proc/meminfo(lxcfs) /proc/stat(lxcfs) /proc/loadavg(lxcfs) /sys/devices/system/cpu/online(lxcfs) /proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup2) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) 
+
+## overmounts, sys=cpu: state=succeeded 
+P:run:meminfo.MemTotal=998352kB
+P:run:meminfo.MemAvailable=995076kB
+P:run:free.total=998352kB
+P:run:cpuinfo.processors=2
+P:run:stat.cpuN=2
+P:run:uptime=0.14
+P:run:loadavg=0.00_0.00_0.00
+P:run:swaps.lines=1
+P:run:sys.cpu.online=0-1
+P:run:nproc=32
+P:run:getconf.NPROCESSORS_ONLN=32
+P:run:cgroup=0::/
+P:run:cgroup.memory.max=1022312448
+P:run:cgroup.cpu.max=200000_100000
+P:run:cgroup.cpuset.effective=0-31
+P:run:python.cpu_count=32
+P:run:python.sched_getaffinity=32
+P:run:python.process_cpu_count=32
+P:run:node.cpus=2
+P:run:node.availableParallelism=2
+P:run:node.totalmem=1022312448
+P:run:proc.mounts=/proc/stat(lxcfs) /proc/cpuinfo(lxcfs) /proc/diskstats(lxcfs) /proc/swaps(lxcfs) /proc/uptime(lxcfs) /proc/meminfo(lxcfs) /proc/loadavg(lxcfs) /sys/devices/system/cpu(lxcfs) /proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup2) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) 

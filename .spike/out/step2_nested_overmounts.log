@@ -1,0 +1,84 @@
+pid1 cgroup=/init controllers there=cpuset cpu io memory hugetlb pids rdma misc dmem
+732 [lxcfs] <defunct>
+1956 lxcfs --enable-cfs -l /var/lib/lxcfs
+  0: fd:   8: cpuset,cpu,io,memory,hugetlb,pids,rdma,misc,dmem
+
+## baseline nested, no LXCFS: podman: succeeded
+P:podman-info:cpus_mem=32_65964941312
+P:podman-inner:meminfo.MemTotal=64418888kB
+P:podman-inner:meminfo.MemAvailable=27210312kB
+P:podman-inner:free.total=64418888kB
+P:podman-inner:cpuinfo.processors=32
+P:podman-inner:stat.cpuN=32
+P:podman-inner:uptime=7552762.18
+P:podman-inner:loadavg=24.33_21.60_21.41
+P:podman-inner:swaps.lines=2
+P:podman-inner:sys.cpu.online=0-31
+P:podman-inner:nproc=32
+P:podman-inner:getconf.NPROCESSORS_ONLN=32
+P:podman-inner:cgroup=0::/
+P:podman-inner:cgroup.memory.max=max
+P:podman-inner:cgroup.cpu.max=max_100000
+P:podman-inner:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:podman-inner:proc.mounts=/proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) 
+P:podman-inner-limited:meminfo.MemTotal=64418888kB
+P:podman-inner-limited:meminfo.MemAvailable=27081504kB
+P:podman-inner-limited:free.total=64418888kB
+P:podman-inner-limited:cpuinfo.processors=32
+P:podman-inner-limited:stat.cpuN=32
+P:podman-inner-limited:uptime=7552762.72
+P:podman-inner-limited:loadavg=24.33_21.60_21.41
+P:podman-inner-limited:swaps.lines=2
+P:podman-inner-limited:sys.cpu.online=0-31
+P:podman-inner-limited:nproc=32
+P:podman-inner-limited:getconf.NPROCESSORS_ONLN=32
+P:podman-inner-limited:cgroup=0::/
+P:podman-inner-limited:cgroup.memory.max=268435456
+P:podman-inner-limited:cgroup.cpu.max=100000_100000
+P:podman-inner-limited:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:podman-inner-limited:proc.mounts=/proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) 
+
+## nested + overmounts: podman: succeeded
+P:run:meminfo.MemTotal=998352kB
+P:run:meminfo.MemAvailable=997240kB
+P:run:free.total=998352kB
+P:run:cpuinfo.processors=2
+P:run:stat.cpuN=2
+P:run:uptime=0.14
+P:run:loadavg=0.00_0.00_0.00
+P:run:swaps.lines=1
+P:run:sys.cpu.online=0-1
+P:run:nproc=32
+P:run:getconf.NPROCESSORS_ONLN=32
+P:run:cgroup=0::/workload/main
+P:run:cgroup.memory.max=1022312448
+P:run:cgroup.cpu.max=200000_100000
+P:run:cgroup.cpuset.effective=0-31
+P:run:python.cpu_count=32
+P:run:python.sched_getaffinity=32
+P:run:python.process_cpu_count=32
+P:run:node.cpus=2
+P:run:node.availableParallelism=2
+P:run:node.totalmem=1022312448
+P:run:proc.mounts=/proc/cpuinfo(lxcfs) /proc/diskstats(lxcfs) /proc/loadavg(lxcfs) /proc/meminfo(lxcfs) /proc/swaps(lxcfs) /proc/stat(lxcfs) /proc/uptime(lxcfs) /sys/devices/system/cpu/online(lxcfs) /proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup2) 
+P:podman-info:cpus_mem=32_1022312448
+Error: runc: runc create failed: unable to start container process: error during container init: error mounting "proc" to rootfs at "/proc": mount src=proc, dst=/proc, dstFd=/proc/thread-self/fd/15, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted: OCI permission denied
+INNER-PODMAN-FAILED
+Error: runc: runc create failed: unable to start container process: error during container init: error mounting "proc" to rootfs at "/proc": mount src=proc, dst=/proc, dstFd=/proc/thread-self/fd/15, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted: OCI permission denied
+INNER-PODMAN-LIMITED-FAILED
+
+## nested + overmounts: docker: succeeded
+P:docker-info:NCPU_MemTotal=32_1022312448
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "proc" to rootfs at "/proc": mount src=proc, dst=/proc, dstFd=/proc/thread-self/fd/15, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+
+Run 'docker run --help' for more information
+INNER-DOCKER-FAILED
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "proc" to rootfs at "/proc": mount src=proc, dst=/proc, dstFd=/proc/thread-self/fd/15, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+
+Run 'docker run --help' for more information
+INNER-DOCKER-LIMITED-FAILED
+DOCKERD-LOG: time="2026-10-16T02:48:32.525983112Z" level=warning msg="warnings while cleaning up dead shim" id=92cd5adc7dc68a526b039daf67b5537d1d5d2b5a2b6786036c1b5580557c0fd5 namespace=moby warnings="time=\"2026-10-16T02:48:32Z\" level=warning msg=\"failed to read init pid file\" error=\"open /tmp/xdg/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/92cd5adc7dc68a526b039daf67b5537d1d5d2b5a2b6786036c1b5580557c0fd5/init.pid: no such file or directory\" runtime=io.containerd.runc.v2\n"
+DOCKERD-LOG: time="2026-10-16T02:48:32.526911327Z" level=error msg="copy shim log" error="read /proc/self/fd/19: file already closed" namespace=moby
+DOCKERD-LOG: time="2026-10-16T02:48:32.527426660Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stdout
+DOCKERD-LOG: time="2026-10-16T02:48:32.528569527Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stderr
+DOCKERD-LOG: time="2026-10-16T02:48:32.816257977Z" level=error msg="Handler for POST /containers/{name:.*}/start returned error" error-response="failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting \"proc\" to rootfs at \"/proc\": mount src=proc, dst=/proc, dstFd=/proc/thread-self/fd/15, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted" method=POST module=api request-url=/v1.56/containers/92cd5adc7dc68a526b039daf67b5537d1d5d2b5a2b6786036c1b5580557c0fd5/start status=500 vars="map[name:92cd5adc7dc68a526b039daf67b5537d1d5d2b5a2b6786036c1b5580557c0fd5 version:1.56]"

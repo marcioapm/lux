@@ -1165,6 +1165,7 @@ func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Net
 	}
 	args = append(args, dnsArgs(sp, network)...)
 	args = append(args, p.extraArgs(sp)...)
+	args = append(args, spikeLXCFSArgs()...)
 	return append(args, image)
 }
 

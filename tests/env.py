@@ -516,7 +516,7 @@ class TestEnvironment:
             "--label", LABEL, "--label", f"lux-e2e-run={self.run_id}",
             "--network", self.network,
             "-v", f"{BIN_DIR}:/opt/lux:ro",
-            PODMAN_IMAGE, "sleep", "infinity",
+            self.extra.get("host_image", PODMAN_IMAGE), "sleep", "infinity",
         )
         host_ip = json.loads(sh("docker", "inspect", container))[0]["NetworkSettings"]["Networks"][self.network]["IPAddress"]
         host = Host(name=name, container=container, ip=host_ip, log_dir=str(Path(self.log_dir) / name))

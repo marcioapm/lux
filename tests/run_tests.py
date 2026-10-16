@@ -103,6 +103,10 @@ def main() -> None:
         docker=every or "test_nested_docker.py" in files)
     images = {**agent_images, "nested": nested, "docker": docker, **{ref: ref for ref in args.image}}
     binaries = {k: str(v) if v else None for k, v in built.items()}
+    spike_host_image = None
+    if "test_spike_lxcfs.py" in files:
+        from build import build_spike_lxcfs_images
+        spike_host_image, images["lxcfs"] = build_spike_lxcfs_images()
 
     if args.jobs > 1 and not (args.serve or args.infra_only):
         sys.exit(run_parallel(args, pytest_args, selected, fake_image, binaries, images))
@@ -110,6 +114,8 @@ def main() -> None:
     env = TestEnvironment(n_hosts=args.hosts)
     env.binaries = binaries
     env.extra["images"] = images
+    if spike_host_image:
+        env.extra["host_image"] = spike_host_image
     if args.preview_local:
         env.extra["luxd_env"] = local_previews(args.preview_local)
     print(f"run id:   {env.run_id}")

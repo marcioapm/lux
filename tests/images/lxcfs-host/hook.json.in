@@ -1,0 +1,6 @@
+{
+  "version": "1.0.0",
+  "hook": {"path": "/usr/local/bin/lux-spike-hidden", "args": ["lux-spike-hidden", "STAGE"]},
+  "when": {"annotations": {"^io\\.lux\\.spike\\.hidden$": ".+"}},
+  "stages": ["STAGE"]
+}

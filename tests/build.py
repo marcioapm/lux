@@ -119,6 +119,27 @@ def build_nested_images(podman: bool, docker: bool) -> tuple[str | None, str | N
     return (NESTED_IMAGE if podman else None), (DOCKER_IMAGE if docker else None)
 
 
+SPIKE_LXCFS_HOST_IMAGE = "localhost/lux-lxcfs-host:test"
+SPIKE_LXCFS_IMAGE = "localhost/lux-lxcfs:test"
+
+
+def build_spike_lxcfs_images() -> tuple[str, str]:
+    """Spike only (.spike/lxcfs.md): a simulated host with LXCFS and the
+    hidden-procfs OCI hook, and a workload image with probes and both
+    nested engines."""
+    from env import ALPINE_IMAGE
+    ensure_local(ALPINE_IMAGE)
+    host_ctx = TESTS_DIR / "images" / "lxcfs-host"
+    _build_image(SPIKE_LXCFS_HOST_IMAGE, {p.name: p for p in host_ctx.iterdir() if p.name != "Containerfile"},
+                 host_ctx / "Containerfile")
+    with tempfile.TemporaryDirectory() as d:
+        tar = Path(d) / "alpine.tar"
+        subprocess.run(["docker", "save", "-o", str(tar), ALPINE_IMAGE], check=True)
+        ctx = TESTS_DIR / "images" / "lxcfs"
+        _build_image(SPIKE_LXCFS_IMAGE, {"alpine.tar": tar, "probe.sh": ctx / "probe.sh"}, ctx / "Containerfile")
+    return SPIKE_LXCFS_HOST_IMAGE, SPIKE_LXCFS_IMAGE
+
+
 # The opt-in real-agent suites: the credentials each needs, and where its
 # self-contained executable is.
 AGENTS = {

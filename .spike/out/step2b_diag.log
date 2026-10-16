@@ -1,0 +1,114 @@
+pid1 cgroup=/init controllers there=cpuset cpu io memory hugetlb pids rdma misc dmem
+234 lxcfs --enable-cfs -l -d /var/lib/lxcfs
+  0: fd:   8: cpuset,cpu,io,memory,hugetlb,pids,rdma,misc,dmem
+P:run:meminfo.MemTotal=998352kB
+P:run:meminfo.MemAvailable=997236kB
+P:run:free.total=998352kB
+P:run:cpuinfo.processors=32
+P:run:stat.cpuN=32
+P:run:uptime=0.16
+P:run:loadavg=0.00_0.00_0.00
+P:run:swaps.lines=1
+P:run:sys.cpu.online=0-31
+P:run:nproc=32
+P:run:getconf.NPROCESSORS_ONLN=32
+P:run:cgroup=0::/workload/main
+P:run:cgroup.memory.max=1022312448
+P:run:cgroup.cpu.max=200000_100000
+P:run:cgroup.cpuset.effective=0-31
+P:run:python.cpu_count=32
+P:run:python.sched_getaffinity=32
+P:run:python.process_cpu_count=32
+P:run:node.cpus=32
+P:run:node.availableParallelism=2
+P:run:node.totalmem=1022312448
+P:run:proc.mounts=/proc/diskstats(lxcfs) /proc/meminfo(lxcfs) /proc/swaps(lxcfs) /proc/cpuinfo(lxcfs) /proc/stat(lxcfs) /proc/uptime(lxcfs) /proc/loadavg(lxcfs) /sys/devices/system/cpu/online(lxcfs) /proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup2) 
+READY
+D:shim pid=633 cgroup=0::/libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/lux.shim
+D:level /libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/lux.shim memory.max=max cpu.max=max 100000 controllers=cpu io memory pids procs=1
+D:level /libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6 memory.max=1022312448 cpu.max=200000 100000 controllers=cpuset cpu io memory hugetlb pids rdma misc dmem procs=0
+D:level /libpod_parent memory.max=max cpu.max=max 100000 controllers=cpuset cpu io memory hugetlb pids rdma misc dmem procs=0
+D:level / memory.max=max cpu.max=max 100000 controllers=cpuset cpu io memory hugetlb pids rdma misc dmem procs=0
+D:workload pid 670 cgroup=0::/libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/workload/main
+D:lxcfs cgroup=0::/init
+D:pidns of 633=pid:[4026537334] status.NSpid=NSpid:	633	1
+D:via nsenter -p into 633: 998352 cpus=32
+D:pidns of 670=pid:[4026537334] status.NSpid=NSpid:	670	14
+D:via nsenter -p into 670: 998352 cpus=32
+D:lux.shim memory.current=610304 stat=anon 0
+D:root subtree_control=cpuset cpu io memory hugetlb pids rdma misc dmem
+D:target /libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/lux.shim memory.max=max cpu.max=max 100000
+D:reader pidns=none: cg=/libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/lux.shim pid=853 mem=998352 cpus=32 online=0-31
+D:reader pidns=pid: cg=/libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/lux.shim pid=1 mem=998352 cpus=32 online=0-31
+D:target /libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/workload/main memory.max=1022312448 cpu.max=200000 100000
+D:reader pidns=none: cg=/libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/workload/main pid=872 mem=998352 cpus=2 online=0-1
+D:reader pidns=pid: cg=/libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/workload/main pid=1 mem=998352 cpus=2 online=0-1
+D:target /libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/workload/spike-a memory.max=max cpu.max=max 100000
+D:reader pidns=none: cg=/libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/workload/spike-a pid=891 mem=998352 cpus=32 online=0-31
+D:reader pidns=pid: cg=/libpod_parent/libpod-4ce48e3ad0c1f707ff107fbdfb475d7f983ab50cffed6de01bffe77cd97bfce6/workload/spike-a pid=1 mem=998352 cpus=32 online=0-31
+D:target /spike-top memory.max=536870912 cpu.max=300000 100000
+D:reader pidns=none: cg=/spike-top pid=910 mem=524288 cpus=3 online=0-2
+D:reader pidns=pid: cg=/spike-top pid=1 mem=524288 cpus=3 online=0-2
+D:target /init memory.max=max cpu.max=max 100000
+D:reader pidns=none: cg=/init pid=929 mem=64418888 cpus=32 online=0-31
+D:reader pidns=pid: cg=/init pid=1 mem=64418888 cpus=32 online=0-31
+D:lxcfs.other       1 mount namespace: 7
+D:lxcfs.other       1 max_readahead=0x00020000
+D:lxcfs.other       1 hierarchies:
+D:lxcfs.other       1 flags=0x73fffffb
+D:lxcfs.other       1 api_extensions:
+D:lxcfs.other       1 Using runtime path /run
+D:lxcfs.other       1 Starting LXCFS at lxcfs
+D:lxcfs.other       1 Running lxcfslib_init to reload liblxcfs
+D:lxcfs.other       1 Kernel supports swap accounting
+D:lxcfs.other       1 Kernel supports pidfds
+D:lxcfs.other       1 INIT: 7.45
+D:lxcfs.other       1 FUSE library version: 3.18.2
+D:lxcfs.other       1 - sys_cpu_online
+D:lxcfs.other       1 - shared_pidns
+D:lxcfs.other       1 - proc_uptime
+D:lxcfs.other       1 - proc_swaps
+D:lxcfs.other       1 - proc_stat
+D:lxcfs.other       1 - proc_slabinfo
+D:lxcfs.other       1 - proc_meminfo
+D:lxcfs.other       1 - proc_loadavg
+D:lxcfs.other       1 - proc_diskstats
+D:lxcfs.other       1 - proc_cpuinfo
+D:lxcfs.other       1 - pidfds
+D:lxcfs.other       1 - loadavg_daemon
+D:lxcfs.other       1 - cpuview_daemon
+D:lxcfs.other       1 - cgroups
+D:lxcfs.other       1   0: fd:   8: cpuset,cpu,io,memory,hugetlb,pids,rdma,misc,dmem
+D:lxcfs.log open flags: 0x8000 /sys/devices/system/cpu/online
+D:lxcfs.log    open[130244951432624] flags: 0x8000 /sys/devices/system/cpu/online
+D:lxcfs.log    unique: 818, success, outsize: 32
+D:lxcfs.log dev unique: 820, opcode: GETATTR (3), nodeid: 9, insize: 56, pid: 942
+D:lxcfs.log getattr[NULL] /sys/devices/system/cpu/online
+D:lxcfs.log    unique: 820, success, outsize: 120
+D:lxcfs.log dev unique: 822, opcode: READ (15), nodeid: 9, insize: 80, pid: 942
+D:lxcfs.log read[130244951432624] 262144 bytes from 0 flags: 0x8000
+D:lxcfs.log    read[130244951432624] 5 bytes from 0
+D:lxcfs.log    unique: 822, success, outsize: 21
+D:lxcfs.log dev unique: 824, opcode: READ (15), nodeid: 9, insize: 80, pid: 942
+D:lxcfs.log read[130244951432624] 262144 bytes from 5 flags: 0x8000
+D:lxcfs.log    read[130244951432624] 0 bytes from 5
+D:lxcfs.log    unique: 824, success, outsize: 16
+D:lxcfs.log dev unique: 826, opcode: FLUSH (25), nodeid: 9, insize: 64, pid: 942
+D:lxcfs.log flush[130244951432624]
+D:lxcfs.log    unique: 826, success, outsize: 16
+D:lxcfs.log dev unique: 828, opcode: RELEASE (18), nodeid: 9, insize: 64, pid: 0
+D:lxcfs.log release[130244951432624] flags: 0x8000
+D:lxcfs.log    unique: 828, success, outsize: 16
+D:lxcfs.err       1    unique: 796, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 758, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 720, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 682, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 644, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 606, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 568, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 544, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 528, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 490, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 444, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 418, error: -38 (Function not implemented), outsize: 16
+D:lxcfs.err       1    unique: 392, error: -38 (Function not implemented), outsize: 16

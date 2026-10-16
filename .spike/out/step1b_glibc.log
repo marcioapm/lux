@@ -1,0 +1,11 @@
+G:cgroup=0::/spike cpu.max=200000 100000
+pid1 cgroup=/init controllers there=cpuset cpu io memory hugetlb pids rdma misc dmem
+239 lxcfs --enable-cfs -l /var/lib/lxcfs
+  0: fd:   8: cpuset,cpu,io,memory,hugetlb,pids,rdma,misc,dmem
+G:cgroup=0::/spike cpu.max=200000 100000
+G:ldd=ldd (GNU libc) 2.43
+G:direct online=0-1 cpuinfo=2 pidns=pid:[4026537328] mypid=1 cg=0::/spike
+G:online=0-1 cpuinfo=2
+G:nproc=2 getconf=2 getconf_conf=32
+G:python.cpu_count=2 affinity=32
+G:with a plain file 0-1 over online: getconf=2 getconf_conf=32 python.cpu_count=2 nproc=2 nproc_all=32

@@ -183,6 +183,11 @@ func delegateCgroup(root string, uid, gid int, probe func(fd int) error) (int, e
 			return fail(err)
 		}
 	}
+	// Spike (.spike/lxcfs.md): LXCFS sizes CPUs from cpu.max of the pid
+	// namespace's init (the shim) and, unlike memory.max, does not walk up.
+	if b, err := os.ReadFile(filepath.Join(root, "cpu.max")); err == nil {
+		_ = os.WriteFile(filepath.Join(root, shimCgroup, "cpu.max"), b, 0o644)
+	}
 	if uid != 0 || gid != 0 {
 		for _, d := range []string{workloadCgroup, mainCgroup} {
 			if err := giveCgroup(filepath.Join(root, d), uid, gid); err != nil {
