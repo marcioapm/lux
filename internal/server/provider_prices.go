@@ -20,6 +20,31 @@ type PriceProvider interface {
 	OnDemand(context.Context, string, string) (HourlyRate, error)                          // region, instance type
 	SpotHistory(context.Context, string, string, time.Time, time.Time) ([]SpotRate, error) // zone, type, from, to
 	BlockStorage(context.Context, string, string) (BlockStoragePrice, error)               // region, volume type
+	DataTransfer(context.Context, string) (DataTransferPrices, error)                      // region
+}
+
+// PerGB is a transfer price per decimal gigabyte (1e9 bytes, the unit
+// providers bill transfer in) for bytes received (Rx) and sent (Tx), as
+// decimal strings; "0" or empty: that direction is not charged.
+type PerGB struct {
+	Rx string `json:"rx,omitempty"`
+	Tx string `json:"tx,omitempty"`
+}
+
+// DataTransferPrices are a region's list prices for network transfer out
+// of the provider's compute, by billing class (proto.NetClass), and its
+// public IPv4 address charge. Internet is the first non-zero tier of the
+// outbound-to-internet price (list price, no free tier: the free tier is
+// account-wide and spent by any real account); inbound from the internet
+// is free. Zone and RegionPublic bill both directions. Provider is keyed by
+// destination region and bills outbound only.
+type DataTransferPrices struct {
+	Currency          string           `json:"currency"`
+	Internet          PerGB            `json:"internet"`
+	Zone              PerGB            `json:"zone"`
+	RegionPublic      PerGB            `json:"regionPublic"`
+	Provider          map[string]PerGB `json:"provider,omitempty"`
+	PublicIPv4PerHour string           `json:"publicIPv4PerHour,omitempty"`
 }
 
 // BlockStoragePrice is a volume type's monthly list prices per unit, as
