@@ -304,21 +304,26 @@ func requeueBlockStorageRuns(ctx context.Context, tx pgx.Tx, runs []string) (ski
 // lockBlockStorageHost): the host's hours from from's hour are rebuilt
 // (rewindHostHours) and those of runs with a placement on it after from
 // are evaluated again (requeueBlockStorageRuns); a Run whose placements
-// there all ended by from gains nothing from it.
-func requeueHostRunsSince(ctx context.Context, tx pgx.Tx, hostID string, runs []string, from time.Time, retention time.Duration) (skipped []string, err error) {
-	if err := rewindHostHours(ctx, tx, hostID, from, retention); err != nil {
-		return nil, err
+// there all ended by from gains nothing from it. Runs left out as
+// legacyComputeRuns are logged under family.
+func (s *Server) requeueHostRunsSince(ctx context.Context, tx pgx.Tx, hostID, family string, runs []string, from time.Time) error {
+	if err := rewindHostHours(ctx, tx, hostID, from, s.cfg.Costs.Hourly); err != nil {
+		return err
 	}
 	rows, err := tx.Query(ctx, `SELECT DISTINCT run_id FROM placements
 		WHERE host_id = $1 AND run_id = ANY($2) AND (ended_at IS NULL OR ended_at > $3) ORDER BY run_id`, hostID, runs, from)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	reached, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return requeueBlockStorageRuns(ctx, tx, reached)
+	skipped, err := requeueBlockStorageRuns(ctx, tx, reached)
+	if len(skipped) > 0 {
+		s.log.Warn("costs: "+family+" not added to Runs final without compute snapshots", "host", hostID, "runs", skipped)
+	}
+	return err
 }
 
 // legacyComputeRuns are those of runs whose compute is final while some

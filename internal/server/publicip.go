@@ -93,11 +93,7 @@ func (s *Server) openPublicIP(ctx context.Context, h publicIPHost, price DataTra
 		if err != nil || first == nil {
 			return err
 		}
-		skipped, err := requeueHostRunsSince(ctx, tx, h.ID, runs, *first, s.cfg.Costs.Hourly)
-		if len(skipped) > 0 {
-			s.log.Warn("costs: public IPv4 not added to Runs final without compute snapshots", "host", h.ID, "runs", skipped)
-		}
-		return err
+		return s.requeueHostRunsSince(ctx, tx, h.ID, familyPublicIP, runs, *first)
 	})
 	if err != nil && ctx.Err() == nil {
 		s.log.Warn("costs: public IPv4 period", "host", h.ID, "err", err)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"math/big"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -374,10 +373,6 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 	return s.writeHostTransferHour(ctx, tx, id, hour)
 }
 
-// loggedHostTransferBaseline: hosts whose unpriced first transfer hour was
-// logged by this process.
-var loggedHostTransferBaseline sync.Map
-
 // writeHostTransferHour writes the unallocated data-transfer row of a
 // host's own traffic in hour (the runner's link to luxd, pulls, uploads;
 // never a Run's): its counters' growth from the last sample before the
@@ -408,7 +403,7 @@ func (s *Server) writeHostTransferHour(ctx context.Context, tx pgx.Tx, id string
 		before = map[string]proto.NetBytes{}
 	}
 	if before == nil {
-		if _, logged := loggedHostTransferBaseline.LoadOrStore(id, struct{}{}); !logged {
+		if _, logged := s.hostTransferBaselineLogged.LoadOrStore(id, struct{}{}); !logged {
 			s.log.Info("costs: host transfer hour not priced: no earlier sample to measure it from", "host", id, "hour", hour)
 		}
 		return nil

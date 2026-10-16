@@ -199,6 +199,9 @@ type Server struct {
 	// instance type), whatever came of it (market.go).
 	marketMu    sync.Mutex
 	marketTried map[[3]string]time.Time
+	// hostTransferBaselineLogged: hosts whose unpriced transfer hour
+	// (writeHostTransferHour) this process has logged, so each logs once.
+	hostTransferBaselineLogged sync.Map
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {

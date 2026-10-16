@@ -117,18 +117,13 @@ func (s *Server) setHostNetwork(ctx context.Context, in *setHostNetworkInput) (*
 	}
 	p := principal(ctx)
 	var id string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		var err error
-		if id, err = s.resolveHost(ctx, tx, p, in.ID, false); err != nil {
-			return err
-		}
-		runs, err := lockBlockStorageHost(ctx, tx, id)
-		if err != nil {
-			return err
-		}
+	// The permission and provider checks run before any lock, so a refused
+	// request never queues behind (or holds up) the drainer; they are read
+	// again under the host's row lock.
+	check := func(tx pgx.Tx, lock string) error {
 		var mine, provisioned bool
 		if err := tx.QueryRow(ctx, `SELECT coalesce(tenant_id = $2, false), provision_requested_at IS NOT NULL
-			FROM hosts WHERE id = $1 FOR UPDATE`, id, p.TenantID).Scan(&mine, &provisioned); err != nil {
+			FROM hosts WHERE id = $1`+lock, id, p.TenantID).Scan(&mine, &provisioned); err != nil {
 			return err
 		}
 		switch {
@@ -136,6 +131,23 @@ func (s *Server) setHostNetwork(ctx context.Context, in *setHostNetworkInput) (*
 			return errf(http.StatusForbidden, "forbidden", "only operators set a platform host's network")
 		case provisioned:
 			return errf(http.StatusUnprocessableEntity, "invalid_network", "host %s was launched by its pool's provider, which describes and prices its network", in.ID)
+		}
+		return nil
+	}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var err error
+		if id, err = s.resolveHost(ctx, tx, p, in.ID, false); err != nil {
+			return err
+		}
+		if err := check(tx, ""); err != nil {
+			return err
+		}
+		runs, err := lockBlockStorageHost(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if err := check(tx, " FOR UPDATE"); err != nil {
+			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE hosts SET network_static = $2, transfer_prices = $3, net_classes = $4 WHERE id = $1`,
 			id, b.Network, b.TransferPrices, staticNetworkClasses(b.Network)); err != nil {
@@ -145,11 +157,7 @@ func (s *Server) setHostNetwork(ctx context.Context, in *setHostNetworkInput) (*
 		if err != nil || first == nil {
 			return err
 		}
-		skipped, err := requeueHostRunsSince(ctx, tx, id, runs, *first, s.cfg.Costs.Hourly)
-		if len(skipped) > 0 {
-			s.log.Warn("costs: public IPv4 not added to Runs final without compute snapshots", "host", id, "runs", skipped)
-		}
-		return err
+		return s.requeueHostRunsSince(ctx, tx, id, familyPublicIP, runs, *first)
 	})
 	if err != nil {
 		return nil, err

@@ -71,6 +71,68 @@ func TestStaticHostNetworkSettings(t *testing.T) {
 	}
 }
 
+// A refused PUT /v1/hosts/{id}/network (a tenant on a platform host: 403;
+// a provider's host: 422) takes no lock: it answers while another
+// transaction holds a Run placed on that host, and the operator's accepted
+// PUT waits for that Run.
+func TestStaticHostNetworkRefusedTakesNoLock(t *testing.T) {
+	s, keys := priceFixture(t)
+	ctx := context.Background()
+	hp := helloAs(t, s, "tokp", nil, "hp", 8, 32)
+	h1 := helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
+	for _, h := range []string{hp, h1} {
+		placeRun(t, s, "t1", "R"+h, StateRunning, h, placementWindow{CPUs: 1, Memory: gib, From: time.Now().Add(-time.Hour)})
+	}
+	execSQL(t, s, ctx, `UPDATE hosts SET provision_requested_at = now() WHERE id = $1`, h1)
+	holder, err := s.db.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback(ctx)
+	var locked int
+	if _, err := holder.Exec(ctx, `SELECT set_config('lux.system', 'on', true)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.QueryRow(ctx, `WITH l AS (SELECT 1 FROM runs WHERE id = ANY($1) FOR UPDATE) SELECT count(*) FROM l`,
+		[]string{"R" + hp, "R" + h1}).Scan(&locked); err != nil || locked != 2 {
+		t.Fatalf("lock the Runs: %d %v", locked, err)
+	}
+	settings := HostNetworkSettings{TransferPrices: &DataTransferPrices{Currency: "USD", Internet: PerGB{Tx: "0.002"}}}
+	put := func(key, host string) <-chan int {
+		out := make(chan int, 1)
+		go func() {
+			code, _ := call(t, s, key, http.MethodPut, "/v1/hosts/"+host+"/network", settings)
+			out <- code
+		}()
+		return out
+	}
+	for _, c := range []struct {
+		key, host string
+		want      int
+	}{{"t1", hp, http.StatusForbidden}, {"t1", h1, http.StatusUnprocessableEntity}} {
+		select {
+		case code := <-put(keys[c.key], c.host):
+			if code != c.want {
+				t.Errorf("%s on %s: %d, want %d", c.key, c.host, code, c.want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s on %s: refused request waited for a Run lock", c.key, c.host)
+		}
+	}
+	accepted := put(keys["op"], hp)
+	select {
+	case code := <-accepted:
+		t.Fatalf("operator PUT answered %d while a Run on the host was locked", code)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-accepted; code != http.StatusOK {
+		t.Errorf("operator PUT after the lock: %d", code)
+	}
+}
+
 // A static host's transfer is priced at its operator's prices; one with no
 // catalog has only local and unknown traffic, so nothing is priced and the
 // unknown bytes are listed as unpriced; one without prices lists its
