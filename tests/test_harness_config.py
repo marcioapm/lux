@@ -168,3 +168,23 @@ def test_serve_passes_nested_to_the_image_build_and_the_runners(monkeypatch, fla
     assert calls["podman"] is nested, calls
     if nested:
         assert calls["images"]["nested"] == "localhost/lux-nested:test", calls
+
+
+# The real-app images are pulled from registries: a bare --serve runs no suite
+# and must not pull them; a named suite brings them only if it needs them.
+@pytest.mark.parametrize("args, sizing", [
+    (["--serve"], False),
+    (["--serve", "--nested"], False),
+    (["--serve", "suites/test_serve.py"], False),
+    (["--serve", "suites/test_run_size.py"], True),
+    (["suites/test_nested.py"], False),
+    (["suites/test_run_size.py::test_plain_run"], True),
+    ([], True),
+    (["suites/"], True),
+])
+def test_dry_run_preloads_real_app_images_only_for_suites_that_need_them(args, sizing):
+    p = subprocess.run([sys.executable, "run_tests.py", "--dry-run", *args], cwd=TESTS_DIR,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, (p.stdout, p.stderr)
+    assert "building" not in p.stdout, p.stdout
+    assert f"sizing={'yes' if sizing else 'no'}" in p.stdout, p.stdout
