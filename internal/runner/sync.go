@@ -63,7 +63,7 @@ func shimKnowsReclaim(path string) bool {
 }
 
 // shimKnowsOCIDefaults: the lux-shim at path lists
-// proto.ShimCapOCIDefaults, so it can be nested Runs' precreate hook.
+// proto.ShimCapOCIDefaults, so it can be delegated nested Runs' precreate hook.
 func shimKnowsOCIDefaults(path string) bool {
 	return slices.Contains(shimCapabilities(path), proto.ShimCapOCIDefaults)
 }

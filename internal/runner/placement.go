@@ -1241,7 +1241,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 			return err
 		}
 		cfg.Env = innerDefaultsEnv(cfg.Env, sp.Env)
-	} else if sp.Sandbox.NestedContainers {
+	} else if cfg.DelegateCgroup {
 		p.r.noOCIDefaults.Do(func() {
 			p.r.log.Warn("this runner's --shim lacks " + proto.ShimCapOCIDefaults + ": containers nested Runs start get no default limits (docs/podman.md)")
 		})

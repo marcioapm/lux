@@ -45,7 +45,7 @@ const (
 	// beforeStop, ignores workload grace, and SIGKILLs at that instant.
 	ShimCapReclaim = "reclaim-v1"
 	// ShimCapOCIDefaults: the shim has ShimOCIDefaultsCmd, so the runner
-	// may register it as nested Runs' precreate hook.
+	// may register it as delegated nested Runs' precreate hook.
 	ShimCapOCIDefaults = "oci-defaults-v1"
 )
 
