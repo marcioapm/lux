@@ -15,14 +15,18 @@ import (
 
 // transferHost adds t1's provider host "nh" in eu-north-1 (pool "ec2p" of
 // provider ec2), billed from 10:00 at $0.40/h with no volumes, and its
-// network (partial or not).
-func transferHost(t *testing.T, s *Server, partial bool) {
+// network (partial or not) with addresses public IPv4 addresses.
+func transferHost(t *testing.T, s *Server, partial bool, addresses ...int) {
 	t.Helper()
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('ec2p', 't1', 'ec2p', 'ec2')`)
-	network := `{"subnetCidrs":["10.0.0.0/24"],"zone":"eu-north-1a","vpcSubnets":[],"publicIPv4":1}`
+	n := 0
+	if len(addresses) > 0 {
+		n = addresses[0]
+	}
+	network := fmt.Sprintf(`{"subnetCidrs":["10.0.0.0/24"],"zone":"eu-north-1a","vpcSubnets":[],"publicIPv4":%d}`, n)
 	if partial {
-		network = `{"partial":true,"subnetCidrs":[],"zone":"eu-north-1a","vpcSubnets":[],"publicIPv4":1}`
+		network = fmt.Sprintf(`{"partial":true,"subnetCidrs":[],"zone":"eu-north-1a","vpcSubnets":[],"publicIPv4":%d}`, n)
 	}
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, registered_at, instance_type, market, zone,
 			launch_template, volumes, network)

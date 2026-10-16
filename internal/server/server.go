@@ -384,6 +384,10 @@ func (s *Server) priceLoop(ctx context.Context) {
 		refreshCtx, cancel = context.WithTimeout(ctx, refreshTimeout)
 		s.refreshBlockStorage(refreshCtx)
 		cancel()
+		refreshCtx, cancel = context.WithTimeout(ctx, refreshTimeout)
+		s.refreshTransferPrices(refreshCtx)
+		s.refreshPublicIP(refreshCtx)
+		cancel()
 		wait(ctx, nil, every)
 	}
 }

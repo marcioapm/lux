@@ -128,6 +128,38 @@ func cachedDataTransfer(ctx context.Context, tx pgx.Tx, provider, region string)
 	return price, fetched, err
 }
 
+// refreshTransferPrices keeps the transfer prices of every region a
+// provider host is live in, or one of its placements still waits for a
+// price in, cached: snapshots read the cache only, and never call the
+// provider from the drainer.
+func (s *Server) refreshTransferPrices(ctx context.Context) {
+	type region struct{ Provider, Region string }
+	var regions []region
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT DISTINCT p.provider, h.launch_template->>'region'
+			FROM hosts h JOIN pools p ON p.id = h.pool_id
+			WHERE h.provision_requested_at IS NOT NULL AND p.provider <> 'static' AND coalesce(h.launch_template->>'region', '') <> ''
+				AND (h.terminated_at IS NULL OR EXISTS (SELECT 1 FROM cost_transfer_snapshots t WHERE t.host_id = h.id AND NOT t.finalized))
+			ORDER BY 1, 2`)
+		if err != nil {
+			return err
+		}
+		regions, err = pgx.CollectRows(rows, pgx.RowToStructByPos[region])
+		return err
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.Warn("costs: list transfer regions", "err", err)
+		}
+		return
+	}
+	for _, r := range regions {
+		if _, err := s.dataTransferPrice(ctx, r.Provider, r.Region); err != nil && ctx.Err() == nil {
+			s.log.Warn("costs: data transfer price", "provider", r.Provider, "region", r.Region, "err", err)
+		}
+	}
+}
+
 // dataTransferPrice is a region's transfer prices: the cache while fresh,
 // else the provider's answer (cached), else a stale cached answer, as
 // blockStoragePrice does.

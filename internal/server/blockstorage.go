@@ -30,7 +30,7 @@ const (
 )
 
 var (
-	sharedFamilies = []string{familyCompute, familyBlockStorage}
+	sharedFamilies = []string{familyCompute, familyBlockStorage, familyPublicIP}
 	hostFamilies   = []string{familyCompute, familyBlockStorage, familyPublicIP, familyDataTransfer}
 )
 

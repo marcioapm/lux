@@ -646,11 +646,13 @@ type snapshotEntry struct {
 }
 
 // writeFamilySnapshots refreshes a Run's unfrozen placement snapshots of one
-// host-tied family and adds their amounts to b and e.Hours; what has no
+// shared family and adds their amounts to b and e.Hours; what has no
 // usable rate goes to e.Missing. Block storage is a provider host's own:
 // a placement on a host that registered itself, or on one with no volume
 // deleted with it (volumes []), has none; one whose volumes are not known
-// yet (NULL) is missing.
+// yet (NULL) is missing. Public IPv4 applies on a host with a public-ip
+// period, or recorded addresses (missing until its period opens); a host
+// whose network was never recorded has none.
 func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, e *computeEval, b *computeLines, now time.Time) error {
 	rows, err := tx.Query(ctx, `SELECT p.id, p.run_id, p.epoch, coalesce((p.resources->>'cpus')::float8, 0),
 		coalesce((p.resources->>'memory')::int8, 0), p.created_at, p.ended_at,
@@ -659,8 +661,11 @@ func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, 
 		s.rate_from, s.per_hour::text, s.currency, s.cap_cpus, s.cap_memory, s.amount::text, s.priced_to, coalesce(s.finalized, false)
 		FROM placements p JOIN hosts h ON h.id = p.host_id
 		LEFT JOIN cost_placement_snapshots s ON s.placement_id = p.id AND s.family = $2
-		WHERE p.run_id = $1 AND ($2 = 'compute' OR (h.provision_requested_at IS NOT NULL
-			AND (h.volumes IS NULL OR jsonb_array_length(h.volumes) > 0)))
+		WHERE p.run_id = $1 AND CASE $2
+			WHEN 'compute' THEN true
+			WHEN 'block-storage' THEN h.provision_requested_at IS NOT NULL AND (h.volumes IS NULL OR jsonb_array_length(h.volumes) > 0)
+			ELSE EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.family = $2)
+				OR coalesce((h.network->>'publicIPv4')::int, 0) > 0 END
 		ORDER BY p.created_at, p.id`, runID, family)
 	if err != nil {
 		return err
@@ -761,6 +766,9 @@ func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, 
 			"cpus": v.p.CPUs, "memory": v.p.Memory, "amount": *v.amount,
 			"share": sh, "ratePerHour": *v.perHour, "finalized": v.final}
 		item := volumesItem(v.volumes)
+		if family == familyPublicIP {
+			item = "ipv4"
+		}
 		if family == familyCompute {
 			item = v.h.item()
 			if v.h.Market != "" {

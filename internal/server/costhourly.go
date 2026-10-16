@@ -340,11 +340,12 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 	return nil
 }
 
-// writeHostHour rebuilds a host's rows for one hour, per host-tied family:
+// writeHostHour rebuilds a host's rows for one hour, per shared family:
 // allocated and unallocated from that family's rate periods. Only compute's
-// missing time is tracked as gaps (and retried); a block-storage period
-// opens over the whole billed window and rewinds the host's cursor itself
-// (openBlockStorageRate), so its missing time needs no retry of its own.
+// missing time is tracked as gaps (and retried); a block-storage or the
+// first public-ip period opens over the whole billed window and rewinds the
+// host's cursor itself (openBlockStorageRate, syncPublicIPRate), so their
+// missing time needs no retry of its own.
 func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, to time.Time, provisioned, registered, terminated *time.Time) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM cost_hourly WHERE host_id = $1 AND run_id IS NULL AND hour = $2`, id, hour); err != nil {
 		return err

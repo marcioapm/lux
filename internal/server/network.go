@@ -121,7 +121,7 @@ func (s *Server) recordNetwork(ctx context.Context) {
 				if !ok {
 					continue
 				}
-				if err := s.storeNetworkRefresh(ctx, h.ID, n, prefixes); err != nil && ctx.Err() == nil {
+				if err := s.storeNetworkRefresh(ctx, h.ID, h.Provider, h.Region, n, prefixes); err != nil && ctx.Err() == nil {
 					s.log.Warn("network: store", "host", h.ID, "err", err)
 				}
 			}
@@ -129,7 +129,10 @@ func (s *Server) recordNetwork(ctx context.Context) {
 	}
 }
 
-func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostNetwork, prefixes ProviderPrefixes) error {
+// storeNetworkRefresh writes a host's network and classes when either
+// changed. A changed public IPv4 count opens a new public-ip period at the
+// region's cached price (the host's first is refreshPublicIP's).
+func (s *Server) storeNetworkRefresh(ctx context.Context, hostID, provider, region string, n HostNetwork, prefixes ProviderPrefixes) error {
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var old *HostNetwork
 		var previous *proto.NetworkClasses
@@ -155,7 +158,15 @@ func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostN
 		}
 		n.SubnetCIDRs, n.VPCSubnets = nonNil(n.SubnetCIDRs), nonNil(n.VPCSubnets)
 		nc := networkClasses(n, prefixes)
-		_, err := tx.Exec(ctx, `UPDATE hosts SET network=$2, net_classes=$3 WHERE id=$1 AND (network IS DISTINCT FROM $2::jsonb OR net_classes IS DISTINCT FROM $3::jsonb)`, hostID, n, nc)
+		tag, err := tx.Exec(ctx, `UPDATE hosts SET network=$2, net_classes=$3 WHERE id=$1 AND (network IS DISTINCT FROM $2::jsonb OR net_classes IS DISTINCT FROM $3::jsonb)`, hostID, n, nc)
+		if err != nil || tag.RowsAffected() == 0 || (old != nil && old.PublicIPv4 == n.PublicIPv4) {
+			return err
+		}
+		price, _, err := cachedDataTransfer(ctx, tx, provider, region)
+		if err != nil || price.PublicIPv4PerHour == "" {
+			return err
+		}
+		_, err = syncPublicIPRate(ctx, tx, hostID, price.PublicIPv4PerHour, price.Currency, provider+"-vpc-pricing", s.cfg.Costs.Hourly)
 		return err
 	})
 }
