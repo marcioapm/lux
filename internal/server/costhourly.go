@@ -399,22 +399,11 @@ func (s *Server) writeHostTransferHour(ctx context.Context, tx pgx.Tx, id string
 	if err != nil || last == nil {
 		return err
 	}
-	if before == nil && fresh {
-		before = map[string]proto.NetBytes{}
-	}
-	if before == nil {
+	if before == nil && !fresh {
 		if _, logged := s.hostTransferBaselineLogged.LoadOrStore(id, struct{}{}); !logged {
 			s.log.Info("costs: host transfer hour not priced: no earlier sample to measure it from", "host", id, "hour", hour)
 		}
 		return nil
-	}
-	delta := map[string]proto.NetBytes{}
-	for k, v := range last {
-		b := before[k]
-		d := proto.NetBytes{Tx: max(0, v.Tx-b.Tx), RxDelivered: max(0, billedRx(v)-billedRx(b))}
-		if d.Tx > 0 || d.RxDelivered > 0 {
-			delta[k] = d
-		}
 	}
 	v := transferSnapshot{hostID: id}
 	if err := tx.QueryRow(ctx, `SELECT h.provision_requested_at IS NOT NULL AND coalesce(pl.provider, '') <> 'static', coalesce(pl.provider, ''),
@@ -426,7 +415,7 @@ func (s *Server) writeHostTransferHour(ctx context.Context, tx pgx.Tx, id string
 	if err != nil || prices == nil {
 		return err
 	}
-	_, _, amount := priceTransfer(delta, prices, v.partial)
+	_, _, amount := priceTransfer(netGrowth(before, last), prices, v.partial)
 	if amount.Sign() == 0 {
 		return nil
 	}

@@ -131,20 +131,21 @@ func priceTransfer(net map[string]proto.NetBytes, p *DataTransferPrices, partial
 		}
 		class, _, _ := strings.Cut(key, ":")
 		switch {
-		case partial && !transferClassFree(class):
+		case transferClassFree(class):
+			continue
+		case partial:
 			unpriced = append(unpriced, transferUnpriced{Class: key, Reason: unpricedPartialNetwork, Rx: rx, Tx: tx})
 			continue
 		case class == string(proto.NetUnknown):
 			unpriced = append(unpriced, transferUnpriced{Class: key, Reason: unpricedUnclassified, Rx: rx, Tx: tx})
 			continue
-		case transferClassFree(class):
-			continue
 		}
-		var missing transferUnpriced
+		missing := transferUnpriced{Class: key, Reason: unpricedNoPrice}
 		for _, d := range []struct {
-			dir   string
-			bytes int64
-		}{{"rx", rx}, {"tx", tx}} {
+			dir      string
+			bytes    int64
+			unpriced *int64
+		}{{"rx", rx, &missing.Rx}, {"tx", tx, &missing.Tx}} {
 			if d.bytes == 0 {
 				continue
 			}
@@ -154,12 +155,7 @@ func priceTransfer(net map[string]proto.NetBytes, p *DataTransferPrices, partial
 				perGB, ok = transferPerGB(*p, key, d.dir)
 			}
 			if !ok {
-				missing.Class, missing.Reason = key, unpricedNoPrice
-				if d.dir == "rx" {
-					missing.Rx = d.bytes
-				} else {
-					missing.Tx = d.bytes
-				}
+				*d.unpriced = d.bytes
 				continue
 			}
 			rate := mustRat(perGB)
@@ -170,7 +166,7 @@ func priceTransfer(net map[string]proto.NetBytes, p *DataTransferPrices, partial
 			total.Add(total, amount)
 			items = append(items, transferItem{Class: key, Direction: d.dir, Bytes: d.bytes, PerGB: trimmedDecimal(perGB), Amount: moneyString(amount)})
 		}
-		if missing.Class != "" {
+		if missing.Rx != 0 || missing.Tx != 0 {
 			unpriced = append(unpriced, missing)
 		}
 	}
@@ -183,6 +179,20 @@ type netSample struct {
 	Net map[string]proto.NetBytes
 }
 
+// netGrowth is each key's billed growth from cumulative counters from to
+// to (none where it did not grow), as Tx and Rx (billedRx's).
+func netGrowth(from, to map[string]proto.NetBytes) map[string]proto.NetBytes {
+	delta := map[string]proto.NetBytes{}
+	for k, v := range to {
+		b := from[k]
+		d := proto.NetBytes{Tx: max(0, v.Tx-b.Tx), Rx: max(0, billedRx(v)-billedRx(b))}
+		if d.Tx > 0 || d.Rx > 0 {
+			delta[k] = d
+		}
+	}
+	return delta
+}
+
 // transferHours spreads a placement's transfer over the UTC hours its
 // bytes moved in: the difference of its cumulative counters between
 // samples, at p's prices; whatever the last sample did not see (final's
@@ -193,27 +203,19 @@ func transferHours(samples []netSample, final map[string]proto.NetBytes, end tim
 	if p == nil {
 		return nil
 	}
-	type counts = map[string]proto.NetBytes
-	cum := counts{}
+	cum := map[string]proto.NetBytes{}
 	byHour := map[time.Time]*big.Rat{}
-	var order []time.Time
-	add := func(hour time.Time, next counts) {
-		delta := counts{}
+	add := func(hour time.Time, next map[string]proto.NetBytes) {
+		_, _, amount := priceTransfer(netGrowth(cum, next), p, partial)
 		for k, v := range next {
 			c := cum[k]
-			d := proto.NetBytes{Tx: max(0, v.Tx-c.Tx), Rx: max(0, billedRx(v)-billedRx(c))}
-			if d.Tx > 0 || d.Rx > 0 {
-				delta[k] = d
-			}
 			cum[k] = proto.NetBytes{Tx: max(c.Tx, v.Tx), Rx: max(billedRx(c), billedRx(v))}
 		}
-		_, _, amount := priceTransfer(delta, p, partial)
 		if amount.Sign() == 0 {
 			return
 		}
 		if byHour[hour] == nil {
 			byHour[hour] = new(big.Rat)
-			order = append(order, hour)
 		}
 		byHour[hour].Add(byHour[hour], amount)
 	}
@@ -221,10 +223,9 @@ func transferHours(samples []netSample, final map[string]proto.NetBytes, end tim
 		add(s.At.UTC().Truncate(time.Hour), s.Net)
 	}
 	add(end.UTC().Truncate(time.Hour), final)
-	slices.SortFunc(order, func(a, b time.Time) int { return a.Compare(b) })
-	out := make([]transferHour, 0, len(order))
+	out := make([]transferHour, 0, len(byHour))
 	running, previous := new(big.Rat), new(big.Rat)
-	for _, h := range order {
+	for _, h := range slices.SortedFunc(maps.Keys(byHour), time.Time.Compare) {
 		running.Add(running, byHour[h])
 		part := mustRat(moneyString(running))
 		out = append(out, transferHour{Hour: h, Amount: moneyString(new(big.Rat).Sub(part, previous))})
