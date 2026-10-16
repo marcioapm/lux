@@ -430,26 +430,19 @@ func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID
 	return nil
 }
 
-// lockReportedHost takes, before a status report writes its placement, the
-// locks the report will need on the placement's host: a heartbeat holds the
-// host's row while it renews the host's placements' leases, so a report
-// that wrote its placement first and then wrote the host's row (a start's
-// first_placement_at, an end's last_placement_ended_at) deadlocked with it.
-// An end also takes the host's cost lock, which serializes it with the
-// host's cost snapshots (lockCostHost), before the row, as the reaper and a
-// registration do. The Run's row is the caller's, taken first. A report
-// that writes no host row (starting, stopping) takes nothing.
+// lockReportedHost locks the host before the placement, matching heartbeat's
+// host → placements order. Ends take the cost lock before the host row to
+// serialize with cost snapshots, as reaping and registration do. Starts need
+// only the host row; other states need neither. The caller holds the Run's row.
 func lockReportedHost(ctx context.Context, tx pgx.Tx, runID string, epoch int, state string) (hostID string, err error) {
 	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
 		return "", err
 	}
-	switch state {
-	case "exited", "failed":
+	if state == "exited" || state == "failed" {
 		if err := lockCostHost(ctx, tx, hostID); err != nil {
 			return "", err
 		}
-	case "running":
-	default:
+	} else if state != "running" {
 		return hostID, nil
 	}
 	_, err = tx.Exec(ctx, `SELECT 1 FROM hosts WHERE id = $1 FOR NO KEY UPDATE`, hostID)
