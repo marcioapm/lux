@@ -110,11 +110,11 @@ func newStreamRig(t *testing.T) *streamRig {
 	return &streamRig{r: r, shim: shim, frames: frames}
 }
 
-// open starts an exec stream as handleStreamFrame does, with an unbuffered
-// input: a send into it returns only once the stream's input goroutine has
-// finished writing the frame before. It returns once the fake shim has the
-// stream's connection and its ShimStream line.
-func (g *streamRig) open(t *testing.T) (*stream, *net.UnixConn, <-chan struct{}) {
+// open starts a stream of the given kind as handleStreamFrame does, with
+// an unbuffered input: a send into it returns only once the stream's input
+// goroutine has finished writing the frame before. It returns once the
+// fake shim has the stream's connection and its ShimStream line.
+func (g *streamRig) open(t *testing.T, kind string) (*stream, *net.UnixConn, <-chan struct{}) {
 	t.Helper()
 	sctx, cancel := context.WithCancelCause(context.Background())
 	st := &stream{input: make(chan proto.StreamData), cancel: cancel}
@@ -122,8 +122,15 @@ func (g *streamRig) open(t *testing.T) (*stream, *net.UnixConn, <-chan struct{})
 	ended := make(chan struct{})
 	go func() {
 		defer close(ended)
-		g.r.runStream(sctx, "run_s", 1, "str_1", proto.StreamOpen{Kind: "exec", Command: []string{"true"}}, st)
+		g.r.runStream(sctx, "run_s", 1, "str_1", proto.StreamOpen{Kind: kind, Command: []string{"true"}}, st)
 	}()
+	return st, g.accept(t, kind), ended
+}
+
+// accept takes the stream's connection on the fake shim and checks its
+// ShimStream line names the stream's kind.
+func (g *streamRig) accept(t *testing.T, kind string) *net.UnixConn {
+	t.Helper()
 	c, err := g.shim.Accept()
 	if err != nil {
 		t.Fatal(err)
@@ -134,15 +141,15 @@ func (g *streamRig) open(t *testing.T) (*stream, *net.UnixConn, <-chan struct{})
 		t.Fatal(err)
 	}
 	var m proto.ShimMsg
-	if err := json.Unmarshal(line, &m); err != nil || m.Type != proto.ShimStream {
-		t.Fatalf("shim got %q, want a ShimStream", line)
+	if err := json.Unmarshal(line, &m); err != nil || m.Type != proto.ShimStream || m.Stream == nil || m.Stream.Kind != kind {
+		t.Fatalf("shim got %q, want a ShimStream of kind %q", line, kind)
 	}
-	return st, c.(*net.UnixConn), ended
+	return c.(*net.UnixConn)
 }
 
-// closes waits for the stream to end and returns every stream.close luxd
-// received for it.
-func (g *streamRig) closes(t *testing.T, ended <-chan struct{}) []proto.StreamData {
+// received waits for the stream to end and returns every stream frame luxd
+// received for it, in order.
+func (g *streamRig) received(t *testing.T, ended <-chan struct{}) []proto.Frame {
 	t.Helper()
 	select {
 	case <-ended:
@@ -154,34 +161,52 @@ func (g *streamRig) closes(t *testing.T, ended <-chan struct{}) []proto.StreamDa
 	if err := g.r.conn.Send(context.Background(), proto.Frame{Type: "ping"}); err != nil {
 		t.Fatal(err)
 	}
-	var out []proto.StreamData
+	var out []proto.Frame
 	for {
 		select {
 		case f := <-g.frames:
 			if f.Type == "ping" {
 				return out
 			}
-			if f.Type == proto.MsgStreamClose {
-				var d proto.StreamData
-				if err := json.Unmarshal(f.Data, &d); err != nil {
-					t.Fatal(err)
-				}
-				out = append(out, d)
-			}
+			out = append(out, f)
 		case <-time.After(10 * time.Second):
 			t.Fatal("luxd's frames never arrived")
 		}
 	}
 }
 
+// closes waits for the stream to end and returns every stream.close luxd
+// received for it.
+func (g *streamRig) closes(t *testing.T, ended <-chan struct{}) []proto.StreamData {
+	t.Helper()
+	var out []proto.StreamData
+	for _, f := range g.received(t, ended) {
+		if f.Type == proto.MsgStreamClose {
+			out = append(out, streamData(t, f))
+		}
+	}
+	return out
+}
+
+func streamData(t *testing.T, f proto.Frame) proto.StreamData {
+	t.Helper()
+	var d proto.StreamData
+	if err := json.Unmarshal(f.Data, &d); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 // feed sends d into the stream's input; false if the stream ended first.
-func feed(st *stream, ended <-chan struct{}, d proto.StreamData) bool {
+func feed(t *testing.T, st *stream, ended <-chan struct{}, d proto.StreamData) bool {
+	t.Helper()
 	select {
 	case st.input <- d:
 		return true
 	case <-ended:
 		return false
 	case <-time.After(10 * time.Second):
+		t.Fatal("the stream's input goroutine stopped taking input")
 		return false
 	}
 }
@@ -192,22 +217,25 @@ func feed(st *stream, ended <-chan struct{}, d proto.StreamData) bool {
 // is, and it reaches luxd as the one stream.close.
 func TestStreamExecExitsBeforeItsInput(t *testing.T) {
 	g := newStreamRig(t)
-	st, shim, ended := g.open(t)
+	st, shim, ended := g.open(t, "exec")
 
-	// The shim stops reading: every write to it now fails (EPIPE).
+	// Stands in for the shim having closed before the runner's write:
+	// every write now fails with EPIPE while the exit line can still be
+	// sent.
 	if err := shim.CloseRead(); err != nil {
 		t.Fatal(err)
 	}
 	// The second feed returns once the first frame's write has failed; the
 	// third, once the second's has.
 	for _, d := range []proto.StreamData{{EOF: true}, {Data: []byte("late")}, {Data: []byte("later")}} {
-		if !feed(st, ended, d) {
+		if !feed(t, st, ended, d) {
 			break
 		}
 	}
-	if _, err := shim.Write([]byte(`{"exitCode":0}` + "\n")); err == nil {
-		shim.Close()
+	if _, err := shim.Write([]byte(`{"exitCode":0}` + "\n")); err != nil {
+		t.Fatalf("the runner closed the shim connection before the exit line: %v", err)
 	}
+	shim.Close()
 
 	closes := g.closes(t, ended)
 	if len(closes) != 1 {
@@ -222,13 +250,13 @@ func TestStreamExecExitsBeforeItsInput(t *testing.T) {
 // connection closed before the input arrives.
 func TestStreamExecExitedAndClosedBeforeItsInput(t *testing.T) {
 	g := newStreamRig(t)
-	st, shim, ended := g.open(t)
+	st, shim, ended := g.open(t, "exec")
 	if _, err := shim.Write([]byte(`{"exitCode":0}` + "\n")); err != nil {
 		t.Fatal(err)
 	}
 	shim.Close()
 	for _, d := range []proto.StreamData{{EOF: true}, {Data: []byte("late")}} {
-		if !feed(st, ended, d) {
+		if !feed(t, st, ended, d) {
 			break
 		}
 	}
@@ -243,25 +271,115 @@ func TestStreamExecExitedAndClosedBeforeItsInput(t *testing.T) {
 }
 
 // A shim that goes away mid-stream, with no exit line, still ends the
-// stream with an error, input written to it or not.
+// stream with an error, input written to it or not; its output before
+// that is relayed.
 func TestStreamShimGoneMidStream(t *testing.T) {
 	g := newStreamRig(t)
-	st, shim, ended := g.open(t)
-	if _, err := shim.Write([]byte(`{"channel":"stdout","data":"aGk="}` + "\n")); err != nil {
+	st, shim, ended := g.open(t, "exec")
+	if _, err := shim.Write([]byte(`{"ch":"stdout","data":"aGk="}` + "\n")); err != nil {
 		t.Fatal(err)
 	}
 	shim.Close()
 	for _, d := range []proto.StreamData{{Data: []byte("more")}, {EOF: true}} {
-		if !feed(st, ended, d) {
+		if !feed(t, st, ended, d) {
+			break
+		}
+	}
+
+	frames := g.received(t, ended)
+	if len(frames) != 2 || frames[0].Type != proto.MsgStreamData || frames[1].Type != proto.MsgStreamClose {
+		t.Fatalf("stream frames %+v, want one stream.data then one stream.close", frames)
+	}
+	if d := streamData(t, frames[0]); d.Channel != "stdout" || string(d.Data) != "hi" {
+		t.Fatalf("stream.data %+v, want stdout %q", d, "hi")
+	}
+	if c := streamData(t, frames[1]); c.ExitCode != nil || c.Error != "the container went away" {
+		t.Fatalf("stream.close %+v, want error %q and no exit code", c, "the container went away")
+	}
+}
+
+// The attached workload exits while the client is still typing: its
+// "the workload exited" line, not the failed write, ends the stream.
+func TestStreamAttachWorkloadExitedBeforeItsInput(t *testing.T) {
+	g := newStreamRig(t)
+	st, shim, ended := g.open(t, "attach")
+	if _, err := shim.Write([]byte(`{"error":"the workload exited"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	shim.Close()
+	for _, d := range []proto.StreamData{{Data: []byte("ls\n")}, {Data: []byte("late")}} {
+		if !feed(t, st, ended, d) {
 			break
 		}
 	}
 
 	closes := g.closes(t, ended)
+	if len(closes) != 1 || closes[0].Error != "the workload exited" || closes[0].ExitCode != nil {
+		t.Fatalf("stream.close frames %+v, want one with error %q and no exit code", closes, "the workload exited")
+	}
+}
+
+// Through handleStreamFrame, with its bounded input: input the shim no
+// longer reads is drained and dropped, so more of it than the buffer holds
+// does not end the stream as having fallen behind; the exit line does.
+func TestStreamExecInputPastTheBufferAfterItsTargetStopped(t *testing.T) {
+	g := newStreamRig(t)
+	ctx := context.Background()
+	g.r.handleStreamFrame(ctx, proto.Frame{Type: proto.MsgStreamOpen, RunID: "run_s", Epoch: 1, Stream: "str_1",
+		Data: proto.Marshal(proto.StreamOpen{Kind: "exec", Command: []string{"true"}})})
+	shim := g.accept(t, "exec")
+	st := g.r.streams.get("str_1")
+	if st == nil {
+		t.Fatal("stream.open registered no stream")
+	}
+	// runStream removes the stream as the last thing it does.
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		for g.r.streams.get("str_1") != nil {
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	// Stands in for the shim having closed before the runner's write.
+	if err := shim.CloseRead(); err != nil {
+		t.Fatal(err)
+	}
+	deliver := func(n int) {
+		for i := range n {
+			g.r.handleStreamFrame(ctx, proto.Frame{Type: proto.MsgStreamData, RunID: "run_s", Epoch: 1, Stream: "str_1",
+				Data: proto.Marshal(proto.StreamData{Data: []byte{byte(i)}})})
+		}
+	}
+	// Each batch fits the buffer; between them the input goroutine must
+	// empty it, or the stream must have ended.
+	drained := func() {
+		deadline := time.Now().Add(10 * time.Second)
+		for len(st.input) > 0 {
+			select {
+			case <-ended:
+				return
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d input frames never drained", len(st.input))
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	for range 3 {
+		deliver(streamInputBuffer)
+		drained()
+	}
+	if _, err := shim.Write([]byte(`{"exitCode":0}` + "\n")); err != nil {
+		t.Fatalf("the runner closed the shim connection before the exit line: %v", err)
+	}
+	shim.Close()
+
+	closes := g.closes(t, ended)
 	if len(closes) != 1 {
 		t.Fatalf("%d stream.close frames %+v, want 1", len(closes), closes)
 	}
-	if c := closes[0]; c.ExitCode != nil || c.Error == "" {
-		t.Fatalf("stream.close %+v, want an error and no exit code", c)
+	if c := closes[0]; c.Error != "" || c.ExitCode == nil || *c.ExitCode != 0 {
+		t.Fatalf("stream.close %+v, want exit code 0 and no error", c)
 	}
 }

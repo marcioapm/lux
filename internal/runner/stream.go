@@ -228,21 +228,19 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 			case <-ctx.Done():
 				return
 			case d := <-st.input:
-				if !writing {
-					continue
-				}
-				var err error
-				switch {
-				case o.Kind != "tunnel":
+				if o.Kind != "tunnel" {
 					// The shim stops reading once the command has exited
 					// (its exit line may already be on the way): the
 					// output below ends the stream, with that line or
 					// with "the container went away". Later input is
 					// dropped, not left to fill st.input.
-					if enc.Encode(d) != nil {
+					if writing && enc.Encode(d) != nil {
 						writing = false
 					}
 					continue
+				}
+				var err error
+				switch {
 				case d.EOF:
 					if tc, ok := conn.(*net.TCPConn); ok {
 						err = tc.CloseWrite()
