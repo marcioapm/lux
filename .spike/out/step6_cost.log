@@ -1,0 +1,19 @@
+pid1 cgroup=/init controllers there=cpuset cpu io memory hugetlb pids rdma misc dmem
+230 lxcfs --enable-cfs -l /var/lib/lxcfs
+  0: fd:   8: cpuset,cpu,io,memory,hugetlb,pids,rdma,misc,dmem
+
+## rss before
+    PID   RSS    VSZ NLWP CMD
+    230  2612 167284    4 lxcfs --enable-cfs -l /var/lib/lxcfs
+
+## bench: succeeded
+B:/proc/meminfo 609ms/1000 reads
+B:/dev/.lux/proc/meminfo 30ms/1000 reads
+B:/proc/cpuinfo 2205ms/1000 reads
+B:/dev/.lux/proc/cpuinfo 631ms/1000 reads
+B:/proc/stat 647ms/1000 reads
+B:/dev/.lux/proc/stat 66ms/1000 reads
+
+## rss after
+    PID   RSS    VSZ NLWP CMD
+    230  3608 388480    7 lxcfs --enable-cfs -l /var/lib/lxcfs

@@ -45,7 +45,8 @@ for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo $p > /sys/fs/cgroup/init/cg
 for c in $(cat /sys/fs/cgroup/cgroup.controllers); do echo +$c > /sys/fs/cgroup/cgroup.subtree_control; done
 echo "pid1 cgroup=$(cut -d: -f3 /proc/1/cgroup) controllers there=$(cat /sys/fs/cgroup$(cut -d: -f3 /proc/1/cgroup)/cgroup.controllers)"
 """, check=False)
-    host.exec("sh", "-c", f"mkdir -p {LXCFS_DIR}; mountpoint -q {LXCFS_DIR} && fusermount3 -u {LXCFS_DIR}; true", check=False)
+    # Unconditional: on a dead daemon `mountpoint` fails with ENOTCONN.
+    host.exec("sh", "-c", f"mkdir -p {LXCFS_DIR}; fusermount3 -u {LXCFS_DIR} 2>/dev/null || umount -l {LXCFS_DIR} 2>/dev/null; true", check=False)
     host.exec("sh", "-c", f"lxcfs {' '.join(flags)} {LXCFS_DIR} >>/var/log/lxcfs.log 2>&1 &")
     for _ in range(50):
         if host.exec("sh", "-c", f"test -e {LXCFS_DIR}/proc/meminfo && echo up", check=False).strip() == "up":
@@ -296,6 +297,13 @@ i=0; while :; do i=$((i+1)); s=$(date +%s.%N)
 def test_step5_failure(lux, env, runners, lxcfs_host):
     h = lxcfs_host
     out = start_lxcfs(h, "--enable-cfs", "-l")
+    try:
+        out = _step5(lux, env, runners, h, out)
+    finally:
+        save("step5_failure", out)
+
+
+def _step5(lux, env, runners, h, out):
     set_hook(h)
     runners.start(h, "--nested", environ=HIDDEN_ENV)
     spec = generic(image(env), "sh", "-c", "exec 2>&1; " + READ_LOOP, resources=SIZE)
@@ -303,18 +311,24 @@ def test_step5_failure(lux, env, runners, lxcfs_host):
     lux.wait_output(rid, "R:3 ", timeout=120)
     host = lambda c: h.exec("sh", "-c", c, check=False)  # noqa: E731
     out += "\n## SIGUSR1 (reload liblxcfs)\n" + host("pkill -USR1 -x lxcfs; sleep 3; tail -3 /var/log/lxcfs.log")
-    out += "\n## SIGSTOP (hung daemon)\n" + host("pkill -STOP -x lxcfs; sleep 8; pkill -CONT -x lxcfs; sleep 3")
-    out += "\n## SIGKILL\n" + host(f"pkill -KILL -x lxcfs; sleep 4; cat {LXCFS_DIR}/proc/meminfo 2>&1 | head -1; grep lxcfs /proc/mounts")
+    out += f"\n## SIGSTOP (hung daemon) at {host('date +%T')}" + host(
+        f"pkill -STOP -x lxcfs; s=$(date +%s.%N); timeout 5 cat {LXCFS_DIR}/proc/meminfo >/dev/null; echo \"host read rc=$? after $(awk -v s=$s -v e=$(date +%s.%N) 'BEGIN{{print e-s}}')s\"; "
+        "sleep 8; pkill -CONT -x lxcfs; sleep 3")
+    out += f"\n## SIGKILL at {host('date +%T')}" + host(
+        f"pkill -KILL -x lxcfs; sleep 4; cat {LXCFS_DIR}/proc/meminfo 2>&1 | head -1; grep lxcfs /proc/mounts")
     # A new Run while the FUSE mount is dead.
     r, logs = run(lux, env, "/opt/probe.sh dead", nested=False, timeout=120)
     out += f"\n## new Run while lxcfs is dead: {r['state']} {r.get('stateReason', '')}\n" + logs[-1500:]
-    out += "\n## restart lxcfs (fusermount -u first)\n" + start_lxcfs(h, "--enable-cfs", "-l")
+    out += "\n## runner.log placement failures\n" + "".join(
+        l for l in (Path(h.log_dir) / "runner.log").read_text().splitlines(True) if "placement failed" in l)[-1500:]
+    out += f"\n## restart lxcfs at {host('date +%T')} (unmount the dead mount first)\n" + start_lxcfs(h, "--enable-cfs", "-l")
     time.sleep(4)
     r, logs = run(lux, env, "/opt/probe.sh restarted", nested=False, timeout=120)
     out += f"\n## new Run after restart: {r['state']} {r.get('stateReason', '')}\n" + logs[-1500:]
+    time.sleep(3)
     out += "\n## the long-running Run's reads, whole\n" + lux.logs(rid)
     lux.run("terminate", rid, "--wait")
-    save("step5_failure", out)
+    return out
 
 
 BENCH = """

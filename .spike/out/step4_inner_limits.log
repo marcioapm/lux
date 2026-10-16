@@ -1,0 +1,115 @@
+pid1 cgroup=/init controllers there=cpuset cpu io memory hugetlb pids rdma misc dmem
+236 lxcfs --enable-cfs -l /var/lib/lxcfs
+  0: fd:   8: cpuset,cpu,io,memory,hugetlb,pids,rdma,misc,dmem
+
+## podman inner, -v binds: succeeded
+P:podman-info:cpus_mem=32_1022312448
+P:podman-inner:meminfo.MemTotal=998352kB
+P:podman-inner:meminfo.MemAvailable=995652kB
+P:podman-inner:free.total=64418888kB
+P:podman-inner:cpuinfo.processors=32
+P:podman-inner:stat.cpuN=32
+P:podman-inner:uptime=0.12
+P:podman-inner:loadavg=0.00_0.00_0.00
+P:podman-inner:swaps.lines=1
+P:podman-inner:sys.cpu.online=0-31
+P:podman-inner:nproc=32
+P:podman-inner:getconf.NPROCESSORS_ONLN=32
+P:podman-inner:cgroup=0::/
+P:podman-inner:cgroup.memory.max=max
+P:podman-inner:cgroup.cpu.max=max_100000
+P:podman-inner:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:podman-inner:proc.mounts=/proc(proc) /sys(sysfs) /proc/cpuinfo(lxcfs) /proc/uptime(lxcfs) /proc/loadavg(lxcfs) /proc/swaps(lxcfs) /proc/diskstats(lxcfs) /proc/stat(lxcfs) /proc/meminfo(lxcfs) /sys/fs/cgroup(cgroup) /sys/devices/system/cpu/online(lxcfs) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) 
+P:podman-inner-limited:meminfo.MemTotal=262144kB
+P:podman-inner-limited:meminfo.MemAvailable=260194kB
+P:podman-inner-limited:free.total=64418888kB
+P:podman-inner-limited:cpuinfo.processors=1
+P:podman-inner-limited:stat.cpuN=1
+P:podman-inner-limited:uptime=0.14
+P:podman-inner-limited:loadavg=0.00_0.00_0.00
+P:podman-inner-limited:swaps.lines=1
+P:podman-inner-limited:sys.cpu.online=0
+P:podman-inner-limited:nproc=32
+P:podman-inner-limited:getconf.NPROCESSORS_ONLN=32
+P:podman-inner-limited:cgroup=0::/
+P:podman-inner-limited:cgroup.memory.max=268435456
+P:podman-inner-limited:cgroup.cpu.max=100000_100000
+P:podman-inner-limited:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:podman-inner-limited:proc.mounts=/proc(proc) /sys(sysfs) /proc/cpuinfo(lxcfs) /proc/swaps(lxcfs) /proc/loadavg(lxcfs) /proc/meminfo(lxcfs) /proc/diskstats(lxcfs) /proc/stat(lxcfs) /proc/uptime(lxcfs) /sys/fs/cgroup(cgroup) /sys/devices/system/cpu/online(lxcfs) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) 
+
+## podman inner, containers.conf volumes: succeeded
+[containers]
+volumes = ["/proc/meminfo:/proc/meminfo:ro", "/proc/cpuinfo:/proc/cpuinfo:ro", "/proc/stat:/proc/stat:ro", "/proc/uptime:/proc/uptime:ro", "/proc/loadavg:/proc/loadavg:ro", "/proc/diskstats:/proc/diskstats:ro", "/proc/swaps:/proc/swaps:ro", "/sys/devices/system/cpu/online:/sys/devices/system/cpu/online:ro"]
+P:podman-info:cpus_mem=32_1022312448
+P:podman-inner:meminfo.MemTotal=998352kB
+P:podman-inner:meminfo.MemAvailable=996887kB
+P:podman-inner:free.total=64418888kB
+P:podman-inner:cpuinfo.processors=32
+P:podman-inner:stat.cpuN=32
+P:podman-inner:uptime=0.14
+P:podman-inner:loadavg=0.00_0.00_0.00
+P:podman-inner:swaps.lines=1
+P:podman-inner:sys.cpu.online=0-31
+P:podman-inner:nproc=32
+P:podman-inner:getconf.NPROCESSORS_ONLN=32
+P:podman-inner:cgroup=0::/
+P:podman-inner:cgroup.memory.max=max
+P:podman-inner:cgroup.cpu.max=max_100000
+P:podman-inner:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:podman-inner:proc.mounts=/proc(proc) /sys(sysfs) /proc/stat(lxcfs) /proc/loadavg(lxcfs) /proc/diskstats(lxcfs) /proc/swaps(lxcfs) /proc/cpuinfo(lxcfs) /proc/uptime(lxcfs) /proc/meminfo(lxcfs) /sys/fs/cgroup(cgroup) /sys/devices/system/cpu/online(lxcfs) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) 
+P:podman-inner-limited:meminfo.MemTotal=262144kB
+P:podman-inner-limited:meminfo.MemAvailable=260963kB
+P:podman-inner-limited:free.total=64418888kB
+P:podman-inner-limited:cpuinfo.processors=1
+P:podman-inner-limited:stat.cpuN=1
+P:podman-inner-limited:uptime=0.14
+P:podman-inner-limited:loadavg=0.00_0.00_0.00
+P:podman-inner-limited:swaps.lines=1
+P:podman-inner-limited:sys.cpu.online=0
+P:podman-inner-limited:nproc=32
+P:podman-inner-limited:getconf.NPROCESSORS_ONLN=32
+P:podman-inner-limited:cgroup=0::/
+P:podman-inner-limited:cgroup.memory.max=268435456
+P:podman-inner-limited:cgroup.cpu.max=100000_100000
+P:podman-inner-limited:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:podman-inner-limited:proc.mounts=/proc(proc) /sys(sysfs) /proc/loadavg(lxcfs) /proc/swaps(lxcfs) /proc/uptime(lxcfs) /proc/meminfo(lxcfs) /proc/diskstats(lxcfs) /proc/cpuinfo(lxcfs) /proc/stat(lxcfs) /sys/fs/cgroup(cgroup) /sys/devices/system/cpu/online(lxcfs) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) 
+
+## docker inner, -v binds: succeeded
+P:docker-info:NCPU_MemTotal=32_1022312448
+P:docker-inner:meminfo.MemTotal=998352kB
+P:docker-inner:meminfo.MemAvailable=996840kB
+P:docker-inner:free.total=64418888kB
+P:docker-inner:cpuinfo.processors=32
+P:docker-inner:stat.cpuN=32
+P:docker-inner:uptime=0.12
+P:docker-inner:loadavg=0.00_0.00_0.00
+P:docker-inner:swaps.lines=1
+P:docker-inner:sys.cpu.online=0-31
+P:docker-inner:nproc=32
+P:docker-inner:getconf.NPROCESSORS_ONLN=32
+P:docker-inner:cgroup=0::/
+P:docker-inner:cgroup.memory.max=max
+P:docker-inner:cgroup.cpu.max=max_100000
+P:docker-inner:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:docker-inner:proc.mounts=/proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup) /proc/cpuinfo(lxcfs) /proc/diskstats(lxcfs) /proc/loadavg(lxcfs) /proc/meminfo(lxcfs) /proc/stat(lxcfs) /proc/swaps(lxcfs) /proc/uptime(lxcfs) /sys/devices/system/cpu/online(lxcfs) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/interrupts(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) 
+P:docker-inner-limited:meminfo.MemTotal=998352kB
+P:docker-inner-limited:meminfo.MemAvailable=996652kB
+P:docker-inner-limited:free.total=64418888kB
+P:docker-inner-limited:cpuinfo.processors=32
+P:docker-inner-limited:stat.cpuN=32
+P:docker-inner-limited:uptime=0.12
+P:docker-inner-limited:loadavg=0.00_0.00_0.00
+P:docker-inner-limited:swaps.lines=1
+P:docker-inner-limited:sys.cpu.online=0-31
+P:docker-inner-limited:nproc=32
+P:docker-inner-limited:getconf.NPROCESSORS_ONLN=32
+P:docker-inner-limited:cgroup=0::/
+P:docker-inner-limited:cgroup.memory.max=max
+P:docker-inner-limited:cgroup.cpu.max=max_100000
+P:docker-inner-limited:cgroup.cpuset.effective=cat: can't open '/sys/fs/cgroup/cpuset.cpus.effective': No such file or directory
+P:docker-inner-limited:proc.mounts=/proc(proc) /sys(sysfs) /sys/fs/cgroup(cgroup) /proc/cpuinfo(lxcfs) /proc/diskstats(lxcfs) /proc/loadavg(lxcfs) /proc/meminfo(lxcfs) /proc/stat(lxcfs) /proc/swaps(lxcfs) /proc/uptime(lxcfs) /sys/devices/system/cpu/online(lxcfs) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /proc/acpi(tmpfs) /proc/interrupts(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) 
+DOCKERD-LOG: time="2026-10-16T02:59:19.996060039Z" level=warning msg="failed check for fsverity support" error="enable fsverity failed: operation not supported" path=/home/agent/.local/share/docker/plugins/storage
+DOCKERD-LOG: time="2026-10-16T02:59:20.073293745Z" level=warning msg="Failed to find nft tool" error="exec: \"nft\": executable file not found in $PATH"
+DOCKERD-LOG: time="2026-10-16T02:59:20.073328325Z" level=info msg="Deleting nftables IPv4 rules" error="failed to find nft tool: exec: \"nft\": executable file not found in $PATH"
+DOCKERD-LOG: time="2026-10-16T02:59:20.073335865Z" level=info msg="Deleting nftables IPv6 rules" error="failed to find nft tool: exec: \"nft\": executable file not found in $PATH"
+DOCKERD-LOG: time="2026-10-16T02:59:20.940360437Z" level=warning msg="git source cannot be enabled: failed to find git binary: exec: \"git\": executable file not found in $PATH"

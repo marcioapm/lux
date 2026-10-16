@@ -1,0 +1,76 @@
+pid1 cgroup=/init controllers there=cpuset cpu io memory hugetlb pids rdma misc dmem
+227 lxcfs --enable-cfs -l /var/lib/lxcfs
+  0: fd:   8: cpuset,cpu,io,memory,hugetlb,pids,rdma,misc,dmem
+
+## SIGUSR1 (reload liblxcfs)
+- cpuview_daemon
+- loadavg_daemon
+- pidfds
+
+## SIGSTOP (hung daemon) at 03:04:09
+host read rc=124 after 5.00844s
+
+## SIGKILL at 03:04:25
+cat: /var/lib/lxcfs/proc/meminfo: Transport endpoint is not connected
+lxcfs /var/lib/lxcfs fuse.lxcfs rw,nosuid,nodev,relatime,user_id=0,group_id=0,allow_other 0 0
+
+## new Run while lxcfs is dead: failed container: podman create --userns=auto:size=65536 --cap-drop=ALL --cap-add=CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,KILL --security-opt=no-new-privileges --cgroups=enabled --cgroupns=private --ipc=private --uts=private --pid=private --restart=no --hostname=lux --init=false --log-driver=none --name lux-run_c32cgzw2gvgjxet2 --label lux.managed=true --label lux.run=run_c32cgzw2gvgjxet2 --label lux.tenant=ten_rnz65qgj4m7tet5p --network lux-run_c32cgzw2gvgjxet2 --user 0:0 --entrypoint /.lux/bin/lux-shim -v /opt/lux/lux-shim:/.lux/bin/lux-shim:ro -v lux-run_c32cgzw2gvgjxet2--rt:/.lux/run:idmap --tmpfs /.lux/secrets:rw,size=16m,mode=0700,nosuid,nodev --tmpfs /.lux/services:rw,size=1m,mode=0755,nosuid,nodev,noexec --cpus 2 --memory 1022312448 --memory-swap 1022312448 --pids-limit 4096 --dns 10.89.1.1 -v /var/lib/lxcfs/proc/meminfo:/proc/meminfo:ro -v /var/lib/lxcfs/proc/cpuinfo:/proc/cpuinfo:ro -v /var/lib/lxcfs/proc/stat:/proc/stat:ro -v /var/lib/lxcfs/proc/uptime:/proc/uptime:ro -v /var/lib/lxcfs/proc/loadavg:/proc/loadavg:ro -v /var/lib/lxcfs/proc/diskstats:/proc/diskstats:ro -v /var/lib/lxcfs/proc/swaps:/proc/swaps:ro -v /var/lib/lxcfs/sys/devices/system/cpu/online:/sys/devices/system/cpu/online:ro --tmpfs /dev/.lux/proc:ro,size=4k,mode=0555 --tmpfs /dev/.lux/sys:ro,size=4k,mode=0555 --annotation io.lux.spike.hidden=proc,sys localhost/lux-lxcfs:test: exit status 125: Error: statfs /var/lib/lxcfs/proc/swaps: transport endpoint is not connected
+
+## runner.log placement failures
+n_c32cgzw2gvgjxet2 epoch=1 stage=container err="podman create --userns=auto:size=65536 --cap-drop=ALL --cap-add=CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,KILL --security-opt=no-new-privileges --cgroups=enabled --cgroupns=private --ipc=private --uts=private --pid=private --restart=no --hostname=lux --init=false --log-driver=none --name lux-run_c32cgzw2gvgjxet2 --label lux.managed=true --label lux.run=run_c32cgzw2gvgjxet2 --label lux.tenant=ten_rnz65qgj4m7tet5p --network lux-run_c32cgzw2gvgjxet2 --user 0:0 --entrypoint /.lux/bin/lux-shim -v /opt/lux/lux-shim:/.lux/bin/lux-shim:ro -v lux-run_c32cgzw2gvgjxet2--rt:/.lux/run:idmap --tmpfs /.lux/secrets:rw,size=16m,mode=0700,nosuid,nodev --tmpfs /.lux/services:rw,size=1m,mode=0755,nosuid,nodev,noexec --cpus 2 --memory 1022312448 --memory-swap 1022312448 --pids-limit 4096 --dns 10.89.1.1 -v /var/lib/lxcfs/proc/meminfo:/proc/meminfo:ro -v /var/lib/lxcfs/proc/cpuinfo:/proc/cpuinfo:ro -v /var/lib/lxcfs/proc/stat:/proc/stat:ro -v /var/lib/lxcfs/proc/uptime:/proc/uptime:ro -v /var/lib/lxcfs/proc/loadavg:/proc/loadavg:ro -v /var/lib/lxcfs/proc/diskstats:/proc/diskstats:ro -v /var/lib/lxcfs/proc/swaps:/proc/swaps:ro -v /var/lib/lxcfs/sys/devices/system/cpu/online:/sys/devices/system/cpu/online:ro --tmpfs /dev/.lux/proc:ro,size=4k,mode=0555 --tmpfs /dev/.lux/sys:ro,size=4k,mode=0555 --annotation io.lux.spike.hidden=proc,sys localhost/lux-lxcfs:test: exit status 125: Error: statfs /var/lib/lxcfs/proc/swaps: transport endpoint is not connected"
+
+## restart lxcfs at 03:04:29
+ (unmount the dead mount first)
+pid1 cgroup=/init controllers there=cpuset cpu io memory hugetlb pids rdma misc dmem
+227 [lxcfs] <defunct>
+1018 lxcfs --enable-cfs -l /var/lib/lxcfs
+  0: fd:   8: cpuset,cpu,io,memory,hugetlb,pids,rdma,misc,dmem
+
+## new Run after restart: succeeded 
+P:restarted:meminfo.MemTotal=998352kB
+P:restarted:meminfo.MemAvailable=995036kB
+P:restarted:free.total=998352kB
+P:restarted:cpuinfo.processors=2
+P:restarted:stat.cpuN=2
+P:restarted:uptime=0.23
+P:restarted:loadavg=0.00_0.00_0.00
+P:restarted:swaps.lines=1
+P:restarted:sys.cpu.online=0-1
+P:restarted:nproc=32
+P:restarted:getconf.NPROCESSORS_ONLN=32
+P:restarted:cgroup=0::/
+P:restarted:cgroup.memory.max=1022312448
+P:restarted:cgroup.cpu.max=200000_100000
+P:restarted:cgroup.cpuset.effective=0-31
+P:restarted:python.cpu_count=32
+P:restarted:python.sched_getaffinity=32
+P:restarted:python.process_cpu_count=32
+P:restarted:node.cpus=2
+P:restarted:node.availableParallelism=2
+P:restarted:node.totalmem=1022312448
+P:restarted:proc.mounts=/proc/swaps(lxcfs) /proc/cpuinfo(lxcfs) /proc/uptime(lxcfs) /proc/stat(lxcfs) /proc/diskstats(lxcfs) /proc/meminfo(lxcfs) /proc/loadavg(lxcfs) /sys/devices/system/cpu/online(lxcfs) /proc(proc) /sys(sysfs) /dev/.lux/sys(tmpfs) /dev/.lux/proc(tmpfs) /sys/fs/cgroup(cgroup2) /proc/acpi(tmpfs) /proc/kcore(tmpfs) /proc/keys(tmpfs) /proc/latency_stats(tmpfs) /proc/scsi(tmpfs) /proc/timer_list(tmpfs) /sys/firmware(tmpfs) /proc/interrupts(tmpfs) /proc/bus(proc) /proc/fs(proc) /proc/irq(proc) /proc/sys(proc) /proc/sysrq-trigger(proc) /dev/.lux/proc(proc) /dev/.lux/sys(sysfs) 
+
+## the long-running Run's reads, whole
+R:1 rc=0 t=03:04:03 v=998352 
+R:2 rc=0 t=03:04:04 v=998352 
+R:3 rc=0 t=03:04:05 v=998352 
+R:4 rc=124 t=03:04:22 v= 
+R:5 rc=0 t=03:04:23 v=998352 
+R:6 rc=0 t=03:04:24 v=998352 
+R:7 rc=0 t=03:04:25 v=998352 
+R:8 rc=1 t=03:04:26 v=awk: /proc/meminfo: Socket not connected 
+R:9 rc=1 t=03:04:27 v=awk: /proc/meminfo: Socket not connected 
+R:10 rc=1 t=03:04:28 v=awk: /proc/meminfo: Socket not connected 
+R:11 rc=1 t=03:04:29 v=awk: /proc/meminfo: Socket not connected 
+R:12 rc=1 t=03:04:30 v=awk: /proc/meminfo: Socket not connected 
+R:13 rc=1 t=03:04:31 v=awk: /proc/meminfo: Socket not connected 
+R:14 rc=1 t=03:04:32 v=awk: /proc/meminfo: Socket not connected 
+R:15 rc=1 t=03:04:33 v=awk: /proc/meminfo: Socket not connected 
+R:16 rc=1 t=03:04:34 v=awk: /proc/meminfo: Socket not connected 
+R:17 rc=1 t=03:04:35 v=awk: /proc/meminfo: Socket not connected 
+R:18 rc=1 t=03:04:36 v=awk: /proc/meminfo: Socket not connected 
+R:19 rc=1 t=03:04:37 v=awk: /proc/meminfo: Socket not connected 
+R:20 rc=1 t=03:04:38 v=awk: /proc/meminfo: Socket not connected 
+R:21 rc=1 t=03:04:39 v=awk: /proc/meminfo: Socket not connected 
+R:22 rc=1 t=03:04:40 v=awk: /proc/meminfo: Socket not connected 
+R:23 rc=1 t=03:04:41 v=awk: /proc/meminfo: Socket not connected 
