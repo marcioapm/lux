@@ -192,7 +192,9 @@ availability immediately. See [CLI](cli.md#runs).
   others are idle. A resume may be pinned to other CPUs.
 - **Containers a nested Run starts with Podman default to the Run's
   size.** One started without `-m` has the Run's memory limit as its
-  `memory.max` (and `memory.swap.max`), and one without `--cpus` the
+  `memory.max` with swap off (OCI `memory.swap`, memory plus swap, is set
+  to the same limit, so cgroup v2 `memory.swap.max` is 0, as for the Run
+  itself), and one without `--cpus` the
   Run's `resources.cpus` as its `cpu.max`; its own `-m` or `--cpus` win
   up to the Run's and are lowered to the Run's above it, and
   `--cgroup-conf memory.max=`/`cpu.max=` win, still capped by the Run's

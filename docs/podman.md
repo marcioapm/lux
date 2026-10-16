@@ -351,10 +351,12 @@ holds one [OCI hook](https://github.com/containers/common/blob/main/pkg/hooks/do
 for Podman's `precreate` stage, which receives the container's proposed
 OCI configuration and returns it: `lux-shim oci-defaults` (the shim
 binary every Run already has, read-only) sets `linux.resources.memory`
-(limit and swap) to the Run's limit and `cpu` to the Run's quota, only
+to the Run's limit, with swap off (OCI `memory.swap` is memory plus
+swap, set to the same value, so cgroup v2 `memory.swap.max` is 0), and
+`cpu` to the Run's quota, only
 where the configuration has none and `unified` sets no `memory.max` or
 `cpu.max`. An explicit `-m` or `--cpus` larger than the Run's (or
-unlimited, `-1`) is lowered to the Run's: the Run's cgroup caps it
+unlimited, `-1` or `0`) is lowered to the Run's: the Run's cgroup caps it
 anyway, and a container reading `4g` would size itself to memory it
 cannot have. crun runs as usual; nothing wraps it. The runner registers
 the hook only when its `--shim` lists `oci-defaults-v1` in
@@ -370,8 +372,11 @@ above its namespace's root.
 
 With `--cpuset`, inner containers inherit the Run's CPUs as their
 affinity and see that many with `nproc`; the default `cpu.max` makes
-ClickHouse, which ignores affinity, agree.
-`tests/suites/test_run_size.py` checks both, with real ClickHouse and JVMs.
+ClickHouse, which ignores affinity, agree. Without `--cpuset` the
+default `cpu.max` alone holds ClickHouse's threads and the JVM's CPU
+count to the Run's `cpus`.
+`tests/suites/test_run_size.py` checks both runner modes, with real
+ClickHouse and JVMs.
 
 Rootless Docker does not read containers.conf. Its containers inherit the
 Run's CPUs (affinity; `docker info` NCPU is the Run's), but in a nested
@@ -387,13 +392,21 @@ read-only, as in a Run that is not split) runc's mkdir fails, the
 container stays in dockerd's cgroup and sees its limits (measured, by
 remounting `/sys/fs/cgroup` read-only in dockerd's mount namespace).
 `docker run --cgroupns=host` (or `default-cgroupns-mode: host` in the
-workload's `daemon.json`) is not a way round it: the container is still
-in `workload/<id>`, whose `memory.max` is `max`, and ClickHouse stops at
-the first `memory.max` it finds walking up from its own cgroup, so it
-still sees no limit. Only a reader that takes the minimum over all
-ancestors (the JVM from 21.0.9 / 24) would find the Run's. This is
+workload's `daemon.json`) is a partial way round it. Measured in a 2 CPU /
+1 GiB nested Run with `--cpuset` (the Run's `memory.max` 1022312448), on
+a 32-CPU host:
+
+| inner Docker container | ClickHouse memory / threads | JVM 21 heap / CPUs | JVM 17 heap / CPUs |
+|---|---|---|---|
+| no flags (`memory.max` and `cpu.max` read `max`, `nproc` 2) | 13800372811 / 32 | 16492003328 / 2 | 16492003328 / 2 |
+| `-m 512m --cpus 1` | as no flags: ignored | as no flags | as no flags |
+| `--cgroupns=host` | 842250211 / 2 | 255852544 / 2 | 16492003328 / 2 |
+
+With `--cgroupns=host` ClickHouse's memory is 0.82 of the Run's limit
+(0.9 in the Run itself) and the JVM 21 heap matches the Run's; the JVM
+17 heap is still sized to the host. This is
 open: `test_run_size.py::test_inner_docker_containers_see_the_runs_size`
-expects the Run's limits and is marked as an expected failure until then.
+expects the Run's memory limit and is marked as an expected failure until then.
 
 ### Out of memory
 

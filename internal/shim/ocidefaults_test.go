@@ -3,6 +3,8 @@ package shim
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -81,14 +83,72 @@ func TestOCIDefaultsFillsOnlyWhatIsUnset(t *testing.T) {
 	}
 }
 
-// Everything else in the config passes through, numbers as written.
+func decodeOCI(t *testing.T, s string) map[string]any {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// The whole config comes back as it went in, unknown keys and numbers
+// beyond float64 included, but for exactly the fields the hook fills:
+// memory limit and swap, cpu quota and period. Existing cpu and memory
+// fields (shares, cpus, mems, reservation) and unified keys stay.
 func TestOCIDefaultsKeepsTheRest(t *testing.T) {
-	in := `{"ociVersion":"1.2.1","process":{"user":{"uid":18446744073709551615}},"linux":{"resources":{"pids":{"limit":2048}},"uidMappings":[{"containerID":0,"hostID":1,"size":65536}]},"annotations":{"a":"b"}}`
-	got := runDefaults(t, in, "0", "0", "0")
-	b, _ := json.Marshal(got)
-	if !strings.Contains(string(b), `"uid":18446744073709551615`) || !strings.Contains(string(b), `"pids":{"limit":2048}`) ||
-		!strings.Contains(string(b), `"annotations":{"a":"b"}`) || strings.Contains(string(b), `"memory"`) || strings.Contains(string(b), `"cpu"`) {
-		t.Fatalf("zero limits changed the config: %s", b)
+	const doc = `{"ociVersion":"1.2.1","hooks":{"prestart":[{"path":"/x"}]},"process":{"user":{"uid":18446744073709551615}},
+		"linux":{"resources":{"cpu":{"shares":512,"cpus":"0-1","mems":"0"%s},"memory":{"reservation":1048576,"disableOOMKiller":false%s},
+		"pids":{"limit":2048},"unified":{"io.weight":"50"}},"uidMappings":[{"containerID":0,"hostID":1,"size":65536}],"x-unknown":{"n":1}},
+		"annotations":{"a":"b"},"x-top":[1,2]}`
+	in := fmt.Sprintf(doc, "", "")
+	want := decodeOCI(t, fmt.Sprintf(doc, `,"quota":200000,"period":100000`, `,"limit":1022312448,"swap":1022312448`))
+	got := runDefaults(t, in, "1022312448", "200000", "100000")
+	if !reflect.DeepEqual(got, want) {
+		g, _ := json.Marshal(got)
+		w, _ := json.Marshal(want)
+		t.Fatalf("got  %s\nwant %s", g, w)
+	}
+	// A Run without limits changes nothing at all.
+	if got := runDefaults(t, in, "0", "0", "0"); !reflect.DeepEqual(got, decodeOCI(t, in)) {
+		t.Fatalf("zero limits changed the config: %v", got)
+	}
+}
+
+// Edge cases of what counts as set, each with the whole resources object
+// expected back.
+func TestOCIDefaultsEdgeCases(t *testing.T) {
+	const run = "1022312448"
+	for _, c := range []struct{ name, in, want string }{
+		// Swap alone in unified: the limit is filled, swap left to unified.
+		{"unified memory.swap.max without memory.max", `{"linux":{"resources":{"unified":{"memory.swap.max":"0"}}}}`,
+			`{"unified":{"memory.swap.max":"0"},"memory":{"limit":` + run + `},"cpu":{"quota":200000,"period":100000}}`},
+		// 0 is no limit to the runtimes, as -1 is: lowered to the Run's.
+		{"memory.limit 0", `{"linux":{"resources":{"memory":{"limit":0}}}}`,
+			`{"memory":{"limit":` + run + `},"cpu":{"quota":200000,"period":100000}}`},
+		// Period 0 counts as the kernel's 100000us: 1.5 CPUs, within 2.
+		{"cpu.period 0", `{"linux":{"resources":{"cpu":{"quota":150000,"period":0}}}}`,
+			`{"memory":{"limit":` + run + `,"swap":` + run + `},"cpu":{"quota":150000,"period":0}}`},
+		{"a non-integer limit is the Run's", `{"linux":{"resources":{"memory":{"limit":1e9}}}}`,
+			`{"memory":{"limit":` + run + `},"cpu":{"quota":200000,"period":100000}}`},
+		// quota*runPeriod overflows int64: the ratio is 1 CPU, kept.
+		{"huge quota and period", `{"linux":{"resources":{"cpu":{"quota":9223372036854775807,"period":9223372036854775807}}}}`,
+			`{"memory":{"limit":` + run + `,"swap":` + run + `},"cpu":{"quota":9223372036854775807,"period":9223372036854775807}}`},
+		{"no linux at all", `{"ociVersion":"1.2.1"}`,
+			`{"memory":{"limit":` + run + `,"swap":` + run + `},"cpu":{"quota":200000,"period":100000}}`},
+		// unified cpu.max wins over the typed default; memory still filled.
+		{"unified cpu.max", `{"linux":{"resources":{"unified":{"cpu.max":"50000 100000"}}}}`,
+			`{"unified":{"cpu.max":"50000 100000"},"memory":{"limit":` + run + `,"swap":` + run + `}}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := resources(runDefaults(t, c.in, run, "200000", "100000"))
+			if want := decodeOCI(t, c.want); !reflect.DeepEqual(got, want) {
+				g, _ := json.Marshal(got)
+				t.Fatalf("resources %s, want %s", g, c.want)
+			}
+		})
 	}
 }
 

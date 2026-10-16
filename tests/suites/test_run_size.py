@@ -15,7 +15,12 @@ from env import ALPINE_IMAGE
 
 GIB = 1 << 30
 SIZE = {"cpus": 2, "memory": "1Gi"}
-INNER = f"podman load -q -i /opt/alpine.tar >/dev/null && podman run --rm --network=none"
+# The sizing tests' Run: it asks 2 GiB of a runner offering twice what the
+# host can give Runs, so its limit is half of that, ~1 GiB, on any host
+# (scaled_runner). What it asked and what it got are then far apart.
+SIZED = {"cpus": 2, "memory": "2Gi"}
+SIZED_MEMORY = 2 * GIB
+INNER = "podman load -q -i /opt/alpine.tar >/dev/null && podman run --rm --network=none"
 # One line of what the process sees: its memory.max, cpu.max, nproc and
 # affinity. In a script file run inside the Run, not on the host.
 SHOW = ("echo mem=$(cat /sys/fs/cgroup/memory.max) cpu=$(tr ' ' _ < /sys/fs/cgroup/cpu.max) "
@@ -33,7 +38,41 @@ def fields(out: str, prefix: str) -> dict[str, str]:
 
 def nested(script: str, image: str = NESTED_IMAGE, **extra) -> dict:
     return generic(image, "sh", "-c", f"exec 2>&1; {script}", sandbox={"nestedContainers": True},
-                   resources=SIZE, **extra)
+                   resources=SIZED, **extra)
+
+
+def cpu_list(s: str) -> set[int]:
+    """The CPUs of a kernel cpu-list ("0-2,5")."""
+    out: set[int] = set()
+    for part in s.strip().split(","):
+        lo, _, hi = part.partition("-")
+        out |= set(range(int(lo), int(hi or lo) + 1))
+    return out
+
+
+def test_cpu_list_parses_ranges_and_commas():
+    assert cpu_list("0-2,5") == {0, 1, 2, 5}
+    assert cpu_list("3") == {3}
+    assert cpu_list("1,3") == {1, 3}
+    assert cpu_list("0-1,4-5\n") == {0, 1, 4, 5}
+    assert cpu_list("0-2") & cpu_list("1,3") == {1}
+
+
+def page_size(host) -> int:
+    return int(host.exec("getconf", "PAGESIZE").strip())
+
+
+def scaled_runner(runners, host, *flags: str) -> int:
+    """Starts host's runner offering twice the memory the host can give
+    Runs (MemTotal less the default 512 MiB headroom), so a Run's limit is
+    half of what it asks, and returns a SIZED Run's limit: SIZED_MEMORY/2
+    in whole pages (1 GiB), whatever the host's RAM."""
+    kb = next(l.split()[1] for l in host.exec("cat", "/proc/meminfo").splitlines() if l.startswith("MemTotal:"))
+    offered = 2 * (int(kb) * 1024 - (512 << 20))
+    runners.start(host, "--memory", str(offered), *flags)
+    limit = host.memory_limit(SIZED_MEMORY, offered=offered)
+    assert limit < SIZED_MEMORY, (limit, offered)
+    return limit
 
 
 def run_to_end(lux, spec: dict, timeout: float = 240) -> str:
@@ -71,12 +110,12 @@ def test_a_fractional_run_gets_one_cpu(lux, runners, hosts):
 
 def test_concurrent_whole_cpu_runs_get_disjoint_sets(lux, runners, hosts):
     runners.start(hosts[0], "--cpuset")
-    ids = [lux.submit(generic(ALPINE_IMAGE, "sh", "-c", f"echo set=$LUX_CPUSET; sleep 600", resources=SIZE))
+    ids = [lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo set=$LUX_CPUSET; sleep 600", resources=SIZE))
            for _ in range(2)]
     sets = []
     for run_id in ids:
         out = lux.wait_output(run_id, "set=", timeout=90)
-        sets.append(set(fields(out, "set=")["set"].replace("-", ",").split(",")))
+        sets.append(cpu_list(fields(out, "set=")["set"]))
     for run_id in ids:
         lux.run("terminate", run_id)
     assert all(len(s) == 2 for s in sets) and not sets[0] & sets[1], sets
@@ -98,7 +137,8 @@ def test_a_restarted_runner_keeps_the_set(lux, runners, hosts):
     for r in (first, second):
         lux.run("terminate", r)
     assert pinned == before, (pinned, before)
-    assert before != after and not set(before.split(",")) & set(after.split(",")), (before, after)
+    b, a = cpu_list(before), cpu_list(after)
+    assert len(b) == len(a) == 2 and not b & a, (before, after)
 
 
 def test_without_cpuset_nothing_is_pinned(lux, runners, hosts):
@@ -118,21 +158,22 @@ def test_without_cpuset_nothing_is_pinned(lux, runners, hosts):
 def test_inner_containers_default_to_the_runs_size(lux, runners, hosts):
     """An inner Podman container without -m or --cpus has the Run's
     memory.max and CPU quota, and the Run's CPUs; explicit limits within the
-    Run's win, larger ones are lowered to the Run's."""
-    runners.start(hosts[0], "--nested", "--cpuset")
-    limit = hosts[0].memory_limit(GIB)
+    Run's win, larger ones are lowered to the Run's. The explicit sizes are
+    derived from the Run's limit, so they hold on any host."""
+    limit = scaled_runner(runners, hosts[0], "--nested", "--cpuset")
+    inner = limit // 2 // page_size(hosts[0]) * page_size(hosts[0])
     out = run_to_end(lux, nested(
         SHOW_FILE +
         "echo \"run: $(sh /tmp/show.sh)\"; "
         f"echo \"none: $({INNER} {SHOW_INNER})\"; "
-        f"echo \"flags: $(podman run --rm --network=none -m 512m --cpus 1 {SHOW_INNER})\"; "
-        f"echo \"over: $(podman run --rm --network=none -m 4g --cpus 4 {SHOW_INNER})\"; "
+        f"echo \"flags: $(podman run --rm --network=none -m {inner}b --cpus 1 {SHOW_INNER})\"; "
+        f"echo \"over: $(podman run --rm --network=none -m {2 * limit}b --cpus 4 {SHOW_INNER})\"; "
         f"echo \"info: cpus=$(podman info --format '{{{{.Host.CPUs}}}}')\""))
     run, none, flags, over = fields(out, "run:"), fields(out, "none:"), fields(out, "flags:"), fields(out, "over:")
     assert run["mem"] == str(limit) and run["nproc"] == "2", out
     assert none["mem"] == str(limit) and none["cpu"] == "200000_100000" and none["nproc"] == "2", out
     assert none["aff"] == run["aff"], out
-    assert flags["mem"] == str(512 << 20) and flags["cpu"] == "100000_100000", out
+    assert flags["mem"] == str(inner) and flags["cpu"] == "100000_100000", out
     assert over["mem"] == str(limit) and over["cpu"] == "200000_100000", out
     assert fields(out, "info:")["cpus"] == "2", out
 
@@ -141,23 +182,50 @@ DOCKERD = """
 export XDG_RUNTIME_DIR=/tmp/xdg DOCKER_HOST=unix:///tmp/xdg/docker.sock; mkdir -p /tmp/xdg
 dockerd-rootless >/tmp/dockerd.log 2>&1 &
 for i in $(seq 90); do docker info >/dev/null 2>&1 && break; sleep 1; done
+docker info >/dev/null 2>&1 && echo "dockerd: up=1" || { echo "dockerd: up=0"; tail -20 /tmp/dockerd.log; }
 docker load -q -i /opt/alpine.tar >/dev/null
 """
 
+_docker_out: dict[str, tuple[str, int]] = {}
 
-@pytest.mark.xfail(strict=True, reason="open finding: rootless runc puts Docker's inner containers in a new "
-                                       "workload/<id> with no limits, their cgroupns root (docs/podman.md)")
-def test_inner_docker_containers_see_the_runs_size(lux, runners, hosts):
-    """Docker containers in a Run should see the Run's memory.max and quota
-    at their cgroup namespace's root, and the Run's CPUs. Today only the
-    CPUs hold (affinity, NCPU); the limits read max."""
-    runners.start(hosts[0], "--nested", "--cpuset")
-    limit = hosts[0].memory_limit(GIB)
-    out = run_to_end(lux, nested(SHOW_FILE + DOCKERD + f"echo \"inner: $(docker run --rm --network=none {SHOW_INNER})\"; "
-                                 "echo \"info: cpus=$(docker info --format '{{.NCPU}}')\"", image=DOCKER_IMAGE))
-    inner = fields(out, "inner:")
-    assert inner["mem"] == str(limit) and inner["cpu"] == "200000_100000" and inner["nproc"] == "2", out
+
+def docker_probe(lux, runners, hosts) -> tuple[str, int]:
+    """What an inner rootless Docker container sees in a 2-CPU nested Run
+    (--cpuset), and the Run's limit; run once per session. A dockerd that
+    did not start, or no inner line, fails here (pytest.fail, not an
+    assertion), so it never counts as the expected failure below."""
+    if "out" not in _docker_out:
+        try:
+            limit = scaled_runner(runners, hosts[0], "--nested", "--cpuset")
+            run_id = lux.submit(nested(SHOW_FILE + DOCKERD + f"echo \"inner: $(docker run --rm --network=none {SHOW_INNER})\"; "
+                                       "echo \"info: cpus=$(docker info --format '{{.NCPU}}')\"", image=DOCKER_IMAGE))
+            run = lux.wait_state(run_id, "succeeded", "failed", timeout=240)
+            out = lux.logs(run_id)
+        except AssertionError as e:  # the harness's waits fail by assertion
+            pytest.fail(f"the Docker probe did not run: {e}")
+        if run["state"] != "succeeded" or fields(out, "dockerd:").get("up") != "1" or "mem" not in fields(out, "inner:"):
+            pytest.fail(f"the Docker probe did not run: {run.get('stateReason')}\n{out}")
+        _docker_out["out"] = (out, limit)
+    return _docker_out["out"]
+
+
+def test_inner_docker_containers_get_the_runs_cpus(lux, runners, hosts):
+    """Docker containers in a pinned nested Run get the Run's CPUs: their
+    affinity, and the engine's NCPU."""
+    out, _ = docker_probe(lux, runners, hosts)
+    assert fields(out, "inner:")["nproc"] == "2", out
     assert fields(out, "info:")["cpus"] == "2", out
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="open finding: rootless runc puts Docker's inner containers in a new workload/<id> with "
+                          "no limits, their cgroupns root (docs/podman.md)")
+def test_inner_docker_containers_see_the_runs_size(lux, runners, hosts):
+    """Docker containers should see the Run's memory.max. It reads max
+    today; only this memory assertion is expected to fail."""
+    out, limit = docker_probe(lux, runners, hosts)
+    inner = fields(out, "inner:")
+    assert inner["mem"] == str(limit), out
 
 
 # ---- real applications -------------------------------------------------------
@@ -177,6 +245,7 @@ for i in $(seq 600); do $L client -q 'SELECT 1' >/dev/null 2>&1 && break; kill -
 $L client -q "SELECT '$1-ch: mem=' || value || ' threads=' || toString(getSetting('max_threads')) FROM system.server_settings WHERE name='max_server_memory_usage'" \
   || grep -v '^ *[0-9]*\. ' $CH/out.log | head -5
 kill $ch; wait $ch
+echo "$1-nproc: n=$(nproc)"
 for v in 21 17; do
   /opt/apps/jvm$v/bin/java -XX:+PrintFlagsFinal -XshowSettings:system -version 2>&1 |
     awk -v p="$1-jvm$v:" '/ MaxHeapSize /{h=$4} /Effective CPU Count/{c=$4} END{print p " heap=" h " cpus=" c}'
@@ -186,37 +255,54 @@ EOF
 APPS_INNER = "-v /opt/apps:/opt/apps:ro -v /tmp/apps.sh:/apps.sh:ro " + ALPINE_IMAGE + " sh /apps.sh"
 
 
-def assert_sized(out: str, label: str, limit: int, cpus: int) -> None:
+def assert_sized(out: str, label: str, limit: int, cpus: int, wrong: int) -> None:
     """ClickHouse keeps max_server_memory_usage at 0.9 of the memory it
     sees, the JVM's default heap is a quarter of it; both use as many
-    threads as CPUs they see."""
+    threads as CPUs they see. limit is the memory the row must see; wrong,
+    the one it would see if sized from the wrong source (what the Run
+    asked, or the Run's limit for an explicit -m). The tolerances (1% of
+    limit for ClickHouse, 4 MiB for the heap's alignment) must tell them
+    apart, or the row proves nothing and the test is skipped."""
+    ch_tol, heap_tol = 0.01 * limit, 4 << 20
+    if abs(0.9 * wrong - 0.9 * limit) <= ch_tol or abs(wrong // 4 - limit // 4) <= heap_tol:
+        pytest.skip(f"{label}: limit {limit} and {wrong} are within the tolerances on this host")
     print(*(l for l in out.splitlines() if l.startswith(f"{label}-")), sep="\n")
     ch = fields(out, f"{label}-ch:")
-    assert "mem" in ch and abs(int(ch["mem"]) - 0.9 * limit) < 0.01 * limit and ch["threads"] == str(cpus), \
+    assert "mem" in ch and abs(int(ch["mem"]) - 0.9 * limit) < ch_tol and ch["threads"] == str(cpus), \
         (label, ch, limit, out)
+    assert abs(int(ch["mem"]) - 0.9 * wrong) > ch_tol, (label, ch, wrong)
     for v in (21, 17):
         jvm = fields(out, f"{label}-jvm{v}:")
-        assert jvm.get("heap") and abs(int(jvm["heap"]) - limit / 4) < 0.02 * limit and jvm["cpus"] == str(cpus), \
+        assert jvm.get("heap") and abs(int(jvm["heap"]) - limit // 4) <= heap_tol and jvm["cpus"] == str(cpus), \
             (label, v, jvm, limit, out)
+        assert abs(int(jvm["heap"]) - wrong // 4) > heap_tol, (label, v, jvm, wrong)
 
 
 def test_clickhouse_and_the_jvm_size_to_a_plain_run(lux, runners, hosts):
-    runners.start(hosts[0], "--cpuset")
-    limit = hosts[0].memory_limit(GIB)
-    out = run_to_end(lux, generic(SIZING_IMAGE, "sh", "-c", APPS + "sh /tmp/apps.sh run", resources=SIZE),
+    limit = scaled_runner(runners, hosts[0], "--cpuset")
+    out = run_to_end(lux, generic(SIZING_IMAGE, "sh", "-c", APPS + "sh /tmp/apps.sh run", resources=SIZED),
                      timeout=420)
-    assert_sized(out, "run", limit, 2)
+    assert_sized(out, "run", limit, 2, SIZED_MEMORY)
 
 
-def test_clickhouse_and_the_jvm_size_to_a_nested_run_and_its_podman_containers(lux, runners, hosts):
+@pytest.mark.parametrize("cpuset", [True, False], ids=["cpuset", "quota-only"])
+def test_clickhouse_and_the_jvm_size_to_a_nested_run_and_its_podman_containers(lux, runners, hosts, cpuset):
     """In a nested Run, in its Podman containers without -m/--cpus (the
-    Run's size, from the precreate defaults) and with them (theirs)."""
-    runners.start(hosts[0], "--nested", "--cpuset")
-    limit = hosts[0].memory_limit(GIB)
+    Run's size, from the precreate defaults) and with them (theirs, derived
+    from the Run's limit). quota-only: a runner without --cpuset, so every
+    process sees all the host's CPUs and only cpu.max (the hook's default
+    quota, inside) holds ClickHouse's and the JVM's threads to the Run's."""
+    host_n = host_cpus(hosts[0])
+    if not cpuset and host_n <= SIZED["cpus"]:
+        pytest.skip(f"the host has {host_n} CPUs: without --cpuset the quota cannot be told from the CPU count")
+    limit = scaled_runner(runners, hosts[0], "--nested", *(["--cpuset"] if cpuset else []))
+    inner = limit // 2 // page_size(hosts[0]) * page_size(hosts[0])
     out = run_to_end(lux, nested(
         APPS + "sh /tmp/apps.sh run; "
         f"{INNER} {APPS_INNER} none; "
-        f"podman run --rm --network=none -m 512m --cpus 1 {APPS_INNER} flags", image=SIZING_IMAGE), timeout=900)
-    assert_sized(out, "run", limit, 2)
-    assert_sized(out, "none", limit, 2)
-    assert_sized(out, "flags", 512 << 20, 1)
+        f"podman run --rm --network=none -m {inner}b --cpus 1 {APPS_INNER} flags", image=SIZING_IMAGE), timeout=900)
+    assert_sized(out, "run", limit, 2, SIZED_MEMORY)
+    assert_sized(out, "none", limit, 2, SIZED_MEMORY)
+    assert_sized(out, "flags", inner, 1, limit)
+    nproc = {label: fields(out, f"{label}-nproc:").get("n") for label in ("run", "none", "flags")}
+    assert set(nproc.values()) == {str(2 if cpuset else host_n)}, (nproc, out)

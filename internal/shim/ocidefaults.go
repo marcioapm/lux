@@ -52,9 +52,9 @@ func ociDefaults(args []string, in io.Reader, out io.Writer) error {
 	unified, _ := res["unified"].(map[string]any)
 	mem := child(res, "memory")
 	if limit, set := mem["limit"]; set && memory > 0 {
-		// -m above the Run's limit, or -1 (unlimited), would read as more
-		// than the Run can give.
-		if n, ok := ociInt(limit); !ok || n < 0 || n > memory {
+		// -m above the Run's limit, or -1 or 0 (no limit to the runtimes),
+		// would read as more than the Run can give.
+		if n, ok := ociInt(limit); !ok || n <= 0 || n > memory {
 			mem["limit"] = memory
 		}
 	} else if !set && unified["memory.max"] == nil && memory > 0 {
