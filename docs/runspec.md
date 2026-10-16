@@ -192,15 +192,13 @@ availability immediately. See [CLI](cli.md#runs).
   others are idle. A resume may be pinned to other CPUs.
 - **Containers a nested Run with `sandbox.cgroupDelegation: true` starts
   with Podman default to the Run's size.** One started without `-m` has
-  the Run's memory limit as its
-  `memory.max` with swap off (OCI `memory.swap`, memory plus swap, is set
-  to the same limit, so cgroup v2 `memory.swap.max` is 0, as for the Run
-  itself), and one without `--cpus` the
-  Run's `resources.cpus` as its `cpu.max`; its own `-m` or `--cpus` win
-  up to the Run's and are lowered to the Run's above it, and
-  `--cgroup-conf memory.max=`/`cpu.max=` win, still capped by the Run's
-  limits. Programs that size themselves from their cgroup (ClickHouse, the
-  JVM) then size to the Run, not the host ([why](podman.md#limits-of-nested-containers)).
+  the Run's memory limit as its `memory.max`, with swap off as for the Run
+  itself, and one without `--cpus` the Run's `resources.cpus` as its
+  `cpu.max`; its own `-m` or `--cpus` win up to the Run's and are lowered
+  to the Run's above it, and `--cgroup-conf memory.max=`/`cpu.max=` win,
+  still capped by the Run's limits. Programs that size themselves from
+  their cgroup (ClickHouse, the JVM) then size to the Run, not the host
+  ([why](podman.md#default-limits-of-nested-containers)).
   lux does it with a Podman `precreate` hook registered through
   `CONTAINERS_CONF_OVERRIDE`; a spec that sets `CONTAINERS_CONF_OVERRIDE`
   itself opts out, and a runner whose `--shim` predates the hook registers

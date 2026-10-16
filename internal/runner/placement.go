@@ -1235,16 +1235,18 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 	cfg.DelegateCgroup = sp.Sandbox.NestedContainers && sp.Sandbox.CgroupDelegation
 	// Inner-container defaults need the delegated cgroup: without it inner
 	// engines cannot make cgroups and their containers already sit in the
-	// Run's, reading its limits (#119).
-	if cfg.DelegateCgroup && p.r.shimOCIDefaults {
-		if err := writeInnerDefaults(rt, p.r.mem.limit(int64(sp.Resources.Memory)), sp.Resources.CPUs); err != nil {
-			return err
+	// Run's, reading its limits.
+	if cfg.DelegateCgroup {
+		if p.r.shimOCIDefaults {
+			if err := writeInnerDefaults(rt, p.r.mem.limit(int64(sp.Resources.Memory)), sp.Resources.CPUs); err != nil {
+				return err
+			}
+			cfg.Env = innerDefaultsEnv(cfg.Env, sp.Env)
+		} else {
+			p.r.noOCIDefaults.Do(func() {
+				p.r.log.Warn("this runner's --shim lacks " + proto.ShimCapOCIDefaults + ": containers nested Runs start get no default limits (docs/podman.md)")
+			})
 		}
-		cfg.Env = innerDefaultsEnv(cfg.Env, sp.Env)
-	} else if cfg.DelegateCgroup {
-		p.r.noOCIDefaults.Do(func() {
-			p.r.log.Warn("this runner's --shim lacks " + proto.ShimCapOCIDefaults + ": containers nested Runs start get no default limits (docs/podman.md)")
-		})
 	}
 	if b := sp.Workload.BeforeStop; b != nil {
 		cfg.BeforeStop = b.Command

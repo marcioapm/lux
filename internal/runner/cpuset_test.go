@@ -72,7 +72,7 @@ func TestCpusetPlacesByDemand(t *testing.T) {
 			}
 		})
 	}
-	// The reviewers' cases, as demand: no CPU above one CPU of time.
+	// As demand: no CPU above one CPU of time.
 	for _, reqs := range [][]float64{{1, 0.1, 0.9}, {0.5, 0.5, 0.5, 0.5, 2}} {
 		for c, d := range demandOf(place(cpus(len(reqs)), reqs...), reqs) {
 			if d > 1+demandEpsilon {

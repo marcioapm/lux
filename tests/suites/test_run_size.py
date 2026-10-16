@@ -229,7 +229,6 @@ def test_inner_docker_containers_see_the_runs_size(lux, runners, hosts):
     CPU quota."""
     out, limit = docker_probe(lux, runners, hosts)
     inner = fields(out, "inner:")
-    print("inner:", inner, "limit:", limit)
     assert inner["own"] == "/" and inner["ownmem"] == str(limit), out
     assert inner["mem"] == str(limit) and inner["cpu"] == "200000_100000", out
 

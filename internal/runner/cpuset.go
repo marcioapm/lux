@@ -37,9 +37,6 @@ func cpusetFor(host []int, held []holding, cpus float64) []int {
 	n = min(n, len(host))
 	demand := make(map[int]float64, len(host))
 	for _, h := range held {
-		if len(h.set) == 0 {
-			continue
-		}
 		for _, c := range h.set {
 			demand[c] += h.cpus / float64(len(h.set))
 		}
