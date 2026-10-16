@@ -531,6 +531,14 @@ from `host_rates`: harmless for AWS list prices, which rarely change, but
 a static host's operator who changes a price mid-placement sees the new
 price on all of it.
 
+**Partial discovery follows the host's current network.** A placement's
+lines and hours are priced, or listed `partial-network`, by its host's
+`hosts.network.partial` at each evaluation until the placement freezes,
+so a host that turns partial mid-placement unprices all of a live
+placement's transfer, hours included. A rebuilt host hour also uses the
+current flag: no history of `partial` is kept, so hours written before a
+flip keep their pricing unless a rewind rebuilds them.
+
 **Cross-AZ.** AWS publishes both `DataTransfer-Regional-Bytes` ($0.01) and
 `DataTransfer-xAZ-*` ($0) usage types with the same description; lux
 prices cross-AZ at the regional rate; confirm against your CUR.
@@ -591,7 +599,11 @@ static pool's defaults with `lux pools set --price-transfer
 traffic outside the listed subnets is `internet`; without one, only
 `local` and `unknown` exist and nothing is priced. `--price-public-ip` is
 the host's whole charge per hour; 0 or unset opens no period, and a change
-opens a new one. Transfer prices have no periods (see "Data transfer"). `lux hosts get` prints the price table.
+opens a new one. Transfer prices have no periods (see "Data transfer").
+A price is per class: a class with neither direction priced is
+`no-price`, but an omitted direction inside a priced class is not charged
+(`zone=0.01` prices both directions). `lux hosts get` prints the price
+table.
 
 ## 3. Prices
 
