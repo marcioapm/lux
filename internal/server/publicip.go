@@ -53,26 +53,23 @@ func (s *Server) refreshPublicIP(ctx context.Context) {
 		return
 	}
 	type key struct{ provider, region string }
-	prices := map[key]DataTransferPrices{}
-	failed := map[key]bool{}
+	// A region's price, nil after a failed fetch (logged once).
+	prices := map[key]*DataTransferPrices{}
 	for _, h := range hosts {
 		k := key{h.Provider, h.Region}
-		if failed[k] {
-			continue
-		}
 		price, ok := prices[k]
 		if !ok {
-			price, err = s.dataTransferPrice(ctx, h.Provider, h.Region)
-			if err != nil {
-				failed[k] = true
-				if ctx.Err() == nil {
-					s.log.Warn("costs: public IPv4 price", "provider", h.Provider, "region", h.Region, "err", err)
-				}
-				continue
+			p, err := s.dataTransferPrice(ctx, h.Provider, h.Region)
+			if err == nil {
+				price = &p
+			} else if ctx.Err() == nil {
+				s.log.Warn("costs: public IPv4 price", "provider", h.Provider, "region", h.Region, "err", err)
 			}
 			prices[k] = price
 		}
-		s.openPublicIP(ctx, h, price)
+		if price != nil {
+			s.openPublicIP(ctx, h, *price)
+		}
 	}
 }
 
