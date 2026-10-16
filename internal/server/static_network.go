@@ -216,8 +216,7 @@ func ValidPoolTransferPrices(provider string, p *DataTransferPrices) error {
 	if provider != "static" {
 		return errf(http.StatusUnprocessableEntity, "invalid_pool", "transferPrices is for static pools: %s pools are priced by the provider", provider)
 	}
-	t := trimmedDataTransfer(*p)
-	*p = t
+	*p = trimmedDataTransfer(*p)
 	return validTransferPrices(p)
 }
 
