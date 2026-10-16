@@ -246,11 +246,11 @@ func TestCpusetOfAReplacedEpochHeldUntilItExits(t *testing.T) {
 // Re-adoption through the run state file: a started placement's set and
 // its spec's CPUs are saved as JSON, read back by readopt after a restart,
 // and held as that demand, so the next 0.5-CPU placement packs beside it
-// (as a whole CPU held, it would take CPU 1).
+// on CPU 2 (held as a whole CPU, or not held at all, it would take CPU 0).
 func TestCpusetReadoptedFromRunState(t *testing.T) {
 	g := newReclaimRig(t, false)
 	p := g.running(t)
-	p.state.Cpuset = "0"
+	p.state.Cpuset = "2"
 	p.state.Spec.Resources.CPUs = 0.5
 	p.state.Egress = &egressState{Unrestricted: true, Interface: "lux0", Gateway: "10.88.0.1"}
 	if err := p.saveState(); err != nil {
@@ -268,8 +268,8 @@ func TestCpusetReadoptedFromRunState(t *testing.T) {
 	got := next.cpuset()
 	q.kill(g.ctx)
 	mustEnd(t, q, "the re-adopted placement never ended")
-	if got != "0" {
-		t.Fatalf("beside the re-adopted 0.5 on CPU 0: %q, want 0 (packed)", got)
+	if got != "2" {
+		t.Fatalf("beside the re-adopted 0.5 on CPU 2: %q, want 2 (packed)", got)
 	}
 }
 
