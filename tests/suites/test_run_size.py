@@ -1,9 +1,11 @@
 """Run size: what a Run's processes see of its size. A runner with
 --cpuset pins each Run to ceil(resources.cpus) of its CPUs; containers a
-nested Run starts with Podman default to the Run's memory and CPUs (a
-precreate OCI hook, docs/podman.md); and real applications that size
-themselves from their cgroup (ClickHouse, the JVM) size to the Run, not the
-host. A runner without --cpuset behaves as before."""
+nested Run with sandbox.cgroupDelegation starts with Podman default to the
+Run's memory and CPUs (a precreate OCI hook, docs/podman.md); Docker
+containers in a nested Run without delegation stay in the Run's cgroup; and
+real applications that size themselves from their cgroup (ClickHouse, the
+JVM) size to the Run, not the host. A runner without --cpuset behaves as
+before."""
 
 from __future__ import annotations
 
@@ -36,9 +38,11 @@ def fields(out: str, prefix: str) -> dict[str, str]:
     return dict(w.split("=", 1) for w in line.split() if "=" in w)
 
 
-def nested(script: str, image: str = NESTED_IMAGE, **extra) -> dict:
-    return generic(image, "sh", "-c", f"exec 2>&1; {script}", sandbox={"nestedContainers": True},
-                   resources=SIZED, **extra)
+def nested(script: str, image: str = NESTED_IMAGE, *, cgroup_delegation: bool = False, **extra) -> dict:
+    sandbox = {"nestedContainers": True}
+    if cgroup_delegation:
+        sandbox["cgroupDelegation"] = True
+    return generic(image, "sh", "-c", f"exec 2>&1; {script}", sandbox=sandbox, resources=SIZED, **extra)
 
 
 def cpu_list(s: str) -> set[int]:
@@ -156,7 +160,8 @@ def test_without_cpuset_nothing_is_pinned(lux, runners, hosts):
 # ---- nested containers -------------------------------------------------------
 
 def test_inner_containers_default_to_the_runs_size(lux, runners, hosts):
-    """An inner Podman container without -m or --cpus has the Run's
+    """In a nested Run with cgroup delegation, an inner Podman container
+    without -m or --cpus has the Run's
     memory.max and CPU quota, and the Run's CPUs; explicit limits within the
     Run's win, larger ones are lowered to the Run's. The explicit sizes are
     derived from the Run's limit, so they hold on any host."""
@@ -168,7 +173,7 @@ def test_inner_containers_default_to_the_runs_size(lux, runners, hosts):
         f"echo \"none: $({INNER} {SHOW_INNER})\"; "
         f"echo \"flags: $(podman run --rm --network=none -m {inner}b --cpus 1 {SHOW_INNER})\"; "
         f"echo \"over: $(podman run --rm --network=none -m {2 * limit}b --cpus 4 {SHOW_INNER})\"; "
-        f"echo \"info: cpus=$(podman info --format '{{{{.Host.CPUs}}}}')\""))
+        f"echo \"info: cpus=$(podman info --format '{{{{.Host.CPUs}}}}')\"", cgroup_delegation=True))
     run, none, flags, over = fields(out, "run:"), fields(out, "none:"), fields(out, "flags:"), fields(out, "over:")
     assert run["mem"] == str(limit) and run["nproc"] == "2", out
     assert none["mem"] == str(limit) and none["cpu"] == "200000_100000" and none["nproc"] == "2", out
@@ -187,22 +192,23 @@ docker load -q -i /opt/alpine.tar >/dev/null
 """
 
 _docker_out: dict[str, tuple[str, int]] = {}
+# SHOW plus the process's own cgroup and that cgroup's memory.max, which
+# ClickHouse and the JVM size from (test_nested_docker.py's CGROUP_PROBE).
+SHOW_OWN_FILE = ("cat > /tmp/show.sh <<'EOF'\n" + SHOW +
+                 " own=$(cut -d: -f3 /proc/self/cgroup) ownmem=$(cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max)"
+                 "\nEOF\n")
 
 
 def docker_probe(lux, runners, hosts) -> tuple[str, int]:
     """What an inner rootless Docker container sees in a 2-CPU nested Run
-    (--cpuset), and the Run's limit; run once per session. A dockerd that
-    did not start, or no inner line, fails here (pytest.fail, not an
-    assertion), so it never counts as the expected failure below."""
+    without cgroup delegation (--cpuset), and the Run's limit; run once per
+    session. A dockerd that did not start, or no inner line, fails here."""
     if "out" not in _docker_out:
-        try:
-            limit = scaled_runner(runners, hosts[0], "--nested", "--cpuset")
-            run_id = lux.submit(nested(SHOW_FILE + DOCKERD + f"echo \"inner: $(docker run --rm --network=none {SHOW_INNER})\"; "
-                                       "echo \"info: cpus=$(docker info --format '{{.NCPU}}')\"", image=DOCKER_IMAGE))
-            run = lux.wait_state(run_id, "succeeded", "failed", timeout=240)
-            out = lux.logs(run_id)
-        except AssertionError as e:  # the harness's waits fail by assertion
-            pytest.fail(f"the Docker probe did not run: {e}")
+        limit = scaled_runner(runners, hosts[0], "--nested", "--cpuset")
+        run_id = lux.submit(nested(SHOW_OWN_FILE + DOCKERD + f"echo \"inner: $(docker run --rm --network=none {SHOW_INNER})\"; "
+                                   "echo \"info: cpus=$(docker info --format '{{.NCPU}}')\"", image=DOCKER_IMAGE))
+        run = lux.wait_state(run_id, "succeeded", "failed", timeout=240)
+        out = lux.logs(run_id)
         if run["state"] != "succeeded" or fields(out, "dockerd:").get("up") != "1" or "mem" not in fields(out, "inner:"):
             pytest.fail(f"the Docker probe did not run: {run.get('stateReason')}\n{out}")
         _docker_out["out"] = (out, limit)
@@ -217,15 +223,15 @@ def test_inner_docker_containers_get_the_runs_cpus(lux, runners, hosts):
     assert fields(out, "info:")["cpus"] == "2", out
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="open finding: rootless runc puts Docker's inner containers in a new workload/<id> with "
-                          "no limits, their cgroupns root (docs/podman.md)")
 def test_inner_docker_containers_see_the_runs_size(lux, runners, hosts):
-    """Docker containers should see the Run's memory.max. It reads max
-    today; only this memory assertion is expected to fail."""
+    """Without cgroup delegation rootless runc leaves Docker's containers in
+    the Run's cgroup: their own cgroup is the Run's, with its memory.max and
+    CPU quota."""
     out, limit = docker_probe(lux, runners, hosts)
     inner = fields(out, "inner:")
-    assert inner["mem"] == str(limit), out
+    print("inner:", inner, "limit:", limit)
+    assert inner["own"] == "/" and inner["ownmem"] == str(limit), out
+    assert inner["mem"] == str(limit) and inner["cpu"] == "200000_100000", out
 
 
 # ---- real applications -------------------------------------------------------
@@ -287,7 +293,8 @@ def test_clickhouse_and_the_jvm_size_to_a_plain_run(lux, runners, hosts):
 
 @pytest.mark.parametrize("cpuset", [True, False], ids=["cpuset", "quota-only"])
 def test_clickhouse_and_the_jvm_size_to_a_nested_run_and_its_podman_containers(lux, runners, hosts, cpuset):
-    """In a nested Run, in its Podman containers without -m/--cpus (the
+    """In a nested Run with cgroup delegation, in its Podman containers
+    without -m/--cpus (the
     Run's size, from the precreate defaults) and with them (theirs, derived
     from the Run's limit). quota-only: a runner without --cpuset, so every
     process sees all the host's CPUs and only cpu.max (the hook's default
@@ -300,7 +307,8 @@ def test_clickhouse_and_the_jvm_size_to_a_nested_run_and_its_podman_containers(l
     out = run_to_end(lux, nested(
         APPS + "sh /tmp/apps.sh run; "
         f"{INNER} {APPS_INNER} none; "
-        f"podman run --rm --network=none -m {inner}b --cpus 1 {APPS_INNER} flags", image=SIZING_IMAGE), timeout=900)
+        f"podman run --rm --network=none -m {inner}b --cpus 1 {APPS_INNER} flags", image=SIZING_IMAGE,
+        cgroup_delegation=True), timeout=900)
     assert_sized(out, "run", limit, 2, SIZED_MEMORY)
     assert_sized(out, "none", limit, 2, SIZED_MEMORY)
     assert_sized(out, "flags", inner, 1, limit)

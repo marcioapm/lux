@@ -190,8 +190,9 @@ availability immediately. See [CLI](cli.md#runs).
   CPUs a Run frees go to later Runs, not to Runs already running, so a
   host whose Runs come and go can have pinned Runs sharing CPUs while
   others are idle. A resume may be pinned to other CPUs.
-- **Containers a nested Run starts with Podman default to the Run's
-  size.** One started without `-m` has the Run's memory limit as its
+- **Containers a nested Run with `sandbox.cgroupDelegation: true` starts
+  with Podman default to the Run's size.** One started without `-m` has
+  the Run's memory limit as its
   `memory.max` with swap off (OCI `memory.swap`, memory plus swap, is set
   to the same limit, so cgroup v2 `memory.swap.max` is 0, as for the Run
   itself), and one without `--cpus` the
@@ -203,8 +204,8 @@ availability immediately. See [CLI](cli.md#runs).
   lux does it with a Podman `precreate` hook registered through
   `CONTAINERS_CONF_OVERRIDE`; a spec that sets `CONTAINERS_CONF_OVERRIDE`
   itself opts out, and a runner whose `--shim` predates the hook registers
-  none. Rootless Docker's containers get the Run's CPUs but
-  not yet its memory limit ([open](podman.md#default-limits-of-nested-containers)).
+  none. Without delegation lux registers no hook: inner containers stay
+  in the Run's cgroup (see *Limits of nested containers* below).
 - Secrets are `env` (the default) or `file` (placed on a tmpfs and linked
   at `path`). A file secret is never in a snapshot. Every resume must
   supply every secret again.

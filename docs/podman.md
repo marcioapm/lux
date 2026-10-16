@@ -326,10 +326,11 @@ not. It does not make Docker enforce `-m` or `--cpus`.
 
 ### Default limits of nested containers
 
-A Podman container in a nested Run has its own cgroup namespace rooted at
-its own cgroup, under `workload/`. Without `-m` its `memory.max` is
-`max`, and the Run's limit above it is out of its sight. Programs that
-size themselves from their cgroup then size to the host:
+In a nested Run with `sandbox.cgroupDelegation: true`, a Podman container
+has its own cgroup namespace rooted at its own cgroup, under `workload/`.
+Without `-m` its `memory.max` is `max`, and the Run's limit above it is
+out of its sight. Programs that size themselves from their cgroup then
+size to the host:
 
 - ClickHouse (`base/base/getMemoryAmount.cpp`) takes the smaller of
   physical RAM and the first `memory.max` it finds walking up from its own
@@ -343,7 +344,9 @@ size themselves from their cgroup then size to the host:
   `memory.max` (it walks to parents only from JDK 24 / 21.0.9) and
   `availableProcessors()` from the affinity mask capped by `cpu.max`.
 
-So every inner container defaults to the Run's limits. The runner writes,
+So inner containers of a delegated Run default to the Run's limits;
+without delegation they already sit in the Run's cgroup, and the runner
+writes none of what follows. The runner writes,
 into the runtime volume, a `containers.conf` with
 `[engine] hooks_dir = ["/.lux/run/oci/hooks.d", {append=true}]` and gives
 the workload `CONTAINERS_CONF_OVERRIDE` pointing at it. That directory
@@ -360,8 +363,8 @@ unlimited, `-1` or `0`) is lowered to the Run's: the Run's cgroup caps it
 anyway, and a container reading `4g` would size itself to memory it
 cannot have. crun runs as usual; nothing wraps it. The runner registers
 the hook only when its `--shim` lists `oci-defaults-v1` in
-`lux-shim capabilities`; with an older or custom shim, nested Runs get
-no hook (their inner containers see `max`, as before) and the runner
+`lux-shim capabilities`; with an older or custom shim, delegated Runs get
+no hook (their inner containers see `max`) and the runner
 logs one warning.
 
 `containers.conf`'s own `cgroup_conf` is not used: Podman puts it in
@@ -378,35 +381,12 @@ count to the Run's `cpus`.
 `tests/suites/test_run_size.py` checks both runner modes, with real
 ClickHouse and JVMs.
 
-Rootless Docker does not read containers.conf. Its containers inherit the
-Run's CPUs (affinity; `docker info` NCPU is the Run's), but in a nested
-Run they read `memory.max` and `cpu.max` as `max` at their namespace's
-root (measured), so ClickHouse and the JVM in them still size memory to
-the host. The cause: with the `none` driver dockerd passes runc no
-cgroup path and no resources, and runc, rootless, makes a best-effort
-cgroup `<parent of its own cgroup>/<container id>`. dockerd runs in
-`workload/main`, so that is `workload/<id>`, a new sibling of `main`
-with no limits of its own, and Docker's private cgroup namespace is
-rooted there. Without a writable parent (a cgroup filesystem mounted
-read-only, as in a Run that is not split) runc's mkdir fails, the
-container stays in dockerd's cgroup and sees its limits (measured, by
-remounting `/sys/fs/cgroup` read-only in dockerd's mount namespace).
-`docker run --cgroupns=host` (or `default-cgroupns-mode: host` in the
-workload's `daemon.json`) is a partial way round it. Measured in a 2 CPU /
-1 GiB nested Run with `--cpuset` (the Run's `memory.max` 1022312448), on
-a 32-CPU host:
-
-| inner Docker container | ClickHouse memory / threads | JVM 21 heap / CPUs | JVM 17 heap / CPUs |
-|---|---|---|---|
-| no flags (`memory.max` and `cpu.max` read `max`, `nproc` 2) | 13800372811 / 32 | 16492003328 / 2 | 16492003328 / 2 |
-| `-m 512m --cpus 1` | as no flags: ignored | as no flags | as no flags |
-| `--cgroupns=host` | 842250211 / 2 | 255852544 / 2 | 16492003328 / 2 |
-
-With `--cgroupns=host` ClickHouse's memory is 0.82 of the Run's limit
-(0.9 in the Run itself) and the JVM 21 heap matches the Run's; the JVM
-17 heap is still sized to the host. This is
-open: `test_run_size.py::test_inner_docker_containers_see_the_runs_size`
-expects the Run's memory limit and is marked as an expected failure until then.
+Rootless Docker does not read containers.conf, so the hook does not apply
+to it. Its containers inherit the Run's CPUs (affinity; `docker info`
+NCPU is the Run's). What they see of its memory depends on delegation, as
+[above](#limits-of-nested-containers): without it they stay in the Run's
+cgroup and read its limits there
+(`test_run_size.py::test_inner_docker_containers_see_the_runs_size`).
 
 ### Out of memory
 

@@ -219,9 +219,10 @@ func TestMadeParents(t *testing.T) {
 	}
 }
 
-// A nested Run's shim config points Podman inside at a containers.conf in
-// the runtime volume whose hooks_dir registers lux-shim oci-defaults; a
-// plain Run gets none of it, and a spec's own CONTAINERS_CONF_OVERRIDE is
+// A nested Run with sandbox.cgroupDelegation has a shim config that points
+// Podman inside at a containers.conf in the runtime volume whose hooks_dir
+// registers lux-shim oci-defaults; a plain Run and a nested Run without
+// delegation get none of it, and a spec's own CONTAINERS_CONF_OVERRIDE is
 // kept. The hook is run here, in process, with the arguments it was
 // registered with: an inner container without limits gets the Run's
 // scaled memory limit and its CPU quota. That Podman reads containers.conf
@@ -238,19 +239,22 @@ func TestNestedRunsGetInnerDefaults(t *testing.T) {
 		t.Fatalf("scale.limit(1GiB) = %d: the test needs a scaled host", scale.limit(gib))
 	}
 	for _, c := range []struct {
-		name      string
-		nested    bool
-		cpus      float64
-		specEnv   map[string]string
-		wantEnv   string
-		wantQuota string
+		name       string
+		nested     bool
+		delegation bool
+		cpus       float64
+		specEnv    map[string]string
+		wantEnv    string
+		wantQuota  string
 	}{
-		{"nested", true, 1.5, nil, proto.ShimOCIConf, "150000"},
+		{"nested", true, true, 1.5, nil, proto.ShimOCIConf, "150000"},
 		// As podman --cpus 0.29 sets the Run's own cpu.max (measured:
 		// 28999): truncated, so the default is never above the Run's.
-		{"nested, 0.29 CPUs", true, 0.29, nil, proto.ShimOCIConf, "28999"},
-		{"nested, spec's own", true, 1.5, map[string]string{"CONTAINERS_CONF_OVERRIDE": "/mine.conf"}, "/mine.conf", "150000"},
-		{"plain", false, 1.5, nil, "", ""},
+		{"nested, 0.29 CPUs", true, true, 0.29, nil, proto.ShimOCIConf, "28999"},
+		{"nested, spec's own", true, true, 1.5, map[string]string{"CONTAINERS_CONF_OVERRIDE": "/mine.conf"}, "/mine.conf", "150000"},
+		// Without delegation inner containers stay in the Run's cgroup.
+		{"nested, not delegated", true, false, 1.5, nil, "", ""},
+		{"plain", false, false, 1.5, nil, "", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			rt := t.TempDir()
@@ -258,7 +262,7 @@ func TestNestedRunsGetInnerDefaults(t *testing.T) {
 			r.mounts.Store(runtimeVolume("run_1"), rt)
 			p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
 			sp := spec.RunSpec{Env: c.specEnv, Resources: spec.Resources{CPUs: c.cpus, Memory: spec.Bytes(gib)},
-				Sandbox: spec.Sandbox{NestedContainers: c.nested}}
+				Sandbox: spec.Sandbox{NestedContainers: c.nested, CgroupDelegation: c.delegation}}
 			if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
 				t.Fatal(err)
 			}
@@ -266,9 +270,9 @@ func TestNestedRunsGetInnerDefaults(t *testing.T) {
 				t.Fatalf("CONTAINERS_CONF_OVERRIDE %q, want %q", got, c.wantEnv)
 			}
 			b, err := os.ReadFile(filepath.Join(rt, "oci", "hooks.d", "lux-run-limits.json"))
-			if !c.nested {
-				if err == nil {
-					t.Fatal("a plain Run got the hook")
+			if !c.delegation {
+				if _, serr := os.Stat(filepath.Join(rt, "oci")); err == nil || serr == nil {
+					t.Fatal("a Run without cgroup delegation got the hook")
 				}
 				return
 			}
@@ -324,12 +328,13 @@ func shimConfigEnv(t *testing.T, rt string) map[string]string {
 }
 
 // With a --shim that does not list oci-defaults-v1 (an older or custom
-// one), a nested Run gets no hook and no CONTAINERS_CONF_OVERRIDE: its
+// one), a delegated nested Run gets no hook and no CONTAINERS_CONF_OVERRIDE: its
 // inner containers behave as before the hook. The runner warns once.
 func TestNestedRunsWithoutTheShimsOCIDefaults(t *testing.T) {
 	var logs bytes.Buffer
 	r := &Runner{log: slog.New(slog.NewTextHandler(&logs, nil))}
-	sp := spec.RunSpec{Resources: spec.Resources{CPUs: 2, Memory: 1 << 30}, Sandbox: spec.Sandbox{NestedContainers: true}}
+	sp := spec.RunSpec{Resources: spec.Resources{CPUs: 2, Memory: 1 << 30},
+		Sandbox: spec.Sandbox{NestedContainers: true, CgroupDelegation: true}}
 	for i := range 2 {
 		rt := t.TempDir()
 		r.mounts.Store(runtimeVolume("run_1"), rt)
