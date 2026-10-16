@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from build import CLICKHOUSE_IMAGE, DOCKER_IMAGE, JVM17_IMAGE, JVM21_IMAGE, NESTED_IMAGE
+from build import DOCKER_IMAGE, NESTED_IMAGE, SIZING_IMAGE
 from conftest import generic
 from env import ALPINE_IMAGE
 
@@ -162,35 +162,61 @@ def test_inner_docker_containers_see_the_runs_size(lux, runners, hosts):
 
 # ---- real applications -------------------------------------------------------
 
-CH = r"""
-CH=/tmp/ch; mkdir -p $CH && cd $CH
-clickhouse server --config-file=/etc/clickhouse-server/config.xml -- --path=$CH/ --tmp_path=$CH/tmp/ \
-  --user_files_path=$CH/uf/ --format_schema_path=$CH/fs/ --logger.console=0 --logger.log=$CH/ch.log \
-  --logger.errorlog=$CH/err.log --listen_host=127.0.0.1 >$CH/out.log 2>&1 &
-for i in $(seq 600); do clickhouse client -q 'SELECT 1' >/dev/null 2>&1 && break; kill -0 $! || break; sleep 0.5; done
-clickhouse client -q "SELECT 'ch: mem=' || value || ' threads=' || toString(getSetting('max_threads')) FROM system.server_settings WHERE name='max_server_memory_usage'" \
-  || { grep -m3 Exception $CH/err.log; exit 1; }
-kill $!
+# /tmp/apps.sh LABEL: starts the real ClickHouse server (through the glibc
+# loader beside it, tests/images/sizing) and prints what it sized to, then
+# each JVM's default heap and CPU count; lines "LABEL-ch:", "LABEL-jvm21:",
+# "LABEL-jvm17:". Runs in the Run or, with /opt/apps mounted, in an inner
+# alpine container.
+APPS = r"""cat > /tmp/apps.sh <<'EOF'
+L="/opt/apps/glibc/ld-2.35.so --library-path /opt/apps/glibc /opt/apps/clickhouse"
+CH=/tmp/ch-$1; mkdir -p $CH/etc && cp -r /opt/apps/clickhouse-server/. $CH/etc/
+sed -i "s#/var/lib/clickhouse/#$CH/#g; s#/var/log/clickhouse-server/#$CH/#g" $CH/etc/config.xml
+$L server --config-file=$CH/etc/config.xml -- --logger.console=0 --listen_host=127.0.0.1 >$CH/out.log 2>&1 &
+ch=$!
+for i in $(seq 600); do $L client -q 'SELECT 1' >/dev/null 2>&1 && break; kill -0 $ch || break; sleep 0.5; done
+$L client -q "SELECT '$1-ch: mem=' || value || ' threads=' || toString(getSetting('max_threads')) FROM system.server_settings WHERE name='max_server_memory_usage'" \
+  || grep -v '^ *[0-9]*\. ' $CH/out.log | head -5
+kill $ch; wait $ch
+for v in 21 17; do
+  /opt/apps/jvm$v/bin/java -XX:+PrintFlagsFinal -XshowSettings:system -version 2>&1 |
+    awk -v p="$1-jvm$v:" '/ MaxHeapSize /{h=$4} /Effective CPU Count/{c=$4} END{print p " heap=" h " cpus=" c}'
+done
+EOF
 """
-
-JVM = ("java -XX:+PrintFlagsFinal -XshowSettings:system -version 2>&1 | "
-       "awk '/ MaxHeapSize /{h=$4} /Effective CPU Count/{c=$4} END{print \"jvm: heap=\" h \" cpus=\" c}'")
+APPS_INNER = "-v /opt/apps:/opt/apps:ro -v /tmp/apps.sh:/apps.sh:ro " + ALPINE_IMAGE + " sh /apps.sh"
 
 
-def assert_sized(out: str, prefix: str, limit: int, cpus: int) -> None:
-    f = fields(out, prefix)
-    if prefix == "ch:":
-        # ClickHouse keeps max_server_memory_usage at 0.9 of what it sees.
-        assert abs(int(f["mem"]) - 0.9 * limit) < 0.01 * limit and f["threads"] == str(cpus), (f, limit, out)
-    else:
-        # The JVM's default heap is a quarter of what it sees.
-        assert abs(int(f["heap"]) - limit / 4) < 0.02 * limit and f["cpus"] == str(cpus), (f, limit, out)
+def assert_sized(out: str, label: str, limit: int, cpus: int) -> None:
+    """ClickHouse keeps max_server_memory_usage at 0.9 of the memory it
+    sees, the JVM's default heap is a quarter of it; both use as many
+    threads as CPUs they see."""
+    print(*(l for l in out.splitlines() if l.startswith(f"{label}-")), sep="\n")
+    ch = fields(out, f"{label}-ch:")
+    assert "mem" in ch and abs(int(ch["mem"]) - 0.9 * limit) < 0.01 * limit and ch["threads"] == str(cpus), \
+        (label, ch, limit, out)
+    for v in (21, 17):
+        jvm = fields(out, f"{label}-jvm{v}:")
+        assert jvm.get("heap") and abs(int(jvm["heap"]) - limit / 4) < 0.02 * limit and jvm["cpus"] == str(cpus), \
+            (label, v, jvm, limit, out)
 
 
 def test_clickhouse_and_the_jvm_size_to_a_plain_run(lux, runners, hosts):
     runners.start(hosts[0], "--cpuset")
     limit = hosts[0].memory_limit(GIB)
-    ch = run_to_end(lux, generic(CLICKHOUSE_IMAGE, "sh", "-c", CH, resources=SIZE), timeout=420)
-    assert_sized(ch, "ch:", limit, 2)
-    for image in (JVM21_IMAGE, JVM17_IMAGE):
-        assert_sized(run_to_end(lux, generic(image, "sh", "-c", JVM, resources=SIZE)), "jvm:", limit, 2)
+    out = run_to_end(lux, generic(SIZING_IMAGE, "sh", "-c", APPS + "sh /tmp/apps.sh run", resources=SIZE),
+                     timeout=420)
+    assert_sized(out, "run", limit, 2)
+
+
+def test_clickhouse_and_the_jvm_size_to_a_nested_run_and_its_podman_containers(lux, runners, hosts):
+    """In a nested Run, in its Podman containers without -m/--cpus (the
+    Run's size, from the precreate defaults) and with them (theirs)."""
+    runners.start(hosts[0], "--nested", "--cpuset")
+    limit = hosts[0].memory_limit(GIB)
+    out = run_to_end(lux, nested(
+        APPS + "sh /tmp/apps.sh run; "
+        f"{INNER} {APPS_INNER} none; "
+        f"podman run --rm --network=none -m 512m --cpus 1 {APPS_INNER} flags", image=SIZING_IMAGE), timeout=900)
+    assert_sized(out, "run", limit, 2)
+    assert_sized(out, "none", limit, 2)
+    assert_sized(out, "flags", 512 << 20, 1)
