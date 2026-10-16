@@ -1,0 +1,89 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.4, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/ubuntu/.arny-worktrees/1547198219946172468/c6d7ec9a2d464daaab56015b0df75b01/lux-docker-limits3/tests
+configfile: pyproject.toml
+plugins: timeout-2.4.0
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+collected 6 items / 5 deselected / 1 selected
+
+suites/test_spike_docker_limits.py == b2-podman-api-buildkit
+engine: 5.8.8 cgroupdriver=cgroupfs security=[name=seccomp,profile=default name=rootless]
+run: memory.max=1022312448 cgroup=0::/workload/main uid_map=2147483647, CapEff: 0000000000000000
+ROW1 SKIP
+ROW2 SKIP
+ROW3 SKIP
+ROW4 FAIL buildkit= classic=one+two+
+    | DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+    |             BuildKit is currently disabled; enable it by removing the DOCKER_BUILDKIT=0
+    |             environment-variable.
+    | 
+    | 545a73bd421e410f182820160e1058ece3de792cdb11084f9b2ba34a2812390b
+    | WARNING: No output specified with docker-container driver. Build result will only remain in the build cache. To push result image into registry use --push or to load image into docker use --load
+    | ERROR: failed to build: Error response from daemon: crun: create `/sys/fs/cgroup/docker`: Permission denied: OCI permission denied
+    engine log:
+    > Trying to pull docker.io/moby/buildkit:buildx-stable-1...
+    > time="2026-10-16T00:36:33Z" level=error msg="Cleaning up container e20ae44732279a558bb40b275bcf42e6e02a2cf26b458a93f13c06292281a29a: removing container e20ae44732279a558bb40b275bcf42e6e02a2cf26b458a93f13c06292281a29a network: 1 error occurred:\n\t* rootless netns: kill network process: permission denied\n\n"
+buildkitd-cgroup: Error response from daemon: can only create exec sessions on running containers: container state improper 
+ROW5 FAIL buildx=
+    | spk
+    | #1 [internal] booting buildkit
+    | #1 pulling image moby/buildkit:v0.33.1 done
+    | #1 pulling failed, using local image moby/buildkit:v0.33.1 done
+    | #1 creating container buildx_buildkit_spk0
+    | #1 creating container buildx_buildkit_spk0 0.4s done
+    | #1 ERROR: Error response from daemon: crun: create `/sys/fs/cgroup/docker`: Permission denied: OCI permission denied
+    | ------
+    |  > [internal] booting buildkit:
+    | ------
+    | ERROR: Error response from daemon: crun: create `/sys/fs/cgroup/docker`: Permission denied: OCI permission denied
+    | Unable to find image 'spike-bx:latest' locally
+    | docker: Error response from daemon: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving
+    | 
+    | Run 'docker run --help' for more information
+    | buildkit container:
+    | buildx_buildkit_spk0 Created
+    | cgroupparent=/docker/buildx privileged=true net=host
+    engine log:
+    > Trying to pull docker.io/moby/buildkit:buildx-stable-1...
+    > time="2026-10-16T00:36:33Z" level=error msg="Cleaning up container e20ae44732279a558bb40b275bcf42e6e02a2cf26b458a93f13c06292281a29a: removing container e20ae44732279a558bb40b275bcf42e6e02a2cf26b458a93f13c06292281a29a network: 1 error occurred:\n\t* rootless netns: kill network process: permission denied\n\n"
+    > Trying to pull docker.io/moby/buildkit:v0.33.1...
+    > Trying to pull docker.io/library/spike-bx:latest...
+step-cgroup=0::/ step-mem=
+buildkitd-cgroup: 0::/init max 
+ROW5b PASS buildx=one+two+
+ROW6 SKIP
+probe: run /sys mount: ro,nosuid,nodev,noexec,relatime
+probe[--network host]: ok ro,nosuid,nodev,noexec,relatime
+probe[--privileged]: unable to upgrade to tcp, received 500
+probe[--privileged --network host]: ok ro,nosuid,nodev,noexec,relatime
+probe[--privileged --network host --cgroup-parent /workload/probe]: ok ro,nosuid,nodev,noexec,relatime
+ROW7 PASS rc=137 run-memory.max=1022312448
+row7: engine-alive=ok
+row7: memory.events[.]: low 0 high 0 max 1441 oom 1 oom_kill 1 oom_group_kill 0 sock_throttled 0 
+row7: memory.events[workload]: low 0 high 0 max 0 oom 0 oom_kill 1 oom_group_kill 0 sock_throttled 0 
+row7: memory.events[workload/main]: low 0 high 0 max 0 oom 0 oom_kill 0 oom_group_kill 0 sock_throttled 0 
+row7: engine-pid 16 alive
+MATRIX-ROWS-DONE
+MATRIX-DONE
+
+.
+
+======================= 1 passed, 5 deselected in 22.09s =======================
+building:
+  luxd         built
+  lux-runner   built
+  lux-shim     built
+  lux          built
+  lux-fake     built
+  localhost/lux-fake:test built
+  localhost/lux-spike-docker-limits:test built
+run id:   90e99ecc
+logs:     /tmp/lux-e2e-90e99ecc
+network:  lux-e2e-90e99ecc (192.168.80.0/20, gateway 192.168.80.1)
+hosts:    host-a=192.168.80.3, host-b=192.168.80.2
+luxd:     http://192.168.80.1:34695
+
+
+logs: /tmp/lux-e2e-90e99ecc

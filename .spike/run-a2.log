@@ -1,0 +1,199 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.4, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/ubuntu/.arny-worktrees/1547198219946172468/c6d7ec9a2d464daaab56015b0df75b01/lux-docker-limits3/tests
+configfile: pyproject.toml
+plugins: timeout-2.4.0
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+collected 4 items / 2 deselected / 2 selected
+
+suites/test_spike_docker_limits.py == a1-dockerd-cgroupfs
+engine: 29.8.2 cgroupdriver=cgroupfs security=[name=seccomp,profile=builtin name=cgroupns]
+run: memory.max=1022312448 cgroup=0::/workload/main uid_map=2147483647, CapEff: 0000000000000000
+ROW1 PASS mem=134217728 oom=true:137 rc=137
+ROW2 PASS cpu=50000_100000 pids=64
+ROW3 PASS 127.0.0.1:8080
+ROW4 PASS buildkit=one+two+ classic=one+two+
+ROW5 FAIL buildx=
+    | spk
+    | #1 [internal] booting buildkit
+    | #1 pulling image moby/buildkit:v0.33.1 0.0s done
+    | #1 pulling failed, using local image moby/buildkit:v0.33.1 done
+    | #1 creating container buildx_buildkit_spk0
+    | #1 creating container buildx_buildkit_spk0 0.5s done
+    | #1 ERROR: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: unable to apply cgroup configuration: mkdir /sys/fs/cgroup/docker: permission denied
+    | ------
+    |  > [internal] booting buildkit:
+    | ------
+    | ERROR: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: unable to apply cgroup configuration: mkdir /sys/fs/cgroup/docker: permission denied
+    | Unable to find image 'spike-bx:latest' locally
+    | docker: Error response from daemon: failed to resolve reference "docker.io/library/spike-bx:latest": failed to do request: Head "https://registry-1.docker.io/v2/library/spike-bx/manifests/latest": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving
+    | 
+    | Run 'docker run --help' for more information
+    | buildkit container:
+    | buildx_buildkit_spk0 Created
+    | cgroupparent=/docker/buildx privileged=true net=host
+    engine log:
+    > time="2026-10-16T00:27:30.240529817Z" level=info msg="image created" imageID="sha256:943928750a5f4de028862b3bcf89079d9cd790e7b0ee0f43370318776df40546" tag="docker.io/library/spike-b4c:latest"
+    > time="2026-10-16T00:27:30.406767271Z" level=info msg="connecting to shim 7cac09135516f99331d097df13ba34b85f2bbd31e4feaca345d6f9eff9c8f12a" address="unix:///run/containerd/s/b53c8ddd7562e7df0554cbc1e63e94e39add469631f332ef85a25d3743d2a712" namespace=moby protocol=ttrpc version=3
+    > time="2026-10-16T00:27:30.492364797Z" level=info msg="sbJoin: gwep4 ''->'65ad60b75332', gwep6 ''->''" eid=65ad60b75332 ep=epic_keller net=bridge nid=9c45f6b33a57
+    > time="2026-10-16T00:27:30.538294934Z" level=info msg="received task-delete event from containerd" container=7cac09135516f99331d097df13ba34b85f2bbd31e4feaca345d6f9eff9c8f12a module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+    > time="2026-10-16T00:27:30.538328355Z" level=info msg="shim disconnected" id=7cac09135516f99331d097df13ba34b85f2bbd31e4feaca345d6f9eff9c8f12a namespace=moby
+    > time="2026-10-16T00:27:30.538355675Z" level=info msg="cleaning up after shim disconnected" id=7cac09135516f99331d097df13ba34b85f2bbd31e4feaca345d6f9eff9c8f12a namespace=moby
+    > time="2026-10-16T00:27:30.538363385Z" level=info msg="cleaning up dead shim" id=7cac09135516f99331d097df13ba34b85f2bbd31e4feaca345d6f9eff9c8f12a namespace=moby
+    > time="2026-10-16T00:27:32.132561966Z" level=warning msg="healthcheck failed" actualDuration=4.294006ms error="Unavailable: connection error: desc = \"transport: Error while dialing: only one connection allowed\"" timeout=15s
+    > time="2026-10-16T00:27:32.144377018Z" level=warning msg="healthcheck failed" actualDuration="230.272µs" error="Unavailable: connection error: desc = \"transport: Error while dialing: only one connection allowed\"" timeout=15s
+    > time="2026-10-16T00:27:34.920021680Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/moby/buildkit/manifests/v0.33.1\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" host=registry-1.docker.io method=HEAD spanID=951eb5032357ead8 traceID=4591020e984f5295458aa0aa56b345cf url="https://registry-1.docker.io/v2/moby/buildkit/manifests/v0.33.1"
+    > time="2026-10-16T00:27:34.927828727Z" level=error msg="unexpected HTTP error handling" error="<nil>"
+    > time="2026-10-16T00:27:34.927877327Z" level=error msg="Handler for POST /images/create returned error" error-response="failed to resolve reference \"docker.io/moby/buildkit:v0.33.1\": failed to do request: Head \"https://registry-1.docker.io/v2/moby/buildkit/manifests/v0.33.1\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" method=POST module=api request-url="/v1.54/images/create?fromImage=docker.io%2Fmoby%2Fbuildkit&tag=v0.33.1" spanID=951eb5032357ead8 status=500 traceID=4591020e984f5295458aa0aa56b345cf vars="map[version:1.54]"
+    > time="2026-10-16T00:27:35.088391286Z" level=error msg="Handler for POST /containers/{name:.*}/start returned error" error-response="failed to discover GPU vendor from CDI: no known GPU vendor found" method=POST module=api request-url=/v1.54/containers/557eddcc3699ff1c81852dcaf6b26ca2ee31b7ac306d33a3208b84dbebf99b85/start spanID=cd5268e337e74c88 status=500 traceID=b6dc91327456e4172973807be8311122 vars="map[name:557eddcc3699ff1c81852dcaf6b26ca2ee31b7ac306d33a3208b84dbebf99b85 version:1.54]"
+    > time="2026-10-16T00:27:35.406683697Z" level=info msg="connecting to shim c45b98572775aa2eabb8bcd9d58e6a57823ceb571656d630688ed0a95224cb6e" address="unix:///run/containerd/s/717b3070a3eee50a2823a759d38aa56c9bc680f79d1d25b8e0b03e5e3ce23da3" namespace=moby protocol=ttrpc version=3
+    > time="2026-10-16T00:27:35.441211725Z" level=error msg="failed to delete task" error="rpc error: code = NotFound desc = container not created: not found" id=c45b98572775aa2eabb8bcd9d58e6a57823ceb571656d630688ed0a95224cb6e
+    > time="2026-10-16T00:27:35.441546027Z" level=info msg="shim disconnected" id=c45b98572775aa2eabb8bcd9d58e6a57823ceb571656d630688ed0a95224cb6e namespace=moby
+    > time="2026-10-16T00:27:35.441565867Z" level=info msg="cleaning up after shim disconnected" id=c45b98572775aa2eabb8bcd9d58e6a57823ceb571656d630688ed0a95224cb6e namespace=moby
+    > time="2026-10-16T00:27:35.441573387Z" level=info msg="cleaning up dead shim" id=c45b98572775aa2eabb8bcd9d58e6a57823ceb571656d630688ed0a95224cb6e namespace=moby
+    > time="2026-10-16T00:27:35.452307342Z" level=warning msg="warnings while cleaning up dead shim" id=c45b98572775aa2eabb8bcd9d58e6a57823ceb571656d630688ed0a95224cb6e namespace=moby warnings="time=\"2026-10-16T00:27:35Z\" level=warning msg=\"failed to read init pid file\" error=\"open /tmp/xdg/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/c45b98572775aa2eabb8bcd9d58e6a57823ceb571656d630688ed0a95224cb6e/init.pid: no such file or directory\" runtime=io.containerd.runc.v2\n"
+    > time="2026-10-16T00:27:35.453214398Z" level=error msg="copy shim log" error="read /proc/self/fd/19: file already closed" namespace=moby
+    > time="2026-10-16T00:27:35.453904032Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stdout
+    > time="2026-10-16T00:27:35.454005883Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stderr
+    > time="2026-10-16T00:27:35.509805579Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-bx/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" host=registry-1.docker.io method=HEAD url="https://registry-1.docker.io/v2/library/spike-bx/manifests/latest"
+    > time="2026-10-16T00:27:35.512336515Z" level=error msg="unexpected HTTP error handling" error="<nil>"
+    > time="2026-10-16T00:27:35.512365465Z" level=error msg="Handler for POST /images/create returned error" error-response="failed to resolve reference \"docker.io/library/spike-bx:latest\": failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-bx/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" method=POST module=api request-url="/v1.56/images/create?fromImage=docker.io%2Flibrary%2Fspike-bx&tag=latest" status=500 vars="map[version:1.56]"
+ROW5b FAIL buildx=
+    | spk
+    | #1 [internal] booting buildkit
+    | #1 pulling image moby/buildkit:v0.33.1 0.0s done
+    | #1 pulling failed, using local image moby/buildkit:v0.33.1 done
+    | #1 creating container buildx_buildkit_spk0
+    | #1 creating container buildx_buildkit_spk0 0.3s done
+    | #1 ERROR: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/14, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+    | ------
+    |  > [internal] booting buildkit:
+    | ------
+    | ERROR: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "sysfs" to rootfs at "/sys": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/14, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted
+    | Unable to find image 'spike-bx:latest' locally
+    | docker: Error response from daemon: failed to resolve reference "docker.io/library/spike-bx:latest": failed to do request: Head "https://registry-1.docker.io/v2/library/spike-bx/manifests/latest": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving
+    | 
+    | Run 'docker run --help' for more information
+    | buildkit container:
+    | buildx_buildkit_spk0 Created
+    | cgroupparent=/workload/buildx privileged=true net=host
+    engine log:
+    > time="2026-10-16T00:27:35.441573387Z" level=info msg="cleaning up dead shim" id=c45b98572775aa2eabb8bcd9d58e6a57823ceb571656d630688ed0a95224cb6e namespace=moby
+    > time="2026-10-16T00:27:35.452307342Z" level=warning msg="warnings while cleaning up dead shim" id=c45b98572775aa2eabb8bcd9d58e6a57823ceb571656d630688ed0a95224cb6e namespace=moby warnings="time=\"2026-10-16T00:27:35Z\" level=warning msg=\"failed to read init pid file\" error=\"open /tmp/xdg/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/c45b98572775aa2eabb8bcd9d58e6a57823ceb571656d630688ed0a95224cb6e/init.pid: no such file or directory\" runtime=io.containerd.runc.v2\n"
+    > time="2026-10-16T00:27:35.453214398Z" level=error msg="copy shim log" error="read /proc/self/fd/19: file already closed" namespace=moby
+    > time="2026-10-16T00:27:35.453904032Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stdout
+    > time="2026-10-16T00:27:35.454005883Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stderr
+    > time="2026-10-16T00:27:35.509805579Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-bx/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" host=registry-1.docker.io method=HEAD url="https://registry-1.docker.io/v2/library/spike-bx/manifests/latest"
+    > time="2026-10-16T00:27:35.512336515Z" level=error msg="unexpected HTTP error handling" error="<nil>"
+    > time="2026-10-16T00:27:35.512365465Z" level=error msg="Handler for POST /images/create returned error" error-response="failed to resolve reference \"docker.io/library/spike-bx:latest\": failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-bx/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" method=POST module=api request-url="/v1.56/images/create?fromImage=docker.io%2Flibrary%2Fspike-bx&tag=latest" status=500 vars="map[version:1.56]"
+    > time="2026-10-16T00:27:36.081978933Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/moby/buildkit/manifests/v0.33.1\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" host=registry-1.docker.io method=HEAD spanID=60acba82181129dd traceID=a99cb7495506ca0b936135dd16f84765 url="https://registry-1.docker.io/v2/moby/buildkit/manifests/v0.33.1"
+    > time="2026-10-16T00:27:36.085064201Z" level=error msg="unexpected HTTP error handling" error="<nil>"
+    > time="2026-10-16T00:27:36.085121041Z" level=error msg="Handler for POST /images/create returned error" error-response="failed to resolve reference \"docker.io/moby/buildkit:v0.33.1\": failed to do request: Head \"https://registry-1.docker.io/v2/moby/buildkit/manifests/v0.33.1\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" method=POST module=api request-url="/v1.54/images/create?fromImage=docker.io%2Fmoby%2Fbuildkit&tag=v0.33.1" spanID=60acba82181129dd status=500 traceID=a99cb7495506ca0b936135dd16f84765 vars="map[version:1.54]"
+    > time="2026-10-16T00:27:36.247220640Z" level=error msg="Handler for POST /containers/{name:.*}/start returned error" error-response="failed to discover GPU vendor from CDI: no known GPU vendor found" method=POST module=api request-url=/v1.54/containers/b3e178771a049425516ddde9fc5066d8cc28a4fb20d12fa4826c74fe96b5ba39/start spanID=c5919bfd63734d61 status=500 traceID=14179692611b9bc99a76945e5f3191a9 vars="map[name:b3e178771a049425516ddde9fc5066d8cc28a4fb20d12fa4826c74fe96b5ba39 version:1.54]"
+    > time="2026-10-16T00:27:36.348400800Z" level=info msg="connecting to shim e5f0104580c06bf3ceb60e7419d7679f4e77fa612ed95857ee5996ca730438fa" address="unix:///run/containerd/s/480783ba72b37f12c907819289177a9f5935cbafeaf6a65addf7614de99e72e3" namespace=moby protocol=ttrpc version=3
+    > time="2026-10-16T00:27:36.388689114Z" level=error msg="failed to delete task" error="rpc error: code = NotFound desc = container not created: not found" id=e5f0104580c06bf3ceb60e7419d7679f4e77fa612ed95857ee5996ca730438fa
+    > time="2026-10-16T00:27:36.389265057Z" level=info msg="shim disconnected" id=e5f0104580c06bf3ceb60e7419d7679f4e77fa612ed95857ee5996ca730438fa namespace=moby
+    > time="2026-10-16T00:27:36.389350328Z" level=info msg="cleaning up after shim disconnected" id=e5f0104580c06bf3ceb60e7419d7679f4e77fa612ed95857ee5996ca730438fa namespace=moby
+    > time="2026-10-16T00:27:36.389359188Z" level=info msg="cleaning up dead shim" id=e5f0104580c06bf3ceb60e7419d7679f4e77fa612ed95857ee5996ca730438fa namespace=moby
+    > time="2026-10-16T00:27:36.399034506Z" level=warning msg="warnings while cleaning up dead shim" id=e5f0104580c06bf3ceb60e7419d7679f4e77fa612ed95857ee5996ca730438fa namespace=moby warnings="time=\"2026-10-16T00:27:36Z\" level=warning msg=\"failed to read init pid file\" error=\"open /tmp/xdg/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/e5f0104580c06bf3ceb60e7419d7679f4e77fa612ed95857ee5996ca730438fa/init.pid: no such file or directory\" runtime=io.containerd.runc.v2\n"
+    > time="2026-10-16T00:27:36.400009212Z" level=error msg="copy shim log" error="read /proc/self/fd/19: file already closed" namespace=moby
+    > time="2026-10-16T00:27:36.400577105Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stdout
+    > time="2026-10-16T00:27:36.400608206Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stderr
+    > time="2026-10-16T00:27:36.425397345Z" level=error msg="Handler for POST /containers/{name:.*}/start returned error" error-response="failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting \"sysfs\" to rootfs at \"/sys\": mount src=sysfs, dst=/sys, dstFd=/proc/thread-self/fd/14, flags=MS_NOSUID|MS_NODEV|MS_NOEXEC: operation not permitted" method=POST module=api request-url=/v1.54/containers/buildx_buildkit_spk0/start spanID=2c2c7d4effc6e213 status=500 traceID=1c32a7d467aeac8c2a4ccd8071603b94 vars="map[name:buildx_buildkit_spk0 version:1.54]"
+    > time="2026-10-16T00:27:36.455574807Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-bx/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" host=registry-1.docker.io method=HEAD url="https://registry-1.docker.io/v2/library/spike-bx/manifests/latest"
+    > time="2026-10-16T00:27:36.457917291Z" level=error msg="unexpected HTTP error handling" error="<nil>"
+    > time="2026-10-16T00:27:36.457963252Z" level=error msg="Handler for POST /images/create returned error" error-response="failed to resolve reference \"docker.io/library/spike-bx:latest\": failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-bx/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" method=POST module=api request-url="/v1.56/images/create?fromImage=docker.io%2Flibrary%2Fspike-bx&tag=latest" status=500 vars="map[version:1.56]"
+ROW6 PASS mem=67108864 compose-ok
+ROW7 PASS rc=137 run-memory.max=1022312448
+MATRIX-ROWS-DONE
+probe: run /sys mount: ro,nosuid,nodev,noexec,relatime
+probe[--network host]: ok ro,nosuid,nodev,noexec,relatime
+probe[--privileged]: Run 'docker run --help' for more information
+probe[--privileged --network host]: Run 'docker run --help' for more information
+probe[--privileged --network host --cgroup-parent /workload/probe]: Run 'docker run --help' for more information
+MATRIX-DONE
+
+.== a2-dockerd-cgroupfs-ro-sysfs
+engine: 29.8.2 cgroupdriver=cgroupfs security=[name=seccomp,profile=builtin name=cgroupns]
+run: memory.max=1022312448 cgroup=0::/workload/main uid_map=2147483647, CapEff: 0000000000000000
+ROW1 PASS mem=134217728 oom=true:137 rc=137
+ROW2 PASS cpu=50000_100000 pids=64
+ROW3 PASS 127.0.0.1:8080
+ROW4 PASS buildkit=one+two+ classic=one+two+
+ROW5 FAIL buildx=
+    | spk
+    | #1 [internal] booting buildkit
+    | #1 pulling image moby/buildkit:v0.33.1 0.1s done
+    | #1 pulling failed, using local image moby/buildkit:v0.33.1 done
+    | #1 creating container buildx_buildkit_spk0
+    | #1 creating container buildx_buildkit_spk0 2.5s done
+    | #1 ERROR: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: unable to apply cgroup configuration: mkdir /sys/fs/cgroup/docker: permission denied
+    | ------
+    |  > [internal] booting buildkit:
+    | ------
+    | ERROR: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: unable to apply cgroup configuration: mkdir /sys/fs/cgroup/docker: permission denied
+    | Unable to find image 'spike-bx:latest' locally
+    | docker: Error response from daemon: failed to resolve reference "docker.io/library/spike-bx:latest": failed to do request: Head "https://registry-1.docker.io/v2/library/spike-bx/manifests/latest": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving
+    | 
+    | Run 'docker run --help' for more information
+    | buildkit container:
+    | buildx_buildkit_spk0 Created
+    | cgroupparent=/docker/buildx privileged=true net=host
+    engine log:
+    > time="2026-10-16T00:28:02.629223748Z" level=info msg="image created" imageID="sha256:da2ed64ff4987b5304351e5e570dd43d09611fdbd24dc98426e69983b7d96b7b" tag="docker.io/library/spike-b4c:latest"
+    > time="2026-10-16T00:28:02.753734479Z" level=info msg="connecting to shim b0515aa7a2c8af446c422805df8511eabe0375f3b5c4291984b6e89e985759a4" address="unix:///run/containerd/s/b45d2bf289f30bbdf97b54635772b72cd7ff95232ec537e36ee8231acb7d9d2f" namespace=moby protocol=ttrpc version=3
+    > time="2026-10-16T00:28:02.848841192Z" level=info msg="sbJoin: gwep4 ''->'133edeed492d', gwep6 ''->''" eid=133edeed492d ep=crazy_snyder net=bridge nid=ef17e239424c
+    > time="2026-10-16T00:28:02.890416153Z" level=info msg="shim disconnected" id=b0515aa7a2c8af446c422805df8511eabe0375f3b5c4291984b6e89e985759a4 namespace=moby
+    > time="2026-10-16T00:28:02.890433543Z" level=info msg="received task-delete event from containerd" container=b0515aa7a2c8af446c422805df8511eabe0375f3b5c4291984b6e89e985759a4 module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+    > time="2026-10-16T00:28:02.890457093Z" level=info msg="cleaning up after shim disconnected" id=b0515aa7a2c8af446c422805df8511eabe0375f3b5c4291984b6e89e985759a4 namespace=moby
+    > time="2026-10-16T00:28:02.890477743Z" level=info msg="cleaning up dead shim" id=b0515aa7a2c8af446c422805df8511eabe0375f3b5c4291984b6e89e985759a4 namespace=moby
+    > time="2026-10-16T00:28:07.212959907Z" level=error msg="healthcheck failed fatally" error="session healthcheck failed fatally: Unavailable: connection error: desc = \"transport: Error while dialing: only one connection allowed\""
+    > time="2026-10-16T00:28:07.235784474Z" level=error msg="healthcheck failed fatally" error="session healthcheck failed fatally: Unavailable: connection error: desc = \"transport: Error while dialing: only one connection allowed\""
+    > time="2026-10-16T00:28:08.425090516Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/moby/buildkit/manifests/v0.33.1\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" host=registry-1.docker.io method=HEAD spanID=c201d3b95a69d428 traceID=0d7d3c808c7d0b1c8ac80f7be4edd9b2 url="https://registry-1.docker.io/v2/moby/buildkit/manifests/v0.33.1"
+    > time="2026-10-16T00:28:08.440288827Z" level=error msg="unexpected HTTP error handling" error="<nil>"
+    > time="2026-10-16T00:28:08.440371148Z" level=error msg="Handler for POST /images/create returned error" error-response="failed to resolve reference \"docker.io/moby/buildkit:v0.33.1\": failed to do request: Head \"https://registry-1.docker.io/v2/moby/buildkit/manifests/v0.33.1\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" method=POST module=api request-url="/v1.54/images/create?fromImage=docker.io%2Fmoby%2Fbuildkit&tag=v0.33.1" spanID=c201d3b95a69d428 status=500 traceID=0d7d3c808c7d0b1c8ac80f7be4edd9b2 vars="map[version:1.54]"
+    > time="2026-10-16T00:28:09.628571502Z" level=error msg="Handler for POST /containers/{name:.*}/start returned error" error-response="failed to discover GPU vendor from CDI: no known GPU vendor found" method=POST module=api request-url=/v1.54/containers/a6958974585afa8fc50cbb390acb59bc9d33b995304ae64dcc069d2e61b4412e/start spanID=4b88d1397cd0e2ed status=500 traceID=178b9dac8359cdf741208b17caab7315 vars="map[name:a6958974585afa8fc50cbb390acb59bc9d33b995304ae64dcc069d2e61b4412e version:1.54]"
+    > time="2026-10-16T00:28:10.710878768Z" level=info msg="connecting to shim 4d252300911de87c3a5d43329e49900233e07afb03f6c983d734f2692909a987" address="unix:///run/containerd/s/028715f09f1170867b422f60be74ea544c7d270963cd7b4855dda1f377960515" namespace=moby protocol=ttrpc version=3
+    > time="2026-10-16T00:28:10.768100703Z" level=error msg="failed to delete task" error="rpc error: code = NotFound desc = container not created: not found" id=4d252300911de87c3a5d43329e49900233e07afb03f6c983d734f2692909a987
+    > time="2026-10-16T00:28:10.768732387Z" level=info msg="shim disconnected" id=4d252300911de87c3a5d43329e49900233e07afb03f6c983d734f2692909a987 namespace=moby
+    > time="2026-10-16T00:28:10.768753547Z" level=info msg="cleaning up after shim disconnected" id=4d252300911de87c3a5d43329e49900233e07afb03f6c983d734f2692909a987 namespace=moby
+    > time="2026-10-16T00:28:10.768761457Z" level=info msg="cleaning up dead shim" id=4d252300911de87c3a5d43329e49900233e07afb03f6c983d734f2692909a987 namespace=moby
+    > time="2026-10-16T00:28:10.780683559Z" level=warning msg="warnings while cleaning up dead shim" id=4d252300911de87c3a5d43329e49900233e07afb03f6c983d734f2692909a987 namespace=moby warnings="time=\"2026-10-16T00:28:10Z\" level=warning msg=\"failed to read init pid file\" error=\"open /tmp/xdg/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/4d252300911de87c3a5d43329e49900233e07afb03f6c983d734f2692909a987/init.pid: no such file or directory\" runtime=io.containerd.runc.v2\n"
+    > time="2026-10-16T00:28:10.781609785Z" level=error msg="copy shim log" error="read /proc/self/fd/19: file already closed" namespace=moby
+    > time="2026-10-16T00:28:10.782134958Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stdout
+    > time="2026-10-16T00:28:10.782563931Z" level=error msg="copy stream failed" error="reading from a closed fifo" stream=stderr
+    > time="2026-10-16T00:28:10.996287659Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-bx/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" host=registry-1.docker.io method=HEAD url="https://registry-1.docker.io/v2/library/spike-bx/manifests/latest"
+    > time="2026-10-16T00:28:10.998962645Z" level=error msg="unexpected HTTP error handling" error="<nil>"
+    > time="2026-10-16T00:28:10.998995176Z" level=error msg="Handler for POST /images/create returned error" error-response="failed to resolve reference \"docker.io/library/spike-bx:latest\": failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-bx/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.0.2.3:53: server misbehaving" method=POST module=api request-url="/v1.56/images/create?fromImage=docker.io%2Flibrary%2Fspike-bx&tag=latest" status=500 vars="map[version:1.56]"
+ROW5b PASS buildx=one+two+
+ROW6 PASS mem=67108864 compose-ok
+ROW7 PASS rc=137 run-memory.max=1022312448
+MATRIX-ROWS-DONE
+probe: run /sys mount: ro,nosuid,nodev,noexec,relatime
+probe[--network host]: ok ro,nosuid,nodev,noexec,relatime
+probe[--privileged]: ok ro,nosuid,nodev,noexec,relatime
+probe[--privileged --network host]: ok ro,nosuid,nodev,noexec,relatime
+probe[--privileged --network host --cgroup-parent /workload/probe]: ok ro,nosuid,nodev,noexec,relatime
+MATRIX-DONE
+
+.
+
+================== 2 passed, 2 deselected in 74.15s (0:01:14) ==================
+building:
+  luxd         built
+  lux-runner   built
+  lux-shim     built
+  lux          built
+  lux-fake     built
+  localhost/lux-fake:test built
+  localhost/lux-spike-docker-limits:test built
+run id:   60e45516
+logs:     /tmp/lux-e2e-60e45516
+network:  lux-e2e-60e45516 (192.168.80.0/20, gateway 192.168.80.1)
+hosts:    host-a=192.168.80.3, host-b=192.168.80.2
+luxd:     http://192.168.80.1:60249
+
+
+logs: /tmp/lux-e2e-60e45516

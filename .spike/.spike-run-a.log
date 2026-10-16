@@ -1,0 +1,180 @@
+Using CPython 3.14.4 interpreter at: /usr/bin/python3.14
+Creating virtual environment at: .venv
+Installed 26 packages in 988ms
+============================= test session starts ==============================
+platform linux -- Python 3.14.4, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/ubuntu/.arny-worktrees/1547198219946172468/c6d7ec9a2d464daaab56015b0df75b01/lux-docker-limits3/tests
+configfile: pyproject.toml
+plugins: timeout-2.4.0
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+collected 3 items / 1 deselected / 2 selected
+
+suites/test_spike_docker_limits.py == a0-dockerd-stock
+engine: 29.8.2 cgroupdriver=none security=[name=seccomp,profile=builtin name=rootless name=cgroupns]
+run: memory.max=1022312448 cgroup=0::/workload/main uid_map=2147483647, CapEff: 0000000000000000
+ROW1 FAIL mem=max oom=false:0 rc=0
+    | inner-mem=max
+    | 268435456
+    engine log:
+    > time="2026-10-16T00:19:25.524171949Z" level=info msg="loaded extension" extension=org.mobyproject.namesgenerator.legacy.v1 origin=builtin providers="[org.mobyproject.extension.containernamegenerator.v0 org.mobyproject.extension.servicenamegenerator.v0]"
+    > time="2026-10-16T00:19:25.524765903Z" level=info msg="Creating a containerd client" address=/tmp/xdg/docker/containerd/containerd.sock timeout=1m0s
+    > time="2026-10-16T00:19:25.525334206Z" level=warning msg="failed check for fsverity support" error="enable fsverity failed: operation not supported" path=/home/agent/.local/share/docker/plugins/storage
+    > time="2026-10-16T00:19:25.543080213Z" level=info msg="Loading containers: start."
+    > time="2026-10-16T00:19:25.543130694Z" level=info msg="NRI is disabled"
+    > time="2026-10-16T00:19:25.543136934Z" level=info msg="Starting daemon with containerd snapshotter integration enabled"
+    > time="2026-10-16T00:19:25.554120160Z" level=info msg="Restoring containers: start."
+    > time="2026-10-16T00:19:25.558645777Z" level=warning msg="Failed to find nft tool" error="exec: \"nft\": executable file not found in $PATH"
+    > time="2026-10-16T00:19:25.558671727Z" level=info msg="Deleting nftables IPv4 rules" error="failed to find nft tool: exec: \"nft\": executable file not found in $PATH"
+    > time="2026-10-16T00:19:25.558678377Z" level=info msg="Deleting nftables IPv6 rules" error="failed to find nft tool: exec: \"nft\": executable file not found in $PATH"
+    > time="2026-10-16T00:19:25.558690617Z" level=info msg="skipping firewalld management for rootless mode"
+    > time="2026-10-16T00:19:25.783869876Z" level=info msg="Loading containers: done."
+    > time="2026-10-16T00:19:25.791347811Z" level=warning msg="WARNING: Running in rootless-mode without cgroups. Systemd is required to enable cgroups in rootless-mode."
+    > time="2026-10-16T00:19:25.791389801Z" level=info msg="Docker daemon" commit=8af9fe3a36bab3e039862a2ab1cef1880c9b4d03 containerd-snapshotter=true storage-driver=overlayfs version=29.8.2
+    > time="2026-10-16T00:19:25.791482902Z" level=info msg="Initializing buildkit"
+    > time="2026-10-16T00:19:25.901864738Z" level=warning msg="git source cannot be enabled: failed to find git binary: exec: \"git\": executable file not found in $PATH"
+    > time="2026-10-16T00:19:25.908883330Z" level=info msg="Completed buildkit initialization"
+    > time="2026-10-16T00:19:25.914767056Z" level=info msg="Daemon has completed initialization"
+    > time="2026-10-16T00:19:25.914818536Z" level=info msg="API listen on /tmp/xdg/docker.sock"
+    > time="2026-10-16T00:19:32.327016631Z" level=info msg="connecting to shim adb47249acf69c25f9ea8d2de3ea68b3e9396b7341b73b94ea5ff2c858b8b87c" address="unix:///run/containerd/s/97a771474757d95b18f02f558ed4fd53f4b48c472d377a3e4c950b3a41865bad" namespace=moby protocol=ttrpc version=3
+    > time="2026-10-16T00:19:32.412914800Z" level=info msg="sbJoin: gwep4 ''->'', gwep6 ''->''" eid=646911d5e974 ep=m1 net=none nid=af46d92d79ab
+    > time="2026-10-16T00:19:32.858994491Z" level=info msg="shim disconnected" id=adb47249acf69c25f9ea8d2de3ea68b3e9396b7341b73b94ea5ff2c858b8b87c namespace=moby
+    > time="2026-10-16T00:19:32.859043101Z" level=info msg="cleaning up after shim disconnected" id=adb47249acf69c25f9ea8d2de3ea68b3e9396b7341b73b94ea5ff2c858b8b87c namespace=moby
+    > time="2026-10-16T00:19:32.859050811Z" level=info msg="cleaning up dead shim" id=adb47249acf69c25f9ea8d2de3ea68b3e9396b7341b73b94ea5ff2c858b8b87c namespace=moby
+    > time="2026-10-16T00:19:32.859175282Z" level=info msg="received task-delete event from containerd" container=adb47249acf69c25f9ea8d2de3ea68b3e9396b7341b73b94ea5ff2c858b8b87c module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+ROW2 FAIL cpu=max_100000 pids=max
+    | cpu=max_100000 pids=max cg=0::/
+    engine log:
+    > time="2026-10-16T00:19:25.554120160Z" level=info msg="Restoring containers: start."
+    > time="2026-10-16T00:19:25.558645777Z" level=warning msg="Failed to find nft tool" error="exec: \"nft\": executable file not found in $PATH"
+    > time="2026-10-16T00:19:25.558671727Z" level=info msg="Deleting nftables IPv4 rules" error="failed to find nft tool: exec: \"nft\": executable file not found in $PATH"
+    > time="2026-10-16T00:19:25.558678377Z" level=info msg="Deleting nftables IPv6 rules" error="failed to find nft tool: exec: \"nft\": executable file not found in $PATH"
+    > time="2026-10-16T00:19:25.558690617Z" level=info msg="skipping firewalld management for rootless mode"
+    > time="2026-10-16T00:19:25.783869876Z" level=info msg="Loading containers: done."
+    > time="2026-10-16T00:19:25.791347811Z" level=warning msg="WARNING: Running in rootless-mode without cgroups. Systemd is required to enable cgroups in rootless-mode."
+    > time="2026-10-16T00:19:25.791389801Z" level=info msg="Docker daemon" commit=8af9fe3a36bab3e039862a2ab1cef1880c9b4d03 containerd-snapshotter=true storage-driver=overlayfs version=29.8.2
+    > time="2026-10-16T00:19:25.791482902Z" level=info msg="Initializing buildkit"
+    > time="2026-10-16T00:19:25.901864738Z" level=warning msg="git source cannot be enabled: failed to find git binary: exec: \"git\": executable file not found in $PATH"
+    > time="2026-10-16T00:19:25.908883330Z" level=info msg="Completed buildkit initialization"
+    > time="2026-10-16T00:19:25.914767056Z" level=info msg="Daemon has completed initialization"
+    > time="2026-10-16T00:19:25.914818536Z" level=info msg="API listen on /tmp/xdg/docker.sock"
+    > time="2026-10-16T00:19:32.327016631Z" level=info msg="connecting to shim adb47249acf69c25f9ea8d2de3ea68b3e9396b7341b73b94ea5ff2c858b8b87c" address="unix:///run/containerd/s/97a771474757d95b18f02f558ed4fd53f4b48c472d377a3e4c950b3a41865bad" namespace=moby protocol=ttrpc version=3
+    > time="2026-10-16T00:19:32.412914800Z" level=info msg="sbJoin: gwep4 ''->'', gwep6 ''->''" eid=646911d5e974 ep=m1 net=none nid=af46d92d79ab
+    > time="2026-10-16T00:19:32.858994491Z" level=info msg="shim disconnected" id=adb47249acf69c25f9ea8d2de3ea68b3e9396b7341b73b94ea5ff2c858b8b87c namespace=moby
+    > time="2026-10-16T00:19:32.859043101Z" level=info msg="cleaning up after shim disconnected" id=adb47249acf69c25f9ea8d2de3ea68b3e9396b7341b73b94ea5ff2c858b8b87c namespace=moby
+    > time="2026-10-16T00:19:32.859050811Z" level=info msg="cleaning up dead shim" id=adb47249acf69c25f9ea8d2de3ea68b3e9396b7341b73b94ea5ff2c858b8b87c namespace=moby
+    > time="2026-10-16T00:19:32.859175282Z" level=info msg="received task-delete event from containerd" container=adb47249acf69c25f9ea8d2de3ea68b3e9396b7341b73b94ea5ff2c858b8b87c module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+    > time="2026-10-16T00:19:33.102436910Z" level=info msg="connecting to shim c0fc63765775833ca70892b63d4e2a7f3f7a3a8ef2cd799567b500e54784e908" address="unix:///run/containerd/s/cf4b4f0f5bbae6e1021251e663b89422bca3919a3c8b8db43174e76367b4b933" namespace=moby protocol=ttrpc version=3
+    > time="2026-10-16T00:19:33.176732548Z" level=info msg="sbJoin: gwep4 ''->'', gwep6 ''->''" eid=3b22f8234e80 ep=condescending_lovelace net=none nid=af46d92d79ab
+    > time="2026-10-16T00:19:33.206453497Z" level=info msg="received task-delete event from containerd" container=c0fc63765775833ca70892b63d4e2a7f3f7a3a8ef2cd799567b500e54784e908 module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+    > time="2026-10-16T00:19:33.206666848Z" level=info msg="shim disconnected" id=c0fc63765775833ca70892b63d4e2a7f3f7a3a8ef2cd799567b500e54784e908 namespace=moby
+    > time="2026-10-16T00:19:33.206738579Z" level=info msg="cleaning up after shim disconnected" id=c0fc63765775833ca70892b63d4e2a7f3f7a3a8ef2cd799567b500e54784e908 namespace=moby
+    > time="2026-10-16T00:19:33.206745619Z" level=info msg="cleaning up dead shim" id=c0fc63765775833ca70892b63d4e2a7f3f7a3a8ef2cd799567b500e54784e908 namespace=moby
+ROW3 PASS 127.0.0.1:8080
+ROW4 PASS buildkit=one+two+ classic=one+two+
+ROW5 PASS buildx=one+two+
+ROW6 FAIL mem=max compose-ok=1
+    |  Network spk_default Creating 
+    |  Network spk_default Created 
+    |  Container spk-other-1 Creating 
+    |  Container spk-other-1 Created 
+    |  Container spk-limited-1 Creating 
+    |  Container spk-limited-1 Created 
+    |  Container spk-other-1 Starting 
+    |  Container spk-other-1 Started 
+    |  Container spk-limited-1 Starting 
+    |  Container spk-limited-1 Started 
+    | limited-1  | limited-mem=max
+    | limited-1  | compose-ok
+    engine log:
+    > time="2026-10-16T00:19:44.229731542Z" level=warning msg="failed to restore thread's network namespace" error="operation not permitted"
+    > time="2026-10-16T00:19:44.230323905Z" level=error msg="libnetwork: restoring thread network namespace failed" error="operation not permitted"
+    > time="2026-10-16T00:19:44.231074290Z" level=warning msg="Failed to read stp_state file \"/sys/class/net/br-5a3a0e1a72af/bridge/stp_state\"" eid=c1345d1048cc ep=spk-other-1 error="open /sys/class/net/br-5a3a0e1a72af/bridge/stp_state: no such file or directory" net=spk_default nid=5a3a0e1a72af spanID=7c8b3f244bef0244 traceID=de77d0a89d1839ebaeb933ddf3dd7560 veth=veth4f28f02
+    > time="2026-10-16T00:19:44.231102500Z" level=warning msg="Failed to open port state file, waiting for 20ms" eid=c1345d1048cc ep=spk-other-1 net=spk_default nid=5a3a0e1a72af port=/sys/class/net/br-5a3a0e1a72af/brif/vethc91958f/state spanID=7c8b3f244bef0244 traceID=de77d0a89d1839ebaeb933ddf3dd7560 veth=veth4f28f02
+    > time="2026-10-16T00:19:44.251447922Z" level=warning msg="failed to restore thread's network namespace" error="operation not permitted"
+    > time="2026-10-16T00:19:44.253766066Z" level=info msg="sbJoin: gwep4 ''->'c1345d1048cc', gwep6 ''->''" eid=c1345d1048cc ep=spk-other-1 net=spk_default nid=5a3a0e1a72af spanID=7c8b3f244bef0244 traceID=de77d0a89d1839ebaeb933ddf3dd7560
+    > time="2026-10-16T00:19:44.323076313Z" level=info msg="connecting to shim ec730d5ed9ef8d359544d810188af503866ae3982736fb25eaf13318b5058008" address="unix:///run/containerd/s/eb4a9795871a8e9f9bf78df9310887f2595bbee1c5f375e71ffd956cf98270c8" namespace=moby protocol=ttrpc version=3
+    > time="2026-10-16T00:19:44.397139848Z" level=warning msg="failed to restore thread's network namespace" error="operation not permitted"
+    > time="2026-10-16T00:19:44.409921865Z" level=warning msg="failed to restore thread's network namespace" error="operation not permitted"
+    > time="2026-10-16T00:19:44.411022051Z" level=error msg="libnetwork: restoring thread network namespace failed" error="operation not permitted"
+    > time="2026-10-16T00:19:44.415103656Z" level=warning msg="Failed to read stp_state file \"/sys/class/net/br-5a3a0e1a72af/bridge/stp_state\"" eid=74187a499ab8 ep=spk-limited-1 error="open /sys/class/net/br-5a3a0e1a72af/bridge/stp_state: no such file or directory" net=spk_default nid=5a3a0e1a72af spanID=a4e5be5b7d74e955 traceID=de77d0a89d1839ebaeb933ddf3dd7560 veth=veth1d044fc
+    > time="2026-10-16T00:19:44.415141226Z" level=warning msg="Failed to open port state file, waiting for 20ms" eid=74187a499ab8 ep=spk-limited-1 net=spk_default nid=5a3a0e1a72af port=/sys/class/net/br-5a3a0e1a72af/brif/veth7b2a270/state spanID=a4e5be5b7d74e955 traceID=de77d0a89d1839ebaeb933ddf3dd7560 veth=veth1d044fc
+    > time="2026-10-16T00:19:44.435443488Z" level=warning msg="failed to restore thread's network namespace" error="operation not permitted"
+    > time="2026-10-16T00:19:44.437886283Z" level=info msg="sbJoin: gwep4 ''->'74187a499ab8', gwep6 ''->''" eid=74187a499ab8 ep=spk-limited-1 net=spk_default nid=5a3a0e1a72af spanID=a4e5be5b7d74e955 traceID=de77d0a89d1839ebaeb933ddf3dd7560
+    > time="2026-10-16T00:19:45.000342143Z" level=error msg="healthcheck failed fatally" error="session healthcheck failed fatally: Unavailable: connection error: desc = \"transport: Error while dialing: only one connection allowed\""
+    > time="2026-10-16T00:19:45.012071304Z" level=error msg="healthcheck failed fatally" error="session healthcheck failed fatally: Unavailable: connection error: desc = \"transport: Error while dialing: only one connection allowed\""
+    > time="2026-10-16T00:19:47.485572220Z" level=info msg="shim disconnected" id=ec730d5ed9ef8d359544d810188af503866ae3982736fb25eaf13318b5058008 namespace=moby
+    > time="2026-10-16T00:19:47.485605140Z" level=info msg="cleaning up after shim disconnected" id=ec730d5ed9ef8d359544d810188af503866ae3982736fb25eaf13318b5058008 namespace=moby
+    > time="2026-10-16T00:19:47.485612260Z" level=info msg="cleaning up dead shim" id=ec730d5ed9ef8d359544d810188af503866ae3982736fb25eaf13318b5058008 namespace=moby
+    > time="2026-10-16T00:19:47.485666531Z" level=info msg="received task-delete event from containerd" container=ec730d5ed9ef8d359544d810188af503866ae3982736fb25eaf13318b5058008 module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+    > time="2026-10-16T00:19:53.652662046Z" level=info msg="Container failed to exit within 1s of signal 15 - using the force" container=9123aabd4e126dd3d312fd946c4bec4938d7502c63c17c5bd81c38df0fd6a354 spanID=de037fc78be011dc traceID=07ff4cd6ed919a3e8da884423e59fcf3
+    > time="2026-10-16T00:19:53.681075527Z" level=info msg="shim disconnected" id=9123aabd4e126dd3d312fd946c4bec4938d7502c63c17c5bd81c38df0fd6a354 namespace=moby
+    > time="2026-10-16T00:19:53.681112677Z" level=info msg="cleaning up after shim disconnected" id=9123aabd4e126dd3d312fd946c4bec4938d7502c63c17c5bd81c38df0fd6a354 namespace=moby
+    > time="2026-10-16T00:19:53.681120657Z" level=info msg="cleaning up dead shim" id=9123aabd4e126dd3d312fd946c4bec4938d7502c63c17c5bd81c38df0fd6a354 namespace=moby
+    > time="2026-10-16T00:19:53.681617360Z" level=info msg="received task-delete event from containerd" container=9123aabd4e126dd3d312fd946c4bec4938d7502c63c17c5bd81c38df0fd6a354 module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+ROW7 PASS rc=137 run-memory.max=1022312448
+MATRIX-DONE
+
+.== a1-dockerd-cgroupfs
+ENGINE-FAILED
++ net=pasta
++ port_driver=implicit
++ mtu=
++ '[' -z pasta ]
++ '[' pasta '=' host ]
++ '[' -z  ]
++ mtu=65520
++ '[' -z implicit ]
++ host_loopback=--disable-host-loopback
++ '['  '=' false ]
++ dockerd=dockerd
++ '[' -z 1 ]
++ '[' 1 '=' 1 ]
++ rm -f /run/docker /run/containerd /run/xtables.lock
++ '[' -n  ]
++ stat -c '%T' -f /etc
++ '[' tmpfs '=' tmpfs ]
++ '[' -L /etc/ssl ]
++ mount_directory /etc/ssl --rbind
++ '[' -z 1 ]
++ DIRECTORY=/etc/ssl
++ '[' '!' -d /etc/ssl ]
++ realpath /etc/ssl
++ DIRECTORY_REALPATH=/etc/.ro2626277587/ssl
++ MOUNT_OPTIONS=--rbind
++ rm -rf /etc/ssl
++ mkdir -p /etc/ssl
++ mount --rbind /etc/.ro2626277587/ssl /etc/ssl
++ netns=/proc/self/ns/net
++ netns=/tmp/xdg/dockerd-rootless/netns
++ nsenter -n/tmp/xdg/dockerd-rootless/netns sysctl -w 'net.ipv4.ip_forward=1'
+net.ipv4.ip_forward = 1
++ nsenter -n/tmp/xdg/dockerd-rootless/netns sysctl -w 'net.ipv6.conf.all.forwarding=1'
+net.ipv6.conf.all.forwarding = 1
++ exec dockerd '--rootless=false' --exec-opt 'native.cgroupdriver=cgroupfs' '--cgroup-parent=/workload'
+time="2026-10-16T00:19:58.749725728Z" level=info msg="Starting up"
+time="2026-10-16T00:19:58.750541403Z" level=info msg="Daemon shutdown complete" error="rootless mode needs to be enabled for running with RootlessKit"
+rootless mode needs to be enabled for running with RootlessKit
+[rootlesskit:child ] error: command [/usr/bin/dockerd-rootless --rootless=false --exec-opt native.cgroupdriver=cgroupfs --cgroup-parent=/workload] exited: exit status 1
+[rootlesskit:parent] error: child exited: exit status 1
+
+.
+
+================= 2 passed, 1 deselected in 130.90s (0:02:10) ==================
+building:
+  luxd         built
+  lux-runner   built
+  lux-shim     built
+  lux          built
+  lux-fake     built
+  localhost/lux-fake:test built
+  localhost/lux-spike-docker-limits:test built
+run id:   af5a5a51
+logs:     /tmp/lux-e2e-af5a5a51
+network:  lux-e2e-af5a5a51 (192.168.80.0/20, gateway 192.168.80.1)
+hosts:    host-a=192.168.80.3, host-b=192.168.80.2
+luxd:     http://192.168.80.1:40383
+
+
+logs: /tmp/lux-e2e-af5a5a51

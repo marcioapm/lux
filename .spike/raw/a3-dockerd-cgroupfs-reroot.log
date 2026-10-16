@@ -1,0 +1,14 @@
+state=succeeded reason=None
+engine: 29.8.2 cgroupdriver=cgroupfs security=[name=seccomp,profile=builtin name=cgroupns]
+run: memory.max=1022312448 cgroup=0::/workload/main uid_map=2147483647, CapEff: 0000000000000000
+ROW1 PASS mem=134217728 oom=true:137 rc=137
+ROW2 PASS cpu=50000_100000 pids=64
+ROW3 PASS 127.0.0.1:8080
+ROW4 PASS buildkit=one+two+ classic=one+two+
+step-cgroup=$(cat /proc/self/cgroup) step-mem=$(cat /sys/fs/cgroup/memory.max)"
+buildkitd-cgroup: 0::/init max 
+ROW5 PASS buildx=one+two+
+ROW6 PASS mem=67108864 compose-ok
+ROW7 PASS rc=137 run-memory.max=1022312448
+MATRIX-ROWS-DONE
+MATRIX-DONE

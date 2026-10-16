@@ -1,0 +1,126 @@
+state=succeeded reason=None
+buildkitd: buildkitd.sock
+time="2026-10-16T00:44:26Z" level=info msg="found 1 workers, default=\"9uqv4tdoydwejkbhglaipj9s2\""
+time="2026-10-16T00:44:26Z" level=warning msg="currently, only the default worker can be used."
+time="2026-10-16T00:44:26Z" level=info msg="running server on /tmp/xdg/buildkit-default/buildkitd.sock"
+engine: time="2026-10-16T00:44:27Z" level=fatal msg="template: :1:9: executing \"\" at <.Server.Version>: can't evaluate field Version in type *dockercompat.ServerVersion" cgroupdriver=cgroupfs security=[name=apparmor name=seccomp,profile=builtin name=cgroupns name=rootless]
+run: memory.max=1022312448 cgroup=0::/workload/main uid_map=2147483647, CapEff: 0000000000000000
+ROW1 FAIL mem=134217728 oom= rc=137
+    | inner-mem=134217728
+    | time="2026-10-16T00:44:28Z" level=warning msg="failed to inspect NetNS" error="failed to Statfs \"/proc/443/ns/net\": no such file or directory" id=648ab586145cecbf55187ca97c1d84323f0e03a7115e6abf39ed24d1960997e1
+    | time="2026-10-16T00:44:28Z" level=error msg="template parsing error: template: :1:8: executing \"\" at <.State.OOMKilled>: map has no entry for key \"OOMKilled\""
+    engine log:
+    > time="2026-10-16T00:44:25.596154902Z" level=info msg="loading plugin" id=io.containerd.server.v1.ttrpc type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.596207382Z" level=info msg="loading plugin" id=io.containerd.monitor.container.v1.restart type=io.containerd.monitor.container.v1
+    > time="2026-10-16T00:44:25.596241852Z" level=info msg="Start subscribing containerd event"
+    > time="2026-10-16T00:44:25.596250612Z" level=info msg="loading plugin" id=io.containerd.metrics.v1.grpc-prometheus type=io.containerd.metrics.v1
+    > time="2026-10-16T00:44:25.596317073Z" level=info msg="Start stats collector"
+    > time="2026-10-16T00:44:25.596324993Z" level=info msg="Start recovering state"
+    > time="2026-10-16T00:44:25.596344713Z" level=info msg="loading plugin" id=io.containerd.metrics.v1.grpc-otel type=io.containerd.metrics.v1
+    > time="2026-10-16T00:44:25.596383713Z" level=info msg="loading plugin" id=io.containerd.server.v1.grpc type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.596427733Z" level=info msg="Start event monitor"
+    > time="2026-10-16T00:44:25.596439213Z" level=info msg="Start cni network conf syncer for default"
+    > time="2026-10-16T00:44:25.596452334Z" level=info msg="Start streaming server"
+    > time="2026-10-16T00:44:25.596464404Z" level=info msg="Registered namespace \"k8s.io\" with NRI"
+    > time="2026-10-16T00:44:25.596474084Z" level=info msg="runtime interface starting up..."
+    > time="2026-10-16T00:44:25.596482744Z" level=info msg="starting plugins..."
+    > time="2026-10-16T00:44:25.596503454Z" level=info msg="Synchronizing NRI (plugin) with current runtime state"
+    > time="2026-10-16T00:44:25.601235952Z" level=info msg="loading plugin" id=io.containerd.server.v1.grpc-tcp type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601285913Z" level=info msg="skip loading plugin" error="skip plugin" id=io.containerd.server.v1.grpc-tcp type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601295123Z" level=info msg="loading plugin" id=io.containerd.http.v1.pprof type=io.containerd.http.v1
+    > time="2026-10-16T00:44:25.601334163Z" level=info msg="loading plugin" id=io.containerd.server.v1.debug type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601341193Z" level=info msg="skip loading plugin" error="skip plugin" id=io.containerd.server.v1.debug type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601483044Z" level=info msg=serving... address=/run/containerd/containerd.sock.ttrpc
+    > time="2026-10-16T00:44:25.601555344Z" level=info msg="starting GRPC server" address=/run/containerd/containerd.sock gid=0 uid=0
+    > time="2026-10-16T00:44:25.601620475Z" level=info msg=serving... address=/run/containerd/containerd.sock
+    > time="2026-10-16T00:44:25.601642735Z" level=info msg="containerd successfully booted in 0.038674s"
+    > time="2026-10-16T00:44:28.242569912Z" level=info msg="connecting to shim 648ab586145cecbf55187ca97c1d84323f0e03a7115e6abf39ed24d1960997e1" address="unix:///run/containerd/s/60ea5c0c19486be5767c535a1ab8b73f1165e3893ecfbfb2910297fe1806c595" namespace=default protocol=ttrpc version=3
+ROW2 PASS cpu=50000_100000 pids=64
+ROW3 PASS 127.0.0.1:8080
+ROW4 FAIL buildkit= classic=
+    | time="2026-10-16T00:44:35Z" level=fatal msg="no image was built"
+    | time="2026-10-16T00:44:35Z" level=fatal msg="no image was built"
+    engine log:
+    > time="2026-10-16T00:44:25.596482744Z" level=info msg="starting plugins..."
+    > time="2026-10-16T00:44:25.596503454Z" level=info msg="Synchronizing NRI (plugin) with current runtime state"
+    > time="2026-10-16T00:44:25.601235952Z" level=info msg="loading plugin" id=io.containerd.server.v1.grpc-tcp type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601285913Z" level=info msg="skip loading plugin" error="skip plugin" id=io.containerd.server.v1.grpc-tcp type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601295123Z" level=info msg="loading plugin" id=io.containerd.http.v1.pprof type=io.containerd.http.v1
+    > time="2026-10-16T00:44:25.601334163Z" level=info msg="loading plugin" id=io.containerd.server.v1.debug type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601341193Z" level=info msg="skip loading plugin" error="skip plugin" id=io.containerd.server.v1.debug type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601483044Z" level=info msg=serving... address=/run/containerd/containerd.sock.ttrpc
+    > time="2026-10-16T00:44:25.601555344Z" level=info msg="starting GRPC server" address=/run/containerd/containerd.sock gid=0 uid=0
+    > time="2026-10-16T00:44:25.601620475Z" level=info msg=serving... address=/run/containerd/containerd.sock
+    > time="2026-10-16T00:44:25.601642735Z" level=info msg="containerd successfully booted in 0.038674s"
+    > time="2026-10-16T00:44:28.242569912Z" level=info msg="connecting to shim 648ab586145cecbf55187ca97c1d84323f0e03a7115e6abf39ed24d1960997e1" address="unix:///run/containerd/s/60ea5c0c19486be5767c535a1ab8b73f1165e3893ecfbfb2910297fe1806c595" namespace=default protocol=ttrpc version=3
+    > time="2026-10-16T00:44:33.699676895Z" level=info msg="shim disconnected" id=648ab586145cecbf55187ca97c1d84323f0e03a7115e6abf39ed24d1960997e1 namespace=default
+    > time="2026-10-16T00:44:33.699719135Z" level=info msg="cleaning up after shim disconnected" id=648ab586145cecbf55187ca97c1d84323f0e03a7115e6abf39ed24d1960997e1 namespace=default
+    > time="2026-10-16T00:44:33.699727495Z" level=info msg="cleaning up dead shim" id=648ab586145cecbf55187ca97c1d84323f0e03a7115e6abf39ed24d1960997e1 namespace=default
+    > time="2026-10-16T00:44:33.893138746Z" level=info msg="connecting to shim 85316260e5798a1f515ff359f9e2179e851e1a640ee6ae9ac8704e77419b670e" address="unix:///run/containerd/s/4e83fb73595ecf2cc6f7f878c96770bef43a358d587f72afb0de74a1f02efd1e" namespace=default protocol=ttrpc version=3
+    > time="2026-10-16T00:44:34.226371022Z" level=info msg="shim disconnected" id=85316260e5798a1f515ff359f9e2179e851e1a640ee6ae9ac8704e77419b670e namespace=default
+    > time="2026-10-16T00:44:34.226437343Z" level=info msg="cleaning up after shim disconnected" id=85316260e5798a1f515ff359f9e2179e851e1a640ee6ae9ac8704e77419b670e namespace=default
+    > time="2026-10-16T00:44:34.226450193Z" level=info msg="cleaning up dead shim" id=85316260e5798a1f515ff359f9e2179e851e1a640ee6ae9ac8704e77419b670e namespace=default
+    > time="2026-10-16T00:44:34.444005349Z" level=info msg="connecting to shim e10633296bf04dfd597f3a2f748bceb23837019dfe84fe176bebfe72dd53d7ac" address="unix:///run/containerd/s/1f62dc90e8f8d3e5eb60ba4b53613d0060a263f8a54c9321b7da444e9b02a8c4" namespace=default protocol=ttrpc version=3
+    > time="2026-10-16T00:44:34.841066722Z" level=error msg="ttrpc: received message on inactive stream" stream=15
+    > time="2026-10-16T00:44:35.063851500Z" level=warning msg="failed to send SIGTERM signal, killing logging shim" error="os: process already finished"
+    > time="2026-10-16T00:44:35.168489813Z" level=info msg="shim disconnected" id=e10633296bf04dfd597f3a2f748bceb23837019dfe84fe176bebfe72dd53d7ac namespace=default
+    > time="2026-10-16T00:44:35.168546174Z" level=info msg="cleaning up after shim disconnected" id=e10633296bf04dfd597f3a2f748bceb23837019dfe84fe176bebfe72dd53d7ac namespace=default
+    > time="2026-10-16T00:44:35.168566894Z" level=info msg="cleaning up dead shim" id=e10633296bf04dfd597f3a2f748bceb23837019dfe84fe176bebfe72dd53d7ac namespace=default
+ROW5 FAIL buildx=
+    | time="2026-10-16T00:44:38Z" level=fatal msg="unknown flag: --name"
+    | time="2026-10-16T00:44:38Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-bx/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" host=registry-1.docker.io
+    | time="2026-10-16T00:44:38Z" level=fatal msg="failed to resolve reference \"docker.io/library/spike-bx:latest\": failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-bx/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving"
+    | buildkit container:
+    | time="2026-10-16T00:44:38Z" level=fatal msg="1 errors: [no such object buildx_buildkit_spk0]"
+    | time="2026-10-16T00:44:38Z" level=fatal msg="no such container buildx_buildkit_spk0"
+    engine log:
+    > time="2026-10-16T00:44:25.596482744Z" level=info msg="starting plugins..."
+    > time="2026-10-16T00:44:25.596503454Z" level=info msg="Synchronizing NRI (plugin) with current runtime state"
+    > time="2026-10-16T00:44:25.601235952Z" level=info msg="loading plugin" id=io.containerd.server.v1.grpc-tcp type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601285913Z" level=info msg="skip loading plugin" error="skip plugin" id=io.containerd.server.v1.grpc-tcp type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601295123Z" level=info msg="loading plugin" id=io.containerd.http.v1.pprof type=io.containerd.http.v1
+    > time="2026-10-16T00:44:25.601334163Z" level=info msg="loading plugin" id=io.containerd.server.v1.debug type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601341193Z" level=info msg="skip loading plugin" error="skip plugin" id=io.containerd.server.v1.debug type=io.containerd.server.v1
+    > time="2026-10-16T00:44:25.601483044Z" level=info msg=serving... address=/run/containerd/containerd.sock.ttrpc
+    > time="2026-10-16T00:44:25.601555344Z" level=info msg="starting GRPC server" address=/run/containerd/containerd.sock gid=0 uid=0
+    > time="2026-10-16T00:44:25.601620475Z" level=info msg=serving... address=/run/containerd/containerd.sock
+    > time="2026-10-16T00:44:25.601642735Z" level=info msg="containerd successfully booted in 0.038674s"
+    > time="2026-10-16T00:44:28.242569912Z" level=info msg="connecting to shim 648ab586145cecbf55187ca97c1d84323f0e03a7115e6abf39ed24d1960997e1" address="unix:///run/containerd/s/60ea5c0c19486be5767c535a1ab8b73f1165e3893ecfbfb2910297fe1806c595" namespace=default protocol=ttrpc version=3
+    > time="2026-10-16T00:44:33.699676895Z" level=info msg="shim disconnected" id=648ab586145cecbf55187ca97c1d84323f0e03a7115e6abf39ed24d1960997e1 namespace=default
+    > time="2026-10-16T00:44:33.699719135Z" level=info msg="cleaning up after shim disconnected" id=648ab586145cecbf55187ca97c1d84323f0e03a7115e6abf39ed24d1960997e1 namespace=default
+    > time="2026-10-16T00:44:33.699727495Z" level=info msg="cleaning up dead shim" id=648ab586145cecbf55187ca97c1d84323f0e03a7115e6abf39ed24d1960997e1 namespace=default
+    > time="2026-10-16T00:44:33.893138746Z" level=info msg="connecting to shim 85316260e5798a1f515ff359f9e2179e851e1a640ee6ae9ac8704e77419b670e" address="unix:///run/containerd/s/4e83fb73595ecf2cc6f7f878c96770bef43a358d587f72afb0de74a1f02efd1e" namespace=default protocol=ttrpc version=3
+    > time="2026-10-16T00:44:34.226371022Z" level=info msg="shim disconnected" id=85316260e5798a1f515ff359f9e2179e851e1a640ee6ae9ac8704e77419b670e namespace=default
+    > time="2026-10-16T00:44:34.226437343Z" level=info msg="cleaning up after shim disconnected" id=85316260e5798a1f515ff359f9e2179e851e1a640ee6ae9ac8704e77419b670e namespace=default
+    > time="2026-10-16T00:44:34.226450193Z" level=info msg="cleaning up dead shim" id=85316260e5798a1f515ff359f9e2179e851e1a640ee6ae9ac8704e77419b670e namespace=default
+    > time="2026-10-16T00:44:34.444005349Z" level=info msg="connecting to shim e10633296bf04dfd597f3a2f748bceb23837019dfe84fe176bebfe72dd53d7ac" address="unix:///run/containerd/s/1f62dc90e8f8d3e5eb60ba4b53613d0060a263f8a54c9321b7da444e9b02a8c4" namespace=default protocol=ttrpc version=3
+    > time="2026-10-16T00:44:34.841066722Z" level=error msg="ttrpc: received message on inactive stream" stream=15
+    > time="2026-10-16T00:44:35.063851500Z" level=warning msg="failed to send SIGTERM signal, killing logging shim" error="os: process already finished"
+    > time="2026-10-16T00:44:35.168489813Z" level=info msg="shim disconnected" id=e10633296bf04dfd597f3a2f748bceb23837019dfe84fe176bebfe72dd53d7ac namespace=default
+    > time="2026-10-16T00:44:35.168546174Z" level=info msg="cleaning up after shim disconnected" id=e10633296bf04dfd597f3a2f748bceb23837019dfe84fe176bebfe72dd53d7ac namespace=default
+    > time="2026-10-16T00:44:35.168566894Z" level=info msg="cleaning up dead shim" id=e10633296bf04dfd597f3a2f748bceb23837019dfe84fe176bebfe72dd53d7ac namespace=default
+ROW6 PASS mem=67108864 compose-ok
+ROW7 PASS rc=137 run-memory.max=1022312448
+row7: engine-alive=ok
+row7: memory.events[.]: low 0 high 0 max 1962 oom 2 oom_kill 2 oom_group_kill 0 sock_throttled 0 
+row7: memory.events[workload]: low 0 high 0 max 35 oom 1 oom_kill 2 oom_group_kill 0 sock_throttled 0 
+row7: memory.events[workload/main]: low 0 high 0 max 0 oom 0 oom_kill 0 oom_group_kill 0 sock_throttled 0 
+MATRIX-ROWS-DONE
+MATRIX-DONE
+ROW4-offline time="2026-10-16T00:44:50Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-oci/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" host=registry-1.docker.io+time="2026-10-16T00:44:50Z" level=fatal msg="failed to resolve reference \"docker.io/library/spike-oci:latest\": failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-oci/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving"+
+    | time="2026-10-16T00:44:50Z" level=fatal msg="open /tmp/oci@sha256:d1e016453729980e0d64c56e3c96789ee89b99987a868dba4161687bff68c044/index.json: no such file or directory"
+buildkitd log:
+    > time="2026-10-16T00:44:26Z" level=info msg="found worker \"9uqv4tdoydwejkbhglaipj9s2\", labels=map[org.mobyproject.buildkit.worker.containerd.namespace:buildkit org.mobyproject.buildkit.worker.containerd.uuid:1346d556-9b17-4fdc-9df2-519687a22a8b org.mobyproject.buildkit.worker.executor:containerd org.mobyproject.buildkit.worker.hostname:lux org.mobyproject.buildkit.worker.network:host org.mobyproject.buildkit.worker.selinux.enabled:false org.mobyproject.buildkit.worker.snapshotter:overlayfs], platforms=[linux/amd64 linux/amd64/v2 linux/amd64/v3 linux/amd64/v4 linux/arm64 linux/386]"
+    > time="2026-10-16T00:44:26Z" level=info msg="found 1 workers, default=\"9uqv4tdoydwejkbhglaipj9s2\""
+    > time="2026-10-16T00:44:26Z" level=warning msg="currently, only the default worker can be used."
+    > time="2026-10-16T00:44:26Z" level=info msg="running server on /tmp/xdg/buildkit-default/buildkitd.sock"
+    > time="2026-10-16T00:44:35Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/alpine/manifests/3.24.2\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" span="resolving docker.io/library/alpine:3.24.2" spanID=85daead052f87db4 traceID=7e2575bd2614269ba2f6c9ead154ad23
+    > time="2026-10-16T00:44:35Z" level=error msg="/moby.buildkit.v1.frontend.LLBBridge/Solve returned error: rpc error: code = Unknown desc = docker.io/library/alpine:3.24.2: failed to resolve source metadata for docker.io/library/alpine:3.24.2: failed to do request: Head \"https://registry-1.docker.io/v2/library/alpine/manifests/3.24.2\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" spanID=26c1643efd96a15b traceID=7e2575bd2614269ba2f6c9ead154ad23
+    > time="2026-10-16T00:44:35Z" level=error msg="/moby.buildkit.v1.Control/Solve returned error: rpc error: code = Unknown desc = docker.io/library/alpine:3.24.2: failed to resolve source metadata for docker.io/library/alpine:3.24.2: failed to do request: Head \"https://registry-1.docker.io/v2/library/alpine/manifests/3.24.2\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" spanID=b20a0fb6b19f0edc traceID=7e2575bd2614269ba2f6c9ead154ad23
+    > time="2026-10-16T00:44:35Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/alpine/manifests/3.24.2\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" span="resolving docker.io/library/alpine:3.24.2" spanID=6a1398964e90d499 traceID=89e12663ed7597107550561cff7630f9
+    > time="2026-10-16T00:44:35Z" level=error msg="/moby.buildkit.v1.frontend.LLBBridge/Solve returned error: rpc error: code = Unknown desc = docker.io/library/alpine:3.24.2: failed to resolve source metadata for docker.io/library/alpine:3.24.2: failed to do request: Head \"https://registry-1.docker.io/v2/library/alpine/manifests/3.24.2\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" spanID=6f3f22c225623fc5 traceID=89e12663ed7597107550561cff7630f9
+    > time="2026-10-16T00:44:35Z" level=error msg="/moby.buildkit.v1.Control/Solve returned error: rpc error: code = Unknown desc = docker.io/library/alpine:3.24.2: failed to resolve source metadata for docker.io/library/alpine:3.24.2: failed to do request: Head \"https://registry-1.docker.io/v2/library/alpine/manifests/3.24.2\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" spanID=be7de7e701541bd3 traceID=89e12663ed7597107550561cff7630f9
+nerdctl inspect m1-like:
+m9 rc=137
+time="2026-10-16T00:44:50Z" level=warning msg="failed to inspect NetNS" error="failed to Statfs \"/proc/2494/ns/net\": no such file or directory" id=9636fdaa42c8ea2e974b374e621c15b1f518280f77baa21788b92f11c68d743f
+{"Status":"exited","Running":false,"Paused":false,"Restarting":false,"Pid":2494,"ExitCode":137,"Error":"","StartedAt":"2026-10-16T00:44:50.638085855Z","FinishedAt":"2026-10-16T00:44:50.836660553Z"}

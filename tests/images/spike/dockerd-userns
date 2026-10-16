@@ -1,0 +1,7 @@
+#!/bin/sh
+# dockerd-rootless's $DOCKERD for the spike: run inside RootlessKit's user,
+# mount and network namespaces, but without RootlessKit's environment, so
+# dockerd is not in rootless mode (config.Rootless false) and uses the
+# cgroupfs driver as root of its user namespace instead of no cgroups.
+for v in $(env | grep -o '^ROOTLESSKIT_[A-Z_]*'); do unset "$v"; done
+exec dockerd "$@"

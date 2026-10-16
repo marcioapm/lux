@@ -1,0 +1,31 @@
+#!/bin/sh
+# An OCI runtime for dockerd-userns: runc, with the bundle's config.json
+# adjusted before create/run:
+# - every sysfs mount read-only. The Run's own /sys is read-only, and in a
+#   user namespace the kernel refuses a sysfs mount less restricted than the
+#   one already visible (EPERM), which --privileged (BuildKit's
+#   docker-container driver) asks for.
+# - with RO_SYSFS_REROOT set, a cgroupsPath outside it (buildx's
+#   docker-container driver forces /docker/buildx under the cgroupfs driver)
+#   moved below it: only /workload is the workload's to create cgroups in.
+bundle=""
+prev=""
+for a in "$@"; do
+  case "$prev" in --bundle|-b) bundle=$a;; esac
+  case "$a" in --bundle=*) bundle=${a#--bundle=};; esac
+  prev=$a
+done
+for a in "$@"; do
+  case "$a" in
+    create|run)
+      if [ -n "$bundle" ] && [ -f "$bundle/config.json" ]; then
+        jq --arg root "${RO_SYSFS_REROOT:-}" '
+          .mounts |= map(if .type == "sysfs" then .options = ((.options // []) - ["rw"] + ["ro"]) else . end)
+          | if $root != "" and (.linux.cgroupsPath // "") != "" and ((.linux.cgroupsPath | startswith($root + "/")) | not)
+            then .linux.cgroupsPath = $root + .linux.cgroupsPath else . end' \
+          "$bundle/config.json" > "$bundle/config.json.ro" && mv "$bundle/config.json.ro" "$bundle/config.json"
+      fi
+      break;;
+  esac
+done
+exec /usr/bin/runc "$@"

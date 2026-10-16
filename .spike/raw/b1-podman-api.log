@@ -1,0 +1,62 @@
+state=succeeded reason=None
+podman-direct-port:
+pd-ok
+time="2026-10-16T00:33:53Z" level=warning msg="StopSignal SIGTERM failed to stop container pd in 10 seconds, resorting to SIGKILL"
+engine: 5.8.8 cgroupdriver=cgroupfs security=[name=seccomp,profile=default name=rootless]
+run: memory.max=1022312448 cgroup=0::/workload/main uid_map=2147483647, CapEff: 0000000000000000
+ROW1 PASS mem=134217728 oom=true:137 rc=137
+ROW2 PASS cpu=50000_100000 pids=64
+ROW3 PASS 127.0.0.1:8080
+ROW4 FAIL buildkit= classic=one+two+
+    | DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+    |             BuildKit is currently disabled; enable it by removing the DOCKER_BUILDKIT=0
+    |             environment-variable.
+    | 
+    | db12dc22e2a9fecb2c158816b6ffc2491d5a099145106b591c795efa1f68724f
+    | WARNING: No output specified with docker-container driver. Build result will only remain in the build cache. To push result image into registry use --push or to load image into docker use --load
+    | ERROR: failed to build: Error response from daemon: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving
+    engine log:
+    > time="2026-10-16T00:34:05Z" level=warning msg="StopSignal SIGTERM failed to stop container p3 in 10 seconds, resorting to SIGKILL"
+    > Trying to pull docker.io/moby/buildkit:buildx-stable-1...
+buildkitd-cgroup: Error response from daemon: can only create exec sessions on running containers: container state improper 
+ROW5 FAIL buildx=
+    | spk
+    | #1 [internal] booting buildkit
+    | #1 pulling image moby/buildkit:v0.33.1 done
+    | #1 pulling failed, using local image moby/buildkit:v0.33.1 done
+    | #1 creating container buildx_buildkit_spk0
+    | #1 creating container buildx_buildkit_spk0 0.4s done
+    | #1 ERROR: Error response from daemon: crun: create `/sys/fs/cgroup/docker`: Permission denied: OCI permission denied
+    | ------
+    |  > [internal] booting buildkit:
+    | ------
+    | ERROR: Error response from daemon: crun: create `/sys/fs/cgroup/docker`: Permission denied: OCI permission denied
+    | Unable to find image 'spike-bx:latest' locally
+    | docker: Error response from daemon: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving
+    | 
+    | Run 'docker run --help' for more information
+    | buildkit container:
+    | buildx_buildkit_spk0 Created
+    | cgroupparent=/docker/buildx privileged=true net=host
+    engine log:
+    > time="2026-10-16T00:34:05Z" level=warning msg="StopSignal SIGTERM failed to stop container p3 in 10 seconds, resorting to SIGKILL"
+    > Trying to pull docker.io/moby/buildkit:buildx-stable-1...
+    > Trying to pull docker.io/moby/buildkit:v0.33.1...
+    > Trying to pull docker.io/library/spike-bx:latest...
+ROW6 PASS mem=67108864 compose-ok
+ROW7 FAIL rc=125 run-memory.max=1022312448
+    | inner-mem=4294967296
+    | time="2026-10-16T00:34:24Z" level=error msg="error waiting for container: unexpected EOF"
+    engine log:
+    > time="2026-10-16T00:34:05Z" level=warning msg="StopSignal SIGTERM failed to stop container p3 in 10 seconds, resorting to SIGKILL"
+    > Trying to pull docker.io/moby/buildkit:buildx-stable-1...
+    > Trying to pull docker.io/moby/buildkit:v0.33.1...
+    > Trying to pull docker.io/library/spike-bx:latest...
+    > time="2026-10-16T00:34:21Z" level=warning msg="StopSignal SIGTERM failed to stop container spk-other-1 in 1 seconds, resorting to SIGKILL"
+MATRIX-ROWS-DONE
+probe: run /sys mount: ro,nosuid,nodev,noexec,relatime
+probe[--network host]: Cannot connect to the Docker daemon at unix:///tmp/xdg/podman.sock. Is the docker daemon running?
+probe[--privileged]: Cannot connect to the Docker daemon at unix:///tmp/xdg/podman.sock. Is the docker daemon running?
+probe[--privileged --network host]: Cannot connect to the Docker daemon at unix:///tmp/xdg/podman.sock. Is the docker daemon running?
+probe[--privileged --network host --cgroup-parent /workload/probe]: Cannot connect to the Docker daemon at unix:///tmp/xdg/podman.sock. Is the docker daemon running?
+MATRIX-DONE

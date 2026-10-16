@@ -102,6 +102,9 @@ def main() -> None:
         podman=every or args.nested or "test_nested.py" in files,
         docker=every or "test_nested_docker.py" in files)
     images = {**agent_images, "nested": nested, "docker": docker, **{ref: ref for ref in args.image}}
+    if "test_spike_docker_limits.py" in files:
+        from build import build_spike_image
+        images["spike"] = build_spike_image()
     binaries = {k: str(v) if v else None for k, v in built.items()}
 
     if args.jobs > 1 and not (args.serve or args.infra_only):

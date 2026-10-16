@@ -1,0 +1,52 @@
+state=succeeded reason=None
+buildkitd: buildkitd.sock
+time="2026-10-16T00:45:48Z" level=info msg="found 1 workers, default=\"3d6nkc6239hhnpx7hzwkzjopw\""
+time="2026-10-16T00:45:48Z" level=warning msg="currently, only the default worker can be used."
+time="2026-10-16T00:45:48Z" level=info msg="running server on /tmp/xdg/buildkit-default/buildkitd.sock"
+engine: time="2026-10-16T00:45:49Z" level=fatal msg="template: :1:9: executing \"\" at <.Server.Version>: can't evaluate field Version in type *dockercompat.ServerVersion" cgroupdriver=cgroupfs security=[name=apparmor name=seccomp,profile=builtin name=cgroupns name=rootless]
+run: memory.max=1022312448 cgroup=0::/workload/main uid_map=2147483647, CapEff: 0000000000000000
+ROW1 SKIP
+ROW2 SKIP
+ROW3 SKIP
+ROW4 SKIP
+ROW5 SKIP
+ROW6 SKIP
+ROW7 SKIP
+MATRIX-ROWS-DONE
+MATRIX-DONE
+build rc=1
+    | #1 [internal] load build definition from Dockerfile
+    | #1 transferring dockerfile: 167B done
+    | #1 DONE 0.1s
+    | 
+    | #2 [internal] load metadata for docker.io/library/alpine:3.24.2
+    | #2 ERROR: failed to do request: Head "https://registry-1.docker.io/v2/library/alpine/manifests/3.24.2": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving
+    | ------
+    |  > [internal] load metadata for docker.io/library/alpine:3.24.2:
+    | ------
+    | Dockerfile:1
+    | --------------------
+    |    1 | >>> FROM docker.io/library/alpine:3.24.2
+    |    2 |     RUN echo one > /one
+    |    3 |     RUN echo two > /two; cat /proc/self/cgroup > /cg
+    | --------------------
+    | error: failed to solve: docker.io/library/alpine:3.24.2: failed to resolve source metadata for docker.io/library/alpine:3.24.2: failed to do request: Head "https://registry-1.docker.io/v2/library/alpine/manifests/3.24.2": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving
+    | time="2026-10-16T00:45:50Z" level=fatal msg="no image was built"
+ROW4-nerdctl time="2026-10-16T00:45:50Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-b4/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" host=registry-1.docker.io+time="2026-10-16T00:45:50Z" level=fatal msg="failed to resolve reference \"docker.io/library/spike-b4:latest\": failed to do request: Head \"https://registry-1.docker.io/v2/library/spike-b4/manifests/latest\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving"+
+build -q rc=1 time="2026-10-16T00:45:50Z" level=fatal msg="no image was built" 
+ROW4-oci rc=0 one+
+    | #6 exporting config sha256:ea06943f43d6239562bc8ac9d30c62c54de25f77b658e86622c70598770a0ab2
+    | #6 exporting config sha256:ea06943f43d6239562bc8ac9d30c62c54de25f77b658e86622c70598770a0ab2 0.0s done
+    | #6 sending tarball 0.1s done
+    | #6 DONE 0.3s
+    | unpacking docker.io/library/spike-oci:latest (sha256:850b9b3b1744495535e791af0cf60ae34a403b31a552dcc564f7b057ad1c81d9)...
+    | Loaded image: docker.io/library/spike-oci:latest
+buildkitd log:
+    > time="2026-10-16T00:45:48Z" level=warning msg="currently, only the default worker can be used."
+    > time="2026-10-16T00:45:48Z" level=info msg="running server on /tmp/xdg/buildkit-default/buildkitd.sock"
+    > time="2026-10-16T00:45:50Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/alpine/manifests/3.24.2\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" span="resolving docker.io/library/alpine:3.24.2" spanID=dc308535
+    > time="2026-10-16T00:45:50Z" level=error msg="/moby.buildkit.v1.frontend.LLBBridge/Solve returned error: rpc error: code = Unknown desc = docker.io/library/alpine:3.24.2: failed to resolve source metadata for docker.io/library/alpine:3.24.2: failed to do request: Head \"https://registry-1.docker.io/v
+    > time="2026-10-16T00:45:50Z" level=error msg="/moby.buildkit.v1.Control/Solve returned error: rpc error: code = Unknown desc = docker.io/library/alpine:3.24.2: failed to resolve source metadata for docker.io/library/alpine:3.24.2: failed to do request: Head \"https://registry-1.docker.io/v2/library/a
+    > time="2026-10-16T00:45:50Z" level=info msg="fetch failed" error="failed to do request: Head \"https://registry-1.docker.io/v2/library/alpine/manifests/3.24.2\": dial tcp: lookup registry-1.docker.io on 10.89.0.1:53: server misbehaving" span="resolving docker.io/library/alpine:3.24.2" spanID=a795513a
+    > time="2026-10-16T00:45:50Z" level=error msg="/moby.buildkit.v1.frontend.LLBBridge/Solve returned error: rpc error: code = Unknown desc = docker.io/library/alpine:3.24.2: failed to resolve source metadata for docker.io/library/alpine:3.24.2: failed to do request: Head \"https://registry-1.docker.io/v
+    > time="2026-10-16T00:45:50Z" level=error msg="/moby.buildkit.v1.Control/Solve returned error: rpc error: code = Unknown desc = docker.io/library/alpine:3.24.2: failed to resolve source metadata for docker.io/library/alpine:3.24.2: failed to do request: Head \"https://registry-1.docker.io/v2/library/a

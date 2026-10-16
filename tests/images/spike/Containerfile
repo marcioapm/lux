@@ -1,0 +1,19 @@
+# Spike image: every candidate engine for Docker-CLI workloads with enforced
+# per-container limits in a nested Run (rootless dockerd, Podman's Docker
+# API, nerdctl with containerd and BuildKit). alpine.tar and buildkit.tar
+# are loaded inside, so nothing reaches a registry.
+FROM docker.io/library/alpine:3.24.2
+RUN apk add --no-cache docker docker-rootless-extras docker-cli-buildx docker-cli-compose \
+      fuse-overlayfs shadow-uidmap libcap-setcap slirp4netns iptables ip6tables \
+      podman passt crun nerdctl containerd buildkit rootlesskit cni-plugins jq util-linux-misc \
+ && setcap cap_setuid=ep /usr/bin/newuidmap && setcap cap_setgid=ep /usr/bin/newgidmap \
+ && ln -f /usr/bin/passt /usr/bin/pasta \
+ && if [ -e /usr/bin/passt.avx2 ]; then ln -f /usr/bin/passt.avx2 /usr/bin/pasta.avx2; fi \
+ && adduser -D -u 1000 agent \
+ && printf 'agent:1:999\nagent:1001:64535\n' > /etc/subuid && cp /etc/subuid /etc/subgid
+COPY --chmod=644 alpine.tar buildkit.tar /opt/
+COPY --chmod=755 dockerd-userns runc-ro-sysfs containerd-rootless.sh /usr/local/bin/
+# nerdctl build shells out to buildctl, which Alpine's buildkit lacks.
+COPY --from=docker.io/moby/buildkit:v0.33.1 /usr/bin/buildctl /usr/local/bin/
+USER agent
+WORKDIR /home/agent

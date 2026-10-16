@@ -119,6 +119,27 @@ def build_nested_images(podman: bool, docker: bool) -> tuple[str | None, str | N
     return (NESTED_IMAGE if podman else None), (DOCKER_IMAGE if docker else None)
 
 
+SPIKE_IMAGE = "localhost/lux-spike-docker-limits:test"
+BUILDKIT_IMAGE = "docker.io/moby/buildkit:v0.33.1"
+
+
+def build_spike_image() -> str:
+    """The docker-limits spike's workload image: every candidate engine,
+    with alpine and the BuildKit image to load inside (tests/images/spike)."""
+    from env import ALPINE_IMAGE
+    ensure_local(ALPINE_IMAGE, BUILDKIT_IMAGE)
+    with tempfile.TemporaryDirectory() as d:
+        files = {}
+        for name, ref in (("alpine.tar", ALPINE_IMAGE), ("buildkit.tar", BUILDKIT_IMAGE)):
+            files[name] = Path(d) / name
+            subprocess.run(["docker", "save", "-o", str(files[name]), ref], check=True)
+        for extra in (TESTS_DIR / "images" / "spike").iterdir():
+            if extra.name != "Containerfile":
+                files[extra.name] = extra
+        _build_image(SPIKE_IMAGE, files, TESTS_DIR / "images" / "spike" / "Containerfile")
+    return SPIKE_IMAGE
+
+
 # The opt-in real-agent suites: the credentials each needs, and where its
 # self-contained executable is.
 AGENTS = {
