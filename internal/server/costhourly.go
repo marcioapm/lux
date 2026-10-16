@@ -382,12 +382,15 @@ var loggedHostTransferBaseline sync.Map
 // host's own traffic in hour (the runner's link to luxd, pulls, uploads;
 // never a Run's): its counters' growth from the last sample before the
 // hour to the last within it, at the host's prices. With no earlier
-// sample the growth is unknown (the counters ran since boot, or since
-// before luxd sampled them), so the hour gets no row: the first hour with
-// a sample is never priced, the next one is. No price, or nothing
-// billable: no row.
+// sample, a host registered in this hour or the one before measures from
+// zero: its counters start at boot, about when it registered, and its
+// first sample may land in the hour after. Any other host's growth is
+// unknown (the counters ran since before luxd sampled them, or the earlier
+// samples are past retention), so the hour gets no row. No price, or
+// nothing billable: no row.
 func (s *Server) writeHostTransferHour(ctx context.Context, tx pgx.Tx, id string, hour time.Time) error {
 	var last, before map[string]proto.NetBytes
+	var fresh bool
 	// The last sample before the hour: one backward scan of the primary key
 	// (host_id, res, at) per resolution, not a sort of the host's history.
 	err := tx.QueryRow(ctx, `SELECT
@@ -395,10 +398,14 @@ func (s *Server) writeHostTransferHour(ctx context.Context, tx pgx.Tx, id string
 			(SELECT x.net_classes FROM unnest('{0,60,3600}'::int[]) r(res),
 				LATERAL (SELECT at, net_classes FROM host_samples
 					WHERE host_id = $1 AND res = r.res AND at < $2 AND net_classes IS NOT NULL ORDER BY at DESC LIMIT 1) x
-				ORDER BY x.at DESC, r.res LIMIT 1)`,
-		id, hour, hour.Add(time.Hour)).Scan(&last, &before)
+				ORDER BY x.at DESC, r.res LIMIT 1),
+			coalesce((SELECT date_trunc('hour', registered_at, 'UTC') >= $2::timestamptz - interval '1 hour' FROM hosts WHERE id = $1), false)`,
+		id, hour, hour.Add(time.Hour)).Scan(&last, &before, &fresh)
 	if err != nil || last == nil {
 		return err
+	}
+	if before == nil && fresh {
+		before = map[string]proto.NetBytes{}
 	}
 	if before == nil {
 		if _, logged := loggedHostTransferBaseline.LoadOrStore(id, struct{}{}); !logged {

@@ -511,13 +511,14 @@ snapshot amount; the Run's line sums per-item amounts each rounded to
 direction). The host-hour refresh does the same with the host's own counters
 (`host_samples.net_classes`), writing **unallocated** `data-transfer` rows
 per host: runner↔luxd across zones shows up as that host's cost, hour by
-hour. **The first host transfer hour after an upgrade or reboot is not
-priced**: a host hour is the growth from the last sample before it, and the
-first hour with a sample has none (its counters ran since boot, or since
-before luxd sampled them), so it gets no row rather than everything since
-boot. The next hour is the first priced one. The same holds for a rebuilt
-hour (a public-ip or block-storage rewind) whose earlier samples have
-passed `history.hours`.
+hour. A host hour is the growth from the last sample before it. A host
+that registered in that hour or the one before measures from zero (its
+counters start at boot), so a new host's first hour, its image pulls, is
+priced. With no earlier sample otherwise, the hour gets no row rather than
+everything since boot: **not priced** are the first hour after the upgrade
+that introduced host transfer sampling, and a rebuilt hour (a public-ip or
+block-storage rewind) whose earlier samples are past `history.hours`. The
+next hour is priced; luxd logs the skipped hour once per host.
 
 **Prices have no rate periods.** Unlike compute, block storage and public
 IPv4 (`host_rates`), per-GB transfer prices are not kept as periods. A

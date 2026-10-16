@@ -49,9 +49,9 @@ func TestHeartbeatSamplesNetOnChange(t *testing.T) {
 }
 
 // The host's own transfer becomes unallocated data-transfer rows, each
-// hour its counters' growth in that hour at the host's prices. The first
-// hour with a sample has nothing to measure from and gets no row; the
-// rows after it add up to the growth from that hour's last reading.
+// hour its counters' growth in that hour at the host's prices. The host
+// registered in its first hour, so that hour measures from zero (counters
+// start at boot) and the rows add up to its cumulative counters.
 func TestHostTransferHours(t *testing.T) {
 	s, _ := costFixture(t)
 	ctx := context.Background()
@@ -64,12 +64,10 @@ func TestHostTransferHours(t *testing.T) {
 			capacity, volumes, launch_template, network)
 		VALUES ('ht', 't1', 'ht', 'ec2p', 'terminated', $1, $1, $2, '{"cpus":8,"memory":34359738368}', '[]', '{"region":"eu-north-1"}', '{"publicIPv4":0}')`,
 		hour, hour.Add(4*time.Hour))
-	// Cumulative: hour 0 reaches 2 GB zone tx (its first sample, at 10
-	// minutes, already shows 1 GB: the hour is not priced); hour 1 reaches
-	// 3 GB; hour 2 nothing new; hour 3 reaches 5 GB zone tx and 1 GB
-	// internet tx, 3 GB delivered from zone. Hour 1's last reading is also
-	// in a minute rollup: the same counters at another resolution add
-	// nothing.
+	// Cumulative: hour 0 reaches 2 GB zone tx; hour 1 reaches 3 GB; hour 2
+	// nothing new; hour 3 reaches 5 GB zone tx and 1 GB internet tx, 3 GB
+	// delivered from zone. Hour 1's last reading is also in a minute
+	// rollup: the same counters at another resolution add nothing.
 	for _, smp := range []struct {
 		min, res int
 		net      map[string]proto.NetBytes
@@ -89,16 +87,46 @@ func TestHostTransferHours(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Hour 1: 1 GB zone tx × 0.01. Hour 3: 2 GB zone tx × 0.01 + 3 GB zone
-	// delivered × 0.01 + 1 GB internet × 0.09. Local is free.
-	want := []string{"1=0.01/0", "3=0.14/0"}
+	// Hour 0: 2 GB zone tx × 0.01. Hour 1: 1 GB zone tx × 0.01. Hour 3:
+	// 2 GB zone tx × 0.01 + 3 GB zone delivered × 0.01 + 1 GB internet ×
+	// 0.09. Local is free.
+	want := []string{"0=0.02/0", "1=0.01/0", "3=0.14/0"}
 	if rows := hostTransferRows(t, s, "ht", hour); !slices.Equal(rows, want) {
 		t.Fatalf("rows %v, want %v", rows, want)
 	}
 	p := eun1TransferTrimmed()
-	_, _, total := priceTransfer(map[string]proto.NetBytes{"zone": {Tx: 3 * gb, Rx: gb, RxDelivered: 3 * gb}, "internet": {Tx: gb}, "local": {Tx: 50 * gb}}, &p, false)
-	if sum := new(big.Rat).Add(mustRat("0.01"), mustRat("0.14")); sum.Cmp(total) != 0 {
-		t.Errorf("hours sum %s, growth after the first hour priced %s", sum.FloatString(9), total.FloatString(9))
+	_, _, total := priceTransfer(map[string]proto.NetBytes{"zone": {Tx: 5 * gb, Rx: gb, RxDelivered: 3 * gb}, "internet": {Tx: gb}, "local": {Tx: 50 * gb}}, &p, false)
+	if sum := new(big.Rat).Add(new(big.Rat).Add(mustRat("0.02"), mustRat("0.01")), mustRat("0.14")); sum.Cmp(total) != 0 {
+		t.Errorf("hours sum %s, cumulative priced %s", sum.FloatString(9), total.FloatString(9))
+	}
+}
+
+// A new host's first hour is its image pulls: registered a few minutes
+// into the hour, its counters started at boot, so the first sample's
+// cumulative is that hour's growth.
+func TestHostTransferFirstHourOfNewHost(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	cacheTransfer(t, s)
+	s.cfg.Costs.Batch = 10
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('ec2p', 't1', 'ec2p', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, registered_at, terminated_at,
+			capacity, volumes, launch_template, network)
+		VALUES ('hn', 't1', 'hn', 'ec2p', 'terminated', $1, $2, $3, '{"cpus":8,"memory":34359738368}', '[]', '{"region":"eu-north-1"}', '{"publicIPv4":0}')`,
+		hour, hour.Add(5*time.Minute), hour.Add(2*time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO host_samples (host_id, res, at, net_classes) VALUES
+		('hn', 0, $1, '{"internet":{"tx":5000000000}}'), ('hn', 0, $2, '{"internet":{"tx":5200000000}}')`,
+		hour.Add(20*time.Minute), hour.Add(80*time.Minute))
+	for range 3 {
+		if err := s.updateHostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Hour 0: 5 GB × 0.09. Hour 1: 0.2 GB × 0.09.
+	if rows, want := hostTransferRows(t, s, "hn", hour), []string{"0=0.45/0", "1=0.018/0"}; !slices.Equal(rows, want) {
+		t.Errorf("rows %v, want %v", rows, want)
 	}
 }
 
