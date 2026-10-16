@@ -370,7 +370,19 @@ Rootless Docker does not read containers.conf. Its containers inherit the
 Run's CPUs (affinity; `docker info` NCPU is the Run's), but in a nested
 Run they read `memory.max` and `cpu.max` as `max` at their namespace's
 root (measured), so ClickHouse and the JVM in them still size memory to
-the host. This is open: `test_run_size.py::test_inner_docker_containers_see_the_runs_size`
+the host. The cause: with the `none` driver dockerd passes runc no
+cgroup path and no resources, and runc, rootless, makes a best-effort
+cgroup `<parent of its own cgroup>/<container id>`. dockerd runs in
+`workload/main`, so that is `workload/<id>`, a new sibling of `main`
+with no limits of its own, and Docker's private cgroup namespace is
+rooted there. Without a writable parent (a cgroup filesystem mounted
+read-only, as in a Run that is not split) runc's mkdir fails, the
+container stays in dockerd's cgroup and sees its limits (measured, by
+remounting `/sys/fs/cgroup` read-only in dockerd's mount namespace).
+`docker run --cgroupns=host` (or `default-cgroupns-mode: host` in the
+workload's `daemon.json`) shows the Run's limits at `/sys/fs/cgroup`, at
+the cost of showing the container the Run's whole cgroup tree. This is
+open: `test_run_size.py::test_inner_docker_containers_see_the_runs_size`
 expects the Run's limits and is marked as an expected failure until then.
 
 ### Out of memory

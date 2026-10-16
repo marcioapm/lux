@@ -142,8 +142,8 @@ docker load -q -i /opt/alpine.tar >/dev/null
 """
 
 
-@pytest.mark.xfail(strict=True, reason="open finding: rootless Docker's inner containers see memory.max=max and "
-                                       "cpu.max=max in a delegated nested Run (docs/podman.md)")
+@pytest.mark.xfail(strict=True, reason="open finding: rootless runc puts Docker's inner containers in a new "
+                                       "workload/<id> with no limits, their cgroupns root (docs/podman.md)")
 def test_inner_docker_containers_see_the_runs_size(lux, runners, hosts):
     """Docker containers in a Run should see the Run's memory.max and quota
     at their cgroup namespace's root, and the Run's CPUs. Today only the
