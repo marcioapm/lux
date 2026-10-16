@@ -137,9 +137,13 @@ func (s *Server) recordNetwork(ctx context.Context) {
 
 // storeNetworkRefresh writes a host's network and classes when either
 // changed. A changed public IPv4 count opens a new public-ip period at the
-// region's cached price (the host's first is refreshPublicIP's).
+// region's cached price; a host's first is openPublicIP's, from when its
+// addresses were first recorded here (hosts.public_ip_from) if that was
+// after it registered.
 func (s *Server) storeNetworkRefresh(ctx context.Context, hostID, provider, region string, n HostNetwork, prefixes ProviderPrefixes) error {
-	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	var first bool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		first = false
 		var old *HostNetwork
 		var previous *proto.NetworkClasses
 		// The stored catalog is only needed to stand in for a failed prefix fetch.
@@ -168,13 +172,39 @@ func (s *Server) storeNetworkRefresh(ctx context.Context, hostID, provider, regi
 		if err != nil || tag.RowsAffected() == 0 || (old != nil && old.PublicIPv4 == n.PublicIPv4) {
 			return err
 		}
+		var known bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM host_rates WHERE host_id = $1 AND family = 'public-ip')`, hostID).Scan(&known); err != nil {
+			return err
+		}
+		if !known {
+			// Addresses appearing on a registered host (recorded late, or
+			// attached after launch) are charged from now, not from its
+			// registration.
+			first = n.PublicIPv4 > 0
+			if first && (old == nil || old.PublicIPv4 == 0) {
+				_, err = tx.Exec(ctx, `UPDATE hosts SET public_ip_from = clock_timestamp() WHERE id = $1 AND registered_at IS NOT NULL`, hostID)
+			}
+			return err
+		}
 		price, _, err := cachedDataTransfer(ctx, tx, provider, region)
 		if err != nil || price.PublicIPv4PerHour == "" {
 			return err
 		}
-		_, err = syncPublicIPRate(ctx, tx, hostID, price.PublicIPv4PerHour, price.Currency, provider+"-vpc-pricing", s.cfg.Costs.Hourly)
+		_, err = syncPublicIPRate(ctx, tx, hostID, price.PublicIPv4PerHour, price.Currency, provider+"-vpc-pricing")
 		return err
 	})
+	if err != nil || !first {
+		return err
+	}
+	var price DataTransferPrices
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		price, _, err = cachedDataTransfer(ctx, tx, provider, region)
+		return err
+	}); err != nil {
+		return err
+	}
+	s.openPublicIP(ctx, publicIPHost{ID: hostID, Provider: provider, Region: region}, price)
+	return nil
 }
 
 // hostNetwork is a host's stored classes (nil: none known, the runner

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -125,4 +126,44 @@ func TestStaticHostTransferPricing(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A public-IP charge set on a static host after it registered is charged
+// from when it was set, not backdated to registration; the host's hours
+// from then are rebuilt and its live Runs evaluated again, while a Run
+// whose placement ended before is left as it was.
+func TestStaticPublicIPSetLater(t *testing.T) {
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	costHosts(t, s)
+	execSQL(t, s, ctx, `UPDATE hosts SET capacity = '{"cpus":8,"memory":34359738368}' WHERE id = 'static'`)
+	placeRun(t, s, "t1", "A", StateStopping, "static", place("A", 2, 8, "10:00", "10:30"))
+	finish(t, s, "t1", "A", StateSucceeded)
+	placeRun(t, s, "t1", "B", StateRunning, "static", place("B", 2, 8, "10:15", ""))
+	drain(t, s)
+	execSQL(t, s, ctx, `DELETE FROM cost_pending`)
+	nextHour := time.Now().UTC().Truncate(time.Hour).Add(time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO cost_host_refresh (host_id, next_hour) VALUES ('static', $1)`, nextHour)
+	set := time.Now()
+	settings := HostNetworkSettings{TransferPrices: &DataTransferPrices{Currency: "USD", Internet: PerGB{Tx: "0.01"}, PublicIPv4PerHour: "0.005"}}
+	if code, body := call(t, s, keys["op"], http.MethodPut, "/v1/hosts/static/network", settings); code != http.StatusOK {
+		t.Fatalf("set network: %d %s", code, body)
+	}
+	got := publicIPRates(t, s, "static")
+	if len(got) != 1 || got[0].From.Before(set) || got[0].To != nil {
+		t.Fatalf("period %+v, want from %s (when set), not registration", got, set)
+	}
+	var cursor time.Time
+	systemScan(t, s, `SELECT next_hour FROM cost_host_refresh WHERE host_id = 'static'`, nil, &cursor)
+	if want := got[0].From.UTC().Truncate(time.Hour); !cursor.Equal(want) {
+		t.Errorf("host-hour cursor %s, want rewound to %s", cursor, want)
+	}
+	if p := pending(t, s, "B"); p == "" {
+		t.Error("live Run B not re-queued")
+	}
+	if p := pending(t, s, "A"); p != "" {
+		t.Errorf("A, ended before the charge, re-queued: %q", p)
+	}
+	drain(t, s)
+	assertPublicIPSince(t, s, keys["t1"], "B")
 }

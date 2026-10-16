@@ -721,7 +721,7 @@ func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, 
 		if err != nil {
 			return err
 		}
-		amount, err := pricePlacementSnapshot(ctx, tx, v.p, v.hostID, rate, end)
+		amount, err := pricePlacementSnapshot(ctx, tx, ownRateWindow(family, v.p, rate.From), v.hostID, rate, end)
 		if err != nil {
 			return err
 		}
@@ -790,7 +790,11 @@ func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, 
 		l.amount.Add(l.amount, amount)
 		l.from, l.to = minTime(l.from, v.p.From), maxTime(l.to, end)
 		l.placements = append(l.placements, d)
-		allocateCostHours(v.p.From, end, amount, func(hour time.Time, allocated *big.Rat) {
+		from := v.p.From
+		if v.rateFrom != nil {
+			from = ownRateWindow(family, v.p, *v.rateFrom).From
+		}
+		allocateCostHours(from, end, amount, func(hour time.Time, allocated *big.Rat) {
 			e.Hours = append(e.Hours, computeHour{hour, v.hostID, family, *v.currency, allocated})
 		})
 	}
@@ -812,15 +816,29 @@ func volumesItem(vols *[]HostVolume) string {
 	return strings.Join(parts, "+")
 }
 
-// resolveOwnRate is hostID's own period of family covering start, else its
+// resolveOwnRate is hostID's own period of family covering start, else the
+// first to open after it (ownRateWindow prices from then), else its
 // latest: no other host's rate is borrowed.
 func resolveOwnRate(ctx context.Context, tx pgx.Tx, hostID, family string, start time.Time) (ratePeriod, error) {
 	var rate ratePeriod
 	err := tx.QueryRow(ctx, `SELECT valid_from, valid_to, per_hour::text, currency, cap_cpus, cap_memory, source
 		FROM host_rates WHERE host_id = $1 AND family = $2
-		ORDER BY (valid_from <= $3 AND (valid_to IS NULL OR valid_to > $3)) DESC, valid_from DESC LIMIT 1`, hostID, family, start).
+		ORDER BY (valid_from <= $3 AND (valid_to IS NULL OR valid_to > $3)) DESC,
+			CASE WHEN valid_from > $3 THEN valid_from END NULLS LAST, valid_from DESC LIMIT 1`, hostID, family, start).
 		Scan(&rate.From, &rate.To, &rate.PerHour, &rate.Currency, &rate.CapCPUs, &rate.CapMemory, &rate.Source)
 	return rate, err
+}
+
+// ownRateWindow is the part of p a host-tied family's period from
+// rateFrom prices: a period that opened after p started (a public-ip
+// charge set or addresses attached later) prices p from then, not from p's
+// start. Compute's rate may be another host's (resolvePlacementRate), so
+// its window is p's.
+func ownRateWindow(family string, p placementWindow, rateFrom time.Time) placementWindow {
+	if family != familyCompute && rateFrom.After(p.From) {
+		p.From = rateFrom
+	}
+	return p
 }
 
 // resolvePlacementRate prefers an observation covering the placement start,

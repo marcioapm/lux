@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/netip"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -120,6 +122,10 @@ func (s *Server) setHostNetwork(ctx context.Context, in *setHostNetworkInput) (*
 		if id, err = s.resolveHost(ctx, tx, p, in.ID, false); err != nil {
 			return err
 		}
+		runs, err := lockBlockStorageHost(ctx, tx, id)
+		if err != nil {
+			return err
+		}
 		var mine, provisioned bool
 		if err := tx.QueryRow(ctx, `SELECT coalesce(tenant_id = $2, false), provision_requested_at IS NOT NULL
 			FROM hosts WHERE id = $1 FOR UPDATE`, id, p.TenantID).Scan(&mine, &provisioned); err != nil {
@@ -135,7 +141,15 @@ func (s *Server) setHostNetwork(ctx context.Context, in *setHostNetworkInput) (*
 			id, b.Network, b.TransferPrices, staticNetworkClasses(b.Network)); err != nil {
 			return err
 		}
-		return syncStaticPublicIP(ctx, tx, id)
+		first, err := syncStaticPublicIP(ctx, tx, id, false)
+		if err != nil || first == nil {
+			return err
+		}
+		skipped, err := requeueHostRunsSince(ctx, tx, id, runs, *first, s.cfg.Costs.Hourly)
+		if len(skipped) > 0 {
+			s.log.Warn("costs: public IPv4 not added to Runs final without compute snapshots", "host", id, "runs", skipped)
+		}
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -147,11 +161,17 @@ func (s *Server) setHostNetwork(ctx context.Context, in *setHostNetworkInput) (*
 
 // syncStaticPublicIP keeps a static host's public-ip period at its
 // operator's charge (transfer_prices.publicIPv4PerHour): a changed charge
-// closes the open period and opens one now; 0 or none opens none. Its
-// first opens when it registered, as its compute does. The caller holds
-// the host's row.
-func syncStaticPublicIP(ctx context.Context, tx pgx.Tx, hostID string) error {
-	_, err := tx.Exec(ctx, `WITH at AS (SELECT clock_timestamp() AS at),
+// closes the open period and opens one now; 0 or none opens none. The
+// host's first period opens when it registered if it is registering (the
+// charge came with it, from its pool), otherwise now: it returns that
+// period's start, for the caller to rebuild the hours and Runs after it
+// (requeueHostRunsSince). The caller holds the host's row.
+func syncStaticPublicIP(ctx context.Context, tx pgx.Tx, hostID string, registering bool) (*time.Time, error) {
+	// RETURNING's subquery sees host_rates as before the statement, so it
+	// tells the host's first period from a reopened one.
+	var from time.Time
+	var first bool
+	err := tx.QueryRow(ctx, `WITH at AS (SELECT clock_timestamp() AS at),
 		want AS (SELECT h.id, (h.transfer_prices->>'publicIPv4PerHour')::numeric AS per_hour, h.transfer_prices->>'currency' AS currency,
 				coalesce((h.capacity->>'cpus')::float8, 0) AS cpus, coalesce((h.capacity->>'memory')::int8, 0) AS memory, h.registered_at
 			FROM hosts h WHERE h.id = $1 AND h.registered_at IS NOT NULL),
@@ -162,14 +182,21 @@ func syncStaticPublicIP(ctx context.Context, tx pgx.Tx, hostID string) error {
 					OR w.cpus <> r.cap_cpus OR w.memory <> r.cap_memory)
 			RETURNING r.host_id)
 		INSERT INTO host_rates (host_id, family, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
-		SELECT w.id, 'public-ip',
-			CASE WHEN EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = w.id AND r.family = 'public-ip') THEN (SELECT at FROM at) ELSE w.registered_at END,
+		SELECT w.id, 'public-ip', CASE WHEN $2 THEN w.registered_at ELSE (SELECT at FROM at) END,
 			w.per_hour, w.currency, w.cpus, w.memory, 'static'
 		FROM want w
 		WHERE w.per_hour > 0 AND (w.cpus > 0 OR w.memory > 0)
 			AND (EXISTS (SELECT 1 FROM closed)
-				OR NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = w.id AND r.family = 'public-ip' AND r.valid_to IS NULL))`, hostID)
-	return err
+				OR NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = w.id AND r.family = 'public-ip' AND r.valid_to IS NULL))
+		RETURNING valid_from, NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = $1 AND r.family = 'public-ip')`,
+		hostID, registering).Scan(&from, &first)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !first) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &from, nil
 }
 
 // ValidPoolTransferPrices checks a pool's default transfer prices: only a

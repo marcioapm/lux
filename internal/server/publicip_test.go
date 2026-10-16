@@ -25,7 +25,7 @@ func publicIPRates(t *testing.T, s *Server, host string) []storedPublicIP {
 	ctx := context.Background()
 	var out []storedPublicIP
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT valid_from, valid_to, trim_scale(per_hour)::text, (details->>'addresses')::int
+		rows, err := tx.Query(ctx, `SELECT valid_from, valid_to, trim_scale(per_hour)::text, coalesce((details->>'addresses')::int, 0)
 			FROM host_rates WHERE host_id = $1 AND family = 'public-ip' ORDER BY valid_from`, host)
 		if err != nil {
 			return err
@@ -89,39 +89,65 @@ func TestPublicIPPeriods(t *testing.T) {
 	}
 }
 
-// Host-hour rows: public IPv4 is split by the same shares as compute,
-// allocated + unallocated = the addresses' cost of each hour.
+// A host whose address count was recorded before it registered (as #114
+// recorded every host's network) and whose Runs and host hours were priced
+// before its first public-ip period opened: the period opens from its
+// registration, its earlier host hours are rebuilt with public-ip rows, and
+// its final Runs are evaluated again and gain their share. Host-hour rows
+// split public IPv4 by the same shares as compute, allocated + unallocated
+// = the addresses' cost of each hour, allocated = the Runs' lines.
 func TestPublicIPHostHours(t *testing.T) {
-	s, _ := costFixture(t)
+	s, keys := costFixture(t)
 	ctx := context.Background()
 	s.cfg.Costs.Batch = 10
 	s.cfg.Costs.Hourly = 48 * time.Hour
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, registered_at, terminated_at, capacity, volumes, network)
-		VALUES ('hh', 't1', 'hh', 'p', 'terminated', $1, $1, $2, '{"cpus":8,"memory":34359738368}', '[]', '{"publicIPv4": 2}')`, hour, hour.Add(2*time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('ec2p', 't1', 'ec2p', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, registered_at, terminated_at, capacity, volumes, instance_type, market)
+		VALUES ('hh', 't1', 'hh', 'ec2p', 'terminated', $1, $1, $2, '{"cpus":8,"memory":34359738368}', '[]', 'm7i.2xlarge', 'on-demand')`, hour, hour.Add(2*time.Hour))
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
-		VALUES ('hh', $1, $2, 0.40, 'USD', 8, $3, 'aws-pricing')`, hour, hour.Add(2*time.Hour), 32*gib)
+		VALUES ('hh', $1, $2, 0.40, 'USD', 8, $3, 'ec2-pricing')`, hour, hour.Add(2*time.Hour), 32*gib)
 	// A: 2 of 8 CPUs over the first hour; B: 6 of 8 over its second half.
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at) VALUES
-		('p-hh', 't1', 'r1', 'hh', 1, 'exited', '{"cpus":2,"memory":8589934592}', $1, $2),
-		('p-hh2', 't1', 'r1', 'hh', 2, 'exited', '{"cpus":6,"memory":8589934592}', $3, $2)`, hour, hour.Add(time.Hour), hour.Add(30*time.Minute))
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := syncPublicIPRate(ctx, tx, "hh", "0.005", "USD", "ec2-vpc-pricing", s.cfg.Costs.Hourly)
-		return err
-	}); err != nil {
-		t.Fatal(err)
+	end1, end2 := hour.Add(time.Hour), hour.Add(time.Hour)
+	placeRun(t, s, "t1", "A", StateStopping, "hh", placementWindow{CPUs: 2, Memory: 8 * gib, From: hour, To: &end1})
+	placeRun(t, s, "t1", "B", StateStopping, "hh", placementWindow{CPUs: 6, Memory: 8 * gib, From: hour.Add(30 * time.Minute), To: &end2})
+	finish(t, s, "t1", "A", StateSucceeded)
+	finish(t, s, "t1", "B", StateSucceeded)
+	drain(t, s)
+	hostHours := func() []string {
+		t.Helper()
+		for range 3 {
+			if err := s.updateHostHours(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var rows []string
+		systemScan(t, s, `SELECT coalesce(array_agg(to_char(hour AT TIME ZONE 'UTC', 'HH24') || ' ' || trim_scale(allocated)::text || ' ' || trim_scale(unallocated)::text
+			ORDER BY hour), '{}') FROM cost_hourly WHERE host_id = 'hh' AND run_id IS NULL AND family = 'public-ip'`, nil, &rows)
+		return rows
 	}
-	for range 3 {
-		if err := s.updateHostHours(ctx); err != nil {
-			t.Fatal(err)
+	if rows := hostHours(); len(rows) != 0 {
+		t.Fatalf("public-ip rows before any period: %v", rows)
+	}
+	for _, run := range []string{"A", "B"} {
+		if lines, src := familyLines(t, s, keys["t1"], run); len(lines) != 1 || src != "final" {
+			t.Fatalf("%s before the period: %v %s", run, lines, src)
+		}
+	}
+	execSQL(t, s, ctx, `UPDATE hosts SET network = '{"publicIPv4": 2}' WHERE id = 'hh'`)
+	s.openPublicIP(ctx, publicIPHost{ID: "hh", Provider: "ec2"}, DataTransferPrices{Currency: "USD", PublicIPv4PerHour: "0.005"})
+	if got := publicIPRates(t, s, "hh"); len(got) != 1 || !got[0].From.Equal(hour) {
+		t.Fatalf("period %+v, want from registration %s", got, hour)
+	}
+	for _, run := range []string{"A", "B"} {
+		if p := pending(t, s, run); p == "" {
+			t.Errorf("final Run %s not re-queued", run)
 		}
 	}
 	// 2 addresses × 0.005 = 0.01 an hour. First hour: A 1/4 of it, B 3/4 of
 	// its half (0.00375); second hour: all unallocated.
 	h := func(n int) string { return hour.Add(time.Duration(n) * time.Hour).Format("15") }
-	var rows []string
-	systemScan(t, s, `SELECT coalesce(array_agg(to_char(hour AT TIME ZONE 'UTC', 'HH24') || ' ' || trim_scale(allocated)::text || ' ' || trim_scale(unallocated)::text
-		ORDER BY hour), '{}') FROM cost_hourly WHERE host_id = 'hh' AND run_id IS NULL AND family = 'public-ip'`, nil, &rows)
+	rows := hostHours()
 	want := []string{h(0) + " 0.00625 0.00375", h(1) + " 0 0.01"}
 	if !slices.Equal(rows, want) {
 		t.Errorf("public-ip host hours %v, want %v", rows, want)
@@ -132,6 +158,70 @@ func TestPublicIPHostHours(t *testing.T) {
 		fmt.Sscan(r, &hr, &a, &u)
 		if sum := new(big.Rat).Add(mustRat(a), mustRat(u)); sum.Cmp(big.NewRat(1, 100)) != 0 {
 			t.Errorf("%s: allocated + unallocated = %s, want the hour's 0.01", hr, sum.FloatString(9))
+		}
+	}
+	drain(t, s)
+	for run, want := range map[string]string{"A": "public-ip ipv4 0.0025 true", "B": "public-ip ipv4 0.00375 true"} {
+		lines, src := familyLines(t, s, keys["t1"], run)
+		if len(lines) != 2 || lines[1] != want || src != "final" {
+			t.Errorf("%s: %v %s, want %s", run, lines, src, want)
+		}
+	}
+}
+
+// Addresses first recorded after the host registered (an address attached
+// later, or a count of 0 that became 1) are charged from when the provider
+// check recorded them, not from registration: the period opens then, at
+// once (the price is cached), a Run that ended before is left final as it
+// was, and a live one is evaluated again.
+func TestPublicIPLateAddresses(t *testing.T) {
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	transferHost(t, s, false, 0) // 0 addresses, registered 10:00
+	cacheTransfer(t, s)
+	s.cfg.Costs.Hourly = 100 * 365 * 24 * time.Hour
+	placeRun(t, s, "t1", "A", StateStopping, "nh", place("A", 2, 8, "10:00", "11:00"))
+	finish(t, s, "t1", "A", StateSucceeded)
+	placeRun(t, s, "t1", "B", StateRunning, "nh", place("B", 2, 8, "10:30", ""))
+	drain(t, s)
+	before, _ := familyLines(t, s, keys["t1"], "A")
+	if fmt.Sprint(before) != "[compute m7i.2xlarge 0.1 true]" {
+		t.Fatalf("A before: %v", before)
+	}
+	execSQL(t, s, ctx, `DELETE FROM cost_pending`)
+	recorded := time.Now()
+	n := hostA()
+	n.Zone, n.PublicIPv4 = "eu-north-1a", 1
+	if err := s.storeNetworkRefresh(ctx, "nh", "ec2", "eu-north-1", n, catalogEU(at("09:00"))); err != nil {
+		t.Fatal(err)
+	}
+	got := publicIPRates(t, s, "nh")
+	if len(got) != 1 || got[0].From.Before(recorded) || got[0].From.After(time.Now()) || got[0].To != nil {
+		t.Fatalf("period %+v, want from %s (recorded), not registration", got, recorded)
+	}
+	if p := pending(t, s, "B"); p == "" {
+		t.Error("live Run B not re-queued")
+	}
+	if p := pending(t, s, "A"); p != "" {
+		t.Errorf("A, ended before the addresses, re-queued: %q", p)
+	}
+	if lines, src := familyLines(t, s, keys["t1"], "A"); !slices.Equal(lines, before) || src != "final" {
+		t.Errorf("A after: %v %s", lines, src)
+	}
+	drain(t, s)
+	assertPublicIPSince(t, s, keys["t1"], "B")
+}
+
+// assertPublicIPSince: live Run runID, placed weeks before its host's
+// public-ip period opened a moment ago, is charged from the period's start
+// only, so its public-ip line is under a nanodollar-scale bound rather
+// than weeks of its share.
+func assertPublicIPSince(t *testing.T, s *Server, key, runID string) {
+	t.Helper()
+	_, c := getCost(t, s, key, runID)
+	for _, l := range c.Lines {
+		if l.Family == familyPublicIP && mustRat(l.Amount).Cmp(big.NewRat(1, 1_000_000)) > 0 {
+			t.Errorf("%s public-ip %s: charged from before the period opened", runID, l.Amount)
 		}
 	}
 }

@@ -168,7 +168,10 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		if err := syncProviderCapacity(ctx, tx, hostID, registering); err != nil {
 			return err
 		}
-		if err := syncStaticPublicIP(ctx, tx, hostID); err != nil {
+		// A first period opened here starts at registration, before any
+		// hour or Run of the host, or now (capacity first advertised later),
+		// which no final Run reaches: nothing to rebuild.
+		if _, err := syncStaticPublicIP(ctx, tx, hostID, registering); err != nil {
 			return err
 		}
 		if registering {

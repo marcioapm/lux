@@ -16,3 +16,8 @@ ALTER TABLE cost_hourly ADD CONSTRAINT cost_hourly_check
   CHECK ((run_id IS NOT NULL AND tenant_id IS NOT NULL AND allocated = 0 AND unallocated = 0)
       OR (run_id IS NULL AND tenant_id IS NULL AND host_id IS NOT NULL AND source = 'compute'
           AND family IN ('compute', 'block-storage', 'public-ip', 'data-transfer') AND amount = 0));
+-- When a provider host's addresses were first recorded after it registered
+-- (a provider check that saw them late, or 0 that became n): its first
+-- public-ip period opens then, not at registration. NULL: known by
+-- registration, or none yet.
+ALTER TABLE hosts ADD COLUMN public_ip_from timestamptz;
