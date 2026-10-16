@@ -336,8 +336,12 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 }
 
 func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status) error {
+	hostID, err := lockReportedHost(ctx, tx, runID, epoch, st.State)
+	if err != nil {
+		return err
+	}
 	t := st.Times
-	_, err := tx.Exec(ctx, `UPDATE placements SET
+	_, err = tx.Exec(ctx, `UPDATE placements SET
 			image_ready_at       = coalesce(image_ready_at, $3),
 			volumes_restored_at  = coalesce(volumes_restored_at, $4),
 			container_started_at = coalesce(container_started_at, $5),
@@ -387,14 +391,14 @@ func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID
 	case "running":
 		// Only the transition matters: a placement reports running more than
 		// once (shim started, workload started), and reports are redelivered.
-		var hostID string
+		var started bool
 		err := tx.QueryRow(ctx, `UPDATE placements SET state = 'running', started_at = coalesce(started_at, now())
 			WHERE run_id = $1 AND epoch = $2 AND state IN ('assigned', 'starting')
-			RETURNING host_id`, runID, epoch).Scan(&hostID)
+			RETURNING true`, runID, epoch).Scan(&started)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if hostID != "" {
+		if started {
 			// The CASE reads first_started_at before this SET: first_pool_id
 			// is written on the first start only, never by a later one.
 			if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()),
@@ -421,23 +425,44 @@ func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID
 			return err
 		}
 	case "exited", "failed":
-		return s.placementExited(ctx, tx, tenantID, runID, epoch, st, runState, terminate)
+		return s.placementExited(ctx, tx, tenantID, hostID, runID, epoch, st, runState, terminate)
 	}
 	return nil
 }
 
+// lockReportedHost takes, before a status report writes its placement, the
+// locks the report will need on the placement's host: a heartbeat holds the
+// host's row while it renews the host's placements' leases, so a report
+// that wrote its placement first and then wrote the host's row (a start's
+// first_placement_at, an end's last_placement_ended_at) deadlocked with it.
+// An end also takes the host's cost lock, which serializes it with the
+// host's cost snapshots (lockCostHost), before the row, as the reaper and a
+// registration do. The Run's row is the caller's, taken first. A report
+// that writes no host row (starting, stopping) takes nothing.
+func lockReportedHost(ctx context.Context, tx pgx.Tx, runID string, epoch int, state string) (hostID string, err error) {
+	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
+		return "", err
+	}
+	switch state {
+	case "exited", "failed":
+		if err := lockCostHost(ctx, tx, hostID); err != nil {
+			return "", err
+		}
+	case "running":
+	default:
+		return hostID, nil
+	}
+	_, err = tx.Exec(ctx, `SELECT 1 FROM hosts WHERE id = $1 FOR NO KEY UPDATE`, hostID)
+	return hostID, err
+}
+
 // placementExited records a placement's end and decides what the Run
 // becomes. The snapshot arrives separately (snapshot.done); a stopped Run is
-// resumable once it has.
-func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status, runState string, terminate bool) error {
-	var stopReason, hostID string
+// resumable once it has. The caller holds the Run's row, the host's cost
+// lock and the host's row (lockReportedHost).
+func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch int, st proto.Status, runState string, terminate bool) error {
+	var stopReason string
 	var snapshotRefused, hasSnapshot, claimed bool
-	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
-		return err
-	}
-	if err := lockCostHost(ctx, tx, hostID); err != nil {
-		return err
-	}
 	err := tx.QueryRow(ctx, `UPDATE placements p SET state = 'exited', ended_at = now(),
 			exited_at = coalesce(exited_at, now()), exit_code = $3, exit_reason = $4, output_seq = nullif($5::bigint, 0),
 			lease_expires_at = NULL
