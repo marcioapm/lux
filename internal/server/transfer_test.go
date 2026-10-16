@@ -320,3 +320,28 @@ func TestTransferHoursSumToTotal(t *testing.T) {
 		t.Errorf("hours sum %s, total %s (%v)", moneyString(sum), moneyString(total), hours)
 	}
 }
+
+// CloudFront (provider-global-free) is a free class: no line, never
+// unpriced, whatever the price list.
+func TestTransferClassFreeCloudFront(t *testing.T) {
+	if !transferClassFree(string(proto.NetProviderGlobalFree)) {
+		t.Error("provider-global-free is not a free class")
+	}
+	if transferClassFree(string(proto.NetProviderGlobal)) {
+		t.Error("provider-global is a free class")
+	}
+}
+
+// Priced on its own, provider-global-free costs 0 per GB in both
+// directions, while provider-global costs internet out.
+func TestTransferPerGBCloudFront(t *testing.T) {
+	p := eun1TransferTrimmed()
+	for _, dir := range []string{"rx", "tx"} {
+		if v, ok := transferPerGB(p, string(proto.NetProviderGlobalFree), dir); !ok || v != "0" {
+			t.Errorf("provider-global-free %s: %q %v, want \"0\" true", dir, v, ok)
+		}
+	}
+	if v, ok := transferPerGB(p, string(proto.NetProviderGlobal), "tx"); !ok || v != "0.09" {
+		t.Errorf("provider-global tx: %q %v, want 0.09", v, ok)
+	}
+}
