@@ -239,6 +239,11 @@ func TestCpusetOfAReplacedEpochHeldUntilItExits(t *testing.T) {
 	if got := other(); got != "0-1" {
 		t.Fatalf("after epoch 1's container exited: %q, want 0-1", got)
 	}
+	// Both epochs write their run state in the background: let them end
+	// before the fixture's temp dir is removed, as the epoch-overlap tests do.
+	f.releaseRemove()
+	mustEnd(t, f.p, "epoch 1 never ended")
+	mustEnd(t, p2, "epoch 2 never ended")
 }
 
 // Re-adoption through the run state file: a started placement's set is
