@@ -119,6 +119,21 @@ def build_nested_images(podman: bool, docker: bool) -> tuple[str | None, str | N
     return (NESTED_IMAGE if podman else None), (DOCKER_IMAGE if docker else None)
 
 
+# Real applications that size themselves from their cgroup (test_run_size):
+# preloaded into the hosts only when that suite runs.
+CLICKHOUSE_IMAGE = "docker.io/clickhouse/clickhouse-server:26.8.28.14-alpine"
+JVM21_IMAGE = "docker.io/library/eclipse-temurin:21.0.12.1_1-jre-alpine-3.24"
+JVM17_IMAGE = "docker.io/library/eclipse-temurin:17.0.20.1_1-jre-alpine-3.24"
+
+
+def size_images(selected: bool) -> dict[str, str | None]:
+    refs = {"clickhouse": CLICKHOUSE_IMAGE, "jvm21": JVM21_IMAGE, "jvm17": JVM17_IMAGE}
+    if not selected:
+        return {k: None for k in refs}
+    ensure_local(*refs.values())
+    return refs
+
+
 # The opt-in real-agent suites: the credentials each needs, and where its
 # self-contained executable is.
 AGENTS = {
