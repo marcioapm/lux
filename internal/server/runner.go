@@ -651,7 +651,14 @@ func (s *Server) heartbeatVersion(ctx context.Context, hostID string, hb proto.H
 		// History: the host's sample, and one per live placement (current
 		// levels, cumulative counters).
 		s.sample(ctx, tx, func(tx pgx.Tx) error {
-			if err := sampleHost(ctx, tx, hostID, hb.Usage, hb.Runner); err != nil || n == 0 {
+			if err := sampleHost(ctx, tx, hostID, hb.Usage, hb.Runner); err != nil {
+				return err
+			}
+			// The host's own counters, on the sample that saw them change.
+			if _, err := tx.Exec(ctx, `WITH changed AS (UPDATE hosts SET net_sampled = host_net_classes
+					WHERE id = $1 AND host_net_classes IS DISTINCT FROM net_sampled RETURNING host_net_classes)
+				UPDATE host_samples SET net_classes = (SELECT host_net_classes FROM changed)
+				WHERE host_id = $1 AND res = 0 AND at = now() AND EXISTS (SELECT 1 FROM changed)`, hostID); err != nil || n == 0 {
 				return err
 			}
 			_, err := tx.Exec(ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx,
