@@ -191,8 +191,8 @@ def test_dry_run_preloads_real_app_images_only_for_suites_that_need_them(args, s
 
 
 # Fake EC2 instances join through add_host mid-test and must not load the
-# nested and real-app images (~1.7 GB): with them they missed the EC2
-# suites' waits (#120 CI shard 4). Only the environment's own hosts do.
+# nested and real-app images (~1.7 GB): loading them delays the instance's
+# registration past the EC2 suites' waits. Only the environment's own hosts do.
 def test_only_the_environments_own_hosts_load_the_nested_and_real_app_images(monkeypatch, tmp_path):
     import build
     import env as envmod
@@ -208,8 +208,7 @@ def test_only_the_environments_own_hosts_load_the_nested_and_real_app_images(mon
     monkeypatch.setattr(envmod, "sh", sh)
     monkeypatch.setattr(envmod, "_load", lambda host, tar, refs: loads.append((host, tar.name, refs)))
     monkeypatch.setattr(envmod.TestEnvironment, "add_host",
-                        lambda self, name, image_tar=None: envmod._load(name, Path(image_tar or "images.tar"),
-                                                                        self._host_images()[0]) or name)
+                        lambda self, name: envmod._load(name, Path("images.tar"), self._host_images()[0]) or name)
 
     e = envmod.TestEnvironment(n_hosts=2)
     e.log_dir, e.fake_image = str(tmp_path), "localhost/lux-fake:test"
@@ -237,7 +236,7 @@ def test_without_nested_or_real_app_images_there_is_one_tar(monkeypatch, tmp_pat
     monkeypatch.setattr(build, "ensure_local", lambda *a: None)
     monkeypatch.setattr(envmod, "sh", lambda *a, **_k: saves.append(Path(a[3]).name) if a[:2] == ("docker", "save") else "")
     monkeypatch.setattr(envmod, "_load", lambda *a: None)
-    monkeypatch.setattr(envmod.TestEnvironment, "add_host", lambda self, name, image_tar=None: name)
+    monkeypatch.setattr(envmod.TestEnvironment, "add_host", lambda self, name: name)
 
     e = envmod.TestEnvironment(n_hosts=1)
     e.log_dir = str(tmp_path)

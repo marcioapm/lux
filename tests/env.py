@@ -534,8 +534,6 @@ class TestEnvironment:
         every, own = self._host_images()
         sh("docker", "save", "-o", str(Path(self.log_dir) / "images.tar"), *every)
         own_tar = Path(self.log_dir) / "own-hosts.tar"
-        if own:
-            sh("docker", "save", "-o", str(own_tar), *own)
 
         def start(name: str) -> Host:
             host = self.add_host(name)
@@ -544,13 +542,15 @@ class TestEnvironment:
             return host
 
         try:
+            if own:
+                sh("docker", "save", "-o", str(own_tar), *own)
             names = host_names(self.n_hosts)
             with ThreadPoolExecutor(max_workers=len(names)) as pool:
                 self.hosts = list(pool.map(start, names))
         finally:
             own_tar.unlink(missing_ok=True)
 
-    def add_host(self, name: str, image_tar: Path | None = None) -> Host:
+    def add_host(self, name: str) -> Host:
         """Start one simulated host. Also used by the fake EC2 provider."""
         container = f"lux-e2e-{self.run_id}-{name}"
         BIN_DIR.mkdir(exist_ok=True)
@@ -574,7 +574,7 @@ class TestEnvironment:
         host.exec("sh", "-c",
                   "printf '[storage]\\ndriver = \"overlay\"\\nrunroot = \"/run/containers/storage\"\\n"
                   "graphroot = \"/var/lib/containers/storage\"\\n' > /etc/containers/storage.conf")
-        _load(host, image_tar or Path(self.log_dir) / "images.tar", self._host_images()[0])
+        _load(host, Path(self.log_dir) / "images.tar", self._host_images()[0])
         return host
 
     def _migrate(self) -> None:
