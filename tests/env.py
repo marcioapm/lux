@@ -66,6 +66,11 @@ S3_CONTAINER_PORT = 9000
 # Images every host has preloaded, so no test waits on a registry.
 ALPINE_IMAGE = "docker.io/library/alpine:3.24.2"
 PRELOAD_IMAGES = [ALPINE_IMAGE]
+# Images only the environment's own hosts get: the nested-container and
+# real-app images (~1.7 GB with test_run_size's ClickHouse and JVMs). Hosts
+# started later, as fake EC2 instances, never run them and load images.tar
+# alone, so they register inside the EC2 suites' waits.
+FIRST_HOSTS_ONLY = {"nested", "docker", "sizing"}
 # The memory every test runner offers (--memory), whatever the machine: a
 # 16 GB CI runner fits as many 8 GiB Runs as a workstation.
 RUNNER_MEMORY = 64 << 30
@@ -318,6 +323,19 @@ class Host:
 _luxd_procs: dict[int, subprocess.Popen] = {}
 
 
+def _load(host: "Host", tar: Path) -> None:
+    """podman load a docker-save tar into a host."""
+    with open(tar, "rb") as f:
+        loaded = subprocess.run(["docker", "exec", "-i", host.container, "podman", "load", "-q"],
+                                stdin=f, capture_output=True)
+    if loaded.returncode:
+        diagnostic = loaded.stdout + loaded.stderr
+        Path(host.log_dir).mkdir(parents=True, exist_ok=True)
+        (Path(host.log_dir) / "image-load.log").write_bytes(diagnostic)
+        raise RuntimeError(f"{host.container}: podman load {tar.name} exited {loaded.returncode}: "
+                           f"{diagnostic.decode(errors='replace')}")
+
+
 @dataclass
 class TestEnvironment:
     __test__ = False  # not a pytest test class
@@ -490,22 +508,37 @@ class TestEnvironment:
     def _bucket(self) -> None:
         self.s3().create_bucket(Bucket=self.bucket)
 
-    def _image_tar(self) -> Path:
+    def _image_tars(self) -> tuple[Path, Path | None]:
+        """images.tar, which every host loads, and first-hosts.tar (or None),
+        which only the environment's own hosts load (FIRST_HOSTS_ONLY)."""
         from build import ensure_local
         tar = Path(self.log_dir) / "images.tar"
         images = list(PRELOAD_IMAGES)
         ensure_local(*images)
         if self.fake_image:
             images.append(self.fake_image)
-        images += [i for i in self.extra.get("images", {}).values() if i]
+        extra = {k: v for k, v in self.extra.get("images", {}).items() if v}
+        images += [v for k, v in extra.items() if k not in FIRST_HOSTS_ONLY]
         sh("docker", "save", "-o", str(tar), *images)
-        return tar
+        first = [v for k, v in extra.items() if k in FIRST_HOSTS_ONLY]
+        if not first:
+            return tar, None
+        first_tar = Path(self.log_dir) / "first-hosts.tar"
+        sh("docker", "save", "-o", str(first_tar), *first)
+        return tar, first_tar
 
     def _hosts(self) -> None:
-        tar = self._image_tar()
+        tar, first_tar = self._image_tars()
+
+        def start(name: str) -> Host:
+            host = self.add_host(name, tar)
+            if first_tar:
+                _load(host, first_tar)
+            return host
+
         names = host_names(self.n_hosts)
         with ThreadPoolExecutor(max_workers=len(names)) as pool:
-            self.hosts = list(pool.map(lambda n: self.add_host(n, tar), names))
+            self.hosts = list(pool.map(start, names))
 
     def add_host(self, name: str, image_tar: Path | None = None) -> Host:
         """Start one simulated host. Also used by the fake EC2 provider."""
@@ -531,16 +564,7 @@ class TestEnvironment:
         host.exec("sh", "-c",
                   "printf '[storage]\\ndriver = \"overlay\"\\nrunroot = \"/run/containers/storage\"\\n"
                   "graphroot = \"/var/lib/containers/storage\"\\n' > /etc/containers/storage.conf")
-        tar = image_tar or Path(self.log_dir) / "images.tar"
-        with open(tar, "rb") as f:
-            loaded = subprocess.run(["docker", "exec", "-i", container, "podman", "load", "-q"],
-                                    stdin=f, capture_output=True)
-        if loaded.returncode:
-            diagnostic = loaded.stdout + loaded.stderr
-            Path(host.log_dir).mkdir(parents=True, exist_ok=True)
-            (Path(host.log_dir) / "image-load.log").write_bytes(diagnostic)
-            raise RuntimeError(f"{container}: podman load exited {loaded.returncode}: "
-                               f"{diagnostic.decode(errors='replace')}")
+        _load(host, image_tar or Path(self.log_dir) / "images.tar")
         # docker save records Docker Hub images by short name (alpine:3.24.2),
         # which podman loads as localhost/alpine; tag them with the full
         # references specs use, so nothing ever reaches a registry.
@@ -683,6 +707,7 @@ class TestEnvironment:
         except Exception as exc:  # noqa: BLE001
             print(f"warning: deleting bucket {self.bucket}: {exc}")
         (Path(self.log_dir) / "images.tar").unlink(missing_ok=True)
+        (Path(self.log_dir) / "first-hosts.tar").unlink(missing_ok=True)
 
     def _run_containers(self) -> list[str]:
         out = sh("docker", "ps", "-aq", "--filter", f"label=lux-e2e-run={self.run_id}", check=False)
