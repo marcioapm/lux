@@ -109,8 +109,8 @@ var jsonFormat = huma.Format{
 // decodeStrict decodes a request body as readJSON does: unknown fields
 // refused, anything after the first value ignored.
 func decodeStrict(data []byte, v any) error {
-	// Preserve an invalid submitted name for the submit validator rather
-	// than silently accepting encoding/json's U+FFFD replacement.
+	// A submitted name keeps its raw bytes, so CheckRunName refuses invalid
+	// UTF-8 rather than accepting encoding/json's U+FFFD replacement.
 	if sp, ok := v.(*spec.RunSpec); ok && !utf8.Valid(data) {
 		if raw, found := rawRunName(data); found && !utf8.Valid(raw) {
 			type plain spec.RunSpec
@@ -128,16 +128,14 @@ func decodeStrict(data []byte, v any) error {
 	return dec.Decode(v)
 }
 
-// rawRunName follows encoding/json's case-insensitive name matching and its
-// null-is-no-op behavior for string fields, while retaining the original value.
-func rawRunName(data []byte) ([]byte, bool) {
+// rawRunName is the raw value of the top-level member encoding/json would
+// decode into RunSpec.Name: the key matched case-insensitively as it does,
+// null skipped (a no-op for a string), the last remaining one winning.
+func rawRunName(data []byte) (raw []byte, found bool) {
 	dec := json.NewDecoder(bytes.NewReader(data))
-	tok, err := dec.Token()
-	if err != nil || tok != json.Delim('{') {
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return nil, false
 	}
-	var raw []byte
-	var found bool
 	for dec.More() {
 		key, err := dec.Token()
 		if err != nil {
@@ -148,8 +146,7 @@ func rawRunName(data []byte) ([]byte, bool) {
 			return nil, false
 		}
 		if key, ok := key.(string); ok && strings.EqualFold(key, "name") && string(value) != "null" {
-			raw = append(raw[:0], value...)
-			found = true
+			raw, found = value, true
 		}
 	}
 	return raw, found

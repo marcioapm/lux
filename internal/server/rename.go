@@ -20,35 +20,38 @@ type PatchRunInput struct {
 	decodeErr error
 }
 
-func (b *PatchRunInput) UnmarshalJSON(data []byte) error {
+// UnmarshalJSON keeps a decode error (an unknown field, a non-string name)
+// for patchRun to refuse as 422 invalid_spec.
+func (in *PatchRunInput) UnmarshalJSON(data []byte) error {
 	type plain PatchRunInput
 	var decoded plain
 	if err := decodeStrict(data, &decoded); err != nil {
-		b.decodeErr = err
+		in.decodeErr = err
 		return nil
 	}
-	*b = PatchRunInput(decoded)
+	*in = PatchRunInput(decoded)
 	return nil
 }
 
 // runName is a JSON string that keeps invalid UTF-8 for CheckRunName to
 // refuse (encoding/json would replace it with U+FFFD), and knows whether
-// it was given: bodies are not validated against their schema.
+// it was given: bodies are not validated against their schema. A null
+// unsets it, so a duplicate key ending in null leaves no name.
 type runName struct {
 	value string
 	set   bool
 }
 
-func (n *runName) UnmarshalJSON(b []byte) error {
-	if string(b) == "null" {
+func (n *runName) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
 		*n = runName{}
 		return nil
 	}
-	if err := json.Unmarshal(b, &n.value); err != nil {
+	if err := json.Unmarshal(data, &n.value); err != nil {
 		return err
 	}
-	if !utf8.Valid(b) {
-		n.value = string(b)
+	if !utf8.Valid(data) {
+		n.value = string(data)
 	}
 	n.set = true
 	return nil
@@ -100,18 +103,20 @@ func (s *Server) patchRun(ctx context.Context, in *patchRunInput) (*runOutput, e
 }
 
 // withNameProblem adds what is wrong with a submitted name to Normalize's
-// problems (err), so a submit lists them all at once.
+// problems (err), so a submit lists them all at once. An err that is not a
+// ValidationError is returned as it is.
 func withNameProblem(name string, err error) error {
 	nameErr := spec.CheckRunName(name)
 	if nameErr == nil {
 		return err
 	}
-	ve := &spec.ValidationError{Problems: []string{nameErr.Error()}}
+	problems := []string{nameErr.Error()}
 	var normalized *spec.ValidationError
-	if errors.As(err, &normalized) {
-		ve.Problems = append(ve.Problems, normalized.Problems...)
-	} else if err != nil {
+	switch {
+	case errors.As(err, &normalized):
+		problems = append(problems, normalized.Problems...)
+	case err != nil:
 		return err
 	}
-	return ve
+	return &spec.ValidationError{Problems: problems}
 }

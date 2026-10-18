@@ -49,19 +49,23 @@ func storedName(t *testing.T, s *Server, ctx context.Context, id string) (name s
 // patchName sends body as JSON, or as it is when it is a rawBody.
 func patchName(t *testing.T, s *Server, key, id string, body any) (int, string) {
 	t.Helper()
-	raw, ok := body.(rawBody)
-	if !ok {
-		return call(t, s, key, http.MethodPatch, "/v1/runs/"+id, body)
+	if raw, ok := body.(rawBody); ok {
+		return callRaw(s, key, http.MethodPatch, "/v1/runs/"+id, raw)
 	}
-	req := httptest.NewRequest(http.MethodPatch, "/v1/runs/"+id, strings.NewReader(string(raw)))
+	return call(t, s, key, http.MethodPatch, "/v1/runs/"+id, body)
+}
+
+// rawBody is a request body sent byte for byte, invalid UTF-8 included.
+type rawBody string
+
+func callRaw(s *Server, key, method, path string, body rawBody) (int, string) {
+	req := httptest.NewRequest(method, path, strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
 	return w.Code, w.Body.String()
 }
-
-type rawBody string
 
 func TestRenameRun(t *testing.T) {
 	s, ctx, keys := renameFixture(t, StateRunning)
@@ -217,43 +221,36 @@ func TestSubmitRefusesLongName(t *testing.T) {
 			t.Fatalf("control character: %d %s", code, body)
 		}
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/runs", strings.NewReader("{\"name\":\"bad \xff\",\"image\":{\"ref\":\"alpine\"},\"workload\":{\"command\":[\"true\"]}}"))
-	req.Header.Set("Authorization", "Bearer "+keys["run"])
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "name: not valid UTF-8") {
-		t.Fatalf("invalid UTF-8: %d %s", w.Code, w.Body)
+	body := rawBody("{\"name\":\"bad \xff\",\"image\":{\"ref\":\"alpine\"},\"workload\":{\"command\":[\"true\"]}}")
+	if code, body := callRaw(s, keys["run"], http.MethodPost, "/v1/runs", body); code != http.StatusUnprocessableEntity ||
+		!strings.Contains(body, "name: not valid UTF-8") {
+		t.Fatalf("invalid UTF-8: %d %s", code, body)
 	}
 }
 
 func TestSubmitCaseFoldRawUTF8(t *testing.T) {
 	s, _, keys := renameFixture(t, StateRunning)
+	runs := queryOne[int](t, s, `SELECT count(*) FROM runs`)
 	for _, field := range []string{"name", "Name", "NAME", "naMe", `na\u006de`} {
 		t.Run(field, func(t *testing.T) {
-			body := `{"` + field + `":"bad ` + string([]byte{0xff}) + `","image":{"ref":"alpine"},"workload":{"command":["true"]}}`
-			req := httptest.NewRequest(http.MethodPost, "/v1/runs", strings.NewReader(body))
-			req.Header.Set("Authorization", "Bearer "+keys["run"])
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			s.Handler().ServeHTTP(w, req)
-			if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "name: not valid UTF-8") {
-				t.Fatalf("submit %s: %d %s", field, w.Code, w.Body)
+			body := rawBody(`{"` + field + `":"bad ` + string([]byte{0xff}) + `","image":{"ref":"alpine"},"workload":{"command":["true"]}}`)
+			if code, body := callRaw(s, keys["run"], http.MethodPost, "/v1/runs", body); code != http.StatusUnprocessableEntity ||
+				!strings.Contains(body, "name: not valid UTF-8") {
+				t.Fatalf("submit %s: %d %s", field, code, body)
+			}
+			if n := queryOne[int](t, s, `SELECT count(*) FROM runs`); n != runs {
+				t.Fatalf("submit %s: %d runs, want %d", field, n, runs)
 			}
 		})
 	}
-	body := `{"name":"bad ` + string([]byte{0xff}) + `","NAME":"safe alias","image":{"ref":"alpine"},"workload":{"command":["true"]}}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/runs", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+keys["run"])
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("safe final alias: %d %s", w.Code, w.Body)
+	body := rawBody(`{"name":"bad ` + string([]byte{0xff}) + `","NAME":"safe alias","image":{"ref":"alpine"},"workload":{"command":["true"]}}`)
+	code, response := callRaw(s, keys["run"], http.MethodPost, "/v1/runs", body)
+	if code != http.StatusCreated {
+		t.Fatalf("safe final alias: %d %s", code, response)
 	}
 	var got Run
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.Name != "safe alias" || got.Spec.Name != "safe alias" {
-		t.Fatalf("safe final alias response: %d %s", w.Code, w.Body)
+	if err := json.Unmarshal([]byte(response), &got); err != nil || got.Name != "safe alias" || got.Spec.Name != "safe alias" {
+		t.Fatalf("safe final alias response: %d %s", code, response)
 	}
 }
 
@@ -272,9 +269,10 @@ func TestRenameDuplicateNull(t *testing.T) {
 	}
 }
 
-// applyReport and resume do: SELECT ... FOR UPDATE, then a rewrite of state
-// and spec from what they read) waits for it, and is applied on top: both
-// the new state and the new name are there, in runs.name and spec.name.
+// A rename during a state change that holds the row lock (as applyReport and
+// resume do: SELECT ... FOR UPDATE, then a rewrite of state and spec from
+// what they read) waits for it, and is applied on top: both the new state
+// and the new name are there, in runs.name and spec.name.
 func TestRenameRacingAStateChange(t *testing.T) {
 	s, ctx, keys := renameFixture(t, StateRunning)
 	type answer struct {
