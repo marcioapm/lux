@@ -13,7 +13,63 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 )
 
+func (p *placement) checkpointLimit() int64 {
+	if p.assign != nil && p.assign.CheckpointBytes > 0 {
+		return p.assign.CheckpointBytes
+	}
+	return proto.DefaultCheckpointBytes
+}
+
+func (p *placement) checkpointRunning(ctx context.Context) {
+	if p.assign == nil || p.assign.Spec.Git == nil {
+		return
+	}
+	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
+	if err != nil {
+		return
+	}
+	dir := "checkpoint-live-" + ids.New("stage")
+	path := rt + "/" + dir
+	if os.Mkdir(path, 0o700) != nil {
+		return
+	}
+	if os.Chown(path, p.user.UID, p.user.GID) != nil {
+		return
+	}
+	a := proto.CheckpointArgs{Dir: proto.ShimRunDir + "/" + dir, MaxBytes: p.checkpointLimit()}
+	for _, repo := range p.assign.Spec.Git.Repositories {
+		a.Repos = append(a.Repos, proto.CheckpointRepo{Name: repo.Name, Path: repo.Path})
+	}
+	out, err := p.r.execShim(ctx, p.runID, fmt.Sprintf("%d:%d", p.user.UID, p.user.GID), "checkpoint", a)
+	if err != nil {
+		p.event(ctx, proto.EvWarning, map[string]any{"message": "git checkpoint: " + err.Error()})
+		return
+	}
+	// This directory was created by the runner and the manifest is replaced,
+	// never opened through a link planted by the workload.
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return
+	}
+	defer root.Close()
+	_ = root.Remove("results.json")
+	f, err := root.OpenFile("results.json", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return
+	}
+	_, err = f.Write(out)
+	f.Close()
+	if err != nil {
+		return
+	}
+	p.collectCheckpointDir(ctx, dir)
+}
+
 func (p *placement) collectCheckpoints(ctx context.Context) {
+	p.collectCheckpointDir(ctx, fmt.Sprintf("checkpoints-%d", p.epoch))
+}
+
+func (p *placement) collectCheckpointDir(ctx context.Context, dir string) {
 	if p.assign == nil || p.assign.Spec.Git == nil || len(p.assign.Spec.Git.Repositories) == 0 {
 		return
 	}
@@ -31,7 +87,6 @@ func (p *placement) collectCheckpoints(ctx context.Context) {
 		return
 	}
 	defer root.Close()
-	dir := fmt.Sprintf("checkpoints-%d", p.epoch)
 	f, err := root.OpenFile(dir+"/results.json", os.O_RDONLY|oNoFollow, 0)
 	if err != nil {
 		warn(fmt.Errorf("no completed checkpoint stage: %w", err))
@@ -67,14 +122,14 @@ func (p *placement) collectCheckpoints(ctx context.Context) {
 			continue
 		}
 		fi, err := src.Stat()
-		if err != nil || !fi.Mode().IsRegular() || fi.Size() != res.Size || res.Size > proto.DefaultCheckpointBytes {
+		if err != nil || !fi.Mode().IsRegular() || fi.Size() != res.Size || res.Size > p.checkpointLimit() {
 			src.Close()
 			warn(fmt.Errorf("%s: invalid bundle size or type", repo.Name))
 			continue
 		}
 		id := ids.New(ids.Blob)
 		size, sum, err := p.r.writeBlob(id, func(w io.Writer) error {
-			_, err := io.Copy(w, io.LimitReader(src, proto.DefaultCheckpointBytes+1))
+			_, err := io.Copy(w, io.LimitReader(src, p.checkpointLimit()+1))
 			return err
 		})
 		src.Close()

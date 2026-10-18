@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/klauspost/compress/zstd"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -70,7 +72,40 @@ func (p *placement) materialize(ctx context.Context, r spec.Repository, user pas
 	if err != nil {
 		return nil, err
 	}
-	res, err := p.r.git.Materialize(ctx, p.gitRepo(r), dir)
+	repo := p.gitRepo(r)
+	if r.From != nil {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return nil, nil
+		}
+		body, err := p.r.api.download(ctx, r.From.Checkpoint)
+		if err != nil {
+			return nil, err
+		}
+		defer body.Close()
+		zr, err := zstd.NewReader(body)
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		f, err := os.CreateTemp(p.r.cfg.DataDir, "checkpoint-*.bundle")
+		if err != nil {
+			return nil, err
+		}
+		defer os.Remove(f.Name())
+		n, err := io.Copy(f, io.LimitReader(zr, proto.DefaultCheckpointBytes+1))
+		closeErr := f.Close()
+		if err != nil {
+			return nil, err
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if n > proto.DefaultCheckpointBytes {
+			return nil, fmt.Errorf("checkpoint exceeds size limit")
+		}
+		repo.Bundle, repo.HeadBranch = f.Name(), r.From.Branch
+	}
+	res, err := p.r.git.Materialize(ctx, repo, dir)
 	if err != nil || !res.Cloned {
 		return nil, err
 	}
@@ -133,6 +168,9 @@ func (p *placement) checkoutDir(path string) (mountpoint, dir string, err error)
 // repository from the Run's spec on it.
 func (p *placement) reportClone(ctx context.Context, r spec.Repository, data map[string]any) error {
 	data["repo"] = r.Name
+	if r.From != nil {
+		data["from"] = map[string]string{"run": r.From.Run, "checkpoint": r.From.Checkpoint}
+	}
 	if r.AddedBy != "" {
 		data["requestId"] = r.AddedBy
 	}

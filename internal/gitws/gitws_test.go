@@ -51,6 +51,28 @@ func TestMaterializeIsIdempotentAndKeepsWork(t *testing.T) {
 	}
 }
 
+func TestMaterializeCheckpointBundle(t *testing.T) {
+	bare, _ := remote(t)
+	source := filepath.Join(t.TempDir(), "source")
+	gitRun(t, filepath.Dir(source), "clone", "-q", bare, source)
+	gitRun(t, source, "checkout", "-q", "-b", "unpublished")
+	gitRun(t, source, "commit", "-q", "--allow-empty", "-m", "local")
+	head := gitRun(t, source, "rev-parse", "HEAD")
+	bundle := filepath.Join(t.TempDir(), "checkpoint.bundle")
+	gitRun(t, source, "bundle", "create", bundle, "--branches", "HEAD")
+	dir := filepath.Join(t.TempDir(), "clone")
+	res, err := New(t.TempDir()).Materialize(context.Background(), Repo{Tenant: "t", Name: "copy", URL: bare, Bundle: bundle, HeadBranch: "unpublished"}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Base != head || res.Branch != "unpublished" {
+		t.Fatalf("%+v", res)
+	}
+	if got := gitRun(t, dir, "remote", "get-url", "origin"); got != bare {
+		t.Fatalf("origin %s", got)
+	}
+}
+
 func TestUnknownRef(t *testing.T) {
 	bare, _ := remote(t)
 	m := New(t.TempDir())

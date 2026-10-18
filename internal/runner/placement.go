@@ -1238,9 +1238,9 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 		Services:     sp.Workload.Services,
 	}
 	if sp.Git != nil && len(sp.Git.Repositories) > 0 {
-		cfg.Checkpoint = &proto.CheckpointArgs{Dir: fmt.Sprintf("%s/checkpoints-%d", proto.ShimRunDir, p.epoch), MaxBytes: proto.DefaultCheckpointBytes}
+		cfg.Checkpoint = &proto.CheckpointArgs{Dir: fmt.Sprintf("%s/checkpoints-%d", proto.ShimRunDir, p.epoch), MaxBytes: p.checkpointLimit()}
 		for _, repo := range sp.Git.Repositories {
-			cfg.Checkpoint.Repos = append(cfg.Checkpoint.Repos, proto.CheckpointRepo{Name: repo.Name, Path: repo.Path})
+			cfg.Checkpoint.Repos = append(cfg.Checkpoint.Repos, proto.CheckpointRepo{Name: repo.Name, Path: repo.Path, Previous: p.assign.CheckpointRefs[repo.Name]})
 		}
 	}
 	if sp.Init != nil {
