@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -211,4 +213,63 @@ func checkpointDownload(s *Server, id, scope string) int {
 	rec := httptest.NewRecorder()
 	s.wrap(s.serveRunnerBlobDownload)(rec, req)
 	return rec.Code
+}
+
+func pinOf(t *testing.T, s *Server, run, repo string) string {
+	t.Helper()
+	var id string
+	systemScan(t, s, `SELECT coalesce((SELECT checkpoint_id FROM git_checkpoint_refs WHERE run_id = $1 AND repo = $2), '')`, []any{run, repo}, &id)
+	return id
+}
+
+// A `from` repository added on resume whose clone fails is dropped with its
+// pin: the pinned checkpoint becomes reclaimable once superseded, and adding
+// the repository again pins and serves the source's current checkpoint.
+func TestResumeAddFromAfterFailedClone(t *testing.T) {
+	s, ctx := reportFixture(t)
+	useFakeS3(t, s)
+	reportCheckpoint(t, s, "checkpoint-one")
+	if err := uploadCheckpoint(s, "checkpoint-one"); err != nil {
+		t.Fatal(err)
+	}
+	dst := stoppedWith(t, s, noSecretsSpec())
+	add := func(requestID string) {
+		t.Helper()
+		if _, err := resumeSecrets(tenantCtx("t1"), s, dst, resumeRequest{RequestID: requestID,
+			Git: &resumeGit{Repositories: []spec.Repository{{Name: "copy", From: &spec.RepositoryFrom{Run: "ra", Repo: "api"}}}}}); err != nil {
+			t.Fatalf("%s: %v", requestID, err)
+		}
+	}
+	add("r-1")
+	if pin := pinOf(t, s, dst, "copy"); pin != "checkpoint-one" {
+		t.Fatalf("pin after the first add: %q", pin)
+	}
+	failClone(t, s, dst, "copy", "r-1")
+	if pin := pinOf(t, s, dst, "copy"); pin != "" {
+		t.Fatalf("pin after the failed clone: %q", pin)
+	}
+	reportCheckpoint(t, s, "checkpoint-two")
+	if err := uploadCheckpoint(s, "checkpoint-two"); err != nil {
+		t.Fatal(err)
+	}
+	if loc := blobLocation(t, s, "checkpoint-one"); loc != "deleted" {
+		t.Fatalf("unpinned superseded checkpoint-one: %s, want deleted", loc)
+	}
+	add("r-2")
+	if pin := pinOf(t, s, dst, "copy"); pin != "checkpoint-two" {
+		t.Fatalf("pin after the re-add: %q", pin)
+	}
+	var stored spec.RunSpec
+	systemScan(t, s, `SELECT spec FROM runs WHERE id = $1`, []any{dst}, &stored)
+	if i := slices.IndexFunc(stored.Git.Repositories, func(r spec.Repository) bool { return r.Name == "copy" }); i < 0 || stored.Git.Repositories[i].From.Checkpoint != "checkpoint-two" {
+		t.Fatalf("stored repositories: %+v", stored.Git.Repositories)
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running', current_epoch = current_epoch + 1 WHERE id = $1`, dst)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources)
+		SELECT 'p-'||id||'-'||current_epoch, 't1', id, 'ha', current_epoch, 'starting', '{}' FROM runs WHERE id = $1`, dst)
+	var epoch int
+	systemScan(t, s, `SELECT current_epoch FROM runs WHERE id = $1`, []any{dst}, &epoch)
+	if code := checkpointDownload(s, "checkpoint-two", "&run="+dst+"&epoch="+strconv.Itoa(epoch)); code != http.StatusFound {
+		t.Fatalf("re-added clone's download: %d", code)
+	}
 }

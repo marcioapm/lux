@@ -792,6 +792,11 @@ func dropFailedRepo(ctx context.Context, tx pgx.Tx, runID string, data map[strin
 	if cred != "" {
 		refs = slices.DeleteFunc(refs, func(r spec.SecretRef) bool { return r.Name == cred })
 	}
+	// The pin of a dropped `from` repository goes too: its checkpoint is
+	// reclaimable, and a re-add pins the one it resolves.
+	if _, err := tx.Exec(ctx, `DELETE FROM git_checkpoint_refs WHERE run_id = $1 AND repo = $2`, runID, repo); err != nil {
+		return "", err
+	}
 	_, err := tx.Exec(ctx, `UPDATE runs SET spec = $2, secrets = $3 WHERE id = $1`, runID, sp, refs)
 	return cred, err
 }
