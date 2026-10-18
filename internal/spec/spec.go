@@ -287,7 +287,7 @@ type Push struct {
 type Volume struct {
 	Name string `json:"name" yaml:"name"`
 	Path string `json:"path" yaml:"path"`
-	Kind string `json:"kind" yaml:"kind"` // state | ephemeral
+	Kind string `json:"kind" yaml:"kind"` // state | ephemeral | cache
 }
 
 type Resources struct {
@@ -532,9 +532,10 @@ func (b *Bytes) parse(s string) error {
 }
 
 var (
-	nameRe   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,62}$`)
-	envRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	volumeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	nameRe      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,62}$`)
+	envRe       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	volumeRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	cacheNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 )
 
 // DefaultGrace is a graceful stop's wait before SIGKILL, when unset.
@@ -657,7 +658,7 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	vols := map[string]bool{}
 	for i := range s.Volumes {
 		v := &s.Volumes[i]
-		if !volumeRe.MatchString(v.Name) {
+		if v.Kind != "cache" && !volumeRe.MatchString(v.Name) {
 			fail("volumes[%d]: invalid name %q (lowercase, digits, - and _)", i, v.Name)
 		}
 		if vols[v.Name] {
@@ -674,8 +675,40 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		if v.Kind == "" {
 			v.Kind = "state"
 		}
-		if v.Kind != "state" && v.Kind != "ephemeral" {
-			fail("volumes[%d].kind must be state or ephemeral", i)
+		if v.Kind != "state" && v.Kind != "ephemeral" && v.Kind != "cache" {
+			fail("volumes[%d].kind must be state, ephemeral or cache", i)
+		}
+		if v.Kind == "cache" && !cacheNameRe.MatchString(v.Name) {
+			fail("volumes[%d].name: invalid cache name %q (lowercase, digits, ., - and _, 1-63 characters)", i, v.Name)
+		}
+		if v.Kind == "cache" {
+			if strings.HasPrefix(v.Path, "$LUX_INPUTS") || v.Path == RuntimeInputsDir || strings.HasPrefix(v.Path, RuntimeInputsDir+"/") {
+				fail("volumes[%d]: cache path %s cannot contain $LUX_INPUTS", i, v.Path)
+			}
+			if strings.HasPrefix(v.Path, "/.lux") {
+				fail("volumes[%d]: cache path %s is reserved", i, v.Path)
+			}
+		}
+	}
+
+	for i, v := range s.Volumes {
+		if v.Kind != "cache" {
+			continue
+		}
+		for _, other := range s.Volumes {
+			if other.Kind == "state" && (Under(v.Path, other.Path) || Under(other.Path, v.Path)) {
+				fail("volumes[%d]: cache path %s overlaps state volume %q at %s", i, v.Path, other.Name, other.Path)
+			}
+		}
+		for _, session := range info.StatePaths {
+			home := "/home/agent"
+			if w.User == "root" {
+				home = "/root"
+			}
+			want := path.Clean(strings.ReplaceAll(session, "$HOME", home))
+			if Under(want, v.Path) || Under(v.Path, want) {
+				fail("volumes[%d]: cache path %s overlaps adapter session path %s, which must be state", i, v.Path, want)
+			}
 		}
 	}
 
