@@ -201,6 +201,87 @@ func TestCheckpointWaitCountsUnchangedRepos(t *testing.T) {
 	}
 }
 
+// A report whose HEAD ref is not its head commit is refused.
+func TestCheckpointRefusesMismatchedHead(t *testing.T) {
+	s, ctx := reportFixture(t)
+	head, other := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	cp := proto.CheckpointReady{Blob: proto.BlobInfo{BlobID: "checkpoint-x", Size: 10, SHA256: sha("bundle")},
+		StagedCheckpoint: proto.StagedCheckpoint{Repo: "api", Head: head, Branch: "main", Refs: map[string]string{"HEAD": other, "refs/heads/main": head}, Size: 10}}
+	f := s.handleReport(ctx, "ha", proto.Frame{Type: proto.MsgCheckpointReady, ID: 1, RunID: "ra", Epoch: 1, Data: proto.Marshal(cp)})
+	if f.Type != proto.MsgAck || !ackRefused(t, f) {
+		t.Fatalf("%s %s, want refused", f.Type, f.Data)
+	}
+}
+
+// A destination resolves only the source's latest uploaded checkpoint in
+// S3: not one still on its host, nor one whose blob is gone.
+func TestCheckpointResolvesOnlyUploadedLatest(t *testing.T) {
+	s, ctx := reportFixture(t)
+	useFakeS3(t, s)
+	resolve := func() (string, error) {
+		sp := fromSpec("ra", "api")
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return resolveCheckpointSources(ctx, tx, "t1", &sp) })
+		return sp.Git.Repositories[0].From.Checkpoint, err
+	}
+	reportCheckpoint(t, s, "checkpoint-one")
+	if id, err := resolve(); err == nil {
+		t.Fatalf("resolved %q before any upload", id)
+	}
+	if err := uploadCheckpoint(s, "checkpoint-one"); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := resolve(); err != nil || id != "checkpoint-one" {
+		t.Fatalf("resolved %q, %v", id, err)
+	}
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 'deleted' WHERE id = 'checkpoint-one'`)
+	if id, err := resolve(); err == nil {
+		t.Fatalf("resolved %q, whose blob is deleted", id)
+	}
+}
+
+// A destination placement that is no longer live cannot download its
+// pinned checkpoint, though it is the Run's current placement on the host.
+func TestCheckpointDownloadNeedsLivePlacement(t *testing.T) {
+	s, ctx := reportFixture(t)
+	useFakeS3(t, s)
+	reportCheckpoint(t, s, "checkpoint-one")
+	if err := uploadCheckpoint(s, "checkpoint-one"); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, s, ctx, `INSERT INTO runs(id,tenant_id,spec,state,current_epoch) VALUES('destination','t1','{}','running',1)`)
+	execSQL(t, s, ctx, `INSERT INTO git_checkpoint_refs(tenant_id,run_id,repo,checkpoint_id) VALUES('t1','destination','copy','checkpoint-one')`)
+	execSQL(t, s, ctx, `INSERT INTO placements(id,tenant_id,run_id,host_id,epoch,state) VALUES('pd','t1','destination','ha',1,'running')`)
+	for state, want := range map[string]int{"running": 302, "starting": 302, "assigned": 302, "stopping": 404, "exited": 404, "lost": 404} {
+		execSQL(t, s, ctx, `UPDATE placements SET state = $1 WHERE id = 'pd'`, state)
+		if code := checkpointDownload(s, "checkpoint-one", "&run=destination&epoch=1"); code != want {
+			t.Errorf("placement %s: %d, want %d", state, code, want)
+		}
+	}
+}
+
+// A submitted spec may not name the checkpoint, head or branch of its
+// source itself: luxd resolves them.
+func TestCheckpointRefusesClientSetFields(t *testing.T) {
+	s, ctx := reportFixture(t)
+	useFakeS3(t, s)
+	reportCheckpoint(t, s, "checkpoint-one")
+	if err := uploadCheckpoint(s, "checkpoint-one"); err != nil {
+		t.Fatal(err)
+	}
+	for name, set := range map[string]func(*spec.RepositoryFrom){
+		"checkpoint": func(f *spec.RepositoryFrom) { f.Checkpoint = "checkpoint-one" },
+		"head":       func(f *spec.RepositoryFrom) { f.Head = strings.Repeat("a", 40) },
+		"branch":     func(f *spec.RepositoryFrom) { f.Branch = "main" },
+	} {
+		sp := fromSpec("ra", "api")
+		set(sp.Git.Repositories[0].From)
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return resolveCheckpointSources(ctx, tx, "t1", &sp) })
+		if err == nil || !strings.Contains(err.Error(), "set by luxd") {
+			t.Errorf("from.%s set by the client: %v", name, err)
+		}
+	}
+}
+
 func TestCheckpointSourceTenantLookup(t *testing.T) {
 	s, _ := reportFixture(t)
 	ctx := context.Background()
