@@ -772,6 +772,9 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		p.setPhase("done")
 		return
 	}
+	if !snapshotReported {
+		p.collectCheckpoints(ctx)
+	}
 	if !snapshotReported && !p.reportSnapshot(ctx, exportCtx, exit) {
 		return
 	}

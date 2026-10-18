@@ -316,7 +316,13 @@ func (s *Server) blobUploaded(ctx context.Context, b *runnerBlob) error {
 		}
 		// Only the upload that moved the blob to s3 adds the event, and
 		// last: event streams come after every row lock.
-		if tag.RowsAffected() == 0 || b.kind != "artifact" {
+		if tag.RowsAffected() == 0 {
+			return nil
+		}
+		if b.kind == "checkpoint" {
+			return checkpointUploaded(ctx, tx, b.id)
+		}
+		if b.kind != "artifact" {
 			return nil
 		}
 		return artifactUploaded(ctx, tx, b.id)

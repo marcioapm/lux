@@ -2,6 +2,13 @@ package proto
 
 const DefaultCheckpointBytes int64 = 512 << 20
 
+const MsgCheckpointReady = "checkpoint.ready"
+
+type CheckpointReady struct {
+	Blob BlobInfo `json:"blob"`
+	StagedCheckpoint
+}
+
 // CheckpointRepo is a checkout to bundle as the workload user.
 type CheckpointRepo struct {
 	Name     string `json:"name"`

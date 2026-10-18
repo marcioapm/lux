@@ -479,6 +479,13 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 			kicked = true
 			refused, err = s.applySnapshotDone(ctx, tx, tenantID, hostID, f.RunID, f.Epoch, current, sd)
 			return err
+		case proto.MsgCheckpointReady:
+			var cp proto.CheckpointReady
+			if err := json.Unmarshal(f.Data, &cp); err != nil {
+				return err
+			}
+			refused, err = applyCheckpointReady(ctx, tx, tenantID, hostID, f.RunID, f.Epoch, cp)
+			return err
 		case proto.MsgArtifactPublished:
 			var ap proto.ArtifactPublished
 			if err := json.Unmarshal(f.Data, &ap); err != nil {
