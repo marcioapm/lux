@@ -26,19 +26,28 @@ func idleFixture(t *testing.T) (*Server, context.Context) {
 
 func idleActivity(t *testing.T, s *Server, ctx context.Context, activity string) {
 	t.Helper()
+	idleEvent(t, s, ctx, 1, proto.AdapterEvent{Activity: activity})
+}
+
+func idleEvent(t *testing.T, s *Server, ctx context.Context, epoch int, ev proto.AdapterEvent) {
+	t.Helper()
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return s.applyAdapterEvent(ctx, tx, "t1", "r1", 1, proto.AdapterEvent{Activity: activity})
+		return s.applyAdapterEvent(ctx, tx, "t1", "r1", epoch, ev)
 	}); err != nil {
 		t.Fatal(err)
 	}
 }
 
+// assertIdleReap runs the reaper and checks the stop of r1's current placement.
 func assertIdleReap(t *testing.T, s *Server, ctx context.Context, stopped bool) {
 	t.Helper()
 	if err := s.reapIdle(ctx); err != nil {
 		t.Fatal(err)
 	}
-	_, got, reason := drainState(t, s, ctx, "h1", "r1")
+	var got bool
+	var reason string
+	systemScan(t, s, `SELECT p.stop_requested_at IS NOT NULL, p.stop_reason FROM placements p
+		JOIN runs r ON r.id = p.run_id AND p.epoch = r.current_epoch WHERE r.id = 'r1'`, nil, &got, &reason)
 	if got != stopped || (stopped && reason != "idle") {
 		t.Fatalf("stop=%v reason=%q, want stop=%v idle", got, reason, stopped)
 	}
@@ -178,6 +187,50 @@ func TestIdleReaperInterruptInput(t *testing.T) {
 			if c.aged {
 				ownerExec(t, s, `UPDATE run_events SET created_at = now() - interval '2 minutes' WHERE run_id = 'r1'`)
 			}
+			assertIdleReap(t, s, ctx, c.stop)
+		})
+	}
+}
+
+// A resumed placement (epoch 2) is judged on its own events only.
+func TestIdleReaperResumedEpoch(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		setup func(*testing.T, *Server, context.Context)
+		stop  bool
+	}{
+		{"old undelivered input", func(t *testing.T, s *Server, ctx context.Context) {
+			if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				return addEvent(ctx, tx, "t1", "r1", 1, "input", map[string]any{"requestId": "req-old"})
+			}); err != nil {
+				t.Fatal(err)
+			}
+			ownerExec(t, s, `UPDATE run_events SET created_at = now() - interval '2 minutes' WHERE run_id = 'r1'`)
+		}, true},
+		{"old input", func(t *testing.T, s *Server, ctx context.Context) {
+			if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				return addEvent(ctx, tx, "t1", "r1", 1, "input", map[string]any{"requestId": "req-old", "interrupt": true, "text": "", "rawBytes": 0})
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"old turn", func(t *testing.T, s *Server, ctx context.Context) {
+			idleEvent(t, s, ctx, 1, proto.AdapterEvent{Activity: "busy"})
+			idleEvent(t, s, ctx, 1, proto.AdapterEvent{Activity: "idle"})
+		}, true},
+		{"new turn", func(t *testing.T, s *Server, ctx context.Context) {
+			idleEvent(t, s, ctx, 2, proto.AdapterEvent{Activity: "busy"})
+			idleEvent(t, s, ctx, 2, proto.AdapterEvent{Activity: "idle"})
+		}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx := idleFixture(t)
+			execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE id = 'p1'`)
+			execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, started_at) VALUES ('p2', 't1', 'r1', 'h1', 2, 'running', now() - interval '1 hour')`)
+			execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 2 WHERE id = 'r1'`)
+			idleEvent(t, s, ctx, 2, proto.AdapterEvent{Activity: "idle"})
+			ownerExec(t, s, `UPDATE run_events SET created_at = now() - interval '2 minutes' WHERE run_id = 'r1'`)
+			c.setup(t, s, ctx)
 			assertIdleReap(t, s, ctx, c.stop)
 		})
 	}
