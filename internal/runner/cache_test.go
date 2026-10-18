@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -23,24 +24,33 @@ esac
 `
 	writeFile(t, f.bin, script)
 	ctx := context.Background()
-	sp := spec.RunSpec{Volumes: []spec.Volume{{Name: "gomod", Path: "/cache", Kind: "cache"}}}
-	prepare := func(run, tenant string) *placement {
-		p := &placement{r: f.r, runID: run, tenantID: tenant, epoch: 1, dir: f.r.runDir(run), state: &runState{RunID: run}}
+	prepare := func(run, tenant string, uid, gid int, name string) *placement {
+		p := &placement{r: f.r, runID: run, tenantID: tenant, epoch: 1, dir: f.r.runDir(run), state: &runState{RunID: run}, user: passwd.User{UID: uid, GID: gid}}
+		sp := spec.RunSpec{Volumes: []spec.Volume{{Name: name, Path: "/cache", Kind: "cache"}}}
 		if err := p.prepareVolumes(ctx, sp, nil); err != nil {
 			t.Fatal(err)
 		}
 		return p
 	}
-	a := prepare("a", "tenant-a")
+	a := prepare("a", "tenant-a", 1000, 1000, "gomod")
 	mp := filepath.Join(f.bin+".volumes", a.state.Volumes[0].Volume)
 	writeFile(t, filepath.Join(mp, "module"), "cached")
 	for _, c := range []struct {
-		run, tenant string
-		want        bool
-	}{{"b", "tenant-a", true}, {"a", "tenant-a", true}, {"c", "tenant-b", false}} {
-		p := prepare(c.run, c.tenant)
+		run, tenant, name string
+		uid, gid          int
+		want              bool
+	}{
+		{"b", "tenant-a", "gomod", 1000, 1000, true},
+		{"a", "tenant-a", "gomod", 1000, 1000, true},
+		{"c", "tenant-b", "gomod", 1000, 1000, false},
+		{"d", "tenant-a", "gomod", 1001, 1000, false},
+		{"e", "tenant-a", "gomod", 1000, 1001, false},
+		{"f", "tenant-a", "npm", 1000, 1000, false},
+		{"g", "tenant-a", "gomod", 1000, 1000, true},
+	} {
+		p := prepare(c.run, c.tenant, c.uid, c.gid, c.name)
 		b, err := os.ReadFile(filepath.Join(f.bin+".volumes", p.state.Volumes[0].Volume, "module"))
-		if (err == nil) != c.want || c.want && string(b) != "cached" {
+		if c.want && (err != nil || string(b) != "cached") || !c.want && !os.IsNotExist(err) {
 			t.Fatalf("%+v: %q %v", c, b, err)
 		}
 	}
