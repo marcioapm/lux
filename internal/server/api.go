@@ -1706,6 +1706,20 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 	// The live state a validateOnly resume did not check.
 	var stateUnchecked string
 	attempt := func(tx pgx.Tx) error {
+		// Lock the destination and every checkpoint source in one deterministic
+		// order. Otherwise reciprocal `from` resumes can deadlock while each
+		// holds its destination and waits for the other's source.
+		lockIDs := []string{id}
+		for _, r := range adding {
+			if r.From != nil && r.From.Run != "" && r.From.Run != id {
+				lockIDs = append(lockIDs, r.From.Run)
+			}
+		}
+		if len(lockIDs) > 1 {
+			if _, err := tx.Exec(ctx, `SELECT id FROM runs WHERE id = ANY($1) ORDER BY id FOR UPDATE`, lockIDs); err != nil {
+				return err
+			}
+		}
 		var state string
 		var refs []spec.SecretRef
 		var sp spec.RunSpec
