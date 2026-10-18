@@ -774,7 +774,8 @@ func (s *Server) reapRetention(ctx context.Context) error {
 		rows, err := tx.Query(ctx, `
 			WITH due AS (
 				SELECT r.id FROM runs r JOIN tenants t ON t.id = r.tenant_id
-				WHERE r.id = ANY (ARRAY(SELECT DISTINCT run_id FROM blobs WHERE location = 's3' AND kind <> 'artifact'))
+				WHERE r.id = ANY (ARRAY(SELECT DISTINCT run_id FROM blobs WHERE location = 's3' AND kind <> 'artifact'
+					AND NOT EXISTS (SELECT 1 FROM git_checkpoint_refs cr WHERE cr.checkpoint_id = blobs.id)))
 				  AND r.state = 'terminated'
 				  AND r.terminated_at IS NOT NULL AND r.terminated_at < now() - make_interval(days => t.retention_days)
 				ORDER BY r.terminated_at LIMIT 20
