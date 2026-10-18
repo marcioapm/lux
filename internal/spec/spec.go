@@ -734,6 +734,11 @@ func (s *RunSpec) Normalize(d Defaults) error {
 				r.Path = "/workspace/repos/" + r.Name
 			}
 			r.Path = path.Clean(r.Path)
+			for j, v := range s.Volumes {
+				if v.Kind == "cache" && (Under(r.Path, v.Path) || Under(v.Path, r.Path)) {
+					fail("volumes[%d]: cache path %s overlaps repository path %s, which must be state", j, v.Path, r.Path)
+				}
+			}
 			if v := s.volumeFor(r.Path); v == nil || v.Kind != "state" {
 				fail("git.repositories[%d]: %s is not on a state volume, so the checkout would not survive a stop", i, r.Path)
 			}

@@ -50,9 +50,14 @@ func TestCacheNeverInSnapshot(t *testing.T) {
 	f := newFinishFixture(t)
 	f.release()
 	f.p.state.Volumes = append(f.p.state.Volumes, volumeRef{Name: "gomod", Volume: "cache", Path: "/cache", Kind: "cache"})
+	f.p.assign.Spec.Artifacts.Paths = []string{"/cache/**"}
+	f.r.mounts.Store("cache", f.data)
 	sd, err := f.p.snapshot(context.Background(), context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(sd.Artifacts) != 0 {
+		t.Fatalf("cache uploaded as artifacts: %+v", sd.Artifacts)
 	}
 	if len(sd.Manifest.Volumes) != 1 || sd.Manifest.Volumes[0].Name != "data" {
 		t.Fatalf("manifest: %+v", sd.Manifest)
