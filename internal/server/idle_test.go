@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -67,6 +70,33 @@ func TestIdleReaperStopsOnceAndEndsStopped(t *testing.T) {
 	}
 }
 
+func TestIdleTimeoutGenericSubmission(t *testing.T) {
+	s, _ := costFixture(t)
+	key := apiKey(t, s, new("t1"), "run", "read")
+	response := submitHTTP(t, s, key, "idle-generic", json.RawMessage(`{"image":{"ref":"alpine"},"workload":{"adapter":"generic","command":["true"],"idleTimeout":"1m"}}`))
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "invalid_spec") || !strings.Contains(response.Body.String(), "workload.idleTimeout") {
+		t.Fatalf("submission: %d %s", response.Code, response.Body)
+	}
+}
+
+func TestRuntimeTimeoutStillFails(t *testing.T) {
+	s, ctx := idleFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"timeout":"1m"}' WHERE id = 'r1'`)
+	if err := s.reapTimeouts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	code := 0
+	f := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgStatus, ID: 1, RunID: "r1", Epoch: 1, Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code})})
+	if f.Type != proto.MsgAck {
+		t.Fatalf("exit: %s %s", f.Type, f.Data)
+	}
+	var state, reason string
+	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
+	if state != StateFailed || reason != "timeout" {
+		t.Fatalf("state=%s reason=%s", state, reason)
+	}
+}
+
 func TestIdleReaperClockAndGuards(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -98,7 +128,7 @@ func TestIdleReaperClockAndGuards(t *testing.T) {
 }
 
 func TestIdleReaperPendingInput(t *testing.T) {
-	for _, phase := range []string{"undelivered", "delivered", "consumed", "failed", "no receipt", "no receipt busy", "new input"} {
+	for _, phase := range []string{"undelivered", "delivered", "consumed", "failed", "no receipt", "no receipt busy", "new input", "new consumed input"} {
 		t.Run(phase, func(t *testing.T) {
 			s, ctx := idleFixture(t)
 			if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -112,8 +142,12 @@ func TestIdleReaperPendingInput(t *testing.T) {
 					if err := s.applyAdapterEvent(ctx, tx, "t1", "r1", 1, ev); err != nil {
 						return err
 					}
-					if phase == "consumed" || phase == "failed" {
-						return applyInputProgress(ctx, tx, "t1", "r1", 1, proto.InputProgress{RequestID: "req-1", Phase: phase})
+					if phase == "consumed" || phase == "failed" || phase == "new consumed input" {
+						progressPhase := phase
+						if phase == "new consumed input" {
+							progressPhase = "consumed"
+						}
+						return applyInputProgress(ctx, tx, "t1", "r1", 1, proto.InputProgress{RequestID: "req-1", Phase: progressPhase})
 					}
 					return nil
 				}); err != nil {
@@ -124,7 +158,7 @@ func TestIdleReaperPendingInput(t *testing.T) {
 				idleActivity(t, s, ctx, "busy")
 				idleActivity(t, s, ctx, "idle")
 			}
-			if phase != "new input" {
+			if phase != "new input" && phase != "new consumed input" {
 				ownerExec(t, s, `UPDATE run_events SET created_at = now() - interval '2 minutes' WHERE run_id = 'r1'`)
 			}
 			assertIdleReap(t, s, ctx, phase == "consumed" || phase == "failed" || phase == "no receipt busy")
