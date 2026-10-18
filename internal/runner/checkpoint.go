@@ -155,16 +155,15 @@ func (p *placement) collectCheckpointDir(ctx context.Context, dir string) {
 			continue
 		}
 		fi, err := src.Stat()
-		if err != nil || fi.Size() != res.Size || res.Size > p.checkpointLimit() {
+		limit := p.checkpointLimit()
+		if err != nil || fi.Size() != res.Size || res.Size > limit {
 			src.Close()
 			warn(fmt.Errorf("%s: invalid bundle size or type", repo.Name))
 			continue
 		}
 		id := ids.New(ids.Blob)
-		var copied int64
 		size, sum, err := p.r.writeBlob(id, func(w io.Writer) error {
-			var err error
-			copied, err = io.Copy(w, io.LimitReader(src, p.checkpointLimit()+1))
+			copied, err := io.Copy(w, io.LimitReader(src, limit+1))
 			if err == nil && copied != res.Size {
 				return fmt.Errorf("bundle changed while collected")
 			}
