@@ -106,13 +106,14 @@ artifacts:
 ## Name
 
 `name` is for humans: lux shows it and sorts by it, and nothing else depends on
-it. It can be at most 200 bytes of UTF-8 with no control characters (C0, DEL,
-C1), and it is kept as given, whitespace included. A submit with an invalid name
-is refused (422 `invalid_spec`). The name can be changed
-later, in any state, terminated included: `PATCH /v1/runs/{id}` with
-`{"name": "…"}` (`lux rename <run> <name>`), under the same rules, with
-`""` to clear it. The Run's `name` and `spec.name` change together, and a
-`renamed` event records `from`, `to` and `by`. Labels cannot be changed.
+it. It is at most 200 bytes of UTF-8 with no control characters (C0, DEL, C1),
+kept as given, whitespace included. A submit with an invalid name is refused
+(422 `invalid_spec`).
+
+The name can be changed later, in any state, terminated included, under the
+same rules: `PATCH /v1/runs/{id}` with `{"name": "…"}` (`lux rename <run>
+<name>`), `""` to clear it. The Run's `name` and `spec.name` change together,
+and a `renamed` event records `from`, `to` and `by`. Labels cannot be changed.
 
 ## Labels
 

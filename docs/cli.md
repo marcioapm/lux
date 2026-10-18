@@ -84,10 +84,10 @@ lux run --spot --dry-run --image alpine -- echo hello
 lux run -f spot.yaml --dry-run -o json
 ```
 
-`lux rename` changes a Run's name (`PATCH /v1/runs/{id}`), as `lux stop`
-takes the Run: by its full id, and needing the `run` scope. The name rules are
-the RunSpec's ([name](runspec.md#name)); one luxd refuses exits 4
-(`invalid_spec`). Its labels never change.
+`lux rename` changes a Run's name (`PATCH /v1/runs/{id}`). Like `lux stop`, it
+takes the Run's full id and needs the `run` scope. The name follows the
+RunSpec's rules ([name](runspec.md#name)); a name luxd refuses exits 4
+(`invalid_spec`). Labels never change.
 
 `lux logs -o json` prints one JSON record per line:
 `{"cursor","epoch","seq","t","ch","data"|"event"}`. Pass a record's
