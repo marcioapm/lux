@@ -963,7 +963,8 @@ bundle until the destination's retention expires, even if the source expires.
 The default ref is the source's HEAD branch, or detached HEAD. `origin` is
 the source repository's URL. No forge credential is needed to clone the bundle.
 A clone's `git.clone` event includes `from: {run, checkpoint}`.
-`--add-repo` on resume accepts the same `from` shape.
+A resume request's `git.repositories` accepts the same `from` shape; the
+`lux resume --add-repo` flag takes only a `url`.
 
 Bundles default to a 512 MiB limit (`checkpoint_limit` in luxd, or
 `LUX_CHECKPOINT_LIMIT`). A failed or oversized bundle warns and never fails
