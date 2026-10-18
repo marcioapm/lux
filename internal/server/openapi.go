@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -108,6 +109,24 @@ var jsonFormat = huma.Format{
 // decodeStrict decodes a request body as readJSON does: unknown fields
 // refused, anything after the first value ignored.
 func decodeStrict(data []byte, v any) error {
+	// Preserve an invalid submitted name for the submit validator rather
+	// than silently accepting encoding/json's U+FFFD replacement.
+	if sp, ok := v.(*spec.RunSpec); ok && !utf8.Valid(data) {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return err
+		}
+		if raw := fields["name"]; !utf8.Valid(raw) {
+			type plain spec.RunSpec
+			dec := json.NewDecoder(bytes.NewReader(data))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode((*plain)(sp)); err != nil {
+				return err
+			}
+			sp.Name = string(raw)
+			return nil
+		}
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
