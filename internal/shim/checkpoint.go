@@ -105,6 +105,15 @@ func (s *Shim) stageCheckpoints() {
 	fail := func(err error) {
 		s.out.Event(proto.EvWarning, map[string]any{"message": "git checkpoint: " + err.Error()})
 	}
+	// A spot reclamation's kill deadline (seconds) is shorter than staging
+	// may take (up to 65s): the stop's last moments are the exit record's.
+	s.mu.Lock()
+	reclaimed := s.reclaimed
+	s.mu.Unlock()
+	if reclaimed {
+		fail(fmt.Errorf("skipped on a spot reclamation"))
+		return
+	}
 	if err := os.Mkdir(a.Dir, 0o700); err != nil {
 		fail(err)
 		return
