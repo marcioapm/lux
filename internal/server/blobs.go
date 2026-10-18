@@ -331,7 +331,7 @@ func (s *Server) blobUploaded(ctx context.Context, b *runnerBlob) error {
 				return err
 			}
 			rows, err := tx.Query(ctx, `UPDATE blobs b SET location='deleted',deleted_at=now()
-				FROM git_checkpoints c WHERE c.id=b.id AND c.run_id=$1 AND NOT c.latest AND c.uploaded
+				FROM git_checkpoints c WHERE c.id=b.id AND c.run_id=$1 AND b.run_id=$1 AND NOT c.latest AND c.uploaded
 				AND b.location='s3' AND NOT EXISTS (SELECT 1 FROM git_checkpoint_refs cr WHERE cr.checkpoint_id=c.id)
 				RETURNING b.s3_key`, b.runID)
 			if err != nil {
