@@ -387,8 +387,28 @@ func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request)
 		return err
 	}
 	id := r.PathValue("id")
+	q := r.URL.Query()
+	host := q.Get("host")
+	// A checkpoint download names the destination placement (run, epoch);
+	// a snapshot volume download names neither.
+	checkpoint := q.Has("run") || q.Has("epoch")
+	dst := q.Get("run")
+	epoch, epochErr := strconv.Atoi(q.Get("epoch"))
+	if checkpoint && (dst == "" || epochErr != nil) {
+		return errf(http.StatusNotFound, "not_found", "no blob %s for a run assigned to this host", id)
+	}
 	var key, location string
 	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
+		if checkpoint {
+			return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location FROM blobs b
+				JOIN git_checkpoint_refs cr ON cr.checkpoint_id = b.id AND cr.tenant_id = b.tenant_id
+				JOIN runs dst ON dst.id = cr.run_id AND dst.tenant_id = cr.tenant_id
+				JOIN placements p ON p.run_id = dst.id AND p.epoch = dst.current_epoch
+				JOIN hosts h ON h.id = p.host_id
+				WHERE b.id = $1 AND b.kind = 'checkpoint' AND h.token_id = $2 AND h.name = $3
+				  AND p.state IN ('assigned', 'starting', 'running')
+				  AND dst.id = $4 AND p.epoch = $5`, id, tok.ID, host, dst, epoch).Scan(&key, &location)
+		}
 		return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location FROM blobs b
 			JOIN runs rn ON rn.id = b.run_id
 			JOIN snapshots sn ON sn.id = rn.snapshot_id AND sn.run_id = rn.id
@@ -396,16 +416,7 @@ func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request)
 			JOIN hosts h ON h.id = p.host_id
 			WHERE b.id = $1 AND b.kind = 'volume' AND b.epoch = sn.epoch AND h.token_id = $2 AND h.name = $3
 			  AND EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(nullif(sn.manifest->'volumes', 'null'), '[]')) v
-				WHERE v->>'blobId' = b.id)
-            UNION ALL
-            SELECT coalesce(b.s3_key,''),b.location FROM blobs b
-            JOIN git_checkpoint_refs cr ON cr.checkpoint_id=b.id AND cr.tenant_id=b.tenant_id
-            JOIN runs dst ON dst.id=cr.run_id AND dst.tenant_id=cr.tenant_id
-            JOIN placements p ON p.run_id=dst.id AND p.epoch=dst.current_epoch
-            JOIN hosts h ON h.id=p.host_id
-            WHERE b.id=$1 AND b.kind='checkpoint' AND h.token_id=$2 AND h.name=$3
-              AND p.state IN ('assigned','starting','running')
-              AND dst.id = $4 AND p.epoch = $5`, id, tok.ID, r.URL.Query().Get("host"), r.URL.Query().Get("run"), r.URL.Query().Get("epoch")).Scan(&key, &location)
+				WHERE v->>'blobId' = b.id)`, id, tok.ID, host).Scan(&key, &location)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errf(http.StatusNotFound, "not_found", "no blob %s for a run assigned to this host", id)

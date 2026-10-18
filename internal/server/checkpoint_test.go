@@ -96,23 +96,37 @@ func TestCheckpointReportAndUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := func(id string) int {
-		req := httptest.NewRequest(http.MethodGet, "/runner/v1/blobs/"+id+"?host=ha", nil)
-		req.SetPathValue("id", id)
-		req.Header.Set("Authorization", "Bearer host-secret")
-		rec := httptest.NewRecorder()
-		s.wrap(s.serveRunnerBlobDownload)(rec, req)
-		return rec.Code
-	}
-	if code := request("checkpoint-one"); code != 404 {
+	if code := checkpointDownload(s, "checkpoint-one", "&run=destination&epoch=1"); code != 404 {
 		t.Fatalf("unplaced destination download: %d", code)
 	}
 	execSQL(t, s, ctx, `INSERT INTO placements(id,tenant_id,run_id,host_id,epoch,state) VALUES('pd','t1','destination','ha',1,'starting')`)
 	execSQL(t, s, ctx, `UPDATE runs SET current_epoch=1 WHERE id='destination'`)
-	if code := request("checkpoint-one"); code != 302 {
-		t.Fatalf("pinned destination download: %d", code)
+	for _, c := range []struct {
+		name, id, scope string
+		want            int
+	}{
+		{"pinned destination", "checkpoint-one", "&run=destination&epoch=1", 302},
+		{"crafted blob reference", "checkpoint-two", "&run=destination&epoch=1", 404},
+		{"wrong run", "checkpoint-one", "&run=ra&epoch=1", 404},
+		{"wrong epoch", "checkpoint-one", "&run=destination&epoch=2", 404},
+		{"malformed epoch", "checkpoint-one", "&run=destination&epoch=x", 404},
+		{"missing epoch", "checkpoint-one", "&run=destination", 404},
+		{"missing run", "checkpoint-one", "&epoch=1", 404},
+		{"no scope", "checkpoint-one", "", 404},
+	} {
+		if code := checkpointDownload(s, c.id, c.scope); code != c.want {
+			t.Errorf("%s: %d, want %d", c.name, code, c.want)
+		}
 	}
-	if code := request("checkpoint-two"); code != 404 {
-		t.Fatalf("crafted blob reference download: %d", code)
-	}
+}
+
+// checkpointDownload is the runner's GET for a checkpoint blob, with the
+// run/epoch scope runner/git.go appends.
+func checkpointDownload(s *Server, id, scope string) int {
+	req := httptest.NewRequest(http.MethodGet, "/runner/v1/blobs/"+id+"?host=ha"+scope, nil)
+	req.SetPathValue("id", id)
+	req.Header.Set("Authorization", "Bearer host-secret")
+	rec := httptest.NewRecorder()
+	s.wrap(s.serveRunnerBlobDownload)(rec, req)
+	return rec.Code
 }
