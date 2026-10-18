@@ -239,7 +239,7 @@ func TestIdleReaperResumedEpoch(t *testing.T) {
 }
 
 func TestIdleReaperPendingInput(t *testing.T) {
-	for _, phase := range []string{"undelivered", "delivered", "consumed", "failed", "no receipt", "no receipt busy", "no receipt steer", "no receipt short turn", "new input", "new consumed input"} {
+	for _, phase := range []string{"undelivered", "undelivered turn", "delivered", "consumed", "failed", "no receipt", "no receipt busy", "no receipt steer", "no receipt short turn", "new input", "new consumed input"} {
 		t.Run(phase, func(t *testing.T) {
 			s, ctx := idleFixture(t)
 			if phase == "no receipt steer" {
@@ -251,12 +251,12 @@ func TestIdleReaperPendingInput(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if phase == "no receipt short turn" {
+			if phase == "no receipt short turn" || phase == "undelivered turn" {
 				// The turn ends before its receipt-free delivery is recorded.
 				idleActivity(t, s, ctx, "busy")
 				idleActivity(t, s, ctx, "idle")
 			}
-			if phase != "undelivered" && phase != "new input" {
+			if phase != "undelivered" && phase != "undelivered turn" && phase != "new input" {
 				if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 					ev := proto.AdapterEvent{InputAck: "req-1", InputPhase: proto.InputAccepted, InputLands: "next_step", InputReceipt: !strings.HasPrefix(phase, "no receipt")}
 					if err := s.applyAdapterEvent(ctx, tx, "t1", "r1", 1, ev); err != nil {
