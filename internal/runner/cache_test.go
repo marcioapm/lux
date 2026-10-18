@@ -1,13 +1,18 @@
 package runner
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/marcioapm/lux/internal/passwd"
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -183,6 +188,110 @@ esac
 	}
 	if b, err := os.ReadFile(f.bin + ".cache.unknown"); err != nil || string(b) != "sentinel" {
 		t.Fatal("listing failure removed unknown cache", err)
+	}
+}
+
+func TestCachePlacementHoldsUntilLastFailedStart(t *testing.T) {
+	f := newFinishFixture(t)
+	for _, d := range []string{f.bin + ".root", f.bin + ".volumes"} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readyPath := f.bin + ".ready"
+	if err := syscall.Mkfifo(readyPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := os.OpenFile(readyPath, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ready.Close()
+	arrived := make(chan string, 2)
+	go func() {
+		scanner := bufio.NewScanner(ready)
+		for scanner.Scan() {
+			arrived <- scanner.Text()
+		}
+	}()
+	script := strings.Replace(podmanForAStart, `"volume exists") exit 1 ;;
+"volume create") ;;`, `"volume exists") test -d "$0.volumes/$3" ;;
+"volume create") for n; do :; done; mkdir -p "$0.volumes/$n" ;;
+"volume inspect") echo "$0.volumes/$5" ;;
+"volume ls") ;;
+"volume rm")
+  shift 2
+  for arg; do case "$arg" in -f|--force) ;; *) n="$arg" ;; esac; done
+  rm -r "$0.volumes/$n" ;;`, 1)
+	script = strings.Replace(script, "create) echo ctr-1 > \"$0.ctr\"; echo ctr-1 ;;", `create)
+  shift
+  while [ "$1" != --name ]; do shift; done
+  n="$2"
+  echo "$n" > "$0.ready"
+  read release < "$0.release.$n"
+  echo "fixture refused create" >&2
+  exit 1 ;;`, 1)
+	writeFile(t, f.bin, script)
+	sp := spec.RunSpec{Image: spec.Image{Ref: "img"}, Network: spec.Network{Unrestricted: true},
+		Volumes: []spec.Volume{{Name: "gomod", Path: "/cache", Kind: "cache"}}}
+	ctx := context.Background()
+	var placements []*placement
+	for _, id := range []string{"cache-a", "cache-b"} {
+		if err := syscall.Mkfifo(f.bin+".release.lux-"+id, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p := newPlacement(f.r, proto.Assign{RunID: id, TenantID: "t1", Epoch: 1, Spec: sp}, nil)
+		placements = append(placements, p)
+		go p.run(ctx)
+	}
+	release := func(p *placement) {
+		t.Helper()
+		pipe, err := os.OpenFile(f.bin+".release.lux-"+p.runID, os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintln(pipe, "fail")
+		pipe.Close()
+		select {
+		case <-p.done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("placement did not finish")
+		}
+	}
+	for range placements {
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			t.Fatal("placement did not reach pre-create barrier")
+		}
+	}
+	defer func() {
+		for _, p := range placements {
+			select {
+			case <-p.done:
+			default:
+				release(p)
+			}
+		}
+	}()
+	sentinel := filepath.Join(f.bin+".volumes", cacheVolume("t1", "gomod", 0, 0), "module")
+	writeFile(t, sentinel, "cached")
+	reclaim := func() { f.r.reclaimCaches(ctx, func() (int64, error) { return 0, nil }, 100) }
+	check := func() {
+		t.Helper()
+		if b, err := os.ReadFile(sentinel); err != nil || string(b) != "cached" {
+			t.Fatalf("placement cache lost: %q %v", b, err)
+		}
+	}
+	reclaim()
+	check()
+	release(placements[0])
+	reclaim()
+	check()
+	release(placements[1])
+	reclaim()
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("cache not reclaimed after last placement: %v", err)
 	}
 }
 
