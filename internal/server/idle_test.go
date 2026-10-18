@@ -154,9 +154,13 @@ func TestIdleReaperInterruptInput(t *testing.T) {
 }
 
 func TestIdleReaperPendingInput(t *testing.T) {
-	for _, phase := range []string{"undelivered", "delivered", "consumed", "failed", "no receipt", "no receipt busy", "new input", "new consumed input"} {
+	for _, phase := range []string{"undelivered", "delivered", "consumed", "failed", "no receipt", "no receipt busy", "no receipt steer", "new input", "new consumed input"} {
 		t.Run(phase, func(t *testing.T) {
 			s, ctx := idleFixture(t)
+			if phase == "no receipt steer" {
+				// The steer joins a running turn: busy precedes the input and no busy follows it.
+				idleActivity(t, s, ctx, "busy")
+			}
 			if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 				return addEvent(ctx, tx, "t1", "r1", 1, "input", map[string]any{"requestId": "req-1"})
 			}); err != nil {
@@ -164,7 +168,7 @@ func TestIdleReaperPendingInput(t *testing.T) {
 			}
 			if phase != "undelivered" && phase != "new input" {
 				if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-					ev := proto.AdapterEvent{InputAck: "req-1", InputPhase: proto.InputAccepted, InputLands: "next_step", InputReceipt: phase != "no receipt" && phase != "no receipt busy"}
+					ev := proto.AdapterEvent{InputAck: "req-1", InputPhase: proto.InputAccepted, InputLands: "next_step", InputReceipt: !strings.HasPrefix(phase, "no receipt")}
 					if err := s.applyAdapterEvent(ctx, tx, "t1", "r1", 1, ev); err != nil {
 						return err
 					}
@@ -184,10 +188,13 @@ func TestIdleReaperPendingInput(t *testing.T) {
 				idleActivity(t, s, ctx, "busy")
 				idleActivity(t, s, ctx, "idle")
 			}
+			if phase == "no receipt steer" {
+				idleActivity(t, s, ctx, "idle")
+			}
 			if phase != "new input" && phase != "new consumed input" {
 				ownerExec(t, s, `UPDATE run_events SET created_at = now() - interval '2 minutes' WHERE run_id = 'r1'`)
 			}
-			assertIdleReap(t, s, ctx, phase == "consumed" || phase == "failed" || phase == "no receipt busy")
+			assertIdleReap(t, s, ctx, phase == "consumed" || phase == "failed" || phase == "no receipt busy" || phase == "no receipt steer")
 		})
 	}
 }

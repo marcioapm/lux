@@ -357,7 +357,9 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 // Event times are luxd's clock, scoped to the current placement. Repeated idle
 // reports do not move the clock; a busy report followed by idle does. A
 // content-free interrupt is sent as MsgInterrupt, which reports no input
-// phase, so it moves the clock but never counts as pending.
+// phase, so it moves the clock but never counts as pending. A delivery
+// without a receipt never reports consumed: the next activity report after
+// it (busy for a new turn, idle for the end of the turn it joined) settles it.
 func (s *Server) reapIdle(ctx context.Context) error {
 	const dueQuery = `SELECT r.id, r.tenant_id, r.current_epoch,
 		extract(epoch FROM (now() - greatest(p.started_at, a.since, i.latest)))::double precision
@@ -392,8 +394,8 @@ func (s *Server) reapIdle(ctx context.Context) error {
 				SELECT 1 FROM run_events delivered WHERE delivered.run_id = r.id AND delivered.epoch = r.current_epoch
 				AND delivered.type = 'input.delivered' AND delivered.data->>'requestId' = input.data->>'requestId'
 				AND delivered.data->>'receipt' = 'false'
-				AND EXISTS (SELECT 1 FROM run_events busy WHERE busy.run_id = r.id AND busy.epoch = r.current_epoch
-					AND busy.type = 'activity' AND busy.data->>'activity' = 'busy' AND busy.id > input.id)
+				AND EXISTS (SELECT 1 FROM run_events activity WHERE activity.run_id = r.id AND activity.epoch = r.current_epoch
+					AND activity.type = 'activity' AND activity.id > delivered.id)
 			)
 		  )`
 	var hosts []string
