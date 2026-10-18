@@ -678,10 +678,10 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		if v.Kind != "state" && v.Kind != "ephemeral" && v.Kind != "cache" {
 			fail("volumes[%d].kind must be state, ephemeral or cache", i)
 		}
-		if v.Kind == "cache" && !cacheNameRe.MatchString(v.Name) {
-			fail("volumes[%d].name: invalid cache name %q (lowercase, digits, ., - and _, 1-63 characters)", i, v.Name)
-		}
 		if v.Kind == "cache" {
+			if !cacheNameRe.MatchString(v.Name) {
+				fail("volumes[%d].name: invalid cache name %q (lowercase, digits, ., - and _, 1-63 characters)", i, v.Name)
+			}
 			if strings.HasPrefix(v.Path, "$LUX_INPUTS") || v.Path == RuntimeInputsDir || strings.HasPrefix(v.Path, RuntimeInputsDir+"/") {
 				fail("volumes[%d]: cache path %s cannot contain $LUX_INPUTS", i, v.Path)
 			}
@@ -691,6 +691,10 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		}
 	}
 
+	home := "/home/agent"
+	if w.User == "root" {
+		home = "/root"
+	}
 	for i, v := range s.Volumes {
 		if v.Kind != "cache" {
 			continue
@@ -701,10 +705,6 @@ func (s *RunSpec) Normalize(d Defaults) error {
 			}
 		}
 		for _, session := range info.StatePaths {
-			home := "/home/agent"
-			if w.User == "root" {
-				home = "/root"
-			}
 			want := path.Clean(strings.ReplaceAll(session, "$HOME", home))
 			if Under(want, v.Path) || Under(v.Path, want) {
 				fail("volumes[%d]: cache path %s overlaps adapter session path %s, which must be state", i, v.Path, want)
@@ -761,10 +761,6 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	}
 
 	for _, p := range info.StatePaths {
-		home := "/home/agent"
-		if w.User == "root" {
-			home = "/root"
-		}
 		want := strings.ReplaceAll(p, "$HOME", home)
 		if s.stateVolumeFor(want) == nil {
 			fail("volumes: adapter %q keeps its session in %s, which must be on a state volume", w.Adapter, want)

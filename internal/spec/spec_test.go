@@ -149,6 +149,10 @@ func TestNormalizeExample(t *testing.T) {
 }
 
 func TestCacheVolumes(t *testing.T) {
+	cacheSpec := func(adapter, name, path string) RunSpec {
+		return RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Adapter: adapter, Command: []string{"true"}},
+			Volumes: []Volume{{Name: name, Path: path, Kind: "cache"}}}
+	}
 	for _, c := range []struct {
 		name string
 		ok   bool
@@ -158,8 +162,7 @@ func TestCacheVolumes(t *testing.T) {
 		{"a/b", false}, {strings.Repeat("a", 64), false},
 	} {
 		t.Run("name/"+c.name, func(t *testing.T) {
-			s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}},
-				Volumes: []Volume{{Name: c.name, Path: "/cache", Kind: "cache"}}}
+			s := cacheSpec("", c.name, "/cache")
 			if err := s.Normalize(BuiltinDefaults); (err == nil) != c.ok {
 				t.Fatalf("Normalize: %v, want valid %v", err, c.ok)
 			}
@@ -181,8 +184,7 @@ func TestCacheVolumes(t *testing.T) {
 		{"/data/.lux-inputs", "/data", "", "", "overlaps state"},
 	} {
 		t.Run(c.path+"/"+c.state, func(t *testing.T) {
-			s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Adapter: c.adapter, Command: []string{"true"}},
-				Volumes: []Volume{{Name: "cache", Path: c.path, Kind: "cache"}}}
+			s := cacheSpec(c.adapter, "cache", c.path)
 			if c.state != "" {
 				s.Volumes = append(s.Volumes, Volume{Name: "state", Path: c.state, Kind: "state"})
 			}

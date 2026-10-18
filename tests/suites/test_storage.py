@@ -5,8 +5,9 @@ quotas are enforced."""
 
 from __future__ import annotations
 
-import pytest
 import uuid
+
+import pytest
 
 from conftest import CLIError, fake_agent, generic
 from env import ALPINE_IMAGE, S3_SECRET_KEY, wait_until

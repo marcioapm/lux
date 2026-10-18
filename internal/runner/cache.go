@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,11 +22,13 @@ var cacheDiscoveryTimeout = 10 * time.Second
 
 type cacheUse struct {
 	mu   sync.Mutex
-	last map[string]int64
+	last map[string]int64 // volume -> last mount or release, Unix ms
 	held map[string]int
 	path string
 }
 
+// cacheUse loads caches.json once, then adds managed cache volumes it lacks
+// as least recently used so they stay reclaimable.
 func (r *Runner) cacheUse() *cacheUse {
 	r.cacheOnce.Do(func() {
 		u := &cacheUse{last: map[string]int64{}, held: map[string]int{}, path: filepath.Join(r.cfg.DataDir, "caches.json")}
@@ -46,15 +49,9 @@ func (r *Runner) cacheUse() *cacheUse {
 			r.log.Warn("discovering cache volumes failed", "managed_err", managedErr, "cache_err", cacheErr)
 			return
 		}
-		known := make(map[string]struct{}, len(managed))
-		for _, name := range managed {
-			known[name] = struct{}{}
-		}
 		for _, name := range cached {
-			if _, ok := known[name]; ok {
-				if _, exists := u.last[name]; !exists {
-					u.last[name] = 0
-				}
+			if _, ok := u.last[name]; !ok && slices.Contains(managed, name) {
+				u.last[name] = 0
 			}
 		}
 	})
@@ -64,6 +61,10 @@ func (r *Runner) cacheUse() *cacheUse {
 func cacheVolume(tenant, name string, uid, gid int) string {
 	h := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d:%d", tenant, name, uid, gid)))
 	return fmt.Sprintf("lux-cache-%x", h[:])
+}
+
+func (p *placement) cacheVolume(name string) string {
+	return cacheVolume(p.tenantID, name, p.user.UID, p.user.GID)
 }
 
 func (u *cacheUse) save() error {
@@ -80,7 +81,7 @@ func (p *placement) holdCaches(sp spec.RunSpec) func() {
 	var names []string
 	for _, v := range sp.Volumes {
 		if v.Kind == "cache" {
-			names = append(names, cacheVolume(p.tenantID, v.Name, p.user.UID, p.user.GID))
+			names = append(names, p.cacheVolume(v.Name))
 		}
 	}
 	if len(names) == 0 {
@@ -131,11 +132,9 @@ func (r *Runner) reclaimCaches(ctx context.Context, free func() (int64, error), 
 	u := r.cacheUse()
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	var names []string
-	for n := range u.last {
-		names = append(names, n)
-	}
-	slices.SortFunc(names, func(a, b string) int { return cmp.Or(cmp.Compare(u.last[a], u.last[b]), cmp.Compare(a, b)) })
+	names := slices.SortedFunc(maps.Keys(u.last), func(a, b string) int {
+		return cmp.Or(cmp.Compare(u.last[a], u.last[b]), cmp.Compare(a, b))
+	})
 	removed := false
 	for _, n := range names {
 		f, err := free()

@@ -960,7 +960,7 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume 
 	for _, v := range sp.Volumes {
 		name := volumeName(p.runID, v.Name)
 		if v.Kind == "cache" {
-			name = cacheVolume(p.tenantID, v.Name, p.user.UID, p.user.GID)
+			name = p.cacheVolume(v.Name)
 		}
 		refs = append(refs, volumeRef{Name: v.Name, Volume: name, Path: v.Path, Kind: v.Kind})
 	}
