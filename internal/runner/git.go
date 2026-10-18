@@ -79,6 +79,9 @@ func (p *placement) materialize(ctx context.Context, r spec.Repository, user pas
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
 			return nil, nil
 		}
+		if r.From.Branch != "" && !proto.ValidBranch(r.From.Branch) {
+			return nil, fmt.Errorf("checkpoint branch %q is not a valid branch name", r.From.Branch)
+		}
 		body, err := p.r.api.downloadScoped(ctx, r.From.Checkpoint, "&run="+url.QueryEscape(p.runID)+"&epoch="+strconv.Itoa(p.epoch))
 		if err != nil {
 			return nil, err

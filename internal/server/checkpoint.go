@@ -169,8 +169,14 @@ func applyCheckpointReady(ctx context.Context, tx pgx.Tx, tenant, host, run stri
 	if c.Repo == "" || c.Head == "" || c.Refs["HEAD"] != c.Head || c.Size < 0 || !storableText(c.Repo, c.Head, c.Branch, c.Blob.BlobID, c.Blob.SHA256) {
 		return true, nil
 	}
+	// The branch and ref names come from the workload and reach git's argv
+	// when a destination clones the checkpoint.
+	if c.Branch != "" && !proto.ValidBranch(c.Branch) {
+		return true, nil
+	}
 	for ref, sha := range c.Refs {
-		if (ref != "HEAD" && !strings.HasPrefix(ref, "refs/heads/")) || !isCommitID(sha) {
+		name, isBranch := strings.CutPrefix(ref, "refs/heads/")
+		if (ref != "HEAD" && (!isBranch || !proto.ValidBranch(name))) || !isCommitID(sha) {
 			return true, nil
 		}
 	}

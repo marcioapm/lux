@@ -232,13 +232,13 @@ func (m *Manager) Materialize(ctx context.Context, r Repo, dir string) (*Result,
 	}
 	res := &Result{Name: r.Name, Cloned: true}
 	// A branch is checked out as a local branch tracking origin; a tag or
-	// sha detached.
+	// sha detached. --end-of-options: a ref is never read as an option.
 	if _, err := git(ctx, dir, "", "rev-parse", "--verify", "-q", "refs/remotes/origin/"+ref); err == nil {
-		if _, err := git(ctx, dir, "", "checkout", "--quiet", "-B", ref, "origin/"+ref); err != nil {
+		if _, err := git(ctx, dir, "", "checkout", "--quiet", "-B", ref, "--end-of-options", "origin/"+ref); err != nil {
 			return nil, err
 		}
 		res.Branch = ref
-	} else if _, err := git(ctx, dir, "", "checkout", "--quiet", "--detach", ref); err != nil {
+	} else if _, err := git(ctx, dir, "", "checkout", "--quiet", "--detach", "--end-of-options", ref); err != nil {
 		return nil, fmt.Errorf("ref %q not found in %s", ref, Scrub(r.URL))
 	}
 	if res.Base, err = git(ctx, dir, "", "rev-parse", "HEAD"); err != nil {

@@ -82,6 +82,19 @@ func TestUnknownRef(t *testing.T) {
 	}
 }
 
+// A ref that looks like an option is looked up as a ref, never passed to
+// checkout as one: "-f" would otherwise check out the default HEAD.
+func TestOptionLikeRefIsARef(t *testing.T) {
+	bare, _ := remote(t)
+	m := New(t.TempDir())
+	for _, ref := range []string{"-f", "--orphan=x"} {
+		_, err := m.Materialize(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: ref}, filepath.Join(t.TempDir(), "r"))
+		if err == nil || !strings.Contains(err.Error(), `"`+ref+`" not found`) {
+			t.Errorf("ref %q: %v", ref, err)
+		}
+	}
+}
+
 func TestScrub(t *testing.T) {
 	if got := Scrub("https://user:tok@example.com/a.git"); got != "https://example.com/a.git" {
 		t.Fatal(got)

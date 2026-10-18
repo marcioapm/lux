@@ -1,6 +1,30 @@
 package proto
 
+import "strings"
+
 const DefaultCheckpointBytes int64 = 512 << 20
+
+// ValidBranch reports whether name is a branch name `git check-ref-format
+// --branch` accepts, as refs/heads/<name>: a workload-reported name later
+// reaches git's argv on another host.
+func ValidBranch(name string) bool {
+	if name == "" || name == "HEAD" || name == "@" || strings.HasPrefix(name, "-") ||
+		strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".") ||
+		strings.Contains(name, "..") || strings.Contains(name, "@{") || strings.ContainsAny(name, " ~^:?*[\\\x7f") {
+		return false
+	}
+	for _, c := range name {
+		if c < 0x20 {
+			return false
+		}
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == "" || strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".lock") {
+			return false
+		}
+	}
+	return true
+}
 
 const MsgCheckpointReady = "checkpoint.ready"
 

@@ -118,6 +118,38 @@ func TestCheckpointFromPreviousEpoch(t *testing.T) {
 	}
 }
 
+// A checkpoint report whose branch or ref names git would refuse, or read
+// as an option, is refused; nothing of it is recorded.
+func TestCheckpointRefusesInvalidBranch(t *testing.T) {
+	s, ctx := reportFixture(t)
+	head := strings.Repeat("a", 40)
+	for i, c := range []struct {
+		branch string
+		refs   map[string]string
+	}{
+		{"-evil", map[string]string{"HEAD": head}},
+		{"--recurse-submodules", map[string]string{"HEAD": head}},
+		{"a..b", map[string]string{"HEAD": head}},
+		{"main", map[string]string{"HEAD": head, "refs/heads/-x": head}},
+		{"main", map[string]string{"HEAD": head, "refs/heads/a b": head}},
+		{"main", map[string]string{"HEAD": head, "refs/heads/x.lock": head}},
+	} {
+		id := "checkpoint-bad-" + strconv.Itoa(i)
+		cp := proto.CheckpointReady{Blob: proto.BlobInfo{BlobID: id, Size: 10, SHA256: sha("bundle")},
+			StagedCheckpoint: proto.StagedCheckpoint{Repo: "api", Head: head, Branch: c.branch, Refs: c.refs, Size: 10}}
+		f := s.handleReport(ctx, "ha", proto.Frame{Type: proto.MsgCheckpointReady, ID: 1, RunID: "ra", Epoch: 1, Data: proto.Marshal(cp)})
+		if f.Type != proto.MsgAck || !ackRefused(t, f) {
+			t.Errorf("branch %q refs %v: %s %s, want refused", c.branch, c.refs, f.Type, f.Data)
+		}
+	}
+	var n int
+	systemScan(t, s, `SELECT count(*) FROM git_checkpoints`, nil, &n)
+	if n != 0 {
+		t.Fatalf("%d checkpoints recorded", n)
+	}
+	reportCheckpoint(t, s, "checkpoint-good")
+}
+
 func TestCheckpointSourceTenantLookup(t *testing.T) {
 	s, _ := reportFixture(t)
 	ctx := context.Background()
