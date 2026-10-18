@@ -127,6 +127,32 @@ func TestIdleReaperClockAndGuards(t *testing.T) {
 	}
 }
 
+// A bare interrupt never reports an input phase; one carrying text does.
+func TestIdleReaperInterruptInput(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		body inputRequest
+		aged bool
+		stop bool
+	}{
+		{"interrupt only", inputRequest{Interrupt: true}, true, true},
+		{"interrupt only moves clock", inputRequest{Interrupt: true}, false, false},
+		{"interrupt with text", inputRequest{Interrupt: true, Text: "stop and look"}, true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx := idleFixture(t)
+			actx := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"run"}})
+			if _, err := s.postInput(actx, &postInputInput{RunPath: RunPath{ID: "r1"}, Body: c.body}); err != nil {
+				t.Fatal(err)
+			}
+			if c.aged {
+				ownerExec(t, s, `UPDATE run_events SET created_at = now() - interval '2 minutes' WHERE run_id = 'r1'`)
+			}
+			assertIdleReap(t, s, ctx, c.stop)
+		})
+	}
+}
+
 func TestIdleReaperPendingInput(t *testing.T) {
 	for _, phase := range []string{"undelivered", "delivered", "consumed", "failed", "no receipt", "no receipt busy", "new input", "new consumed input"} {
 		t.Run(phase, func(t *testing.T) {

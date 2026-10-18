@@ -355,7 +355,9 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 
 // reapIdle parks idle agents through the same stop path as a requested stop.
 // Event times are luxd's clock, scoped to the current placement. Repeated idle
-// reports do not move the clock; a busy report followed by idle does.
+// reports do not move the clock; a busy report followed by idle does. A
+// content-free interrupt is sent as MsgInterrupt, which reports no input
+// phase, so it moves the clock but never counts as pending.
 func (s *Server) reapIdle(ctx context.Context) error {
 	const dueQuery = `SELECT r.id, r.tenant_id, r.current_epoch,
 		extract(epoch FROM (now() - greatest(p.started_at, a.since, i.latest)))::double precision
@@ -383,6 +385,7 @@ func (s *Server) reapIdle(ctx context.Context) error {
 		  )
 		  AND NOT EXISTS (
 			SELECT 1 FROM run_events input WHERE input.run_id = r.id AND input.epoch = r.current_epoch AND input.type = 'input'
+			AND NOT (input.data @> '{"interrupt":true,"text":"","rawBytes":0}' AND NOT input.data ? 'attachments')
 			AND NOT EXISTS (SELECT 1 FROM run_input_events terminal WHERE terminal.run_id = r.id
 				AND terminal.request_id = input.data->>'requestId' AND terminal.type IN ('input.consumed', 'input.failed'))
 			AND NOT EXISTS (
