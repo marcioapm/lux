@@ -361,46 +361,9 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 // without a receipt never reports consumed: the next activity report after
 // it (busy for a new turn, idle for the end of the turn it joined) settles it.
 func (s *Server) reapIdle(ctx context.Context) error {
-	const dueQuery = `SELECT r.id, r.tenant_id, r.current_epoch,
-		extract(epoch FROM (now() - greatest(p.started_at, a.since, i.latest)))::double precision
-		FROM runs r JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch
-		CROSS JOIN LATERAL (
-			SELECT max(created_at) AS since FROM (
-				SELECT created_at, data->>'activity' AS activity,
-					lag(data->>'activity') OVER (ORDER BY id) AS previous
-				FROM run_events WHERE run_id = r.id AND epoch = r.current_epoch AND type = 'activity'
-			) changes WHERE activity = 'idle' AND previous IS DISTINCT FROM 'idle'
-		) a
-		CROSS JOIN LATERAL (
-			SELECT max(created_at) AS latest FROM run_events
-			WHERE run_id = r.id AND epoch = r.current_epoch AND type = 'input'
-		) i
-		WHERE r.state = 'running' AND r.activity = 'idle' AND p.state = 'running'
-		  AND p.started_at IS NOT NULL AND p.stop_requested_at IS NULL
-		  AND coalesce(r.spec->'workload'->>'idleTimeout', '') NOT IN ('', '0s')
-		  AND now() - greatest(p.started_at, a.since, i.latest) > (r.spec->'workload'->>'idleTimeout')::interval
-		  AND NOT EXISTS (
-			SELECT 1 FROM run_events delivered WHERE delivered.run_id = r.id AND delivered.epoch = r.current_epoch
-			AND delivered.type = 'input.delivered' AND delivered.data->>'receipt' = 'true'
-			AND NOT EXISTS (SELECT 1 FROM run_input_events terminal WHERE terminal.run_id = r.id
-				AND terminal.request_id = delivered.data->>'requestId' AND terminal.type IN ('input.consumed', 'input.failed'))
-		  )
-		  AND NOT EXISTS (
-			SELECT 1 FROM run_events input WHERE input.run_id = r.id AND input.epoch = r.current_epoch AND input.type = 'input'
-			AND NOT (input.data @> '{"interrupt":true,"text":"","rawBytes":0}' AND NOT input.data ? 'attachments')
-			AND NOT EXISTS (SELECT 1 FROM run_input_events terminal WHERE terminal.run_id = r.id
-				AND terminal.request_id = input.data->>'requestId' AND terminal.type IN ('input.consumed', 'input.failed'))
-			AND NOT EXISTS (
-				SELECT 1 FROM run_events delivered WHERE delivered.run_id = r.id AND delivered.epoch = r.current_epoch
-				AND delivered.type = 'input.delivered' AND delivered.data->>'requestId' = input.data->>'requestId'
-				AND delivered.data->>'receipt' = 'false'
-				AND EXISTS (SELECT 1 FROM run_events activity WHERE activity.run_id = r.id AND activity.epoch = r.current_epoch
-					AND activity.type = 'activity' AND activity.id > delivered.id)
-			)
-		  )`
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id FROM (`+dueQuery+`) due ORDER BY id LIMIT 50`)
+		rows, err := tx.Query(ctx, `SELECT id FROM (`+idleDueQuery("")+`) due ORDER BY id LIMIT 50`)
 		if err != nil {
 			return err
 		}
@@ -414,7 +377,7 @@ func (s *Server) reapIdle(ctx context.Context) error {
 		if err := lockCostHosts(ctx, tx, candidates); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, dueQuery+` AND r.id = ANY($1) ORDER BY r.id`, candidates)
+		rows, err = tx.Query(ctx, idleDueQuery(`AND r.id = ANY($1)`)+` ORDER BY c.id`, candidates)
 		if err != nil {
 			return err
 		}
@@ -451,6 +414,56 @@ func (s *Server) reapIdle(ctx context.Context) error {
 		}
 	}
 	return err
+}
+
+// idleDueQuery selects the Runs reapIdle parks; runFilter narrows the
+// candidates. Only Runs whose placement is older than their idleTimeout
+// reach the event lookups, and each lookup is keyed on run_id so it reads
+// run_events_run for that Run alone. The pending check is a target-list
+// EXISTS, which Postgres runs per candidate instead of turning it into an
+// anti-join over all of run_events; OFFSET 0 fences the Run's open inputs so
+// each terminal probe is a full run_input_events primary-key lookup.
+func idleDueQuery(runFilter string) string {
+	return `WITH live AS MATERIALIZED (
+		SELECT r.id, r.tenant_id, r.current_epoch AS epoch, p.started_at,
+			(r.spec->'workload'->>'idleTimeout')::interval AS timeout
+		FROM runs r JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch
+		WHERE r.state = 'running' AND r.activity = 'idle' AND p.state = 'running'
+		  AND p.started_at IS NOT NULL AND p.stop_requested_at IS NULL
+		  AND coalesce(r.spec->'workload'->>'idleTimeout', '') NOT IN ('', '0s')
+		  AND now() - p.started_at > (r.spec->'workload'->>'idleTimeout')::interval
+		  ` + runFilter + `
+	), clock AS MATERIALIZED (
+		SELECT l.*, greatest(l.started_at,
+			(SELECT max(created_at) FROM (
+				SELECT created_at, data->>'activity' AS activity, lag(data->>'activity') OVER (ORDER BY id) AS previous
+				FROM run_events WHERE run_id = l.id AND epoch = l.epoch AND type = 'activity'
+			) changes WHERE activity = 'idle' AND previous IS DISTINCT FROM 'idle'),
+			(SELECT max(created_at) FROM run_events WHERE run_id = l.id AND epoch = l.epoch AND type = 'input')
+		) AS since
+		FROM live l
+	), due AS MATERIALIZED (
+		SELECT c.*, EXISTS (
+			SELECT 1 FROM (
+				SELECT e.id, e.type, e.data->>'requestId' AS request_id FROM run_events e
+				WHERE e.run_id = c.id AND e.epoch = c.epoch
+				AND ((e.type = 'input.delivered' AND e.data->>'receipt' = 'true')
+					OR (e.type = 'input' AND NOT (e.data @> '{"interrupt":true,"text":"","rawBytes":0}' AND NOT e.data ? 'attachments')))
+				OFFSET 0
+			) open
+			WHERE NOT EXISTS (SELECT 1 FROM run_input_events terminal WHERE terminal.run_id = c.id
+				AND terminal.request_id = open.request_id AND terminal.type IN ('input.consumed', 'input.failed'))
+			AND (open.type = 'input.delivered' OR NOT EXISTS (
+				SELECT 1 FROM run_events delivered WHERE delivered.run_id = c.id AND delivered.epoch = c.epoch
+				AND delivered.type = 'input.delivered' AND delivered.data->>'requestId' = open.request_id
+				AND delivered.data->>'receipt' = 'false'
+				AND EXISTS (SELECT 1 FROM run_events activity WHERE activity.run_id = c.id AND activity.epoch = c.epoch
+					AND activity.type = 'activity' AND activity.id > delivered.id)))
+		) AS pending
+		FROM clock c WHERE now() - c.since > c.timeout
+	)
+	SELECT c.id, c.tenant_id, c.epoch, extract(epoch FROM (now() - c.since))::double precision
+	FROM due c WHERE NOT c.pending`
 }
 
 // reapOutdatedStaticHosts tells a static host drained for outdated
