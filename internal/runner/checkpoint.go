@@ -49,7 +49,12 @@ func (p *placement) checkpointRunning(ctx context.Context) {
 	}
 	// This directory was created by the runner and the manifest is replaced,
 	// never opened through a link planted by the workload.
-	root, err := os.OpenRoot(path)
+	rtRoot, err := os.OpenRoot(rt)
+	if err != nil {
+		return
+	}
+	defer rtRoot.Close()
+	root, err := rtRoot.OpenRoot(dir)
 	if err != nil {
 		return
 	}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
@@ -130,7 +131,7 @@ func (s *Shim) stageCheckpoints() {
 			return
 		}
 	case <-time.After(65 * time.Second):
-		_ = cmd.Process.Kill()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		<-exited
 		_ = cmd.Wait()
 		fail(fmt.Errorf("staging timed out"))
