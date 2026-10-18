@@ -17,6 +17,8 @@ import (
 
 const labelCache = "lux.cache"
 
+var cacheDiscoveryTimeout = 10 * time.Second
+
 type cacheUse struct {
 	mu   sync.Mutex
 	last map[string]int64
@@ -36,8 +38,10 @@ func (r *Runner) cacheUse() *cacheUse {
 			}
 		}
 		r.caches = u
-		managed, managedErr := r.pm.VolumeList(context.Background(), LabelManaged+"=true")
-		cached, cacheErr := r.pm.VolumeList(context.Background(), labelCache+"=true")
+		ctx, cancel := context.WithTimeout(context.Background(), cacheDiscoveryTimeout)
+		defer cancel()
+		managed, managedErr := r.pm.VolumeList(ctx, LabelManaged+"=true")
+		cached, cacheErr := r.pm.VolumeList(ctx, labelCache+"=true")
 		if managedErr != nil || cacheErr != nil {
 			r.log.Warn("discovering cache volumes failed", "managed_err", managedErr, "cache_err", cacheErr)
 			return
