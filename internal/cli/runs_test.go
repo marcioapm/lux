@@ -90,6 +90,24 @@ func TestRunDryRunDoesNotResolveSecretValues(t *testing.T) {
 	}
 }
 
+func TestRunIdleTimeoutFlag(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "spec.yaml")
+	if err := os.WriteFile(file, []byte("image: {ref: alpine}\nworkload: {adapter: acp, idleTimeout: 5m}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "5m0s"}, {[]string{"--idle-timeout", "2m"}, "2m0s"}, {[]string{"--idle-timeout", "0"}, "0s"},
+	} {
+		body := submitted(t, append([]string{"run", "-f", file}, c.args...)...)
+		if got := body["workload"].(map[string]any)["idleTimeout"]; got != c.want {
+			t.Fatalf("got %v want %s", got, c.want)
+		}
+	}
+}
+
 func TestRunSpotFlag(t *testing.T) {
 	body := submitted(t, "run", "--spot", "--image", "alpine", "--", "true")
 	if body["spot"] != true {

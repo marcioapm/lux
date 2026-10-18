@@ -237,7 +237,9 @@ Header values come from secrets and are never in the command line. See
 
 - **Idle or busy.** The Run's `activity` field says whether an agent is
   working or waiting for input. `lux ls` shows `running (waiting for
-  input)` instead of leaving you to guess whether it is hung. Most adapters
+  input)` instead of leaving you to guess whether it is hung. Set
+  `workload.idleTimeout` to stop and snapshot an idle agent with no pending input.
+  Most adapters
   know only the turns lux started. `opencode` with OpenCode's server up also
   follows OpenCode's own status for the Run's session, so a loop a client
   started over OpenCode's HTTP API (`prompt_async`) shows the Run busy too,
