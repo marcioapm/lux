@@ -35,7 +35,7 @@ const storageReapEvery = time.Minute
 // reapOnce is one reaper tick. lastStorage is when the storage reapers
 // last ran (zero: never); it is moved when they run.
 func (s *Server) reapOnce(ctx context.Context, lastStorage *time.Time) {
-	reapers := []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapExpiry}
+	reapers := []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapIdle, s.reapExpiry}
 	if time.Since(*lastStorage) >= storageReapEvery {
 		*lastStorage = time.Now()
 		reapers = append(reapers, s.reapSuperseded, s.reapRetention)
@@ -349,6 +349,101 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 	})
 	for _, h := range hosts {
 		s.hub.Notify(h)
+	}
+	return err
+}
+
+// reapIdle parks idle agents through the same stop path as a requested stop.
+// Event times are luxd's clock, scoped to the current placement. Repeated idle
+// reports do not move the clock; a busy report followed by idle does.
+func (s *Server) reapIdle(ctx context.Context) error {
+	const dueQuery = `SELECT r.id, r.tenant_id, r.current_epoch,
+		extract(epoch FROM (now() - greatest(p.started_at, a.since, i.latest)))::double precision
+		FROM runs r JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch
+		CROSS JOIN LATERAL (
+			SELECT max(created_at) AS since FROM (
+				SELECT created_at, data->>'activity' AS activity,
+					lag(data->>'activity') OVER (ORDER BY id) AS previous
+				FROM run_events WHERE run_id = r.id AND epoch = r.current_epoch AND type = 'activity'
+			) changes WHERE activity = 'idle' AND previous IS DISTINCT FROM 'idle'
+		) a
+		CROSS JOIN LATERAL (
+			SELECT max(created_at) AS latest FROM run_events
+			WHERE run_id = r.id AND epoch = r.current_epoch AND type = 'input'
+		) i
+		WHERE r.state = 'running' AND r.activity = 'idle' AND p.state = 'running'
+		  AND p.started_at IS NOT NULL AND p.stop_requested_at IS NULL
+		  AND coalesce(r.spec->'workload'->>'idleTimeout', '') NOT IN ('', '0s')
+		  AND now() - greatest(p.started_at, a.since, i.latest) > (r.spec->'workload'->>'idleTimeout')::interval
+		  AND NOT EXISTS (
+			SELECT 1 FROM run_events delivered WHERE delivered.run_id = r.id AND delivered.epoch = r.current_epoch
+			AND delivered.type = 'input.delivered' AND delivered.data->>'receipt' = 'true'
+			AND NOT EXISTS (SELECT 1 FROM run_input_events terminal WHERE terminal.run_id = r.id
+				AND terminal.request_id = delivered.data->>'requestId' AND terminal.type IN ('input.consumed', 'input.failed'))
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM run_events input WHERE input.run_id = r.id AND input.epoch = r.current_epoch AND input.type = 'input'
+			AND NOT EXISTS (SELECT 1 FROM run_input_events terminal WHERE terminal.run_id = r.id
+				AND terminal.request_id = input.data->>'requestId' AND terminal.type IN ('input.consumed', 'input.failed'))
+			AND NOT EXISTS (
+				SELECT 1 FROM run_events delivered WHERE delivered.run_id = r.id AND delivered.epoch = r.current_epoch
+				AND delivered.type = 'input.delivered' AND delivered.data->>'requestId' = input.data->>'requestId'
+				AND delivered.data->>'receipt' = 'false'
+				AND EXISTS (SELECT 1 FROM run_events busy WHERE busy.run_id = r.id AND busy.epoch = r.current_epoch
+					AND busy.type = 'activity' AND busy.data->>'activity' = 'busy' AND busy.id > input.id)
+			)
+		  )`
+	var hosts []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id FROM (`+dueQuery+`) due ORDER BY id LIMIT 50`)
+		if err != nil {
+			return err
+		}
+		candidates, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		if err := lockReaperRuns(ctx, tx, candidates); err != nil {
+			return err
+		}
+		if err := lockCostHosts(ctx, tx, candidates); err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, dueQuery+` AND r.id = ANY($1) ORDER BY r.id`, candidates)
+		if err != nil {
+			return err
+		}
+		type idleRun struct {
+			id, tenant string
+			epoch      int
+			seconds    float64
+		}
+		due, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (idleRun, error) {
+			var r idleRun
+			err := row.Scan(&r.id, &r.tenant, &r.epoch, &r.seconds)
+			return r, err
+		})
+		if err != nil {
+			return err
+		}
+		for _, r := range due {
+			h, err := s.requestStop(ctx, tx, r.tenant, r.id, "idle")
+			if err != nil {
+				return err
+			}
+			if h != "" {
+				hosts = append(hosts, h)
+				if err := addEvent(ctx, tx, r.tenant, r.id, r.epoch, "idle", map[string]any{"reason": "idle", "idleSeconds": r.seconds}); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err == nil {
+		for _, h := range hosts {
+			s.hub.Notify(h)
+		}
 	}
 	return err
 }
