@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
@@ -528,14 +529,41 @@ func TestCheckpointReportAndUpload(t *testing.T) {
 			t.Errorf("%s: %d, want %d", c.name, code, c.want)
 		}
 	}
+	// Another host, by its own token or by name under the same token,
+	// asking for the destination's pinned checkpoint.
+	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, token_hash) VALUES ('tok-c', $1)`, ids.Hash("other-secret"))
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, token_id, last_heartbeat) VALUES ('hc', 'hc', 'default', 'ready', 'tok-c', now())`)
+	for _, c := range []struct{ name, host, token string }{
+		{"other host's token", "hc", "other-secret"},
+		{"other host's name", "hb", "host-secret"},
+		{"other token with this host's name", "ha", "other-secret"},
+	} {
+		if code := checkpointDownloadAs(s, c.host, c.token, "checkpoint-one", "&run=destination&epoch=1"); code != 404 {
+			t.Errorf("%s: %d, want 404", c.name, code)
+		}
+	}
+	// A live placement of an older epoch on this host is not the
+	// destination's current placement.
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch=2 WHERE id='destination'`)
+	execSQL(t, s, ctx, `INSERT INTO placements(id,tenant_id,run_id,host_id,epoch,state) VALUES('pd2','t1','destination','hb',2,'assigned')`)
+	if code := checkpointDownload(s, "checkpoint-one", "&run=destination&epoch=1"); code != 404 {
+		t.Errorf("older epoch's live placement: %d, want 404", code)
+	}
+	if code := checkpointDownloadAs(s, "hb", "host-secret", "checkpoint-one", "&run=destination&epoch=2"); code != 302 {
+		t.Errorf("current placement on hb: %d, want 302", code)
+	}
 }
 
 // checkpointDownload is the runner's GET for a checkpoint blob, with the
 // run/epoch scope runner/git.go appends.
 func checkpointDownload(s *Server, id, scope string) int {
-	req := httptest.NewRequest(http.MethodGet, "/runner/v1/blobs/"+id+"?host=ha"+scope, nil)
+	return checkpointDownloadAs(s, "ha", "host-secret", id, scope)
+}
+
+func checkpointDownloadAs(s *Server, host, token, id, scope string) int {
+	req := httptest.NewRequest(http.MethodGet, "/runner/v1/blobs/"+id+"?host="+host+scope, nil)
 	req.SetPathValue("id", id)
-	req.Header.Set("Authorization", "Bearer host-secret")
+	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	s.wrap(s.serveRunnerBlobDownload)(rec, req)
 	return rec.Code
