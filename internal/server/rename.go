@@ -41,6 +41,7 @@ type runName struct {
 
 func (n *runName) UnmarshalJSON(b []byte) error {
 	if string(b) == "null" {
+		*n = runName{}
 		return nil
 	}
 	if err := json.Unmarshal(b, &n.value); err != nil {

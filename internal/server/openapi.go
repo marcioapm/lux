@@ -112,11 +112,7 @@ func decodeStrict(data []byte, v any) error {
 	// Preserve an invalid submitted name for the submit validator rather
 	// than silently accepting encoding/json's U+FFFD replacement.
 	if sp, ok := v.(*spec.RunSpec); ok && !utf8.Valid(data) {
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(data, &fields); err != nil {
-			return err
-		}
-		if raw := fields["name"]; !utf8.Valid(raw) {
+		if raw, found := rawRunName(data); found && !utf8.Valid(raw) {
 			type plain spec.RunSpec
 			dec := json.NewDecoder(bytes.NewReader(data))
 			dec.DisallowUnknownFields()
@@ -130,6 +126,33 @@ func decodeStrict(data []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
+}
+
+// rawRunName follows encoding/json's case-insensitive name matching and its
+// null-is-no-op behavior for string fields, while retaining the original value.
+func rawRunName(data []byte) ([]byte, bool) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return nil, false
+	}
+	var raw []byte
+	var found bool
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, false
+		}
+		if key, ok := key.(string); ok && strings.EqualFold(key, "name") && string(value) != "null" {
+			raw = append(raw[:0], value...)
+			found = true
+		}
+	}
+	return raw, found
 }
 
 // Schema names, where two packages use the same type name.

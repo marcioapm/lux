@@ -227,7 +227,51 @@ func TestSubmitRefusesLongName(t *testing.T) {
 	}
 }
 
-// A rename that comes while a state change holds the Run's row (as
+func TestSubmitCaseFoldRawUTF8(t *testing.T) {
+	s, _, keys := renameFixture(t, StateRunning)
+	for _, field := range []string{"name", "Name", "NAME", "naMe", `na\u006de`} {
+		t.Run(field, func(t *testing.T) {
+			body := `{"` + field + `":"bad ` + string([]byte{0xff}) + `","image":{"ref":"alpine"},"workload":{"command":["true"]}}`
+			req := httptest.NewRequest(http.MethodPost, "/v1/runs", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+keys["run"])
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "name: not valid UTF-8") {
+				t.Fatalf("submit %s: %d %s", field, w.Code, w.Body)
+			}
+		})
+	}
+	body := `{"name":"bad ` + string([]byte{0xff}) + `","NAME":"safe alias","image":{"ref":"alpine"},"workload":{"command":["true"]}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/runs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+keys["run"])
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("safe final alias: %d %s", w.Code, w.Body)
+	}
+	var got Run
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.Name != "safe alias" || got.Spec.Name != "safe alias" {
+		t.Fatalf("safe final alias response: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestRenameDuplicateNull(t *testing.T) {
+	s, ctx, keys := renameFixture(t, StateRunning)
+	for _, body := range []rawBody{`{"name":"should-not-stick","name":null}`, `{"name":"should-not-stick","Name":null}`} {
+		t.Run(string(body), func(t *testing.T) {
+			code, response := patchName(t, s, keys["run"], r1, body)
+			if code != http.StatusUnprocessableEntity || !strings.Contains(response, "name is required") {
+				t.Fatalf("duplicate null: %d %s", code, response)
+			}
+			if name, specName := storedName(t, s, ctx, r1); name != "first" || specName == nil || *specName != "first" {
+				t.Fatalf("duplicate null changed stored name: %q %v", name, specName)
+			}
+		})
+	}
+}
+
 // applyReport and resume do: SELECT ... FOR UPDATE, then a rewrite of state
 // and spec from what they read) waits for it, and is applied on top: both
 // the new state and the new name are there, in runs.name and spec.name.
