@@ -122,8 +122,33 @@ func TestIdleReaperClockAndGuards(t *testing.T) {
 		{"already stopping", func(t *testing.T, s *Server, ctx context.Context) {
 			execSQL(t, s, ctx, `UPDATE runs SET state = 'stopping' WHERE id = 'r1'`)
 		}, false},
+		{"first prompt delivered", func(t *testing.T, s *Server, ctx context.Context) {
+			// The first prompt has no input event; its receipt alone keeps it pending.
+			if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				return s.applyAdapterEvent(ctx, tx, "t1", "r1", 1, proto.AdapterEvent{InputAck: "prompt", InputPhase: proto.InputAccepted, InputLands: "next_step", InputReceipt: true})
+			}); err != nil {
+				t.Fatal(err)
+			}
+			ownerExec(t, s, `UPDATE run_events SET created_at = now() - interval '2 minutes' WHERE run_id = 'r1'`)
+		}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) { s, ctx := idleFixture(t); c.setup(t, s, ctx); assertIdleReap(t, s, ctx, c.stop) })
+	}
+}
+
+// A stop requested before runs.state moves to stopping is not stopped again.
+func TestIdleReaperSkipsRequestedStop(t *testing.T) {
+	s, ctx := idleFixture(t)
+	execSQL(t, s, ctx, `UPDATE placements SET stop_requested_at = now(), stop_reason = 'stop' WHERE id = 'p1'`)
+	if err := s.reapIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var state, reason string
+	var stops int
+	systemScan(t, s, `SELECT r.state, p.stop_reason, (SELECT count(*) FROM host_messages WHERE run_id = 'r1' AND type = 'stop')
+		FROM runs r JOIN placements p ON p.run_id = r.id WHERE r.id = 'r1'`, nil, &state, &reason, &stops)
+	if state != StateRunning || reason != "stop" || stops != 0 {
+		t.Fatalf("state=%s reason=%s stop messages=%d", state, reason, stops)
 	}
 }
 
