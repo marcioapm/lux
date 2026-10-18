@@ -373,34 +373,9 @@ func (p *placement) push(ctx context.Context, req proto.Push) {
 	p.event(ctx, "git.push", map[string]any{"requestId": req.RequestID, "results": results})
 }
 
-// bundleScript runs in the checkout as `sh -c bundleScript sh BUNDLE
-// STATE...`. The workload keeps running, so nothing here is atomic with
-// it: the operation states are checked before HEAD is read as S, after,
-// and after the bundle is made, and the bundle must hold S alone. The
-// first state found where git resolves it is printed as
-// lux-operation:STATE; a bundle whose head is not S prints lux-moved. Any
-// failure (no sh, no git, not a checkout) exits non-zero. Only empty
-// output leaves a bundle to push.
-const bundleScript = `set -e
-b=$1; shift
-check() {
-	for s in "$@"; do
-		p=$(git rev-parse --git-path "$s")
-		if [ -e "$p" ] || [ -L "$p" ]; then
-			printf 'lux-operation:%s\n' "$s"
-			exit 0
-		fi
-	done
-}
-check "$@"
-S=$(git rev-parse --verify HEAD)
-check "$@"
-git bundle create --quiet "$b" HEAD
-check "$@"
-heads=$(git bundle list-heads "$b")
-if [ "$heads" != "$S HEAD" ]; then
-	echo lux-moved
-fi`
+// bundleScript is the shared workload-side bundler used by pushes and
+// checkpoints. Pushes select HEAD only.
+const bundleScript = proto.BundleScript
 
 // errMovedWhilePushed: HEAD moved between being read and being bundled.
 var errMovedWhilePushed = errors.New("the checkout changed while it was being pushed; push again")
@@ -430,7 +405,7 @@ func (p *placement) bundle(ctx context.Context, r spec.Repository) (path, op str
 	name := r.Name + ".bundle"
 	user := fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
 	args := []string{"exec", "--user", user, "--workdir", r.Path, containerName(p.runID),
-		"sh", "-c", bundleScript, "sh", proto.ShimRunDir + "/push/" + name}
+		"sh", "-c", bundleScript, "sh", "push", proto.ShimRunDir + "/push/" + name}
 	path = filepath.Join(dir, name)
 	out, err := p.r.pm.Run(ctx, append(args, proto.OperationStates...)...)
 	got := strings.TrimSpace(string(out))
