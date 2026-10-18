@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -166,7 +167,7 @@ func TestIdleReaperSkipsRequestedStop(t *testing.T) {
 	}
 }
 
-// A bare interrupt never reports an input phase; one carrying text does.
+// A bare interrupt never reports an input phase; one carrying content does.
 func TestIdleReaperInterruptInput(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -177,6 +178,7 @@ func TestIdleReaperInterruptInput(t *testing.T) {
 		{"interrupt only", inputRequest{Interrupt: true}, true, true},
 		{"interrupt only moves clock", inputRequest{Interrupt: true}, false, false},
 		{"interrupt with text", inputRequest{Interrupt: true, Text: "stop and look"}, true, false},
+		{"interrupt with attachments", inputRequest{Interrupt: true, Attachments: []spec.Attachment{{Name: "a.png", ContentType: "image/png", Data: b64(tinyPNG)}}}, true, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, ctx := idleFixture(t)
