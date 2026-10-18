@@ -48,6 +48,7 @@ func (s *Server) listCheckpoints(ctx context.Context, in *RunPath) (*checkpointO
 func (s *Server) checkpointRun(ctx context.Context, in *checkpointInput) (*checkpointOutput, error) {
 	var host string
 	var epoch int
+	var repos []string
 	err := s.db.Tx(ctx, store.Tenant(principal(ctx).TenantID), func(tx pgx.Tx) error {
 		var state string
 		var sp spec.RunSpec
@@ -56,6 +57,9 @@ func (s *Server) checkpointRun(ctx context.Context, in *checkpointInput) (*check
 		}
 		if sp.Git == nil || len(sp.Git.Repositories) == 0 {
 			return errf(http.StatusConflict, "no_checkpoint", "the Run has no repositories")
+		}
+		for _, r := range sp.Git.Repositories {
+			repos = append(repos, r.Name)
 		}
 		if state != StateRunning {
 			return errf(http.StatusConflict, "not_running", "checkpoint needs a running Run")
@@ -93,12 +97,21 @@ func (s *Server) checkpointRun(ctx context.Context, in *checkpointInput) (*check
 			if err != nil {
 				return nil, err
 			}
-			if len(out.Body.Checkpoints) == 0 {
-				continue
+			unchanged, err := s.unchangedSince(ctx, in.ID, started)
+			if err != nil {
+				return nil, err
 			}
-			ready := true
+			fresh := map[string]bool{}
 			for _, c := range out.Body.Checkpoints {
-				if c.CreatedAt.Before(started) {
+				if !c.CreatedAt.Before(started) {
+					fresh[c.Repo] = true
+				}
+			}
+			// Each repository has a checkpoint from this request, or the
+			// runner found it unchanged since its latest one.
+			ready := true
+			for _, repo := range repos {
+				if !fresh[repo] && !unchanged[repo] {
 					ready = false
 				}
 			}
@@ -107,6 +120,26 @@ func (s *Server) checkpointRun(ctx context.Context, in *checkpointInput) (*check
 			}
 		}
 	}
+}
+
+// unchangedSince is the repositories the Run's runner reported unchanged
+// since its latest checkpoint (a git.checkpoint event with unchanged) at or
+// after since.
+func (s *Server) unchangedSince(ctx context.Context, run string, since time.Time) (map[string]bool, error) {
+	out := map[string]bool{}
+	err := s.db.Tx(ctx, store.Tenant(principal(ctx).TenantID), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT DISTINCT data->>'repo' FROM run_events
+			WHERE run_id = $1 AND type = 'git.checkpoint' AND data->>'unchanged' = 'true' AND created_at >= $2`, run, since)
+		if err != nil {
+			return err
+		}
+		repos, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		for _, r := range repos {
+			out[r] = true
+		}
+		return err
+	})
+	return out, err
 }
 
 func resolveCheckpointSources(ctx context.Context, tx pgx.Tx, tenant string, sp *spec.RunSpec) error {

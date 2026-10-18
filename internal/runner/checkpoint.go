@@ -47,9 +47,11 @@ func (p *placement) checkpointRunning(ctx context.Context) {
 		return
 	}
 	a := proto.CheckpointArgs{Dir: proto.ShimRunDir + "/" + dir, MaxBytes: p.checkpointLimit()}
+	p.mu.Lock()
 	for _, repo := range p.assign.Spec.Git.Repositories {
-		a.Repos = append(a.Repos, proto.CheckpointRepo{Name: repo.Name, Path: repo.Path})
+		a.Repos = append(a.Repos, proto.CheckpointRepo{Name: repo.Name, Path: repo.Path, Previous: p.assign.CheckpointRefs[repo.Name]})
 	}
+	p.mu.Unlock()
 	out, err := p.r.execShim(ctx, p.runID, fmt.Sprintf("%d:%d", p.user.UID, p.user.GID), "checkpoint", a)
 	if err != nil {
 		p.event(ctx, proto.EvWarning, map[string]any{"message": "git checkpoint: " + err.Error()})
@@ -134,6 +136,9 @@ func (p *placement) collectCheckpointDir(ctx context.Context, dir string) {
 		}
 		res := results[i]
 		if res.Unchanged {
+			// Its latest checkpoint stands; a waiting checkpoint request
+			// counts the repository as done.
+			p.event(ctx, "git.checkpoint", map[string]any{"repo": repo.Name, "unchanged": true})
 			continue
 		}
 		if res.Error != "" {

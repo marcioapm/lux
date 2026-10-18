@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -21,8 +22,13 @@ import (
 // host ha and fails unless it is accepted.
 func reportCheckpoint(t *testing.T, s *Server, id string) {
 	t.Helper()
+	reportRepoCheckpoint(t, s, id, "api")
+}
+
+func reportRepoCheckpoint(t *testing.T, s *Server, id, repo string) {
+	t.Helper()
 	head := strings.Repeat("a", 40)
-	c := proto.CheckpointReady{Blob: proto.BlobInfo{BlobID: id, Size: 10, SHA256: sha("bundle")}, StagedCheckpoint: proto.StagedCheckpoint{Repo: "api", Head: head, Branch: "main", Refs: map[string]string{"HEAD": head, "refs/heads/main": head}, Size: 10}}
+	c := proto.CheckpointReady{Blob: proto.BlobInfo{BlobID: id, Size: 10, SHA256: sha("bundle")}, StagedCheckpoint: proto.StagedCheckpoint{Repo: repo, Head: head, Branch: "main", Refs: map[string]string{"HEAD": head, "refs/heads/main": head}, Size: 10}}
 	f := s.handleReport(context.Background(), "ha", proto.Frame{Type: proto.MsgCheckpointReady, ID: 1, RunID: "ra", Epoch: 1, Data: proto.Marshal(c)})
 	if f.Type != proto.MsgAck || ackRefused(t, f) {
 		t.Fatalf("report %s: %+v", id, f)
@@ -148,6 +154,51 @@ func TestCheckpointRefusesInvalidBranch(t *testing.T) {
 		t.Fatalf("%d checkpoints recorded", n)
 	}
 	reportCheckpoint(t, s, "checkpoint-good")
+}
+
+// checkpoint --wait on a Run with two repositories, one of which the
+// runner finds unchanged since its latest checkpoint: the wait ends once
+// the other's new checkpoint is uploaded, with both listed.
+func TestCheckpointWaitCountsUnchangedRepos(t *testing.T) {
+	s, ctx := reportFixture(t)
+	useFakeS3(t, s)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running', spec = '{"git":{"repositories":[{"name":"api","url":"https://git.example/api.git"},{"name":"docs","url":"https://git.example/docs.git"}]}}' WHERE id = 'ra'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE id = 'pa1'`)
+	reportRepoCheckpoint(t, s, "checkpoint-docs", "docs")
+	if err := uploadCheckpoint(s, "checkpoint-docs"); err != nil {
+		t.Fatal(err)
+	}
+	c := &runnerConn{hostID: "ha", send: make(chan proto.Frame, 16), notify: make(chan struct{}, 1), done: make(chan struct{})}
+	s.hub.mu.Lock()
+	s.hub.conns["ha"] = c
+	s.hub.mu.Unlock()
+	t.Cleanup(func() { close(c.done) })
+	go func() {
+		select {
+		case f := <-c.send:
+			if f.Type != "checkpoint" || f.RunID != "ra" {
+				return
+			}
+			reportRepoCheckpoint(t, s, "checkpoint-api", "api")
+			_ = uploadCheckpoint(s, "checkpoint-api")
+			s.handleReport(ctx, "ha", proto.Frame{Type: proto.MsgRunEvent, ID: 2, RunID: "ra", Epoch: 1,
+				Data: proto.Marshal(proto.RunEvent{Type: "git.checkpoint", Data: map[string]any{"repo": "docs", "unchanged": true}})})
+		case <-c.done:
+		}
+	}()
+	wctx, cancel := context.WithTimeout(tenantCtx("t1"), 10*time.Second)
+	defer cancel()
+	out, err := s.checkpointRun(wctx, &checkpointInput{RunPath: RunPath{ID: "ra"}, Wait: true})
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	got := map[string]string{}
+	for _, cp := range out.Body.Checkpoints {
+		got[cp.Repo] = cp.ID
+	}
+	if got["api"] != "checkpoint-api" || got["docs"] != "checkpoint-docs" {
+		t.Fatalf("checkpoints %v", got)
+	}
 }
 
 func TestCheckpointSourceTenantLookup(t *testing.T) {

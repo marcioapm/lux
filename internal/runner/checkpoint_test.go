@@ -133,6 +133,41 @@ printf '[{"repo":"api","head":"` + head + `","refs":{"HEAD":"` + head + `"},"siz
 	}
 }
 
+// A repository the shim found unchanged since its latest checkpoint is
+// reported as a git.checkpoint event with unchanged, and nothing uploaded.
+func TestCollectCheckpointReportsUnchanged(t *testing.T) {
+	f := newFinishFixture(t)
+	dir := stageCheckpointDir(t, f)
+	b, _ := json.Marshal([]proto.StagedCheckpoint{{Repo: "api", Unchanged: true}})
+	if err := os.WriteFile(filepath.Join(dir, "results.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.p.collectCheckpoints(context.Background())
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		f.mu.Lock()
+		var found, ready bool
+		for _, fr := range f.reports {
+			var ev proto.RunEvent
+			if fr.Type == proto.MsgRunEvent && json.Unmarshal(fr.Data, &ev) == nil && ev.Type == "git.checkpoint" {
+				found = ev.Data["repo"] == "api" && ev.Data["unchanged"] == true
+			}
+			ready = ready || fr.Type == proto.MsgCheckpointReady
+		}
+		f.mu.Unlock()
+		if ready {
+			t.Fatal("an unchanged repository was reported as a checkpoint")
+		}
+		if found {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no unchanged git.checkpoint event")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // A FIFO the workload planted in place of a staged bundle is refused at
 // once with a warning; collection neither blocks on it nor reports it.
 func TestCollectCheckpointRefusesFIFO(t *testing.T) {

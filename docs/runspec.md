@@ -940,6 +940,11 @@ The shim stages bundles after the workload and `beforeStop` finish, before
 it exits. The runner uploads them like snapshot blobs. A crash that prevents
 staging leaves the previous checkpoint; it does not record a new one.
 `lux checkpoint <run> --wait` asks a running Run for a checkpoint now.
+Each uploaded checkpoint is a `git.checkpoint` event `{repo, head, refs,
+size}`; a repository whose branches and `HEAD` have not moved since its
+latest checkpoint keeps that one and is a `git.checkpoint` event `{repo,
+unchanged: true}`. `--wait` returns once every repository has one or the
+other.
 `lux get` lists the latest uploaded checkpoints.
 
 A repository can use `from` instead of `url`:
