@@ -164,7 +164,7 @@ func pinCheckpointSources(ctx context.Context, tx pgx.Tx, tenant, run string, sp
 }
 
 func applyCheckpointReady(ctx context.Context, tx pgx.Tx, tenant, host, run string, epoch int, c proto.CheckpointReady) (bool, error) {
-	if c.Repo == "" || c.Head == "" || c.Refs["HEAD"] != c.Head || c.Size < 0 || c.Size > proto.DefaultCheckpointBytes || !storableText(c.Repo, c.Head, c.Branch, c.Blob.BlobID, c.Blob.SHA256) {
+	if c.Repo == "" || c.Head == "" || c.Refs["HEAD"] != c.Head || c.Size < 0 || !storableText(c.Repo, c.Head, c.Branch, c.Blob.BlobID, c.Blob.SHA256) {
 		return true, nil
 	}
 	for ref, sha := range c.Refs {

@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"github.com/marcioapm/lux/internal/spec"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -48,7 +50,8 @@ func TestCheckpointReportAndUpload(t *testing.T) {
 			t.Fatal(err)
 		}
 		if id == "checkpoint-one" {
-			execSQL(t, s, ctx, `INSERT INTO git_checkpoint_refs(tenant_id,run_id,repo,checkpoint_id) VALUES('t1','ra','copy','checkpoint-one')`)
+			execSQL(t, s, ctx, `INSERT INTO runs(id,tenant_id,spec,state) VALUES('destination','t1','{}','submitted')`)
+			execSQL(t, s, ctx, `INSERT INTO git_checkpoint_refs(tenant_id,run_id,repo,checkpoint_id) VALUES('t1','destination','copy','checkpoint-one')`)
 		}
 	}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -77,5 +80,39 @@ func TestCheckpointReportAndUpload(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET state='terminated',terminated_at=now()-interval '100 days' WHERE id='ra'`)
+	if err := s.reapRetention(ctx); err != nil {
+		t.Fatal(err)
+	}
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var location string
+		err := tx.QueryRow(ctx, `SELECT location FROM blobs WHERE id='checkpoint-one'`).Scan(&location)
+		if err == nil && location != "s3" {
+			t.Fatalf("source expiry deleted pinned blob: %s", location)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(id string) int {
+		req := httptest.NewRequest(http.MethodGet, "/runner/v1/blobs/"+id+"?host=ha", nil)
+		req.SetPathValue("id", id)
+		req.Header.Set("Authorization", "Bearer host-secret")
+		rec := httptest.NewRecorder()
+		s.wrap(s.serveRunnerBlobDownload)(rec, req)
+		return rec.Code
+	}
+	if code := request("checkpoint-one"); code != 404 {
+		t.Fatalf("unplaced destination download: %d", code)
+	}
+	execSQL(t, s, ctx, `INSERT INTO placements(id,tenant_id,run_id,host_id,epoch,state) VALUES('pd','t1','destination','ha',1,'starting')`)
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch=1 WHERE id='destination'`)
+	if code := request("checkpoint-one"); code != 302 {
+		t.Fatalf("pinned destination download: %d", code)
+	}
+	if code := request("checkpoint-two"); code != 404 {
+		t.Fatalf("crafted blob reference download: %d", code)
 	}
 }

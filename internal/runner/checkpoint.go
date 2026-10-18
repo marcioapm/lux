@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/marcioapm/lux/internal/ids"
@@ -128,8 +130,13 @@ func (p *placement) collectCheckpointDir(ctx context.Context, dir string) {
 			continue
 		}
 		id := ids.New(ids.Blob)
+		var copied int64
 		size, sum, err := p.r.writeBlob(id, func(w io.Writer) error {
-			_, err := io.Copy(w, io.LimitReader(src, p.checkpointLimit()+1))
+			var err error
+			copied, err = io.Copy(w, io.LimitReader(src, p.checkpointLimit()+1))
+			if err == nil && copied != res.Size {
+				return fmt.Errorf("bundle changed while collected")
+			}
 			return err
 		})
 		src.Close()
@@ -153,6 +160,24 @@ func (p *placement) collectCheckpointDir(ctx context.Context, dir string) {
 			continue
 		}
 		p.r.updateRecord(id, func(r *snapshotRecord) { r.Reported = true })
+		names := make([]string, 0, len(res.Refs))
+		for ref := range res.Refs {
+			if ref != "HEAD" {
+				names = append(names, ref)
+			}
+		}
+		slices.Sort(names)
+		var lines []string
+		for _, ref := range names {
+			lines = append(lines, res.Refs[ref]+" "+ref)
+		}
+		lines = append(lines, res.Head+" HEAD")
+		p.mu.Lock()
+		if p.assign.CheckpointRefs == nil {
+			p.assign.CheckpointRefs = map[string]string{}
+		}
+		p.assign.CheckpointRefs[repo.Name] = strings.Join(lines, "\n")
+		p.mu.Unlock()
 		p.r.uploads.kick()
 	}
 }
