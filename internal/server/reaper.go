@@ -354,13 +354,13 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 }
 
 // reapIdle parks idle agents through the same stop path as a requested stop.
-// Event times are luxd's clock, scoped to the current placement. Repeated idle
-// reports do not move the clock; a busy report followed by idle does. A
-// content-free interrupt is sent as MsgInterrupt, which reports no input
-// phase, so it moves the clock but never counts as pending. A delivery
-// without a receipt never reports consumed: once delivered, the input is
-// settled by any activity report after the input itself. Adapters report busy
-// before such a delivery, and a short turn's idle can be recorded before it.
+// The clock uses luxd's event times for the current placement: a busy→idle
+// change or any input moves it, a repeated idle report does not. A
+// content-free interrupt goes out as MsgInterrupt and reports no input phase,
+// so it never counts as pending. A delivery without a receipt never reports
+// consumed; any activity report after its input row settles it, since
+// adapters report busy before such a delivery and a short turn's idle can be
+// recorded before it.
 func (s *Server) reapIdle(ctx context.Context) error {
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -383,26 +383,22 @@ func (s *Server) reapIdle(ctx context.Context) error {
 			return err
 		}
 		type idleRun struct {
-			id, tenant string
-			epoch      int
-			seconds    float64
+			ID, Tenant string
+			Epoch      int
+			Seconds    float64
 		}
-		due, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (idleRun, error) {
-			var r idleRun
-			err := row.Scan(&r.id, &r.tenant, &r.epoch, &r.seconds)
-			return r, err
-		})
+		due, err := pgx.CollectRows(rows, pgx.RowToStructByPos[idleRun])
 		if err != nil {
 			return err
 		}
 		for _, r := range due {
-			h, err := s.requestStop(ctx, tx, r.tenant, r.id, "idle")
+			h, err := s.requestStop(ctx, tx, r.Tenant, r.ID, "idle")
 			if err != nil {
 				return err
 			}
 			if h != "" {
 				hosts = append(hosts, h)
-				if err := addEvent(ctx, tx, r.tenant, r.id, r.epoch, "idle", map[string]any{"reason": "idle", "idleSeconds": r.seconds}); err != nil {
+				if err := addEvent(ctx, tx, r.Tenant, r.ID, r.Epoch, "idle", map[string]any{"reason": "idle", "idleSeconds": r.Seconds}); err != nil {
 					return err
 				}
 			}
@@ -418,14 +414,13 @@ func (s *Server) reapIdle(ctx context.Context) error {
 }
 
 // idleDueQuery selects the Runs reapIdle parks; runFilter narrows the
-// candidates. Only Runs whose placement is older than their idleTimeout
-// reach the event lookups, and each lookup is keyed on run_id so it reads
-// run_events_run for that Run alone. The pending check is a target-list
-// EXISTS, which Postgres runs per candidate instead of turning it into an
-// anti-join over all of run_events; OFFSET 0 fences the Run's open inputs so
-// each terminal probe is a full run_input_events primary-key lookup. The
-// receipt-free delivery lookup must not reference open, so Postgres hashes
-// it once per Run instead of rescanning the Run's events for each input.
+// candidates. Only placements older than their idleTimeout reach the event
+// lookups, each keyed on run_id (run_events_run). Plan constraints:
+//   - pending is a target-list EXISTS so it runs per candidate, not as an
+//     anti-join over all of run_events;
+//   - OFFSET 0 fences open so each terminal probe is a full primary-key lookup;
+//   - the receipt-free delivery lookup must not reference open.id, so it is
+//     hashed once per Run rather than rescanned per input.
 func idleDueQuery(runFilter string) string {
 	return `WITH live AS MATERIALIZED (
 		SELECT r.id, r.tenant_id, r.current_epoch AS epoch, p.started_at,
