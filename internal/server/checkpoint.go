@@ -75,7 +75,16 @@ func (s *Server) checkpointRun(ctx context.Context, in *checkpointInput) (*check
 	if err != nil {
 		return nil, err
 	}
-	started := time.Now()
+	// Both marks come from the database: the event id orders this request's
+	// unchanged reports, its clock the checkpoints' created_at.
+	var lastEvent int64
+	var started time.Time
+	err = s.db.Tx(ctx, store.Tenant(principal(ctx).TenantID), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT coalesce(max(id), 0), clock_timestamp() FROM run_events WHERE run_id = $1`, in.ID).Scan(&lastEvent, &started)
+	})
+	if err != nil {
+		return nil, err
+	}
 	if err := s.hub.SendLive(host, proto.Frame{Type: "checkpoint", RunID: in.ID, Epoch: epoch}); err != nil {
 		return nil, errf(http.StatusServiceUnavailable, "host_unreachable", "%v", err)
 	}
@@ -97,7 +106,7 @@ func (s *Server) checkpointRun(ctx context.Context, in *checkpointInput) (*check
 			if err != nil {
 				return nil, err
 			}
-			unchanged, err := s.unchangedSince(ctx, in.ID, started)
+			unchanged, err := s.unchangedSince(ctx, in.ID, lastEvent)
 			if err != nil {
 				return nil, err
 			}
@@ -123,13 +132,16 @@ func (s *Server) checkpointRun(ctx context.Context, in *checkpointInput) (*check
 }
 
 // unchangedSince is the repositories the Run's runner reported unchanged
-// since its latest checkpoint (a git.checkpoint event with unchanged) at or
-// after since.
-func (s *Server) unchangedSince(ctx context.Context, run string, since time.Time) (map[string]bool, error) {
+// since its latest checkpoint (a git.checkpoint event with unchanged) after
+// event afterID, less those with a checkpoint still on the host: the runner
+// compares against the refs it last reported, which may not be uploaded yet.
+func (s *Server) unchangedSince(ctx context.Context, run string, afterID int64) (map[string]bool, error) {
 	out := map[string]bool{}
 	err := s.db.Tx(ctx, store.Tenant(principal(ctx).TenantID), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT DISTINCT data->>'repo' FROM run_events
-			WHERE run_id = $1 AND type = 'git.checkpoint' AND data->>'unchanged' = 'true' AND created_at >= $2`, run, since)
+		rows, err := tx.Query(ctx, `SELECT DISTINCT e.data->>'repo' FROM run_events e
+			WHERE e.run_id = $1 AND e.id > $2 AND e.type = 'git.checkpoint' AND e.data->>'unchanged' = 'true'
+			  AND NOT EXISTS (SELECT 1 FROM git_checkpoints c JOIN blobs b ON b.id = c.id
+				WHERE c.run_id = $1 AND c.repo = e.data->>'repo' AND NOT c.uploaded AND b.location = 'host')`, run, afterID)
 		if err != nil {
 			return err
 		}

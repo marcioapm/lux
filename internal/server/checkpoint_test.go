@@ -279,6 +279,69 @@ func TestCheckpointWaitCountsUnchangedRepos(t *testing.T) {
 	}
 }
 
+// The runner reports a repository unchanged against the refs it last
+// reported, whose checkpoint may still be uploading: --wait ends only once
+// that checkpoint is uploaded, and lists it.
+func TestCheckpointWaitUnchangedNeedsPendingUpload(t *testing.T) {
+	s, ctx := reportFixture(t)
+	useFakeS3(t, s)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running', spec = '{"git":{"repositories":[{"name":"api","url":"https://git.example/api.git"}]}}' WHERE id = 'ra'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE id = 'pa1'`)
+	reportCheckpoint(t, s, "checkpoint-one")
+	if err := uploadCheckpoint(s, "checkpoint-one"); err != nil {
+		t.Fatal(err)
+	}
+	reportCheckpoint(t, s, "checkpoint-two")
+	c := &runnerConn{hostID: "ha", send: make(chan proto.Frame, 16), notify: make(chan struct{}, 1), done: make(chan struct{})}
+	s.hub.mu.Lock()
+	s.hub.conns["ha"] = c
+	s.hub.mu.Unlock()
+	t.Cleanup(func() { close(c.done) })
+	answered := make(chan struct{})
+	go func() {
+		select {
+		case f := <-c.send:
+			if f.Type == "checkpoint" && f.RunID == "ra" {
+				s.handleReport(ctx, "ha", proto.Frame{Type: proto.MsgRunEvent, ID: 2, RunID: "ra", Epoch: 1,
+					Data: proto.Marshal(proto.RunEvent{Type: "git.checkpoint", Data: map[string]any{"repo": "api", "unchanged": true}})})
+			}
+			close(answered)
+		case <-c.done:
+		}
+	}()
+	type result struct {
+		out *checkpointOutput
+		err error
+	}
+	waited := make(chan result, 1)
+	wctx, cancel := context.WithTimeout(tenantCtx("t1"), 10*time.Second)
+	defer cancel()
+	go func() {
+		out, err := s.checkpointRun(wctx, &checkpointInput{RunPath: RunPath{ID: "ra"}, Wait: true})
+		waited <- result{out, err}
+	}()
+	<-answered
+	if got, err := s.unchangedSince(tenantCtx("t1"), "ra", 0); err != nil || got["api"] {
+		t.Fatalf("unchanged with checkpoint-two pending: %v %v", got, err)
+	}
+	// Several of the wait's 200 ms polls see the unchanged report.
+	select {
+	case r := <-waited:
+		t.Fatalf("wait returned with checkpoint-two pending: %+v %v", r.out, r.err)
+	case <-time.After(time.Second):
+	}
+	if err := uploadCheckpoint(s, "checkpoint-two"); err != nil {
+		t.Fatal(err)
+	}
+	r := <-waited
+	if r.err != nil {
+		t.Fatalf("wait: %v", r.err)
+	}
+	if len(r.out.Body.Checkpoints) != 1 || r.out.Body.Checkpoints[0].ID != "checkpoint-two" || !r.out.Body.Checkpoints[0].Uploaded {
+		t.Fatalf("checkpoints %+v", r.out.Body.Checkpoints)
+	}
+}
+
 // A report whose HEAD ref is not its head commit is refused.
 func TestCheckpointRefusesMismatchedHead(t *testing.T) {
 	s, ctx := reportFixture(t)

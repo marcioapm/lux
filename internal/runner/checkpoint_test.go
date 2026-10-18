@@ -101,12 +101,16 @@ func TestCheckpointRunningRemovesItsStage(t *testing.T) {
 	f := newFinishFixture(t)
 	f.p.assign.Spec.Git = &spec.Git{Repositories: []spec.Repository{{Name: "api", Path: "/work/api"}}}
 	f.p.user = passwd.User{UID: os.Getuid(), GID: os.Getgid()}
+	f.p.assign.CheckpointRefs = map[string]string{"api": "previous-refs"}
 	rt := filepath.Join(f.r.cfg.DataDir, "rt")
 	head := strings.Repeat("a", 40)
-	// `podman exec ... lux-shim checkpoint ARGS`: stage 0.bundle in the one
-	// live stage dir and print its result, as the shim does.
+	argsFile := filepath.Join(t.TempDir(), "args.json")
+	// `podman exec ... lux-shim checkpoint ARGS`: record ARGS, stage
+	// 0.bundle in the one live stage dir and print its result, as the shim
+	// does.
 	script := `#!/bin/sh
 [ "$1" = exec ] || exit 1
+eval "printf '%s' \"\${$#}\"" > ` + argsFile + `
 d=$(ls -d ` + rt + `/checkpoint-live-*)
 printf data > "$d/0.bundle"
 printf '[{"repo":"api","head":"` + head + `","refs":{"HEAD":"` + head + `"},"size":4,"file":"0.bundle"}]'
@@ -130,6 +134,15 @@ printf '[{"repo":"api","head":"` + head + `","refs":{"HEAD":"` + head + `"},"siz
 	}
 	if left, _ := filepath.Glob(filepath.Join(rt, "checkpoint-live-*")); len(left) != 0 {
 		t.Fatalf("stage left on the runtime volume: %v", left)
+	}
+	// The shim compares against the refs of the latest checkpoint luxd
+	// acknowledged, so an unchanged repository is not bundled again.
+	var args proto.CheckpointArgs
+	if b, err := os.ReadFile(argsFile); err != nil || json.Unmarshal(b, &args) != nil {
+		t.Fatalf("shim args: %s %v", b, err)
+	}
+	if len(args.Repos) != 1 || args.Repos[0].Name != "api" || args.Repos[0].Previous != "previous-refs" {
+		t.Fatalf("shim repos %+v", args.Repos)
 	}
 }
 
