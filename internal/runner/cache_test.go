@@ -81,6 +81,44 @@ func TestCacheFreeHoldDoesNotWaitForLifecycle(t *testing.T) {
 	(&placement{}).holdCaches(spec.RunSpec{})()
 }
 
+func TestCacheDiscoveryTimeoutDoesNotBlockPlacement(t *testing.T) {
+	oldTimeout := cacheDiscoveryTimeout
+	cacheDiscoveryTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { cacheDiscoveryTimeout = oldTimeout })
+
+	f := newFinishFixture(t)
+	writeFile(t, filepath.Join(f.r.cfg.DataDir, "caches.json"), `{"known":1}`)
+	// The listing exits only on SIGTERM from context cancellation; the cap
+	// keeps a mutated (uncancelled) run from leaking the process.
+	writeFile(t, f.bin, `#!/bin/sh
+case "$1 $2" in
+"volume ls")
+  trap 'exit 1' TERM
+  i=0
+  while [ "$i" -lt 3000 ]; do sleep 0.01; i=$((i + 1)); done
+  printf 'leaked\n' ;;
+*) exit 1 ;;
+esac
+`)
+	sp := spec.RunSpec{Volumes: []spec.Volume{{Name: "gomod", Path: "/cache", Kind: "cache"}}}
+	done := make(chan struct{})
+	go func() {
+		f.p.holdCaches(sp)()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cache placement remained blocked by volume discovery")
+	}
+	u := f.r.cacheUse()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if len(u.last) != 2 || u.last["known"] != 1 || u.last[cacheVolume("t1", "gomod", 0, 0)] == 0 {
+		t.Fatalf("cache metadata after discovery timeout: %+v", u.last)
+	}
+}
+
 func TestCacheMetadataPreparationAndRelease(t *testing.T) {
 	for _, metadata := range []string{"missing", "null", "{", "{}"} {
 		t.Run(metadata, func(t *testing.T) {
