@@ -7,9 +7,11 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -77,7 +79,7 @@ func (p *placement) materialize(ctx context.Context, r spec.Repository, user pas
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
 			return nil, nil
 		}
-		body, err := p.r.api.download(ctx, r.From.Checkpoint)
+		body, err := p.r.api.downloadScoped(ctx, r.From.Checkpoint, "&run="+url.QueryEscape(p.runID)+"&epoch="+strconv.Itoa(p.epoch))
 		if err != nil {
 			return nil, err
 		}

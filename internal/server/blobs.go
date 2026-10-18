@@ -404,7 +404,8 @@ func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request)
             JOIN placements p ON p.run_id=dst.id AND p.epoch=dst.current_epoch
             JOIN hosts h ON h.id=p.host_id
             WHERE b.id=$1 AND b.kind='checkpoint' AND h.token_id=$2 AND h.name=$3
-              AND p.state IN ('assigned','starting','running')`, id, tok.ID, r.URL.Query().Get("host")).Scan(&key, &location)
+              AND p.state IN ('assigned','starting','running')
+              AND dst.id = $4 AND p.epoch = $5`, id, tok.ID, r.URL.Query().Get("host"), r.URL.Query().Get("run"), r.URL.Query().Get("epoch")).Scan(&key, &location)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errf(http.StatusNotFound, "not_found", "no blob %s for a run assigned to this host", id)
