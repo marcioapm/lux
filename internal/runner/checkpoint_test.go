@@ -1,14 +1,19 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -44,6 +49,48 @@ func (f *finishFixture) warnings() []string {
 		}
 	}
 	return out
+}
+
+// A destination downloads a checkpoint up to the assignment's checkpoint
+// limit, not the default: one at a limit below the default is accepted,
+// one byte over it refused and removed. The request names the destination
+// placement.
+func TestDownloadCheckpointUsesAssignedLimit(t *testing.T) {
+	f := newFinishFixture(t)
+	const limit = 1 << 10
+	content := bytes.Repeat([]byte("b"), limit)
+	var query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		zw, _ := zstd.NewWriter(w)
+		_, _ = zw.Write(content)
+		_ = zw.Close()
+	}))
+	defer srv.Close()
+	f.r.api = newAPI(srv.URL, "tok", "host")
+	for _, c := range []struct {
+		limit int64
+		ok    bool
+	}{{limit, true}, {limit - 1, false}} {
+		f.p.assign.CheckpointBytes = c.limit
+		path, err := f.p.downloadCheckpoint(context.Background(), "blob-1")
+		if (err == nil) != c.ok {
+			t.Fatalf("limit %d: %v", c.limit, err)
+		}
+		if c.ok {
+			if b, _ := os.ReadFile(path); !bytes.Equal(b, content) {
+				t.Fatalf("downloaded %d bytes", len(b))
+			}
+			os.Remove(path)
+		}
+	}
+	if query != "host=host&run=run1&epoch=1" {
+		t.Fatalf("query %q", query)
+	}
+	left, _ := filepath.Glob(filepath.Join(f.r.cfg.DataDir, "checkpoint-*.bundle"))
+	if len(left) != 0 {
+		t.Fatalf("left behind: %v", left)
+	}
 }
 
 // A FIFO the workload planted in place of a staged bundle is refused at

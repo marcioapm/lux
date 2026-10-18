@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/klauspost/compress/zstd"
 	"io"
 	"io/fs"
 	"net/url"
@@ -14,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/marcioapm/lux/internal/gitws"
 	"github.com/marcioapm/lux/internal/passwd"
@@ -82,33 +83,12 @@ func (p *placement) materialize(ctx context.Context, r spec.Repository, user pas
 		if r.From.Branch != "" && !proto.ValidBranch(r.From.Branch) {
 			return nil, fmt.Errorf("checkpoint branch %q is not a valid branch name", r.From.Branch)
 		}
-		body, err := p.r.api.downloadScoped(ctx, r.From.Checkpoint, "&run="+url.QueryEscape(p.runID)+"&epoch="+strconv.Itoa(p.epoch))
+		bundle, err := p.downloadCheckpoint(ctx, r.From.Checkpoint)
 		if err != nil {
 			return nil, err
 		}
-		defer body.Close()
-		zr, err := zstd.NewReader(body)
-		if err != nil {
-			return nil, err
-		}
-		defer zr.Close()
-		f, err := os.CreateTemp(p.r.cfg.DataDir, "checkpoint-*.bundle")
-		if err != nil {
-			return nil, err
-		}
-		defer os.Remove(f.Name())
-		n, err := io.Copy(f, io.LimitReader(zr, proto.DefaultCheckpointBytes+1))
-		closeErr := f.Close()
-		if err != nil {
-			return nil, err
-		}
-		if closeErr != nil {
-			return nil, closeErr
-		}
-		if n > proto.DefaultCheckpointBytes {
-			return nil, fmt.Errorf("checkpoint exceeds size limit")
-		}
-		repo.Bundle, repo.HeadBranch = f.Name(), r.From.Branch
+		defer os.Remove(bundle)
+		repo.Bundle, repo.HeadBranch = bundle, r.From.Branch
 	}
 	res, err := p.r.git.Materialize(ctx, repo, dir)
 	if err != nil || !res.Cloned {
@@ -124,6 +104,39 @@ func (p *placement) materialize(ctx context.Context, r spec.Repository, user pas
 		_ = os.Lchown(d, user.UID, user.GID)
 	}
 	return res, nil
+}
+
+// downloadCheckpoint fetches a pinned checkpoint for this placement into a
+// temporary bundle in DataDir, decompressed and capped at the assignment's
+// checkpoint limit; the caller removes it.
+func (p *placement) downloadCheckpoint(ctx context.Context, id string) (string, error) {
+	body, err := p.r.api.downloadScoped(ctx, id, "&run="+url.QueryEscape(p.runID)+"&epoch="+strconv.Itoa(p.epoch))
+	if err != nil {
+		return "", err
+	}
+	defer body.Close()
+	zr, err := zstd.NewReader(body)
+	if err != nil {
+		return "", err
+	}
+	defer zr.Close()
+	f, err := os.CreateTemp(p.r.cfg.DataDir, "checkpoint-*.bundle")
+	if err != nil {
+		return "", err
+	}
+	limit := p.checkpointLimit()
+	n, err := io.Copy(f, io.LimitReader(zr, limit+1))
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil && n > limit {
+		err = fmt.Errorf("checkpoint exceeds the %d-byte limit", limit)
+	}
+	if err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 // checkoutDir is where a checkout goes on the host: inside its volume,
