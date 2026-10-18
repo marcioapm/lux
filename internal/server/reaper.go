@@ -440,7 +440,8 @@ func idleDueQuery(runFilter string) string {
 				FROM run_events WHERE run_id = l.id AND epoch = l.epoch AND type = 'activity'
 			) changes WHERE activity = 'idle' AND previous IS DISTINCT FROM 'idle'),
 			(SELECT max(created_at) FROM run_events WHERE run_id = l.id AND epoch = l.epoch AND type = 'input')
-		) AS since
+		) AS since,
+		(SELECT max(id) FROM run_events WHERE run_id = l.id AND epoch = l.epoch AND type = 'activity') AS last_activity
 		FROM live l
 	), due AS MATERIALIZED (
 		SELECT c.*, EXISTS (
@@ -456,9 +457,7 @@ func idleDueQuery(runFilter string) string {
 			AND (open.type = 'input.delivered' OR NOT EXISTS (
 				SELECT 1 FROM run_events delivered WHERE delivered.run_id = c.id AND delivered.epoch = c.epoch
 				AND delivered.type = 'input.delivered' AND delivered.data->>'requestId' = open.request_id
-				AND delivered.data->>'receipt' = 'false'
-				AND EXISTS (SELECT 1 FROM run_events activity WHERE activity.run_id = c.id AND activity.epoch = c.epoch
-					AND activity.type = 'activity' AND activity.id > delivered.id)))
+				AND delivered.data->>'receipt' = 'false' AND delivered.id < c.last_activity))
 		) AS pending
 		FROM clock c WHERE now() - c.since > c.timeout
 	)
