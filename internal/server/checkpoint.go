@@ -123,7 +123,9 @@ func resolveCheckpointSources(ctx context.Context, tx pgx.Tx, tenant string, sp 
 			return errf(422, "invalid_spec", "from checkpoint fields are set by luxd")
 		}
 		var source spec.RunSpec
-		err := tx.QueryRow(ctx, `SELECT spec FROM runs WHERE id=$1 AND tenant_id=$2`, f.Run, tenant).Scan(&source)
+		// FOR SHARE orders this against blobUploaded's FOR UPDATE of the
+		// source: a newer checkpoint's superseded sweep then sees the pin.
+		err := tx.QueryRow(ctx, `SELECT spec FROM runs WHERE id=$1 AND tenant_id=$2 FOR SHARE`, f.Run, tenant).Scan(&source)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errf(422, "invalid_spec", "source Run %s does not exist", f.Run)
 		}

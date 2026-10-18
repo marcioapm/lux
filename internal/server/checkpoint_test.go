@@ -2,16 +2,98 @@ package server
 
 import (
 	"context"
-	"github.com/marcioapm/lux/internal/spec"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
+
+// reportCheckpoint reports checkpoint id of ra's repo api at epoch 1 from
+// host ha and fails unless it is accepted.
+func reportCheckpoint(t *testing.T, s *Server, id string) {
+	t.Helper()
+	head := strings.Repeat("a", 40)
+	c := proto.CheckpointReady{Blob: proto.BlobInfo{BlobID: id, Size: 10, SHA256: sha("bundle")}, StagedCheckpoint: proto.StagedCheckpoint{Repo: "api", Head: head, Branch: "main", Refs: map[string]string{"HEAD": head, "refs/heads/main": head}, Size: 10}}
+	f := s.handleReport(context.Background(), "ha", proto.Frame{Type: proto.MsgCheckpointReady, ID: 1, RunID: "ra", Epoch: 1, Data: proto.Marshal(c)})
+	if f.Type != proto.MsgAck || ackRefused(t, f) {
+		t.Fatalf("report %s: %+v", id, f)
+	}
+}
+
+func uploadCheckpoint(s *Server, id string) error {
+	return s.blobUploaded(context.Background(), &runnerBlob{id: id, tenantID: "t1", runID: "ra", epoch: 1, kind: "checkpoint"})
+}
+
+func blobLocation(t *testing.T, s *Server, id string) string {
+	t.Helper()
+	var location string
+	systemScan(t, s, `SELECT location FROM blobs WHERE id = $1`, []any{id}, &location)
+	return location
+}
+
+func fromSpec(run, repo string) spec.RunSpec {
+	return spec.RunSpec{Git: &spec.Git{Repositories: []spec.Repository{{Name: "copy", From: &spec.RepositoryFrom{Run: run, Repo: repo}}}}}
+}
+
+// A destination resolving ra's latest checkpoint while ra's next checkpoint
+// finishes uploading: the upload's superseded sweep waits for the
+// destination's transaction and then sees its pin, so the pinned blob stays.
+func TestCheckpointPinRacesSupersede(t *testing.T) {
+	s, ctx := reportFixture(t)
+	useFakeS3(t, s)
+	reportCheckpoint(t, s, "checkpoint-one")
+	if err := uploadCheckpoint(s, "checkpoint-one"); err != nil {
+		t.Fatal(err)
+	}
+	reportCheckpoint(t, s, "checkpoint-two")
+	execSQL(t, s, ctx, `INSERT INTO runs(id,tenant_id,spec,state) VALUES('destination','t1','{}','submitted')`)
+
+	resolved, release := make(chan error, 1), make(chan struct{})
+	submitted := make(chan error, 1)
+	go func() {
+		submitted <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			sp := fromSpec("ra", "api")
+			err := resolveCheckpointSources(ctx, tx, "t1", &sp)
+			resolved <- err
+			if err != nil {
+				return err
+			}
+			<-release
+			if sp.Git.Repositories[0].From.Checkpoint != "checkpoint-one" {
+				t.Errorf("resolved %q", sp.Git.Repositories[0].From.Checkpoint)
+			}
+			return pinCheckpointSources(ctx, tx, "t1", "destination", sp)
+		})
+	}()
+	if err := <-resolved; err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	uploaded := make(chan error, 1)
+	go func() { uploaded <- uploadCheckpoint(s, "checkpoint-two") }()
+	// Both with and without the source-row lock the upload blocks on the
+	// submit transaction (the run row, or the blob row in the sweep).
+	waitBlocked(t, s)
+	close(release)
+	if err := <-submitted; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-uploaded; err != nil {
+		t.Fatal(err)
+	}
+	if loc := blobLocation(t, s, "checkpoint-one"); loc != "s3" {
+		t.Fatalf("pinned checkpoint-one is %s", loc)
+	}
+	if loc := blobLocation(t, s, "checkpoint-two"); loc != "s3" {
+		t.Fatalf("checkpoint-two is %s", loc)
+	}
+}
 
 func TestCheckpointSourceTenantLookup(t *testing.T) {
 	s, _ := reportFixture(t)
