@@ -104,6 +104,84 @@ func TestCheckpointPinRacesSupersede(t *testing.T) {
 	}
 }
 
+// checkpointEvents is the git.checkpoint events luxd added for ra's uploads.
+func checkpointEvents(t *testing.T, s *Server) int {
+	t.Helper()
+	var n int
+	systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = 'ra' AND type = 'git.checkpoint'`, nil, &n)
+	return n
+}
+
+func latestCheckpoint(t *testing.T, s *Server) string {
+	t.Helper()
+	var id string
+	systemScan(t, s, `SELECT coalesce((SELECT id FROM git_checkpoints WHERE run_id = 'ra' AND repo = 'api' AND latest), '')`, nil, &id)
+	return id
+}
+
+// An older checkpoint whose upload lands after a newer one's is recorded
+// as uploaded but does not replace it: the newer stays latest and in S3,
+// the older is swept as superseded, and only the newer emits an event.
+func TestCheckpointLateOlderUploadKeepsNewer(t *testing.T) {
+	s, _ := reportFixture(t)
+	useFakeS3(t, s)
+	reportCheckpoint(t, s, "checkpoint-one")
+	reportCheckpoint(t, s, "checkpoint-two")
+	for _, id := range []string{"checkpoint-two", "checkpoint-one"} {
+		if err := uploadCheckpoint(s, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if id := latestCheckpoint(t, s); id != "checkpoint-two" {
+		t.Fatalf("latest %q, want checkpoint-two", id)
+	}
+	if loc := blobLocation(t, s, "checkpoint-two"); loc != "s3" {
+		t.Fatalf("checkpoint-two is %s", loc)
+	}
+	if loc := blobLocation(t, s, "checkpoint-one"); loc != "deleted" {
+		t.Fatalf("checkpoint-one is %s, want deleted", loc)
+	}
+	if n := checkpointEvents(t, s); n != 1 {
+		t.Fatalf("%d git.checkpoint events, want 1", n)
+	}
+}
+
+// The previous placement's checkpoint uploads after the next epoch's:
+// epoch orders before report time, so the new epoch's stays latest.
+func TestCheckpointLateOlderEpochUploadKeepsNewer(t *testing.T) {
+	s, ctx := reportFixture(t)
+	useFakeS3(t, s)
+	reportCheckpoint(t, s, "checkpoint-z-epoch1")
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 2 WHERE id = 'ra'`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('pa2', 't1', 'ra', 'hb', 2, 'running')`)
+	head := strings.Repeat("b", 40)
+	c := proto.CheckpointReady{Blob: proto.BlobInfo{BlobID: "checkpoint-a-epoch2", Size: 10, SHA256: sha("bundle")},
+		StagedCheckpoint: proto.StagedCheckpoint{Repo: "api", Head: head, Branch: "main", Refs: map[string]string{"HEAD": head, "refs/heads/main": head}, Size: 10}}
+	if f := s.handleReport(ctx, "hb", proto.Frame{Type: proto.MsgCheckpointReady, ID: 1, RunID: "ra", Epoch: 2, Data: proto.Marshal(c)}); f.Type != proto.MsgAck || ackRefused(t, f) {
+		t.Fatalf("epoch 2 report: %+v", f)
+	}
+	// Neither report time nor id may outrank the epoch.
+	execSQL(t, s, ctx, `UPDATE git_checkpoints SET created_at = now() + interval '1 hour' WHERE id = 'checkpoint-z-epoch1'`)
+	if err := s.blobUploaded(ctx, &runnerBlob{id: "checkpoint-a-epoch2", tenantID: "t1", runID: "ra", epoch: 2, kind: "checkpoint"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := uploadCheckpoint(s, "checkpoint-z-epoch1"); err != nil {
+		t.Fatal(err)
+	}
+	if id := latestCheckpoint(t, s); id != "checkpoint-a-epoch2" {
+		t.Fatalf("latest %q, want checkpoint-a-epoch2", id)
+	}
+	if loc := blobLocation(t, s, "checkpoint-a-epoch2"); loc != "s3" {
+		t.Fatalf("epoch 2 checkpoint is %s", loc)
+	}
+	if loc := blobLocation(t, s, "checkpoint-z-epoch1"); loc != "deleted" {
+		t.Fatalf("epoch 1 checkpoint is %s, want deleted", loc)
+	}
+	if n := checkpointEvents(t, s); n != 1 {
+		t.Fatalf("%d git.checkpoint events, want 1", n)
+	}
+}
+
 // A checkpoint reported by the previous placement on its host, after luxd
 // has moved the Run to the next epoch, is accepted as that placement's
 // final state, as a snapshot is; a status from it is stale.

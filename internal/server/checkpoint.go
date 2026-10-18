@@ -250,10 +250,24 @@ func checkpointUploaded(ctx context.Context, tx pgx.Tx, id string) error {
 	if err != nil {
 		return err
 	}
+	if _, err = tx.Exec(ctx, `UPDATE git_checkpoints SET uploaded=true WHERE id=$1`, id); err != nil {
+		return err
+	}
+	// Uploads can land out of order (a retried record, or an older
+	// placement's uploader): an older checkpoint arriving after a newer one
+	// stays non-latest, and the caller's superseded sweep reclaims it.
+	// Order is (epoch, created_at, id); the caller holds the run FOR UPDATE.
+	var newer bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM git_checkpoints n, git_checkpoints c
+		WHERE c.id=$1 AND n.run_id=c.run_id AND n.repo=c.repo AND n.uploaded AND n.id<>c.id
+		  AND (n.epoch, n.created_at, n.id) > (c.epoch, c.created_at, c.id))`, id).Scan(&newer)
+	if err != nil || newer {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `UPDATE git_checkpoints SET latest=false WHERE run_id=$1 AND repo=$2 AND latest`, run, repo); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE git_checkpoints SET latest=true,uploaded=true WHERE id=$1`, id); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE git_checkpoints SET latest=true WHERE id=$1`, id); err != nil {
 		return err
 	}
 	return addEvent(ctx, tx, tenant, run, epoch, "git.checkpoint", map[string]any{"repo": repo, "head": head, "refs": refs, "size": size})
