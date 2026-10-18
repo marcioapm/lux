@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/spec"
@@ -56,6 +57,135 @@ esac
 	}
 }
 
+func TestCacheFreeHoldDoesNotWaitForLifecycle(t *testing.T) {
+	f := newFinishFixture(t)
+	u := f.r.cacheUse()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		f.p.holdCaches(spec.RunSpec{})()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cache-free hold/release blocked on cache lifecycle")
+	}
+	// A fresh runner needs no cache bookkeeping at all for a cache-free Run.
+	(&placement{}).holdCaches(spec.RunSpec{})()
+}
+
+func TestCacheMetadataPreparationAndRelease(t *testing.T) {
+	for _, metadata := range []string{"missing", "null", "{", "{}"} {
+		t.Run(metadata, func(t *testing.T) {
+			f := newFinishFixture(t)
+			writeFile(t, f.bin, `#!/bin/sh
+case "$1 $2" in
+"volume exists") exit 1 ;;
+"volume create"|"volume ls") ;;
+*) exit 1 ;;
+esac
+`)
+			if metadata != "missing" {
+				writeFile(t, filepath.Join(f.r.cfg.DataDir, "caches.json"), metadata)
+			}
+			sp := spec.RunSpec{Volumes: []spec.Volume{{Name: "gomod", Path: "/cache", Kind: "cache"}}}
+			release := f.p.holdCaches(sp)
+			if err := f.p.prepareVolumes(context.Background(), sp, nil); err != nil {
+				t.Fatal(err)
+			}
+			release()
+		})
+	}
+}
+
+func TestCacheDiscoveryReclaimsLostMetadata(t *testing.T) {
+	for _, metadata := range []string{"missing", "{", "null", `{"recent":100,"old":1}`} {
+		t.Run(metadata, func(t *testing.T) {
+			f := newFinishFixture(t)
+			writeFile(t, f.bin, `#!/bin/sh
+case "$1 $2" in
+"volume ls")
+  case "$4" in
+  label=lux.managed=true) printf 'unknown\nattached\nrecent\nold\nnot-cache\n' ;;
+  label=lux.cache=true) printf 'unknown\nattached\nrecent\nold\nunmanaged\n' ;;
+  *) exit 1 ;;
+  esac ;;
+"volume rm")
+  shift 2
+  force=false
+  n=
+  for arg; do
+    case "$arg" in -f|--force) force=true ;; *) n="$arg" ;; esac
+  done
+  [ "$n" = attached ] && [ "$force" = false ] && exit 1
+  rm "$0.cache.$n" ;;
+*) exit 1 ;;
+esac
+`)
+			if metadata != "missing" {
+				writeFile(t, filepath.Join(f.r.cfg.DataDir, "caches.json"), metadata)
+			}
+			for _, n := range []string{"unknown", "attached", "recent", "old", "not-cache", "unmanaged"} {
+				writeFile(t, f.bin+".cache."+n, "sentinel")
+			}
+			free := func() (int64, error) {
+				if _, err := os.Stat(f.bin + ".cache.unknown"); os.IsNotExist(err) {
+					return 100, nil
+				}
+				return 0, nil
+			}
+			if !f.r.reclaimCaches(context.Background(), free, 100) {
+				t.Fatal("lost cache was not discovered and reclaimed")
+			}
+			for _, n := range []string{"attached", "not-cache", "unmanaged"} {
+				if b, err := os.ReadFile(f.bin + ".cache." + n); err != nil || string(b) != "sentinel" {
+					t.Fatalf("removed protected %s: %q %v", n, b, err)
+				}
+			}
+			if metadata == `{"recent":100,"old":1}` {
+				for _, n := range []string{"old", "recent"} {
+					if _, err := os.Stat(f.bin + ".cache." + n); err != nil {
+						t.Fatalf("lost existing timestamp for %s", n)
+					}
+				}
+				if !f.r.reclaimCaches(context.Background(), func() (int64, error) {
+					if _, err := os.Stat(f.bin + ".cache.old"); os.IsNotExist(err) {
+						return 100, nil
+					}
+					return 0, nil
+				}, 100) {
+					t.Fatal("known old cache not reclaimed")
+				}
+				if _, err := os.Stat(f.bin + ".cache.recent"); err != nil {
+					t.Fatal("valid timestamp ordering lost")
+				}
+			}
+		})
+	}
+}
+
+func TestCacheDiscoveryFailureRetainsKnown(t *testing.T) {
+	f := newFinishFixture(t)
+	writeFile(t, filepath.Join(f.r.cfg.DataDir, "caches.json"), `{"known":1}`)
+	writeFile(t, f.bin+".cache.known", "sentinel")
+	writeFile(t, f.bin+".cache.unknown", "sentinel")
+	writeFile(t, f.bin, `#!/bin/sh
+case "$1 $2" in
+"volume ls") echo unavailable >&2; exit 1 ;;
+"volume rm") rm "$0.cache.$3" ;;
+*) exit 1 ;;
+esac
+`)
+	if !f.r.reclaimCaches(context.Background(), func() (int64, error) { return 0, nil }, 100) {
+		t.Fatal("listing failure lost known cache")
+	}
+	if b, err := os.ReadFile(f.bin + ".cache.unknown"); err != nil || string(b) != "sentinel" {
+		t.Fatal("listing failure removed unknown cache", err)
+	}
+}
+
 func TestCacheNeverInSnapshot(t *testing.T) {
 	f := newFinishFixture(t)
 	f.release()
@@ -78,7 +208,15 @@ func TestCacheReclaimLRUAndMounted(t *testing.T) {
 	f := newFinishFixture(t)
 	script := `#!/bin/sh
 case "$1 $2" in
-"volume rm") [ -e "$0.busy.$3" ] && exit 1; rm "$0.cache.$3" ;;
+"volume rm")
+  shift 2
+  force=false
+  n=
+  for arg; do
+    case "$arg" in -f|--force) force=true ;; *) n="$arg" ;; esac
+  done
+  [ -e "$0.busy.$n" ] && [ "$force" = false ] && exit 1
+  rm "$0.cache.$n" ;;
 *) exit 1 ;;
 esac
 `

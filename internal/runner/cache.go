@@ -28,9 +28,31 @@ func (r *Runner) cacheUse() *cacheUse {
 	r.cacheOnce.Do(func() {
 		u := &cacheUse{last: map[string]int64{}, held: map[string]int{}, path: filepath.Join(r.cfg.DataDir, "caches.json")}
 		if b, err := os.ReadFile(u.path); err == nil {
-			_ = json.Unmarshal(b, &u.last)
+			var last map[string]int64
+			if err := json.Unmarshal(b, &last); err != nil || last == nil {
+				r.log.Warn("invalid cache use metadata; starting with empty cache map", "path", u.path, "err", err)
+			} else {
+				u.last = last
+			}
 		}
 		r.caches = u
+		managed, managedErr := r.pm.VolumeList(context.Background(), LabelManaged+"=true")
+		cached, cacheErr := r.pm.VolumeList(context.Background(), labelCache+"=true")
+		if managedErr != nil || cacheErr != nil {
+			r.log.Warn("discovering cache volumes failed", "managed_err", managedErr, "cache_err", cacheErr)
+			return
+		}
+		known := make(map[string]struct{}, len(managed))
+		for _, name := range managed {
+			known[name] = struct{}{}
+		}
+		for _, name := range cached {
+			if _, ok := known[name]; ok {
+				if _, exists := u.last[name]; !exists {
+					u.last[name] = 0
+				}
+			}
+		}
 	})
 	return r.caches
 }
@@ -51,15 +73,19 @@ func (u *cacheUse) save() error {
 // Hold through setup and container removal, including failed starts. This
 // serializes lifecycle changes only; workloads may write concurrently.
 func (p *placement) holdCaches(sp spec.RunSpec) func() {
-	u := p.r.cacheUse()
 	var names []string
-	u.mu.Lock()
 	for _, v := range sp.Volumes {
 		if v.Kind == "cache" {
-			n := cacheVolume(p.tenantID, v.Name, p.user.UID, p.user.GID)
-			u.held[n]++
-			names = append(names, n)
+			names = append(names, cacheVolume(p.tenantID, v.Name, p.user.UID, p.user.GID))
 		}
+	}
+	if len(names) == 0 {
+		return func() {}
+	}
+	u := p.r.cacheUse()
+	u.mu.Lock()
+	for _, n := range names {
+		u.held[n]++
 	}
 	u.mu.Unlock()
 	return func() {
@@ -69,12 +95,10 @@ func (p *placement) holdCaches(sp spec.RunSpec) func() {
 			u.held[n]--
 			u.last[n] = time.Now().UnixMilli()
 		}
-		if len(names) > 0 {
-			if err := u.save(); err != nil {
-				p.logf("saving cache use failed", "err", err)
-			}
-			p.r.diskChanged()
+		if err := u.save(); err != nil {
+			p.logf("saving cache use failed", "err", err)
 		}
+		p.r.diskChanged()
 	}
 }
 
