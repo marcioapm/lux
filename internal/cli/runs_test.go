@@ -306,4 +306,23 @@ func TestGetPrintsTheStage(t *testing.T) {
 	if want := "stage:     stopping (migrate) since " + since.Local().Format(time.RFC3339) + "\n"; !strings.Contains(out, want) {
 		t.Errorf("lux get printed:\n%s\nwant a line %q", out, want)
 	}
+	if strings.Contains(out, "idle") {
+		t.Errorf("lux get printed an idle line without idleTimeout:\n%s", out)
+	}
+}
+
+// lux get shows a set idle timeout in the label column.
+func TestGetPrintsTheIdleTimeout(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"run_1","state":"running","createdAt":"2026-10-09T12:00:00Z",
+			"spec":{"workload":{"adapter":"codex","idleTimeout":"15m"}}}`))
+	})
+	out, err := runCLI(t, h, "get", "run_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "adapter:   codex\nidle stop: 15m0s\n"; !strings.Contains(out, want) {
+		t.Errorf("lux get printed:\n%s\nwant %q", out, want)
+	}
 }

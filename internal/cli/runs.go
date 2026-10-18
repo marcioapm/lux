@@ -378,7 +378,9 @@ func (a *app) getCmd() *cobra.Command {
 				fmt.Fprintf(w, "exit code: %d\n", *run.ExitCode)
 			}
 			fmt.Fprintf(w, "adapter:   %s\n", run.Spec.Workload.Adapter)
-			fmt.Fprintf(w, "idle timeout: %s\n", run.Spec.Workload.IdleTimeout.Duration)
+			if d := run.Spec.Workload.IdleTimeout.Duration; d > 0 {
+				fmt.Fprintf(w, "idle stop: %s\n", d)
+			}
 			if run.Spec.Image.Ref != "" {
 				fmt.Fprintf(w, "image:     %s\n", run.Spec.Image.Ref)
 			} else if run.Image != nil {

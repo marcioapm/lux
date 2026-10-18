@@ -367,10 +367,19 @@ Unset or `0` disables it. Otherwise it must be between `1m` and `24h`.
 Only `acp`, `claude-code`, `codex` and `opencode` report activity;
 `generic` with a non-zero idle timeout is refused, 422 `invalid_spec`.
 
-The Run must be running and idle with no pending input. An input accepted
-by luxd blocks the stop until it fails or is consumed. Where the adapter
-has no consumption receipt, delivery plus a busy report after the input
-counts as consumed. Delivery alone while idle does not.
+The Run must be running and idle with no pending input. Pending means:
+
+- an input request (`lux steer`, `POST /v1/runs/{id}/input`) with text,
+  raw bytes or attachments that has neither failed nor been consumed and,
+  if its delivery had no consumption receipt, has not been followed by
+  an activity change since that delivery;
+- a delivery with a consumption receipt, including the first prompt and
+  a resume prompt, that has neither failed nor been consumed.
+
+A delivery without a receipt settles at the next activity change after it:
+busy when it starts a turn, idle when the turn it joined ends. An
+interrupt with no content (`lux interrupt`) reports no delivery and is
+never pending; it still resets the clock.
 
 The clock starts at the latest idle activity change, input request, or
 placement reaching running. Busy activity and new input reset it; repeated

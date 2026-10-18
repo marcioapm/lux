@@ -68,6 +68,11 @@ func TestIdleReaperStopsOnceAndEndsStopped(t *testing.T) {
 	if state != StateStopped || reason != "idle" || !resumable(state) {
 		t.Fatalf("state=%s reason=%s", state, reason)
 	}
+	var stateEvent string
+	systemScan(t, s, `SELECT data->>'reason' FROM run_events WHERE run_id = 'r1' AND type = 'state' AND data->>'state' = 'stopped'`, nil, &stateEvent)
+	if stateEvent != "idle" {
+		t.Fatalf("stopped state event reason=%q", stateEvent)
+	}
 }
 
 func TestIdleTimeoutGenericSubmission(t *testing.T) {
