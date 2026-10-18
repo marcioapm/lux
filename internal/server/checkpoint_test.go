@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -94,6 +95,26 @@ func TestCheckpointPinRacesSupersede(t *testing.T) {
 	}
 	if loc := blobLocation(t, s, "checkpoint-two"); loc != "s3" {
 		t.Fatalf("checkpoint-two is %s", loc)
+	}
+}
+
+// A checkpoint reported by the previous placement on its host, after luxd
+// has moved the Run to the next epoch, is accepted as that placement's
+// final state, as a snapshot is; a status from it is stale.
+func TestCheckpointFromPreviousEpoch(t *testing.T) {
+	s, ctx := reportFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 2 WHERE id = 'ra'`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('pa2', 't1', 'ra', 'hb', 2, 'assigned')`)
+	reportCheckpoint(t, s, "checkpoint-old")
+	var epoch int
+	systemScan(t, s, `SELECT epoch FROM git_checkpoints WHERE id = 'checkpoint-old'`, nil, &epoch)
+	if epoch != 1 {
+		t.Fatalf("checkpoint epoch %d, want 1", epoch)
+	}
+	f := s.handleReport(ctx, "ha", proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: "ra", Epoch: 1, Data: proto.Marshal(proto.Status{State: "running"})})
+	var nack proto.Nack
+	if f.Type != proto.MsgNack || json.Unmarshal(f.Data, &nack) != nil || !nack.Stale {
+		t.Fatalf("status from epoch 1: %s %s, want a stale nack", f.Type, f.Data)
 	}
 }
 

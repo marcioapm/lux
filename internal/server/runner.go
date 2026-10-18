@@ -450,10 +450,10 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 		if placementHost != hostID || placementState == "lost" {
 			return &staleError{f.RunID, f.Epoch, current}
 		}
-		// Snapshots, published artifacts and uploads from an older
-		// placement on this host are still wanted: they are that
+		// Snapshots, checkpoints, published artifacts and uploads from an
+		// older placement on this host are still wanted: they are that
 		// placement's final state. Status and adapter events are not.
-		if f.Epoch != current && f.Type != proto.MsgSnapshotDone && f.Type != proto.MsgArtifactPublished {
+		if f.Epoch != current && f.Type != proto.MsgSnapshotDone && f.Type != proto.MsgArtifactPublished && f.Type != proto.MsgCheckpointReady {
 			return &staleError{f.RunID, f.Epoch, current}
 		}
 		switch f.Type {
