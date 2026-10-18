@@ -423,7 +423,9 @@ func (s *Server) reapIdle(ctx context.Context) error {
 // run_events_run for that Run alone. The pending check is a target-list
 // EXISTS, which Postgres runs per candidate instead of turning it into an
 // anti-join over all of run_events; OFFSET 0 fences the Run's open inputs so
-// each terminal probe is a full run_input_events primary-key lookup.
+// each terminal probe is a full run_input_events primary-key lookup. The
+// receipt-free delivery lookup must not reference open, so Postgres hashes
+// it once per Run instead of rescanning the Run's events for each input.
 func idleDueQuery(runFilter string) string {
 	return `WITH live AS MATERIALIZED (
 		SELECT r.id, r.tenant_id, r.current_epoch AS epoch, p.started_at,
@@ -455,10 +457,10 @@ func idleDueQuery(runFilter string) string {
 			) open
 			WHERE NOT EXISTS (SELECT 1 FROM run_input_events terminal WHERE terminal.run_id = c.id
 				AND terminal.request_id = open.request_id AND terminal.type IN ('input.consumed', 'input.failed'))
-			AND (open.type = 'input.delivered' OR NOT EXISTS (
+			AND (open.type = 'input.delivered' OR open.id > coalesce(c.last_activity, 0) OR NOT EXISTS (
 				SELECT 1 FROM run_events delivered WHERE delivered.run_id = c.id AND delivered.epoch = c.epoch
 				AND delivered.type = 'input.delivered' AND delivered.data->>'requestId' = open.request_id
-				AND delivered.data->>'receipt' = 'false' AND open.id < c.last_activity))
+				AND delivered.data->>'receipt' = 'false'))
 		) AS pending
 		FROM clock c WHERE now() - c.since > c.timeout
 	)
