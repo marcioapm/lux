@@ -372,12 +372,13 @@ The Run must be running and idle with no pending input. Pending means:
 - an input request (`lux steer`, `POST /v1/runs/{id}/input`) with text,
   raw bytes or attachments that has neither failed nor been consumed and,
   if its delivery had no consumption receipt, has not been followed by
-  an activity change since that delivery;
+  an activity change since the request;
 - a delivery with a consumption receipt, including the first prompt and
   a resume prompt, that has neither failed nor been consumed.
 
-A delivery without a receipt settles at the next activity change after it:
-busy when it starts a turn, idle when the turn it joined ends. An
+A delivery without a receipt settles at the next activity change after
+its request: busy when it starts a turn, idle when the turn it joined
+ends, even if a short turn's idle is recorded before the delivery. An
 interrupt with no content (`lux interrupt`) reports no delivery and is
 never pending; it still resets the clock.
 

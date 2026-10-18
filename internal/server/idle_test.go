@@ -184,7 +184,7 @@ func TestIdleReaperInterruptInput(t *testing.T) {
 }
 
 func TestIdleReaperPendingInput(t *testing.T) {
-	for _, phase := range []string{"undelivered", "delivered", "consumed", "failed", "no receipt", "no receipt busy", "no receipt steer", "new input", "new consumed input"} {
+	for _, phase := range []string{"undelivered", "delivered", "consumed", "failed", "no receipt", "no receipt busy", "no receipt steer", "no receipt short turn", "new input", "new consumed input"} {
 		t.Run(phase, func(t *testing.T) {
 			s, ctx := idleFixture(t)
 			if phase == "no receipt steer" {
@@ -195,6 +195,11 @@ func TestIdleReaperPendingInput(t *testing.T) {
 				return addEvent(ctx, tx, "t1", "r1", 1, "input", map[string]any{"requestId": "req-1"})
 			}); err != nil {
 				t.Fatal(err)
+			}
+			if phase == "no receipt short turn" {
+				// The turn ends before its receipt-free delivery is recorded.
+				idleActivity(t, s, ctx, "busy")
+				idleActivity(t, s, ctx, "idle")
 			}
 			if phase != "undelivered" && phase != "new input" {
 				if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -224,7 +229,7 @@ func TestIdleReaperPendingInput(t *testing.T) {
 			if phase != "new input" && phase != "new consumed input" {
 				ownerExec(t, s, `UPDATE run_events SET created_at = now() - interval '2 minutes' WHERE run_id = 'r1'`)
 			}
-			assertIdleReap(t, s, ctx, phase == "consumed" || phase == "failed" || phase == "no receipt busy" || phase == "no receipt steer")
+			assertIdleReap(t, s, ctx, phase == "consumed" || phase == "failed" || phase == "no receipt busy" || phase == "no receipt steer" || phase == "no receipt short turn")
 		})
 	}
 }

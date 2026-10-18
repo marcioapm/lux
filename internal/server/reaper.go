@@ -358,8 +358,9 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 // reports do not move the clock; a busy report followed by idle does. A
 // content-free interrupt is sent as MsgInterrupt, which reports no input
 // phase, so it moves the clock but never counts as pending. A delivery
-// without a receipt never reports consumed: the next activity report after
-// it (busy for a new turn, idle for the end of the turn it joined) settles it.
+// without a receipt never reports consumed: once delivered, the input is
+// settled by any activity report after the input itself. Adapters report busy
+// before such a delivery, and a short turn's idle can be recorded before it.
 func (s *Server) reapIdle(ctx context.Context) error {
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -457,7 +458,7 @@ func idleDueQuery(runFilter string) string {
 			AND (open.type = 'input.delivered' OR NOT EXISTS (
 				SELECT 1 FROM run_events delivered WHERE delivered.run_id = c.id AND delivered.epoch = c.epoch
 				AND delivered.type = 'input.delivered' AND delivered.data->>'requestId' = open.request_id
-				AND delivered.data->>'receipt' = 'false' AND delivered.id < c.last_activity))
+				AND delivered.data->>'receipt' = 'false' AND open.id < c.last_activity))
 		) AS pending
 		FROM clock c WHERE now() - c.since > c.timeout
 	)
