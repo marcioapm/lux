@@ -30,12 +30,20 @@ func (p *placement) checkpointRunning(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	dir := "checkpoint-live-" + ids.New("stage")
-	path := rt + "/" + dir
-	if os.Mkdir(path, 0o700) != nil {
+	rtRoot, err := os.OpenRoot(rt)
+	if err != nil {
 		return
 	}
-	if os.Chown(path, p.user.UID, p.user.GID) != nil {
+	defer rtRoot.Close()
+	dir := "checkpoint-live-" + ids.New("stage")
+	if rtRoot.Mkdir(dir, 0o700) != nil {
+		return
+	}
+	// Collected bundles are copied into the blob store; the stage, written
+	// by the workload user, is removed through the root so no link it
+	// planted is followed.
+	defer func() { _ = rtRoot.RemoveAll(dir) }()
+	if rtRoot.Chown(dir, p.user.UID, p.user.GID) != nil {
 		return
 	}
 	a := proto.CheckpointArgs{Dir: proto.ShimRunDir + "/" + dir, MaxBytes: p.checkpointLimit()}
@@ -47,13 +55,8 @@ func (p *placement) checkpointRunning(ctx context.Context) {
 		p.event(ctx, proto.EvWarning, map[string]any{"message": "git checkpoint: " + err.Error()})
 		return
 	}
-	// This directory was created by the runner and the manifest is replaced,
-	// never opened through a link planted by the workload.
-	rtRoot, err := os.OpenRoot(rt)
-	if err != nil {
-		return
-	}
-	defer rtRoot.Close()
+	// The manifest is replaced, never opened through a link planted by the
+	// workload.
 	root, err := rtRoot.OpenRoot(dir)
 	if err != nil {
 		return

@@ -15,6 +15,8 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/marcioapm/lux/internal/passwd"
+	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
@@ -90,6 +92,44 @@ func TestDownloadCheckpointUsesAssignedLimit(t *testing.T) {
 	left, _ := filepath.Glob(filepath.Join(f.r.cfg.DataDir, "checkpoint-*.bundle"))
 	if len(left) != 0 {
 		t.Fatalf("left behind: %v", left)
+	}
+}
+
+// An on-demand checkpoint of a running Run collects what the shim staged
+// and then removes its checkpoint-live-* stage from the runtime volume.
+func TestCheckpointRunningRemovesItsStage(t *testing.T) {
+	f := newFinishFixture(t)
+	f.p.assign.Spec.Git = &spec.Git{Repositories: []spec.Repository{{Name: "api", Path: "/work/api"}}}
+	f.p.user = passwd.User{UID: os.Getuid(), GID: os.Getgid()}
+	rt := filepath.Join(f.r.cfg.DataDir, "rt")
+	head := strings.Repeat("a", 40)
+	// `podman exec ... lux-shim checkpoint ARGS`: stage 0.bundle in the one
+	// live stage dir and print its result, as the shim does.
+	script := `#!/bin/sh
+[ "$1" = exec ] || exit 1
+d=$(ls -d ` + rt + `/checkpoint-live-*)
+printf data > "$d/0.bundle"
+printf '[{"repo":"api","head":"` + head + `","refs":{"HEAD":"` + head + `"},"size":4,"file":"0.bundle"}]'
+`
+	bin := filepath.Join(t.TempDir(), "podman")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.r.pm = &podman.Podman{Bin: bin}
+	f.p.checkpointRunning(context.Background())
+	f.mu.Lock()
+	reported := 0
+	for _, fr := range f.reports {
+		if fr.Type == proto.MsgCheckpointReady {
+			reported++
+		}
+	}
+	f.mu.Unlock()
+	if reported != 1 {
+		t.Fatalf("checkpoint.ready reports: %d; warnings %q", reported, f.warnings())
+	}
+	if left, _ := filepath.Glob(filepath.Join(rt, "checkpoint-live-*")); len(left) != 0 {
+		t.Fatalf("stage left on the runtime volume: %v", left)
 	}
 }
 
