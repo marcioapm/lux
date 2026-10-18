@@ -76,6 +76,24 @@ func (p *placement) collectCheckpoints(ctx context.Context) {
 	p.collectCheckpointDir(ctx, fmt.Sprintf("checkpoints-%d", p.epoch))
 }
 
+// openStaged opens a file of a workload-writable staging dir for reading:
+// never through a link, never blocking on a FIFO, and only a regular file.
+func openStaged(root *os.Root, name string) (*os.File, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|oNoFollow|oNonBlock, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file", name)
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
 func (p *placement) collectCheckpointDir(ctx context.Context, dir string) {
 	if p.assign == nil || p.assign.Spec.Git == nil || len(p.assign.Spec.Git.Repositories) == 0 {
 		return
@@ -94,7 +112,7 @@ func (p *placement) collectCheckpointDir(ctx context.Context, dir string) {
 		return
 	}
 	defer root.Close()
-	f, err := root.OpenFile(dir+"/results.json", os.O_RDONLY|oNoFollow, 0)
+	f, err := openStaged(root, dir+"/results.json")
 	if err != nil {
 		warn(fmt.Errorf("no completed checkpoint stage: %w", err))
 		return
@@ -123,13 +141,13 @@ func (p *placement) collectCheckpointDir(ctx context.Context, dir string) {
 			warn(fmt.Errorf("%s: invalid stage result", repo.Name))
 			continue
 		}
-		src, err := root.OpenFile(dir+"/"+res.File, os.O_RDONLY|oNoFollow, 0)
+		src, err := openStaged(root, dir+"/"+res.File)
 		if err != nil {
-			warn(err)
+			warn(fmt.Errorf("%s: %w", repo.Name, err))
 			continue
 		}
 		fi, err := src.Stat()
-		if err != nil || !fi.Mode().IsRegular() || fi.Size() != res.Size || res.Size > p.checkpointLimit() {
+		if err != nil || fi.Size() != res.Size || res.Size > p.checkpointLimit() {
 			src.Close()
 			warn(fmt.Errorf("%s: invalid bundle size or type", repo.Name))
 			continue
