@@ -17,9 +17,8 @@ from env import ALPINE_IMAGE, wait_until
 
 def test_cost_cli(lux, tenant_factory, operator, runners, hosts):
     # 36 USD an hour: a Run of a few seconds costs a few cents, never
-    # rounded away at 4 decimals. The price is the pool's default, so the
-    # host's rate opens as it registers: a host-hour pass that ran before a
-    # later `lux hosts price` would find no rate and retry only after 2m.
+    # rounded away at 4 decimals. Set the pool price before registration so
+    # the host has a rate before any host-hour refresh.
     lux.run("pools", "set", "default", "--provider", "static", "--hourly-price", "36", "--currency", "USD")
     host = runners.start(hosts[0])
     run_id = lux.submit(generic(ALPINE_IMAGE, "sleep", "3"))
