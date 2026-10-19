@@ -88,15 +88,7 @@ func openStaged(root *os.Root, name string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	fi, err := f.Stat()
-	if err == nil && !fi.Mode().IsRegular() {
-		err = fmt.Errorf("%s is not a regular file", name)
-	}
-	if err != nil {
-		f.Close()
-		return nil, err
-	}
-	return f, nil
+	return regularFile(f, name)
 }
 
 // openRegular opens a file at a fixed path the workload can replace (on
@@ -107,9 +99,13 @@ func openRegular(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	return regularFile(f, path)
+}
+
+func regularFile(f *os.File, name string) (*os.File, error) {
 	fi, err := f.Stat()
 	if err == nil && !fi.Mode().IsRegular() {
-		err = fmt.Errorf("%s is not a regular file", path)
+		err = fmt.Errorf("%s is not a regular file", name)
 	}
 	if err != nil {
 		f.Close()
