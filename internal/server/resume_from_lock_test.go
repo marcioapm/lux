@@ -78,14 +78,14 @@ func TestResumeReciprocalFromSources(t *testing.T) {
 		out *resumeOutput
 		err error
 	}
-	fromB, fromA := make(chan result, 1), make(chan result, 1)
+	resumeA, resumeB := make(chan result, 1), make(chan result, 1)
 	go func() {
 		out, err := resumeAddingFrom(asTenant(ctx, "t1"), s, a, "copy-b", b)
-		fromB <- result{out, err}
+		resumeA <- result{out, err}
 	}()
 	go func() {
 		out, err := resumeAddingFrom(asTenant(ctx, "t1"), s, b, "copy-a", a)
-		fromA <- result{out, err}
+		resumeB <- result{out, err}
 	}()
 	waitLockWaiters(t, ctx, s, 2)
 	if err := holder.finishWith(t, ctx, nil); err != nil {
@@ -96,8 +96,8 @@ func TestResumeReciprocalFromSources(t *testing.T) {
 		dst, repo, source, url, pin string
 		got                         <-chan result
 	}{
-		{a, "copy-b", b, "https://git.example.com/b.git", "checkpoint-b", fromB},
-		{b, "copy-a", a, "https://git.example.com/a.git", "checkpoint-a", fromA},
+		{a, "copy-b", b, "https://git.example.com/b.git", "checkpoint-b", resumeA},
+		{b, "copy-a", a, "https://git.example.com/a.git", "checkpoint-a", resumeB},
 	} {
 		var r result
 		select {
@@ -120,6 +120,9 @@ func TestResumeReciprocalFromSources(t *testing.T) {
 		}
 		var stored spec.RunSpec
 		systemScan(t, s, `SELECT spec FROM runs WHERE id = $1`, []any{c.dst}, &stored)
+		if stored.Git == nil {
+			t.Fatalf("%s has no git repositories", c.dst)
+		}
 		var added *spec.Repository
 		for i, repo := range stored.Git.Repositories {
 			if repo.Name == c.repo {
