@@ -99,6 +99,25 @@ func openStaged(root *os.Root, name string) (*os.File, error) {
 	return f, nil
 }
 
+// openRegular opens a file at a fixed path the workload can replace (on
+// the runtime volume) for reading: never blocking on a FIFO, and only a
+// regular file.
+func openRegular(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|oNonBlock, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file", path)
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
 func (p *placement) collectCheckpointDir(ctx context.Context, dir string) {
 	if p.assign == nil || p.assign.Spec.Git == nil || len(p.assign.Spec.Git.Repositories) == 0 {
 		return

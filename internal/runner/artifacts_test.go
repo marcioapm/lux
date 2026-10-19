@@ -67,11 +67,18 @@ func boundedFIFO(t *testing.T, fifo string, fn func()) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		if w, err := os.OpenFile(fifo, os.O_RDWR, 0); err == nil {
-			w.Close()
+		// Retried: a reader blocked on a later open of the FIFO
+		// (tailRecords polls) needs another writer.
+		for {
+			if w, err := os.OpenFile(fifo, os.O_RDWR, 0); err == nil {
+				w.Close()
+			}
+			select {
+			case <-done:
+				t.Fatal("blocked on a FIFO")
+			case <-time.After(100 * time.Millisecond):
+			}
 		}
-		<-done
-		t.Fatal("artifact collection blocked on a FIFO")
 	}
 }
 
