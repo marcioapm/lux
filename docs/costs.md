@@ -1508,8 +1508,8 @@ Each `hosts` row also carries the host's `hours` (its billed window,
 provision request or registration to termination or now, within the range;
 the same on each of its family rows) and its `volumes` as `GET /v1/hosts`
 has them. As on `GET /v1/hosts/{id}/cost`, `data-transfer`'s `allocated`
-in `hostSeries` and `hosts` is the Runs' transfer on the pool's hosts
-(every tenant's Runs, read once the reader may see the host time) and
+in `hostSeries` and `hosts` is the transfer of the Runs on the pool's hosts
+that the reader may see, and
 its `unallocated` (and `idle`) the hosts' own traffic. `GET /v1/hosts/{id}/cost`'s `rates` carry `details`: for block
 storage, the volumes, the unit prices per volume type and `hoursPerMonth`
 the period was priced from.

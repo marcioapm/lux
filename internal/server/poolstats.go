@@ -377,7 +377,7 @@ type PoolHostTime struct {
 	HostName    string        `json:"hostName,omitempty"`
 	Family      string        `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
 	Currency    string        `json:"currency"`
-	Allocated   string        `json:"allocated" doc:"Charged to Runs: host time they reserved (compute, block-storage, public-ip); for data-transfer, the transfer of the Runs on the pool's hosts, every tenant's."`
+	Allocated   string        `json:"allocated" doc:"Charged to Runs: host time they reserved (compute, block-storage, public-ip); for data-transfer, the transfer of the Runs on the pool's hosts."`
 	Unallocated string        `json:"unallocated" doc:"No Run's: idle host time (compute, block-storage, public-ip); for data-transfer, the hosts' own traffic."`
 	Hours       *float64      `json:"hours,omitempty" doc:"Per host: the hours of its billed window (provision request, or registration, to termination or now) within the range; the same on each of its family rows."`
 	Volumes     *[]HostVolume `json:"volumes,omitempty" doc:"Per host: its recorded block-storage volumes, as GET /v1/hosts has them; absent while not known and for a host that registered itself."`
@@ -518,11 +518,6 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 	if p.TenantID != "" && (pool.TenantID == nil || *pool.TenantID != p.TenantID) {
 		return out, nil
 	}
-	// The pool is the tenant's own (checked above) or the reader an operator,
-	// so the host time is read as the system: host rows as RLS
-	// (cost_hourly_own_hosts) would give them, and the Run rows' transfer of
-	// every tenant's Runs on the pool's hosts, as compute's allocated counts
-	// every Run's share.
 	const hostRows = `c.run_id IS NULL AND c.pool_id = $1 AND c.hour >= $2 AND c.hour < $3`
 	// Host time per family: the host rows, plus, for data transfer (whose
 	// host row is only the host's own traffic), the Runs' transfer as allocated.
@@ -530,7 +525,7 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		UNION ALL
 		SELECT c.hour, c.host_id, c.family, c.currency, c.amount, 0 FROM cost_hourly c
 		WHERE c.run_id IS NOT NULL AND c.family = 'data-transfer' AND c.pool_id = $1 AND c.hour >= $2 AND c.hour < $3) c`
-	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	err = s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT c.family, c.currency, trim_scale(sum(c.unallocated))::text FROM cost_hourly c WHERE `+hostRows+`
 			GROUP BY 1, 2 ORDER BY 2, 1`, pool.ID, from, to)
 		if err != nil {

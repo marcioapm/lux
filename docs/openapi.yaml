@@ -1839,7 +1839,7 @@ components:
       additionalProperties: false
       properties:
         allocated:
-          description: "Charged to Runs: host time they reserved (compute, block-storage, public-ip); for data-transfer, the transfer of the Runs on the pool's hosts, every tenant's."
+          description: "Charged to Runs: host time they reserved (compute, block-storage, public-ip); for data-transfer, the transfer of the Runs on the pool's hosts."
           type: string
         at:
           format: date-time
