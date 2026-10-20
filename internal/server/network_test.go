@@ -110,7 +110,7 @@ func networkFixture(t *testing.T) (*Server, map[string]string, *networkProvider)
 func TestRecordNetworkRefreshesLiveProviderHosts(t *testing.T) {
 	s, keys, p := networkFixture(t)
 	ctx := context.Background()
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	if fmt.Sprint(p.netCalls) != "[[i-1 i-2]]" {
 		t.Errorf("calls %v: one per region, live provider hosts only", p.netCalls)
 	}
@@ -130,7 +130,7 @@ func TestRecordNetworkRefreshesLiveProviderHosts(t *testing.T) {
 	n := hostA()
 	n.PublicIPv4 = 3
 	p.nets["i-1"] = n
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	if getJSON(t, s, keys["t1"], "/v1/hosts/h1", &h); h.Network.PublicIPv4 != 3 {
 		t.Errorf("publicIPv4 not refreshed: %+v", h.Network)
 	}
@@ -143,7 +143,7 @@ func TestRecordNetworkRefreshesLiveProviderHosts(t *testing.T) {
 
 	// A failing call keeps what is stored.
 	p.netErr = errors.New("UnauthorizedOperation")
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	if getJSON(t, s, keys["t1"], "/v1/hosts/h1", &h); h.Network == nil || h.Network.PublicIPv4 != 3 {
 		t.Errorf("a failed call cleared the network: %+v", h.Network)
 	}
@@ -152,12 +152,12 @@ func TestRecordNetworkRefreshesLiveProviderHosts(t *testing.T) {
 func TestRecordNetworkColdFailureAndPartialSubnets(t *testing.T) {
 	s, keys, p := networkFixture(t)
 	ctx := context.Background()
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	var before proto.NetworkClasses
 	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id='h1'`, nil, &before)
 	fresh := &networkProvider{nets: map[string]HostNetwork{"i-1": {Zone: "eu-west-1a", PublicIPv4: 4, SubnetsUnavailable: true}, "i-2": hostA()}, prefixErr: errors.New("unavailable")}
 	s.cfg.Providers["ec2"] = fresh
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	var n HostNetwork
 	var after proto.NetworkClasses
 	systemScan(t, s, `SELECT network,net_classes FROM hosts WHERE id='h1'`, nil, &n, &after)
@@ -181,13 +181,13 @@ func TestRecordNetworkColdFailureAndPartialSubnets(t *testing.T) {
 func TestRecordNetworkColdPrefixFailureCompleteHost(t *testing.T) {
 	s, keys, _ := networkFixture(t)
 	ctx := context.Background()
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	var before, after proto.NetworkClasses
 	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id='h1'`, nil, &before)
 	n := hostA()
 	n.PublicIPv4 = 9
 	s.cfg.Providers["ec2"] = &networkProvider{nets: map[string]HostNetwork{"i-1": n}, prefixErr: errors.New("unavailable")}
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id='h1'`, nil, &after)
 	if after.Version != before.Version || !after.Catalog() {
 		t.Fatalf("cold prefix failure lost catalog: before=%+v after=%+v", before, after)
@@ -201,7 +201,7 @@ func TestRecordNetworkColdPrefixFailureCompleteHost(t *testing.T) {
 func TestRecordNetworkColdPartialHasNoCatalog(t *testing.T) {
 	s, _, p := networkFixture(t)
 	p.nets = map[string]HostNetwork{"i-1": {SubnetsUnavailable: true, PublicIPv4: 1}}
-	s.recordNetwork(context.Background())
+	s.recordNetwork(context.Background(), false)
 	var nc proto.NetworkClasses
 	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id='h1'`, nil, &nc)
 	if nc.Catalog() || len(nc.Local) != 0 || len(nc.Zone) != 0 {
@@ -213,13 +213,85 @@ func TestRecordNetworkColdPartialHasNoCatalog(t *testing.T) {
 func TestRecordNetworkWritesOnlyChanges(t *testing.T) {
 	s, _, _ := networkFixture(t)
 	ctx := context.Background()
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	var before, after string
 	systemScan(t, s, `SELECT xmin::text FROM hosts WHERE id = 'h1'`, nil, &before)
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	systemScan(t, s, `SELECT xmin::text FROM hosts WHERE id = 'h1'`, nil, &after)
 	if before != after {
 		t.Errorf("an unchanged network was rewritten (xmin %s -> %s)", before, after)
+	}
+}
+
+// A host that registers is discovered by the next provision() pass that is
+// not a provider check; once it has a catalog, those passes ask nothing.
+func TestProvisionDiscoversNewHostNetwork(t *testing.T) {
+	s, _, p := networkFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	execSQL(t, s, ctx, `UPDATE hosts SET registered_at = now() WHERE id = 'h1'`)
+	provisionPass(t, s)
+	if fmt.Sprint(p.netCalls) != "[[i-1]]" || p.prefixCalls != 1 {
+		t.Fatalf("calls %v prefixes %d: want the registered host without a catalog only", p.netCalls, p.prefixCalls)
+	}
+	var nc proto.NetworkClasses
+	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id = 'h1'`, nil, &nc)
+	if !nc.Catalog() || !slices.Equal(nc.Local, []string{"10.0.0.0/24", "2001:db8::/64"}) {
+		t.Fatalf("net_classes after one pass: %+v", nc)
+	}
+	// Past the retry spacing, so only the stored catalog can stop a call.
+	now = now.Add(2 * netRetryEvery)
+	provisionPass(t, s)
+	if len(p.netCalls) != 1 || p.prefixCalls != 1 {
+		t.Errorf("calls %v prefixes %d: a pass with nothing missing called the provider", p.netCalls, p.prefixCalls)
+	}
+}
+
+// A host whose discovery fails is asked again no more often than every
+// netRetryEvery, and not at all past netNewHostWindow (the full pass then
+// covers it).
+func TestProvisionNewHostNetworkRetrySpacing(t *testing.T) {
+	s, _, p := networkFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	execSQL(t, s, ctx, `UPDATE hosts SET registered_at = now() WHERE id = 'h1'`)
+	execSQL(t, s, ctx, `UPDATE hosts SET registered_at = now() - interval '6 minutes' WHERE id = 'h2'`)
+	p.netErr = errors.New("RequestLimitExceeded")
+	var at []time.Duration
+	for off := time.Duration(0); off <= 25*time.Second; off += time.Second {
+		now = now.Add(time.Second)
+		before := len(p.netCalls)
+		provisionPass(t, s)
+		if len(p.netCalls) > before {
+			at = append(at, off)
+		}
+	}
+	if want := []time.Duration{0, 10 * time.Second, 20 * time.Second}; !slices.Equal(at, want) {
+		t.Fatalf("failing host asked at %v, want %v", at, want)
+	}
+	for _, ids := range p.netCalls {
+		if !slices.Equal(ids, []string{"i-1"}) {
+			t.Fatalf("calls %v: a host registered before the window was asked", p.netCalls)
+		}
+	}
+	// A partial answer (Source none) is still missing a catalog: retried.
+	p.netErr = nil
+	p.prefixErr, p.prefixes = errors.New("unavailable"), ProviderPrefixes{}
+	now = now.Add(netRetryEvery)
+	provisionPass(t, s)
+	var nc proto.NetworkClasses
+	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id = 'h1'`, nil, &nc)
+	if nc.Source != proto.NetSourceNone {
+		t.Fatalf("net_classes %+v", nc)
+	}
+	p.prefixErr, p.prefixes = nil, catalogEU(time.Now().UTC().Truncate(time.Second))
+	now = now.Add(netRetryEvery)
+	provisionPass(t, s)
+	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id = 'h1'`, nil, &nc)
+	if !nc.Catalog() {
+		t.Fatalf("Source none not retried: %+v", nc)
 	}
 }
 
@@ -244,7 +316,7 @@ func TestWelcomeAndAckCarryNetwork(t *testing.T) {
 		t.Errorf("ack with nothing to say: %s %s", ack.Type, ack.Data)
 	}
 
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	w, err = s.registerHost(ctx, tok, proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-1"})
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +340,7 @@ func TestRunnerNetworkEndpoint(t *testing.T) {
 	raw := ids.Secret("luxh")
 	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ('tok1', 't1', 'pec2', $1)`, ids.Hash(raw))
 	execSQL(t, s, ctx, `UPDATE hosts SET token_id = 'tok1' WHERE id IN ('h1', 'h2')`)
-	s.recordNetwork(ctx)
+	s.recordNetwork(ctx, false)
 	get := func(name, token string) (int, proto.NetworkClasses) {
 		req := httptest.NewRequest(http.MethodGet, "/runner/v1/network?name="+name, nil)
 		req.Header.Set("Authorization", "Bearer "+token)

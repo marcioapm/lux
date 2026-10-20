@@ -491,7 +491,11 @@ the provider.
 
 **Unpriced.** `GET /v1/runs/{id}/cost` carries `unpriced: [{class, reason,
 rx, tx}]`: transfer in no line, so that absence never reads as $0.
-`unclassified` is `unknown` traffic (no catalog). `partial-network`: the
+`unclassified` is `unknown` traffic (no catalog). A new provider host is
+discovered on the provisioner's next tick after it registers, and its
+runner has the lists within a heartbeat. Some `unclassified` bytes on a
+host's first seconds are therefore expected, bounded to about a tick plus
+a heartbeat ([telemetry](telemetry.md#network-transfer)). `partial-network`: the
 host's network discovery was partial (`hosts.network.partial`), so its
 classes cannot be trusted and **none** of its billable transfer is priced.
 `no-price`: a billable class with no price (an inter-region destination the

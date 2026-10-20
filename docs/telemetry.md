@@ -174,6 +174,17 @@ change of lists only refills nftables sets, in one transaction: no counter
 is reset. With no lists from luxd, the runner's own interface subnets are
 `local` and everything else `unknown`.
 
+**A new host's first seconds.** Discovery is never part of the runner's
+hello or of a launch. A provider host that registers with no catalog is
+discovered on the provisioner's next tick (`LUX_TICK`, 1s) after registering,
+not at the next provider check. Every provider check then refreshes it. If
+discovery fails, or gives no catalog, the host is asked again at most every
+10s for its first 5 minutes. After that only the provider check asks. The
+Welcome may already have gone out with no lists, in which case the runner
+picks the lists up after its next heartbeat (a third of the lease, 10s by
+default). Some `unknown` traffic in a new host's first seconds is
+therefore expected. It is bounded to about a tick plus a heartbeat.
+
 **Continuity and limits.** A runner restart preserves named kernel counters,
 including removed regions. Host offsets and last observations are atomically
 stored in the runner data directory with Linux boot identity. A same-boot

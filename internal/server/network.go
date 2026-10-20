@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -20,9 +21,11 @@ import (
 // Network transfer classification (docs/telemetry.md, "Network transfer").
 // The provider check stores each provider host's network placement
 // (hosts.network) and the NetworkClasses built from it and the provider's
-// published prefixes (hosts.net_classes). A runner gets them in its Welcome;
-// each heartbeat's ack carries their Version, and a runner holding another
-// fetches GET /runner/v1/network. No provider is called on hello or launch.
+// published prefixes (hosts.net_classes); a host that registers without a
+// catalog is discovered on the provisioner's next tick, not the next check.
+// A runner gets them in its Welcome; each heartbeat's ack carries their
+// Version, and a runner holding another fetches GET /runner/v1/network. No
+// provider is called on hello or launch.
 
 // networkClasses builds a host's lists: Local its own zone's subnets, Zone
 // the rest of its network's, the provider lists as published. Version is a
@@ -64,24 +67,45 @@ func netClassesVersion(nc proto.NetworkClasses) string {
 	return hex.EncodeToString(sum[:12])
 }
 
+// The narrow pass (recordNetwork with onlyMissing) discovers hosts that
+// registered within netNewHostWindow and have no catalog, each at most once
+// per netRetryEvery. Both bounds are needed. Without the spacing, a failing
+// host costs a provider call on every 1s tick. Without the window, a host
+// that can never get a catalog (DescribeSubnets denied gives Source none)
+// costs one every 10s for life; past the window the full pass covers it.
+const (
+	netRetryEvery    = 10 * time.Second
+	netNewHostWindow = 5 * time.Minute
+)
+
 // recordNetwork asks each provider, once per region, for the network of
 // every live provider host, and stores what changed. Every pass, not only
 // while unknown: an interface or address can be attached later. A failed
 // prefix fetch with no copy yet still stores the host's subnets, with
 // Source none (unlisted traffic is then unknown, never internet).
-func (s *Server) recordNetwork(ctx context.Context) {
+//
+// onlyMissing limits the pass to newly registered hosts with no catalog
+// (above), so a new host's traffic is classified a tick after it registers
+// rather than at the next provider check. With none, it is one query.
+func (s *Server) recordNetwork(ctx context.Context, onlyMissing bool) {
 	type host struct {
 		ID, ProviderID, Provider, Region string
 		Template                         json.RawMessage
 	}
+	query := `SELECT h.id, h.provider_id, p.provider, coalesce(h.launch_template->>'region', ''),
+			coalesce(h.launch_template, p.template)
+		FROM hosts h JOIN pools p ON p.id = h.pool_id
+		WHERE h.provider_id IS NOT NULL AND h.provision_requested_at IS NOT NULL
+			AND h.state <> 'terminated' AND p.provider <> 'static'`
+	var args []any
+	if onlyMissing {
+		query += ` AND h.registered_at > now() - make_interval(secs => $1)
+			AND coalesce(h.net_classes->>'source', '') IN ('', $2)`
+		args = append(args, netNewHostWindow.Seconds(), proto.NetSourceNone)
+	}
 	var hosts []host
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT h.id, h.provider_id, p.provider, coalesce(h.launch_template->>'region', ''),
-				coalesce(h.launch_template, p.template)
-			FROM hosts h JOIN pools p ON p.id = h.pool_id
-			WHERE h.provider_id IS NOT NULL AND h.provision_requested_at IS NOT NULL
-				AND h.state <> 'terminated' AND p.provider <> 'static'
-			ORDER BY h.id`)
+		rows, err := tx.Query(ctx, query+` ORDER BY h.id`, args...)
 		if err != nil {
 			return err
 		}
@@ -93,6 +117,25 @@ func (s *Server) recordNetwork(ctx context.Context) {
 			s.log.Warn("network: list hosts", "err", err)
 		}
 		return
+	}
+	if onlyMissing {
+		now := s.now()
+		maps.DeleteFunc(s.netTried, func(_ string, at time.Time) bool { return now.Sub(at) >= netRetryEvery })
+		hosts = slices.DeleteFunc(hosts, func(h host) bool { _, recent := s.netTried[h.ID]; return recent })
+		if len(hosts) == 0 {
+			return
+		}
+		// Pool reconciles may have outlasted the lease; the full pass's
+		// caller checks it, the narrow pass only when it will call out.
+		if ok, _ := s.holdProvisionLease(ctx); !ok {
+			return
+		}
+		if s.netTried == nil {
+			s.netTried = map[string]time.Time{}
+		}
+		for _, h := range hosts {
+			s.netTried[h.ID] = now
+		}
 	}
 	groups := map[[2]string][]host{}
 	for _, h := range hosts {
