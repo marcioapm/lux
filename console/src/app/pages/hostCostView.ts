@@ -19,7 +19,7 @@ const SHARED_FAMILIES: readonly string[] = [COMPUTE, BLOCK_STORAGE, PUBLIC_IP];
 const LABELS = familyDisplay(HOST_FAMILIES.map((family) => ({ family })));
 export const familyLabel = (f: string) => LABELS.get(f)?.label ?? f;
 /** What a family's part no Run was charged is called: the host's own traffic for data transfer, idle time otherwise. */
-export const ownPartLabel = (f: string) => (f === DATA_TRANSFER ? "Host's own" : "unallocated");
+export const ownPartLabel = (f: string, ownLabel = "Host's own") => (f === DATA_TRANSFER ? ownLabel : "unallocated");
 
 /** One figure per currency, summed over families (a pool's idle per family and currency, say). */
 export function sumPerCurrency(rows: readonly { currency: string; amount: string }[] | null | undefined): MoneyTotal[] {
@@ -222,11 +222,11 @@ export interface HostChart {
 }
 
 /** The series of the host-cost chart: each family charged to Runs, then (when visible) its part no Run was charged, faded; a family with no row draws nothing, so its legend entry is absent too. */
-function hostChartSeries(families: readonly string[], unallocated: boolean): { family: string; part: "runs" | "unallocated"; label: string; color: string; faded?: boolean }[] {
+function hostChartSeries(families: readonly string[], unallocated: boolean, ownLabel: string): { family: string; part: "runs" | "unallocated"; label: string; color: string; faded?: boolean }[] {
   return HOST_FAMILIES.filter((f) => families.includes(f)).flatMap((family) => {
     const color = LABELS.get(family)!.color;
     const runs = { family, part: "runs" as const, label: `${familyLabel(family)} · runs`, color };
-    return unallocated ? [runs, { family, part: "unallocated" as const, label: `${familyLabel(family)} · ${ownPartLabel(family)}`, color, faded: true }] : [runs];
+    return unallocated ? [runs, { family, part: "unallocated" as const, label: `${familyLabel(family)} · ${ownPartLabel(family, ownLabel)}`, color, faded: true }] : [runs];
   });
 }
 
@@ -236,14 +236,14 @@ function hostChartSeries(families: readonly string[], unallocated: boolean): { f
  * stacked. Rows finer than the step (hours on a daily chart) are summed
  * exactly; a bucket without a row is a gap, not zero.
  */
-export function hostCharts(rows: readonly TimedHostRow[], from: string, to: string, step: number): HostChart[] {
+export function hostCharts(rows: readonly TimedHostRow[], from: string, to: string, step: number, ownLabel = "Host's own"): HostChart[] {
   const start = Math.floor(Date.parse(from) / 1000 / step) * step;
   const end = Math.floor(Date.parse(to) / 1000);
   const x: number[] = [];
   for (let t = start; t < end; t += step) x.push(t);
   const index = new Map(x.map((t, i) => [t, i]));
   return [...byCurrency(rows.filter((r) => isHostFamily(r.family)))].map(([currency, rs]) => {
-    const series = hostChartSeries([...new Set(rs.map((r) => r.family))], rs.some((r) => r.unallocated != null));
+    const series = hostChartSeries([...new Set(rs.map((r) => r.family))], rs.some((r) => r.unallocated != null), ownLabel);
     const cells = series.map(() => x.map((): string[] => []));
     for (const r of rs) {
       const i = index.get(Math.floor(r.t / step) * step);

@@ -675,7 +675,7 @@ type hostCostHour struct {
 	Family      string    `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
 	Currency    string    `json:"currency"`
 	Allocated   string    `json:"allocated" doc:"Charged to the host's Runs: their share of the host's period (compute, block-storage, public-ip); for data-transfer, the transfer of the host's Runs."`
-	Unallocated *string   `json:"unallocated,omitempty" doc:"No Run's: idle host time (compute, block-storage, public-ip); for data-transfer, the host's own traffic. Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."`
+	Unallocated *string   `json:"unallocated,omitempty" doc:"Charged to no Run: idle host time (compute, block-storage, public-ip); for data-transfer, the host's own traffic. Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."`
 }
 type hostCostRate struct {
 	Family   string         `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`

@@ -126,7 +126,7 @@ async function fullView(role: "operator" | "tenant", pool: Pool) {
       ["Compute", "$12.88", `${"$1.1009"}/h avg`],
       ["Block storage", "$1.38", `100 GiB gp3 · ${"$0.1179"}/h avg`],
       ["Public IPv4", "$0.30", `${"$0.0256"}/h avg`],
-      ["Data transfer", "$9.05", "Runs $9.02 · Host's own $0.03"],
+      ["Data transfer", "$9.05", "Runs $9.02 · Hosts' own $0.03"],
       // Idle time of compute, block storage and public IPv4; the hosts' own transfer is not idle.
       ["Unallocated", "$6.96", "29% of host cost · no Run reserved it"],
       // Compute and block storage only: 7.32 of 14.26.
@@ -145,7 +145,7 @@ async function fullView(role: "operator" | "tenant", pool: Pool) {
       "Compute51% charged to Runs · 49% unallocated",
       "Block storage51% charged to Runs · 49% unallocated",
       "Public IPv493% charged to Runs · 7% unallocated",
-      "Data transfer100% charged to Runs · <1% Host's own",
+      "Data transfer100% charged to Runs · <1% Hosts' own",
     ]);
     // Cost by host: costliest first, each family apart (the total includes public IPv4 and data transfer), a link to its Cost tab.
     const hosts = rowsOf(p.card("Cost by host"));
@@ -164,7 +164,7 @@ async function fullView(role: "operator" | "tenant", pool: Pool) {
       "Public IPv4 · runs",
       "Public IPv4 · unallocated",
       "Data transfer · runs",
-      "Data transfer · Host's own",
+      "Data transfer · Hosts' own",
     ]);
     expect(p.tab()!.textContent).not.toMatch(/AI models/);
     expect(p.tab()!.querySelector(".callout")!.textContent).toBe("Pool cost is the machines only — instance, disk, public IPv4 and network transfer. AI and other external costs belong to Runs.");

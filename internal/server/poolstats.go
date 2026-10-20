@@ -378,7 +378,7 @@ type PoolHostTime struct {
 	Family      string        `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
 	Currency    string        `json:"currency"`
 	Allocated   string        `json:"allocated" doc:"Charged to Runs: host time they reserved (compute, block-storage, public-ip); for data-transfer, the transfer of the Runs on the pool's hosts."`
-	Unallocated string        `json:"unallocated" doc:"No Run's: idle host time (compute, block-storage, public-ip); for data-transfer, the hosts' own traffic."`
+	Unallocated string        `json:"unallocated" doc:"Charged to no Run: idle host time (compute, block-storage, public-ip); for data-transfer, the hosts' own traffic."`
 	Hours       *float64      `json:"hours,omitempty" doc:"Per host: the hours of its billed window (provision request, or registration, to termination or now) within the range; the same on each of its family rows."`
 	Volumes     *[]HostVolume `json:"volumes,omitempty" doc:"Per host: its recorded block-storage volumes, as GET /v1/hosts has them; absent while not known and for a host that registered itself."`
 }
@@ -416,8 +416,8 @@ type poolCostOutput struct {
 		Families   []CostFamilyInfo `json:"families,omitempty"`
 		TopRuns    []PoolTopRun     `json:"topRuns" doc:"The costliest Runs by the pool's machines, up to 10 per currency, costliest first."`
 		Idle       *[]PoolIdle      `json:"idle,omitempty" doc:"Host time no Run reserved, per family and currency (for data-transfer, the hosts' own traffic). Not part of totals. Present (maybe empty) exactly when the reader may see the pool's host time: operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."`
-		HostSeries []PoolHostTime   `json:"hostSeries,omitempty" doc:"Host time per bucket and family, allocated and idle; visible as idle."`
-		Hosts      []PoolHostTime   `json:"hosts,omitempty" doc:"Host time per host and family in the range, allocated and idle; visible as idle."`
+		HostSeries []PoolHostTime   `json:"hostSeries,omitempty" doc:"Host cost per bucket and family: charged to Runs, and the rest (idle time; for data-transfer, the hosts' own traffic); visible as idle."`
+		Hosts      []PoolHostTime   `json:"hosts,omitempty" doc:"Host cost per host and family: charged to Runs, and the rest (idle time; for data-transfer, the hosts' own traffic); visible as idle."`
 	} `nameHint:"PoolCost"`
 }
 

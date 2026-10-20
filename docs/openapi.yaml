@@ -914,7 +914,7 @@ components:
           format: date-time
           type: string
         unallocated:
-          description: "No Run's: idle host time (compute, block-storage, public-ip); for data-transfer, the host's own traffic. Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."
+          description: "Charged to no Run: idle host time (compute, block-storage, public-ip); for data-transfer, the host's own traffic. Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."
           type: string
       type: object
     HostCostRate:
@@ -1775,14 +1775,14 @@ components:
           format: date-time
           type: string
         hostSeries:
-          description: Host time per bucket and family, allocated and idle; visible as idle.
+          description: "Host cost per bucket and family: charged to Runs, and the rest (idle time; for data-transfer, the hosts' own traffic); visible as idle."
           items:
             $ref: "#/components/schemas/PoolHostTime"
           type:
             - array
             - "null"
         hosts:
-          description: Host time per host and family in the range, allocated and idle; visible as idle.
+          description: "Host cost per host and family: charged to Runs, and the rest (idle time; for data-transfer, the hosts' own traffic); visible as idle."
           items:
             $ref: "#/components/schemas/PoolHostTime"
           type:
@@ -1858,7 +1858,7 @@ components:
           format: double
           type: number
         unallocated:
-          description: "No Run's: idle host time (compute, block-storage, public-ip); for data-transfer, the hosts' own traffic."
+          description: "Charged to no Run: idle host time (compute, block-storage, public-ip); for data-transfer, the hosts' own traffic."
           type: string
         volumes:
           description: "Per host: its recorded block-storage volumes, as GET /v1/hosts has them; absent while not known and for a host that registered itself."

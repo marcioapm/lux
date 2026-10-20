@@ -28,6 +28,7 @@ const ratios = (w: WhoPaid[], f: (p: WhoPaid) => number | null) => {
 
 interface HostCostTilesProps {
   /** "Host cost (7d)", "Host cost (24h)". */
+  ownLabel?: string;
   since: string;
   paid: WhoPaid[];
   /** Host-hours in the range; null when not known. */
@@ -46,7 +47,7 @@ interface HostCostTilesProps {
  * Utilisation (compute and block storage). Without: only what the reader's
  * Runs were charged, never a zero or a dash for a figure it may not see.
  */
-export function HostCostTiles({ since, paid, hours, volumes, unallocated, loading }: HostCostTilesProps) {
+export function HostCostTiles({ since, ownLabel = "Host's own", paid, hours, volumes, unallocated, loading }: HostCostTilesProps) {
   const avg = (f: (p: WhoPaid) => string | null) => {
     const a = paid.flatMap((p) => {
       const v = perHour(f(p), hours);
@@ -82,7 +83,7 @@ export function HostCostTiles({ since, paid, hours, volumes, unallocated, loadin
         unit={
           dtRuns.length || dtOwn.length ? (
             <span data-transfer-parts>
-              Runs <MoneyList amounts={dtRuns} decimals={CENTS} /> · Host's own <MoneyList amounts={dtOwn} decimals={CENTS} />
+              Runs <MoneyList amounts={dtRuns} decimals={CENTS} /> · {ownLabel} <MoneyList amounts={dtOwn} decimals={CENTS} />
             </span>
           ) : (
             "network transfer"
@@ -154,10 +155,10 @@ const PAID_COLS: Column<PaidRow>[] = [
 ];
 
 /** Charged to Runs vs the rest of one family, as a bar: Runs in the family's colour, the rest (unallocated, or for data transfer the host's own) its faded shade. */
-function FamilySplit({ family, paid, currency }: { family: string; paid: Paid; currency: string }) {
+function FamilySplit({ family, paid, currency, ownLabel }: { family: string; paid: Paid; currency: string; ownLabel: string }) {
   const color = familyColor(family);
   const label = familyLabel(family);
-  const own = ownPartLabel(family);
+  const own = ownPartLabel(family, ownLabel);
   const shares = partShares([Number(paid.runs ?? 0), Number(paid.unallocated ?? 0)]);
   return (
     <div className="stack stack-tight" data-family-split={family}>
@@ -179,7 +180,7 @@ function FamilySplit({ family, paid, currency }: { family: string; paid: Paid; c
 }
 
 /** Who paid for the host, per currency: Runs or no Run, per host-tied family, then each family's split as a bar. */
-export function WhoPaidCard({ paid, loading }: { paid: WhoPaid[]; loading: boolean }) {
+export function WhoPaidCard({ paid, loading, ownLabel = "Host's own" }: { paid: WhoPaid[]; loading: boolean; ownLabel?: string }) {
   const rows: PaidRow[] = paid.flatMap((p) => [
     ...FAMILY_PARTS.filter((f) => f.of(p).total != null || f.family === COMPUTE || f.family === BLOCK_STORAGE).map((f) => ({
       key: `${p.currency}:${f.family}`,
@@ -191,13 +192,13 @@ export function WhoPaidCard({ paid, loading }: { paid: WhoPaid[]; loading: boole
     { key: `${p.currency}:total`, label: "Total", currency: p.currency, paid: p.all, total: true },
   ]);
   return (
-    <Card title="Who paid" subtitle="Runs vs idle time (unallocated) or, for data transfer, the host's own traffic" className="who-paid" flush>
-      <Table columns={PAID_COLS} rows={rows} rowKey={(r) => r.key} loading={loading} loadingRows={3} empty="No host time recorded in this range." dense minWidth={340} />
+    <Card title="Who paid" subtitle={`Runs vs idle time (unallocated) or, for data transfer, ${ownLabel.toLowerCase()} traffic`} className="who-paid" flush>
+      <Table columns={PAID_COLS.map((c) => c.key === "unallocated" ? { ...c, header: `Unallocated / ${ownLabel.toLowerCase()}` } : c)} rows={rows} rowKey={(r) => r.key} loading={loading} loadingRows={3} empty="No host time recorded in this range." dense minWidth={340} />
       <div className="stack who-paid-split">
         {paid.map((p) => (
           <div key={p.currency} className="stack stack-tight">
             {paid.length > 1 && <span className="secondary">{p.currency}</span>}
-            {FAMILY_PARTS.map((f) => (f.of(p).total != null ? <FamilySplit key={f.family} family={f.family} paid={f.of(p)} currency={p.currency} /> : null))}
+            {FAMILY_PARTS.map((f) => (f.of(p).total != null ? <FamilySplit key={f.family} family={f.family} paid={f.of(p)} currency={p.currency} ownLabel={ownLabel} /> : null))}
           </div>
         ))}
       </div>
