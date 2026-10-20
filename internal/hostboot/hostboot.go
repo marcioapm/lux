@@ -111,6 +111,23 @@ RestartSec=10s
 WantedBy=multi-user.target
 `
 
+// WritebackSysctlPath and WritebackSysctl cap the dirty page cache of a
+// Fedora CoreOS runner host. Every Run on a host keeps its container
+// storage on one filesystem, and unmounting an overlay (a nested engine
+// removing a container, Podman stopping a Run) syncs that whole filesystem:
+// it waits for every Run's unwritten data, not just its own. The kernel's
+// default, 20% of memory, lets gigabytes pile up, which one unmount then
+// waits behind for 10-20s on an EBS volume. Capped at 256 MiB, that wait is
+// about a second; a Run writing faster than the disk is throttled to disk
+// speed sooner, which it would be anyway. Ignition only: those hosts are
+// lux's alone, while the script format also sets up hosts that run other
+// things.
+const WritebackSysctlPath = "/etc/sysctl.d/90-lux-writeback.conf"
+
+const WritebackSysctl = `vm.dirty_background_bytes = 67108864
+vm.dirty_bytes = 268435456
+`
+
 // FetchBinariesPath is where every format installs FetchBinariesScript.
 const FetchBinariesPath = InstallDir + "/lux-fetch-binaries.sh"
 

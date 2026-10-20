@@ -957,7 +957,7 @@ with an unrecognized value is refused, not left to fail at boot:
 
 | Value | What it is | When to use it |
 | --- | --- | --- |
-| `ignition` (default) | An Ignition v3.4.0 config for Fedora CoreOS. | The default: no packages to install, fastest boot. |
+| `ignition` (default) | An Ignition v3.4.0 config for Fedora CoreOS. It also caps the host's dirty page cache (`vm.dirty_background_bytes` 64 MiB, `vm.dirty_bytes` 256 MiB, in `/etc/sysctl.d/90-lux-writeback.conf`): every Run's container storage shares one filesystem, and an overlay unmount waits for all of it to be written, so the default (20% of memory) let one Run's container teardown stall 10-20s behind another's writes. | The default: no packages to install, fastest boot. |
 | `script` | A `#!/bin/bash` script cloud-init runs. | A stock Fedora Cloud, Ubuntu, Debian or AL2023 AMI. |
 | `env` | Plain `KEY=value` lines (`LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`, `LUX_RUNNER_MEMORY` when luxd knows the instance type's memory, `LUX_NESTED` for a nested pool, and for a shaped pool `LUX_RUNNER_CPUS`, `LUX_RUNNER_MEMORY`, `LUX_RUNNER_DISK` and `LUX_RUNNER_DISK_HEADROOM`, its shape's nominal host and disk headroom). | A custom AMI with its own boot script, from before self-update. |
 

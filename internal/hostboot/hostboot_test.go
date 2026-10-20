@@ -83,6 +83,63 @@ func TestIgnitionShape(t *testing.T) {
 	}
 }
 
+// An Ignition host gets the writeback limits as a sysctl.d file, which
+// systemd-sysctl applies at boot, before lux-runner starts. Parsed back the
+// way systemd-sysctl reads it, so a typo in a key or a value is caught.
+func TestIgnitionCapsWriteback(t *testing.T) {
+	b, err := Ignition(Env{URL: "http://10.0.1.10:7070", HostToken: "luxh_x", HostName: "h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Storage struct {
+			Files []struct {
+				Path     string `json:"path"`
+				Mode     int    `json:"mode"`
+				Contents struct {
+					Source string `json:"source"`
+				} `json:"contents"`
+			} `json:"files"`
+		} `json:"storage"`
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, f := range cfg.Storage.Files {
+		if f.Path != "/etc/sysctl.d/90-lux-writeback.conf" {
+			continue
+		}
+		found = true
+		if f.Mode != 0o644 {
+			t.Errorf("mode %o, want 644", f.Mode)
+		}
+		_, b64, _ := strings.Cut(f.Contents.Source, ",")
+		raw, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			k, v, ok := strings.Cut(line, "=")
+			if !ok {
+				t.Fatalf("not a sysctl line: %q", line)
+			}
+			got[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+		want := map[string]string{"vm.dirty_background_bytes": "67108864", "vm.dirty_bytes": "268435456"}
+		if !maps.Equal(got, want) {
+			t.Errorf("sysctls %v, want %v", got, want)
+		}
+	}
+	if !found {
+		t.Error("no /etc/sysctl.d/90-lux-writeback.conf in the Ignition config")
+	}
+	if strings.Contains(Script(Env{URL: "http://luxd", HostToken: "luxh_x"}), "dirty_") {
+		t.Error("the script format must not change a shared host's writeback limits")
+	}
+}
+
 // Both Ignition and the script format append the subuid/subgid range only
 // through FetchBinariesScript's own idempotent grep-then-append, not
 // separately: Ignition installs no /etc/subuid or /etc/subgid file entry
