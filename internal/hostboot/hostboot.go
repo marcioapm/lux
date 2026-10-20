@@ -125,11 +125,17 @@ vm.dirty_bytes = 268435456
 `
 
 // writebackScript is Script's tail. cloud-init runs after systemd-sysctl has
-// applied /etc/sysctl.d, so the file is also loaded here with sysctl -p.
+// applied /etc/sysctl.d, so the file is also loaded here with sysctl -p. A
+// host without sysctl (procps) keeps the file for its next boot and still
+// boots its runner: the cap is not worth failing a host over.
 const writebackScript = `mkdir -p /etc/sysctl.d
 cat > ` + WritebackSysctlPath + ` <<'LUX_SYSCTL'
 ` + WritebackSysctl + `LUX_SYSCTL
-sysctl -q -p ` + WritebackSysctlPath + `
+if command -v sysctl >/dev/null 2>&1; then
+  sysctl -q -p ` + WritebackSysctlPath + ` || echo "lux: warning: could not load ` + WritebackSysctlPath + `; it applies from the next boot" >&2
+else
+  echo "lux: warning: no sysctl on this host; ` + WritebackSysctlPath + ` applies from the next boot" >&2
+fi
 `
 
 // FetchBinariesPath is where every format installs FetchBinariesScript.

@@ -177,6 +177,23 @@ func TestScriptCapsWriteback(t *testing.T) {
 	}
 }
 
+// A host without sysctl, or one where loading the file fails, still
+// boots its runner: Script runs under set -e, and the cap is not worth
+// failing a host over. The file is still written for the next boot.
+func TestScriptBootsWithoutWorkingSysctl(t *testing.T) {
+	for name, sysctl := range map[string]string{"missing": "", "failing": "exit 1"} {
+		t.Run(name, func(t *testing.T) {
+			root := bootScriptWith(t, Script(Env{URL: "http://luxd", HostToken: "luxh_x", HostName: "h"}), sysctl)
+			if _, err := os.Stat(root + "/etc/sysctl.d/90-lux-writeback.conf"); err != nil {
+				t.Errorf("the file was not written: %v", err)
+			}
+			if _, err := os.Stat(root + "/etc/lux/runner.env"); err != nil {
+				t.Errorf("the runner was not set up: %v", err)
+			}
+		})
+	}
+}
+
 // The bootstrap script sets up static hosts, which may run other things:
 // run, it must neither write a sysctl.d file nor call sysctl.
 func TestBootstrapLeavesWritebackAlone(t *testing.T) {
@@ -416,6 +433,13 @@ func bootRunnerEnv(t *testing.T, script string, environ ...string) map[string]st
 // sysctl.calls) and returns that root.
 func bootScript(t *testing.T, script string, environ ...string) string {
 	t.Helper()
+	return bootScriptWith(t, script, "<record>", environ...)
+}
+
+// bootScriptWith is bootScript with sysctl's stub body chosen: "<record>"
+// records its arguments, "" leaves sysctl off PATH altogether.
+func bootScriptWith(t *testing.T, script, sysctl string, environ ...string) string {
+	t.Helper()
 	root := t.TempDir()
 	stubs := filepath.Join(root, "stubs")
 	for _, dir := range []string{stubs, root + "/etc/systemd/system", root + InstallDir, root + "/sys/fs/cgroup"} {
@@ -426,8 +450,23 @@ func bootScript(t *testing.T, script string, environ ...string) string {
 	if err := os.WriteFile(root+"/sys/fs/cgroup/cgroup.controllers", nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for name, body := range map[string]string{"podman": "echo 5.2.0", "nft": "exit 0", "git": "exit 0", "systemctl": "exit 0",
-		"sysctl": `echo "$*" >> "` + root + `/sysctl.calls"`} {
+	stubBodies := map[string]string{"podman": "echo 5.2.0", "nft": "exit 0", "git": "exit 0", "systemctl": "exit 0"}
+	switch sysctl {
+	case "<record>":
+		stubBodies["sysctl"] = `echo "$*" >> "` + root + `/sysctl.calls"`
+	case "":
+		// No stub: the script's PATH is stubs, /usr/bin and /bin, so a host
+		// sysctl there would still be found. Fail the test rather than pass
+		// it for the wrong reason.
+		for _, d := range []string{"/usr/bin", "/bin"} {
+			if _, err := os.Stat(d + "/sysctl"); err == nil {
+				t.Skipf("%s/sysctl exists on this machine; cannot simulate a host without it", d)
+			}
+		}
+	default:
+		stubBodies["sysctl"] = sysctl
+	}
+	for name, body := range stubBodies {
 		if err := os.WriteFile(filepath.Join(stubs, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
