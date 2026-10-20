@@ -111,27 +111,21 @@ RestartSec=10s
 WantedBy=multi-user.target
 `
 
-// WritebackSysctlPath and WritebackSysctl cap the dirty page cache of a
-// runner host luxd launches. Every Run on a host keeps its container
-// storage on one filesystem, and unmounting an overlay (a nested engine
-// removing a container, Podman stopping a Run) syncs that whole filesystem:
-// it waits for every Run's unwritten data, not just its own. The kernel's
-// default (vm.dirty_ratio, 20% of available memory) lets gigabytes pile up,
-// which one unmount then waited behind for 10-20s on an EBS volume. At
-// 256 MiB the wait is the time the volume takes to write 256 MiB: about 2s
-// at gp3's baseline 125 MiB/s, under 1s at 350 MiB/s. A Run writing faster
-// than the disk is throttled to disk speed sooner, which it would be anyway.
-// Both EC2 formats install it (Ignition as a file systemd-sysctl applies at
-// boot, Script by writing and loading it); the bootstrap script for static
-// hosts does not, since those hosts may run other things.
+// WritebackSysctlPath and WritebackSysctl cap a luxd-launched runner host's
+// dirty page cache. All Runs share one filesystem and an overlay unmount
+// syncs all of it, so under the kernel default (20% of available memory)
+// one Run's teardown waits behind every other Run's unwritten data; at
+// 256 MiB that wait is about 2s at gp3's 125 MiB/s baseline. Ignition and
+// Script install it; Bootstrap does not, since static hosts may run other
+// workloads (docs/operations.md, "EC2 pools").
 const WritebackSysctlPath = "/etc/sysctl.d/90-lux-writeback.conf"
 
 const WritebackSysctl = `vm.dirty_background_bytes = 67108864
 vm.dirty_bytes = 268435456
 `
 
-// writebackScript is Script's tail: cloud-init runs after systemd-sysctl,
-// so the file is loaded at once as well as on later boots.
+// writebackScript is Script's tail. cloud-init runs after systemd-sysctl has
+// applied /etc/sysctl.d, so the file is also loaded here with sysctl -p.
 const writebackScript = `mkdir -p /etc/sysctl.d
 cat > ` + WritebackSysctlPath + ` <<'LUX_SYSCTL'
 ` + WritebackSysctl + `LUX_SYSCTL
