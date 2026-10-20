@@ -730,15 +730,16 @@ func (s *Server) hostCost(ctx context.Context, in *hostCostInput) (*hostCostOutp
 		}
 		out.Body.HostID = id
 		// Data transfer's host row holds only the host's own traffic; what its
-		// Runs sent is on their Run rows, joined in here as allocated.
+		// Runs sent is on their Run rows, joined in here as allocated. The
+		// literal family matches the partial index of migration 088.
 		rows, err := tx.Query(ctx, `SELECT hour, family, currency, trim_scale(sum(allocated))::text,
 			trim_scale(sum(unallocated))::text FROM (
 				SELECT hour, family, currency, allocated, unallocated FROM cost_hourly
 				WHERE host_id = $1 AND run_id IS NULL AND hour >= $2 AND hour < $3
 				UNION ALL
 				SELECT hour, family, currency, amount, 0 FROM cost_hourly
-				WHERE host_id = $1 AND run_id IS NOT NULL AND family = $4 AND hour >= $2 AND hour < $3) c
-			GROUP BY hour, family, currency ORDER BY hour, currency, family`, id, from, to, familyDataTransfer)
+				WHERE host_id = $1 AND run_id IS NOT NULL AND family = 'data-transfer' AND hour >= $2 AND hour < $3) c
+			GROUP BY hour, family, currency ORDER BY hour, currency, family`, id, from, to)
 		if err != nil {
 			return err
 		}
