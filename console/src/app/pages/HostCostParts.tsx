@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 import { Card, CENTS, ColorKey, compareMoney, EmptyState, fadedCss, familyColor, formatMoney, ListPriceNote, meterText, Money, MoneyList, PartBar, partShares, StatTile, Table, TimeSeriesChart, Tooltip, type Column, type MoneyAmount } from "@lux/design-system";
 import { BLOCK_STORAGE, COMPUTE, ratio } from "./costView.ts";
-import { DATA_TRANSFER, familyLabel, ownPartLabel, perHour, PUBLIC_IP, utilisation, type HostChart, type Paid, type WhoPaid } from "./hostCostView.ts";
+import { DATA_TRANSFER, familyLabel, HOST_OWN, ownPartLabel, perHour, PUBLIC_IP, utilisation, type HostChart, type Paid, type WhoPaid } from "./hostCostView.ts";
 
 const COMPUTE_COLOR = familyColor(COMPUTE);
 const BS_COLOR = familyColor(BLOCK_STORAGE);
@@ -48,7 +48,7 @@ interface HostCostTilesProps {
  * Utilisation (compute and block storage). Without: only what the reader's
  * Runs were charged, never a zero or a dash for a figure it may not see.
  */
-export function HostCostTiles({ since, ownLabel = "Host's own", paid, hours, volumes, unallocated, loading }: HostCostTilesProps) {
+export function HostCostTiles({ since, ownLabel = HOST_OWN, paid, hours, volumes, unallocated, loading }: HostCostTilesProps) {
   const avg = (f: (p: WhoPaid) => string | null) => {
     const a = paid.flatMap((p) => {
       const v = perHour(f(p), hours);
@@ -148,10 +148,10 @@ interface PaidRow {
 
 const money = (a: string | null, currency: string) => (a == null ? <span className="muted">–</span> : <Money amount={a} currency={currency} decimals={CENTS} />);
 
-const PAID_COLS: Column<PaidRow>[] = [
+const paidCols = (ownLabel: string): Column<PaidRow>[] => [
   { key: "family", header: "", cell: (r) => (r.total ? <strong>Total</strong> : r.label), lead: true },
   { key: "runs", header: "Runs", cell: (r) => money(r.paid.runs, r.currency), align: "right", mono: true, width: 76 },
-  { key: "unallocated", header: "Unallocated / host's own", cell: (r) => money(r.paid.unallocated, r.currency), align: "right", mono: true, width: 120 },
+  { key: "unallocated", header: `Unallocated / ${ownLabel.toLowerCase()}`, cell: (r) => money(r.paid.unallocated, r.currency), align: "right", mono: true, width: 120 },
   { key: "total", header: "Total", cell: (r) => (r.total ? <strong>{money(r.paid.total, r.currency)}</strong> : money(r.paid.total, r.currency)), align: "right", mono: true, width: 80 },
 ];
 
@@ -181,7 +181,7 @@ function FamilySplit({ family, paid, currency, ownLabel }: { family: string; pai
 }
 
 /** Who paid for the host, per currency: Runs or no Run, per host-tied family, then each family's split as a bar. */
-export function WhoPaidCard({ paid, loading, ownLabel = "Host's own" }: { paid: WhoPaid[]; loading: boolean; ownLabel?: string }) {
+export function WhoPaidCard({ paid, loading, ownLabel = HOST_OWN }: { paid: WhoPaid[]; loading: boolean; ownLabel?: string }) {
   const rows: PaidRow[] = paid.flatMap((p) => [
     ...FAMILY_PARTS.filter((f) => f.of(p).total != null || f.family === COMPUTE || f.family === BLOCK_STORAGE).map((f) => ({
       key: `${p.currency}:${f.family}`,
@@ -194,7 +194,7 @@ export function WhoPaidCard({ paid, loading, ownLabel = "Host's own" }: { paid: 
   ]);
   return (
     <Card title="Who paid" subtitle={`Runs vs idle time (unallocated) or, for data transfer, ${ownLabel.toLowerCase()} traffic`} className="who-paid" flush>
-      <Table columns={PAID_COLS.map((c) => c.key === "unallocated" ? { ...c, header: `Unallocated / ${ownLabel.toLowerCase()}` } : c)} rows={rows} rowKey={(r) => r.key} loading={loading} loadingRows={3} empty="No host time recorded in this range." dense minWidth={340} />
+      <Table columns={paidCols(ownLabel)} rows={rows} rowKey={(r) => r.key} loading={loading} loadingRows={3} empty="No host time recorded in this range." dense minWidth={340} />
       <div className="stack who-paid-split">
         {paid.map((p) => (
           <div key={p.currency} className="stack stack-tight">

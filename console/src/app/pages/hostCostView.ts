@@ -18,8 +18,10 @@ const SHARED_FAMILIES: readonly string[] = [COMPUTE, BLOCK_STORAGE, PUBLIC_IP];
 
 const LABELS = familyDisplay(HOST_FAMILIES.map((family) => ({ family })));
 export const familyLabel = (f: string) => LABELS.get(f)?.label ?? f;
+/** Data transfer's part no Run was charged on one host; a pool's screens say "Hosts' own". */
+export const HOST_OWN = "Host's own";
 /** What a family's part no Run was charged is called: the host's own traffic for data transfer, idle time otherwise. */
-export const ownPartLabel = (f: string, ownLabel = "Host's own") => (f === DATA_TRANSFER ? ownLabel : "unallocated");
+export const ownPartLabel = (f: string, ownLabel = HOST_OWN) => (f === DATA_TRANSFER ? ownLabel : "unallocated");
 
 /** One figure per currency, summed over families (a pool's idle per family and currency, say). */
 export function sumPerCurrency(rows: readonly { currency: string; amount: string }[] | null | undefined): MoneyTotal[] {
@@ -236,7 +238,7 @@ function hostChartSeries(families: readonly string[], unallocated: boolean, ownL
  * stacked. Rows finer than the step (hours on a daily chart) are summed
  * exactly; a bucket without a row is a gap, not zero.
  */
-export function hostCharts(rows: readonly TimedHostRow[], from: string, to: string, step: number, ownLabel = "Host's own"): HostChart[] {
+export function hostCharts(rows: readonly TimedHostRow[], from: string, to: string, step: number, ownLabel = HOST_OWN): HostChart[] {
   const start = Math.floor(Date.parse(from) / 1000 / step) * step;
   const end = Math.floor(Date.parse(to) / 1000);
   const x: number[] = [];

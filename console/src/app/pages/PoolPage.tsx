@@ -14,6 +14,8 @@ import { PagedEvents } from "./PagedEvents.tsx";
 const POLL = 15_000;
 const TABS = ["metrics", "cost", "hosts", "events"] as const;
 type Tab = (typeof TABS)[number];
+/** Data transfer's part no Run was charged, over the pool's hosts. */
+const HOSTS_OWN = "Hosts' own";
 
 export function PoolPage({ name }: { name: string }) {
   const scope = useScope();
@@ -254,13 +256,13 @@ function PoolCostTab({ name, owner }: { name: string; owner?: PoolOwner }) {
   return (
     <div className="stack pool-cost">
       <ErrorStrip error={q.error} />
-      <HostCostTiles ownLabel="Hosts' own" since={since} paid={v.paid} hours={v.hours} volumes={v.volumes} unallocated={v.visible} loading={loading} />
+      <HostCostTiles ownLabel={HOSTS_OWN} since={since} paid={v.paid} hours={v.hours} volumes={v.volumes} unallocated={v.visible} loading={loading} />
       {v.visible ? (
         <div className="grid grid-2-1">
           <div className="stack">
             <HostCostChart charts={v.charts} title={`Host cost per ${per}`} subtitle="per family, what Runs were charged and the rest: unallocated time, or the hosts' own transfer" loading={loading} step={interval} />
           </div>
-          <WhoPaidCard ownLabel="Hosts' own" paid={v.paid} loading={loading} />
+          <WhoPaidCard ownLabel={HOSTS_OWN} paid={v.paid} loading={loading} />
         </div>
       ) : (
         <HostCostChart charts={v.charts} title={`Charged to your Runs per ${per}`} subtitle="your Runs' share of the machines: compute, block storage, public IPv4 and data transfer" loading={loading} step={interval} />
@@ -294,7 +296,7 @@ export function poolCostView(d: PoolCost | undefined) {
   return {
     visible,
     paid: whoPaid(series),
-    charts: hostCharts(series, d.from, d.to, step, "Hosts' own"),
+    charts: hostCharts(series, d.from, d.to, step, HOSTS_OWN),
     hosts: hostCostRows(hostRows),
     hours: hostHours(hostRows),
     volumes: volumeSummary([...byHost.values()]),
