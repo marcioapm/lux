@@ -121,6 +121,7 @@ test("unallocatedSides: luxd's unallocated rows as Compute, Block storage and th
       { family: "data-transfer", currency: "EUR", amount: "0" },
       // Public IPv4's idle part is not compute's.
       { family: "public-ip", currency: "USD", amount: "5" },
+      { family: "public-ip", currency: "EUR", amount: "0" },
     ]),
   ).toEqual({
     compute: [
@@ -128,9 +129,10 @@ test("unallocatedSides: luxd's unallocated rows as Compute, Block storage and th
       { currency: "USD", amount: "6.28" },
     ],
     blockStorage: [{ currency: "USD", amount: "0.67" }],
+    publicIp: [{ currency: "USD", amount: "5" }],
     hostTransfer: [{ currency: "USD", amount: "0.03" }],
   });
-  expect(unallocatedSides(undefined)).toEqual({ compute: [], blockStorage: [], hostTransfer: [] });
+  expect(unallocatedSides(undefined)).toEqual({ compute: [], blockStorage: [], publicIp: [], hostTransfer: [] });
 });
 
 test("split: a side with no cost is no figure, not zero; a currency with no shown cost is absent", () => {

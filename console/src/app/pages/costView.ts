@@ -5,7 +5,7 @@
 // (hour or day) is the page's (every.ts).
 import { bandColor, compareMoney, familyDisplay, NONE_BAND_COLOR, OTHER_BAND_COLOR, sumMoney } from "@lux/design-system";
 import type { CostFamily, CostKey, CostSummary, CostSummaryRow, MoneyTotal } from "../../api/index.ts";
-import { BLOCK_STORAGE, COMPUTE, DATA_TRANSFER, HOST_FAMILIES } from "../../costFamilies.ts";
+import { BLOCK_STORAGE, COMPUTE, DATA_TRANSFER, HOST_FAMILIES, PUBLIC_IP } from "../../costFamilies.ts";
 
 export { BLOCK_STORAGE, COMPUTE, DATA_TRANSFER, HOST_FAMILIES };
 
@@ -175,9 +175,9 @@ export function sideTotals(rows: CostSummaryRow[]): SideTotals[] {
 }
 
 /** Unallocated host-tied cost per family (luxd's unallocated rows), each per currency; a family with no row is absent. hostTransfer is data transfer's: the hosts' own traffic, not idle time. A row without family (a luxd from before block storage) is compute. */
-export function unallocatedSides(rows: CostSummaryRow[] | null | undefined): { compute: MoneyTotal[]; blockStorage: MoneyTotal[]; hostTransfer: MoneyTotal[] } {
+export function unallocatedSides(rows: CostSummaryRow[] | null | undefined): { compute: MoneyTotal[]; blockStorage: MoneyTotal[]; publicIp: MoneyTotal[]; hostTransfer: MoneyTotal[] } {
   const of = (family: string) => [...byCurrency((rows ?? []).filter((r) => (r.family ?? COMPUTE) === family))].map(([currency, rs]) => ({ currency, amount: sumMoney(rs.map((r) => r.amount))! }));
-  return { compute: of(COMPUTE), blockStorage: of(BLOCK_STORAGE), hostTransfer: of(DATA_TRANSFER).filter((m) => compareMoney(m.amount, "0") !== 0) };
+  return { compute: of(COMPUTE), blockStorage: of(BLOCK_STORAGE), publicIp: of(PUBLIC_IP).filter((m) => compareMoney(m.amount, "0") !== 0), hostTransfer: of(DATA_TRANSFER).filter((m) => compareMoney(m.amount, "0") !== 0) };
 }
 
 /** A ratio of two amounts of one currency, for a share or a bar's length; display only. */

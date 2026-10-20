@@ -1,3 +1,4 @@
+import { PUBLIC_IP } from "../../costFamilies.ts";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   BreakdownTable,
@@ -567,6 +568,11 @@ function Unallocated({ amounts, loading }: { amounts: CostSummaryRow[] | undefin
           <span data-unallocated="block-storage">
             <ColorKey color={BLOCK_STORAGE_COLOR}>Block storage</ColorKey> <MoneyList amounts={u.blockStorage} decimals={CENTS} />
           </span>
+          {u.publicIp.length > 0 && (
+            <span data-unallocated="public-ip">
+              <ColorKey color={familyColor(PUBLIC_IP)}>Public IPv4</ColorKey> <MoneyList amounts={u.publicIp} decimals={CENTS} />
+            </span>
+          )}
           {u.hostTransfer.length > 0 && (
             <span data-unallocated="data-transfer" title="The hosts' own traffic (image pulls, uploads, their link to luxd): no Run sent it">
               <ColorKey color={DATA_TRANSFER_COLOR}>Hosts' own transfer</ColorKey> <MoneyList amounts={u.hostTransfer} decimals={CENTS} />
