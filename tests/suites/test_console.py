@@ -1244,7 +1244,9 @@ def test_pool_cost_tab_and_run_placements_with_block_storage(page, env, lux, pri
     # The tenant owns the pool: every tile, unallocated included.
     expect(tab.locator(".stat-label")).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Public IPv4", "Data transfer", "Unallocated", "Utilisation"], timeout=15_000)
     # Block storage's line names the host's disk, as luxd recorded it.
-    expect(tab.locator(".stat", has_text="Block storage").locator(".stat-unit")).to_contain_text("100 GiB gp3")
+    # By its label: Utilisation's basis also names block storage.
+    block_tile = tab.locator(".stat").filter(has=page.locator(".stat-label", has_text=re.compile(r"^Block storage$")))
+    expect(block_tile.locator(".stat-unit")).to_contain_text("100 GiB gp3")
     legend = tab.locator(".host-cost-chart .tschart-legend-label")
     # Compute and block storage first; public IPv4 and data transfer follow when the range has them.
     expect(legend.nth(3)).to_have_text("Block storage · unallocated")
