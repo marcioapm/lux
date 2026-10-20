@@ -903,6 +903,7 @@ components:
       additionalProperties: false
       properties:
         allocated:
+          description: "Charged to the host's Runs: their share of the host's period (compute, block-storage, public-ip); for data-transfer, the transfer of the host's Runs."
           type: string
         currency:
           type: string
@@ -913,7 +914,7 @@ components:
           format: date-time
           type: string
         unallocated:
-          description: Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host.
+          description: "No Run's: idle host time (compute, block-storage, public-ip); for data-transfer, the host's own traffic. Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."
           type: string
       type: object
     HostCostRate:
