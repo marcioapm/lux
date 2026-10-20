@@ -26,8 +26,8 @@ test("hostCostRows: one row per host with compute and block storage apart, total
     hostRow("h2", "compute", "0.1", "0.3", { hours: 4.8 }),
   ]);
   expect(rows).toEqual([
-    { hostId: "h1", hostName: "h1-name", currency: "USD", hours: 6.9, compute: "0.783", blockStorage: "0.079", publicIp: null, dataTransfer: null, total: "0.862", allocated: "0.775", unallocated: "0.087", hostOwn: "0", utilisation: 0.775 / 0.862 },
-    { hostId: "h2", hostName: "h2-name", currency: "USD", hours: 4.8, compute: "0.4", blockStorage: null, publicIp: null, dataTransfer: null, total: "0.4", allocated: "0.1", unallocated: "0.3", hostOwn: "0", utilisation: 0.25 },
+    { hostId: "h1", hostName: "h1-name", currency: "USD", hours: 6.9, compute: "0.783", blockStorage: "0.079", publicIp: null, dataTransfer: null, total: "0.862", allocated: "0.775", unallocated: "0.087", hostOwn: null, utilisation: 0.775 / 0.862 },
+    { hostId: "h2", hostName: "h2-name", currency: "USD", hours: 4.8, compute: "0.4", blockStorage: null, publicIp: null, dataTransfer: null, total: "0.4", allocated: "0.1", unallocated: "0.3", hostOwn: null, utilisation: 0.25 },
   ]);
   // A host that cost nothing has no utilisation (not 0%).
   expect(hostCostRows([hostRow("h3", "compute", "0", "0")])[0]!.utilisation).toBeNull();

@@ -105,8 +105,8 @@ export interface HostCostRow {
   allocated: string;
   /** Idle host time: compute, block storage and public IPv4 no Run reserved. */
   unallocated: string;
-  /** Data transfer no Run sent: the host's own traffic. */
-  hostOwn: string;
+  /** Data transfer no Run sent: the host's own traffic; null when the host has no transfer row (an en dash, not $0). */
+  hostOwn: string | null;
   /** Compute and block storage charged to Runs ÷ their total; null when they cost nothing. */
   utilisation: number | null;
 }
@@ -136,7 +136,7 @@ export function hostCostRows(rows: readonly HostRow[] | null | undefined): HostC
       total: p.total ?? "0",
       allocated: p.runs ?? "0",
       unallocated: ofFamilies(rs, SHARED_FAMILIES).unallocated ?? "0",
-      hostOwn: ofFamilies(rs, [DATA_TRANSFER]).unallocated ?? "0",
+      hostOwn: ofFamilies(rs, [DATA_TRANSFER]).unallocated,
       utilisation: ratio(time.runs, time.total ?? "0"),
     };
   });

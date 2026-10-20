@@ -224,6 +224,20 @@ test("pool Cost tab: compute-only host series keeps Compute and Block storage in
   }
 });
 
+test("pool Cost tab: a host with no transfer row shows an en dash for its own transfer, never $0", async () => {
+  const cost = { ...withHostTime, hosts: withHostTime.hosts!.filter((r) => r.family !== "data-transfer") };
+  const p = await render("operator", PLATFORM, cost);
+  try {
+    await until(() => rowsOf(p.card("Cost by host")).length > 0, "the Cost by host rows");
+    // Columns as in the full view: host, up, compute, block storage, public IPv4, data transfer, total, unallocated, host's own transfer.
+    const hosts = rowsOf(p.card("Cost by host"));
+    expect(hosts.map((r) => r[5])).toEqual(["–", "–"]);
+    expect(hosts.map((r) => r[8])).toEqual(["–", "–"]);
+  } finally {
+    await p.done();
+  }
+});
+
 test("pool Cost tab while loading: skeleton tiles, no figure, no zero", async () => {
   const p = await render("operator", PLATFORM, new Promise<never>(() => {}));
   try {

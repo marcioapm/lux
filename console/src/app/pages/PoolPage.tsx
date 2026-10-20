@@ -318,7 +318,7 @@ function HostCostTable({ rows, loading }: { rows: HostCostRow[]; loading: boolea
       { key: "dt", header: "Data transfer", cell: (h) => money(h.dataTransfer, h.currency), sortValue: (h) => (h.dataTransfer == null ? null : Number(h.dataTransfer)), align: "right", mono: true, width: 130 },
       { key: "total", header: "Total", cell: (h) => <Money amount={h.total} currency={h.currency} />, sortValue: (h) => Number(h.total), align: "right", mono: true, width: 120 },
       { key: "unallocated", header: "Unallocated", cell: (h) => <span className="muted"><Money amount={h.unallocated} currency={h.currency} /></span>, sortValue: (h) => Number(h.unallocated), align: "right", mono: true, width: 120 },
-      { key: "own", header: "Host's own transfer", cell: (h) => <span className="muted"><Money amount={h.hostOwn} currency={h.currency} /></span>, sortValue: (h) => Number(h.hostOwn), align: "right", mono: true, width: 140 },
+      { key: "own", header: "Host's own transfer", cell: (h) => <span className="muted">{money(h.hostOwn, h.currency)}</span>, sortValue: (h) => (h.hostOwn == null ? null : Number(h.hostOwn)), align: "right", mono: true, width: 140 },
       { key: "util", header: "Utilisation", cell: (h) => <Meter value={h.utilisation} />, sortValue: (h) => h.utilisation, align: "right", width: 130 },
     ],
     [multi],
