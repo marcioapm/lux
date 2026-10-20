@@ -1,12 +1,22 @@
 // The pieces the pool and host Cost tabs share: the tiles, the host-cost
 // chart and the "who paid" card, built from hostCostView.ts's figures.
 import type { ReactNode } from "react";
-import { Card, CENTS, ColorKey, EmptyState, fadedCss, familyColor, formatMoney, ListPriceNote, meterText, Money, MoneyList, PartBar, partShares, StatTile, Table, TimeSeriesChart, type Column, type MoneyAmount } from "@lux/design-system";
+import { Card, CENTS, ColorKey, EmptyState, fadedCss, familyColor, formatMoney, ListPriceNote, meterText, Money, MoneyList, PartBar, partShares, StatTile, Table, TimeSeriesChart, Tooltip, type Column, type MoneyAmount } from "@lux/design-system";
 import { BLOCK_STORAGE, COMPUTE, ratio } from "./costView.ts";
-import { familyLabel, perHour, type HostChart, type Paid, type WhoPaid } from "./hostCostView.ts";
+import { DATA_TRANSFER, familyLabel, ownPartLabel, perHour, PUBLIC_IP, utilisation, type HostChart, type Paid, type WhoPaid } from "./hostCostView.ts";
 
 const COMPUTE_COLOR = familyColor(COMPUTE);
 const BS_COLOR = familyColor(BLOCK_STORAGE);
+const IP_COLOR = familyColor(PUBLIC_IP);
+const DT_COLOR = familyColor(DATA_TRANSFER);
+/** The family parts of WhoPaid, in the order every screen lists them. */
+const FAMILY_PARTS: { family: string; of: (p: WhoPaid) => Paid }[] = [
+  { family: COMPUTE, of: (p) => p.compute },
+  { family: BLOCK_STORAGE, of: (p) => p.blockStorage },
+  { family: PUBLIC_IP, of: (p) => p.publicIp },
+  { family: DATA_TRANSFER, of: (p) => p.dataTransfer },
+];
+const UTILISATION_NOTE = "Compute and block storage only: the families billed by host time. Public IPv4 and data transfer are left out.";
 
 /** One figure per currency of a WhoPaid list, skipping the currencies that have none. */
 export const pick = (w: WhoPaid[], f: (p: WhoPaid) => string | null): MoneyAmount[] => w.flatMap((p) => (f(p) == null ? [] : [{ currency: p.currency, amount: f(p)! }]));
@@ -31,9 +41,10 @@ interface HostCostTilesProps {
 
 /**
  * The tiles over a host-cost view. With unallocated: Host cost (lead),
- * Compute, Block storage, Unallocated (warn) and Utilisation. Without:
- * only what the reader's Runs were charged, never a zero or a dash for a
- * figure it may not see.
+ * Compute, Block storage, Public IPv4, Data transfer (Runs and the host's
+ * own), Unallocated (warn: idle time of the shared families) and
+ * Utilisation (compute and block storage). Without: only what the reader's
+ * Runs were charged, never a zero or a dash for a figure it may not see.
  */
 export function HostCostTiles({ since, paid, hours, volumes, unallocated, loading }: HostCostTilesProps) {
   const avg = (f: (p: WhoPaid) => string | null) => {
@@ -47,19 +58,48 @@ export function HostCostTiles({ since, paid, hours, volumes, unallocated, loadin
   if (!unallocated) {
     return (
       <div className="grid grid-stats" data-host-cost-tiles="runs">
-        <StatTile lead label={`Charged to your Runs (${since})`} loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.all.runs)} decimals={CENTS} />} unit={<><ListPriceNote /> · compute and block storage</>} />
+        <StatTile lead label={`Charged to your Runs (${since})`} loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.all.runs)} decimals={CENTS} />} unit={<><ListPriceNote /> · the machines</>} />
         <StatTile swatch={COMPUTE_COLOR} label="Compute" loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.compute.runs)} decimals={CENTS} />} unit="your Runs' share of the machines" />
         <StatTile swatch={BS_COLOR} label="Block storage" loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.blockStorage.runs)} decimals={CENTS} />} unit="your Runs' share of the disks" />
+        <StatTile swatch={IP_COLOR} label="Public IPv4" loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.publicIp.runs)} decimals={CENTS} />} unit="your Runs' share of the addresses" />
+        <StatTile swatch={DT_COLOR} label="Data transfer" loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.dataTransfer.runs)} decimals={CENTS} />} unit="what your Runs sent and received" />
       </div>
     );
   }
+  const dtRuns = pick(paid, (p) => p.dataTransfer.runs);
+  const dtOwn = pick(paid, (p) => p.dataTransfer.unallocated);
   return (
     <div className="grid grid-stats" data-host-cost-tiles="all">
       <StatTile lead label={`Host cost (${since})`} loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.all.total)} decimals={CENTS} />} unit={<><ListPriceNote />{hoursText ? ` · ${hoursText}` : ""}</>} />
       <StatTile swatch={COMPUTE_COLOR} label="Compute" loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.compute.total)} decimals={CENTS} />} unit={avg((p) => p.compute.total) ?? "the machines"} />
       <StatTile swatch={BS_COLOR} label="Block storage" loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.blockStorage.total)} decimals={CENTS} />} unit={[volumes, avg((p) => p.blockStorage.total)].filter(Boolean).join(" · ") || "the disks"} />
-      <StatTile tone="warn" label="Unallocated" loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.all.unallocated)} decimals={CENTS} />} unit={`${ratios(paid, (p) => ratio(p.all.unallocated, p.all.total)) ?? "–"} of host cost · no Run reserved it`} />
-      <StatTile label="Utilisation" loading={loading} value={ratios(paid, (p) => ratio(p.all.runs, p.all.total)) ?? "–"} unit="charged to Runs ÷ host cost" />
+      <StatTile swatch={IP_COLOR} label="Public IPv4" loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.publicIp.total)} decimals={CENTS} />} unit={avg((p) => p.publicIp.total) ?? "the addresses"} />
+      <StatTile
+        swatch={DT_COLOR}
+        label="Data transfer"
+        loading={loading}
+        value={<MoneyList amounts={pick(paid, (p) => p.dataTransfer.total)} decimals={CENTS} />}
+        unit={
+          dtRuns.length || dtOwn.length ? (
+            <span data-transfer-parts>
+              Runs <MoneyList amounts={dtRuns} decimals={CENTS} /> · Host's own <MoneyList amounts={dtOwn} decimals={CENTS} />
+            </span>
+          ) : (
+            "network transfer"
+          )
+        }
+      />
+      <StatTile tone="warn" label="Unallocated" loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.shared.unallocated)} decimals={CENTS} />} unit={`${ratios(paid, (p) => ratio(p.shared.unallocated, p.all.total)) ?? "–"} of host cost · no Run reserved it`} />
+      <StatTile
+        label="Utilisation"
+        loading={loading}
+        value={ratios(paid, utilisation) ?? "–"}
+        unit={
+          <Tooltip content={UTILISATION_NOTE}>
+            <span data-utilisation-basis>charged to Runs ÷ host cost · compute and block storage</span>
+          </Tooltip>
+        }
+      />
     </div>
   );
 }
@@ -109,50 +149,55 @@ const money = (a: string | null, currency: string) => (a == null ? <span classNa
 const PAID_COLS: Column<PaidRow>[] = [
   { key: "family", header: "", cell: (r) => (r.total ? <strong>Total</strong> : r.label), lead: true },
   { key: "runs", header: "Runs", cell: (r) => money(r.paid.runs, r.currency), align: "right", mono: true, width: 76 },
-  { key: "unallocated", header: "Unallocated", cell: (r) => money(r.paid.unallocated, r.currency), align: "right", mono: true, width: 100 },
+  { key: "unallocated", header: "Unallocated / host's own", cell: (r) => money(r.paid.unallocated, r.currency), align: "right", mono: true, width: 120 },
   { key: "total", header: "Total", cell: (r) => (r.total ? <strong>{money(r.paid.total, r.currency)}</strong> : money(r.paid.total, r.currency)), align: "right", mono: true, width: 80 },
 ];
 
-/** Charged to Runs vs unallocated of one family, as a bar: Runs in the family's colour, unallocated its faded shade. */
+/** Charged to Runs vs the rest of one family, as a bar: Runs in the family's colour, the rest (unallocated, or for data transfer the host's own) its faded shade. */
 function FamilySplit({ family, paid, currency }: { family: string; paid: Paid; currency: string }) {
   const color = familyColor(family);
   const label = familyLabel(family);
+  const own = ownPartLabel(family);
   const shares = partShares([Number(paid.runs ?? 0), Number(paid.unallocated ?? 0)]);
   return (
     <div className="stack stack-tight" data-family-split={family}>
       <div className="row">
         <ColorKey color={color}>{label}</ColorKey>
         <span className="secondary">
-          {shares[0]!.label || "0%"} charged to Runs · {shares[1]!.label || "0%"} unallocated
+          {shares[0]!.label || "0%"} charged to Runs · {shares[1]!.label || "0%"} {own}
         </span>
       </div>
       <PartBar
-        label={`${label}: charged to Runs vs unallocated`}
+        label={`${label}: charged to Runs vs ${own}`}
         parts={[
           { label: `${label} · runs`, value: Number(paid.runs ?? 0), color, text: formatMoney(paid.runs, currency) },
-          { label: `${label} · unallocated`, value: Number(paid.unallocated ?? 0), color: fadedCss(color), text: formatMoney(paid.unallocated, currency) },
+          { label: `${label} · ${own}`, value: Number(paid.unallocated ?? 0), color: fadedCss(color), text: formatMoney(paid.unallocated, currency) },
         ]}
       />
     </div>
   );
 }
 
-/** Who paid for the host time, per currency: Runs or nobody, Compute and Block storage apart, then each family's split as a bar. */
+/** Who paid for the host, per currency: Runs or no Run, per host-tied family, then each family's split as a bar. */
 export function WhoPaidCard({ paid, loading }: { paid: WhoPaid[]; loading: boolean }) {
   const rows: PaidRow[] = paid.flatMap((p) => [
-    { key: `${p.currency}:compute`, label: <ColorKey color={COMPUTE_COLOR}>{familyLabel(COMPUTE)}</ColorKey>, currency: p.currency, paid: p.compute, total: false },
-    { key: `${p.currency}:block-storage`, label: <ColorKey color={BS_COLOR}>{familyLabel(BLOCK_STORAGE)}</ColorKey>, currency: p.currency, paid: p.blockStorage, total: false },
+    ...FAMILY_PARTS.filter((f) => f.of(p).total != null || f.family === COMPUTE || f.family === BLOCK_STORAGE).map((f) => ({
+      key: `${p.currency}:${f.family}`,
+      label: <ColorKey color={familyColor(f.family)}>{familyLabel(f.family)}</ColorKey>,
+      currency: p.currency,
+      paid: f.of(p),
+      total: false,
+    })),
     { key: `${p.currency}:total`, label: "Total", currency: p.currency, paid: p.all, total: true },
   ]);
   return (
-    <Card title="Who paid" subtitle="Runs vs nobody, per family" className="who-paid" flush>
+    <Card title="Who paid" subtitle="Runs vs idle time (unallocated) or, for data transfer, the host's own traffic" className="who-paid" flush>
       <Table columns={PAID_COLS} rows={rows} rowKey={(r) => r.key} loading={loading} loadingRows={3} empty="No host time recorded in this range." dense minWidth={340} />
       <div className="stack who-paid-split">
         {paid.map((p) => (
           <div key={p.currency} className="stack stack-tight">
             {paid.length > 1 && <span className="secondary">{p.currency}</span>}
-            {p.compute.total != null && <FamilySplit family={COMPUTE} paid={p.compute} currency={p.currency} />}
-            {p.blockStorage.total != null && <FamilySplit family={BLOCK_STORAGE} paid={p.blockStorage} currency={p.currency} />}
+            {FAMILY_PARTS.map((f) => (f.of(p).total != null ? <FamilySplit key={f.family} family={f.family} paid={f.of(p)} currency={p.currency} /> : null))}
           </div>
         ))}
       </div>
