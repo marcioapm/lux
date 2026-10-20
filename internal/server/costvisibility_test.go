@@ -266,6 +266,59 @@ func TestHostCostDataTransferRunsAndOwn(t *testing.T) {
 	}
 }
 
+// Pool cost, data transfer: idle is the hosts' own traffic; hostSeries and
+// hosts carry the Runs' transfer as allocated, per bucket and per host,
+// currencies apart; totals are unchanged (Run rows, as before). A tenant on
+// a platform pool still gets no host time.
+func TestPoolCostDataTransferRunsAndOwn(t *testing.T) {
+	s, keys, hour := transferFixture(t)
+	timeOf := func(rows []PoolHostTime) []string {
+		var out []string
+		for _, r := range rows {
+			at := "host"
+			if r.At != nil {
+				at = fmt.Sprintf("%+d", int(r.At.Sub(hour).Hours()))
+			}
+			if r.Family == familyDataTransfer {
+				out = append(out, fmt.Sprintf("%s%s %s %s/%s", at, r.HostID, r.Currency, r.Allocated, r.Unallocated))
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	for _, c := range []struct {
+		key, path, idle, totals string
+		series, hosts           []string
+	}{
+		{"a", "/v1/pools/own/cost?since=6h", "map[block-storage USD:0.01 compute USD:0.1 data-transfer USD:0.005]", "map[EUR:0.5 USD:1.1]",
+			[]string{"+0 EUR 0.5/0", "+0 USD 0.03/0.005", "+1 USD 0.04/0"}, []string{"hostha EUR 0.5/0", "hostha USD 0.07/0.005"}},
+		{"op", "/v1/pools/shared/cost?owner=platform&since=6h", "map[block-storage USD:0.002 compute USD:0.25 data-transfer USD:0.01]", "map[EUR:0.05 USD:0.47]",
+			[]string{"+0 USD 0.07/0.01"}, []string{"hosthb-shared USD 0.07/0.01"}},
+	} {
+		var body costBody
+		if code := getJSON(t, s, keys[c.key], c.path, &body); code != http.StatusOK {
+			t.Fatalf("%s %s: %d", c.key, c.path, code)
+		}
+		if got := fmt.Sprint(idleOf(body.Idle)); got != c.idle {
+			t.Errorf("%s %s idle %s, want %s", c.key, c.path, got, c.idle)
+		}
+		if got := fmt.Sprint(money(body.Totals)); got != c.totals {
+			t.Errorf("%s %s totals %s, want %s", c.key, c.path, got, c.totals)
+		}
+		if got := timeOf(body.HostSeries); !slices.Equal(got, c.series) {
+			t.Errorf("%s %s hostSeries %v, want %v", c.key, c.path, got, c.series)
+		}
+		if got := timeOf(body.Hosts); !slices.Equal(got, c.hosts) {
+			t.Errorf("%s %s hosts %v, want %v", c.key, c.path, got, c.hosts)
+		}
+	}
+	var b costBody
+	getJSON(t, s, keys["b"], "/v1/pools/shared/cost?owner=platform&since=6h", &b)
+	if len(b.Idle) != 0 || len(b.Hosts) != 0 || len(b.HostSeries) != 0 {
+		t.Errorf("b reads a platform pool's host time: %v %v %v", b.Idle, b.Hosts, b.HostSeries)
+	}
+}
+
 // Host cost: hours per family; the owner tenant of a host in its own pool
 // reads its unallocated; rates carry their family (operators).
 func TestHostCostPerFamily(t *testing.T) {

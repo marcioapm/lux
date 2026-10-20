@@ -1789,7 +1789,7 @@ components:
             - array
             - "null"
         idle:
-          description: "Host time no Run reserved, per family and currency. Not part of totals. Present (maybe empty) exactly when the reader may see the pool's host time: operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."
+          description: "Host time no Run reserved, per family and currency (for data-transfer, the hosts' own traffic). Not part of totals. Present (maybe empty) exactly when the reader may see the pool's host time: operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."
           items:
             $ref: "#/components/schemas/PoolIdle"
           type: array
@@ -1839,7 +1839,7 @@ components:
       additionalProperties: false
       properties:
         allocated:
-          description: Host time reserved by Runs (their compute cost comes from it).
+          description: "Charged to Runs: host time they reserved (compute, block-storage, public-ip); for data-transfer, the transfer of the Runs on the pool's hosts, every tenant's."
           type: string
         at:
           format: date-time
@@ -1858,7 +1858,7 @@ components:
           format: double
           type: number
         unallocated:
-          description: "Host time no Run reserved: idle."
+          description: "No Run's: idle host time (compute, block-storage, public-ip); for data-transfer, the hosts' own traffic."
           type: string
         volumes:
           description: "Per host: its recorded block-storage volumes, as GET /v1/hosts has them; absent while not known and for a host that registered itself."
