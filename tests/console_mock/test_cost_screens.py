@@ -66,7 +66,7 @@ def test_pool_cost_tab_splits_host_cost_by_family_and_who_paid(page, mock_consol
         "Public IPv4 · runs",
         "Public IPv4 · unallocated",
         "Data transfer · runs",
-        "Data transfer · Host's own",
+        "Data transfer · Hosts' own",
     ], legend
 
     # Who paid: each family apart, then their total.
