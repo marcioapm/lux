@@ -48,7 +48,7 @@ export function HostCost({ host, range, operator }: { host: Host; range: TimeRan
       <HostCostChart
         charts={view?.charts ?? []}
         title={visible ? `Host cost per ${daily ? "day" : "hour"}` : `Charged to your Runs per ${daily ? "day" : "hour"}`}
-        subtitle={visible ? `charged to Runs vs unallocated (data transfer: the host's own traffic), ${per}, over ${since}` : `allocated to your Runs, ${per}, over ${since}`}
+        subtitle={visible ? `charged to Runs vs unallocated, ${per}, over ${since} · data transfer's rest is the host's own traffic` : `allocated to your Runs, ${per}, over ${since}`}
         loading={!c}
         step={daily ? "day" : "hour"}
       />
