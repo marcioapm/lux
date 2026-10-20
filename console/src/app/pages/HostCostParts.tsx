@@ -27,8 +27,9 @@ const ratios = (w: WhoPaid[], f: (p: WhoPaid) => number | null) => {
 };
 
 interface HostCostTilesProps {
-  /** "Host cost (7d)", "Host cost (24h)". */
+  /** What data transfer's part no Run was charged is called: "Host's own", "Hosts' own". */
   ownLabel?: string;
+  /** "Host cost (7d)", "Host cost (24h)". */
   since: string;
   paid: WhoPaid[];
   /** Host-hours in the range; null when not known. */
@@ -141,7 +142,7 @@ interface PaidRow {
   label: ReactNode;
   currency: string;
   paid: Paid;
-  /** The currency's Total row (both families), drawn bold. */
+  /** The currency's Total row (every family), drawn bold. */
   total: boolean;
 }
 
