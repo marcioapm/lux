@@ -485,11 +485,12 @@ test("host Cost tab, an operator over every tenant on a tenant's host: no ?tenan
 });
 
 test("host Cost tab, a tenant's host in a platform pool: luxd omits unallocated, so only what its Runs were charged", async () => {
-  const p = await render(ec2Host(), "tenant", "http://localhost/hosts/h1?tab=cost", runsOnlyCost);
+  const p = await render(ec2Host({ netClasses: { internet: { rx: 2048, tx: 4096 } } }), "tenant", "http://localhost/hosts/h1?tab=cost", runsOnlyCost);
   try {
     await until(() => tiles(p.el).length === 5, "the five tiles");
     expect(tiles(p.el)).toEqual(RUNS_ONLY_TILES);
     expect(p.el.querySelector(".host-cost")!.textContent).not.toMatch(/nallocated|Utilisation/);
+    expect(cardTitles(p.el)).not.toContain("Host's own network");
     expect(cardTitles(p.el)).toEqual(["Charged to your Runs per hour"]);
   } finally {
     await p.done();

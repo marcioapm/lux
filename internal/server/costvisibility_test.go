@@ -313,7 +313,9 @@ func TestPoolCostDataTransferRunsAndOwn(t *testing.T) {
 		}
 	}
 	var b costBody
-	getJSON(t, s, keys["b"], "/v1/pools/shared/cost?owner=platform&since=6h", &b)
+	if code := getJSON(t, s, keys["b"], "/v1/pools/shared/cost?owner=platform&since=6h", &b); code != http.StatusOK {
+		t.Fatalf("b pool cost: %d", code)
+	}
 	if len(b.Idle) != 0 || len(b.Hosts) != 0 || len(b.HostSeries) != 0 {
 		t.Errorf("b reads a platform pool's host time: %v %v %v", b.Idle, b.Hosts, b.HostSeries)
 	}

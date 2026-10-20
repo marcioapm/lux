@@ -209,6 +209,21 @@ test("pool Cost tab, a tenant on a platform pool: its Runs' figures only, no una
   }
 });
 
+test("pool Cost tab: compute-only host series keeps Compute and Block storage in Who paid", async () => {
+  const cost = { ...withHostTime, hostSeries: withHostTime.hostSeries!.filter((r) => r.family === "compute") };
+  const p = await render("operator", PLATFORM, cost);
+  try {
+    await until(() => rowsOf(p.card("Who paid")).length === 3, "the Who paid rows");
+    expect(rowsOf(p.card("Who paid"))).toEqual([
+      ["Compute", "$6.61", "$6.27", "$12.88"],
+      ["Block storage", "–", "–", "–"],
+      ["Total", "$6.61", "$6.27", "$12.88"],
+    ]);
+  } finally {
+    await p.done();
+  }
+});
+
 test("pool Cost tab while loading: skeleton tiles, no figure, no zero", async () => {
   const p = await render("operator", PLATFORM, new Promise<never>(() => {}));
   try {
