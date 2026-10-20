@@ -1,7 +1,7 @@
 // The pieces the pool and host Cost tabs share: the tiles, the host-cost
 // chart and the "who paid" card, built from hostCostView.ts's figures.
 import type { ReactNode } from "react";
-import { Card, CENTS, ColorKey, EmptyState, fadedCss, familyColor, formatMoney, ListPriceNote, meterText, Money, MoneyList, PartBar, partShares, StatTile, Table, TimeSeriesChart, Tooltip, type Column, type MoneyAmount } from "@lux/design-system";
+import { Card, CENTS, ColorKey, compareMoney, EmptyState, fadedCss, familyColor, formatMoney, ListPriceNote, meterText, Money, MoneyList, PartBar, partShares, StatTile, Table, TimeSeriesChart, Tooltip, type Column, type MoneyAmount } from "@lux/design-system";
 import { BLOCK_STORAGE, COMPUTE, ratio } from "./costView.ts";
 import { DATA_TRANSFER, familyLabel, ownPartLabel, perHour, PUBLIC_IP, utilisation, type HostChart, type Paid, type WhoPaid } from "./hostCostView.ts";
 
@@ -68,7 +68,7 @@ export function HostCostTiles({ since, ownLabel = "Host's own", paid, hours, vol
     );
   }
   const dtRuns = pick(paid, (p) => p.dataTransfer.runs);
-  const dtOwn = pick(paid, (p) => p.dataTransfer.unallocated);
+  const dtOwn = pick(paid, (p) => p.dataTransfer.unallocated).filter((m) => compareMoney(m.amount, "0") !== 0);
   return (
     <div className="grid grid-stats" data-host-cost-tiles="all">
       <StatTile lead label={`Host cost (${since})`} loading={loading} value={<MoneyList amounts={pick(paid, (p) => p.all.total)} decimals={CENTS} />} unit={<><ListPriceNote />{hoursText ? ` · ${hoursText}` : ""}</>} />
@@ -83,7 +83,7 @@ export function HostCostTiles({ since, ownLabel = "Host's own", paid, hours, vol
         unit={
           dtRuns.length || dtOwn.length ? (
             <span data-transfer-parts>
-              Runs <MoneyList amounts={dtRuns} decimals={CENTS} /> · {ownLabel} <MoneyList amounts={dtOwn} decimals={CENTS} />
+              Runs <MoneyList amounts={dtRuns} decimals={CENTS} />{dtOwn.length > 0 && <> · {ownLabel} <MoneyList amounts={dtOwn} decimals={CENTS} /></>}
             </span>
           ) : (
             "network transfer"

@@ -377,6 +377,17 @@ test("host Cost tab: a non-zero share under 1% reads <1%, never 0%", async () =>
   }
 });
 
+test("host Cost tab: zero own transfer is hidden", async () => {
+  const cost = { ...opCost, hours: opCost.hours.map((h) => h.family === "data-transfer" ? { ...h, unallocated: "0" } : h) };
+  const p = await render(ec2Host({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tab=cost", cost);
+  try {
+    await until(() => tiles(p.el).length === 7, "the seven tiles");
+    expect(tileUnit(p.el, "Data transfer")).toBe("Runs $0.20");
+  } finally {
+    await p.done();
+  }
+});
+
 test("host Cost tab: the host's own network bytes per class under the tiles, from the host's netClasses", async () => {
   const p = await render(ec2Host({ platform: true, tenant: "", netClasses: { internet: { rx: 2048, tx: 5 * 1024 * 1024 }, local: { rx: 0, tx: 0 } } }), "operator", "http://localhost/hosts/h1?tab=cost", opCost);
   try {
