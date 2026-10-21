@@ -49,6 +49,13 @@ func feedEvent(t *testing.T, s *Server, ctx context.Context, tenant string, runI
 	return id
 }
 
+// feedUnmatchedEvents inserts settled state events of Run B (team=y).
+func feedUnmatchedEvents(t *testing.T, s *Server, ctx context.Context, n int) {
+	t.Helper()
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data, created_at)
+		SELECT 't1', $1, 1, 'state', '{}', now() - interval '1 hour' FROM generate_series(1, $2::int)`, feedRunB, n)
+}
+
 func ptr[T any](v T) *T { return &v }
 
 // feedBody is GET target through the route, follow=false, as key.
@@ -268,8 +275,7 @@ func TestFeedLabelFilterServerEvents(t *testing.T) {
 // it.
 func TestFeedWatermarkPassesUnmatchedEvents(t *testing.T) {
 	s, ctx, key, _, start := feedFixture(t)
-	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data, created_at)
-		SELECT 't1', $1, 1, 'state', '{}', now() - interval '1 hour' FROM generate_series(1, $2::int)`, feedRunB, feedPage+100)
+	feedUnmatchedEvents(t, s, ctx, feedPage+100)
 	var lastSkipped int64
 	systemScan(t, s, `SELECT max(id) FROM run_events`, nil, &lastSkipped)
 	match := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "state", `{}`, "2026-01-02T03:04:05Z")
@@ -413,24 +419,20 @@ func TestFeedLastIsBounded(t *testing.T) {
 	s, ctx, key, _, _ := feedFixture(t)
 	const at = "2026-01-02T03:04:05Z"
 	old := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
-	unmatched := func(n int) {
-		execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data, created_at)
-			SELECT 't1', $1, 1, 'state', '{}', now() - interval '1 hour' FROM generate_series(1, $2::int)`, feedRunB, n)
-	}
 	filters := []string{label("team=x"), "type=exited", label("team=x") + "&type=exited"}
 	last := func(n int, q string) []int64 {
 		return feedIDs(t, feedBody(t, s, key, fmt.Sprintf("/v1/events?follow=false&last=%d&%s", n, q)))
 	}
-	unmatched(documentedScan - 1)
+	feedUnmatchedEvents(t, s, ctx, documentedScan-1)
 	for _, q := range filters {
 		wantIDs(t, "newest documentedScan "+q, last(1, q), old)
 	}
-	unmatched(1)
+	feedUnmatchedEvents(t, s, ctx, 1)
 	for _, q := range filters {
 		wantIDs(t, "past documentedScan "+q, last(1, q))
 	}
 	n1 := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
-	unmatched(3)
+	feedUnmatchedEvents(t, s, ctx, 3)
 	n2 := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
 	n3 := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
 	for _, q := range filters {
