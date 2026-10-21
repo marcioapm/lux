@@ -304,7 +304,7 @@ func TestPrefixesFailedRefreshBacksOff(t *testing.T) {
 	_, err1 := p.Prefixes(context.Background(), template)
 	now = now.Add(time.Minute - time.Second)
 	_, err2 := p.Prefixes(context.Background(), template)
-	if err1 == nil || err2 == nil || err2.Error() != err1.Error() || count() != 1 {
+	if err1 == nil || err2 == nil || err2.Error() != err1.Error() || !strings.Contains(err2.Error(), "503") || count() != 1 {
 		t.Fatalf("cold: errors %v / %v, %d requests; want the same error and one request", err1, err2, count())
 	}
 	now = now.Add(time.Second)
@@ -332,5 +332,53 @@ func TestPrefixesFailedRefreshBacksOff(t *testing.T) {
 	now = now.Add(time.Minute)
 	if _, err := p.Prefixes(context.Background(), template); err != nil || count() != 5 {
 		t.Fatalf("warm retry: %v, %d requests, want 5", err, count())
+	}
+}
+
+// A caller that gives up mid-fetch is not the source failing: the next
+// caller fetches at once.
+func TestPrefixesCancelledCallIsNotABackoff(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"prefixes":[{"ip_prefix":"192.0.2.0/24","region":"eu-north-1","service":"EC2"}]}`)
+	}))
+	defer fake.Close()
+	t.Setenv("LUX_IPRANGES_URL", fake.URL)
+	p := New("", discard)
+	template := json.RawMessage(`{"region":"eu-north-1"}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := p.Prefixes(ctx, template); err == nil {
+		t.Fatal("cancelled call succeeded")
+	}
+	if _, err := p.Prefixes(context.Background(), template); err != nil {
+		t.Fatalf("after a cancelled call: %v", err)
+	}
+}
+
+// The retry spacing runs from the end of the failed fetch, so a fetch that
+// hangs for its whole timeout still waits a full minute before the next.
+func TestPrefixesBackoffCountsFromFailure(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	p := New("", discard)
+	now := time.Now()
+	p.now = func() time.Time { return now }
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		now = now.Add(30 * time.Second) // the fetch hangs half a minute, then fails
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer fake.Close()
+	t.Setenv("LUX_IPRANGES_URL", fake.URL)
+	template := json.RawMessage(`{"region":"eu-north-1"}`)
+	_, _ = p.Prefixes(context.Background(), template)
+	now = now.Add(45 * time.Second)
+	_, _ = p.Prefixes(context.Background(), template)
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("%d requests 45s after a failure that ended 75s after it began; want 1", calls)
 	}
 }

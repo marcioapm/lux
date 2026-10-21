@@ -237,7 +237,8 @@ func (p *Provider) Prefixes(ctx context.Context, template json.RawMessage) (serv
 				return server.ProviderPrefixes{}, err
 			}
 		} else if err != nil {
-			p.prefixFailedAt, p.prefixErr = now, err
+			// From the failure, not the attempt: a hung fetch can take the full client timeout.
+			p.prefixFailedAt, p.prefixErr = p.now(), err
 		} else {
 			p.prefixFailedAt, p.prefixErr = time.Time{}, nil
 		}
