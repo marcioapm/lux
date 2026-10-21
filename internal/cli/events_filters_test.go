@@ -33,7 +33,15 @@ func TestEventsAllFilters(t *testing.T) {
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("requests:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	if code, _, errOut := lux(srv.URL, "events", "run_1", "--type", "state"); code == 0 || !strings.Contains(errOut, "--label and --type go with --all") {
-		t.Fatalf("without --all: exit %d, stderr %q", code, errOut)
+	// Refused when given at all, an empty value too.
+	got = nil
+	for _, args := range [][]string{{"--type", "state"}, {"--type="}, {"-l", ""}} {
+		args = append([]string{"events", "run_1"}, args...)
+		if code, _, errOut := lux(srv.URL, args...); code == 0 || !strings.Contains(errOut, "--label and --type go with --all") {
+			t.Fatalf("%v without --all: exit %d, stderr %q", args, code, errOut)
+		}
+	}
+	if len(got) != 0 {
+		t.Fatalf("requests without --all: %v", got)
 	}
 }

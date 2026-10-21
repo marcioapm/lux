@@ -662,7 +662,7 @@ and of those types.`,
 			if all == (len(args) == 1) {
 				return fmt.Errorf("give a run, or --all")
 			}
-			if !all && (len(labels) > 0 || len(types) > 0) {
+			if !all && (cmd.Flags().Changed("label") || cmd.Flags().Changed("type")) {
 				return fmt.Errorf("--label and --type go with --all")
 			}
 			return nil
