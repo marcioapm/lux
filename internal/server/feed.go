@@ -187,10 +187,10 @@ func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput
 	}
 }
 
-// feedTenant is the condition binding run_events e to tenant when it is not
-// "" (the principal's tenant, as for RLS), else none. RLS's tenant-or-system
-// predicate is no index condition: without this, a tenant's scan walks
-// every other tenant's events in id order. With it, the scan reads
+// feedTenant binds run_events to a non-empty principal tenant, else returns
+// no condition. RLS's tenant-or-system predicate is no index condition:
+// without this, a tenant's scan walks every other tenant's events in id
+// order. With it, the scan reads
 // run_events_tenant (tenant_id, id).
 func feedTenant(tenant string, arg func(any) string) string {
 	if tenant == "" {
@@ -199,10 +199,9 @@ func feedTenant(tenant string, arg func(any) string) string {
 	return "tenant_id = " + arg(tenant)
 }
 
-// feedLastSQL is the watermark below the $1 newest events matching f: just
-// before the oldest of them, or the newest event's id if none; of tenant
-// only when it is not "". With a filter it looks only among the
-// feedLastScan newest events.
+// feedLastSQL is the watermark just before the $1 newest events matching f,
+// or the newest event's id if none. A non-empty tenant restricts both reads.
+// With a filter it looks only among the feedLastScan newest events.
 func feedLastSQL(f feedFilter, tenant string, arg func(any) string) string {
 	where := ""
 	if c := feedTenant(tenant, arg); c != "" {
@@ -264,9 +263,8 @@ func (s *Server) feedWindow(ctx context.Context, p Principal, after int64, f fee
 	return evs, err
 }
 
-// feedWindowSQL reads the $2 events after $1, each with whether it matches
-// f, of tenant only when it is not ""; without a filter, the feed's read as
-// it always was.
+// feedWindowSQL reads the $2 events after $1, each with whether it matches f.
+// A non-empty tenant restricts the window, with or without a filter.
 func feedWindowSQL(f feedFilter, tenant string, arg func(any) string) string {
 	join, data, match := "", "e.data", "true"
 	if !f.none() {
