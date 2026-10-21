@@ -409,6 +409,15 @@ func TestProvisionalNetworkAtRegistration(t *testing.T) {
 	if xmin1 != xmin2 {
 		t.Errorf("an unchanged region catalog was rewritten (xmin %s -> %s)", xmin1, xmin2)
 	}
+	// A changed catalog replaces the row under a new version.
+	var before, after string
+	systemScan(t, s, `SELECT version FROM network_catalog WHERE provider = 'ec2' AND region = 'eu-west-1'`, nil, &before)
+	p.prefixes.RegionPublic = append(slices.Clone(p.prefixes.RegionPublic), "54.72.0.0/15")
+	s.recordNetwork(ctx, false)
+	systemScan(t, s, `SELECT version FROM network_catalog WHERE provider = 'ec2' AND region = 'eu-west-1'`, nil, &after)
+	if after == before {
+		t.Fatalf("a changed region catalog kept version %s", before)
+	}
 
 	netCalls, prefixCalls := len(p.netCalls), p.prefixCalls
 	w := hello(proto.CapProvisionalNet)
@@ -416,9 +425,9 @@ func TestProvisionalNetworkAtRegistration(t *testing.T) {
 		t.Fatalf("hello called the provider: network %d -> %d, prefixes %d -> %d", netCalls, len(p.netCalls), prefixCalls, p.prefixCalls)
 	}
 	nc := w.Network
-	want := catalogEU(p.prefixes.FetchedAt)
-	if nc == nil || !nc.Provisional || !nc.Catalog() || nc.Source != want.Source || nc.FetchedAt == nil || !nc.FetchedAt.Equal(want.FetchedAt) {
-		t.Fatalf("provisional welcome: %+v", nc)
+	want := p.prefixes
+	if nc == nil || !nc.Provisional || !nc.Catalog() || nc.Source != want.Source || nc.FetchedAt == nil || !nc.FetchedAt.Equal(want.FetchedAt) || nc.Version != after {
+		t.Fatalf("provisional welcome: %+v, want version %s", nc, after)
 	}
 	if !slices.Equal(nc.RegionService, want.RegionService) || !slices.Equal(nc.RegionPublic, want.RegionPublic) ||
 		!slices.Equal(nc.ProviderGlobal, want.ProviderGlobal) || !slices.Equal(nc.ProviderGlobalFree, want.ProviderGlobalFree) ||
@@ -434,11 +443,16 @@ func TestProvisionalNetworkAtRegistration(t *testing.T) {
 		t.Fatalf("provisional classes stored: %s", *stored)
 	}
 	provisional := nc.Version
+	settled := *nc
+	settled.Provisional = false
+	if netClassesVersion(settled) == provisional {
+		t.Errorf("provisional version %s equals the same lists' without Provisional", provisional)
+	}
 	if v := heartbeatAckVersion(t, s, "h1"); v != provisional {
 		t.Errorf("ack version %q, want the provisional %q", v, provisional)
 	}
-	if code, got := getRunnerNetwork(t, s, "h1", raw); code != http.StatusOK || !got.Provisional || got.Version != provisional || len(got.RegionPublic) != 1 {
-		t.Errorf("endpoint while undiscovered: %d %+v", code, got)
+	if code, got := getRunnerNetwork(t, s, "h1", raw); code != http.StatusOK || !reflect.DeepEqual(got, *nc) {
+		t.Errorf("endpoint while undiscovered: %d %+v, want the welcome's %+v", code, got, *nc)
 	}
 
 	// A runner without the capability would price its own subnet as zone.
@@ -515,6 +529,16 @@ func TestRecordNetworkWarmsEmptyPoolRegion(t *testing.T) {
 	if n != 0 || p.prefixCalls != 0 {
 		t.Fatalf("narrow pass with nothing missing: %d rows, %d prefix calls", n, p.prefixCalls)
 	}
+	// A host the narrow pass discovers: its region only, no warm-up.
+	execSQL(t, s, ctx, `UPDATE hosts SET registered_at = now() WHERE id = 'h1'`)
+	s.recordNetwork(ctx, true)
+	var regions []string
+	systemScan(t, s, `SELECT array_agg(region ORDER BY region) FROM network_catalog`, nil, &regions)
+	if !slices.Equal(regions, []string{"eu-west-1"}) || p.prefixCalls != 1 {
+		t.Fatalf("narrow pass: regions %v, %d prefix calls; want the host's region once", regions, p.prefixCalls)
+	}
+	execSQL(t, s, ctx, `DELETE FROM network_catalog`)
+	p.prefixCalls = 0
 	s.recordNetwork(ctx, false)
 	rows := map[string]bool{}
 	systemScan(t, s, `SELECT count(*) FROM network_catalog`, nil, &n)
