@@ -269,12 +269,13 @@ const (
 
 // NetworkClasses are the address lists a runner classifies traffic by,
 // built by luxd from what the host's provider says about it. CIDRs, IPv4
-// or IPv6. Precedence is NetClasses' order. With no Local (an older luxd, a
-// host luxd knows nothing about, provisional classes) the runner's own
-// interface subnets are Local; a runner without CapProvisionalNet does so
-// only when Zone is empty too. An address in no list is internet when
-// Catalog() and unknown otherwise: without a catalog "not listed" may well
-// be the provider's, and must not read as internet or as free.
+// or IPv6. Precedence is NetClasses' order. With neither Local nor Zone (an
+// older luxd, a host luxd knows nothing about), or provisional classes, the
+// runner's own interface subnets are Local; a runner without
+// CapProvisionalNet does so only when Zone is empty. An address in no list
+// is internet when Catalog() and unknown otherwise: without a catalog "not
+// listed" may well be the provider's, and must not read as internet or as
+// free.
 type NetworkClasses struct {
 	// Version changes whenever any list does.
 	Version string `json:"version"`
@@ -301,8 +302,8 @@ type NetworkClasses struct {
 }
 
 // CapProvisionalNet is the Hello capability of a runner that fills an empty
-// NetworkClasses.Local from its interface subnets even when Zone is not
-// empty; only such a runner is sent provisional classes.
+// NetworkClasses.Local from its interface subnets for provisional classes
+// even when Zone is not empty; only such a runner is sent them.
 const CapProvisionalNet = "provisional-net"
 
 // Catalog: nc holds a provider catalog, so unlisted addresses are internet.
