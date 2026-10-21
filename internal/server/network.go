@@ -26,10 +26,9 @@ import (
 // catalog is discovered on the provisioner's next tick, not the next check.
 // Until discovery stores any, a runner with CapProvisionalNet gets
 // provisional classes built from its region's stored catalog
-// (network_catalog).
-// A runner gets them in its Welcome; each heartbeat's ack carries their
-// Version, and a runner holding another fetches GET /runner/v1/network. No
-// provider is called on hello or launch.
+// (network_catalog). A runner gets them in its Welcome; each heartbeat's ack
+// carries their Version, and a runner holding another fetches
+// GET /runner/v1/network. No provider is called on hello or launch.
 
 // networkClasses builds a host's lists: Local its own zone's subnets, Zone
 // the rest of its network's, the provider lists as published. Version is a
@@ -84,14 +83,8 @@ func regionCatalog(p ProviderPrefixes) proto.NetworkClasses {
 	return nc
 }
 
-// provisionalClasses are a new host's classes from its region's catalog
-// (network_catalog), before its own network is discovered.
-func provisionalClasses(region proto.NetworkClasses) proto.NetworkClasses {
-	nc := provisionalLists(region)
-	nc.Version = netClassesVersion(nc)
-	return nc
-}
-
+// provisionalLists are a new host's classes from its region's catalog
+// (network_catalog), before its own network is discovered, without Version.
 func provisionalLists(region proto.NetworkClasses) proto.NetworkClasses {
 	region.Local, region.Zone, region.Provisional = nil, slices.Clone(privateRanges), true
 	return region
@@ -105,7 +98,7 @@ func (s *Server) storeRegionCatalog(ctx context.Context, provider, region string
 		return nil
 	}
 	rc := regionCatalog(p)
-	version := provisionalClasses(rc).Version
+	version := netClassesVersion(provisionalLists(rc))
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var stored string
 		err := tx.QueryRow(ctx, `SELECT version FROM network_catalog WHERE provider = $1 AND region = $2`, provider, region).Scan(&stored)
@@ -406,12 +399,9 @@ func (s *Server) hostNetwork(ctx context.Context, tx pgx.Tx, hostID string) (*pr
 		return nil, nil, err
 	}
 	if nc == nil {
-		p, err := provisionalNetwork(ctx, tx, hostID)
-		if err != nil {
+		var err error
+		if nc, err = provisionalNetwork(ctx, tx, hostID); err != nil {
 			return nil, nil, err
-		}
-		if p != nil {
-			nc = p
 		}
 	}
 	return nc, net, nil
