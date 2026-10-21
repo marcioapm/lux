@@ -4936,12 +4936,12 @@ paths:
           schema:
             description: "From after this event id (default: from now)."
             type: string
-        - description: Start with the last N events (at most 500), instead of from now. With label or type, the last N events that match.
+        - description: "Start with the last N events (at most 500), instead of from now. With label or type: the newest N matching events among the most recent 20,000 events; fewer if fewer match there."
           explode: false
           in: query
           name: last
           schema:
-            description: Start with the last N events (at most 500), instead of from now. With label or type, the last N events that match.
+            description: "Start with the last N events (at most 500), instead of from now. With label or type: the newest N matching events among the most recent 20,000 events; fewer if fewer match there."
             format: int64
             type: integer
         - description: "false: end after what there is now."

@@ -274,8 +274,41 @@ func TestFeedFiltersKeepTenants(t *testing.T) {
 	for _, q := range []string{label("team=x"), "type=state", label("team=x") + "&type=state"} {
 		wantIDs(t, "t1 "+q, feedQuery(t, s, key, start, q), a)
 		wantIDs(t, "t2 "+q, feedQuery(t, s, key2, start, q), o)
+		// t2's match is the newest: last=1 counts t1's own.
+		target := "/v1/events?follow=false&last=1&" + q
+		wantIDs(t, "t1 last "+q, feedIDs(t, feedBody(t, s, key, target)), a)
+		wantIDs(t, "t2 last "+q, feedIDs(t, feedBody(t, s, key2, target)), o)
 	}
-	q := "/v1/events?follow=false&last=5&" + label("team=x")
-	wantIDs(t, "t1 last", feedIDs(t, feedBody(t, s, key, q)), a)
-	wantIDs(t, "t2 last", feedIDs(t, feedBody(t, s, key2, q)), o)
+}
+
+// last=N with a filter looks among the feedLastScan newest events only: a
+// match just inside them starts the stream, one just outside does not.
+func TestFeedLastIsBounded(t *testing.T) {
+	s, ctx, key, _, _ := feedFixture(t)
+	const at = "2026-01-02T03:04:05Z"
+	old := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
+	unmatched := func(n int) {
+		execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data, created_at)
+			SELECT 't1', $1, 1, 'state', '{}', now() - interval '1 hour' FROM generate_series(1, $2::int)`, feedRunB, n)
+	}
+	filters := []string{label("team=x"), "type=exited", label("team=x") + "&type=exited"}
+	last := func(n int, q string) []int64 {
+		return feedIDs(t, feedBody(t, s, key, fmt.Sprintf("/v1/events?follow=false&last=%d&%s", n, q)))
+	}
+	unmatched(feedLastScan - 1)
+	for _, q := range filters {
+		wantIDs(t, "newest feedLastScan "+q, last(1, q), old)
+	}
+	unmatched(1)
+	for _, q := range filters {
+		wantIDs(t, "past feedLastScan "+q, last(1, q))
+	}
+	n1 := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
+	unmatched(3)
+	n2 := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
+	n3 := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
+	for _, q := range filters {
+		wantIDs(t, "last=2 "+q, last(2, q), n2, n3)
+		wantIDs(t, "last=5 "+q, last(5, q), n1, n2, n3)
+	}
 }

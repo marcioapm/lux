@@ -16,7 +16,7 @@ import (
 type feedInput struct {
 	TenantQuery
 	After       string   `query:"after" doc:"From after this event id (default: from now)."`
-	Last        int      `query:"last" doc:"Start with the last N events (at most 500), instead of from now. With label or type, the last N events that match."`
+	Last        int      `query:"last" doc:"Start with the last N events (at most 500), instead of from now. With label or type: the newest N matching events among the most recent 20,000 events; fewer if fewer match there."`
 	Follow      string   `query:"follow" doc:"false: end after what there is now."`
 	Label       []string `query:"label,explode" doc:"Only events of Runs with this label (key=value); repeat to require several. A server's event matches through the Run it is attached to (runId); one attached to no Run never matches."`
 	Type        string   `query:"type" doc:"Only events of these types (comma-separated)." example:"state,exited,input.consumed"`
@@ -61,6 +61,13 @@ func (f feedFilter) sql(arg func(any) string) (labels, types []string) {
 	return labels, types
 }
 
+// match is the filter as one condition, false for an event of no Run when
+// labels are given (r.labels is NULL).
+func (f feedFilter) match(arg func(any) string) string {
+	labels, types := f.sql(arg)
+	return "coalesce(" + strings.Join(append(labels, types...), " AND ") + ", false)"
+}
+
 // feedSettle: event ids are taken when an event is written, not when its
 // transaction commits, so a lower id can become visible after a higher
 // one. The feed re-reads events this young on every read (sending each
@@ -73,6 +80,12 @@ const feedSettle = 10 * time.Second
 const feedFallback = 5 * time.Second
 
 const feedPage = 500
+
+// feedLastScan bounds the work of last=N with a filter, done before the
+// stream's headers are sent: it looks among this many newest events only.
+// Without an index on labels or types, finding N rare matches (or none)
+// would otherwise read the whole table.
+const feedLastScan = 20000
 
 // feedRead reads one window of the feed; a test replaces it to watch the
 // watermark.
@@ -180,28 +193,20 @@ func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput
 }
 
 // feedLastSQL is the watermark below the $1 newest events matching f: just
-// before the oldest of them, or the newest event's id if none.
+// before the oldest of them, or the newest event's id if none. With a
+// filter it looks only among the feedLastScan newest events.
 func feedLastSQL(f feedFilter, arg func(any) string) string {
 	if f.none() {
 		return `SELECT coalesce(min(id) - 1, (SELECT coalesce(max(id), 0) FROM run_events))
 				FROM (SELECT id FROM run_events ORDER BY id DESC LIMIT $1) x`
 	}
-	labels, types := f.sql(arg)
-	if len(labels) == 0 {
-		return `SELECT coalesce(min(id) - 1, (SELECT coalesce(max(id), 0) FROM run_events))
-				FROM (SELECT e.id FROM run_events e WHERE ` + strings.Join(types, " AND ") + ` ORDER BY e.id DESC LIMIT $1) x`
-	}
-	// Runs first: each matching Run's newest N by run_events_run (run_id,
-	// id), then the newest N of those. A join ordered by e.id walks back
-	// through every event until N match: the whole table when fewer do.
-	// Run-less events never match a label, so an inner join loses none.
-	of := ""
-	if len(types) > 0 {
-		of = " AND " + strings.Join(types, " AND ")
+	join := ""
+	if len(f.labels) > 0 {
+		join = " LEFT JOIN runs r ON r.id = e.run_id"
 	}
 	return `SELECT coalesce(min(id) - 1, (SELECT coalesce(max(id), 0) FROM run_events))
-				FROM (SELECT e.id FROM runs r CROSS JOIN LATERAL (SELECT e.id FROM run_events e WHERE e.run_id = r.id` + of + `
-					ORDER BY e.id DESC LIMIT $1) e WHERE ` + strings.Join(labels, " AND ") + ` ORDER BY e.id DESC LIMIT $1) x`
+				FROM (SELECT e.id FROM (SELECT e.id, e.run_id, e.type FROM run_events e ORDER BY e.id DESC LIMIT ` + strconv.Itoa(feedLastScan) + `) e` + join + `
+					WHERE ` + f.match(arg) + ` ORDER BY e.id DESC LIMIT $1) x`
 }
 
 func (s *Server) feedAfter(ctx context.Context, p Principal, after int64) ([]FeedEvent, error) {
@@ -246,15 +251,14 @@ func (s *Server) feedWindow(ctx context.Context, p Principal, after int64, f fee
 // feedWindowSQL reads the $2 events after $1, each with whether it matches
 // f; without a filter, the feed's read as it always was.
 func feedWindowSQL(f feedFilter, arg func(any) string) string {
-	labels, types := f.sql(arg)
 	join, data, match := "", "e.data", "true"
 	if !f.none() {
-		if len(labels) > 0 {
+		if len(f.labels) > 0 {
 			// A server's event with no Run joins no row: r.labels is NULL.
 			join = " LEFT JOIN runs r ON r.id = e.run_id"
 		}
 		// The payload of an event that is not sent is not read.
-		join += " CROSS JOIN LATERAL (SELECT coalesce(" + strings.Join(append(labels, types...), " AND ") + ", false) AS match) m"
+		join += " CROSS JOIN LATERAL (SELECT " + f.match(arg) + " AS match) m"
 		data, match = "CASE WHEN m.match THEN e.data END", "m.match"
 	}
 	return `SELECT e.id, coalesce(e.server_id, ''), e.epoch, e.type, ` + data + `, e.created_at, e.run_id, t.name, ` + match + `
