@@ -203,7 +203,11 @@ func feedLastSQL(f feedFilter, tenant string, arg func(any) string) string {
 	}
 	join := ""
 	if len(f.labels) > 0 {
-		join = " LEFT JOIN runs r ON r.id = e.run_id"
+		// A primary-key lookup per scanned event, whatever the statistics:
+		// OFFSET 0 keeps the planner from flattening it into a join that,
+		// on an unanalyzed run_events, rescans a materialized runs. No Run:
+		// r.labels is NULL, as with a LEFT JOIN.
+		join = " LEFT JOIN LATERAL (SELECT r.labels FROM runs r WHERE r.id = e.run_id OFFSET 0) r ON true"
 	}
 	// RLS's tenant-or-system predicate is no index condition: a tenant's
 	// scan would otherwise walk every other tenant's newer events.
