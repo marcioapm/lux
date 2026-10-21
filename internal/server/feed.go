@@ -48,24 +48,19 @@ func (in *feedInput) filter() feedFilter {
 
 func (f feedFilter) none() bool { return len(f.labels) == 0 && len(f.types) == 0 }
 
-// sql is the filter as SQL conditions, on runs r (labels) and on
-// run_events e (types). arg binds a value and returns its placeholder.
-func (f feedFilter) sql(arg func(any) string) (labels, types []string) {
+// match is the filter as one condition on runs r and run_events e, false
+// for an event of no Run when labels are given (r.labels is NULL).
+// arg binds a value and returns its placeholder.
+func (f feedFilter) match(arg func(any) string) string {
+	var conditions []string
 	for _, l := range f.labels {
 		k, v, _ := strings.Cut(l, "=")
-		labels = append(labels, "r.labels @> "+arg(map[string]string{k: v}))
+		conditions = append(conditions, "r.labels @> "+arg(map[string]string{k: v}))
 	}
 	if len(f.types) > 0 {
-		types = append(types, "e.type = ANY("+arg(f.types)+")")
+		conditions = append(conditions, "e.type = ANY("+arg(f.types)+")")
 	}
-	return labels, types
-}
-
-// match is the filter as one condition, false for an event of no Run when
-// labels are given (r.labels is NULL).
-func (f feedFilter) match(arg func(any) string) string {
-	labels, types := f.sql(arg)
-	return "coalesce(" + strings.Join(append(labels, types...), " AND ") + ", false)"
+	return "coalesce(" + strings.Join(conditions, " AND ") + ", false)"
 }
 
 // feedSettle: event ids are taken when an event is written, not when its
