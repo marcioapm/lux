@@ -396,7 +396,11 @@ func TestFeedLastSparseTenant(t *testing.T) {
 	for _, pr := range principals {
 		// last: the watermark query serveFeed issues for last=n, its first.
 		last := func(f feedFilter, n int) int {
-			return cost(pr.p, feedStatements(t, s, pr.p, feedInputOf(f, n, ""))[0])
+			qs := feedStatements(t, s, pr.p, feedInputOf(f, n, ""))
+			if len(qs) != 2 {
+				t.Fatalf("%s last=%d %+v: %d reads, want 2", pr.name, n, f, len(qs))
+			}
+			return cost(pr.p, qs[0])
 		}
 		// window: the one window read after id 0, the oldest of all events.
 		window := func(f feedFilter) int {
