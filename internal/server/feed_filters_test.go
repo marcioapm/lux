@@ -329,6 +329,33 @@ func TestFeedFiltersKeepTenants(t *testing.T) {
 	}
 }
 
+// A tenant's filtered last=N finds its own newest old match behind many
+// newer events of another tenant that match the same filter, never theirs;
+// an operator's finds the other tenant's, or the narrowed tenant's.
+func TestFeedLastSparseTenant(t *testing.T) {
+	s, ctx, key, key2, _ := feedFixture(t)
+	const at = "2026-01-02T03:04:05Z"
+	feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
+	a := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data, created_at)
+		SELECT 't2', $1, 1, 'exited', '{}', now() - interval '1 hour' FROM generate_series(1, 50000)`, feedRunO)
+	var newestO int64
+	systemScan(t, s, `SELECT max(id) FROM run_events`, nil, &newestO)
+	op := operatorKey(t, s, ctx)
+	last := func(key, q string) []int64 {
+		return feedIDs(t, feedBody(t, s, key, "/v1/events?follow=false&last=1&"+q))
+	}
+	for _, q := range []string{label("team=x"), "type=exited", label("team=x") + "&type=exited"} {
+		wantIDs(t, "t1 "+q, last(key, q), a)
+		wantIDs(t, "t2 "+q, last(key2, q), newestO)
+		wantIDs(t, "operator "+q, last(op, q), newestO)
+		wantIDs(t, "operator tenant=t1 "+q, last(op, "tenant=t1&"+q), a)
+	}
+	for _, q := range []string{label("team=absent"), "type=absent", label("team=x") + "&type=absent"} {
+		wantIDs(t, "t1 "+q, last(key, q))
+	}
+}
+
 // last=N with a filter looks among the feedLastScan newest events only: a
 // match just inside them starts the stream, one just outside does not.
 func TestFeedLastIsBounded(t *testing.T) {

@@ -108,7 +108,7 @@ func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput
 	}
 	if low < 0 {
 		args := []any{min(max(in.Last, 0), feedPage)}
-		q := feedLastSQL(f, func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) })
+		q := feedLastSQL(f, p.TenantID, func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) })
 		err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, q, args...).Scan(&low)
 		})
@@ -194,8 +194,9 @@ func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput
 
 // feedLastSQL is the watermark below the $1 newest events matching f: just
 // before the oldest of them, or the newest event's id if none. With a
-// filter it looks only among the feedLastScan newest events.
-func feedLastSQL(f feedFilter, arg func(any) string) string {
+// filter it looks only among the feedLastScan newest events, of tenant
+// only when it is not "" (the principal's tenant, as for RLS).
+func feedLastSQL(f feedFilter, tenant string, arg func(any) string) string {
 	if f.none() {
 		return `SELECT coalesce(min(id) - 1, (SELECT coalesce(max(id), 0) FROM run_events))
 				FROM (SELECT id FROM run_events ORDER BY id DESC LIMIT $1) x`
@@ -204,8 +205,14 @@ func feedLastSQL(f feedFilter, arg func(any) string) string {
 	if len(f.labels) > 0 {
 		join = " LEFT JOIN runs r ON r.id = e.run_id"
 	}
-	return `SELECT coalesce(min(id) - 1, (SELECT coalesce(max(id), 0) FROM run_events))
-				FROM (SELECT e.id FROM (SELECT e.id, e.run_id, e.type FROM run_events e ORDER BY e.id DESC LIMIT ` + strconv.Itoa(feedLastScan) + `) e` + join + `
+	// RLS's tenant-or-system predicate is no index condition: a tenant's
+	// scan would otherwise walk every other tenant's newer events.
+	where := ""
+	if tenant != "" {
+		where = " WHERE tenant_id = " + arg(tenant)
+	}
+	return `SELECT coalesce(min(id) - 1, (SELECT coalesce(max(id), 0) FROM run_events` + where + `))
+				FROM (SELECT e.id FROM (SELECT e.id, e.run_id, e.type FROM run_events e` + where + ` ORDER BY e.id DESC LIMIT ` + strconv.Itoa(feedLastScan) + `) e` + join + `
 					WHERE ` + f.match(arg) + ` ORDER BY e.id DESC LIMIT $1) x`
 }
 
