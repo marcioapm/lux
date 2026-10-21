@@ -366,6 +366,26 @@ func heartbeatAckVersion(t *testing.T, s *Server, hostID string) string {
 	return a.NetworkVersion
 }
 
+// hostTokenFor issues token tok1 (pool pec2) to hostIDs and returns its secret.
+func hostTokenFor(t *testing.T, s *Server, hostIDs ...string) string {
+	t.Helper()
+	raw := ids.Secret("luxh")
+	execSQL(t, s, context.Background(), `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ('tok1', 't1', 'pec2', $1)`, ids.Hash(raw))
+	execSQL(t, s, context.Background(), `UPDATE hosts SET token_id = 'tok1' WHERE id = ANY($1)`, hostIDs)
+	return raw
+}
+
+// helloH1 registers h1 (provider id i-1) under tok1 with caps.
+func helloH1(t *testing.T, s *Server, caps ...string) proto.Welcome {
+	t.Helper()
+	tok := &hostToken{ID: "tok1", TenantID: new("t1"), PoolID: new("pec2")}
+	w, err := s.registerHost(context.Background(), tok, proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-1", Capabilities: caps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
 // A new host is sent provisional classes at registration, built from its
 // region's network_catalog row, which a provisioner pass stored: no
 // provider call on hello, never another provider's or region's row, only to
@@ -375,25 +395,14 @@ func heartbeatAckVersion(t *testing.T, s *Server, hostID string) string {
 func TestProvisionalNetworkAtRegistration(t *testing.T) {
 	s, _, p := networkFixture(t)
 	ctx := context.Background()
-	raw := ids.Secret("luxh")
-	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ('tok1', 't1', 'pec2', $1)`, ids.Hash(raw))
-	execSQL(t, s, ctx, `UPDATE hosts SET token_id = 'tok1' WHERE id = 'h1'`)
+	raw := hostTokenFor(t, s, "h1")
 	foreign := `{"source":"ec2-ip-ranges","regionPublic":["198.51.100.0/24"]}`
 	execSQL(t, s, ctx, `INSERT INTO network_catalog (provider, region, catalog, fetched_at, version) VALUES
 		('ec2', 'us-east-1', $1, now(), 'other-region'), ('gce', 'eu-west-1', $1, now(), 'other-provider')`, foreign)
 	p.nets = map[string]HostNetwork{} // the host's own network is not discovered yet
-	tok := &hostToken{ID: "tok1", TenantID: new("t1"), PoolID: new("pec2")}
-	hello := func(caps ...string) proto.Welcome {
-		t.Helper()
-		w, err := s.registerHost(ctx, tok, proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-1", Capabilities: caps})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return w
-	}
 
 	// No row for ec2/eu-west-1 yet: nothing, as before.
-	if w := hello(proto.CapProvisionalNet); w.Network != nil {
+	if w := helloH1(t, s, proto.CapProvisionalNet); w.Network != nil {
 		t.Fatalf("welcome without a region catalog: %+v", w.Network)
 	}
 	if v := heartbeatAckVersion(t, s, "h1"); v != "" {
@@ -420,7 +429,7 @@ func TestProvisionalNetworkAtRegistration(t *testing.T) {
 	}
 
 	netCalls, prefixCalls := len(p.netCalls), p.prefixCalls
-	w := hello(proto.CapProvisionalNet)
+	w := helloH1(t, s, proto.CapProvisionalNet)
 	if len(p.netCalls) != netCalls || p.prefixCalls != prefixCalls {
 		t.Fatalf("hello called the provider: network %d -> %d, prefixes %d -> %d", netCalls, len(p.netCalls), prefixCalls, p.prefixCalls)
 	}
@@ -456,14 +465,14 @@ func TestProvisionalNetworkAtRegistration(t *testing.T) {
 	}
 
 	// A runner without the capability would price its own subnet as zone.
-	if w := hello(); w.Network != nil {
+	if w := helloH1(t, s); w.Network != nil {
 		t.Fatalf("welcome to a runner without %s: %+v", proto.CapProvisionalNet, w.Network)
 	}
 	if v := heartbeatAckVersion(t, s, "h1"); v != "" {
 		t.Errorf("ack version %q for a runner without the capability", v)
 	}
 
-	hello(proto.CapProvisionalNet)
+	helloH1(t, s, proto.CapProvisionalNet)
 	p.nets = map[string]HostNetwork{"i-1": hostA()}
 	s.netTried = nil
 	s.recordNetwork(ctx, true)
@@ -483,9 +492,7 @@ func TestProvisionalNetworkAtRegistration(t *testing.T) {
 func TestStoredSourceNoneClassesBeatProvisional(t *testing.T) {
 	s, _, p := networkFixture(t)
 	ctx := context.Background()
-	raw := ids.Secret("luxh")
-	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ('tok1', 't1', 'pec2', $1)`, ids.Hash(raw))
-	execSQL(t, s, ctx, `UPDATE hosts SET token_id = 'tok1' WHERE id = 'h1'`)
+	raw := hostTokenFor(t, s, "h1")
 	catalog := p.prefixes
 	p.prefixes, p.prefixErr = ProviderPrefixes{}, errors.New("unavailable")
 	s.recordNetwork(ctx, false)
@@ -497,12 +504,7 @@ func TestStoredSourceNoneClassesBeatProvisional(t *testing.T) {
 	if stored.Source != proto.NetSourceNone || len(stored.Local) == 0 || len(stored.Zone) == 0 {
 		t.Fatalf("setup: stored %+v, want Source none with Local and Zone", stored)
 	}
-	tok := &hostToken{ID: "tok1", TenantID: new("t1"), PoolID: new("pec2")}
-	w, err := s.registerHost(ctx, tok, proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-1",
-		Capabilities: []string{proto.CapProvisionalNet}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := helloH1(t, s, proto.CapProvisionalNet)
 	if w.Network == nil || w.Network.Provisional || !reflect.DeepEqual(*w.Network, stored) {
 		t.Fatalf("welcome %+v, want the stored %+v", w.Network, stored)
 	}
@@ -562,21 +564,9 @@ func TestRecordNetworkWarmsEmptyPoolRegion(t *testing.T) {
 func TestRunnerNetworkEndpoint(t *testing.T) {
 	s, _, _ := networkFixture(t)
 	ctx := context.Background()
-	raw := ids.Secret("luxh")
-	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ('tok1', 't1', 'pec2', $1)`, ids.Hash(raw))
-	execSQL(t, s, ctx, `UPDATE hosts SET token_id = 'tok1' WHERE id IN ('h1', 'h2')`)
+	raw := hostTokenFor(t, s, "h1", "h2")
 	s.recordNetwork(ctx, false)
-	get := func(name, token string) (int, proto.NetworkClasses) {
-		req := httptest.NewRequest(http.MethodGet, "/runner/v1/network?name="+name, nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, req)
-		var nc proto.NetworkClasses
-		if w.Code == http.StatusOK {
-			_ = json.Unmarshal(w.Body.Bytes(), &nc)
-		}
-		return w.Code, nc
-	}
+	get := func(name, token string) (int, proto.NetworkClasses) { return getRunnerNetwork(t, s, name, token) }
 	if code, nc := get("h1", raw); code != http.StatusOK || !nc.Catalog() || len(nc.Zone) != 2 {
 		t.Errorf("h1: %d %+v", code, nc)
 	}
