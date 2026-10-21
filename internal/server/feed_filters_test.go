@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -84,6 +86,52 @@ data: {"id":%d,"serverId":"srv_pinned","type":"server.state","data":{"host":"web
 	if got := feedBody(t, s, key, "/v1/events?follow=false&last=2"); got != wantLast {
 		t.Fatalf("last=2:\n%s\nwant:\n%s", got, wantLast)
 	}
+	if got := feedResume(t, s, key, a1); got != wantLast {
+		t.Fatalf("Last-Event-ID:\n%s\nwant:\n%s", got, wantLast)
+	}
+	// More than a window: feedPage events of Run A, then a server event,
+	// all of them, by after= and by Last-Event-ID.
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data, created_at)
+		SELECT 't1', $1, 1, 'state', jsonb_build_object('n', g), $2::timestamptz FROM generate_series(1, $3::int) g`, feedRunA, at, feedPage)
+	var first, last, n int64
+	systemScan(t, s, `SELECT min(id), max(id), count(*) FROM run_events WHERE id > $1`, []any{sv}, &first, &last, &n)
+	if n != feedPage || last-first != feedPage-1 {
+		t.Fatalf("ids %d..%d, %d events", first, last, n)
+	}
+	sv2 := feedEvent(t, s, ctx, "t1", nil, ptr("srv_pinned"), "server.state", `{"host": "web", "name": "web", "runId": null}`, at)
+	var big strings.Builder
+	for i := range int64(feedPage) {
+		fmt.Fprintf(&big, `id: %d
+event: lux
+data: {"id":%d,"epoch":1,"type":"state","data":{"n":%d},"time":"2026-01-02T03:04:05Z","runId":"%s","tenant":"t1"}
+
+`, first+i, first+i, i+1, feedRunA)
+	}
+	fmt.Fprintf(&big, `id: %d
+event: lux
+data: {"id":%d,"serverId":"srv_pinned","type":"server.state","data":{"host":"web","hostname":"web.lux.example.com","name":"web","runId":null,"url":"https://web.lux.example.com"},"time":"2026-01-02T03:04:05Z","runId":null,"tenant":"t1"}
+
+`, sv2, sv2)
+	if got := feedBody(t, s, key, fmt.Sprintf("/v1/events?follow=false&after=%d", sv)); got != big.String() {
+		t.Fatalf("after, %d events: %d bytes, want %d; ids %v", feedPage+1, len(got), big.Len(), feedIDs(t, got)[max(0, len(feedIDs(t, got))-3):])
+	}
+	if got := feedResume(t, s, key, sv); got != big.String() {
+		t.Fatalf("Last-Event-ID, %d events: %d bytes, want %d; ids %v", feedPage+1, len(got), big.Len(), feedIDs(t, got)[max(0, len(feedIDs(t, got))-3):])
+	}
+}
+
+// feedResume is the follow=false feed resumed with Last-Event-ID id.
+func feedResume(t *testing.T, s *Server, key string, id int64) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/events?follow=false", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Last-Event-ID", fmt.Sprint(id))
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Last-Event-ID %d: %d %s", id, w.Code, w.Body)
+	}
+	return w.Body.String()
 }
 
 // feedIDs is the ids of the lux events of an SSE body, in order.
@@ -310,5 +358,115 @@ func TestFeedLastIsBounded(t *testing.T) {
 	for _, q := range filters {
 		wantIDs(t, "last=2 "+q, last(2, q), n2, n3)
 		wantIDs(t, "last=5 "+q, last(5, q), n1, n2, n3)
+	}
+}
+
+// feedScript serves target with feedRead replaced by step: step(i, after)
+// is read i's rows, given the watermark it reads after. Each read but the
+// last wakes the feed, so it reads again at once; the last cancels the
+// request. It returns the body and each read's watermark, once the
+// handler has returned.
+func feedScript(t *testing.T, s *Server, key, target string, steps int, step func(i int, after int64) []feedRow) (string, []int64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var afters []int64
+	feedRead = func(s *Server, _ context.Context, _ Principal, after int64, _ feedFilter) ([]feedRow, error) {
+		afters = append(afters, after)
+		i := len(afters) - 1
+		if i >= steps-1 {
+			cancel()
+		} else {
+			s.wakeups.notify("")
+		}
+		if i >= steps {
+			return nil, nil
+		}
+		return step(i, after), nil
+	}
+	t.Cleanup(func() { feedRead = (*Server).feedWindow })
+	req := httptest.NewRequest(http.MethodGet, target, nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Handler().ServeHTTP(w, req)
+	}()
+	bound, stop := context.WithTimeout(context.Background(), time.Minute)
+	defer stop()
+	select {
+	case <-done:
+	case <-bound.Done():
+		t.Fatalf("handler still running after cancel; reads after %v", afters)
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatalf("ended by %v, not the last read's cancel; reads after %v", ctx.Err(), afters)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("%s: %d %s", target, w.Code, w.Body)
+	}
+	return w.Body.String(), afters
+}
+
+// feedRows is rows, those above after, in id order.
+func feedRows(after int64, rows ...feedRow) []feedRow {
+	out := []feedRow{}
+	for _, r := range rows {
+		if r.ID > after {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func feedRowAt(id int64, match bool, at time.Time) feedRow {
+	e := feedRow{match: match}
+	e.ID, e.Type, e.Time, e.Tenant, e.RunID = id, "state", at, "t1", ptr(feedRunA)
+	if match {
+		e.Data = map[string]any{}
+	}
+	return e
+}
+
+// A young event that does not match holds the watermark, as a young match
+// does: a match with a lower id, committed late, is still sent, and the
+// older match after it is not sent again.
+func TestFeedWatermarkHeldByYoungUnmatched(t *testing.T) {
+	s, _, key, _, start := feedFixture(t)
+	young, old := time.Now(), time.Now().Add(-time.Hour)
+	late, nonmatch, match := start+1, start+2, start+3
+	body, afters := feedScript(t, s, key, fmt.Sprintf("/v1/events?after=%d&%s", start, label("team=x")), 2, func(i int, after int64) []feedRow {
+		if i == 0 {
+			return feedRows(after, feedRowAt(nonmatch, false, young), feedRowAt(match, true, old))
+		}
+		return feedRows(after, feedRowAt(late, true, young), feedRowAt(nonmatch, false, young), feedRowAt(match, true, old))
+	})
+	if len(afters) != 2 || afters[1] != start {
+		t.Fatalf("passed young nonmatch: reads after %v, want [%d %d]", afters, start, start)
+	}
+	wantIDs(t, "late commit delivered, earlier match not duplicated", feedIDs(t, body), match, late)
+}
+
+// follow (the default) with a filter keeps streaming past its first read:
+// a match that becomes visible later is sent on the same request, once,
+// though it is read again while young.
+func TestFeedFilteredFollow(t *testing.T) {
+	s, _, key, _, start := feedFixture(t)
+	at := time.Now().UTC().Truncate(time.Second)
+	m := feedRowAt(start+2, true, at)
+	body, afters := feedScript(t, s, key, fmt.Sprintf("/v1/events?after=%d&%s", start, label("team=x")), 3, func(i int, after int64) []feedRow {
+		if i == 0 {
+			return feedRows(after, feedRowAt(start+1, false, at))
+		}
+		return feedRows(after, feedRowAt(start+1, false, at), m)
+	})
+	if len(afters) != 3 {
+		t.Fatalf("reads after %v, want 3", afters)
+	}
+	want := fmt.Sprintf("id: %d\nevent: lux\ndata: {\"id\":%d,\"type\":\"state\",\"data\":{},\"time\":\"%s\",\"runId\":\"%s\",\"tenant\":\"t1\"}\n\n",
+		m.ID, m.ID, at.Format(time.RFC3339), feedRunA)
+	if body != want {
+		t.Fatalf("body:\n%q\nwant:\n%q", body, want)
 	}
 }
