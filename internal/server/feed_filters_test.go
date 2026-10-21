@@ -250,6 +250,9 @@ func TestFeedLabelFilterServerEvents(t *testing.T) {
 	if !strings.Contains(body, `"url":"https://web.lux.example.com"`) {
 		t.Fatalf("detail: %s", body)
 	}
+	// Type-only last=N counts events of no Run: the newest match is one.
+	newestLoose := feedEvent(t, s, ctx, "t1", nil, ptr("srv_loose"), "server.state", `{"host": "web"}`, at)
+	wantIDs(t, "last=1 type=server.state", feedIDs(t, feedBody(t, s, key, "/v1/events?follow=false&last=1&type=server.state")), newestLoose)
 }
 
 // More than a window of settled events that do not match, then one that
@@ -356,9 +359,11 @@ func TestFeedLastSparseTenant(t *testing.T) {
 	}
 }
 
-// last=N with a filter looks among the feedLastScan newest events only: a
-// match just inside them starts the stream, one just outside does not.
+// last=N with a filter looks among the 20,000 newest events only (the
+// documented bound): a match just inside them starts the stream, one just
+// outside does not.
 func TestFeedLastIsBounded(t *testing.T) {
+	const documentedScan = 20_000
 	s, ctx, key, _, _ := feedFixture(t)
 	const at = "2026-01-02T03:04:05Z"
 	old := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
@@ -370,13 +375,13 @@ func TestFeedLastIsBounded(t *testing.T) {
 	last := func(n int, q string) []int64 {
 		return feedIDs(t, feedBody(t, s, key, fmt.Sprintf("/v1/events?follow=false&last=%d&%s", n, q)))
 	}
-	unmatched(feedLastScan - 1)
+	unmatched(documentedScan - 1)
 	for _, q := range filters {
-		wantIDs(t, "newest feedLastScan "+q, last(1, q), old)
+		wantIDs(t, "newest documentedScan "+q, last(1, q), old)
 	}
 	unmatched(1)
 	for _, q := range filters {
-		wantIDs(t, "past feedLastScan "+q, last(1, q))
+		wantIDs(t, "past documentedScan "+q, last(1, q))
 	}
 	n1 := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
 	unmatched(3)
@@ -393,9 +398,12 @@ func TestFeedLastIsBounded(t *testing.T) {
 // last wakes the feed, so it reads again at once; the last cancels the
 // request. It returns the body and each read's watermark, once the
 // handler has returned.
+//
+// The request has feedScriptBudget, less than feedFallback: a script whose
+// next read comes from the fallback, not the wakeup, ends DeadlineExceeded.
 func feedScript(t *testing.T, s *Server, key, target string, steps int, step func(i int, after int64) []feedRow) (string, []int64) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), feedScriptBudget)
 	defer cancel()
 	var afters []int64
 	feedRead = func(s *Server, _ context.Context, _ Principal, after int64, _ feedFilter) ([]feedRow, error) {
@@ -436,6 +444,10 @@ func feedScript(t *testing.T, s *Server, key, target string, steps int, step fun
 	return w.Body.String(), afters
 }
 
+// feedScriptBudget covers a woken script with margin (it takes milliseconds;
+// see feedScript), not feedFallback's 5s.
+const feedScriptBudget = 2 * time.Second
+
 // feedRows is rows, those above after, in id order.
 func feedRows(after int64, rows ...feedRow) []feedRow {
 	out := []feedRow{}
@@ -463,14 +475,19 @@ func TestFeedWatermarkHeldByYoungUnmatched(t *testing.T) {
 	s, _, key, _, start := feedFixture(t)
 	young, old := time.Now(), time.Now().Add(-time.Hour)
 	late, nonmatch, match := start+1, start+2, start+3
-	body, afters := feedScript(t, s, key, fmt.Sprintf("/v1/events?after=%d&%s", start, label("team=x")), 2, func(i int, after int64) []feedRow {
-		if i == 0 {
+	// Read 0 sends nothing, so its next read is the wakeup's, not the 1s
+	// re-read of young sent events.
+	body, afters := feedScript(t, s, key, fmt.Sprintf("/v1/events?after=%d&%s", start, label("team=x")), 3, func(i int, after int64) []feedRow {
+		switch i {
+		case 0:
+			return feedRows(after, feedRowAt(nonmatch, false, young))
+		case 1:
 			return feedRows(after, feedRowAt(nonmatch, false, young), feedRowAt(match, true, old))
 		}
 		return feedRows(after, feedRowAt(late, true, young), feedRowAt(nonmatch, false, young), feedRowAt(match, true, old))
 	})
-	if len(afters) != 2 || afters[1] != start {
-		t.Fatalf("passed young nonmatch: reads after %v, want [%d %d]", afters, start, start)
+	if len(afters) != 3 || afters[1] != start || afters[2] != start {
+		t.Fatalf("passed young nonmatch: reads after %v, want [%d %d %d]", afters, start, start, start)
 	}
 	wantIDs(t, "late commit delivered, earlier match not duplicated", feedIDs(t, body), match, late)
 }
