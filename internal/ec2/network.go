@@ -231,16 +231,18 @@ func (p *Provider) Prefixes(ctx context.Context, template json.RawMessage) (serv
 	now := p.now()
 	due := p.prefixChecked.IsZero() || now.Sub(p.prefixChecked) >= prefixMaxAge
 	if due && (p.prefixFailedAt.IsZero() || now.Sub(p.prefixFailedAt) >= prefixRetryAfter) {
-		if err := p.fetchPrefixes(ctx); err != nil && ctx.Err() != nil {
+		err := p.fetchPrefixes(ctx)
+		switch {
+		case err == nil:
+			p.prefixFailedAt, p.prefixErr = time.Time{}, nil
+		case ctx.Err() != nil:
 			// The caller gave up: not the source's failure, so no backoff.
 			if !p.prefixGood {
 				return server.ProviderPrefixes{}, err
 			}
-		} else if err != nil {
+		default:
 			// From the failure, not the attempt: a hung fetch can take the full client timeout.
 			p.prefixFailedAt, p.prefixErr = p.now(), err
-		} else {
-			p.prefixFailedAt, p.prefixErr = time.Time{}, nil
 		}
 	}
 	if !p.prefixGood {
