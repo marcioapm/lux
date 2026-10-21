@@ -346,14 +346,16 @@ func TestFeedFiltersKeepTenants(t *testing.T) {
 	}
 }
 
-// A tenant's filtered last=N finds its own newest old match behind many
-// newer events of another tenant that match the same filter, never theirs,
-// reading about as many pages as without them; an operator's finds the
-// other tenant's, or the narrowed tenant's.
+// A tenant's feed reads about as many pages behind many newer events of
+// another tenant as without them: its filtered last=N, finding its own
+// newest old match among events that match the same filter, never theirs;
+// its window, filtered or not, from before all of them; its unfiltered
+// last=N, and from now (last=0). An operator's finds the other tenant's,
+// or the narrowed tenant's.
 func TestFeedLastSparseTenant(t *testing.T) {
-	s, ctx, key, key2, _ := feedFixture(t)
+	s, ctx, key, key2, start := feedFixture(t)
 	const at = "2026-01-02T03:04:05Z"
-	feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
+	a0 := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
 	a := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
 	costed := []feedFilter{
 		{labels: []string{"team=x"}},
@@ -363,35 +365,62 @@ func TestFeedLastSparseTenant(t *testing.T) {
 		{types: []string{"absent"}},
 		{labels: []string{"team=x"}, types: []string{"absent"}},
 	}
-	// lastCost: the buffer pages t1's last=1 watermark query reads for f.
-	lastCost := func(f feedFilter) int {
+	// cost: the buffer pages q reads as t1.
+	cost := func(q string, args []any) int {
 		t.Helper()
-		args := []any{1}
-		q := feedLastSQL(f, "t1", func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) })
 		var blocks int
 		if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
 			c := &costTx{Tx: tx, t: t}
-			var low int64
-			err := c.QueryRow(ctx, q, args...).Scan(&low)
+			c.measure(ctx, q, args...)
 			blocks = c.blocks
-			return err
+			return nil
 		}); err != nil {
 			t.Fatal(err)
 		}
 		return blocks
 	}
-	before := make([]int, len(costed))
-	for i, f := range costed {
-		before[i] = lastCost(f)
+	bind := func(args *[]any) func(any) string {
+		return func(v any) string { *args = append(*args, v); return "$" + strconv.Itoa(len(*args)) }
+	}
+	// lastCost: t1's last=n watermark query for f.
+	lastCost := func(f feedFilter, n int) int {
+		args := []any{n}
+		return cost(feedLastSQL(f, "t1", bind(&args)), args)
+	}
+	// windowCost: t1's window after id 0, the oldest of all events.
+	windowCost := func(f feedFilter) int {
+		args := []any{int64(0), feedPage}
+		return cost(feedWindowSQL(f, "t1", bind(&args)), args)
+	}
+	type probe struct {
+		name string
+		cost func() int
+	}
+	probes := []probe{}
+	for _, f := range costed {
+		probes = append(probes, probe{fmt.Sprintf("last=1 %+v", f), func() int { return lastCost(f, 1) }})
+	}
+	// last=0 is only the fallback max(id): the newest event, from now.
+	for _, n := range []int{0, 1, feedPage} {
+		probes = append(probes, probe{fmt.Sprintf("last=%d unfiltered", n), func() int { return lastCost(feedFilter{}, n) }})
+	}
+	for _, f := range []feedFilter{{}, {labels: []string{"team=x"}}, {types: []string{"exited"}}} {
+		probes = append(probes, probe{fmt.Sprintf("window %+v", f), func() int { return windowCost(f) }})
+	}
+	before := make([]int, len(probes))
+	for i, p := range probes {
+		before[i] = p.cost()
 	}
 	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data, created_at)
 		SELECT 't2', $1, 1, 'exited', '{}', now() - interval '1 hour' FROM generate_series(1, 50000)`, feedRunO)
 	ownerExec(t, s, `ANALYZE run_events`)
-	// Walking t2's 50,000 events would read hundreds of pages.
+	// Walking t2's 50,000 events would read hundreds of pages (516 to 654
+	// measured without the tenant bind); bound, each probe read 1 to 10,
+	// at most 2 more than before t2's events.
 	const allowance = 64
-	for i, f := range costed {
-		if after := lastCost(f); after > before[i]+allowance {
-			t.Errorf("t1 last=1 %+v: %d buffer pages behind t2's events, %d without", f, after, before[i])
+	for i, p := range probes {
+		if after := p.cost(); after > before[i]+allowance {
+			t.Errorf("t1 %s: %d buffer pages behind t2's events, %d without", p.name, after, before[i])
 		}
 	}
 	var newestO int64
@@ -409,6 +438,17 @@ func TestFeedLastSparseTenant(t *testing.T) {
 	for _, q := range []string{label("team=absent"), "type=absent", label("team=x") + "&type=absent"} {
 		wantIDs(t, "t1 "+q, last(key, q))
 	}
+	wantIDs(t, "t1 last=1", last(key, ""), a)
+	wantIDs(t, "operator tenant=t1 last=1", last(op, "tenant=t1"), a)
+	wantIDs(t, "t2 last=1", last(key2, ""), newestO)
+	wantIDs(t, "operator last=1", last(op, ""), newestO)
+	for _, q := range []string{"", label("team=x"), "type=exited"} {
+		wantIDs(t, "t1 window "+q, feedQuery(t, s, key, start, q), a0, a)
+		wantIDs(t, "operator tenant=t1 window "+q, feedQuery(t, s, op, start, "tenant=t1&"+q), a0, a)
+	}
+	// From now: nothing yet, for t1 as for the narrowed operator.
+	wantIDs(t, "t1 from now", feedIDs(t, feedBody(t, s, key, "/v1/events?follow=false")))
+	wantIDs(t, "operator tenant=t1 from now", feedIDs(t, feedBody(t, s, op, "/v1/events?follow=false&tenant=t1")))
 }
 
 // last=N with a filter looks among the 20,000 newest events only (the
