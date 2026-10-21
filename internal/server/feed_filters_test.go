@@ -8,9 +8,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
 )
 
 const (
@@ -333,15 +338,53 @@ func TestFeedFiltersKeepTenants(t *testing.T) {
 }
 
 // A tenant's filtered last=N finds its own newest old match behind many
-// newer events of another tenant that match the same filter, never theirs;
-// an operator's finds the other tenant's, or the narrowed tenant's.
+// newer events of another tenant that match the same filter, never theirs,
+// reading about as many pages as without them; an operator's finds the
+// other tenant's, or the narrowed tenant's.
 func TestFeedLastSparseTenant(t *testing.T) {
 	s, ctx, key, key2, _ := feedFixture(t)
 	const at = "2026-01-02T03:04:05Z"
 	feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
 	a := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
+	costed := []feedFilter{
+		{labels: []string{"team=x"}},
+		{types: []string{"exited"}},
+		{labels: []string{"team=x"}, types: []string{"exited"}},
+		{labels: []string{"team=absent"}},
+		{types: []string{"absent"}},
+		{labels: []string{"team=x"}, types: []string{"absent"}},
+	}
+	// lastCost: the buffer pages t1's last=1 watermark query reads for f.
+	lastCost := func(f feedFilter) int {
+		t.Helper()
+		args := []any{1}
+		q := feedLastSQL(f, "t1", func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) })
+		var blocks int
+		if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+			c := &costTx{Tx: tx, t: t}
+			var low int64
+			err := c.QueryRow(ctx, q, args...).Scan(&low)
+			blocks = c.blocks
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return blocks
+	}
+	before := make([]int, len(costed))
+	for i, f := range costed {
+		before[i] = lastCost(f)
+	}
 	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data, created_at)
 		SELECT 't2', $1, 1, 'exited', '{}', now() - interval '1 hour' FROM generate_series(1, 50000)`, feedRunO)
+	ownerExec(t, s, `ANALYZE run_events`)
+	// Walking t2's 50,000 events would read hundreds of pages.
+	const allowance = 64
+	for i, f := range costed {
+		if after := lastCost(f); after > before[i]+allowance {
+			t.Errorf("t1 last=1 %+v: %d buffer pages behind t2's events, %d without", f, after, before[i])
+		}
+	}
 	var newestO int64
 	systemScan(t, s, `SELECT max(id) FROM run_events`, nil, &newestO)
 	op := operatorKey(t, s, ctx)
