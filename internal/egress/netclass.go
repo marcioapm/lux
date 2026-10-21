@@ -194,8 +194,9 @@ func parsePrefixes(c string, list []string) ([]netip.Prefix, error) {
 	return disjoint(ps), nil
 }
 
-// effective are the lists the sets hold for nc. Without Local and Zone the
-// host's interface subnets are Local.
+// effective are the lists the sets hold for nc. Without Local the host's
+// interface subnets are Local, read again on every call (provisional
+// classes carry a Zone but no Local).
 func (f *Firewall) effective(nc *proto.NetworkClasses) (classLists, error) {
 	cl := classLists{single: map[proto.NetClass][]netip.Prefix{}, regions: map[string][]netip.Prefix{}}
 	var in proto.NetworkClasses
@@ -213,7 +214,7 @@ func (f *Firewall) effective(nc *proto.NetworkClasses) (classLists, error) {
 		}
 		cl.single[c] = ps
 	}
-	if len(cl.single[proto.NetLocal]) == 0 && len(cl.single[proto.NetZone]) == 0 {
+	if len(cl.single[proto.NetLocal]) == 0 {
 		cl.single[proto.NetLocal] = disjoint(f.acct.ifaceSubnets())
 	}
 	cl.layout.catalog = nc.Catalog()
