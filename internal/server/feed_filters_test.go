@@ -257,6 +257,9 @@ func TestFeedLabelFilterServerEvents(t *testing.T) {
 	}
 	// Type-only last=N counts events of no Run: the newest match is one.
 	newestLoose := feedEvent(t, s, ctx, "t1", nil, ptr("srv_loose"), "server.state", `{"host": "web"}`, at)
+	// A newer Run-less event must not count toward last=N under a label filter.
+	wantIDs(t, "last=1 team=x ignores newer Run-less events",
+		feedIDs(t, feedBody(t, s, key, "/v1/events?follow=false&last=1&"+label("team=x"))), onA)
 	wantIDs(t, "last=1 type=server.state", feedIDs(t, feedBody(t, s, key, "/v1/events?follow=false&last=1&type=server.state")), newestLoose)
 }
 
