@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -459,6 +460,43 @@ func TestProvisionalNetworkAtRegistration(t *testing.T) {
 	code, got := getRunnerNetwork(t, s, "h1", raw)
 	if code != http.StatusOK || got.Provisional || got.Version != discovered || !slices.Equal(got.Local, []string{"10.0.0.0/24", "2001:db8::/64"}) {
 		t.Errorf("endpoint after discovery: %d %+v", code, got)
+	}
+}
+
+// A host with stored classes is served them even when they are Source none
+// (a failed prefix fetch): provisional classes are only for a host with
+// none stored, so they never replace a discovered Local and Zone.
+func TestStoredSourceNoneClassesBeatProvisional(t *testing.T) {
+	s, _, p := networkFixture(t)
+	ctx := context.Background()
+	raw := ids.Secret("luxh")
+	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ('tok1', 't1', 'pec2', $1)`, ids.Hash(raw))
+	execSQL(t, s, ctx, `UPDATE hosts SET token_id = 'tok1' WHERE id = 'h1'`)
+	catalog := p.prefixes
+	p.prefixes, p.prefixErr = ProviderPrefixes{}, errors.New("unavailable")
+	s.recordNetwork(ctx, false)
+	if err := s.storeRegionCatalog(ctx, "ec2", "eu-west-1", catalog); err != nil {
+		t.Fatal(err)
+	}
+	var stored proto.NetworkClasses
+	systemScan(t, s, `SELECT net_classes FROM hosts WHERE id = 'h1'`, nil, &stored)
+	if stored.Source != proto.NetSourceNone || len(stored.Local) == 0 || len(stored.Zone) == 0 {
+		t.Fatalf("setup: stored %+v, want Source none with Local and Zone", stored)
+	}
+	tok := &hostToken{ID: "tok1", TenantID: new("t1"), PoolID: new("pec2")}
+	w, err := s.registerHost(ctx, tok, proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-1",
+		Capabilities: []string{proto.CapProvisionalNet}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Network == nil || w.Network.Provisional || !reflect.DeepEqual(*w.Network, stored) {
+		t.Fatalf("welcome %+v, want the stored %+v", w.Network, stored)
+	}
+	if v := heartbeatAckVersion(t, s, "h1"); v != stored.Version {
+		t.Errorf("ack version %q, want the stored %q", v, stored.Version)
+	}
+	if code, got := getRunnerNetwork(t, s, "h1", raw); code != http.StatusOK || got.Provisional || !reflect.DeepEqual(got, stored) {
+		t.Errorf("endpoint: %d %+v, want the stored %+v", code, got, stored)
 	}
 }
 

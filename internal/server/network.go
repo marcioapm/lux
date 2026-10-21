@@ -24,8 +24,9 @@ import (
 // (hosts.network) and the NetworkClasses built from it and the provider's
 // published prefixes (hosts.net_classes); a host that registers without a
 // catalog is discovered on the provisioner's next tick, not the next check.
-// Until then a runner with CapProvisionalNet gets provisional classes built
-// from its region's stored catalog (network_catalog).
+// Until discovery stores any, a runner with CapProvisionalNet gets
+// provisional classes built from its region's stored catalog
+// (network_catalog).
 // A runner gets them in its Welcome; each heartbeat's ack carries their
 // Version, and a runner holding another fetches GET /runner/v1/network. No
 // provider is called on hello or launch.
@@ -120,12 +121,13 @@ func (s *Server) storeRegionCatalog(ctx context.Context, provider, region string
 }
 
 // provisionalFrom are the joins and conditions that give a host provisional
-// classes: a provider host with no catalog of its own, whose runner has
+// classes: a provider host with no stored classes at all, whose runner has
 // CapProvisionalNet, in a (provider, region) with a network_catalog row.
+// Stored classes, even Source none, are served as stored.
 const provisionalFrom = ` FROM hosts h JOIN pools p ON p.id = h.pool_id
 	JOIN network_catalog c ON c.provider = p.provider AND c.region = coalesce(h.launch_template->>'region', '')
 	WHERE h.id = $1 AND h.provider_id IS NOT NULL AND h.provision_requested_at IS NOT NULL AND p.provider <> 'static'
-		AND coalesce(h.net_classes->>'source', '') IN ('', '` + proto.NetSourceNone + `')
+		AND h.net_classes IS NULL
 		AND '` + proto.CapProvisionalNet + `' = ANY(h.capabilities)`
 
 // provisionalNetwork is hostID's provisional classes, nil if it has none.
@@ -394,17 +396,16 @@ func (s *Server) storeNetworkRefresh(ctx context.Context, hostID, provider, regi
 }
 
 // hostNetwork is a host's classes (nil: none known, the runner derives
-// Local itself) and its own traffic as last recorded. A host whose stored
-// classes hold no catalog gets provisional ones when it qualifies
-// (provisionalFrom); they are never stored, so net_classes stays what
-// discovery found.
+// Local itself) and its own traffic as last recorded. A host with no stored
+// classes gets provisional ones when it qualifies (provisionalFrom); they
+// are never stored, so net_classes stays what discovery found.
 func (s *Server) hostNetwork(ctx context.Context, tx pgx.Tx, hostID string) (*proto.NetworkClasses, map[string]proto.NetBytes, error) {
 	var nc *proto.NetworkClasses
 	var net map[string]proto.NetBytes
 	if err := tx.QueryRow(ctx, `SELECT net_classes, host_net_classes FROM hosts WHERE id = $1`, hostID).Scan(&nc, &net); err != nil {
 		return nil, nil, err
 	}
-	if !nc.Catalog() {
+	if nc == nil {
 		p, err := provisionalNetwork(ctx, tx, hostID)
 		if err != nil {
 			return nil, nil, err
