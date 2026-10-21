@@ -240,6 +240,11 @@ func TestProvisionDiscoversNewHostNetwork(t *testing.T) {
 	if !nc.Catalog() || !slices.Equal(nc.Local, []string{"10.0.0.0/24", "2001:db8::/64"}) {
 		t.Fatalf("net_classes after one pass: %+v", nc)
 	}
+	var regionRows int
+	systemScan(t, s, `SELECT count(*) FROM network_catalog WHERE provider = 'ec2' AND region = 'eu-west-1'`, nil, &regionRows)
+	if regionRows != 1 {
+		t.Fatalf("the narrow pass stored %d region catalogs", regionRows)
+	}
 	// Past the retry spacing, so only the stored catalog can stop a call.
 	now = now.Add(2 * netRetryEvery)
 	provisionPass(t, s)
@@ -331,6 +336,164 @@ func TestWelcomeAndAckCarryNetwork(t *testing.T) {
 	var a proto.Ack
 	if err := json.Unmarshal(ack.Data, &a); err != nil || a.NetworkVersion != w.Network.Version {
 		t.Errorf("ack %s, want version %s", ack.Data, w.Network.Version)
+	}
+}
+
+// getRunnerNetwork is GET /runner/v1/network for host name with token.
+func getRunnerNetwork(t *testing.T, s *Server, name, token string) (int, proto.NetworkClasses) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/runner/v1/network?name="+name, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	var nc proto.NetworkClasses
+	if w.Code == http.StatusOK {
+		_ = json.Unmarshal(w.Body.Bytes(), &nc)
+	}
+	return w.Code, nc
+}
+
+func heartbeatAckVersion(t *testing.T, s *Server, hostID string) string {
+	t.Helper()
+	ack := s.handleReport(context.Background(), hostID, proto.Frame{Type: proto.MsgHeartbeat, Data: proto.Marshal(proto.Heartbeat{})})
+	var a proto.Ack
+	if len(ack.Data) > 0 {
+		if err := json.Unmarshal(ack.Data, &a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return a.NetworkVersion
+}
+
+// A new host is sent provisional classes at registration, built from its
+// region's network_catalog row, which a provisioner pass stored: no
+// provider call on hello, never another provider's or region's row, only to
+// a runner with CapProvisionalNet, never stored in hosts.net_classes. Once
+// discovery stores the host's own, the ack's version moves and the
+// endpoint serves those.
+func TestProvisionalNetworkAtRegistration(t *testing.T) {
+	s, _, p := networkFixture(t)
+	ctx := context.Background()
+	raw := ids.Secret("luxh")
+	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ('tok1', 't1', 'pec2', $1)`, ids.Hash(raw))
+	execSQL(t, s, ctx, `UPDATE hosts SET token_id = 'tok1' WHERE id = 'h1'`)
+	foreign := `{"source":"ec2-ip-ranges","regionPublic":["198.51.100.0/24"]}`
+	execSQL(t, s, ctx, `INSERT INTO network_catalog (provider, region, catalog, fetched_at, version) VALUES
+		('ec2', 'us-east-1', $1, now(), 'other-region'), ('gce', 'eu-west-1', $1, now(), 'other-provider')`, foreign)
+	p.nets = map[string]HostNetwork{} // the host's own network is not discovered yet
+	tok := &hostToken{ID: "tok1", TenantID: new("t1"), PoolID: new("pec2")}
+	hello := func(caps ...string) proto.Welcome {
+		t.Helper()
+		w, err := s.registerHost(ctx, tok, proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-1", Capabilities: caps})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+
+	// No row for ec2/eu-west-1 yet: nothing, as before.
+	if w := hello(proto.CapProvisionalNet); w.Network != nil {
+		t.Fatalf("welcome without a region catalog: %+v", w.Network)
+	}
+	if v := heartbeatAckVersion(t, s, "h1"); v != "" {
+		t.Fatalf("ack version %q without a region catalog", v)
+	}
+
+	s.recordNetwork(ctx, false)
+	var xmin1, xmin2 string
+	systemScan(t, s, `SELECT coalesce((SELECT xmin::text FROM network_catalog WHERE provider = 'ec2' AND region = 'eu-west-1'), '')`, nil, &xmin1)
+	s.recordNetwork(ctx, false)
+	s.recordNetwork(ctx, true)
+	systemScan(t, s, `SELECT coalesce((SELECT xmin::text FROM network_catalog WHERE provider = 'ec2' AND region = 'eu-west-1'), '')`, nil, &xmin2)
+	if xmin1 != xmin2 {
+		t.Errorf("an unchanged region catalog was rewritten (xmin %s -> %s)", xmin1, xmin2)
+	}
+
+	netCalls, prefixCalls := len(p.netCalls), p.prefixCalls
+	w := hello(proto.CapProvisionalNet)
+	if len(p.netCalls) != netCalls || p.prefixCalls != prefixCalls {
+		t.Fatalf("hello called the provider: network %d -> %d, prefixes %d -> %d", netCalls, len(p.netCalls), prefixCalls, p.prefixCalls)
+	}
+	nc := w.Network
+	want := catalogEU(p.prefixes.FetchedAt)
+	if nc == nil || !nc.Provisional || !nc.Catalog() || nc.Source != want.Source || nc.FetchedAt == nil || !nc.FetchedAt.Equal(want.FetchedAt) {
+		t.Fatalf("provisional welcome: %+v", nc)
+	}
+	if !slices.Equal(nc.RegionService, want.RegionService) || !slices.Equal(nc.RegionPublic, want.RegionPublic) ||
+		!slices.Equal(nc.ProviderGlobal, want.ProviderGlobal) || !slices.Equal(nc.ProviderGlobalFree, want.ProviderGlobalFree) ||
+		!maps.EqualFunc(nc.Provider, want.Provider, slices.Equal) {
+		t.Errorf("region half %+v, want %+v", nc, want)
+	}
+	if len(nc.Local) != 0 || !slices.Equal(nc.Zone, []string{"10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}) {
+		t.Errorf("local %v zone %v", nc.Local, nc.Zone)
+	}
+	var stored *string
+	systemScan(t, s, `SELECT net_classes::text FROM hosts WHERE id = 'h1'`, nil, &stored)
+	if stored != nil {
+		t.Fatalf("provisional classes stored: %s", *stored)
+	}
+	provisional := nc.Version
+	if v := heartbeatAckVersion(t, s, "h1"); v != provisional {
+		t.Errorf("ack version %q, want the provisional %q", v, provisional)
+	}
+	if code, got := getRunnerNetwork(t, s, "h1", raw); code != http.StatusOK || !got.Provisional || got.Version != provisional || len(got.RegionPublic) != 1 {
+		t.Errorf("endpoint while undiscovered: %d %+v", code, got)
+	}
+
+	// A runner without the capability would price its own subnet as zone.
+	if w := hello(); w.Network != nil {
+		t.Fatalf("welcome to a runner without %s: %+v", proto.CapProvisionalNet, w.Network)
+	}
+	if v := heartbeatAckVersion(t, s, "h1"); v != "" {
+		t.Errorf("ack version %q for a runner without the capability", v)
+	}
+
+	hello(proto.CapProvisionalNet)
+	p.nets = map[string]HostNetwork{"i-1": hostA()}
+	s.netTried = nil
+	s.recordNetwork(ctx, true)
+	discovered := heartbeatAckVersion(t, s, "h1")
+	if discovered == "" || discovered == provisional {
+		t.Fatalf("ack version after discovery %q (provisional %q)", discovered, provisional)
+	}
+	code, got := getRunnerNetwork(t, s, "h1", raw)
+	if code != http.StatusOK || got.Provisional || got.Version != discovered || !slices.Equal(got.Local, []string{"10.0.0.0/24", "2001:db8::/64"}) {
+		t.Errorf("endpoint after discovery: %d %+v", code, got)
+	}
+}
+
+// The full pass stores the region catalog of a pool with no hosts, so the
+// first host of a new pool's region registers with one already there.
+func TestRecordNetworkWarmsEmptyPoolRegion(t *testing.T) {
+	s, _, p := networkFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider, template) VALUES
+		('pus', 't1', 'us', 'ec2', '{"region":"us-east-1"}'),
+		('pold', 't1', 'old', 'ec2', '{"region":"ap-south-1"}')`)
+	execSQL(t, s, ctx, `UPDATE pools SET retired = true WHERE id = 'pold'`)
+	s.recordNetwork(ctx, true)
+	var n int
+	systemScan(t, s, `SELECT count(*) FROM network_catalog`, nil, &n)
+	if n != 0 || p.prefixCalls != 0 {
+		t.Fatalf("narrow pass with nothing missing: %d rows, %d prefix calls", n, p.prefixCalls)
+	}
+	s.recordNetwork(ctx, false)
+	rows := map[string]bool{}
+	systemScan(t, s, `SELECT count(*) FROM network_catalog`, nil, &n)
+	for _, r := range []string{"eu-west-1", "us-east-1", "ap-south-1"} {
+		var ok bool
+		systemScan(t, s, `SELECT EXISTS (SELECT 1 FROM network_catalog WHERE provider = 'ec2' AND region = $1)`, []any{r}, &ok)
+		rows[r] = ok
+	}
+	if !rows["eu-west-1"] || !rows["us-east-1"] || rows["ap-south-1"] || n != 2 || p.prefixCalls != 2 {
+		t.Errorf("rows %v (%d), prefix calls %d: want the live pools' regions once each", rows, n, p.prefixCalls)
+	}
+	// No real source: nothing is stored.
+	execSQL(t, s, ctx, `DELETE FROM network_catalog`)
+	p.prefixes = ProviderPrefixes{}
+	s.recordNetwork(ctx, false)
+	if systemScan(t, s, `SELECT count(*) FROM network_catalog`, nil, &n); n != 0 {
+		t.Errorf("%d rows from a catalog with no source", n)
 	}
 }
 
