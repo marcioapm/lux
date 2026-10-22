@@ -54,7 +54,11 @@ func TestSubmitNonPreemptibleRefusals(t *testing.T) {
 		{"preemptible pool by name", nonPreemptibleSpec("spot", "", spec.Resources{}), codePoolPreemptible},
 		{"preemptible pool by id", nonPreemptibleSpec("", spotID, spec.Resources{}), codePoolPreemptible},
 		{"no such pool name", nonPreemptibleSpec("nope", "", spec.Resources{}), codePoolPreemptible},
-		{"with spot", func() spec.RunSpec { sp := nonPreemptibleSpec("steady", "", spec.Resources{}); sp.Spot = true; return sp }(), "invalid_spec"},
+		{"with spot", func() spec.RunSpec {
+			sp := nonPreemptibleSpec("steady", "", spec.Resources{})
+			sp.Spot = true
+			return sp
+		}(), "invalid_spec"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			submitErr, validateErr := submitBoth(t, s, c.sp)
