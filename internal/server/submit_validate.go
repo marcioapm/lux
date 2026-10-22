@@ -22,8 +22,12 @@ func (s *Server) validateSubmit(ctx context.Context, p Principal, stored spec.Ru
 		if err := checkRunQuota(ctx, tx, p.TenantID); err != nil {
 			return err
 		}
+		named := stored.Placement.Pool != "" || stored.Placement.PoolID != ""
 		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool, stored.Placement.PoolID)
 		if err != nil {
+			return err
+		}
+		if err := checkNonPreemptiblePool(ctx, tx, &stored, rp, named); err != nil {
 			return err
 		}
 		stored.Placement.Pool = rp.Name

@@ -710,8 +710,12 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		// The Run is bound to its pool's id: every later placement stays
 		// in that pool whatever the default becomes or the pool is called.
 		// The spec keeps the name as resolved now.
+		named := stored.Placement.Pool != "" || stored.Placement.PoolID != ""
 		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool, stored.Placement.PoolID)
 		if err != nil {
+			return err
+		}
+		if err := checkNonPreemptiblePool(ctx, tx, &stored, rp, named); err != nil {
 			return err
 		}
 		stored.Placement.Pool = rp.Name
@@ -1748,6 +1752,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			// this placement outside the pool the Run is bound to.
 			if placeOn != nil && placeOnPool.ID != *rp.ID {
 				return errf(http.StatusUnprocessableEntity, "invalid_spec", "the chosen host is in pool %s, not %s", cmp.Or(placeOnPool.Name, "(none)"), rp.Name)
+			}
+			if sp.NonPreemptible() {
+				if err := requireNonPreemptiblePool(ctx, tx, rp); err != nil {
+					return err
+				}
 			}
 			to = &rp
 		}
@@ -3190,14 +3199,15 @@ type listPoolsOutput struct {
 const poolColumns = `p.id, p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
 	coalesce(p.scale_down_after_s, 0), p.warm_while_active,
 	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.is_default, p.shape,
-	coalesce(p.placement, ''), CASE WHEN $1 = '' OR p.tenant_id = $1 THEN p.transfer_prices END`
+	coalesce(p.placement, ''), CASE WHEN $1 = '' OR p.tenant_id = $1 THEN p.transfer_prices END, p.preemptible`
 
 func scanPool(row pgx.Row) (Pool, error) {
 	var pl Pool
 	var sda int
 	var isDefault bool
 	err := row.Scan(&pl.ID, &pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault, &pl.Shape, &pl.Placement, &pl.TransferPrices)
+		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault, &pl.Shape, &pl.Placement, &pl.TransferPrices,
+		&pl.Preemptible)
 	pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
 	pl.IsDefault = &isDefault
 	if pl.Shape != nil {
@@ -3513,25 +3523,29 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	// A pool this set creates gets newID, which its check's lux:pool-id
 	// tag carries; an existing one keeps its own.
 	newID := ids.New(ids.Pool)
-	checkedID, err := CheckPoolTemplate(ctx, s.db, s.cfg.Providers, p.TenantID, pl.Name, newID, pl.Provider, pl.Template)
+	checkedID, err := CheckPoolTemplate(ctx, s.db, s.cfg.Providers, p.TenantID, pl.Name, newID, pl.Provider, pl.Template, pl.Preemptible)
 	if err != nil {
 		return nil, err
 	}
 	var out Pool
 	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		err := SavePool(ctx, tx, p.TenantID, pl.Name, pl.IsDefault, func() error {
+			preemptible, err := SavePoolPreemptible(ctx, tx, p.TenantID, pl.Name, pl.Provider, pl.Template, pl.Preemptible)
+			if err != nil {
+				return err
+			}
 			var storedID string
-			err := tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
-					scale_down_after_s, warm_while_active, hourly_price, price_currency, shape, placement, transfer_prices)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), $13, nullif($14, ''), $15)
+			err = tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
+					scale_down_after_s, warm_while_active, hourly_price, price_currency, shape, placement, transfer_prices, preemptible)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), $13, nullif($14, ''), $15, $16)
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency, shape = EXCLUDED.shape,
-					placement = EXCLUDED.placement, transfer_prices = EXCLUDED.transfer_prices,
+					placement = EXCLUDED.placement, transfer_prices = EXCLUDED.transfer_prices, preemptible = EXCLUDED.preemptible,
 					`+PoolRevive+` RETURNING id`,
 				newID, p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency, pl.Shape, pl.Placement, pl.TransferPrices).Scan(&storedID)
+				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency, pl.Shape, pl.Placement, pl.TransferPrices, preemptible).Scan(&storedID)
 			if err != nil {
 				return err
 			}
