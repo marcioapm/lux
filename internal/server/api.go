@@ -39,8 +39,8 @@ func (s *Server) routes(api huma.API) {
 	// Runs.
 	register(s, api, huma.Operation{
 		OperationID: "submitRun", Method: http.MethodPost, Path: "/v1/runs", Tags: []string{"runs"},
-		Summary:       "Submit a Run",
-		Description:   "Validates and normalizes the RunSpec (docs/runspec.md) and queues the Run. Secret values are held in memory until the Run is placed, never stored. " +
+		Summary: "Submit a Run",
+		Description: "Validates and normalizes the RunSpec (docs/runspec.md) and queues the Run. Secret values are held in memory until the Run is placed, never stored. " +
 			"A Run with placement.preemptible false must name its pool (422 pool_required) and that pool must have preemptible false (422 pool_preemptible); validateOnly applies the same checks.",
 		DefaultStatus: http.StatusCreated,
 		Responses:     map[string]*huma.Response{"200": {Description: "An earlier submission with the same Idempotency-Key.", Content: jsonContent(schemaRef[Run](api))}},
