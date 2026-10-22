@@ -301,6 +301,9 @@ A refusal is 422 and changes nothing (pool, spec, state, secrets):
   host, and before any registration is not refused on size. Hosts it no
   longer has (terminated) do not count. A static pool no host has
   registered in is not refused.
+- `pool_preemptible`: the Run has `placement.preemptible: false` and the
+  pool is preemptible
+  ([Non-preemptible Runs](runspec.md#non-preemptible-runs)).
 
 The answer's `placement` is `{pool, poolId, from: {name, id},
 platformUnchecked}`, and the `resume.requested` event carries `pool:
@@ -580,6 +583,18 @@ reservation for sizing only; the scheduler still places each Run on its
 own. See [Telemetry](telemetry.md#capacity-planning). `GET /v1/pools`
 says that size as each pool's `hostSize` (with `hostSizeFrom` and the
 latest host's `instanceType`), also for a pool scaled to zero.
+
+A pool is **preemptible** (`preemptible: true`, the default) or not. An
+`ec2` pool's flag is its market: `true` launches spot instances, `false`
+on-demand ones; luxd sets the template's `spot` from it at every launch.
+Only a pool with `preemptible: false` takes Runs submitted with
+`placement.preemptible: false`
+([Non-preemptible Runs](runspec.md#non-preemptible-runs)), and a pool
+holding such a Run (queued, live or resumable) cannot be made preemptible
+again (409 `pool_has_non_preemptible_runs`). A pool turned non-preemptible
+keeps its spot hosts until they scale down: they keep taking ordinary
+Runs, never non-preemptible ones. Omitted on create, the flag follows the
+template's `spot` (else `true`); omitted on update, it is unchanged.
 
 ### Shaped pools
 

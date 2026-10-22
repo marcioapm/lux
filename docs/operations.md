@@ -560,7 +560,11 @@ lasts, the runner:
    stops no more than it needs. A stopped Run gets a `disk.pressure_stop`
    event and ends `failed`, its reason e.g. `stopped: host disk pressure,
    12.3 GiB over its 37.5 GiB disk limit`. **A Run at or under its limit
-   is never stopped.**
+   is never stopped**, and neither is one with `placement.preemptible:
+   false` ([Non-preemptible Runs](runspec.md#non-preemptible-runs)),
+   however far over: with only such Runs over, the pass finds no relief and
+   admissions stay blocked. Such a Run is still held to its own limit after
+   its grace (`disk.exceeded`).
 
 What a stop gives back, and when: the Run's container goes as soon as its
 end is reported, which frees its writable layer. Its state volumes stay,
@@ -909,6 +913,36 @@ A Run whose stop or upload cannot finish in time (a very large state
 volume) is lost when the instance goes. It is resumable from its previous
 snapshot. Keep state volumes small on spot pools, or use on-demand for
 Runs that cannot afford it (`placement.pool`).
+
+### Non-preemptible pools
+
+A pool's `preemptible` decides an `ec2` pool's market: `true` (the default)
+launches spot instances, `false` on-demand ones. luxd sets the template's
+`spot` from it before every launch and template check, so it is the one
+place the market is set; a template `spot` that contradicts it is refused
+(422 `invalid_pool`). Migration `091_pool_preemptible` set every existing
+`ec2` pool without `"spot": true` to `false`: they already launched
+on-demand. Static pools are `true` until set otherwise.
+
+```bash
+lux pools set steady --provider ec2 --max 4 --preemptible=false \
+  --template '{"region":"eu-west-1","launchTemplate":"lux-runner"}'
+lux run --pool steady --preemptible=false -f release.yaml
+```
+
+Only a pool with `preemptible: false` takes Runs submitted with
+`placement.preemptible: false`
+([Non-preemptible Runs](runspec.md#non-preemptible-runs)). Those Runs are
+placed only on hosts that are not spot instances and whose lux-runner
+advertises the `non-preemptible` capability (its disk guard exempts them),
+so after setting a pool's flag to `false` its existing spot hosts keep
+taking ordinary Runs and scale down as usual, and runners from before the
+capability take none of these Runs until they update. Setting a pool back
+to `true` while it holds a non-preemptible Run that is queued, live or
+resumable is refused (409 `pool_has_non_preemptible_runs`): terminate those
+Runs or move them (`lux resume --pool` to another non-preemptible pool)
+first. Operator actions still stop them: `lux hosts drain --force-evict`,
+`lux pools rm --force-evict` and `lux migrate`.
 
 What an instance needs:
 
