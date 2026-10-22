@@ -40,7 +40,8 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "submitRun", Method: http.MethodPost, Path: "/v1/runs", Tags: []string{"runs"},
 		Summary:       "Submit a Run",
-		Description:   "Validates and normalizes the RunSpec (docs/runspec.md) and queues the Run. Secret values are held in memory until the Run is placed, never stored.",
+		Description:   "Validates and normalizes the RunSpec (docs/runspec.md) and queues the Run. Secret values are held in memory until the Run is placed, never stored. " +
+			"A Run with placement.preemptible false must name its pool (422 pool_required) and that pool must have preemptible false (422 pool_preemptible); validateOnly applies the same checks.",
 		DefaultStatus: http.StatusCreated,
 		Responses:     map[string]*huma.Response{"200": {Description: "An earlier submission with the same Idempotency-Key.", Content: jsonContent(schemaRef[Run](api))}},
 		Errors:        []int{http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusTooManyRequests},
@@ -108,7 +109,7 @@ func (s *Server) routes(api huma.API) {
 			"resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller " +
 			"only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). " +
 			"A Run already resuming refuses other sizes (409).\n\n" +
-			"placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit; nothing changes). " +
+			"placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit, and pool_preemptible for a Run with placement.preemptible false into a preemptible pool; nothing changes). " +
 			"validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.",
 		DefaultStatus: http.StatusAccepted,
 		Responses:     map[string]*huma.Response{"200": {Description: "validateOnly: the resume would be accepted.", Content: jsonContent(schemaRef[ResumeAnswer](api))}},
@@ -448,7 +449,9 @@ func (s *Server) routes(api huma.API) {
 			"for tenants without one of their own. " +
 			"An `ec2` pool is stored only if EC2 would launch its template (a dry-run RunInstances per subnet and fallback type, within 10s); " +
 			"otherwise 422 `invalid_pool` `template: ec2 cannot launch it: <EC2's code>: <message>`. " +
-			"A pool set again with the same provider and an identical template is not checked. " +
+			"A pool set again with the same provider, preemptible and an identical template is not checked; the check launches with the market `preemptible` gives. " +
+			"`preemptible` omitted on create follows an `ec2` template's `spot` (else true), omitted on update leaves it; a `spot` contradicting it is 422 `invalid_pool`. " +
+			"409 `pool_has_non_preemptible_runs`: the set makes the pool preemptible while a Run with placement.preemptible false is queued, live or resumable in it. " +
 			"409 `pool_changed`: another set created or replaced the pool while its template was being checked; set it again.",
 		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "admin", s.putPool)
