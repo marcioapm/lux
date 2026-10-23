@@ -22,8 +22,10 @@ import (
 // clone of a large mirror fails 5 runs in 10.
 //
 // These tests pin the fix: a fetch leaves no gc running behind it, gc
-// waits for readers, a clone holds the mirror until it has copied it, and
-// clones beside fetches and repacks come out whole.
+// waits for readers, a fetch waits for a clone copying the mirror (its
+// temporary files vanish under the copy), a clone holds the mirror until it
+// has copied it, a burst fetches once, and clones beside fetches and
+// repacks come out whole.
 
 // pushLoose adds a commit of n new files to the remote.
 func pushLoose(t *testing.T, bare, branch string, n int) {
@@ -49,7 +51,7 @@ func warm(t *testing.T, m *Manager, bare string) string {
 // fetch runs mirror() for ref and releases it at once.
 func fetch(t *testing.T, m *Manager, bare, ref string) {
 	t.Helper()
-	_, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: ref})
+	_, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: ref}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,8 +82,9 @@ func TestFetchRepacksBeforeReturning(t *testing.T) {
 	}
 }
 
-// A reader holds off gc, not other readers and not a fetch; gc runs on the
-// next fetch once the mirror is free.
+// A reader (a push or sync, borrowing objects through alternates) holds
+// off gc, not other readers and not a fetch; gc runs on the next fetch
+// once the mirror is free.
 func TestAReaderHoldsOffGCOnly(t *testing.T) {
 	bare, sha := remote(t)
 	m := New(t.TempDir())
@@ -90,7 +93,7 @@ func TestAReaderHoldsOffGCOnly(t *testing.T) {
 	gitRun(t, mirror, "config", "gc.autoPackLimit", "1")
 	gitRun(t, mirror, "repack", "-q", "-a", "-d")
 	l := m.lockFor(mirror)
-	_, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: sha})
+	_, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: sha}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +157,11 @@ func TestMaterializeHoldsTheMirrorThroughItsClone(t *testing.T) {
 		w.Close()
 		t.Fatal("gc could run while a clone was copying the mirror")
 	}
+	if l.files.TryLock() {
+		l.files.Unlock()
+		w.Close()
+		t.Fatal("a fetch could run while a clone was copying the mirror")
+	}
 	w.Close()
 	select {
 	case err := <-done:
@@ -163,15 +171,74 @@ func TestMaterializeHoldsTheMirrorThroughItsClone(t *testing.T) {
 	case <-time.After(time.Minute):
 		t.Fatal("the clone never finished")
 	}
-	if !l.gc.TryLock() {
+	if !l.gc.TryLock() || !l.files.TryLock() {
 		t.Fatal("the clone kept the mirror after it finished")
 	}
 	l.gc.Unlock()
+	l.files.Unlock()
+}
+
+// A fetch waits for a clone that is copying the mirror (a fetch's temporary
+// files come and go in objects/), and runs once the clone is done.
+func TestAFetchWaitsForACopy(t *testing.T) {
+	bare, sha := remote(t)
+	m := New(t.TempDir())
+	mirror := warm(t, m, bare)
+	_, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: sha}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushLoose(t, bare, "next", 3)
+	fetched := make(chan struct{})
+	go func() { defer close(fetched); fetch(t, m, bare, "next") }()
+	// Can pass for a slow fetch on a loaded host, never fail for a right one.
+	select {
+	case <-fetched:
+		t.Fatal("a fetch ran while a clone was copying the mirror")
+	case <-time.After(500 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-fetched:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the fetch never ran after the copy")
+	}
+	if out := gitRun(t, mirror, "for-each-ref", "refs/heads/next"); out == "" {
+		t.Fatal("the fetch did not land")
+	}
+}
+
+// Callers that queued behind a fetch use it: a burst of starts for one
+// repository fetches once, not once per Run. A fetch that started before a
+// caller asked is not enough for it.
+func TestQueuedFetchesUseTheOneBeforeThem(t *testing.T) {
+	bare, _ := remote(t)
+	m := New(t.TempDir())
+	mirror := warm(t, m, bare)
+	l := m.lockFor(mirror)
+	r := Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}
+	asked := time.Now()
+	l.fetchedAt = asked.Add(time.Millisecond) // a fetch started after we asked
+	pushLoose(t, bare, "skipped", 1)
+	if err := m.update(context.Background(), r, mirror, l, asked); err != nil {
+		t.Fatal(err)
+	}
+	if out := gitRun(t, mirror, "for-each-ref", "refs/heads/skipped"); out != "" {
+		t.Fatal("fetched again although a fetch had started since this caller asked")
+	}
+	l.fetchedAt = asked.Add(-time.Millisecond) // the last fetch began before we asked
+	if err := m.update(context.Background(), r, mirror, l, asked); err != nil {
+		t.Fatal(err)
+	}
+	if out := gitRun(t, mirror, "for-each-ref", "refs/heads/skipped"); out == "" {
+		t.Fatal("did not fetch although the last fetch began before this caller asked")
+	}
 }
 
 // The symptom end to end: clones of a mirror while fetches into it each
-// leave loose objects and make a repack due. Probabilistic (main fails a
-// few of 60), so it complements the deterministic tests above.
+// leave loose objects and make a repack due. Probabilistic: main fails a
+// few of 60 (a detached gc), and so did a fetch beside a copy (its
+// temporary files), so it complements the deterministic tests above.
 func TestClonesSurviveConcurrentFetchAndRepack(t *testing.T) {
 	if testing.Short() {
 		t.Skip("about 30 s")
@@ -202,7 +269,7 @@ func TestClonesSurviveConcurrentFetchAndRepack(t *testing.T) {
 			default:
 			}
 			pushLoose(t, bare, fmt.Sprintf("b%d", n), 300)
-			if _, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}); err == nil {
+			if _, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}, false); err == nil {
 				release()
 			}
 		}
