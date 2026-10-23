@@ -418,6 +418,15 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
 	if r.egress != nil {
 		r.welcomeNetwork(w)
+		// Replaced on every Welcome: a luxd that sends none (or an older
+		// one) leaves the control plane fully blocked.
+		if err := r.egress.SetControlPlanePorts(w.ControlPlanePorts); err != nil {
+			r.log.Warn("control-plane ports", "ports", w.ControlPlanePorts, "err", err)
+			// A list that cannot be applied opens nothing.
+			if err := r.egress.SetControlPlanePorts(nil); err != nil {
+				r.log.Warn("control-plane ports: clearing", "err", err)
+			}
+		}
 	}
 	if w.LeaseSeconds > 0 {
 		r.lease.Store(int64(w.LeaseSeconds * float64(time.Second)))

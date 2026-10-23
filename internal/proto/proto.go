@@ -376,6 +376,11 @@ type Welcome struct {
 	// whose host counters start from zero (the host rebooted) counts on
 	// from these rather than from zero, which luxd's maximum would hide.
 	HostNet map[string]NetBytes `json:"hostNet,omitempty"`
+	// ControlPlanePorts: TCP ports on the control plane's addresses Runs
+	// may reach (runners.control_plane_ports). The runner replaces its
+	// list with this one on every Welcome; none (an older luxd included)
+	// keeps the control plane fully blocked.
+	ControlPlanePorts []int `json:"controlPlanePorts,omitempty"`
 }
 
 type Heartbeat struct {
