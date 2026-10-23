@@ -52,12 +52,12 @@ type Result struct {
 type Manager struct {
 	mirrors string
 	mu      sync.Mutex
-	locks   map[string]*sync.Mutex
+	locks   map[string]*sync.RWMutex
 	known   map[string]bool // mirrored "tenant\x00url"
 }
 
 func New(dataDir string) *Manager {
-	m := &Manager{mirrors: filepath.Join(dataDir, "mirrors"), locks: map[string]*sync.Mutex{}, known: map[string]bool{}}
+	m := &Manager{mirrors: filepath.Join(dataDir, "mirrors"), locks: map[string]*sync.RWMutex{}, known: map[string]bool{}}
 	entries, _ := os.ReadDir(m.mirrors)
 	for _, e := range entries {
 		b, err := os.ReadFile(filepath.Join(m.mirrors, e.Name(), "lux-url"))
@@ -76,16 +76,18 @@ func New(dataDir string) *Manager {
 	return m
 }
 
-func (m *Manager) lock(key string) func() {
+// lockFor is one mirror's lock: held for writing while the mirror is
+// fetched into, created or repacked, and for reading while a clone, push
+// or sync reads its objects.
+func (m *Manager) lockFor(path string) *sync.RWMutex {
 	m.mu.Lock()
-	l := m.locks[key]
+	defer m.mu.Unlock()
+	l := m.locks[path]
 	if l == nil {
-		l = &sync.Mutex{}
-		m.locks[key] = l
+		l = &sync.RWMutex{}
+		m.locks[path] = l
 	}
-	m.mu.Unlock()
-	l.Lock()
-	return l.Unlock
+	return l
 }
 
 // Mirrors lists the URLs this host has mirrors of, whoever's: a scheduling
@@ -138,49 +140,78 @@ func git(ctx context.Context, dir, token string, args ...string) (string, error)
 
 var shaRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// mirror makes sure the host has a mirror of the repository holding ref.
-// A branch is fetched every time (it moves); a full sha already in the
-// mirror is not.
-func (m *Manager) mirror(ctx context.Context, r Repo) (string, error) {
+// noAutoGC keeps a fetch from starting gc or maintenance by itself. By
+// default that runs detached, after the fetch and its lock are done, and
+// packs and deletes loose objects while another Run's clone may be copying
+// objects/. A local clone lists the refs first and then copies objects/ in
+// directory order, so it ended with a ref to an object it never copied
+// ("trying to write ref ... with nonexistent object"). update repacks
+// under the write lock instead.
+var noAutoGC = []string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}
+
+// mirror makes sure the host has a mirror of the repository holding ref,
+// and returns it read-locked: nothing fetches into it or repacks it until
+// the caller calls release, after its last read of the mirror. A branch is
+// fetched every time (it moves); a full sha already in the mirror is not.
+func (m *Manager) mirror(ctx context.Context, r Repo) (path string, release func(), err error) {
 	if r.Tenant == "" {
-		return "", fmt.Errorf("repository %s: no tenant", r.Name)
+		return "", nil, fmt.Errorf("repository %s: no tenant", r.Name)
 	}
-	path := m.mirrorPath(r.Tenant, r.URL)
-	defer m.lock(path)()
+	path = m.mirrorPath(r.Tenant, r.URL)
+	l := m.lockFor(path)
+	if shaRe.MatchString(r.Ref) {
+		l.RLock()
+		if _, err := git(ctx, path, "", "cat-file", "-e", r.Ref+"^{commit}"); err == nil {
+			return path, l.RUnlock, nil
+		}
+		l.RUnlock()
+	}
+	l.Lock()
+	err = m.update(ctx, r, path)
+	l.Unlock()
+	if err != nil {
+		return "", nil, err
+	}
+	// An update may land between the two locks. It leaves the mirror
+	// whole and still holding ref (a fetch only adds), which is all a
+	// reader needs.
+	l.RLock()
+	return path, l.RUnlock, nil
+}
+
+// update fetches into the mirror, or creates it, then repacks it if git
+// thinks it is due, all before returning. The caller holds the write lock.
+func (m *Manager) update(ctx context.Context, r Repo, path string) error {
 	if _, err := os.Stat(filepath.Join(path, "HEAD")); err == nil {
-		if shaRe.MatchString(r.Ref) {
-			if _, err := git(ctx, path, "", "cat-file", "-e", r.Ref+"^{commit}"); err == nil {
-				return path, nil
-			}
+		if _, err := git(ctx, path, r.Token, append(noAutoGC, "fetch", "--prune", "--tags", r.URL, "+refs/heads/*:refs/heads/*")...); err != nil {
+			return err
 		}
-		if _, err := git(ctx, path, r.Token, "fetch", "--prune", "--tags", r.URL, "+refs/heads/*:refs/heads/*"); err != nil {
-			return "", err
-		}
-		return path, nil
+		_, err := git(ctx, path, "", "-c", "gc.autoDetach=false", "gc", "--auto", "--quiet")
+		return err
 	}
 	if err := os.MkdirAll(m.mirrors, 0o700); err != nil {
-		return "", err
+		return err
 	}
 	tmp := path + ".tmp"
 	os.RemoveAll(tmp)
 	if _, err := git(ctx, m.mirrors, r.Token, "clone", "--mirror", "--quiet", r.URL, tmp); err != nil {
 		os.RemoveAll(tmp)
-		return "", err
+		return err
 	}
 	// The URL is kept for Mirrors(), never with a credential.
 	if err := os.WriteFile(filepath.Join(tmp, "lux-url"), []byte(r.URL), 0o600); err != nil {
-		return "", err
+		return err
 	}
 	if err := os.WriteFile(filepath.Join(tmp, "lux-tenant"), []byte(r.Tenant), 0o600); err != nil {
-		return "", err
+		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return "", err
+		return err
 	}
 	m.mu.Lock()
 	m.known[r.Tenant+"\x00"+r.URL] = true
 	m.mu.Unlock()
-	return path, nil
+	return nil
 }
 
 // Materialize clones a repository into dir (on the Run's workspace
@@ -196,10 +227,13 @@ func (m *Manager) Materialize(ctx context.Context, r Repo, dir string) (*Result,
 	mirror := r.Bundle
 	var err error
 	if mirror == "" {
-		mirror, err = m.mirror(ctx, r)
-	}
-	if err != nil {
-		return nil, err
+		var release func()
+		if mirror, release, err = m.mirror(ctx, r); err != nil {
+			return nil, err
+		}
+		// Held until the clone is done: the mirror's objects are copied,
+		// and its HEAD is read for a default branch.
+		defer release()
 	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return nil, err
@@ -272,11 +306,13 @@ func (m *Manager) Push(ctx context.Context, r Repo, bundle, branch, lease string
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	res := PushResult{Repo: r.Name, Branch: branch, Status: "failed"}
-	mirror, err := m.mirror(ctx, Repo{Tenant: r.Tenant, Name: r.Name, URL: r.URL, Ref: branch, Token: r.Token})
+	mirror, release, err := m.mirror(ctx, Repo{Tenant: r.Tenant, Name: r.Name, URL: r.URL, Ref: branch, Token: r.Token})
 	if err != nil {
 		res.Error = err.Error()
 		return res
 	}
+	// The scratch repository borrows the mirror's objects (alternates).
+	defer release()
 	// The bundle's commits land in a scratch repository, never in the
 	// shared mirror.
 	work, err := m.scratch(ctx, mirror, "push-")
@@ -384,10 +420,11 @@ func (m *Manager) SyncBundle(ctx context.Context, r Repo, base, bundle string) (
 	if r.Ref == "" {
 		return t, fmt.Errorf("repository %s: no ref to sync to", r.Name)
 	}
-	mirror, err := m.mirror(ctx, r)
+	mirror, release, err := m.mirror(ctx, r)
 	if err != nil {
 		return t, err
 	}
+	defer release()
 	if _, err := git(ctx, mirror, "", "rev-parse", "--verify", "-q", "refs/heads/"+r.Ref); err == nil {
 		t.Branch = r.Ref
 	}
