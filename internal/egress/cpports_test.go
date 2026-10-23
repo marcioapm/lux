@@ -21,14 +21,35 @@ const (
 // cp4 and cp6, set up as New does.
 func cpFirewall(t *testing.T) (*kernel, *Firewall) {
 	t.Helper()
+	return lookupFirewall(t, func(context.Context, string) ([]netip.Addr, error) { return nil, nil },
+		netip.MustParsePrefix(cp4+"/32"), netip.MustParsePrefix(cp6+"/128"))
+}
+
+// lookupFirewall is a Firewall on an in-memory kernel that resolves with
+// lookup and whose control plane is controlPlane, set up as New does.
+func lookupFirewall(t *testing.T, lookup func(context.Context, string) ([]netip.Addr, error), controlPlane ...netip.Prefix) (*kernel, *Firewall) {
+	t.Helper()
 	k := newKernel()
-	f := newFirewall([]netip.Prefix{netip.MustParsePrefix(cp4 + "/32"), netip.MustParsePrefix(cp6 + "/128")},
-		func(context.Context, string) ([]netip.Addr, error) { return nil, nil }, k.nft, k.list)
+	f := newFirewall(controlPlane, lookup, k.nft, k.list)
 	f.acct.ifaceSubnets = func() []netip.Prefix { return nil }
 	if err := f.setup(); err != nil {
 		t.Fatal(err)
 	}
 	return k, f
+}
+
+// installRestricted loads a restricted Run's chain on iface and installs
+// it as Apply does, without the DNS stub Apply would start on the gateway.
+func installRestricted(t *testing.T, f *Firewall, iface string, rules []spec.EgressRule) {
+	t.Helper()
+	r, err := newRun(false, rules, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.nft(egressScript(iface, false, r.cidrs)); err != nil {
+		t.Fatal(err)
+	}
+	f.install(context.Background(), iface, r)
 }
 
 func tcpTo(iface, dst string, port int) packet {
@@ -105,22 +126,12 @@ func TestControlPlanePortsUnrestricted(t *testing.T) {
 
 func TestControlPlanePortsRestricted(t *testing.T) {
 	k, f := cpFirewall(t)
-	ctx := context.Background()
-	// Apply would start a DNS stub on the gateway; load the chains and
-	// install the Runs as Apply does, without it.
 	for iface, rules := range map[string][]spec.EgressRule{
 		"luxnone": nil,
 		"luxcidr": {{CIDR: cp4 + "/32"}},
 		"luxwide": {{CIDR: "10.0.0.0/8"}},
 	} {
-		r, err := newRun(false, rules, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := f.nft(egressScript(iface, false, r.cidrs)); err != nil {
-			t.Fatal(err)
-		}
-		f.install(ctx, iface, r)
+		installRestricted(t, f, iface, rules)
 	}
 	if _, err := f.SetControlPlanePorts([]int{8090}); err != nil {
 		t.Fatal(err)
@@ -256,29 +267,16 @@ func TestControlPlanePortsLimits(t *testing.T) {
 // A restricted Run whose host: rule resolves to the control-plane address
 // reaches the exempt port there and nothing else.
 func TestControlPlanePortsRestrictedByHostname(t *testing.T) {
-	k := newKernel()
-	f := newFirewall([]netip.Prefix{netip.MustParsePrefix(cp4 + "/32")},
-		func(_ context.Context, host string) ([]netip.Addr, error) {
-			if host == "cache.example.com" {
-				return []netip.Addr{netip.MustParseAddr(cp4)}, nil
-			}
-			return nil, nil
-		}, k.nft, k.list)
-	f.acct.ifaceSubnets = func() []netip.Prefix { return nil }
-	if err := f.setup(); err != nil {
-		t.Fatal(err)
-	}
+	k, f := lookupFirewall(t, func(_ context.Context, host string) ([]netip.Addr, error) {
+		if host == "cache.example.com" {
+			return []netip.Addr{netip.MustParseAddr(cp4)}, nil
+		}
+		return nil, nil
+	}, netip.MustParsePrefix(cp4+"/32"))
 	if _, err := f.SetControlPlanePorts([]int{8090}); err != nil {
 		t.Fatal(err)
 	}
-	r, err := newRun(false, []spec.EgressRule{{Host: "cache.example.com"}}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.nft(egressScript("luxhost", false, r.cidrs)); err != nil {
-		t.Fatal(err)
-	}
-	f.install(context.Background(), "luxhost", r)
+	installRestricted(t, f, "luxhost", []spec.EgressRule{{Host: "cache.example.com"}})
 	for _, c := range []struct {
 		port int
 		want string
