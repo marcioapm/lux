@@ -345,7 +345,8 @@ func runPlaceOn(t *testing.T, s *Server, id string) (state, placeOn string) {
 
 // An operator's migrate --to a spot host, or one whose runner lacks
 // CapNonPreemptible, is a 422 for a non-preemptible Run and changes
-// nothing (no stop requested); a capable on-demand host is accepted.
+// nothing (no stop requested); a capable on-demand or static (no market)
+// host is accepted.
 func TestMigrateNonPreemptibleToIncapableHost(t *testing.T) {
 	for _, c := range []struct {
 		name, market string
@@ -355,11 +356,12 @@ func TestMigrateNonPreemptibleToIncapableHost(t *testing.T) {
 		{"spot", MarketSpot, []string{proto.CapNonPreemptible}, false},
 		{"old runner", MarketOnDemand, []string{}, false},
 		{"capable on-demand", MarketOnDemand, []string{proto.CapNonPreemptible}, true},
+		{"capable static", "", []string{proto.CapNonPreemptible}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, ctx := policyFixture(t, "")
 			execSQL(t, s, ctx, `UPDATE runs SET spec = jsonb_set(spec, '{placement,preemptible}', 'false') WHERE id = 'r1'`)
-			execSQL(t, s, ctx, `UPDATE hosts SET market = $1, capabilities = $2 WHERE id = 'h2'`, c.market, c.caps)
+			execSQL(t, s, ctx, `UPDATE hosts SET market = nullif($1, ''), capabilities = $2 WHERE id = 'h2'`, c.market, c.caps)
 			_, err := s.migrateRun(operatorCtx(), &migrateRunInput{RunPath: RunPath{ID: "r1"}, Body: &migrateRequest{To: "h2"}})
 			state, placeOn := runPlaceOn(t, s, "r1")
 			if c.ok {
@@ -389,12 +391,13 @@ func TestResumeNonPreemptibleToIncapableHost(t *testing.T) {
 		{"spot", MarketSpot, []string{proto.CapNonPreemptible}, false},
 		{"old runner", MarketOnDemand, []string{}, false},
 		{"capable on-demand", MarketOnDemand, []string{proto.CapNonPreemptible}, true},
+		{"capable static", "", []string{proto.CapNonPreemptible}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
 			id, _ := movedRun(t, s)
 			setSpec(t, s, id, "{placement,preemptible}", `false`)
-			execSQL(t, s, context.Background(), `UPDATE hosts SET market = $1, capabilities = $2 WHERE id = 'hc'`, c.market, c.caps)
+			execSQL(t, s, context.Background(), `UPDATE hosts SET market = nullif($1, ''), capabilities = $2 WHERE id = 'hc'`, c.market, c.caps)
 			_, err := s.resumeRun(operatorCtx(), &resumeRunInput{RunPath: RunPath{ID: id}, Body: &resumeRequest{
 				To: "hc", Secrets: []spec.Secret{{Name: "TOKEN", Value: "v"}}}})
 			state, placeOn := runPlaceOn(t, s, id)
