@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -235,13 +236,113 @@ func TestQueuedFetchesUseTheOneBeforeThem(t *testing.T) {
 	}
 }
 
+// parkGit puts a git wrapper first on PATH that, for a command line
+// containing word, opens the returned FIFO for reading (so it blocks until
+// the test opens it for writing) before running the real git.
+func parkGit(t *testing.T, word string) string {
+	t.Helper()
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "park")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = \"" + word + "\" ] && cat " + fifo + " >/dev/null && break; done\nexec " + real + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	return fifo
+}
+
+// fetchedAt is when the fetch started, not when it ended: a caller that
+// asked during a fetch is not served by it, since its ref may have moved
+// after the fetch read the remote's.
+func TestFetchedAtIsWhenTheFetchStarted(t *testing.T) {
+	bare, _ := remote(t)
+	m := New(t.TempDir())
+	mirror := warm(t, m, bare)
+	fifo := parkGit(t, "--prune")
+	done := make(chan struct{})
+	go func() { defer close(done); fetch(t, m, bare, "main") }()
+	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid := time.Now()
+	w.Close()
+	<-done
+	if l := m.lockFor(mirror); !l.fetchedAt.Before(mid) {
+		t.Fatal("fetchedAt is after a moment inside the fetch")
+	}
+}
+
+// Push and SyncBundle hold gc off while their scratch repository borrows
+// the mirror's objects through alternates: each is parked on its last git
+// command that reads them.
+func TestPushAndSyncHoldOffGC(t *testing.T) {
+	for _, c := range []struct{ name, word string }{{"sync", "create"}, {"push", "--porcelain"}} {
+		t.Run(c.name, func(t *testing.T) {
+			bare, _ := remote(t)
+			m := New(t.TempDir())
+			mirror := warm(t, m, bare)
+			var bundle string
+			if c.name == "push" {
+				dir := filepath.Join(t.TempDir(), "r")
+				if _, err := m.Materialize(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}, dir); err != nil {
+					t.Fatal(err)
+				}
+				os.WriteFile(filepath.Join(dir, "a.txt"), []byte("two\n"), 0o644)
+				gitRun(t, dir, "commit", "-qam", "two")
+				bundle = filepath.Join(t.TempDir(), "push.bundle")
+				gitRun(t, dir, "bundle", "create", "-q", bundle, "HEAD")
+			}
+			fifo := parkGit(t, c.word)
+			done := make(chan error, 1)
+			go func() {
+				r := Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}
+				if c.name == "sync" {
+					_, err := m.SyncBundle(context.Background(), r, "", filepath.Join(t.TempDir(), "s.bundle"))
+					done <- err
+					return
+				}
+				res := m.Push(context.Background(), r, bundle, "lux/x", "")
+				if res.Status != "pushed" {
+					done <- fmt.Errorf("push: %+v", res)
+					return
+				}
+				done <- nil
+			}()
+			w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l := m.lockFor(mirror)
+			held := !l.gc.TryLock()
+			if !held {
+				l.gc.Unlock()
+			}
+			w.Close()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if !held {
+				t.Fatalf("gc could run while a %s's scratch borrowed the mirror", c.name)
+			}
+		})
+	}
+}
+
 // The symptom end to end: clones of a mirror while fetches into it each
 // leave loose objects and make a repack due. Probabilistic: main fails a
-// few of 60 (a detached gc), and so did a fetch beside a copy (its
-// temporary files), so it complements the deterministic tests above.
+// few of 60 (a detached gc); a fetch beside a copy (its temporary files)
+// fails it only rarely, which TestAFetchWaitsForACopy pins instead.
 func TestClonesSurviveConcurrentFetchAndRepack(t *testing.T) {
 	if testing.Short() {
-		t.Skip("about 30 s")
+		t.Skip("about a minute")
 	}
 	bare, _ := remote(t)
 	work := filepath.Join(filepath.Dir(bare), "work")
