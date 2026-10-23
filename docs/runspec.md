@@ -201,6 +201,8 @@ The Run is placed only on a host that is not a spot instance (`hosts.market`
 is not `spot`; a static host has none) and whose lux-runner exempts it from
 its disk guard. Other hosts are `capability` blockers in a `validateOnly`
 answer, and its wait reason says they cannot take a non-preemptible Run.
+An operator's `lux resume --to` or `lux migrate --to` naming such a host is
+refused with 422 `invalid_spec`, before the Run is stopped or changed.
 
 What the guarantee covers, exactly:
 

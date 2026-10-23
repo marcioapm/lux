@@ -1763,6 +1763,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			}
 			to = &rp
 		}
+		if err := checkChosenHost(ctx, tx, &sp, placeOn); err != nil {
+			return err
+		}
 		switch {
 		case resumable(state):
 			// Resuming would start from scratch, not from the refused state.

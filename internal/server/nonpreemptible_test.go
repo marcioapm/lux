@@ -335,3 +335,79 @@ func TestForceDrainStopsNonPreemptibleRun(t *testing.T) {
 		t.Fatalf("stopRequested=%v reason=%q, want a drain stop", stopRequested, reason)
 	}
 }
+
+// runPlaceOn is the Run's state and place_on ("" for none).
+func runPlaceOn(t *testing.T, s *Server, id string) (state, placeOn string) {
+	t.Helper()
+	systemScan(t, s, `SELECT state, coalesce(place_on, '') FROM runs WHERE id = $1`, []any{id}, &state, &placeOn)
+	return state, placeOn
+}
+
+// An operator's migrate --to a spot host, or one whose runner lacks
+// CapNonPreemptible, is a 422 for a non-preemptible Run and changes
+// nothing (no stop requested); a capable on-demand host is accepted.
+func TestMigrateNonPreemptibleToIncapableHost(t *testing.T) {
+	for _, c := range []struct {
+		name, market string
+		caps         []string
+		ok           bool
+	}{
+		{"spot", MarketSpot, []string{proto.CapNonPreemptible}, false},
+		{"old runner", MarketOnDemand, []string{}, false},
+		{"capable on-demand", MarketOnDemand, []string{proto.CapNonPreemptible}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx := policyFixture(t, "")
+			execSQL(t, s, ctx, `UPDATE runs SET spec = jsonb_set(spec, '{placement,preemptible}', 'false') WHERE id = 'r1'`)
+			execSQL(t, s, ctx, `UPDATE hosts SET market = $1, capabilities = $2 WHERE id = 'h2'`, c.market, c.caps)
+			_, err := s.migrateRun(operatorCtx(), &migrateRunInput{RunPath: RunPath{ID: "r1"}, Body: &migrateRequest{To: "h2"}})
+			state, placeOn := runPlaceOn(t, s, "r1")
+			if c.ok {
+				if err != nil || placeOn != "h2" {
+					t.Fatalf("migrate --to h2: %v, place_on %q", err, placeOn)
+				}
+				return
+			}
+			wantRefused(t, err, "invalid_spec")
+			if state != StateRunning || placeOn != "" {
+				t.Errorf("after the refusal: state %s place_on %q", state, placeOn)
+			}
+			if _, stopRequested, _ := drainState(t, s, ctx, "h1", "r1"); stopRequested {
+				t.Error("a refused migrate requested a stop")
+			}
+		})
+	}
+}
+
+// resume --to holds a non-preemptible Run to the same rule.
+func TestResumeNonPreemptibleToIncapableHost(t *testing.T) {
+	for _, c := range []struct {
+		name, market string
+		caps         []string
+		ok           bool
+	}{
+		{"spot", MarketSpot, []string{proto.CapNonPreemptible}, false},
+		{"old runner", MarketOnDemand, []string{}, false},
+		{"capable on-demand", MarketOnDemand, []string{proto.CapNonPreemptible}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			id, _ := movedRun(t, s)
+			setSpec(t, s, id, "{placement,preemptible}", `false`)
+			execSQL(t, s, context.Background(), `UPDATE hosts SET market = $1, capabilities = $2 WHERE id = 'hc'`, c.market, c.caps)
+			_, err := s.resumeRun(operatorCtx(), &resumeRunInput{RunPath: RunPath{ID: id}, Body: &resumeRequest{
+				To: "hc", Secrets: []spec.Secret{{Name: "TOKEN", Value: "v"}}}})
+			state, placeOn := runPlaceOn(t, s, id)
+			if c.ok {
+				if err != nil || placeOn != "hc" || state != StateResuming {
+					t.Fatalf("resume --to hc: %v, state %s place_on %q", err, state, placeOn)
+				}
+				return
+			}
+			wantRefused(t, err, "invalid_spec")
+			if state != StateStopped || placeOn != "" {
+				t.Errorf("after the refusal: state %s place_on %q", state, placeOn)
+			}
+		})
+	}
+}

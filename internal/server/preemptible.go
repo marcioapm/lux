@@ -6,9 +6,11 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -129,6 +131,30 @@ func SavePoolPreemptible(ctx context.Context, tx pgx.Tx, tenantID, name, provide
 		return next, err
 	}
 	return next, checkPreemptibleFlip(ctx, tx, id, *current, next)
+}
+
+// checkChosenHost refuses (422) an operator's chosen host for a
+// non-preemptible Run when the host is spot or its runner lacks
+// CapNonPreemptible: hostFit would never place the Run there, and place_on
+// would hold it waiting for that host indefinitely.
+func checkChosenHost(ctx context.Context, tx pgx.Tx, sp *spec.RunSpec, hostID *string) error {
+	if hostID == nil || !sp.NonPreemptible() {
+		return nil
+	}
+	var market string
+	var caps []string
+	if err := tx.QueryRow(ctx, `SELECT coalesce(market, ''), capabilities FROM hosts WHERE id = $1`, *hostID).Scan(&market, &caps); err != nil {
+		return err
+	}
+	switch {
+	case market == MarketSpot:
+		return errf(http.StatusUnprocessableEntity, "invalid_spec",
+			"the chosen host is a spot instance: a Run with placement.preemptible false runs only on a host that is not spot")
+	case !slices.Contains(caps, proto.CapNonPreemptible):
+		return errf(http.StatusUnprocessableEntity, "invalid_spec",
+			"the chosen host's lux-runner lacks non-preemptible support: a Run with placement.preemptible false cannot run there")
+	}
+	return nil
 }
 
 // checkNonPreemptiblePool holds a non-preemptible Run's pool to its rules:
