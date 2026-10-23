@@ -170,7 +170,8 @@ func New(extra []netip.Prefix) (*Firewall, error) {
 	return f, nil
 }
 
-// setup replaces the table, keeping the counters of the one it replaces.
+// setup replaces the table, keeping the counters of the one it replaces,
+// and re-applies the control-plane ports in force.
 func (f *Firewall) setup() error {
 	if err := f.keepCounters(); err != nil {
 		return err
@@ -194,7 +195,9 @@ func (f *Firewall) setup() error {
 	if len(v6) > 0 {
 		fmt.Fprintf(&b, "add element inet lux blocked6 { %s }\n", strings.Join(v6, ", "))
 	}
+	f.mu.Lock()
 	b.WriteString(f.pairsElements())
+	f.mu.Unlock()
 	b.WriteString(f.countingSetup())
 	if err := f.nft(b.String()); err != nil {
 		return fmt.Errorf("nftables: %w", err)
