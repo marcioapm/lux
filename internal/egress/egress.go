@@ -116,14 +116,14 @@ type Firewall struct {
 	// opMu serializes lifecycle kernel transactions and accounting
 	// publication. Take before mu; never hold across resolution, callbacks
 	// or stub close.
-	opMu     sync.Mutex
-	mu       sync.Mutex
-	lookup   func(ctx context.Context, host string) ([]netip.Addr, error) // IPv4 addresses of host
-	nft      func(script string) error
-	list     func() ([]byte, error) // `nft -j list counters table inet lux`
-	runs     map[string]*run        // by bridge interface
-	blocked  []netip.Prefix         // parsed once: always blocked, plus the control plane
-	always   []netip.Prefix         // the always-blocked ranges alone
+	opMu    sync.Mutex
+	mu      sync.Mutex
+	lookup  func(ctx context.Context, host string) ([]netip.Addr, error) // IPv4 addresses of host
+	nft     func(script string) error
+	list    func() ([]byte, error) // `nft -j list counters table inet lux`
+	runs    map[string]*run        // by bridge interface
+	blocked []netip.Prefix         // parsed once: always blocked, plus the control plane
+	always  []netip.Prefix         // the always-blocked ranges alone
 	// controlPlane are New's extra prefixes; cpPorts the TCP ports on them
 	// Runs may reach (SetControlPlanePorts), sorted.
 	controlPlane []netip.Prefix
