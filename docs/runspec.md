@@ -541,9 +541,115 @@ image:
   network, so a `RUN` step has the Run's egress (and needs its registries
   and package mirrors allowed).
 - A `FROM` naming its image through a build argument can't be pinned and
-  is refused. `scratch` and earlier stages are left alone.
-- Not yet: a build context. `COPY` and `ADD` have nothing to copy from, so
-  a spec with `image.build.context` is refused.
+  is refused. `scratch` and earlier stages are left alone. Render the
+  argument into the Containerfile (pinned by digest) before submitting.
+- A build sees only its [context](#build-contexts): with none, `COPY` and
+  `ADD` have nothing to copy from. `image.build.context` (an artifact) is
+  refused.
+- What a host builds for is part of the build: a host builds for its own
+  platform (`linux/amd64`, `linux/arm64`), and the key covers it.
+
+### Build contexts
+
+```yaml
+image:
+  build:
+    containerfile: |
+      FROM ghcr.io/acme/base@sha256:…
+      COPY setup.sh /opt/setup.sh
+      COPY --from=repo package.json package-lock.json /tmp/seed/
+      RUN sh /opt/setup.sh
+    contextFiles:                 # the default context: COPY and ADD read it
+      setup.sh: |
+        npm ci --prefix /tmp/seed
+    contexts:                     # named contexts: COPY --from=<name>, RUN --mount=from=<name>
+      repo:
+        git: { url: https://github.com/acme/web.git, ref: 3f1c…(40 hex), credential: GITHUB_TOKEN }
+secrets:
+  - { name: GITHUB_TOKEN, value: ghp_… }
+network:
+  egress: [{ host: github.com }]
+```
+
+- `contextFiles` maps relative paths to UTF-8 text: at most 64 files and
+  1 MiB in all. A path is clean and relative, at most 255 bytes and 16
+  components, each of `A-Z a-z 0-9 . _ @ + -` and not `.` or `..`; no path
+  is also another's directory. Files are written `0644` (a script runs as
+  `sh setup.sh`, or `chmod` it), directories `0755`, whatever the host.
+- `contexts` names up to 4 contexts, each a git repository's tree at one
+  commit, without `.git`. A name is 1-63 of `a-z 0-9 _ -`, starting with
+  a letter, and is no stage's (nor `scratch` or `context`). `ref` is the
+  commit's full 40-character sha: a branch, tag or short sha is refused,
+  since a context never moves. `url` is `https` (or `http`: the commit pins
+  the content), with no credentials, query or fragment, not localhost, a
+  loopback or link-local address, and allowed by `network.egress` (unless
+  `unrestricted`). The runner fetches it, before the build, through the
+  tenant's own mirror on the host (as `git.repositories`, never another
+  tenant's); a commit no branch has, such as a pull request's head, is
+  fetched by its sha. `credential` names a secret, which is then a git
+  credential: the runner's only, never in the build, its arguments or the
+  container. Its tree is bounded by the Run's disk.
+- Every input is part of the build's key: each file's path and content,
+  each context's name, URL and commit. A changed file is another build.
+- Each fetch is an `image.context` event (`name`, `url`, `commit`). A
+  stop or terminate during a fetch ends it.
+
+### Published images
+
+`image.build.publish: true` publishes the build to the operator's
+**managed image registry** ([operations](operations.md#configuration):
+any registry with a static credential, or Amazon ECR with luxd's own AWS
+credentials),
+in the tenant's own repository, `<[images] repository>/<tenant id>`, with
+luxd's credential: the Run needs no `registryAuth` for it.
+
+```yaml
+image:
+  build:
+    containerfile: |
+      FROM ghcr.io/acme/base@sha256:…
+      RUN …
+    publish: true
+```
+
+- The placement goes on only once the push succeeded and the image was
+  pulled back by the manifest digest the registry returned, and is the
+  build. The Run's image (`GET /v1/runs/{id}`, `image`) then has
+  `publishedRef`, `<repository>@sha256:<digest>`, and `platform`, e.g.
+  `linux/arm64`, recorded with its first build. A push that fails fails
+  the placement (`image` in its reason), and the Run has no published
+  image. A luxd without a managed registry refuses the spec (422).
+- Later Runs of the tenant use it as `image.ref: <publishedRef>`, with no
+  registry credentials of their own, on any host; so can a `FROM` of
+  another build. A Run naming another tenant's managed repository, as its
+  image or a `FROM`, is refused (422), and `image.build.cache` can't be in
+  the managed registry. `GET /v1/whoami` says whether luxd has one
+  (`managedImages`).
+- A later placement of the Run on a host of the same platform runs the
+  published image, pulled by digest, rather than rebuilding it
+  (`image.built` with `fromPublished: true`), so a build that is not
+  reproducible runs the same image after a move. On a host of another
+  platform it builds from the pinned Containerfile and publishes that
+  build too (an `image.published` event); the Run's image keeps the first.
+- Builds are reused from the tenant's repository as from a [build
+  cache](#a-shared-build-cache): it is tagged `<repository>:<key>`, and a
+  host without the build pulls that tag before building (`image.cache`
+  with `managed: true`). Each placement's publication is an
+  `image.published` event (`ref`, `platform`, `reused`).
+- lux never deletes published images, and needs them kept: retention
+  must not remove a digest a Run or a later Run's `image.ref` still uses.
+  A placement on a host of the published image's platform never rebuilds
+  it: without a local copy of exactly that image (the host's build of the
+  same id, or the digest pulled before by the tenant), it pulls the
+  digest, and if the registry no longer has it the placement fails
+  (`image`, `published image <ref>: ...`). So does a Run naming a deleted
+  digest as `image.ref`. Only a host of another platform builds.
+- Runs that publish, have a build context, or need luxd's credential (an
+  `image.ref` or `FROM` in the managed registry, its tenant's or a shared
+  repository's) are placed only on runners that support them
+  (`managed-images-v1`): with an older one only, the Run waits, with a
+  reason saying so, rather than failing a pull. Runs using only their own
+  `registryAuth` are placed as before.
 
 ### Private registries
 
@@ -606,8 +712,10 @@ image:
 
 - A build is cached as `<cache>:<key>`. The key is the same one the host
   tags its local build with: the tenant, the egress rules, the pinned
-  Containerfile, and the args. Different tenants or rules never share an
-  image, as on a single host.
+  Containerfile, the args, the [context](#build-contexts) and the
+  platform. Different tenants or rules never share an image, as on a
+  single host. The cache is best effort; for a build that must be in a
+  registry, see [published images](#published-images).
 - A host without the image locally first pulls `<cache>:<key>`. On a hit
   it runs that image, with no build (an `image.cache` event,
   `{hit: true, ref}`). When the cache does not have it, the host builds.
@@ -641,7 +749,13 @@ image:
 Hosts remove the images lux put there once they go unused:
 
 - lux records the images it pulled (`image.ref`, `FROM` bases, cache
-  pulls), built, or tagged, with their last use on the host. After the
+  pulls), built, or tagged, with their last use on the host. A Run's
+  [published image](#published-images) is named for its digest
+  (`localhost/lux-published:<tenant>-<digest>`), not the build's key: two
+  Runs of the same inputs may have published different images, and each
+  runs its own. That name is the tenant's alone, and no spec may name
+  `lux-published` (as `image.ref` or `FROM`, however spelled): use the
+  `publishedRef`. After the
   host TTL (`lux-runner --host-ttl`, 24h by default) without use, it
   removes them. A Run's stop counts as a use of its image, so a resume on
   the host within the TTL finds the image there, as it finds the volumes.

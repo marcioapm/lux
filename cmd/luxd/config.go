@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/marcioapm/lux/internal/ec2"
+	"github.com/marcioapm/lux/internal/ecrauth"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/server"
 	"github.com/marcioapm/lux/internal/spec"
@@ -155,6 +157,17 @@ type config struct {
 			AUD string `toml:"aud" env:"LUX_PREVIEW_CF_ACCESS_AUD"`
 		} `toml:"cloudflare_access"`
 	} `toml:"preview"`
+	// Images: the managed image registry (image.build.publish).
+	Images struct {
+		Repository     string   `toml:"repository" env:"LUX_IMAGES_REPOSITORY"`
+		CredentialFile string   `toml:"credential_file" env:"LUX_IMAGES_CREDENTIAL_FILE"`
+		CredentialEnv  string   `toml:"credential_env" env:"LUX_IMAGES_CREDENTIAL_ENV"`
+		Shared         []string `toml:"shared" env:"LUX_IMAGES_SHARED"`
+		// Auth: "static" (credential_file or credential_env, the default)
+		// or "ecr" (an ECR token from the AWS default credential chain).
+		Auth           string   `toml:"auth" env:"LUX_IMAGES_AUTH"`
+		ECRMinValidity duration `toml:"ecr_min_validity" env:"LUX_IMAGES_ECR_MIN_VALIDITY"`
+	} `toml:"images"`
 }
 
 // Nil timeout and max_batch use the transport defaults; explicit zero is invalid.
@@ -282,6 +295,7 @@ func defaultConfig() config {
 	c.Preview.Scheme = "https"
 	c.Preview.ActivityEvery.Duration = 30 * time.Second
 	c.Preview.IdleCheck.Duration = 5 * time.Second
+	c.Images.ECRMinValidity.Duration = 4 * time.Hour
 	return c
 }
 
@@ -582,6 +596,7 @@ func (c config) check() error {
 		}
 		checkSettle(key+".settle", p.Settle)
 	}
+	problems = append(problems, c.imagesProblems()...)
 	if c.Costs.Compute.PricesRefresh.Duration <= 0 {
 		problems = append(problems, "costs.compute.prices_refresh (LUX_COSTS_PRICES_REFRESH) must be positive")
 	}
@@ -815,3 +830,65 @@ func validInstanceType(s string) bool {
 	}
 	return true
 }
+
+// imagesProblems checks [images]: a repository with its credential's
+// source, or nothing; shared repositories need the repository.
+func (c *config) imagesProblems() []string {
+	im := c.Images
+	var problems []string
+	if im.Auth != "" && im.Auth != "static" && im.Auth != "ecr" {
+		problems = append(problems, `images.auth (LUX_IMAGES_AUTH) must be "static" or "ecr"`)
+	}
+	if im.Repository == "" {
+		if im.CredentialFile != "" || im.CredentialEnv != "" || len(im.Shared) > 0 || im.Auth == "ecr" {
+			problems = append(problems, "images.repository (LUX_IMAGES_REPOSITORY) is required with images.auth ecr, credential_file, credential_env or shared")
+		}
+		return problems
+	}
+	if !spec.ManagedRepoRoot(im.Repository) {
+		problems = append(problems, "images.repository (LUX_IMAGES_REPOSITORY): need a lowercase repository with its registry and no tag, e.g. ghcr.io/acme/lux-images")
+	}
+	if im.Auth == "ecr" {
+		host, _, _ := strings.Cut(im.Repository, "/")
+		if _, _, ok := ecrauth.ParseHost(host); !ok {
+			problems = append(problems, "images.auth ecr: images.repository must be on a private ECR registry, <account>.dkr.ecr.<region>.amazonaws.com/<path>")
+		}
+		if im.CredentialFile != "" || im.CredentialEnv != "" {
+			problems = append(problems, "images.auth ecr takes no images.credential_file or credential_env: luxd gets ECR tokens itself")
+		}
+		if d := im.ECRMinValidity.Duration; d < ecrauth.MinMinValidity || d > ecrauth.MaxMinValidity {
+			problems = append(problems, fmt.Sprintf("images.ecr_min_validity (LUX_IMAGES_ECR_MIN_VALIDITY) must be %s to %s: an ECR token lives 12h", ecrauth.MinMinValidity, ecrauth.MaxMinValidity))
+		}
+		for _, r := range im.Shared {
+			if h, _, _ := strings.Cut(r, "/"); h != host {
+				problems = append(problems, fmt.Sprintf("images.shared %q: with images.auth ecr, on the registry of images.repository (%s): the token is that registry's", r, host))
+			}
+		}
+		return append(problems, sharedProblems(im.Repository, im.Shared)...)
+	}
+	switch {
+	case im.CredentialFile != "" && im.CredentialEnv != "":
+		problems = append(problems, "images.credential_file and images.credential_env are mutually exclusive")
+	case im.CredentialFile == "" && im.CredentialEnv == "":
+		problems = append(problems, "images.repository needs images.credential_file (LUX_IMAGES_CREDENTIAL_FILE) or images.credential_env (LUX_IMAGES_CREDENTIAL_ENV)")
+	case im.CredentialFile != "" && !filepath.IsAbs(im.CredentialFile):
+		problems = append(problems, "images.credential_file must be an absolute path")
+	case im.CredentialEnv != "" && !envNameRe.MatchString(im.CredentialEnv):
+		problems = append(problems, "images.credential_env must name an environment variable (A-Z, 0-9, _)")
+	}
+	return append(problems, sharedProblems(im.Repository, im.Shared)...)
+}
+
+func sharedProblems(repository string, shared []string) []string {
+	var problems []string
+	for _, r := range shared {
+		if !spec.ManagedRepoRoot(r) {
+			problems = append(problems, fmt.Sprintf("images.shared (LUX_IMAGES_SHARED) %q: need a repository with its registry and no tag", r))
+		} else if r == repository || strings.HasPrefix(r, repository+"/") {
+			problems = append(problems, fmt.Sprintf("images.shared (LUX_IMAGES_SHARED) %q: inside images.repository, where every repository is a tenant's", r))
+		}
+	}
+	return problems
+}
+
+var envNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)

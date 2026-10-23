@@ -368,6 +368,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	if err != nil {
 		return plan, err
 	}
+	s.markManagedAuth(slicePtrs(runs)...)
 	ready, err := s.readyHosts(ctx, tx, runs)
 	if err != nil {
 		return plan, err
@@ -407,7 +408,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	virtual := func(id string) *candidateHost {
 		h := &candidateHost{ID: id, TenantID: pl.TenantID, PoolID: pl.ID, Pool: pl.Name, Shared: pl.Shared && pl.TenantID == nil, Retired: pl.Retired, Connected: true,
 			// A new host runs the binaries this luxd serves.
-			Caps: []string{proto.CapSyncModes, proto.CapNonPreemptible}}
+			Caps: []string{proto.CapSyncModes, proto.CapNonPreemptible, proto.CapManagedImages}}
 		// Its market is the pool's (ProviderTemplate).
 		if pl.Provider == "ec2" && pl.Preemptible {
 			h.Market = MarketSpot
