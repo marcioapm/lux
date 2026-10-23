@@ -592,9 +592,11 @@ Only a pool with `preemptible: false` takes Runs submitted with
 ([Non-preemptible Runs](runspec.md#non-preemptible-runs)), and a pool
 holding such a Run (queued, live or resumable) cannot be made preemptible
 again (409 `pool_has_non_preemptible_runs`). A pool turned non-preemptible
-keeps its spot hosts until they scale down: they keep taking ordinary
-Runs, never non-preemptible ones. Omitted on create, the flag follows the
-template's `spot` (else `true`); omitted on update, it is unchanged.
+keeps its spot hosts: they keep taking ordinary Runs, never
+non-preemptible ones, and the pool's `min`/`warm` floors may keep them
+indefinitely; `lux hosts drain` them to replace them with on-demand hosts.
+Omitted on create, the flag follows the template's `spot` (else `true`);
+omitted on update, it is unchanged.
 
 ### Shaped pools
 

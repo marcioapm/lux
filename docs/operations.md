@@ -886,12 +886,17 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
 
 ### Spot instances
 
-Add `"spot": true` to the template to launch one-time spot instances:
+A new `ec2` pool is preemptible, so it launches one-time spot instances,
+unless it is set with `--preemptible=false`, which launches on-demand ones
+([Non-preemptible pools](#non-preemptible-pools)):
 
 ```bash
 lux pools set burst --provider ec2 --max 10 \
-  --template '{"region":"eu-west-1","launchTemplate":"lux-runner","spot":true}'
+  --template '{"region":"eu-west-1","launchTemplate":"lux-runner"}'
 ```
+
+The template's `"spot": true` is still accepted for compatibility, but it
+must agree with the pool's `preemptible` (422 `invalid_pool` otherwise).
 
 EC2 gives two minutes' notice before it takes a spot instance back. Each
 instance's runner watches for it (user data sets `LUX_EC2_IMDS`, which the
@@ -924,6 +929,13 @@ place the market is set; a template `spot` that contradicts it is refused
 `ec2` pool without `"spot": true` to `false`: they already launched
 on-demand. Static pools are `true` until set otherwise.
 
+For API and IaC callers this changes what a create means: a pool created
+(`POST /v1/pools`, `lux pools set`, `luxd admin create-pool`) without
+`preemptible` and without a template `spot` is now preemptible and
+launches spot instances; it used to launch on-demand. Pass
+`preemptible: false` to keep on-demand. Existing pools are backfilled as
+they were and keep their market on later updates that omit `preemptible`.
+
 ```bash
 lux pools set steady --provider ec2 --max 4 --preemptible=false \
   --template '{"region":"eu-west-1","launchTemplate":"lux-runner"}'
@@ -936,8 +948,10 @@ Only a pool with `preemptible: false` takes Runs submitted with
 placed only on hosts that are not spot instances and whose lux-runner
 advertises the `non-preemptible` capability (its disk guard exempts them),
 so after setting a pool's flag to `false` its existing spot hosts keep
-taking ordinary Runs and scale down as usual, and runners from before the
-capability take none of these Runs until they update. Setting a pool back
+taking ordinary Runs. They do not necessarily scale down: the pool's
+`min` and `warm` floors may keep them indefinitely, so `lux hosts drain`
+them to have the pool launch on-demand replacements. Runners from before
+the capability take none of these Runs until they update. Setting a pool back
 to `true` while it holds a non-preemptible Run that is queued, live or
 resumable is refused (409 `pool_has_non_preemptible_runs`): terminate those
 Runs or move them (`lux resume --pool` to another non-preemptible pool)
