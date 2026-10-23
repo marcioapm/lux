@@ -19,28 +19,34 @@ const (
 	codePoolHasNonPreempt  = "pool_has_non_preemptible_runs"
 	nonPreemptibleRunSQL   = `coalesce(r.spec->'placement'->>'preemptible', '') = 'false'`
 	errPreemptibleTemplate = "template.spot %v contradicts preemptible %v: an ec2 pool's market is preemptible (spot: true is preemptible: true); leave template.spot out"
+	errPreemptibleStored   = "template.spot %v contradicts the pool's stored preemptible %v: an ec2 pool's market is preemptible (spot: true is preemptible: true); set preemptible explicitly or leave template.spot out"
 )
 
-// PoolPreemptible is the preemptible a pool set stores: explicit, else an
-// ec2 template's spot when it has one, else current (the stored value, on
-// update), else true. An ec2 template spot contradicting explicit is a 422.
+// PoolPreemptible is the preemptible a pool set stores: explicit, else
+// current (the stored value, on update), else an ec2 template's spot when
+// it has one, else true. An ec2 template spot contradicting explicit, or
+// with explicit omitted the stored value, is a 422.
 func PoolPreemptible(provider string, template map[string]any, explicit, current *bool) (bool, error) {
+	want := explicit
+	if want == nil {
+		want = current
+	}
 	raw, hasSpot := template["spot"]
 	if hasSpot && provider == "ec2" {
 		spot, ok := raw.(bool)
 		if !ok {
 			return false, errf(http.StatusUnprocessableEntity, "invalid_pool", "template.spot must be true or false, got %T", raw)
 		}
-		if explicit != nil && *explicit != spot {
-			return false, errf(http.StatusUnprocessableEntity, "invalid_pool", errPreemptibleTemplate, spot, *explicit)
+		if want != nil && *want != spot {
+			if explicit == nil {
+				return false, errf(http.StatusUnprocessableEntity, "invalid_pool", errPreemptibleStored, spot, *want)
+			}
+			return false, errf(http.StatusUnprocessableEntity, "invalid_pool", errPreemptibleTemplate, spot, *want)
 		}
 		return spot, nil
 	}
-	switch {
-	case explicit != nil:
-		return *explicit, nil
-	case current != nil:
-		return *current, nil
+	if want != nil {
+		return *want, nil
 	}
 	return true, nil
 }

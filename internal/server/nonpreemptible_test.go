@@ -154,6 +154,18 @@ func TestPutPoolPreemptible(t *testing.T) {
 		_, err := putPoolAs(t, s, "t1", Pool{Name: "x", Provider: "ec2", Template: map[string]any{"spot": c.spot}, Preemptible: mark(c.preemptible)})
 		wantRefused(t, err, "invalid_pool")
 	}
+	// Omitted on update, the stored value stands: a template spot
+	// contradicting it is a 422, one without spot keeps it.
+	mustPut(t, s, "t1", Pool{Name: "kept", Provider: "ec2", Preemptible: mark(false)})
+	_, err := putPoolAs(t, s, "t1", Pool{Name: "kept", Provider: "ec2", Template: map[string]any{"spot": true}})
+	wantRefused(t, err, "invalid_pool")
+	if got("kept") {
+		t.Error("an update with template spot true and no preemptible made the pool preemptible")
+	}
+	mustPut(t, s, "t1", Pool{Name: "kept", Provider: "ec2", Template: map[string]any{"region": "r"}})
+	if got("kept") {
+		t.Error("an update with a template without spot changed preemptible")
+	}
 	list, err := s.listPools(tenantCtx("t1"), &TenantQuery{})
 	if err != nil {
 		t.Fatal(err)
