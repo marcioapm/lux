@@ -12,21 +12,14 @@ import (
 	"time"
 )
 
-// Three of seven dude reviewers starting together on one host failed with
-// "git clone: ... trying to write ref ... with nonexistent object"
-// (ABS-30, 2026-10-23). A fetch into the mirror ended with git's automatic
-// gc, detached by default, so it was still packing loose objects and
-// deleting them after the fetch had returned. A local clone lists refs
-// first and then copies objects/ in directory order, so one copying
-// meanwhile missed objects that moved into a pack it had already gone
-// past. Plain git reproduces it: repack -d plus prune-packed during a
-// clone of a large mirror fails 5 runs in 10.
-//
-// These tests pin the fix: a fetch leaves no gc running behind it, gc
-// waits for readers, a fetch waits for a clone copying the mirror (its
-// temporary files vanish under the copy), a clone holds the mirror until it
-// has copied it, a burst fetches once, and clones beside fetches and
-// repacks come out whole.
+// Clones of a mirror failed with "trying to write ref ... with nonexistent
+// object" beside a fetch's detached gc (ABS-30); mirrorLock explains the
+// race. Plain git reproduces it: repack -d plus prune-packed during a clone
+// of a large mirror fails 5 runs in 10.
+
+func repo(bare, ref string) Repo {
+	return Repo{Tenant: "t", Name: "r", URL: bare, Ref: ref}
+}
 
 // pushLoose adds a commit of n new files to the remote.
 func pushLoose(t *testing.T, bare, branch string, n int) {
@@ -43,7 +36,7 @@ func pushLoose(t *testing.T, bare, branch string, n int) {
 // warm materializes main once, so the mirror exists, and returns its path.
 func warm(t *testing.T, m *Manager, bare string) string {
 	t.Helper()
-	if _, err := m.Materialize(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}, filepath.Join(t.TempDir(), "warm")); err != nil {
+	if _, err := m.Materialize(context.Background(), repo(bare, "main"), filepath.Join(t.TempDir(), "warm")); err != nil {
 		t.Fatal(err)
 	}
 	return m.mirrorPath("t", bare)
@@ -52,25 +45,41 @@ func warm(t *testing.T, m *Manager, bare string) string {
 // fetch runs mirror() for ref and releases it at once.
 func fetch(t *testing.T, m *Manager, bare, ref string) {
 	t.Helper()
-	_, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: ref}, false)
+	_, release, err := m.mirror(context.Background(), repo(bare, ref), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	release()
 }
 
+// packEachFetch keeps each fetch as its own pack and makes gc due at two
+// packs: the mirror's, repacked into one here, and the next fetch's.
+func packEachFetch(t *testing.T, mirror string) {
+	t.Helper()
+	gitRun(t, mirror, "config", "fetch.unpackLimit", "1")
+	gitRun(t, mirror, "config", "gc.autoPackLimit", "1")
+	gitRun(t, mirror, "repack", "-q", "-a", "-d")
+}
+
+// waitParked returns once git has opened fifo for reading, parking it
+// there until the returned file is closed.
+func waitParked(t *testing.T, fifo string) *os.File {
+	t.Helper()
+	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
 func TestFetchRepacksBeforeReturning(t *testing.T) {
 	bare, _ := remote(t)
 	m := New(t.TempDir())
 	mirror := warm(t, m, bare)
-	// Forces the auto gc a busy mirror reaches by default, detached as git
-	// would run it: a fetch kept as its own pack next to the mirror's one
-	// makes two, past the limit of one.
-	gitRun(t, mirror, "config", "fetch.unpackLimit", "1")
-	gitRun(t, mirror, "config", "gc.autoPackLimit", "1")
+	// The auto gc a busy mirror reaches, detached as git runs it by default.
 	gitRun(t, mirror, "config", "gc.autoDetach", "true")
 	gitRun(t, mirror, "config", "maintenance.autoDetach", "true")
-	gitRun(t, mirror, "repack", "-q", "-a", "-d")
+	packEachFetch(t, mirror)
 	pushLoose(t, bare, "next", 300)
 	fetch(t, m, bare, "next")
 	// Done when mirror returned: no gc still running, the fetch's pack
@@ -90,11 +99,9 @@ func TestAReaderHoldsOffGCOnly(t *testing.T) {
 	bare, sha := remote(t)
 	m := New(t.TempDir())
 	mirror := warm(t, m, bare)
-	gitRun(t, mirror, "config", "fetch.unpackLimit", "1")
-	gitRun(t, mirror, "config", "gc.autoPackLimit", "1")
-	gitRun(t, mirror, "repack", "-q", "-a", "-d")
+	packEachFetch(t, mirror)
 	l := m.lockFor(mirror)
-	_, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: sha}, false)
+	_, release, err := m.mirror(context.Background(), repo(bare, sha), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,22 +152,18 @@ func TestMaterializeHoldsTheMirrorThroughItsClone(t *testing.T) {
 	defer os.Remove(fifo)
 	done := make(chan error, 1)
 	go func() {
-		_, err := m.Materialize(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}, filepath.Join(t.TempDir(), "c"))
+		_, err := m.Materialize(context.Background(), repo(bare, "main"), filepath.Join(t.TempDir(), "c"))
 		done <- err
 	}()
-	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := waitParked(t, fifo)
+	defer w.Close()
 	l := m.lockFor(mirror)
 	if l.gc.TryLock() {
 		l.gc.Unlock()
-		w.Close()
 		t.Fatal("gc could run while a clone was copying the mirror")
 	}
 	if l.files.TryLock() {
 		l.files.Unlock()
-		w.Close()
 		t.Fatal("a fetch could run while a clone was copying the mirror")
 	}
 	w.Close()
@@ -185,7 +188,7 @@ func TestAFetchWaitsForACopy(t *testing.T) {
 	bare, sha := remote(t)
 	m := New(t.TempDir())
 	mirror := warm(t, m, bare)
-	_, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: sha}, true)
+	_, release, err := m.mirror(context.Background(), repo(bare, sha), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +220,7 @@ func TestQueuedFetchesUseTheOneBeforeThem(t *testing.T) {
 	m := New(t.TempDir())
 	mirror := warm(t, m, bare)
 	l := m.lockFor(mirror)
-	r := Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}
+	r := repo(bare, "main")
 	asked := time.Now()
 	l.fetchedAt = asked.Add(time.Millisecond) // a fetch started after we asked
 	pushLoose(t, bare, "skipped", 1)
@@ -268,10 +271,7 @@ func TestFetchedAtIsWhenTheFetchStarted(t *testing.T) {
 	fifo := parkGit(t, "--prune")
 	done := make(chan struct{})
 	go func() { defer close(done); fetch(t, m, bare, "main") }()
-	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := waitParked(t, fifo)
 	mid := time.Now()
 	w.Close()
 	<-done
@@ -292,7 +292,7 @@ func TestPushAndSyncHoldOffGC(t *testing.T) {
 			var bundle string
 			if c.name == "push" {
 				dir := filepath.Join(t.TempDir(), "r")
-				if _, err := m.Materialize(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}, dir); err != nil {
+				if _, err := m.Materialize(context.Background(), repo(bare, "main"), dir); err != nil {
 					t.Fatal(err)
 				}
 				os.WriteFile(filepath.Join(dir, "a.txt"), []byte("two\n"), 0o644)
@@ -303,7 +303,7 @@ func TestPushAndSyncHoldOffGC(t *testing.T) {
 			fifo := parkGit(t, c.word)
 			done := make(chan error, 1)
 			go func() {
-				r := Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}
+				r := repo(bare, "main")
 				if c.name == "sync" {
 					_, err := m.SyncBundle(context.Background(), r, "", filepath.Join(t.TempDir(), "s.bundle"))
 					done <- err
@@ -316,10 +316,7 @@ func TestPushAndSyncHoldOffGC(t *testing.T) {
 				}
 				done <- nil
 			}()
-			w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
+			w := waitParked(t, fifo)
 			l := m.lockFor(mirror)
 			held := !l.gc.TryLock()
 			if !held {
@@ -370,7 +367,7 @@ func TestClonesSurviveConcurrentFetchAndRepack(t *testing.T) {
 			default:
 			}
 			pushLoose(t, bare, fmt.Sprintf("b%d", n), 300)
-			if _, release, err := m.mirror(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}, false); err == nil {
+			if _, release, err := m.mirror(context.Background(), repo(bare, "main"), false); err == nil {
 				release()
 			}
 		}
@@ -378,7 +375,7 @@ func TestClonesSurviveConcurrentFetchAndRepack(t *testing.T) {
 	root := t.TempDir()
 	var failed []error
 	for i := 0; i < 60; i++ {
-		if _, err := m.Materialize(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: "main"}, filepath.Join(root, fmt.Sprint(i))); err != nil {
+		if _, err := m.Materialize(context.Background(), repo(bare, "main"), filepath.Join(root, fmt.Sprint(i))); err != nil {
 			failed = append(failed, err)
 		}
 	}

@@ -56,11 +56,12 @@ type Manager struct {
 	known   map[string]bool // mirrored "tenant\x00url"
 }
 
-// mirrorLock guards one mirror. A fetch adds objects, but not only files:
-// it writes temporary files in objects/ (tmp_obj_*, tmp_pack_*) and
-// renames or deletes them, and a local clone, which lists objects/ and
-// then copies each file, dies on one that vanished in between. gc deletes
-// object files outright. So:
+// mirrorLock guards one mirror against the two ways a local clone of it
+// breaks. The clone lists the refs, then objects/, then copies each file.
+// A fetch writes temporary files in objects/ (tmp_obj_*, tmp_pack_*) and
+// renames or deletes them, so the copy dies on one that vanished. gc packs
+// and deletes loose objects, so the clone ends with a ref to an object it
+// never copied ("trying to write ref ... with nonexistent object"). So:
 //   - files: held exclusively by a fetch, shared by clones copying objects/.
 //   - gc: held exclusively by a repack, shared by every reader (clones, and
 //     push/sync scratch repositories borrowing objects through alternates,
@@ -156,22 +157,18 @@ func git(ctx context.Context, dir, token string, args ...string) (string, error)
 
 var shaRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// noAutoGC keeps a fetch from starting gc or maintenance by itself. By
-// default that runs detached, after the fetch has returned, and packs and
-// deletes loose objects while another Run's clone may be copying objects/.
-// A local clone lists the refs first and then copies objects/ in directory
-// order, so it ended with a ref to an object it never copied ("trying to
-// write ref ... with nonexistent object"). update runs gc itself, only
-// when no one is reading the mirror.
+// noAutoGC keeps a fetch from starting gc or maintenance by itself: by
+// default that runs detached, after the fetch has returned, outside
+// mirrorLock.gc. update runs gc itself, only when no one reads the mirror.
 var noAutoGC = []string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}
 
 // mirror makes sure the host has a mirror of the repository holding ref,
 // and returns it held: no gc until the caller calls release, after its
-// last read of the mirror, and with copy (a clone of objects/) no fetch
+// last read of the mirror, and when cloning (a copy of objects/) no fetch
 // either. A branch is fetched every time (it moves), unless a fetch that
 // started after this call already did; a full sha already in the mirror
 // is not.
-func (m *Manager) mirror(ctx context.Context, r Repo, copy bool) (path string, release func(), err error) {
+func (m *Manager) mirror(ctx context.Context, r Repo, cloning bool) (path string, release func(), err error) {
 	if r.Tenant == "" {
 		return "", nil, fmt.Errorf("repository %s: no tenant", r.Name)
 	}
@@ -190,13 +187,13 @@ func (m *Manager) mirror(ctx context.Context, r Repo, copy bool) (path string, r
 	}
 	// A fetch may land before the caller reads. It leaves the mirror whole,
 	// and a ref it prunes or moves did so upstream.
-	if copy {
+	if cloning {
 		l.files.RLock()
 	}
 	l.gc.RLock()
 	return path, func() {
 		l.gc.RUnlock()
-		if copy {
+		if cloning {
 			l.files.RUnlock()
 		}
 	}, nil
