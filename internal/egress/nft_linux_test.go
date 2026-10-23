@@ -54,7 +54,7 @@ func TestRealNft(t *testing.T) {
 		t.Fatalf("unrestricted Apply: %v", err)
 	}
 	for _, ports := range [][]int{{8090, 9000}, {8090}, nil} {
-		if err := f.SetControlPlanePorts(ports); err != nil {
+		if _, err := f.SetControlPlanePorts(ports); err != nil {
 			t.Fatalf("SetControlPlanePorts(%v): %v", ports, err)
 		}
 	}

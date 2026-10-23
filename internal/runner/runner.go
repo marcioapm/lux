@@ -419,13 +419,20 @@ func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
 	if r.egress != nil {
 		r.welcomeNetwork(w)
 		// Replaced on every Welcome: a luxd that sends none (or an older
-		// one) leaves the control plane fully blocked.
-		if err := r.egress.SetControlPlanePorts(w.ControlPlanePorts); err != nil {
+		// one) leaves the control plane fully blocked. A refused list
+		// clears the exception; on an nft failure the previous list stays
+		// until the next Welcome.
+		changed, err := r.egress.SetControlPlanePorts(w.ControlPlanePorts)
+		if err != nil {
 			r.log.Warn("control-plane ports", "ports", w.ControlPlanePorts, "err", err)
-			// A list that cannot be applied opens nothing.
-			if err := r.egress.SetControlPlanePorts(nil); err != nil {
-				r.log.Warn("control-plane ports: clearing", "err", err)
+			changed, err = r.egress.SetControlPlanePorts(nil)
+			if err != nil {
+				r.log.Error("control-plane ports: clearing failed, the previous list stays in force until the next Welcome",
+					"ports", r.egress.ControlPlanePorts(), "err", err)
 			}
+		}
+		if changed {
+			r.log.Info("control-plane ports", "ports", r.egress.ControlPlanePorts())
 		}
 	}
 	if w.LeaseSeconds > 0 {

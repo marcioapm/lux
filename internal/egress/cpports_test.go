@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -83,7 +84,7 @@ func TestControlPlanePortsUnrestricted(t *testing.T) {
 			t.Errorf("no ports configured: %s:%d %s", p.dst, p.dport, v)
 		}
 	}
-	if err := f.SetControlPlanePorts([]int{8090}); err != nil {
+	if _, err := f.SetControlPlanePorts([]int{8090}); err != nil {
 		t.Fatal(err)
 	}
 	for p, v := range map[packet]string{
@@ -121,7 +122,7 @@ func TestControlPlanePortsRestricted(t *testing.T) {
 		}
 		f.install(ctx, iface, r)
 	}
-	if err := f.SetControlPlanePorts([]int{8090}); err != nil {
+	if _, err := f.SetControlPlanePorts([]int{8090}); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
@@ -150,7 +151,7 @@ func TestControlPlanePortsReplaced(t *testing.T) {
 	if err := f.Apply(context.Background(), "luxu", netip.Addr{}, true, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.SetControlPlanePorts([]int{9000, 8090, 8090}); err != nil {
+	if _, err := f.SetControlPlanePorts([]int{9000, 8090, 8090}); err != nil {
 		t.Fatal(err)
 	}
 	pairs := func() []string {
@@ -166,7 +167,7 @@ func TestControlPlanePortsReplaced(t *testing.T) {
 	if got, want := pairs(), []string{"10.0.0.5 . 8090", "10.0.0.5 . 9000", "fd00::5 . 8090", "fd00::5 . 9000"}; !slices.Equal(got, want) {
 		t.Fatalf("pairs %v, want %v", got, want)
 	}
-	if err := f.SetControlPlanePorts([]int{9000}); err != nil {
+	if _, err := f.SetControlPlanePorts([]int{9000}); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := pairs(), []string{"10.0.0.5 . 9000", "fd00::5 . 9000"}; !slices.Equal(got, want) {
@@ -178,7 +179,7 @@ func TestControlPlanePortsReplaced(t *testing.T) {
 	if v := k.send(tcpTo("luxu", cp4, 9000), true); v != "accept" {
 		t.Errorf("kept port: %s", v)
 	}
-	if err := f.SetControlPlanePorts(nil); err != nil {
+	if _, err := f.SetControlPlanePorts(nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := pairs(); len(got) != 0 {
@@ -188,7 +189,7 @@ func TestControlPlanePortsReplaced(t *testing.T) {
 		t.Errorf("cleared list: %s", v)
 	}
 	// A restarted runner's setup reloads the list in force.
-	if err := f.SetControlPlanePorts([]int{8090}); err != nil {
+	if _, err := f.SetControlPlanePorts([]int{8090}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.setup(); err != nil {
@@ -201,23 +202,54 @@ func TestControlPlanePortsReplaced(t *testing.T) {
 
 func TestControlPlanePortsFailedTransactionKeepsList(t *testing.T) {
 	k, f := cpFirewall(t)
-	if err := f.SetControlPlanePorts([]int{8090}); err != nil {
+	if _, err := f.SetControlPlanePorts([]int{8090}); err != nil {
 		t.Fatal(err)
 	}
 	k.failOn = "cp_ports4"
-	if err := f.SetControlPlanePorts([]int{9000}); err == nil {
+	if _, err := f.SetControlPlanePorts([]int{9000}); err == nil {
 		t.Fatal("no error")
 	}
 	if got := f.ControlPlanePorts(); !slices.Equal(got, []int{8090}) {
 		t.Errorf("list after a failed change: %v", got)
 	}
-	many := make([]int, MaxControlPlanePorts+1)
-	for i := range many {
-		many[i] = 1000 + i
+}
+
+// ports is n distinct ports from 1000.
+func ports(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = 1000 + i
 	}
-	k.failOn = ""
-	if err := f.SetControlPlanePorts(many); err == nil {
-		t.Error("more than MaxControlPlanePorts accepted")
+	return out
+}
+
+// Exactly MaxControlPlanePorts apply, one pair per port and address; one
+// more, or a port outside 1-65535, refuses the list and keeps the old one.
+func TestControlPlanePortsLimits(t *testing.T) {
+	k, f := cpFirewall(t)
+	changed, err := f.SetControlPlanePorts(ports(proto.MaxControlPlanePorts))
+	if err != nil || !changed {
+		t.Fatalf("%d ports: changed %v, %v", proto.MaxControlPlanePorts, changed, err)
+	}
+	if n := len(k.st.sets["cp_ports4"].pairs) + len(k.st.sets["cp_ports6"].pairs); n != 2*proto.MaxControlPlanePorts {
+		t.Errorf("%d pairs, want %d", n, 2*proto.MaxControlPlanePorts)
+	}
+	if changed, err := f.SetControlPlanePorts(ports(proto.MaxControlPlanePorts)); err != nil || changed {
+		t.Errorf("same list again: changed %v, %v", changed, err)
+	}
+	for _, bad := range [][]int{ports(proto.MaxControlPlanePorts + 1), {0, 8090}, {8090, 70000}, {-1}} {
+		if changed, err := f.SetControlPlanePorts(bad); err == nil || changed {
+			t.Errorf("%v: changed %v, %v", bad, changed, err)
+		}
+	}
+	if got := f.ControlPlanePorts(); !slices.Equal(got, ports(proto.MaxControlPlanePorts)) {
+		t.Errorf("list after refusals: %v", got)
+	}
+	if _, err := f.SetControlPlanePorts([]int{8090, 8090}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.ControlPlanePorts(); !slices.Equal(got, []int{8090}) {
+		t.Errorf("duplicates: %v", got)
 	}
 }
 
@@ -234,7 +266,7 @@ func TestControlPlaneAddressAdmittedOnlyWithPorts(t *testing.T) {
 	if rc, addrs := ask(t, f, "lux1", "cp.example.com"); rc != dnsmessage.RCodeNameError || addrs != nil || n.inSet("lux1", cp) {
 		t.Fatalf("no ports: %v %v", rc, addrs)
 	}
-	if err := f.SetControlPlanePorts([]int{8090}); err != nil {
+	if _, err := f.SetControlPlanePorts([]int{8090}); err != nil {
 		t.Fatal(err)
 	}
 	if rc, addrs := ask(t, f, "lux1", "cp.example.com"); rc != dnsmessage.RCodeSuccess || !slices.Equal(addrs, []netip.Addr{cp}) || !n.inSet("lux1", cp) {
@@ -256,7 +288,7 @@ func TestControlPlaneAddressAdmittedOnlyWithPorts(t *testing.T) {
 	if strings.Contains(elems, "127.0.0.1") || strings.Contains(elems, "169.254.") {
 		t.Errorf("an always-blocked address got pairs: %s", elems)
 	}
-	if err := f.SetControlPlanePorts(nil); err != nil {
+	if _, err := f.SetControlPlanePorts(nil); err != nil {
 		t.Fatal(err)
 	}
 	if rc, addrs := ask(t, f, "lux1", "cp.example.com"); rc != dnsmessage.RCodeNameError || addrs != nil {

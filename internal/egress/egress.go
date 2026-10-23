@@ -518,38 +518,40 @@ func (f *Firewall) exemptAddr(ip netip.Addr) bool {
 	return slices.ContainsFunc(f.controlPlane, func(p netip.Prefix) bool { return p.IsSingleIP() && p.Addr() == ip })
 }
 
-// MaxControlPlanePorts caps the exempt control-plane ports.
-const MaxControlPlanePorts = proto.MaxControlPlanePorts
-
 // SetControlPlanePorts replaces the TCP ports on the control plane's
 // addresses that Runs may reach, for every Run at once, in one
-// transaction: the pairs sets are flushed and refilled. Ports outside
-// 1-65535 are ignored, duplicates collapsed. Empty restores the full block.
-// On an nft error the previous list stays in force.
-func (f *Firewall) SetControlPlanePorts(ports []int) error {
+// transaction: the pairs sets are flushed and refilled. Duplicates
+// collapse; a port outside 1-65535 or more than
+// proto.MaxControlPlanePorts refuses the whole list before any nft call.
+// Empty restores the full block. changed reports that the list in force
+// is now a different one. On an nft error the previous list stays.
+func (f *Firewall) SetControlPlanePorts(ports []int) (changed bool, err error) {
 	var clean []int
 	for _, p := range ports {
-		if p >= 1 && p <= 65535 && !slices.Contains(clean, p) {
+		if p < 1 || p > 65535 {
+			return false, fmt.Errorf("control-plane ports: %d is not a TCP port", p)
+		}
+		if !slices.Contains(clean, p) {
 			clean = append(clean, p)
 		}
 	}
 	slices.Sort(clean)
-	if len(clean) > MaxControlPlanePorts {
-		return fmt.Errorf("control-plane ports: %d, at most %d", len(clean), MaxControlPlanePorts)
+	if len(clean) > proto.MaxControlPlanePorts {
+		return false, fmt.Errorf("control-plane ports: %d, at most %d", len(clean), proto.MaxControlPlanePorts)
 	}
 	f.opMu.Lock()
 	defer f.opMu.Unlock()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if slices.Equal(clean, f.cpPorts) {
-		return nil
+		return false, nil
 	}
 	old := f.cpPorts
 	f.cpPorts = clean
 	script := "flush set inet lux cp_ports4\nflush set inet lux cp_ports6\n" + f.pairsElements()
 	if err := f.nft(script); err != nil {
 		f.cpPorts = old
-		return fmt.Errorf("nftables: control-plane ports: %w", err)
+		return false, fmt.Errorf("nftables: control-plane ports: %w", err)
 	}
 	if len(clean) == 0 {
 		// The stub stops answering control-plane addresses. Elements already
@@ -562,10 +564,10 @@ func (f *Firewall) SetControlPlanePorts(ports []int) error {
 			}
 		}
 	}
-	return nil
+	return true, nil
 }
 
-// ControlPlanePorts is the list SetControlPlanePorts last applied.
+// ControlPlanePorts reports the list in force, for tests and diagnostics.
 func (f *Firewall) ControlPlanePorts() []int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
