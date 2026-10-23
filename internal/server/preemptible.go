@@ -156,18 +156,18 @@ func checkChosenHost(ctx context.Context, tx pgx.Tx, sp *spec.RunSpec, hostID *s
 	return nil
 }
 
-// checkNonPreemptiblePool holds a non-preemptible Run's pool to its rules:
-// named explicitly (pool or poolId, not a default), and preemptible false.
-// rp is the resolved pool; named reports whether the spec named it.
-func checkNonPreemptiblePool(ctx context.Context, tx pgx.Tx, sp *spec.RunSpec, rp resolvedPool, named bool) error {
-	if !sp.NonPreemptible() {
-		return nil
+// resolveSubmitPool applies the same pool resolution and eligibility checks
+// to submit and validateOnly, before either normalizes the spec's pool name.
+func resolveSubmitPool(ctx context.Context, tx pgx.Tx, tenantID string, sp *spec.RunSpec) (resolvedPool, error) {
+	rp, err := resolvePool(ctx, tx, tenantID, sp.Placement.Pool, sp.Placement.PoolID)
+	if err != nil || !sp.NonPreemptible() {
+		return rp, err
 	}
-	if !named {
-		return errf(http.StatusUnprocessableEntity, codePoolRequired,
+	if sp.Placement.Pool == "" && sp.Placement.PoolID == "" {
+		return rp, errf(http.StatusUnprocessableEntity, codePoolRequired,
 			"placement.preemptible false needs a pool named by placement.pool or placement.poolId: default pools are not used")
 	}
-	return requireNonPreemptiblePool(ctx, tx, rp)
+	return rp, requireNonPreemptiblePool(ctx, tx, rp)
 }
 
 // requireNonPreemptiblePool refuses a pool that is preemptible, or not

@@ -713,12 +713,8 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		// The Run is bound to its pool's id: every later placement stays
 		// in that pool whatever the default becomes or the pool is called.
 		// The spec keeps the name as resolved now.
-		named := stored.Placement.Pool != "" || stored.Placement.PoolID != ""
-		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool, stored.Placement.PoolID)
+		rp, err := resolveSubmitPool(ctx, tx, p.TenantID, &stored)
 		if err != nil {
-			return err
-		}
-		if err := checkNonPreemptiblePool(ctx, tx, &stored, rp, named); err != nil {
 			return err
 		}
 		stored.Placement.Pool = rp.Name
