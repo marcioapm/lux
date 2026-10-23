@@ -925,9 +925,11 @@ A pool's `preemptible` decides an `ec2` pool's market: `true` (the default)
 launches spot instances, `false` on-demand ones. luxd sets the template's
 `spot` from it before every launch and template check, so it is the one
 place the market is set; a template `spot` that contradicts it is refused
-(422 `invalid_pool`). Migration `091_pool_preemptible` set every existing
-`ec2` pool without `"spot": true` to `false`: they already launched
-on-demand. Static pools are `true` until set otherwise.
+(422 `invalid_pool`). Omitted on create, the flag follows the template's
+`spot` (else `true`); omitted on update, it is unchanged. Migration
+`091_pool_preemptible` set every existing `ec2` pool without `"spot": true`
+to `false`: they already launched on-demand. Static pools are `true` until
+set otherwise.
 
 For API and IaC callers this changes what a create means: a pool created
 (`POST /v1/pools`, `lux pools set`, `luxd admin create-pool`) without
@@ -944,19 +946,17 @@ lux run --pool steady --preemptible=false -f release.yaml
 
 Only a pool with `preemptible: false` takes Runs submitted with
 `placement.preemptible: false`
-([Non-preemptible Runs](runspec.md#non-preemptible-runs)). Those Runs are
-placed only on hosts that are not spot instances and whose lux-runner
-advertises the `non-preemptible` capability (its disk guard exempts them),
-so after setting a pool's flag to `false` its existing spot hosts keep
-taking ordinary Runs. They do not necessarily scale down: the pool's
+([Non-preemptible Runs](runspec.md#non-preemptible-runs)). After setting a
+pool's flag to `false`, its existing spot hosts keep taking ordinary Runs,
+never non-preemptible ones. They do not necessarily scale down: the pool's
 `min` and `warm` floors may keep them indefinitely, so `lux hosts drain`
-them to have the pool launch on-demand replacements. Runners from before
-the capability take none of these Runs until they update. Setting a pool back
-to `true` while it holds a non-preemptible Run that is queued, live or
+them to have the pool launch on-demand replacements. Runners without the
+`non-preemptible` capability take none of these Runs until they update.
+Setting a pool back to `true` while it holds a non-preemptible Run that is queued, live or
 resumable is refused (409 `pool_has_non_preemptible_runs`): terminate those
 Runs or move them (`lux resume --pool` to another non-preemptible pool)
-first. Operator actions still stop them: `lux hosts drain --force-evict`,
-`lux pools rm --force-evict` and `lux migrate`.
+first. See the [Run guarantee](runspec.md#non-preemptible-runs) for what
+still stops a non-preemptible Run, including forced operator actions.
 
 What an instance needs:
 

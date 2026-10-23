@@ -586,17 +586,13 @@ latest host's `instanceType`), also for a pool scaled to zero.
 
 A pool is **preemptible** (`preemptible: true`, the default) or not. An
 `ec2` pool's flag is its market: `true` launches spot instances, `false`
-on-demand ones; luxd sets the template's `spot` from it at every launch.
+on-demand ones.
 Only a pool with `preemptible: false` takes Runs submitted with
 `placement.preemptible: false`
-([Non-preemptible Runs](runspec.md#non-preemptible-runs)), and a pool
-holding such a Run (queued, live or resumable) cannot be made preemptible
-again (409 `pool_has_non_preemptible_runs`). A pool turned non-preemptible
-keeps its spot hosts: they keep taking ordinary Runs, never
-non-preemptible ones, and the pool's `min`/`warm` floors may keep them
-indefinitely; `lux hosts drain` them to replace them with on-demand hosts.
-Omitted on create, the flag follows the template's `spot` (else `true`);
-omitted on update, it is unchanged.
+([Non-preemptible Runs](runspec.md#non-preemptible-runs)). See
+[Non-preemptible pools](operations.md#non-preemptible-pools) for create and
+update defaults, restrictions on changing the flag, and replacing existing
+spot hosts.
 
 ### Shaped pools
 
