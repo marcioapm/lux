@@ -253,6 +253,42 @@ func TestControlPlanePortsLimits(t *testing.T) {
 	}
 }
 
+// A restricted Run whose host: rule resolves to the control-plane address
+// reaches the exempt port there and nothing else.
+func TestControlPlanePortsRestrictedByHostname(t *testing.T) {
+	k := newKernel()
+	f := newFirewall([]netip.Prefix{netip.MustParsePrefix(cp4 + "/32")},
+		func(_ context.Context, host string) ([]netip.Addr, error) {
+			if host == "cache.example.com" {
+				return []netip.Addr{netip.MustParseAddr(cp4)}, nil
+			}
+			return nil, nil
+		}, k.nft, k.list)
+	f.acct.ifaceSubnets = func() []netip.Prefix { return nil }
+	if err := f.setup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.SetControlPlanePorts([]int{8090}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := newRun(false, []spec.EgressRule{{Host: "cache.example.com"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.nft(egressScript("luxhost", false, r.cidrs)); err != nil {
+		t.Fatal(err)
+	}
+	f.install(context.Background(), "luxhost", r)
+	for _, c := range []struct {
+		port int
+		want string
+	}{{8090, "accept"}, {7070, "drop"}} {
+		if got := k.send(tcpTo("luxhost", cp4, c.port), true); got != c.want {
+			t.Errorf("%s:%d: %s, want %s", cp4, c.port, got, c.want)
+		}
+	}
+}
+
 // A control-plane address enters a restricted Run's set (and the stub's
 // answers) only while some port is exempt; a loopback or link-local
 // control-plane address never does.
