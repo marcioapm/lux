@@ -52,12 +52,23 @@ type Result struct {
 type Manager struct {
 	mirrors string
 	mu      sync.Mutex
-	locks   map[string]*sync.RWMutex
+	locks   map[string]*mirrorLock
 	known   map[string]bool // mirrored "tenant\x00url"
 }
 
+// mirrorLock guards one mirror. fetch serializes what writes refs and
+// objects into it (a fetch, its creation). gc is held shared by every
+// reader of the mirror's objects (a clone copying them, a push or sync
+// borrowing them through alternates) and exclusively by a repack, the only
+// thing that removes object files. A fetch only adds objects, so it runs
+// beside readers.
+type mirrorLock struct {
+	fetch sync.Mutex
+	gc    sync.RWMutex
+}
+
 func New(dataDir string) *Manager {
-	m := &Manager{mirrors: filepath.Join(dataDir, "mirrors"), locks: map[string]*sync.RWMutex{}, known: map[string]bool{}}
+	m := &Manager{mirrors: filepath.Join(dataDir, "mirrors"), locks: map[string]*mirrorLock{}, known: map[string]bool{}}
 	entries, _ := os.ReadDir(m.mirrors)
 	for _, e := range entries {
 		b, err := os.ReadFile(filepath.Join(m.mirrors, e.Name(), "lux-url"))
@@ -76,15 +87,12 @@ func New(dataDir string) *Manager {
 	return m
 }
 
-// lockFor is one mirror's lock: held for writing while the mirror is
-// fetched into, created or repacked, and for reading while a clone, push
-// or sync reads its objects.
-func (m *Manager) lockFor(path string) *sync.RWMutex {
+func (m *Manager) lockFor(path string) *mirrorLock {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	l := m.locks[path]
 	if l == nil {
-		l = &sync.RWMutex{}
+		l = &mirrorLock{}
 		m.locks[path] = l
 	}
 	return l
@@ -141,53 +149,56 @@ func git(ctx context.Context, dir, token string, args ...string) (string, error)
 var shaRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // noAutoGC keeps a fetch from starting gc or maintenance by itself. By
-// default that runs detached, after the fetch and its lock are done, and
-// packs and deletes loose objects while another Run's clone may be copying
-// objects/. A local clone lists the refs first and then copies objects/ in
-// directory order, so it ended with a ref to an object it never copied
-// ("trying to write ref ... with nonexistent object"). update repacks
-// under the write lock instead.
+// default that runs detached, after the fetch has returned, and packs and
+// deletes loose objects while another Run's clone may be copying objects/.
+// A local clone lists the refs first and then copies objects/ in directory
+// order, so it ended with a ref to an object it never copied ("trying to
+// write ref ... with nonexistent object"). update runs gc itself, only
+// when no one is reading the mirror.
 var noAutoGC = []string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}
 
 // mirror makes sure the host has a mirror of the repository holding ref,
-// and returns it read-locked: nothing fetches into it or repacks it until
-// the caller calls release, after its last read of the mirror. A branch is
-// fetched every time (it moves); a full sha already in the mirror is not.
+// and returns it held for reading: its object files stay until the caller
+// calls release, after its last read of the mirror. A branch is fetched
+// every time (it moves); a full sha already in the mirror is not.
 func (m *Manager) mirror(ctx context.Context, r Repo) (path string, release func(), err error) {
 	if r.Tenant == "" {
 		return "", nil, fmt.Errorf("repository %s: no tenant", r.Name)
 	}
 	path = m.mirrorPath(r.Tenant, r.URL)
 	l := m.lockFor(path)
+	have := false
 	if shaRe.MatchString(r.Ref) {
-		l.RLock()
-		if _, err := git(ctx, path, "", "cat-file", "-e", r.Ref+"^{commit}"); err == nil {
-			return path, l.RUnlock, nil
+		_, err := git(ctx, path, "", "cat-file", "-e", r.Ref+"^{commit}")
+		have = err == nil
+	}
+	if !have {
+		if err := m.update(ctx, r, path, l); err != nil {
+			return "", nil, err
 		}
-		l.RUnlock()
 	}
-	l.Lock()
-	err = m.update(ctx, r, path)
-	l.Unlock()
-	if err != nil {
-		return "", nil, err
-	}
-	// An update may land between the two locks. It leaves the mirror
-	// whole and still holding ref (a fetch only adds), which is all a
-	// reader needs.
-	l.RLock()
-	return path, l.RUnlock, nil
+	// A fetch may land before the caller reads: with gc off it only adds
+	// objects, and a ref it prunes or moves did so upstream.
+	l.gc.RLock()
+	return path, l.gc.RUnlock, nil
 }
 
-// update fetches into the mirror, or creates it, then repacks it if git
-// thinks it is due, all before returning. The caller holds the write lock.
-func (m *Manager) update(ctx context.Context, r Repo, path string) error {
+// update fetches into the mirror, or creates it.
+func (m *Manager) update(ctx context.Context, r Repo, path string, l *mirrorLock) error {
+	l.fetch.Lock()
+	defer l.fetch.Unlock()
 	if _, err := os.Stat(filepath.Join(path, "HEAD")); err == nil {
 		if _, err := git(ctx, path, r.Token, append(noAutoGC, "fetch", "--prune", "--tags", r.URL, "+refs/heads/*:refs/heads/*")...); err != nil {
 			return err
 		}
-		_, err := git(ctx, path, "", "-c", "gc.autoDetach=false", "gc", "--auto", "--quiet")
-		return err
+		// Then a repack if git thinks one is due, attached, and only while
+		// nothing reads the mirror; otherwise a later fetch does it. Best
+		// effort: the fetch succeeded, so a failed gc fails no Run.
+		if l.gc.TryLock() {
+			git(ctx, path, "", "-c", "gc.autoDetach=false", "gc", "--auto", "--quiet")
+			l.gc.Unlock()
+		}
+		return nil
 	}
 	if err := os.MkdirAll(m.mirrors, 0o700); err != nil {
 		return err
@@ -225,16 +236,15 @@ func (m *Manager) Materialize(ctx context.Context, r Repo, dir string) (*Result,
 		return &Result{Name: r.Name}, nil
 	}
 	mirror := r.Bundle
+	release := func() {}
 	var err error
 	if mirror == "" {
-		var release func()
 		if mirror, release, err = m.mirror(ctx, r); err != nil {
 			return nil, err
 		}
-		// Held until the clone is done: the mirror's objects are copied,
-		// and its HEAD is read for a default branch.
-		defer release()
 	}
+	release = sync.OnceFunc(release)
+	defer release()
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return nil, err
 	}
@@ -249,10 +259,6 @@ func (m *Manager) Materialize(ctx context.Context, r Repo, dir string) (*Result,
 	if _, err := git(ctx, filepath.Dir(dir), "", "clone", "--quiet", "--no-hardlinks", "--no-checkout", mirror, dir); err != nil {
 		return nil, err
 	}
-	// The remote the workload sees is the real URL, with no credential.
-	if _, err := git(ctx, dir, "", "remote", "set-url", "origin", r.URL); err != nil {
-		return nil, err
-	}
 	ref := r.Ref
 	if ref == "" || ref == "HEAD" {
 		if r.Bundle != "" {
@@ -263,6 +269,12 @@ func (m *Manager) Materialize(ctx context.Context, r Repo, dir string) (*Result,
 		} else if ref, err = git(ctx, mirror, "", "symbolic-ref", "--short", "HEAD"); err != nil {
 			return nil, err
 		}
+	}
+	// The clone stands alone: nothing below reads the mirror.
+	release()
+	// The remote the workload sees is the real URL, with no credential.
+	if _, err := git(ctx, dir, "", "remote", "set-url", "origin", r.URL); err != nil {
+		return nil, err
 	}
 	res := &Result{Name: r.Name, Cloned: true}
 	// A branch is checked out as a local branch tracking origin; a tag or
