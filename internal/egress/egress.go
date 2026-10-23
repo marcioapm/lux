@@ -189,12 +189,8 @@ func (f *Firewall) setup() error {
 			v6 = append(v6, p.String())
 		}
 	}
-	if len(v4) > 0 {
-		fmt.Fprintf(&b, "add element inet lux blocked4 { %s }\n", strings.Join(v4, ", "))
-	}
-	if len(v6) > 0 {
-		fmt.Fprintf(&b, "add element inet lux blocked6 { %s }\n", strings.Join(v6, ", "))
-	}
+	addElements(&b, "blocked4", v4)
+	addElements(&b, "blocked6", v6)
 	f.mu.Lock()
 	b.WriteString(f.pairsElements())
 	f.mu.Unlock()
@@ -579,12 +575,13 @@ func (f *Firewall) ControlPlanePorts() []int {
 func (f *Firewall) pairsElements() string {
 	var v4, v6 []string
 	for _, p := range f.controlPlane {
-		if !p.IsSingleIP() || !f.exemptAddr(p.Addr()) {
+		ip := p.Addr()
+		if !p.IsSingleIP() || !f.exemptAddr(ip) {
 			continue
 		}
 		for _, port := range f.cpPorts {
-			e := fmt.Sprintf("%s . %d", p.Addr(), port)
-			if p.Addr().Is4() {
+			e := fmt.Sprintf("%s . %d", ip, port)
+			if ip.Is4() {
 				v4 = append(v4, e)
 			} else {
 				v6 = append(v6, e)
@@ -592,13 +589,16 @@ func (f *Firewall) pairsElements() string {
 		}
 	}
 	var b strings.Builder
-	if len(v4) > 0 {
-		fmt.Fprintf(&b, "add element inet lux cp_ports4 { %s }\n", strings.Join(v4, ", "))
-	}
-	if len(v6) > 0 {
-		fmt.Fprintf(&b, "add element inet lux cp_ports6 { %s }\n", strings.Join(v6, ", "))
-	}
+	addElements(&b, "cp_ports4", v4)
+	addElements(&b, "cp_ports6", v6)
 	return b.String()
+}
+
+// addElements writes the line adding elems to set, or nothing with none.
+func addElements(b *strings.Builder, set string, elems []string) {
+	if len(elems) > 0 {
+		fmt.Fprintf(b, "add element inet lux %s { %s }\n", set, strings.Join(elems, ", "))
+	}
 }
 
 // answerFor is what the DNS stub answers a Run for name: nothing unless it
