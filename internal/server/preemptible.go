@@ -92,15 +92,14 @@ func checkPreemptibleFlip(ctx context.Context, tx pgx.Tx, poolID string, current
 	if current || !next {
 		return nil
 	}
-	var n int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM runs r WHERE r.pool_id = $1 AND r.state <> 'terminated' AND `+nonPreemptibleRunSQL,
-		poolID).Scan(&n); err != nil {
+	var held bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs r WHERE r.pool_id = $1 AND r.state <> 'terminated' AND `+nonPreemptibleRunSQL+`)`,
+		poolID).Scan(&held); err != nil {
 		return err
 	}
-	if n > 0 {
+	if held {
 		return errf(http.StatusConflict, codePoolHasNonPreempt,
-			"%d %s with placement.preemptible false %s in this pool (queued, live or resumable): terminate or move them before making it preemptible",
-			n, plural(n, "Run", "Runs"), plural(n, "is", "are"))
+			"a Run with placement.preemptible false is in this pool (queued, live or resumable): terminate or move such Runs before making it preemptible")
 	}
 	return nil
 }
