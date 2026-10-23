@@ -383,6 +383,10 @@ type Welcome struct {
 	ControlPlanePorts []int `json:"controlPlanePorts,omitempty"`
 }
 
+// MaxControlPlanePorts caps Welcome.ControlPlanePorts: luxd refuses more at
+// startup, and a runner applies none of a longer list.
+const MaxControlPlanePorts = 16
+
 type Heartbeat struct {
 	Leases []LivePlacement `json:"leases"`
 	// LocalSnapshots: the Runs this host still holds local copies of. luxd

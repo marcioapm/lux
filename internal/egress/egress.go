@@ -515,9 +515,8 @@ func (f *Firewall) exemptAddr(ip netip.Addr) bool {
 	return slices.ContainsFunc(f.controlPlane, func(p netip.Prefix) bool { return p.IsSingleIP() && p.Addr() == ip })
 }
 
-// MaxControlPlanePorts caps the exempt control-plane ports; luxd refuses
-// more at startup.
-const MaxControlPlanePorts = 16
+// MaxControlPlanePorts caps the exempt control-plane ports.
+const MaxControlPlanePorts = proto.MaxControlPlanePorts
 
 // SetControlPlanePorts replaces the TCP ports on the control plane's
 // addresses that Runs may reach, for every Run at once, in one
