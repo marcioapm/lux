@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,10 +16,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
-	ststypes "github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"github.com/coder/websocket"
 	"github.com/jackc/pgx/v5"
 
@@ -32,44 +27,37 @@ import (
 
 const testRegistryHost = "123456789012.dkr.ecr.eu-west-1.amazonaws.com"
 
-// fakeRegistryAWS mints a distinct token per call: <owner>-pw-<n>, with
-// the owner read from the session tag, so a test can tell a reused token
-// from a fresh one and one owner's from another's.
-type fakeRegistryAWS struct {
-	mu       sync.Mutex
-	now      func() time.Time
-	clock    *testClock    // the clock now reads, when the fixture made one
-	timers   *manualTimers // the minter's hold timers, when the fixture made them
-	assumed  []sts.AssumeRoleInput
-	tokens   int
-	fail     map[string]error // by owner: AssumeRole fails
-	noCreds  map[string]bool  // by owner: AssumeRole answers no credentials
-	tokenTTL time.Duration    // 0: 12h
-	// token, by owner, replaces GetAuthorizationToken's answer.
-	token map[string]func() (*ecrtypes.AuthorizationData, error)
-	// gate, by owner: AssumeRole waits for it to close (or its context).
+// fakeTokenSource is a RegistryTokenSource minting a distinct token per
+// call: <owner>-pw-<n>, so a test can tell a reused token from a fresh one
+// and one owner's from another's.
+type fakeTokenSource struct {
+	mu     sync.Mutex
+	now    func() time.Time
+	clock  *testClock    // the clock now reads, when the fixture made one
+	timers *manualTimers // the minter's hold timers, when the fixture made them
+	minted []string      // the owner of every Mint call, in order
+	tokens int           // tokens issued
+	fail   map[string]error
+	ttl    time.Duration // 0: an hour
+	// token, by owner, replaces Mint's answer.
+	token map[string]func() (RegistryToken, error)
+	// gate, by owner: Mint waits for it to close (or its context).
 	gate map[string]chan struct{}
-	// releaseOnly, by owner: a gated AssumeRole ignores its context and
-	// waits for the gate alone, so no mint deadline can end it.
+	// releaseOnly, by owner: a gated Mint ignores its context and waits
+	// for the gate alone, so no mint deadline can end it.
 	releaseOnly map[string]bool
-	// cancelled, if set, is closed when a gated AssumeRole sees its context
-	// end; that call then returns only once exit is closed.
+	// cancelled, if set, is closed when a gated Mint sees its context end;
+	// that call then returns only once exit is closed.
 	cancelled, exit chan struct{}
-	// entered, if set, gets the owner of every AssumeRole as it starts;
+	// entered, if set, gets the owner of every Mint as it starts;
 	// contexts, if set, the context it was called with.
 	entered  chan string
 	contexts chan context.Context
-	// ended counts AssumeRole calls that have returned, by owner.
+	// ended counts Mint calls that have returned, by owner.
 	ended map[string]int
 }
 
-func (f *fakeRegistryAWS) AssumeRole(ctx context.Context, in *sts.AssumeRoleInput) (*ststypes.Credentials, error) {
-	owner := ""
-	for _, tag := range in.Tags {
-		if aws.ToString(tag.Key) == "lux-owner" {
-			owner = aws.ToString(tag.Value)
-		}
-	}
+func (f *fakeTokenSource) Mint(ctx context.Context, owner string) (RegistryToken, error) {
 	defer func() {
 		f.mu.Lock()
 		if f.ended == nil {
@@ -79,7 +67,7 @@ func (f *fakeRegistryAWS) AssumeRole(ctx context.Context, in *sts.AssumeRoleInpu
 		f.mu.Unlock()
 	}()
 	f.mu.Lock()
-	f.assumed = append(f.assumed, *in)
+	f.minted = append(f.minted, owner)
 	gate, entered, contexts := f.gate[owner], f.entered, f.contexts
 	releaseOnly, cancelled, exit := f.releaseOnly[owner], f.cancelled, f.exit
 	f.mu.Unlock()
@@ -100,56 +88,45 @@ func (f *fakeRegistryAWS) AssumeRole(ctx context.Context, in *sts.AssumeRoleInpu
 				close(cancelled)
 				<-exit
 			}
-			return nil, ctx.Err()
+			return RegistryToken{}, ctx.Err()
 		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.fail[owner]; err != nil {
-		return nil, err
+		return RegistryToken{}, err
 	}
-	if f.noCreds[owner] {
-		return nil, nil
-	}
-	exp := f.now().Add(time.Duration(aws.ToInt32(in.DurationSeconds)) * time.Second)
-	return &ststypes.Credentials{AccessKeyId: aws.String("ASIA" + owner), SecretAccessKey: aws.String("sk"), SessionToken: aws.String(owner), Expiration: &exp}, nil
-}
-
-func (f *fakeRegistryAWS) AuthorizationToken(_ context.Context, c *ststypes.Credentials) (*ecrtypes.AuthorizationData, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.tokens++
-	if tok := f.token[aws.ToString(c.SessionToken)]; tok != nil {
+	if tok := f.token[owner]; tok != nil {
 		return tok()
 	}
-	ttl := f.tokenTTL
+	ttl := f.ttl
 	if ttl == 0 {
-		ttl = 12 * time.Hour
+		ttl = time.Hour
 	}
-	exp := f.now().Add(ttl)
-	tok := base64.StdEncoding.EncodeToString(fmt.Appendf(nil, "AWS:%s-pw-%d", aws.ToString(c.SessionToken), f.tokens))
-	return &ecrtypes.AuthorizationData{AuthorizationToken: &tok, ExpiresAt: &exp}, nil
+	return RegistryToken{User: "puller", Password: fmt.Sprintf("%s-pw-%d", owner, f.tokens), Expires: f.now().Add(ttl)}, nil
 }
 
-func (f *fakeRegistryAWS) calls() []sts.AssumeRoleInput {
+// calls is the owner of every Mint call, in order.
+func (f *fakeTokenSource) calls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return slices.Clone(f.assumed)
+	return slices.Clone(f.minted)
 }
 
-func (f *fakeRegistryAWS) tokenCalls() int {
+func (f *fakeTokenSource) tokenCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.tokens
 }
 
-func (f *fakeRegistryAWS) endedFor(owner string) int {
+func (f *fakeTokenSource) endedFor(owner string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.ended[owner]
 }
 
-func (f *fakeRegistryAWS) block(owner string) chan struct{} {
+func (f *fakeTokenSource) block(owner string) chan struct{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.gate == nil {
@@ -162,7 +139,7 @@ func (f *fakeRegistryAWS) block(owner string) chan struct{} {
 
 // blockUntilRelease is block, except that the call ignores its context:
 // only closing the returned channel ends it.
-func (f *fakeRegistryAWS) blockUntilRelease(owner string) chan struct{} {
+func (f *fakeTokenSource) blockUntilRelease(owner string) chan struct{} {
 	ch := f.block(owner)
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -191,12 +168,10 @@ func (c *testClock) advance(d time.Duration) {
 }
 
 func newTestMinter(now func() time.Time, grants ...RegistryGrant) *registryMinter {
-	fake := &fakeRegistryAWS{now: now}
-	return newRegistryMinter(RegistryConfig{Host: testRegistryHost, Region: "eu-west-1",
-		PullRoleARN: "arn:aws:iam::123456789012:role/lux-registry-pull", Grants: grants, AWS: fake}, now)
+	return newRegistryMinter(RegistryConfig{Host: testRegistryHost, Grants: grants, Source: &fakeTokenSource{now: now}}, now)
 }
 
-func fakeOf(m *registryMinter) *fakeRegistryAWS { return m.cfg.AWS.(*fakeRegistryAWS) }
+func fakeOf(m *registryMinter) *fakeTokenSource { return m.cfg.Source.(*fakeTokenSource) }
 
 // manualTimers replaces a minter's hold timers: each scheduled function
 // runs only when the test calls fire.
@@ -286,9 +261,9 @@ func settle(t *testing.T, m *registryMinter, done minted, id int64, tenant strin
 	}
 }
 
-// minter is a minter on a fake clock with a fake AWS and manual hold
+// minter is a minter on a fake clock with a fake token source and manual hold
 // timers, closed when the test ends.
-func minter(t testing.TB, grants ...RegistryGrant) (*registryMinter, *fakeRegistryAWS, *testClock, minted) {
+func minter(t testing.TB, grants ...RegistryGrant) (*registryMinter, *fakeTokenSource, *testClock, minted) {
 	t.Helper()
 	clock := &testClock{t: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)}
 	m := newTestMinter(clock.now, grants...)
@@ -329,7 +304,7 @@ func TestRegistryGrants(t *testing.T) {
 	}
 	none, fake, _, _ := minter(t, RegistryGrant{Owner: "team", Tenants: []string{"t1"}})
 	if creds, errs := settle(t, none, done, 1, "t2"); creds != nil || errs != nil || len(fake.calls()) != 0 {
-		t.Fatalf("ungranted tenant: %v %v, %d AssumeRole calls", creds, errs, len(fake.calls()))
+		t.Fatalf("ungranted tenant: %v %v, %d mints", creds, errs, len(fake.calls()))
 	}
 	// Off: no minter, nothing granted.
 	if off := newRegistryMinter(RegistryConfig{}, time.Now); off != nil || off.ownersFor("t1") != nil {
@@ -337,44 +312,32 @@ func TestRegistryGrants(t *testing.T) {
 	}
 }
 
-// One AssumeRole per owner, tagged and named for it. Its token is handed
-// out while 30 minutes or more remain; under 40, a new one is minted in the
-// background while the old one is still handed out.
+// One mint per owner. Its token is handed out while 30 minutes or more
+// remain; under 40, a new one is minted in the background while the old
+// one is still handed out.
 func TestRegistryMintPerOwnerAndCache(t *testing.T) {
 	m, fake, clock, done := minter(t, RegistryGrant{Owner: "acme", Tenants: []string{"*"}}, RegistryGrant{Owner: "team.b", Tenants: []string{"t1"}})
 	creds, errs := settle(t, m, done, 1, "t1")
 	if errs != nil {
 		t.Fatal(errs)
 	}
-	acme1 := proto.RegistryCredential{Registry: testRegistryHost + "/acme", User: "AWS", Password: "acme-pw-1"}
-	team1 := proto.RegistryCredential{Registry: testRegistryHost + "/team.b", User: "AWS", Password: "team.b-pw-2"}
+	acme1 := proto.RegistryCredential{Registry: testRegistryHost + "/acme", User: "puller", Password: "acme-pw-1"}
+	team1 := proto.RegistryCredential{Registry: testRegistryHost + "/team.b", User: "puller", Password: "team.b-pw-2"}
 	slices.SortFunc(creds, func(a, b proto.RegistryCredential) int { return strings.Compare(a.Registry, b.Registry) })
-	// Minted in parallel: either may take the first ECR call.
+	// Minted in parallel: either may take the first token.
 	if len(creds) == 2 && creds[0].Password == "acme-pw-2" {
 		acme1.Password, team1.Password = "acme-pw-2", "team.b-pw-1"
 	}
 	if want := []proto.RegistryCredential{acme1, team1}; !slices.Equal(creds, want) {
 		t.Fatalf("credentials %+v, want %+v", creds, want)
 	}
-	calls := fake.calls()
-	if len(calls) != 2 {
-		t.Fatalf("%d AssumeRole calls, want 2", len(calls))
-	}
-	slices.SortFunc(calls, func(a, b sts.AssumeRoleInput) int {
-		return strings.Compare(aws.ToString(a.RoleSessionName), aws.ToString(b.RoleSessionName))
-	})
-	for i, owner := range []string{"acme", "team.b"} {
-		c := calls[i]
-		if aws.ToString(c.RoleArn) != "arn:aws:iam::123456789012:role/lux-registry-pull" ||
-			aws.ToString(c.RoleSessionName) != "luxd-registry-"+owner || aws.ToInt32(c.DurationSeconds) != 3600 ||
-			len(c.Tags) != 1 || aws.ToString(c.Tags[0].Key) != "lux-owner" || aws.ToString(c.Tags[0].Value) != owner {
-			t.Errorf("AssumeRole for %s: role %s session %s duration %d tags %+v", owner, aws.ToString(c.RoleArn),
-				aws.ToString(c.RoleSessionName), aws.ToInt32(c.DurationSeconds), c.Tags)
-		}
+	calls := slices.Sorted(slices.Values(fake.calls()))
+	if !slices.Equal(calls, []string{"acme", "team.b"}) {
+		t.Fatalf("minted for %v, want acme and team.b once each", calls)
 	}
 
-	// The session lasts an hour, so the token is taken to. At 15m: the
-	// cached token, nothing minted.
+	// The fake's tokens last an hour. At 15m: the cached token, nothing
+	// minted.
 	clock.advance(15 * time.Minute)
 	if again, _, _ := m.lookup(context.Background(), "h1", 2, m.ownersFor("t2")); len(again) != 1 || again[0] != acme1 || len(fake.calls()) != 2 {
 		t.Fatalf("at 15m: %+v, %d calls; want the cached token", again, len(fake.calls()))
@@ -392,26 +355,27 @@ func TestRegistryMintPerOwnerAndCache(t *testing.T) {
 		return len(next) == 1 && next[0].Password == "acme-pw-3"
 	}, "the refreshed token")
 	if len(fake.calls()) != 3 {
-		t.Fatalf("%d AssumeRole calls, want 3 (acme refreshed once)", len(fake.calls()))
+		t.Fatalf("%d mints, want 3 (acme refreshed once)", len(fake.calls()))
 	}
 }
 
-// An ECR token that expires before the session bounds its reuse.
-func TestRegistryECRExpiryBoundsReuse(t *testing.T) {
+// A token the source says expires sooner than usual is reused only while
+// 30 minutes of its own validity remain.
+func TestRegistrySourceExpiryBoundsReuse(t *testing.T) {
 	m, fake, clock, done := minter(t, RegistryGrant{Owner: "acme", Tenants: []string{"*"}})
-	fake.tokenTTL = 45 * time.Minute
+	fake.ttl = 45 * time.Minute
 	first, errs := settle(t, m, done, 1, "t1")
 	if len(errs) != 0 || len(first) != 1 {
 		t.Fatalf("first mint: %v %v", first, errs)
 	}
-	// 29m left by ECR's expiry (44m by the session's): below the cutoff.
+	// 29m left: below the cutoff.
 	clock.advance(16 * time.Minute)
 	next, errs := settle(t, m, done, 2, "t1")
 	if len(errs) != 0 || len(next) != 1 || next[0].Password == first[0].Password {
-		t.Fatalf("ECR-bound refresh: %v %v", next, errs)
+		t.Fatalf("expiry-bound refresh: %v %v", next, errs)
 	}
 	if len(fake.calls()) != 2 {
-		t.Fatalf("got %d AssumeRole calls, want 2", len(fake.calls()))
+		t.Fatalf("got %d mints, want 2", len(fake.calls()))
 	}
 }
 
@@ -453,7 +417,7 @@ func TestRegistryConcurrentRequestsShareOneMint(t *testing.T) {
 		}
 	}
 	if len(fake.calls()) != 1 || fake.tokenCalls() != 1 {
-		t.Fatalf("%d AssumeRole and %d GetAuthorizationToken calls, want 1 each", len(fake.calls()), fake.tokenCalls())
+		t.Fatalf("%d mints and %d tokens issued, want 1 each", len(fake.calls()), fake.tokenCalls())
 	}
 }
 
@@ -469,17 +433,17 @@ func TestRegistryOwnersMintIndependently(t *testing.T) {
 	if owner := <-fake.entered; owner != "acme" {
 		t.Fatalf("entered %s", owner)
 	}
-	// acme's AssumeRole is still blocked.
+	// acme's mint is still blocked.
 	creds, errs := settle(t, m, done, 2, "tb")
 	if errs != nil || len(creds) != 1 || creds[0].Registry != testRegistryHost+"/team" || !strings.HasPrefix(creds[0].Password, "team-pw-") {
 		t.Fatalf("tb while acme mints: %+v %v", creds, errs)
 	}
 }
 
-// fails mints acme with fake configured by setup, and requires: no
-// credential, an error naming the step without sentinel, backoff for
-// registryRetry (no AWS call), then a fresh attempt.
-func requireMintFails(t *testing.T, setup func(*fakeRegistryAWS), step, sentinel string) {
+// requireMintFails mints acme with fake configured by setup, and requires:
+// no credential, an error containing want, backoff for registryRetry (no
+// mint) whose error carries the cause, then a fresh attempt.
+func requireMintFails(t *testing.T, setup func(*fakeTokenSource), want string) {
 	t.Helper()
 	m, fake, clock, done := minter(t, RegistryGrant{Owner: "acme", Tenants: []string{"*"}}, RegistryGrant{Owner: "good", Tenants: []string{"*"}})
 	setup(fake)
@@ -488,89 +452,48 @@ func requireMintFails(t *testing.T, setup func(*fakeRegistryAWS), step, sentinel
 		t.Fatalf("credentials %+v, want good's only", creds)
 	}
 	err := errs["acme"]
-	if err == nil || !strings.Contains(err.Error(), step) || (sentinel != "" && strings.Contains(err.Error(), sentinel)) {
-		t.Fatalf("error %v: want %q, never %q", err, step, sentinel)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %v: want %q", err, want)
 	}
 	calls := len(fake.calls())
 	if _, errs = settle(t, m, done, 2, "t1"); !errors.Is(errs["acme"], errRegistryBackoff) || len(fake.calls()) != calls {
 		t.Fatalf("retried at once: %v, %d calls", errs, len(fake.calls()))
 	}
-	if sentinel != "" && strings.Contains(errs["acme"].Error(), sentinel) {
-		t.Fatalf("backoff error quotes the token: %v", errs["acme"])
+	if !strings.Contains(errs["acme"].Error(), want) {
+		t.Fatalf("backoff error lost its cause: %v", errs["acme"])
 	}
 	clock.advance(registryRetry)
 	settle(t, m, done, 3, "t1")
 	if len(fake.calls()) != calls+1 {
-		t.Fatalf("%d AssumeRole calls after the pause, want %d", len(fake.calls()), calls+1)
+		t.Fatalf("%d mints after the pause, want %d", len(fake.calls()), calls+1)
 	}
 }
 
-func TestRegistrySTSFailure(t *testing.T) {
-	requireMintFails(t, func(f *fakeRegistryAWS) {
-		f.fail = map[string]error{"acme": errors.New("AccessDenied: not authorized to perform sts:TagSession")}
-	}, "sts:AssumeRole: AccessDenied", "")
+func TestRegistryMintFailure(t *testing.T) {
+	requireMintFails(t, func(f *fakeTokenSource) {
+		f.fail = map[string]error{"acme": errors.New("AccessDenied: not authorized")}
+	}, "AccessDenied: not authorized")
 }
 
-// AssumeRole answering without credentials (nor an error) is a failure.
-func TestRegistrySTSNoCredentials(t *testing.T) {
-	requireMintFails(t, func(f *fakeRegistryAWS) {
-		f.noCreds = map[string]bool{"acme": true}
-	}, "sts:AssumeRole: no credentials", "")
-}
-
-func TestRegistryECRFailure(t *testing.T) {
-	requireMintFails(t, func(f *fakeRegistryAWS) {
-		f.token = map[string]func() (*ecrtypes.AuthorizationData, error){"acme": func() (*ecrtypes.AuthorizationData, error) {
-			return nil, errors.New("AccessDeniedException: ecr:GetAuthorizationToken")
-		}}
-	}, "ecr:GetAuthorizationToken: AccessDeniedException", "")
-}
-
-// A response without a token or its expiry is no token.
-func TestRegistryECREmptyToken(t *testing.T) {
-	future := time.Now().Add(time.Hour)
-	tok := base64.StdEncoding.EncodeToString([]byte("AWS:SENTINEL-empty"))
-	for name, d := range map[string]*ecrtypes.AuthorizationData{
-		"nil":        nil,
-		"no token":   {ExpiresAt: &future},
-		"no expiry":  {AuthorizationToken: &tok},
-		"empty data": {},
+// A source answering without a password or an expiry (and no error) has
+// failed: such a token is never cached or handed out.
+func TestRegistrySourceNoToken(t *testing.T) {
+	for name, tok := range map[string]RegistryToken{
+		"no password": {User: "AWS", Expires: time.Now().Add(time.Hour)},
+		"no expiry":   {User: "AWS", Password: "pw"},
+		"nothing":     {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			requireMintFails(t, func(f *fakeRegistryAWS) {
-				f.token = map[string]func() (*ecrtypes.AuthorizationData, error){"acme": func() (*ecrtypes.AuthorizationData, error) { return d, nil }}
-			}, "ecr:GetAuthorizationToken: no token", "SENTINEL")
-		})
-	}
-}
-
-// A token that does not decode to AWS:<password> is refused without
-// quoting it.
-func TestRegistryECRMalformedToken(t *testing.T) {
-	for name, raw := range map[string]string{
-		"not base64":  "SENTINEL!!not*base64",
-		"no colon":    base64.StdEncoding.EncodeToString([]byte("SENTINEL-no-colon")),
-		"not AWS":     base64.StdEncoding.EncodeToString([]byte("root:SENTINEL-pw")),
-		"no password": base64.StdEncoding.EncodeToString([]byte("AWS:")),
-	} {
-		step := "token is not AWS:password"
-		if name == "not base64" {
-			step = "token is not base64"
-		}
-		t.Run(name, func(t *testing.T) {
-			exp := time.Now().Add(time.Hour)
-			requireMintFails(t, func(f *fakeRegistryAWS) {
-				f.token = map[string]func() (*ecrtypes.AuthorizationData, error){"acme": func() (*ecrtypes.AuthorizationData, error) {
-					return &ecrtypes.AuthorizationData{AuthorizationToken: &raw, ExpiresAt: &exp}, nil
-				}}
-			}, step, "SENTINEL")
+			requireMintFails(t, func(f *fakeTokenSource) {
+				f.token = map[string]func() (RegistryToken, error){"acme": func() (RegistryToken, error) { return tok, nil }}
+			}, errRegistryNoToken.Error())
 		})
 	}
 }
 
 // A caller that goes away mid-mint neither aborts the mint nor puts the
-// owner in backoff for the next caller: the context AWS got outlives the
-// caller's, keeps its values, and has the mint's own deadline.
+// owner in backoff for the next caller: the context the source got
+// outlives the caller's, keeps its values, and has the mint's own deadline.
 func TestRegistryCancelledCallerDoesNotArmBackoff(t *testing.T) {
 	m, fake, _, done := minter(t, RegistryGrant{Owner: "acme", Tenants: []string{"*"}})
 	fake.contexts = make(chan context.Context, 1)
@@ -585,17 +508,17 @@ func TestRegistryCancelledCallerDoesNotArmBackoff(t *testing.T) {
 	select {
 	case mintCtx = <-fake.contexts:
 	case <-time.After(10 * time.Second):
-		t.Fatal("AssumeRole was not called")
+		t.Fatal("Mint was not called")
 	}
 	cancel()
 	if err := mintCtx.Err(); err != nil {
-		t.Fatalf("the caller's cancellation reached AWS: %v", err)
+		t.Fatalf("the caller's cancellation reached the source: %v", err)
 	}
 	if mintCtx.Value(key{}) != "caller" {
-		t.Fatal("AWS's context lost the caller's values")
+		t.Fatal("the source's context lost the caller's values")
 	}
 	if dl, ok := mintCtx.Deadline(); !ok || dl.Before(before.Add(registryMintTimeout)) || dl.After(time.Now().Add(registryMintTimeout)) {
-		t.Fatalf("AWS's deadline %v (set %v), want the mint's own %s", dl, ok, registryMintTimeout)
+		t.Fatalf("the source's deadline %v (set %v), want the mint's own %s", dl, ok, registryMintTimeout)
 	}
 	close(release)
 	creds, errs := settle(t, m, done, 2, "t1")
@@ -603,7 +526,7 @@ func TestRegistryCancelledCallerDoesNotArmBackoff(t *testing.T) {
 		t.Fatalf("after a cancelled caller: %+v %v", creds, errs)
 	}
 	if len(fake.calls()) != 1 {
-		t.Fatalf("%d AssumeRole calls, want the first mint's only", len(fake.calls()))
+		t.Fatalf("%d mints, want the first one only", len(fake.calls()))
 	}
 }
 
@@ -659,7 +582,7 @@ func TestRegistryCloseEndsMintsAndTimers(t *testing.T) {
 		}
 		m.notify("h1") // no ready after close: a Done here would panic
 		if creds, pending, errs := m.lookup(context.Background(), "h1", 2, []string{"acme"}); creds != nil || !pending || errs != nil || len(fake.calls()) != 1 {
-			t.Fatalf("lookup after close: %v %v %v, %d AssumeRole calls", creds, pending, errs, len(fake.calls()))
+			t.Fatalf("lookup after close: %v %v %v, %d mints", creds, pending, errs, len(fake.calls()))
 		}
 	})
 }
@@ -805,7 +728,7 @@ func TestRegistryOwners(t *testing.T) {
 // stands still unless a test advances it, and its hold timers
 // (fake.timers) fire only by hand, so no hold ends on its own. It is
 // closed when the test ends.
-func registryFixture(t *testing.T) (*Server, context.Context, *fakeRegistryAWS, *syncBuffer) {
+func registryFixture(t *testing.T) (*Server, context.Context, *fakeTokenSource, *syncBuffer) {
 	t.Helper()
 	s := testServer(t)
 	logs := &syncBuffer{}
@@ -908,7 +831,7 @@ func TestRegistryCredentialsAttachedAtSendTime(t *testing.T) {
 	got := deliveredAssigns(t, s, ctx, r1, r2, acmeOnly)
 	for _, a := range got {
 		for _, c := range a.RegistryCredentials {
-			if c.User != "AWS" || c.Password == "" {
+			if c.User != "puller" || c.Password == "" {
 				t.Fatalf("credential %+v", c)
 			}
 		}
@@ -943,7 +866,7 @@ func TestRegistryCredentialsAttachedAtSendTime(t *testing.T) {
 }
 
 // A runner without the capability, from a cold cache: nothing attached,
-// and no AWS call at all.
+// and no mint at all.
 func TestRegistryNothingMintedWithoutCapability(t *testing.T) {
 	s, ctx, fake, _ := registryFixture(t)
 	execSQL(t, s, ctx, `UPDATE hosts SET capabilities = '{}' WHERE id = 'h1'`)
@@ -953,7 +876,7 @@ func TestRegistryNothingMintedWithoutCapability(t *testing.T) {
 		t.Fatalf("unsupported runner assignment: %+v, present=%v", a, ok)
 	}
 	if len(fake.calls()) != 0 || fake.tokenCalls() != 0 {
-		t.Fatalf("%d AssumeRole, %d GetAuthorizationToken calls for a runner without %s", len(fake.calls()), fake.tokenCalls(), proto.CapRegistryMinted)
+		t.Fatalf("%d mints, %d tokens for a runner without %s", len(fake.calls()), fake.tokenCalls(), proto.CapRegistryMinted)
 	}
 }
 
@@ -975,7 +898,7 @@ func TestRegistryNotMintedForRunsThatCannotUseIt(t *testing.T) {
 		}
 	}
 	if len(fake.calls()) != 0 {
-		t.Fatalf("%d AssumeRole calls for Runs that cannot use the token", len(fake.calls()))
+		t.Fatalf("%d mints for Runs that cannot use the token", len(fake.calls()))
 	}
 	// A build whose FROM names the registry gets them.
 	built := submitImage(t, s, "t2", spec.Image{Build: &spec.Build{Containerfile: "FROM " + testRegistryHost + "/acme/base:1\nRUN true"}})
@@ -987,11 +910,11 @@ func TestRegistryNotMintedForRunsThatCannotUseIt(t *testing.T) {
 // A failed mint does not hold the assignment: it is delivered without the
 // owner's entry, and the warning names the owner, never a token.
 func TestRegistryMintFailureStillAssigns(t *testing.T) {
-	for name, setup := range map[string]func(*fakeRegistryAWS){
-		"sts": func(f *fakeRegistryAWS) { f.fail = map[string]error{"team": errors.New("AccessDenied")} },
-		"ecr": func(f *fakeRegistryAWS) {
-			f.token = map[string]func() (*ecrtypes.AuthorizationData, error){"team": func() (*ecrtypes.AuthorizationData, error) {
-				return nil, errors.New("AccessDenied")
+	for name, setup := range map[string]func(*fakeTokenSource){
+		"error": func(f *fakeTokenSource) { f.fail = map[string]error{"team": errors.New("AccessDenied")} },
+		"no token": func(f *fakeTokenSource) {
+			f.token = map[string]func() (RegistryToken, error){"team": func() (RegistryToken, error) {
+				return RegistryToken{User: "AWS"}, nil
 			}}
 		},
 	} {
@@ -1004,7 +927,8 @@ func TestRegistryMintFailureStillAssigns(t *testing.T) {
 				t.Fatalf("delivered %v, want acme's only", g)
 			}
 			log := logs.String()
-			if !strings.Contains(log, "registry pull credentials not minted") || !strings.Contains(log, "owner=team") || !strings.Contains(log, "AccessDenied") {
+			cause := map[string]string{"error": "AccessDenied", "no token": errRegistryNoToken.Error()}[name]
+			if !strings.Contains(log, "registry pull credentials not minted") || !strings.Contains(log, "owner=team") || !strings.Contains(log, cause) {
 				t.Fatalf("no warning naming the owner:\n%s", log)
 			}
 			notStored(t, s, ctx, logs, a.RegistryCredentials[0].Password)
@@ -1341,8 +1265,8 @@ func TestRegistryCapabilityChangeDuringAPass(t *testing.T) {
 // While a mint is blocked, the host's WebSocket still carries live frames
 // and unrelated durable messages; the cold assignment goes once its hold
 // ends, with the tokens that are ready, once. The hold's end is driven by
-// the test (a fixed clock and its timer fired by hand), and acme's
-// AssumeRole returns only when the test releases it, not at the mint's
+// the test (a fixed clock and its timer fired by hand), and acme's mint
+// returns only when the test releases it, not at the mint's
 // real deadline, so no outcome depends on how fast the machine is; the
 // timeouts are watchdogs only.
 func TestRegistryMintDoesNotBlockDelivery(t *testing.T) {
@@ -1414,7 +1338,7 @@ func TestRegistryMintDoesNotBlockDelivery(t *testing.T) {
 			t.Fatal("watchdog: the mints did not start")
 		}
 	}
-	// acme's AssumeRole is blocked, and the logical clock stands still, so
+	// acme's mint is blocked, and the logical clock stands still, so
 	// the hold cannot end. A stop for another Run, and a live frame, go out.
 	queue(t, s, "run_other", 1, proto.MsgStop)
 	s.hub.Notify("h1")

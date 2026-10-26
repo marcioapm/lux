@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,13 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/ecr"
-	ecrtypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
-	ststypes "github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/proto"
@@ -26,16 +18,13 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// RegistryConfig is [registry]: the operator's in-region ECR registry, from
-// which luxd mints pull credentials for Runs whose tenant has a grant.
-// Host "" is off.
+// RegistryConfig is [registry]: the operator's registry, from which luxd
+// mints pull credentials for Runs whose tenant has a grant. Host "" is off.
 type RegistryConfig struct {
-	Host        string
-	Region      string
-	PullRoleARN string
-	Grants      []RegistryGrant
-	// AWS replaces the SDK (tests); nil is the default AWS chain.
-	AWS RegistryAWS
+	Host   string
+	Grants []RegistryGrant
+	// Source is the provider that mints the tokens (registry_ecr.go).
+	Source RegistryTokenSource
 }
 
 // RegistryGrant lets Tenants (ids, or "*" for every tenant) pull Owner's
@@ -45,18 +34,24 @@ type RegistryGrant struct {
 	Tenants []string
 }
 
-// RegistryAWS is the two calls minting takes: STS AssumeRole with luxd's
-// own credentials, then ECR GetAuthorizationToken with the assumed ones.
-type RegistryAWS interface {
-	AssumeRole(ctx context.Context, in *sts.AssumeRoleInput) (*ststypes.Credentials, error)
-	AuthorizationToken(ctx context.Context, creds *ststypes.Credentials) (*ecrtypes.AuthorizationData, error)
+// A RegistryTokenSource mints a pull-only credential for one owner's
+// repositories on the registry's host. The token Mint returns for owner
+// must be able to pull <host>/<owner>/... and nothing else: no other
+// owner's repositories, no push, no other action. luxd attaches it to the
+// auth.json key <host>/<owner> only, caches one per owner, and decides
+// which owners a Run gets; a source only mints. Mint may block (a network
+// call) and must return when ctx ends.
+type RegistryTokenSource interface {
+	Mint(ctx context.Context, owner string) (RegistryToken, error)
+}
+
+// RegistryToken is an auth.json credential valid until Expires.
+type RegistryToken struct {
+	User, Password string
+	Expires        time.Time
 }
 
 const (
-	// registryOwnerTag is the session tag the pull role's policy scopes
-	// repositories by (repository/${aws:PrincipalTag/lux-owner}/*).
-	registryOwnerTag = "lux-owner"
-	registrySession  = time.Hour
 	// registryReuse: a cached token is handed out while it has at least
 	// this long left, which covers a slow pull started just before expiry.
 	registryReuse = 30 * time.Minute
@@ -125,8 +120,8 @@ func newRegistryMinter(cfg RegistryConfig, now func() time.Time) *registryMinter
 	if cfg.Host == "" {
 		return nil
 	}
-	if cfg.AWS == nil {
-		cfg.AWS = &awsRegistry{region: cfg.Region}
+	if cfg.Source == nil {
+		panic("registry: a host with no token source")
 	}
 	life, end := context.WithCancel(context.Background())
 	return &registryMinter{cfg: cfg, now: now, hold: registryHold, ready: func(string) {},
@@ -195,7 +190,7 @@ func registryRefreshFor(owner string) time.Duration {
 // some owner is minting and msgID was first held less than m.hold ago;
 // hostID is notified (m.ready) as each such mint ends, and when the hold
 // does. An owner with no token that is not pending is in errs. Never waits
-// on AWS. A closed minter (luxd shutting down) holds every assignment that
+// on the token source. A closed minter (luxd shutting down) holds every assignment that
 // needs it, and mints nothing.
 func (m *registryMinter) lookup(ctx context.Context, hostID string, msgID int64, owners []string) (creds []proto.RegistryCredential, pending bool, errs map[string]error) {
 	m.mu.Lock()
@@ -305,41 +300,19 @@ func (m *registryMinter) startMint(ctx context.Context, owner string, t *ownerTo
 	}()
 }
 
+// errRegistryNoToken: a source answered without a password or an expiry.
+// Cached, such a token would read as none and be minted again every pass.
+var errRegistryNoToken = errors.New("the token source returned no password or no expiry")
+
 func (m *registryMinter) mint(ctx context.Context, owner string) (user, pass string, expires time.Time, err error) {
-	creds, err := m.cfg.AWS.AssumeRole(ctx, &sts.AssumeRoleInput{
-		RoleArn:         aws.String(m.cfg.PullRoleARN),
-		RoleSessionName: aws.String("luxd-registry-" + owner),
-		DurationSeconds: aws.Int32(int32(registrySession / time.Second)),
-		Tags:            []ststypes.Tag{{Key: aws.String(registryOwnerTag), Value: aws.String(owner)}},
-	})
+	tok, err := m.cfg.Source.Mint(ctx, owner)
 	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("sts:AssumeRole: %w", err)
+		return "", "", time.Time{}, err
 	}
-	if creds == nil {
-		return "", "", time.Time{}, errors.New("sts:AssumeRole: no credentials")
+	if tok.Password == "" || tok.Expires.IsZero() {
+		return "", "", time.Time{}, errRegistryNoToken
 	}
-	d, err := m.cfg.AWS.AuthorizationToken(ctx, creds)
-	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("ecr:GetAuthorizationToken: %w", err)
-	}
-	if d == nil || d.AuthorizationToken == nil || d.ExpiresAt == nil {
-		return "", "", time.Time{}, errors.New("ecr:GetAuthorizationToken: no token")
-	}
-	// The errors below never quote the token: it may be a valid one.
-	raw, err := base64.StdEncoding.DecodeString(*d.AuthorizationToken)
-	if err != nil {
-		return "", "", time.Time{}, errors.New("ecr:GetAuthorizationToken: token is not base64")
-	}
-	user, pass, ok := strings.Cut(string(raw), ":")
-	if !ok || user != "AWS" || pass == "" {
-		return "", "", time.Time{}, errors.New("ecr:GetAuthorizationToken: token is not AWS:password")
-	}
-	// A token is presumed to last no longer than the session that minted it.
-	expires = *d.ExpiresAt
-	if creds.Expiration != nil && creds.Expiration.Before(expires) {
-		expires = *creds.Expiration
-	}
-	return user, pass, expires, nil
+	return tok.User, tok.Password, tok.Expires, nil
 }
 
 // registryOwners is which of granted a Run with image (and the pinned
@@ -498,47 +471,4 @@ func attachRegistryCredentials(creds []proto.RegistryCredential, data json.RawMe
 	}
 	a.RegistryCredentials = creds
 	return proto.Marshal(a)
-}
-
-// awsRegistry is RegistryAWS with the SDK and luxd's default credential
-// chain, loaded on first use.
-type awsRegistry struct {
-	region string
-	once   sync.Once
-	cfg    aws.Config
-	err    error
-}
-
-func (r *awsRegistry) load(ctx context.Context) (aws.Config, error) {
-	r.once.Do(func() { r.cfg, r.err = config.LoadDefaultConfig(ctx, config.WithRegion(r.region)) })
-	return r.cfg, r.err
-}
-
-func (r *awsRegistry) AssumeRole(ctx context.Context, in *sts.AssumeRoleInput) (*ststypes.Credentials, error) {
-	cfg, err := r.load(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out, err := sts.NewFromConfig(cfg).AssumeRole(ctx, in)
-	if err != nil {
-		return nil, err
-	}
-	return out.Credentials, nil
-}
-
-func (r *awsRegistry) AuthorizationToken(ctx context.Context, c *ststypes.Credentials) (*ecrtypes.AuthorizationData, error) {
-	cfg, err := r.load(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out, err := ecr.NewFromConfig(cfg, func(o *ecr.Options) {
-		o.Credentials = credentials.NewStaticCredentialsProvider(aws.ToString(c.AccessKeyId), aws.ToString(c.SecretAccessKey), aws.ToString(c.SessionToken))
-	}).GetAuthorizationToken(ctx, &ecr.GetAuthorizationTokenInput{})
-	if err != nil {
-		return nil, err
-	}
-	if len(out.AuthorizationData) == 0 {
-		return nil, errors.New("no authorization data")
-	}
-	return &out.AuthorizationData[0], nil
 }

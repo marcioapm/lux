@@ -106,7 +106,7 @@ type Config struct {
 	// Market: candidate instance types' prices and spot placement scores
 	// (market.go).
 	Market MarketConfig
-	// Registry: pull credentials minted for the in-region registry
+	// Registry: pull credentials minted for the operator's registry
 	// (registry.go); Host "" is off.
 	Registry RegistryConfig
 }
@@ -143,7 +143,7 @@ type Server struct {
 	// secrets holds submitted secret values in memory, by run id, until
 	// the placement that needs them has been assigned. Never persisted.
 	secrets *secretCache
-	// registry mints in-region registry pull tokens; nil when [registry]
+	// registry mints registry pull tokens; nil when [registry]
 	// is not configured.
 	registry *registryMinter
 	// registryPlanFails, if set, fails planRegistryCredentials' reads with
