@@ -357,3 +357,82 @@ func TestMintedCredentialsStayInTheAuthFile(t *testing.T) {
 		}
 	}
 }
+
+// A build uses the minted credentials for its FROM base and for reading
+// its build cache; a push to the cache, which the pull-only token cannot
+// do, is an image.cache warning without the token, and each auth file is
+// gone afterwards.
+func TestMintedCredentialsInABuild(t *testing.T) {
+	f := newFinishFixture(t)
+	tmp := filepath.Join(f.r.cfg.DataDir, "tmp")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const token = "ecr-minted-build-token"
+	enc := base64.StdEncoding.EncodeToString([]byte("AWS:" + token))
+	// Each pull or push keeps a copy of its auth file under its ref; the
+	// push is refused, echoing the file.
+	writeFile(t, f.bin, fakePodman(`"image exists") exit 1 ;;
+"image inspect") echo sha256:0123 ;;
+"tag "*) ;;
+"pull -q") cp "$4" "$0.auth.$(echo "$5" | tr '/:@' '___')" ;;
+"push -q")
+  cp "$4" "$0.auth.push"
+  echo "denied: not authorized to push with $(cat "$4") `+token+`" >&2
+  exit 1 ;;`))
+	f.p.assign = &proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 1,
+		RegistryCredentials: []proto.RegistryCredential{{Registry: mintedHost + "/acme", User: "AWS", Password: token}}}
+	base, cache := mintedHost+"/acme/base:1", mintedHost+"/acme/cache"
+	sp := spec.RunSpec{Image: spec.Image{Build: &spec.Build{Containerfile: "FROM " + base + "\nRUN true", Cache: cache}}}
+	auth, err := f.p.registryLogin(sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := f.p.pinFroms(context.Background(), sp.Image.Build.Containerfile, auth)
+	if err != nil || !strings.HasPrefix(pinned, "FROM "+base+"@sha256:0123") {
+		t.Fatalf("pinned %q: %v", pinned, err)
+	}
+	ref := cacheRef(cache, "k1")
+	if _, ok := f.p.pullCached(context.Background(), ref, "localhost/lux-build:k1", auth); !ok {
+		t.Fatal("the cache pull did not hit")
+	}
+	auth.close()
+	want := map[string]string{mintedHost + "/acme": "AWS:" + token}
+	for _, pulled := range []string{base, ref} {
+		if got := readAuths(t, f.bin+".auth."+strings.NewReplacer("/", "_", ":", "_", "@", "_").Replace(pulled)); !reflect.DeepEqual(got, want) {
+			t.Fatalf("auth file for %s: %v", pulled, got)
+		}
+	}
+
+	f.p.pushCached(context.Background(), sp, "localhost/lux-build:k1", ref)
+	if got := readAuths(t, f.bin+".auth.push"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("push auth file: %v", got)
+	}
+	var warning string
+	waitFor(t, "the push's image.cache warning", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, r := range f.reports {
+			var ev proto.RunEvent
+			if json.Unmarshal(r.Data, &ev) == nil && ev.Type == "image.cache" && ev.Data["pushed"] == false {
+				warning, _ = ev.Data["warning"].(string)
+				return true
+			}
+		}
+		return false
+	})
+	if !strings.Contains(warning, "not authorized to push") || strings.Contains(warning, token) || strings.Contains(warning, enc) {
+		t.Fatalf("push warning %q", warning)
+	}
+	f.mu.Lock()
+	for _, r := range f.reports {
+		if strings.Contains(string(r.Data), token) || strings.Contains(string(r.Data), enc) {
+			f.mu.Unlock()
+			t.Fatalf("token in a report: %s", r.Data)
+		}
+	}
+	f.mu.Unlock()
+	if entries, _ := os.ReadDir(tmp); len(entries) != 0 {
+		t.Fatalf("auth files left behind: %v", entries)
+	}
+}
