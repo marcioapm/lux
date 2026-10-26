@@ -6,6 +6,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -246,15 +250,35 @@ func TestECRMintPassesItsContext(t *testing.T) {
 	}
 }
 
-// The SDK client fails on a cancelled context before any request leaves:
-// static credentials, an unreachable endpoint, no shared config.
+// The SDK client fails on a cancelled context before any request leaves.
+// Both services' endpoints are a local server that fails the test on any
+// request; static credentials, empty shared config and no inherited
+// endpoint, profile or role setting keep the SDK off every real endpoint.
 func TestECRSDKHonoursCancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("the SDK sent %s %s after its context was cancelled", r.Method, r.URL)
+		http.Error(w, "unexpected request", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	empty := func(name string) string {
+		p := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
 	for k, v := range map[string]string{
-		"AWS_ACCESS_KEY_ID": "AKIDTEST", "AWS_SECRET_ACCESS_KEY": "secret", "AWS_SESSION_TOKEN": "",
-		"AWS_ENDPOINT_URL": "http://127.0.0.1:1", "AWS_CONFIG_FILE": "/dev/null", "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
-		"AWS_EC2_METADATA_DISABLED": "true", "AWS_PROFILE": "", "AWS_ROLE_ARN": "", "AWS_WEB_IDENTITY_TOKEN_FILE": "",
+		"AWS_ACCESS_KEY_ID": "AKIDTEST", "AWS_SECRET_ACCESS_KEY": "secret",
+		"AWS_ENDPOINT_URL": srv.URL, "AWS_ENDPOINT_URL_STS": srv.URL, "AWS_ENDPOINT_URL_ECR": srv.URL,
+		"AWS_CONFIG_FILE": empty("config"), "AWS_SHARED_CREDENTIALS_FILE": empty("credentials"),
+		"AWS_EC2_METADATA_DISABLED": "true",
 	} {
 		t.Setenv(k, v)
+	}
+	for _, k := range []string{"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SESSION_TOKEN",
+		"AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_USE_FIPS_ENDPOINT", "AWS_USE_DUALSTACK_ENDPOINT"} {
+		t.Setenv(k, "") // restored when the test ends
+		os.Unsetenv(k)
 	}
 	src := NewECRSource(ECRConfig{Region: "eu-west-1", PullRoleARN: testPullRole})
 	ctx, cancel := context.WithCancel(context.Background())
