@@ -344,20 +344,30 @@ func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered
 		(*hook)()
 	}
 	var out []proto.Frame
+	// The barrier is read from current rows, so an assignment committed
+	// (or made undelivered again) since the plan holds its Run's later
+	// messages too: a stop or input sent before its Run's assignment
+	// would be acked by a runner that ignores it, having no placement.
+	// barrier is the id of the Run's earliest excluded assignment, from
+	// one window pass over the pending rows rather than a probe per
+	// candidate; later ids wait. With minting off it is a constant and the
+	// subquery flattens. The subquery keeps the name host_messages for
+	// unsupportedSync.
+	barrier := `NULL::bigint`
+	if s.registry != nil {
+		barrier = `min(id) FILTER (WHERE run_id IS NOT NULL AND ` + registryExcluded("host_messages") + `)
+			OVER (PARTITION BY run_id)`
+	}
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		// The barrier is read from current rows, so an assignment committed
-		// (or made undelivered again) since the plan holds its Run's later
-		// messages too: a stop or input sent before its Run's assignment
-		// would be acked by a runner that ignores it, having no placement.
 		rows, err := tx.Query(ctx, `
 			UPDATE host_messages SET delivered_at = now()
-			WHERE id IN (SELECT id FROM host_messages
-				WHERE host_id = $1 AND acked_at IS NULL AND (NOT $2 OR delivered_at IS NULL)
-				  AND NOT (`+unsupportedSync+`)
+			WHERE id IN (SELECT id FROM (
+					SELECT id, type, payload, host_id, `+barrier+` AS barrier
+					FROM host_messages
+					WHERE host_id = $1 AND acked_at IS NULL AND (NOT $2 OR delivered_at IS NULL)) host_messages
+				WHERE NOT (`+unsupportedSync+`)
 				  AND NOT (`+registryExcluded("host_messages")+`)
-				  AND (NOT $7 OR NOT EXISTS (SELECT 1 FROM host_messages a
-					WHERE a.host_id = host_messages.host_id AND a.run_id = host_messages.run_id AND a.id < host_messages.id
-					  AND a.acked_at IS NULL AND (NOT $2 OR a.delivered_at IS NULL) AND `+registryExcluded("a")+`))
+				  AND (barrier IS NULL OR id < barrier)
 				ORDER BY id LIMIT 500)
 			RETURNING id, type, coalesce(run_id, ''), coalesce(epoch, 0), payload`,
 			hostID, undelivered, plan.restrict, proto.MsgAssign, nonNil(plan.sendable), proto.CapRegistryMinted, s.registry != nil)
