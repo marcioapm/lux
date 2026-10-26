@@ -287,18 +287,23 @@ luxd admin costs backfill-volumes --pool P [--tenant T] --volume type=gp3,size=1
 
 A request over quota gets HTTP 429, and the CLI exits with code 5.
 
-### In-region registry
+### Registry pull credentials
 
-Optional. With `[registry]` set, Runs pull images from the operator's ECR
+Optional. With `[registry]` set, Runs pull images from the operator's
 registry with no `image.registryAuth`: set up once per owner, never per
-Run ([the RunSpec](runspec.md#the-in-region-registry)). Absent, nothing
-changes.
+Run ([the RunSpec](runspec.md#the-operators-registry)). luxd mints a
+short-lived, pull-only token per repository owner through a **provider**,
+the one part that knows the registry's cloud; everything else on this
+page is the same for any provider. Absent, nothing changes. The only
+provider today is [ECR](#provider-ecr).
 
 ```toml
 [registry]
+provider = "ecr"        # required; the only provider today
 host = "<account>.dkr.ecr.<region>.amazonaws.com"
+[registry.ecr]          # the provider's own section (see Provider: ECR)
 region = "<region>"
-pull_role_arn = "arn:aws:iam::<account>:role/<name>-registry-pull"
+pull_role_arn = "arn:<partition>:iam::<account>:role/<name>-registry-pull"
 [[registry.grants]]
 owner = "acme"          # repositories <host>/acme/...
 tenants = ["*"]         # tenant ids, or "*" for every tenant (the default)
@@ -306,19 +311,20 @@ tenants = ["*"]         # tenant ids, or "*" for every tenant (the default)
 
 | Variable | Default | |
 | --- | --- | --- |
-| `LUX_REGISTRY_HOST` | — | The ECR registry, `<account>.dkr.ecr.<region>.amazonaws.com`. |
-| `LUX_REGISTRY_REGION` | — | Its region; must be the host's. STS and ECR are called there. |
-| `LUX_REGISTRY_PULL_ROLE_ARN` | — | The pull role luxd assumes (`arn:aws:iam::<account>:role/<name>`). |
+| `LUX_REGISTRY_PROVIDER` | — | Who mints the tokens: `ecr`. |
+| `LUX_REGISTRY_HOST` | — | The registry's host, with an optional port, as `auth.json` keys it. |
 | `LUX_REGISTRY_GRANTS` | — | JSON array replacing every `[[registry.grants]]`, e.g. `[{"owner":"acme","tenants":["ten_…"]}]`. |
 
-To turn the feature off, remove the whole `[registry]` section and every
-`LUX_REGISTRY_*` variable. As everywhere in luxd, an empty variable is
-ignored: `LUX_REGISTRY_HOST=` does not override a host in the file.
+To turn the feature off, remove the whole `[registry]` section (with its
+provider's section) and every `LUX_REGISTRY_*` variable. As everywhere in
+luxd, an empty variable is ignored: `LUX_REGISTRY_HOST=` does not override
+a host in the file.
 
-Refused at startup: a host that is not a private ECR registry, a missing or
-mismatched region, a role ARN that is not an IAM role, no grants, an owner
-outside `[a-z0-9._-]` (or over 50 characters), a duplicate owner, an
-empty `tenants` list, or any other `[registry]` key without a host.
+Refused at startup: any `[registry]` setting without a `provider`, an
+unknown provider, a provider without its section or a section for another
+provider, a missing host or one that is not a registry host (a scheme or a
+path), no grants, an owner outside `[a-z0-9._-]`, a duplicate owner, an
+empty `tenants` list, and whatever the provider refuses (below).
 
 How it works. Before luxd sends an assignment to a runner (one advertising
 the `registry-minted` capability; older runners get nothing), it reads the
@@ -330,32 +336,25 @@ only `acme` gets no `team` token, even if its tenant has both. A `FROM`
 naming its image through a build argument names no owner: the runner
 refuses to pin it, so it never pulls with a token. A Run with its own
 `registryAuth` entry for the host gets nothing, since that entry wins on
-the runner. For each owner, luxd:
-
-1. calls `sts:AssumeRole` on `pull_role_arn` with luxd's own AWS
-   credentials (the default chain: instance role, environment), session
-   name `luxd-registry-<owner>`, one hour, and the session tag
-   `lux-owner=<owner>`;
-2. calls `ecr:GetAuthorizationToken` with those credentials;
-3. attaches the token as an auth entry keyed `<host>/<owner>`. Podman
-   matches `auth.json` keys most specific first
-   ([containers-auth.json(5)](https://github.com/containers/image/blob/main/docs/containers-auth.json.5.md)),
-   so each owner's token is used for its own repositories only.
+the runner. For each owner, luxd asks the provider for a token and
+attaches it as an auth entry keyed `<host>/<owner>`. Podman matches
+`auth.json` keys most specific first
+([containers-auth.json(5)](https://github.com/containers/image/blob/main/docs/containers-auth.json.5.md)),
+so each owner's token is used for its own repositories only.
 
 Tokens are cached per owner in luxd's memory and handed out while at least
-30 minutes of the session remain. Between about 36 and 40 minutes left
-(the point is fixed per owner, so owners do not all refresh at once), luxd
-mints the next token in the background, so assignments normally find a
-ready one; a busy luxd assumes the role about three times an hour per
-owner. Mints run outside the runner connection: other Runs' assignments
-and stops, input and live streams never wait for one. Only an assignment
-whose owner has no token yet waits, at most 10 seconds in total, while its
-owners' mints run in parallel, one at a time per owner. After that, or on
-a failure (STS, ECR, a missing permission), it goes without that owner's
-entry, and the pull fails as it would have without `[registry]`. The
-failure is logged as `registry pull credentials not minted` with the owner
-and the error, never a token. luxd tries that owner again after 30
-seconds.
+30 minutes of their validity (as the provider reports it) remain. Between
+about 36 and 40 minutes left (the point is fixed per owner, so owners do
+not all refresh at once), luxd mints the next token in the background, so
+assignments normally find a ready one. Mints run outside the runner
+connection: other Runs' assignments and stops, input and live streams
+never wait for one. Only an assignment whose owner has no token yet waits,
+at most 10 seconds in total, while its owners' mints run in parallel, one
+at a time per owner. After that, or on a failure (the provider's call, a
+missing permission), it goes without that owner's entry, and the pull
+fails as it would have without `[registry]`. The failure is logged as
+`registry pull credentials not minted` with the owner and the error, never
+a token. luxd tries that owner again after 30 seconds.
 
 A Run's own later messages (a stop, a terminate, input) stay behind its
 waiting assignment, so a stop for that Run can wait up to those 10
@@ -366,7 +365,52 @@ holds for an assignment queued (or made pending again by a reconnect)
 while a delivery pass is under way: it and its Run's later messages go
 together on the next pass.
 
-The pull role (a separate IAM role, not luxd's own) needs:
+Revoking a grant (removing it from luxd, or in the provider's own access
+rules) takes effect for new tokens only. A token already issued stays
+valid until it expires; the provider's section says for how long and how
+to cut it short.
+
+**Adding a provider.** A provider is a `RegistryTokenSource`
+(`internal/server/registry.go`): `Mint(ctx, owner)` returns a user, a
+password and an expiry for a token that can pull `<host>/<owner>/...` and
+nothing else. It brings its own `[registry.<provider>]` section, its
+startup checks and the cloud-side setup that enforces that scope. Grants,
+caching, refresh, holds, ordering and delivery to runners need no change.
+Registries that can mint such a token per namespace fit this shape, for
+example GHCR through a GitHub App installation token, Google Artifact
+Registry or Azure ACR; none of them is implemented.
+
+### Provider: ECR
+
+`provider = "ecr"` mints from a private Amazon ECR registry. The host must
+be `<account>.dkr.ecr.<region>.amazonaws.com` (`.com.cn` in China).
+
+| Variable | Default | |
+| --- | --- | --- |
+| `LUX_REGISTRY_ECR_REGION` | — | `[registry.ecr] region`: the registry's region; must be the host's. STS and ECR are called there. |
+| `LUX_REGISTRY_ECR_PULL_ROLE_ARN` | — | `[registry.ecr] pull_role_arn`: the pull role luxd assumes (`arn:<partition>:iam::<account>:role/<name>`). |
+
+Refused at startup, besides the general checks: a host that is not a
+private ECR registry, a missing or mismatched region, a role ARN that is
+not an IAM role, and an owner over 50 characters (it is part of the STS
+session name). The flat `[registry] region` and `pull_role_arn` keys and
+`LUX_REGISTRY_REGION` / `LUX_REGISTRY_PULL_ROLE_ARN` are refused with a
+message naming their place under `[registry.ecr]`.
+
+For each owner, luxd:
+
+1. calls `sts:AssumeRole` on `pull_role_arn` with luxd's own AWS
+   credentials (the default chain: instance role, environment), session
+   name `luxd-registry-<owner>`, one hour, and the session tag
+   `lux-owner=<owner>`;
+2. calls `ecr:GetAuthorizationToken` with those credentials, and takes
+   the token's expiry as the earlier of the session's and ECR's.
+
+A busy luxd so assumes the role about three times an hour per owner.
+
+The pull role (a separate IAM role, not luxd's own) enforces the scope a
+provider promises: pull, and only the tagged owner's repositories. It
+needs:
 
 ```json
 {
@@ -425,7 +469,7 @@ fails closed. The tokens are pull-only, whatever a repository policy
 grants: pushes, such as a build cache's, still need a `registryAuth`
 credential.
 
-Revoking a grant (removing it from luxd, or the owner from the trust
+Revoking an ECR grant (removing it from luxd, or the owner from the trust
 policy) takes effect for new tokens only. A token already issued stays
 valid until it expires: at most the session's hour, or ECR's 12 hours if
 ECR does not bound it by the session. To cut access at once, revoke the

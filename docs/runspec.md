@@ -584,19 +584,20 @@ secrets:
 - **ECR:** the secret can be `AWS:<token>` from
   `aws ecr get-login-password`, which expires after 12 hours. Resuming a
   Run later needs a fresh token, supplied with the resume like any secret.
-  For the operator's in-region registry, see below: no secret is needed.
+  For the operator's registry, see below: no secret is needed.
 - Registries should be HTTPS. A plain-HTTP registry must be listed as
   insecure on every host ([operations](operations.md#hosts)).
 
-### The in-region registry
+### The operator's registry
 
 When the operator configured luxd's `[registry]`
-([operations](operations.md#in-region-registry)), a Run pulls from that
-ECR registry with no `registryAuth` and no secret, much as any GitHub
-token reads public GHCR images. luxd mints a short-lived pull token for each repository owner
-(`<account>.dkr.ecr.<region>.amazonaws.com/<owner>/...`) the Run names and
-its tenant is granted, and gives it to the runner with the assignment, on
-every placement, resumes and moves included.
+([operations](operations.md#registry-pull-credentials)), a Run pulls from
+that registry with no `registryAuth` and no secret, much as any GitHub
+token reads public GHCR images. luxd mints a short-lived pull token for
+each repository owner (`<host>/<owner>/...`) the Run names and its tenant
+is granted, and gives it to the runner with the assignment, on every
+placement, resumes and moves included. How luxd mints it depends on the
+registry's provider (today, Amazon ECR); what a Run sees does not.
 
 ```yaml
 image:
@@ -606,7 +607,8 @@ image:
 - It covers every pull of the placement: `image.ref`, `FROM` bases, and a
   build cache in a granted owner's repositories.
 - **Pull only.** The token cannot push, nor do anything but pull its
-  owner's images, whatever the registry's repository policies grant. A
+  owner's images (for ECR, whatever the registry's repository policies
+  grant). A
   build cache there is read, and its push fails with an `image.cache`
   warning, as with any read-only credential. Pushes need a `registryAuth`
   entry for the registry.
@@ -671,7 +673,7 @@ image:
   across Runs, pin `FROM` by digest yourself.
 - The cache's registry usually has a `registryAuth` entry. Without one,
   the cache is used anonymously, or with the
-  [in-region registry](#the-in-region-registry)'s pull-only token, which
+  [operator's registry](#the-operators-registry)'s pull-only token, which
   reads it but cannot push to it.
 - Two hosts that build the same key at once both push it. The last push
   wins, and either image is the build.

@@ -95,15 +95,19 @@ endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
 # candidates under throttling).
 no_capacity_retry_after = "30s"    # LUX_EC2_NO_CAPACITY_RETRY_AFTER
 
-# Optional: the in-region ECR registry. luxd mints a pull-only token per
-# granted owner (STS AssumeRole of pull_role_arn with the session tag
-# lux-owner=<owner>, then ECR GetAuthorizationToken) and hands it to the
-# runner with each assignment, so Runs pull <host>/<owner>/... without
-# image.registryAuth (docs/operations.md#in-region-registry). Absent: off.
+# Optional: the operator's registry. luxd mints a pull-only token per
+# granted owner through the provider and hands it to the runner with each
+# assignment, so Runs pull <host>/<owner>/... without image.registryAuth
+# (docs/operations.md#registry-pull-credentials). Absent: off.
 # [registry]
+# provider = "ecr"                                    # LUX_REGISTRY_PROVIDER: the only provider today
 # host = "<account>.dkr.ecr.<region>.amazonaws.com"   # LUX_REGISTRY_HOST
-# region = "<region>"                                 # LUX_REGISTRY_REGION: must be the host's
-# pull_role_arn = "arn:aws:iam::<account>:role/<name>-registry-pull"  # LUX_REGISTRY_PULL_ROLE_ARN
+#
+# Provider ecr: STS AssumeRole of pull_role_arn with the session tag
+# lux-owner=<owner>, then ECR GetAuthorizationToken.
+# [registry.ecr]
+# region = "<region>"                                 # LUX_REGISTRY_ECR_REGION: must be the host's
+# pull_role_arn = "arn:<partition>:iam::<account>:role/<name>-registry-pull"  # LUX_REGISTRY_ECR_PULL_ROLE_ARN
 #
 # LUX_REGISTRY_GRANTS replaces the whole list with a JSON array of objects
 # using these same keys, e.g. [{"owner":"acme","tenants":["*"]}].
