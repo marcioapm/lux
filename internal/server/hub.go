@@ -340,20 +340,27 @@ func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered
 	if err != nil {
 		return nil, err
 	}
-	heldRuns, heldFrom := plan.heldArgs()
+	if hook := s.afterRegistryPlan.Swap(nil); hook != nil {
+		(*hook)()
+	}
 	var out []proto.Frame
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// The barrier is read from current rows, so an assignment committed
+		// (or made undelivered again) since the plan holds its Run's later
+		// messages too: a stop or input sent before its Run's assignment
+		// would be acked by a runner that ignores it, having no placement.
 		rows, err := tx.Query(ctx, `
 			UPDATE host_messages SET delivered_at = now()
 			WHERE id IN (SELECT id FROM host_messages
 				WHERE host_id = $1 AND acked_at IS NULL AND (NOT $2 OR delivered_at IS NULL)
 				  AND NOT (`+unsupportedSync+`)
-				  AND (NOT $3 OR type <> $4 OR id = ANY($5))
-				  AND NOT EXISTS (SELECT 1 FROM unnest($6::text[], $7::bigint[]) h(run_id, from_id)
-					WHERE host_messages.run_id = h.run_id AND host_messages.id >= h.from_id)
+				  AND NOT (`+registryExcluded("host_messages")+`)
+				  AND (NOT $7 OR NOT EXISTS (SELECT 1 FROM host_messages a
+					WHERE a.host_id = host_messages.host_id AND a.run_id = host_messages.run_id AND a.id < host_messages.id
+					  AND a.acked_at IS NULL AND (NOT $2 OR a.delivered_at IS NULL) AND `+registryExcluded("a")+`))
 				ORDER BY id LIMIT 500)
 			RETURNING id, type, coalesce(run_id, ''), coalesce(epoch, 0), payload`,
-			hostID, undelivered, plan.restrict, proto.MsgAssign, plan.planned, heldRuns, heldFrom)
+			hostID, undelivered, plan.restrict, proto.MsgAssign, nonNil(plan.sendable), proto.CapRegistryMinted, s.registry != nil)
 		if err != nil {
 			return err
 		}
@@ -382,6 +389,18 @@ func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered
 		}
 	}
 	return out, nil
+}
+
+// registryExcluded, for the delivery query on host_messages row m: an
+// assignment this pass does not send under the registry plan ($7 minting
+// is on, $3 the plan saw CapRegistryMinted, $4 the assign type, $5 the
+// plan's sendable ids, $6 CapRegistryMinted). Not sendable, or the host's
+// registration gained or lost the capability since the plan: it waits for
+// a pass that plans it again, so a token never goes to a host that dropped
+// the capability nor is skipped for one that gained it.
+func registryExcluded(m string) string {
+	return `(` + m + `.type = $4 AND $7 AND (($3 AND ` + m + `.id <> ALL($5))
+		OR $3 <> EXISTS (SELECT 1 FROM hosts h WHERE h.id = ` + m + `.host_id AND $6 = ANY(h.capabilities))))`
 }
 
 // unsupportedSync, for SQL on host_messages: a sync or assignment that asks

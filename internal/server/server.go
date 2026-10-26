@@ -149,6 +149,9 @@ type Server struct {
 	// registryPlanFails, if set, fails planRegistryCredentials' reads with
 	// its error (tests).
 	registryPlanFails func() error
+	// afterRegistryPlan, if set, runs once between a delivery pass's
+	// registry plan and its UPDATE, then clears itself (tests).
+	afterRegistryPlan atomic.Pointer[func()]
 	// cfAccess verifies Cloudflare Access tokens, when that is the console
 	// auth (access.go).
 	cfAccess *cfAccess
@@ -344,6 +347,8 @@ func redirectConsole(w http.ResponseWriter, r *http.Request) {
 
 // Run starts the background loops and serves until ctx ends.
 func (s *Server) Run(ctx context.Context) error {
+	// Mints in flight and hold timers end with the server.
+	defer s.registry.close()
 	if err := s.initCFTenant(ctx); err != nil {
 		return err
 	}
