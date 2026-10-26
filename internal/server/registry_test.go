@@ -49,6 +49,12 @@ type fakeRegistryAWS struct {
 	token map[string]func() (*ecrtypes.AuthorizationData, error)
 	// gate, by owner: AssumeRole waits for it to close (or its context).
 	gate map[string]chan struct{}
+	// releaseOnly, by owner: a gated AssumeRole ignores its context and
+	// waits for the gate alone, so no mint deadline can end it.
+	releaseOnly map[string]bool
+	// cancelled, if set, is closed when a gated AssumeRole sees its context
+	// end; that call then returns only once exit is closed.
+	cancelled, exit chan struct{}
 	// entered, if set, gets the owner of every AssumeRole as it starts;
 	// contexts, if set, the context it was called with.
 	entered  chan string
@@ -77,6 +83,7 @@ func (f *fakeRegistryAWS) AssumeRole(ctx context.Context, in *sts.AssumeRoleInpu
 	f.mu.Lock()
 	f.assumed = append(f.assumed, *in)
 	gate, entered, contexts := f.gate[owner], f.entered, f.contexts
+	releaseOnly, cancelled, exit := f.releaseOnly[owner], f.cancelled, f.exit
 	f.mu.Unlock()
 	if contexts != nil {
 		contexts <- ctx
@@ -84,10 +91,17 @@ func (f *fakeRegistryAWS) AssumeRole(ctx context.Context, in *sts.AssumeRoleInpu
 	if entered != nil {
 		entered <- owner
 	}
-	if gate != nil {
+	switch {
+	case gate != nil && releaseOnly:
+		<-gate
+	case gate != nil:
 		select {
 		case <-gate:
 		case <-ctx.Done():
+			if cancelled != nil {
+				close(cancelled)
+				<-exit
+			}
 			return nil, ctx.Err()
 		}
 	}
@@ -139,6 +153,19 @@ func (f *fakeRegistryAWS) block(owner string) chan struct{} {
 	}
 	ch := make(chan struct{})
 	f.gate[owner] = ch
+	return ch
+}
+
+// blockUntilRelease is block, except that the call ignores its context:
+// only closing the returned channel ends it.
+func (f *fakeRegistryAWS) blockUntilRelease(owner string) chan struct{} {
+	ch := f.block(owner)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.releaseOnly == nil {
+		f.releaseOnly = map[string]bool{}
+	}
+	f.releaseOnly[owner] = true
 	return ch
 }
 
@@ -578,47 +605,59 @@ func TestRegistryCancelledCallerDoesNotArmBackoff(t *testing.T) {
 
 // Closing the minter cancels a blocked mint, waits for it, stops the hold
 // timers, and leaves lookups inert: nothing minted, and an assignment that
-// needs a token is held rather than sent without it.
+// needs a token is held rather than sent without it. In a synctest bubble
+// the fake mint, once cancelled, returns only when the test lets it, and
+// close is checked still blocked after every other goroutine has settled.
 func TestRegistryCloseEndsMintsAndTimers(t *testing.T) {
-	clock := &testClock{t: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)}
-	m := newTestMinter(clock.now, RegistryGrant{Owner: "acme", Tenants: []string{"*"}})
-	timers := useManualTimers(m)
-	var notified sync.WaitGroup
-	m.ready = func(string) { notified.Done() }
-	fake := fakeOf(m)
-	fake.contexts = make(chan context.Context, 1)
-	fake.block("acme") // never released: only close ends it
-	if _, pending, _ := m.lookup(context.Background(), "h1", 1, []string{"acme"}); !pending {
-		t.Fatal("not minting")
-	}
-	mintCtx := <-fake.contexts
-	if timers.live() != 1 {
-		t.Fatalf("%d hold timers, want 1", timers.live())
-	}
-	closed := make(chan struct{})
-	go func() { m.close(); close(closed) }()
-	select {
-	case <-closed:
-	case <-time.After(10 * time.Second):
-		t.Fatal("close did not return while a mint was blocked")
-	}
-	if fake.returned.Load() != 1 {
-		t.Fatal("close returned before the mint in flight ended")
-	}
-	if mintCtx.Err() == nil {
-		t.Fatal("close did not cancel the mint in flight")
-	}
-	if timers.live() != 0 {
-		t.Fatalf("%d hold timers still live after close", timers.live())
-	}
-	// Firing a stopped timer runs nothing, so ready is never called.
-	if n := timers.fire(); n != 0 {
-		t.Fatalf("%d timers fired after close", n)
-	}
-	m.notify("h1") // no ready after close: a Done here would panic
-	if creds, pending, errs := m.lookup(context.Background(), "h1", 2, []string{"acme"}); creds != nil || !pending || errs != nil || len(fake.calls()) != 1 {
-		t.Fatalf("lookup after close: %v %v %v, %d AssumeRole calls", creds, pending, errs, len(fake.calls()))
-	}
+	synctest.Test(t, func(t *testing.T) {
+		clock := &testClock{t: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)}
+		m := newTestMinter(clock.now, RegistryGrant{Owner: "acme", Tenants: []string{"*"}})
+		timers := useManualTimers(m)
+		var notified sync.WaitGroup
+		m.ready = func(string) { notified.Done() }
+		fake := fakeOf(m)
+		fake.contexts = make(chan context.Context, 1)
+		fake.cancelled, fake.exit = make(chan struct{}), make(chan struct{})
+		// A failure must not leave the mint blocked in the bubble.
+		release := sync.OnceFunc(func() { close(fake.exit) })
+		defer release()
+		fake.block("acme") // never released: only close ends it
+		if _, pending, _ := m.lookup(context.Background(), "h1", 1, []string{"acme"}); !pending {
+			t.Fatal("not minting")
+		}
+		mintCtx := <-fake.contexts
+		if timers.live() != 1 {
+			t.Fatalf("%d hold timers, want 1", timers.live())
+		}
+		closed := make(chan struct{})
+		go func() { m.close(); close(closed) }()
+		<-fake.cancelled
+		synctest.Wait()
+		select {
+		case <-closed:
+			t.Fatal("close returned before the mint in flight ended")
+		default:
+		}
+		release()
+		<-closed
+		if fake.returned.Load() != 1 {
+			t.Fatal("close returned before the mint in flight ended")
+		}
+		if mintCtx.Err() == nil {
+			t.Fatal("close did not cancel the mint in flight")
+		}
+		if timers.live() != 0 {
+			t.Fatalf("%d hold timers still live after close", timers.live())
+		}
+		// Firing a stopped timer runs nothing, so ready is never called.
+		if n := timers.fire(); n != 0 {
+			t.Fatalf("%d timers fired after close", n)
+		}
+		m.notify("h1") // no ready after close: a Done here would panic
+		if creds, pending, errs := m.lookup(context.Background(), "h1", 2, []string{"acme"}); creds != nil || !pending || errs != nil || len(fake.calls()) != 1 {
+			t.Fatalf("lookup after close: %v %v %v, %d AssumeRole calls", creds, pending, errs, len(fake.calls()))
+		}
+	})
 }
 
 // An assignment waits on its cold owners for one bound in total, from when
@@ -1301,12 +1340,14 @@ func TestRegistryCapabilityChangeDuringAPass(t *testing.T) {
 // While a mint is blocked, the host's WebSocket still carries live frames
 // and unrelated durable messages; the cold assignment goes once its hold
 // ends, with the tokens that are ready, once. The hold's end is driven by
-// the test (a fixed clock and its timer fired by hand), so no deadline
-// depends on how fast the machine is; the timeouts are watchdogs only.
+// the test (a fixed clock and its timer fired by hand), and acme's
+// AssumeRole returns only when the test releases it, not at the mint's
+// real deadline, so no outcome depends on how fast the machine is; the
+// timeouts are watchdogs only.
 func TestRegistryMintDoesNotBlockDelivery(t *testing.T) {
 	s, ctx, fake, _ := registryFixture(t)
 	fake.entered = make(chan string, 4)
-	release := fake.block("acme")
+	release := fake.blockUntilRelease("acme")
 	defer close(release)
 	raw := ids.Secret("luxh")
 	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, pool_id, token_hash) VALUES ('tok1', $1, $2)`, poolID(t, s, "default", ""), ids.Hash(raw))
