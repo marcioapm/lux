@@ -333,10 +333,13 @@ func redactPassword(err error, password string) error {
 	if password == "" || !strings.Contains(msg, password) {
 		return err
 	}
-	if len(password) < registryRedactMin {
+	// A password inside the marker itself ("redacted", "[redacte", ...)
+	// would survive the cut, so that text is withheld too.
+	cut := strings.ReplaceAll(msg, password, "[redacted]")
+	if len(password) < registryRedactMin || strings.Contains(cut, password) {
 		return &redactedError{msg: errRegistryWithheld, err: err}
 	}
-	return &redactedError{msg: strings.ReplaceAll(msg, password, "[redacted]"), err: err}
+	return &redactedError{msg: cut, err: err}
 }
 
 func (m *registryMinter) mint(ctx context.Context, owner string) (user, pass string, expires time.Time, err error) {

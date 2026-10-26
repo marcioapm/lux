@@ -528,6 +528,13 @@ func TestRegistryRedactShortPassword(t *testing.T) {
 	if long.Error() != "token [redacted] and [redacted]: context deadline exceeded" || !errors.Is(long, context.DeadlineExceeded) {
 		t.Fatalf("password at the minimum: %q, want every occurrence cut in place", long)
 	}
+	// A password the marker itself contains would survive the cut.
+	for _, pw := range []string{"redacted", "[redacted]", "edacted]"} {
+		got := redactPassword(fmt.Errorf("denied token %s: %w", pw, context.DeadlineExceeded), pw)
+		if strings.Contains(got.Error(), pw) || got.Error() != errRegistryWithheld || !errors.Is(got, context.DeadlineExceeded) {
+			t.Fatalf("password %q inside the marker: %q, want the text withheld", pw, got)
+		}
+	}
 	if got := redactPassword(cause, "zzzz"); got != cause {
 		t.Fatalf("unquoted password: %v, want the error unchanged", got)
 	}
