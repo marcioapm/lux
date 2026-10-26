@@ -287,6 +287,95 @@ luxd admin costs backfill-volumes --pool P [--tenant T] --volume type=gp3,size=1
 
 A request over quota gets HTTP 429, and the CLI exits with code 5.
 
+### In-region registry
+
+Optional. With `[registry]` set, Runs pull images from the operator's ECR
+registry with no `image.registryAuth`: set up once per owner, never per
+Run ([the RunSpec](runspec.md#the-in-region-registry)). Absent, nothing
+changes.
+
+```toml
+[registry]
+host = "<account>.dkr.ecr.<region>.amazonaws.com"
+region = "<region>"
+pull_role_arn = "arn:aws:iam::<account>:role/<name>-registry-pull"
+[[registry.grants]]
+owner = "acme"          # repositories <host>/acme/...
+tenants = ["*"]         # tenant ids, or "*" for every tenant (the default)
+```
+
+| Variable | Default | |
+| --- | --- | --- |
+| `LUX_REGISTRY_HOST` | — | The ECR registry, `<account>.dkr.ecr.<region>.amazonaws.com`; empty turns the feature off. |
+| `LUX_REGISTRY_REGION` | — | Its region; must be the host's. STS and ECR are called there. |
+| `LUX_REGISTRY_PULL_ROLE_ARN` | — | The pull role luxd assumes (`arn:aws:iam::<account>:role/<name>`). |
+| `LUX_REGISTRY_GRANTS` | — | JSON array replacing every `[[registry.grants]]`, e.g. `[{"owner":"acme","tenants":["ten_…"]}]`. |
+
+Refused at startup: a host that is not a private ECR registry, a missing or
+mismatched region, a role ARN that is not an IAM role, no grants, an owner
+outside `[a-z0-9._-]` (or over 50 characters), a duplicate owner, an
+empty `tenants` list, or any other `[registry]` key without a host.
+
+How it works. When luxd sends an assignment to a runner (one advertising
+the `registry-minted` capability; older runners get nothing), for each
+owner granted to the Run's tenant it:
+
+1. calls `sts:AssumeRole` on `pull_role_arn` with luxd's own AWS
+   credentials (the default chain: instance role, environment), session
+   name `luxd-registry-<owner>`, one hour, and the session tag
+   `lux-owner=<owner>`;
+2. calls `ecr:GetAuthorizationToken` with those credentials;
+3. attaches the token as an auth entry keyed `<host>/<owner>`. Podman
+   matches `auth.json` keys most specific first
+   ([containers-auth.json(5)](https://github.com/containers/image/blob/main/docs/containers-auth.json.5.md)),
+   so each owner's token is used for its own repositories only.
+
+Tokens are cached per owner in luxd's memory and reused while at least 30
+minutes of the session remain, so a busy luxd assumes the role about twice
+an hour per owner. A failure (STS, ECR, a missing permission) is logged as
+`registry pull credentials not minted` with the owner and the error, never
+a token; the assignment goes without that owner's entry, and the pull
+fails as it would have without `[registry]`. luxd tries that owner again
+after 30 seconds.
+
+The pull role (a separate IAM role, not luxd's own) needs:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*" },
+    { "Effect": "Allow",
+      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+      "Resource": "arn:aws:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" }
+  ]
+}
+```
+
+and a trust policy that lets only luxd's role assume it, tag the session,
+and only with granted owners:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "AWS": "arn:aws:iam::<account>:role/<luxd-role>" },
+    "Action": ["sts:AssumeRole", "sts:TagSession"],
+    "Condition": {
+      "StringEquals": { "aws:RequestTag/lux-owner": ["acme"] },
+      "ForAllValues:StringEquals": { "aws:TagKeys": ["lux-owner"] }
+    }
+  }]
+}
+```
+
+luxd's own role needs `sts:AssumeRole` and `sts:TagSession` on the pull
+role. Keep the trust policy's owner list in step with the grants: an owner
+granted in luxd but missing there fails to mint (and is logged), which
+fails closed. The tokens are pull-only: pushes, such as a build cache's,
+still need a `registryAuth` credential.
+
 ## Where bytes live
 
 Every placement ends with a **snapshot** of its state volumes, its

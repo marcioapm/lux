@@ -68,6 +68,18 @@ are in the linked pages.
   API with no endpoint that reflects request headers. Git credentials
   never enter the container at all: the runner clones and pushes. Git
   mirrors on a host are per tenant: one tenant never clones from another's.
+- **In-region registry tokens** (luxd's optional `[registry]`): luxd
+  assumes the operator's pull role with the session tag `lux-owner=<owner>`
+  and mints an ECR token per granted owner. The role's policy limits each
+  token to pulling `<owner>/*` repositories: no push, no other owner's
+  images, no other AWS action. luxd holds tokens in memory only (reused
+  while 30 minutes or more of validity remain), attaches them to an
+  assignment when it is sent, and never writes them to Postgres, an event,
+  a log line or an error. On the host they live only in the runner's 0600
+  `auth.json` for the pull, never in the container. A tenant receives
+  tokens only for the owners its grants list, but a token is not tenant
+  scoped: every tenant granted an owner can pull all of that owner's
+  repositories ([operations](operations.md#in-region-registry)).
 
 ## Previews
 
