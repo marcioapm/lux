@@ -53,15 +53,27 @@ type fakeRegistryAWS struct {
 	// contexts, if set, the context it was called with.
 	entered  chan string
 	contexts chan context.Context
+	// returned counts AssumeRole calls that have returned, by owner.
+	returned atomic.Int32
+	ended    map[string]int
 }
 
 func (f *fakeRegistryAWS) AssumeRole(ctx context.Context, in *sts.AssumeRoleInput) (*ststypes.Credentials, error) {
+	defer f.returned.Add(1)
 	owner := ""
 	for _, tag := range in.Tags {
 		if aws.ToString(tag.Key) == "lux-owner" {
 			owner = aws.ToString(tag.Value)
 		}
 	}
+	defer func() {
+		f.mu.Lock()
+		if f.ended == nil {
+			f.ended = map[string]int{}
+		}
+		f.ended[owner]++
+		f.mu.Unlock()
+	}()
 	f.mu.Lock()
 	f.assumed = append(f.assumed, *in)
 	gate, entered, contexts := f.gate[owner], f.entered, f.contexts
@@ -590,6 +602,9 @@ func TestRegistryCloseEndsMintsAndTimers(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("close did not return while a mint was blocked")
 	}
+	if fake.returned.Load() != 1 {
+		t.Fatal("close returned before the mint in flight ended")
+	}
 	if mintCtx.Err() == nil {
 		t.Fatal("close did not cancel the mint in flight")
 	}
@@ -624,10 +639,14 @@ func TestRegistryHoldIsOneTotalBound(t *testing.T) {
 	if pending || creds != nil || !errors.Is(errs["acme"], errRegistrySlow) || !errors.Is(errs["team"], errRegistrySlow) {
 		t.Fatalf("at the bound: %+v pending=%v %v", creds, pending, errs)
 	}
-	// A pass that then fails to send it does not start a new wait.
-	clock.advance(time.Second)
-	if _, pending, _ := m.lookup(context.Background(), "h1", 1, m.ownersFor("t1")); pending {
-		t.Fatal("a second look after the bound waited again")
+	// Passes that then fail to send it do not start a new wait while a mint
+	// it waited on may still run (up to hold + registryMintTimeout), across
+	// the sweep of old holds at 2×hold.
+	for _, step := range []time.Duration{registryHold / 2, registryHold / 2, time.Millisecond} {
+		clock.advance(step)
+		if _, pending, _ := m.lookup(context.Background(), "h1", 1, m.ownersFor("t1")); pending {
+			t.Fatal("a look after the bound waited again")
+		}
 	}
 	// Another assignment has its own bound.
 	if _, pending, _ := m.lookup(context.Background(), "h1", 2, m.ownersFor("t1")); !pending {
@@ -1374,6 +1393,12 @@ func TestRegistryMintDoesNotBlockDelivery(t *testing.T) {
 		t.Fatalf("%d hold timers fired, want r1's", n)
 	}
 	collect("assignment", has(proto.MsgAssign, r1))
+	fake.mu.Lock()
+	acmeEnded := fake.ended["acme"]
+	fake.mu.Unlock()
+	if acmeEnded != 0 {
+		t.Fatal("the assignment went only once acme's mint ended, not when its hold did")
+	}
 	as := registryAssign(t, seen, r1)
 	if g := registries(as); !slices.Equal(g, []string{testRegistryHost + "/team"}) {
 		t.Fatalf("assignment carried %v, want team's only (acme still minting)", g)
