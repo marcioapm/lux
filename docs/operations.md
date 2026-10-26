@@ -375,10 +375,10 @@ The pull role (a separate IAM role, not luxd's own) needs:
     { "Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*" },
     { "Effect": "Allow",
       "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
-      "Resource": "arn:aws:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" },
+      "Resource": "arn:<partition>:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" },
     { "Effect": "Deny",
       "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
-      "NotResource": "arn:aws:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" },
+      "NotResource": "arn:<partition>:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" },
     { "Effect": "Deny",
       "NotAction": ["ecr:GetAuthorizationToken", "ecr:BatchGetImage",
                     "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
@@ -386,6 +386,8 @@ The pull role (a separate IAM role, not luxd's own) needs:
   ]
 }
 ```
+
+`<partition>` is `aws`, `aws-cn` or `aws-us-gov`, as in the role ARN.
 
 The two `Deny`s keep a repository (or any resource) policy that allows the
 account or the organisation from widening a token past pulling its own
