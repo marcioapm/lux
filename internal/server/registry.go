@@ -418,8 +418,13 @@ func (s *Server) planRegistryCredentials(ctx context.Context, hostID string, und
 		runID, tenantID, resolved string
 		image                     spec.Image
 	}
+	if s.registryPlanFails != nil {
+		if err := s.registryPlanFails(); err != nil {
+			return registryPlan{}, err
+		}
+	}
 	var assigns []pendingAssign
-	err := s.planQuery(ctx, func(tx pgx.Tx) error {
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		// One row with a NULL id when the host is capable but has no
 		// assignment; none when it is not capable.
 		rows, err := tx.Query(ctx, `SELECT m.id, coalesce(m.epoch, 0), coalesce(m.run_id, ''), coalesce(m.payload->>'tenantId', ''),
@@ -479,16 +484,6 @@ func (s *Server) planRegistryCredentials(ctx context.Context, hostID string, und
 		}
 	}
 	return plan, nil
-}
-
-// planQuery runs the plan's reads; tests replace it to fail them.
-func (s *Server) planQuery(ctx context.Context, fn func(pgx.Tx) error) error {
-	if s.registryPlanFails != nil {
-		if err := s.registryPlanFails(); err != nil {
-			return err
-		}
-	}
-	return s.db.Tx(ctx, store.System(), fn)
 }
 
 // attachRegistryCredentials adds an assignment's planned credentials: at

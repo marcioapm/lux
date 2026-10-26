@@ -59,13 +59,11 @@ type fakeRegistryAWS struct {
 	// contexts, if set, the context it was called with.
 	entered  chan string
 	contexts chan context.Context
-	// returned counts AssumeRole calls that have returned, by owner.
-	returned atomic.Int32
-	ended    map[string]int
+	// ended counts AssumeRole calls that have returned, by owner.
+	ended map[string]int
 }
 
 func (f *fakeRegistryAWS) AssumeRole(ctx context.Context, in *sts.AssumeRoleInput) (*ststypes.Credentials, error) {
-	defer f.returned.Add(1)
 	owner := ""
 	for _, tag := range in.Tags {
 		if aws.ToString(tag.Key) == "lux-owner" {
@@ -143,6 +141,12 @@ func (f *fakeRegistryAWS) tokenCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.tokens
+}
+
+func (f *fakeRegistryAWS) endedFor(owner string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ended[owner]
 }
 
 func (f *fakeRegistryAWS) block(owner string) chan struct{} {
@@ -640,7 +644,7 @@ func TestRegistryCloseEndsMintsAndTimers(t *testing.T) {
 		}
 		release()
 		<-closed
-		if fake.returned.Load() != 1 {
+		if fake.endedFor("acme") != 1 {
 			t.Fatal("close returned before the mint in flight ended")
 		}
 		if mintCtx.Err() == nil {
@@ -1101,7 +1105,7 @@ func passPausedAfterPlan(t *testing.T, s *Server, during func()) []proto.Frame {
 
 // keys are frames as type/run, in order.
 func keys(frames []proto.Frame) []string {
-	out := []string{}
+	var out []string
 	for _, f := range frames {
 		out = append(out, f.Type+"/"+f.RunID)
 	}
@@ -1110,9 +1114,6 @@ func keys(frames []proto.Frame) []string {
 
 func requireKeys(t *testing.T, what string, frames []proto.Frame, want ...string) {
 	t.Helper()
-	if want == nil {
-		want = []string{}
-	}
 	if got := keys(frames); !slices.Equal(got, want) {
 		t.Fatalf("%s: %v, want %v", what, got, want)
 	}
@@ -1434,10 +1435,7 @@ func TestRegistryMintDoesNotBlockDelivery(t *testing.T) {
 		t.Fatalf("%d hold timers fired, want r1's", n)
 	}
 	collect("assignment", has(proto.MsgAssign, r1))
-	fake.mu.Lock()
-	acmeEnded := fake.ended["acme"]
-	fake.mu.Unlock()
-	if acmeEnded != 0 {
+	if fake.endedFor("acme") != 0 {
 		t.Fatal("the assignment went only once acme's mint ended, not when its hold did")
 	}
 	as := registryAssign(t, seen, r1)

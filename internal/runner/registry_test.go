@@ -221,6 +221,20 @@ func readAuths(t *testing.T, path string) map[string]string {
 	return out
 }
 
+// requireNoReportHolds fails if any report f sent contains one of secrets.
+func requireNoReportHolds(t *testing.T, f *finishFixture, secrets ...string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.reports {
+		for _, s := range secrets {
+			if strings.Contains(string(r.Data), s) {
+				t.Fatalf("token in a report: %s", r.Data)
+			}
+		}
+	}
+}
+
 // luxd's minted pull credentials are written under <host>/<owner> keys
 // beside the spec's, redacted like them; a spec entry for the registry's
 // host wins over every minted entry for it.
@@ -331,14 +345,7 @@ func TestMintedCredentialsStayInTheAuthFile(t *testing.T) {
 		}
 		return false
 	})
-	f.mu.Lock()
-	for _, r := range f.reports {
-		if strings.Contains(string(r.Data), token) || strings.Contains(string(r.Data), enc) {
-			f.mu.Unlock()
-			t.Fatalf("token in a report: %s", r.Data)
-		}
-	}
-	f.mu.Unlock()
+	requireNoReportHolds(t, f, token, enc)
 
 	// The container: neither its shim config nor its command line.
 	rt := t.TempDir()
@@ -424,14 +431,7 @@ func TestMintedCredentialsInABuild(t *testing.T) {
 	if !strings.Contains(warning, "not authorized to push") || strings.Contains(warning, token) || strings.Contains(warning, enc) {
 		t.Fatalf("push warning %q", warning)
 	}
-	f.mu.Lock()
-	for _, r := range f.reports {
-		if strings.Contains(string(r.Data), token) || strings.Contains(string(r.Data), enc) {
-			f.mu.Unlock()
-			t.Fatalf("token in a report: %s", r.Data)
-		}
-	}
-	f.mu.Unlock()
+	requireNoReportHolds(t, f, token, enc)
 	if entries, _ := os.ReadDir(tmp); len(entries) != 0 {
 		t.Fatalf("auth files left behind: %v", entries)
 	}
