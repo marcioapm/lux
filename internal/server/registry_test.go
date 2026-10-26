@@ -491,6 +491,31 @@ func TestRegistrySourceNoToken(t *testing.T) {
 	}
 }
 
+// A source that breaks its contract, echoing the password it returned in
+// its error, does not get it logged: the failure and its backoff carry the
+// cause without the password.
+func TestRegistryMintErrorNeverQuotesThePassword(t *testing.T) {
+	const secret = "SENTINEL-pw-7f3a9c"
+	m, fake, _, done := minter(t, RegistryGrant{Owner: "acme", Tenants: []string{"*"}})
+	fake.token = map[string]func() (RegistryToken, error){"acme": func() (RegistryToken, error) {
+		return RegistryToken{User: "puller", Password: secret, Expires: time.Now().Add(time.Hour)},
+			fmt.Errorf("denied for token %s: %w", secret, context.DeadlineExceeded)
+	}}
+	for id := range int64(2) {
+		creds, errs := settle(t, m, done, id+1, "t1")
+		err := errs["acme"]
+		if len(creds) != 0 || !errors.Is(err, errRegistryBackoff) {
+			t.Fatalf("lookup %d: %+v %v, want the failure", id+1, creds, err)
+		}
+		if msg := err.Error(); strings.Contains(msg, secret) || !strings.Contains(msg, "denied for token [redacted]") {
+			t.Fatalf("lookup %d error %q: want the cause without the password", id+1, msg)
+		}
+	}
+	if _, _, _, err := m.mint(context.Background(), "acme"); !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), secret) {
+		t.Fatalf("mint error %v: want the cause, unwrappable, without the password", err)
+	}
+}
+
 // A caller that goes away mid-mint neither aborts the mint nor puts the
 // owner in backoff for the next caller: the context the source got
 // outlives the caller's, keeps its values, and has the mint's own deadline.

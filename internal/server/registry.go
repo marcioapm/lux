@@ -40,7 +40,9 @@ type RegistryGrant struct {
 // owner's repositories, no push, no other action. luxd attaches it to the
 // auth.json key <host>/<owner> only, caches one per owner, and decides
 // which owners a Run gets; a source only mints. Mint may block (a network
-// call) and must return when ctx ends.
+// call) and must return when ctx ends. An error Mint returns must not
+// contain the token, its password or any other credential material
+// (keys, signed assertions, response bodies carrying them): luxd logs it.
 type RegistryTokenSource interface {
 	Mint(ctx context.Context, owner string) (RegistryToken, error)
 }
@@ -304,9 +306,22 @@ func (m *registryMinter) startMint(ctx context.Context, owner string, t *ownerTo
 // Cached, such a token would read as none and be minted again every pass.
 var errRegistryNoToken = errors.New("the token source returned no password or no expiry")
 
+// redactedError is a source's error with the password it returned beside
+// it cut from the text luxd logs; errors.Is still sees the cause.
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.err }
+
 func (m *registryMinter) mint(ctx context.Context, owner string) (user, pass string, expires time.Time, err error) {
 	tok, err := m.cfg.Source.Mint(ctx, owner)
 	if err != nil {
+		if tok.Password != "" && strings.Contains(err.Error(), tok.Password) {
+			err = &redactedError{msg: strings.ReplaceAll(err.Error(), tok.Password, "[redacted]"), err: err}
+		}
 		return "", "", time.Time{}, err
 	}
 	if tok.Password == "" || tok.Expires.IsZero() {
