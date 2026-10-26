@@ -499,7 +499,7 @@ func TestRegistryMintErrorNeverQuotesThePassword(t *testing.T) {
 	m, fake, _, done := minter(t, RegistryGrant{Owner: "acme", Tenants: []string{"*"}})
 	fake.token = map[string]func() (RegistryToken, error){"acme": func() (RegistryToken, error) {
 		return RegistryToken{User: "puller", Password: secret, Expires: time.Now().Add(time.Hour)},
-			fmt.Errorf("denied for token %s: %w", secret, context.DeadlineExceeded)
+			fmt.Errorf("denied for token %s; echoed again %s: %w", secret, secret, context.DeadlineExceeded)
 	}}
 	for id := range int64(2) {
 		creds, errs := settle(t, m, done, id+1, "t1")
@@ -507,12 +507,33 @@ func TestRegistryMintErrorNeverQuotesThePassword(t *testing.T) {
 		if len(creds) != 0 || !errors.Is(err, errRegistryBackoff) {
 			t.Fatalf("lookup %d: %+v %v, want the failure", id+1, creds, err)
 		}
-		if msg := err.Error(); strings.Contains(msg, secret) || !strings.Contains(msg, "denied for token [redacted]") {
+		if msg := err.Error(); strings.Contains(msg, secret) || !strings.Contains(msg, "denied for token [redacted]; echoed again [redacted]") {
 			t.Fatalf("lookup %d error %q: want the cause without the password", id+1, msg)
 		}
 	}
 	if _, _, _, err := m.mint(context.Background(), "acme"); !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), secret) {
 		t.Fatalf("mint error %v: want the cause, unwrappable, without the password", err)
+	}
+}
+
+// A password too short to cut out of an error's text without mangling it
+// (it also matches ordinary words) withholds the whole text instead; the
+// cause still unwraps, and an error that does not quote it is left alone.
+func TestRegistryRedactShortPassword(t *testing.T) {
+	cause := fmt.Errorf("denied: exceeded e deadline: %w", context.DeadlineExceeded)
+	err := redactPassword(cause, "e")
+	if err.Error() != errRegistryWithheld || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("short password: %q, want the text withheld and the cause unwrappable", err)
+	}
+	long := redactPassword(fmt.Errorf("token 12345678 and 12345678: %w", context.DeadlineExceeded), "12345678")
+	if long.Error() != "token [redacted] and [redacted]: context deadline exceeded" || !errors.Is(long, context.DeadlineExceeded) {
+		t.Fatalf("password at the minimum: %q, want every occurrence cut in place", long)
+	}
+	if got := redactPassword(cause, "zzzz"); got != cause {
+		t.Fatalf("unquoted password: %v, want the error unchanged", got)
+	}
+	if got := redactPassword(cause, ""); got != cause {
+		t.Fatalf("no password: %v, want the error unchanged", got)
 	}
 }
 

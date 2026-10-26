@@ -316,13 +316,32 @@ type redactedError struct {
 func (e *redactedError) Error() string { return e.msg }
 func (e *redactedError) Unwrap() error { return e.err }
 
+// registryRedactMin is the shortest password cut out of an error's text in
+// place. A shorter one also matches ordinary words, so cutting it would
+// mangle the message: the whole text is withheld instead.
+const registryRedactMin = 8
+
+// errRegistryWithheld is the text logged for a source error that quotes a
+// password too short to cut out cleanly.
+const errRegistryWithheld = "the token source's error was withheld: it quotes the credential it returned"
+
+// redactPassword is err with every occurrence of password removed from its
+// text, or err itself when the text does not contain it.
+func redactPassword(err error, password string) error {
+	msg := err.Error()
+	if password == "" || !strings.Contains(msg, password) {
+		return err
+	}
+	if len(password) < registryRedactMin {
+		return &redactedError{msg: errRegistryWithheld, err: err}
+	}
+	return &redactedError{msg: strings.ReplaceAll(msg, password, "[redacted]"), err: err}
+}
+
 func (m *registryMinter) mint(ctx context.Context, owner string) (user, pass string, expires time.Time, err error) {
 	tok, err := m.cfg.Source.Mint(ctx, owner)
 	if err != nil {
-		if tok.Password != "" && strings.Contains(err.Error(), tok.Password) {
-			err = &redactedError{msg: strings.ReplaceAll(err.Error(), tok.Password, "[redacted]"), err: err}
-		}
-		return "", "", time.Time{}, err
+		return "", "", time.Time{}, redactPassword(err, tok.Password)
 	}
 	if tok.Password == "" || tok.Expires.IsZero() {
 		return "", "", time.Time{}, errRegistryNoToken
