@@ -610,14 +610,19 @@ image:
   its push fails with an `image.cache` warning, as with any read-only
   credential. Pushes need a `registryAuth` entry for the registry.
 - **An explicit entry wins.** A `registryAuth` entry for the registry's
-  host replaces every minted token for it, on every owner's repositories.
-- The token is handled like a `registryAuth` credential: in the runner's
-  temporary `auth.json` only, redacted from errors, never in the
-  container, an event or a log. luxd keeps it in memory, never in its
-  database.
-- If luxd cannot mint a token, the Run is still placed, without it: the
-  pull then fails as it would have without the registry configured.
-  The operator sees a warning in luxd's log.
+  host replaces every minted token for it, on every owner's repositories;
+  luxd then mints none for the Run.
+- luxd mints only for a Run that names the registry: in `image.ref`,
+  `image.build.cache`, or a `FROM` of `image.build.containerfile` (a
+  `FROM` given by a build argument counts, since luxd cannot tell what it
+  names).
+- The token is handled like a `registryAuth` credential: in lux-runner's
+  memory with the assignment and in its temporary 0600 `auth.json` while
+  it pulls or pushes, redacted from errors, never in the container, an
+  event or a log. luxd keeps it in memory, never in its database.
+- If luxd cannot mint a token within 10 seconds, the Run is still placed,
+  without it: the pull then fails as it would have without the registry
+  configured. The operator sees a warning in luxd's log.
 - A Run whose tenant has no grant, or whose host's `lux-runner` predates
   this feature, gets no token.
 

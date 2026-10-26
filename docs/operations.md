@@ -306,19 +306,27 @@ tenants = ["*"]         # tenant ids, or "*" for every tenant (the default)
 
 | Variable | Default | |
 | --- | --- | --- |
-| `LUX_REGISTRY_HOST` | — | The ECR registry, `<account>.dkr.ecr.<region>.amazonaws.com`; empty turns the feature off. |
+| `LUX_REGISTRY_HOST` | — | The ECR registry, `<account>.dkr.ecr.<region>.amazonaws.com`. |
 | `LUX_REGISTRY_REGION` | — | Its region; must be the host's. STS and ECR are called there. |
 | `LUX_REGISTRY_PULL_ROLE_ARN` | — | The pull role luxd assumes (`arn:aws:iam::<account>:role/<name>`). |
 | `LUX_REGISTRY_GRANTS` | — | JSON array replacing every `[[registry.grants]]`, e.g. `[{"owner":"acme","tenants":["ten_…"]}]`. |
+
+To turn the feature off, remove the whole `[registry]` section and every
+`LUX_REGISTRY_*` variable. As everywhere in luxd, an empty variable is
+ignored: `LUX_REGISTRY_HOST=` does not override a host in the file.
 
 Refused at startup: a host that is not a private ECR registry, a missing or
 mismatched region, a role ARN that is not an IAM role, no grants, an owner
 outside `[a-z0-9._-]` (or over 50 characters), a duplicate owner, an
 empty `tenants` list, or any other `[registry]` key without a host.
 
-How it works. When luxd sends an assignment to a runner (one advertising
-the `registry-minted` capability; older runners get nothing), for each
-owner granted to the Run's tenant it:
+How it works. Before luxd sends an assignment to a runner (one advertising
+the `registry-minted` capability; older runners get nothing), it checks
+that the Run can use the registry: its `image.ref`, its
+`image.build.cache` or a `FROM` of its Containerfile names the host, or a
+`FROM` is a build argument luxd cannot resolve. A Run with its own
+`registryAuth` entry for the host gets nothing, since that entry wins on
+the runner. For each owner granted to the Run's tenant, luxd:
 
 1. calls `sts:AssumeRole` on `pull_role_arn` with luxd's own AWS
    credentials (the default chain: instance role, environment), session
@@ -330,13 +338,18 @@ owner granted to the Run's tenant it:
    ([containers-auth.json(5)](https://github.com/containers/image/blob/main/docs/containers-auth.json.5.md)),
    so each owner's token is used for its own repositories only.
 
-Tokens are cached per owner in luxd's memory and reused while at least 30
-minutes of the session remain, so a busy luxd assumes the role about twice
-an hour per owner. A failure (STS, ECR, a missing permission) is logged as
+Tokens are cached per owner in luxd's memory and handed out while at least
+30 minutes of the session remain. Below 40 minutes, luxd mints the next
+token in the background, so assignments normally find a ready one; a busy
+luxd assumes the role about three times an hour per owner. Mints run
+outside the runner connection: other messages to the host (stops, input,
+live streams) never wait for one. Only an assignment whose owner has no
+token yet waits, at most 10 seconds in total, while its owners' mints run
+in parallel, one at a time per owner. After that, or on a failure (STS,
+ECR, a missing permission), it goes without that owner's entry, and the
+pull fails as it would have without `[registry]`. The failure is logged as
 `registry pull credentials not minted` with the owner and the error, never
-a token; the assignment goes without that owner's entry, and the pull
-fails as it would have without `[registry]`. luxd tries that owner again
-after 30 seconds.
+a token. luxd tries that owner again after 30 seconds.
 
 The pull role (a separate IAM role, not luxd's own) needs:
 
@@ -347,10 +360,17 @@ The pull role (a separate IAM role, not luxd's own) needs:
     { "Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*" },
     { "Effect": "Allow",
       "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
-      "Resource": "arn:aws:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" }
+      "Resource": "arn:aws:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" },
+    { "Effect": "Deny",
+      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+      "NotResource": "arn:aws:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" }
   ]
 }
 ```
+
+The `Deny` keeps a repository policy that allows the account or the
+organisation from widening a token past its owner: an explicit deny in the
+identity policy overrides any allow in a repository policy.
 
 and a trust policy that lets only luxd's role assume it, tag the session,
 and only with granted owners:
@@ -375,6 +395,12 @@ role. Keep the trust policy's owner list in step with the grants: an owner
 granted in luxd but missing there fails to mint (and is logged), which
 fails closed. The tokens are pull-only: pushes, such as a build cache's,
 still need a `registryAuth` credential.
+
+Revoking a grant (removing it from luxd, or the owner from the trust
+policy) takes effect for new tokens only. A token already issued stays
+valid until it expires: at most the session's hour, or ECR's 12 hours if
+ECR does not bound it by the session. To cut access at once, revoke the
+pull role's active sessions (IAM "Revoke active sessions").
 
 ## Where bytes live
 
