@@ -95,6 +95,22 @@ endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
 # candidates under throttling).
 no_capacity_retry_after = "30s"    # LUX_EC2_NO_CAPACITY_RETRY_AFTER
 
+# Optional: the in-region ECR registry. luxd mints a pull-only token per
+# granted owner (STS AssumeRole of pull_role_arn with the session tag
+# lux-owner=<owner>, then ECR GetAuthorizationToken) and hands it to the
+# runner with each assignment, so Runs pull <host>/<owner>/... without
+# image.registryAuth (docs/operations.md#in-region-registry). Absent: off.
+# [registry]
+# host = "<account>.dkr.ecr.<region>.amazonaws.com"   # LUX_REGISTRY_HOST
+# region = "<region>"                                 # LUX_REGISTRY_REGION: must be the host's
+# pull_role_arn = "arn:aws:iam::<account>:role/<name>-registry-pull"  # LUX_REGISTRY_PULL_ROLE_ARN
+#
+# LUX_REGISTRY_GRANTS replaces the whole list with a JSON array of objects
+# using these same keys, e.g. [{"owner":"acme","tenants":["*"]}].
+# [[registry.grants]]
+# owner = "acme"                     # the repositories <host>/acme/...; lowercase, digits, . _ -
+# tenants = ["*"]                    # tenant ids, or "*" for every tenant (the default)
+
 [console]
 # How the web console signs people in (docs/operators.md#signing-in):
 #   key                a pasted API key (the default)

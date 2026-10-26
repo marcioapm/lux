@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -155,6 +156,21 @@ type config struct {
 			AUD string `toml:"aud" env:"LUX_PREVIEW_CF_ACCESS_AUD"`
 		} `toml:"cloudflare_access"`
 	} `toml:"preview"`
+	// Registry: the in-region ECR registry luxd mints pull credentials
+	// for (docs/operations.md#in-region-registry). No host: off.
+	Registry struct {
+		Host        string `toml:"host" env:"LUX_REGISTRY_HOST"`
+		Region      string `toml:"region" env:"LUX_REGISTRY_REGION"`
+		PullRoleARN string `toml:"pull_role_arn" env:"LUX_REGISTRY_PULL_ROLE_ARN"`
+		// Grants: in the environment, a JSON array of {owner, tenants}.
+		Grants []registryGrant `toml:"grants" env:"LUX_REGISTRY_GRANTS"`
+	} `toml:"registry"`
+}
+
+// registryGrant is one [[registry.grants]]; nil tenants is every tenant.
+type registryGrant struct {
+	Owner   string   `toml:"owner" json:"owner"`
+	Tenants []string `toml:"tenants" json:"tenants"`
 }
 
 // Nil timeout and max_batch use the transport defaults; explicit zero is invalid.
@@ -433,7 +449,7 @@ func setField(v reflect.Value, s string) error {
 		}
 		v.SetInt(int64(n))
 	case reflect.Slice:
-		if v.Type() == reflect.TypeFor[[]duration]() || v.Type() == reflect.TypeFor[[]costPluginConfig]() {
+		if v.Type() == reflect.TypeFor[[]duration]() || v.Type() == reflect.TypeFor[[]costPluginConfig]() || v.Type() == reflect.TypeFor[[]registryGrant]() {
 			dec := json.NewDecoder(strings.NewReader(s))
 			dec.DisallowUnknownFields()
 			if err := dec.Decode(v.Addr().Interface()); err != nil {
@@ -682,6 +698,7 @@ func (c config) check() error {
 		}
 	}
 	problems = append(problems, c.controlPlanePortProblems()...)
+	problems = append(problems, c.registryProblems()...)
 	if len(problems) > 0 {
 		return errors.New("configuration: " + strings.Join(problems, "; "))
 	}
@@ -814,4 +831,79 @@ func validInstanceType(s string) bool {
 		}
 	}
 	return true
+}
+
+var (
+	// ecrHostRe: a private ECR registry, <account>.dkr.ecr.<region>.amazonaws.com
+	// (.com.cn in China); its region is the second capture.
+	ecrHostRe = regexp.MustCompile(`^[0-9]{12}\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com(\.cn)?$`)
+	roleARNRe = regexp.MustCompile(`^arn:aws(-cn|-us-gov)?:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$`)
+	// registryOwnerRe: an ECR namespace segment, also valid in an STS
+	// session name and tag value.
+	registryOwnerRe = regexp.MustCompile(`^[a-z0-9._-]+$`)
+)
+
+// registryProblems checks [registry]: off without a host; with one, the
+// region, the role and each grant must be usable, owners unique.
+func (c config) registryProblems() []string {
+	r := c.Registry
+	if r.Host == "" {
+		if r.Region != "" || r.PullRoleARN != "" || len(r.Grants) > 0 {
+			return []string{"registry: host (LUX_REGISTRY_HOST) is required when any registry setting is set"}
+		}
+		return nil
+	}
+	var problems []string
+	m := ecrHostRe.FindStringSubmatch(r.Host)
+	if m == nil {
+		problems = append(problems, fmt.Sprintf("registry.host (LUX_REGISTRY_HOST) %q: want <account>.dkr.ecr.<region>.amazonaws.com", r.Host))
+	}
+	switch {
+	case r.Region == "":
+		problems = append(problems, "registry.region (LUX_REGISTRY_REGION) is required")
+	case m != nil && m[1] != r.Region:
+		problems = append(problems, fmt.Sprintf("registry.region (LUX_REGISTRY_REGION) %q: registry.host is in %s", r.Region, m[1]))
+	}
+	if !roleARNRe.MatchString(r.PullRoleARN) {
+		problems = append(problems, fmt.Sprintf("registry.pull_role_arn (LUX_REGISTRY_PULL_ROLE_ARN) %q: want arn:aws:iam::<account>:role/<name>", r.PullRoleARN))
+	}
+	if len(r.Grants) == 0 {
+		problems = append(problems, "registry.grants (LUX_REGISTRY_GRANTS): at least one grant is required")
+	}
+	owners := map[string]bool{}
+	for i, g := range r.Grants {
+		key := fmt.Sprintf("registry.grants[%d]", i)
+		// Session names are at most 64 characters: luxd-registry-<owner>.
+		if !registryOwnerRe.MatchString(g.Owner) || len(g.Owner) > 64-len("luxd-registry-") {
+			problems = append(problems, fmt.Sprintf("%s.owner %q: want lowercase letters, digits, '.', '_' or '-', at most 50", key, g.Owner))
+		}
+		if owners[g.Owner] {
+			problems = append(problems, fmt.Sprintf("%s.owner %q: duplicate", key, g.Owner))
+		}
+		owners[g.Owner] = true
+		if g.Tenants != nil && len(g.Tenants) == 0 {
+			problems = append(problems, key+".tenants: empty; omit it, or [\"*\"], for every tenant")
+		}
+		for _, t := range g.Tenants {
+			if t == "" || strings.TrimSpace(t) != t {
+				problems = append(problems, fmt.Sprintf("%s.tenants %q: want a tenant id or \"*\"", key, t))
+			}
+		}
+	}
+	return problems
+}
+
+// registryConfig is [registry] as the server takes it; tenants default to
+// every tenant.
+func (c config) registryConfig() server.RegistryConfig {
+	r := c.Registry
+	out := server.RegistryConfig{Host: r.Host, Region: r.Region, PullRoleARN: r.PullRoleARN}
+	for _, g := range r.Grants {
+		tenants := g.Tenants
+		if tenants == nil {
+			tenants = []string{"*"}
+		}
+		out.Grants = append(out.Grants, server.RegistryGrant{Owner: g.Owner, Tenants: slices.Clone(tenants)})
+	}
+	return out
 }

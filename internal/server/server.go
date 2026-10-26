@@ -106,6 +106,9 @@ type Config struct {
 	// Market: candidate instance types' prices and spot placement scores
 	// (market.go).
 	Market MarketConfig
+	// Registry: pull credentials minted for the in-region registry
+	// (registry.go); Host "" is off.
+	Registry RegistryConfig
 }
 
 // PreviewConfig is the preview listener's ([preview]).
@@ -140,6 +143,9 @@ type Server struct {
 	// secrets holds submitted secret values in memory, by run id, until
 	// the placement that needs them has been assigned. Never persisted.
 	secrets *secretCache
+	// registry mints in-region registry pull tokens; nil when [registry]
+	// is not configured.
+	registry *registryMinter
 	// cfAccess verifies Cloudflare Access tokens, when that is the console
 	// auth (access.go).
 	cfAccess *cfAccess
@@ -275,6 +281,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		hostname:    hostname(),
 		now:         time.Now,
 	}
+	s.registry = newRegistryMinter(cfg.Registry, time.Now)
 	s.readPostgres = s.postgresFigures
 	if cfg.ConsoleAuth.Mode == "cloudflare-access" {
 		s.cfAccess = newCFAccess(cfg.ConsoleAuth.CFTeam, cfg.ConsoleAuth.CFAud)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -363,10 +364,17 @@ func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered
 	}
 	// RETURNING does not preserve the subquery's order.
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	minted := false
+	if s.registry != nil && slices.ContainsFunc(out, func(f proto.Frame) bool { return f.Type == proto.MsgAssign }) {
+		if minted, err = s.hostHas(ctx, hostID, proto.CapRegistryMinted); err != nil {
+			return nil, err
+		}
+	}
 	for i := range out {
 		switch out[i].Type {
 		case proto.MsgAssign:
 			out[i].Data = s.attachSecrets(out[i].RunID, out[i].Data)
+			out[i].Data = s.attachRegistryCredentials(ctx, hostID, minted, out[i].Data)
 		case proto.MsgPush, proto.MsgSync:
 			out[i].Data = s.attachCredentials(out[i].ID, out[i].Type, out[i].Data)
 		}
