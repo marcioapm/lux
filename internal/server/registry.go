@@ -192,8 +192,8 @@ func registryRefreshFor(owner string) time.Duration {
 // some owner is minting and msgID was first held less than m.hold ago;
 // hostID is notified (m.ready) as each such mint ends, and when the hold
 // does. An owner with no token that is not pending is in errs. Never waits
-// on the token source. A closed minter (luxd shutting down) holds every assignment that
-// needs it, and mints nothing.
+// on the token source. A closed minter (luxd shutting down) holds every
+// assignment that needs it, and mints nothing.
 func (m *registryMinter) lookup(ctx context.Context, hostID string, msgID int64, owners []string) (creds []proto.RegistryCredential, pending bool, errs map[string]error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -325,8 +325,9 @@ const registryRedactMin = 8
 // password too short to cut out cleanly.
 const errRegistryWithheld = "the token source's error was withheld: it quotes the credential it returned"
 
-// redactPassword is err with every occurrence of password removed from its
-// text, or err itself when the text does not contain it.
+// redactPassword is err with every occurrence of password cut from its
+// text (the whole text withheld when password is shorter than
+// registryRedactMin), or err itself when the text does not contain it.
 func redactPassword(err error, password string) error {
 	msg := err.Error()
 	if password == "" || !strings.Contains(msg, password) {

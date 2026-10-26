@@ -107,7 +107,6 @@ func (f *fakeTokenSource) Mint(ctx context.Context, owner string) (RegistryToken
 	return RegistryToken{User: "puller", Password: fmt.Sprintf("%s-pw-%d", owner, f.tokens), Expires: f.now().Add(ttl)}, nil
 }
 
-// calls is the owner of every Mint call, in order.
 func (f *fakeTokenSource) calls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
