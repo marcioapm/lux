@@ -321,12 +321,16 @@ outside `[a-z0-9._-]` (or over 50 characters), a duplicate owner, an
 empty `tenants` list, or any other `[registry]` key without a host.
 
 How it works. Before luxd sends an assignment to a runner (one advertising
-the `registry-minted` capability; older runners get nothing), it checks
-that the Run can use the registry: its `image.ref`, its
-`image.build.cache` or a `FROM` of its Containerfile names the host, or a
-`FROM` is a build argument luxd cannot resolve. A Run with its own
+the `registry-minted` capability; older runners get nothing), it reads the
+owners the Run pulls from: the `<owner>` of each `<host>/<owner>/...` in
+its `image.ref`, its `image.build.cache` and the `FROM`s of its
+Containerfile (and of the pinned one an earlier placement recorded). Of
+those, it mints only for owners granted to the Run's tenant; a Run naming
+only `acme` gets no `team` token, even if its tenant has both. A `FROM`
+naming its image through a build argument names no owner: the runner
+refuses to pin it, so it never pulls with a token. A Run with its own
 `registryAuth` entry for the host gets nothing, since that entry wins on
-the runner. For each owner granted to the Run's tenant, luxd:
+the runner. For each owner, luxd:
 
 1. calls `sts:AssumeRole` on `pull_role_arn` with luxd's own AWS
    credentials (the default chain: instance role, environment), session
@@ -339,17 +343,28 @@ the runner. For each owner granted to the Run's tenant, luxd:
    so each owner's token is used for its own repositories only.
 
 Tokens are cached per owner in luxd's memory and handed out while at least
-30 minutes of the session remain. Below 40 minutes, luxd mints the next
-token in the background, so assignments normally find a ready one; a busy
-luxd assumes the role about three times an hour per owner. Mints run
-outside the runner connection: other messages to the host (stops, input,
-live streams) never wait for one. Only an assignment whose owner has no
-token yet waits, at most 10 seconds in total, while its owners' mints run
-in parallel, one at a time per owner. After that, or on a failure (STS,
-ECR, a missing permission), it goes without that owner's entry, and the
-pull fails as it would have without `[registry]`. The failure is logged as
-`registry pull credentials not minted` with the owner and the error, never
-a token. luxd tries that owner again after 30 seconds.
+30 minutes of the session remain. Between about 36 and 40 minutes left
+(the point is fixed per owner, so owners do not all refresh at once), luxd
+mints the next token in the background, so assignments normally find a
+ready one; a busy luxd assumes the role about three times an hour per
+owner. Mints run outside the runner connection: other Runs' assignments
+and stops, input and live streams never wait for one. Only an assignment
+whose owner has no token yet waits, at most 10 seconds in total, while its
+owners' mints run in parallel, one at a time per owner. After that, or on
+a failure (STS, ECR, a missing permission), it goes without that owner's
+entry, and the pull fails as it would have without `[registry]`. The
+failure is logged as `registry pull credentials not minted` with the owner
+and the error, never a token. luxd tries that owner again after 30
+seconds.
+
+A Run's own later messages (a stop, a terminate, input) stay behind its
+waiting assignment, so a stop for that Run can wait up to those 10
+seconds. That is deliberate: the runner acknowledges a stop or input for a
+Run it has no placement for and ignores it, so a stop sent ahead of its
+assignment would be lost, and the placement would then start. The same
+holds for an assignment queued (or made pending again by a reconnect)
+while a delivery pass is under way: it and its Run's later messages go
+together on the next pass.
 
 The pull role (a separate IAM role, not luxd's own) needs:
 
@@ -363,14 +378,25 @@ The pull role (a separate IAM role, not luxd's own) needs:
       "Resource": "arn:aws:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" },
     { "Effect": "Deny",
       "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
-      "NotResource": "arn:aws:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" }
+      "NotResource": "arn:aws:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" },
+    { "Effect": "Deny",
+      "NotAction": ["ecr:GetAuthorizationToken", "ecr:BatchGetImage",
+                    "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+      "Resource": "*" }
   ]
 }
 ```
 
-The `Deny` keeps a repository policy that allows the account or the
-organisation from widening a token past its owner: an explicit deny in the
-identity policy overrides any allow in a repository policy.
+The two `Deny`s keep a repository (or any resource) policy that allows the
+account or the organisation from widening a token past pulling its own
+owner's images: an explicit deny in the identity policy overrides any
+allow in a resource policy. The first stops pulls from another owner's
+repositories; the second stops every other action, such as pushing
+(`ecr:PutImage`, the layer uploads), deleting or listing images, on any
+repository. The four actions it leaves are all a pull uses: the token, the
+manifest (`BatchGetImage`), and the layers (`BatchCheckLayerAvailability`,
+`GetDownloadUrlForLayer`). A repository that is a pull-through cache needs
+more to fill itself on a first pull, and is not supported this way.
 
 and a trust policy that lets only luxd's role assume it, tag the session,
 and only with granted owners:
@@ -393,8 +419,9 @@ and only with granted owners:
 luxd's own role needs `sts:AssumeRole` and `sts:TagSession` on the pull
 role. Keep the trust policy's owner list in step with the grants: an owner
 granted in luxd but missing there fails to mint (and is logged), which
-fails closed. The tokens are pull-only: pushes, such as a build cache's,
-still need a `registryAuth` credential.
+fails closed. The tokens are pull-only, whatever a repository policy
+grants: pushes, such as a build cache's, still need a `registryAuth`
+credential.
 
 Revoking a grant (removing it from luxd, or the owner from the trust
 policy) takes effect for new tokens only. A token already issued stays

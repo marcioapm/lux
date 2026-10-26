@@ -72,19 +72,21 @@ are in the linked pages.
   assumes the operator's pull role with the session tag `lux-owner=<owner>`
   and mints an ECR token per granted owner. The role's policy limits each
   token to pulling `<owner>/*` repositories: no push, no other owner's
-  images (an explicit deny, so a repository policy cannot widen it), no
-  other AWS action. luxd holds tokens in memory only (handed out while 30
-  minutes or more of validity remain), attaches them to an assignment when
-  it is sent, only for a Run whose spec names the registry, and never
-  writes them to Postgres, an event, a log line or an error. On the host a
-  token is in lux-runner's memory with the assignment, for the life of the
-  placement, and in a 0600 `auth.json` only while the runner pulls or
-  pushes; never in the container. Revoking a grant stops new tokens; an
-  issued one stays valid until it expires (at most the session's hour, or
-  ECR's 12 hours). A tenant receives
-  tokens only for the owners its grants list, but a token is not tenant
-  scoped: every tenant granted an owner can pull all of that owner's
-  repositories ([operations](operations.md#in-region-registry)).
+  images, no other ECR or AWS action (two explicit denies, so a repository
+  policy cannot widen it). luxd holds tokens in memory only (handed out
+  while 30 minutes or more of validity remain), attaches them to an
+  assignment when it is sent, only for the owners the Run's spec names in
+  the registry, and never writes them to Postgres, an event, a log line or
+  an error. On the host a token is in lux-runner's memory with the
+  assignment, for the life of the placement, and in a 0600 `auth.json`
+  only while the runner pulls or pushes; never in the container. Revoking
+  a grant stops new tokens; an issued one stays valid until it expires (at
+  most the session's hour, or ECR's 12 hours). A tenant receives tokens
+  only for the owners its grants list, but a token is not tenant scoped:
+  every tenant granted an owner can pull all of that owner's repositories
+  ([operations](operations.md#in-region-registry)). A Run's stop or input
+  waits (at most 10 seconds) behind its own assignment while that waits
+  for a token; another tenant's Runs never wait for it.
 
 ## Previews
 

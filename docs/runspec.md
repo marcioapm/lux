@@ -593,11 +593,10 @@ secrets:
 When the operator configured luxd's `[registry]`
 ([operations](operations.md#in-region-registry)), a Run pulls from that
 ECR registry with no `registryAuth` and no secret, much as any GitHub
-token reads public GHCR images. luxd mints a short-lived pull token for
-each repository owner the Run's tenant is granted
-(`<account>.dkr.ecr.<region>.amazonaws.com/<owner>/...`) and gives it to
-the runner with the assignment, on every placement, resumes and moves
-included.
+token reads public GHCR images. luxd mints a short-lived pull token for each repository owner
+(`<account>.dkr.ecr.<region>.amazonaws.com/<owner>/...`) the Run names and
+its tenant is granted, and gives it to the runner with the assignment, on
+every placement, resumes and moves included.
 
 ```yaml
 image:
@@ -606,23 +605,29 @@ image:
 
 - It covers every pull of the placement: `image.ref`, `FROM` bases, and a
   build cache in a granted owner's repositories.
-- **Pull only.** The token cannot push. A build cache there is read, and
-  its push fails with an `image.cache` warning, as with any read-only
-  credential. Pushes need a `registryAuth` entry for the registry.
+- **Pull only.** The token cannot push, nor do anything but pull its
+  owner's images, whatever the registry's repository policies grant. A
+  build cache there is read, and its push fails with an `image.cache`
+  warning, as with any read-only credential. Pushes need a `registryAuth`
+  entry for the registry.
 - **An explicit entry wins.** A `registryAuth` entry for the registry's
   host replaces every minted token for it, on every owner's repositories;
   luxd then mints none for the Run.
-- luxd mints only for a Run that names the registry: in `image.ref`,
-  `image.build.cache`, or a `FROM` of `image.build.containerfile` (a
-  `FROM` given by a build argument counts, since luxd cannot tell what it
-  names).
+- **Only the owners the Run names.** luxd reads the owner of each
+  reference to the registry in `image.ref`, `image.build.cache` and the
+  `FROM`s of `image.build.containerfile`, and mints for those of them its
+  tenant is granted. A Run naming only `acme` gets no token for `team`. A
+  `FROM` given by a build argument names no owner: such a `FROM` cannot be
+  pinned, so the build fails before it pulls.
 - The token is handled like a `registryAuth` credential: in lux-runner's
   memory with the assignment and in its temporary 0600 `auth.json` while
   it pulls or pushes, redacted from errors, never in the container, an
   event or a log. luxd keeps it in memory, never in its database.
 - If luxd cannot mint a token within 10 seconds, the Run is still placed,
   without it: the pull then fails as it would have without the registry
-  configured. The operator sees a warning in luxd's log.
+  configured. The operator sees a warning in luxd's log. While the
+  assignment waits, a stop or input for the Run waits behind it (a runner
+  ignores those for a Run it has not been assigned yet).
 - A Run whose tenant has no grant, or whose host's `lux-runner` predates
   this feature, gets no token.
 
