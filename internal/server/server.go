@@ -146,6 +146,9 @@ type Server struct {
 	// registry mints in-region registry pull tokens; nil when [registry]
 	// is not configured.
 	registry *registryMinter
+	// registryPlanFails, if set, fails planRegistryCredentials' reads with
+	// its error (tests).
+	registryPlanFails func() error
 	// cfAccess verifies Cloudflare Access tokens, when that is the console
 	// auth (access.go).
 	cfAccess *cfAccess
@@ -287,6 +290,9 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		s.cfAccess = newCFAccess(cfg.ConsoleAuth.CFTeam, cfg.ConsoleAuth.CFAud)
 	}
 	s.hub = newHub(s)
+	if s.registry != nil {
+		s.registry.ready = s.hub.Notify
+	}
 	s.loadRunnerBinaries()
 	if cfg.Preview.Domain != "" {
 		s.preview = newPreviews(s)

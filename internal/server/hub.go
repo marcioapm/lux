@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -337,15 +336,24 @@ func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered
 	if err := s.refuseUndeliverable(ctx, hostID); err != nil {
 		return nil, err
 	}
+	plan, err := s.planRegistryCredentials(ctx, hostID, undelivered)
+	if err != nil {
+		return nil, err
+	}
+	heldRuns, heldFrom := plan.heldArgs()
 	var out []proto.Frame
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			UPDATE host_messages SET delivered_at = now()
 			WHERE id IN (SELECT id FROM host_messages
 				WHERE host_id = $1 AND acked_at IS NULL AND (NOT $2 OR delivered_at IS NULL)
 				  AND NOT (`+unsupportedSync+`)
+				  AND (NOT $3 OR type <> $4 OR id = ANY($5))
+				  AND NOT EXISTS (SELECT 1 FROM unnest($6::text[], $7::bigint[]) h(run_id, from_id)
+					WHERE host_messages.run_id = h.run_id AND host_messages.id >= h.from_id)
 				ORDER BY id LIMIT 500)
-			RETURNING id, type, coalesce(run_id, ''), coalesce(epoch, 0), payload`, hostID, undelivered)
+			RETURNING id, type, coalesce(run_id, ''), coalesce(epoch, 0), payload`,
+			hostID, undelivered, plan.restrict, proto.MsgAssign, plan.planned, heldRuns, heldFrom)
 		if err != nil {
 			return err
 		}
@@ -364,17 +372,11 @@ func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered
 	}
 	// RETURNING does not preserve the subquery's order.
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	minted := false
-	if s.registry != nil && slices.ContainsFunc(out, func(f proto.Frame) bool { return f.Type == proto.MsgAssign }) {
-		if minted, err = s.hostHas(ctx, hostID, proto.CapRegistryMinted); err != nil {
-			return nil, err
-		}
-	}
 	for i := range out {
 		switch out[i].Type {
 		case proto.MsgAssign:
 			out[i].Data = s.attachSecrets(out[i].RunID, out[i].Data)
-			out[i].Data = s.attachRegistryCredentials(ctx, hostID, minted, out[i].Data)
+			out[i].Data = attachRegistryCredentials(plan.creds[out[i].ID], out[i].Data)
 		case proto.MsgPush, proto.MsgSync:
 			out[i].Data = s.attachCredentials(out[i].ID, out[i].Type, out[i].Data)
 		}
