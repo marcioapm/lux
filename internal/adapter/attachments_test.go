@@ -108,10 +108,17 @@ func TestSnapshotWithoutSessionSendsPrompt(t *testing.T) {
 				var content string
 				switch name {
 				case "claude-code":
-					w, _ := startWire(t, ad, cfg)
+					w, sink := startWire(t, ad, cfg)
 					id, got := claudeContent(t, w)
 					if id != claudeUUID("prompt") {
 						t.Fatalf("prompt uuid %s", id)
+					}
+					// Reading a lifecycle frame synchronizes with Run after its
+					// startup idle decision, before the prompt is consumed.
+					w.send(clLifecycle(id, "queued"))
+					sink.wait(t, "accepted prompt")
+					if sink.has("idle") {
+						t.Fatalf("idle before prompt consumed: %q", sink.lines())
 					}
 					content = got
 				case "codex":
@@ -140,6 +147,12 @@ func TestSnapshotWithoutSessionSendsPrompt(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestClaudeSessionResumeWithoutPromptIsIdle(t *testing.T) {
+	w, sink := startWire(t, NewClaude(), proto.ShimConfig{Resume: true, SessionID: "existing"})
+	sink.wait(t, "idle")
+	w.none()
 }
 
 // Existing sessions never replay the initial text/images, even when a missing
