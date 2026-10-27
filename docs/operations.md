@@ -418,14 +418,14 @@ needs:
   "Statement": [
     { "Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*" },
     { "Effect": "Allow",
-      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
       "Resource": "arn:<partition>:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" },
     { "Effect": "Deny",
-      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
       "NotResource": "arn:<partition>:ecr:<region>:<account>:repository/${aws:PrincipalTag/lux-owner}/*" },
     { "Effect": "Deny",
       "NotAction": ["ecr:GetAuthorizationToken", "ecr:BatchGetImage",
-                    "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+                    "ecr:GetDownloadUrlForLayer"],
       "Resource": "*" }
   ]
 }
@@ -439,10 +439,15 @@ owner's images: an explicit deny in the identity policy overrides any
 allow in a resource policy. The first stops pulls from another owner's
 repositories; the second stops every other action, such as pushing
 (`ecr:PutImage`, the layer uploads), deleting or listing images, on any
-repository. The four actions it leaves are all a pull uses: the token, the
-manifest (`BatchGetImage`), and the layers (`BatchCheckLayerAvailability`,
-`GetDownloadUrlForLayer`). A repository that is a pull-through cache needs
-more to fill itself on a first pull, and is not supported this way.
+repository. The three actions it leaves are all a pull uses: the token, the
+manifest (`BatchGetImage`), and the layers (`GetDownloadUrlForLayer`). Do
+not add `ecr:BatchCheckLayerAvailability`: a pull never calls it, it is the
+first call of a push, and in an account with a repository creation template
+(create on push) it can create a repository that does not exist yet, even
+though the push itself is then refused. Left out, the second `Deny`
+refuses it, so a Run's token can never create a repository. A repository
+that is a pull-through cache needs more to fill itself on a first pull, and
+is not supported this way.
 
 and a trust policy that lets only luxd's role assume it, tag the session,
 and only with granted owners:
