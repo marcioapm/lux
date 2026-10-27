@@ -233,8 +233,13 @@ func TestInterruptedMoveRefusedSnapshot(t *testing.T) {
 					execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('other-p', 't1', 'other', 'h1', 1, 'exited')`)
 					execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest) VALUES ('snapR1', 't1', 'other', 'other-p', 1, '{}')`)
 				}
-				if f := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgSnapshotDone, ID: 3, RunID: "r1", Epoch: 1, Data: proto.Marshal(sd)}); f.Type != proto.MsgAck || !ackRefused(t, f) {
-					t.Fatalf("expected refused report: %+v", f)
+				if f := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgSnapshotDone, ID: 3, RunID: "r1", Epoch: 1, Data: proto.Marshal(sd)}); f.Type != proto.MsgAck || ackRefused(t, f) != !earlier {
+					t.Fatalf("unexpected snapshot acknowledgment: %+v", f)
+				}
+				var rejected bool
+				systemScan(t, s, `SELECT snapshot_refused FROM placements WHERE id = 'p1'`, nil, &rejected)
+				if !rejected {
+					t.Fatal("changed or foreign snapshot report was not refused")
 				}
 				execSQL(t, s, ctx, `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE id = 'p1'`)
 				if err := s.reapLeases(ctx); err != nil {
