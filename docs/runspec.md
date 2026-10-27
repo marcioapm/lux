@@ -819,9 +819,12 @@ own count; see the attribution caveats in [out of memory](podman.md#out-of-memor
 luxd checks them at submit: a bad one is refused with 400
 `invalid_attachment` (its message names each by index and why), and any on
 a `generic` Run with 400 `attachments_unsupported`. They go with the initial
-prompt: resuming an existing agent session does not send them again. A move
-before the agent has a session (for example during init) restores its snapshot
-and still sends that initial prompt, including image-only prompts. The
+prompt: resuming an existing agent session does not send them again. Any
+placement before the agent has a session — a move during init, a resume of a
+Run stopped or failed there, or `--from-snapshot` of a sessionless snapshot —
+restores the saved files and still sends the initial prompt, including
+image-only prompts. With `--input`, the agent gets the initial prompt first,
+then that input. The
 shim also writes each to `$LUX_INPUTS/prompt/<n>-<name>`, on a state
 volume, so they are there after any resume ([adapters](adapters.md#images)
 says where, and how each agent gets them). luxd keeps their bytes apart
