@@ -110,13 +110,7 @@ func assignOf(t *testing.T, s *Server, epoch int) proto.Assign {
 	return a
 }
 
-// With resumePolicy manual or never, a move that stops the Run ends it
-// (manual: failed, resumable by hand; never: terminated), its reason
-// naming the move, with no new placement, its secrets dropped and
-// its servers stopped as for any end. With auto or unset it is resumed
-// from its snapshot and session; with restart it is placed again as a
-// first placement: no snapshot to restore, no session (the adapter's
-// start path), its snapshot kept for a resume by hand.
+// Interrupted moves keep their Run nonterminal even when no final snapshot arrives.
 func TestInterruptedMoveResumes(t *testing.T) {
 	for _, stop := range []string{"preempt", "drain", "migrate"} {
 		for _, policy := range []string{"", "auto", "restart"} {
@@ -175,6 +169,93 @@ func TestInterruptedMoveResumes(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+func TestInterruptedMoveGuards(t *testing.T) {
+	for _, c := range []struct {
+		name, policy, change, want string
+	}{
+		{"manual", "manual", "", StateLost},
+		{"never", "never", "", StateTerminated},
+		{"terminate flag", "auto", `UPDATE runs SET terminate_requested = true WHERE id = 'r1'`, StateTerminated},
+		{"terminate stop", "auto", `UPDATE placements SET stop_reason = 'terminate' WHERE id = 'p1'`, StateLost},
+		{"operator stop", "auto", `UPDATE placements SET stop_reason = 'stop' WHERE id = 'p1'`, StateLost},
+		{"idle", "auto", `UPDATE placements SET stop_reason = 'idle' WHERE id = 'p1'`, StateLost},
+		{"cancel", "auto", `UPDATE placements SET stop_reason = 'cancel' WHERE id = 'p1'`, StateLost},
+		{"unannounced", "auto", `UPDATE runs SET state = 'running' WHERE id = 'r1'`, StateLost},
+		{"no stop intent", "auto", `UPDATE placements SET stop_requested_at = NULL WHERE id = 'p1'`, StateLost},
+		{"stale epoch", "auto", `UPDATE runs SET current_epoch = 2 WHERE id = 'r1'`, StateStopping},
+		{"already ended", "auto", `UPDATE runs SET state = 'succeeded' WHERE id = 'r1'`, StateSucceeded},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx := policyFixture(t, c.policy)
+			if err := moveStops["preempt"](t, s); err != nil {
+				t.Fatal(err)
+			}
+			if c.change != "" {
+				execSQL(t, s, ctx, c.change)
+			}
+			execSQL(t, s, ctx, `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE id = 'p1'`)
+			for range 2 {
+				if err := s.reapLeases(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var state, placement string
+			var resumes int
+			systemScan(t, s, `SELECT r.state, p.state, (SELECT count(*) FROM run_events WHERE run_id = r.id AND type = 'state' AND data->>'state' = 'resuming')
+				FROM runs r JOIN placements p ON p.id = 'p1' WHERE r.id = 'r1'`, nil, &state, &placement, &resumes)
+			if state != c.want || placement != "lost" || resumes != 0 {
+				t.Fatalf("Run %s, placement %s, resume events %d; want %s, lost, 0", state, placement, resumes, c.want)
+			}
+		})
+	}
+}
+
+func TestInterruptedMoveRefusedSnapshot(t *testing.T) {
+	for _, policy := range []string{"auto", "restart"} {
+		for _, earlier := range []bool{false, true} {
+			t.Run(fmt.Sprint(policy, "/earlier=", earlier), func(t *testing.T) {
+				s, ctx := policyFixture(t, policy)
+				if earlier {
+					snapshotR1(t, s)
+					execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
+				}
+				if err := moveStops["preempt"](t, s); err != nil {
+					t.Fatal(err)
+				}
+				sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "snapR1", RunID: "r1", Epoch: 1, SessionID: "rejected"}}
+				if !earlier {
+					// A snapshot id belonging to another Run must be refused.
+					execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('other', 't1', '{}', 'running')`)
+					execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('other-p', 't1', 'other', 'h1', 1, 'exited')`)
+					execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest) VALUES ('snapR1', 't1', 'other', 'other-p', 1, '{}')`)
+				}
+				if f := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgSnapshotDone, ID: 3, RunID: "r1", Epoch: 1, Data: proto.Marshal(sd)}); f.Type != proto.MsgAck || !ackRefused(t, f) {
+					t.Fatalf("expected refused report: %+v", f)
+				}
+				execSQL(t, s, ctx, `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE id = 'p1'`)
+				if err := s.reapLeases(ctx); err != nil {
+					t.Fatal(err)
+				}
+				var state string
+				systemScan(t, s, `SELECT state FROM runs WHERE id = 'r1'`, nil, &state)
+				want := StateLost
+				if policy == "restart" {
+					want = StateResuming
+				}
+				if state != want {
+					t.Fatalf("Run %s, want %s", state, want)
+				}
+				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+					t.Fatal(err)
+				}
+				if policy == "restart" && assignOf(t, s, 2).Resume != nil {
+					t.Error("restart restored refused state")
+				}
+			})
 		}
 	}
 }
