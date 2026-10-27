@@ -674,9 +674,7 @@ func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epo
 	case terminate:
 		end.state, end.reason, end.requeued = StateTerminated, "terminated; host lost", false
 	case !requeued:
-		if end.policy, err = runResumePolicy(ctx, tx, runID); err != nil {
-			return "", err
-		}
+		end.policy = policy
 	}
 	return s.endRun(ctx, tx, end)
 }
