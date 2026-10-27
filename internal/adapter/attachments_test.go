@@ -179,10 +179,15 @@ func TestSessionResumeDoesNotReplayPrompt(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/fallback=%v", name, fallback), func(t *testing.T) {
 				ad, _ := New(name)
 				cfg := proto.ShimConfig{Resume: true, SessionID: "existing", Prompt: "DO NOT REPLAY", PromptAttachments: []spec.Attachment{img}}
-				w, _ := startWire(t, ad, cfg)
+				w, sink := startWire(t, ad, cfg)
 				switch name {
 				case "claude-code":
-					// A user line would be observable immediately on stdin.
+					// Idle synchronizes with Run's startup before delivering.
+					sink.wait(t, "idle")
+					ad.Deliver(proto.Input{RequestID: "steer", Text: "next"})
+					if id, _ := claudeContent(t, w); id != claudeUUID("steer") {
+						t.Fatalf("first user line %s, want steer's uuid", id)
+					}
 				case "codex":
 					id, _ := w.next("initialize")
 					w.send(`{"id":` + id + `,"result":{"userAgent":"lux/0.155.1"}}`)
