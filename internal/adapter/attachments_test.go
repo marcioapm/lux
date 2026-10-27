@@ -106,9 +106,12 @@ func TestSnapshotWithoutSessionSendsPrompt(t *testing.T) {
 					t.Fatal(err)
 				}
 				var content string
+				var w *agentWire
+				want := `[{"text":"original prompt","type":"text"}]`
 				switch name {
 				case "claude-code":
-					w, sink := startWire(t, ad, cfg)
+					var sink *inputSink
+					w, sink = startWire(t, ad, cfg)
 					id, got := claudeContent(t, w)
 					if id != claudeUUID("prompt") {
 						t.Fatalf("prompt uuid %s", id)
@@ -121,29 +124,39 @@ func TestSnapshotWithoutSessionSendsPrompt(t *testing.T) {
 						t.Fatalf("idle before prompt consumed: %q", sink.lines())
 					}
 					content = got
+					if images {
+						want = "[" + clImage + "]"
+					}
 				case "codex":
-					w, _ := startWire(t, ad, cfg)
+					w, _ = startWire(t, ad, cfg)
 					id, _ := w.next("initialize")
 					w.send(`{"id":` + id + `,"result":{"userAgent":"lux/0.155.1"}}`)
 					id, _ = w.next("thread/start")
 					w.send(`{"id":` + id + `,"result":{"thread":{"id":"` + cxThread + `"}}}`)
-					_, p := w.next("turn/start")
+					id, p := w.next("turn/start")
 					if str(p, "clientUserMessageId") != "prompt" {
 						t.Fatalf("prompt request id: %s", p)
 					}
 					content = string(p["input"])
-				default:
-					w, _ := acpStarted(t, ad.(*ACP), true, cfg)
-					_, p := w.next("session/prompt")
-					content = string(p["prompt"])
-				}
-				if images {
-					if !strings.Contains(content, `"type":"image"`) && !strings.Contains(content, `"type":"localImage"`) {
-						t.Fatalf("no initial image: %s", content)
+					if images {
+						want = `[{"path":"/home/agent/.lux-inputs/s/1-shot.png","type":"localImage"}]`
 					}
-				} else if !strings.Contains(content, "original prompt") {
-					t.Fatalf("no initial text: %s", content)
+					w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + cxTurn + `","status":"inProgress"}}}`)
+					w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u1","clientId":"prompt","content":[]},"threadId":"` + cxThread + `","turnId":"` + cxTurn + `"}}`)
+					w.send(cxCompleted("completed"))
+				default:
+					w, _ = acpStarted(t, ad.(*ACP), true, cfg)
+					id, p := w.next("session/prompt")
+					content = string(p["prompt"])
+					if images {
+						want = `[{"data":"` + imgData + `","mimeType":"image/png","type":"image"}]`
+					}
+					w.resolve(id, ocResult)
 				}
+				if content != want {
+					t.Fatalf("initial prompt %s, want %s", content, want)
+				}
+				w.none()
 			})
 		}
 	}
