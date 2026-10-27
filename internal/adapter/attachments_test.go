@@ -142,6 +142,48 @@ func TestSnapshotWithoutSessionSendsPrompt(t *testing.T) {
 	}
 }
 
+// Existing sessions never replay the initial text/images, even when a missing
+// session forces ACP/Codex to create a new one (the existing fallback policy).
+func TestSessionResumeDoesNotReplayPrompt(t *testing.T) {
+	for _, name := range []string{"acp", "opencode", "claude-code", "codex"} {
+		for _, fallback := range []bool{false, true} {
+			if name == "claude-code" && fallback {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/fallback=%v", name, fallback), func(t *testing.T) {
+				ad, _ := New(name)
+				cfg := proto.ShimConfig{Resume: true, SessionID: "existing", Prompt: "DO NOT REPLAY", PromptAttachments: []spec.Attachment{img}}
+				w, _ := startWire(t, ad, cfg)
+				switch name {
+				case "claude-code":
+					// A user line would be observable immediately on stdin.
+				case "codex":
+					id, _ := w.next("initialize")
+					w.send(`{"id":` + id + `,"result":{"userAgent":"lux/0.155.1"}}`)
+					id, _ = w.next("thread/resume")
+					if fallback {
+						w.send(`{"id":` + id + `,"error":{"code":-1,"message":"missing"}}`)
+						id, _ = w.next("thread/start")
+					}
+					w.send(`{"id":` + id + `,"result":{"thread":{"id":"` + cxThread + `"}}}`)
+				default:
+					id, _ := w.next("initialize")
+					w.send(`{"id":` + id + `,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true}}}}`)
+					id, _ = w.next("session/load")
+					if fallback {
+						w.send(`{"id":` + id + `,"error":{"code":-1,"message":"missing"}}`)
+						id, _ = w.next("session/new")
+						w.send(`{"id":` + id + `,"result":{"sessionId":"` + ocSession + `"}}`)
+					} else {
+						w.send(`{"id":` + id + `,"result":{}}`)
+					}
+				}
+				w.none()
+			})
+		}
+	}
+}
+
 // Claude Code: the prompt's and a steer's images go in their user line;
 // a steer cancelled by an interrupt is written again with its images.
 func TestClaudeAttachments(t *testing.T) {
