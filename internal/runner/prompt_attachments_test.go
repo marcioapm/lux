@@ -18,9 +18,10 @@ import (
 	"github.com/marcioapm/lux/internal/spec"
 )
 
-// A real second placement restores the snapshot through prepareVolumes, writes
-// the actual shim config and starts lux-fake through each agent adapter. The
-// fake must consume requestId=prompt, even for an image-only workload.
+// A second placement restores the snapshot through prepareVolumes and passes
+// the runner's shim config to each adapter through lux-fake, which must consume
+// requestId=prompt even for an image-only workload. The shim's config gate is
+// covered separately by TestAdapterConfigSnapshotWithoutSession.
 func TestSnapshotOnlySecondPlacementStartsAgentPrompt(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "lux-fake")
 	if out, err := exec.Command("go", "build", "-o", bin, "github.com/marcioapm/lux/cmd/lux-fake").CombinedOutput(); err != nil {

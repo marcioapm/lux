@@ -177,7 +177,10 @@ func TestSessionResumeDoesNotReplayPrompt(t *testing.T) {
 				continue
 			}
 			t.Run(fmt.Sprintf("%s/fallback=%v", name, fallback), func(t *testing.T) {
-				ad, _ := New(name)
+				ad, err := New(name)
+				if err != nil {
+					t.Fatal(err)
+				}
 				cfg := proto.ShimConfig{Resume: true, SessionID: "existing", Prompt: "DO NOT REPLAY", PromptAttachments: []spec.Attachment{img}}
 				w, sink := startWire(t, ad, cfg)
 				switch name {
