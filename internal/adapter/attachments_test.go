@@ -91,6 +91,57 @@ const (
 	clImage = `{"source":{"data":"` + "iVBORw0KGgpJTUc=" + `","media_type":"image/png","type":"base64"},"type":"image"}`
 )
 
+// Snapshot restoration alone is not an agent-session resume: every protocol
+// sends the initial prompt, including image-only input, rather than idling.
+func TestSnapshotWithoutSessionSendsPrompt(t *testing.T) {
+	for _, name := range []string{"acp", "opencode", "claude-code", "codex"} {
+		for _, images := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/images=%v", name, images), func(t *testing.T) {
+				cfg := proto.ShimConfig{Adapter: name, Resume: true, Prompt: "original prompt"}
+				if images {
+					cfg.Prompt, cfg.PromptAttachments = "", []spec.Attachment{img}
+				}
+				ad, err := New(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var content string
+				switch name {
+				case "claude-code":
+					w, _ := startWire(t, ad, cfg)
+					id, got := claudeContent(t, w)
+					if id != claudeUUID("prompt") {
+						t.Fatalf("prompt uuid %s", id)
+					}
+					content = got
+				case "codex":
+					w, _ := startWire(t, ad, cfg)
+					id, _ := w.next("initialize")
+					w.send(`{"id":` + id + `,"result":{"userAgent":"lux/0.155.1"}}`)
+					id, _ = w.next("thread/start")
+					w.send(`{"id":` + id + `,"result":{"thread":{"id":"` + cxThread + `"}}}`)
+					_, p := w.next("turn/start")
+					if str(p, "clientUserMessageId") != "prompt" {
+						t.Fatalf("prompt request id: %s", p)
+					}
+					content = string(p["input"])
+				default:
+					w, _ := acpStarted(t, ad.(*ACP), true, cfg)
+					_, p := w.next("session/prompt")
+					content = string(p["prompt"])
+				}
+				if images {
+					if !strings.Contains(content, `"type":"image"`) && !strings.Contains(content, `"type":"localImage"`) {
+						t.Fatalf("no initial image: %s", content)
+					}
+				} else if !strings.Contains(content, "original prompt") {
+					t.Fatalf("no initial text: %s", content)
+				}
+			})
+		}
+	}
+}
+
 // Claude Code: the prompt's and a steer's images go in their user line;
 // a steer cancelled by an interrupt is written again with its images.
 func TestClaudeAttachments(t *testing.T) {

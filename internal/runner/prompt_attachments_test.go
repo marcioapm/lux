@@ -24,6 +24,7 @@ func TestShimConfigPromptAttachments(t *testing.T) {
 		want   []spec.Attachment
 	}{
 		{"first", nil, prompt},
+		{"snapshot-only", &proto.ResumeInfo{Snapshot: &proto.Manifest{SnapshotID: "snap1"}}, prompt},
 		{"resume", &proto.ResumeInfo{SessionID: "s"}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {

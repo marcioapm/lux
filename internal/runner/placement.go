@@ -1251,9 +1251,8 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 	if sp.Init != nil {
 		cfg.Init = sp.Init.Script
 	}
-	// luxd sends images with the prompt only on the first placement, as the
-	// prompt goes.
-	if a.Resume == nil {
+	// Restoring files before an agent has a session still needs its prompt.
+	if a.Resume == nil || a.Resume.SessionID == "" {
 		cfg.PromptAttachments = prompt
 	}
 	cfg.InputsDir, cfg.InputsRoot = sp.InputsDir(p.user.Home)

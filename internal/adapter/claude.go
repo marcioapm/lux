@@ -109,7 +109,7 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 	c.mu.Unlock()
 
 	go pump(p.Stderr, sink.Stderr)
-	if !cfg.Resume && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
+	if !cfg.AgentResume() && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
 		c.send(proto.Input{RequestID: "prompt", Text: cfg.Prompt, Attachments: cfg.PromptAttachments})
 	}
 	cfg.PromptAttachments = nil // c.sent holds them while they are needed
