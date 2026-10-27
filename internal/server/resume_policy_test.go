@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"testing"
@@ -116,6 +117,68 @@ func assignOf(t *testing.T, s *Server, epoch int) proto.Assign {
 // from its snapshot and session; with restart it is placed again as a
 // first placement: no snapshot to restore, no session (the adapter's
 // start path), its snapshot kept for a resume by hand.
+func TestInterruptedMoveResumes(t *testing.T) {
+	for _, stop := range []string{"preempt", "drain", "migrate"} {
+		for _, policy := range []string{"", "auto", "restart"} {
+			for _, snapshot := range []bool{false, true} {
+				t.Run(stop+"/"+policy+fmt.Sprint("/snapshot=", snapshot), func(t *testing.T) {
+					s, ctx := policyFixture(t, policy)
+					if snapshot {
+						snapshotR1(t, s)
+						execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
+					} else {
+						execSQL(t, s, ctx, `UPDATE runs SET session_id = 'sess-1' WHERE id = 'r1'`)
+					}
+					if err := moveStops[stop](t, s); err != nil {
+						t.Fatal(err)
+					}
+					execSQL(t, s, ctx, `UPDATE runs SET pending_input = '{"requestId":"continue","text":"continue working"}' WHERE id = 'r1'`)
+					execSQL(t, s, ctx, `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE id = 'p1'`)
+					if err := s.reapLeases(ctx); err != nil {
+						t.Fatal(err)
+					}
+					var state, reason, placement, serverStop string
+					systemScan(t, s, `SELECT r.state, r.state_reason, p.state, sv.stop_reason FROM runs r
+						JOIN placements p ON p.id = 'p1' JOIN run_servers sv ON sv.run_id = r.id WHERE r.id = 'r1'`, nil,
+						&state, &reason, &placement, &serverStop)
+					wantReason := "auto-resume after " + stop
+					if policy == "restart" {
+						wantReason = "auto-restart after " + stop
+					}
+					if state != StateResuming || reason != wantReason || placement != "lost" || serverStop != "migrated" {
+						t.Fatalf("Run %s (%s), placement %s, server %s", state, reason, placement, serverStop)
+					}
+					var states []string
+					systemScan(t, s, `SELECT array_agg(data->>'state' ORDER BY id) FROM run_events WHERE run_id = 'r1' AND type = 'state'`, nil, &states)
+					if !slices.Equal(states, []string{StateStopping, StateResuming}) {
+						t.Errorf("state event sequence %v", states)
+					}
+					if secrets, ok := s.secrets.get("r1"); !ok || secrets["TOKEN"] != "jit" {
+						t.Error("automatic move dropped secrets")
+					}
+					if err := s.reapLeases(ctx); err != nil {
+						t.Fatal(err)
+					}
+					if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+						t.Fatal(err)
+					}
+					a := assignOf(t, s, 2)
+					if a.Input == nil || a.Input.RequestID != "continue" || a.Input.Text != "continue working" {
+						t.Errorf("pending input lost: %+v", a.Input)
+					}
+					if policy == "restart" {
+						if a.Resume != nil {
+							t.Errorf("restart restored state: %+v", a.Resume)
+						}
+					} else if a.Resume == nil || a.Resume.SessionID != "sess-1" || (a.Resume.Snapshot != nil) != snapshot || snapshot && a.Resume.Snapshot.SnapshotID != "snapR1" {
+						t.Errorf("unexpected restore: %+v", a.Resume)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestResumePolicyOnMove(t *testing.T) {
 	for _, stop := range []string{"preempt", "drain", "migrate"} {
 		for _, policy := range []string{"manual", "never", "restart", "auto", ""} {
