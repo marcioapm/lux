@@ -32,6 +32,9 @@ func TestExitSnapshotExportsStateVolumesUnlessTerminated(t *testing.T) {
 		{"migrate", []string{"migrate"}, true},
 		{"drain", []string{"drain"}, true},
 		{"timeout", []string{"timeout"}, true},
+		{"preempt", []string{"preempt"}, true},
+		{"disk", []string{"disk"}, true},
+		{"preempt then terminate", []string{"preempt", "terminate"}, false},
 		{"spot-reclaim", nil, true},
 		{"spot-reclaim then terminate", []string{"terminate"}, true},
 		{"no stop", nil, true},
@@ -117,8 +120,10 @@ func TestReadoptedExitSnapshotExportsStateVolumesUnlessTerminated(t *testing.T) 
 		volumes bool
 	}{
 		{"terminate", false},
+		{"cancel", false},
 		{"stop", true},
 		{"idle", true},
+		{"preempt", true},
 		{stopSpotReclaim, true},
 	} {
 		t.Run(c.reason, func(t *testing.T) {

@@ -708,7 +708,7 @@ func TestLocalCopiesHeldInS3(t *testing.T) {
 	for _, c := range []struct {
 		stop        string
 		reclaimable bool
-	}{{"terminate", true}, {"stop", false}} {
+	}{{"terminate", true}, {"cancel", true}, {"stop", false}, {"migrate", false}, {stopSpotReclaim, false}} {
 		t.Run("resumable, no volumes snapshot, "+c.stop, func(t *testing.T) {
 			f := newDiskFixture(t)
 			st := &runState{RunID: "run1", Epoch: 1, Phase: "reported", LastExitAt: 1, StopReason: c.stop,
