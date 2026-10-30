@@ -1435,12 +1435,12 @@ func (p *placement) pendingStop() string {
 	return p.stopWhy
 }
 
-// terminating: the placement is ending because its Run is terminated
-// ("cancel" is the reason an older luxd sends for a terminate).
-func (p *placement) terminating() bool {
-	why := p.pendingStop()
-	return why == "terminate" || why == "cancel"
-}
+// terminating: the placement is ending because its Run is terminated.
+func (p *placement) terminating() bool { return terminateStop(p.pendingStop()) }
+
+// terminateStop: a stop reason that ends the Run for good ("cancel" is
+// what an older luxd sends for a terminate).
+func terminateStop(why string) bool { return why == "terminate" || why == "cancel" }
 
 // sendStop asks the shim for a graceful stop; if the shim cannot be
 // reached, Podman stops the container (SIGTERM, then SIGKILL after grace).

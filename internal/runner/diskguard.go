@@ -522,7 +522,8 @@ func (r *Runner) localCopies() []localCopy {
 
 // heldInS3: every snapshot record of st's Run is reported and uploaded,
 // and its local volumes are either the recorded snapshot's or never
-// resumed. Volumes whose export failed hold the Run's only copy.
+// resumed (resumePolicy never, or terminated). Volumes whose export failed
+// hold the Run's only copy.
 func heldInS3(st *runState, records map[string]*snapshotRecord) bool {
 	for _, rec := range records {
 		if rec.RunID == st.RunID && (!rec.Reported || !allUploaded(rec)) {
@@ -530,7 +531,7 @@ func heldInS3(st *runState, records map[string]*snapshotRecord) bool {
 		}
 	}
 	if st.VolumesSnapshot == "" {
-		return st.Spec != nil && spec.RefusesResume(st.Spec.ResumePolicy)
+		return terminateStop(st.StopReason) || st.Spec != nil && spec.RefusesResume(st.Spec.ResumePolicy)
 	}
 	rec := records[st.VolumesSnapshot]
 	return rec != nil && rec.RunID == st.RunID

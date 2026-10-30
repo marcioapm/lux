@@ -703,6 +703,24 @@ func TestLocalCopiesHeldInS3(t *testing.T) {
 			}
 		})
 	}
+	// A terminated placement exports no volumes: they match no snapshot,
+	// and nothing resumes from them.
+	for _, c := range []struct {
+		stop        string
+		reclaimable bool
+	}{{"terminate", true}, {"stop", false}} {
+		t.Run("resumable, no volumes snapshot, "+c.stop, func(t *testing.T) {
+			f := newDiskFixture(t)
+			st := &runState{RunID: "run1", Epoch: 1, Phase: "reported", LastExitAt: 1, StopReason: c.stop,
+				Spec: &spec.RunSpec{ResumePolicy: spec.ResumeAuto}}
+			if err := writeRunState(f.r.runDir("run1"), st); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.r.localCopies(); len(got) != 1 || got[0].reclaimable != c.reclaimable {
+				t.Fatalf("copies %+v, want run1 reclaimable %v", got, c.reclaimable)
+			}
+		})
+	}
 	t.Run("oldest exit first", func(t *testing.T) {
 		f := newDiskFixture(t)
 		copyRun(t, f.r, "run-a", 2, "", spec.ResumeNever)
