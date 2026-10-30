@@ -153,7 +153,10 @@ ones a Run can still use:
 - **A terminated Run** (an expired Run too) keeps its snapshots and output
   for the tenant's retention (default 30 days) counted from when it was
   terminated (not from when its last placement ended), then they are
-  deleted.
+  deleted. A Run terminated while it is live, before its exit snapshot
+  starts, takes no new snapshot of its state volumes: the snapshot its last
+  placement reports lists no volume (only its output and artifacts are
+  uploaded); its earlier snapshots are kept as above.
 - **Artifacts** are never deleted by time: they stay until their owner
   deletes them (`lux artifacts <run> --delete`, a terminated
   Run's only).
