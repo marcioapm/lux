@@ -1435,6 +1435,10 @@ func (p *placement) pendingStop() string {
 	return p.stopWhy
 }
 
+// terminateStop: a stop reason that ends the Run for good ("cancel" is
+// what an older luxd sends for a terminate).
+func terminateStop(why string) bool { return why == "terminate" || why == "cancel" }
+
 // sendStop asks the shim for a graceful stop; if the shim cannot be
 // reached, Podman stops the container (SIGTERM, then SIGKILL after grace).
 func (p *placement) sendStop(ctx context.Context, reason string) {
@@ -1869,15 +1873,17 @@ func dirSize(ctx context.Context, root string) (int64, error) {
 // snapshot exports every state volume (zstd), compresses the output file,
 // and records them for upload. The local volumes now hold exactly this
 // snapshot, so a resume here moves nothing. A Run whose resumePolicy is
-// never is not resumed, so its state volumes are not exported: its
-// manifest lists none, and no local copy is claimed. exportCtx covers the
-// volume exports only.
+// never, or whose placement ends in a terminate, is not resumed, so its
+// state volumes are not exported: its manifest lists none, and no local
+// copy is claimed. exportCtx covers the volume exports only.
 func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDone, error) {
 	snapID := ids.New(ids.Snapshot)
 	rec := &snapshotRecord{RunID: p.runID, Epoch: p.epoch, Created: time.Now().UnixMilli()}
 	sd := &proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: snapID, RunID: p.runID, Epoch: p.epoch, Volumes: []proto.VolumeSnapshot{}}}
 	sd.Manifest.SessionID = p.sessionID()
-	exportVolumes := p.assign == nil || !spec.RefusesResume(p.assign.Spec.ResumePolicy)
+	// Decided once, here: a terminate arriving after this still gets the
+	// volumes exported and uploaded.
+	exportVolumes := (p.assign == nil || !spec.RefusesResume(p.assign.Spec.ResumePolicy)) && !terminateStop(p.pendingStop())
 	vols := p.state.Volumes
 	if !exportVolumes {
 		vols = nil
