@@ -1435,9 +1435,6 @@ func (p *placement) pendingStop() string {
 	return p.stopWhy
 }
 
-// terminating: the placement is ending because its Run is terminated.
-func (p *placement) terminating() bool { return terminateStop(p.pendingStop()) }
-
 // terminateStop: a stop reason that ends the Run for good ("cancel" is
 // what an older luxd sends for a terminate).
 func terminateStop(why string) bool { return why == "terminate" || why == "cancel" }
@@ -1886,7 +1883,7 @@ func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDon
 	sd.Manifest.SessionID = p.sessionID()
 	// Decided once, here: a terminate arriving after this still gets the
 	// volumes exported and uploaded.
-	exportVolumes := (p.assign == nil || !spec.RefusesResume(p.assign.Spec.ResumePolicy)) && !p.terminating()
+	exportVolumes := (p.assign == nil || !spec.RefusesResume(p.assign.Spec.ResumePolicy)) && !terminateStop(p.pendingStop())
 	vols := p.state.Volumes
 	if !exportVolumes {
 		vols = nil
