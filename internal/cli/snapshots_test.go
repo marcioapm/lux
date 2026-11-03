@@ -290,6 +290,7 @@ func TestSnapshotsDownloadExtract(t *testing.T) {
 		tarEntry{hdr: tar.Header{Name: "./", Typeflag: tar.TypeDir, Mode: 0o755}},
 		tarEntry{hdr: tar.Header{Name: "src/", Typeflag: tar.TypeDir, Mode: 0o755}},
 		tarEntry{hdr: tar.Header{Name: "src/main.go", Mode: 0o644}, body: "package main\n"},
+		tarEntry{hdr: tar.Header{Name: "priv/", Typeflag: tar.TypeDir, Mode: 0o700}},
 		tarEntry{hdr: tar.Header{Name: "bin/tool", Mode: 0o4755}, body: "#!/bin/sh\n"},
 		tarEntry{hdr: tar.Header{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "src/main.go"}},
 		tarEntry{hdr: tar.Header{Name: "hard", Typeflag: tar.TypeLink, Linkname: "src/main.go"}},
@@ -315,6 +316,9 @@ func TestSnapshotsDownloadExtract(t *testing.T) {
 	fi, err := os.Stat(filepath.Join(root, "bin/tool"))
 	if err != nil || fi.Mode()&os.ModeSetuid != 0 || fi.Mode().Perm() != 0o755 {
 		t.Fatalf("tool mode %v %v", fi.Mode(), err)
+	}
+	if fi, err := os.Stat(filepath.Join(root, "priv")); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("priv mode %v %v", fi.Mode(), err)
 	}
 	for _, skipped := range []string{"fifo", "dev"} {
 		if _, err := os.Lstat(filepath.Join(root, skipped)); err == nil {
