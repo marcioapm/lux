@@ -326,3 +326,67 @@ func TestTimeoutRemainingAgreesWithReaper(t *testing.T) {
 		t.Fatalf("remaining %v without a timeout", *r)
 	}
 }
+
+func resumeR1(s *Server, req resumeRequest) (*resumeOutput, error) {
+	return s.resumeRun(tenantCtx("t1"), &resumeRunInput{RunPath: RunPath{ID: "r1"}, Body: &req})
+}
+
+// A Run failed on its timeout, resumed with a longer one, runs on; resumed
+// without one it is stopped again at once (TestTimeoutFailedRunResumesAndTimesOutAgain).
+func TestTimeoutResumeWithTimeout(t *testing.T) {
+	s, ctx := timeoutFixture(t, "2 hours")
+	failOnTimeout(t, s, ctx)
+	_, err := resumeR1(s, resumeRequest{Timeout: dur("2h")})
+	he := wantHTTPError(t, err, 422, "timeout_too_short")
+	if !strings.Contains(he.Message, "has run 2h0m0s") {
+		t.Fatalf("message %q", he.Message)
+	}
+	wantHTTPError(t, func() error { _, err := resumeR1(s, resumeRequest{Timeout: dur("-1h")}); return err }(), 422, "invalid_spec")
+	wantHTTPError(t, func() error { _, err := resumeR1(s, resumeRequest{Timeout: dur("2h"), ValidateOnly: true}); return err }(), 422, "timeout_too_short")
+	if out, err := resumeR1(s, resumeRequest{Timeout: dur("3h"), ValidateOnly: true}); err != nil || !out.Body.Valid {
+		t.Fatalf("validateOnly: %+v %v", out, err)
+	}
+	if got := r1Timeout(t, s); got != "1h" || len(timeoutEvents(t, s)) != 0 {
+		t.Fatalf("after refused and dry resumes: timeout %q events %q", got, timeoutEvents(t, s))
+	}
+	if _, err := resumeR1(s, resumeRequest{Timeout: dur("3h")}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if got := r1Timeout(t, s); got != "3h0m0s" {
+		t.Fatalf("timeout %q", got)
+	}
+	// Already resuming: the same timeout is the same resume, another is refused.
+	if _, err := resumeR1(s, resumeRequest{Timeout: dur("3h")}); err != nil {
+		t.Fatalf("same timeout again: %v", err)
+	}
+	wantHTTPError(t, func() error { _, err := resumeR1(s, resumeRequest{Timeout: dur("4h")}); return err }(), 409, "not_resumable")
+	startEpoch2(t, s, ctx)
+	if err := s.reapTimeouts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, reason := r1Stop(t, s); state != StateRunning || reason != "" {
+		t.Fatalf("resumed with 3h: %s %q", state, reason)
+	}
+	if got, want := timeoutEvents(t, s), []string{"1h0m0s→3h0m0s by k-t1"}; !slices.Equal(got, want) {
+		t.Fatalf("events %q, want %q", got, want)
+	}
+}
+
+// "0s" on resume removes the timeout.
+func TestTimeoutResumeUnlimited(t *testing.T) {
+	s, ctx := timeoutFixture(t, "2 hours")
+	failOnTimeout(t, s, ctx)
+	if _, err := resumeR1(s, resumeRequest{Timeout: dur("0s")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r1Timeout(t, s); got != "" {
+		t.Fatalf("timeout %q", got)
+	}
+	startEpoch2(t, s, ctx)
+	if err := s.reapTimeouts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := r1Stop(t, s); state != StateRunning {
+		t.Fatalf("resumed unlimited: %s", state)
+	}
+}
