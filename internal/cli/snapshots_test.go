@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -334,7 +335,9 @@ func TestSnapshotsDownloadExtract(t *testing.T) {
 func TestSnapshotsDownloadExtractHostile(t *testing.T) {
 	isolateConfig(t, "")
 	wantErr := map[string]string{
-		"hard link to a symlink": "not a regular file",
+		"hard link outside":         "outside the volume",
+		"hard link through symlink": "through a symlink",
+		"hard link to a symlink":    "not a regular file",
 	}
 	for name, entries := range map[string][]tarEntry{
 		"absolute": {{hdr: tar.Header{Name: "/escape"}, body: "x"}},
@@ -352,7 +355,11 @@ func TestSnapshotsDownloadExtractHostile(t *testing.T) {
 			{hdr: tar.Header{Name: "l", Typeflag: tar.TypeSymlink, Linkname: ".."}},
 			{hdr: tar.Header{Name: "l/", Typeflag: tar.TypeDir}},
 		},
-		"hard link outside": {{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "../../escape"}}},
+		"hard link outside": {{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "../../victim"}}},
+		"hard link through symlink": {
+			{hdr: tar.Header{Name: "l", Typeflag: tar.TypeSymlink, Linkname: ".."}},
+			{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "l/victim"}},
+		},
 		"hard link to a symlink": {
 			{hdr: tar.Header{Name: "s", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"}},
 			{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "s"}},
@@ -363,6 +370,16 @@ func TestSnapshotsDownloadExtractHostile(t *testing.T) {
 			f := newSnapFake(t, []server.Snapshot{snapWith("snap1", 1, true, true, vol("v", "b1", tz))}, map[string][]byte{"b1": tz})
 			dir := t.TempDir()
 			ext := filepath.Join(dir, "out")
+			// Victims next to DIR's parent and in it, for the hard links to reach.
+			victims := []string{filepath.Join(dir, "victim"), filepath.Join(ext, "victim")}
+			for _, v := range victims {
+				if err := os.MkdirAll(filepath.Dir(v), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(v, []byte("victim"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			_, _, err := f.run(dir, "snapshots", "download", "run_1", "--extract", ext)
 			if err == nil {
 				t.Fatal("accepted")
@@ -372,6 +389,11 @@ func TestSnapshotsDownloadExtractHostile(t *testing.T) {
 			}
 			if _, err := os.Lstat(filepath.Join(dir, "escape")); err == nil {
 				t.Fatal("wrote outside the volume")
+			}
+			for _, v := range victims {
+				if n := linkCount(t, v); n != 1 {
+					t.Fatalf("%s has %d links", v, n)
+				}
 			}
 			if _, err := os.Lstat(filepath.Join(ext, "v")); err == nil {
 				t.Fatalf("left %v", listFiles(t, ext))
@@ -394,6 +416,16 @@ func TestSnapshotsDownloadExtractHostile(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(dir, "out/v/l")); string(b) != "replaced" {
 		t.Fatalf("l: %q", b)
 	}
+}
+
+// linkCount is the number of hard links to file p.
+func linkCount(t *testing.T, p string) uint64 {
+	t.Helper()
+	fi, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return uint64(fi.Sys().(*syscall.Stat_t).Nlink)
 }
 
 // lux snapshots <run> still lists.
