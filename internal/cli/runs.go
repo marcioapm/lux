@@ -316,7 +316,11 @@ func runtimeCell(r Run) string {
 	if r.RuntimeSince == nil && r.RuntimeSeconds == 0 {
 		return "-"
 	}
-	s := int64(r.RuntimeSeconds)
+	return secondsText(int64(r.RuntimeSeconds))
+}
+
+// secondsText is s seconds in their two largest units ("45s", "3m20s", "2h5m", "1d3h").
+func secondsText(s int64) string {
 	units := []struct {
 		name string
 		size int64
@@ -388,6 +392,9 @@ func (a *app) getCmd() *cobra.Command {
 			fmt.Fprintf(w, "adapter:   %s\n", run.Spec.Workload.Adapter)
 			if d := run.Spec.Workload.IdleTimeout.Duration; d > 0 {
 				fmt.Fprintf(w, "idle stop: %s\n", d)
+			}
+			if run.Timeout != "" {
+				fmt.Fprintf(w, "timeout:   %s\n", timeoutText(*run))
 			}
 			if run.Spec.Image.Ref != "" {
 				fmt.Fprintf(w, "image:     %s\n", run.Spec.Image.Ref)
@@ -963,6 +970,65 @@ func (a *app) renameCmd() *cobra.Command {
 	}
 }
 
+// timeoutText is a Run's timeout and the running time it leaves.
+func timeoutText(r Run) string {
+	if r.Timeout == "" {
+		return "none"
+	}
+	if r.TimeoutRemainingSeconds == nil {
+		return r.Timeout
+	}
+	return fmt.Sprintf("%s (%s left)", r.Timeout, secondsText(int64(*r.TimeoutRemainingSeconds)))
+}
+
+func (a *app) extendCmd() *cobra.Command {
+	var to string
+	var unlimited bool
+	cmd := &cobra.Command{
+		Use:   "extend <run> [<duration>]",
+		Short: "Give a Run more running time: add to its timeout, or --to a new total, or --unlimited",
+		Long: `Change a Run's timeout, the running time it may have summed over all its
+placements, while it runs or before it is resumed:
+
+  lux extend <run> 1h          add an hour
+  lux extend <run> --to 4h     a total of 4h
+  lux extend <run> --unlimited no timeout
+
+The new timeout counts at once. It must leave at least a minute past the
+time the Run has already run (timeout_too_short says how long that is). A
+Run already being stopped for its timeout cannot be extended: once it has
+failed, resume it with lux resume --timeout.`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body := map[string]any{}
+			if len(args) == 2 {
+				body["add"] = args[1]
+			}
+			if to != "" {
+				body["set"] = to
+			}
+			if unlimited {
+				body["unlimited"] = true
+			}
+			if len(body) != 1 {
+				return fmt.Errorf("give exactly one of <duration>, --to or --unlimited")
+			}
+			var run Run
+			if err := a.c.Do(ctxOf(cmd), "POST", "/v1/runs/"+args[0]+"/timeout", body, &run); err != nil {
+				return err
+			}
+			if a.output == "json" {
+				return a.json(run)
+			}
+			fmt.Fprintf(a.stdout, "%s timeout %s\n", run.ID, timeoutText(run))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&to, "to", "", "the new timeout, a total over all placements (e.g. 4h)")
+	cmd.Flags().BoolVar(&unlimited, "unlimited", false, "no timeout")
+	return cmd
+}
+
 func (a *app) terminateCmd() *cobra.Command {
 	// A terminate request ends terminated on every path (an ended Run at
 	// once, a live one when its placement exits or is lost).
@@ -1034,7 +1100,7 @@ func parseAddRepo(v string) (spec.Repository, error) {
 }
 
 func (a *app) resumeCmd() *cobra.Command {
-	var input, secretsFrom, fromSnapshot, to, disk, diskGrace, memory, reqID, syncMode, pool, size string
+	var input, secretsFrom, fromSnapshot, to, disk, diskGrace, memory, reqID, syncMode, pool, size, timeout string
 	var cpus float64
 	var secretArgs, removeSecrets, addRepos, syncs []string
 	var follow, wait, dryRun bool
@@ -1092,6 +1158,11 @@ any host change. lux refuses a pool the image's platform does not run on
 (platform_mismatch) or that can never take the Run (pool_unfit: nested
 containers, required labels, a size beyond its hosts), changing nothing.
 "platform unchecked" on stderr: lux could not tell the platform.
+
+--timeout sets the Run's timeout from this resume on: the total running
+time over all its placements, the time already run included, so it must
+be at least a minute more than that (0s: no timeout). A Run that failed on
+its timeout has used its time up and needs it to run again.
 
 --dry-run runs every check the resume would and changes nothing: "valid", or
 the error the resume would meet. Secret values may be left out. A running
@@ -1175,6 +1246,9 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 			}
 			if len(res) > 0 {
 				req["resources"] = res
+			}
+			if timeout != "" {
+				req["timeout"] = timeout
 			}
 			if reqID != "" {
 				req["requestId"] = reqID
@@ -1272,6 +1346,7 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 	cmd.Flags().StringArrayVar(&syncs, "sync", nil, "repo=ref: move the repository's checkout to ref before init (repeatable)")
 	cmd.Flags().StringVar(&syncMode, "sync-mode", "", "with --sync: "+syncModeHelp)
 	cmd.Flags().StringVar(&pool, "pool", "", "move the Run to this pool (name or id) from this resume on")
+	cmd.Flags().StringVar(&timeout, "timeout", "", "the Run's timeout from now on, a total over all placements including time already run (e.g. 4h; 0s: none)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "check the resume and change nothing; a running Run is checked as if it were stopped")
 	return cmd
 }

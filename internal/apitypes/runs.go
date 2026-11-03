@@ -53,6 +53,10 @@ type Run struct {
 	FinishedAt     *time.Time             `json:"finishedAt,omitempty"`
 	RuntimeSeconds float64                `json:"runtimeSeconds" doc:"Seconds its placements have spent running, summed: each from reaching running to exiting or being lost; one still running counts up to the time of the response."`
 	RuntimeSince   *time.Time             `json:"runtimeSince,omitempty" doc:"When the placement still running started, if one is: runtimeSeconds grows from the response's time on."`
+	Timeout        string                 `json:"timeout,omitempty" doc:"spec.timeout, the most running time the Run may have summed over its placements; absent without one. POST /v1/runs/{id}/timeout changes it."`
+	// TimeoutRemainingSeconds is counted as the reaper counts it, which can
+	// differ from runtimeSeconds by a placement that ended without an end time.
+	TimeoutRemainingSeconds *float64 `json:"timeoutRemainingSeconds,omitempty" doc:"With a timeout: the running time it leaves, in seconds (timeout less the running time so far, never below 0). The Run is stopped and fails soon after it reaches 0 while it runs."`
 	// Placement time: what getting the Run onto a host and started took.
 	PlacementSeconds      float64     `json:"placementSeconds" doc:"Time spent placing the Run, summed over its placements: for each, from when the Run needed a host (created, or its previous placement ending) until that placement's workload started. A Run still being placed counts up to the time of the response (placing). waitSeconds + startSeconds."`
 	PlacementWaitSeconds  float64     `json:"placementWaitSeconds" doc:"The part of placementSeconds spent waiting for a host (needing one until assigned)."`
