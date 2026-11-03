@@ -2606,6 +2606,13 @@ components:
         tenant:
           description: The owning tenant's name.
           type: string
+        timeout:
+          description: spec.timeout, the most running time the Run may have summed over its placements; absent without one. POST /v1/runs/{id}/timeout changes it.
+          type: string
+        timeoutRemainingSeconds:
+          description: "With a timeout: the running time it leaves, in seconds (timeout less the running time so far, never below 0). The Run is stopped and fails soon after it reaches 0 while it runs."
+          format: double
+          type: number
         usage:
           $ref: "#/components/schemas/RunUsage"
         valid:
@@ -2686,6 +2693,13 @@ components:
           type:
             - array
             - "null"
+        timeout:
+          description: "The Run's timeout from this resume on: its total running time over all its placements, the time already run included (\"4h\"); \"0s\": no timeout. Absent: unchanged. It must leave at least a minute past the time already run (422 timeout_too_short); negative: 422 invalid_spec. Written into spec.timeout with a timeout.changed event. A Run failed on its timeout has used its time up: without a longer timeout it is stopped again as soon as it runs. On a Run already resuming: its timeout now, 202; other values, 409 not_resumable (POST /v1/runs/{id}/timeout changes it)."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
         to:
           description: "Operators: place it on this host (id or name), and nowhere else."
           type: string
@@ -2880,6 +2894,13 @@ components:
         tenant:
           description: The owning tenant's name.
           type: string
+        timeout:
+          description: spec.timeout, the most running time the Run may have summed over its placements; absent without one. POST /v1/runs/{id}/timeout changes it.
+          type: string
+        timeoutRemainingSeconds:
+          description: "With a timeout: the running time it leaves, in seconds (timeout less the running time so far, never below 0). The Run is stopped and fails soon after it reaches 0 while it runs."
+          format: double
+          type: number
         usage:
           $ref: "#/components/schemas/RunUsage"
       type: object
@@ -3720,6 +3741,29 @@ components:
             - array
             - "null"
       type: object
+    SnapshotVolumeURL:
+      additionalProperties: false
+      properties:
+        blobId:
+          type: string
+        expiresAt:
+          format: date-time
+          type: string
+        name:
+          type: string
+        sha256:
+          description: "The blob's SHA-256, hex: of the compressed bytes."
+          type: string
+        size:
+          description: "The blob's size: compressed, as stored."
+          format: int64
+          type: integer
+        snapshotId:
+          type: string
+        url:
+          description: "A presigned GET of the volume's blob: no Authorization header."
+          type: string
+      type: object
     StaticNetwork:
       additionalProperties: false
       properties:
@@ -4017,6 +4061,13 @@ components:
         tenant:
           description: The owning tenant's name.
           type: string
+        timeout:
+          description: spec.timeout, the most running time the Run may have summed over its placements; absent without one. POST /v1/runs/{id}/timeout changes it.
+          type: string
+        timeoutRemainingSeconds:
+          description: "With a timeout: the running time it leaves, in seconds (timeout less the running time so far, never below 0). The Run is stopped and fails soon after it reaches 0 while it runs."
+          format: double
+          type: number
         usage:
           $ref: "#/components/schemas/RunUsage"
         valid:
@@ -4314,6 +4365,27 @@ components:
             - exec
             - preview
           type: string
+      type: object
+    TimeoutRequest:
+      additionalProperties: false
+      properties:
+        add:
+          description: "Add this to the Run's timeout (\"1h\"). A Run without a timeout has nothing to add to: 422 invalid_spec, use set."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        set:
+          description: The new timeout, the total running time over all its placements ("4h").
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        unlimited:
+          description: "true: no timeout from now on."
+          type: boolean
       type: object
     Totals:
       additionalProperties: false
@@ -8402,6 +8474,8 @@ paths:
 
         resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). A Run already resuming refuses other sizes (409).
 
+        timeout sets the Run's timeout (its total running time) from this resume on, as POST /v1/runs/{id}/timeout does: a Run failed on its timeout needs a longer one to run again.
+
         placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit, and pool_preemptible for a Run with placement.preemptible false into a preemptible pool; nothing changes). validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.
 
         Needs the `run` scope.
@@ -9086,6 +9160,107 @@ paths:
       summary: List a Run's snapshots
       tags:
         - runs
+  /v1/runs/{id}/snapshots/{snap}/volumes/{name}:
+    get:
+      description: |-
+        A 302 to a presigned S3 URL of the volume as stored: a zstd-compressed tar of the volume's files, valid 15 minutes and fetched without an Authorization header. With redirect=false, the URL as JSON instead, with the size and sha256 of those compressed bytes (`lux snapshots download` checks both). Works in any state of the Run while the snapshot is available, terminated included; each URL handed out is a snapshot.downloaded event. 404 for a snapshot not of this Run or a volume not in its manifest; 410 snapshot_unavailable once retention deleted it; 409 not_uploaded (with Retry-After) while the volume is still on its host. It needs the run scope, not read: a volume holds whatever the workload wrote, credentials included.
+
+        Needs the `run` scope.
+      operationId: downloadSnapshotVolume
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: The snapshot's id.
+          in: path
+          name: snap
+          required: true
+          schema:
+            description: The snapshot's id.
+            type: string
+        - description: The volume's name, as in the snapshot's manifest.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The volume's name, as in the snapshot's manifest.
+            type: string
+        - description: "false: answer the URL as JSON instead of redirecting to it."
+          explode: false
+          in: query
+          name: redirect
+          schema:
+            description: "false: answer the URL as JSON instead of redirecting to it."
+            enum:
+              - "true"
+              - "false"
+              - ""
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotVolumeURL"
+          description: "With redirect=false: the URL."
+        "302":
+          description: To the presigned URL.
+          headers:
+            Location:
+              description: The presigned URL.
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "410":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Gone
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Download a volume of a Run's snapshot
+      tags:
+        - runs
   /v1/runs/{id}/stop:
     post:
       description: |-
@@ -9342,6 +9517,75 @@ paths:
       summary: Mint a stream ticket
       tags:
         - interactive
+  /v1/runs/{id}/timeout:
+    post:
+      description: |-
+        Gives a Run more (or less) running time while it runs, or before it is resumed: exactly one of `add` (added to its timeout), `set` (the new total) or `unlimited: true` (no timeout). The timeout is the Run's running time summed over its placements (spec.timeout); the new one counts at once, for the placement running now too. It must leave at least a minute past the time the Run has already run (runtimeSeconds): 422 timeout_too_short, whose message says both. add on a Run without a timeout: 422 invalid_spec (use set). Concurrent adds each count. Any state but terminated (409 run_terminated). Once the Run is being stopped for its timeout the stop cannot be called back: 409 timeout_stop_started; resume it with a timeout instead. A `timeout.changed` event (`from`, `to`, `by`; "" for none) is recorded; the same timeout again changes nothing and records no event. Answers the Run as GET /v1/runs/{id} does.
+
+        Needs the `run` scope.
+      operationId: timeoutRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TimeoutRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Change a Run's timeout
+      tags:
+        - runs
   /v1/servers:
     get:
       description: |-

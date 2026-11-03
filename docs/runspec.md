@@ -76,7 +76,7 @@ volumes:
 
 resources: { cpus: 4, memory: 8Gi, disk: 50Gi, pids: 2048, diskGrace: 5m }   # diskGrace: time allowed over disk
 # resources: { size: m-2-arm64 }  # on a shaped pool: one of its sizes instead (lux pools sizes <pool>)
-timeout: 4h                     # running time, over all placements; unset: no limit
+timeout: 4h                     # running time, over all placements; unset: no limit; `lux extend` changes it
 resumePolicy: auto              # auto | restart | manual | never: after a drain, preemption or migration (see below)
 
 placement:
@@ -417,6 +417,37 @@ covered.
   submit with 422 `unknown_pool`; the Run is not created. A spec that sets
   both `pool` and `poolId` is refused with 422 `invalid_spec`.
 
+## Timeout
+
+`timeout` is the most running time a Run may have, summed over all its
+placements: from each placement reaching running to its end. Time stopped,
+lost or waiting for a host does not count. luxd checks it on each reaper
+tick; past it the Run is stopped (stop reason `timeout`) and ends `failed`
+with reason `timeout`. `GET /v1/runs/{id}` shows `timeout` and
+`timeoutRemainingSeconds`, counted as the reaper counts.
+
+It can change while the Run runs, or before it is resumed
+(`POST /v1/runs/{id}/timeout`, `lux extend`):
+
+```bash
+lux extend run_x 1h            # add an hour
+lux extend run_x --to 4h       # a total of 4h
+lux extend run_x --unlimited   # no timeout
+```
+
+The new timeout counts at once, for the placement running now too. It must
+leave at least a minute past the time already run (`timeout_too_short`
+says both). A `timeout.changed` event (`from`, `to`, `by`) records each
+change. A terminated Run's timeout cannot change (409 `run_terminated`).
+Once the Run is being stopped for its timeout, the stop cannot be called
+back (409 `timeout_stop_started`). A Run failed on its timeout has used its
+time up: resumed as it is, it is stopped again as soon as it runs. Resume
+it with a longer one, the total including the time already run:
+
+```bash
+lux resume run_x --timeout 4h  # 0s: no timeout
+```
+
 ## Idle timeout
 
 `workload.idleTimeout` parks an agent after it has been idle for this long.
@@ -447,7 +478,9 @@ reaper tick, so the stop can be one tick later than the duration.
 This is a graceful stop, not a failure: `beforeStop` runs and state volumes
 are snapshotted. The stop and state reasons are `idle`; an `idle` event
 carries `reason: idle` and `idleSeconds`. Resume with `lux resume --input`
-as usual. `timeout` still limits total running time and fails the Run.
+as usual. `timeout` still limits total running time and fails the Run;
+`lux extend` gives a running Run more, and a Run failed on its timeout
+resumes with `lux resume --timeout` ([timeout](#timeout)).
 `resumePolicy` is unchanged, including `never`, which forbids resuming any stop.
 
 ## Resume policy

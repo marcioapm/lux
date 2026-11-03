@@ -288,6 +288,11 @@ func (s *Server) reapHosts(ctx context.Context) error {
 	return err
 }
 
+// timedRuntimeSQL is the runtime (an interval) reapTimeouts holds Run r's
+// timeout against; a timeout change reads it too, and runRuntimeJoin (rr.timed) repeats it for timeoutRemainingSeconds.
+const timedRuntimeSQL = `(SELECT coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0')
+	FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL)`
+
 // reapTimeouts stops Runs that exceeded their timeout: time spent running,
 // summed over placements (each from reaching running to its end, or now).
 // Time stopped, lost or waiting for a host does not count, so a Run parked
@@ -298,8 +303,7 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 		const dueQuery = `SELECT r.id FROM runs r
 			WHERE r.state IN ('starting', 'running') AND r.first_started_at IS NOT NULL
 			  AND coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
-			  AND (SELECT coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0')
-			       FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) > (r.spec->>'timeout')::interval
+			  AND ` + timedRuntimeSQL + ` > (r.spec->>'timeout')::interval
 			  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.stop_requested_at IS NOT NULL)`
 		rows, err := tx.Query(ctx, dueQuery+` ORDER BY r.id LIMIT 50`)
 		if err != nil {
@@ -318,8 +322,7 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 		rows, err = tx.Query(ctx, `SELECT r.id, r.tenant_id FROM runs r
 			WHERE r.id = ANY($1) AND r.state IN ('starting', 'running') AND r.first_started_at IS NOT NULL
 			  AND coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
-			  AND (SELECT coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0')
-			       FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) > (r.spec->>'timeout')::interval
+			  AND `+timedRuntimeSQL+` > (r.spec->>'timeout')::interval
 			  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.stop_requested_at IS NOT NULL)
 			ORDER BY r.id`, candidates)
 		if err != nil {

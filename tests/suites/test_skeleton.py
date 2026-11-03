@@ -323,6 +323,28 @@ def test_disk_is_reserved_on_the_host(lux, runners, hosts):
     lux.wait_state(second, "succeeded", timeout=60)
 
 
+def test_a_timeout_failed_run_resumes_with_more_time(lux, runners, hosts):
+    """A Run failed on its timeout resumes with --timeout and runs on; lux
+    extend then adds to its timeout while it runs."""
+    runners.start(hosts[0])
+    spec = generic(ALPINE_IMAGE, "sh", "-c", "echo up; trap 'exit 0' TERM; while :; do sleep 1; done",
+                   volumes=[{"name": "w", "path": "/w", "kind": "state"}])
+    spec["timeout"] = "5s"
+    run_id = lux.submit(spec)
+    run = lux.wait_state(run_id, "failed", timeout=90)
+    assert run["stateReason"] == "timeout", run
+    lux.run("resume", run_id, "--timeout", "2m", "--wait")
+    time.sleep(8)  # several reaper ticks past the old 5s
+    run = lux.get(run_id)
+    assert run["state"] == "running" and run["timeout"] == "2m0s", run
+    assert 0 < run["timeoutRemainingSeconds"] <= 120 - 5, run
+    out = lux.run("extend", run_id, "1m").stdout
+    assert out.startswith(f"{run_id} timeout 3m0s ("), out
+    events = [e for e in lux.json("events", run_id) if e["type"] == "timeout.changed"]
+    assert [(e["data"]["from"], e["data"]["to"]) for e in events] == [("5s", "2m0s"), ("2m0s", "3m0s")], events
+    lux.run("terminate", run_id, "--wait")
+
+
 def test_a_timeout_counts_running_time_only(lux, runners, hosts):
     """A Run's timeout is time spent running, over its placements: parked
     (stopped) time does not count, so a Run resumed later keeps what it had

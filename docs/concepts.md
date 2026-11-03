@@ -52,7 +52,7 @@ any state ──(terminate, or expiry of a resting Run)──▶ terminated (fin
 | `stopping` | Asked to wind down. The adapter stops the workload gracefully, then it is killed after the grace period. |
 | `stopped` | Exited on request with its state saved. **Resumable.** An idle timeout stops with reason `idle`; resume it with `lux resume [--input]`. A Run stopped by a move (force-evicting drain, spot preemption, migrate) is then resumed by lux at once, unless its spec's `resumePolicy` says otherwise: `restart` starts it again from scratch, `manual` ends it `failed` and `never` ends it `terminated` ([resume policy](runspec.md#resume-policy)). |
 | `resuming` | Waiting for a host for its next placement. |
-| `succeeded` / `failed` | Ended: its workload exited. **Resumable**, like `stopped` (the adapter's resume path, with its session). A Run whose `resumePolicy` is `never` never rests here: it ends `terminated`, its outcome in `stateReason`. |
+| `succeeded` / `failed` | Ended: its workload exited. **Resumable**, like `stopped` (the adapter's resume path, with its session). One failed on its `timeout` (reason `timeout`) has used its time up: resume it with `lux resume --timeout` ([timeout](runspec.md#timeout)). A Run whose `resumePolicy` is `never` never rests here: it ends `terminated`, its outcome in `stateReason`. |
 | `terminated` | Ended for good: the only terminal state. Never resumed, and its snapshots and output go after the tenant's retention. A Run becomes terminated by `lux terminate` (`POST /v1/runs/{id}/terminate`), or by lux when it expires. |
 | `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. Never resumed automatically. A Run whose `resumePolicy` is `never` ends `terminated` instead. |
 
@@ -156,7 +156,11 @@ ones a Run can still use:
   deleted. A Run terminated while it is live, before its exit snapshot
   starts, takes no new snapshot of its state volumes: the snapshot its last
   placement reports lists no volume (only its output and artifacts are
-  uploaded); its earlier snapshots are kept as above.
+  uploaded); its earlier snapshots are kept as above. Until then its
+  tenant can download them: `lux snapshots download <run> --extract DIR`
+  (`GET /v1/runs/{id}/snapshots/{snap}/volumes/{name}`, `run` scope)
+  unpacks each state volume, so work never committed is not lost with the
+  Run.
 - **Artifacts** are never deleted by time: they stay until their owner
   deletes them (`lux artifacts <run> --delete`, a terminated
   Run's only).

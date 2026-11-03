@@ -64,6 +64,17 @@ func (s *Server) routes(api huma.API) {
 		Errors: []int{http.StatusNotFound, http.StatusUnprocessableEntity},
 	}, "run", s.patchRun)
 	register(s, api, huma.Operation{
+		OperationID: "timeoutRun", Method: http.MethodPost, Path: "/v1/runs/{id}/timeout", Tags: []string{"runs"},
+		Summary: "Change a Run's timeout",
+		Description: "Gives a Run more (or less) running time while it runs, or before it is resumed: exactly one of `add` (added to its timeout), `set` (the new total) or `unlimited: true` (no timeout). " +
+			"The timeout is the Run's running time summed over its placements (spec.timeout); the new one counts at once, for the placement running now too. " +
+			"It must leave at least a minute past the time the Run has already run (runtimeSeconds): 422 timeout_too_short, whose message says both. " +
+			"add on a Run without a timeout: 422 invalid_spec (use set). Concurrent adds each count. " +
+			"Any state but terminated (409 run_terminated). Once the Run is being stopped for its timeout the stop cannot be called back: 409 timeout_stop_started; resume it with a timeout instead. " +
+			"A `timeout.changed` event (`from`, `to`, `by`; \"\" for none) is recorded; the same timeout again changes nothing and records no event. Answers the Run as GET /v1/runs/{id} does.",
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "run", s.timeoutRun)
+	register(s, api, huma.Operation{
 		OperationID: "listEvents", Method: http.MethodGet, Path: "/v1/runs/{id}/events", Tags: []string{"runs"},
 		Summary: "List a Run's lifecycle events",
 		Errors:  []int{http.StatusNotFound},
@@ -109,6 +120,7 @@ func (s *Server) routes(api huma.API) {
 			"resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller " +
 			"only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). " +
 			"A Run already resuming refuses other sizes (409).\n\n" +
+			"timeout sets the Run's timeout (its total running time) from this resume on, as POST /v1/runs/{id}/timeout does: a Run failed on its timeout needs a longer one to run again.\n\n" +
 			"placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit, and pool_preemptible for a Run with placement.preemptible false into a preemptible pool; nothing changes). " +
 			"validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.",
 		DefaultStatus: http.StatusAccepted,
@@ -218,6 +230,23 @@ func (s *Server) routes(api huma.API) {
 			"a terminated Run keeps them for its tenant's retention. A deleted one stays listed, available false.",
 		Errors: []int{http.StatusNotFound},
 	}, "read", s.listSnapshots)
+	register(s, api, huma.Operation{
+		OperationID: "downloadSnapshotVolume", Method: http.MethodGet, Path: "/v1/runs/{id}/snapshots/{snap}/volumes/{name}", Tags: []string{"runs"},
+		Summary: "Download a volume of a Run's snapshot",
+		Description: "A 302 to a presigned S3 URL of the volume as stored: a zstd-compressed tar of the volume's files, valid 15 minutes and fetched without an Authorization header. " +
+			"With redirect=false, the URL as JSON instead, with the size and sha256 of those compressed bytes (`lux snapshots download` checks both). " +
+			"Works in any state of the Run while the snapshot is available, terminated included; each URL handed out is a snapshot.downloaded event. " +
+			"404 for a snapshot not of this Run or a volume not in its manifest; 410 snapshot_unavailable once retention deleted it; " +
+			"409 not_uploaded (with Retry-After) while the volume is still on its host. " +
+			"It needs the run scope, not read: a volume holds whatever the workload wrote, credentials included.",
+		Responses: map[string]*huma.Response{
+			"200": {Description: "With redirect=false: the URL.", Content: jsonContent(schemaRef[SnapshotVolumeURL](api))},
+			"302": {Description: "To the presigned URL.", Headers: map[string]*huma.Header{
+				"Location": {Description: "The presigned URL.", Schema: &huma.Schema{Type: huma.TypeString}},
+			}},
+		},
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusGone},
+	}, "run", streamed(s, s.downloadSnapshotVolume))
 	register(s, api, huma.Operation{
 		OperationID: "listArtifacts", Method: http.MethodGet, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
 		Summary: "List a Run's artifacts",
@@ -521,7 +550,12 @@ type ImageResolution = proto.ImageResolution
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + runRaiseColumns + `, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + resumableSQL + `, ` + stageColumns
+	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + runRaiseColumns + `, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + timeoutRemainingSQL + `, ` + resumableSQL + `, ` + stageColumns
+
+// timeoutRemainingSQL: the seconds Run r's timeout leaves it, by the reaper's
+// count (rr.timed, timedRuntimeSQL's); NULL without a timeout.
+const timeoutRemainingSQL = `CASE WHEN coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
+	THEN greatest(0, extract(epoch FROM (r.spec->>'timeout')::interval - rr.timed))::float8 END`
 
 // runRaiseColumns: a Run's raise (from, for), "" unless it raised to the
 // Run's current resolved_size; a luxd without size_raised_to rewrites
@@ -557,7 +591,8 @@ const (
 func runRuntimeJoin(now string) string {
 	return ` CROSS JOIN LATERAL (SELECT
 			coalesce(sum(greatest(0, extract(epoch FROM coalesce(p.ended_at, CASE WHEN p.state IN ` + livePlacementStates + ` THEN ` + now + ` ELSE p.started_at END) - p.started_at))), 0)::float8 AS seconds,
-			max(p.started_at) FILTER (WHERE p.ended_at IS NULL AND p.state IN ` + livePlacementStates + `) AS since
+			max(p.started_at) FILTER (WHERE p.ended_at IS NULL AND p.state IN ` + livePlacementStates + `) AS since,
+			coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0') AS timed
 		FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) rr`
 }
 
@@ -598,7 +633,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 	err := row.Scan(append([]any{&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
 		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing,
-		&requested, &size, &raisedFrom, &raisedFor, &shape, &r.Resumable},
+		&requested, &size, &raisedFrom, &raisedFor, &shape, &r.TimeoutRemainingSeconds, &r.Resumable},
 		stage.scanTargets()...)...)
 	// resolved_size is shown only while it names a size of the pool's
 	// current ladder with the Run's resources: a removed or changed shape
@@ -615,6 +650,9 @@ func scanRun(row pgx.Row) (*Run, error) {
 		}
 	}
 	r.PlacementSeconds = r.PlacementWaitSeconds + r.PlacementStartSeconds
+	if r.Spec.Timeout.Duration > 0 {
+		r.Timeout = r.Spec.Timeout.String()
+	}
 	stage.State, stage.CreatedAt = r.State, r.CreatedAt
 	st := deriveStage(stage)
 	r.Stage, r.StageSince, r.StageReason = st.Stage, st.Since, st.Reason
@@ -1550,6 +1588,7 @@ type resumeRequest struct {
 	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over). On a Run already resuming: the same as its resume asked for, 202 with that resume's resize; absent or empty, 202; other values, 409 not_resumable."`
 	Placement    *resumeTarget    `json:"placement,omitempty" doc:"Move the Run to another pool (poolId) from this resume on, with its saved state, as on any host change."`
 	ValidateOnly bool             `json:"validateOnly,omitempty" doc:"Run every check this resume would run and change nothing: 200 with valid: true (and the resize and placement it would apply), or the error it would meet. Secret values may be left out: only the names sent are checked. A live Run (scheduled, starting, running, stopping) is judged as if it were stopped, its state given in stateUnchecked."`
+	Timeout      *spec.Duration   `json:"timeout,omitempty" doc:"The Run's timeout from this resume on: its total running time over all its placements, the time already run included (\"4h\"); \"0s\": no timeout. Absent: unchanged. It must leave at least a minute past the time already run (422 timeout_too_short); negative: 422 invalid_spec. Written into spec.timeout with a timeout.changed event. A Run failed on its timeout has used its time up: without a longer timeout it is stopped again as soon as it runs. On a Run already resuming: its timeout now, 202; other values, 409 not_resumable (POST /v1/runs/{id}/timeout changes it)."`
 	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha; mode: move, fast-forward or fetch) before init, through the host's mirror. Mode move (default): tracked files become the ref's, untracked and ignored ones are kept. fast-forward: only a checkout that loses nothing moves; fetch: none does. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
 }
 
@@ -1674,6 +1713,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		req = *in.Body
 	}
 	req.RequestID = cmp.Or(req.RequestID, ids.New("resume"))
+	if req.Timeout != nil && req.Timeout.Duration < 0 {
+		return nil, invalidSpec(&spec.ValidationError{Problems: []string{"timeout must not be negative: \"0s\" removes it"}})
+	}
 	var adding []spec.Repository
 	if req.Git != nil {
 		adding = req.Git.Repositories
@@ -1802,6 +1844,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 					resize = first
 				}
 			}
+			if req.Timeout != nil && req.Timeout.Duration != sp.Timeout.Duration {
+				return errf(http.StatusConflict, "not_resumable", "run is resuming already with timeout %s: change it with POST /v1/runs/{id}/timeout", cmp.Or(durationText(sp.Timeout.Duration), "none"))
+			}
 			return nil // idempotent: the first resume's secrets stand
 		case terminal(state):
 			return errf(http.StatusConflict, "not_resumable", "run is %s", state)
@@ -1925,6 +1970,12 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		var in *proto.Input
 		if req.Input != nil && req.Input.Text != "" {
 			in = &proto.Input{RequestID: ids.New("in"), Text: req.Input.Text}
+		}
+		if req.Timeout != nil {
+			if err := changeTimeout(ctx, tx, p, id, sp.Timeout.Duration, req.Timeout.Duration); err != nil {
+				return err
+			}
+			sp.Timeout = *req.Timeout
 		}
 		// A live Run's own placement counts against the quota until it
 		// stops, so a dry run on it cannot judge the quota a resume meets.

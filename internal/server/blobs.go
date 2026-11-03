@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"time"
 
@@ -430,6 +431,88 @@ func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request)
 	url, err := s.blobs.PresignGet(r.Context(), key, presignTTL)
 	if err != nil {
 		return err
+	}
+	http.Redirect(w, r, url, http.StatusFound)
+	return nil
+}
+
+type snapshotVolumePath struct {
+	RunPath
+	Snap     string `path:"snap" doc:"The snapshot's id."`
+	Name     string `path:"name" doc:"The volume's name, as in the snapshot's manifest."`
+	Redirect string `query:"redirect" enum:"true,false," doc:"false: answer the URL as JSON instead of redirecting to it."`
+}
+
+type SnapshotVolumeURL struct {
+	URL        string    `json:"url" doc:"A presigned GET of the volume's blob: no Authorization header."`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	Size       int64     `json:"size" doc:"The blob's size: compressed, as stored."`
+	SHA256     string    `json:"sha256" doc:"The blob's SHA-256, hex: of the compressed bytes."`
+	Name       string    `json:"name"`
+	SnapshotID string    `json:"snapshotId"`
+	BlobID     string    `json:"blobId"`
+}
+
+// downloadSnapshotVolume hands a tenant a presigned URL of one volume of
+// one of its Run's snapshots, in whatever state the Run is.
+func (s *Server) downloadSnapshotVolume(w http.ResponseWriter, r *http.Request, in *snapshotVolumePath) error {
+	ctx := r.Context()
+	p := principal(ctx)
+	var vol proto.VolumeSnapshot
+	var key string
+	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		if err := requireRun(ctx, tx, in.ID); err != nil {
+			return err
+		}
+		var available bool
+		var m proto.Manifest
+		err := tx.QueryRow(ctx, `SELECT available, manifest FROM snapshots WHERE id = $1 AND run_id = $2`, in.Snap, in.ID).Scan(&available, &m)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errf(http.StatusNotFound, "not_found", "no snapshot %s for this run", in.Snap)
+		}
+		if err != nil {
+			return err
+		}
+		i := slices.IndexFunc(m.Volumes, func(v proto.VolumeSnapshot) bool { return v.Name == in.Name })
+		if i < 0 {
+			return errf(http.StatusNotFound, "not_found", "snapshot %s has no volume %s", in.Snap, in.Name)
+		}
+		vol = m.Volumes[i]
+		unavailable := errf(http.StatusGone, "snapshot_unavailable", "snapshot %s is no longer available", in.Snap)
+		if !available {
+			return unavailable
+		}
+		var location string
+		err = tx.QueryRow(ctx, `SELECT location, coalesce(s3_key, '') FROM blobs WHERE id = $1 AND run_id = $2 AND kind = 'volume'`,
+			vol.BlobID, in.ID).Scan(&location, &key)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return unavailable
+		}
+		if err != nil {
+			return err
+		}
+		switch location {
+		case "s3":
+		case "host":
+			w.Header().Set("Retry-After", "2")
+			return errf(http.StatusConflict, "not_uploaded", "volume %s is still being uploaded from its host", in.Name)
+		default:
+			return unavailable
+		}
+		return addEvent(ctx, tx, p.TenantID, in.ID, 0, "snapshot.downloaded", map[string]any{"snapshot": in.Snap, "volume": in.Name, "by": p.Actor()})
+	})
+	if err != nil {
+		return err
+	}
+	expires := time.Now().Add(presignTTL)
+	url, err := s.blobs.PresignGet(ctx, key, presignTTL)
+	if err != nil {
+		return err
+	}
+	if in.Redirect == "false" {
+		writeJSON(w, http.StatusOK, SnapshotVolumeURL{URL: url, ExpiresAt: expires.UTC().Truncate(time.Second), Size: vol.Size, SHA256: vol.SHA256,
+			Name: vol.Name, SnapshotID: in.Snap, BlobID: vol.BlobID})
+		return nil
 	}
 	http.Redirect(w, r, url, http.StatusFound)
 	return nil

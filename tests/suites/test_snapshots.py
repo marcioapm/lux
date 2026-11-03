@@ -161,6 +161,28 @@ def test_resume_a_succeeded_run(lux, runners, hosts):
     assert p.returncode == 4 and p.stderr.strip() == "lux: run is terminated", p
 
 
+def test_download_a_terminated_runs_snapshot(lux, runners, hosts, tmp_path):
+    """A terminated Run cannot resume, but its tenant can still download
+    and unpack its snapshot's volumes (#150): the uncommitted work is back."""
+    runners.start(hosts[0])
+    spec = generic(ALPINE_IMAGE, "sh", "-c", "echo 'work in progress' > /data/notes.txt; echo ready; sleep 300",
+                   volumes=[{"name": "data", "path": "/data", "kind": "state"}])
+    run_id = lux.submit(spec)
+    lux.wait_output(run_id, "ready")
+    lux.run("stop", run_id, "--wait")
+    snap = lux.wait_uploaded(run_id)
+    lux.run("terminate", run_id, "--wait")
+    assert lux.get(run_id)["state"] == "terminated"
+
+    dest = tmp_path / "restored"
+    p = lux.run("snapshots", "download", run_id, "--extract", str(dest), "-o", "json")
+    assert snap["id"] in p.stderr, p.stderr
+    written = json.loads(p.stdout)
+    assert [w["volume"] for w in written] == ["data"], written
+    assert (dest / "data" / "notes.txt").read_text() == "work in progress\n"
+    assert [e["data"]["volume"] for e in lux.events(run_id, "snapshot.downloaded")] == ["data"]
+
+
 def test_resume_resizes_a_stopped_run(lux, runners, hosts):
     """A resume with less memory and more CPUs: the container's own cgroup
     limits are the new ones, the state volume's data survived, and the
