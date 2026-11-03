@@ -341,7 +341,7 @@ func TestSnapshotsDownloadExtractHostile(t *testing.T) {
 	wantErr := map[string]string{
 		"hard link outside":         "outside the volume",
 		"hard link through symlink": "through a symlink",
-		"hard link to a symlink":    "not a regular file",
+		"hard link to a directory":  "not a regular file",
 	}
 	for name, entries := range map[string][]tarEntry{
 		"absolute": {{hdr: tar.Header{Name: "/escape"}, body: "x"}},
@@ -364,9 +364,9 @@ func TestSnapshotsDownloadExtractHostile(t *testing.T) {
 			{hdr: tar.Header{Name: "l", Typeflag: tar.TypeSymlink, Linkname: ".."}},
 			{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "l/victim"}},
 		},
-		"hard link to a symlink": {
-			{hdr: tar.Header{Name: "s", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"}},
-			{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "s"}},
+		"hard link to a directory": {
+			{hdr: tar.Header{Name: "d/", Typeflag: tar.TypeDir}},
+			{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "d"}},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -404,13 +404,35 @@ func TestSnapshotsDownloadExtractHostile(t *testing.T) {
 			}
 		})
 	}
-	// A symlink pointing outside is kept as a link, never followed.
+	// A hard link to a symlink (GNU tar writes them) is that symlink again,
+	// never a link to what it points at.
 	tz := zstdTar(t,
-		tarEntry{hdr: tar.Header{Name: "l", Typeflag: tar.TypeSymlink, Linkname: "../../target"}},
-		tarEntry{hdr: tar.Header{Name: "l"}, body: "replaced"},
+		tarEntry{hdr: tar.Header{Name: "s", Typeflag: tar.TypeSymlink, Linkname: "../../victim"}},
+		tarEntry{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "s"}},
 	)
 	f := newSnapFake(t, []server.Snapshot{snapWith("snap1", 1, true, true, vol("v", "b1", tz))}, map[string][]byte{"b1": tz})
 	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("victim"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.run(dir, "snapshots", "download", "run_1", "--extract", filepath.Join(dir, "out")); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := os.Readlink(filepath.Join(dir, "out/v/h")); err != nil || l != "../../victim" {
+		t.Fatalf("h: %q %v, want the symlink", l, err)
+	}
+	if n := linkCount(t, victim); n != 1 {
+		t.Fatalf("victim has %d links", n)
+	}
+
+	// A symlink pointing outside is kept as a link, never followed.
+	tz = zstdTar(t,
+		tarEntry{hdr: tar.Header{Name: "l", Typeflag: tar.TypeSymlink, Linkname: "../../target"}},
+		tarEntry{hdr: tar.Header{Name: "l"}, body: "replaced"},
+	)
+	f = newSnapFake(t, []server.Snapshot{snapWith("snap1", 1, true, true, vol("v", "b1", tz))}, map[string][]byte{"b1": tz})
+	dir = t.TempDir()
 	if _, _, err := f.run(dir, "snapshots", "download", "run_1", "--extract", filepath.Join(dir, "out")); err != nil {
 		t.Fatal(err)
 	}

@@ -350,12 +350,24 @@ func extractVolume(r io.Reader, dir string) (err error) {
 			if err := replaceable(dst, hdr.Name); err != nil {
 				return err
 			}
-			// link(2) on macOS follows a symlink target out of the volume.
-			if fi, err := os.Lstat(filepath.Join(dir, target)); err != nil || !fi.Mode().IsRegular() {
+			fi, err := os.Lstat(filepath.Join(dir, target))
+			switch {
+			case err == nil && fi.Mode()&os.ModeSymlink != 0:
+				// A hard link to a symlink is that symlink again: link(2)
+				// would follow it on macOS, out of the volume.
+				l, err := os.Readlink(filepath.Join(dir, target))
+				if err == nil {
+					err = os.Symlink(l, dst)
+				}
+				if err != nil {
+					return err
+				}
+			case err != nil || !fi.Mode().IsRegular():
 				return fmt.Errorf("%s: hard link to %q, which is not a regular file in the volume", hdr.Name, hdr.Linkname)
-			}
-			if err := os.Link(filepath.Join(dir, target), dst); err != nil {
-				return err
+			default:
+				if err := os.Link(filepath.Join(dir, target), dst); err != nil {
+					return err
+				}
 			}
 		default:
 			// Devices, fifos, and headers that are not files.
