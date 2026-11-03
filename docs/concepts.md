@@ -156,7 +156,11 @@ ones a Run can still use:
   deleted. A Run terminated while it is live, before its exit snapshot
   starts, takes no new snapshot of its state volumes: the snapshot its last
   placement reports lists no volume (only its output and artifacts are
-  uploaded); its earlier snapshots are kept as above.
+  uploaded); its earlier snapshots are kept as above. Until then its
+  tenant can download them: `lux snapshots download <run> --extract DIR`
+  (`GET /v1/runs/{id}/snapshots/{snap}/volumes/{name}`, `run` scope)
+  unpacks each state volume, so work never committed is not lost with the
+  Run.
 - **Artifacts** are never deleted by time: they stay until their owner
   deletes them (`lux artifacts <run> --delete`, a terminated
   Run's only).

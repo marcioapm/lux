@@ -134,7 +134,26 @@ lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--se
 lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID] [--credential repo=VALUE]   # a running Run's checkouts
 lux terminate <run> [--wait]    # ends it for good: terminated, never resumable (a snapshot is still taken); a Run left stopped, lost, failed or succeeded is terminated after its tenant's expiry (default 90 days). `lux cancel` is a deprecated alias.
 lux snapshots <run>             # where each snapshot lives; only the current one is kept once uploaded (older ones: available false)
+lux snapshots download <run> [--snapshot ID] [--volume NAME]... [--out PATH | --extract DIR]   # a snapshot's volumes, any Run state (terminated too)
 ```
+
+`lux snapshots download` fetches a snapshot's state volumes, in whatever
+state the Run is while the snapshot is available: it is how a terminated
+Run's uncommitted work comes back. `--snapshot` defaults to the newest
+snapshot that is available and uploaded (it says which on stderr);
+`--volume` (repeatable) picks volumes, every one by default. Each volume is
+a zstd-compressed tar, fetched from S3 through a short-lived URL (the API
+key is never sent there) and checked against the manifest's size and
+sha256; a mismatch leaves nothing behind. `--out PATH` keeps the raw
+`.tar.zst`: PATH is the file for one volume, a directory of
+`<volume>.tar.zst` for several; with neither flag each goes to
+`./<snapshot>-<volume>.tar.zst`. `--extract DIR` unpacks each volume into
+`DIR/<volume>/` (absent or empty), refusing absolute or `..` paths and paths
+through a symlink, skipping devices and fifos, dropping setuid/setgid bits
+and owners. Nothing existing is overwritten. `-o json` lists what was
+written. It needs a key with the `run` scope: a volume holds whatever the
+workload wrote, credentials included. Each URL is a `snapshot.downloaded`
+event on the Run.
 
 A resume needs the Run's secrets again. lux looks for each one in
 `--secret`, then `--secrets-from`, then an environment variable of the same
