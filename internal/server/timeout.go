@@ -71,11 +71,16 @@ func (s *Server) timeoutRun(ctx context.Context, in *timeoutRunInput) (*runOutpu
 		return nil, err
 	}
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		// Lock first: a statement that waits for the lock keeps its older
+		// snapshot of placements, missing a timeout stop committed meanwhile.
+		if _, err := tx.Exec(ctx, `SELECT id FROM runs WHERE id = $1 FOR UPDATE`, in.ID); err != nil {
+			return err
+		}
 		var state, stored string
 		var stopReason *string
 		if err := tx.QueryRow(ctx, `SELECT r.state, coalesce(r.spec->>'timeout', ''), (SELECT p.stop_reason FROM placements p
 				WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.stop_requested_at IS NOT NULL AND p.state IN `+livePlacementStates+`)
-			FROM runs r WHERE r.id = $1 FOR UPDATE`, in.ID).Scan(&state, &stored, &stopReason); err != nil {
+			FROM runs r WHERE r.id = $1`, in.ID).Scan(&state, &stored, &stopReason); err != nil {
 			return err
 		}
 		var from spec.Duration

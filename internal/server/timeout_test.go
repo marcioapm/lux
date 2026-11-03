@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // timeoutFixture is policyFixture's running r1 with a 1h timeout whose
@@ -220,6 +223,42 @@ func TestTimeoutChangeRefusedStates(t *testing.T) {
 			t.Fatalf("resumed after extend: %s %q", state, reason)
 		}
 	})
+}
+
+// A timeout stop committed while the change waits on the Run's lock refuses
+// the change: it reads the stop after the lock, not from before it.
+func TestTimeoutChangeWaitsOutTimeoutStop(t *testing.T) {
+	s, ctx := timeoutFixture(t, "1 minute")
+	locked, release := make(chan struct{}), make(chan struct{})
+	stopped := make(chan error, 1)
+	go func() {
+		stopped <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT id FROM runs WHERE id = 'r1' FOR UPDATE`); err != nil {
+				return err
+			}
+			if _, err := s.requestStop(ctx, tx, "t1", "r1", "timeout"); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+	changed := make(chan error, 1)
+	go func() {
+		_, err := changeR1Timeout(s, TimeoutRequest{Add: dur("4h")})
+		changed <- err
+	}()
+	waitForRunWaiter(t, s, ctx, "r1")
+	close(release)
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	wantHTTPError(t, <-changed, 409, "timeout_stop_started")
+	if got := timeoutEvents(t, s); len(got) != 0 {
+		t.Fatalf("events %v", got)
+	}
 }
 
 // Two adds at once both count: each reads the other's committed timeout.
