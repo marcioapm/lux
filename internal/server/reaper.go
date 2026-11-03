@@ -303,7 +303,7 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 		const dueQuery = `SELECT r.id FROM runs r
 			WHERE r.state IN ('starting', 'running') AND r.first_started_at IS NOT NULL
 			  AND coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
-			  AND `+timedRuntimeSQL+` > (r.spec->>'timeout')::interval
+			  AND ` + timedRuntimeSQL + ` > (r.spec->>'timeout')::interval
 			  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.stop_requested_at IS NOT NULL)`
 		rows, err := tx.Query(ctx, dueQuery+` ORDER BY r.id LIMIT 50`)
 		if err != nil {
