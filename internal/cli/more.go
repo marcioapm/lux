@@ -171,7 +171,7 @@ func (a *app) waitPush(cmd *cobra.Command, runID, requestID string) error {
 }
 
 func (a *app) snapshotsCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "snapshots <run>",
 		Short: "List a Run's snapshots and where each lives",
 		Args:  cobra.ExactArgs(1),
@@ -207,6 +207,8 @@ func (a *app) snapshotsCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.AddCommand(a.snapshotsDownloadCmd())
+	return cmd
 }
 
 func (a *app) artifactsCmd() *cobra.Command {
