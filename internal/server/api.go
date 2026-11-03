@@ -64,6 +64,17 @@ func (s *Server) routes(api huma.API) {
 		Errors: []int{http.StatusNotFound, http.StatusUnprocessableEntity},
 	}, "run", s.patchRun)
 	register(s, api, huma.Operation{
+		OperationID: "timeoutRun", Method: http.MethodPost, Path: "/v1/runs/{id}/timeout", Tags: []string{"runs"},
+		Summary: "Change a Run's timeout",
+		Description: "Gives a Run more (or less) running time while it runs, or before it is resumed: exactly one of `add` (added to its timeout), `set` (the new total) or `unlimited: true` (no timeout). " +
+			"The timeout is the Run's running time summed over its placements (spec.timeout); the new one counts at once, for the placement running now too. " +
+			"It must leave at least a minute past the time the Run has already run (runtimeSeconds): 422 timeout_too_short, whose message says both. " +
+			"add on a Run without a timeout: 422 invalid_spec (use set). Concurrent adds each count. " +
+			"Any state but terminated (409 run_terminated). Once the Run is being stopped for its timeout the stop cannot be called back: 409 timeout_stop_started; resume it with a timeout instead. " +
+			"A `timeout.changed` event (`from`, `to`, `by`; \"\" for none) is recorded; the same timeout again changes nothing and records no event. Answers the Run as GET /v1/runs/{id} does.",
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "run", s.timeoutRun)
+	register(s, api, huma.Operation{
 		OperationID: "listEvents", Method: http.MethodGet, Path: "/v1/runs/{id}/events", Tags: []string{"runs"},
 		Summary: "List a Run's lifecycle events",
 		Errors:  []int{http.StatusNotFound},
