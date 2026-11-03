@@ -3720,6 +3720,29 @@ components:
             - array
             - "null"
       type: object
+    SnapshotVolumeURL:
+      additionalProperties: false
+      properties:
+        blobId:
+          type: string
+        expiresAt:
+          format: date-time
+          type: string
+        name:
+          type: string
+        sha256:
+          description: "The blob's SHA-256, hex: of the compressed bytes."
+          type: string
+        size:
+          description: "The blob's size: compressed, as stored."
+          format: int64
+          type: integer
+        snapshotId:
+          type: string
+        url:
+          description: "A presigned GET of the volume's blob: no Authorization header."
+          type: string
+      type: object
     StaticNetwork:
       additionalProperties: false
       properties:
@@ -9084,6 +9107,107 @@ paths:
       security:
         - apiKey: []
       summary: List a Run's snapshots
+      tags:
+        - runs
+  /v1/runs/{id}/snapshots/{snap}/volumes/{name}:
+    get:
+      description: |-
+        A 302 to a presigned S3 URL of the volume as stored: a zstd-compressed tar of the volume's files, valid 15 minutes and fetched without an Authorization header. With redirect=false, the URL as JSON instead, with the size and sha256 of those compressed bytes (`lux snapshots download` checks both). Works in any state of the Run while the snapshot is available, terminated included; each URL handed out is a snapshot.downloaded event. 404 for a snapshot not of this Run or a volume not in its manifest; 410 snapshot_unavailable once retention deleted it; 409 not_uploaded (with Retry-After) while the volume is still on its host. It needs the run scope, not read: a volume holds whatever the workload wrote, credentials included.
+
+        Needs the `run` scope.
+      operationId: downloadSnapshotVolume
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: The snapshot's id.
+          in: path
+          name: snap
+          required: true
+          schema:
+            description: The snapshot's id.
+            type: string
+        - description: The volume's name, as in the snapshot's manifest.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The volume's name, as in the snapshot's manifest.
+            type: string
+        - description: "false: answer the URL as JSON instead of redirecting to it."
+          explode: false
+          in: query
+          name: redirect
+          schema:
+            description: "false: answer the URL as JSON instead of redirecting to it."
+            enum:
+              - "true"
+              - "false"
+              - ""
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotVolumeURL"
+          description: "With redirect=false: the URL."
+        "302":
+          description: To the presigned URL.
+          headers:
+            Location:
+              description: The presigned URL.
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "410":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Gone
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Download a volume of a Run's snapshot
       tags:
         - runs
   /v1/runs/{id}/stop:

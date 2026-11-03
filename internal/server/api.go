@@ -219,6 +219,23 @@ func (s *Server) routes(api huma.API) {
 		Errors: []int{http.StatusNotFound},
 	}, "read", s.listSnapshots)
 	register(s, api, huma.Operation{
+		OperationID: "downloadSnapshotVolume", Method: http.MethodGet, Path: "/v1/runs/{id}/snapshots/{snap}/volumes/{name}", Tags: []string{"runs"},
+		Summary: "Download a volume of a Run's snapshot",
+		Description: "A 302 to a presigned S3 URL of the volume as stored: a zstd-compressed tar of the volume's files, valid 15 minutes and fetched without an Authorization header. " +
+			"With redirect=false, the URL as JSON instead, with the size and sha256 of those compressed bytes (`lux snapshots download` checks both). " +
+			"Works in any state of the Run while the snapshot is available, terminated included; each URL handed out is a snapshot.downloaded event. " +
+			"404 for a snapshot not of this Run or a volume not in its manifest; 410 snapshot_unavailable once retention deleted it; " +
+			"409 not_uploaded (with Retry-After) while the volume is still on its host. " +
+			"It needs the run scope, not read: a volume holds whatever the workload wrote, credentials included.",
+		Responses: map[string]*huma.Response{
+			"200": {Description: "With redirect=false: the URL.", Content: jsonContent(schemaRef[SnapshotVolumeURL](api))},
+			"302": {Description: "To the presigned URL.", Headers: map[string]*huma.Header{
+				"Location": {Description: "The presigned URL.", Schema: &huma.Schema{Type: huma.TypeString}},
+			}},
+		},
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusGone},
+	}, "run", streamed(s, s.downloadSnapshotVolume))
+	register(s, api, huma.Operation{
 		OperationID: "listArtifacts", Method: http.MethodGet, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
 		Summary: "List a Run's artifacts",
 		Description: "Each path's latest version, or with versions=all every version. A Run publishes a file (lux-shim publish) as it runs; " +
