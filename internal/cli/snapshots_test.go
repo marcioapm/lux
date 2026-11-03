@@ -333,6 +333,9 @@ func TestSnapshotsDownloadExtract(t *testing.T) {
 // directory (and leaving no directory behind).
 func TestSnapshotsDownloadExtractHostile(t *testing.T) {
 	isolateConfig(t, "")
+	wantErr := map[string]string{
+		"hard link to a symlink": "not a regular file",
+	}
 	for name, entries := range map[string][]tarEntry{
 		"absolute": {{hdr: tar.Header{Name: "/escape"}, body: "x"}},
 		"dotdot":   {{hdr: tar.Header{Name: "a/../../escape"}, body: "x"}},
@@ -350,14 +353,22 @@ func TestSnapshotsDownloadExtractHostile(t *testing.T) {
 			{hdr: tar.Header{Name: "l/", Typeflag: tar.TypeDir}},
 		},
 		"hard link outside": {{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "../../escape"}}},
+		"hard link to a symlink": {
+			{hdr: tar.Header{Name: "s", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"}},
+			{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "s"}},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			tz := zstdTar(t, entries...)
 			f := newSnapFake(t, []server.Snapshot{snapWith("snap1", 1, true, true, vol("v", "b1", tz))}, map[string][]byte{"b1": tz})
 			dir := t.TempDir()
 			ext := filepath.Join(dir, "out")
-			if _, _, err := f.run(dir, "snapshots", "download", "run_1", "--extract", ext); err == nil {
+			_, _, err := f.run(dir, "snapshots", "download", "run_1", "--extract", ext)
+			if err == nil {
 				t.Fatal("accepted")
+			}
+			if want := wantErr[name]; want != "" && !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q, want %q", err, want)
 			}
 			if _, err := os.Lstat(filepath.Join(dir, "escape")); err == nil {
 				t.Fatal("wrote outside the volume")

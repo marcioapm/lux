@@ -350,6 +350,10 @@ func extractVolume(r io.Reader, dir string) (err error) {
 			if err := replaceable(dst, hdr.Name); err != nil {
 				return err
 			}
+			// link(2) on macOS follows a symlink target out of the volume.
+			if fi, err := os.Lstat(filepath.Join(dir, target)); err != nil || !fi.Mode().IsRegular() {
+				return fmt.Errorf("%s: hard link to %q, which is not a regular file in the volume", hdr.Name, hdr.Linkname)
+			}
 			if err := os.Link(filepath.Join(dir, target), dst); err != nil {
 				return err
 			}
