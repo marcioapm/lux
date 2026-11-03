@@ -553,9 +553,9 @@ const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.
 	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + runRaiseColumns + `, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + timeoutRemainingSQL + `, ` + resumableSQL + `, ` + stageColumns
 
 // timeoutRemainingSQL: the seconds Run r's timeout leaves it, by the reaper's
-// count (timedRuntimeSQL); NULL without a timeout.
+// count (rr.timed, timedRuntimeSQL's); NULL without a timeout.
 const timeoutRemainingSQL = `CASE WHEN coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
-	THEN greatest(0, extract(epoch FROM (r.spec->>'timeout')::interval - ` + timedRuntimeSQL + `))::float8 END`
+	THEN greatest(0, extract(epoch FROM (r.spec->>'timeout')::interval - rr.timed))::float8 END`
 
 // runRaiseColumns: a Run's raise (from, for), "" unless it raised to the
 // Run's current resolved_size; a luxd without size_raised_to rewrites
@@ -591,7 +591,8 @@ const (
 func runRuntimeJoin(now string) string {
 	return ` CROSS JOIN LATERAL (SELECT
 			coalesce(sum(greatest(0, extract(epoch FROM coalesce(p.ended_at, CASE WHEN p.state IN ` + livePlacementStates + ` THEN ` + now + ` ELSE p.started_at END) - p.started_at))), 0)::float8 AS seconds,
-			max(p.started_at) FILTER (WHERE p.ended_at IS NULL AND p.state IN ` + livePlacementStates + `) AS since
+			max(p.started_at) FILTER (WHERE p.ended_at IS NULL AND p.state IN ` + livePlacementStates + `) AS since,
+			coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0') AS timed
 		FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) rr`
 }
 

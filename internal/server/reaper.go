@@ -289,7 +289,7 @@ func (s *Server) reapHosts(ctx context.Context) error {
 }
 
 // timedRuntimeSQL is the runtime (an interval) reapTimeouts holds Run r's
-// timeout against; a timeout change and timeoutRemainingSeconds read it too.
+// timeout against; a timeout change reads it too, and runRuntimeJoin (rr.timed) repeats it for timeoutRemainingSeconds.
 const timedRuntimeSQL = `(SELECT coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0')
 	FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL)`
 
