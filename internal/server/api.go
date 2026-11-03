@@ -532,7 +532,12 @@ type ImageResolution = proto.ImageResolution
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + runRaiseColumns + `, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + resumableSQL + `, ` + stageColumns
+	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + runRaiseColumns + `, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + timeoutRemainingSQL + `, ` + resumableSQL + `, ` + stageColumns
+
+// timeoutRemainingSQL: the seconds Run r's timeout leaves it, by the reaper's
+// count (timedRuntimeSQL); NULL without a timeout.
+const timeoutRemainingSQL = `CASE WHEN coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
+	THEN greatest(0, extract(epoch FROM (r.spec->>'timeout')::interval - ` + timedRuntimeSQL + `))::float8 END`
 
 // runRaiseColumns: a Run's raise (from, for), "" unless it raised to the
 // Run's current resolved_size; a luxd without size_raised_to rewrites
@@ -609,7 +614,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 	err := row.Scan(append([]any{&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
 		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing,
-		&requested, &size, &raisedFrom, &raisedFor, &shape, &r.Resumable},
+		&requested, &size, &raisedFrom, &raisedFor, &shape, &r.TimeoutRemainingSeconds, &r.Resumable},
 		stage.scanTargets()...)...)
 	// resolved_size is shown only while it names a size of the pool's
 	// current ladder with the Run's resources: a removed or changed shape
@@ -626,6 +631,9 @@ func scanRun(row pgx.Row) (*Run, error) {
 		}
 	}
 	r.PlacementSeconds = r.PlacementWaitSeconds + r.PlacementStartSeconds
+	if r.Spec.Timeout.Duration > 0 {
+		r.Timeout = r.Spec.Timeout.String()
+	}
 	stage.State, stage.CreatedAt = r.State, r.CreatedAt
 	st := deriveStage(stage)
 	r.Stage, r.StageSince, r.StageReason = st.Stage, st.Since, st.Reason

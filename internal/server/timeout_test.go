@@ -273,3 +273,56 @@ func TestTimeoutReaperFollowsChange(t *testing.T) {
 		t.Fatalf("past the new timeout: %s %q", state, reason)
 	}
 }
+
+// timeoutRemainingSeconds, on GET and list, counts runtime as the reaper
+// does: the Run is stopped exactly when it reaches 0.
+func TestTimeoutRemainingAgreesWithReaper(t *testing.T) {
+	s, ctx := timeoutFixture(t, "50 minutes")
+	remaining := func() *float64 {
+		t.Helper()
+		got, err := s.getRun(tenantCtx("t1"), &RunPath{ID: "r1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		list, err := s.listRuns(tenantCtx("t1"), &listRunsInput{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list.Body.Runs) != 1 || (list.Body.Runs[0].TimeoutRemainingSeconds == nil) != (got.Body.TimeoutRemainingSeconds == nil) {
+			t.Fatalf("list %+v", list.Body.Runs)
+		}
+		if got.Body.TimeoutRemainingSeconds != nil && got.Body.Timeout != got.Body.Spec.Timeout.String() {
+			t.Fatalf("timeout %q, spec %s", got.Body.Timeout, got.Body.Spec.Timeout)
+		}
+		return got.Body.TimeoutRemainingSeconds
+	}
+	if r := remaining(); r == nil || *r < 598 || *r > 601 {
+		t.Fatalf("remaining %v, want 600", r)
+	}
+	// An earlier placement that ended without an end time: the reaper
+	// counts it to now, and so does the remaining time.
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, started_at) VALUES ('p0', 't1', 'r1', 'h1', 0, 'exited', now() - interval '5 minutes')`)
+	if r := remaining(); r == nil || *r < 298 || *r > 301 {
+		t.Fatalf("remaining %v, want 300", r)
+	}
+	if err := s.reapTimeouts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := r1Stop(t, s); state != StateRunning {
+		t.Fatalf("stopped with time left: %s", state)
+	}
+	execSQL(t, s, ctx, `UPDATE placements SET started_at = now() - interval '56 minutes' WHERE id = 'p1'`)
+	if r := remaining(); r == nil || *r != 0 {
+		t.Fatalf("remaining %v, want 0", r)
+	}
+	if err := s.reapTimeouts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, reason := r1Stop(t, s); state != StateStopping || reason != "timeout" {
+		t.Fatalf("at 0 left: %s %q", state, reason)
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET spec = spec - 'timeout' WHERE id = 'r1'`)
+	if r := remaining(); r != nil {
+		t.Fatalf("remaining %v without a timeout", *r)
+	}
+}
