@@ -33,11 +33,12 @@ lux run --image alpine -- echo hello           # a quick generic Run
 lux run --image alpine --pool arm64 -- uname -m
 lux run --image alpine --pool m --size m-2-arm64 -- make test   # a size of a shaped pool
 lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with RUNTIME and COST columns; --resumable omits Runs whose only snapshot report was refused, and resumePolicy never
-lux get <run>                                  # state, stage, placements, usage; size: on a shaped pool, its size and what it asked for
+lux get <run>                                  # state, stage, placements, usage; timeout and time left; size: on a shaped pool, its size and what it asked for
 lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false] [--server NAME | --servers]
 lux events <run>                               # lifecycle events
 lux wait <run> [--state s1,s2] [--timeout 5m]  # default: until it ends; exits with its code
 lux rename <run> <name>                        # in any state; '' clears it; prints "renamed <id> to <name>"
+lux extend <run> <duration> | --to <duration> | --unlimited   # add to its timeout, set it, or remove it; prints "<id> timeout <t> (<left> left)"
 ```
 
 Specs are YAML or JSON (`-f -` reads stdin). A secret's value can come from
@@ -103,6 +104,15 @@ takes the Run's full id and needs the `run` scope. The name follows the
 RunSpec's rules ([name](runspec.md#name)); a name luxd refuses exits 4
 (`invalid_spec`). Labels never change.
 
+`lux extend` changes a Run's timeout (`POST /v1/runs/{id}/timeout`, `run`
+scope), its running time summed over all placements
+([timeout](runspec.md#timeout)), in any state but terminated:
+`lux extend <run> 1h` adds an hour, `--to 4h` sets a total, `--unlimited`
+removes it. It counts at once. A timeout that leaves less than a minute
+past the time already run exits 4 (`timeout_too_short`, with that time).
+Once the Run is being stopped for its timeout it exits 4
+(`timeout_stop_started`): let it fail, then `lux resume --timeout`.
+
 `lux logs -o json` prints one JSON record per line:
 `{"cursor","epoch","seq","t","ch","data"|"event"}`. Pass a record's
 `cursor` to `--since` to continue from it, across placements and hosts.
@@ -128,7 +138,7 @@ JPEG, WebP or GIF). See [images](adapters.md#images).
 
 ```bash
 lux stop <run> [--wait]         # graceful; snapshot; resumable
-lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--disk-grace DURATION] [--size NAME] [--pool NAME|ID] [--dry-run] [--to HOST]
+lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--disk-grace DURATION] [--size NAME] [--pool NAME|ID] [--timeout DURATION] [--dry-run] [--to HOST]
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]... [--sync-mode move|fast-forward|fetch]  # move restored checkouts to ref before init
 lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID] [--credential repo=VALUE]   # a running Run's checkouts
@@ -158,6 +168,10 @@ state fits it with headroom. When it does not, the Run keeps its disk,
 resumes anyway, and lux prints `disk kept: <why>` on stderr.
 `--disk-grace` sets how long it may stay over its disk before it is
 stopped from now on (`0s` to `1h`; `0s` stops it on the first sample over).
+
+`--timeout` sets the Run's timeout from this resume on: the total running
+time over all its placements, the time already run included (`0s`: none).
+A Run failed on its timeout needs a longer one to run again.
 
 ```bash
 lux resume run_x --cpus 4 --memory 2Gi    # more CPUs, less memory
