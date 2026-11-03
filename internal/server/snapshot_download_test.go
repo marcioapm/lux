@@ -10,16 +10,6 @@ import (
 	"time"
 )
 
-// getSnapshotVolume is GET path with key, without following a redirect.
-func getSnapshotVolume(t *testing.T, s *Server, key, path string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req.Header.Set("Authorization", "Bearer "+key)
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, req)
-	return w
-}
-
 func downloadEvents(t *testing.T, s *Server, run string) []map[string]any {
 	t.Helper()
 	var raw []byte
@@ -39,7 +29,7 @@ func TestDownloadSnapshotVolume(t *testing.T) {
 	const path = "/v1/runs/ra/snapshots/snapA/volumes/work"
 	for _, state := range []string{StateStopped, StateTerminated, StateRunning} {
 		execSQL(t, s, ctx, `UPDATE runs SET state = $1 WHERE id = 'ra'`, state)
-		w := getSnapshotVolume(t, s, key, path)
+		w := apiCall(t, s, key, http.MethodGet, path, nil)
 		if w.Code != http.StatusFound {
 			t.Fatalf("%s: %d %s, want 302", state, w.Code, w.Body)
 		}
@@ -48,7 +38,7 @@ func TestDownloadSnapshotVolume(t *testing.T) {
 			t.Fatalf("%s: Location %s (%v), want a presigned GET of ra/bA-vol for 15 minutes", state, w.Header().Get("Location"), err)
 		}
 	}
-	w := getSnapshotVolume(t, s, key, path+"?redirect=false")
+	w := apiCall(t, s, key, http.MethodGet, path+"?redirect=false", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("redirect=false: %d %s", w.Code, w.Body)
 	}
@@ -74,7 +64,7 @@ func TestDownloadSnapshotVolume(t *testing.T) {
 	}
 	// An operator, scoped to the Run's tenant by the Run.
 	op := apiKey(t, s, nil, "operator")
-	if w := getSnapshotVolume(t, s, op, path); w.Code != http.StatusFound {
+	if w := apiCall(t, s, op, http.MethodGet, path, nil); w.Code != http.StatusFound {
 		t.Fatalf("operator: %d %s", w.Code, w.Body)
 	}
 }
@@ -89,7 +79,7 @@ func TestDownloadSnapshotVolumeRefused(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('rc', 't1', '{}', 'terminated', 1)`)
 	check := func(name, key, path string, want int, code string) *httptest.ResponseRecorder {
 		t.Helper()
-		w := getSnapshotVolume(t, s, key, path)
+		w := apiCall(t, s, key, http.MethodGet, path, nil)
 		if w.Code != want || (code != "" && !strings.Contains(w.Body.String(), `"`+code+`"`)) {
 			t.Fatalf("%s: %d %s, want %d %s", name, w.Code, w.Body, want, code)
 		}

@@ -96,16 +96,6 @@ func r1Timeout(t *testing.T, s *Server) string {
 	return queryOne[string](t, s, `SELECT coalesce(spec->>'timeout', '') FROM runs WHERE id = 'r1'`)
 }
 
-// wantHTTPError fails unless err is an HTTPError with status and code.
-func wantHTTPError(t *testing.T, err error, status int, code string) *HTTPError {
-	t.Helper()
-	var he *HTTPError
-	if !errors.As(err, &he) || he.Status != status || he.Code != code {
-		t.Fatalf("err %v, want %d %s", err, status, code)
-	}
-	return he
-}
-
 // timeoutEvents is r1's timeout.changed events' from→to, in order.
 func timeoutEvents(t *testing.T, s *Server) []string {
 	t.Helper()
@@ -138,7 +128,8 @@ func TestTimeoutChange(t *testing.T) {
 		t.Fatalf("after unlimited: %q", got)
 	}
 	// Nothing to add to.
-	wantHTTPError(t, func() error { _, err := changeR1Timeout(s, TimeoutRequest{Add: dur("1h")}); return err }(), 422, "invalid_spec")
+	_, err = changeR1Timeout(s, TimeoutRequest{Add: dur("1h")})
+	refused(t, err, 422, "invalid_spec", "add without a timeout")
 	want := []string{"1h0m0s→2h0m0s by k-t1", "2h0m0s→4h0m0s by k-t1", "4h0m0s→ by k-t1"}
 	if got := timeoutEvents(t, s); !slices.Equal(got, want) {
 		t.Fatalf("events %q, want %q", got, want)
@@ -157,7 +148,7 @@ func TestTimeoutChangeBodies(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := changeR1Timeout(s, body)
-			wantHTTPError(t, err, 422, "invalid_spec")
+			refused(t, err, 422, "invalid_spec", name)
 		})
 	}
 	if got := r1Timeout(t, s); got != "1h" {
@@ -167,7 +158,8 @@ func TestTimeoutChangeBodies(t *testing.T) {
 
 func TestTimeoutChangeTooShort(t *testing.T) {
 	s, _ := timeoutFixture(t, "50 minutes")
-	he := wantHTTPError(t, func() error { _, err := changeR1Timeout(s, TimeoutRequest{Set: dur("50m")}); return err }(), 422, "timeout_too_short")
+	_, err := changeR1Timeout(s, TimeoutRequest{Set: dur("50m")})
+	he := refused(t, err, 422, "timeout_too_short", "50m after 50m run")
 	if !strings.Contains(he.Message, "has run 50m") || !strings.Contains(he.Message, "least it may be given is 51m") {
 		t.Fatalf("message %q", he.Message)
 	}
@@ -184,7 +176,7 @@ func TestTimeoutChangeRefusedStates(t *testing.T) {
 		s, ctx := timeoutFixture(t, "1 minute")
 		execSQL(t, s, ctx, `UPDATE runs SET state = 'terminated' WHERE id = 'r1'`)
 		_, err := changeR1Timeout(s, TimeoutRequest{Add: dur("1h")})
-		wantHTTPError(t, err, 409, "run_terminated")
+		refused(t, err, 409, "run_terminated", "terminated")
 	})
 	t.Run("timeout stop started", func(t *testing.T) {
 		s, ctx := timeoutFixture(t, "2 hours")
@@ -192,7 +184,7 @@ func TestTimeoutChangeRefusedStates(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := changeR1Timeout(s, TimeoutRequest{Add: dur("4h")})
-		wantHTTPError(t, err, 409, "timeout_stop_started")
+		refused(t, err, 409, "timeout_stop_started", "timeout stop started")
 		if got := r1Timeout(t, s); got != "1h" {
 			t.Fatalf("timeout %q", got)
 		}
@@ -255,7 +247,7 @@ func TestTimeoutChangeWaitsOutTimeoutStop(t *testing.T) {
 	if err := <-stopped; err != nil {
 		t.Fatal(err)
 	}
-	wantHTTPError(t, <-changed, 409, "timeout_stop_started")
+	refused(t, <-changed, 409, "timeout_stop_started", "timeout stop committed while waiting")
 	if got := timeoutEvents(t, s); len(got) != 0 {
 		t.Fatalf("events %v", got)
 	}
@@ -376,12 +368,14 @@ func TestTimeoutResumeWithTimeout(t *testing.T) {
 	s, ctx := timeoutFixture(t, "2 hours")
 	failOnTimeout(t, s, ctx)
 	_, err := resumeR1(s, resumeRequest{Timeout: dur("2h")})
-	he := wantHTTPError(t, err, 422, "timeout_too_short")
+	he := refused(t, err, 422, "timeout_too_short", "resume with 2h")
 	if !strings.Contains(he.Message, "has run 2h0m0s") {
 		t.Fatalf("message %q", he.Message)
 	}
-	wantHTTPError(t, func() error { _, err := resumeR1(s, resumeRequest{Timeout: dur("-1h")}); return err }(), 422, "invalid_spec")
-	wantHTTPError(t, func() error { _, err := resumeR1(s, resumeRequest{Timeout: dur("2h"), ValidateOnly: true}); return err }(), 422, "timeout_too_short")
+	_, err = resumeR1(s, resumeRequest{Timeout: dur("-1h")})
+	refused(t, err, 422, "invalid_spec", "resume with negative timeout")
+	_, err = resumeR1(s, resumeRequest{Timeout: dur("2h"), ValidateOnly: true})
+	refused(t, err, 422, "timeout_too_short", "validate resume with 2h")
 	if out, err := resumeR1(s, resumeRequest{Timeout: dur("3h"), ValidateOnly: true}); err != nil || !out.Body.Valid {
 		t.Fatalf("validateOnly: %+v %v", out, err)
 	}
@@ -398,7 +392,8 @@ func TestTimeoutResumeWithTimeout(t *testing.T) {
 	if _, err := resumeR1(s, resumeRequest{Timeout: dur("3h")}); err != nil {
 		t.Fatalf("same timeout again: %v", err)
 	}
-	wantHTTPError(t, func() error { _, err := resumeR1(s, resumeRequest{Timeout: dur("4h")}); return err }(), 409, "not_resumable")
+	_, err = resumeR1(s, resumeRequest{Timeout: dur("4h")})
+	refused(t, err, 409, "not_resumable", "already resuming with another timeout")
 	startEpoch2(t, s, ctx)
 	if err := s.reapTimeouts(ctx); err != nil {
 		t.Fatal(err)
