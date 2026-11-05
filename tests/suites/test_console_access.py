@@ -19,6 +19,13 @@ def access(env):
     env.start_luxd(LUX_CONSOLE_AUTH="cloudflare-access", LUX_CF_ACCESS_TEAM=fake.team, LUX_CF_ACCESS_AUD=fake.AUD,
                    LUX_CF_ACCESS_OPERATORS="ada@example.com,grace@example.com,mallory-victim@example.com",
                    LUX_CF_ACCESS_DEFAULT_TENANT=tenant["tenantId"])
+    # Memberships are explicit now; admission through Access alone grants
+    # no tenant privileges. Keep the infrastructure tests' admin fixture.
+    operator_headers = {"Cf-Access-Jwt-Assertion": fake.token("ada@example.com")}
+    for email in ("ordinary@example.com", "pictured@example.com", "plain-http@example.com"):
+        r = requests.post(env.luxd_url + "/v1/members", params={"tenant": tenant["tenantId"]},
+                          headers=operator_headers, json={"email": email, "role": "admin"}, timeout=10)
+        assert r.status_code == 200, r.text
     yield fake
     env.stop_luxd()
     env.start_luxd()
@@ -83,8 +90,8 @@ def test_access_tenant_is_isolated(env, access, tenant_factory):
     own = _get(env, "/v1/runs/" + mine_id, headers=hdr)
     assert own.status_code == 200 and own.json()["id"] == mine_id, own.text
     assert mine_id in {r["id"] for r in _get(env, "/v1/runs?limit=1000", headers=hdr).json()["runs"]}
-    assert run_id not in {r["id"] for r in _get(env, "/v1/runs?limit=1000&tenant=" + other.tenant_id,
-                                                   headers=hdr).json()["runs"]}
+    denied = _get(env, "/v1/runs?limit=1000&tenant=" + other.tenant_id, headers=hdr)
+    assert denied.status_code == 403 and denied.json()["error"]["code"] == "not_a_member", denied.text
     assert _get(env, "/v1/runs/" + run_id, headers=hdr).status_code == 404
     assert _get(env, "/v1/tenants", headers=hdr).status_code == 403
     r = requests.post(f"{env.luxd_url}/v1/runs/{run_id}/terminate", headers=hdr, timeout=10)
@@ -107,7 +114,7 @@ def test_access_status_and_history_are_tenant_scoped(env, access, tenant_factory
     own_id = mine.json()["id"]
     other_ids = [other.submit(spec) for _ in range(2)]
     try:
-        for path in ("/v1/status", f"/v1/status?tenant={other.tenant_id}"):
+        for path in ("/v1/status",):
             r = _get(env, path, headers=hdr)
             assert r.status_code == 200 and r.json()["queued"] == 1, r.text
         foreign = _get(env, "/v1/status", headers=operator, params={"tenant": other.tenant_id})
@@ -122,7 +129,8 @@ def test_access_status_and_history_are_tenant_scoped(env, access, tenant_factory
         wait_until(lambda: any(s.get("queued") == 2 for s in sampled(operator, other.tenant_id)),
                    30, 1, "foreign tenant never had two queued Runs in history")
         own_samples = sampled(hdr)
-        narrowed_samples = sampled(hdr, other.tenant_id)
+        narrowed_samples = own_samples
+        assert _get(env, "/v1/history", headers=hdr, params={"tenant": other.tenant_id}).status_code == 403
         assert own_samples and any(s.get("queued") == 1 for s in own_samples), own_samples
         assert narrowed_samples and any(s.get("queued") == 1 for s in narrowed_samples), narrowed_samples
         assert all(s.get("queued", 0) < 2 for s in own_samples + narrowed_samples)
@@ -155,14 +163,14 @@ def test_access_hosts_and_pools_are_tenant_scoped(env, access, tenant_factory, h
                    30, 0.3, "Access tenant host never became ready")
         foreign.start(hosts[1], name=foreign_host)
         foreign_id = next(h["id"] for h in other.json("hosts", "ls") if h["name"] == foreign_host)
-        for path in ("/v1/hosts", f"/v1/hosts?tenant={other.tenant_id}"):
+        for path in ("/v1/hosts",):
             r = _get(env, path, headers=hdr)
             assert r.status_code == 200, r.text
             names = {h["name"] for h in r.json()["hosts"]}
             assert own_host in names and foreign_host not in names, r.text
         for suffix in ("", f"?tenant={other.tenant_id}"):
-            assert _get(env, f"/v1/hosts/{foreign_id}{suffix}", headers=hdr).status_code == 404
-            assert _get(env, f"/v1/hosts/{foreign_id}/history{suffix}", headers=hdr).status_code == 404
+            assert _get(env, f"/v1/hosts/{foreign_id}{suffix}", headers=hdr).status_code == (403 if suffix else 404)
+            assert _get(env, f"/v1/hosts/{foreign_id}/history{suffix}", headers=hdr).status_code == (403 if suffix else 404)
         visible = _get(env, f"/v1/hosts/{foreign_id}", headers=operator)
         assert visible.status_code == 200 and visible.json()["name"] == foreign_host, visible.text
         own_visible = _get(env, f"/v1/hosts/{own_host}/history", headers=hdr)
@@ -174,14 +182,14 @@ def test_access_hosts_and_pools_are_tenant_scoped(env, access, tenant_factory, h
         pool["maxHosts"] = 2
         updated = requests.post(f"{env.luxd_url}/v1/pools", headers=hdr, json=pool, timeout=10)
         assert updated.status_code == 200, updated.text
-        for path in ("/v1/pools", f"/v1/pools?tenant={other.tenant_id}"):
+        for path in ("/v1/pools",):
             r = _get(env, path, headers=hdr)
             assert r.status_code == 200, r.text
             pools = {p["name"]: p for p in r.json()["pools"]}
             assert pools[own_name]["maxHosts"] == 2 and foreign_name not in pools, r.text
         forbidden = requests.delete(f"{env.luxd_url}/v1/pools/{foreign_name}", headers=hdr,
                                     params={"tenant": other.tenant_id}, timeout=10)
-        assert forbidden.status_code == 404, forbidden.text
+        assert forbidden.status_code == 403, forbidden.text
         assert any(p["name"] == foreign_name for p in other.json("pools", "ls"))
         deleted = requests.delete(f"{env.luxd_url}/v1/pools/{own_name}", headers=hdr, timeout=10)
         assert deleted.status_code == 204, deleted.text
@@ -194,13 +202,13 @@ def test_access_hosts_and_pools_are_tenant_scoped(env, access, tenant_factory, h
                         headers={"Authorization": f"Bearer {other.api_key}"}, timeout=10)
 
 
-def test_missing_default_tenant_denies_nonoperators(env, access):
+def test_missing_default_tenant_keeps_explicit_memberships(env, access):
     env.stop_luxd()
     env.start_luxd(LUX_CONSOLE_AUTH="cloudflare-access", LUX_CF_ACCESS_TEAM=access.team, LUX_CF_ACCESS_AUD=access.AUD,
                    LUX_CF_ACCESS_OPERATORS="ada@example.com", LUX_CF_ACCESS_DEFAULT_TENANT="missing-access-tenant")
     try:
         tenant = _get(env, "/v1/whoami", headers={"Cf-Access-Jwt-Assertion": access.token("ordinary@example.com")})
-        assert tenant.status_code == 403, tenant.text
+        assert tenant.status_code == 200 and tenant.json()["role"] == "admin", tenant.text
         operator = _get(env, "/v1/whoami", headers={"Cf-Access-Jwt-Assertion": access.token("ada@example.com")})
         assert operator.status_code == 200 and operator.json()["operator"], operator.text
     finally:
@@ -216,7 +224,7 @@ def test_access_does_not_promote_bad_or_unlisted_email(env, access, email):
     if not email or email != email.strip() or "<" in email:
         assert r.status_code == 401, r.text
     else:
-        assert r.status_code == 200 and not r.json()["operator"], r.text
+        assert r.status_code == 403 and r.json()["error"]["code"] == "not_a_member", r.text
 
 
 
