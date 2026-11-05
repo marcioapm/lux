@@ -148,6 +148,21 @@ export const INVITES: Inv[] = [
   { id: "inv_06", tenantId: "ten_initech", email: "cto@initech.dev", role: "owner", by: "usr_mar", created: 5 * DAY, expires: -9 * DAY, code: "inv_Ic7Tt2Cc0o" },
 ];
 
+const INITIAL = structuredClone({ USERS, MEMBERSHIPS, TENANTS, SAS, KEYS, INVITES });
+/** Back to the fixtures (tests change them). */
+export function resetPeople() {
+  const fresh = structuredClone(INITIAL);
+  for (const [arr, init] of [
+    [USERS, fresh.USERS],
+    [MEMBERSHIPS, fresh.MEMBERSHIPS],
+    [TENANTS, fresh.TENANTS],
+    [SAS, fresh.SAS],
+    [KEYS, fresh.KEYS],
+    [INVITES, fresh.INVITES],
+  ] as [unknown[], unknown[]][])
+    arr.splice(0, arr.length, ...init);
+}
+
 /** Run owners, by Run id or name (mock.ts's and mockSessions.ts's Runs). */
 const RUN_OWNERS: Record<string, { user?: string; sa?: string }> = {
   "agent-refactor-42": { sa: "sa_7cr3b2x9" },

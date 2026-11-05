@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { Avatar, IconButton, LiveDot, Logo, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
+import { Avatar, IconButton, LiveDot, Logo, ROLE_LABEL, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
 import { IconChevronLeft, IconChevronRight, IconClose, IconGlobe, IconGrid, IconKey, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
 import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
 import { isPlainClick, Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
 import { ScopeStep } from "./ScopeStep.tsx";
+import { useViewer } from "./identity.ts";
 
 interface NavItem {
   to: string;
@@ -79,6 +80,7 @@ const wideMedia = mediaStore("(min-width: 1280px)");
  */
 export function Shell({ tenants, operator, title, children }: ShellProps) {
   const session = useSession();
+  const viewer = useViewer();
   const path = usePath();
   const scope = useScope();
   const { resolved, toggle } = useTheme();
@@ -163,7 +165,20 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
   // Who is signed in, at the foot of the sidebar: the person and a way out.
   // Until whoami answers, a key's role is unknown: do not guess.
   const keyName = session.role === "operator" ? "Operator key" : session.role === "tenant" ? "Tenant key" : "API key";
-  const user = session.user ? (
+  const who = session.whoami;
+  // A person (by Access, or by their own key): who, their role here, and a link to their profile.
+  const personName = session.user?.name ?? who?.name ?? who?.email;
+  const roleSub = [viewer.role ? ROLE_LABEL[viewer.role] : null, who?.tenant || (viewer.memberships.length === 1 ? viewer.memberships[0]!.tenant : null), viewer.operator ? "operator" : null].filter(Boolean).join(" · ");
+  const user = who?.userId && personName ? (
+    <SidebarUser
+      avatar={<Avatar key={session.user?.picture ?? who.picture} name={personName} picture={session.user?.picture ?? who.picture} labelled={compact} />}
+      name={personName}
+      sub={roleSub || (viewer.noTenant ? "no tenant" : (who.email ?? ""))}
+      profile
+      signOut={session.user ? () => window.location.assign("/cdn-cgi/access/logout") : signOut}
+      signOutLabel={session.user ? "Sign out of Cloudflare Access" : "Sign out"}
+    />
+  ) : session.user ? (
     <SidebarUser
       avatar={<Avatar key={session.user.picture} name={session.user.name} picture={session.user.picture} labelled={compact} />}
       name={session.user.name}
@@ -287,14 +302,25 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
  * rail only the avatar and the button show, so the avatar names the person
  * (hover, and to assistive technology).
  */
-function SidebarUser({ avatar, name, sub, signOut, signOutLabel }: { avatar: ReactNode; name: string; sub: string; signOut: () => void; signOutLabel: string }) {
-  return (
-    <div className="sidebar-user" title={`${name} · ${sub}`}>
+function SidebarUser({ avatar, name, sub, signOut, signOutLabel, profile }: { avatar: ReactNode; name: string; sub: string; signOut: () => void; signOutLabel: string; profile?: boolean }) {
+  const inner = (
+    <>
       {avatar}
       <span className="sidebar-user-text">
         <span className="sidebar-user-name ellipsis">{name}</span>
         <span className="sidebar-user-sub ellipsis">{sub}</span>
       </span>
+    </>
+  );
+  return (
+    <div className="sidebar-user" title={`${name} · ${sub}`}>
+      {profile ? (
+        <Link to="/me" className="sidebar-user-link" aria-label={`Profile and API keys: ${name}`}>
+          {inner}
+        </Link>
+      ) : (
+        inner
+      )}
       <IconButton size="sm" label={signOutLabel} onClick={signOut}>
         <IconLogout size={15} />
       </IconButton>

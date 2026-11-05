@@ -96,10 +96,11 @@ export const api = {
   createTenant: (body: { name: string; ownerEmail?: string }) => request<NewTenantResult>("/tenants", { method: "POST", body }),
 
   me: (signal?: Sig) => request<Me>("/me", { signal }),
-  myKeys: (signal?: Sig) => request<{ keys: ApiKey[] }>("/me/keys", { signal }).then((r) => r.keys ?? []),
-  createMyKey: (body: NewKeyRequest) => request<CreatedApiKey>("/me/keys", { method: "POST", body }),
-  renameMyKey: (id: string, name: string) => request<ApiKey>(`/me/keys/${enc(id)}`, { method: "PATCH", body: { name } }),
-  revokeMyKey: (id: string) => request<void>(`/me/keys/${enc(id)}`, { method: "DELETE" }),
+  /** My keys in the tenant in scope (keys are per person per tenant). */
+  myKeys: (tenant: Scope, signal?: Sig) => request<{ keys: ApiKey[] }>("/me/keys", { tenant, signal }).then((r) => r.keys ?? []),
+  createMyKey: (tenant: Scope, body: NewKeyRequest) => request<CreatedApiKey>("/me/keys", { method: "POST", tenant, body }),
+  renameMyKey: (tenant: Scope, id: string, name: string) => request<ApiKey>(`/me/keys/${enc(id)}`, { method: "PATCH", tenant, body: { name } }),
+  revokeMyKey: (tenant: Scope, id: string) => request<void>(`/me/keys/${enc(id)}`, { method: "DELETE", tenant }),
   myInvitations: (signal?: Sig) => request<{ invitations: MyInvitation[] }>("/me/invitations", { signal }).then((r) => r.invitations ?? []),
 
   members: (tenant: Scope, signal?: Sig) => request<{ members: Member[] }>("/members", { tenant, signal }).then((r) => r.members ?? []),
