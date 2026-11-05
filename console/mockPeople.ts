@@ -220,7 +220,8 @@ export function callerOf(req: Request, url: URL, accessMode: boolean): Caller | 
 
 export const person = (id: string | undefined) => {
   const u = USERS.find((x) => x.id === id);
-  return u ? { id: u.id, email: u.email, name: u.name, ...(u.picture ? { picture: u.picture } : {}), operator: u.operator } : undefined;
+  // As me.go's Person: picture is always there ("" without one).
+  return u ? { id: u.id, email: u.email, name: u.name, picture: u.picture ?? "", operator: u.operator } : undefined;
 };
 export const atLeast = (c: Caller, r: Role) => c.operator || (c.role != null && RANK[c.role] >= RANK[r]);
 export const err = (status: number, code: string, message: string) => ({ status, body: { error: { code, message } } });
@@ -333,21 +334,31 @@ export function ownerFilter(c: Caller | null, u: URL): (name: string | undefined
   };
 }
 
+/** A person's memberships as whoami, /me and /people send them (userMemberships: by tenant name, with joinedAt). */
+export function membershipsOf(userId: string) {
+  return MEMBERSHIPS.filter((m) => m.userId === userId)
+    .map((m) => ({ tenantId: m.tenantId, tenant: tenantName(m.tenantId), role: m.role, joinedAt: ago(m.joined) }))
+    .sort((a, b) => a.tenant.localeCompare(b.tenant));
+}
+
 export function whoamiFor(c: Caller, consoleAuth: string, previewDomain: string | null) {
-  const memberships = c.user ? MEMBERSHIPS.filter((m) => m.userId === c.user!.id).map((m) => ({ tenantId: m.tenantId, tenant: tenantName(m.tenantId), role: m.role })) : [];
+  const memberships = c.user ? membershipsOf(c.user.id) : [];
   const key = c.user ? KEYS.find((k) => k.userId === c.user!.id) : KEYS.find((k) => k.saId === c.sa?.id);
   return {
     operator: c.operator,
     tenant: c.tenantId ? tenantName(c.tenantId) : "",
     tenantId: c.tenantId ?? "",
     ...(consoleAuth === "key" && key ? { keyId: key.id } : {}),
-    ...(c.user ? { userId: c.user.id, email: c.user.email, name: c.user.name } : {}),
-    ...(c.role ? { role: c.role } : {}),
+    ...(c.user ? { userId: c.user.id, email: c.user.email, name: c.user.name, ...(c.user.picture ? { picture: c.user.picture } : {}) } : {}),
+    // whoami.go: no role for an operator.
+    ...(c.role && !c.operator ? { role: c.role } : {}),
     ...(c.sa ? { serviceAccount: { id: c.sa.id, name: c.sa.name } } : {}),
     memberships,
     scopes: c.operator || atLeast(c, "admin") ? ["read", "run", "admin"] : atLeast(c, "member") ? ["read", "run"] : c.role ? ["read"] : [],
     consoleAuth,
     invitationsEnabled: consoleAuth === "cloudflare-access",
+    previews: previewDomain != null,
+    serverInject: true,
     previewDomain,
   };
 }

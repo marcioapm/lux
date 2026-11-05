@@ -93,6 +93,25 @@ test("cost by member and by owner: service accounts fold into their owner, (no o
   expect(withRuns.totals.some((r) => r.key === "user:usr_dio")).toBe(false);
 });
 
+// Field sets as luxd's structs marshal them (me.go Person: picture always; whoami.go: no role for an operator; MembershipRef with joinedAt).
+test("people shapes: Person always has picture, operators have no role, memberships carry joinedAt", async () => {
+  resetPeople();
+  const keys = (o: unknown) => Object.keys(o as object).sort();
+  const me = (await as("member", "/v1/me"))!.body as Record<string, unknown> & { memberships: Record<string, unknown>[] };
+  expect(keys(me)).toEqual(["email", "id", "lastSignInAt", "memberships", "name", "operator", "picture"]);
+  expect(me.picture).toBe("");
+  expect(keys(me.memberships[0])).toEqual(["joinedAt", "role", "tenant", "tenantId"]);
+  const members = ((await as("admin", "/v1/members"))!.body as { members: Record<string, unknown>[] }).members;
+  expect(keys(members[0])).toEqual(["email", "id", "joinedAt", "keyCount", "lastSeenAt", "name", "operator", "picture", "role", "runningRuns"]);
+  const sa = ((await as("admin", "/v1/service-accounts"))!.body as { serviceAccounts: Record<string, unknown>[] }).serviceAccounts.find((s) => s.name === "gha-runners")!;
+  expect(keys(sa.owner)).toEqual(["email", "id", "name", "operator", "picture"]);
+  const req = (r: string) => new Request("http://mock/v1/whoami", { headers: { authorization: `Bearer luxk_mock_${r}` } });
+  const who = (r: string, tenant = "") => whoamiFor(callerOf(req(r), new URL(`http://mock/v1/whoami${tenant}`), false)!, "cloudflare-access", null) as Record<string, unknown>;
+  expect(who("operator", "?tenant=acme")).not.toHaveProperty("role");
+  expect((who("member").memberships as Record<string, unknown>[])[0]).toHaveProperty("joinedAt");
+  expect(who("member")).toMatchObject({ previews: false, serverInject: true });
+});
+
 test("canAct: owners, service account owners and admins act; viewers never", () => {
   const c = (r: string) => {
     const req = new Request("http://mock/", { headers: { authorization: `Bearer luxk_mock_${r}` } });

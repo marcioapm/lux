@@ -3,7 +3,7 @@ import type { WhoAmI } from "../api/types.ts";
 import { atLeast, canActOnRun, viewerOf, whoCanAct } from "./identity.ts";
 
 const base: WhoAmI = { operator: false, tenant: "acme", tenantId: "ten_acme", scopes: ["read", "run"], consoleAuth: "cloudflare-access" };
-const sas = [{ id: "sa_ci", name: "ci-review-bot", owner: { id: "usr_car", email: "carla@acme.dev", name: "Carla Santos", operator: false } }];
+const sas = [{ id: "sa_ci", name: "ci-review-bot", owner: { id: "usr_car", email: "carla@acme.dev", name: "Carla Santos", picture: "", operator: false } }];
 
 test("roles: members act on their own and their service accounts' Runs, admins on all, viewers on none", () => {
   const carla = viewerOf({ ...base, userId: "usr_car", role: "member", memberships: [{ tenantId: "ten_acme", tenant: "acme", role: "member" }] });

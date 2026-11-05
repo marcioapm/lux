@@ -746,9 +746,11 @@ export interface WhoAmI {
   role?: TenantRole;
   /** A service account's key: which. */
   serviceAccount?: { id: string; name: string };
-  /** The tenants the person belongs to, with their role in each. */
+  /** The key is read-only: it reads whatever the role is (absent: false). */
+  readOnly?: boolean;
+  /** The tenants the person belongs to, with their role in each. luxd with people always sends it ([] for a service account or platform key); absent: an older luxd. */
   memberships?: Membership[];
-  /** Invitations exist (console.auth = "cloudflare-access"); false or absent hides every invitation control. */
+  /** Invitations exist (console.auth = "cloudflare-access"); luxd with people always sends it; false or absent hides every invitation control. */
   invitationsEnabled?: boolean;
 }
 
@@ -759,16 +761,24 @@ export interface Person {
   id: string;
   email: string;
   name: string;
-  picture?: string;
+  /** Always sent; "" when the identity provider has none. */
+  picture: string;
   operator: boolean;
 }
 
-/** A person's membership of one tenant. */
+/** A person's membership of one tenant (MembershipRef). joinedAt: luxd always fills it; optional in its schema. */
 export interface Membership {
   tenantId: string;
   tenant: string;
   role: TenantRole;
   joinedAt?: string;
+}
+
+/** POST /v1/invitations/by-code/{code}/accept: the membership made (no joinedAt). */
+export interface AcceptedInvitation {
+  tenantId: string;
+  tenant: string;
+  role: TenantRole;
 }
 
 /** GET /v1/members: a person in the tenant. keyCount only for themselves and admins+. */

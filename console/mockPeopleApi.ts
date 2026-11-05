@@ -1,7 +1,7 @@
 // The people routes of the mock luxd (mockPeople.ts holds the data):
 // /v1/me, /me/keys, /me/invitations, /members, /invitations (and by-code),
 // /service-accounts, /people, /costs?by=member|owner, POST /tenants.
-import { activeKeys, ago, atLeast, DAY, err, INVITES, invJson, invStatus, KEYS, keyJson, memberJson, MEMBERSHIPS, ok, OWNER_COST, person, SAS, saJson, seq, TENANTS, tenantName, USERS, type Caller, type Inv, type Key, type MembershipRow, type Role, type SA } from "./mockPeople.ts";
+import { activeKeys, ago, atLeast, DAY, err, INVITES, invJson, invStatus, KEYS, keyJson, memberJson, MEMBERSHIPS, membershipsOf, ok, OWNER_COST, person, SAS, saJson, seq, TENANTS, tenantName, USERS, type Caller, type Inv, type Key, type MembershipRow, type Role, type SA } from "./mockPeople.ts";
 
 let codeSeq = 0;
 const newCode = () => `inv_${(Date.now() + ++codeSeq).toString(36).slice(-6)}${Math.random().toString(36).slice(2, 6)}`;
@@ -30,7 +30,7 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
 
   if (p === "/v1/me") {
     if (!c.user) return err(404, "not_found", "a service account has no profile");
-    const ms = MEMBERSHIPS.filter((m) => m.userId === c.user!.id).map((m) => ({ tenantId: m.tenantId, tenant: tenantName(m.tenantId), role: m.role, joinedAt: ago(m.joined) }));
+    const ms = membershipsOf(c.user.id);
     return ok({ ...person(c.user.id), memberships: ms, lastSignInAt: ago(3 * 3600) });
   }
   if (p === "/v1/me/invitations") {
@@ -44,9 +44,10 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
     if (!i) return err(410, "invitation_unusable", "this invitation can't be used");
     const st = invStatus(i);
     const matches = c.user?.email === i.email;
+    const inviter = (by: string) => ({ name: person(by)?.name || person(by)?.email || "" });
     if (!byCode[2]) {
       if (!matches) return ok({ status: st, emailMatches: false });
-      return ok({ tenant: tenantName(i.tenantId), role: i.role, invitedBy: { name: person(i.by)?.name ?? "" }, expiresAt: ago(i.expires), status: st, emailMatches: true });
+      return ok({ tenant: tenantName(i.tenantId), role: i.role, invitedBy: inviter(i.by), expiresAt: ago(i.expires), status: st, emailMatches: true });
     }
     if (st !== "pending") return err(410, "invitation_unusable", "this invitation can't be used");
     if (!matches) return err(403, "invitation_email_mismatch", "this invitation is for someone else");
@@ -59,7 +60,7 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
     return ok({
       people: USERS.filter((x) => x.operator || MEMBERSHIPS.some((m) => m.userId === x.id)).map((x) => ({
         ...person(x.id),
-        memberships: MEMBERSHIPS.filter((m) => m.userId === x.id).map((m) => ({ tenantId: m.tenantId, tenant: tenantName(m.tenantId), role: m.role })),
+        memberships: membershipsOf(x.id),
         keyCount: KEYS.filter((k) => k.userId === x.id && activeKeys(k)).length,
         lastSeenAt: ago(x.lastSeen),
       })),

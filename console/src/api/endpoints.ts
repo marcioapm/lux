@@ -1,6 +1,6 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { ApiKey, Artifact, CostByOwner, CostLabels, CostSummary, CostSummaryParams, CreatedApiKey, Event, History, Host, HostCost, HostListParams, HostSummary, Invitation, InvitationCounts, InvitationLookup, InviteResult, LifecycleEvent, Me, Member, Membership, MigrateRequest, MyInvitation, NewKeyRequest, NewTenantResult, Page, PageParams, PlatformPerson, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, ServiceAccount, TenantRole, TenantServer, TenantServerList, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
+import type { AcceptedInvitation, ApiKey, Artifact, CostByOwner, CostLabels, CostSummary, CostSummaryParams, CreatedApiKey, Event, History, Host, HostCost, HostListParams, HostSummary, Invitation, InvitationCounts, InvitationLookup, InviteResult, LifecycleEvent, Me, Member, MigrateRequest, MyInvitation, NewKeyRequest, NewTenantResult, Page, PageParams, PlatformPerson, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, ServiceAccount, TenantRole, TenantServer, TenantServerList, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
@@ -113,13 +113,14 @@ export const api = {
   /** Operators: add a person directly by email (key-mode installs). */
   addMember: (tenant: Scope, body: { email: string; role: TenantRole }) => request<Member>("/members", { method: "POST", tenant, body }),
 
-  invitations: (tenant: Scope, p: { status?: string; q?: string; cursor?: string } = {}, signal?: Sig) => request<{ invitations: Invitation[]; cursor?: string }>("/invitations", { tenant, query: p, signal }),
+  /** cursor: luxd always sends it; "" when there are no more. */
+  invitations: (tenant: Scope, p: { status?: string; q?: string; cursor?: string } = {}, signal?: Sig) => request<{ invitations: Invitation[]; cursor: string }>("/invitations", { tenant, query: p, signal }),
   invitationCounts: (tenant: Scope, signal?: Sig) => request<InvitationCounts>("/invitations/counts", { tenant, signal }),
   invite: (tenant: Scope, body: { invitations: { email: string; name?: string }[]; role: TenantRole }) => request<{ results: InviteResult[] }>("/invitations", { method: "POST", tenant, body }).then((r) => r.results ?? []),
   renewInvitation: (tenant: Scope, id: string) => request<Invitation>(`/invitations/${enc(id)}/renew`, { method: "POST", tenant }),
   revokeInvitation: (tenant: Scope, id: string) => request<Invitation>(`/invitations/${enc(id)}/revoke`, { method: "POST", tenant }),
   invitationByCode: (code: string, signal?: Sig) => request<InvitationLookup>(`/invitations/by-code/${enc(code)}`, { signal }),
-  acceptInvitation: (code: string) => request<Membership>(`/invitations/by-code/${enc(code)}/accept`, { method: "POST" }),
+  acceptInvitation: (code: string) => request<AcceptedInvitation>(`/invitations/by-code/${enc(code)}/accept`, { method: "POST" }),
 
   serviceAccounts: (tenant: Scope, signal?: Sig) => request<{ serviceAccounts: ServiceAccount[] }>("/service-accounts", { tenant, signal }).then((r) => r.serviceAccounts ?? []),
   serviceAccount: (tenant: Scope, id: string, signal?: Sig) => request<ServiceAccount>(`/service-accounts/${enc(id)}`, { tenant, signal }),
