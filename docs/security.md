@@ -44,7 +44,10 @@ are in the linked pages.
   Only configured operator emails are operators; everyone else needs a
   membership in the selected tenant. Without one the API returns
   `403 not_a_member`; `/v1/me` and pending invitations remain available.
-  `?tenant=` or `Lux-Tenant` selects a membership. Service tokens (no email)
+  `?tenant=` or `Lux-Tenant` selects a membership. An operator who is also
+  a member of a tenant keeps full operator capability there, `?tenant=`
+  included: the membership's role never narrows an operator (it only
+  attributes the Runs they submit). Service tokens (no email)
   are refused. Access cookies authorize writes only with same-origin
   `Sec-Fetch-Site`, preventing cross-site forms from acting with them.
 - Invitations require Access mode (`409 invitations_unavailable` in key

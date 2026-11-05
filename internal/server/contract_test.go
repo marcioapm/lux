@@ -129,6 +129,26 @@ func TestCostByMemberContract(t *testing.T) {
 	}
 }
 
+// An operator who is also a member of a tenant keeps full operator
+// capability with ?tenant= for that tenant (docs/security.md): no role
+// from the membership narrows them, and whoami says operator, no role.
+func TestOperatorMemberKeepsOperator(t *testing.T) {
+	f, access := accessFixture(t)
+	s := f.s
+	execSQL(t, s, context.Background(), `INSERT INTO memberships (tenant_id, user_id, role) SELECT 't2', id, 'viewer' FROM users WHERE email = 'op@example.com'`)
+	code, who := accessDo(t, s, access.sign("op@example.com"), http.MethodGet, "/v1/whoami?tenant=t2", nil)
+	if code != 200 || who["operator"] != true || who["role"] != nil {
+		t.Fatalf("whoami: %d %v", code, who)
+	}
+	// A viewer could not do these; the operator does.
+	if code, out := accessDo(t, s, access.sign("op@example.com"), http.MethodPost, "/v1/runs?tenant=t2", rawJSON(minimalRun)); code != http.StatusCreated {
+		t.Fatalf("operator (a viewer of t2) submits: %d %v", code, out)
+	}
+	if code, out := accessDo(t, s, access.sign("op@example.com"), http.MethodPatch, "/v1/members/usr_member?tenant=t1", map[string]any{"role": "admin"}); code != 200 {
+		t.Fatalf("operator changes a role: %d %v", code, out)
+	}
+}
+
 // GET /v1/tenants: owners are the owners' display names (name, else
 // email) by email, with ownersCount and membersCount; POST /v1/tenants
 // answers {id, tenantId, name, invitation?}.
