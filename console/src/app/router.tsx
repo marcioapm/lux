@@ -10,7 +10,8 @@ const listeners = new Set<() => void>();
 function notify() {
   listeners.forEach((l) => l());
 }
-window.addEventListener("popstate", notify);
+// Guarded: a module that only needs the types (a unit test without a DOM) may import it.
+if (typeof window !== "undefined") window.addEventListener("popstate", notify);
 
 function subscribe(cb: () => void) {
   listeners.add(cb);
