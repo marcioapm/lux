@@ -265,6 +265,20 @@
   right: 0;
   left: auto;
 }
+/* A picker in the menu (Every's long summary) stays inside it: shrink and ellipsize rather than push the page wider. */
+.topbar-pop-row > .select {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.topbar-pop-row > .select .select-trigger {
+  max-width: 100%;
+}
+.topbar-pop-row > .select .select-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .live-indicator {
   display: inline-flex;
   align-items: center;
