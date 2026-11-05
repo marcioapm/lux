@@ -120,7 +120,7 @@ export function Overview() {
           </div>
         </>
       )}
-      {tab === "cost" && <><OverviewCost />{!viewer.legacy && <MemberCost />}</>}
+      {tab === "cost" && <><OverviewCost />{viewer.resolved && !viewer.legacy && <MemberCost />}</>}
       {tab === "storage" && (
         <>
           <ErrorStrip error={history.error} />

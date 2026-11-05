@@ -52,6 +52,8 @@ export function TerminalPage({ id }: { id: string }) {
   const { apiTenant } = useScope();
   const run = useQuery(`terminal-permission:${id}`, (s) => api.run(id, s));
   const sas = useQuery(`sas@${apiTenant ?? ""}`, (s) => api.serviceAccounts(apiTenant, s));
+  // Until whoami answers, nobody gets a shell.
+  if (!viewer.resolved) return <PageSkeleton />;
   if (!viewer.legacy && !viewer.operator) {
     if (!run.data) return <PageSkeleton />;
     if (!canActOnRun(viewer, run.data, sas.data)) return <div className="page"><PageHeader title="Terminal" /><EmptyState title="Only the owner and admins can open a terminal" description="You can still read the Run's output and Session transcript." /></div>;

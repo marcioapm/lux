@@ -21,7 +21,7 @@ type Tab = (typeof TABS)[number];
 export function RunPage({ id }: { id: string }) {
   const { operator, apiTenant } = useScope();
   const viewer = useViewer();
-  const sas = useQuery(`sas@${apiTenant ?? ""}`, (s) => api.serviceAccounts(apiTenant, s), { enabled: !viewer.legacy });
+  const sas = useQuery(`sas@${apiTenant ?? ""}`, (s) => api.serviceAccounts(apiTenant, s), { enabled: viewer.resolved && !viewer.legacy });
   const now = useNow(5000);
   // The tab lives in the URL (?tab=), so links can open one; the first tab has none.
   const params = useSearchParams();
@@ -82,7 +82,7 @@ export function RunPage({ id }: { id: string }) {
             {run.exitCode != null && !run.stateReason?.includes(`exit code ${run.exitCode}`) && <span>exit {run.exitCode}</span>}
           </>
         }
-        note={canAct ? run.stateReason : readNote}
+        note={canAct || !viewer.resolved ? run.stateReason : readNote}
         actions={canAct ? <RunActions run={run} operator={operator} onChanged={onChanged} /> : undefined}
       />
       <ErrorStrip error={q.error} />

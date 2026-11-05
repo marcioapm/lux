@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import type { WhoAmI } from "../../api/index.ts";
 
 // The page's imports (the router) touch window at load: register the DOM first.
 let RunPage: typeof import("./RunPage.tsx").RunPage;
@@ -26,9 +27,37 @@ afterAll(async () => {
 
 const IMAGE = "ghcr.io/acme/jervasion-agent@sha256:2c567002fb22e0d9c1b7a4f35e6d2c8b90a1f4e7d3c2b1a09f8e7d6cd76856cf";
 const run = (adapter: string, extra: Record<string, unknown> = {}) => ({ id: "run_1", tenant: "t", state: "succeeded", epoch: 1, labels: {}, createdAt: new Date(0).toISOString(), spec: { image: { ref: IMAGE }, resources: {}, workload: { adapter } }, ...extra });
+const LEGACY_RUN: WhoAmI = { operator: false, tenant: "t", tenantId: "t", keyId: "k", scopes: ["read", "run"], consoleAuth: "key" };
 
-async function render(adapter: string, url: string, extra: Record<string, unknown> = {}, input?: (body: unknown) => unknown) {
+// Until whoami answers, the page shows no action at all; an older luxd's whoami decides by its scopes.
+test("unknown identity: no Run actions, no input; a legacy whoami's run scope acts, its read scope does not", async () => {
+  const button = (el: HTMLElement, t: string) => [...el.querySelectorAll("button")].find((b) => b.textContent?.trim() === t);
+  const running = { state: "running" };
+  const unknown = await render("opencode", "http://localhost/runs/run_1", running, undefined, null);
+  try {
+    expect(button(unknown.el, "Terminate")).toBeUndefined();
+    expect(unknown.el.querySelector("textarea")).toBeNull();
+  } finally {
+    await unknown.done();
+  }
+  const legacy = await render("opencode", "http://localhost/runs/run_1", running);
+  try {
+    expect(button(legacy.el, "Terminate")).toBeDefined();
+  } finally {
+    await legacy.done();
+  }
+  const reader = await render("opencode", "http://localhost/runs/run_1", running, undefined, { ...LEGACY_RUN, scopes: ["read"] });
+  try {
+    expect(button(reader.el, "Terminate")).toBeUndefined();
+  } finally {
+    await reader.done();
+  }
+});
+
+async function render(adapter: string, url: string, extra: Record<string, unknown> = {}, input?: (body: unknown) => unknown, who: WhoAmI | null = LEGACY_RUN) {
   api.signIn("k");
+  // Default: an older luxd's key with the run scope (no people): it acts as before, from its scopes.
+  if (who) api.setWhoAmI(who);
   const fake = fakeApi((path, method, body) => {
     if (path.startsWith("/v1/runs/run_1/output")) return new Response("event: end\ndata: {}\n\n", { headers: { "Content-Type": "text/event-stream" } });
     if (path === "/v1/runs/run_1/input" && method === "POST") return input ? input(body) : { requestId: "in_1" };

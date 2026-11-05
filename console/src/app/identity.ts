@@ -10,7 +10,9 @@ export interface Viewer {
   operator: boolean;
   /** The role in the tenant in scope; null when unknown (an older luxd: see legacy). */
   role: TenantRole | null;
-  /** whoami had no role: decide from scopes, as before people. */
+  /** whoami has answered. Until then nobody may change anything: every mutating control is hidden or disabled. */
+  resolved: boolean;
+  /** whoami answered without people (no role, userId, memberships, service account): an older luxd; decide from scopes, as before people. */
   legacy: boolean;
   userId?: string;
   serviceAccountId?: string;
@@ -30,14 +32,15 @@ export function viewerOf(me: WhoAmI | null, tenant?: string): Viewer {
   return {
     operator: me?.operator ?? false,
     role,
-    legacy: me == null || (me.role == null && me.memberships == null),
+    resolved: me != null,
+    legacy: me != null && me.role == null && me.userId == null && me.memberships == null && me.serviceAccount == null,
     userId: me?.userId,
     serviceAccountId: me?.serviceAccount?.id,
     email: me?.email,
     name: me?.name,
     memberships,
     invitationsEnabled: me?.invitationsEnabled === true && me.consoleAuth === "cloudflare-access",
-    scopes: me?.scopes ?? ["read", "run"],
+    scopes: me?.scopes ?? [],
     noTenant: me != null && !me.operator && !me.serviceAccount && me.memberships != null && me.memberships.length === 0,
   };
 }
@@ -48,8 +51,9 @@ export function useViewer(): Viewer {
   return viewerOf(whoami, apiTenant);
 }
 
-/** Operators count as every role; an older luxd's key by its scopes. */
+/** Operators count as every role; an older luxd's key by its scopes; before whoami answers, reading only. */
 export function atLeast(v: Viewer, r: TenantRole): boolean {
+  if (!v.resolved) return r === "viewer";
   if (v.operator) return true;
   if (v.legacy) return r === "viewer" ? true : r === "member" ? v.scopes.includes("run") || v.scopes.includes("admin") : v.scopes.includes("admin");
   return roleAtLeast(v.role, r);
@@ -69,10 +73,27 @@ export function ownsOwner(v: Viewer, o: Owner | undefined, sas: readonly Pick<Se
  * viewers none. An older luxd (no roles, no owners): the run scope.
  */
 export function canActOnRun(v: Viewer, run: Pick<Run, "owner">, sas: readonly Pick<ServiceAccount, "id" | "owner">[] = []): boolean {
+  if (!v.resolved) return false;
   if (v.operator) return true;
   if (v.legacy) return v.scopes.includes("run") || v.scopes.includes("admin");
   if (atLeast(v, "admin")) return true;
   return atLeast(v, "member") && ownsOwner(v, run.owner, sas);
+}
+
+/**
+ * Tenant infrastructure (decisions 2–5): a tenant's pools, hosts (drain,
+ * price, network) and unattached servers are its admins' and owners'; the
+ * platform's, operators' only. Viewers and members change none of it.
+ */
+export function canManageInfra(v: Viewer, platform = false): boolean {
+  if (!v.resolved) return false;
+  if (v.operator) return true;
+  return !platform && atLeast(v, "admin");
+}
+
+/** A tenant server: attached to a Run, as that Run (canActOnRun); attached to none, an admin. */
+export function canActOnServer(v: Viewer, run: Pick<Run, "owner"> | null, sas: readonly Pick<ServiceAccount, "id" | "owner">[] = []): boolean {
+  return run ? canActOnRun(v, run, sas) : canManageInfra(v);
 }
 
 /** "Carla Santos (owner of ci-review-bot)", "Bruno Costa", or null with no owner: who besides admins may act on a Run. */

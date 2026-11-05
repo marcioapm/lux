@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { WhoAmI } from "../api/types.ts";
-import { atLeast, canActOnRun, viewerOf, whoCanAct } from "./identity.ts";
+import { atLeast, canActOnRun, canActOnServer, canManageInfra, viewerOf, whoCanAct } from "./identity.ts";
 
 const base: WhoAmI = { operator: false, tenant: "acme", tenantId: "ten_acme", scopes: ["read", "run"], consoleAuth: "cloudflare-access" };
 const sas = [{ id: "sa_ci", name: "ci-review-bot", owner: { id: "usr_car", email: "carla@acme.dev", name: "Carla Santos", picture: "", operator: false } }];
@@ -28,7 +28,35 @@ test("an older luxd (no role, no memberships) falls back to scopes", () => {
   expect(legacy.legacy).toBe(true);
   expect(atLeast(legacy, "member")).toBe(false);
   expect(canActOnRun(viewerOf({ ...base }), {})).toBe(true);
+  expect(atLeast(viewerOf({ ...base, scopes: ["read", "run", "admin"] }), "admin")).toBe(true);
+  expect(canManageInfra(viewerOf({ ...base, scopes: ["read", "run", "admin"] }))).toBe(true);
+  expect(canManageInfra(viewerOf({ ...base }))).toBe(false);
   expect(legacy.noTenant).toBe(false);
+});
+
+test("before whoami answers, nothing may change: no Run actions, no infra, reading only", () => {
+  const unknown = viewerOf(null);
+  expect(unknown.resolved).toBe(false);
+  expect(unknown.legacy).toBe(false);
+  expect(atLeast(unknown, "viewer")).toBe(true);
+  expect(atLeast(unknown, "member")).toBe(false);
+  expect(canActOnRun(unknown, {})).toBe(false);
+  expect(canActOnRun(unknown, { owner: { kind: "user", id: "usr_car", name: "Carla" } })).toBe(false);
+  expect(canManageInfra(unknown)).toBe(false);
+  expect(canActOnServer(unknown, null)).toBe(false);
+});
+
+test("infra by role: viewers and members none, admins the tenant's, operators the platform's too", () => {
+  const as = (role: "viewer" | "member" | "admin" | "owner") => viewerOf({ ...base, userId: "usr_x", role, memberships: [{ tenantId: "ten_acme", tenant: "acme", role }] });
+  expect(canManageInfra(as("viewer"))).toBe(false);
+  expect(canManageInfra(as("member"))).toBe(false);
+  expect(canManageInfra(as("admin"))).toBe(true);
+  expect(canManageInfra(as("owner"), true)).toBe(false);
+  expect(canManageInfra(viewerOf({ ...base, operator: true, memberships: [] }), true)).toBe(true);
+  const carla = viewerOf({ ...base, userId: "usr_car", role: "member", memberships: [] });
+  expect(canActOnServer(carla, { owner: { kind: "user", id: "usr_car", name: "Carla" } })).toBe(true);
+  expect(canActOnServer(carla, { owner: { kind: "user", id: "usr_bru", name: "Bruno" } })).toBe(false);
+  expect(canActOnServer(carla, null)).toBe(false);
 });
 
 test("no tenant: signed in with no membership, not an operator; invitations only with Access", () => {
