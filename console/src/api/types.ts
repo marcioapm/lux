@@ -901,9 +901,11 @@ export interface CostByOwner {
   totals: CostByOwnerRow[];
 }
 
-/** POST /v1/tenants (operators). */
+/** POST /v1/tenants (operators): the new tenant's id (also as tenantId) and name, and its first owner's invitation when one was asked for. */
 export interface NewTenantResult {
-  tenant: Tenant;
+  id: string;
+  tenantId: string;
+  name: string;
   invitation?: Invitation;
 }
 
@@ -921,11 +923,12 @@ export interface Tenant {
   hosts: number;
   storedBytes: number;
   createdAt: string;
-  /** The tenant's owners (absent from an older luxd). */
-  owners?: Person[];
+  /** The owners' display names (a name, else the email), by email; absent from an older luxd. */
+  owners?: string[] | null;
+  /** How many owners; 0: "No owner". Absent from an older luxd. */
+  ownersCount?: number;
   /** How many people are members. */
-  members?: number;
-  serviceAccounts?: number;
+  membersCount?: number;
 }
 
 export interface Percentiles {

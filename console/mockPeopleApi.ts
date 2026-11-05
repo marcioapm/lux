@@ -298,14 +298,18 @@ export function costByOwner(byOwner: boolean, members: MembershipRow[]) {
   };
 }
 
-/** GET /v1/tenants' extra columns. */
+/** GET /v1/tenants' people columns (status.go): owners' names (else email) by email, and the counts. */
 export function tenantPeople(id: string) {
-  const owners = MEMBERSHIPS.filter((m) => m.tenantId === id && m.role === "owner").map((m) => person(m.userId)!);
-  return { owners, members: MEMBERSHIPS.filter((m) => m.tenantId === id).length, serviceAccounts: SAS.filter((s) => s.tenantId === id).length };
+  const owners = MEMBERSHIPS.filter((m) => m.tenantId === id && m.role === "owner")
+    .map((m) => USERS.find((u) => u.id === m.userId)!)
+    .sort((a, b) => a.email.localeCompare(b.email));
+  return { ownersCount: owners.length, owners: owners.map((u) => u.name || u.email), membersCount: MEMBERSHIPS.filter((m) => m.tenantId === id).length };
 }
 
-/** POST /v1/tenants: the tenant, and its first owner's invitation when asked. */
+/** POST /v1/tenants (invitation_accept.go): {id, tenantId, name}, and its first owner's invitation when asked. */
 export function createTenant(name: string, ownerEmail: string | undefined, c: Caller, origin: string) {
+  if (!name.trim()) return err(422, "invalid_request", "name is required");
+  if (TENANTS.some((t) => t.name === name)) return err(409, "conflict", `tenant ${name} exists`);
   const t = { id: `ten_${name}`, name };
   TENANTS.push(t);
   let invitation: unknown;
@@ -314,5 +318,5 @@ export function createTenant(name: string, ownerEmail: string | undefined, c: Ca
     INVITES.push(i);
     invitation = invJson(i, origin);
   }
-  return { tenant: { ...t, retentionDays: 30, expireAfterDays: 90, activeRuns: 0, runs: 0, hosts: 0, storedBytes: 0, createdAt: ago(0), ...tenantPeople(t.id) }, ...(invitation ? { invitation } : {}) };
+  return ok({ id: t.id, tenantId: t.id, name: t.name, ...(invitation ? { invitation } : {}) }, 201);
 }

@@ -51,10 +51,10 @@ const tenant = (id: string, expireAfterDays: number): Tenant => ({
 });
 
 /** The Tenants page as an operator, /v1/tenants answering tenants. */
-async function render(tenants: Tenant[]) {
+async function render(tenants: Tenant[], answer?: (path: string, method: string) => unknown) {
   api.signIn("k");
-  api.setRole("operator");
-  const fake = fakeApi((path) => (path.startsWith("/v1/tenants") ? { tenants } : {}));
+  api.setWhoAmI({ operator: true, tenant: "", tenantId: "", scopes: ["read", "run", "admin"], consoleAuth: "cloudflare-access", memberships: [], invitationsEnabled: true });
+  const fake = fakeApi((path, method) => answer?.(path, method) ?? (path.startsWith("/v1/tenants") ? { tenants } : {}));
   (window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM.setURL("http://localhost/tenants");
   const el = document.createElement("div");
   document.body.appendChild(el);
@@ -97,6 +97,20 @@ async function render(tenants: Tenant[]) {
       const th = headerCells().find((h) => visibleText(h) === "Expiry") as HTMLElement;
       await act(async () => th.click());
     },
+    /** Each row as header → cell text. */
+    cells: () => cellTexts().map((cells) => Object.fromEntries(headers().map((h, i) => [h, cells[i]]))),
+    dialogText: () => [...el.querySelectorAll("dialog")].filter((d) => d.open).map((d) => visibleText(d)).join(" "),
+    create: async (name: string, email: string) => {
+      const btn = (root: ParentNode, label: string) => [...root.querySelectorAll("button")].find((b) => visibleText(b) === label) as HTMLButtonElement;
+      await act(async () => btn(el, "New tenant").click());
+      const d = [...el.querySelectorAll("dialog")].find((x) => x.open)!;
+      const [n, e] = [...d.querySelectorAll<HTMLInputElement>("input")];
+      const { fill } = await import("../peopleTesting.tsx");
+      for (const [input, v] of [[n!, name], [e!, email]] as const) await fill(input, v);
+      const b = btn(d, "Create and get link");
+      if (!b) throw new Error(`no Create and get link in: ${[...d.querySelectorAll("button")].map((x) => visibleText(x)).join(" | ")}; inputs ${[...d.querySelectorAll("input")].map((i) => i.value).join(",")}`);
+      await act(async () => b.click());
+    },
     done,
   };
 }
@@ -121,6 +135,37 @@ test("sorted by Expiry, never is the longest", async () => {
     expect(p.expiries().map((r) => r[0])).toEqual(["keep", "acme", "brisk"]);
     await p.sortByExpiry();
     expect(p.expiries().map((r) => r[0])).toEqual(["brisk", "acme", "keep"]);
+  } finally {
+    await p.done();
+  }
+});
+
+// GET /v1/tenants as luxd answers it (TestTenantPeopleContract): owners are names (else the email), with the counts.
+test("Owners and Members come from owners/ownersCount/membersCount; ownersCount 0 is No owner", async () => {
+  const p = await render([
+    { ...tenant("acme", 90), owners: ["owner person", "zed@example.com"], ownersCount: 2, membersCount: 7 },
+    { ...tenant("bare", 90), owners: [], ownersCount: 0, membersCount: 0 },
+    tenant("old", 90),
+  ]);
+  try {
+    const rows = p.cells();
+    expect(rows.find((r) => r.Tenant === "acme")).toMatchObject({ Owners: "owner person, zed@example.com", Members: "7" });
+    expect(rows.find((r) => r.Tenant === "bare")).toMatchObject({ Owners: "No owner", Members: "0" });
+    expect(rows.find((r) => r.Tenant === "old")).toMatchObject({ Owners: "–", Members: "–" });
+  } finally {
+    await p.done();
+  }
+});
+
+// POST /v1/tenants answers {id, tenantId, name, invitation?} (no tenant object).
+test("New tenant with a first owner shows that invitation's link, named for the new tenant", async () => {
+  const created = { id: "ten_new", tenantId: "ten_new", name: "newco", invitation: { id: "inv_1", email: "cto@newco.dev", role: "owner", status: "pending", code: "c", url: "http://localhost/invite/c", createdAt: "2026-11-05T00:00:00Z", expiresAt: "2026-11-19T00:00:00Z" } };
+  const p = await render([tenant("acme", 90)], (path, method) => (path.startsWith("/v1/tenants") && method === "POST" ? created : undefined));
+  try {
+    await p.create("newco", "cto@newco.dev");
+    await until(() => p.dialogText().includes("Send newco's Owner invitation"), "the link dialog");
+    expect(p.dialogText()).toContain("http://localhost/invite/c");
+    expect(p.dialogText()).toContain("cto@newco.dev");
   } finally {
     await p.done();
   }

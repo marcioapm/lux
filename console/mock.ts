@@ -296,7 +296,8 @@ async function api(req: Request, srv: Srv): Promise<Response> {
     if (p === "/v1/tenants" && req.method === "POST" && caller) {
       if (!caller.operator) return json({ error: { code: "forbidden", message: "operators only" } }, 403);
       const b = (await req.json()) as { name: string; ownerEmail?: string };
-      return json(createTenant(b.name, b.ownerEmail || undefined, caller, u.origin), 201);
+      const r = createTenant(b.name ?? "", b.ownerEmail || undefined, caller, u.origin);
+      return json(r.body, r.status);
     }
     if (p === "/v1/whoami" && tenantRole) return json({ operator: false, tenant: "acme", tenantId: "ten_acme", keyId: "key_ci", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null });
     if (p === "/v1/whoami") return json(consoleAuth === "cloudflare-access" ? { operator: true, tenant: "", tenantId: "", email: "ada@example.com", name: "Ada Lovelace", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null } : { operator: true, tenant: "", tenantId: "", keyId: "key_op", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null });

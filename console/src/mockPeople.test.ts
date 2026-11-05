@@ -1,6 +1,21 @@
 import { expect, test } from "bun:test";
-import { callerOf, canAct, whoamiFor } from "../mockPeople.ts";
-import { peopleApi } from "../mockPeopleApi.ts";
+import { callerOf, canAct, resetPeople, whoamiFor } from "../mockPeople.ts";
+import { createTenant, peopleApi, tenantPeople } from "../mockPeopleApi.ts";
+
+// GET/POST /v1/tenants as luxd answers (internal/server/contract_test.go TestTenantPeopleContract).
+test("tenants: owners are names by email with ownersCount/membersCount; create answers {id, tenantId, name, invitation?}", () => {
+  resetPeople();
+  expect(tenantPeople("ten_acme")).toEqual({ ownersCount: 2, owners: ["Eva Moreira", "Márcio Martins"], membersCount: 6 });
+  expect(tenantPeople("ten_initech")).toEqual({ ownersCount: 0, owners: [], membersCount: 0 });
+  const op = callerOf(new Request("http://mock/", { headers: { authorization: "Bearer luxk_mock_operator" } }), new URL("http://mock/"), false)!;
+  const r = createTenant("newco", "CTO@newco.dev", op, "http://mock");
+  expect(r.status).toBe(201);
+  expect(Object.keys(r.body as object).sort()).toEqual(["id", "invitation", "name", "tenantId"]);
+  expect(r.body).toMatchObject({ id: "ten_newco", tenantId: "ten_newco", name: "newco", invitation: { email: "cto@newco.dev", role: "owner" } });
+  expect(Object.keys(createTenant("plain", undefined, op, "http://mock").body as object).sort()).toEqual(["id", "name", "tenantId"]);
+  expect(createTenant("plain", undefined, op, "http://mock").status).toBe(409);
+  resetPeople();
+});
 
 // The dev mock answers the people routes to the API contract, per role, so
 // every screen can be shown as each role (luxk_mock_<role>).
