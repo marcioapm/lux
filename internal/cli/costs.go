@@ -169,7 +169,7 @@ func (a *app) costsCmd() *cobra.Command {
 		Short: "Costs over a time range, by currency and up to two groups",
 		Long: `Costs over a range of whole UTC hours (--since, default 7d, as lux
 history; or --from/--to, RFC 3339), per currency, grouped by up to two of
---by tenant (operators), pool, host, family, run, key or label:KEY. Grouping by
+--by tenant (operators), pool, host, family, run, key, member, owner or label:KEY. Grouping by
 pool or host applies to the host-tied families (compute, block storage,
 public IPv4, data transfer); other families show as "(none)". key is
 who submitted the Runs: the API key's name, a person's email, or "(none)"
@@ -228,7 +228,7 @@ luxd's response as it came.`,
 	cmd.Flags().StringVar(&since, "since", "7d", "how far back from now (e.g. 24h, 7d)")
 	cmd.Flags().StringVar(&from, "from", "", "the start (RFC 3339), instead of --since")
 	cmd.Flags().StringVar(&to, "to", "", "the end (RFC 3339); default now")
-	cmd.Flags().StringArrayVar(&by, "by", nil, "group by tenant|pool|host|family|run|key|label:KEY (repeat for two levels)")
+	cmd.Flags().StringArrayVar(&by, "by", nil, "group by tenant|pool|host|family|run|key|member|owner|label:KEY (repeat for two levels)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "only Runs with label KEY=VALUE (repeat: values of one key are alternatives, different keys all apply)")
 	cmd.Flags().StringArrayVar(&noLabels, "no-label", nil, "only Runs without label KEY (repeatable)")
 	cmd.Flags().StringVar(&family, "family", "", "only this family")
@@ -261,6 +261,16 @@ func (a *app) renderCostSummary(s *server.CostSummaryBody, by []string, interval
 		row := make([]string, 0, len(by)+2)
 		for _, g := range by {
 			v := r.Group[g]
+			if g == "member" || g == "owner" {
+				if r.Owner != nil {
+					v = r.Owner.Name
+					if v == "" {
+						v = r.Owner.Email
+					}
+				} else if v == "(none)" {
+					v = "(no owner)"
+				}
+			}
 			if g == "key" {
 				v = cmpOr(keyNames[v], v)
 			}
