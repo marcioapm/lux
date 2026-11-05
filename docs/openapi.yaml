@@ -7558,6 +7558,66 @@ paths:
       summary: List a member's active keys
       tags:
         - people
+  /v1/members/{user}/keys/{key}:
+    delete:
+      description: |-
+        Admins and owners revoke any member's key in this tenant (by id or prefix); an owner's keys only owners and operators. 404 for a key that is not that member's active key in this tenant. Records key.revoked, by the actor.
+
+        Needs the `admin` scope.
+      operationId: revokeMemberKey
+      parameters:
+        - description: The member's id or email.
+          in: path
+          name: user
+          required: true
+          schema:
+            description: The member's id or email.
+            type: string
+        - description: The key's id, or its prefix.
+          in: path
+          name: key
+          required: true
+          schema:
+            description: The key's id, or its prefix.
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Revoke a member's key
+      tags:
+        - people
   /v1/people:
     get:
       description: |-

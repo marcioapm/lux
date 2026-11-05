@@ -114,13 +114,16 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
     if (!target) return err(404, "not_found", "member not found");
     const self = target.userId === c.user?.id;
     if (p.includes("/keys")) {
-      if (!self && !atLeast(c, "admin")) return err(404, "not_found", "not found");
       if (mm[2] && method === "DELETE") {
-        const k = KEYS.find((x) => x.id === mm[2] && x.userId === target.userId);
-        if (!k) return err(404, "not_found", "key not found");
+        // members.go revokeMemberKey: admins+; an owner's keys owners and operators; 404 for a key not theirs here.
+        if (!atLeast(c, "admin")) return err(403, "forbidden", "only admins and owners revoke a member's keys");
+        if (target.role === "owner" && !atLeast(c, "owner")) return err(403, "forbidden", "only owners and operators revoke an owner's keys");
+        const k = KEYS.find((x) => (x.id === mm[2] || x.prefix === mm[2]) && x.userId === target.userId && x.tenantId === tenantId && activeKeys(x));
+        if (!k) return err(404, "not_found", `no active key ${mm[2]}`);
         k.revoked = true;
         return ok(null, 204);
       }
+      if (!self && !atLeast(c, "admin")) return err(404, "not_found", "not found");
       return ok({ keys: KEYS.filter((k) => k.userId === target.userId && k.tenantId === tenantId && activeKeys(k)).map(keyJson) });
     }
     if (method === "GET") return ok(memberJson(target, c));

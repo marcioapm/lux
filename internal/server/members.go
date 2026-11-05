@@ -43,6 +43,42 @@ func (s *Server) memberRoutes(api huma.API) {
 	register(s, api, huma.Operation{OperationID: "changeMemberRole", Method: http.MethodPatch, Path: "/v1/members/{user}", Tags: []string{"people"}, Summary: "Change a member's role", Description: "Admins manage roles up to admin; only owners and operators manage owners. Only an operator may demote the last owner (409 last_owner)."}, "admin", forTenant(s.changeMemberRole))
 	register(s, api, huma.Operation{OperationID: "removeMember", Method: http.MethodDelete, Path: "/v1/members/{user}", Tags: []string{"people"}, Summary: "Remove a member", Description: "Revokes their keys in this tenant immediately; their Runs keep running and stay theirs. Their service accounts become ownerless. Only an operator may remove the last owner.", DefaultStatus: 204}, "admin", forTenant(s.removeMember))
 	register(s, api, huma.Operation{OperationID: "listMemberKeys", Method: http.MethodGet, Path: "/v1/members/{user}/keys", Tags: []string{"people"}, Summary: "List a member's active keys", Description: "Self and admins only; everyone else gets 404."}, "read", forTenant(s.listMemberKeys))
+	register(s, api, huma.Operation{OperationID: "revokeMemberKey", Method: http.MethodDelete, Path: "/v1/members/{user}/keys/{key}", Tags: []string{"people"},
+		Summary: "Revoke a member's key",
+		Description: "Admins and owners revoke any member's key in this tenant (by id or prefix); an owner's keys only owners and operators. " +
+			"404 for a key that is not that member's active key in this tenant. Records key.revoked, by the actor.",
+		DefaultStatus: http.StatusNoContent, Errors: []int{http.StatusForbidden, http.StatusNotFound}}, "admin", forTenant(s.revokeMemberKey))
+}
+
+type memberKeyPath struct {
+	MemberPath
+	Key string `path:"key" doc:"The key's id, or its prefix."`
+}
+
+func (s *Server) revokeMemberKey(ctx context.Context, in *memberKeyPath) (*struct{}, error) {
+	p := principal(ctx)
+	if !p.atLeast("admin") {
+		return nil, errf(http.StatusForbidden, "forbidden", "only admins and owners revoke a member's keys")
+	}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		m, err := findMember(ctx, tx, p, in.User)
+		if err != nil {
+			return err
+		}
+		if m.Role == "owner" && !p.atLeast("owner") {
+			return errf(http.StatusForbidden, "forbidden", "only owners and operators revoke an owner's keys")
+		}
+		id, err := findKey(ctx, tx, in.Key, `k.user_id = $1 AND k.tenant_id = $2`, m.ID, p.TenantID)
+		if err != nil {
+			return err
+		}
+		var name string
+		if err := tx.QueryRow(ctx, `UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING name`, id).Scan(&name); err != nil {
+			return err
+		}
+		return addTenantEvent(ctx, tx, p.TenantID, "key.revoked", p, map[string]any{"key": id, "name": name, "user": m.ID})
+	})
+	return nil, err
 }
 
 func memberRows(ctx context.Context, tx pgx.Tx, p Principal, ref string) ([]Member, error) {

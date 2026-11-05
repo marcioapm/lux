@@ -154,3 +154,26 @@ test("A member's page: stats, owned service accounts, keys only for admins and t
     await asOther.done();
   }
 });
+
+// DELETE /v1/members/{user}/keys/{key} (members.go revokeMemberKey): admins revoke a member's key; an owner's only owners.
+test("An admin revokes a member's key on their page; an owner's keys have no Revoke for an admin", async () => {
+  const runs = { extra: (path: string) => (path.startsWith("/v1/runs") ? { runs: [] } : undefined) };
+  const p = await t.mountAs("admin", "/members/usr_car", <MemberPage id="usr_car" />, runs);
+  try {
+    await p.until(() => p.button("Revoke laptop") != null, "Carla's keys");
+    await t.click(p.button("Revoke laptop"));
+    await t.click(t.dialogButton(p.dialog(), "Revoke key"));
+    await p.until(() => p.fake.posts.some((x) => x.method === "DELETE"), "the DELETE");
+    expect(p.fake.posts.find((x) => x.method === "DELETE")!.path).toBe("/v1/members/usr_car/keys/key_u_car1");
+    await p.until(() => p.button("Revoke laptop") == null && p.button("Revoke dude-agent") != null, "the key gone, the other kept");
+  } finally {
+    await p.done();
+  }
+  const o = await t.mountAs("admin", "/members/usr_eva", <MemberPage id="usr_eva" />, runs);
+  try {
+    await o.until(() => o.text().includes("API keys") && o.text().includes("laptop"), "Eva's keys");
+    expect(o.button("Revoke laptop")).toBeUndefined();
+  } finally {
+    await o.done();
+  }
+});

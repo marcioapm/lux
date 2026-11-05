@@ -123,7 +123,7 @@ export function MemberPage({ id }: { id: string }) {
         </Card>
         {seesKeys && (
           <Card flush title="API keys" subtitle={self ? "yours: manage them on your profile" : `visible to ${first} and admins`}>
-            <KeysTable keys={keys.data ?? []} loading={keys.loading} role={p.role} whose={self ? "my" : "their"} onRevoke={atLeast(v, "admin") && !self ? setRevoking : undefined} empty={`${first} has no API keys.`} />
+            <KeysTable keys={keys.data ?? []} loading={keys.loading} role={p.role} whose={self ? "my" : "their"} onRevoke={canRevokeKeys(v, p, self) ? setRevoking : undefined} empty={`${first} has no API keys.`} />
           </Card>
         )}
       </div>
@@ -134,6 +134,11 @@ export function MemberPage({ id }: { id: string }) {
       )}
     </div>
   );
+}
+
+/** DELETE /v1/members/{user}/keys/{key}: admins+; an owner's keys only owners and operators. Your own: on your profile. */
+function canRevokeKeys(v: ReturnType<typeof useViewer>, m: { role: string }, self: boolean): boolean {
+  return !self && atLeast(v, "admin") && (m.role !== "owner" || atLeast(v, "owner"));
 }
 
 function KeyRevokeConfirm({ name, busy, onConfirm, onCancel }: { name: string; busy: boolean; onConfirm: () => void; onCancel: () => void }) {

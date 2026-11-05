@@ -36,7 +36,9 @@ are in the linked pages.
 - Removing a member immediately revokes their tenant keys, leaves their
   Runs running and attributed, and leaves their service accounts ownerless.
   Personal keys are visible only to self/admins; account keys to their
-  owner/admins. Service accounts cannot sign in or have the Owner role.
+  owner/admins. Admins revoke a member's key
+  (`DELETE /v1/members/{user}/keys/{key}`, event `key.revoked` by them);
+  an owner's keys only owners and operators. Service accounts cannot sign in or have the Owner role.
 - The console signs in with a key, kept in browser-tab session storage, or
   through Cloudflare Access. luxd verifies signatures, audience and expiry.
   Only configured operator emails are operators; everyone else needs a
