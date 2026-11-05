@@ -23,6 +23,7 @@ import { Tenants } from "./pages/Tenants.tsx";
 import { Profile } from "./pages/Profile.tsx";
 import { Members } from "./pages/Members.tsx";
 import { MemberPage } from "./pages/MemberPage.tsx";
+import { ServiceAccounts, ServiceAccountPage } from "./pages/ServiceAccounts.tsx";
 import { NotFound } from "./pages/NotFound.tsx";
 import { ErrorBlock } from "./pages/common.tsx";
 
@@ -62,6 +63,8 @@ const ROUTES: Route[] = [
   { pattern: "/me", title: "Profile", render: () => <Profile /> },
   { pattern: "/members", title: "Members", render: () => <Members /> },
   { pattern: "/members/:id", title: "Members", render: (p) => <MemberPage id={p.id!} /> },
+  { pattern: "/service-accounts", title: "Service accounts", render: () => <ServiceAccounts /> },
+  { pattern: "/service-accounts/:id", title: "Service accounts", render: (p) => <ServiceAccountPage id={p.id!} /> },
   {
     pattern: "/preview-auth",
     title: "Preview",
