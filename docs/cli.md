@@ -1,5 +1,49 @@
 # CLI
 
+## People, keys and roles
+
+All these commands support `-o json`. Tenant selection uses `--tenant` as
+elsewhere. Personal keys follow your role; `--read-only` only reads.
+Secrets appear only at creation. Five active personal keys per tenant;
+two per service account. Rotate by creating a replacement then revoking
+its predecessor.
+
+```bash
+lux whoami
+lux keys create --name laptop --expires 90d [--read-only]
+lux keys ls
+lux keys rename <id|prefix> new-name
+lux keys revoke <id|prefix>
+lux members ls
+lux members add person@example.com --role member # operator only
+lux members set-role person@example.com admin
+lux members rm person@example.com
+lux invites create one@example.com two@example.com --role member
+lux invites ls --status pending
+lux invites renew <email|id>
+lux invites revoke <email|id>
+lux sa create ci --role member --owner person@example.com --description CI
+lux sa ls
+lux sa get ci
+lux sa set ci --role admin --owner person@example.com
+lux sa disable ci
+lux sa keys create ci --name rotation
+lux sa keys ls ci
+lux sa keys revoke ci <id|prefix>
+lux ls --mine
+lux ls --owner person@example.com
+lux costs --by member
+lux costs --by owner
+lux tenants create team --owner first@example.com # operator
+```
+
+Viewers read everything but cannot submit, input or open terminals. Members
+act on their own Runs and their service accounts' Runs; Admins act on all
+and manage members/service accounts/infrastructure. Owners additionally
+manage Owners; only operators may remove/demote the last Owner. Invitations
+need Cloudflare Access mode and return links to send yourself (no emails).
+
+
 `lux` talks to luxd. It reads its configuration from flags, then the
 environment, then `~/.config/lux/config.toml`:
 

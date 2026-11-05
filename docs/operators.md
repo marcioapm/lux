@@ -16,6 +16,49 @@ Only `luxd admin` makes them, never the API. The `operator` scope implies
 tenant's rows: that is still enforced by Postgres row-level security, and an
 operator's request on a Run runs in that Run's tenant's scope.
 
+## People, invitations and upgrading
+
+Operators remain the emails in `console.cloudflare_access.operators`
+(`LUX_CF_ACCESS_OPERATORS`). At startup luxd upserts their person records
+and syncs the operator flag both ways; removing an email takes away
+operator privilege at the next restart, not its memberships. An operator
+key named exactly after an operator email becomes that person's key;
+other operator keys stay personless platform principals.
+
+`GET /v1/people` lists people and their memberships, key counts and last
+seen. Tenant lists include owner names/counts and member counts.
+Operators can also belong to tenants; Runs submitted as a person are
+attributed to that person.
+
+```bash
+lux tenants create team --owner first@example.com --tenant ""
+lux invites create member@example.com --role member --tenant team
+lux invites ls --status pending --tenant team
+lux members add member@example.com --role admin --tenant team # operator only
+lux members set-role first@example.com owner --tenant team
+luxd admin create-tenant --name team --owner first@example.com
+```
+
+Invitations exist only in Access mode, bind an email, and last 14 days.
+Send the returned links yourself. An existing live link is returned again;
+an expired one is renewed with the same code. No open links or mail sending.
+In key mode, operators add members directly by email.
+
+On upgrade (migrations 092/093), every existing tenant key gets its own
+ownerless service account: sanitized/deduplicated key name, role from scopes.
+**The secret, hash and effective scope do not change**: dude and threadctl
+need no configuration change. Runs gain a person owner from submitted email,
+otherwise the submitting key's service account, otherwise no owner.
+At first startup with a bound default tenant, configured operator emails
+become its Admins; other distinct emails that submitted Runs there become
+Members. Nobody else gains membership. Tenants initially have no Owner;
+an operator assigns Owners directly or by invitation. Removed members'
+Runs keep running and stay attributed; their tenant keys are revoked.
+
+Previews deliberately keep their older gate: verified Access users need no
+membership for default-tenant previews; other tenants require membership
+or operator status. See [Security](security.md#previews).
+
 ## One tenant, or all of them
 
 With no tenant from the flag, the environment or the config file, an
@@ -199,13 +242,14 @@ or load balancer you already use for luxd.
   `.default_tenant` (an existing tenant ID, preferred, or exact name such as
   `absmartly`). Missing or invalid settings prevent startup. Only an email
   in the verified Access JWT can match the operator allowlist; matching is
-  case-insensitive. Every other Access user with a valid email is an `admin`
-  principal confined to the default tenant, including when `?tenant=` names
-  another tenant. An absent default tenant denies their requests; it never
-  promotes them to operator. Create the tenant and verify its ID before
-  enabling this mode. Keep Access policies restrictive as the default tenant
-  grants Run and admin operations to every admitted user. Never put personal
-  addresses in a public config example; keep the actual allowlist in private
+   case-insensitive. Every other verified Access user needs a tenant
+   membership; their role is viewer, member, admin or owner. `?tenant=` (or
+   `Lux-Tenant`) selects one, otherwise the default membership is preferred.
+   A person in no tenant receives `403 not_a_member` on tenant routes, but
+   may read their profile and pending invitations and accept an invitation.
+   The default tenant no longer grants API administration to all Access
+   users. Never put personal addresses in a public config example; keep
+   the actual allowlist in private
   deployment configuration. luxd verifies tokens (header or cookie): team
   signature, issuer, audience and expiry. API keys still work alongside.
   The Access cookie authenticates reads and same-origin writes only

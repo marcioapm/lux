@@ -19,20 +19,37 @@ are in the linked pages.
 
 ## Keys and sign-in
 
-- API keys are stored hashed. A key has scopes: `read`, `run`, `admin`
-  (each implying the ones before), or `operator`.
-- The console signs in with a key, kept in the browser tab's session
-  storage only, or through Cloudflare Access (`console.auth =
-  "cloudflare-access"`). There luxd verifies every Access token itself:
-  signed by the team's keys, for the configured application (AUD), not
-  expired. Only explicitly allowlisted verified JWT emails are operators;
-  other users with a valid email are scoped to the configured default tenant
-  (which must exist). Missing or invalid settings fail startup, and a missing
-  tenant denies its users. Keep the Access application's policy restrictive:
-  every admitted user can administer the default tenant. Service tokens (no
-  email) are refused. The Access cookie authenticates reads, and writes
-  only when the browser marks them same-origin (`Sec-Fetch-Site`), so another
-  site cannot act with it ([Operators](operators.md#signing-in)).
+- API keys are stored hashed. Personal keys (`lux_u_…`) follow the person's
+  membership role in their tenant; service-account keys (`lux_s_…`) follow
+  that account's role. Read-only keys only read. Expired/revoked keys,
+  disabled principals and removed memberships fail authentication.
+  Personal keys have a concurrent-safe 5-active cap per person per tenant;
+  service accounts have 2. Secrets are shown once, on creation.
+- Roles are **viewer < member < admin < owner**. Viewers read everything
+  (including artifacts, diffs, snapshots, costs and events), never terminal
+  or input. Members submit Runs and act on their own Runs and those of
+  service accounts they own. Admins act on every Run and manage members up
+  to Admin, service accounts, tenant servers, pools and hosts. Owners also
+  manage Owners. Only operators may remove or demote the last owner.
+  Run mutations refuse another member with `403 not_run_owner`, naming
+  the owner. Every role sees every Run; ownership is not a read boundary.
+- Removing a member immediately revokes their tenant keys, leaves their
+  Runs running and attributed, and leaves their service accounts ownerless.
+  Personal keys are visible only to self/admins; account keys to their
+  owner/admins. Service accounts cannot sign in or have the Owner role.
+- The console signs in with a key, kept in browser-tab session storage, or
+  through Cloudflare Access. luxd verifies signatures, audience and expiry.
+  Only configured operator emails are operators; everyone else needs a
+  membership in the selected tenant. Without one the API returns
+  `403 not_a_member`; `/v1/me` and pending invitations remain available.
+  `?tenant=` or `Lux-Tenant` selects a membership. Service tokens (no email)
+  are refused. Access cookies authorize writes only with same-origin
+  `Sec-Fetch-Site`, preventing cross-site forms from acting with them.
+- Invitations require Access mode (`409 invitations_unavailable` in key
+  mode). Links bind one verified email to one role and tenant for 14 days.
+  A different email cannot inspect details or accept. No emails are sent.
+  Expired invitations renew with the same code; accepted/revoked codes
+  cannot be used again. Concurrent acceptance creates one membership.
 - **Streams from a browser** (exec, attach, ports) authenticate with the
   Access cookie or a **stream ticket**: `POST /v1/runs/{id}/tickets`, made
   with the caller's own key, good once for 60 seconds, for one Run and one
@@ -44,7 +61,7 @@ are in the linked pages.
   affected.
 - **A terminal is the Run's secrets.** A shell in a Run sees the
   workload's environment, `env` secrets included: whoever may open one
-  (`run` scope on the Run's tenant) may read them.
+  (`member` or above and ownership of the Run, or an admin) may read them.
 
 ## Workloads
 
@@ -98,8 +115,11 @@ domain ([Operators](operators.md#previews)). What protects that:
 
 - **Always authenticated.** Cloudflare Access with the preview
   application's own AUD, where luxd also verifies the token and checks
-  the user may read the Run (an operator, or its tenant under the Access
-  mapping); or, in ticket mode, a `__Host-` cookie (host-only, `Secure`,
+  the verified Access user is an operator, a member of the server's tenant
+  (any role), **or the server belongs to the configured default tenant**.
+  Previews need no lux membership: external testers keep default-tenant
+  previews. Other tenants require membership. This gate does not go through
+  the API's `not_a_member` lookup. Or, in ticket mode, a `__Host-` cookie (host-only, `Secure`,
   `HttpOnly`, `SameSite=Lax`) that luxd signs (HMAC-SHA256 with a key it
   keeps in its database), bound to one server, and gives out only for a
   preview ticket of that very server (or of the Run it is attached to),

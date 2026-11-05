@@ -12,6 +12,18 @@ lux records today (see [Concepts](concepts.md) and
 [Telemetry](telemetry.md)). Where lux lacks something the design needs,
 the doc says so under **Missing today**.
 
+## Cost by member and owner
+
+`GET /v1/costs?by=member` (`lux costs --by member`) groups the existing
+Run costs through Run ownership: each person and each service account is
+one row. `by=owner` folds service accounts into their current person owner;
+ownerless accounts stay separate. Rows have `key` (`user:<id>`, `sa:<id>`,
+or `(none)`) and optional `owner {kind,id,name,email?}`. `(none)` means
+**(no owner)**, for legacy or platform-submitted Runs. No new cost rows,
+quotas or per-person caps are introduced. Per-member/account costs are
+visible to every role. `by=key` (also `group=key`) is restricted to the
+key's principal, a service account's owner, or admins and operators.
+
 ## What lux has today
 
 The parts this design builds on:

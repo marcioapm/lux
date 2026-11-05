@@ -1,5 +1,20 @@
 # Concepts
 
+## People and tenants
+
+A person is identified by their verified Access email and may belong to
+several tenants, each with a role: Viewer, Member, Admin or Owner. A
+personal API key follows that tenant role (or reads only). A service
+account is a tenant's non-person principal with viewer/member/admin role,
+optional person owner and its own keys. Operators come from luxd's config
+and span tenants; personless operator keys remain platform principals.
+
+Runs have an owner, separate from “Submitted with” (the key/email): the
+person or service account that submitted them. Everyone in a tenant sees
+every Run; Members act on their own and their service accounts' Runs,
+Admins on every Run. Removing membership never stops or reattributes Runs.
+See [Security](security.md) and [CLI](cli.md#people-keys-and-roles).
+
 ## Run
 
 A **Run** is one unit of work, from submission until it is terminated. It is
