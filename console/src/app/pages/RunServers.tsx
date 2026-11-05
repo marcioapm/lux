@@ -9,7 +9,7 @@ const LOG_TAIL = 200;
 const LOG_H = 240;
 
 /** Servers tab: the Run's servers (from the Run itself, which the page keeps fresh), an Add dialog, per-server logs. */
-export function RunServers({ run, refetch, fetching, error, canAct = true }: { run: Run; refetch: () => Promise<void>; fetching: boolean; error: string | null; canAct?: boolean }) {
+export function RunServers({ run, refetch, fetching, error, canAct = false }: { run: Run; refetch: () => Promise<void>; fetching: boolean; error: string | null; canAct?: boolean }) {
   const now = useNow(5000);
   const toast = useToast();
   const running = EXEC_RUN_STATES.has(run.state);
@@ -76,7 +76,7 @@ export function RunServers({ run, refetch, fetching, error, canAct = true }: { r
           hrefFor={(s) => (s.id ? serverPath(s.id) : undefined)}
           renderLog={(s) => <ServerLog runId={run.id} server={s} />}
           note={note}
-          empty={<EmptyState compact title="No servers" description="Add one to expose a port of this run, with a command lux starts for you, or declare them in the spec under workload.servers." action={<Button size="sm" icon={<IconPlus size={13} />} onClick={() => setAdding(true)}>Add server</Button>} />}
+          empty={<EmptyState compact title="No servers" description={canAct ? "Add one to expose a port of this run, with a command lux starts for you, or declare them in the spec under workload.servers." : "Only this Run's owner and admins add servers to it."} action={canAct ? <Button size="sm" icon={<IconPlus size={13} />} onClick={() => setAdding(true)}>Add server</Button> : undefined} />}
         />
       </Card>
       {attaching && (

@@ -4,6 +4,7 @@ import { IconPencil, IconStar } from "@lux/design-system/icons";
 import { api, errorText, type Pool, type PoolStats } from "../../api/index.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
+import { canManageInfra, useViewer } from "../identity.ts";
 import { DASH, ErrorBlock, ErrorStrip, poolPath, UsageBar } from "./common.tsx";
 import { currentDefaultText } from "./defaultPool.ts";
 
@@ -27,6 +28,7 @@ const costValue = (p: PoolRow) => (p.stats?.cost[0] ? Number(p.stats.cost[0].amo
 
 export function Pools() {
   const { showTenant, operator, range } = useScope();
+  const viewer = useViewer();
   const toast = useToast();
   const pools = useScopedQuery("pools", api.pools, { interval: 15_000 });
   const [marking, setMarking] = useState<PoolRow | null>(null);
@@ -104,10 +106,11 @@ export function Pools() {
         key: "actions",
         header: "",
         // Operators mark and rename any pool (a platform pool as the
-        // platform's default); a tenant, its own pools. The row opens the
+        // platform's default); a tenant's admins and owners, its own pools;
+        // viewers and members neither. The row opens the
         // pool's page: the buttons' click and Enter stay here.
         cell: (p) =>
-          operator || !p.platform ? (
+          canManageInfra(viewer, p.platform) ? (
             <span className="row-actions">
               {!p.isDefault && (
                 <IconButton
@@ -140,7 +143,7 @@ export function Pools() {
       },
     );
     return c;
-  }, [showTenant, operator, range]);
+  }, [showTenant, operator, range, viewer.resolved, viewer.operator, viewer.role, viewer.legacy]);
 
   let whose = "your";
   if (marking?.platform) {
