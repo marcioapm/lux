@@ -42,11 +42,11 @@ type Principal struct {
 // atLeast: the principal holds role (or more) in its tenant, and may use
 // it: a read-only key reads only.
 func (p Principal) atLeast(role string) bool {
-	if p.Operator {
-		return true
-	}
 	if p.ReadOnly && roleRank(role) > roleRank("viewer") {
 		return false
+	}
+	if p.Operator {
+		return true
 	}
 	return roleRank(p.Role) >= roleRank(role)
 }

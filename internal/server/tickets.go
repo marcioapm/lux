@@ -177,7 +177,13 @@ func (s *Server) redeemTicket(ctx context.Context, raw string, f ticketFor, kind
 // keyLiveTx: the API key keyID exists and is not revoked.
 func keyLiveTx(ctx context.Context, tx pgx.Tx, keyID string) (bool, error) {
 	var live bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE id = $1 AND revoked_at IS NULL)`, keyID).Scan(&live)
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys k
+		LEFT JOIN users u ON u.id=k.user_id
+		LEFT JOIN memberships m ON m.user_id=k.user_id AND m.tenant_id=k.tenant_id
+		LEFT JOIN service_accounts sa ON sa.id=k.service_account_id
+		WHERE k.id=$1 AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>now())
+		AND (k.user_id IS NULL OR (u.disabled_at IS NULL AND ((k.tenant_id IS NULL AND u.operator) OR m.user_id IS NOT NULL)))
+		AND (k.service_account_id IS NULL OR sa.disabled_at IS NULL))`, keyID).Scan(&live)
 	return live, err
 }
 

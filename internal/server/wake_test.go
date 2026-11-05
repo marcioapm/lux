@@ -34,7 +34,7 @@ func wakeFixture(t *testing.T) (s *Server, ctx context.Context, key, key2 string
 	ctx = context.Background()
 	key = serversFixture(t, s, ctx)
 	key2 = ids.Secret("luxk")
-	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('k2', 't2', 'other', $1, ARRAY['run'])`, ids.Hash(key2))
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('k2', 't2', 'other', $1, ARRAY['admin'])`, ids.Hash(key2))
 	s.preview = newPreviews(s)
 	if err := s.preview.init(ctx); err != nil {
 		t.Fatal(err)

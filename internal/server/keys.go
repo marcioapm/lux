@@ -178,6 +178,9 @@ type keySpec struct {
 // tenant before counting, so the count and the insert are one step.
 func insertKey(ctx context.Context, tx pgx.Tx, p Principal, k keySpec) (NewApiKey, error) {
 	var out NewApiKey
+	if p.ReadOnly {
+		return out, errf(403, "forbidden", "this key is read-only")
+	}
 	if err := checkKeyName(k.name); err != nil {
 		return out, err
 	}
@@ -245,6 +248,9 @@ func findKey(ctx context.Context, tx pgx.Tx, ref, where string, args ...any) (st
 
 func (s *Server) renameMyKey(ctx context.Context, in *renameKeyInput) (*keyOutput, error) {
 	p := principal(ctx)
+	if p.ReadOnly {
+		return nil, errf(403, "forbidden", "this key is read-only")
+	}
 	if err := checkKeyName(in.Body.Name); err != nil {
 		return nil, err
 	}
@@ -268,6 +274,9 @@ func (s *Server) renameMyKey(ctx context.Context, in *renameKeyInput) (*keyOutpu
 
 func (s *Server) revokeMyKey(ctx context.Context, in *KeyPath) (*struct{}, error) {
 	p := principal(ctx)
+	if p.ReadOnly {
+		return nil, errf(403, "forbidden", "this key is read-only")
+	}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		id, err := findKey(ctx, tx, in.Key, `k.user_id = $1 AND k.tenant_id = $2`, p.UserID, p.TenantID)
 		if err != nil {
