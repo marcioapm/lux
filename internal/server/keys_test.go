@@ -174,6 +174,37 @@ func TestServiceAccounts(t *testing.T) {
 	}
 }
 
+// A service account's owner, by email: set, kept when the patch leaves
+// ownerEmail out, and cleared by ownerEmail "" (the console's "No owner").
+func TestServiceAccountOwnerClears(t *testing.T) {
+	f := peopleFixture(t)
+	owner := func(out map[string]any) any {
+		if o, ok := out["owner"].(map[string]any); ok {
+			return o["email"]
+		}
+		return nil
+	}
+	code, out := f.do(t, f.keys["admin"], http.MethodPost, "/v1/service-accounts", map[string]any{"name": "nightly", "role": "member", "ownerEmail": "mia@example.com"})
+	if code != http.StatusCreated || owner(out) != "mia@example.com" {
+		t.Fatalf("create with owner: %d %v", code, out)
+	}
+	code, out = f.do(t, f.keys["admin"], http.MethodPatch, "/v1/service-accounts/nightly", map[string]any{"description": "d"})
+	if code != 200 || owner(out) != "mia@example.com" {
+		t.Fatalf("patch without ownerEmail keeps the owner: %d %v", code, out)
+	}
+	code, out = f.do(t, f.keys["admin"], http.MethodPatch, "/v1/service-accounts/nightly", map[string]any{"ownerEmail": "MAX@example.com"})
+	if code != 200 || owner(out) != "max@example.com" {
+		t.Fatalf("reassign (any case): %d %v", code, out)
+	}
+	code, out = f.do(t, f.keys["admin"], http.MethodPatch, "/v1/service-accounts/nightly", map[string]any{"ownerEmail": ""})
+	if code != 200 || out["owner"] != nil {
+		t.Fatalf(`ownerEmail "" clears: %d %v`, code, out)
+	}
+	if got := queryAll(t, f.s, `SELECT coalesce(owner_user_id, '-') FROM service_accounts WHERE name = 'nightly'`); len(got) != 1 || got[0] != "-" {
+		t.Fatalf("stored owner after clearing: %v", got)
+	}
+}
+
 func contains(list []string, v string) bool {
 	for _, x := range list {
 		if x == v {

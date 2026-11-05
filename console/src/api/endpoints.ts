@@ -123,8 +123,10 @@ export const api = {
 
   serviceAccounts: (tenant: Scope, signal?: Sig) => request<{ serviceAccounts: ServiceAccount[] }>("/service-accounts", { tenant, signal }).then((r) => r.serviceAccounts ?? []),
   serviceAccount: (tenant: Scope, id: string, signal?: Sig) => request<ServiceAccount>(`/service-accounts/${enc(id)}`, { tenant, signal }),
-  createServiceAccount: (tenant: Scope, body: { name: string; description?: string; role: string; ownerId?: string }) => request<ServiceAccount>("/service-accounts", { method: "POST", tenant, body }),
-  updateServiceAccount: (tenant: Scope, id: string, body: { description?: string; role?: string; ownerId?: string | null; disabled?: boolean }) =>
+  /** ownerEmail: a member's email (the server resolves it). */
+  createServiceAccount: (tenant: Scope, body: { name: string; description?: string; role: string; ownerEmail?: string }) => request<ServiceAccount>("/service-accounts", { method: "POST", tenant, body }),
+  /** ownerEmail: a member's email, "" for no owner, absent to leave it. */
+  updateServiceAccount: (tenant: Scope, id: string, body: { description?: string; role?: string; ownerEmail?: string; disabled?: boolean }) =>
     request<ServiceAccount>(`/service-accounts/${enc(id)}`, { method: "PATCH", tenant, body }),
   serviceAccountKeys: (tenant: Scope, id: string, signal?: Sig) => request<{ keys: ApiKey[] }>(`/service-accounts/${enc(id)}/keys`, { tenant, signal }).then((r) => r.keys ?? []),
   createServiceAccountKey: (tenant: Scope, id: string, body: NewKeyRequest) => request<CreatedApiKey>(`/service-accounts/${enc(id)}/keys`, { method: "POST", tenant, body }),

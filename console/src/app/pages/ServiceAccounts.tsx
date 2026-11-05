@@ -132,9 +132,10 @@ export function ServiceAccounts() {
 export function ServiceAccountDialog({ target, tenant, tenantName, members, onSaved, onCancel }: { target: ServiceAccount | "new" | null; tenant: string | undefined; tenantName: string; members: Member[]; onSaved: (s: ServiceAccount, key?: CreatedApiKey) => void | Promise<void>; onCancel: () => void }) {
   const isNew = target === "new";
   const sa = target && target !== "new" ? target : null;
-  const [form, setForm] = useState<{ for: string; name: string; description: string; ownerId: string; role: Exclude<TenantRole, "owner"> } | null>(null);
+  // The owner by email: the server takes ownerEmail ("" on a patch: no owner).
+  const [form, setForm] = useState<{ for: string; name: string; description: string; ownerEmail: string; role: Exclude<TenantRole, "owner"> } | null>(null);
   const key = isNew ? "new" : (sa?.id ?? "");
-  const f = form?.for === key ? form : { for: key, name: "", description: sa?.description ?? "", ownerId: sa?.owner?.id ?? "", role: sa?.role ?? "member" };
+  const f = form?.for === key ? form : { for: key, name: "", description: sa?.description ?? "", ownerEmail: sa?.owner?.email ?? "", role: sa?.role ?? "member" };
   const set = (p: Partial<typeof f>) => setForm({ ...f, ...p });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -144,12 +145,12 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
     setError(null);
     try {
       if (isNew) {
-        const s = await api.createServiceAccount(tenant, { name: f.name, description: f.description || undefined, role: f.role, ownerId: f.ownerId || undefined });
+        const s = await api.createServiceAccount(tenant, { name: f.name, description: f.description || undefined, role: f.role, ownerEmail: f.ownerEmail || undefined });
         const k = await api.createServiceAccountKey(tenant, s.id, { name: `${s.name}-${new Date().toISOString().slice(0, 7)}` });
         setForm(null);
         await onSaved(s, k);
       } else if (sa) {
-        const s = await api.updateServiceAccount(tenant, sa.id, { description: f.description, role: f.role, ownerId: f.ownerId || null });
+        const s = await api.updateServiceAccount(tenant, sa.id, { description: f.description, role: f.role, ownerEmail: f.ownerEmail });
         setForm(null);
         await onSaved(s);
       }
@@ -159,7 +160,7 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
       setBusy(false);
     }
   };
-  const ownerOptions = [{ value: "", label: <span className="muted">No owner</span>, text: "No owner" }, ...members.map((m) => ({ value: m.id, label: `${m.name || m.email} · ${ROLE_LABEL[m.role]}`, text: m.name || m.email }))];
+  const ownerOptions = [{ value: "", label: <span className="muted">No owner</span>, text: "No owner" }, ...members.map((m) => ({ value: m.email, label: `${m.name || m.email} · ${ROLE_LABEL[m.role]}`, text: m.name || m.email }))];
   return (
     <Dialog
       open={target != null}
@@ -189,7 +190,7 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
       </label>
       <div className="field">
         <span className="field-label">Owner</span>
-        <Select value={f.ownerId} onChange={(ownerId) => set({ ownerId })} options={ownerOptions} searchable={members.length > 8} />
+        <Select value={f.ownerEmail} onChange={(ownerEmail) => set({ ownerEmail })} options={ownerOptions} searchable={members.length > 8} />
         <span className="field-hint">Answers for it: rotates its keys and acts on its Runs. Its cost also rolls up to them under “By owner”.</span>
       </div>
       <RoleField value={f.role} onChange={(r) => set({ role: r === "owner" ? "admin" : r })} options={(["viewer", "member", "admin"] as const).map((r) => ({ value: r, label: ROLE_LABEL[r], text: ROLE_LABEL[r] }))} />

@@ -193,46 +193,71 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
     return err(404, "not_found", "not found");
   }
 
-  // ---- service accounts
+  // ---- service accounts (serviceaccounts.go: create/patch admin+, ownerEmail a member's email, "" clears)
   const ownsSA = (s: SA) => s.ownerId != null && s.ownerId === c.user?.id;
+  const SA_ROLES = ["viewer", "member", "admin"];
+  /** A member of the tenant by email (any case), or the server's 422. */
+  const ownerByEmail = (email: string): { id: string } | { error: Res } => {
+    const u = USERS.find((x) => x.email.toLowerCase() === email.toLowerCase() && inTenant().some((m) => m.userId === x.id));
+    return u ? { id: u.id } : { error: err(422, "invalid_request", `${email} is not a member of this tenant`) };
+  };
   if (p === "/v1/service-accounts") {
-    if (method === "GET") return ok({ serviceAccounts: SAS.filter((s) => s.tenantId === tenantId).map(saJson) });
-    if (!atLeast(c, "admin")) return err(403, "forbidden", "only admins and owners create service accounts");
-    const b = await body<{ name: string; description?: string; role: SA["role"]; ownerId?: string }>();
-    if (!SA_NAME_RE.test(b.name ?? "")) return err(400, "invalid", "a name is lowercase letters, digits and dashes");
-    if (SAS.some((s) => s.tenantId === tenantId && s.name === b.name)) return err(409, "name_taken", `${b.name} exists in ${tenantName(tenantId)}`);
-    const s: SA = { id: `sa_${(++seq.key).toString(36)}x${Math.random().toString(36).slice(2, 7)}`, tenantId, name: b.name, description: b.description ?? "", role: b.role, ownerId: b.ownerId || undefined, created: 0, createdBy: c.user?.id };
+    if (method === "GET") return ok({ serviceAccounts: SAS.filter((s) => s.tenantId === tenantId).sort((a, b) => a.name.localeCompare(b.name)).map(saJson) });
+    if (!atLeast(c, "admin")) return err(403, "forbidden", "this needs the admin scope");
+    const b = await body<{ name: string; description?: string; role: SA["role"]; ownerEmail?: string }>();
+    if (!SA_NAME_RE.test(b.name ?? "")) return err(422, "invalid_request", `name ${JSON.stringify(b.name ?? "")}: lowercase letters, digits and dashes, starting and ending with a letter or digit, at most 63`);
+    if (!SA_ROLES.includes(b.role)) return err(422, "invalid_request", "role: viewer, member or admin");
+    let ownerId: string | undefined;
+    if (b.ownerEmail) {
+      const o = ownerByEmail(b.ownerEmail);
+      if ("error" in o) return o.error;
+      ownerId = o.id;
+    }
+    if (SAS.some((s) => s.tenantId === tenantId && s.name === b.name)) return err(409, "conflict", `a service account ${b.name} exists in this tenant`);
+    const s: SA = { id: `sa_${(++seq.key).toString(36)}x${Math.random().toString(36).slice(2, 7)}`, tenantId, name: b.name, description: b.description ?? "", role: b.role, ownerId, created: 0, createdBy: c.user?.id };
     SAS.push(s);
     return ok(saJson(s), 201);
   }
   const sm = p.match(/^\/v1\/service-accounts\/([^/]+)(?:\/keys(?:\/([^/]+))?)?$/);
   if (sm) {
     const s = SAS.find((x) => x.tenantId === tenantId && (x.id === sm[1] || x.name === sm[1]));
-    if (!s) return err(404, "not_found", "service account not found");
+    if (!s) return err(404, "not_found", `no service account ${sm[1]}`);
     if (p.includes("/keys")) {
+      // Its owner and admins only; anyone else is told it is not there (accountKeyHolder).
+      if (!atLeast(c, "admin") && !ownsSA(s)) return err(404, "not_found", `no service account ${sm[1]}`);
       const ks = KEYS.filter((k) => k.saId === s.id && activeKeys(k));
       if (method === "GET") return ok({ keys: ks.map(keyJson) });
-      if (!atLeast(c, "admin") && !ownsSA(s)) return err(403, "forbidden", "only its owner and admins manage its keys");
       if (method === "DELETE") {
-        const k = ks.find((x) => x.id === sm[2]);
+        const k = ks.find((x) => x.id === sm[2] || x.prefix === sm[2]);
         if (!k) return err(404, "not_found", "key not found");
         k.revoked = true;
         return ok(null, 204);
       }
       if (ks.length >= 2) return err(409, "key_limit", "2 active keys is the limit: revoke the old one first");
-      const b = await body<{ name?: string; expiresAt?: string }>();
+      const b = await body<{ name?: string; readOnly?: boolean; expiresAt?: string }>();
+      if (!b.name?.trim()) return err(422, "invalid_request", "a key needs a name");
       const value = secret("lux_s_");
-      const k: Key = { id: `key_s_${++seq.key}`, tenantId, saId: s.id, name: b.name?.trim() || `${s.name}-key`, prefix: value.slice(0, 10), readOnly: false, created: 0, createdBy: c.user?.id, ...(b.expiresAt ? { expires: secondsUntil(b.expiresAt) } : {}) };
+      const k: Key = { id: `key_s_${++seq.key}`, tenantId, saId: s.id, name: b.name.trim(), prefix: value.slice(0, 10), readOnly: !!b.readOnly, created: 0, createdBy: c.user?.id, ...(b.expiresAt ? { expires: secondsUntil(b.expiresAt) } : {}) };
       KEYS.push(k);
       return ok({ ...keyJson(k), apiKey: value }, 201);
     }
     if (method === "GET") return ok(saJson(s));
-    if (!atLeast(c, "admin")) return err(403, "forbidden", "only admins and owners edit service accounts");
-    const b = await body<{ description?: string; role?: SA["role"]; ownerId?: string | null; disabled?: boolean }>();
+    if (!atLeast(c, "admin")) return err(403, "forbidden", "this needs the admin scope");
+    const b = await body<{ description?: string; role?: SA["role"]; ownerEmail?: string; disabled?: boolean }>();
+    if (b.role != null && !SA_ROLES.includes(b.role)) return err(422, "invalid_request", "role: viewer, member or admin");
+    let ownerId = s.ownerId;
+    if (b.ownerEmail != null) {
+      if (b.ownerEmail === "") ownerId = undefined;
+      else {
+        const o = ownerByEmail(b.ownerEmail);
+        if ("error" in o) return o.error;
+        ownerId = o.id;
+      }
+    }
     if (b.description != null) s.description = b.description;
     if (b.role) s.role = b.role;
-    if (b.ownerId !== undefined) s.ownerId = b.ownerId || undefined;
-    if (b.disabled != null) s.disabled = b.disabled ? 0 : undefined;
+    s.ownerId = ownerId;
+    if (b.disabled != null) s.disabled = b.disabled ? (s.disabled ?? 0) : undefined;
     return ok(saJson(s));
   }
 
