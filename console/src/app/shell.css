@@ -363,6 +363,9 @@
 /* ---------- Sign-in ---------- */
 .signin {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  width: 100%;
   place-items: center;
   height: 100%;
   padding: var(--pad-page);
@@ -426,7 +429,8 @@
 }
 /* Phone width: Shell.tsx's query must match. */
 @media (max-width: 767px) {
-  .signin-card {
+.signin-card {
+  min-width: 0;
     padding: var(--sp-7);
   }
 }
