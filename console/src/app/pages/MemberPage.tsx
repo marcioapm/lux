@@ -4,7 +4,7 @@ import { api, errorText, useQuery, type ApiKey, type Run, type ServiceAccount } 
 import { atLeast, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
 import { ErrorBlock, PageSkeleton, runColumns, runPath } from "./common.tsx";
-import { canManage, ChangeRoleDialog, RemoveMemberDialog, useCostByOwner, usePeopleTenant } from "./Members.tsx";
+import { canManage, ChangeRoleDialog, lastOwnerReason, RemoveMemberDialog, useCostByOwner, usePeopleTenant } from "./Members.tsx";
 import { KeysTable, serviceAccountPath } from "./peopleParts.tsx";
 
 /** /members/:id: one person's role, spend, service accounts, Runs and (to them and admins) keys. */
@@ -13,6 +13,7 @@ export function MemberPage({ id }: { id: string }) {
   const toast = useToast();
   const { tenant, name: tenantName } = usePeopleTenant();
   const m = useQuery(`member:${id}@${tenant ?? ""}`, (s) => api.member(tenant, id, s));
+  const all = useQuery(`members@${tenant ?? ""}`, (s) => api.members(tenant, s), { enabled: atLeast(v, "admin") });
   const sas = useQuery(`sas@${tenant ?? ""}`, (s) => api.serviceAccounts(tenant, s));
   const cost = useCostByOwner("member");
   const self = id === v.userId;
@@ -38,6 +39,8 @@ export function MemberPage({ id }: { id: string }) {
   const viaSaRuns = viaSa.reduce((n, r) => n + (r.runs ?? 0), 0);
   const viaSaCost = viaSa.reduce((n, r) => n + Number(r.amount), 0);
   const manage = canManage(v, p);
+  // The last-owner rule: only an operator demotes or removes the only owner.
+  const lastOwner = lastOwnerReason(v, p, (all.data ?? []).filter((x) => x.role === "owner").length || 1);
 
   const act = async (title: string, fn: () => Promise<unknown>, after: () => void) => {
     setBusy(true);
@@ -98,7 +101,7 @@ export function MemberPage({ id }: { id: string }) {
           manage ? (
             <>
               <Button onClick={() => setChanging(true)}>Change role</Button>
-              <Button variant="danger" onClick={() => setRemoving(true)}>
+              <Button variant="danger" disabled={lastOwner != null} title={lastOwner ?? undefined} onClick={() => setRemoving(true)}>
                 Remove
               </Button>
             </>
@@ -130,7 +133,7 @@ export function MemberPage({ id }: { id: string }) {
           </Card>
         )}
       </div>
-      <ChangeRoleDialog member={changing ? p : null} tenantName={tenantName} owner={atLeast(v, "owner")} busy={busy} onCancel={() => setChanging(false)} onConfirm={(x, role) => void act(`${who} is now ${ROLE_LABEL[role]}`, () => api.setMemberRole(tenant, x.id, role), () => (setChanging(false), void m.refetch()))} />
+      <ChangeRoleDialog member={changing ? p : null} lastOwner={lastOwner} tenantName={tenantName} owner={atLeast(v, "owner")} busy={busy} onCancel={() => setChanging(false)} onConfirm={(x, role) => void act(`${who} is now ${ROLE_LABEL[role]}`, () => api.setMemberRole(tenant, x.id, role), () => (setChanging(false), void m.refetch()))} />
       <RemoveMemberDialog member={removing ? p : null} tenantName={tenantName} busy={busy} onCancel={() => setRemoving(false)} onConfirm={(x) => void act(`Removed ${who}`, () => api.removeMember(tenant, x.id), () => (setRemoving(false), go("/members")))} />
       {revoking && (
         <KeyRevokeConfirm name={revoking.name} busy={busy} onCancel={() => setRevoking(null)} onConfirm={() => void act(`Revoked ${revoking.name}`, () => api.revokeMemberKey(tenant, p.id, revoking.id), () => (setRevoking(null), void keys.refetch()))} />

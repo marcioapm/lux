@@ -142,6 +142,7 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
   const admin = atLeast(v, "admin");
   const rows = members.data ?? [];
   const keysShown = rows.some((m) => m.keyCount != null);
+  const owners = rows.filter((m) => m.role === "owner").length;
 
   const cols = useMemo<Column<Member>[]>(() => {
     const c: Column<Member>[] = [
@@ -191,7 +192,7 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
               <IconButton size="sm" label={`Change ${m.name || m.email}'s role`} onClick={(e) => (e.stopPropagation(), setChanging(m))} onKeyDown={(e) => e.stopPropagation()}>
                 <IconPencil size={14} />
               </IconButton>
-              <IconButton size="sm" label={`Remove ${m.name || m.email} from ${tenantName}`} onClick={(e) => (e.stopPropagation(), setRemoving(m))} onKeyDown={(e) => e.stopPropagation()}>
+              <IconButton size="sm" label={`Remove ${m.name || m.email} from ${tenantName}`} disabled={lastOwnerReason(v, m, owners) != null} title={lastOwnerReason(v, m, owners) ?? undefined} onClick={(e) => (e.stopPropagation(), setRemoving(m))} onKeyDown={(e) => e.stopPropagation()}>
                 <IconTrash size={14} />
               </IconButton>
             </span>
@@ -200,7 +201,7 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
         width: 84,
       });
     return c;
-  }, [v, cost.byKey, keysShown, admin, tenantName]);
+  }, [v, cost.byKey, keysShown, admin, tenantName, owners]);
 
   const act = async (title: string, fn: () => Promise<unknown>, close: () => void) => {
     setBusy(true);
@@ -226,31 +227,46 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
           <Table columns={cols} rows={rows} rowKey={(m) => m.id} loading={members.loading} onRowClick={(m) => go(memberPath(m.id))} defaultSort={{ key: "role", dir: "desc" }} empty="No members yet." minWidth={860} />
         )}
       </Card>
-      <ChangeRoleDialog member={changing} tenantName={tenantName} busy={busy} owner={atLeast(v, "owner")} onCancel={() => setChanging(null)} onConfirm={(m, role) => void act(`${m.name || m.email} is now ${ROLE_LABEL[role]}`, () => api.setMemberRole(tenant, m.id, role), () => setChanging(null))} />
+      <ChangeRoleDialog member={changing} tenantName={tenantName} busy={busy} owner={atLeast(v, "owner")} lastOwner={changing ? lastOwnerReason(v, changing, owners) : null} onCancel={() => setChanging(null)} onConfirm={(m, role) => void act(`${m.name || m.email} is now ${ROLE_LABEL[role]}`, () => api.setMemberRole(tenant, m.id, role), () => setChanging(null))} />
       <RemoveMemberDialog member={removing} tenantName={tenantName} busy={busy} onCancel={() => setRemoving(null)} onConfirm={(m) => void act(`Removed ${m.name || m.email}`, () => api.removeMember(tenant, m.id), () => setRemoving(null))} />
     </>
   );
 }
 
-export function ChangeRoleDialog({ member, tenantName, owner, busy, onConfirm, onCancel }: { member: Member | null; tenantName: string; owner: boolean; busy: boolean; onConfirm: (m: Member, role: TenantRole) => void; onCancel: () => void }) {
-  const [role, setRole] = useState<TenantRole | null>(null);
+/**
+ * The last-owner rule (members.go checkOwnerChange): only an operator may
+ * demote or remove a tenant's only owner. The reason, or null when allowed.
+ */
+export function lastOwnerReason(v: Viewer, m: Pick<Member, "role">, owners: number): string | null {
+  if (m.role !== "owner" || owners > 1 || v.operator) return null;
+  return "The only owner: make someone else an owner first";
+}
+
+export function ChangeRoleDialog({ member, tenantName, owner, busy, onConfirm, onCancel, lastOwner = null }: { member: Member | null; tenantName: string; owner: boolean; busy: boolean; onConfirm: (m: Member, role: TenantRole) => void; onCancel: () => void; lastOwner?: string | null }) {
+  // The pick is for one member, and ends when the dialog closes (after a change, or a cancel): the next open starts from the member's role.
+  const [pick, setPick] = useState<{ for: string; role: TenantRole } | null>(null);
+  useEffect(() => {
+    if (!member) setPick(null);
+  }, [member]);
+  const role = pick && pick.for === member?.id ? pick.role : null;
   const shown = role ?? member?.role ?? "member";
   const who = member?.name || member?.email || "";
+  const options = roleOptions({ owner }).map((o) => (lastOwner && o.value !== "owner" ? { ...o, disabled: lastOwner } : o));
   return (
     <Dialog
       open={member != null}
       title={`Change ${who}'s role`}
-      description={`Takes effect on ${who.split(" ")[0]}'s next request, keys included.`}
+      description={lastOwner ?? `Takes effect on ${who.split(" ")[0]}'s next request, keys included.`}
       confirmLabel="Change role"
       disabled={shown === member?.role}
       loading={busy}
       onConfirm={() => member && onConfirm(member, shown)}
       onCancel={() => {
-        setRole(null);
+        setPick(null);
         onCancel();
       }}
     >
-      <RoleField value={shown} onChange={setRole} options={roleOptions({ owner })} label={`Role in ${tenantName}`} />
+      <RoleField value={shown} onChange={(r) => member && setPick({ for: member.id, role: r })} options={options} label={`Role in ${tenantName}`} />
     </Dialog>
   );
 }

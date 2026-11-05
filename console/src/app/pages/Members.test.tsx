@@ -201,6 +201,60 @@ test("Invitations: Load more follows the cursor; the search lives in ?q= and a l
   }
 });
 
+// After a change the dialog starts again from the member's (new) role; the last owner cannot be demoted or removed but by an operator.
+test("Change role: the dialog resets after a change; the last-owner rule disables the moves luxd refuses", async () => {
+  const p = await t.mountAs("admin", "/members", <Members />);
+  try {
+    await p.until(() => rows(p.el).length === 6, "6 members");
+    const pick = async (label: string) => {
+      const d = p.dialog()!;
+      await t.click(d.querySelector(".select-trigger"));
+      await t.click([...d.querySelectorAll('[role="option"]')].find((o) => o.textContent?.startsWith(label)));
+    };
+    await t.click(p.button("Change Bruno Costa's role"));
+    await pick("Admin");
+    await t.click(t.dialogButton(p.dialog(), "Change role"));
+    await p.until(() => !p.dialog(), "closed after the change");
+    await p.until(() => t.visibleText(rowOf(p.el, "Bruno Costa")!).includes("Admin"), "Bruno is Admin");
+    // Opening it again shows Bruno's role now, nothing left of the last pick; Change role is off until a new pick.
+    await t.click(p.button("Change Carla Santos's role"));
+    expect(p.dialog()!.querySelector(".select-trigger")!.textContent).toContain("Member");
+    await pick("Viewer");
+    await t.click(t.dialogButton(p.dialog(), "Cancel"));
+    await t.click(p.button("Change Carla Santos's role"));
+    expect(p.dialog()!.querySelector(".select-trigger")!.textContent).toContain("Member");
+    expect(t.dialogButton(p.dialog(), "Change role")!.disabled).toBe(true);
+  } finally {
+    await p.done();
+  }
+});
+
+test("lastOwnerReason: only an operator may demote or remove the only owner", async () => {
+  const { lastOwnerReason } = await import("./Members.tsx");
+  const { viewerOf } = await import("../identity.ts");
+  const owner = viewerOf({ operator: false, tenant: "acme", tenantId: "ten_acme", scopes: ["read", "run", "admin"], consoleAuth: "cloudflare-access", userId: "usr_eva", role: "owner", memberships: [] });
+  const op = viewerOf({ operator: true, tenant: "", tenantId: "", scopes: ["read", "run", "admin"], consoleAuth: "cloudflare-access", memberships: [] });
+  expect(lastOwnerReason(owner, { role: "owner" }, 1)).toContain("only owner");
+  expect(lastOwnerReason(owner, { role: "owner" }, 2)).toBeNull();
+  expect(lastOwnerReason(owner, { role: "admin" }, 1)).toBeNull();
+  expect(lastOwnerReason(op, { role: "owner" }, 1)).toBeNull();
+});
+
+test("Change role for the only owner: every role below Owner is disabled, with the reason", async () => {
+  const { ChangeRoleDialog } = await import("./Members.tsx");
+  const eva = { id: "usr_eva", email: "eva@acme.dev", name: "Eva Moreira", picture: "", operator: false, role: "owner" as const, joinedAt: "2026-01-01T00:00:00Z", runningRuns: 0 };
+  const p = await t.mountAs("owner", "/members", <ChangeRoleDialog member={eva} tenantName="acme" owner busy={false} lastOwner="The only owner: make someone else an owner first" onConfirm={() => {}} onCancel={() => {}} />);
+  try {
+    const d = p.dialog()!;
+    expect(d.textContent).toContain("The only owner: make someone else an owner first");
+    await t.click(d.querySelector(".select-trigger"));
+    const opts = [...d.querySelectorAll('[role="option"]')];
+    expect(opts.filter((o) => o.getAttribute("aria-disabled") === "true").map((o) => o.textContent?.split("The only")[0])).toEqual(["Viewer", "Member", "Admin"]);
+  } finally {
+    await p.done();
+  }
+});
+
 // DELETE /v1/members/{user}/keys/{key} (members.go revokeMemberKey): admins revoke a member's key; an owner's only owners.
 test("An admin revokes a member's key on their page; an owner's keys have no Revoke for an admin", async () => {
   const runs = { extra: (path: string) => (path.startsWith("/v1/runs") ? { runs: [] } : undefined) };
