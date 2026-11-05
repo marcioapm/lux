@@ -155,9 +155,13 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
       return ok(n);
     }
     if (p === "/v1/invitations" && method === "GET") {
-      const st = u.searchParams.get("status");
-      const q = u.searchParams.get("q")?.toLowerCase();
-      return ok({ invitations: here.filter((i) => (!st || st === "all" || invStatus(i) === st) && (!q || i.email.includes(q))).sort((a, b) => a.created - b.created).map((i) => invJson(i, origin)) });
+      // invitations.go listInvitations: by id, 100 a page; cursor: the last id shown ("" when no more).
+      const st = u.searchParams.get("status") || "all";
+      const q = (u.searchParams.get("q") ?? "").toLowerCase();
+      const after = u.searchParams.get("cursor") ?? "";
+      const all = here.filter((i) => (st === "all" || invStatus(i) === st) && i.email.toLowerCase().includes(q) && i.id > after).sort((a, b) => (a.id < b.id ? -1 : 1));
+      const page = all.slice(0, 100);
+      return ok({ invitations: page.map((i) => invJson(i, origin)), cursor: all.length > 100 ? page[99]!.id : "" });
     }
     if (p === "/v1/invitations") {
       const b = await body<{ invitations: { email: string; name?: string }[]; role: Role }>();

@@ -153,6 +153,15 @@ export const INVITES: Inv[] = [
   { id: "inv_06", tenantId: "ten_initech", email: "cto@initech.dev", role: "owner", by: "usr_mar", created: 5 * DAY, expires: -9 * DAY, code: "inv_Ic7Tt2Cc0o" },
 ];
 
+/** n more pending invitations to acme (MOCK_INVITES=<n>: enough for the Invitations list to page, 100 at a time). */
+export function seedInvitations(n: number) {
+  for (let k = 0; k < n; k++) {
+    const id = `inv_x${String(k).padStart(3, "0")}`;
+    if (INVITES.some((i) => i.id === id)) continue;
+    INVITES.push({ id, tenantId: "ten_acme", email: `guest${k}@contractor.io`, role: "viewer", by: "usr_ana", created: k * 600, expires: -(14 * DAY - k * 600), code: `inv_X${k.toString(36)}q${k}` });
+  }
+}
+
 const INITIAL = structuredClone({ USERS, MEMBERSHIPS, TENANTS, SAS, KEYS, INVITES });
 /** Back to the fixtures (tests change them). */
 export function resetPeople() {

@@ -173,6 +173,34 @@ test("A member's page lists their Runs and their service accounts' Runs", async 
   }
 });
 
+// GET /v1/invitations pages 100 at a time by luxd's cursor; the search is in the URL (?q=).
+test("Invitations: Load more follows the cursor; the search lives in ?q= and a link with ?q= opens searched", async () => {
+  const mock = await import("../../../mockPeople.ts");
+  const p = await t.mountAs("admin", "/members?tab=invitations", <Members />);
+  try {
+    mock.seedInvitations(130);
+    await t.fill(p.el.querySelector<HTMLInputElement>('input[aria-label="Search email"]'), "guest");
+    await p.until(() => new URL(window.location.href).searchParams.get("q") === "guest", "?q=guest");
+    await p.until(() => rows(p.el).length === 100 && p.button("Load more") != null, "the first page");
+    const first = p.fake.calls.filter((c) => c.startsWith("/v1/invitations?")).at(-1)!;
+    expect(new URL(`http://x${first}`).searchParams.get("q")).toBe("guest");
+    await t.click(p.button("Load more"));
+    await p.until(() => rows(p.el).length === 130, "the second page");
+    const second = new URL(`http://x${p.fake.calls.filter((c) => c.startsWith("/v1/invitations?")).at(-1)!}`);
+    expect(second.searchParams.get("cursor")).toBe("inv_x099");
+    expect(p.button("Load more")).toBeUndefined();
+  } finally {
+    await p.done();
+  }
+  const linked = await t.mountAs("admin", "/members?tab=invitations&q=joao", <Members />);
+  try {
+    await linked.until(() => rows(linked.el).length === 1, "searched from the link");
+    expect(linked.el.querySelector<HTMLInputElement>('input[aria-label="Search email"]')!.value).toBe("joao");
+  } finally {
+    await linked.done();
+  }
+});
+
 // DELETE /v1/members/{user}/keys/{key} (members.go revokeMemberKey): admins revoke a member's key; an owner's only owners.
 test("An admin revokes a member's key on their page; an owner's keys have no Revoke for an admin", async () => {
   const runs = { extra: (path: string) => (path.startsWith("/v1/runs") ? { runs: [] } : undefined) };

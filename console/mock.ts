@@ -15,13 +15,17 @@
 //   notenant (Sam: no membership), invited (Filipa: no membership, a pending invitation), sa (ci-review-bot).
 //   With MOCK_AUTH=cloudflare-access: MOCK_AS=<role>, or the cookie lux_mock_as=<role>; invitations
 //   exist only there (key mode answers 409 invitations_unavailable, as luxd does).
+//   MOCK_INVITES=130: that many more pending invitations to acme (the list pages 100 at a time: Load more).
+//   multi (Rui) is a member of two tenants: globex (viewer) and initech (admin).
 import index from "./index.html";
 import { COST_TENANTS, costLabels, costSummary, submittedBy } from "./mockCosts.ts";
 import { history, hostHistory, poolMetrics, POOLS } from "./mockHistory.ts";
 import { costHost, hostCost, hostNetClasses, poolCost, runCost } from "./mockHostCost.ts";
 import { sessionOutput, sessionRun, sessionRunJson, SESSION_RUNS } from "./mockSessions.ts";
-import { callerOf, canAct, ownerFilter, runOwner, TENANTS, whoamiFor } from "./mockPeople.ts";
+import { callerOf, canAct, ownerFilter, runOwner, seedInvitations, TENANTS, whoamiFor } from "./mockPeople.ts";
 import { createTenant, peopleApi, tenantPeople } from "./mockPeopleApi.ts";
+
+if (process.env.MOCK_INVITES) seedInvitations(Number(process.env.MOCK_INVITES));
 
 const RUN_ID = "run_k3jq7x2mfa9vbn4z";
 const HOST_ID = "host_7f2cq9m1x0";

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, CENTS, ConfirmDialog, Dialog, EmptyState, IconButton, Money, PageHeader, Person, RelativeTime, RoleBadge, ROLE_LABEL, SegmentedControl, Table, Tabs, useToast, type Column, type TenantRole } from "@lux/design-system";
 import { IconClose, IconCopy, IconPencil, IconPlus, IconRefresh, IconTrash } from "@lux/design-system/icons";
 import { api, errorText, useQuery, useSession, type CostByOwnerRow, type Invitation, type InvitationStatus, type InviteResult, type Member } from "../../api/index.ts";
@@ -297,9 +297,36 @@ function InvitationsTab({ tenant, onChanged }: { tenant: string | undefined; onC
   const params = useSearchParams();
   const sp = params.get("status");
   const status: StatusFilter = STATUSES.includes(sp as StatusFilter) ? (sp as StatusFilter) : "pending";
-  const [q, setQ] = useState(params.get("q") ?? "");
+  // The search is in the URL (?q=), so a link or a reload keeps it; typing replaces the entry.
+  const urlQ = params.get("q") ?? "";
+  const [q, setQ] = useState(urlQ);
+  useEffect(() => setQ(urlQ), [urlQ]);
+  useEffect(() => {
+    if (q === urlQ) return;
+    const t = setTimeout(() => setSearchParams({ q: q.trim() || null }, { replace: true }), 250);
+    return () => clearTimeout(t);
+  }, [q, urlQ]);
   const counts = useQuery(`invitations:counts@${tenant ?? ""}`, (s) => api.invitationCounts(tenant, s));
-  const list = useQuery(`invitations@${tenant ?? ""}:${status}:${q}`, (s) => api.invitations(tenant, { status: status === "all" ? undefined : status, q: q.trim() || undefined }, s).then((r) => r.invitations), { keep: true });
+  const listKey = `invitations@${tenant ?? ""}:${status}:${urlQ}`;
+  const ask = (cursor: string | undefined, s?: AbortSignal) => api.invitations(tenant, { status: status === "all" ? undefined : status, q: urlQ.trim() || undefined, cursor }, s);
+  const list = useQuery(listKey, (s) => ask(undefined, s), { keep: true });
+  // Load more: the pages after the first, by luxd's cursor ("" when there are no more); a new filter starts over.
+  const [more, setMore] = useState<{ key: string; rows: Invitation[]; cursor: string } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const extra = more?.key === listKey ? more : null;
+  const rows = [...(list.data?.invitations ?? []), ...(extra?.rows ?? [])];
+  const cursor = extra ? extra.cursor : (list.data?.cursor ?? "");
+  const loadMore = async () => {
+    setLoadingMore(true);
+    try {
+      const r = await ask(cursor);
+      setMore({ key: listKey, rows: [...(extra?.rows ?? []), ...r.invitations], cursor: r.cursor ?? "" });
+    } catch (e) {
+      toast({ title: "Could not load more invitations", description: errorText(e), tone: "danger" });
+    } finally {
+      setLoadingMore(false);
+    }
+  };
   const [revoking, setRevoking] = useState<Invitation | null>(null);
   const [busy, setBusy] = useState(false);
   const owner = atLeast(v, "owner");
@@ -310,6 +337,7 @@ function InvitationsTab({ tenant, onChanged }: { tenant: string | undefined; onC
       await fn();
       toast({ title, tone: "success" });
       setRevoking(null);
+      setMore(null);
       await Promise.all([list.refetch(), counts.refetch()]);
       onChanged();
     } catch (e) {
@@ -393,7 +421,15 @@ function InvitationsTab({ tenant, onChanged }: { tenant: string | undefined; onC
         {list.error && !list.data && !list.loading ? (
           <ErrorBlock error={list.error} onRetry={list.refetch} />
         ) : (
-          <Table columns={cols} rows={list.data ?? []} rowKey={(i) => i.id} loading={list.loading} defaultSort={{ key: "sent", dir: "desc" }} empty={q ? `No invitations match “${q}”.` : "No invitations here."} minWidth={860} />
+          <Table columns={cols} rows={rows} rowKey={(i) => i.id} loading={list.loading} defaultSort={{ key: "sent", dir: "desc" }} empty={urlQ ? `No invitations match “${urlQ}”.` : "No invitations here."} minWidth={860} />
+        )}
+        {cursor !== "" && list.data && (
+          <div className="card-foot">
+            <span className="muted">{rows.length} shown</span>
+            <Button size="sm" variant="ghost" loading={loadingMore} onClick={() => void loadMore()}>
+              Load more
+            </Button>
+          </div>
         )}
       </Card>
       <p className="page-note">An invitation is for one email and works only when that email signs in. It lasts 14 days; Renew keeps the same link. Accepting creates the membership with the invited role.</p>
