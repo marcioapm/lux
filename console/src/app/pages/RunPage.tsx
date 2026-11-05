@@ -1,5 +1,7 @@
 import { Badge, FactRow, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, ImageRef, KeyValue, LabelsFact, PageHeader, StatePill, Tabs } from "@lux/design-system";
-import { isRunActive, useNow, type Run, type RunSubmitter } from "../../api/index.ts";
+import { api, isRunActive, useNow, useQuery, type Run, type RunSubmitter } from "../../api/index.ts";
+import { canActOnRun, useViewer, whoCanAct } from "../identity.ts";
+import { OwnerCell } from "./people.tsx";
 import { setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, HostLink, PageSkeleton, useRun } from "./common.tsx";
@@ -17,7 +19,9 @@ const TABS = ["session", "output", "servers", "timeline", "resources", "events",
 type Tab = (typeof TABS)[number];
 
 export function RunPage({ id }: { id: string }) {
-  const { operator } = useScope();
+  const { operator, apiTenant } = useScope();
+  const viewer = useViewer();
+  const sas = useQuery(`sas@${apiTenant ?? ""}`, (s) => api.serviceAccounts(apiTenant, s), { enabled: !viewer.legacy });
   const now = useNow(5000);
   // The tab lives in the URL (?tab=), so links can open one; the first tab has none.
   const params = useSearchParams();
@@ -46,6 +50,9 @@ export function RunPage({ id }: { id: string }) {
     void q.refetch();
   };
   const live = isRunActive(run.state);
+  const canAct = canActOnRun(viewer, run, sas.data);
+  const ownerName = whoCanAct(run, sas.data);
+  const readNote = `You can view this Run; only ${ownerName ? `${ownerName} and admins` : "admins"} can act on it.`;
 
   return (
     <div className="page">
@@ -75,8 +82,8 @@ export function RunPage({ id }: { id: string }) {
             {run.exitCode != null && !run.stateReason?.includes(`exit code ${run.exitCode}`) && <span>exit {run.exitCode}</span>}
           </>
         }
-        note={run.stateReason}
-        actions={<RunActions run={run} operator={operator} onChanged={onChanged} />}
+        note={canAct ? run.stateReason : readNote}
+        actions={canAct ? <RunActions run={run} operator={operator} onChanged={onChanged} /> : undefined}
       />
       <ErrorStrip error={q.error} />
 
@@ -88,7 +95,8 @@ export function RunPage({ id }: { id: string }) {
           { key: "Finished", value: run.finishedAt ? `${formatTimestamp(run.finishedAt)} · ${formatRelative(run.finishedAt, now)}` : DASH },
           { key: "Resources", value: `${run.spec.resources.cpus ?? "–"} cpus · ${formatBytes(run.spec.resources.memory)} · ${formatBytes(run.spec.resources.disk)} disk` },
           { key: "Usage", value: run.usage ? `CPU ${formatDuration(run.usage.cpuSeconds)} · peak mem ${formatBytes(run.usage.peakMemoryBytes)} · ${run.usage.placements} placement${run.usage.placements === 1 ? "" : "s"}` : DASH },
-          { key: "Submitted by", value: <SubmittedBy by={run.submittedBy} /> },
+           { key: "Owner", value: <OwnerCell owner={run.owner} /> },
+           { key: "Submitted with", value: <SubmittedBy by={run.submittedBy} /> },
           { key: "Session", value: run.sessionId ? <IdChip value={run.sessionId} truncate={24} /> : DASH },
           { key: "Snapshot", value: run.snapshotId ? <IdChip value={run.snapshotId} truncate={24} /> : DASH },
         ]}
@@ -114,9 +122,9 @@ export function RunPage({ id }: { id: string }) {
           { key: "spec", label: "Spec" },
         ]}
       />
-      {tab === "session" && (session ? <RunSession run={run} /> : <RunStdinSession run={run} />)}
+      {tab === "session" && (session ? <RunSession run={run} canAct={canAct} /> : <RunStdinSession run={run} canAct={canAct} />)}
       {tab === "output" && <RunOutput run={run} />}
-      {tab === "servers" && <RunServers run={run} refetch={q.refetch} fetching={q.fetching} error={q.error} />}
+      {tab === "servers" && <RunServers run={run} canAct={canAct} refetch={q.refetch} fetching={q.fetching} error={q.error} />}
       {tab === "timeline" && <RunTimeline run={run} now={now} />}
       {tab === "resources" && (
         <div className="stack">

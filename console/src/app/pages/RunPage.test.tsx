@@ -235,7 +235,7 @@ test("the facts: the grid in its order, Image and Labels as full-width rows outs
     const facts = r.el.querySelector('[role="group"]')!.parentElement!;
     expect(facts.classList.contains("kv-facts")).toBe(true);
     const grid = facts.querySelector(":scope > dl")!;
-    expect([...grid.querySelectorAll(":scope > div > dt")].map((d) => d.textContent)).toEqual(["Created", "First started", "Finished", "Resources", "Usage", "Submitted by", "Session", "Snapshot"]);
+    expect([...grid.querySelectorAll(":scope > div > dt")].map((d) => d.textContent)).toEqual(["Created", "First started", "Finished", "Resources", "Usage", "Owner", "Submitted with", "Session", "Snapshot"]);
     const rows = [...facts.querySelectorAll(':scope > [role="group"]')];
     expect(rows.map((g) => r.el.querySelector(`#${CSS.escape(g.getAttribute("aria-labelledby")!)}`)?.textContent)).toEqual(["Image", "Labels 5"]);
     expect(rows[0]!.querySelector(`[title="${IMAGE}"]`)?.textContent).toBe("ghcr.io/acme/jervasion-agent@sha256:2c567002fb22…d76856cf");

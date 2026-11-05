@@ -30,14 +30,14 @@ export function viewerOf(me: WhoAmI | null, tenant?: string): Viewer {
   return {
     operator: me?.operator ?? false,
     role,
-    legacy: me != null && me.role == null && me.memberships == null,
+    legacy: me == null || (me.role == null && me.memberships == null),
     userId: me?.userId,
     serviceAccountId: me?.serviceAccount?.id,
     email: me?.email,
     name: me?.name,
     memberships,
     invitationsEnabled: me?.invitationsEnabled === true && me.consoleAuth === "cloudflare-access",
-    scopes: me?.scopes ?? [],
+    scopes: me?.scopes ?? ["read", "run"],
     noTenant: me != null && !me.operator && !me.serviceAccount && me.memberships != null && me.memberships.length === 0,
   };
 }

@@ -2,6 +2,9 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Badge, Button, Card, ConnectionBadge, CrumbSep, DEFAULT_FONT_SIZE, EmptyState, formatDuration, IconButton, IdChip, LinkButton, PageHeader, SegmentedControl, StatePill, Terminal, TerminalOverlay, useTerminalScheme, type ConnectionStatus, type TerminalHandle, type TerminalSchemePref, type TerminalSize } from "@lux/design-system";
 import { IconChevronLeft, IconExternal, IconMinus, IconPlus, IconRefresh, IconTerminal, IconWarning } from "@lux/design-system/icons";
 import { ENDED_RUN_STATES, errorText, EXEC_RUN_STATES, isApiError, openExec, SHELL_COMMAND, TERMINAL_RUN_STATES, useSession, type ExecSession, type Run } from "../../api/index.ts";
+import { api, useQuery } from "../../api/index.ts";
+import { canActOnRun, useViewer } from "../identity.ts";
+import { useScope } from "../scope.tsx";
 import { href, Link, scoped, useSearch } from "../router.tsx";
 import { ButtonLink, ErrorBlock, HostLink, PageSkeleton, RunLink, runPath, useRun } from "./common.tsx";
 
@@ -45,6 +48,18 @@ const SCHEMES: { value: TerminalSchemePref; label: string; title: string }[] = [
  * reload, Reconnect or a new tab starts another; closing the tab ends it.
  */
 export function TerminalPage({ id }: { id: string }) {
+  const viewer = useViewer();
+  const { apiTenant } = useScope();
+  const run = useQuery(`terminal-permission:${id}`, (s) => api.run(id, s));
+  const sas = useQuery(`sas@${apiTenant ?? ""}`, (s) => api.serviceAccounts(apiTenant, s));
+  if (!viewer.legacy && !viewer.operator) {
+    if (!run.data) return <PageSkeleton />;
+    if (!canActOnRun(viewer, run.data, sas.data)) return <div className="page"><PageHeader title="Terminal" /><EmptyState title="Only the owner and admins can open a terminal" description="You can still read the Run's output and Session transcript." /></div>;
+  }
+  return <TerminalSession id={id} />;
+}
+
+function TerminalSession({ id }: { id: string }) {
   const session = useSession();
   // The terminal's own colours: changing them repaints this terminal in
   // place (same shell, same scrollback), never the console.
