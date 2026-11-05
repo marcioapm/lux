@@ -194,6 +194,7 @@ type AdmissionBlocker struct {
 type Event struct {
 	ID       int64          `json:"id"`
 	ServerID string         `json:"serverId,omitempty" doc:"A server's event: its id (the server.* events)."`
+	Subject  string         `json:"subject,omitempty" doc:"A tenant's event about its people (member.*, invitation.*, key.*, service_account.*): what it is about, e.g. usr_..., sa_..., inv_... or key_...; runId and serverId are then absent."`
 	Epoch    *int           `json:"epoch,omitempty"`
 	Type     string         `json:"type"`
 	Data     map[string]any `json:"data"`

@@ -156,11 +156,12 @@ func serversFixture(t *testing.T, s *Server, ctx context.Context) (key string) {
 	t.Helper()
 	key = ids.Secret("luxk")
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1'), ('t2', 't2')`)
-	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('k1', 't1', 'ci', $1, ARRAY['run'])`, ids.Hash(key))
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('k1', 't1', 'ci', $1, ARRAY['admin'])`, ids.Hash(key))
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h1', 'h1', 'ready')`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES
 		('run_aaaaaaaaaaaaaaaa', 't1', '{"workload": {"workdir": "/work"}}', 'running', 1)`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'run_aaaaaaaaaaaaaaaa', 'h1', 1, 'running')`)
+	claimRuns(t, s, key)
 	return key
 }
 

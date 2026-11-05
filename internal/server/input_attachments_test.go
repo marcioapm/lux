@@ -47,6 +47,7 @@ func inputFixture(t *testing.T) (*Server, string) {
 		('p1', 't1', 'r1', 'h1', 1, 'running'), ('p2', 't1', 'r2', 'h1', 1, 'running')`)
 	key := ids.Secret("luxk")
 	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('k1', 't1', 'k', $1, ARRAY['run', 'read'])`, ids.Hash(key))
+	claimRuns(t, s, key)
 	return s, key
 }
 
