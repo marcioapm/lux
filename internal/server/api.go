@@ -238,7 +238,7 @@ func (s *Server) routes(api huma.API) {
 			"Works in any state of the Run while the snapshot is available, terminated included; each URL handed out is a snapshot.downloaded event. " +
 			"404 for a snapshot not of this Run or a volume not in its manifest; 410 snapshot_unavailable once retention deleted it; " +
 			"409 not_uploaded (with Retry-After) while the volume is still on its host. " +
-			"It needs the run scope, not read: a volume holds whatever the workload wrote, credentials included.",
+			"Every role of the tenant may download one, viewers included (a viewer reads everything of the tenant's); a volume holds whatever the workload wrote, credentials included.",
 		Responses: map[string]*huma.Response{
 			"200": {Description: "With redirect=false: the URL.", Content: jsonContent(schemaRef[SnapshotVolumeURL](api))},
 			"302": {Description: "To the presigned URL.", Headers: map[string]*huma.Header{
@@ -246,7 +246,7 @@ func (s *Server) routes(api huma.API) {
 			}},
 		},
 		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusGone},
-	}, "run", streamed(s, s.downloadSnapshotVolume))
+	}, "read", streamed(s, s.downloadSnapshotVolume))
 	register(s, api, huma.Operation{
 		OperationID: "listArtifacts", Method: http.MethodGet, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
 		Summary: "List a Run's artifacts",
@@ -553,7 +553,13 @@ type ImageResolution = proto.ImageResolution
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + runRaiseColumns + `, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + timeoutRemainingSQL + `, ` + resumableSQL + `, ` + stageColumns
+	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + runRaiseColumns + `, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + timeoutRemainingSQL + `, ` + resumableSQL + `, ` + runOwnerSQL + `, ` + stageColumns
+
+// runOwnerSQL: the Run r's owner, as an Owner (JSON), or NULL.
+const runOwnerSQL = `coalesce(
+	(SELECT jsonb_build_object('kind', 'user', 'id', u.id, 'name', coalesce(nullif(u.name, ''), u.email), 'email', u.email) FROM users u WHERE u.id = r.owner_user_id),
+	CASE WHEN r.owner_user_id IS NOT NULL THEN jsonb_build_object('kind', 'user', 'id', r.owner_user_id, 'name', r.owner_user_id) END,
+	(SELECT jsonb_build_object('kind', 'serviceAccount', 'id', sa.id, 'name', sa.name) FROM service_accounts sa WHERE sa.id = r.owner_sa_id))`
 
 // timeoutRemainingSQL: the seconds Run r's timeout leaves it, by the reaper's
 // count (rr.timed, timedRuntimeSQL's); NULL without a timeout.
@@ -636,7 +642,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 	err := row.Scan(append([]any{&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
 		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing,
-		&requested, &size, &raisedFrom, &raisedFor, &shape, &r.TimeoutRemainingSeconds, &r.Resumable},
+		&requested, &size, &raisedFrom, &raisedFor, &shape, &r.TimeoutRemainingSeconds, &r.Resumable, &r.Owner},
 		stage.scanTargets()...)...)
 	// resolved_size is shown only while it names a size of the pool's
 	// current ladder with the Run's resources: a removed or changed shape
@@ -918,6 +924,8 @@ type listRunsInput struct {
 	Label     []string `query:"label,explode" doc:"Only Runs with this label (key=value); repeat to require several."`
 	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."`
 	Limit     string   `query:"limit" doc:"Unpaged lists: at most this many Runs, newest first, 1 to 1000 (default 100; a value out of range is ignored). Paged lists (sort or a cursor): Runs per page, 1 to 200 (default 50; out of range is a 400). limit alone does not page." example:"100"`
+	Owner     string   `query:"owner" doc:"Only Runs this owner owns: a person's id or email, or a service account's id or name."`
+	Mine      bool     `query:"mine" doc:"Only the caller's Runs: a person's own and those of the service accounts they own; a service account's key, the account's."`
 }
 
 // Resolve reads every label as given: huma drops them all when the first
@@ -977,6 +985,23 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 	for _, l := range in.Label {
 		k, v, _ := strings.Cut(l, "=")
 		where = append(where, "r.labels @> "+arg(map[string]string{k: v}))
+	}
+	if in.Owner != "" {
+		// users is the system's; the tenant's view shows its members and its Runs' owners.
+		o := arg(in.Owner)
+		where = append(where, `(r.owner_user_id IN (SELECT u.id FROM users u WHERE u.id = `+o+` OR lower(u.email) = lower(`+o+`))
+			OR r.owner_sa_id IN (SELECT sa.id FROM service_accounts sa WHERE sa.id = `+o+` OR sa.name = `+o+`))`)
+	}
+	if in.Mine {
+		switch {
+		case p.UserID != "":
+			u := arg(p.UserID)
+			where = append(where, `(r.owner_user_id = `+u+` OR r.owner_sa_id IN (SELECT sa.id FROM service_accounts sa WHERE sa.owner_user_id = `+u+`))`)
+		case p.ServiceAccountID != "":
+			where = append(where, "r.owner_sa_id = "+arg(p.ServiceAccountID))
+		default:
+			where = append(where, "false")
+		}
 	}
 	pg, paged, err := resolvePaging(in.PageQuery, runSortKeys, "created", in.Limit, 50, 200)
 	if err != nil {

@@ -21,14 +21,6 @@ type Person struct {
 	Operator bool   `json:"operator"`
 }
 
-// Owner is who owns a Run, a key or a cost row: a person or a service account.
-type Owner struct {
-	Kind  string `json:"kind" enum:"user,serviceAccount"`
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email,omitempty"`
-}
-
 type Me struct {
 	Person
 	Memberships  []MembershipRef `json:"memberships"`

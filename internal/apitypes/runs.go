@@ -72,6 +72,7 @@ type Run struct {
 	Resume *Resumability `json:"resume,omitempty"`
 	// Servers: on GET /v1/runs/{id}, its servers.
 	Servers     []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
+	Owner       *Owner        `json:"owner,omitempty" doc:"Who owns the Run: the person or service account that submitted it. Members act on their own Runs and their service accounts'; admins on all. Absent: no owner (submitted with a platform key, or before luxd recorded it)."`
 	SubmittedBy *RunSubmitter `json:"submittedBy,omitempty" doc:"On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."`
 	Cost        *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
 	Sizing      *RunSizing    `json:"sizing,omitempty" doc:"On a shaped pool: what its submit asked for in resources and the size it has. Absent for a Run submitted to and still in an unshaped pool."`
@@ -151,6 +152,15 @@ type RunUsage struct {
 }
 
 // RunSubmitter is who submitted a Run: an API key, or a person signed in.
+// Owner is who owns a Run, a key or a cost row: a person or a service
+// account.
+type Owner struct {
+	Kind  string `json:"kind" enum:"user,serviceAccount"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Email string `json:"email,omitempty"`
+}
+
 type RunSubmitter struct {
 	KeyID   string `json:"keyId,omitempty"`
 	KeyName string `json:"keyName,omitempty" doc:"Absent for an operator's key when a tenant asks."`

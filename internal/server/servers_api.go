@@ -198,6 +198,9 @@ type tenantServerOutput struct {
 func (s *Server) createServer(ctx context.Context, in *createServerInput) (*tenantServerOutput, error) {
 	p := principal(ctx)
 	b := in.Body
+	if err := s.requireServerRunActor(ctx, p, b.RunID); err != nil {
+		return nil, err
+	}
 	wake := cmp.Or(b.Wake, WakeNever)
 	if err := checkWake(wake); err != nil {
 		return nil, err
@@ -420,6 +423,9 @@ func (s *Server) attachServer(ctx context.Context, in *attachInput) (*tenantServ
 	p := principal(ctx)
 	if in.Body.RunID == "" {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_request", "runId is required")
+	}
+	if err := s.requireRunActor(ctx, p, in.Body.RunID); err != nil {
+		return nil, err
 	}
 	err := s.changeServers(ctx, p.TenantID, in.Body.RunID, func(tx pgx.Tx) error {
 		state, epoch, sp, err := serverRun(ctx, tx, in.Body.RunID)

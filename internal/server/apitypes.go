@@ -10,6 +10,7 @@ type (
 	Placement        = apitypes.Placement
 	RunUsage         = apitypes.RunUsage
 	RunSubmitter     = apitypes.RunSubmitter
+	Owner            = apitypes.Owner
 	SubmitAnswer     = apitypes.SubmitAnswer
 	AdmissionBlocker = apitypes.AdmissionBlocker
 	Event            = apitypes.Event

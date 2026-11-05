@@ -143,6 +143,18 @@ func (s *Server) requireServerActor(ctx context.Context, p Principal, serverID s
 	return s.requireRunActor(ctx, p, *run)
 }
 
+// requireServerRunActor: a server created for a Run, as the Run; one for
+// no Run (the tenant's own), an admin.
+func (s *Server) requireServerRunActor(ctx context.Context, p Principal, runID string) error {
+	if runID != "" {
+		return s.requireRunActor(ctx, p, runID)
+	}
+	if !p.atLeast("admin") {
+		return errf(http.StatusForbidden, "forbidden", "a server attached to no Run is the tenant's: only an admin may create one")
+	}
+	return nil
+}
+
 // checkAccess enforces the operation's accessRule, after authentication.
 func (s *Server) checkAccess(ctx huma.Context, p Principal) error {
 	rule, ok := ctx.Operation().Metadata[accessKey].(accessRule)
