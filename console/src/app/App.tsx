@@ -20,6 +20,8 @@ import { HostPage } from "./pages/HostPage.tsx";
 import { Pools } from "./pages/Pools.tsx";
 import { PoolPage } from "./pages/PoolPage.tsx";
 import { Tenants } from "./pages/Tenants.tsx";
+import { InviteAccept, NoTenant } from "./pages/InviteAccept.tsx";
+import { viewerOf } from "./identity.ts";
 import { People } from "./pages/People.tsx";
 import { Profile } from "./pages/Profile.tsx";
 import { Members } from "./pages/Members.tsx";
@@ -42,6 +44,7 @@ interface Route {
 }
 
 const ROUTES: Route[] = [
+  { pattern: "/invite/:code", title: "Invitation", bare: true, render: (p) => <InviteAccept code={p.code!} /> },
   { pattern: "/", title: "Overview", render: () => <Overview /> },
   { pattern: "/runs", title: "Runs", render: () => <Runs /> },
   { pattern: "/runs/:id", title: "Run", render: (p) => <RunPage id={p.id!} /> },
@@ -149,6 +152,7 @@ function Router() {
     );
   }
 
+  if (!path.startsWith("/invite/") && path !== "/preview-auth" && viewerOf(session.whoami).noTenant) return <NoTenant />;
   for (const r of ROUTES) {
     const m = matchPath(r.pattern, path);
     if (!m) continue;
