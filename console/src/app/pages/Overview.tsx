@@ -8,6 +8,7 @@ import { ErrorBlock, ErrorStrip, seriesFrom, useSeries, type SeriesData } from "
 import { ActivityFeed } from "./ActivityFeed.tsx";
 import { ControlHost } from "./ControlHost.tsx";
 import { OverviewCost } from "./OverviewCost.tsx";
+import { MemberCost } from "./MemberCost.tsx";
 
 /** What the Queued tile counts. */
 const QUEUED = ["submitted", "resuming", "provisioning"];
@@ -117,7 +118,7 @@ export function Overview() {
           </div>
         </>
       )}
-      {tab === "cost" && <OverviewCost />}
+      {tab === "cost" && <><OverviewCost /><MemberCost /></>}
       {tab === "storage" && (
         <>
           <ErrorStrip error={history.error} />
