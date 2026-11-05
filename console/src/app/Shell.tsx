@@ -159,6 +159,16 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
 
   const toggleRail = useCallback(() => setRail(!readRail()), []);
 
+  // The tenant picker: an operator's, every tenant (and All); a person in
+  // several tenants, theirs (whoami's memberships), showing the one
+  // whoami resolved to until they pick.
+  const multi = !operator && viewer.memberships.length > 1;
+  const tenantPicker = operator ? (
+    <TenantPicker tenants={tenants} value={scope.tenant} onChange={scope.setTenant} />
+  ) : multi ? (
+    <TenantPicker tenants={tenants} all={false} value={scope.apiTenant ? (viewer.memberships.find((m) => m.tenantId === scope.apiTenant || m.tenant === scope.apiTenant)?.tenantId ?? scope.apiTenant) : (session.whoami?.tenantId ?? "")} onChange={scope.setTenant} />
+  ) : null;
+
   const themeButton = (
     <IconButton size="sm" label={resolved === "dark" ? "Switch to light theme" : "Switch to dark theme"} onClick={toggle}>
       {resolved === "dark" ? <IconSun size={15} /> : <IconMoon size={15} />}
@@ -259,7 +269,7 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
           <div className="topbar-controls">
             <LiveIndicator />
             <div className="topbar-wide">
-              {operator && <TenantPicker tenants={tenants} value={scope.tenant} onChange={scope.setTenant} />}
+              {tenantPicker}
               <TimeRangePicker value={scope.range} onChange={scope.setRange} />
               <ScopeStep />
               <span className="topbar-sep" aria-hidden="true" />
@@ -272,10 +282,10 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
               </IconButton>
               {menu && (
                 <div className="topbar-pop" role="dialog" aria-label="Scope and settings">
-                  {operator && (
+                  {tenantPicker && (
                     <div className="topbar-pop-row">
                       <span className="topbar-pop-label">Tenant</span>
-                      <TenantPicker tenants={tenants} value={scope.tenant} onChange={scope.setTenant} />
+                      {tenantPicker}
                     </div>
                   )}
                   <div className="topbar-pop-row">

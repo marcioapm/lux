@@ -181,12 +181,14 @@ export interface TenantPickerProps {
   value: string;
   onChange: (tenantId: string) => void;
   size?: "sm" | "md";
+  /** Offer "All tenants" (an operator's). false: a person picking one of their memberships. Default true. */
+  all?: boolean;
 }
 
 /** Global tenant scope. "*" means all tenants. */
-export function TenantPicker({ tenants, value, onChange, size = "sm" }: TenantPickerProps) {
+export function TenantPicker({ tenants, value, onChange, size = "sm", all = true }: TenantPickerProps) {
   const options: SelectOption[] = [
-    { value: ALL_TENANTS, label: "All tenants", text: "All tenants" },
+    ...(all ? [{ value: ALL_TENANTS, label: "All tenants", text: "All tenants" }] : []),
     ...tenants.map((t) => ({
       value: t.id,
       text: t.name ?? t.id,

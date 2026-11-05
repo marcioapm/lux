@@ -333,7 +333,7 @@ Tabs), RelativeTime ("3h ago",
 the exact date, time and zone in a Tooltip; every table's times),
 DurationCell (a duration with how it was measured in a Tooltip, a live one
 in the foreground, a slow one in the warn tone),
-Tooltip, Select (an option's `disabled` is the reason it cannot be picked: shown greyed with the reason on its right; clicks and arrow keys pass it by; `hint` is a quiet note on the right of a pickable one; `footer` sits under the options), TenantPicker, TimeRangePicker, StepPicker (the page's step beside the range, "Every": Auto shows what it resolved to, `min/hour`; each choice its points or why it is off; a footer says what each kind of chart does with it), TimeSeriesChart (uPlot, with
+Tooltip, Select (an option's `disabled` is the reason it cannot be picked: shown greyed with the reason on its right; clicks and arrow keys pass it by; `hint` is a quiet note on the right of a pickable one; `footer` sits under the options), TenantPicker (`all={false}`: no "All tenants", for a person picking one of their memberships), TimeRangePicker, StepPicker (the page's step beside the range, "Every": Auto shows what it resolved to, `min/hour`; each choice its points or why it is off; a footer says what each kind of chart does with it), TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline
 (placement waterfall: a stage is a bar from `start` to `end`, striped while
 it has no `end`; a `point: true` stage is an instant, a dot at `start` with

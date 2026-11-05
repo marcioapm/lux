@@ -6,5 +6,5 @@ beforeAll(async () => { GlobalRegistrator.register(); ({ People } = await import
 afterAll(async () => { await GlobalRegistrator.unregister(); });
 test("People lists platform accounts with memberships and operator labels", async () => {
   const p = await t.mountAs("operator", "/people", <People />);
-  try { await p.until(() => p.text().includes("Márcio Martins"), "people"); expect(p.text()).toContain("globex · Admin"); expect(p.text()).toContain("Operator"); expect(p.el.querySelectorAll("tbody tr").length).toBe(6); } finally { await p.done(); }
+  try { await p.until(() => p.text().includes("Márcio Martins"), "people"); expect(p.text()).toContain("globex · Admin"); expect(p.text()).toContain("Operator"); expect(p.el.querySelectorAll("tbody tr").length).toBe(7); } finally { await p.done(); }
 });

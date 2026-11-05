@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { IdChip, ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
+import { IdChip, ROLE_LABEL, ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
 import { IconExternal, IconTerminal } from "@lux/design-system/icons";
 import { api, errorText, getSession, isApiError, setWhoAmI, signInAs, useQuery, useSession } from "../api/index.ts";
 import { matchPath, usePath, useSearchParams } from "./router.tsx";
@@ -87,11 +87,12 @@ const ROUTES: Route[] = [
 ];
 
 /**
- * Learns the key's role from GET /v1/whoami once per sign-in, retrying
- * network and server errors with backoff. A 401 signs out (apiFetch), which
- * brings back the sign-in screen.
+ * Learns the key's role from GET /v1/whoami once per sign-in and again for
+ * each tenant picked (a person in several tenants has a role in each),
+ * retrying network and server errors with backoff. A 401 signs out
+ * (apiFetch), which brings back the sign-in screen.
  */
-function useRole(): { error: string | null; retrying: boolean; retry: () => void } {
+function useRole(tenant: string | undefined): { error: string | null; retrying: boolean; retry: () => void } {
   const [failure, setFailure] = useState<{ error: string; retrying: boolean } | null>(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -100,7 +101,7 @@ function useRole(): { error: string | null; retrying: boolean; retry: () => void
     let backoff = 1000;
     const probe = async () => {
       try {
-        const me = await api.whoami(ctrl.signal);
+        const me = await api.whoami(ctrl.signal, tenant);
         setWhoAmI(me);
         setFailure(null);
       } catch (e) {
@@ -124,21 +125,25 @@ function useRole(): { error: string | null; retrying: boolean; retry: () => void
       ctrl.abort();
       clearTimeout(timer);
     };
-  }, [attempt]);
+  }, [attempt, tenant]);
   return { error: failure?.error ?? null, retrying: failure?.retrying ?? false, retry: () => setAttempt((n) => n + 1) };
 }
 
 function Router() {
   const path = usePath();
   const session = useSession();
-  const role = useRole();
-  const { operator } = useScope();
+  const { operator, apiTenant } = useScope();
+  const role = useRole(apiTenant);
   useLiveUpdates();
-  // The tenant picker's list: operators only.
+  // The tenant picker's list: an operator's, every tenant; a person in several tenants, their memberships.
   const tenants = useQuery("tenants", (signal) => api.tenants(signal), { interval: 60_000, enabled: operator });
+  const memberships = session.whoami?.memberships;
   const picker = useMemo<PickerTenant[]>(
-    () => (tenants.data ?? []).map((t) => ({ id: t.id, name: t.name, hint: t.activeRuns > 0 ? `${t.activeRuns} active` : undefined })),
-    [tenants.data],
+    () =>
+      operator
+        ? (tenants.data ?? []).map((t) => ({ id: t.id, name: t.name, hint: t.activeRuns > 0 ? `${t.activeRuns} active` : undefined }))
+        : (memberships ?? []).map((m) => ({ id: m.tenantId, name: m.tenant, hint: ROLE_LABEL[m.role] })),
+    [operator, tenants.data, memberships],
   );
 
   // Until whoami answers, the role is unknown: do not guess "tenant".

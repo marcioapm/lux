@@ -32,6 +32,7 @@ export const USERS: User[] = [
   { id: "usr_dio", name: "Diogo Lopes", email: "diogo@acme.dev", operator: false, lastSeen: 3 * DAY },
   { id: "usr_fil", name: "Filipa Rocha", email: "filipa@acme.dev", operator: false, lastSeen: 60 },
   { id: "usr_sam", name: "Sam Lee", email: "sam@globex.io", operator: false, lastSeen: 60 },
+  { id: "usr_rui", name: "Rui Alves", email: "rui@acme.dev", operator: false, lastSeen: 600 },
 ];
 
 export interface MembershipRow {
@@ -48,6 +49,9 @@ export const MEMBERSHIPS: MembershipRow[] = [
   { tenantId: "ten_acme", userId: "usr_bru", role: "member", joined: 149 * DAY },
   { tenantId: "ten_acme", userId: "usr_dio", role: "viewer", joined: 45 * DAY },
   { tenantId: "ten_globex", userId: "usr_mar", role: "admin", joined: 258 * DAY },
+  // Rui: a non-operator in two tenants (viewer in globex, admin in initech).
+  { tenantId: "ten_globex", userId: "usr_rui", role: "viewer", joined: 20 * DAY },
+  { tenantId: "ten_initech", userId: "usr_rui", role: "admin", joined: 10 * DAY },
 ];
 
 export const TENANTS = [
@@ -68,6 +72,7 @@ export const AS: Record<string, string | null> = {
   invited: "usr_fil",
   sa: null,
   bruno: "usr_bru",
+  multi: "usr_rui",
 };
 
 export interface SA {
