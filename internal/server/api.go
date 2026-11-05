@@ -439,6 +439,7 @@ func (s *Server) routes(api huma.API) {
 	s.serviceAccountRoutes(api)
 	s.memberRoutes(api)
 	s.invitationRoutes(api)
+	s.operatorPeopleRoutes(api)
 
 	// Operators and the system.
 	register(s, api, huma.Operation{

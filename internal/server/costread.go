@@ -17,7 +17,8 @@ import (
 
 type costSummaryInput struct {
 	CostLabelQuery
-	Group    []string `query:"group,explode" doc:"Repeat up to twice: tenant (operators), pool, host, family, run, key, label:key."`
+	By       string   `query:"by" doc:"Alias for one group: member (people and service accounts), owner (service accounts folded into their owner), key, run, pool, host or family."`
+	Group    []string `query:"group,explode" doc:"Repeat up to twice: tenant (operators), pool, host, family, run, key, member, owner, label:key."`
 	Family   []string `query:"family,explode" doc:"Only these families: repeat up to 8 times, each value non-empty. Not with nofamily."`
 	NoFamily []string `query:"nofamily,explode" doc:"Every family but these: repeat up to 8 times, each value non-empty."`
 	Interval string   `query:"interval" doc:"hour or day; include a time series."`
@@ -81,8 +82,11 @@ func (q *CostLabelQuery) labelFilter() (map[string][]string, []string, error) {
 const costScopedSQL = `scoped AS (
 		SELECT c.hour, c.currency, c.amount, c.tenant_id, c.family, c.run_id,
 			coalesce(cp.name, '(none)') AS pool, coalesce(c.host_id, '(none)') AS host, r.labels,
-			coalesce(r.submitted_by_key, 'email:' || r.submitted_by_email, '(none)') AS submitter
+			coalesce(r.submitted_by_key, 'email:' || r.submitted_by_email, '(none)') AS submitter,
+			coalesce('user:' || r.owner_user_id, 'sa:' || r.owner_sa_id, '(none)') AS member,
+			coalesce('user:' || r.owner_user_id, 'user:' || sa.owner_user_id, 'sa:' || r.owner_sa_id, '(none)') AS owner
 		FROM cost_hourly c JOIN runs r ON r.id = c.run_id LEFT JOIN pools cp ON cp.id = c.pool_id
+		LEFT JOIN service_accounts sa ON sa.id = r.owner_sa_id
 		WHERE c.run_id IS NOT NULL AND c.hour >= $1 AND c.hour < $2
 			AND (cardinality($3::text[]) = 0 OR c.family = ANY($3::text[]))
 			AND ($4::jsonb = '{}' OR NOT EXISTS (SELECT 1 FROM jsonb_each($4::jsonb) f
@@ -110,6 +114,8 @@ func (s *Server) costTx(ctx context.Context, p Principal, read func(pgx.Tx) erro
 }
 
 type CostSummaryRow struct {
+	Key      string            `json:"key,omitempty" doc:"For member/owner groups: user:<id>, sa:<id>, or (none)."`
+	Owner    *Owner            `json:"owner,omitempty"`
 	At       *time.Time        `json:"at,omitempty"`
 	Group    map[string]string `json:"group,omitempty"`
 	Currency string            `json:"currency"`
@@ -254,6 +260,12 @@ func costRowLimit(n int) error {
 
 func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSummaryOutput, error) {
 	p := principal(ctx)
+	if in.By != "" {
+		if len(in.Group) != 0 {
+			return nil, errf(400, "bad_request", "by and group cannot be combined")
+		}
+		in.Group = []string{in.By}
+	}
 	from, to, _, err := s.historyRange(in.HistoryQuery)
 	if err != nil {
 		return nil, err
@@ -272,7 +284,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	var label [2]string
 	for i, g := range in.Group {
 		switch {
-		case g == "tenant" && p.Operator, g == "pool", g == "host", g == "family", g == "run", g == "key":
+		case g == "tenant" && p.Operator, g == "pool", g == "host", g == "family", g == "run", g == "key", g == "member", g == "owner":
 			group[i] = g
 		case strings.HasPrefix(g, "label:") && len(g) > len("label:"):
 			group[i], label[i] = "label", strings.TrimPrefix(g, "label:")
@@ -301,11 +313,14 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	// ranks: rank=compute counts the host families ($13), external the rest.
 	const base = `WITH ` + costScopedSQL + `, dimensions AS (
 		SELECT hour, currency, amount, run_id, ($10 = 'all' OR (family = ANY($13::text[])) = ($10 = 'compute')) AS ranks,
-			CASE $6::text WHEN 'tenant' THEN tenant_id WHEN 'pool' THEN pool WHEN 'host' THEN host WHEN 'key' THEN submitter
+			CASE $6::text WHEN 'tenant' THEN tenant_id WHEN 'pool' THEN pool WHEN 'host' THEN host WHEN 'key' THEN submitter WHEN 'member' THEN member WHEN 'owner' THEN owner
 				WHEN 'family' THEN family WHEN 'run' THEN run_id WHEN 'label' THEN coalesce(labels->>$8, '(none)') END AS g1,
-			CASE $7::text WHEN 'tenant' THEN tenant_id WHEN 'pool' THEN pool WHEN 'host' THEN host WHEN 'key' THEN submitter
+			CASE $7::text WHEN 'tenant' THEN tenant_id WHEN 'pool' THEN pool WHEN 'host' THEN host WHEN 'key' THEN submitter WHEN 'member' THEN member WHEN 'owner' THEN owner
 				WHEN 'family' THEN family WHEN 'run' THEN run_id WHEN 'label' THEN coalesce(labels->>$9, '(none)') END AS g2
 		FROM scoped WHERE family <> ALL($12::text[])
+		AND ($14::boolean OR submitter IN (SELECT k.id FROM api_keys k LEFT JOIN service_accounts sa ON sa.id=k.service_account_id
+			WHERE (k.user_id=nullif($15,'')) OR k.service_account_id=nullif($16,'') OR sa.owner_user_id=nullif($15,''))
+			OR submitter = 'email:' || nullif($17,''))
 	)`
 	// The fold ranks g1 per currency by the cost rank counts (a value with
 	// none ranks last), then marks every value past $11 other and names it
@@ -352,7 +367,8 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	case in.Runs:
 		query = base + plainRuns
 	}
-	args := []any{from, to, family, want, absent, group[0], group[1], label[0], label[1], rank, top, nofamily, hostFamilies}
+	args := []any{from, to, family, want, absent, group[0], group[1], label[0], label[1], rank, top, nofamily, hostFamilies,
+		(group[0] != "key" && group[1] != "key") || p.atLeast("admin"), p.UserID, p.ServiceAccountID, p.Email}
 	rowCount := 0
 	read := func(tx pgx.Tx, interval string) ([]CostSummaryRow, error) {
 		bucket := "NULL::timestamptz"
@@ -505,6 +521,40 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	}
 	if group[0] == "key" || group[1] == "key" {
 		if out.Body.Keys, err = s.summaryKeys(ctx, p, out.Body.Totals, in.Group[0]); err != nil {
+			return nil, err
+		}
+	}
+	if group[0] == "member" || group[0] == "owner" {
+		err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			for _, rows := range [][]CostSummaryRow{out.Body.Totals, out.Body.Series} {
+				for i := range rows {
+					r := &rows[i]
+					r.Key = r.Group[group[0]]
+					if strings.HasPrefix(r.Key, "user:") {
+						id := strings.TrimPrefix(r.Key, "user:")
+						person, e := personByID(ctx, tx, &id)
+						if e != nil {
+							return e
+						}
+						if person != nil {
+							r.Owner = &Owner{Kind: "user", ID: person.ID, Name: person.Name, Email: person.Email}
+							if r.Owner.Name == "" {
+								r.Owner.Name = person.Email
+							}
+						}
+					} else if strings.HasPrefix(r.Key, "sa:") {
+						id := strings.TrimPrefix(r.Key, "sa:")
+						var name string
+						if e := tx.QueryRow(ctx, `SELECT name FROM service_accounts WHERE id=$1`, id).Scan(&name); e != nil {
+							return e
+						}
+						r.Owner = &Owner{Kind: "serviceAccount", ID: id, Name: name}
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
 			return nil, err
 		}
 	}

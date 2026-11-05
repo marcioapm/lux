@@ -22,6 +22,9 @@ type Tenant struct {
 	Runs              int       `json:"runs"`
 	Hosts             int       `json:"hosts"`
 	StoredBytes       int64     `json:"storedBytes"`
+	OwnersCount       int       `json:"ownersCount"`
+	Owners            []string  `json:"owners"`
+	MembersCount      int       `json:"membersCount"`
 	CreatedAt         time.Time `json:"createdAt"`
 }
 
@@ -41,7 +44,10 @@ func (s *Server) listTenants(ctx context.Context, _ *TenantQuery) (*listTenantsO
 				(SELECT count(*) FROM runs WHERE tenant_id = t.id),
 				(SELECT count(*) FROM hosts WHERE tenant_id = t.id AND state <> 'terminated'),
 				(SELECT coalesce(sum(size), 0) FROM blobs WHERE tenant_id = t.id AND location <> 'deleted'),
-				t.created_at
+				t.created_at,
+				(SELECT count(*) FROM memberships m WHERE m.tenant_id=t.id AND m.role='owner')::int,
+				ARRAY(SELECT coalesce(nullif(u.name,''),u.email) FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=t.id AND m.role='owner' ORDER BY u.email),
+				(SELECT count(*) FROM memberships m WHERE m.tenant_id=t.id)::int
 			FROM tenants t WHERE $1 = '' OR t.id = $1 ORDER BY t.name`, p.TenantID)
 		if err != nil {
 			return err
@@ -49,7 +55,7 @@ func (s *Server) listTenants(ctx context.Context, _ *TenantQuery) (*listTenantsO
 		tenants, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Tenant, error) {
 			var t Tenant
 			err := row.Scan(&t.ID, &t.Name, &t.RetentionDays, &t.ExpireAfterDays, &t.MaxConcurrentRuns, &t.MaxHosts, &t.MaxStorageBytes,
-				&t.ActiveRuns, &t.Runs, &t.Hosts, &t.StoredBytes, &t.CreatedAt)
+				&t.ActiveRuns, &t.Runs, &t.Hosts, &t.StoredBytes, &t.CreatedAt, &t.OwnersCount, &t.Owners, &t.MembersCount)
 			return t, err
 		})
 		return err

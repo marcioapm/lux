@@ -165,6 +165,8 @@ func TestCostLabels(t *testing.T) {
 func TestCostSummaryByKey(t *testing.T) {
 	s, keys := costLabelFixture(t)
 	ctx := context.Background()
+	// Key-level breakdowns of everyone require an admin now.
+	execSQL(t, s, ctx, `UPDATE service_accounts SET role='admin' WHERE id IN (SELECT service_account_id FROM api_keys WHERE id IN ('k1','k2'))`)
 	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes, revoked_at) VALUES
 		('k1old', 't1', 'old-bot', 'h-old', ARRAY['run'], now())`)
 	execSQL(t, s, ctx, `UPDATE runs SET submitted_by_key = 'k1' WHERE id = 'r1'`)
