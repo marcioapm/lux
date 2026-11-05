@@ -281,6 +281,8 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       return new Response("upgrade failed", { status: 500 });
     }
     if (!authed(req)) return json({ error: { code: "unauthorized", message: "no key" } }, 401);
+    // As luxd (TestAccessMembership): a person in no tenant, or not in the one asked for, gets 403 not_a_member, no identity.
+    if (p === "/v1/whoami" && caller && !caller.operator && !caller.sa && !caller.role) return json({ error: { code: "not_a_member", message: "you are not a member of this tenant: ask one of its admins to invite this email" } }, 403);
     if (p === "/v1/whoami" && caller) return json(whoamiFor(caller, consoleAuth, previewDomain || null));
     const people = await peopleApi(req, u, caller, consoleAuth);
     if (people) return people.status === 204 ? new Response(null, { status: 204 }) : json(people.body, people.status);

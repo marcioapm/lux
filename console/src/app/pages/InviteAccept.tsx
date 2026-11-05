@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button, RelativeTime, ROLE_DESC, ROLE_LABEL } from "@lux/design-system";
-import { api, errorText, setWhoAmI, signOut, useQuery, useSession } from "../../api/index.ts";
+import { api, errorText, isApiError, setWhoAmI, signOut, useQuery, useSession } from "../../api/index.ts";
 import { AuthScreen } from "../SignIn.tsx";
 import { go } from "../router.tsx";
 
@@ -12,15 +12,22 @@ function SignOutButton() {
 /** /invite/:code: reachable before any tenant membership, bare and behind Access. */
 export function InviteAccept({ code }: { code: string }) {
   const s = useSession();
-  const q = useQuery(`invite:${code}`, (sig) => api.invitationByCode(code, sig));
+  // luxd says a code is unusable with 410 invitation_unusable; anything else that fails (the network, a 5xx) is not the invitation's fault: retry.
+  const q = useQuery(`invite:${code}`, (sig) =>
+    api.invitationByCode(code, sig).catch((e) => {
+      if (isApiError(e) && (e.status === 410 || e.status === 404)) return { unusable: true as const };
+      throw e;
+    }),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const i = q.data;
+  const i = q.data && !("unusable" in q.data) ? q.data : undefined;
   const unavailable = s.consoleAuth === "key";
-  const unusable = !!q.error || (i && i.status !== "pending");
+  const unusable = (q.data != null && "unusable" in q.data) || (i && i.status !== "pending");
+  const failed = q.error != null && q.data == null;
   return (
     <AuthScreen>
-      {unavailable ? <><h2 className="dialog-title">Invitations need Cloudflare Access</h2><p className="secondary">This console signs in with keys. Ask an operator to add your email directly.</p></> : unusable ? <><h2 className="dialog-title">This invitation can't be used</h2><p className="secondary">It expired, was revoked or was already accepted. Ask whoever sent it for a new link; renewing keeps the same one.</p><Button onClick={() => go("/")}>Go to lux</Button></> : i && !i.emailMatches ? <><h2 className="dialog-title">This invitation is for someone else</h2><p className="secondary">You're signed in as <b>{s.user?.email ?? s.whoami?.email}</b>. The invitation was sent to a different email. Sign out and sign in with the invited one.</p><SignOutButton /></> : i ? <>
+      {unavailable ? <><h2 className="dialog-title">Invitations need Cloudflare Access</h2><p className="secondary">This console signs in with keys. Ask an operator to add your email directly.</p></> : failed ? <><h2 className="dialog-title">Couldn't check this invitation</h2><p className="secondary">{q.error} The link may still be fine.</p><div className="dialog-actions"><Button variant="primary" loading={q.loading} onClick={() => void q.refetch()}>Try again</Button></div></> : unusable ? <><h2 className="dialog-title">This invitation can't be used</h2><p className="secondary">It expired, was revoked or was already accepted. Ask whoever sent it for a new link; renewing keeps the same one.</p><Button onClick={() => go("/")}>Go to lux</Button></> : i && !i.emailMatches ? <><h2 className="dialog-title">This invitation is for someone else</h2><p className="secondary">You're signed in as <b>{s.user?.email ?? s.whoami?.email}</b>. The invitation was sent to a different email. Sign out and sign in with the invited one.</p><SignOutButton /></> : i ? <>
         <h2 className="dialog-title">Join {i.tenant}</h2>
         <p className="secondary">{i.invitedBy?.name ?? "An admin"} invited you as <b>{i.role ? ROLE_LABEL[i.role] : "a member"}</b>. {i.role ? ROLE_DESC[i.role] : ""}</p>
         <div className="signin-next">Signed in as <b>{s.user?.email ?? s.whoami?.email}</b> · expires <RelativeTime at={i.expiresAt} /></div>

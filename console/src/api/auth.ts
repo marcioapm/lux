@@ -27,9 +27,11 @@ interface Session {
   consoleAuth: "key" | "cloudflare-access" | null;
   /** The last whoami answer for this session (null until it has answered). */
   whoami: WhoAmI | null;
+  /** whoami answered 403 not_a_member: signed in, in no tenant (or not in the one asked for), not an operator. */
+  notAMember: boolean;
 }
 
-let session: Session = { key: readKey(), role: "unknown", user: null, consoleAuth: null, whoami: null };
+let session: Session = { key: readKey(), role: "unknown", user: null, consoleAuth: null, whoami: null, notAMember: false };
 
 function readKey(): string | null {
   try {
@@ -53,7 +55,7 @@ export function getKey(): string | null {
 
 export function signIn(key: string) {
   storeKey(key);
-  session = { ...session, key, role: "unknown", user: null, whoami: null };
+  session = { ...session, key, role: "unknown", user: null, whoami: null, notAMember: false };
   emit();
 }
 
@@ -77,7 +79,7 @@ export function signOut() {
   try {
     sessionStorage.removeItem(KEY);
   } catch {}
-  session = { ...session, key: null, role: "unknown", user: null, whoami: null };
+  session = { ...session, key: null, role: "unknown", user: null, whoami: null, notAMember: false };
   emit();
 }
 
@@ -89,7 +91,14 @@ export function setRole(role: Role, consoleAuth?: Session["consoleAuth"]) {
 
 /** What whoami said: the role, and who (a person, a service account) with their memberships. */
 export function setWhoAmI(me: WhoAmI) {
-  session = { ...session, role: me.operator ? "operator" : "tenant", consoleAuth: me.consoleAuth ?? session.consoleAuth, whoami: me };
+  session = { ...session, role: me.operator ? "operator" : "tenant", consoleAuth: me.consoleAuth ?? session.consoleAuth, whoami: me, notAMember: false };
+  emit();
+}
+
+/** whoami said 403 not_a_member (no identity body): the "not part of any tenant" screen, never a generic error. */
+export function setNotAMember() {
+  if (session.notAMember) return;
+  session = { ...session, role: "tenant", whoami: null, notAMember: true };
   emit();
 }
 

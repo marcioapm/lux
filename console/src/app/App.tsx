@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { IdChip, ROLE_LABEL, ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
 import { IconExternal, IconTerminal } from "@lux/design-system/icons";
-import { api, errorText, getSession, isApiError, setWhoAmI, signInAs, useQuery, useSession } from "../api/index.ts";
+import { api, errorText, getSession, isApiError, setNotAMember, setWhoAmI, signInAs, useQuery, useSession } from "../api/index.ts";
 import { matchPath, usePath, useSearchParams } from "./router.tsx";
 import { ScopeProvider, useScope } from "./scope.tsx";
 import { useLiveUpdates } from "./live.ts";
@@ -106,6 +106,12 @@ function useRole(tenant: string | undefined): { error: string | null; retrying: 
         setFailure(null);
       } catch (e) {
         if (ctrl.signal.aborted) return;
+        // Signed in, but a member of no tenant (or not of the one asked for): luxd sends no identity, only the code.
+        if (isApiError(e) && e.status === 403 && e.code === "not_a_member") {
+          setNotAMember();
+          setFailure(null);
+          return;
+        }
         // Signed in by Cloudflare Access and now a network error: most
         // likely the Access session expired, and Access answered with a
         // redirect to its login, which fetch cannot follow. A reload can.
@@ -157,7 +163,7 @@ function Router() {
     );
   }
 
-  if (!path.startsWith("/invite/") && path !== "/preview-auth" && viewerOf(session.whoami).noTenant) return <NoTenant />;
+  if (!path.startsWith("/invite/") && path !== "/preview-auth" && (session.notAMember || viewerOf(session.whoami).noTenant)) return <NoTenant />;
   for (const r of ROUTES) {
     const m = matchPath(r.pattern, path);
     if (!m) continue;
@@ -225,7 +231,14 @@ function useConsoleAuth(enabled: boolean): "checking" | "done" {
       .then((me) => {
         if (me.email) signInAs({ email: me.email, name: me.name || me.email, picture: me.picture }, me.operator ? "operator" : "tenant");
       })
-      .catch(() => {})
+      .catch(async (e) => {
+        // Signed in through Access but in no tenant: whoami is 403 not_a_member with no identity; /v1/me still says who.
+        if (!isApiError(e) || e.status !== 403 || e.code !== "not_a_member") return;
+        const me = await api.me(ctrl.signal).catch(() => null);
+        if (!me || ctrl.signal.aborted) return;
+        signInAs({ email: me.email, name: me.name || me.email, picture: me.picture || undefined }, "tenant");
+        setNotAMember();
+      })
       .finally(() => !ctrl.signal.aborted && setState({ for: true, value: "done" }));
     return () => ctrl.abort();
   }, [enabled]);
