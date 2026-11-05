@@ -21,6 +21,10 @@ const (
 	Snapshot  = "snap"
 	Artifact  = "art"
 	Server    = "srv"
+	User      = "usr"
+	// ServiceAccount: a tenant's non-person principal.
+	ServiceAccount = "sa"
+	Invitation     = "inv"
 )
 
 // alphabet is lowercase base32 without padding: safe in URLs, container

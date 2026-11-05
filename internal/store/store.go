@@ -133,6 +133,12 @@ func Migrate(ctx context.Context, dsn, appPassword string) ([]string, error) {
 	return migrate(ctx, dsn, appPassword, "")
 }
 
+// MigrateUpTo applies pending migrations up to and including version upTo:
+// for tests that seed a database as an older luxd left it.
+func MigrateUpTo(ctx context.Context, dsn, appPassword, upTo string) ([]string, error) {
+	return migrate(ctx, dsn, appPassword, upTo)
+}
+
 // migrate applies pending migrations up to and including version upTo
 // ("" for all of them).
 func migrate(ctx context.Context, dsn, appPassword, upTo string) ([]string, error) {
