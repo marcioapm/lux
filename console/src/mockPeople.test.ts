@@ -85,6 +85,12 @@ test("cost by member and by owner: service accounts fold into their owner, (no o
   expect(amt(byOwner, "sa:sa_7cr3b2x9")).toBeUndefined();
   expect(amt(byOwner, "sa:sa_5dd0p2x8")).toBe("77.40");
   expect(amt(byOwner, "(none)")).toBe("61.33");
+  // As luxd: runs only with runs=true; group {member: key}; only owners with cost.
+  expect(byMember.totals.every((r) => !("runs" in r))).toBe(true);
+  const withRuns = (await as("viewer", "/v1/costs?by=member&runs=true"))!.body as { totals: Record<string, unknown>[] };
+  expect(withRuns.totals.find((r) => r.key === "user:usr_car")).toEqual({ key: "user:usr_car", owner: { kind: "user", id: "usr_car", name: "Carla Santos", email: "carla@acme.dev" }, group: { member: "user:usr_car" }, currency: "USD", amount: "212.40", runs: 148 });
+  expect(withRuns.totals.find((r) => r.key === "(none)")).toEqual({ key: "(none)", group: { member: "(none)" }, currency: "USD", amount: "61.33", runs: 211 });
+  expect(withRuns.totals.some((r) => r.key === "user:usr_dio")).toBe(false);
 });
 
 test("canAct: owners, service account owners and admins act; viewers never", () => {

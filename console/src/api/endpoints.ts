@@ -132,8 +132,8 @@ export const api = {
   createServiceAccountKey: (tenant: Scope, id: string, body: NewKeyRequest) => request<CreatedApiKey>(`/service-accounts/${enc(id)}/keys`, { method: "POST", tenant, body }),
   revokeServiceAccountKey: (tenant: Scope, id: string, key: string) => request<void>(`/service-accounts/${enc(id)}/keys/${enc(key)}`, { method: "DELETE", tenant }),
 
-  /** Cost per member (each person and service account) or per owner (service accounts folded into their owner). */
-  costsByOwner: (tenant: Scope, by: "member" | "owner", since: string, signal?: Sig) => request<CostByOwner>("/costs", { tenant, query: { by, since }, signal }),
+  /** Cost per member (each person and service account) or per owner (service accounts folded into their owner); runs=true: luxd counts Runs only when asked. */
+  costsByOwner: (tenant: Scope, by: "member" | "owner", since: string, signal?: Sig) => request<CostByOwner>("/costs", { tenant, query: { by, since, runs: true }, signal }),
 
   /** Operators: every person, across tenants. */
   people: (signal?: Sig) => request<{ people: PlatformPerson[] }>("/people", { signal }).then((r) => r.people ?? []),

@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -65,6 +67,65 @@ func TestRevokeMemberKey(t *testing.T) {
 	want := []string{"k_mia2 usr_member adam@example.com", "k_admin usr_admin olive@example.com", "k_owner usr_owner k_op"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("key.revoked events: %v, want %v", got, want)
+	}
+}
+
+// GET /v1/costs?by=member|owner: totals rows keyed user:<id> | sa:<id> |
+// (none), with owner (absent on (none)) and group {member|owner: key}.
+// runs is filled only with runs=true (or top): the console asks for it.
+// The console's test (MemberCost.test.tsx) replays the body logged here.
+func TestCostByMemberContract(t *testing.T) {
+	s, keys := costLabelFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO users(id,email,name) VALUES('usr_cost','cost@example.com','Cost Member')`)
+	execSQL(t, s, ctx, `INSERT INTO memberships(tenant_id,user_id,role) VALUES('t1','usr_cost','member')`)
+	execSQL(t, s, ctx, `UPDATE runs SET owner_user_id='usr_cost' WHERE id='r1'`)
+	execSQL(t, s, ctx, `UPDATE runs SET owner_sa_id=(SELECT service_account_id FROM api_keys WHERE id='k1') WHERE id='r3'`)
+	sa := queryAll(t, s, `SELECT service_account_id || ' ' || (SELECT name FROM service_accounts WHERE id = service_account_id) FROM api_keys WHERE id='k1'`)[0]
+	saID, saName, _ := strings.Cut(sa, " ")
+	raw := func(q string) []map[string]any {
+		code, out := doJSON(t, s, keys["t1"], http.MethodGet, costPath(q), nil)
+		if code != 200 {
+			t.Fatalf("%s: %d %v", q, code, out)
+		}
+		b, _ := json.Marshal(out["totals"])
+		t.Logf("%s totals: %s", q, b)
+		var rows []map[string]any
+		for _, r := range out["totals"].([]any) {
+			rows = append(rows, r.(map[string]any))
+		}
+		return rows
+	}
+	for _, r := range raw("&by=member&family=compute") {
+		if _, ok := r["runs"]; ok {
+			t.Fatalf("runs without runs=true: %v", r)
+		}
+	}
+	rows := raw("&by=member&family=compute&runs=true")
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r["key"].(string)] = r
+		if r["runs"] == nil || r["group"].(map[string]any)["member"] != r["key"] {
+			t.Errorf("row: %v", r)
+		}
+	}
+	want := map[string]map[string]any{
+		"user:usr_cost": {"kind": "user", "id": "usr_cost", "name": "Cost Member", "email": "cost@example.com"},
+		"sa:" + saID:    {"kind": "serviceAccount", "id": saID, "name": saName},
+	}
+	for k, o := range want {
+		if !reflect.DeepEqual(byKey[k]["owner"], o) {
+			t.Errorf("%s owner: %v, want %v", k, byKey[k]["owner"], o)
+		}
+		if byKey[k]["runs"] != float64(1) {
+			t.Errorf("%s runs: %v", k, byKey[k]["runs"])
+		}
+	}
+	if none := byKey["(none)"]; none == nil || none["owner"] != nil || none["amount"] != "100" || none["currency"] != "USD" {
+		t.Errorf("(none): %v", none)
+	}
+	if len(byKey) != 3 {
+		t.Errorf("rows: %v", byKey)
 	}
 }
 

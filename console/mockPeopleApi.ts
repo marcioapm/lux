@@ -265,12 +265,18 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
   }
 
   // ---- cost per member / owner
-  if (p === "/v1/costs") return ok(costByOwner(u.searchParams.get("by") === "owner", inTenant()));
+  if (p === "/v1/costs") return ok(costByOwner(u.searchParams.get("by") === "owner", u.searchParams.get("runs") === "true"));
   return null;
 }
 
-/** GET /v1/costs?by=member|owner: each person, service account and (none); by owner, service accounts fold into their owner. */
-export function costByOwner(byOwner: boolean, members: MembershipRow[]) {
+/**
+ * GET /v1/costs?by=member|owner (costread.go): a CostSummary whose totals
+ * are keyed user:<id> | sa:<id> | (none), with group {by: key}, owner (not
+ * on (none)), and runs only with runs=true. Only owners with cost have a
+ * row; by owner, service accounts fold into their owner.
+ */
+export function costByOwner(byOwner: boolean, withRuns = false) {
+  const by = byOwner ? "owner" : "member";
   const rows = new Map<string, { owner?: unknown; cents: number; runs: number }>();
   const add = (key: string, owner: unknown, cents: number, runs: number) => {
     const r = rows.get(key) ?? { owner, cents: 0, runs: 0 };
@@ -280,7 +286,7 @@ export function costByOwner(byOwner: boolean, members: MembershipRow[]) {
   };
   const userOwner = (id: string) => {
     const x = USERS.find((y) => y.id === id)!;
-    return { kind: "user", id: x.id, name: x.name, email: x.email };
+    return { kind: "user", id: x.id, name: x.name || x.email, email: x.email };
   };
   for (const [key, v] of Object.entries(OWNER_COST)) {
     const cents = Math.round(Number(v.amount) * 100);
@@ -292,12 +298,13 @@ export function costByOwner(byOwner: boolean, members: MembershipRow[]) {
       else add(key, { kind: "serviceAccount", id: s.id, name: s.name }, cents, v.runs);
     }
   }
-  // A member who spent nothing still has a row: who did not spend is a fact too.
-  for (const m of members) if (!rows.has(`user:${m.userId}`)) add(`user:${m.userId}`, userOwner(m.userId), 0, 0);
   return {
     from: ago(30 * DAY),
     to: ago(0),
-    totals: [...rows].map(([key, r]) => ({ key, ...(r.owner ? { owner: r.owner } : {}), currency: "USD", amount: (r.cents / 100).toFixed(2), runs: r.runs })),
+    basis: "list",
+    totals: [...rows]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, r]) => ({ key, ...(r.owner ? { owner: r.owner } : {}), group: { [by]: key }, currency: "USD", amount: (r.cents / 100).toFixed(2), ...(withRuns ? { runs: r.runs } : {}) })),
   };
 }
 

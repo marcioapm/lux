@@ -400,6 +400,10 @@ export interface Unpriced {
 }
 
 export interface CostSummaryRow {
+  /** For member/owner groups: user:<id>, sa:<id>, or (none). */
+  key?: string;
+  /** For member/owner groups: the person or service account; absent on (none). */
+  owner?: Owner;
   /** With interval: the bucket's start. */
   at?: string;
   /** With group: the group's value per group key ("(none)" when absent). */
@@ -885,19 +889,15 @@ export interface PlatformPerson extends Person {
   lastSeenAt?: string;
 }
 
-/** GET /v1/costs?by=member|owner: one row per owner and currency. */
-export interface CostByOwnerRow {
+/** GET /v1/costs?by=member|owner&runs=true: a CostSummary whose totals rows carry key and (but on (none)) owner, one per owner and currency. */
+export interface CostByOwnerRow extends CostSummaryRow {
   /** user:<id>, sa:<id>, or (none). */
   key: string;
-  owner?: Owner;
-  currency: string;
-  amount: string;
+  /** Filled because the console asks runs=true. */
   runs?: number;
 }
 
-export interface CostByOwner {
-  from: string;
-  to: string;
+export interface CostByOwner extends Omit<CostSummary, "totals"> {
   totals: CostByOwnerRow[];
 }
 
