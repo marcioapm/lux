@@ -6,7 +6,7 @@ import { atLeast, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
 import { ErrorBlock, ErrorStrip, PageSkeleton, runColumns, runPath } from "./common.tsx";
 import { useCostByOwner, usePeopleTenant } from "./Members.tsx";
-import { KeyRevealDialog, KeysTable, NewKeyDialog, PersonInline, RoleField, serviceAccountPath } from "./people.tsx";
+import { KeyRevealDialog, KeysTable, NewKeyDialog, PersonInline, RoleField, serviceAccountPath } from "./peopleParts.tsx";
 
 /** At most this many active keys per service account (luxd: 409 key_limit), so one can rotate without downtime. */
 export const SA_KEY_CAP = 2;

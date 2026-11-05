@@ -1,7 +1,7 @@
 import { Badge, FactRow, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, ImageRef, KeyValue, LabelsFact, PageHeader, StatePill, Tabs } from "@lux/design-system";
 import { api, isRunActive, useNow, useQuery, type Run, type RunSubmitter } from "../../api/index.ts";
 import { canActOnRun, useViewer, whoCanAct } from "../identity.ts";
-import { OwnerCell } from "./people.tsx";
+import { OwnerCell } from "./peopleParts.tsx";
 import { setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, HostLink, PageSkeleton, useRun } from "./common.tsx";

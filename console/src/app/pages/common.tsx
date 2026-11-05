@@ -4,7 +4,7 @@ import { useMemo, useRef, type ReactNode } from "react";
 import { Button, CostFigure, DurationCell, EmptyState, formatDuration, formatPercent, formatUnit, IdChip, KeyValue, LinkButton, RelativeTime, RUN_STATE_LIST, Skeleton, SkeletonLines, StatePill, type ChartMark, type Column, type LinkButtonProps, type RunState, type Unit } from "@lux/design-system";
 import { api, isRunActive, useNow, useQuery, type QueryState, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
-import { OwnerCell } from "./people.tsx";
+import { OwnerCell } from "./peopleParts.tsx";
 
 /** Polling cadence for a Run: while it is still changing, and once it has settled; each with the slower rate used while the event stream is live. */
 export interface RunCadence {

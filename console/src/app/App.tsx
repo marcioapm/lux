@@ -20,6 +20,7 @@ import { HostPage } from "./pages/HostPage.tsx";
 import { Pools } from "./pages/Pools.tsx";
 import { PoolPage } from "./pages/PoolPage.tsx";
 import { Tenants } from "./pages/Tenants.tsx";
+import { People } from "./pages/People.tsx";
 import { Profile } from "./pages/Profile.tsx";
 import { Members } from "./pages/Members.tsx";
 import { MemberPage } from "./pages/MemberPage.tsx";
@@ -60,6 +61,7 @@ const ROUTES: Route[] = [
   { pattern: "/pools", title: "Pools", render: () => <Pools /> },
   { pattern: "/pools/:name", title: "Pool", render: (p) => <PoolPage name={p.name!} /> },
   { pattern: "/tenants", title: "Tenants", render: () => <Tenants /> },
+  { pattern: "/people", title: "People", render: () => <People /> },
   { pattern: "/me", title: "Profile", render: () => <Profile /> },
   { pattern: "/members", title: "Members", render: () => <Members /> },
   { pattern: "/members/:id", title: "Members", render: (p) => <MemberPage id={p.id!} /> },
@@ -150,7 +152,7 @@ function Router() {
   for (const r of ROUTES) {
     const m = matchPath(r.pattern, path);
     if (!m) continue;
-    if (r.pattern === "/tenants" && session.role === "tenant") break;
+    if ((r.pattern === "/tenants" || r.pattern === "/people") && session.role === "tenant") break;
     if (r.bare) return <>{r.render(m.params)}</>;
     return (
       <Shell tenants={picker} operator={operator} title={r.title}>

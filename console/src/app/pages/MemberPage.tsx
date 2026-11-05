@@ -5,7 +5,7 @@ import { atLeast, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
 import { ErrorBlock, PageSkeleton, runColumns, runPath } from "./common.tsx";
 import { canManage, ChangeRoleDialog, RemoveMemberDialog, useCostByOwner, usePeopleTenant } from "./Members.tsx";
-import { KeysTable, serviceAccountPath } from "./people.tsx";
+import { KeysTable, serviceAccountPath } from "./peopleParts.tsx";
 
 /** /members/:id: one person's role, spend, service accounts, Runs and (to them and admins) keys. */
 export function MemberPage({ id }: { id: string }) {

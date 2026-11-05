@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import { Badge, classifyEmails, CopyAllLinks, Dialog, emailCounts, EmailInput, InviteLinkList, inviteButtonText, isTaken, ROLE_LABEL, useToast, type EmailEntry, type EmailVerdict, type TenantRole } from "@lux/design-system";
 import { IconCopy, IconUser } from "@lux/design-system/icons";
 import { api, errorText, type Invitation, type InviteResult, type Member } from "../../api/index.ts";
-import { RoleField, roleOptions } from "./people.tsx";
+import { RoleField, roleOptions } from "./peopleParts.tsx";
 
 /** Copies an invitation's link from the left-out list. */
 function useCopyLink() {

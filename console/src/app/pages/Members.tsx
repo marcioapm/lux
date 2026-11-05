@@ -7,7 +7,7 @@ import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip } from "./common.tsx";
 import { InviteDialog, InviteLinksDialog } from "./InviteDialog.tsx";
-import { memberPath, PersonInline, RoleField, roleOptions } from "./people.tsx";
+import { memberPath, PersonInline, RoleField, roleOptions } from "./peopleParts.tsx";
 
 /** The tenant a people page is about: the scope's, else the viewer's own. */
 export function usePeopleTenant(): { tenant: string | undefined; name: string } {

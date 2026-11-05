@@ -5,7 +5,7 @@ import { api, errorText, useQuery, useSession, type ApiKey, type CreatedApiKey, 
 import { atLeast, useViewer } from "../identity.ts";
 import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, PageSkeleton } from "./common.tsx";
-import { KeyRevealDialog, KeysTable, NewKeyDialog } from "./people.tsx";
+import { KeyRevealDialog, KeysTable, NewKeyDialog } from "./peopleParts.tsx";
 
 /** At most this many active personal keys per person per tenant (luxd enforces it: 409 key_limit). */
 export const PERSONAL_KEY_CAP = 5;
