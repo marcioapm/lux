@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { IdChip, ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
 import { IconExternal, IconTerminal } from "@lux/design-system/icons";
-import { api, errorText, getSession, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
+import { api, errorText, getSession, isApiError, setWhoAmI, signInAs, useQuery, useSession } from "../api/index.ts";
 import { matchPath, usePath, useSearchParams } from "./router.tsx";
 import { ScopeProvider, useScope } from "./scope.tsx";
 import { useLiveUpdates } from "./live.ts";
@@ -87,7 +87,7 @@ function useRole(): { error: string | null; retrying: boolean; retry: () => void
     const probe = async () => {
       try {
         const me = await api.whoami(ctrl.signal);
-        setRole(me.operator ? "operator" : "tenant", me.consoleAuth);
+        setWhoAmI(me);
         setFailure(null);
       } catch (e) {
         if (ctrl.signal.aborted) return;

@@ -10,11 +10,18 @@
 //   MOCK_COST_CURRENCIES=USD,EUR bun run mock   # cost in two currencies (mockCosts.ts)
 //   MOCK_ROLE=tenant bun run mock   # a tenant key (acme): no tenant picker, its own costs and key names;
 //                                   # the platform pool "default" hides its unallocated host time, its own pool "ci" shows it
+// Signed in as a role (mockPeople.ts): paste the key luxk_mock_<role>, role one of
+//   viewer (Diogo), member (Carla), admin (Ana), owner (Eva), operator (Márcio, also an owner of acme),
+//   notenant (Sam: no membership), invited (Filipa: no membership, a pending invitation), sa (ci-review-bot).
+//   With MOCK_AUTH=cloudflare-access: MOCK_AS=<role>, or the cookie lux_mock_as=<role>; invitations
+//   exist only there (key mode answers 409 invitations_unavailable, as luxd does).
 import index from "./index.html";
 import { COST_TENANTS, costLabels, costSummary, submittedBy } from "./mockCosts.ts";
 import { history, hostHistory, poolMetrics, POOLS } from "./mockHistory.ts";
 import { costHost, hostCost, hostNetClasses, poolCost, runCost } from "./mockHostCost.ts";
 import { sessionOutput, sessionRun, sessionRunJson, SESSION_RUNS } from "./mockSessions.ts";
+import { callerOf, canAct, ownerFilter, runOwner, TENANTS, whoamiFor } from "./mockPeople.ts";
+import { createTenant, peopleApi, tenantPeople } from "./mockPeopleApi.ts";
 
 const RUN_ID = "run_k3jq7x2mfa9vbn4z";
 const HOST_ID = "host_7f2cq9m1x0";
@@ -181,7 +188,14 @@ const run = () => ({
   usage: { peakMemoryBytes: 1.9 * 1024 ** 3, peakDiskBytes: 0, peakPids: 120, cpuSeconds: 724, netRxBytes: 0, netTxBytes: 0, placements: 3, queueSeconds: 17 },
   servers: servers.map(withUrl),
   submittedBy: submittedBy("key_ci", callerTenant),
+  owner: runOwner("agent-refactor-42"),
 });
+
+/** A Run with its owner (mockPeople.ts). */
+const withOwner = <R extends { name?: string }>(r: R) => {
+  const owner = runOwner(r.name);
+  return owner ? { ...r, owner } : r;
+};
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const notFound = (what: string) => json({ error: { code: "not_found", message: `${what} not found` } }, 404);
@@ -252,6 +266,7 @@ type Srv = Bun.Server<ShellSock>;
 async function api(req: Request, srv: Srv): Promise<Response> {
     const u = new URL(req.url);
     const p = u.pathname;
+    const caller = callerOf(req, u, consoleAuth === "cloudflare-access");
     if (p === `/v1/runs/${RUN_ID}/exec`) {
       if (!u.searchParams.has("ticket") && !authed(req)) return json({ error: { code: "unauthorized", message: "no key" } }, 401);
       if (runState !== "running") return json({ error: { code: "not_running", message: `run is ${runState}: interactive access needs it running` } }, 409);
@@ -262,9 +277,30 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       return new Response("upgrade failed", { status: 500 });
     }
     if (!authed(req)) return json({ error: { code: "unauthorized", message: "no key" } }, 401);
+    if (p === "/v1/whoami" && caller) return json(whoamiFor(caller, consoleAuth, previewDomain || null));
+    const people = await peopleApi(req, u, caller, consoleAuth);
+    if (people) return people.status === 204 ? new Response(null, { status: 204 }) : json(people.body, people.status);
+    // Signed in, in no tenant and not an operator: only whoami and the people routes above answer.
+    if (caller && !caller.operator && !caller.role && !caller.sa) return json({ error: { code: "not_a_member", message: "You're not part of any tenant yet. Contact your admin to invite this email." } }, 403);
+    // A Run's mutations are its owner's, its service account owner's, and admins'.
+    const runAct = p.match(/^\/v1\/runs\/(run_[a-z0-9]+)\/(stop|terminate|resume|migrate|input|cancel|extend|timeout|servers|tickets|push|sync|checkpoint|artifacts)/);
+    if (runAct && req.method !== "GET" && caller) {
+      const name = runAct[1] === RUN_ID ? run().name : sessionRun(runAct[1]!)?.name;
+      // Tickets: an output-only ticket is anyone's; exec (terminal) and input ones are the owner's.
+      const readOnlyTicket = runAct[2] === "tickets" && ((await req.clone().json().catch(() => ({}))) as { kind?: string }).kind === "output";
+      if (!readOnlyTicket && !canAct(caller, name)) {
+        const o = runOwner(name);
+        return json({ error: { code: "not_run_owner", message: `only ${o ? o.name : "admins"}${o ? " and admins" : ""} can act on this Run` } }, 403);
+      }
+    }
+    if (p === "/v1/tenants" && req.method === "POST" && caller) {
+      if (!caller.operator) return json({ error: { code: "forbidden", message: "operators only" } }, 403);
+      const b = (await req.json()) as { name: string; ownerEmail?: string };
+      return json(createTenant(b.name, b.ownerEmail || undefined, caller, u.origin), 201);
+    }
     if (p === "/v1/whoami" && tenantRole) return json({ operator: false, tenant: "acme", tenantId: "ten_acme", keyId: "key_ci", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null });
     if (p === "/v1/whoami") return json(consoleAuth === "cloudflare-access" ? { operator: true, tenant: "", tenantId: "", email: "ada@example.com", name: "Ada Lovelace", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null } : { operator: true, tenant: "", tenantId: "", keyId: "key_op", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null });
-    if (p === "/v1/tenants") return json({ tenants: COST_TENANTS.map((t, i) => ({ ...t, retentionDays: 30, expireAfterDays: 90, activeRuns: 1 - i, runs: 12, hosts: 2, storedBytes: 0, createdAt: ago(86400) })) });
+    if (p === "/v1/tenants") return json({ tenants: [...COST_TENANTS, ...TENANTS.filter((t) => !COST_TENANTS.some((x) => x.id === t.id))].map((t, i) => ({ ...t, retentionDays: 30, expireAfterDays: 90, activeRuns: Math.max(1 - i, 0), runs: 12, hosts: 2, storedBytes: 0, createdAt: ago(86400 * (300 - i * 120)), ...tenantPeople(t.id) })) });
     if (p === "/v1/costs") {
       const r = costSummary(u, callerTenant);
       return json(r.body, r.status);
@@ -273,12 +309,15 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       const r = costLabels(u, callerTenant);
       return json(r.body, r.status);
     }
-    if (p === "/v1/runs") return json({ runs: [run(), ...SESSION_RUNS.map((r) => sessionRunJson(r, SESSION_HOST, runState))] });
+    if (p === "/v1/runs") {
+      const keep = ownerFilter(caller, u);
+      return json({ runs: [run(), ...SESSION_RUNS.map((r) => withOwner(sessionRunJson(r, SESSION_HOST, runState)))].filter((r) => keep(r.name)) });
+    }
     if (p === `/v1/runs/${RUN_ID}`) return json(run());
     const sr = p.match(/^\/v1\/runs\/(run_[a-z0-9]+)(\/.*)?$/);
     const sess = sr && sessionRun(sr[1]!);
     if (sess) {
-      const sj = sessionRunJson(sess, SESSION_HOST, runState);
+      const sj = withOwner(sessionRunJson(sess, SESSION_HOST, runState));
       if (!sr![2]) return json(sj);
       if (sr![2] === "/output") return sessionOutput(sess, SESSION_HOST, u.searchParams.get("since"), req.signal);
       if (sr![2] === "/cost") return json(runCost(sess.id, sj.placements.map((x) => ({ ...x, hostId: x.host }))));
