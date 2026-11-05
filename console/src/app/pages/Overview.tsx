@@ -2,12 +2,14 @@ import { useMemo } from "react";
 import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, rangeText, SectionHeader, StatTile, STORAGE_KIND_LIST, storageKindStyle, Tabs, TimeSeriesChart, type StorageKind } from "@lux/design-system";
 import { api, useNow, type Sample } from "../../api/index.ts";
 import { historyRes, stepNote, stepOfRes, stepSentence } from "../every.ts";
+import { useViewer } from "../identity.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, seriesFrom, useSeries, type SeriesData } from "./common.tsx";
 import { ActivityFeed } from "./ActivityFeed.tsx";
 import { ControlHost } from "./ControlHost.tsx";
 import { OverviewCost } from "./OverviewCost.tsx";
+import { MemberCost } from "./MemberCost.tsx";
 
 /** What the Queued tile counts. */
 const QUEUED = ["submitted", "resuming", "provisioning"];
@@ -30,6 +32,7 @@ type Tab = (typeof TABS)[number];
 
 export function Overview() {
   const scope = useScope();
+  const viewer = useViewer();
   const now = useNow();
   const tabParam = useSearchParams().get("tab");
   const tab: Tab = TABS.includes(tabParam as Tab) ? (tabParam as Tab) : "activity";
@@ -117,7 +120,7 @@ export function Overview() {
           </div>
         </>
       )}
-      {tab === "cost" && <OverviewCost />}
+      {tab === "cost" && <><OverviewCost />{!viewer.legacy && <MemberCost />}</>}
       {tab === "storage" && (
         <>
           <ErrorStrip error={history.error} />

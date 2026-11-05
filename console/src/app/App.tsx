@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { IdChip, ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
 import { IconExternal, IconTerminal } from "@lux/design-system/icons";
-import { api, errorText, getSession, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
+import { api, errorText, getSession, isApiError, setWhoAmI, signInAs, useQuery, useSession } from "../api/index.ts";
 import { matchPath, usePath, useSearchParams } from "./router.tsx";
 import { ScopeProvider, useScope } from "./scope.tsx";
 import { useLiveUpdates } from "./live.ts";
@@ -20,6 +20,13 @@ import { HostPage } from "./pages/HostPage.tsx";
 import { Pools } from "./pages/Pools.tsx";
 import { PoolPage } from "./pages/PoolPage.tsx";
 import { Tenants } from "./pages/Tenants.tsx";
+import { InviteAccept, NoTenant } from "./pages/InviteAccept.tsx";
+import { viewerOf } from "./identity.ts";
+import { People } from "./pages/People.tsx";
+import { Profile } from "./pages/Profile.tsx";
+import { Members } from "./pages/Members.tsx";
+import { MemberPage } from "./pages/MemberPage.tsx";
+import { ServiceAccounts, ServiceAccountPage } from "./pages/ServiceAccounts.tsx";
 import { NotFound } from "./pages/NotFound.tsx";
 import { ErrorBlock } from "./pages/common.tsx";
 
@@ -37,6 +44,7 @@ interface Route {
 }
 
 const ROUTES: Route[] = [
+  { pattern: "/invite/:code", title: "Invitation", bare: true, render: (p) => <InviteAccept code={p.code!} /> },
   { pattern: "/", title: "Overview", render: () => <Overview /> },
   { pattern: "/runs", title: "Runs", render: () => <Runs /> },
   { pattern: "/runs/:id", title: "Run", render: (p) => <RunPage id={p.id!} /> },
@@ -56,6 +64,12 @@ const ROUTES: Route[] = [
   { pattern: "/pools", title: "Pools", render: () => <Pools /> },
   { pattern: "/pools/:name", title: "Pool", render: (p) => <PoolPage name={p.name!} /> },
   { pattern: "/tenants", title: "Tenants", render: () => <Tenants /> },
+  { pattern: "/people", title: "People", render: () => <People /> },
+  { pattern: "/me", title: "Profile", render: () => <Profile /> },
+  { pattern: "/members", title: "Members", render: () => <Members /> },
+  { pattern: "/members/:id", title: "Members", render: (p) => <MemberPage id={p.id!} /> },
+  { pattern: "/service-accounts", title: "Service accounts", render: () => <ServiceAccounts /> },
+  { pattern: "/service-accounts/:id", title: "Service accounts", render: (p) => <ServiceAccountPage id={p.id!} /> },
   {
     pattern: "/preview-auth",
     title: "Preview",
@@ -87,7 +101,7 @@ function useRole(): { error: string | null; retrying: boolean; retry: () => void
     const probe = async () => {
       try {
         const me = await api.whoami(ctrl.signal);
-        setRole(me.operator ? "operator" : "tenant", me.consoleAuth);
+        setWhoAmI(me);
         setFailure(null);
       } catch (e) {
         if (ctrl.signal.aborted) return;
@@ -138,10 +152,11 @@ function Router() {
     );
   }
 
+  if (!path.startsWith("/invite/") && path !== "/preview-auth" && viewerOf(session.whoami).noTenant) return <NoTenant />;
   for (const r of ROUTES) {
     const m = matchPath(r.pattern, path);
     if (!m) continue;
-    if (r.pattern === "/tenants" && session.role === "tenant") break;
+    if ((r.pattern === "/tenants" || r.pattern === "/people") && session.role === "tenant") break;
     if (r.bare) return <>{r.render(m.params)}</>;
     return (
       <Shell tenants={picker} operator={operator} title={r.title}>

@@ -1,0 +1,48 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+let ServiceAccounts: typeof import("./ServiceAccounts.tsx").ServiceAccounts;
+let ServiceAccountPage: typeof import("./ServiceAccounts.tsx").ServiceAccountPage;
+let t: typeof import("../peopleTesting.tsx");
+beforeAll(async () => {
+  GlobalRegistrator.register();
+  ({ ServiceAccounts, ServiceAccountPage } = await import("./ServiceAccounts.tsx"));
+  t = await import("../peopleTesting.tsx");
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+});
+afterAll(async () => { await GlobalRegistrator.unregister(); });
+
+test("service accounts: admins create, members read; names, roles and owners lead", async () => {
+  const p = await t.mountAs("admin", "/service-accounts", <ServiceAccounts />);
+  try {
+    await p.until(() => p.text().includes("gha-runners"), "accounts");
+    expect(p.button("New service account")).toBeDefined();
+    expect(p.text()).toContain("Eva Moreira");
+    await t.click(p.button("New service account"));
+    const d = p.dialog()!;
+    await t.fill(d.querySelector<HTMLInputElement>("input"), "release-bot");
+    await t.click(t.dialogButton(d, "Create and make a key"));
+    await p.until(() => p.dialog()?.textContent?.includes("Key created") === true, "first key reveal");
+    expect(p.fake.posts.find((x) => x.path === "/v1/service-accounts")!.body).toMatchObject({ name: "release-bot", role: "member" });
+    await t.click(t.dialogButton(p.dialog(), "Done"));
+    expect(p.text()).toContain("release-bot");
+  } finally { await p.done(); }
+});
+
+test("service account detail: cap 2, rotation copy; a non-admin owner rotates keys, not role", async () => {
+  const p = await t.mountAs("owner", "/service-accounts/sa_4kq2v8m1", <ServiceAccountPage id="sa_4kq2v8m1" />, { extra: (path) => path.startsWith("/v1/runs") ? { runs: [] } : undefined });
+  try {
+    await p.until(() => p.button("New key") != null && p.text().includes("gha-2026-05"), "keys");
+    expect(p.button("New key")!.disabled).toBe(true);
+    expect(p.text()).toContain("create the new one, switch the client, revoke the old");
+    await t.click(p.button("Revoke gha-2026-05"));
+    await t.click(t.dialogButton(p.dialog(), "Revoke key"));
+    await p.until(() => p.button("New key")?.disabled === false, "one slot free");
+  } finally { await p.done(); }
+  const m = await t.mountAs("member", "/service-accounts/sa_7cr3b2x9", <ServiceAccountPage id="sa_7cr3b2x9" />, { extra: (path) => path.startsWith("/v1/runs") ? { runs: [] } : undefined });
+  try {
+    await m.until(() => m.button("New key") != null, "owner's key action");
+    expect(m.button("Edit")).toBeUndefined();
+    expect(m.button("Disable")).toBeUndefined();
+    expect(m.button("New key")!.disabled).toBe(false);
+  } finally { await m.done(); }
+});

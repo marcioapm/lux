@@ -9,7 +9,7 @@ const LOG_TAIL = 200;
 const LOG_H = 240;
 
 /** Servers tab: the Run's servers (from the Run itself, which the page keeps fresh), an Add dialog, per-server logs. */
-export function RunServers({ run, refetch, fetching, error }: { run: Run; refetch: () => Promise<void>; fetching: boolean; error: string | null }) {
+export function RunServers({ run, refetch, fetching, error, canAct = true }: { run: Run; refetch: () => Promise<void>; fetching: boolean; error: string | null; canAct?: boolean }) {
   const now = useNow(5000);
   const toast = useToast();
   const running = EXEC_RUN_STATES.has(run.state);
@@ -51,12 +51,12 @@ export function RunServers({ run, refetch, fetching, error }: { run: Run; refetc
             <Button size="sm" variant="ghost" icon={<IconRefresh size={13} />} loading={fetching} onClick={() => void refetch()}>
               Refresh
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setAttaching(true)} disabled={TERMINAL_RUN_STATES.has(run.state)}>
+            {canAct && <><Button size="sm" variant="ghost" onClick={() => setAttaching(true)} disabled={TERMINAL_RUN_STATES.has(run.state)}>
               Attach server…
             </Button>
             <Button size="sm" icon={<IconPlus size={13} />} onClick={() => setAdding(true)} disabled={TERMINAL_RUN_STATES.has(run.state)}>
               Add server
-            </Button>
+            </Button></>}
           </>
         }
       >
@@ -66,11 +66,13 @@ export function RunServers({ run, refetch, fetching, error }: { run: Run; refetc
           busy={busy}
           runRunning={running}
           now={now}
-          onStart={(s) => void act("Started", s, () => api.startServer(run.id, s.name))}
-          onStop={(s) => void act("Stopped", s, () => api.stopServer(run.id, s.name))}
-          onRestart={(s) => void act("Restarted", s, () => api.restartServer(run.id, s.name))}
-          onRemove={(s) => setRemoving(servers.find((x) => x.name === s.name) ?? null)}
-          onDetach={(s) => s.id && void act("Detached", s, () => api.detachServer(s.id!))}
+          {...(canAct ? {
+            onStart: (s: ServerInfo) => void act("Started", s, () => api.startServer(run.id, s.name)),
+            onStop: (s: ServerInfo) => void act("Stopped", s, () => api.stopServer(run.id, s.name)),
+            onRestart: (s: ServerInfo) => void act("Restarted", s, () => api.restartServer(run.id, s.name)),
+            onRemove: (s: ServerInfo) => setRemoving(servers.find((x) => x.name === s.name) ?? null),
+            onDetach: (s: ServerInfo) => s.id && void act("Detached", s, () => api.detachServer(s.id!)),
+          } : {})}
           hrefFor={(s) => (s.id ? serverPath(s.id) : undefined)}
           renderLog={(s) => <ServerLog runId={run.id} server={s} />}
           note={note}

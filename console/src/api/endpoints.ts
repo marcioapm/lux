@@ -1,6 +1,6 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { Artifact, CostLabels, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, HostSummary, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, TenantServer, TenantServerList, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
+import type { ApiKey, Artifact, CostByOwner, CostLabels, CostSummary, CostSummaryParams, CreatedApiKey, Event, History, Host, HostCost, HostListParams, HostSummary, Invitation, InvitationCounts, InvitationLookup, InviteResult, LifecycleEvent, Me, Member, Membership, MigrateRequest, MyInvitation, NewKeyRequest, NewTenantResult, Page, PageParams, PlatformPerson, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, ServiceAccount, TenantRole, TenantServer, TenantServerList, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
@@ -17,7 +17,7 @@ export const api = {
     request<{ runs: Run[] }>("/runs", { tenant, query: { state: p.state?.join(","), resumable: p.resumable, host: p.host, label: p.label, before: p.before, limit: p.limit }, signal }).then((r) => r.runs),
   /** A page of Runs in a sort's order (server-side, across every match). */
   runsPage: (tenant: Scope, p: RunListParams, signal?: Sig) =>
-    request<{ runs: Run[] } & PageLinks>("/runs", { tenant, query: { state: p.state?.join(","), resumable: p.resumable, host: p.host, label: p.label, limit: p.limit, ...pageQuery(p) }, signal }).then((r) => toPage(r.runs, r)),
+    request<{ runs: Run[] } & PageLinks>("/runs", { tenant, query: { state: p.state?.join(","), resumable: p.resumable, host: p.host, label: p.label, owner: p.owner, mine: p.mine, limit: p.limit, ...pageQuery(p) }, signal }).then((r) => toPage(r.runs, r)),
   run: (id: string, signal?: Sig) => request<Run>(`/runs/${enc(id)}`, { signal }),
   runHistory: (id: string, since: string, signal?: Sig) => request<History>(`/runs/${enc(id)}/history`, { query: { since }, signal }),
   runEvents: (id: string, after = 0, signal?: Sig) => request<{ events: Event[] }>(`/runs/${enc(id)}/events`, { query: { after }, signal }).then((r) => r.events),
@@ -92,6 +92,49 @@ export const api = {
   poolEventsPage: (name: string, tenant: Scope, owner: PoolOwner | undefined, p: PageParams & { limit: number }, signal?: Sig) =>
     request<{ events: LifecycleEvent[] } & PageLinks>(`/pools/${enc(name)}/events`, { tenant, query: { owner, limit: p.limit, ...pageQuery(p) }, signal }).then((r) => toPage(r.events, r)),
   tenants: (signal?: Sig) => request<{ tenants: Tenant[] }>("/tenants", { signal }).then((r) => r.tenants),
+  /** Operators: a tenant, and optionally its first owner's invitation. */
+  createTenant: (body: { name: string; ownerEmail?: string }) => request<NewTenantResult>("/tenants", { method: "POST", body }),
+
+  me: (signal?: Sig) => request<Me>("/me", { signal }),
+  /** My keys in the tenant in scope (keys are per person per tenant). */
+  myKeys: (tenant: Scope, signal?: Sig) => request<{ keys: ApiKey[] }>("/me/keys", { tenant, signal }).then((r) => r.keys ?? []),
+  createMyKey: (tenant: Scope, body: NewKeyRequest) => request<CreatedApiKey>("/me/keys", { method: "POST", tenant, body }),
+  renameMyKey: (tenant: Scope, id: string, name: string) => request<ApiKey>(`/me/keys/${enc(id)}`, { method: "PATCH", tenant, body: { name } }),
+  revokeMyKey: (tenant: Scope, id: string) => request<void>(`/me/keys/${enc(id)}`, { method: "DELETE", tenant }),
+  myInvitations: (signal?: Sig) => request<{ invitations: MyInvitation[] }>("/me/invitations", { signal }).then((r) => r.invitations ?? []),
+
+  members: (tenant: Scope, signal?: Sig) => request<{ members: Member[] }>("/members", { tenant, signal }).then((r) => r.members ?? []),
+  member: (tenant: Scope, user: string, signal?: Sig) => request<Member>(`/members/${enc(user)}`, { tenant, signal }),
+  /** A member's keys: 404 unless it is me or I am an admin. */
+  memberKeys: (tenant: Scope, user: string, signal?: Sig) => request<{ keys: ApiKey[] }>(`/members/${enc(user)}/keys`, { tenant, signal }).then((r) => r.keys ?? []),
+  revokeMemberKey: (tenant: Scope, user: string, id: string) => request<void>(`/members/${enc(user)}/keys/${enc(id)}`, { method: "DELETE", tenant }),
+  setMemberRole: (tenant: Scope, user: string, role: TenantRole) => request<Member>(`/members/${enc(user)}`, { method: "PATCH", tenant, body: { role } }),
+  removeMember: (tenant: Scope, user: string) => request<void>(`/members/${enc(user)}`, { method: "DELETE", tenant }),
+  /** Operators: add a person directly by email (key-mode installs). */
+  addMember: (tenant: Scope, body: { email: string; role: TenantRole }) => request<Member>("/members", { method: "POST", tenant, body }),
+
+  invitations: (tenant: Scope, p: { status?: string; q?: string; cursor?: string } = {}, signal?: Sig) => request<{ invitations: Invitation[]; cursor?: string }>("/invitations", { tenant, query: p, signal }),
+  invitationCounts: (tenant: Scope, signal?: Sig) => request<InvitationCounts>("/invitations/counts", { tenant, signal }),
+  invite: (tenant: Scope, body: { invitations: { email: string; name?: string }[]; role: TenantRole }) => request<{ results: InviteResult[] }>("/invitations", { method: "POST", tenant, body }).then((r) => r.results ?? []),
+  renewInvitation: (tenant: Scope, id: string) => request<Invitation>(`/invitations/${enc(id)}/renew`, { method: "POST", tenant }),
+  revokeInvitation: (tenant: Scope, id: string) => request<Invitation>(`/invitations/${enc(id)}/revoke`, { method: "POST", tenant }),
+  invitationByCode: (code: string, signal?: Sig) => request<InvitationLookup>(`/invitations/by-code/${enc(code)}`, { signal }),
+  acceptInvitation: (code: string) => request<Membership>(`/invitations/by-code/${enc(code)}/accept`, { method: "POST" }),
+
+  serviceAccounts: (tenant: Scope, signal?: Sig) => request<{ serviceAccounts: ServiceAccount[] }>("/service-accounts", { tenant, signal }).then((r) => r.serviceAccounts ?? []),
+  serviceAccount: (tenant: Scope, id: string, signal?: Sig) => request<ServiceAccount>(`/service-accounts/${enc(id)}`, { tenant, signal }),
+  createServiceAccount: (tenant: Scope, body: { name: string; description?: string; role: string; ownerId?: string }) => request<ServiceAccount>("/service-accounts", { method: "POST", tenant, body }),
+  updateServiceAccount: (tenant: Scope, id: string, body: { description?: string; role?: string; ownerId?: string | null; disabled?: boolean }) =>
+    request<ServiceAccount>(`/service-accounts/${enc(id)}`, { method: "PATCH", tenant, body }),
+  serviceAccountKeys: (tenant: Scope, id: string, signal?: Sig) => request<{ keys: ApiKey[] }>(`/service-accounts/${enc(id)}/keys`, { tenant, signal }).then((r) => r.keys ?? []),
+  createServiceAccountKey: (tenant: Scope, id: string, body: NewKeyRequest) => request<CreatedApiKey>(`/service-accounts/${enc(id)}/keys`, { method: "POST", tenant, body }),
+  revokeServiceAccountKey: (tenant: Scope, id: string, key: string) => request<void>(`/service-accounts/${enc(id)}/keys/${enc(key)}`, { method: "DELETE", tenant }),
+
+  /** Cost per member (each person and service account) or per owner (service accounts folded into their owner). */
+  costsByOwner: (tenant: Scope, by: "member" | "owner", since: string, signal?: Sig) => request<CostByOwner>("/costs", { tenant, query: { by, since }, signal }),
+
+  /** Operators: every person, across tenants. */
+  people: (signal?: Sig) => request<{ people: PlatformPerson[] }>("/people", { signal }).then((r) => r.people ?? []),
 };
 
 export type PoolOwner = "platform" | "tenant";

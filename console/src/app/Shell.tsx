@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { IconButton, LiveDot, Logo, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
-import { IconChevronLeft, IconChevronRight, IconClose, IconGlobe, IconGrid, IconKey, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
+import { Avatar, IconButton, LiveDot, Logo, ROLE_LABEL, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
+import { IconBot, IconChevronLeft, IconChevronRight, IconClose, IconGlobe, IconGrid, IconKey, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSliders, IconSun, IconUser, IconUsers } from "@lux/design-system/icons";
 import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
 import { isPlainClick, Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
 import { ScopeStep } from "./ScopeStep.tsx";
+import { useViewer } from "./identity.ts";
 
 interface NavItem {
   to: string;
@@ -12,6 +13,8 @@ interface NavItem {
   icon: ReactNode;
   match: (p: string) => boolean;
   operator?: boolean;
+  /** Only where luxd has people (whoami says memberships). */
+  people?: boolean;
 }
 
 const NAV: NavItem[] = [
@@ -20,7 +23,10 @@ const NAV: NavItem[] = [
   { to: "/servers", label: "Servers", icon: <IconGlobe />, match: (p) => p.startsWith("/servers") },
   { to: "/hosts", label: "Hosts", icon: <IconServer />, match: (p) => p.startsWith("/hosts") },
   { to: "/pools", label: "Pools", icon: <IconLayers />, match: (p) => p.startsWith("/pools") },
+  { to: "/members", label: "Members", icon: <IconUsers />, match: (p) => p.startsWith("/members"), people: true },
+  { to: "/service-accounts", label: "Service accounts", icon: <IconBot />, match: (p) => p.startsWith("/service-accounts"), people: true },
   { to: "/tenants", label: "Tenants", icon: <IconUsers />, match: (p) => p.startsWith("/tenants"), operator: true },
+  { to: "/people", label: "People", icon: <IconUser />, match: (p) => p.startsWith("/people"), operator: true },
 ];
 
 export interface ShellProps {
@@ -79,6 +85,9 @@ const wideMedia = mediaStore("(min-width: 1280px)");
  */
 export function Shell({ tenants, operator, title, children }: ShellProps) {
   const session = useSession();
+  const viewer = useViewer();
+  // An older luxd has no people: no Members or Service accounts.
+  const hasPeople = session.whoami?.memberships != null;
   const path = usePath();
   const scope = useScope();
   const { resolved, toggle } = useTheme();
@@ -163,7 +172,20 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
   // Who is signed in, at the foot of the sidebar: the person and a way out.
   // Until whoami answers, a key's role is unknown: do not guess.
   const keyName = session.role === "operator" ? "Operator key" : session.role === "tenant" ? "Tenant key" : "API key";
-  const user = session.user ? (
+  const who = session.whoami;
+  // A person (by Access, or by their own key): who, their role here, and a link to their profile.
+  const personName = session.user?.name ?? who?.name ?? who?.email;
+  const roleSub = [viewer.role ? ROLE_LABEL[viewer.role] : null, who?.tenant || (viewer.memberships.length === 1 ? viewer.memberships[0]!.tenant : null), viewer.operator ? "operator" : null].filter(Boolean).join(" · ");
+  const user = who?.userId && personName ? (
+    <SidebarUser
+      avatar={<Avatar key={session.user?.picture ?? who.picture} name={personName} picture={session.user?.picture ?? who.picture} labelled={compact} />}
+      name={personName}
+      sub={roleSub || (viewer.noTenant ? "no tenant" : (who.email ?? ""))}
+      profile
+      signOut={session.user ? () => window.location.assign("/cdn-cgi/access/logout") : signOut}
+      signOutLabel={session.user ? "Sign out of Cloudflare Access" : "Sign out"}
+    />
+  ) : session.user ? (
     <SidebarUser
       avatar={<Avatar key={session.user.picture} name={session.user.name} picture={session.user.picture} labelled={compact} />}
       name={session.user.name}
@@ -216,7 +238,7 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
           )}
         </div>
         <nav className="nav" aria-label="Primary">
-          {NAV.filter((n) => !n.operator || operator).map((n) => (
+          {NAV.filter((n) => (!n.operator || operator) && (!n.people || hasPeople)).map((n) => (
             <Link key={n.to} to={n.to} className={n.match(path) ? "nav-item is-active" : "nav-item"} aria-current={n.match(path) ? "page" : undefined} title={n.label} aria-label={n.label}>
               <span className="nav-icon">{n.icon}</span>
               <span className="nav-label">{n.label}</span>
@@ -287,50 +309,30 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
  * rail only the avatar and the button show, so the avatar names the person
  * (hover, and to assistive technology).
  */
-function SidebarUser({ avatar, name, sub, signOut, signOutLabel }: { avatar: ReactNode; name: string; sub: string; signOut: () => void; signOutLabel: string }) {
-  return (
-    <div className="sidebar-user" title={`${name} · ${sub}`}>
+function SidebarUser({ avatar, name, sub, signOut, signOutLabel, profile }: { avatar: ReactNode; name: string; sub: string; signOut: () => void; signOutLabel: string; profile?: boolean }) {
+  const inner = (
+    <>
       {avatar}
       <span className="sidebar-user-text">
         <span className="sidebar-user-name ellipsis">{name}</span>
         <span className="sidebar-user-sub ellipsis">{sub}</span>
       </span>
+    </>
+  );
+  return (
+    <div className="sidebar-user" title={`${name} · ${sub}`}>
+      {profile ? (
+        <Link to="/me" className="sidebar-user-link" aria-label={`Profile and API keys: ${name}`}>
+          {inner}
+        </Link>
+      ) : (
+        inner
+      )}
       <IconButton size="sm" label={signOutLabel} onClick={signOut}>
         <IconLogout size={15} />
       </IconButton>
     </div>
   );
-}
-
-/**
- * A photo (the identity provider's); without one, or if it fails to load,
- * the fallback: initials unless given. Labelled: it names the person, for
- * where their name is not shown beside it; otherwise it is decoration.
- */
-function Avatar({ name, picture, fallback, labelled }: { name: string; picture?: string; fallback?: ReactNode; labelled: boolean }) {
-  const [failed, setFailed] = useState(false);
-  return (
-    <span className="avatar" {...(labelled ? { role: "img", "aria-label": name } : { "aria-hidden": true })}>
-      {picture && !failed ? <img src={picture} alt="" referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : (fallback ?? initials(name))}
-    </span>
-  );
-}
-
-/* Graphemes where the browser can (an emoji or accent stays whole); code points otherwise. */
-const graphemes = typeof Intl.Segmenter === "function" ? new Intl.Segmenter() : null;
-function firstChar(w: string): string {
-  return (graphemes ? graphemes.segment(w).containing(0)?.segment : [...w][0]) ?? "";
-}
-
-/** "Ada Lovelace" → "AL"; "ada@example.com" → "A"; "Ada Lovelace (ops)" → "AO"; "Ada | Ops" → "AO". Leading punctuation and symbols are skipped; emoji (So) are kept. */
-function initials(name: string): string {
-  const local = /^[^\s@]+@[^\s@]+$/.test(name) ? name.slice(0, name.indexOf("@")) : name;
-  const words = local
-    .split(/[\s._-]+/)
-    .map((w) => w.replace(/^[\p{P}\p{Sm}\p{Sc}\p{Sk}]+/u, ""))
-    .filter(Boolean);
-  const ends = words.length > 1 ? [words[0] ?? "", words.at(-1) ?? ""] : words;
-  return ends.map(firstChar).join("").toUpperCase() || "?";
 }
 
 /** Whether the event stream is up: pages update as things happen, or fall back to polling. */
