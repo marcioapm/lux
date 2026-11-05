@@ -22,11 +22,21 @@ export interface Mounted {
   done: () => Promise<void>;
 }
 
-/** Visible text: without aria-hidden decoration and sr-only text. */
+/** Visible text: without aria-hidden decoration and sr-only text, element boundaries as spaces. */
 export function visibleText(n: Element): string {
   const c = n.cloneNode(true) as Element;
-  for (const h of c.querySelectorAll('[aria-hidden="true"], .sr-only')) h.remove();
-  return c.textContent?.replace(/\s+/g, " ").trim() ?? "";
+  for (const h of c.querySelectorAll('[aria-hidden="true"], .sr-only, dialog:not([open])')) h.remove();
+  const parts: string[] = [];
+  const walk = (x: Node) => {
+    if (x.nodeType === 3) parts.push(x.textContent ?? "");
+    else {
+      parts.push(" ");
+      x.childNodes.forEach(walk);
+      parts.push(" ");
+    }
+  };
+  walk(c);
+  return parts.join("").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -58,6 +68,8 @@ export async function mountAs(role: string, url: string, node: ReactNode, opts: 
     if (r.status === 204) return new Response(null, { status: 204 });
     return new Response(JSON.stringify(r.body), { status: r.status, headers: { "Content-Type": "application/json" } });
   });
+  // fakeApi moves the page to the origin: back to the page under test.
+  (window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM.setURL(`http://localhost${url}`);
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);

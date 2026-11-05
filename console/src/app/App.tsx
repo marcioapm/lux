@@ -21,6 +21,8 @@ import { Pools } from "./pages/Pools.tsx";
 import { PoolPage } from "./pages/PoolPage.tsx";
 import { Tenants } from "./pages/Tenants.tsx";
 import { Profile } from "./pages/Profile.tsx";
+import { Members } from "./pages/Members.tsx";
+import { MemberPage } from "./pages/MemberPage.tsx";
 import { NotFound } from "./pages/NotFound.tsx";
 import { ErrorBlock } from "./pages/common.tsx";
 
@@ -58,6 +60,8 @@ const ROUTES: Route[] = [
   { pattern: "/pools/:name", title: "Pool", render: (p) => <PoolPage name={p.name!} /> },
   { pattern: "/tenants", title: "Tenants", render: () => <Tenants /> },
   { pattern: "/me", title: "Profile", render: () => <Profile /> },
+  { pattern: "/members", title: "Members", render: () => <Members /> },
+  { pattern: "/members/:id", title: "Members", render: (p) => <MemberPage id={p.id!} /> },
   {
     pattern: "/preview-auth",
     title: "Preview",

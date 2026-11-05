@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Avatar, IconButton, LiveDot, Logo, ROLE_LABEL, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
-import { IconChevronLeft, IconChevronRight, IconClose, IconGlobe, IconGrid, IconKey, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
+import { IconBot, IconChevronLeft, IconChevronRight, IconClose, IconGlobe, IconGrid, IconKey, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSliders, IconSun, IconUser, IconUsers } from "@lux/design-system/icons";
 import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
 import { isPlainClick, Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
@@ -13,6 +13,8 @@ interface NavItem {
   icon: ReactNode;
   match: (p: string) => boolean;
   operator?: boolean;
+  /** Only where luxd has people (whoami says memberships). */
+  people?: boolean;
 }
 
 const NAV: NavItem[] = [
@@ -21,7 +23,10 @@ const NAV: NavItem[] = [
   { to: "/servers", label: "Servers", icon: <IconGlobe />, match: (p) => p.startsWith("/servers") },
   { to: "/hosts", label: "Hosts", icon: <IconServer />, match: (p) => p.startsWith("/hosts") },
   { to: "/pools", label: "Pools", icon: <IconLayers />, match: (p) => p.startsWith("/pools") },
+  { to: "/members", label: "Members", icon: <IconUsers />, match: (p) => p.startsWith("/members"), people: true },
+  { to: "/service-accounts", label: "Service accounts", icon: <IconBot />, match: (p) => p.startsWith("/service-accounts"), people: true },
   { to: "/tenants", label: "Tenants", icon: <IconUsers />, match: (p) => p.startsWith("/tenants"), operator: true },
+  { to: "/people", label: "People", icon: <IconUser />, match: (p) => p.startsWith("/people"), operator: true },
 ];
 
 export interface ShellProps {
@@ -81,6 +86,8 @@ const wideMedia = mediaStore("(min-width: 1280px)");
 export function Shell({ tenants, operator, title, children }: ShellProps) {
   const session = useSession();
   const viewer = useViewer();
+  // An older luxd has no people: no Members or Service accounts.
+  const hasPeople = session.whoami?.memberships != null;
   const path = usePath();
   const scope = useScope();
   const { resolved, toggle } = useTheme();
@@ -231,7 +238,7 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
           )}
         </div>
         <nav className="nav" aria-label="Primary">
-          {NAV.filter((n) => !n.operator || operator).map((n) => (
+          {NAV.filter((n) => (!n.operator || operator) && (!n.people || hasPeople)).map((n) => (
             <Link key={n.to} to={n.to} className={n.match(path) ? "nav-item is-active" : "nav-item"} aria-current={n.match(path) ? "page" : undefined} title={n.label} aria-label={n.label}>
               <span className="nav-icon">{n.icon}</span>
               <span className="nav-label">{n.label}</span>

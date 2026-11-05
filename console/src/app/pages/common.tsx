@@ -4,6 +4,7 @@ import { useMemo, useRef, type ReactNode } from "react";
 import { Button, CostFigure, DurationCell, EmptyState, formatDuration, formatPercent, formatUnit, IdChip, KeyValue, LinkButton, RelativeTime, RUN_STATE_LIST, Skeleton, SkeletonLines, StatePill, type ChartMark, type Column, type LinkButtonProps, type RunState, type Unit } from "@lux/design-system";
 import { api, isRunActive, useNow, useQuery, type QueryState, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
+import { OwnerCell } from "./people.tsx";
 
 /** Polling cadence for a Run: while it is still changing, and once it has settled; each with the slower rate used while the event stream is live. */
 export interface RunCadence {
@@ -147,13 +148,14 @@ export function StateCell({ kind, state, activity, reason, children }: { kind: "
  * default, or, with server, the server's order (the keys are GET /v1/runs'
  * sort keys).
  */
-export function runColumns({ tenant, host = true, adapter = true, cost = false, placement = false }: { tenant: boolean; host?: boolean; adapter?: boolean; cost?: boolean; placement?: boolean }): Column<Run>[] {
+export function runColumns({ tenant, host = true, adapter = true, cost = false, placement = false, owner = false, me }: { tenant: boolean; host?: boolean; adapter?: boolean; cost?: boolean; placement?: boolean; owner?: boolean; me?: string }): Column<Run>[] {
   const c: Column<Run>[] = [
     { key: "name", header: "Run", cell: (r) => <RunNameLink id={r.id} name={r.name} />, sortValue: (r) => r.name || r.id, sortKind: "text", lead: true },
     { key: "id", header: "Id", cell: (r) => <RunLink id={r.id} />, sortValue: (r) => r.id, sortKind: "text", mono: true, width: 170, optional: true },
   ];
   if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, sortKind: "text", width: 96 });
   c.push({ key: "state", header: "State", cell: (r) => <StateCell kind="run" state={r.state} activity={r.activity} reason={r.stateReason} />, sortValue: (r) => RUN_STATE_LIST.indexOf(r.state as RunState), sortFirst: "asc", sortKind: "text", width: 130 });
+  if (owner) c.push({ key: "owner", header: "Owner", cell: (r) => <OwnerCell owner={r.owner} me={me} />, sortValue: (r) => r.owner?.name, sortKind: "text", width: 170 });
   if (host) c.push({ key: "host", header: "Host", cell: (r) => (r.hostId ? <HostLink id={r.hostId} name={r.host} /> : DASH), sortValue: (r) => r.host, sortKind: "text", width: 110 });
   c.push({ key: "pool", header: "Pool", cell: (r) => r.pool || DASH, sortValue: (r) => r.pool, sortKind: "text", width: 90 });
   if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.spec.workload.adapter}</span>, sortValue: (r) => r.spec.workload.adapter, sortKind: "text", width: 104, optional: true });

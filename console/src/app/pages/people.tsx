@@ -4,7 +4,7 @@ import { useState, type ReactNode } from "react";
 import { Badge, Button, Dialog, IconButton, Person, RelativeTime, ROLE_DESC, ROLE_LABEL, roleAtLeast, Select, Table, useCopy, type Column, type SelectOption, type TenantRole } from "@lux/design-system";
 import { IconCheck, IconCopy, IconPencil, IconTrash } from "@lux/design-system/icons";
 import type { ApiKey, CreatedApiKey, NewKeyRequest, Owner, Person as PersonT } from "../../api/index.ts";
-import { DASH } from "./common.tsx";
+
 
 export const memberPath = (id: string) => `/members/${encodeURIComponent(id)}`;
 export const serviceAccountPath = (id: string) => `/service-accounts/${encodeURIComponent(id)}`;
@@ -16,7 +16,7 @@ export function OwnerCell({ owner, me }: { owner?: Owner; me?: string }) {
 }
 
 export function PersonInline({ person }: { person?: PersonT }) {
-  if (!person) return DASH;
+  if (!person) return <span className="muted">–</span>;
   return <Person inline name={person.name || person.email} picture={person.picture} />;
 }
 
