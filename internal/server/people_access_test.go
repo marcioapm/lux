@@ -29,7 +29,9 @@ func accessFixture(t *testing.T) (*peopleFix, fakeAccess) {
 // failingTransport: Access's identity endpoint is not there; names are emails.
 type failingTransport struct{}
 
-func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, http.ErrHandlerTimeout }
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, http.ErrHandlerTimeout
+}
 
 func accessDo(t *testing.T, s *Server, token, method, path string, body any) (int, map[string]any) {
 	t.Helper()

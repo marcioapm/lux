@@ -49,9 +49,9 @@ type ServiceAccountRef struct {
 }
 
 type MembershipRef struct {
-	TenantID string    `json:"tenantId"`
-	Tenant   string    `json:"tenant"`
-	Role     string    `json:"role" enum:"viewer,member,admin,owner"`
+	TenantID string     `json:"tenantId"`
+	Tenant   string     `json:"tenant"`
+	Role     string     `json:"role" enum:"viewer,member,admin,owner"`
 	JoinedAt *time.Time `json:"joinedAt,omitempty"`
 }
 
