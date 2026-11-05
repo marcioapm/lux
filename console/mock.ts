@@ -273,6 +273,11 @@ async function api(req: Request, srv: Srv): Promise<Response> {
     const caller = callerOf(req, u, consoleAuth === "cloudflare-access");
     if (p === `/v1/runs/${RUN_ID}/exec`) {
       if (!u.searchParams.has("ticket") && !authed(req)) return json({ error: { code: "unauthorized", message: "no key" } }, 401);
+      // As luxd's execRun accessRule: a key's caller must be able to act on the Run (a ticket was checked when it was minted).
+      if (!u.searchParams.has("ticket") && caller && !canAct(caller, run().name)) {
+        const o = runOwner(run().name);
+        return json({ error: { code: "not_run_owner", message: `this Run is owned by ${o ? o.name : "no one"}: only they, or an admin of the tenant, may act on it` } }, 403);
+      }
       if (runState !== "running") return json({ error: { code: "not_running", message: `run is ${runState}: interactive access needs it running` } }, 409);
       if (req.headers.get("upgrade") !== "websocket") return json({ status: "ok" });
       // MOCK_OPEN_DELAY=ms holds the upgrade, to see the page connecting.
@@ -350,6 +355,14 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       if (sm[2] === "events") return json({ events: [{ id: 1, serverId: x.id, type: "server.created", data: { name: x.name, by: "key_mock" }, time: ago(2 * 86400) }, { id: 2, serverId: x.id, type: "server.wake_requested", data: { name: x.name, by: "ada@example.com", path: "/goals" }, time: ago(60) }] });
       if (sm[2] === "log") return json({ lines: fakeLog(x as unknown as Server) });
       if (sm[2] === "tickets") return json({ ticket: "tkt_mock", kind: "preview", serverId: x.id, expiresAt: new Date(Date.now() + 60_000).toISOString() }, 201);
+      // As luxd's server accessRule: attached, as its Run; attached to none, admins.
+      if ((req.method === "DELETE" || req.method === "PATCH" || (req.method === "POST" && sm[2])) && caller) {
+        const rid = (x as { runId?: string | null }).runId;
+        const name = rid === RUN_ID ? run().name : rid ? sessionRun(rid)?.name : undefined;
+        if (rid ? !canAct(caller, name) : !(caller.operator || (caller.role != null && ["admin", "owner"].includes(caller.role)))) {
+          return json({ error: { code: rid ? "not_run_owner" : "forbidden", message: rid ? "only the Run's owner, or an admin of the tenant, may change this server" : "this server is attached to no Run: only an admin of the tenant may change it" } }, 403);
+        }
+      }
       if (req.method === "DELETE") return new Response(null, { status: 204 });
       return json(x);
     }

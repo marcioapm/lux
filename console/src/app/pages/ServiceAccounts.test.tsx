@@ -47,6 +47,18 @@ test("service account detail: cap 2, rotation copy; a non-admin owner rotates ke
   } finally { await m.done(); }
 });
 
+// luxd answers a service account's keys to its owner and admins only (others 404): the page neither asks nor shows them.
+test("service account detail as a member who does not own it: no Keys card, no keys request", async () => {
+  const p = await t.mountAs("bruno", "/service-accounts/sa_7cr3b2x9", <ServiceAccountPage id="sa_7cr3b2x9" />, { extra: (path) => (path.startsWith("/v1/runs") ? { runs: [] } : undefined) });
+  try {
+    await p.until(() => p.text().includes("ci-review-bot"), "the account");
+    expect(p.text()).toContain("Its keys are visible to its owner and to admins.");
+    expect(p.button("New key")).toBeUndefined();
+    expect(p.fake.calls.some((c) => c.includes("/keys"))).toBe(false);
+    expect(p.text()).not.toContain("Not found");
+  } finally { await p.done(); }
+});
+
 // The server takes the owner by email (ownerEmail), and "" clears it.
 const pickOption = async (d: HTMLDialogElement, trigger: number, label: string) => {
   const triggers = [...d.querySelectorAll<HTMLButtonElement>(".select-trigger")];

@@ -135,6 +135,8 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
       if (target.role === "owner" && owners.length === 1 && !c.operator) return err(409, "last_owner", "the last owner cannot be removed");
       MEMBERSHIPS.splice(MEMBERSHIPS.indexOf(target), 1);
       for (const k of KEYS) if (k.userId === target.userId && k.tenantId === tenantId) k.revoked = true;
+      // members.go removeMember: their service accounts here are left without an owner.
+      for (const s of SAS) if (s.tenantId === tenantId && s.ownerId === target.userId) s.ownerId = undefined;
       return ok(null, 204);
     }
     const b = await body<{ role: Role }>();

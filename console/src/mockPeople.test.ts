@@ -122,6 +122,25 @@ test("owner filter: several owners, user:/sa: exact, email any case, no substrin
   expect(keep("owner=user:carla@acme.dev")).toEqual([]);
 });
 
+// As luxd: removeMember leaves their service accounts ownerless; accountKeyHolder 404s anyone but the owner and admins; roles validate (422).
+test("mock: removing a member clears the accounts they own; account keys hidden from non-owners; roles validated", async () => {
+  resetPeople();
+  const sa = async (role: string, id: string) => (await as(role, `/v1/service-accounts/${id}`))!.body as { owner?: { id: string } };
+  expect((await sa("admin", "sa_7cr3b2x9")).owner?.id).toBe("usr_car");
+  expect((await as("admin", "/v1/members/usr_car", { method: "DELETE" }))!.status).toBe(204);
+  expect((await sa("admin", "sa_7cr3b2x9")).owner).toBeUndefined();
+  resetPeople();
+  expect((await as("bruno", "/v1/service-accounts/ci-review-bot/keys"))!.status).toBe(404);
+  expect((await as("viewer", "/v1/service-accounts/ci-review-bot/keys"))!.status).toBe(404);
+  expect((await as("member", "/v1/service-accounts/ci-review-bot/keys"))!.status).toBe(200);
+  expect((await as("bruno", "/v1/service-accounts/ci-review-bot/keys", { method: "POST", body: JSON.stringify({ name: "x" }) }))!.status).toBe(404);
+  expect((await as("admin", "/v1/service-accounts", { method: "POST", body: JSON.stringify({ name: "boss", role: "owner" }) }))).toMatchObject({ status: 422, body: { error: { code: "invalid_request" } } });
+  expect((await as("admin", "/v1/service-accounts/ci-review-bot", { method: "PATCH", body: JSON.stringify({ role: "owner" }) }))!.status).toBe(422);
+  expect((await as("admin", "/v1/service-accounts", { method: "POST", body: JSON.stringify({ name: "x", role: "member", ownerEmail: "sam@globex.io" }) }))!.status).toBe(422);
+  expect((await as("admin", "/v1/service-accounts", { method: "POST", body: JSON.stringify({ name: "ci-review-bot", role: "member" }) }))).toMatchObject({ status: 409, body: { error: { code: "conflict" } } });
+  resetPeople();
+});
+
 test("canAct: owners, service account owners and admins act; viewers never", () => {
   const c = (r: string) => {
     const req = new Request("http://mock/", { headers: { authorization: `Bearer luxk_mock_${r}` } });

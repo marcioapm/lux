@@ -209,7 +209,9 @@ export function ServiceAccountPage({ id }: { id: string }) {
   const toast = useToast();
   const { tenant, name: tenantName } = usePeopleTenant();
   const q = useQuery(`sa:${id}@${tenant ?? ""}`, (s) => api.serviceAccount(tenant, id, s));
-  const keys = useQuery(`sa:${id}:keys@${tenant ?? ""}`, (s) => api.serviceAccountKeys(tenant, id, s));
+  // Its keys: its owner's and admins' to see (luxd answers anyone else 404).
+  const seesKeys = q.data != null && (atLeast(v, "admin") || (q.data.owner != null && q.data.owner.id === v.userId));
+  const keys = useQuery(`sa:${id}:keys@${tenant ?? ""}`, (s) => api.serviceAccountKeys(tenant, id, s), { enabled: seesKeys });
   const members = useQuery(`members@${tenant ?? ""}`, (s) => api.members(tenant, s));
   const cost = useCostByOwner("member");
   const runs = useQuery(`sa:${id}:runs@${tenant ?? ""}`, (s) => api.runsPage(tenant, { owner: q.data?.name ?? id, limit: 50 }, s).then((p) => p.rows), { enabled: q.data != null });
@@ -289,23 +291,25 @@ export function ServiceAccountPage({ id }: { id: string }) {
         <div className="grid grid-stats">
           <StatTile label="Runs · 30d" value={mine?.runs != null ? mine.runs.toLocaleString("en-US") : "–"} loading={cost.loading} />
           <StatTile label="Cost · 30d" value={mine ? <Money amount={mine.amount} currency={mine.currency} decimals={CENTS} /> : "–"} unit={mine && total > 0 ? `${Math.round((Number(mine.amount) / total) * 100)}% of ${tenantName}` : "list prices"} loading={cost.loading} />
-          <StatTile label="Keys" value={`${active.length} / ${SA_KEY_CAP}`} unit="active" loading={keys.loading} />
+          <StatTile label="Keys" value={`${manageKeys ? active.length : s.activeKeys} / ${SA_KEY_CAP}`} unit="active" loading={manageKeys && keys.loading} />
         </div>
-        <Card
-          flush
-          title="Keys"
-          subtitle={`At most ${SA_KEY_CAP} active, so a key can be rotated without downtime: create the new one, switch the client, revoke the old.`}
-          actions={
-            manageKeys ? (
+        {manageKeys ? (
+          <Card
+            flush
+            title="Keys"
+            subtitle={`At most ${SA_KEY_CAP} active, so a key can be rotated without downtime: create the new one, switch the client, revoke the old.`}
+            actions={
               <Button variant="primary" size="sm" icon={<IconPlus size={14} />} disabled={full || keys.loading || s.disabledAt != null} title={full ? `${SA_KEY_CAP} active keys is the limit: revoke the old one first` : undefined} onClick={() => setNewKey(true)}>
                 New key
               </Button>
-            ) : undefined
-          }
-        >
-          {manageKeys && full && <div className="card-note muted">{SA_KEY_CAP} active keys is the limit: revoke the old one first.</div>}
-          <KeysTable keys={active} loading={keys.loading} access={false} createdBy onRevoke={manageKeys ? setRevoking : undefined} empty="No keys: nothing can use this account." />
-        </Card>
+            }
+          >
+            {full && <div className="card-note muted">{SA_KEY_CAP} active keys is the limit: revoke the old one first.</div>}
+            <KeysTable keys={active} loading={keys.loading} access={false} createdBy onRevoke={setRevoking} empty="No keys: nothing can use this account." />
+          </Card>
+        ) : (
+          <p className="page-note">Its keys are visible to its owner and to admins.</p>
+        )}
         <Card flush title="Runs" subtitle="this account's, newest first">
           <Table<Run> columns={runColumns({ tenant: false, owner: true, adapter: false })} rows={runs.data ?? []} rowKey={(r) => r.id} loading={runs.loading} onRowClick={(r) => go(runPath(r.id))} defaultSort={{ key: "created", dir: "desc" }} empty={`No Runs by ${s.name}.`} />
         </Card>
