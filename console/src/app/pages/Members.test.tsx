@@ -155,6 +155,24 @@ test("A member's page: stats, owned service accounts, keys only for admins and t
   }
 });
 
+// The Runs card says "owned by Carla or their service accounts": it asks for both (owner=user:<id>,sa:<id>…).
+test("A member's page lists their Runs and their service accounts' Runs", async () => {
+  const runs = [
+    { id: "run_c", name: "hosts-probe-claude", owner: { kind: "user", id: "usr_car", name: "Carla Santos", email: "carla@acme.dev" } },
+    { id: "run_s", name: "agent-refactor-42", owner: { kind: "serviceAccount", id: "sa_7cr3b2x9", name: "ci-review-bot" } },
+  ].map((r) => ({ ...r, tenant: "acme", state: "running", epoch: 1, labels: {}, createdAt: new Date().toISOString(), spec: { image: { ref: "img" }, resources: {}, workload: { adapter: "generic" } } }));
+  const p = await t.mountAs("viewer", "/members/usr_car", <MemberPage id="usr_car" />, { extra: (path) => (path.startsWith("/v1/runs") ? { runs } : undefined) });
+  try {
+    await p.until(() => p.text().includes("agent-refactor-42"), "the Runs");
+    const call = new URL(`http://x${p.fake.calls.find((c) => c.startsWith("/v1/runs"))!}`);
+    expect(call.searchParams.get("owner")!.split(",").sort()).toEqual(["sa:sa_7cr3b2x9", "user:usr_car"]);
+    expect(p.text()).toContain("owned by Carla or their service accounts");
+    expect(p.text()).toContain("hosts-probe-claude");
+  } finally {
+    await p.done();
+  }
+});
+
 // DELETE /v1/members/{user}/keys/{key} (members.go revokeMemberKey): admins revoke a member's key; an owner's only owners.
 test("An admin revokes a member's key on their page; an owner's keys have no Revoke for an admin", async () => {
   const runs = { extra: (path: string) => (path.startsWith("/v1/runs") ? { runs: [] } : undefined) };

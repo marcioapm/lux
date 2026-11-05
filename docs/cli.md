@@ -32,6 +32,7 @@ lux sa keys ls ci
 lux sa keys revoke ci <id|prefix>
 lux ls --mine
 lux ls --owner person@example.com
+lux ls --owner user:usr_…,sa:sa_… # any of several owners
 lux costs --by member
 lux costs --by owner
 lux tenants create team --owner first@example.com # operator

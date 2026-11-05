@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { callerOf, canAct, resetPeople, whoamiFor } from "../mockPeople.ts";
+import { callerOf, canAct, ownerFilter, resetPeople, whoamiFor } from "../mockPeople.ts";
 import { createTenant, peopleApi, tenantPeople } from "../mockPeopleApi.ts";
 
 // GET/POST /v1/tenants as luxd answers (internal/server/contract_test.go TestTenantPeopleContract).
@@ -110,6 +110,16 @@ test("people shapes: Person always has picture, operators have no role, membersh
   expect(who("operator", "?tenant=acme")).not.toHaveProperty("role");
   expect((who("member").memberships as Record<string, unknown>[])[0]).toHaveProperty("joinedAt");
   expect(who("member")).toMatchObject({ previews: false, serverInject: true });
+});
+
+// GET /v1/runs?owner= as luxd (ownership_test.go TestRunOwnerShownAndFiltered): exact, comma-separated, user:/sa: prefixes.
+test("owner filter: several owners, user:/sa: exact, email any case, no substrings", () => {
+  const keep = (q: string) => ["hosts-probe-claude", "agent-refactor-42", "billing-backoff-418", "notes-count-acp", "no-owner"].filter(ownerFilter(null, new URL(`http://mock/v1/runs?${q}`)));
+  expect(keep("owner=user:usr_car,sa:sa_7cr3b2x9")).toEqual(["hosts-probe-claude", "agent-refactor-42"]);
+  expect(keep("owner=CARLA@acme.dev")).toEqual(["hosts-probe-claude"]);
+  expect(keep("owner=ci-review-bot")).toEqual(["agent-refactor-42"]);
+  expect(keep("owner=carla")).toEqual([]);
+  expect(keep("owner=user:carla@acme.dev")).toEqual([]);
 });
 
 test("canAct: owners, service account owners and admins act; viewers never", () => {

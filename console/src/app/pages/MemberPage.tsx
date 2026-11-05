@@ -18,7 +18,10 @@ export function MemberPage({ id }: { id: string }) {
   const self = id === v.userId;
   const seesKeys = self || atLeast(v, "admin");
   const keys = useQuery(`member:${id}:keys@${tenant ?? ""}`, (s) => api.memberKeys(tenant, id, s), { enabled: seesKeys });
-  const runs = useQuery(`member:${id}:runs@${tenant ?? ""}`, (s) => api.runsPage(tenant, { owner: m.data?.email ?? id, limit: 50 }, s).then((p) => p.rows), { enabled: m.data != null });
+  // Theirs and their service accounts': GET /v1/runs?owner= takes several owners (user:<id>, sa:<id>).
+  const ownedIds = (sas.data ?? []).filter((s) => s.owner?.id === id || s.owner?.email === id).map((s) => `sa:${s.id}`);
+  const ownerParam = m.data ? [`user:${m.data.id}`, ...ownedIds].join(",") : "";
+  const runs = useQuery(`member:${id}:runs@${tenant ?? ""}:${ownerParam}`, (s) => api.runsPage(tenant, { owner: ownerParam, limit: 50 }, s).then((p) => p.rows), { enabled: m.data != null && sas.data != null });
   const [changing, setChanging] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [revoking, setRevoking] = useState<ApiKey | null>(null);

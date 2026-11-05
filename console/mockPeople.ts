@@ -315,9 +315,16 @@ export function canAct(c: Caller | null, name: string | undefined): boolean {
   return false;
 }
 
+/** GET /v1/runs' mine= and owner= (api.go listRuns): owner= is comma-separated, any of them; user:<id> / sa:<id> exactly, else a person's id or email (any case), or an account's id or name. */
 export function ownerFilter(c: Caller | null, u: URL): (name: string | undefined) => boolean {
   const mine = u.searchParams.get("mine") === "true";
-  const owner = u.searchParams.get("owner")?.toLowerCase();
+  const owners = (u.searchParams.get("owner") ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  const matches = (o: { user?: string; sa?: string }, v: string) => {
+    if (v.startsWith("user:")) return o.user === v.slice(5);
+    if (v.startsWith("sa:")) return o.sa === v.slice(3);
+    if (o.user) return o.user === v || USERS.find((x) => x.id === o.user)?.email.toLowerCase() === v.toLowerCase();
+    return o.sa === v || SAS.find((x) => x.id === o.sa)?.name === v;
+  };
   return (name) => {
     const o = name ? RUN_OWNERS[name] : undefined;
     if (mine) {
@@ -325,11 +332,7 @@ export function ownerFilter(c: Caller | null, u: URL): (name: string | undefined
       if (o.user && o.user !== c.user?.id) return false;
       if (o.sa && !(o.sa === c.sa?.id || SAS.find((s) => s.id === o.sa)?.ownerId === c.user?.id)) return false;
     }
-    if (owner) {
-      const j = runOwner(name);
-      if (!j) return false;
-      if (![j.id, j.name, j.email].some((x) => x?.toLowerCase().includes(owner))) return false;
-    }
+    if (owners.length && !(o && owners.some((v) => matches(o, v)))) return false;
     return true;
   };
 }

@@ -8505,12 +8505,12 @@ paths:
             examples:
               - "100"
             type: string
-        - description: "Only Runs this owner owns: a person's id or email, or a service account's id or name."
+        - description: "Only Runs these owners own (comma-separated, any of them): user:<id> or sa:<id> exactly, or a person's id or email, or a service account's id or name."
           explode: false
           in: query
           name: owner
           schema:
-            description: "Only Runs this owner owns: a person's id or email, or a service account's id or name."
+            description: "Only Runs these owners own (comma-separated, any of them): user:<id> or sa:<id> exactly, or a person's id or email, or a service account's id or name."
             type: string
         - description: "Only the caller's Runs: a person's own and those of the service accounts they own; a service account's key, the account's."
           explode: false

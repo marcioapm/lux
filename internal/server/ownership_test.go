@@ -137,7 +137,10 @@ func TestRunOwnerShownAndFiltered(t *testing.T) {
 		return strings.Join(out, ",")
 	}
 	execSQL(t, f.s, context.Background(), `INSERT INTO memberships (tenant_id, user_id, role) VALUES ('t1', 'usr_member', 'member')`)
-	for q, w := range map[string]string{"owner=mia@example.com": "r_mia", "owner=MIA@example.com": "r_mia", "owner=sa-bot": "r_sa", "owner=usr_owner": "r_olive"} {
+	for q, w := range map[string]string{"owner=mia@example.com": "r_mia", "owner=MIA@example.com": "r_mia", "owner=sa-bot": "r_sa", "owner=usr_owner": "r_olive",
+		// Several owners: any of them; user:/sa: exactly (a member's page: them and their accounts).
+		"owner=user:usr_member,sa:sa_bot&sort=id": "r_mia,r_sa", "owner=mia@example.com,sa-bot&sort=id": "r_mia,r_sa",
+		"owner=user:usr_owner": "r_olive", "owner=sa:sa_bot": "r_sa", "owner=user:mia@example.com": "", "owner=sa:sa-bot": "", "owner=user:nobody,sa:nothing": ""} {
 		if got := ids(f.keys["viewer"], q); got != w {
 			t.Errorf("%s: %s, want %s", q, got, w)
 		}

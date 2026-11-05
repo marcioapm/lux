@@ -929,7 +929,7 @@ type listRunsInput struct {
 	Label     []string `query:"label,explode" doc:"Only Runs with this label (key=value); repeat to require several."`
 	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."`
 	Limit     string   `query:"limit" doc:"Unpaged lists: at most this many Runs, newest first, 1 to 1000 (default 100; a value out of range is ignored). Paged lists (sort or a cursor): Runs per page, 1 to 200 (default 50; out of range is a 400). limit alone does not page." example:"100"`
-	Owner     string   `query:"owner" doc:"Only Runs this owner owns: a person's id or email, or a service account's id or name."`
+	Owner     string   `query:"owner" doc:"Only Runs these owners own (comma-separated, any of them): user:<id> or sa:<id> exactly, or a person's id or email, or a service account's id or name."`
 	Mine      bool     `query:"mine" doc:"Only the caller's Runs: a person's own and those of the service accounts they own; a service account's key, the account's."`
 }
 
@@ -992,10 +992,27 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		where = append(where, "r.labels @> "+arg(map[string]string{k: v}))
 	}
 	if in.Owner != "" {
+		// Several owners, comma-separated: any of them. user:<id> and
+		// sa:<id> are exact (as cost rows key them); a bare value is a
+		// person's id or email, or a service account's id or name.
 		// users is the system's; the tenant's view shows its members and its Runs' owners.
-		o := arg(in.Owner)
-		where = append(where, `(r.owner_user_id IN (SELECT u.id FROM users u WHERE u.id = `+o+` OR lower(u.email) = lower(`+o+`))
-			OR r.owner_sa_id IN (SELECT sa.id FROM service_accounts sa WHERE sa.id = `+o+` OR sa.name = `+o+`))`)
+		var users, sas, any []string
+		for _, v := range strings.Split(in.Owner, ",") {
+			v = strings.TrimSpace(v)
+			switch {
+			case v == "":
+			case strings.HasPrefix(v, "user:"):
+				users = append(users, strings.TrimPrefix(v, "user:"))
+			case strings.HasPrefix(v, "sa:"):
+				sas = append(sas, strings.TrimPrefix(v, "sa:"))
+			default:
+				any = append(any, v)
+			}
+		}
+		u, s, o := arg(users), arg(sas), arg(any)
+		where = append(where, `(r.owner_user_id = ANY(`+u+`) OR r.owner_sa_id = ANY(`+s+`)
+			OR r.owner_user_id IN (SELECT u.id FROM users u WHERE u.id = ANY(`+o+`) OR lower(u.email) = ANY(SELECT lower(x) FROM unnest(`+o+`::text[]) x))
+			OR r.owner_sa_id IN (SELECT sa.id FROM service_accounts sa WHERE sa.id = ANY(`+o+`) OR sa.name = ANY(`+o+`)))`)
 	}
 	if in.Mine {
 		switch {

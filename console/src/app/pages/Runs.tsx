@@ -118,7 +118,7 @@ export function Runs() {
           </label>
         </div>
         <form className="filters" onSubmit={submitText}>
-          <input className="input input-sm" placeholder="owner (name, email or service account)" aria-label="Owner filter" value={ownerDraft} onChange={(e) => setOwnerDraft(e.target.value)} />
+          <input className="input input-sm" placeholder="owner (email, id or service account; several: a,b)" aria-label="Owner filter" value={ownerDraft} onChange={(e) => setOwnerDraft(e.target.value)} />
           <input className="input input-sm mono" placeholder="host id or name" value={hostDraft} onChange={(e) => setHostDraft(e.target.value)} style={{ width: 200 }} />
           <input className="input input-sm mono" placeholder="label k=v" value={labelDraft} onChange={(e) => setLabelDraft(e.target.value)} style={{ width: 160 }} />
           <Button size="sm" type="submit">
