@@ -289,6 +289,7 @@ func admin(ctx context.Context, cfg config, args []string) error {
 	switch args[0] {
 	case "create-tenant":
 		name := fs.String("name", "", "tenant name")
+		ownerEmail := fs.String("owner", "", "invite the first owner by email (Cloudflare Access mode)")
 		maxRuns := fs.Int("max-runs", 0, "max concurrent runs (0: unlimited)")
 		maxHosts := fs.Int("max-hosts", 0, "max hosts (0: unlimited)")
 		retention := fs.Int("retention-days", 30, "days to keep a terminated Run's snapshots and output, from its terminate")
@@ -300,12 +301,27 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		if *expire < 0 {
 			return errors.New("--expire-after-days must be 0 (never) or more")
 		}
+		if *ownerEmail != "" {
+			if cfg.Console.Auth != "cloudflare-access" {
+				return errors.New("invitations_unavailable: --owner requires cloudflare-access console auth")
+			}
+			if !server.ValidAccessOperatorEmail(*ownerEmail) {
+				return errors.New("invalid owner email")
+			}
+		}
+		invitationCode := ""
 		tenantID := ids.New(ids.Tenant)
 		key := ids.Secret("lux")
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, retention_days, max_concurrent_runs, max_hosts, expire_after_days)
 				VALUES ($1, $2, $3, nullif($4, 0), nullif($5, 0), $6)`, tenantID, *name, *retention, *maxRuns, *maxHosts, *expire); err != nil {
 				return err
+			}
+			if *ownerEmail != "" {
+				invitationCode = ids.Secret("invite")
+				if _, err := tx.Exec(ctx, `INSERT INTO invitations(id,tenant_id,code,email,role,expires_at) VALUES($1,$2,$3,$4,'owner',now()+interval '14 days')`, ids.New(ids.Invitation), tenantID, invitationCode, *ownerEmail); err != nil {
+					return err
+				}
 			}
 			_, err := tx.Exec(ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ($1, $2, 'bootstrap', $3, $4)`,
 				ids.New(ids.APIKey), tenantID, ids.Hash(key), []string{"admin"})
@@ -314,7 +330,12 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		if err != nil {
 			return err
 		}
-		return out.Encode(map[string]string{"tenantId": tenantID, "apiKey": key})
+		answer := map[string]string{"tenantId": tenantID, "apiKey": key}
+		if invitationCode != "" {
+			answer["invitationCode"] = invitationCode
+			answer["invitationUrl"] = strings.TrimRight(cfg.PublicURL, "/") + "/invite/" + invitationCode
+		}
+		return out.Encode(answer)
 
 	case "create-key":
 		tenant := fs.String("tenant", "", "tenant id")

@@ -234,7 +234,8 @@ func fillSecrets(secrets []spec.Secret, envFile string) error {
 }
 
 func (a *app) lsCmd() *cobra.Command {
-	var state, host string
+	var state, host, owner string
+	var mine bool
 	var labels []string
 	var resumable bool
 	var limit int
@@ -254,6 +255,12 @@ reported. A leading ~ marks a total that may still change: part of it is
 an estimate, or a cost source has not answered yet.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			q := url.Values{}
+			if owner != "" {
+				q.Set("owner", owner)
+			}
+			if mine {
+				q.Set("mine", "true")
+			}
 			if state != "" {
 				q.Set("state", state)
 			}
@@ -302,6 +309,8 @@ an estimate, or a cost source has not answered yet.`,
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&owner, "owner", "", "owner's id, email or service account name")
+	cmd.Flags().BoolVar(&mine, "mine", false, "your Runs and those of service accounts you own")
 	cmd.Flags().StringVar(&state, "state", "", "filter by state (comma-separated)")
 	cmd.Flags().BoolVar(&resumable, "resumable", false, "only Runs resume accepts (stopped, lost, failed, succeeded; not resumePolicy never, nor those whose only snapshot report was refused)")
 	cmd.Flags().StringVar(&host, "host", "", "only Runs placed on this host (id or name), ever")
