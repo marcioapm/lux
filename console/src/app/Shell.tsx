@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { IconButton, LiveDot, Logo, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
+import { Avatar, IconButton, LiveDot, Logo, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
 import { IconChevronLeft, IconChevronRight, IconClose, IconGlobe, IconGrid, IconKey, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
 import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
 import { isPlainClick, Link, usePath } from "./router.tsx";
@@ -300,37 +300,6 @@ function SidebarUser({ avatar, name, sub, signOut, signOutLabel }: { avatar: Rea
       </IconButton>
     </div>
   );
-}
-
-/**
- * A photo (the identity provider's); without one, or if it fails to load,
- * the fallback: initials unless given. Labelled: it names the person, for
- * where their name is not shown beside it; otherwise it is decoration.
- */
-function Avatar({ name, picture, fallback, labelled }: { name: string; picture?: string; fallback?: ReactNode; labelled: boolean }) {
-  const [failed, setFailed] = useState(false);
-  return (
-    <span className="avatar" {...(labelled ? { role: "img", "aria-label": name } : { "aria-hidden": true })}>
-      {picture && !failed ? <img src={picture} alt="" referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : (fallback ?? initials(name))}
-    </span>
-  );
-}
-
-/* Graphemes where the browser can (an emoji or accent stays whole); code points otherwise. */
-const graphemes = typeof Intl.Segmenter === "function" ? new Intl.Segmenter() : null;
-function firstChar(w: string): string {
-  return (graphemes ? graphemes.segment(w).containing(0)?.segment : [...w][0]) ?? "";
-}
-
-/** "Ada Lovelace" → "AL"; "ada@example.com" → "A"; "Ada Lovelace (ops)" → "AO"; "Ada | Ops" → "AO". Leading punctuation and symbols are skipped; emoji (So) are kept. */
-function initials(name: string): string {
-  const local = /^[^\s@]+@[^\s@]+$/.test(name) ? name.slice(0, name.indexOf("@")) : name;
-  const words = local
-    .split(/[\s._-]+/)
-    .map((w) => w.replace(/^[\p{P}\p{Sm}\p{Sc}\p{Sk}]+/u, ""))
-    .filter(Boolean);
-  const ends = words.length > 1 ? [words[0] ?? "", words.at(-1) ?? ""] : words;
-  return ends.map(firstChar).join("").toUpperCase() || "?";
 }
 
 /** Whether the event stream is up: pages update as things happen, or fall back to polling. */

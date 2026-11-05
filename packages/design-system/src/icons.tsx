@@ -156,6 +156,19 @@ export const IconUsers = (p: IconProps) => (
     <path d="M10.5 3.2a2.5 2.5 0 0 1 0 4.6M12 9.3a4.5 4.5 0 0 1 2.5 4.2" />
   </Icon>
 );
+export const IconUser = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="8" cy="5.5" r="2.75" />
+    <path d="M2.75 13.75c.7-2.7 2.8-4.2 5.25-4.2s4.55 1.5 5.25 4.2" />
+  </Icon>
+);
+/** A service account: a machine principal. */
+export const IconBot = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3" y="5" width="10" height="8" rx="2" />
+    <path d="M8 2.5V5M6 9h.01M10 9h.01M1.5 9v1.5M14.5 9v1.5" />
+  </Icon>
+);
 export const IconLogout = (p: IconProps) => (
   <Icon {...p}>
     <path d="M6.5 2.5H3.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3" />
