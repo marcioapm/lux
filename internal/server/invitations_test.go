@@ -1,0 +1,115 @@
+package server
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"testing"
+)
+
+func TestInvitations(t *testing.T) {
+	f, access := accessFixture(t)
+	s := f.s
+	invite := func(email, role string) (int, map[string]any) {
+		return f.do(t, f.keys["admin"], "POST", "/v1/invitations", map[string]any{"role": role, "invitations": []any{map[string]any{"email": email}}})
+	}
+	code, out := invite("new@example.com", "member")
+	if code != 200 {
+		t.Fatalf("create: %d %v", code, out)
+	}
+	result := func(out map[string]any) map[string]any { return out["results"].([]any)[0].(map[string]any) }
+	r := result(out)
+	if r["result"] != "created" {
+		t.Fatal(r)
+	}
+	v := r["invitation"].(map[string]any)
+	id, invcode := v["id"].(string), v["code"].(string)
+	_, out = invite("NEW@example.com", "member")
+	if result(out)["result"] != "existing" || result(out)["invitation"].(map[string]any)["code"] != invcode {
+		t.Fatal(out)
+	}
+	execSQL(t, s, context.Background(), `UPDATE invitations SET expires_at=now()-interval '1 hour' WHERE id=$1`, id)
+	_, out = invite("new@example.com", "member")
+	if result(out)["result"] != "renewed" || result(out)["invitation"].(map[string]any)["code"] != invcode {
+		t.Fatal(out)
+	}
+	_, out = invite("mia@example.com", "member")
+	if result(out)["result"] != "member" {
+		t.Fatal(out)
+	}
+	_, out = invite("not-an-email", "member")
+	if result(out)["result"] != "invalid" {
+		t.Fatal(out)
+	}
+	if code, _ := invite("boss@example.com", "owner"); code != 403 {
+		t.Error(code)
+	}
+	wrong := access.sign("wrong@example.com")
+	right := access.sign("NEW@example.com")
+	code, out = accessDo(t, s, wrong, "GET", "/v1/invitations/by-code/"+invcode, nil)
+	if code != 200 || out["emailMatches"] != false || len(out) != 2 {
+		t.Fatalf("wrong email lookup leaks: %d %v", code, out)
+	}
+	code, out = accessDo(t, s, wrong, "POST", "/v1/invitations/by-code/"+invcode+"/accept", nil)
+	if c, _ := errCode(out); code != 403 || c != "invitation_email_mismatch" {
+		t.Fatalf("wrong accept: %d %v", code, out)
+	}
+	code, out = accessDo(t, s, right, "GET", "/v1/invitations/by-code/"+invcode, nil)
+	if code != 200 || out["emailMatches"] != true || out["tenant"] != "t1" {
+		t.Fatal(code, out)
+	}
+	code, out = accessDo(t, s, right, "GET", "/v1/me/invitations", nil)
+	if code != 200 || len(out["invitations"].([]any)) != 1 {
+		t.Fatal(code, out)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	counts := map[int]int{}
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			code, _ := accessDo(t, s, right, "POST", "/v1/invitations/by-code/"+invcode+"/accept", nil)
+			mu.Lock()
+			counts[code]++
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if counts[200] != 1 || counts[410] != 1 {
+		t.Fatalf("concurrent accepts: %v", counts)
+	}
+	if n := queryOne[int64](t, s, `SELECT count(*) FROM memberships m JOIN users u ON u.id=m.user_id WHERE lower(u.email)='new@example.com'`); n != 1 {
+		t.Fatal(n)
+	}
+	for _, status := range []string{"expired", "revoked"} {
+		email := status + "@example.com"
+		_, out = invite(email, "viewer")
+		v := result(out)["invitation"].(map[string]any)
+		id := v["id"].(string)
+		c := v["code"].(string)
+		if status == "expired" {
+			execSQL(t, s, context.Background(), `UPDATE invitations SET expires_at=now()-interval '1 hour' WHERE id=$1`, id)
+		} else {
+			if code, out := f.do(t, f.keys["admin"], "POST", "/v1/invitations/"+id+"/revoke", nil); code != 200 {
+				t.Fatal(code, out)
+			}
+		}
+		code, out := accessDo(t, s, access.sign(email), "POST", "/v1/invitations/by-code/"+c+"/accept", nil)
+		if e, _ := errCode(out); code != 410 || e != "invitation_unusable" {
+			t.Errorf("%s: %d %v", status, code, out)
+		}
+	}
+	// Every invitation route refuses key console mode before doing anything.
+	s.cfg.ConsoleAuth.Mode = "key"
+	for _, rt := range []struct {
+		method, path string
+		body         any
+	}{{"GET", "/v1/invitations", nil}, {"GET", "/v1/invitations/counts", nil}, {"POST", "/v1/invitations", map[string]any{"role": "member", "invitations": []any{}}}, {"POST", "/v1/invitations/" + id + "/renew", nil}, {"POST", "/v1/invitations/" + id + "/revoke", nil}, {"GET", "/v1/invitations/by-code/" + invcode, nil}, {"POST", "/v1/invitations/by-code/" + invcode + "/accept", nil}, {"GET", "/v1/me/invitations", nil}} {
+		code, out := f.do(t, f.keys["admin"], rt.method, rt.path, rt.body)
+		if c, _ := errCode(out); code != 409 || c != "invitations_unavailable" {
+			t.Errorf("%s: %d %v", rt.path, code, out)
+		}
+	}
+	_ = fmt.Sprint
+}
