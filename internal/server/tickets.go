@@ -159,14 +159,48 @@ func (s *Server) redeemTicket(ctx context.Context, raw string, f ticketFor, kind
 			WHERE token_hash = $1 AND kind = $4 AND used_at IS NULL AND expires_at > now()
 			  AND ((run_id IS NOT NULL AND run_id = nullif($2, '')) OR (server_id IS NOT NULL AND server_id = nullif($3, '')))
 			RETURNING principal`, ids.Hash(raw), f.runID, f.serverID, kind).Scan(&sp)
-		if err != nil || sp.KeyID == "" {
+		if err != nil {
 			return err
 		}
-		live, err := keyLiveTx(ctx, tx, sp.KeyID)
-		if err == nil && !live {
-			err = pgx.ErrNoRows
+		if sp.KeyID != "" {
+			live, err := keyLiveTx(ctx, tx, sp.KeyID)
+			if err != nil {
+				return err
+			}
+			if !live {
+				return pgx.ErrNoRows
+			}
 		}
-		return err
+		// A ticket is a credential, not a frozen role grant: demotion,
+		// removal and disabling take effect before its next redemption.
+		if sp.UserID != "" {
+			var disabled, op bool
+			var role *string
+			if err := tx.QueryRow(ctx, `SELECT u.disabled_at IS NOT NULL,u.operator,m.role FROM users u
+				LEFT JOIN memberships m ON m.user_id=u.id AND m.tenant_id=$2 WHERE u.id=$1`, sp.UserID, sp.TenantID).Scan(&disabled, &op, &role); err != nil {
+				return err
+			}
+			if disabled || (sp.Operator && !op) || (!sp.Operator && role == nil) {
+				return pgx.ErrNoRows
+			}
+			if !sp.Operator {
+				sp.Role = *role
+				sp.Scopes = []string{roleScope(*role)}
+			}
+		} else if sp.ServiceAccountID != "" {
+			var disabled bool
+			if err := tx.QueryRow(ctx, `SELECT role,disabled_at IS NOT NULL FROM service_accounts WHERE id=$1`, sp.ServiceAccountID).Scan(&sp.Role, &disabled); err != nil {
+				return err
+			}
+			if disabled {
+				return pgx.ErrNoRows
+			}
+			sp.Scopes = []string{roleScope(sp.Role)}
+		}
+		if sp.ReadOnly {
+			sp.Scopes = []string{"read"}
+		}
+		return nil
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, errBadTicket
