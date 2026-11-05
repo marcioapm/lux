@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -231,6 +232,7 @@ func (s *Server) newAPI(mux *http.ServeMux) huma.API {
 				{Name: "hosts", Description: "The hosts that run your workloads."},
 				{Name: "pools", Description: "Pools of hosts, and how they are provisioned."},
 				{Name: "history", Description: "The system, hosts and Runs now and over time."},
+				{Name: "people", Description: "Members, their roles and keys, service accounts and invitations."},
 				{Name: "operators", Description: "For operator keys: every tenant."},
 			},
 		},
@@ -290,10 +292,18 @@ func (s *Server) requireKey(scope string) func(huma.Context, func(huma.Context))
 			p, err = s.authKey(ctx.Context(), key, scope)
 		} else {
 			r, _ := humago.Unwrap(ctx)
-			p, err = s.consoleUser(r, scope)
+			ref := cmp.Or(ctx.Query("tenant"), ctx.Header("Lux-Tenant"))
+			var obj string
+			obj, err = s.objectTenant(ctx)
+			if err == nil {
+				p, err = s.consoleUser(r, scope, ref, obj)
+			}
 		}
 		if err == nil {
 			p, err = s.operatorScope(ctx, p)
+		}
+		if err == nil {
+			err = s.checkAccess(ctx, p)
 		}
 		if err != nil {
 			r, w := humago.Unwrap(ctx)
@@ -364,11 +374,22 @@ func register[I, O any](s *Server, api huma.API, op huma.Operation, scope string
 			op.Metadata[ownerKey] = o.owner
 		}
 	}
+	if rule, ok := accessRules[op.OperationID]; ok {
+		if op.Metadata == nil {
+			op.Metadata = map[string]any{}
+		}
+		op.Metadata[accessKey] = rule
+		op.Description = strings.TrimSpace(op.Description + "\n\n" + rule.doc())
+	}
 	if scope != "" {
 		op.Security = []map[string][]string{{"apiKey": {}}}
 		op.Middlewares = append(op.Middlewares, s.requireKey(scope))
 		op.Errors = append([]int{http.StatusUnauthorized, http.StatusForbidden}, op.Errors...)
-		op.Description = strings.TrimSpace(op.Description + fmt.Sprintf("\n\nNeeds the `%s` scope.", scope))
+		if scope == scopeSignin {
+			op.Description = strings.TrimSpace(op.Description + "\n\nAny caller: a key, or a person signed in, in a tenant or not.")
+		} else {
+			op.Description = strings.TrimSpace(op.Description + fmt.Sprintf("\n\nNeeds the `%s` scope.", scope))
+		}
 	}
 	// Bodies are decoded as they always were (decodeStrict), not validated
 	// against their schema first: the schema documents them, and errors

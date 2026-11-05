@@ -101,6 +101,11 @@ func (s *Server) mintTicket(ctx context.Context, in *mintTicketInput) (*ticketOu
 	if err != nil {
 		return nil, err
 	}
+	if kind == TicketExec {
+		if err := s.requireRunActor(ctx, p, in.ID); err != nil {
+			return nil, err
+		}
+	}
 	raw := ids.Secret("tkt")
 	t := Ticket{Ticket: raw, Kind: kind, RunID: in.ID, ExpiresAt: time.Now().Add(ticketTTL).UTC().Truncate(time.Millisecond)}
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -116,21 +121,26 @@ func (s *Server) mintTicket(ctx context.Context, in *mintTicketInput) (*ticketOu
 
 // storedPrincipal is a Principal as a ticket keeps it.
 type storedPrincipal struct {
-	TenantID string   `json:"tenantId"`
-	KeyID    string   `json:"keyId,omitempty"`
-	Scopes   []string `json:"scopes"`
-	Operator bool     `json:"operator,omitempty"`
-	Email    string   `json:"email,omitempty"`
-	Name     string   `json:"name,omitempty"`
-	Picture  string   `json:"picture,omitempty"`
+	TenantID         string   `json:"tenantId"`
+	KeyID            string   `json:"keyId,omitempty"`
+	Scopes           []string `json:"scopes"`
+	Operator         bool     `json:"operator,omitempty"`
+	Email            string   `json:"email,omitempty"`
+	Name             string   `json:"name,omitempty"`
+	Picture          string   `json:"picture,omitempty"`
+	UserID           string   `json:"userId,omitempty"`
+	ServiceAccountID string   `json:"serviceAccountId,omitempty"`
+	Role             string   `json:"role,omitempty"`
+	ReadOnly         bool     `json:"readOnly,omitempty"`
 }
 
 func ticketPrincipal(p Principal) storedPrincipal {
-	return storedPrincipal{p.TenantID, p.KeyID, p.Scopes, p.Operator, p.Email, p.Name, p.Picture}
+	return storedPrincipal{p.TenantID, p.KeyID, p.Scopes, p.Operator, p.Email, p.Name, p.Picture, p.UserID, p.ServiceAccountID, p.Role, p.ReadOnly}
 }
 
 func (sp storedPrincipal) principal() Principal {
-	return Principal{TenantID: sp.TenantID, KeyID: sp.KeyID, Scopes: sp.Scopes, Operator: sp.Operator, Email: sp.Email, Name: sp.Name, Picture: sp.Picture}
+	return Principal{TenantID: sp.TenantID, KeyID: sp.KeyID, Scopes: sp.Scopes, Operator: sp.Operator, Email: sp.Email, Name: sp.Name, Picture: sp.Picture,
+		UserID: sp.UserID, ServiceAccountID: sp.ServiceAccountID, Role: sp.Role, ReadOnly: sp.ReadOnly}
 }
 
 var errBadTicket = errf(http.StatusUnauthorized, "unauthorized", "invalid, used or expired ticket")

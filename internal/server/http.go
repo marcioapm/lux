@@ -18,16 +18,37 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// Principal is who a request is from: a tenant's key, or an operator's.
-// An operator key belongs to no tenant; it sees and acts on every tenant.
+// Principal is who a request is from: a person (by a personal key or
+// signed in), a tenant's service account (by its key), or an operator. An
+// operator belongs to no tenant; it sees and acts on every tenant.
 type Principal struct {
 	TenantID string
 	KeyID    string
 	Scopes   []string
 	Operator bool
-	// Email, Name and Picture (a photo's URL, if any): a person's, when
-	// authenticated as one (console auth) rather than by an API key.
+	// Email, Name and Picture (a photo's URL, if any): a person's.
 	Email, Name, Picture string
+	// UserID: the person's; ServiceAccountID: the account's, by its key.
+	UserID, ServiceAccountID string
+	// ServiceAccountName: with ServiceAccountID.
+	ServiceAccountName string
+	// Role in TenantID: the person's membership, or the account's role.
+	// Empty for an operator, which outranks every role.
+	Role string
+	// ReadOnly: a key made read-only; it reads whatever the role is.
+	ReadOnly bool
+}
+
+// atLeast: the principal holds role (or more) in its tenant, and may use
+// it: a read-only key reads only.
+func (p Principal) atLeast(role string) bool {
+	if p.Operator {
+		return true
+	}
+	if p.ReadOnly && roleRank(role) > roleRank("viewer") {
+		return false
+	}
+	return roleRank(p.Role) >= roleRank(role)
 }
 
 // Actor names who a request is from in events: the person, or the key.
@@ -38,7 +59,15 @@ func (p Principal) Actor() string {
 	return p.KeyID
 }
 
+// scopeSignin is the pseudo-scope of the routes any authenticated caller
+// may use, a person in no tenant included (their own profile, their
+// invitations).
+const scopeSignin = "signin"
+
 func (p Principal) Can(scope string) bool {
+	if scope == scopeSignin {
+		return true
+	}
 	for _, s := range p.Scopes {
 		// operator implies admin implies run implies read.
 		if s == scope || s == "operator" || (s == "admin" && scope != "operator") || (s == "run" && scope == "read") {
@@ -149,24 +178,33 @@ func readJSON(r *http.Request, v any) error {
 // maxBody bounds a JSON request body.
 const maxBody = 8 << 20
 
-// authKey authenticates an API key (a tenant's, or an operator's: no
-// tenant) and requires a scope.
+// authKey authenticates an API key and requires a scope. A person's key
+// acts with the person's role in the key's tenant, a service account's
+// with the account's; either only while the key has not expired, the
+// person is still a member and not disabled, and the account not
+// disabled. A read-only key reads only. A key with neither (an operator's
+// key owned by no person, or a tenant key from before people) has its
+// scopes.
 func (s *Server) authKey(ctx context.Context, key, scope string) (Principal, error) {
 	var p Principal
 	if key == "" {
 		return p, errf(http.StatusUnauthorized, "unauthorized", "missing API key")
 	}
-	var tenant *string
+	var tenant, userID, saID, email, uname, picture, memberRole, saRole, saName *string
+	var userOperator, userDisabled, saDisabled *bool
 	var stale bool
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
-			SELECT tenant_id, id, scopes, coalesce(last_used_at < now() - interval '1 minute', true)
-			FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL`, ids.Hash(key)).
-			Scan(&tenant, &p.KeyID, &p.Scopes, &stale)
-		p.Operator = tenant == nil
-		if tenant != nil {
-			p.TenantID = *tenant
-		}
+			SELECT k.tenant_id, k.id, k.scopes, coalesce(k.last_used_at < now() - interval '1 minute', true), k.read_only,
+				k.user_id, k.service_account_id, u.email, u.name, u.picture, u.operator, u.disabled_at IS NOT NULL, m.role,
+				sa.role, sa.name, sa.disabled_at IS NOT NULL
+			FROM api_keys k
+			LEFT JOIN users u ON u.id = k.user_id
+			LEFT JOIN memberships m ON m.user_id = k.user_id AND m.tenant_id = k.tenant_id
+			LEFT JOIN service_accounts sa ON sa.id = k.service_account_id
+			WHERE k.key_hash = $1 AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now())`, ids.Hash(key)).
+			Scan(&tenant, &p.KeyID, &p.Scopes, &stale, &p.ReadOnly, &userID, &saID, &email, &uname, &picture, &userOperator, &userDisabled,
+				&memberRole, &saRole, &saName, &saDisabled)
 		if err != nil || !stale {
 			return err
 		}
@@ -175,13 +213,55 @@ func (s *Server) authKey(ctx context.Context, key, scope string) (Principal, err
 		_, err = tx.Exec(ctx, `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, p.KeyID)
 		return err
 	})
+	invalid := errf(http.StatusUnauthorized, "unauthorized", "invalid API key")
 	if errors.Is(err, pgx.ErrNoRows) {
-		return p, errf(http.StatusUnauthorized, "unauthorized", "invalid API key")
+		return p, invalid
 	}
 	if err != nil {
 		return p, err
 	}
+	p.Operator = tenant == nil
+	if tenant != nil {
+		p.TenantID = *tenant
+	}
+	switch {
+	case userID != nil:
+		if *userDisabled {
+			return p, invalid
+		}
+		p.UserID, p.Email, p.Name, p.Picture = *userID, *email, *uname, *picture
+		if p.Operator {
+			// An operator's own key: theirs while they are one.
+			if !*userOperator {
+				return p, invalid
+			}
+			break
+		}
+		if memberRole == nil {
+			return p, invalid
+		}
+		p.Role = *memberRole
+		p.Scopes = []string{roleScope(p.Role)}
+	case saID != nil:
+		if *saDisabled {
+			return p, invalid
+		}
+		p.ServiceAccountID, p.ServiceAccountName, p.Role = *saID, *saName, *saRole
+		// A key from before people keeps the scopes it lists while they
+		// still say its account's role: whoami shows what it always did.
+		if scopesRole(p.Scopes) != p.Role || p.ReadOnly {
+			p.Scopes = []string{roleScope(p.Role)}
+		}
+	case !p.Operator:
+		p.Role = scopesRole(p.Scopes)
+	}
+	if p.ReadOnly {
+		p.Scopes = []string{"read"}
+	}
 	if !p.Can(scope) {
+		if p.ReadOnly {
+			return p, errf(http.StatusForbidden, "forbidden", "this key is read-only")
+		}
 		return p, errf(http.StatusForbidden, "forbidden", "this key lacks the %q scope", scope)
 	}
 	return p, nil

@@ -433,6 +433,9 @@ func (s *Server) routes(api huma.API) {
 		Errors: []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
 	}, "read", s.listPoolEvents)
 
+	// People.
+	s.peopleRoutes(api)
+
 	// Operators and the system.
 	register(s, api, huma.Operation{
 		OperationID: "whoami", Method: http.MethodGet, Path: "/v1/whoami", Tags: []string{"operators"},
@@ -766,9 +769,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		var prompt []spec.Attachment
 		stored, prompt = splitPromptAttachments(stored)
 		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since, prompt_attachments,
-				submitted_by_key, submitted_by_email, requested_resources, resolved_size)
-			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''), $12, $13)`,
-			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email, requested, size)
+				submitted_by_key, submitted_by_email, requested_resources, resolved_size, owner_user_id, owner_sa_id)
+			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''), $12, $13, nullif($14, ''), nullif($15, ''))`,
+			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email, requested, size, p.UserID, p.ServiceAccountID)
 		if err != nil {
 			return err
 		}
