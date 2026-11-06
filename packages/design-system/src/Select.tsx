@@ -81,7 +81,10 @@ export function Select<V extends string>(props: SelectProps<V>) {
     }
     if (!open) return;
     if (e.key === "Escape") {
-      // Closes this menu only, not a dialog the select sits in.
+      // Closes this menu only, not a dialog the select sits in: a native
+      // <dialog> closes on Escape as the keydown's default action, which
+      // stopPropagation does not cancel; preventDefault does.
+      e.preventDefault();
       e.stopPropagation();
       setOpen(false);
     } else if (e.key === "ArrowDown") {

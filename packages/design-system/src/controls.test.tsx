@@ -7,6 +7,7 @@ import { pageList, Pagination } from "./Pagination.tsx";
 import { DurationCell, RelativeTime } from "./RelativeTime.tsx";
 import { SegmentedControl } from "./SegmentedControl.tsx";
 import { Select } from "./Select.tsx";
+import { Dialog } from "./Dialog.tsx";
 import { StatePill } from "./Badge.tsx";
 import { hostDisplayState } from "./states.ts";
 import { readTerminalScheme, setTerminalScheme, TERMINAL_THEME_KEY, useTerminalScheme } from "./theme.ts";
@@ -131,6 +132,37 @@ describe("in a DOM", () => {
     await act(async () => root.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
     await act(async () => root.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(picked).toEqual(["hour"]);
+  });
+
+  // A browser closes a modal <dialog> on Escape as the keydown's default
+  // action (the cancel event), however far the event propagated:
+  // stopPropagation does not stop it, only preventDefault. happy-dom has no
+  // such default, so press() does what the browser does after dispatch:
+  // cancels the dialog unless the keydown's default was prevented.
+  test("Select in a dialog: Escape on its open menu closes the menu only, not the dialog", async () => {
+    let cancelled = 0;
+    const el = await render(
+      <Dialog open title="Pick" onConfirm={() => {}} onCancel={() => cancelled++}>
+        <Select options={[{ value: "a", label: "Alpha" }, { value: "b", label: "Beta" }]} value="a" onChange={() => {}} />
+      </Dialog>,
+    );
+    const dialog = el.querySelector("dialog") as HTMLDialogElement;
+    const root = el.querySelector(".select") as HTMLElement;
+    const press = async () => {
+      const k = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      await act(async () => {
+        root.dispatchEvent(k);
+        if (!k.defaultPrevented) dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
+      });
+    };
+    await act(async () => (el.querySelector(".select-trigger") as HTMLElement).click());
+    expect(root.classList.contains("is-open")).toBe(true);
+    await press();
+    expect(root.classList.contains("is-open")).toBe(false);
+    expect(cancelled).toBe(0);
+    // With the menu closed, Escape is the dialog's again.
+    await press();
+    expect(cancelled).toBe(1);
   });
 
   test("Pagination, cursor mode: past page 1, First stays on even when the page has lost its previous one", async () => {
