@@ -386,11 +386,51 @@ func TestCostMonthlyFamilyRowLimit(t *testing.T) {
 			t.Fatalf("exact limit: HTTP=%d rows=%d", code, len(got.Totals)+len(got.Series))
 		}
 	}
+	// Hour 79 is outside the initial 0..78 set: add one series row, no new total.
 	ownerExec(t, s, `INSERT INTO cost_hourly(hour,tenant_id,run_id,source,family,currency,amount,allocated,unallocated)
-		VALUES($1,'t1','r1','limit','family-126','USD',1,0,0)`, t0.Add(79*time.Hour))
+		VALUES($1,'t1','r1','limit','family-1','USD',1,0,0)`, t0.Add(79*time.Hour))
 	for _, suffix := range []string{"", "&runs=true"} {
 		if code := getJSON(t, s, keys["t1"], path+suffix, &got); code != 413 {
 			t.Fatalf("over limit: HTTP=%d", code)
 		}
+	}
+}
+
+func TestCostMonthlyFamilySessionTimeZone(t *testing.T) {
+	for _, tz := range []string{"UTC", "Asia/Tokyo"} {
+		t.Run(tz, func(t *testing.T) {
+			s, keys := costFixture(t)
+			sessionTimeZone(t, s, tz)
+			at := t0.UTC().Truncate(24 * time.Hour).Add(23 * time.Hour)
+			ownerExec(t, s, `INSERT INTO cost_hourly(hour,tenant_id,run_id,source,family,currency,amount,allocated,unallocated)
+    VALUES($1,'t1','r1','tz','compute','USD',1,0,0),($2,'t1','r1','tz','compute','USD',2,0,0)`, at, at.Add(time.Hour))
+			for _, interval := range []string{"hour", "day"} {
+				for _, runs := range []bool{false, true} {
+					path := "/v1/costs?from=" + url.QueryEscape(at.Add(-time.Hour).Format(time.RFC3339)) + "&to=" + url.QueryEscape(at.Add(2*time.Hour).Format(time.RFC3339)) + "&group=family&interval=" + interval
+					if runs {
+						path += "&runs=true"
+					}
+					var got CostSummaryBody
+					if code := getJSON(t, s, keys["t1"], path, &got); code != 200 {
+						t.Fatal(code)
+					}
+					if len(got.Totals) != 1 || len(got.Series) != 2 {
+						t.Fatalf("unexpected buckets: %+v", got)
+					}
+					for i, row := range got.Series {
+						want := at.Add(time.Duration(i) * time.Hour)
+						if interval == "day" {
+							want = want.Truncate(24 * time.Hour)
+						}
+						if row.At == nil || !row.At.Equal(want) || row.Runs != nil {
+							t.Fatalf("%s runs=%t bucket=%+v want=%s", interval, runs, row, want)
+						}
+					}
+					if runs && (got.Totals[0].Runs == nil || *got.Totals[0].Runs != 1) {
+						t.Fatalf("whole-window count=%+v", got.Totals)
+					}
+				}
+			}
+		})
 	}
 }
