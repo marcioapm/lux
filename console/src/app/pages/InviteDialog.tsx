@@ -1,6 +1,6 @@
 // The Invite people dialog (EmailInput + role) and the links it hands back.
 import { useMemo, useState } from "react";
-import { Badge, classifyEmails, CopyAllLinks, Dialog, emailCounts, EmailInput, InviteLinkList, inviteButtonText, isTaken, ROLE_LABEL, useToast, type EmailEntry, type EmailVerdict, type TenantRole } from "@lux/design-system";
+import { Badge, classifyEmails, CopyAllLinks, Dialog, emailCounts, EmailInput, InviteLinkList, inviteButtonText, isTaken, RoleBadge, ROLE_LABEL, useToast, type EmailEntry, type EmailVerdict, type TenantRole } from "@lux/design-system";
 import { IconCopy, IconUser } from "@lux/design-system/icons";
 import { api, errorText, type Invitation, type InviteResult, type Member } from "../../api/index.ts";
 import { RoleField, roleOptions } from "./peopleParts.tsx";
@@ -81,26 +81,35 @@ export function InviteDialog({ open, tenant, tenantName, members, invitations, c
   );
 }
 
-/** The links an invite produced: created, renewed or existing ones; members and invalid addresses are said in words. */
-export function InviteLinksDialog({ results, role, tenantName, onDone }: { results: InviteResult[] | null; role: TenantRole; tenantName: string; onDone: () => void }) {
+/**
+ * The links an invite produced: created, renewed or existing ones, each
+ * with the role its own invitation carries (a renewed or existing one keeps
+ * the role it was sent with, which need not be the role just picked);
+ * members and invalid addresses are said in words.
+ */
+export function InviteLinksDialog({ results, tenantName, onDone }: { results: InviteResult[] | null; role?: TenantRole; tenantName: string; onDone: () => void }) {
   const withLink = (results ?? []).filter((r) => r.invitation);
   const links = withLink.map((r) => ({
     email: r.email,
     url: r.invitation!.url,
-    note:
-      r.result === "existing" ? (
-        <Badge tone="info" title="Already invited: this is the same link">
-          already invited
-        </Badge>
-      ) : r.result === "renewed" ? (
-        <Badge tone="info" title="The expired invitation was renewed: same link, 14 more days">
-          renewed
-        </Badge>
-      ) : undefined,
+    note: (
+      <>
+        <RoleBadge role={r.invitation!.role} />
+        {r.result === "existing" ? (
+          <Badge tone="info" title={`Already invited as ${ROLE_LABEL[r.invitation!.role]}: this is the same link`}>
+            already invited
+          </Badge>
+        ) : r.result === "renewed" ? (
+          <Badge tone="info" title={`The expired invitation (as ${ROLE_LABEL[r.invitation!.role]}) was renewed: same link, 14 more days`}>
+            renewed
+          </Badge>
+        ) : null}
+      </>
+    ),
   }));
   const refused = (results ?? []).filter((r) => !r.invitation);
   return (
-    <Dialog open={results != null} title="Send these links" description={`Each opens lux, signs the person in through Cloudflare Access, and joins them to ${tenantName} as ${ROLE_LABEL[role]}. Valid 14 days.`} confirmLabel="Done" cancelLabel="Close" width={520} onConfirm={onDone} onCancel={onDone}>
+    <Dialog open={results != null} title="Send these links" description={`Each opens lux, signs the person in through Cloudflare Access, and joins them to ${tenantName} with the role beside it. Valid 14 days.`} confirmLabel="Done" cancelLabel="Close" width={520} onConfirm={onDone} onCancel={onDone}>
       {links.length > 0 ? <InviteLinkList links={links} /> : <p className="muted">No links: nobody was invited.</p>}
       {refused.length > 0 && (
         <ul className="emailinput-left" aria-label="Not invited">
