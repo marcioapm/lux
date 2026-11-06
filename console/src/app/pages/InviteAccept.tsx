@@ -9,6 +9,17 @@ function SignOutButton() {
   return <Button variant="ghost" onClick={() => s.user ? window.location.assign("/cdn-cgi/access/logout") : signOut()}>Sign out</Button>;
 }
 
+/**
+ * After accepting: whoami as the joined tenant (its role, the new
+ * membership), then its Members page, scoped to it: not the tenant the
+ * person was in before.
+ */
+export async function joined(tenantId: string) {
+  setWhoAmI(await api.whoami(undefined, tenantId));
+  // go keeps the scope query, except what the path sets: tenant here.
+  go(`/members?tenant=${encodeURIComponent(tenantId)}`);
+}
+
 /** /invite/:code: reachable before any tenant membership, bare and behind Access. */
 export function InviteAccept({ code }: { code: string }) {
   const s = useSession();
@@ -32,7 +43,7 @@ export function InviteAccept({ code }: { code: string }) {
         <p className="secondary">{i.invitedBy?.name ?? "An admin"} invited you as <b>{i.role ? ROLE_LABEL[i.role] : "a member"}</b>. {i.role ? ROLE_DESC[i.role] : ""}</p>
         <div className="signin-next">Signed in as <b>{s.user?.email ?? s.whoami?.email}</b> · expires <RelativeTime at={i.expiresAt} /></div>
         {error && <div className="error-strip" role="alert">{error}</div>}
-        <div className="dialog-actions"><Button variant="ghost" onClick={() => go("/")}>Not now</Button><Button variant="primary" loading={busy} onClick={() => { setBusy(true); void api.acceptInvitation(code).then(async () => { setWhoAmI(await api.whoami()); go("/members"); }).catch((e) => setError(errorText(e))).finally(() => setBusy(false)); }}>Join {i.tenant}</Button></div>
+        <div className="dialog-actions"><Button variant="ghost" onClick={() => go("/")}>Not now</Button><Button variant="primary" loading={busy} onClick={() => { setBusy(true); void api.acceptInvitation(code).then((r) => joined(r.tenantId)).catch((e) => setError(errorText(e))).finally(() => setBusy(false)); }}>Join {i.tenant}</Button></div>
       </> : <p className="secondary">Checking the invitation…</p>}
     </AuthScreen>
   );
