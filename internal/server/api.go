@@ -745,6 +745,28 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	created := false
 	id := ids.New(ids.Run)
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		if p.ServiceAccountID != "" {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext('lux_keys:' || $1 || ':' || $2))`, p.TenantID, p.ServiceAccountID); err != nil {
+				return err
+			}
+			// Authentication precedes reading the body. Revalidate at the write
+			// boundary, under the lifecycle lock, including before a replay.
+			// A converted in-flight key is refused (401); retry authenticates
+			// as its new person. Never insert using the stale SA principal.
+			err := tx.QueryRow(ctx, `SELECT sa.role, sa.name, k.read_only FROM api_keys k
+				JOIN service_accounts sa ON sa.id = k.service_account_id AND sa.tenant_id = k.tenant_id
+				WHERE k.id = $1 AND k.tenant_id = $2 AND k.service_account_id = $3
+				AND `+activeKey+` AND sa.disabled_at IS NULL`, p.KeyID, p.TenantID, p.ServiceAccountID).Scan(&p.Role, &p.ServiceAccountName, &p.ReadOnly)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errf(http.StatusUnauthorized, "unauthorized", "API key principal changed or is no longer active; retry authentication")
+			}
+			if err != nil {
+				return err
+			}
+			if !p.atLeast("member") {
+				return errf(http.StatusForbidden, "forbidden", "this key lacks the run scope")
+			}
+		}
 		if idem != "" {
 			existing, err := runByIdempotencyKey(ctx, tx, idem)
 			if err == nil {

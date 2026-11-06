@@ -2,9 +2,15 @@ package server
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/marcioapm/lux/internal/store"
 
 	"github.com/marcioapm/lux/internal/ids"
 )
@@ -79,6 +85,7 @@ func TestServiceAccountConvert(t *testing.T) {
 	legacyAccount(t, f)
 	ctx := context.Background()
 	execSQL(t, f.s, ctx, `UPDATE api_keys SET read_only = true, expires_at = now() + interval '30 days' WHERE id = 'k_ext2'`)
+	expiryBefore := queryAll(t, f.s, `SELECT id || ':' || coalesce(expires_at::text, 'NULL') FROM api_keys WHERE id LIKE 'k_ext%' ORDER BY id`)
 	execSQL(t, f.s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, owner_sa_id) VALUES ('r_e1', 't1', '{}', 'stopped', 'sa_ext'), ('r_e2', 't1', '{}', 'running', 'sa_ext')`)
 	for _, key := range []string{"member", "viewer", "sa"} {
 		if code, out := f.do(t, f.keys[key], http.MethodPost, "/v1/service-accounts/external-app/convert", map[string]any{"email": "mia@example.com"}); code != 403 {
@@ -96,6 +103,9 @@ func TestServiceAccountConvert(t *testing.T) {
 	code, out = f.do(t, f.keys["admin"], http.MethodPost, "/v1/service-accounts/external-app/convert", map[string]any{"email": "mia@example.com"})
 	if code != 200 || out["keys"] != float64(2) || out["runs"] != float64(2) || out["user"].(map[string]any)["id"] != "usr_member" {
 		t.Fatalf("convert: %d %v", code, out)
+	}
+	if after := queryAll(t, f.s, `SELECT id || ':' || coalesce(expires_at::text, 'NULL') FROM api_keys WHERE id LIKE 'k_ext%' ORDER BY id`); stringify(after) != stringify(expiryBefore) {
+		t.Fatalf("expiry changed: before %v after %v", expiryBefore, after)
 	}
 	// The keys authenticate as Mia now: her role, no service account.
 	for _, k := range []string{"ext", "ext2"} {
@@ -191,12 +201,17 @@ func TestServiceAccountConvertConcurrent(t *testing.T) {
 	f := peopleFixture(t)
 	legacyAccount(t, f)
 	execSQL(t, f.s, context.Background(), `INSERT INTO runs (id, tenant_id, spec, state, owner_sa_id) VALUES ('r_e1', 't1', '{}', 'stopped', 'sa_ext')`)
+	holder := lifecycleHolder(t, f, "lux_members:t1", false)
 	codes := make(chan int, 2)
 	for _, email := range []string{"mia@example.com", "max@example.com"} {
 		go func(email string) {
 			code, _ := f.do(t, f.keys["admin"], http.MethodPost, "/v1/service-accounts/external-app/convert", map[string]any{"email": email})
 			codes <- code
 		}(email)
+	}
+	waitLifecycleLock(t, f, "lux_members:t1", 2)
+	if err := holder.Commit(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	a, b := <-codes, <-codes
 	if !((a == 200 && (b == 404 || b == 409)) || (b == 200 && (a == 404 || a == 409))) {
@@ -209,6 +224,279 @@ func TestServiceAccountConvertConcurrent(t *testing.T) {
 	}
 	if n := queryOne[int64](t, f.s, `SELECT count(*) FROM run_events WHERE type = 'service_account.converted'`); n != 1 {
 		t.Errorf("%d convert events", n)
+	}
+}
+
+// lifecycleHolder and waitLifecycleLock establish exact advisory-lock barriers,
+// not merely overlapping goroutines. Observation is bounded and tenant/db scoped.
+func lifecycleHolder(t *testing.T, f *peopleFix, key string, shared bool) pgx.Tx {
+	t.Helper()
+	tx, err := f.s.db.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { tx.Rollback(context.Background()) })
+	fn := "pg_advisory_xact_lock"
+	if shared {
+		fn += "_shared"
+	}
+	if _, err := tx.Exec(context.Background(), `SELECT `+fn+`(hashtext($1))`, key); err != nil {
+		t.Fatal(err)
+	}
+	return tx
+}
+
+func waitLifecycleLock(t *testing.T, f *peopleFix, key string, n int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		var count int
+		err := f.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+				AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+				AND classid = CASE WHEN hashtext($1) < 0 THEN 4294967295 ELSE 0 END::oid
+				AND objid = (hashtext($1)::bigint & 4294967295)::oid`, key).Scan(&count)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count == n {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("expected %d waiters on %s, got %d", n, key, count)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+type lifecycleBody struct {
+	io.Reader
+	entered chan struct{}
+	resume  chan struct{}
+}
+
+func (b *lifecycleBody) Read(p []byte) (int, error) {
+	if b.entered != nil {
+		close(b.entered)
+		b.entered = nil
+		<-b.resume
+	}
+	return b.Reader.Read(p)
+}
+func (b *lifecycleBody) Close() error { return nil }
+
+func TestServiceAccountPausedSubmit(t *testing.T) {
+	for _, action := range []string{"delete", "convert"} {
+		t.Run(action, func(t *testing.T) {
+			f := peopleFixture(t)
+			body := &lifecycleBody{Reader: strings.NewReader(`{"image":{"ref":"alpine"},"workload":{"command":["true"]}}`), entered: make(chan struct{}), resume: make(chan struct{})}
+			entered := body.entered
+			req := httptest.NewRequest(http.MethodPost, "/v1/runs", nil)
+			req.Body = body
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+f.keys["sa"])
+			done := make(chan int, 1)
+			go func() { w := httptest.NewRecorder(); f.s.Handler().ServeHTTP(w, req); done <- w.Code }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("body not reached")
+			}
+			method, path := http.MethodDelete, "/v1/service-accounts/sa_bot"
+			var payload any
+			want := 204
+			if action == "convert" {
+				method, path, payload, want = http.MethodPost, path+"/convert", map[string]any{"email": "mia@example.com"}, 200
+			}
+			code, out := f.do(t, f.keys["admin"], method, path, payload)
+			close(body.resume)
+			if code != want {
+				t.Fatalf("lifecycle %d %v", code, out)
+			}
+			select {
+			case code = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("submit blocked")
+			}
+			if code != 401 {
+				t.Fatalf("stale submit %d, want 401", code)
+			}
+			if n := queryOne[int64](t, f.s, `SELECT count(*) FROM runs`); n != 0 {
+				t.Fatalf("inserted %d Runs", n)
+			}
+			code, _ = f.do(t, f.keys["sa"], http.MethodGet, "/v1/whoami", nil)
+			if action == "delete" && code != 401 {
+				t.Fatalf("deleted key %d", code)
+			}
+			if action == "convert" && code != 200 {
+				t.Fatalf("converted retry %d", code)
+			}
+		})
+	}
+}
+
+func TestServiceAccountCapSerialization(t *testing.T) {
+	f := peopleFixture(t)
+	for i := 0; i < 3; i++ {
+		f.addKey(t, "extra"+string(rune('a'+i)), "user_id", "usr_member")
+	}
+	holder := lifecycleHolder(t, f, "lux_keys:t1:usr_member", false)
+	converted := make(chan int, 1)
+	go func() {
+		code, _ := f.do(t, f.keys["admin"], http.MethodPost, "/v1/service-accounts/sa_bot/convert", map[string]any{"email": "mia@example.com"})
+		converted <- code
+	}()
+	waitLifecycleLock(t, f, "lux_keys:t1:usr_member", 1)
+	created := make(chan int, 1)
+	go func() {
+		code, _ := f.do(t, f.keys["admin"], http.MethodPost, "/v1/service-accounts/sa_bot/keys", map[string]any{"name": "queued"})
+		created <- code
+	}()
+	waitLifecycleLock(t, f, "lux_keys:t1:sa_bot", 1)
+	if err := holder.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-converted; code != 200 {
+		t.Fatalf("convert %d", code)
+	}
+	if code := <-created; code != 404 {
+		t.Fatalf("queued creator %d", code)
+	}
+	if n := queryOne[int64](t, f.s, `SELECT count(*) FROM api_keys k WHERE user_id = 'usr_member' AND `+activeKey); n != 5 {
+		t.Fatalf("cap %d", n)
+	}
+}
+
+func TestServiceAccountInsertWinsLifecycle(t *testing.T) {
+	for _, action := range []string{"delete", "convert"} {
+		t.Run(action, func(t *testing.T) {
+			f := peopleFixture(t)
+			// Hold the Run table: submit acquires its shared SA lock, then
+			// blocks at INSERT. Observe both locks before releasing it.
+			holder, err := f.s.db.Pool.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer holder.Rollback(context.Background())
+			if _, err := holder.Exec(context.Background(), `LOCK TABLE runs IN SHARE MODE`); err != nil {
+				t.Fatal(err)
+			}
+			submitted := make(chan int, 1)
+			go func() {
+				code, _ := f.do(t, f.keys["sa"], http.MethodPost, "/v1/runs", map[string]any{"image": map[string]any{"ref": "alpine"}, "workload": map[string]any{"command": []string{"true"}}})
+				submitted <- code
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			for {
+				var blocked bool
+				err := f.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+					return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation = 'runs'::regclass AND mode = 'RowExclusiveLock' AND NOT granted)`).Scan(&blocked)
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if blocked {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatal("submit did not reach insert")
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
+			lifecycle := make(chan int, 1)
+			go func() {
+				method, path := http.MethodDelete, "/v1/service-accounts/sa_bot"
+				var body any
+				if action == "convert" {
+					method, path, body = http.MethodPost, path+"/convert", map[string]any{"email": "mia@example.com"}
+				}
+				code, _ := f.do(t, f.keys["admin"], method, path, body)
+				lifecycle <- code
+			}()
+			waitLifecycleLock(t, f, "lux_keys:t1:sa_bot", 1)
+			if err := holder.Commit(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if code := <-submitted; code != 201 {
+				t.Fatalf("submit %d", code)
+			}
+			want := 409
+			if action == "convert" {
+				want = 200
+			}
+			if code := <-lifecycle; code != want {
+				t.Fatalf("%s %d", action, code)
+			}
+			if action == "convert" {
+				if n := queryOne[int64](t, f.s, `SELECT count(*) FROM runs WHERE owner_user_id = 'usr_member' AND owner_sa_id IS NULL`); n != 1 {
+					t.Fatal("new Run did not move")
+				}
+			}
+		})
+	}
+}
+
+func TestServiceAccountRenameConcurrent(t *testing.T) {
+	f := peopleFixture(t)
+	legacyAccount(t, f)
+	holder, err := f.s.db.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback(context.Background())
+	if _, err := holder.Exec(context.Background(), `SELECT set_config('lux.system', 'on', true)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(context.Background(), `SELECT id FROM service_accounts WHERE id = 'sa_ext' FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+	codes := make(chan int, 2)
+	go func() {
+		code, _ := f.do(t, f.keys["admin"], http.MethodPatch, "/v1/service-accounts/sa_ext", map[string]any{"name": "first"})
+		codes <- code
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		var n int
+		err := f.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM pg_locks WHERE locktype = 'transactionid' AND NOT granted`).Scan(&n)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("rename did not reach row lock")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	go func() {
+		code, _ := f.do(t, f.keys["admin"], http.MethodPatch, "/v1/service-accounts/sa_ext", map[string]any{"name": "second"})
+		codes <- code
+	}()
+	waitLifecycleLock(t, f, "lux_keys:t1:sa_ext", 1)
+	if err := holder.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if code := <-codes; code != 200 {
+			t.Fatalf("rename %d", code)
+		}
+	}
+	if name := queryOne[string](t, f.s, `SELECT name FROM api_keys WHERE id = 'k_ext'`); name != "second" {
+		t.Fatalf("key name %s", name)
+	}
+	if ev := queryAll(t, f.s, `SELECT data->>'from' || '>' || (data->>'to') FROM run_events WHERE type = 'service_account.updated' ORDER BY id`); strings.Join(ev, ",") != "external-app>first,first>second" {
+		t.Fatalf("events %v", ev)
 	}
 }
 

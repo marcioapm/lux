@@ -174,7 +174,7 @@ func (s *Server) convertServiceAccount(ctx context.Context, in *struct {
 		if err := lockAccounts(ctx, tx, p.TenantID); err != nil {
 			return err
 		}
-		sa, _, err := loadAccount(ctx, tx, p.TenantID, in.SA)
+		sa, _, err := lockAccount(ctx, tx, p.TenantID, in.SA)
 		if err != nil {
 			return err
 		}
@@ -228,6 +228,25 @@ func (s *Server) convertServiceAccount(ctx context.Context, in *struct {
 	return &convertOutput{out}, nil
 }
 
+// Lock order: membership (convert/delete) -> SA lux_keys lock -> personal
+// lux_keys cap -> rows / Run INSERT. Submit holds the SA lock shared; key
+// create/revoke, patch (including rename/disable), delete and convert hold it
+// exclusively. Personal creates only take their cap; membership mutations only
+// take membership. Never acquire membership after an SA lock. Resolve names
+// before waiting, but reload by immutable ID after locking. Rename additionally
+// locks the row BEFORE loading the name used for key-follow and audit events.
+// Thus unrelated accounts/person submissions remain independent, without writes.
+func lockAccount(ctx context.Context, tx pgx.Tx, tenant, ref string) (ServiceAccount, string, error) {
+	var id string
+	if err := tx.QueryRow(ctx, `SELECT id FROM service_accounts WHERE tenant_id = $1 AND (id = $2 OR name = $2)`, tenant, ref).Scan(&id); err != nil {
+		return ServiceAccount{}, "", err
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('lux_keys:' || $1 || ':' || $2))`, tenant, id); err != nil {
+		return ServiceAccount{}, "", err
+	}
+	return loadAccount(ctx, tx, tenant, id)
+}
+
 // lockAccounts serializes deleting and converting a tenant's service
 // accounts with membership changes (the members lock): a convert's target
 // stays a member, with its role, until it commits, and two converts or
@@ -270,7 +289,7 @@ func (s *Server) deleteServiceAccount(ctx context.Context, in *SAPath) (*struct{
 		if err := lockAccounts(ctx, tx, p.TenantID); err != nil {
 			return err
 		}
-		sa, _, err := loadAccount(ctx, tx, p.TenantID, in.SA)
+		sa, _, err := lockAccount(ctx, tx, p.TenantID, in.SA)
 		if err != nil {
 			return err
 		}
@@ -487,7 +506,15 @@ func (s *Server) patchServiceAccount(ctx context.Context, in *struct {
 	}
 	var out ServiceAccount
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		sa, _, err := loadAccount(ctx, tx, p.TenantID, in.SA)
+		sa, _, err := lockAccount(ctx, tx, p.TenantID, in.SA)
+		if err != nil {
+			return err
+		}
+		var lockedID string
+		if err := tx.QueryRow(ctx, `SELECT id FROM service_accounts WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, p.TenantID, sa.ID).Scan(&lockedID); err != nil {
+			return err
+		}
+		sa, _, err = loadAccount(ctx, tx, p.TenantID, lockedID)
 		if err != nil {
 			return err
 		}
@@ -579,7 +606,11 @@ func (s *Server) createServiceAccountKey(ctx context.Context, in *struct {
 	p := principal(ctx)
 	var out NewApiKey
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		sa, err := accountKeyHolder(ctx, tx, p, in.SA)
+		sa, _, err := lockAccount(ctx, tx, p.TenantID, in.SA)
+		if err != nil {
+			return err
+		}
+		sa, err = accountKeyHolder(ctx, tx, p, sa.ID)
 		if err != nil {
 			return err
 		}
@@ -599,7 +630,11 @@ func (s *Server) createServiceAccountKey(ctx context.Context, in *struct {
 func (s *Server) revokeServiceAccountKey(ctx context.Context, in *SAKeyPath) (*struct{}, error) {
 	p := principal(ctx)
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		sa, err := accountKeyHolder(ctx, tx, p, in.SA)
+		sa, _, err := lockAccount(ctx, tx, p.TenantID, in.SA)
+		if err != nil {
+			return err
+		}
+		sa, err = accountKeyHolder(ctx, tx, p, sa.ID)
 		if err != nil {
 			return err
 		}
