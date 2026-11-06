@@ -206,8 +206,9 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
   // ---- service accounts (serviceaccounts.go: create/patch admin+, ownerEmail a member's email, "" clears)
   const ownsSA = (s: SA) => s.ownerId != null && s.ownerId === c.user?.id;
   const SA_ROLES = ["viewer", "member", "admin"];
-  /** A member of the tenant by email (any case), or the server's 422. */
-  const ownerByEmail = (email: string): { id: string } | { error: Res } => {
+  /** A member of the tenant by email (any case), "" none, or the server's 422 (serviceaccounts.go accountOwner). */
+  const ownerByEmail = (email: string): { id: string | undefined } | { error: Res } => {
+    if (email === "") return { id: undefined };
     const u = USERS.find((x) => x.email.toLowerCase() === email.toLowerCase() && inTenant().some((m) => m.userId === x.id));
     return u ? { id: u.id } : { error: err(422, "invalid_request", `${email} is not a member of this tenant`) };
   };
@@ -217,12 +218,9 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
     const b = await body<{ name: string; description?: string; role: SA["role"]; ownerEmail?: string }>();
     if (!SA_NAME_RE.test(b.name ?? "")) return err(422, "invalid_request", `name ${JSON.stringify(b.name ?? "")}: lowercase letters, digits and dashes, starting and ending with a letter or digit, at most 63`);
     if (!SA_ROLES.includes(b.role)) return err(422, "invalid_request", "role: viewer, member or admin");
-    let ownerId: string | undefined;
-    if (b.ownerEmail) {
-      const o = ownerByEmail(b.ownerEmail);
-      if ("error" in o) return o.error;
-      ownerId = o.id;
-    }
+    const o = ownerByEmail(b.ownerEmail ?? "");
+    if ("error" in o) return o.error;
+    const ownerId = o.id;
     if (SAS.some((s) => s.tenantId === tenantId && s.name === b.name)) return err(409, "conflict", `a service account ${b.name} exists in this tenant`);
     const s: SA = { id: `sa_${(++seq.key).toString(36)}x${Math.random().toString(36).slice(2, 7)}`, tenantId, name: b.name, description: b.description ?? "", role: b.role, ownerId, created: 0, createdBy: c.user?.id };
     SAS.push(s);
@@ -257,12 +255,9 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
     if (b.role != null && !SA_ROLES.includes(b.role)) return err(422, "invalid_request", "role: viewer, member or admin");
     let ownerId = s.ownerId;
     if (b.ownerEmail != null) {
-      if (b.ownerEmail === "") ownerId = undefined;
-      else {
-        const o = ownerByEmail(b.ownerEmail);
-        if ("error" in o) return o.error;
-        ownerId = o.id;
-      }
+      const o = ownerByEmail(b.ownerEmail);
+      if ("error" in o) return o.error;
+      ownerId = o.id;
     }
     if (b.description != null) s.description = b.description;
     if (b.role) s.role = b.role;
