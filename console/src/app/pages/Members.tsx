@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Badge, Button, Card, CENTS, ConfirmDialog, Dialog, EmptyState, IconButton, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_LABEL, SegmentedControl, Table, Tabs, useToast, type Column, type TenantRole } from "@lux/design-system";
+import { Badge, Button, Card, CENTS, ConfirmDialog, Dialog, EmptyState, IconButton, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_LABEL, ROLES, SegmentedControl, Table, Tabs, useToast, type Column, type TenantRole } from "@lux/design-system";
 import { IconClose, IconCopy, IconPencil, IconPlus, IconRefresh, IconTrash } from "@lux/design-system/icons";
 import { api, errorText, useQuery, useSession, type Invitation, type InvitationStatus, type InviteResult, type Member } from "../../api/index.ts";
 import { atLeast, useViewer, type Viewer } from "../identity.ts";
@@ -162,7 +162,7 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
             )}
           </span>
         ),
-        sortValue: (m) => ["viewer", "member", "admin", "owner"].indexOf(m.role),
+        sortValue: (m) => ROLES.indexOf(m.role),
         sortFirst: "desc",
         width: 170,
       },
@@ -365,7 +365,7 @@ function InvitationsTab({ tenant, onChanged }: { tenant: string | undefined; onC
 
   const cols: Column<Invitation>[] = [
     { key: "email", header: "Email", cell: (i) => <span className="person-name">{i.email}</span>, sortValue: (i) => i.email, lead: true },
-    { key: "role", header: "Role", cell: (i) => <RoleBadge role={i.role} />, sortValue: (i) => ["viewer", "member", "admin", "owner"].indexOf(i.role), width: 100 },
+    { key: "role", header: "Role", cell: (i) => <RoleBadge role={i.role} />, sortValue: (i) => ROLES.indexOf(i.role), width: 100 },
     { key: "by", header: "Invited by", cell: (i) => <PersonInline person={i.invitedBy} />, sortValue: (i) => i.invitedBy?.name, width: 170 },
     { key: "sent", header: "Sent", cell: (i) => <RelativeTime at={i.renewedAt ?? i.createdAt} label={i.renewedAt ? "Renewed" : "Sent"} />, sortValue: (i) => Date.parse(i.renewedAt ?? i.createdAt), sortKind: "time", align: "right", width: 110 },
     {

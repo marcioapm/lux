@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, Dialog, IconButton, IdChip, KeyValue, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_DESC, ROLE_LABEL, Select, StatTile, Table, useToast, type Column, type TenantRole } from "@lux/design-system";
+import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, Dialog, IconButton, IdChip, KeyValue, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_DESC, ROLE_LABEL, ROLES, Select, StatTile, Table, useToast, type Column, type TenantRole } from "@lux/design-system";
 import { IconPencil, IconPlus, IconStop } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type ApiKey, type CreatedApiKey, type Member, type Run, type ServiceAccount } from "../../api/index.ts";
 import { atLeast, canManageAccountKeys, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
 import { ErrorBlock, ErrorStrip, PageSkeleton, runColumns, runPath } from "./common.tsx";
 import { useCostByOwner, usePeopleTenant } from "./Members.tsx";
-import { KeyRevealDialog, KeysTable, NewKeyDialog, PersonInline, RoleField, serviceAccountPath } from "./peopleParts.tsx";
+import { KeyRevealDialog, KeysTable, NewKeyDialog, PersonInline, RoleField, roleOptions, serviceAccountPath } from "./peopleParts.tsx";
 import { sortAmount, totalsByCurrency } from "./memberMoney.ts";
 
 /** At most this many active keys per service account (luxd: 409 key_limit), so one can rotate without downtime. */
@@ -31,7 +31,7 @@ export function ServiceAccounts() {
   const cols: Column<ServiceAccount>[] = [
     { key: "name", header: "Service account", label: "Service account", cell: (s) => <Person name={s.name} sub={s.disabledAt ? "disabled" : s.description} serviceAccount />, sortValue: (s) => s.name },
     { key: "owner", header: "Owner", cell: (s) => (s.owner ? <PersonInline person={s.owner} /> : <span className="muted">no owner</span>), sortValue: (s) => s.owner?.name, width: 170 },
-    { key: "role", header: "Role", cell: (s) => <RoleBadge role={s.role} />, sortValue: (s) => ["viewer", "member", "admin"].indexOf(s.role), width: 100 },
+    { key: "role", header: "Role", cell: (s) => <RoleBadge role={s.role} />, sortValue: (s) => ROLES.indexOf(s.role), width: 100 },
     { key: "keys", header: "Keys", cell: (s) => `${s.activeKeys} / ${SA_KEY_CAP}`, sortValue: (s) => s.activeKeys, align: "right", mono: true, width: 70 },
     { key: "runs", header: "Runs · 30d", cell: (s) => cost.cost(`sa:${s.id}`).runs?.toLocaleString("en-US") ?? "–", sortValue: (s) => cost.cost(`sa:${s.id}`).runs, align: "right", mono: true, width: 104 },
     {
@@ -191,7 +191,7 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
         <Select value={f.ownerEmail} onChange={(ownerEmail) => set({ ownerEmail })} options={ownerOptions} searchable={members.length > 8} />
         <span className="field-hint">Answers for it: rotates its keys and acts on its Runs. Its cost also rolls up to them under “By owner”.</span>
       </div>
-      <RoleField value={f.role} onChange={(r) => set({ role: r === "owner" ? "admin" : r })} options={(["viewer", "member", "admin"] as const).map((r) => ({ value: r, label: ROLE_LABEL[r], text: ROLE_LABEL[r] }))} />
+      <RoleField value={f.role} onChange={(r) => set({ role: r === "owner" ? "admin" : r })} options={roleOptions({ owner: false }, { includeOwner: false })} />
       {error && (
         <div className="error-strip" role="alert">
           {error}

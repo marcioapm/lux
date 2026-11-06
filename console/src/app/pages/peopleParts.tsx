@@ -1,7 +1,7 @@
 // Pieces the people pages share: who cells, key tables, the New key and
 // shown-once dialogs, role pickers.
 import { useState, type ReactNode } from "react";
-import { Badge, Button, Dialog, IconButton, Person, RelativeTime, ROLE_DESC, ROLE_LABEL, roleAtLeast, Select, Table, useCopy, type Column, type SelectOption, type TenantRole } from "@lux/design-system";
+import { Badge, Button, Dialog, IconButton, Person, RelativeTime, ROLE_DESC, ROLE_LABEL, ROLES, roleAtLeast, Select, Table, useCopy, type Column, type SelectOption, type TenantRole } from "@lux/design-system";
 import { IconCheck, IconCopy, IconPencil, IconTrash } from "@lux/design-system/icons";
 import type { ApiKey, CreatedApiKey, NewKeyRequest, Owner, Person as PersonT } from "../../api/index.ts";
 
@@ -196,7 +196,7 @@ export function KeyRevealDialog({ created, onDone }: { created: CreatedApiKey | 
 
 /** Role options up to what the actor may grant: Owner off, with the reason, unless they are an owner. */
 export function roleOptions(actor: { owner: boolean }, { includeOwner = true }: { includeOwner?: boolean } = {}): SelectOption<TenantRole>[] {
-  const roles: TenantRole[] = includeOwner ? ["viewer", "member", "admin", "owner"] : ["viewer", "member", "admin"];
+  const roles = includeOwner ? ROLES : ROLES.filter((r) => r !== "owner");
   return roles.map((r) => ({ value: r, label: ROLE_LABEL[r], text: ROLE_LABEL[r], ...(r === "owner" && !actor.owner ? { disabled: "only owners grant Owner" } : {}) }));
 }
 
