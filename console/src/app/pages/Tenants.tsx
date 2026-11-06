@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Badge, Button, Dialog, InviteLinkList, Card, formatBytes, formatCount, formatDuration, IdChip, PageHeader, Table, type Column, RelativeTime } from "@lux/design-system";
 import { api, errorText, useQuery, type Invitation, type Tenant } from "../../api/index.ts";
 import { go, linkTo } from "../router.tsx";
-import { useViewer } from "../identity.ts";
+import { operatorActs, useViewer } from "../identity.ts";
 import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, UsageBar } from "./common.tsx";
 import { memberPath } from "./peopleParts.tsx";
@@ -67,7 +67,7 @@ export function Tenants() {
 
   return (
     <div className="page page-list">
-      <PageHeader title="Tenants" description={`${q.data?.length ?? 0} tenants · click one to scope the console to it`} actions={<Button variant="primary" onClick={() => setCreating(true)}>New tenant</Button>} />
+      <PageHeader title="Tenants" description={`${q.data?.length ?? 0} tenants · click one to scope the console to it`} actions={operatorActs(viewer) ? <Button variant="primary" onClick={() => setCreating(true)}>New tenant</Button> : undefined} />
       <Card flush>
         <ErrorStrip error={(q.data?.length ?? 0) > 0 ? q.error : null} />
         {q.error && !q.data && !q.loading ? (

@@ -28,7 +28,7 @@ import { Members } from "./pages/Members.tsx";
 import { MemberPage } from "./pages/MemberPage.tsx";
 import { ServiceAccounts, ServiceAccountPage } from "./pages/ServiceAccounts.tsx";
 import { NotFound } from "./pages/NotFound.tsx";
-import { ErrorBlock } from "./pages/common.tsx";
+import { ErrorBlock, PageSkeleton } from "./pages/common.tsx";
 
 /** What the sign-in screen says about the page it continues to. */
 type SignInNote = Pick<SignInProps, "next" | "reason">;
@@ -167,7 +167,12 @@ function Router() {
   for (const r of ROUTES) {
     const m = matchPath(r.pattern, path);
     if (!m) continue;
-    if ((r.pattern === "/tenants" || r.pattern === "/people") && session.role === "tenant") break;
+    // Operator routes only for a resolved operator: a tenant session, and
+    // one whose role whoami has not said yet, get Not found / the skeleton.
+    if (r.pattern === "/tenants" || r.pattern === "/people") {
+      if (session.role === "tenant") break;
+      if (session.role === "unknown") return <Shell tenants={picker} operator={false} title={r.title}><PageSkeleton /></Shell>;
+    }
     if (r.bare) return <>{r.render(m.params)}</>;
     return (
       <Shell tenants={picker} operator={operator} title={r.title}>
