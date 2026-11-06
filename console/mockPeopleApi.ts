@@ -22,6 +22,28 @@ type Res = { status: number; body: unknown } | null;
 export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleAuth: string): Promise<Res> {
   const p = u.pathname;
   const method = req.method;
+  // Dispatch only documented method + complete path combinations. Unknown
+  // subpaths/verbs must never fall through to another route's mutation.
+  const routes: [RegExp, string[]][] = [
+    [/^\/v1\/(me|me\/invitations|people|costs)$/, ["GET"]],
+    [/^\/v1\/me\/keys$/, ["GET", "POST"]],
+    [/^\/v1\/me\/keys\/[^/]+$/, ["PATCH", "DELETE"]],
+    [/^\/v1\/members$/, ["GET", "POST"]],
+    [/^\/v1\/members\/[^/]+$/, ["GET", "PATCH", "DELETE"]],
+    [/^\/v1\/members\/[^/]+\/keys$/, ["GET"]],
+    [/^\/v1\/members\/[^/]+\/keys\/[^/]+$/, ["DELETE"]],
+    [/^\/v1\/service-accounts$/, ["GET", "POST"]],
+    [/^\/v1\/service-accounts\/[^/]+$/, ["GET", "PATCH", "DELETE"]],
+    [/^\/v1\/service-accounts\/[^/]+\/convert$/, ["POST"]],
+    [/^\/v1\/service-accounts\/[^/]+\/keys$/, ["GET", "POST"]],
+    [/^\/v1\/service-accounts\/[^/]+\/keys\/[^/]+$/, ["DELETE"]],
+    [/^\/v1\/invitations$/, ["GET", "POST"]],
+    [/^\/v1\/invitations\/counts$/, ["GET"]],
+    [/^\/v1\/invitations\/by-code\/[^/]+$/, ["GET"]],
+    [/^\/v1\/invitations\/by-code\/[^/]+\/accept$/, ["POST"]],
+    [/^\/v1\/invitations\/[^/]+\/(renew|revoke)$/, ["POST"]],
+  ];
+  if (!routes.some(([pattern, methods]) => pattern.test(p) && methods.includes(method))) return null;
   const body = async <T>() => (method === "GET" || method === "DELETE" ? ({} as T) : ((await req.json().catch(() => ({}))) as T));
   const origin = u.origin;
   if (!c) return null;
@@ -282,6 +304,7 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
       KEYS.push(k);
       return ok({ ...keyJson(k), apiKey: value }, 201);
     }
+    if (sm[3] || (method !== "GET" && method !== "PATCH" && method !== "DELETE")) return null;
     if (method === "GET") return ok(saJson(s));
     if (!atLeast(c, "admin")) return err(403, "forbidden", "this needs the admin scope");
     if (method === "DELETE") {
