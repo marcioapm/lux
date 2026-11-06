@@ -155,7 +155,8 @@
       "description",
       "id",
       "name",
-      "role"
+      "role",
+      "runs"
     ],
     "filled": [
       "activeKeys",
@@ -167,7 +168,8 @@
       "lastUsedAt",
       "name",
       "owner",
-      "role"
+      "role",
+      "runs"
     ]
   },
   "Tenant": {

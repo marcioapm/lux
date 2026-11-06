@@ -20,6 +20,8 @@ func (a *app) saCmd() *cobra.Command {
 		return a.peopleRequest(c, "GET", "/v1/service-accounts/"+url.PathEscape(args[0]), nil, "")
 	}}, &cobra.Command{Use: "disable <sa>", Short: "Disable a service account", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
 		return a.peopleRequest(c, "PATCH", "/v1/service-accounts/"+url.PathEscape(args[0]), map[string]any{"disabled": true}, "")
+	}}, &cobra.Command{Use: "rm <sa>", Short: "Delete a service account that owns no Runs (admins only); its keys are revoked", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
+		return a.peopleRequest(c, "DELETE", "/v1/service-accounts/"+url.PathEscape(args[0]), nil, "")
 	}})
 	var setRole, setOwner, setDesc, setName string
 	var disabled bool

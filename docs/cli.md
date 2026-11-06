@@ -29,6 +29,7 @@ lux sa get ci
 lux sa set ci --role admin --owner person@example.com
 lux sa set external-app --name jervasion          # rename; its key named external-app becomes jervasion too
 lux sa disable ci
+lux sa rm old-bot                                  # only with no Runs (else 409 has_runs: disable it); its keys are revoked
 lux sa keys create ci --name rotation
 lux sa keys ls ci
 lux sa keys revoke ci <id|prefix>

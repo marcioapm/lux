@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, Dialog, IconButton, IdChip, KeyValue, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_DESC, ROLE_LABEL, ROLES, Select, StatTile, Table, useToast, type Column, type TenantRole } from "@lux/design-system";
-import { IconPencil, IconPlus, IconStop } from "@lux/design-system/icons";
+import { IconPencil, IconPlus, IconStop, IconTrash } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type ApiKey, type CreatedApiKey, type Member, type Run, type ServiceAccount } from "../../api/index.ts";
 import { atLeast, canManageAccountKeys, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
@@ -11,6 +11,30 @@ import { sortAmount, totalsByCurrency } from "./memberMoney.ts";
 
 /** At most this many active keys per service account (luxd: 409 key_limit), so one can rotate without downtime. */
 export const SA_KEY_CAP = 2;
+
+/** Why the account cannot be deleted (it owns Runs: luxd answers 409 has_runs), or null. An older luxd sends no count: luxd decides. */
+export function deleteBlocked(s: Pick<ServiceAccount, "runs" | "disabledAt">): string | null {
+  if (!s.runs) return null;
+  const n = `${s.runs.toLocaleString("en-US")} Run${s.runs === 1 ? "" : "s"}`;
+  return `It owns ${n}: ${s.disabledAt ? "it is disabled already, which keeps them attributed" : "disable it instead (its keys stop, its Runs stay attributed)"}, or convert it to a member's personal keys`;
+}
+
+/** Delete: confirm naming the account and what goes with it. */
+export function DeleteServiceAccountDialog({ sa, busy, onConfirm, onCancel }: { sa: ServiceAccount | null; busy: boolean; onConfirm: (s: ServiceAccount) => void; onCancel: () => void }) {
+  const keys = sa?.activeKeys ?? 0;
+  return (
+    <ConfirmDialog
+      open={sa != null}
+      title={`Delete ${sa?.name ?? ""}?`}
+      description={`${keys ? `Its ${keys === 1 ? "key stops" : `${keys} keys stop`} working at once and ${keys === 1 ? "is" : "are"} kept, revoked, for the record. ` : ""}The service account ${sa?.name ?? ""} is gone for good; its name is free again. It owns no Runs.`}
+      confirmLabel="Delete service account"
+      tone="danger"
+      loading={busy}
+      onConfirm={() => sa && onConfirm(sa)}
+      onCancel={onCancel}
+    />
+  );
+}
 
 const ROLE_WHAT: Record<string, string> = { viewer: "reads only", member: "starts Runs, manages its own", admin: "manages the tenant's Runs and settings" };
 
@@ -24,6 +48,7 @@ export function ServiceAccounts() {
   const cost = useCostByOwner("member");
   const [editing, setEditing] = useState<ServiceAccount | "new" | null>(null);
   const [disabling, setDisabling] = useState<ServiceAccount | null>(null);
+  const [deleting, setDeleting] = useState<ServiceAccount | null>(null);
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const { busy, act } = useAct();
   const admin = atLeast(v, "admin");
@@ -60,10 +85,13 @@ export function ServiceAccounts() {
               <IconStop size={14} />
             </IconButton>
           )}
+          <IconButton size="sm" label={`Delete ${s.name}`} disabled={deleteBlocked(s) != null} title={deleteBlocked(s) ?? `Delete ${s.name}`} onClick={(e) => (e.stopPropagation(), setDeleting(s))} onKeyDown={(e) => e.stopPropagation()}>
+            <IconTrash size={14} />
+          </IconButton>
         </span>
       ),
       align: "right",
-      width: 84,
+      width: 110,
     });
 
   const disable = (s: ServiceAccount) =>
@@ -112,6 +140,7 @@ export function ServiceAccounts() {
         onConfirm={() => disabling && void disable(disabling)}
         onCancel={() => setDisabling(null)}
       />
+      <DeleteServiceAccountDialog sa={deleting} busy={busy} onCancel={() => setDeleting(null)} onConfirm={(s) => void act(`Deleted ${s.name}`, () => api.deleteServiceAccount(tenant, s.id), () => (setDeleting(null), q.refetch()))} />
     </div>
   );
 }
@@ -207,6 +236,7 @@ export function ServiceAccountPage({ id }: { id: string }) {
   const runs = useQuery(`sa:${id}:runs@${tenant ?? ""}`, (s) => api.runsPage(tenant, { owner: q.data?.name ?? id, limit: 50 }, s).then((p) => p.rows), { enabled: q.data != null });
   const [editing, setEditing] = useState(false);
   const [disabling, setDisabling] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [newKey, setNewKey] = useState(false);
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const [revoking, setRevoking] = useState<ApiKey | null>(null);
@@ -253,10 +283,14 @@ export function ServiceAccountPage({ id }: { id: string }) {
                   Disable
                 </Button>
               )}
+              <Button variant="danger" disabled={deleteBlocked(s) != null} title={deleteBlocked(s) ?? undefined} onClick={() => setDeleting(true)}>
+                Delete
+              </Button>
             </>
           ) : undefined
         }
       />
+      {admin && deleteBlocked(s) && <p className="page-note">Delete is off: {deleteBlocked(s)}.</p>}
       <div className="stack">
         <KeyValue
           columns={3}
@@ -316,6 +350,7 @@ export function ServiceAccountPage({ id }: { id: string }) {
       <KeyRevealDialog created={created} onDone={() => setCreated(null)} />
       <ConfirmDialog open={revoking != null} title={`Revoke ${revoking?.name ?? ""}?`} description={`Clients still using it stop working at once. Switch them to the other key first.`} confirmLabel="Revoke key" tone="danger" loading={busy} onConfirm={() => revoking && void act(`Revoked ${revoking.name}`, () => api.revokeServiceAccountKey(tenant, s.id, revoking.id), done(() => setRevoking(null)))} onCancel={() => setRevoking(null)} />
       <ConfirmDialog open={disabling} title={`Disable ${s.name}?`} description="Its keys stop working at once; its running Runs keep running." confirmLabel="Disable" tone="danger" loading={busy} onConfirm={() => void act(`Disabled ${s.name}`, () => api.updateServiceAccount(tenant, s.id, { disabled: true }), done(() => setDisabling(false)))} onCancel={() => setDisabling(false)} />
+      <DeleteServiceAccountDialog sa={deleting ? s : null} busy={busy} onCancel={() => setDeleting(false)} onConfirm={(x) => void act(`Deleted ${x.name}`, () => api.deleteServiceAccount(tenant, x.id), () => (setDeleting(false), go("/service-accounts")))} />
     </div>
   );
 }

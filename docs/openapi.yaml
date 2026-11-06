@@ -4198,6 +4198,10 @@ components:
             - member
             - admin
           type: string
+        runs:
+          description: The Runs it owns, of any state and age. An account that owns Runs cannot be deleted (disable it instead); converting it moves them.
+          format: int64
+          type: integer
       type: object
     ServiceAccountRef:
       additionalProperties: false
@@ -12210,6 +12214,64 @@ paths:
       tags:
         - people
   /v1/service-accounts/{sa}:
+    delete:
+      description: |-
+        Admins and owners only. Only an account that owns no Runs: otherwise 409 has_runs (with the count), and the answer is to disable it, which stops its keys and keeps its Runs attributed. Its keys stop working at once: active ones are revoked (key.revoked each) and every key row is kept, revoked, for the record, no longer tied to the account. Records service_account.deleted.
+
+        Needs the `admin` scope.
+      operationId: deleteServiceAccount
+      parameters:
+        - description: The service account's id or name.
+          in: path
+          name: sa
+          required: true
+          schema:
+            description: The service account's id or name.
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Delete a service account
+      tags:
+        - people
     get:
       description: Needs the `read` scope.
       operationId: getServiceAccount

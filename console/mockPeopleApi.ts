@@ -259,6 +259,13 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
     }
     if (method === "GET") return ok(saJson(s));
     if (!atLeast(c, "admin")) return err(403, "forbidden", "this needs the admin scope");
+    if (method === "DELETE") {
+      // serviceaccounts.go deleteServiceAccount: only with no Runs; its keys revoked, kept.
+      if ((s.runs ?? 0) > 0) return { status: 409, body: { error: { code: "has_runs", message: `${s.name} owns ${s.runs} Runs: a service account with Runs cannot be deleted; disable it instead (its keys stop, its Runs stay attributed), or convert it to a member's personal keys`, details: [`runs: ${s.runs}`] } } };
+      for (const k of KEYS) if (k.saId === s.id) (k.revoked = true), (k.saId = undefined);
+      SAS.splice(SAS.indexOf(s), 1);
+      return ok(null, 204);
+    }
     const b = await body<{ name?: string; description?: string; role?: SA["role"]; ownerEmail?: string; disabled?: boolean }>();
     if (b.role != null && !SA_ROLES.includes(b.role)) return err(422, "invalid_request", "role: viewer, member or admin");
     if (b.name != null && !SA_NAME_RE.test(b.name)) return err(422, "invalid_request", `name ${JSON.stringify(b.name)}: lowercase letters, digits and dashes, starting and ending with a letter or digit, at most 63`);

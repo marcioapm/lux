@@ -131,6 +131,7 @@ export const api = {
   updateServiceAccount: (tenant: Scope, id: string, body: { name?: string; description?: string; role?: string; ownerEmail?: string; disabled?: boolean }) =>
     request<ServiceAccount>(`/service-accounts/${enc(id)}`, { method: "PATCH", tenant, body }),
   serviceAccountKeys: (tenant: Scope, id: string, signal?: Sig) => request<{ keys: ApiKey[] }>(`/service-accounts/${enc(id)}/keys`, { tenant, signal }).then((r) => r.keys ?? []),
+  deleteServiceAccount: (tenant: Scope, id: string) => request<void>(`/service-accounts/${enc(id)}`, { method: "DELETE", tenant }),
   createServiceAccountKey: (tenant: Scope, id: string, body: NewKeyRequest) => request<CreatedApiKey>(`/service-accounts/${enc(id)}/keys`, { method: "POST", tenant, body }),
   revokeServiceAccountKey: (tenant: Scope, id: string, key: string) => request<void>(`/service-accounts/${enc(id)}/keys/${enc(key)}`, { method: "DELETE", tenant }),
 

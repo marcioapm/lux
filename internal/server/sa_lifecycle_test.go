@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/ids"
@@ -20,6 +21,54 @@ func legacyAccount(t *testing.T, f *peopleFix) {
 		('k_ext', 't1', 'external-app', $1, '{run}', 'sa_ext'), ('k_ext2', 't1', 'rotation', $2, '{}', 'sa_ext')`, ids.Hash(f.keys["ext"]), ids.Hash(f.keys["ext2"]))
 	execSQL(t, f.s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes, service_account_id, revoked_at) VALUES
 		('k_ext_old', 't1', 'external-app', $1, '{}', 'sa_ext', now())`, ids.Hash(ids.Secret("lux")))
+}
+
+// DELETE /v1/service-accounts/{sa}: admins and owners; only with no Runs
+// (409 has_runs, the count); its keys stop at once, their rows stay revoked.
+func TestServiceAccountDelete(t *testing.T) {
+	f := peopleFixture(t)
+	legacyAccount(t, f)
+	ownedRuns(t, f) // r_sa is sa_bot's
+	if code, _ := f.do(t, f.keys["ext"], http.MethodGet, "/v1/whoami", nil); code != 200 {
+		t.Fatal("the key works before", code)
+	}
+	for _, key := range []string{"member", "viewer", "sa"} {
+		if code, out := f.do(t, f.keys[key], http.MethodDelete, "/v1/service-accounts/external-app", nil); code != 403 {
+			t.Errorf("%s deletes: %d %v", key, code, out)
+		}
+	}
+	code, out := f.do(t, f.keys["admin"], http.MethodDelete, "/v1/service-accounts/sa-bot", nil)
+	if c, msg := errCode(out); code != 409 || c != "has_runs" || !strings.Contains(msg, "owns 1 Runs") || !strings.Contains(msg, "disable") {
+		t.Errorf("with Runs: %d %v", code, out)
+	}
+	if n := queryOne[int64](t, f.s, `SELECT count(*) FROM service_accounts WHERE id = 'sa_bot'`); n != 1 {
+		t.Error("deleted despite its Runs")
+	}
+	execSQL(t, f.s, context.Background(), `INSERT INTO service_accounts (id, tenant_id, name, role) VALUES ('sa_t2', 't2', 'other', 'member')`)
+	if code, _ := f.do(t, f.keys["admin"], http.MethodDelete, "/v1/service-accounts/sa_t2", nil); code != 404 {
+		t.Errorf("another tenant's: %d", code)
+	}
+	if code, out := f.do(t, f.keys["owner"], http.MethodDelete, "/v1/service-accounts/external-app", nil); code != 204 {
+		t.Fatalf("delete: %d %v", code, out)
+	}
+	for _, k := range []string{"ext", "ext2"} {
+		if code, _ := f.do(t, f.keys[k], http.MethodGet, "/v1/whoami", nil); code != 401 {
+			t.Errorf("%s after delete: %d, want 401", k, code)
+		}
+	}
+	if code, _ := f.do(t, f.keys["admin"], http.MethodGet, "/v1/service-accounts/external-app", nil); code != 404 {
+		t.Errorf("get after delete: %d", code)
+	}
+	if got := queryAll(t, f.s, `SELECT id || ':' || (revoked_at IS NOT NULL) || ':' || coalesce(service_account_id, '-') FROM api_keys WHERE id LIKE 'k_ext%' ORDER BY id`); stringify(got) != `["k_ext:true:-","k_ext2:true:-","k_ext_old:true:-"]` {
+		t.Errorf("keys kept, revoked, untied: %v", got)
+	}
+	if got := queryAll(t, f.s, `SELECT type FROM run_events WHERE type IN ('key.revoked', 'service_account.deleted') ORDER BY id`); stringify(got) != `["key.revoked","key.revoked","service_account.deleted"]` {
+		t.Errorf("events: %v", got)
+	}
+	// The name is free again.
+	if code, out := f.do(t, f.keys["admin"], http.MethodPost, "/v1/service-accounts", map[string]any{"name": "external-app", "role": "member"}); code != 201 {
+		t.Errorf("name reused: %d %v", code, out)
+	}
 }
 
 // PATCH /v1/service-accounts/{sa} {name}: admins and owners; validated as
