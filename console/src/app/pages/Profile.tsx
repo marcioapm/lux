@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Avatar, Badge, Button, Callout, Card, ConfirmDialog, formatCount, Money, PageHeader, RelativeTime, RoleBadge, ROLE_LABEL, StatTile, Table, useToast, CENTS, type Column } from "@lux/design-system";
 import { IconPlus } from "@lux/design-system/icons";
 import { api, errorText, useQuery, useSession, type ApiKey, type CreatedApiKey, type Membership } from "../../api/index.ts";
-import { atLeast, useViewer } from "../identity.ts";
+import { atLeast, canManageOwnKeys, useViewer } from "../identity.ts";
 import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, PageSkeleton } from "./common.tsx";
 import { KeyRevealDialog, KeysTable, NewKeyDialog } from "./peopleParts.tsx";
@@ -33,6 +33,8 @@ export function Profile() {
   const role = viewer.role;
   const active = keys.data ?? [];
   const full = active.length >= PERSONAL_KEY_CAP;
+  // A read-only key changes nothing, its own keys included (luxd refuses it).
+  const manage = canManageOwnKeys(viewer);
   const self = members.data?.find((m) => m.id === p.id);
   const mine = cost.data?.totals.filter((r) => r.key === `user:${p.id}`) ?? [];
 
@@ -92,24 +94,27 @@ export function Profile() {
           <StatTile label="Running now" value={self ? String(self.runningRuns) : "–"} unit={tenantName ? `in ${tenantName}` : undefined} loading={members.loading} />
           <StatTile label="Runs · 30d" value={mine[0]?.runs != null ? formatCount(mine[0].runs) : "–"} unit="mine, not my service accounts'" loading={cost.loading} />
           <StatTile label="Cost · 30d" value={mine.length ? <Money amount={mine[0]!.amount} currency={mine[0]!.currency} decimals={CENTS} /> : "–"} unit="list prices" loading={cost.loading} />
-          <StatTile label="API keys" value={`${active.length} / ${PERSONAL_KEY_CAP}`} unit="active" loading={keys.loading} />
+          <StatTile label="API keys" value={keys.data ? `${active.length} / ${PERSONAL_KEY_CAP}` : "–"} unit="active" loading={keys.loading} />
         </div>
         <Card
           flush
           title="API keys"
-          subtitle={`Keys act as you. ${active.length} of ${PERSONAL_KEY_CAP} active.`}
+          subtitle={keys.data ? `Keys act as you. ${active.length} of ${PERSONAL_KEY_CAP} active.` : "Keys act as you."}
           actions={
-            <Button variant="primary" size="sm" icon={<IconPlus size={14} />} disabled={full || keys.loading} title={full ? `${PERSONAL_KEY_CAP} active keys is the limit: revoke one first` : undefined} onClick={() => setNewKey(true)}>
-              New key
-            </Button>
+            manage ? (
+              <Button variant="primary" size="sm" icon={<IconPlus size={14} />} disabled={full || !keys.data} title={full ? `${PERSONAL_KEY_CAP} active keys is the limit: revoke one first` : undefined} onClick={() => setNewKey(true)}>
+                New key
+              </Button>
+            ) : undefined
           }
         >
-          {full && <div className="card-note muted">{PERSONAL_KEY_CAP} active keys is the limit: revoke one first.</div>}
+          {!manage && viewer.readOnly && <div className="card-note muted">Signed in with a read-only key: it cannot create, rename or revoke keys.</div>}
+          {manage && full && <div className="card-note muted">{PERSONAL_KEY_CAP} active keys is the limit: revoke one first.</div>}
           <ErrorStrip error={keys.data ? keys.error : null} />
           {keys.error && !keys.data && !keys.loading ? (
             <ErrorBlock error={keys.error} onRetry={keys.refetch} compact />
           ) : (
-            <KeysTable keys={active} loading={keys.loading} role={role} onRename={setRenaming} onRevoke={setRevoking} empty="No API keys yet. The console works without one; the CLI and scripts need one." />
+            <KeysTable keys={active} loading={keys.loading} role={role} onRename={manage ? setRenaming : undefined} onRevoke={manage ? setRevoking : undefined} empty="No API keys yet. The console works without one; the CLI and scripts need one." />
           )}
         </Card>
         <Card flush title="Tenants" subtitle={p.memberships.length > 1 ? "Your role in each. Switch with the Tenant picker in the top bar." : "Your role in each."}>

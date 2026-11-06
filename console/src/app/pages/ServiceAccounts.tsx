@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, Dialog, IconButton, IdChip, KeyValue, Money, PageHeader, Person, RelativeTime, RoleBadge, ROLE_DESC, ROLE_LABEL, Select, StatTile, Table, useToast, type Column, type TenantRole } from "@lux/design-system";
 import { IconPencil, IconPlus, IconStop } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type ApiKey, type CreatedApiKey, type Member, type Run, type ServiceAccount } from "../../api/index.ts";
-import { atLeast, useViewer } from "../identity.ts";
+import { atLeast, canManageAccountKeys, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
 import { ErrorBlock, ErrorStrip, PageSkeleton, runColumns, runPath } from "./common.tsx";
 import { useCostByOwner, usePeopleTenant } from "./Members.tsx";
@@ -226,7 +226,8 @@ export function ServiceAccountPage({ id }: { id: string }) {
   if (!q.data) return <PageSkeleton />;
   const s = q.data;
   const admin = atLeast(v, "admin");
-  const manageKeys = admin || (s.owner != null && s.owner.id === v.userId);
+  // Seeing its keys (owner, admins) is not changing them: never with a read-only key.
+  const manageKeys = canManageAccountKeys(v, s);
   const active = keys.data ?? [];
   const full = active.length >= SA_KEY_CAP;
   const mine = cost.byKey.get(`sa:${s.id}`);

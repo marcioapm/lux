@@ -144,6 +144,7 @@ export function MemberPage({ id }: { id: string }) {
 
 /** DELETE /v1/members/{user}/keys/{key}: admins+; an owner's keys only owners and operators. Your own: on your profile. */
 function canRevokeKeys(v: ReturnType<typeof useViewer>, m: { role: string }, self: boolean): boolean {
+  // atLeast is false above viewer with a read-only key: it revokes nothing.
   return !self && atLeast(v, "admin") && (m.role !== "owner" || atLeast(v, "owner"));
 }
 

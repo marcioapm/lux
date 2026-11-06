@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { WhoAmI } from "../api/types.ts";
-import { atLeast, canActOnRun, canActOnServer, canManageInfra, viewerOf, whoCanAct } from "./identity.ts";
+import { atLeast, canActOnRun, canActOnServer, canManageAccountKeys, canManageInfra, canManageOwnKeys, knowsTenant, mayChange, operatorActs, viewerOf, whoCanAct } from "./identity.ts";
 
 const base: WhoAmI = { operator: false, tenant: "acme", tenantId: "ten_acme", scopes: ["read", "run"], consoleAuth: "cloudflare-access" };
 const sas = [{ id: "sa_ci", name: "ci-review-bot", owner: { id: "usr_car", email: "carla@acme.dev", name: "Carla Santos", picture: "", operator: false } }];
@@ -70,4 +70,45 @@ test("whoCanAct names the owner, or a service account's owner", () => {
   expect(whoCanAct({ owner: { kind: "user", id: "u", name: "Bruno Costa" } })).toBe("Bruno Costa");
   expect(whoCanAct({ owner: { kind: "serviceAccount", id: "sa_ci", name: "ci-review-bot" } }, sas)).toBe("Carla Santos (owner of ci-review-bot)");
   expect(whoCanAct({})).toBeNull();
+});
+
+// whoami readOnly (http.go Principal.atLeast): a read-only key reads as its
+// role and changes nothing, an operator's included.
+test("a read-only key: every mutation capability is denied, keys included, operators too", () => {
+  const ro = (w: Partial<WhoAmI>) => viewerOf({ ...base, readOnly: true, ...w });
+  const admin = ro({ userId: "usr_ana", role: "admin", memberships: [{ tenantId: "ten_acme", tenant: "acme", role: "admin" }] });
+  const op = ro({ operator: true, userId: "usr_mar", memberships: [] });
+  const owner = ro({ userId: "usr_car", role: "member", memberships: [{ tenantId: "ten_acme", tenant: "acme", role: "member" }] });
+  for (const v of [admin, op, owner]) {
+    expect(v.readOnly).toBe(true);
+    expect(mayChange(v)).toBe(false);
+    expect(atLeast(v, "viewer")).toBe(true);
+    expect(atLeast(v, "member")).toBe(false);
+    expect(atLeast(v, "admin")).toBe(false);
+    expect(canActOnRun(v, {})).toBe(false);
+    expect(canActOnRun(v, { owner: { kind: "user", id: "usr_car", name: "Carla" } })).toBe(false);
+    expect(canManageInfra(v)).toBe(false);
+    expect(canManageInfra(v, true)).toBe(false);
+    expect(canActOnServer(v, null)).toBe(false);
+    expect(canManageOwnKeys(v)).toBe(false);
+    expect(canManageAccountKeys(v, sas[0]!)).toBe(false);
+    expect(operatorActs(v)).toBe(false);
+  }
+  // Not read-only: the same people may.
+  const carla = viewerOf({ ...base, userId: "usr_car", role: "member", memberships: [] });
+  expect(canManageOwnKeys(carla)).toBe(true);
+  expect(canManageAccountKeys(carla, sas[0]!)).toBe(true);
+  expect(operatorActs(viewerOf({ ...base, operator: true, memberships: [] }))).toBe(true);
+});
+
+// A Run or server of another tenant than the one in scope: the role there.
+test("knowsTenant: whoami's own tenant or a membership answers; another tenant needs whoami?tenant=", () => {
+  const rui: WhoAmI = { ...base, tenant: "globex", tenantId: "ten_globex", userId: "usr_rui", role: "viewer", memberships: [{ tenantId: "ten_globex", tenant: "globex", role: "viewer" }, { tenantId: "ten_initech", tenant: "initech", role: "admin" }] };
+  expect(knowsTenant(rui, "globex")).toBe(true);
+  expect(knowsTenant(rui, "initech")).toBe(true);
+  expect(viewerOf(rui, "initech").role).toBe("admin");
+  expect(viewerOf(rui, "globex").role).toBe("viewer");
+  expect(knowsTenant(rui, "acme")).toBe(false);
+  expect(knowsTenant({ ...base, operator: true, memberships: [] }, "acme")).toBe(true);
+  expect(knowsTenant(null, "acme")).toBe(false);
 });

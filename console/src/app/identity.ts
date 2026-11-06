@@ -3,7 +3,7 @@
 // whether invitations exist. Every field the people model added is
 // optional, so a console in front of an older luxd falls back to scopes.
 import { roleAtLeast, type TenantRole } from "@lux/design-system";
-import { useSession, type Owner, type Run, type ServiceAccount, type WhoAmI } from "../api/index.ts";
+import { api, useQuery, useSession, type Owner, type Run, type ServiceAccount, type WhoAmI } from "../api/index.ts";
 import { useScope } from "./scope.tsx";
 
 export interface Viewer {
@@ -23,6 +23,8 @@ export interface Viewer {
   scopes: string[];
   /** Signed in, no membership, not an operator. */
   noTenant: boolean;
+  /** whoami's readOnly: the key reads whatever its role is and changes nothing (luxd refuses every write). Operators' keys too. */
+  readOnly: boolean;
 }
 
 export function viewerOf(me: WhoAmI | null, tenant?: string): Viewer {
@@ -42,6 +44,7 @@ export function viewerOf(me: WhoAmI | null, tenant?: string): Viewer {
     invitationsEnabled: me?.invitationsEnabled === true && me.consoleAuth === "cloudflare-access",
     scopes: me?.scopes ?? [],
     noTenant: me != null && !me.operator && !me.serviceAccount && me.memberships != null && me.memberships.length === 0,
+    readOnly: me?.readOnly === true,
   };
 }
 
@@ -51,12 +54,60 @@ export function useViewer(): Viewer {
   return viewerOf(whoami, apiTenant);
 }
 
-/** Operators count as every role; an older luxd's key by its scopes; before whoami answers, reading only. */
+/**
+ * whoami already says the caller's role in tenant (by id or name): it is
+ * the tenant whoami resolved to, or one of the person's memberships (each
+ * carries its role), or whoami is an older luxd's (no memberships: one
+ * tenant per key).
+ */
+export function knowsTenant(me: WhoAmI | null, tenant: string): boolean {
+  if (me == null) return false;
+  // An operator acts in every tenant (a read-only key reads only, in all of them).
+  if (me.memberships == null || me.operator) return true;
+  return me.tenantId === tenant || me.tenant === tenant || me.memberships.some((m) => m.tenantId === tenant || m.tenant === tenant);
+}
+
+/**
+ * The viewer for an object of tenant (a Run, a server): the caller's role
+ * there, which is not the tenant in scope's when the object is another
+ * tenant's (a link, the Runs list of an operator or of a person in several
+ * tenants). From the session's whoami when it knows that tenant (above);
+ * else whoami?tenant=<tenant>, unresolved (nothing may change) until it
+ * answers. tenant undefined (not loaded yet): unresolved too; null (the
+ * object names no tenant): the scope's viewer.
+ */
+export function useObjectViewer(tenant: string | null | undefined): Viewer {
+  const { whoami } = useSession();
+  const { apiTenant } = useScope();
+  const known = tenant === null || (tenant != null && knowsTenant(whoami, tenant));
+  const other = useQuery(`whoami@${tenant ?? ""}`, (s) => api.whoami(s, tenant ?? undefined), { enabled: tenant != null && whoami != null && !known });
+  if (tenant === undefined) return viewerOf(null);
+  if (tenant === null) return viewerOf(whoami, apiTenant);
+  if (known) return viewerOf(whoami, tenant);
+  return viewerOf(other.data ?? null, tenant);
+}
+
+/**
+ * The viewer may change anything at all: whoami has answered and the key
+ * is not read-only. Every mutation capability checks this first (a
+ * read-only key's own keys, a service account's keys it owns, included).
+ */
+export function mayChange(v: Viewer): boolean {
+  return v.resolved && !v.readOnly;
+}
+
+/** Operators count as every role; an older luxd's key by its scopes; before whoami answers, or with a read-only key (operators' too), reading only. */
 export function atLeast(v: Viewer, r: TenantRole): boolean {
   if (!v.resolved) return r === "viewer";
+  if (v.readOnly && r !== "viewer") return false;
   if (v.operator) return true;
   if (v.legacy) return r === "viewer" ? true : r === "member" ? v.scopes.includes("run") || v.scopes.includes("admin") : v.scopes.includes("admin");
   return roleAtLeast(v.role, r);
+}
+
+/** An operator who may change things (not with a read-only key): operator-only actions. */
+export function operatorActs(v: Viewer): boolean {
+  return v.operator && mayChange(v);
 }
 
 /** I own it: it is me, my service account, or a service account I own. */
@@ -73,7 +124,7 @@ export function ownsOwner(v: Viewer, o: Owner | undefined, sas: readonly Pick<Se
  * viewers none. An older luxd (no roles, no owners): the run scope.
  */
 export function canActOnRun(v: Viewer, run: Pick<Run, "owner">, sas: readonly Pick<ServiceAccount, "id" | "owner">[] = []): boolean {
-  if (!v.resolved) return false;
+  if (!mayChange(v)) return false;
   if (v.operator) return true;
   if (v.legacy) return v.scopes.includes("run") || v.scopes.includes("admin");
   if (atLeast(v, "admin")) return true;
@@ -86,9 +137,20 @@ export function canActOnRun(v: Viewer, run: Pick<Run, "owner">, sas: readonly Pi
  * platform's, operators' only. Viewers and members change none of it.
  */
 export function canManageInfra(v: Viewer, platform = false): boolean {
-  if (!v.resolved) return false;
+  if (!mayChange(v)) return false;
   if (v.operator) return true;
   return !platform && atLeast(v, "admin");
+}
+
+/** My own API keys (create, rename, revoke): anyone signed in, except with a read-only key. */
+export function canManageOwnKeys(v: Viewer): boolean {
+  return mayChange(v);
+}
+
+/** A service account's keys: admins, and its owner (member-level), never with a read-only key. */
+export function canManageAccountKeys(v: Viewer, sa: Pick<ServiceAccount, "owner">): boolean {
+  if (!mayChange(v)) return false;
+  return atLeast(v, "admin") || (sa.owner != null && v.userId != null && sa.owner.id === v.userId);
 }
 
 /** A tenant server: attached to a Run, as that Run (canActOnRun); attached to none, an admin. */

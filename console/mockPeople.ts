@@ -73,7 +73,13 @@ export const AS: Record<string, string | null> = {
   sa: null,
   bruno: "usr_bru",
   multi: "usr_rui",
+  // Read-only keys (whoami readOnly): an admin's and an operator's.
+  readonly: "usr_ana",
+  opreadonly: "usr_mar",
 };
+
+/** The mock roles that sign in with a read-only key: they read as their role and change nothing (luxd: 403 on every write). */
+export const READ_ONLY_AS = new Set(["readonly", "opreadonly"]);
 
 export interface SA {
   id: string;
@@ -210,6 +216,8 @@ export interface Caller {
   /** The tenant the call is resolved to. */
   tenantId: string | null;
   role: Role | null;
+  /** A read-only key: reads as role, changes nothing. */
+  readOnly?: boolean;
 }
 
 export function callerOf(req: Request, url: URL, accessMode: boolean): Caller | null {
@@ -229,7 +237,7 @@ export function callerOf(req: Request, url: URL, accessMode: boolean): Caller | 
   const ms = askedId ? mine.find((x) => x.tenantId === askedId) : mine.length >= 1 ? mine[0] : undefined;
   // An operator with no ?tenant= sees every tenant; for member pages the console narrows to one.
   const tenantId = askedId ?? (user.operator ? null : (ms?.tenantId ?? null));
-  return { as, user, sa: null, operator: user.operator, tenantId, role: ms?.role ?? null };
+  return { as, user, sa: null, operator: user.operator, tenantId, role: ms?.role ?? null, ...(READ_ONLY_AS.has(as) ? { readOnly: true } : {}) };
 }
 
 export const person = (id: string | undefined) => {
@@ -237,7 +245,8 @@ export const person = (id: string | undefined) => {
   // As me.go's Person: picture is always there ("" without one).
   return u ? { id: u.id, email: u.email, name: u.name, picture: u.picture ?? "", operator: u.operator } : undefined;
 };
-export const atLeast = (c: Caller, r: Role) => c.operator || (c.role != null && RANK[c.role] >= RANK[r]);
+/** As luxd's Principal.atLeast: a read-only key holds nothing above viewer, operators' included. */
+export const atLeast = (c: Caller, r: Role) => (c.readOnly && r !== "viewer" ? false : c.operator || (c.role != null && RANK[c.role] >= RANK[r]));
 export const err = (status: number, code: string, message: string) => ({ status, body: { error: { code, message } } });
 export const ok = (body: unknown, status = 200) => ({ status, body });
 
@@ -370,8 +379,9 @@ export function whoamiFor(c: Caller, consoleAuth: string, previewDomain: string 
     // whoami.go: no role for an operator.
     ...(c.role && !c.operator ? { role: c.role } : {}),
     ...(c.sa ? { serviceAccount: { id: c.sa.id, name: c.sa.name } } : {}),
+    ...(c.readOnly ? { readOnly: true } : {}),
     memberships,
-    scopes: c.operator || atLeast(c, "admin") ? ["read", "run", "admin"] : atLeast(c, "member") ? ["read", "run"] : c.role ? ["read"] : [],
+    scopes: atLeast(c, "admin") ? ["read", "run", "admin"] : atLeast(c, "member") ? ["read", "run"] : c.role || c.operator ? ["read"] : [],
     consoleAuth,
     invitationsEnabled: consoleAuth === "cloudflare-access",
     previews: previewDomain != null,
