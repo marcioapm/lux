@@ -991,38 +991,19 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		k, v, _ := strings.Cut(l, "=")
 		where = append(where, "r.labels @> "+arg(map[string]string{k: v}))
 	}
-	if in.Owner != "" {
-		// Several owners, comma-separated: any of them. user:<id> and
-		// sa:<id> are exact (as cost rows key them); a bare value is a
-		// person's id or email, or a service account's id or name.
-		// users is the system's; the tenant's view shows its members and its Runs' owners.
-		var users, sas, any []string
-		for _, v := range strings.Split(in.Owner, ",") {
-			v = strings.TrimSpace(v)
-			switch {
-			case v == "":
-			case strings.HasPrefix(v, "user:"):
-				users = append(users, strings.TrimPrefix(v, "user:"))
-			case strings.HasPrefix(v, "sa:"):
-				sas = append(sas, strings.TrimPrefix(v, "sa:"))
-			default:
-				any = append(any, v)
-			}
+	if in.Owner != "" || in.Mine {
+		// Names resolve to ids first (one query, in the caller's scope),
+		// so the filter is the owner columns against ids, as runs_owner_*
+		// index them: a name subquery ORed in would scan every Run.
+		users, sas, err := s.resolveRunOwners(ctx, p, in.Owner, in.Mine)
+		if err != nil {
+			return nil, err
 		}
-		u, s, o := arg(users), arg(sas), arg(any)
-		where = append(where, `(r.owner_user_id = ANY(`+u+`) OR r.owner_sa_id = ANY(`+s+`)
-			OR r.owner_user_id IN (SELECT u.id FROM users u WHERE u.id = ANY(`+o+`) OR lower(u.email) = ANY(SELECT lower(x) FROM unnest(`+o+`::text[]) x))
-			OR r.owner_sa_id IN (SELECT sa.id FROM service_accounts sa WHERE sa.id = ANY(`+o+`) OR sa.name = ANY(`+o+`)))`)
-	}
-	if in.Mine {
-		switch {
-		case p.UserID != "":
-			u := arg(p.UserID)
-			where = append(where, `(r.owner_user_id = `+u+` OR r.owner_sa_id IN (SELECT sa.id FROM service_accounts sa WHERE sa.owner_user_id = `+u+`))`)
-		case p.ServiceAccountID != "":
-			where = append(where, "r.owner_sa_id = "+arg(p.ServiceAccountID))
-		default:
-			where = append(where, "false")
+		if in.Owner != "" {
+			where = append(where, ownerPredicate(users.owner, sas.owner, arg))
+		}
+		if in.Mine {
+			where = append(where, ownerPredicate(users.mine, sas.mine, arg))
 		}
 	}
 	pg, paged, err := resolvePaging(in.PageQuery, runSortKeys, "created", in.Limit, 50, 200)
@@ -1074,6 +1055,72 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 	out := &listRunsOutput{}
 	out.Body.Runs = runs
 	return out, nil
+}
+
+// ownerIDs: the person and service account ids an owner= list, and mine,
+// resolve to.
+type ownerIDs struct{ owner, mine []string }
+
+// resolveRunOwners resolves owner= (several, comma-separated: any of them;
+// user:<id> and sa:<id> exactly, as cost rows key them; a bare value a
+// person's id or email, or a service account's id or name) and mine (a
+// person: them and the accounts they own; an account's key: the account)
+// to ids, in one query in the caller's scope. users is the system's; the
+// tenant's view shows its members and its Runs' owners.
+func (s *Server) resolveRunOwners(ctx context.Context, p Principal, owner string, mine bool) (users, sas ownerIDs, err error) {
+	bare := []string{}
+	for _, v := range strings.Split(owner, ",") {
+		v = strings.TrimSpace(v)
+		switch {
+		case v == "":
+		case strings.HasPrefix(v, "user:"):
+			users.owner = append(users.owner, strings.TrimPrefix(v, "user:"))
+		case strings.HasPrefix(v, "sa:"):
+			sas.owner = append(sas.owner, strings.TrimPrefix(v, "sa:"))
+		default:
+			bare = append(bare, v)
+		}
+	}
+	me := ""
+	if mine {
+		switch {
+		case p.UserID != "":
+			me = p.UserID
+			users.mine = []string{p.UserID}
+		case p.ServiceAccountID != "":
+			sas.mine = []string{p.ServiceAccountID}
+		}
+	}
+	if len(bare) == 0 && me == "" {
+		return users, sas, nil
+	}
+	var bu, bs, ms []string
+	err = s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT
+			ARRAY(SELECT u.id FROM users u WHERE cardinality($1::text[]) > 0 AND (u.id = ANY($1) OR lower(u.email) = ANY(SELECT lower(x) FROM unnest($1::text[]) x))),
+			ARRAY(SELECT sa.id FROM service_accounts sa WHERE cardinality($1::text[]) > 0 AND (sa.id = ANY($1) OR sa.name = ANY($1))),
+			ARRAY(SELECT sa.id FROM service_accounts sa WHERE $2 <> '' AND sa.owner_user_id = $2)`, bare, me).Scan(&bu, &bs, &ms)
+	})
+	users.owner = append(users.owner, bu...)
+	sas.owner = append(sas.owner, bs...)
+	sas.mine = append(sas.mine, ms...)
+	return users, sas, err
+}
+
+// ownerPredicate: Runs owned by one of these people or accounts; none of
+// either, no Run. Empty alternatives are left out.
+func ownerPredicate(users, sas []string, arg func(any) string) string {
+	var or []string
+	if len(users) > 0 {
+		or = append(or, "r.owner_user_id = ANY("+arg(users)+")")
+	}
+	if len(sas) > 0 {
+		or = append(or, "r.owner_sa_id = ANY("+arg(sas)+")")
+	}
+	if len(or) == 0 {
+		return "false"
+	}
+	return "(" + strings.Join(or, " OR ") + ")"
 }
 
 // listRunsPage is a page of GET /v1/runs in any sort key's order, keyed by
