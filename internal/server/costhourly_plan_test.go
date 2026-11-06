@@ -105,9 +105,10 @@ func TestHostHoursSelectorWork(t *testing.T) {
 							}
 							visit(root)
 							blocks := root["Shared Hit Blocks"].(float64) + root["Shared Read Blocks"].(float64)
-							encoded, _ := json.Marshal(plan)
-							t.Logf("%s branch=%d removed=%.0f buffers=%.0f plan=%s", mode, branch, removed, blocks, encoded)
+							t.Logf("%s branch=%d removed=%.0f buffers=%.0f", mode, branch, removed, blocks)
 							if removed > float64(n*8) || blocks > float64(n*12) || root["Actual Rows"].(float64) != 0 {
+								encoded, _ := json.Marshal(plan)
+								t.Logf("plan=%s", encoded)
 								t.Errorf("selector work not linear or empty: removed=%.0f buffers=%.0f rows=%v", removed, blocks, root["Actual Rows"])
 							}
 							return nil
