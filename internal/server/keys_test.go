@@ -1,11 +1,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/marcioapm/lux/internal/ids"
 )
 
 // Personal keys: made, shown once, prefixed, listed without the secret,
@@ -202,6 +205,50 @@ func TestServiceAccountOwnerClears(t *testing.T) {
 	}
 	if got := queryAll(t, f.s, `SELECT coalesce(owner_user_id, '-') FROM service_accounts WHERE name = 'nightly'`); len(got) != 1 || got[0] != "-" {
 		t.Fatalf("stored owner after clearing: %v", got)
+	}
+}
+
+// Another tenant's service account is not there, for its admins and for an
+// operator narrowed to it: by id (a same-named account of their own is
+// theirs, by name), on every account and key route, and nothing changes.
+func TestServiceAccountsForeignTenant(t *testing.T) {
+	f := peopleFixture(t)
+	ctx := context.Background()
+	execSQL(t, f.s, ctx, `INSERT INTO users (id, email, name) VALUES ('usr_t2admin', 'tara@example.com', 'Tara')`)
+	execSQL(t, f.s, ctx, `INSERT INTO memberships (tenant_id, user_id, role) VALUES ('t2', 'usr_t2admin', 'admin')`)
+	t2key := ids.Secret("lux_u")
+	execSQL(t, f.s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes, user_id) VALUES ('k_t2admin', 't2', 't2admin', $1, '{}', 'usr_t2admin')`, ids.Hash(t2key))
+	execSQL(t, f.s, ctx, `INSERT INTO service_accounts (id, tenant_id, name, role) VALUES ('sa_bot2', 't2', 'sa-bot', 'member')`)
+	// The t2 admin sees their own sa-bot by name: the fixture is live.
+	if code, out := f.do(t, t2key, http.MethodGet, "/v1/service-accounts/sa-bot", nil); code != 200 || out["id"] != "sa_bot2" {
+		t.Errorf("t2 admin gets t2's sa-bot: %d %v", code, out)
+	}
+	before := queryOne[string](t, f.s, `SELECT role || description || coalesce(disabled_at::text, '') || (SELECT count(*) FROM api_keys WHERE service_account_id = 'sa_bot' AND revoked_at IS NULL) FROM service_accounts WHERE id = 'sa_bot'`)
+	for who, q := range map[string]struct{ key, query string }{
+		"t2 admin":             {t2key, ""},
+		"t2-narrowed operator": {f.keys["op"], "?tenant=t2"},
+	} {
+		for _, rt := range []struct {
+			method, path string
+			body         any
+		}{
+			{http.MethodGet, "/v1/service-accounts/sa_bot", nil},
+			{http.MethodPatch, "/v1/service-accounts/sa_bot", map[string]any{"role": "admin", "disabled": true}},
+			{http.MethodGet, "/v1/service-accounts/sa_bot/keys", nil},
+			{http.MethodPost, "/v1/service-accounts/sa_bot/keys", map[string]any{"name": "stolen"}},
+			{http.MethodDelete, "/v1/service-accounts/sa_bot/keys/k_sa", nil},
+		} {
+			if code, out := f.do(t, q.key, rt.method, rt.path+q.query, rt.body); code != http.StatusNotFound {
+				t.Errorf("%s: %s %s: %d %v, want 404", who, rt.method, rt.path, code, out)
+			}
+		}
+	}
+	if after := queryOne[string](t, f.s, `SELECT role || description || coalesce(disabled_at::text, '') || (SELECT count(*) FROM api_keys WHERE service_account_id = 'sa_bot' AND revoked_at IS NULL) FROM service_accounts WHERE id = 'sa_bot'`); after != before {
+		t.Errorf("t1's account changed: %q, was %q", after, before)
+	}
+	var who Whoami
+	if code := getJSON(t, f.s, f.keys["sa"], "/v1/whoami", &who); code != 200 {
+		t.Errorf("t1's account key after: %d", code)
 	}
 }
 
