@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, CENTS, ConfirmDialog, Dialog, EmptyState, IconButton, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_LABEL, ROLES, SegmentedControl, Table, Tabs, useToast, type Column, type TenantRole } from "@lux/design-system";
 import { IconClose, IconCopy, IconPencil, IconPlus, IconRefresh, IconTrash } from "@lux/design-system/icons";
-import { api, errorText, useQuery, useSession, type Invitation, type InvitationStatus, type InviteResult, type Member } from "../../api/index.ts";
+import { api, errorText, setWhoAmI, useQuery, useSession, type Invitation, type InvitationStatus, type InviteResult, type Member } from "../../api/index.ts";
 import { atLeast, useViewer, type Viewer } from "../identity.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
@@ -19,11 +19,41 @@ export function usePeopleTenant(): { tenant: string | undefined; name: string } 
   return { tenant: apiTenant, name: m?.tenant ?? (apiTenant || whoami?.tenant || v.memberships[0]?.tenant || "") };
 }
 
-/** Admins act on members below Owner; owners and operators on anyone; nobody on themselves. */
+/** Admins act on members below Owner; owners and operators on anyone else (your own row: memberActions). */
 export function canManage(v: Viewer, m: Pick<Member, "id" | "role">): boolean {
   if (m.id === v.userId) return false;
   if (!atLeast(v, "admin")) return false;
   return m.role !== "owner" || atLeast(v, "owner");
+}
+
+/** What a member's row offers: Change role and Remove, each with the reason it is disabled (null: enabled). */
+export interface MemberActions {
+  change: boolean;
+  changeReason: string | null;
+  remove: boolean;
+  removeReason: string | null;
+  self: boolean;
+}
+
+/**
+ * The actions luxd would allow on m (members.go checkOwnerChange). On
+ * someone else: canManage, Remove off for the only owner. On your own row:
+ * an operator changes their role and removes themselves (they keep operator
+ * access); an owner changes their own role while another owner exists
+ * (else disabled: "you are the last owner") and never removes themselves;
+ * an admin, nothing.
+ */
+export function memberActions(v: Viewer, m: Pick<Member, "id" | "role">, owners: number): MemberActions {
+  const self = m.id === v.userId && v.userId != null;
+  const none = { change: false, changeReason: null, remove: false, removeReason: null, self };
+  if (!atLeast(v, "admin")) return none;
+  if (!self) {
+    if (!canManage(v, m)) return none;
+    return { change: true, changeReason: null, remove: true, removeReason: lastOwnerReason(v, m, owners), self };
+  }
+  if (v.operator) return { change: true, changeReason: null, remove: true, removeReason: null, self };
+  if (m.role === "owner") return { change: true, changeReason: owners > 1 ? null : "You are the last owner: make someone else an owner first", remove: false, removeReason: null, self };
+  return none;
 }
 
 /**
@@ -184,17 +214,25 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
         key: "actions",
         header: "",
         label: "Actions",
-        cell: (m) =>
-          canManage(v, m) ? (
+        cell: (m) => {
+          const a = memberActions(v, m, owners);
+          if (!a.change && !a.remove) return null;
+          const who = a.self ? "your" : `${m.name || m.email}'s`;
+          return (
             <span className="row-actions">
-              <IconButton size="sm" label={`Change ${m.name || m.email}'s role`} onClick={(e) => (e.stopPropagation(), setChanging(m))} onKeyDown={(e) => e.stopPropagation()}>
-                <IconPencil size={14} />
-              </IconButton>
-              <IconButton size="sm" label={`Remove ${m.name || m.email} from ${tenantName}`} disabled={lastOwnerReason(v, m, owners) != null} title={lastOwnerReason(v, m, owners) ?? undefined} onClick={(e) => (e.stopPropagation(), setRemoving(m))} onKeyDown={(e) => e.stopPropagation()}>
-                <IconTrash size={14} />
-              </IconButton>
+              {a.change && (
+                <IconButton size="sm" label={`Change ${who} role`} disabled={a.changeReason != null} title={a.changeReason ?? undefined} onClick={(e) => (e.stopPropagation(), setChanging(m))} onKeyDown={(e) => e.stopPropagation()}>
+                  <IconPencil size={14} />
+                </IconButton>
+              )}
+              {a.remove && (
+                <IconButton size="sm" label={a.self ? `Leave ${tenantName}` : `Remove ${m.name || m.email} from ${tenantName}`} disabled={a.removeReason != null} title={a.removeReason ?? undefined} onClick={(e) => (e.stopPropagation(), setRemoving(m))} onKeyDown={(e) => e.stopPropagation()}>
+                  <IconTrash size={14} />
+                </IconButton>
+              )}
             </span>
-          ) : null,
+          );
+        },
         align: "right",
         width: 84,
       });
@@ -211,10 +249,23 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
           <Table columns={cols} rows={rows} rowKey={(m) => m.id} loading={members.loading} onRowClick={(m) => go(memberPath(m.id))} defaultSort={{ key: "role", dir: "desc" }} empty="No members yet." minWidth={860} />
         )}
       </Card>
-      <ChangeRoleDialog member={changing} tenantName={tenantName} busy={busy} owner={atLeast(v, "owner")} lastOwner={changing ? lastOwnerReason(v, changing, owners) : null} onCancel={() => setChanging(null)} onConfirm={(m, role) => void act(`${m.name || m.email} is now ${ROLE_LABEL[role]}`, () => api.setMemberRole(tenant, m.id, role), () => (setChanging(null), members.refetch()))} />
-      <RemoveMemberDialog member={removing} tenantName={tenantName} busy={busy} onCancel={() => setRemoving(null)} onConfirm={(m) => void act(`Removed ${m.name || m.email}`, () => api.removeMember(tenant, m.id), () => (setRemoving(null), members.refetch()))} />
+      <ChangeRoleDialog member={changing} self={changing?.id === v.userId} tenantName={tenantName} busy={busy} owner={atLeast(v, "owner")} lastOwner={changing ? lastOwnerReason(v, changing, owners) : null} onCancel={() => setChanging(null)} onConfirm={(m, role) => void act(m.id === v.userId ? `You are now ${ROLE_LABEL[role]}` : `${m.name || m.email} is now ${ROLE_LABEL[role]}`, () => api.setMemberRole(tenant, m.id, role), () => (setChanging(null), m.id === v.userId ? refreshWhoAmI(tenant) : undefined, members.refetch()))} />
+      <RemoveMemberDialog member={removing} self={removing?.id === v.userId} tenantName={tenantName} busy={busy} onCancel={() => setRemoving(null)} onConfirm={(m) => void act(m.id === v.userId ? `You left ${tenantName}` : `Removed ${m.name || m.email}`, () => api.removeMember(tenant, m.id), () => (setRemoving(null), m.id === v.userId ? refreshWhoAmI(tenant) : undefined, members.refetch()))} />
     </>
   );
+}
+
+/**
+ * After changing your own membership, whoami says something else (your
+ * role in this tenant): ask again so every capability follows. A failure
+ * leaves the old one; App's probe tries again on the next tenant pick.
+ */
+export async function refreshWhoAmI(tenant: string | undefined) {
+  try {
+    setWhoAmI(await api.whoami(undefined, tenant));
+  } catch {
+    /* the change itself succeeded */
+  }
 }
 
 /**
@@ -226,7 +277,7 @@ export function lastOwnerReason(v: Viewer, m: Pick<Member, "role">, owners: numb
   return "The only owner: make someone else an owner first";
 }
 
-export function ChangeRoleDialog({ member, tenantName, owner, busy, onConfirm, onCancel, lastOwner = null }: { member: Member | null; tenantName: string; owner: boolean; busy: boolean; onConfirm: (m: Member, role: TenantRole) => void; onCancel: () => void; lastOwner?: string | null }) {
+export function ChangeRoleDialog({ member, tenantName, owner, busy, onConfirm, onCancel, lastOwner = null, self = false }: { member: Member | null; tenantName: string; owner: boolean; busy: boolean; onConfirm: (m: Member, role: TenantRole) => void; onCancel: () => void; lastOwner?: string | null; self?: boolean }) {
   // The pick is for one member, and ends when the dialog closes (after a change, or a cancel): the next open starts from the member's role.
   const [pick, setPick] = useState<{ for: string; role: TenantRole } | null>(null);
   useEffect(() => {
@@ -236,11 +287,12 @@ export function ChangeRoleDialog({ member, tenantName, owner, busy, onConfirm, o
   const shown = role ?? member?.role ?? "member";
   const who = member?.name || member?.email || "";
   const options = roleOptions({ owner }).map((o) => (lastOwner && o.value !== "owner" ? { ...o, disabled: lastOwner } : o));
+  const demotesSelf = self && member != null && shown !== member.role && ROLES.indexOf(shown) < ROLES.indexOf(member.role);
   return (
     <Dialog
       open={member != null}
-      title={`Change ${who}'s role`}
-      description={lastOwner ?? `Takes effect on ${who.split(" ")[0]}'s next request, keys included.`}
+      title={self ? "Change your role" : `Change ${who}'s role`}
+      description={lastOwner ?? (self ? "Takes effect on your next request, keys included." : `Takes effect on ${who.split(" ")[0]}'s next request, keys included.`)}
       confirmLabel="Change role"
       disabled={shown === member?.role}
       loading={busy}
@@ -251,18 +303,23 @@ export function ChangeRoleDialog({ member, tenantName, owner, busy, onConfirm, o
       }}
     >
       <RoleField value={shown} onChange={(r) => member && setPick({ for: member.id, role: r })} options={options} label={`Role in ${tenantName}`} />
+      {demotesSelf && <p className="field-hint">You give up {ROLE_LABEL[member!.role]}: only someone with that role can give it back.</p>}
     </Dialog>
   );
 }
 
-export function RemoveMemberDialog({ member, tenantName, busy, onConfirm, onCancel }: { member: Member | null; tenantName: string; busy: boolean; onConfirm: (m: Member) => void; onCancel: () => void }) {
+export function RemoveMemberDialog({ member, tenantName, busy, onConfirm, onCancel, self = false }: { member: Member | null; tenantName: string; busy: boolean; onConfirm: (m: Member) => void; onCancel: () => void; self?: boolean }) {
   const who = member?.name || member?.email || "";
   return (
     <ConfirmDialog
       open={member != null}
-      title={`Remove ${who} from ${tenantName}?`}
-      description={`Their API keys in ${tenantName} are revoked at once. Their running Runs keep running and stay theirs; service accounts they own are left without an owner.`}
-      confirmLabel="Remove"
+      title={self ? `Leave ${tenantName}?` : `Remove ${who} from ${tenantName}?`}
+      description={
+        self
+          ? `You stop being a member of ${tenantName}: your API keys in ${tenantName} are revoked at once and service accounts you own are left without an owner. A member would lose access to ${tenantName}; you keep it only because you are an operator.`
+          : `Their API keys in ${tenantName} are revoked at once. Their running Runs keep running and stay theirs; service accounts they own are left without an owner.`
+      }
+      confirmLabel={self ? "Leave" : "Remove"}
       tone="danger"
       loading={busy}
       onConfirm={() => member && onConfirm(member)}

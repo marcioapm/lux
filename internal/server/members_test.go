@@ -87,3 +87,23 @@ func TestMembersOwnerRules(t *testing.T) {
 	}
 	_ = context.Background
 }
+
+// An owner changes their own role while another owner exists; the last owner
+// who is not an operator cannot (409 last_owner); an operator always can.
+func TestOwnerChangesOwnRole(t *testing.T) {
+	f := peopleFixture(t)
+	code, out := f.do(t, f.keys["owner"], "PATCH", "/v1/members/olive@example.com", map[string]any{"role": "admin"})
+	if c, _ := errCode(out); code != 409 || c != "last_owner" {
+		t.Fatalf("last owner demotes self: %d %v", code, out)
+	}
+	if code, out := f.do(t, f.keys["owner"], "PATCH", "/v1/members/usr_admin", map[string]any{"role": "owner"}); code != 200 {
+		t.Fatalf("second owner: %d %v", code, out)
+	}
+	if code, out := f.do(t, f.keys["owner"], "PATCH", "/v1/members/olive@example.com", map[string]any{"role": "admin"}); code != 200 || out["role"] != "admin" {
+		t.Fatalf("owner demotes self with another owner: %d %v", code, out)
+	}
+	// Now the only owner, adam, as an operator would be allowed: the operator demotes them.
+	if code, out := f.do(t, f.keys["op"], "PATCH", "/v1/members/usr_admin?tenant=t1", map[string]any{"role": "member"}); code != 200 {
+		t.Fatalf("operator demotes the last owner: %d %v", code, out)
+	}
+}

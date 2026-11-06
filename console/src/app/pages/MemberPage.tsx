@@ -4,7 +4,7 @@ import { api, useQuery, type ApiKey, type Run, type ServiceAccount } from "../..
 import { atLeast, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
 import { ErrorBlock, PageSkeleton, QueryBody, runColumns, runPath, useAct } from "./common.tsx";
-import { canManage, ChangeRoleDialog, lastOwnerReason, RemoveMemberDialog, useCostByOwner, usePeopleTenant } from "./Members.tsx";
+import { ChangeRoleDialog, lastOwnerReason, memberActions, refreshWhoAmI, RemoveMemberDialog, useCostByOwner, usePeopleTenant } from "./Members.tsx";
 import { KeysTable, serviceAccountPath } from "./peopleParts.tsx";
 
 /** /members/:id: one person's role, spend, service accounts, Runs and (to them and admins) keys. */
@@ -37,9 +37,10 @@ export function MemberPage({ id }: { id: string }) {
   const own = cost.cost(`user:${p.id}`);
   const viaSa = cost.cost(...owned.map((s) => `sa:${s.id}`));
   const viaSaRuns = viaSa.runs ?? 0;
-  const manage = canManage(v, p);
+  const owners = (all.data ?? []).filter((x) => x.role === "owner").length || 1;
+  const actions = memberActions(v, p, owners);
   // The last-owner rule: only an operator demotes or removes the only owner.
-  const lastOwner = lastOwnerReason(v, p, (all.data ?? []).filter((x) => x.role === "owner").length || 1);
+  const lastOwner = lastOwnerReason(v, p, owners);
 
   const saCols: Column<ServiceAccount>[] = [
     { key: "name", header: "Service account", cell: (s) => <Person name={s.name} sub={s.description} serviceAccount />, sortValue: (s) => s.name, label: "Service account" },
@@ -81,12 +82,18 @@ export function MemberPage({ id }: { id: string }) {
           </>
         }
         actions={
-          manage ? (
+          actions.change || actions.remove ? (
             <>
-              <Button onClick={() => setChanging(true)}>Change role</Button>
-              <Button variant="danger" disabled={lastOwner != null} title={lastOwner ?? undefined} onClick={() => setRemoving(true)}>
-                Remove
-              </Button>
+              {actions.change && (
+                <Button disabled={actions.changeReason != null || (self && !all.data)} title={actions.changeReason ?? undefined} onClick={() => setChanging(true)}>
+                  Change role
+                </Button>
+              )}
+              {actions.remove && (
+                <Button variant="danger" disabled={actions.removeReason != null} title={actions.removeReason ?? undefined} onClick={() => setRemoving(true)}>
+                  {self ? "Leave tenant" : "Remove"}
+                </Button>
+              )}
             </>
           ) : undefined
         }
@@ -118,8 +125,8 @@ export function MemberPage({ id }: { id: string }) {
           </Card>
         )}
       </div>
-      <ChangeRoleDialog member={changing ? p : null} lastOwner={lastOwner} tenantName={tenantName} owner={atLeast(v, "owner")} busy={busy} onCancel={() => setChanging(false)} onConfirm={(x, role) => void act(`${who} is now ${ROLE_LABEL[role]}`, () => api.setMemberRole(tenant, x.id, role), () => (setChanging(false), void m.refetch()))} />
-      <RemoveMemberDialog member={removing ? p : null} tenantName={tenantName} busy={busy} onCancel={() => setRemoving(false)} onConfirm={(x) => void act(`Removed ${who}`, () => api.removeMember(tenant, x.id), () => (setRemoving(false), go("/members")))} />
+      <ChangeRoleDialog member={changing ? p : null} self={self} lastOwner={lastOwner} tenantName={tenantName} owner={atLeast(v, "owner")} busy={busy} onCancel={() => setChanging(false)} onConfirm={(x, role) => void act(self ? `You are now ${ROLE_LABEL[role]}` : `${who} is now ${ROLE_LABEL[role]}`, () => api.setMemberRole(tenant, x.id, role), () => (setChanging(false), self ? refreshWhoAmI(tenant) : undefined, void m.refetch(), void all.refetch()))} />
+      <RemoveMemberDialog member={removing ? p : null} self={self} tenantName={tenantName} busy={busy} onCancel={() => setRemoving(false)} onConfirm={(x) => void act(self ? `You left ${tenantName}` : `Removed ${who}`, () => api.removeMember(tenant, x.id), () => (setRemoving(false), self ? refreshWhoAmI(tenant) : undefined, go("/members")))} />
       {revoking && (
         <KeyRevokeConfirm name={revoking.name} busy={busy} onCancel={() => setRevoking(null)} onConfirm={() => void act(`Revoked ${revoking.name}`, () => api.revokeMemberKey(tenant, p.id, revoking.id), () => (setRevoking(null), void keys.refetch()))} />
       )}
