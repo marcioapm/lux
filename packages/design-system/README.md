@@ -479,7 +479,7 @@ Owner column and Cost by member).
 | `RoleBadge({role})`, `ROLES`, `ROLE_LABEL`, `ROLE_DESC`, `roleAtLeast(a, b)`, `isRole` | a tenant role (viewer < member < admin < owner) as a Badge: Owner accent, Admin info, Member neutral, Viewer an outline; its title says what the role may do (`ROLE_DESC`, also a role picker's hint). An unknown role shows its name, neutral. The word is "Member", never "user" |
 | `EmailInput({entries, onChange, classify, id?, label?, placeholder?, hint?, disabled?})` | addresses as chips (below) |
 | `parseEmails(text)`, `classifyEmails(entries, classify)`, `emailCounts(views)`, `inviteButtonText(n)` | EmailInput's parsing, verdicts and counts, for the caller's submit button and tests |
-| `InviteLinkList({links})`, `CopyAllLinks({links})`, `inviteLinksText(links)` | invitation links to send by hand: each address, its link (mono, ellipsized, whole in the title) and a Copy; an optional `note` (an "already invited" Badge) before Copy. Copy all copies `email  link` lines, as `lux invites create` prints |
+| `InviteLinkList({links})`, `CopyAllLinks({links})`, `inviteLinksText(links)`, `breakableEmail(email)` | invitation links to send by hand: each address, its link (mono, ellipsized, whole in the title) and a Copy; an optional `note` (role and status Badges) before Copy. The address is never truncated: it wraps at `@` and `.` (`breakableEmail` puts `<wbr>`s there), so two addresses with the same prefix stay distinct. The list is its own container (`invlinks`): under 480px the note goes on its own line under the address, the link under that, Copy keeps its column. Copy all copies `email  link` lines, as `lux invites create` prints |
 
 Icons: `IconUser` (a person), `IconBot` (a service account).
 

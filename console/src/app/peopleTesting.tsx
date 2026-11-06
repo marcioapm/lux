@@ -29,6 +29,8 @@ export function visibleText(n: Element): string {
   const parts: string[] = [];
   const walk = (x: Node) => {
     if (x.nodeType === 3) parts.push(x.textContent ?? "");
+    // <wbr>: a break opportunity, no text and no boundary.
+    else if (x.nodeName === "WBR") return;
     else {
       parts.push(" ");
       x.childNodes.forEach(walk);

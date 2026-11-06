@@ -1649,44 +1649,75 @@ a.idchip-text:hover {
 }
 
 /* ---------- InviteLinkList ----------
-   Invitation links to send by hand: address, link (mono, ellipsized), Copy. */
+   Invitation links to send by hand: address, link (mono, ellipsized), its
+   note (badges) and Copy. The address is never cut: it wraps at "@" and
+   "." (breakableEmail's <wbr>s, then anywhere). Wide: the note sits
+   between the text and Copy. Narrow (the list under 480px, a phone's
+   dialog): the note goes on its own line under the address, so badges
+   never squeeze it; Copy keeps its column. */
 .invlinks {
   list-style: none;
   margin: 0;
   padding: 0;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
+  container-type: inline-size;
+  container-name: invlinks;
 }
 .invlinks li {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "email note copy"
+    "url   note copy";
   align-items: center;
-  gap: var(--sp-4);
+  column-gap: var(--sp-4);
   padding: var(--sp-4) var(--sp-5);
   min-width: 0;
+  line-height: 1.3;
 }
 .invlinks li + li {
   border-top: 1px solid var(--border-soft);
 }
-.invlinks-text {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-  line-height: 1.3;
-}
 .invlinks-email {
+  grid-area: email;
+  min-width: 0;
   color: var(--fg);
   font-weight: var(--weight-medium);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .invlinks-url {
+  grid-area: url;
+  min-width: 0;
   color: var(--fg-muted);
   font-size: var(--text-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.invlinks-note {
+  grid-area: note;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.invlinks-copy {
+  grid-area: copy;
+  display: flex;
+}
+@container invlinks (max-width: 479px) {
+  .invlinks li {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "email copy"
+      "note  copy"
+      "url   copy";
+    row-gap: var(--sp-1);
+  }
+  .invlinks-note {
+    justify-self: start;
+  }
 }
 
 /* ---------- StatTile ----------

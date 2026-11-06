@@ -1807,6 +1807,16 @@ function PeopleDemo() {
     { email: "marta@acme.dev", url: "https://lux.acme.dev/invite/inv_9Lp3Cx7Ve5" },
     { email: "filipa@acme.dev", url: "https://lux.acme.dev/invite/inv_7Rk2Qm9xPa", note: <Badge tone="info" title="Already invited: this is the same link">already invited</Badge> },
   ];
+  const narrowLinks = ["engineering.alice@acme.dev", "engineering.bob@acme.dev"].map((email, i) => ({
+    email,
+    url: `https://lux.acme.dev/invite/inv_${i ? "2Hs8Kd4Lm1" : "6Wq1Zp3Nb7"}`,
+    note: (
+      <>
+        <RoleBadge role="admin" />
+        <Badge tone="info">renewed</Badge>
+      </>
+    ),
+  }));
   return (
     <Section id="people" title="Avatar, Person, RoleBadge, EmailInput, InviteLinkList" note="Who: a person is a round avatar (photo or initials), a service account a square with the Bot glyph; sm (22px) beside a name in a cell, lg (48px) in a page header. Person is the cell: avatar, name, a sub line; inline for an Owner or Invited by column. RoleBadge: Owner accent, Admin info, Member neutral, Viewer outline, what the role may do in its title. EmailInput: chips carry the address only, state is tone (struck outline = left out, danger = not an email, info glyph = renewed); why is said once, under the box, with one action at most; the hint shows only while empty; the submit button carries the count. InviteLinkList: links to send by hand, each with Copy, and Copy all.">
       <h3 className="sg-h3">Avatar</h3>
@@ -1861,6 +1871,11 @@ function PeopleDemo() {
         <div className="sg-row" style={{ marginTop: 12 }}>
           <CopyAllLinks links={links} />
         </div>
+      </div>
+      <h3 className="sg-h3">InviteLinkList, narrow (a phone's dialog, under 480px)</h3>
+      <p className="muted">The badges take their own line under the address; the address wraps at @ and . and is never cut, so two links with the same prefix still read apart.</p>
+      <div style={{ maxWidth: 300 }}>
+        <InviteLinkList links={narrowLinks} />
       </div>
     </Section>
   );

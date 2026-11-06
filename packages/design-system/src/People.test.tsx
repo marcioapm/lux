@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Avatar, initials } from "./Avatar.tsx";
-import { CopyAllLinks, inviteLinksText, InviteLinkList } from "./InviteLinkList.tsx";
+import { breakableEmail, CopyAllLinks, inviteLinksText, InviteLinkList } from "./InviteLinkList.tsx";
 import { Person, RoleBadge, roleAtLeast } from "./Person.tsx";
 
 test("initials", () => {
@@ -113,6 +113,41 @@ describe("in a DOM", () => {
     expect(rows.map((r) => r.querySelector(".invlinks-url")!.textContent)).toEqual(["https://lux/invite/a", "https://lux/invite/b"]);
     expect(rows[1]!.textContent).toContain("already invited");
     expect(rows.map((r) => r.querySelector("button")!.getAttribute("aria-label"))).toEqual(["Copy link for jorge@acme.dev", "Copy link for filipa@acme.dev"]);
+  });
+
+  // A5: two addresses with the same prefix must read apart on a phone. The
+  // address is whole in the DOM (wrapping at @ and .), the badges are out of
+  // its line, and the stylesheet never ellipsizes it; narrow, the badges
+  // take their own row under it.
+  test("InviteLinkList: the address is whole, wraps instead of truncating; narrow, badges go under it", async () => {
+    const emails = ["engineering.alice@acme.dev", "engineering.bob@acme.dev"];
+    const el = await render(<InviteLinkList links={emails.map((email, i) => ({ email, url: `https://lux.example.com/invite/${i}`, note: <><span className="badge">Admin</span><span className="badge">renewed</span></> }))} />);
+    const rows = [...el.querySelectorAll("li")];
+    for (const [i, r] of rows.entries()) {
+      const e = r.querySelector(".invlinks-email")!;
+      expect(e.textContent).toBe(emails[i]!);
+      expect(e.getAttribute("title")).toBe(emails[i]!);
+      // Break opportunities: after "@", before each ".".
+      expect(e.querySelectorAll("wbr").length).toBe(3);
+      expect(e.querySelector(".badge")).toBeNull();
+      expect(r.querySelector(".invlinks-note")!.textContent).toBe("Adminrenewed");
+      expect(r.querySelector(".invlinks-copy button")).not.toBeNull();
+    }
+    const css = await Bun.file(new URL("./components.css", import.meta.url)).text();
+    const block = (sel: string, from = css) => from.slice(from.indexOf(`${sel} {`), from.indexOf("}", from.indexOf(`${sel} {`)));
+    const email = block(".invlinks-email");
+    expect(email).toContain("overflow-wrap: anywhere");
+    expect(email).not.toMatch(/ellipsis|nowrap|overflow: hidden/);
+    expect(block(".invlinks-url")).toContain("text-overflow: ellipsis");
+    const narrow = css.slice(css.indexOf("@container invlinks (max-width: 479px)"));
+    expect(narrow.length).toBeLessThan(css.length);
+    expect(block(".invlinks li", narrow).replace(/\s+/g, " ")).toContain(`"email copy" "note copy" "url copy"`);
+  });
+
+  test("breakableEmail: the same text, breaks after @ and before .", async () => {
+    const el = await render(<span>{breakableEmail("a.b@c.dev")}</span>);
+    expect(el.textContent).toBe("a.b@c.dev");
+    expect(el.innerHTML).toBe("<span>a<wbr>.b@<wbr>c<wbr>.dev</span>");
   });
 
   // The rendered control, not just inviteLinksText: a CopyAllLinks that put
