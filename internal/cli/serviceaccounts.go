@@ -64,3 +64,13 @@ func (a *app) tenantCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&owner, "owner", "", "first owner's email")
 	return cmd
 }
+
+// tenantSetOwnerCmd: POST /v1/members?tenant=<tenant> {email, role: owner,
+// upsert: true}. Operators only: a member becomes owner, anyone else joins
+// as one; no invitation.
+func (a *app) tenantSetOwnerCmd() *cobra.Command {
+	return &cobra.Command{Use: "set-owner <tenant> <email>", Short: "Make someone an owner of a tenant (operators only): a member is promoted, anyone else added", Args: cobra.ExactArgs(2), RunE: func(c *cobra.Command, args []string) error {
+		a.c.Tenant = args[0]
+		return a.peopleRequest(c, "POST", "/v1/members", map[string]any{"email": args[1], "role": "owner", "upsert": true}, "")
+	}}
+}

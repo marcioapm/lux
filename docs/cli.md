@@ -17,6 +17,7 @@ lux keys revoke <id|prefix>
 lux members ls
 lux members add person@example.com --role member # operator only
 lux members set-role person@example.com admin
+lux members set-role me admin                    # your own role (owners while another owner exists; operators always)
 lux members rm person@example.com
 lux invites create one@example.com two@example.com --role member
 lux invites ls --status pending
@@ -36,7 +37,14 @@ lux ls --owner user:usr_…,sa:sa_… # any of several owners
 lux costs --by member
 lux costs --by owner
 lux tenants create team --owner first@example.com # operator
+lux tenants set-owner team person@example.com     # operator: a member becomes Owner, anyone else joins as Owner
 ```
+
+`members set-role me` resolves you from `lux whoami` (a service account's
+key, or a platform operator key with no person, has no `me`: name the
+member by email). `tenants set-owner` is one call, `POST /v1/members
+{email, role: "owner", upsert: true}` in that tenant: no invitation, so it
+works in key console mode too; existing owners stay owners.
 
 Viewers read everything but cannot submit, input or open terminals. Members
 act on their own Runs and their service accounts' Runs; Admins act on all
