@@ -152,3 +152,57 @@ test("canAct: owners, service account owners and admins act; viewers never", () 
   expect(canAct(c("viewer"), "billing-backoff-418")).toBe(false);
   expect(canAct(c("admin"), "billing-backoff-418")).toBe(true);
 });
+
+// The mock against luxd's own JSON: internal/server/shapes_test.go writes the
+// keys each type marshals (zero: always sent; filled: all it may send) to
+// api/testdata/shapes.json, failing when stale. Every object the mock sends
+// must carry the zero keys and nothing outside filled.
+test("mock shapes match luxd's (api/testdata/shapes.json from shapes_test.go)", async () => {
+  const shapes = (await import("./api/testdata/shapes.json")).default as Record<string, { zero: string[]; filled: string[] }>;
+  resetPeople();
+  const body = async (role: string, path: string, init?: RequestInit) => (await as(role, path, init))!.body as Record<string, unknown>;
+  const samples: [string, unknown][] = [];
+  const add = (type: string, ...xs: unknown[]) => xs.forEach((x) => samples.push([type, x]));
+  const me = await body("member", "/v1/me");
+  add("Me", me);
+  add("MembershipRef", ...(me.memberships as unknown[]));
+  const members = (await body("admin", "/v1/members")).members as Record<string, unknown>[];
+  add("Member", ...members);
+  add("Member", ...((await body("member", "/v1/members")).members as unknown[]));
+  const sas = (await body("admin", "/v1/service-accounts")).serviceAccounts as Record<string, unknown>[];
+  add("ServiceAccount", ...sas);
+  add("Person", ...sas.flatMap((s) => [s.owner, s.createdBy]).filter(Boolean));
+  add("ApiKey", ...((await body("member", "/v1/me/keys")).keys as unknown[]));
+  add("ApiKey", ...((await body("admin", "/v1/service-accounts/ci-review-bot/keys")).keys as unknown[]));
+  const invs = (await body("admin", "/v1/invitations?status=all")).invitations as Record<string, unknown>[];
+  add("Invitation", ...invs);
+  add("Person", ...invs.flatMap((i) => [i.invitedBy, i.revokedBy]).filter(Boolean));
+  const created = (await as("member", "/v1/me/keys", { method: "POST", body: JSON.stringify({ name: "shape" }) }))!.body as Record<string, unknown>;
+  const { apiKey: _secret, ...createdKey } = created;
+  add("ApiKey", createdKey);
+  const costs = (await body("viewer", "/v1/costs?by=member&runs=true")).totals as Record<string, unknown>[];
+  add("CostSummaryRow", ...costs);
+  add("Owner", ...costs.map((r) => r.owner).filter(Boolean));
+  const req = (r: string) => new Request("http://mock/v1/whoami", { headers: { authorization: `Bearer luxk_mock_${r}` } });
+  for (const r of ["viewer", "operator", "sa", "readonly"]) add("Whoami", whoamiFor(callerOf(req(r), new URL("http://mock/v1/whoami"), false)!, "cloudflare-access", null));
+  const tenant = { id: "ten_acme", name: "acme", retentionDays: 30, expireAfterDays: 90, activeRuns: 0, runs: 12, hosts: 2, storedBytes: 0, createdAt: "2026-01-01T00:00:00Z", ...tenantPeople("ten_acme") };
+  add("Tenant", tenant);
+  add("TenantOwner", ...tenant.owners);
+  resetPeople();
+
+  const problems: string[] = [];
+  // A key outside zero is one luxd omits when empty (omitempty): sent empty, it is not luxd's JSON.
+  const empty = (v: unknown) => v === "" || v === 0 || v === false || v == null || (Array.isArray(v) && v.length === 0) || (typeof v === "object" && v != null && !Array.isArray(v) && Object.keys(v).length === 0);
+  for (const [type, x] of samples) {
+    const shape = shapes[type];
+    if (!shape) throw new Error(`no shape for ${type} in shapes.json`);
+    const keys = Object.keys(x as object);
+    const missing = shape.zero.filter((k) => !keys.includes(k));
+    const extra = keys.filter((k) => !shape.filled.includes(k));
+    const omitted = keys.filter((k) => !shape.zero.includes(k) && empty((x as Record<string, unknown>)[k]));
+    if (missing.length || extra.length || omitted.length) problems.push(`${type}: missing ${missing.join(",") || "-"}; not luxd's ${extra.join(",") || "-"}; empty where luxd omits ${omitted.join(",") || "-"}: ${JSON.stringify(x).slice(0, 160)}`);
+  }
+  expect(problems).toEqual([]);
+  // Every type the fixture has is sampled at least once.
+  expect(Object.keys(shapes).filter((t) => !samples.some(([s]) => s === t))).toEqual([]);
+});
