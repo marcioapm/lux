@@ -7,6 +7,13 @@
 -- style, deduplicated per tenant), its role from the key's scopes (admin →
 -- admin, run → member, else viewer), no owner. The key's hash and its
 -- effective scopes stay what they were.
+--
+-- The Run owners' UPDATE (below) rewrites every Run submitted by an email
+-- or a key in this one transaction and holds their row locks, live Runs'
+-- included, until it commits: writes to them (runner reports, and the
+-- heartbeats queued behind them) wait. Its duration (about 17-19 s and
+-- 1.2 GB of WAL per million Runs measured) and the stop → migrate → start
+-- procedure above 500,000 such Runs: docs/operations.md (upgrading, step 2).
 
 CREATE FUNCTION lux_sa_name(tenant text, raw text) RETURNS text
 LANGUAGE plpgsql AS $$

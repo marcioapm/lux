@@ -54,6 +54,10 @@ become its Admins; other distinct emails that submitted Runs there become
 Members. Nobody else gains membership. Tenants initially have no Owner;
 an operator assigns Owners directly or by invitation. Removed members'
 Runs keep running and stay attributed; their tenant keys are revoked.
+093 sets every Run's owner in one transaction, holding writes to those
+Runs (live ones' runner reports included) until it commits: count them
+and, above 500,000, stop every luxd for the migration
+([Operations, upgrading](operations.md#upgrading), step 2).
 
 Previews deliberately keep their older gate: verified Access users need no
 membership for default-tenant previews; other tenants require membership
