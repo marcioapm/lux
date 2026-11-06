@@ -437,9 +437,8 @@ func (s *Server) attachServer(ctx context.Context, in *attachInput) (*tenantServ
 		if err != nil {
 			return err
 		}
-		// The source as locked: checkAccess judged the server by the Run
-		// it was on before the lock, and a detach meanwhile makes it the
-		// tenant's (admins only).
+		// The source as locked: a move or detach since checkAccess must be
+		// judged by its current Run or its original creator, respectively.
 		if err := lockedServerActor(ctx, tx, p, v); err != nil {
 			return err
 		}
@@ -911,7 +910,9 @@ func (s *Server) serverRoutes(api huma.API) {
 		Summary: "Create a server",
 		Description: "A named URL that reaches a port in a Run, independent of Runs: attach it to one (runId, or POST .../attach), " +
 			"detach it, and it outlives them (lifetime owner). With wake request, a signed-in request while no running Run serves it " +
-			"emits server.wake_requested on GET /v1/events for its owner, once per wake; lux never starts a Run itself.",
+			"emits server.wake_requested on GET /v1/events for its owner, once per wake; lux never starts a Run itself. " +
+			"Members may create unattached servers, owned by their creator principal (including a service account and its owning member). " +
+			"With runId, permission on that Run is required; while attached, only Run-based authorization applies. Viewers and read-only keys cannot create servers.",
 		DefaultStatus: http.StatusCreated,
 		Errors:        []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", forTenant(s.createServer))

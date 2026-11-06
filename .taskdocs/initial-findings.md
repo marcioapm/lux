@@ -1,0 +1,9 @@
+# Initial findings (2026-11-06)
+
+Base and starting HEAD: 97427c80a0054ecf388cfa29095904848187f124; clean checkout. No tracked or checkout AGENTS.md/CONTRIBUTING guidance found. Read Makefile, docs/security.md and docs/development.md, ownership.go, server mutation/attachment paths, people fixture, and people migration.
+
+Confirmed blocker: requireServerRunActor rejects member standalone creation; both preflight and lockedServerActor reject all unattached servers. run_servers.owner already persists Principal.Actor() (email or key ID), and detach/attach do not rewrite it. No migration is needed.
+
+Chosen approach: resolve existing creator attribution in the authorization transaction: email -> tenant membership's user; key ID -> retained api_keys row explicitly bound to server tenant -> current user_id or service_account_id and tenant-bound SA owning user. Reuse the existing principal/run-owner identity comparison, never display names or key secrets, and never filter revoked keys from attribution. Unresolved/platform actors remain admin-only. Attached servers continue to authorize exclusively through their current Run. Preflight loads the server and calls the exact same checker as locked mutation. Preserve existing lock order and retry; no new locks. Member-capable standalone creation only; unchanged scopes/read-only fences.
+
+Tests: real-DB HTTP lifecycle for member/SA, unrelated principals, immutable attribution, retained/reassigned keys and Access identity, and deterministic lock-blocked races. First run new regression against base; then implement and exercise creator-guard/create-allowance mutants. Local Postgres uses Makefile DSN postgres://lux:lux@127.0.0.1:55432/postgres?sslmode=disable. No production or credential access. Canonical OpenAPI generator is go run ./cmd/luxd openapi.
