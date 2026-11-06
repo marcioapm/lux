@@ -140,10 +140,10 @@ test("sorted by Expiry, never is the longest", async () => {
   }
 });
 
-// GET /v1/tenants as luxd answers it (TestTenantPeopleContract): owners are names (else the email), with the counts.
+// GET /v1/tenants as luxd answers it (TestTenantPeopleContract): owners are {id, name, email}, with the counts.
 test("Owners and Members come from owners/ownersCount/membersCount; ownersCount 0 is No owner", async () => {
   const p = await render([
-    { ...tenant("acme", 90), owners: ["owner person", "zed@example.com"], ownersCount: 2, membersCount: 7 },
+    { ...tenant("acme", 90), owners: [{ id: "usr_owner", name: "owner person", email: "olive@example.com" }, { id: "usr_noname", name: "", email: "zed@example.com" }], ownersCount: 2, membersCount: 7 },
     { ...tenant("bare", 90), owners: [], ownersCount: 0, membersCount: 0 },
     tenant("old", 90),
   ]);
@@ -152,6 +152,12 @@ test("Owners and Members come from owners/ownersCount/membersCount; ownersCount 
     expect(rows.find((r) => r.Tenant === "acme")).toMatchObject({ Owners: "owner person, zed@example.com", Members: "7" });
     expect(rows.find((r) => r.Tenant === "bare")).toMatchObject({ Owners: "No owner", Members: "0" });
     expect(rows.find((r) => r.Tenant === "old")).toMatchObject({ Owners: "–", Members: "–" });
+    // Each owner links to their page in that tenant (not the selected one).
+    const links = [...document.querySelectorAll<HTMLAnchorElement>("tbody a")].map((a) => [a.textContent, a.getAttribute("href")]);
+    expect(links).toEqual([
+      ["owner person", "/members/usr_owner?tenant=acme"],
+      ["zed@example.com", "/members/usr_noname?tenant=acme"],
+    ]);
   } finally {
     await p.done();
   }

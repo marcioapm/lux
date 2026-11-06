@@ -919,6 +919,12 @@ export interface NewTenantResult {
   invitation?: Invitation;
 }
 
+export interface TenantOwner {
+  id: string;
+  name: string;
+  email: string;
+}
+
 export interface Tenant {
   id: string;
   name: string;
@@ -933,8 +939,8 @@ export interface Tenant {
   hosts: number;
   storedBytes: number;
   createdAt: string;
-  /** The owners' display names (a name, else the email), by email; absent from an older luxd. */
-  owners?: string[] | null;
+  /** The owners, by email: a person each (name empty when they have none: show the email). Absent from an older luxd. */
+  owners?: TenantOwner[] | null;
   /** How many owners; 0: "No owner". Absent from an older luxd. */
   ownersCount?: number;
   /** How many people are members. */

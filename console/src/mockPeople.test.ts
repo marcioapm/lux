@@ -3,9 +3,9 @@ import { callerOf, canAct, ownerFilter, resetPeople, whoamiFor } from "../mockPe
 import { createTenant, peopleApi, tenantPeople } from "../mockPeopleApi.ts";
 
 // GET/POST /v1/tenants as luxd answers (internal/server/contract_test.go TestTenantPeopleContract).
-test("tenants: owners are names by email with ownersCount/membersCount; create answers {id, tenantId, name, invitation?}", () => {
+test("tenants: owners are {id, name, email} by email with ownersCount/membersCount; create answers {id, tenantId, name, invitation?}", () => {
   resetPeople();
-  expect(tenantPeople("ten_acme")).toEqual({ ownersCount: 2, owners: ["Eva Moreira", "Márcio Martins"], membersCount: 6 });
+  expect(tenantPeople("ten_acme")).toEqual({ ownersCount: 2, owners: [{ id: "usr_eva", name: "Eva Moreira", email: "eva@acme.dev" }, { id: "usr_mar", name: "Márcio Martins", email: "marcio@lux.dev" }], membersCount: 6 });
   expect(tenantPeople("ten_initech")).toEqual({ ownersCount: 0, owners: [], membersCount: 1 });
   const op = callerOf(new Request("http://mock/", { headers: { authorization: "Bearer luxk_mock_operator" } }), new URL("http://mock/"), false)!;
   const r = createTenant("newco", "CTO@newco.dev", op, "http://mock");

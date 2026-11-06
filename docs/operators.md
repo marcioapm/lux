@@ -26,7 +26,8 @@ key named exactly after an operator email becomes that person's key;
 other operator keys stay personless platform principals.
 
 `GET /v1/people` lists people and their memberships, key counts and last
-seen. Tenant lists include owner names/counts and member counts.
+seen. Tenant lists include their owners (`owners: [{id, name, email}]`,
+`ownersCount`) and member counts.
 Operators can also belong to tenants; Runs submitted as a person are
 attributed to that person.
 

@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
 import { Badge, Button, Dialog, InviteLinkList, Card, formatBytes, formatCount, formatDuration, IdChip, PageHeader, Table, type Column, RelativeTime } from "@lux/design-system";
 import { api, errorText, useQuery, type Invitation, type Tenant } from "../../api/index.ts";
-import { go } from "../router.tsx";
+import { go, linkTo } from "../router.tsx";
 import { useViewer } from "../identity.ts";
 import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, UsageBar } from "./common.tsx";
+import { memberPath } from "./peopleParts.tsx";
 
 // expiry: how long a stopped, lost, failed or succeeded Run of the tenant may rest
 // before it is terminated; 0 is never.
@@ -12,11 +13,22 @@ export function expiry(days: number): string {
   return days === 0 ? "never" : formatDuration(days * 86_400);
 }
 
-/** The Owners cell: the owners' names as luxd sends them; "No owner" at ownersCount 0; – from an older luxd. */
+/** The Owners cell: each owner's name (else email), linked to their page in that tenant; "No owner" at ownersCount 0; – from an older luxd. */
 export function ownersCell(t: Tenant) {
   if (t.ownersCount == null) return "–";
   if (t.ownersCount === 0) return <Badge tone="warn">No owner</Badge>;
-  return (t.owners ?? []).join(", ") || String(t.ownersCount);
+  const owners = t.owners ?? [];
+  if (owners.length === 0) return String(t.ownersCount);
+  return (
+    <span className="tenant-owners">
+      {owners.map((o, i) => (
+        <span key={o.id}>
+          {i > 0 && ", "}
+          <a {...linkTo(`${memberPath(o.id)}?tenant=${encodeURIComponent(t.id)}`)} title={o.email}>{o.name || o.email}</a>
+        </span>
+      ))}
+    </span>
+  );
 }
 
 export function Tenants() {

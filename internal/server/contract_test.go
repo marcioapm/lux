@@ -149,8 +149,8 @@ func TestOperatorMemberKeepsOperator(t *testing.T) {
 	}
 }
 
-// GET /v1/tenants: owners are the owners' display names (name, else
-// email) by email, with ownersCount and membersCount; POST /v1/tenants
+// GET /v1/tenants: owners are the owners as {id, name, email} (name empty
+// when the person has none) by email, with ownersCount and membersCount; POST /v1/tenants
 // answers {id, tenantId, name, invitation?}.
 func TestTenantPeopleContract(t *testing.T) {
 	f, _ := accessFixture(t)
@@ -171,8 +171,12 @@ func TestTenantPeopleContract(t *testing.T) {
 	if t1["ownersCount"] != float64(2) || t1["membersCount"] != float64(7) {
 		t.Fatalf("t1 counts: %v", t1)
 	}
-	if got := t1["owners"]; !reflect.DeepEqual(got, []any{"owner person", "zed@example.com"}) {
-		t.Fatalf("t1 owners (names, else email, by email): %#v", got)
+	want := []any{
+		map[string]any{"id": "usr_owner", "name": "owner person", "email": "olive@example.com"},
+		map[string]any{"id": "usr_noname", "name": "", "email": "zed@example.com"},
+	}
+	if got := t1["owners"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("t1 owners ({id, name, email}, by email): %#v", got)
 	}
 	if t2["ownersCount"] != float64(0) || !reflect.DeepEqual(t2["owners"], []any{}) {
 		t.Fatalf("t2 has no owner: %v", t2)

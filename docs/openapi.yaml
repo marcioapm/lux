@@ -4682,8 +4682,9 @@ components:
         name:
           type: string
         owners:
+          description: The tenant's owners, by email.
           items:
-            type: string
+            $ref: "#/components/schemas/TenantOwner"
           type:
             - array
             - "null"
@@ -4710,6 +4711,16 @@ components:
           type:
             - array
             - "null"
+      type: object
+    TenantOwner:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
       type: object
     TenantServer:
       additionalProperties: false

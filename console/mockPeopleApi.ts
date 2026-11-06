@@ -320,7 +320,7 @@ export function tenantPeople(id: string) {
   const owners = MEMBERSHIPS.filter((m) => m.tenantId === id && m.role === "owner")
     .map((m) => USERS.find((u) => u.id === m.userId)!)
     .sort((a, b) => a.email.localeCompare(b.email));
-  return { ownersCount: owners.length, owners: owners.map((u) => u.name || u.email), membersCount: MEMBERSHIPS.filter((m) => m.tenantId === id).length };
+  return { ownersCount: owners.length, owners: owners.map((u) => ({ id: u.id, name: u.name, email: u.email })), membersCount: MEMBERSHIPS.filter((m) => m.tenantId === id).length };
 }
 
 /** POST /v1/tenants (invitation_accept.go): {id, tenantId, name}, and its first owner's invitation when asked. */
