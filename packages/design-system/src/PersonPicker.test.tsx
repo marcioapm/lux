@@ -67,13 +67,13 @@ describe("in a DOM", () => {
     expect(options(el).length).toBe(3);
     await type(input, "bru");
     expect(options(el).map((o) => o.querySelector(".person-name")!.textContent)).toEqual(["Bruno Costa"]);
-    await act(async () => options(el)[0]!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+    await act(async () => options(el)[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(last).toBe("bruno@acme.dev");
     await type(input, "eva");
     const eva = options(el)[0]!;
     expect(eva.getAttribute("aria-disabled")).toBe("true");
     expect(eva.textContent).toContain("already the owner");
-    await act(async () => eva.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+    await act(async () => eva.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(last).toBe("eva");
   });
 
@@ -119,10 +119,86 @@ describe("in a DOM", () => {
     const inputs = el.querySelectorAll("input");
     await type(inputs[0]!, "bru");
     const first = options(el)[0]!.id;
-    await act(async () => options(el)[0]!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" })));
+    await act(async () => {
+      const option = options(el)[0]!;
+      option.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      expect(last).toBe("bru");
+      option.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "touch" }));
+      option.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     expect(last).toBe("bruno@acme.dev");
     await type(inputs[1]!, "bru");
     expect(options(el)[0]!.id).not.toBe(first);
+  });
+
+  test("exact overlap beyond limit wins before filtering; disabled exact has no active selection", async () => {
+    const people = Array.from({ length: 10 }, (_, i) => ({ email: `jo${i}ann@example.com`, name: "ann@example.com overlap" }));
+    people.push({ email: "ann@example.com", name: "Exact Ann" });
+    function Exact({ disabled = false }: { disabled?: boolean }) {
+      const [value, setValue] = useState("");
+      last = value;
+      return <PersonPicker people={people.map((p) => ({ ...p, disabled: disabled && p.name === "Exact Ann" ? "not eligible" : undefined }))} value={value} onChange={setValue} freeText={false} />;
+    }
+    const el = await render(<Exact />);
+    const input = el.querySelector("input")!;
+    await type(input, "  ANN@EXAMPLE.COM  ");
+    expect(options(el)).toHaveLength(1);
+    expect(options(el)[0]!.textContent).toContain("Exact Ann");
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(last).toBe("ann@example.com");
+    const disabled = await render(<Exact disabled />);
+    const di = disabled.querySelector("input")!;
+    await type(di, "  ANN@EXAMPLE.COM  ");
+    expect(options(disabled)).toHaveLength(1);
+    expect(options(disabled)[0]!.getAttribute("aria-selected")).toBe("false");
+    expect(di.hasAttribute("aria-activedescendant")).toBe(false);
+    expect(di.getAttribute("aria-invalid")).toBe("true");
+    await act(async () => di.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(last).toBe("  ANN@EXAMPLE.COM  ");
+  });
+
+  test("swipes and cancelled gestures do not pick, while completed tap does", async () => {
+    const el = await render(<Harness />);
+    const input = el.querySelector("input")!;
+    await type(input, "bru");
+    for (const event of ["pointermove", "pointercancel"]) {
+      await act(async () => {
+        const option = options(el)[0]!;
+        option.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", clientY: 100 }));
+        option.dispatchEvent(new PointerEvent(event, { bubbles: true, pointerType: "touch", clientY: 30 }));
+        option.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "touch", clientY: 30 }));
+        option.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(last).toBe("bru");
+      expect(options(el)).toHaveLength(1);
+    }
+    await act(async () => {
+      const option = options(el)[0]!;
+      option.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      option.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "touch" }));
+      option.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(last).toBe("bruno@acme.dev");
+  });
+
+  test("dialog focus transitions retain layout through one confirm click; generic outside focus closes", async () => {
+    let confirms = 0;
+    const el = await render(<><Dialog open title="Pick" onConfirm={() => { confirms++; }} onCancel={() => {}}><Harness /></Dialog><button>Outside</button></>);
+    const input = el.querySelector("input")!;
+    await type(input, "bruno@acme.dev");
+    const confirm = el.querySelector(".dialog-actions button:last-child") as HTMLButtonElement ?? el.querySelector("dialog button:last-child") as HTMLButtonElement;
+    expect(confirm).not.toBeNull();
+    await act(async () => confirm.focus());
+    expect(options(el)).toHaveLength(1);
+    await act(async () => confirm.click());
+    expect(confirms).toBe(1);
+    expect(last).toBe("bruno@acme.dev");
+    await act(async () => (el.lastElementChild as HTMLButtonElement).focus());
+    expect(options(el)).toHaveLength(0);
+    const generic = await render(<><Harness /><button>Next</button></>);
+    await type(generic.querySelector("input")!, "bru");
+    await act(async () => generic.querySelector("button")!.focus());
+    expect(options(generic)).toHaveLength(0);
   });
 
   test("Escape consumes only the first key inside Dialog", async () => {

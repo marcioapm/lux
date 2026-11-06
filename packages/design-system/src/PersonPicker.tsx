@@ -46,9 +46,36 @@ export function PersonPicker({ people, value, onChange, freeText = true, label, 
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
+  const root = useRef<HTMLDivElement>(null);
+  const gesture = useRef<{ x: number; y: number; cancelled: boolean } | null>(null);
   const q = value.trim().toLowerCase();
-  const exact = people.find((p) => p.email.toLowerCase() === q);
-  const matches = useMemo(() => people.filter((p) => !q || p.email.toLowerCase().includes(q) || (p.name ?? "").toLowerCase().includes(q)).slice(0, limit), [people, q, limit]);
+  const exact = people.find((p) => p.email.trim().toLowerCase() === q);
+  const matches = useMemo(() => exact ? [exact] : people.filter((p) => !q || p.email.toLowerCase().includes(q) || (p.name ?? "").toLowerCase().includes(q)).slice(0, limit), [people, q, limit, exact]);
+  // A dialog is the focus boundary: tabbing/clicking its confirmation control
+  // must not remove this in-flow list between pointerdown and click. Generic
+  // pickers use their root. Outside clicks close only after target dispatch.
+  useEffect(() => {
+    if (!open) return;
+    const boundary = root.current?.closest("dialog") ?? root.current;
+    const inside = (target: EventTarget | null) => target instanceof Node && boundary?.contains(target);
+    const focus = (e: FocusEvent) => { if (!inside(e.target)) setOpen(false); };
+    const click = (e: MouseEvent) => { if (!inside(e.target)) setOpen(false); };
+    const key = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && inside(e.target)) {
+        e.preventDefault();
+        e.stopPropagation();
+        setOpen(false);
+      }
+    };
+    document.addEventListener("focusin", focus);
+    document.addEventListener("click", click);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("focusin", focus);
+      document.removeEventListener("click", click);
+      document.removeEventListener("keydown", key);
+    };
+  }, [open]);
   const list = useRef<HTMLUListElement>(null);
   useEffect(() => {
     if (open) list.current?.children[active]?.scrollIntoView?.({ block: "nearest" });
@@ -76,10 +103,10 @@ export function PersonPicker({ people, value, onChange, freeText = true, label, 
       setOpen(false);
     }
   };
-  const invalid = value.trim() !== "" && (freeText ? !isEmail(value) : !exact);
+  const invalid = value.trim() !== "" && (freeText ? !isEmail(value) || !!exact?.disabled : !exact || !!exact.disabled);
   const shown = open && matches.length > 0;
   return (
-    <div className="field person-picker">
+    <div ref={root} className="field person-picker">
       {label && (
         <label className="field-label" htmlFor={id}>
           {label}
@@ -96,7 +123,7 @@ export function PersonPicker({ people, value, onChange, freeText = true, label, 
           aria-expanded={shown}
           aria-controls={`${id}-list`}
           aria-autocomplete="list"
-          aria-activedescendant={shown && matches[active] ? `${id}-option-${encodeURIComponent(matches[active]!.email)}` : undefined}
+          aria-activedescendant={shown && matches[active] && !matches[active]!.disabled ? `${id}-option-${encodeURIComponent(matches[active]!.email)}` : undefined}
           aria-describedby={invalid || hint ? `${id}-hint` : undefined}
           aria-invalid={invalid || undefined}
           autoComplete="off"
@@ -110,7 +137,6 @@ export function PersonPicker({ people, value, onChange, freeText = true, label, 
             setActive(0);
           }}
           onFocus={() => setOpen(true)}
-          onBlur={() => setOpen(false)}
           onKeyDown={onKey}
         />
         {shown && (
@@ -120,18 +146,25 @@ export function PersonPicker({ people, value, onChange, freeText = true, label, 
                 key={p.email}
                 role="option"
                 id={`${id}-option-${encodeURIComponent(p.email)}`}
-                aria-selected={i === active}
+                aria-selected={i === active && !p.disabled}
                 aria-disabled={p.disabled ? true : undefined}
                 title={p.disabled}
                 className={["select-opt", i === active ? "is-active" : "", p.disabled ? "is-disabled" : ""].join(" ").trim()}
-                // mousedown, not click: the input's blur would close the list first.
+                // Only a completed click/tap commits. Do not prevent touch
+                // pointerdown: the browser must remain free to scroll the list.
                 onPointerDown={(e) => {
-                  e.preventDefault();
-                  pick(p);
+                  gesture.current = { x: e.clientX, y: e.clientY, cancelled: false };
                 }}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  pick(p);
+                onPointerMove={(e) => {
+                  const g = gesture.current;
+                  if (g && (e.clientX !== g.x || e.clientY !== g.y)) g.cancelled = true;
+                }}
+                onPointerCancel={() => { if (gesture.current) gesture.current.cancelled = true; }}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  const cancelled = gesture.current?.cancelled;
+                  gesture.current = null;
+                  if (!cancelled) pick(p);
                 }}
                 onMouseEnter={() => setActive(i)}
               >
