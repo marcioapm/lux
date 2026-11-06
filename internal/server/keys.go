@@ -179,7 +179,7 @@ type keySpec struct {
 func insertKey(ctx context.Context, tx pgx.Tx, p Principal, k keySpec) (NewApiKey, error) {
 	var out NewApiKey
 	if p.ReadOnly {
-		return out, errf(403, "forbidden", "this key is read-only")
+		return out, errReadOnly()
 	}
 	if err := checkKeyName(k.name); err != nil {
 		return out, err
@@ -201,10 +201,7 @@ func insertKey(ctx context.Context, tx pgx.Tx, p Principal, k keySpec) (NewApiKe
 	out.Key = secret
 	out.ID, out.Name, out.ReadOnly, out.ExpiresAt = ids.New(ids.APIKey), strings.TrimSpace(k.name), k.readOnly, k.expires
 	out.Prefix = secret[:len(k.prefix)+5]
-	var by *string
-	if p.UserID != "" {
-		by = &p.UserID
-	}
+	by := p.userRef()
 	err := tx.QueryRow(ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes, `+k.col+`, read_only, expires_at, created_by, prefix)
 		VALUES ($1, $2, $3, $4, '{}', $5, $6, $7, $8, $9) RETURNING created_at`,
 		out.ID, p.TenantID, out.Name, ids.Hash(secret), k.owner, k.readOnly, k.expires, by, out.Prefix).Scan(&out.CreatedAt)
@@ -249,7 +246,7 @@ func findKey(ctx context.Context, tx pgx.Tx, ref, where string, args ...any) (st
 func (s *Server) renameMyKey(ctx context.Context, in *renameKeyInput) (*keyOutput, error) {
 	p := principal(ctx)
 	if p.ReadOnly {
-		return nil, errf(403, "forbidden", "this key is read-only")
+		return nil, errReadOnly()
 	}
 	if err := checkKeyName(in.Body.Name); err != nil {
 		return nil, err
@@ -275,7 +272,7 @@ func (s *Server) renameMyKey(ctx context.Context, in *renameKeyInput) (*keyOutpu
 func (s *Server) revokeMyKey(ctx context.Context, in *KeyPath) (*struct{}, error) {
 	p := principal(ctx)
 	if p.ReadOnly {
-		return nil, errf(403, "forbidden", "this key is read-only")
+		return nil, errReadOnly()
 	}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		id, err := findKey(ctx, tx, in.Key, `k.user_id = $1 AND k.tenant_id = $2`, p.UserID, p.TenantID)

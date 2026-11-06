@@ -36,10 +36,7 @@ func (s *Server) changeInvitation(ctx context.Context, id string, revoke bool) (
 		if v.AcceptedAt != nil || v.RevokedAt != nil {
 			return errf(410, "invitation_unusable", "this invitation can't be used")
 		}
-		var by *string
-		if p.UserID != "" {
-			by = &p.UserID
-		}
+		by := p.userRef()
 		typ := "invitation.renewed"
 		if revoke {
 			_, err = tx.Exec(ctx, `UPDATE invitations SET revoked_at=now(),revoked_by=$2 WHERE id=$1`, v.ID, by)

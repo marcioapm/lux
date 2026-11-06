@@ -201,10 +201,7 @@ func (s *Server) inviteOne(ctx context.Context, tx pgx.Tx, p Principal, email, n
 		return res, err
 	}
 	var id string
-	var by *string
-	if p.UserID != "" {
-		by = &p.UserID
-	}
+	by := p.userRef()
 	if len(list) > 0 {
 		v := list[0]
 		id = v.ID

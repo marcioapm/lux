@@ -303,7 +303,7 @@ func (s *Server) requireKey(scope string) func(huma.Context, func(huma.Context))
 			p, err = s.operatorScope(ctx, p)
 		}
 		if err == nil && p.ReadOnly && ctx.Method() != http.MethodGet && ctx.Method() != http.MethodHead {
-			err = errf(403, "forbidden", "this key is read-only")
+			err = errReadOnly()
 		}
 		if err == nil {
 			err = s.checkAccess(ctx, p)

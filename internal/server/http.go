@@ -59,6 +59,15 @@ func (p Principal) Actor() string {
 	return p.KeyID
 }
 
+// userRef is the person's id for a by column: nil for a service account's
+// or an operator key with no person.
+func (p Principal) userRef() *string {
+	if p.UserID == "" {
+		return nil
+	}
+	return &p.UserID
+}
+
 // scopeSignin is the pseudo-scope of the routes any authenticated caller
 // may use, a person in no tenant included (their own profile, their
 // invitations).
@@ -127,6 +136,8 @@ func errf(status int, code, f string, a ...any) *HTTPError {
 }
 
 var errNotFound = errf(http.StatusNotFound, "not_found", "not found")
+
+func errReadOnly() error { return errf(http.StatusForbidden, "forbidden", "this key is read-only") }
 
 type handler func(w http.ResponseWriter, r *http.Request) error
 
@@ -260,7 +271,7 @@ func (s *Server) authKey(ctx context.Context, key, scope string) (Principal, err
 	}
 	if !p.Can(scope) {
 		if p.ReadOnly {
-			return p, errf(http.StatusForbidden, "forbidden", "this key is read-only")
+			return p, errReadOnly()
 		}
 		return p, errf(http.StatusForbidden, "forbidden", "this key lacks the %q scope", scope)
 	}
