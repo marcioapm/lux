@@ -238,6 +238,30 @@ components:
             - array
             - "null"
       type: object
+    ConvertServiceAccountInput:
+      additionalProperties: false
+      properties:
+        email:
+          description: The member whose personal keys they become, by email (or user id).
+          type: string
+      required:
+        - email
+      type: object
+    ConvertedServiceAccount:
+      additionalProperties: false
+      properties:
+        keys:
+          description: Keys that became the member's.
+          format: int64
+          type: integer
+        runs:
+          description: Runs that became the member's.
+          format: int64
+          type: integer
+        user:
+          $ref: "#/components/schemas/Member"
+          description: The member, as now.
+      type: object
     CostFamilyInfo:
       additionalProperties: false
       properties:
@@ -12391,6 +12415,75 @@ paths:
       security:
         - apiKey: []
       summary: Change a service account
+      tags:
+        - people
+  /v1/service-accounts/{sa}/convert:
+    post:
+      description: |-
+        For a key that was always a person's (the upgrade made every legacy key a service account's). Admins and owners only, in one step: each active key of the account becomes the member's personal key (its secret, read-only and expiry unchanged), so it acts as that member, with their role, from the next request; every Run the account owns becomes the member's; the account is deleted (its revoked keys kept, revoked, as on delete). The member must be one of the tenant (404 not_a_member). 409 key_limit if the member would have more than 5 active keys (nothing moves). The key gains the member's role, not the account's: a caller converts only to a member whose role is at most their own (an owner: owners and operators only; 403 otherwise). Records service_account.converted {serviceAccount, name, user, keys, runs}.
+
+        Needs the `admin` scope.
+      operationId: convertServiceAccount
+      parameters:
+        - description: The service account's id or name.
+          in: path
+          name: sa
+          required: true
+          schema:
+            description: The service account's id or name.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConvertServiceAccountInput"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConvertedServiceAccount"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Make a service account's keys a member's personal keys
       tags:
         - people
   /v1/service-accounts/{sa}/keys:

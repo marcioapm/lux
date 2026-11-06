@@ -62,6 +62,82 @@ test("Delete on the list: per row, disabled for accounts with Runs; a 409 has_ru
   }
 });
 
+async function pickMember(p: Awaited<ReturnType<typeof t.mountAs>>, text: string, email: string) {
+  const { act } = await import("react");
+  const input = p.dialog()!.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+  await t.fill(input, text);
+  await p.until(() => [...p.dialog()!.querySelectorAll('[role="option"]')].some((o) => o.textContent?.includes(email)), `${email} suggested`);
+  const opt = [...p.dialog()!.querySelectorAll('[role="option"]')].find((o) => o.textContent?.includes(email))!;
+  await act(async () => opt.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+  return opt;
+}
+
+test("Convert, same role: the sentence, the counts, then the member's page; the keys and Runs are theirs", async () => {
+  const p = await t.mountAs("admin", "/service-accounts/sa_3jo1n4s2", <ServiceAccountPage id="sa_3jo1n4s2" />, { extra: noRuns });
+  try {
+    await p.until(() => p.button("Convert to personal keys") != null, "the page");
+    await p.until(() => p.fake.calls.some((c) => c.startsWith("/v1/members")), "members");
+    await t.click(p.button("Convert to personal keys"));
+    expect(p.dialog()!.textContent).toContain("Convert jonas to personal keys");
+    expect(t.dialogButton(p.dialog(), "Convert")!.disabled).toBe(true);
+    await pickMember(p, "bru", "bruno@acme.dev");
+    const d = p.dialog()!;
+    expect(d.textContent).toContain("jonas's key will act as Bruno Costa (Member) instead of the service account (Member).");
+    expect(d.querySelector(".callout")).toBeNull();
+    expect(d.textContent).toContain("1 key, 145 Runs move to Bruno; the service account is deleted.");
+    await t.click(t.dialogButton(d, "Convert"));
+    await p.until(() => p.fake.posts.some((x) => x.path.endsWith("/convert")), "the POST");
+    expect(p.fake.posts.find((x) => x.path.endsWith("/convert"))).toMatchObject({ method: "POST", path: "/v1/service-accounts/sa_3jo1n4s2/convert", body: { email: "bruno@acme.dev" } });
+    await p.until(() => window.location.pathname === "/members/usr_bru", "Bruno's page");
+    expect(mock.KEYS.find((k) => k.id === "key_jonas")).toMatchObject({ userId: "usr_bru", saId: undefined });
+    expect(mock.SAS.some((s) => s.id === "sa_3jo1n4s2")).toBe(false);
+  } finally {
+    await p.done();
+  }
+});
+
+test("Convert, more access: a Callout says so; less access is said too; an admin cannot pick an owner", async () => {
+  const p = await t.mountAs("admin", "/service-accounts/sa_3jo1n4s2", <ServiceAccountPage id="sa_3jo1n4s2" />, { extra: noRuns });
+  try {
+    await p.until(() => p.button("Convert to personal keys") != null, "the page");
+    await p.until(() => p.fake.calls.some((c) => c.startsWith("/v1/members")), "members");
+    await t.click(p.button("Convert to personal keys"));
+    await pickMember(p, "ana", "ana@acme.dev");
+    const d = p.dialog()!;
+    expect(d.querySelector(".callout")!.textContent).toBe("jonas's key will act as Ana Ribeiro (Admin) instead of the service account (Member): more access.");
+    await pickMember(p, "diogo", "diogo@acme.dev");
+    expect(d.textContent).toContain("as Diogo Lopes (Viewer) instead of the service account (Member): less access.");
+    expect(d.querySelector(".callout")).toBeNull();
+    await t.fill(d.querySelector<HTMLInputElement>('input[role="combobox"]'), "eva");
+    await p.until(() => d.querySelectorAll('[role="option"]').length > 0, "Eva suggested");
+    const eva = [...d.querySelectorAll('[role="option"]')].find((o) => o.textContent?.includes("eva@acme.dev"))!;
+    expect(eva.getAttribute("aria-disabled")).toBe("true");
+    expect(eva.textContent).toContain("Owner: above your role");
+  } finally {
+    await p.done();
+  }
+});
+
+test("Convert: a member at the key cap is off with the reason", async () => {
+  // Ana has 3 keys; gha-runners has 2: 5 fits. Give her a 4th.
+  const p = await t.mountAs("owner", "/service-accounts/sa_4kq2v8m1", <ServiceAccountPage id="sa_4kq2v8m1" />, {
+    extra: (path) => {
+      if (!mock.KEYS.some((k) => k.id === "key_u_ana4")) mock.KEYS.push({ id: "key_u_ana4", tenantId: "ten_acme", userId: "usr_ana", name: "four", prefix: "lux_u_four", readOnly: false, created: 0 });
+      return noRuns(path);
+    },
+  });
+  try {
+    await p.until(() => p.button("Convert to personal keys") != null, "the page");
+    await p.until(() => p.fake.calls.some((c) => c.startsWith("/v1/members")), "members");
+    await t.click(p.button("Convert to personal keys"));
+    await t.fill(p.dialog()!.querySelector<HTMLInputElement>('input[role="combobox"]'), "ana");
+    await p.until(() => p.dialog()!.querySelectorAll('[role="option"]').length > 0, "Ana suggested");
+    expect(p.dialog()!.querySelector('[role="option"]')!.textContent).toContain("has 4 keys: 5 at most");
+  } finally {
+    await p.done();
+  }
+});
+
 test("no lifecycle controls for members, viewers and read-only keys", async () => {
   for (const role of ["member", "viewer", "readonly"]) {
     const p = await t.mountAs(role, "/service-accounts/sa_3jo1n4s2", <ServiceAccountPage id="sa_3jo1n4s2" />, { extra: noRuns });

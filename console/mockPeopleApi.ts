@@ -1,7 +1,7 @@
 // The people routes of the mock luxd (mockPeople.ts holds the data):
 // /v1/me, /me/keys, /me/invitations, /members, /invitations (and by-code),
 // /service-accounts, /people, /costs?by=member|owner, POST /tenants.
-import { activeKeys, ago, atLeast, DAY, err, INVITES, invJson, invStatus, KEYS, keyJson, memberJson, MEMBERSHIPS, membershipsOf, ok, OWNER_COST, person, RANK, SAS, saJson, seq, TENANTS, tenantName, USERS, type Caller, type Inv, type Key, type MembershipRow, type Role, type SA } from "./mockPeople.ts";
+import { activeKeys, ago, atLeast, DAY, err, INVITES, invJson, invStatus, KEYS, keyJson, memberJson, MEMBERSHIPS, membershipsOf, moveRunOwners, ok, OWNER_COST, person, RANK, SAS, saJson, seq, TENANTS, tenantName, USERS, type Caller, type Inv, type Key, type MembershipRow, type Role, type SA } from "./mockPeople.ts";
 
 let codeSeq = 0;
 const newCode = () => `inv_${(Date.now() + ++codeSeq).toString(36).slice(-6)}${Math.random().toString(36).slice(2, 6)}`;
@@ -234,10 +234,35 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
     SAS.push(s);
     return ok(saJson(s), 201);
   }
-  const sm = p.match(/^\/v1\/service-accounts\/([^/]+)(?:\/keys(?:\/([^/]+))?)?$/);
+  const sm = p.match(/^\/v1\/service-accounts\/([^/]+)(?:\/keys(?:\/([^/]+))?|\/(convert))?$/);
   if (sm) {
     const s = SAS.find((x) => x.tenantId === tenantId && (x.id === sm[1] || x.name === sm[1]));
     if (!s) return err(404, "not_found", `no service account ${sm[1]}`);
+    if (sm[3] === "convert") {
+      // serviceaccounts.go convertServiceAccount: admins+; a member; at most the caller's role; the 5-key cap; keys, Runs move; the account goes.
+      if (method !== "POST") return err(405, "method_not_allowed", "POST");
+      if (!atLeast(c, "admin")) return err(403, "forbidden", "only admins and owners convert service accounts");
+      const b = await body<{ email?: string }>();
+      const target = inTenant().find((m) => m.userId === b.email || USERS.find((x) => x.id === m.userId)?.email.toLowerCase() === (b.email ?? "").toLowerCase());
+      if (!target) return err(404, "not_a_member", `${b.email ?? ""} is not a member of this tenant`);
+      if (!atLeast(c, target.role)) return err(403, "forbidden", `${b.email} is ${target.role}: only someone at least ${target.role} converts keys to theirs (the keys would act with that role)`);
+      const moving = KEYS.filter((k) => k.saId === s.id && activeKeys(k));
+      const have = KEYS.filter((k) => k.userId === target.userId && k.tenantId === tenantId && activeKeys(k)).length;
+      if (have + moving.length > 5) return err(409, "key_limit", `${b.email} has ${have} active keys and ${s.name} ${moving.length}: at most 5 personal keys; revoke ${have + moving.length - 5} first`);
+      for (const k of moving) (k.userId = target.userId), (k.saId = undefined);
+      for (const k of KEYS) if (k.saId === s.id) (k.revoked = true), (k.saId = undefined);
+      const runs = s.runs ?? 0;
+      const sk = `sa:${s.id}`;
+      if (OWNER_COST[sk]) {
+        const uk = `user:${target.userId}`;
+        const u = OWNER_COST[uk] ?? { amount: "0.00", runs: 0, cpuh: 0 };
+        OWNER_COST[uk] = { amount: (Number(u.amount) + Number(OWNER_COST[sk]!.amount)).toFixed(2), runs: u.runs + OWNER_COST[sk]!.runs, cpuh: u.cpuh + OWNER_COST[sk]!.cpuh };
+        delete OWNER_COST[sk];
+      }
+      moveRunOwners(s.id, target.userId);
+      SAS.splice(SAS.indexOf(s), 1);
+      return ok({ user: memberJson(target, c), keys: moving.length, runs });
+    }
     if (p.includes("/keys")) {
       // Its owner and admins only; anyone else is told it is not there (accountKeyHolder).
       if (!atLeast(c, "admin") && !ownsSA(s)) return err(404, "not_found", `no service account ${sm[1]}`);

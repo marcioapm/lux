@@ -25,7 +25,7 @@ type apiShape struct {
 var shapeTypes = map[string]any{
 	"Person": Person{}, "Me": Me{}, "Member": Member{}, "MembershipRef": MembershipRef{}, "Whoami": Whoami{},
 	"ServiceAccount": ServiceAccount{}, "ApiKey": ApiKey{}, "Invitation": Invitation{}, "Tenant": Tenant{},
-	"TenantOwner": TenantOwner{}, "CostSummaryRow": CostSummaryRow{}, "Owner": Owner{},
+	"TenantOwner": TenantOwner{}, "CostSummaryRow": CostSummaryRow{}, "Owner": Owner{}, "ConvertedServiceAccount": ConvertedServiceAccount{},
 }
 
 // fill sets every exported field of v (recursively) to a non-empty value.

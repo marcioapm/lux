@@ -136,6 +136,96 @@ func (s *Server) serviceAccountRoutes(api huma.API) {
 		DefaultStatus: http.StatusNoContent,
 		Errors:        []int{http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, "admin", forTenant(s.deleteServiceAccount))
+	register(s, api, huma.Operation{
+		OperationID: "convertServiceAccount", Method: http.MethodPost, Path: "/v1/service-accounts/{sa}/convert", Tags: []string{"people"},
+		Summary: "Make a service account's keys a member's personal keys",
+		Description: "For a key that was always a person's (the upgrade made every legacy key a service account's). Admins and owners only, in one step: " +
+			"each active key of the account becomes the member's personal key (its secret, read-only and expiry unchanged), so it acts as that member, with their role, from the next request; " +
+			"every Run the account owns becomes the member's; the account is deleted (its revoked keys kept, revoked, as on delete). " +
+			fmt.Sprintf("The member must be one of the tenant (404 not_a_member). 409 key_limit if the member would have more than %d active keys (nothing moves). ", maxPersonalKeys) +
+			"The key gains the member's role, not the account's: a caller converts only to a member whose role is at most their own (an owner: owners and operators only; 403 otherwise). " +
+			"Records service_account.converted {serviceAccount, name, user, keys, runs}.",
+		Errors: []int{http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "admin", forTenant(s.convertServiceAccount))
+}
+
+type ConvertServiceAccountInput struct {
+	Email string `json:"email" required:"true" doc:"The member whose personal keys they become, by email (or user id)."`
+}
+
+type ConvertedServiceAccount struct {
+	User Member `json:"user" doc:"The member, as now."`
+	Keys int    `json:"keys" doc:"Keys that became the member's."`
+	Runs int    `json:"runs" doc:"Runs that became the member's."`
+}
+
+type convertOutput struct{ Body ConvertedServiceAccount }
+
+func (s *Server) convertServiceAccount(ctx context.Context, in *struct {
+	SAPath
+	Body ConvertServiceAccountInput
+}) (*convertOutput, error) {
+	p := principal(ctx)
+	if !p.atLeast("admin") {
+		return nil, errf(http.StatusForbidden, "forbidden", "only admins and owners convert service accounts")
+	}
+	var out ConvertedServiceAccount
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if err := lockAccounts(ctx, tx, p.TenantID); err != nil {
+			return err
+		}
+		sa, _, err := loadAccount(ctx, tx, p.TenantID, in.SA)
+		if err != nil {
+			return err
+		}
+		m, err := findMember(ctx, tx, p, in.Body.Email)
+		if errors.Is(err, errNotFound) {
+			return errf(http.StatusNotFound, "not_a_member", "%s is not a member of this tenant", in.Body.Email)
+		}
+		if err != nil {
+			return err
+		}
+		// The keys will act with the member's role: never more than the caller's own.
+		if !p.atLeast(m.Role) {
+			return errf(http.StatusForbidden, "forbidden", "%s is %s: only someone at least %s converts keys to theirs (the keys would act with that role)", m.Email, m.Role, m.Role)
+		}
+		// The personal cap, as insertKey holds it against concurrent creates.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('lux_keys:' || $1 || ':' || $2))`, p.TenantID, m.ID); err != nil {
+			return err
+		}
+		var have int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM api_keys k WHERE `+activeKey+` AND k.tenant_id = $1 AND k.user_id = $2`, p.TenantID, m.ID).Scan(&have); err != nil {
+			return err
+		}
+		if have+sa.ActiveKeys > maxPersonalKeys {
+			return errf(http.StatusConflict, "key_limit", "%s has %d active keys and %s %d: at most %d personal keys; revoke %d first", m.Email, have, sa.Name, sa.ActiveKeys, maxPersonalKeys, have+sa.ActiveKeys-maxPersonalKeys)
+		}
+		tag, err := tx.Exec(ctx, `UPDATE api_keys k SET user_id = $2, service_account_id = NULL WHERE k.service_account_id = $1 AND `+activeKey, sa.ID, m.ID)
+		if err != nil {
+			return err
+		}
+		out.Keys = int(tag.RowsAffected())
+		tag, err = tx.Exec(ctx, `UPDATE runs SET owner_user_id = $3, owner_sa_id = NULL WHERE tenant_id = $1 AND owner_sa_id = $2`, p.TenantID, sa.ID, m.ID)
+		if err != nil {
+			return err
+		}
+		out.Runs = int(tag.RowsAffected())
+		if err := detachAccountKeys(ctx, tx, p, sa); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM service_accounts WHERE id = $1`, sa.ID); err != nil {
+			return err
+		}
+		if err := addTenantEvent(ctx, tx, p.TenantID, "service_account.converted", p, map[string]any{"serviceAccount": sa.ID, "name": sa.Name, "user": m.ID, "keys": out.Keys, "runs": out.Runs}); err != nil {
+			return err
+		}
+		out.User, err = findMember(ctx, tx, p, m.ID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &convertOutput{out}, nil
 }
 
 // lockAccounts serializes deleting and converting a tenant's service

@@ -132,6 +132,8 @@ export const api = {
     request<ServiceAccount>(`/service-accounts/${enc(id)}`, { method: "PATCH", tenant, body }),
   serviceAccountKeys: (tenant: Scope, id: string, signal?: Sig) => request<{ keys: ApiKey[] }>(`/service-accounts/${enc(id)}/keys`, { tenant, signal }).then((r) => r.keys ?? []),
   deleteServiceAccount: (tenant: Scope, id: string) => request<void>(`/service-accounts/${enc(id)}`, { method: "DELETE", tenant }),
+  /** Its active keys become the member's personal keys, its Runs theirs; the account goes (serviceaccounts.go convertServiceAccount). */
+  convertServiceAccount: (tenant: Scope, id: string, email: string) => request<{ user: Member; keys: number; runs: number }>(`/service-accounts/${enc(id)}/convert`, { method: "POST", tenant, body: { email } }),
   createServiceAccountKey: (tenant: Scope, id: string, body: NewKeyRequest) => request<CreatedApiKey>(`/service-accounts/${enc(id)}/keys`, { method: "POST", tenant, body }),
   revokeServiceAccountKey: (tenant: Scope, id: string, key: string) => request<void>(`/service-accounts/${enc(id)}/keys/${enc(key)}`, { method: "DELETE", tenant }),
 

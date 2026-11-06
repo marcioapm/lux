@@ -188,6 +188,9 @@ test("mock shapes match luxd's (api/testdata/shapes.json from shapes_test.go)", 
   const tenant = { id: "ten_acme", name: "acme", retentionDays: 30, expireAfterDays: 90, activeRuns: 0, runs: 12, hosts: 2, storedBytes: 0, createdAt: "2026-01-01T00:00:00Z", ...tenantPeople("ten_acme") };
   add("Tenant", tenant);
   add("TenantOwner", ...tenant.owners);
+  const converted = (await as("owner", "/v1/service-accounts/jonas/convert", { method: "POST", body: JSON.stringify({ email: "bruno@acme.dev" }) }))!.body as Record<string, unknown>;
+  add("ConvertedServiceAccount", converted);
+  add("Member", converted.user);
   resetPeople();
 
   const problems: string[] = [];
@@ -205,4 +208,24 @@ test("mock shapes match luxd's (api/testdata/shapes.json from shapes_test.go)", 
   expect(problems).toEqual([]);
   // Every type the fixture has is sampled at least once.
   expect(Object.keys(shapes).filter((t) => !samples.some(([s]) => s === t))).toEqual([]);
+});
+
+// The mock's new people routes answer as luxd's (sa_lifecycle_test.go, members_test.go).
+test("mock: upsert, delete and convert follow luxd's rules", async () => {
+  resetPeople();
+  const post = (role: string, path: string, b: unknown, method = "POST") => as(role, path, { method, body: JSON.stringify(b) });
+  const code = async (r: ReturnType<typeof as>) => ((await r)!.body as { error?: { code: string } } | null)?.error?.code ?? (await r)!.status;
+  expect(await code(post("owner", "/v1/members", { email: "x@y.io", role: "owner", upsert: true }))).toBe("forbidden");
+  expect(await code(post("operator", "/v1/members?tenant=ten_acme", { email: "bruno@acme.dev", role: "owner" }))).toBe("conflict");
+  expect(await code(post("operator", "/v1/members?tenant=ten_acme", { email: "bruno@acme.dev", role: "owner", upsert: true }))).toBe(200);
+  expect(await code(as("admin", "/v1/service-accounts/jonas", { method: "DELETE" }))).toBe("has_runs");
+  expect(await code(as("member", "/v1/service-accounts/grafana-reader", { method: "DELETE" }))).toBe("forbidden");
+  expect(await code(as("admin", "/v1/service-accounts/grafana-reader", { method: "DELETE" }))).toBe(204);
+  expect(await code(post("admin", "/v1/service-accounts/jonas/convert", { email: "eva@acme.dev" }))).toBe("forbidden");
+  expect(await code(post("admin", "/v1/service-accounts/jonas/convert", { email: "nobody@acme.dev" }))).toBe("not_a_member");
+  // Ana has 3 keys: 3 + 1 fits; then gha-runners' 2 would make 6.
+  expect(await code(post("admin", "/v1/service-accounts/jonas/convert", { email: "ana@acme.dev" }))).toBe(200);
+  expect(await code(post("admin", "/v1/service-accounts/gha-runners/convert", { email: "ana@acme.dev" }))).toBe("key_limit");
+  expect(await code(post("admin", "/v1/service-accounts/jonas/convert", { email: "ana@acme.dev" }))).toBe("not_found");
+  resetPeople();
 });

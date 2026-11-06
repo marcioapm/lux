@@ -1,8 +1,10 @@
 package cli
 
 import (
-	"github.com/spf13/cobra"
+	"fmt"
 	"net/url"
+
+	"github.com/spf13/cobra"
 )
 
 func (a *app) saCmd() *cobra.Command {
@@ -22,6 +24,24 @@ func (a *app) saCmd() *cobra.Command {
 		return a.peopleRequest(c, "PATCH", "/v1/service-accounts/"+url.PathEscape(args[0]), map[string]any{"disabled": true}, "")
 	}}, &cobra.Command{Use: "rm <sa>", Short: "Delete a service account that owns no Runs (admins only); its keys are revoked", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
 		return a.peopleRequest(c, "DELETE", "/v1/service-accounts/"+url.PathEscape(args[0]), nil, "")
+	}}, &cobra.Command{Use: "convert <sa> <email>", Short: "Make a service account's keys a member's personal keys and its Runs theirs; the account is deleted (admins only)", Args: cobra.ExactArgs(2), RunE: func(c *cobra.Command, args []string) error {
+		var out struct {
+			User struct {
+				ID    string `json:"id"`
+				Email string `json:"email"`
+				Role  string `json:"role"`
+			} `json:"user"`
+			Keys int `json:"keys"`
+			Runs int `json:"runs"`
+		}
+		if err := a.c.Do(ctxOf(c), "POST", "/v1/service-accounts/"+url.PathEscape(args[0])+"/convert", map[string]any{"email": args[1]}, &out); err != nil {
+			return err
+		}
+		if a.output == "json" {
+			return a.json(out)
+		}
+		fmt.Fprintf(a.stdout, "%d keys and %d Runs are %s's (%s) now; %s is deleted\n", out.Keys, out.Runs, out.User.Email, out.User.Role, args[0])
+		return nil
 	}})
 	var setRole, setOwner, setDesc, setName string
 	var disabled bool

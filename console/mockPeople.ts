@@ -185,10 +185,15 @@ export function resetPeople() {
     [INVITES, fresh.INVITES],
   ] as [unknown[], unknown[]][])
     arr.splice(0, arr.length, ...init);
+  // A convert moved Runs and their cost: back too (declared below; called after module load).
+  for (const k of Object.keys(RUN_OWNERS)) delete RUN_OWNERS[k];
+  Object.assign(RUN_OWNERS, structuredClone(INITIAL_RUN_OWNERS));
+  for (const k of Object.keys(OWNER_COST)) delete OWNER_COST[k];
+  Object.assign(OWNER_COST, structuredClone(INITIAL_OWNER_COST));
 }
 
 /** Run owners, by Run id or name (mock.ts's and mockSessions.ts's Runs). */
-const RUN_OWNERS: Record<string, { user?: string; sa?: string }> = {
+const INITIAL_RUN_OWNERS: Record<string, { user?: string; sa?: string }> = {
   "agent-refactor-42": { sa: "sa_7cr3b2x9" },
   "billing-backoff-418": { user: "usr_bru" },
   "hosts-probe-claude": { user: "usr_car" },
@@ -196,9 +201,15 @@ const RUN_OWNERS: Record<string, { user?: string; sa?: string }> = {
   "notes-count-acp": { user: "usr_ana" },
   "jervasion-pr-45": { sa: "sa_4kq2v8m1" },
 };
+const RUN_OWNERS: Record<string, { user?: string; sa?: string }> = structuredClone(INITIAL_RUN_OWNERS);
+
+/** A convert: the account's Runs become the person's (serviceaccounts.go convertServiceAccount). */
+export function moveRunOwners(sa: string, user: string) {
+  for (const o of Object.values(RUN_OWNERS)) if (o.sa === sa) (o.sa = undefined), (o.user = user);
+}
 
 /** Cost · 30d per owner (USD, list prices), Runs · 30d and CPU-hours. */
-export const OWNER_COST: Record<string, { amount: string; runs: number; cpuh: number }> = {
+const INITIAL_OWNER_COST: Record<string, { amount: string; runs: number; cpuh: number }> = {
   "user:usr_eva": { amount: "3.10", runs: 2, cpuh: 1.4 },
   "user:usr_mar": { amount: "18.22", runs: 9, cpuh: 22 },
   "user:usr_ana": { amount: "41.80", runs: 31, cpuh: 64.2 },
@@ -208,8 +219,10 @@ export const OWNER_COST: Record<string, { amount: string; runs: number; cpuh: nu
   "sa:sa_7cr3b2x9": { amount: "388.77", runs: 612, cpuh: 1310 },
   "sa:sa_2ne9v1q5": { amount: "142.05", runs: 90, cpuh: 455.2 },
   "sa:sa_5dd0p2x8": { amount: "77.40", runs: 41, cpuh: 98.1 },
+  "sa:sa_3jo1n4s2": { amount: "52.70", runs: 145, cpuh: 61.2 },
   "(none)": { amount: "61.33", runs: 211, cpuh: 140.8 },
 };
+export const OWNER_COST: Record<string, { amount: string; runs: number; cpuh: number }> = structuredClone(INITIAL_OWNER_COST);
 
 /** Who is calling, from the key (luxk_mock_<role>) or, in Access mode, MOCK_AS. */
 export interface Caller {

@@ -24,6 +24,7 @@ func TestPeopleCommands(t *testing.T) {
 		{[]string{"sa", "keys", "create", "ci", "--name", "rotation"}, "POST", "/v1/service-accounts/ci/keys", "name", "rotation", `{"apiKey":"lux_s_secret"}`},
 		{[]string{"sa", "set", "external-app", "--name", "jervasion"}, "PATCH", "/v1/service-accounts/external-app", "name", "jervasion", `{"name":"jervasion"}`},
 		{[]string{"sa", "rm", "old-bot"}, "DELETE", "/v1/service-accounts/old-bot", "", "", ``},
+		{[]string{"sa", "convert", "jonas", "jonas@example.com"}, "POST", "/v1/service-accounts/jonas/convert", "email", "jonas@example.com", `{"user":{"id":"usr_j","email":"jonas@example.com","role":"member"},"keys":1,"runs":145}`},
 		{[]string{"tenants", "create", "team", "--owner", "a@example.com"}, "POST", "/v1/tenants", "ownerEmail", "a@example.com", `{"id":"ten_1"}`},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
