@@ -161,15 +161,18 @@ func (s *Server) readInvitations(ctx context.Context, tx pgx.Tx, where string, a
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]*string, 0, 2*len(list))
+	for _, x := range list {
+		ids = append(ids, x.by, x.rev)
+	}
+	people, err := peopleByIDs(ctx, tx, ids...)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Invitation, 0, len(list))
 	for _, x := range list {
 		x.v.URL = s.inviteURL(ctx, x.v.Code)
-		if x.v.InvitedBy, err = personByID(ctx, tx, x.by); err != nil {
-			return nil, err
-		}
-		if x.v.RevokedBy, err = personByID(ctx, tx, x.rev); err != nil {
-			return nil, err
-		}
+		x.v.InvitedBy, x.v.RevokedBy = person(people, x.by), person(people, x.rev)
 		out = append(out, x.v)
 	}
 	return out, nil

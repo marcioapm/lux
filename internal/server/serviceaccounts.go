@@ -146,14 +146,17 @@ func scanAccounts(ctx context.Context, tx pgx.Tx, where string, args ...any) ([]
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]*string, 0, 2*len(list))
+	for _, x := range list {
+		ids = append(ids, x.owner, x.by)
+	}
+	people, err := peopleByIDs(ctx, tx, ids...)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]ServiceAccount, 0, len(list))
 	for _, x := range list {
-		if x.a.Owner, err = personByID(ctx, tx, x.owner); err != nil {
-			return nil, err
-		}
-		if x.a.CreatedBy, err = personByID(ctx, tx, x.by); err != nil {
-			return nil, err
-		}
+		x.a.Owner, x.a.CreatedBy = person(people, x.owner), person(people, x.by)
 		out = append(out, x.a)
 	}
 	return out, nil

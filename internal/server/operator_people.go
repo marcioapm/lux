@@ -41,11 +41,30 @@ func (s *Server) listPeople(ctx context.Context, _ *struct{}) (*peopleOutput, er
 		if out.Body.People == nil {
 			out.Body.People = []OperatorPerson{}
 		}
+		// Every membership in one query, grouped by person here.
+		byUser := map[string][]MembershipRef{}
+		rows, err = tx.Query(ctx, `SELECT m.user_id, m.tenant_id, t.name, m.role, m.created_at FROM memberships m JOIN tenants t ON t.id = m.tenant_id ORDER BY t.name`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var user string
+			var m MembershipRef
+			var at time.Time
+			if err := rows.Scan(&user, &m.TenantID, &m.Tenant, &m.Role, &at); err != nil {
+				return err
+			}
+			m.JoinedAt = &at
+			byUser[user] = append(byUser[user], m)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
 		for i := range out.Body.People {
 			p := &out.Body.People[i]
-			p.Memberships, err = userMemberships(ctx, tx, p.ID)
-			if err != nil {
-				return err
+			if p.Memberships = byUser[p.ID]; p.Memberships == nil {
+				p.Memberships = []MembershipRef{}
 			}
 		}
 		return nil

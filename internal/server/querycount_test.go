@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -94,6 +95,74 @@ func TestCostByMemberOwnerQueries(t *testing.T) {
 	}
 	if p1 != p2 || a1 != a2 || p2 > 1 || a2 > 1 {
 		t.Errorf("owner queries grow with buckets: people %d→%d, accounts %d→%d (series %d→%d rows)", p1, p2, a1, a2, n1, n2)
+	}
+}
+
+// The service account, people and invitation lists read the people they
+// show in one query, not one (or two) a row: the count of statements on
+// users and memberships does not grow with the list.
+func TestPeopleListsBatchHydration(t *testing.T) {
+	f, _ := accessFixture(t)
+	ctx := context.Background()
+	stmts := func(path string) (users, memberships int) {
+		_, got := tracedRequest(t, f.s, f.keys[map[bool]string{true: "op", false: "admin"}[path == "/v1/people"]], http.MethodGet, path)
+		return countStatements(got, "FROM users"), countStatements(got, "FROM memberships")
+	}
+	type counts struct{ users, memberships int }
+	before := map[string]counts{}
+	paths := []string{"/v1/service-accounts", "/v1/people", "/v1/invitations?status=all"}
+	add := func(i int) {
+		id := fmt.Sprintf("usr_n%02d", i)
+		execSQL(t, f.s, ctx, `INSERT INTO users (id, email, name) VALUES ($1, $1 || '@example.com', 'n')`, id)
+		execSQL(t, f.s, ctx, `INSERT INTO memberships (tenant_id, user_id, role) VALUES ('t1', $1, 'member'), ('t2', $1, 'viewer')`, id)
+		execSQL(t, f.s, ctx, `INSERT INTO service_accounts (id, tenant_id, name, role, owner_user_id, created_by) VALUES ($1, 't1', $2, 'member', $3, 'usr_admin')`,
+			fmt.Sprintf("sa_n%02d", i), fmt.Sprintf("bot-%02d", i), id)
+		execSQL(t, f.s, ctx, `INSERT INTO invitations (id, tenant_id, code, email, role, invited_by, expires_at, revoked_at, revoked_by)
+			VALUES ($1, 't1', $1, $1 || '@example.com', 'member', $2, now() + interval '1 day', now(), 'usr_owner')`, fmt.Sprintf("inv_n%02d", i), id)
+	}
+	add(0)
+	for _, p := range paths {
+		u, m := stmts(p)
+		before[p] = counts{u, m}
+	}
+	for i := 1; i <= 12; i++ {
+		add(i)
+	}
+	for _, p := range paths {
+		u, m := stmts(p)
+		b := before[p]
+		if u != b.users || m != b.memberships || u > 2 {
+			t.Errorf("%s: statements on users %d→%d, memberships %d→%d with 12 more rows", p, b.users, u, b.memberships, m)
+		}
+	}
+	// And the lists still name them.
+	code, out := f.do(t, f.keys["admin"], http.MethodGet, "/v1/service-accounts", nil)
+	found := false
+	for _, a := range out["serviceAccounts"].([]any) {
+		a := a.(map[string]any)
+		if a["name"] == "bot-03" {
+			found = true
+			if a["owner"].(map[string]any)["email"] != "usr_n03@example.com" || a["createdBy"].(map[string]any)["id"] != "usr_admin" {
+				t.Errorf("bot-03: %v", a)
+			}
+		}
+	}
+	if code != 200 || !found {
+		t.Errorf("service accounts: %d %v", code, out)
+	}
+	_, out = f.do(t, f.keys["op"], http.MethodGet, "/v1/people", nil)
+	for _, p := range out["people"].([]any) {
+		p := p.(map[string]any)
+		if p["id"] == "usr_n05" && len(p["memberships"].([]any)) != 2 {
+			t.Errorf("usr_n05 memberships: %v", p["memberships"])
+		}
+	}
+	_, out = f.do(t, f.keys["admin"], http.MethodGet, "/v1/invitations?status=revoked", nil)
+	for _, v := range out["invitations"].([]any) {
+		v := v.(map[string]any)
+		if v["id"] == "inv_n07" && (v["invitedBy"].(map[string]any)["id"] != "usr_n07" || v["revokedBy"].(map[string]any)["id"] != "usr_owner") {
+			t.Errorf("inv_n07: %v", v)
+		}
 	}
 }
 
