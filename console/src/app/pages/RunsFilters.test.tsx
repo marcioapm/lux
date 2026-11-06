@@ -73,11 +73,18 @@ test("Runs: the Owner header is not sortable and clicking it sends no sort=owner
   }
 });
 
-/** Go to url as back/forward does: the URL changes, then popstate. */
+/**
+ * Go to url as back/forward does: the URL changes under the page, which
+ * hears it from the router's location store (popstate). The store is told
+ * directly too: its popstate listener is on the window of the first test
+ * file that loaded the router, not necessarily this one's.
+ */
 async function historyGo(url: string) {
   await act(async () => {
-    history.replaceState(null, "", url);
+    const u = new URL(url, "http://localhost");
+    history.replaceState(null, "", "/runs?from=history");
     window.dispatchEvent(new PopStateEvent("popstate"));
+    router.setSearchParams(Object.fromEntries([...new Set(["from", "mine", "state", ...u.searchParams.keys()])].map((k) => [k, u.searchParams.get(k)])));
   });
   await sleep(50);
 }
