@@ -2,12 +2,13 @@ package server
 
 import (
 	"context"
-	"github.com/jackc/pgx/v5"
-	"github.com/marcioapm/lux/internal/ids"
-	"github.com/marcioapm/lux/internal/store"
-	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/ids"
+	"github.com/marcioapm/lux/internal/store"
 )
 
 func (s *Server) changeInvitation(ctx context.Context, id string, revoke bool) (*invitationOutput, error) {
@@ -239,5 +240,3 @@ func (s *Server) createTenant(ctx context.Context, in *createTenantInput) (*crea
 	})
 	return out, err
 }
-
-var _ = http.MethodGet
