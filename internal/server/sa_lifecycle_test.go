@@ -288,6 +288,147 @@ func (b *lifecycleBody) Read(p []byte) (int, error) {
 }
 func (b *lifecycleBody) Close() error { return nil }
 
+func TestServiceAccountKeyCallerPausedBody(t *testing.T) {
+	for _, action := range []string{"revoke", "convert", "delete", "disable", "demote", "readonly"} {
+		t.Run(action, func(t *testing.T) {
+			f := peopleFixture(t)
+			legacyAccount(t, f)
+			execSQL(t, f.s, context.Background(), `UPDATE service_accounts SET role = 'admin' WHERE id = 'sa_bot'`)
+			body := &lifecycleBody{Reader: strings.NewReader(`{"name":"replacement"}`), entered: make(chan struct{}), resume: make(chan struct{})}
+			entered := body.entered
+			req := httptest.NewRequest(http.MethodPost, "/v1/service-accounts/sa_ext/keys", nil)
+			req.Body = body
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+f.keys["sa"])
+			done := make(chan int, 1)
+			go func() { w := httptest.NewRecorder(); f.s.Handler().ServeHTTP(w, req); done <- w.Code }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("body not reached")
+			}
+			method, path, want := http.MethodPatch, "/v1/service-accounts/sa_bot", 200
+			var payload any
+			switch action {
+			case "revoke":
+				method, path, want = http.MethodDelete, path+"/keys/k_sa", 204
+			case "convert":
+				method, path, payload = http.MethodPost, path+"/convert", map[string]any{"email": "mia@example.com"}
+			case "delete":
+				method, want = http.MethodDelete, 204
+			case "disable":
+				payload = map[string]any{"disabled": true}
+			case "demote":
+				payload = map[string]any{"role": "viewer"}
+			case "readonly":
+				execSQL(t, f.s, context.Background(), `UPDATE api_keys SET read_only = true WHERE id = 'k_sa'`)
+			}
+			if action != "readonly" {
+				if code, out := f.do(t, f.keys["owner"], method, path, payload); code != want {
+					close(body.resume)
+					t.Fatalf("%s: %d %v", action, code, out)
+				}
+			}
+			close(body.resume)
+			want = 401
+			if action == "demote" || action == "readonly" {
+				want = 404
+			}
+			select {
+			case code := <-done:
+				if code != want {
+					t.Fatalf("stale caller: %d, want %d", code, want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("key create blocked")
+			}
+			if n := queryOne[int64](t, f.s, `SELECT count(*) FROM api_keys WHERE name = 'replacement' AND revoked_at IS NULL`); n != 0 {
+				t.Fatalf("minted %d replacement keys", n)
+			}
+		})
+	}
+}
+
+func TestServiceAccountKeyCallerQueued(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			f := peopleFixture(t)
+			legacyAccount(t, f)
+			execSQL(t, f.s, context.Background(), `UPDATE service_accounts SET role = 'admin' WHERE id = 'sa_bot'`)
+			holder := lifecycleHolder(t, f, "lux_keys:t1:sa_bot", false)
+			path := "/v1/service-accounts/sa_ext/keys"
+			var payload any = map[string]any{"name": "queued"}
+			if method == http.MethodDelete {
+				path += "/k_ext"
+				payload = nil
+			}
+			done := make(chan int, 1)
+			go func() { code, _ := f.do(t, f.keys["sa"], method, path, payload); done <- code }()
+			waitLifecycleLock(t, f, "lux_keys:t1:sa_bot", 1)
+			if _, err := holder.Exec(context.Background(), `SELECT set_config('lux.system', 'on', true)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := holder.Exec(context.Background(), `UPDATE service_accounts SET role = 'viewer' WHERE id = 'sa_bot'`); err != nil {
+				t.Fatal(err)
+			}
+			if err := holder.Commit(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case code := <-done:
+				if code != 404 {
+					t.Fatalf("demoted caller: %d", code)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("queued operation blocked")
+			}
+			if n := queryOne[int64](t, f.s, `SELECT count(*) FROM api_keys WHERE name = 'queued'`); n != 0 {
+				t.Fatalf("created %d keys", n)
+			}
+			if n := queryOne[int64](t, f.s, `SELECT count(*) FROM api_keys WHERE id = 'k_ext' AND revoked_at IS NULL`); n != 1 {
+				t.Fatal("revoked despite demotion")
+			}
+		})
+	}
+}
+
+func TestServiceAccountCrossKeyLockOrder(t *testing.T) {
+	f := peopleFixture(t)
+	legacyAccount(t, f)
+	execSQL(t, f.s, context.Background(), `UPDATE api_keys SET revoked_at = now() WHERE id = 'k_ext2'`)
+	execSQL(t, f.s, context.Background(), `UPDATE service_accounts SET role = 'admin' WHERE id IN ('sa_bot', 'sa_ext')`)
+	holder := lifecycleHolder(t, f, "lux_keys:t1:sa_bot", false)
+	done := make(chan int, 2)
+	go func() {
+		code, _ := f.do(t, f.keys["sa"], http.MethodPost, "/v1/service-accounts/sa_ext/keys", map[string]any{"name": "cross-a"})
+		done <- code
+	}()
+	go func() {
+		code, _ := f.do(t, f.keys["ext"], http.MethodDelete, "/v1/service-accounts/sa_bot/keys/k_sa", nil)
+		done <- code
+	}()
+	// Both must wait on the SAME first sorted ID, rather than holding their
+	// respective targets and deadlocking while waiting for the other caller.
+	waitLifecycleLock(t, f, "lux_keys:t1:sa_bot", 2)
+	if err := holder.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	codes := []int{}
+	for range 2 {
+		select {
+		case code := <-done:
+			codes = append(codes, code)
+		case <-time.After(5 * time.Second):
+			t.Fatal("cross operations deadlocked")
+		}
+	}
+	// If revocation wins the create must reauthenticate; otherwise it commits
+	// before revocation. Either serial order preserves current permissions.
+	if !((codes[0] == 204 && (codes[1] == 201 || codes[1] == 401)) || (codes[1] == 204 && (codes[0] == 201 || codes[0] == 401))) {
+		t.Fatalf("cross results %v", codes)
+	}
+}
+
 func TestServiceAccountPausedSubmit(t *testing.T) {
 	for _, action := range []string{"delete", "convert"} {
 		t.Run(action, func(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -572,6 +573,53 @@ func (s *Server) patchServiceAccount(ctx context.Context, in *struct {
 	return &saOutput{http.StatusOK, out}, nil
 }
 
+// revalidateAccountCaller reuses authentication's SA identity at the write
+// boundary. The caller's lifecycle lock must already be held through commit.
+// Converted credentials retry authentication as their new person; personal
+// callers retain the existing membership/role semantics without another query.
+func revalidateAccountCaller(ctx context.Context, tx pgx.Tx, p Principal) (Principal, error) {
+	if p.ServiceAccountID == "" {
+		return p, nil
+	}
+	err := tx.QueryRow(ctx, `SELECT sa.role, sa.name, k.read_only FROM api_keys k
+		JOIN service_accounts sa ON sa.id = k.service_account_id AND sa.tenant_id = k.tenant_id
+		WHERE k.id = $1 AND k.tenant_id = $2 AND k.service_account_id = $3
+		AND `+activeKey+` AND sa.disabled_at IS NULL`, p.KeyID, p.TenantID, p.ServiceAccountID).Scan(&p.Role, &p.ServiceAccountName, &p.ReadOnly)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return p, errf(http.StatusUnauthorized, "unauthorized", "API key principal changed or is no longer active; retry authentication")
+	}
+	return p, err
+}
+
+// lockKeyAccounts resolves the target before waiting, then takes the unique
+// caller+target lifecycle locks EXCLUSIVELY in sorted immutable-ID order.
+// Submit takes one shared lock; patch/delete/convert and personal callers' key
+// operations take one exclusive target lock. Membership (delete/convert only)
+// precedes these locks, and personal cap/row locks follow them. No participant
+// may acquire membership after an SA lock. Locks last through write and audit.
+func lockKeyAccounts(ctx context.Context, tx pgx.Tx, p Principal, ref string) (ServiceAccount, Principal, error) {
+	var id string
+	if err := tx.QueryRow(ctx, `SELECT id FROM service_accounts WHERE tenant_id = $1 AND (id = $2 OR name = $2)`, p.TenantID, ref).Scan(&id); err != nil {
+		return ServiceAccount{}, p, err
+	}
+	ids := []string{id}
+	if p.ServiceAccountID != "" && p.ServiceAccountID != id {
+		ids = append(ids, p.ServiceAccountID)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('lux_keys:' || $1 || ':' || $2))`, p.TenantID, id); err != nil {
+			return ServiceAccount{}, p, err
+		}
+	}
+	p, err := revalidateAccountCaller(ctx, tx, p)
+	if err != nil {
+		return ServiceAccount{}, p, err
+	}
+	sa, err := accountKeyHolder(ctx, tx, p, id)
+	return sa, p, err
+}
+
 // accountKeyHolder loads the account for a key route: its owner and
 // admins may; anyone else is told it is not there.
 func accountKeyHolder(ctx context.Context, tx pgx.Tx, p Principal, ref string) (ServiceAccount, error) {
@@ -606,14 +654,11 @@ func (s *Server) createServiceAccountKey(ctx context.Context, in *struct {
 	p := principal(ctx)
 	var out NewApiKey
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		sa, _, err := lockAccount(ctx, tx, p.TenantID, in.SA)
+		sa, fresh, err := lockKeyAccounts(ctx, tx, p, in.SA)
 		if err != nil {
 			return err
 		}
-		sa, err = accountKeyHolder(ctx, tx, p, sa.ID)
-		if err != nil {
-			return err
-		}
+		p = fresh
 		out, err = insertKey(ctx, tx, p, keySpec{col: "service_account_id", owner: sa.ID, prefix: "lux_s", limit: maxAccountKeys,
 			readOnly: in.Body.ReadOnly, expires: in.Body.ExpiresAt, name: in.Body.Name})
 		if err != nil {
@@ -630,14 +675,11 @@ func (s *Server) createServiceAccountKey(ctx context.Context, in *struct {
 func (s *Server) revokeServiceAccountKey(ctx context.Context, in *SAKeyPath) (*struct{}, error) {
 	p := principal(ctx)
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		sa, _, err := lockAccount(ctx, tx, p.TenantID, in.SA)
+		sa, fresh, err := lockKeyAccounts(ctx, tx, p, in.SA)
 		if err != nil {
 			return err
 		}
-		sa, err = accountKeyHolder(ctx, tx, p, sa.ID)
-		if err != nil {
-			return err
-		}
+		p = fresh
 		id, err := findKey(ctx, tx, in.Key, `k.service_account_id = $1`, sa.ID)
 		if err != nil {
 			return err
