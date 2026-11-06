@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 
 // The shown-once secret: after Done, and after Escape, nothing in the
 // document (an input's value, a snippet, any text or attribute) still holds
@@ -7,15 +7,10 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 let Profile: typeof import("./Profile.tsx").Profile;
 let SA: typeof import("./ServiceAccounts.tsx");
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ Profile } = await import("./Profile.tsx"));
   SA = await import("./ServiceAccounts.tsx");
   t = await import("../peopleTesting.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 /** Whether secret is anywhere in the document: text, attributes, or an input's live value. */

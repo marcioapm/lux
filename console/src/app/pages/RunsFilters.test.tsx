@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -9,16 +9,11 @@ let RUN_SORT_KEYS: typeof import("./Runs.tsx").RUN_SORT_KEYS;
 let ScopeProvider: typeof import("../scope.tsx").ScopeProvider;
 let fakeApi: typeof import("../testing.ts").fakeApi;
 let router: typeof import("../router.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ Runs, RUN_SORT_KEYS } = await import("./Runs.tsx"));
   ({ ScopeProvider } = await import("../scope.tsx"));
   ({ fakeApi } = await import("../testing.ts"));
   router = await import("../router.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 const sleep = (ms: number) => act(() => new Promise<void>((r) => setTimeout(r, ms)));

@@ -1,14 +1,11 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 let RunPage: typeof import("./RunPage.tsx").RunPage;
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ RunPage } = await import("./RunPage.tsx"));
   t = await import("../peopleTesting.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
-afterAll(async () => { await GlobalRegistrator.unregister(); });
 const run = { id: "run_own", tenant: "acme", name: "another-persons-run", state: "running", epoch: 1, labels: {}, owner: { kind: "user", id: "usr_bru", name: "Bruno Costa" }, spec: { image: { ref: "alpine" }, workload: { adapter: "generic" }, resources: {} }, createdAt: "2026-11-01T00:00:00Z" };
 
 test("viewer and another member cannot act: no Terminal or run actions, note names who can", async () => {

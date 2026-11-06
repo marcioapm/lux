@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 
 // A key list that failed to load is an error with Retry, never "no keys"
 // (nor 0 active keys); New key waits for the list. A failed refresh keeps
@@ -7,15 +7,10 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 let SA: typeof import("./ServiceAccounts.tsx");
 let MemberPage: typeof import("./MemberPage.tsx").MemberPage;
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   SA = await import("./ServiceAccounts.tsx");
   ({ MemberPage } = await import("./MemberPage.tsx"));
   t = await import("../peopleTesting.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 const down = () => new Response(JSON.stringify({ error: { code: "internal", message: "database unavailable" } }), { status: 500, headers: { "Content-Type": "application/json" } });

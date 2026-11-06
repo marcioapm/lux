@@ -1,20 +1,15 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 import { act } from "react";
 
 // The page's imports (the router) touch window at load: register the DOM first.
 let Members: typeof import("./Members.tsx").Members;
 let MemberPage: typeof import("./MemberPage.tsx").MemberPage;
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ Members } = await import("./Members.tsx"));
   ({ MemberPage } = await import("./MemberPage.tsx"));
   t = await import("../peopleTesting.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 const headers = (el: HTMLElement) => [...el.querySelectorAll("thead th")].map((th) => t.visibleText(th));

@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 
 // Object pages decide in the object's tenant, not the one in scope: Rui
 // (mock "multi") is a viewer in globex and an admin in initech.
@@ -7,16 +7,11 @@ let RunPage: typeof import("./RunPage.tsx").RunPage;
 let TerminalPage: typeof import("./TerminalPage.tsx").TerminalPage;
 let ServerPage: typeof import("./ServerPage.tsx").ServerPage;
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ RunPage } = await import("./RunPage.tsx"));
   ({ TerminalPage } = await import("./TerminalPage.tsx"));
   ({ ServerPage } = await import("./ServerPage.tsx"));
   t = await import("../peopleTesting.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 const runIn = (tenant: string) => ({ id: `run_${tenant}`, tenant, name: `a-run-in-${tenant}`, state: "running", epoch: 1, labels: {}, owner: { kind: "user", id: "usr_bru", name: "Bruno Costa" }, spec: { image: { ref: "alpine" }, workload: { adapter: "generic" }, resources: {} }, createdAt: "2026-11-01T00:00:00Z" });

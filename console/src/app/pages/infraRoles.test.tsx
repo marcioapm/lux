@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 
 // Hosts, pools and tenant servers by role (decisions 2–5): viewers change
 // nothing; members only their own Runs' servers; admins the tenant's
@@ -9,17 +9,12 @@ let Pools: typeof import("./Pools.tsx").Pools;
 let ServerPage: typeof import("./ServerPage.tsx").ServerPage;
 let RunPage: typeof import("./RunPage.tsx").RunPage;
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ HostPage } = await import("./HostPage.tsx"));
   ({ Pools } = await import("./Pools.tsx"));
   ({ ServerPage } = await import("./ServerPage.tsx"));
   ({ RunPage } = await import("./RunPage.tsx"));
   t = await import("../peopleTesting.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 const now = new Date().toISOString();

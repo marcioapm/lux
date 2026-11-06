@@ -1,10 +1,9 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 let InviteAccept: typeof import("./InviteAccept.tsx").InviteAccept;
 let NoTenant: typeof import("./InviteAccept.tsx").NoTenant;
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => { GlobalRegistrator.register(); ({ InviteAccept, NoTenant } = await import("./InviteAccept.tsx")); t = await import("../peopleTesting.tsx"); (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true; });
-afterAll(async () => { await GlobalRegistrator.unregister(); });
+withDom(async () => { ({ InviteAccept, NoTenant } = await import("./InviteAccept.tsx")); t = await import("../peopleTesting.tsx"); });
 test("invitation: matching email can join, another email sees nothing about tenant", async () => {
   const p = await t.mountAs("invited", "/invite/inv_7Rk2Qm9xPa", <InviteAccept code="inv_7Rk2Qm9xPa" />);
   try { await p.until(() => p.text().includes("Join acme"), "join offer"); expect(p.button("Join acme")).toBeDefined(); } finally { await p.done(); }

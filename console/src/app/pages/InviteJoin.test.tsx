@@ -1,6 +1,6 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { act, useState } from "react";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { withDom } from "../testDom.ts";
 
 // Accepting lands in the joined tenant: whoami?tenant=<accepted tenantId>,
 // then /members?tenant=<it>, never the tenant the person was in before.
@@ -8,16 +8,11 @@ let InviteAccept: typeof import("./InviteAccept.tsx").InviteAccept;
 let t: typeof import("../peopleTesting.tsx");
 let api: typeof import("../../api/index.ts");
 let mock: typeof import("../../../mockPeople.ts");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ InviteAccept } = await import("./InviteAccept.tsx"));
   t = await import("../peopleTesting.tsx");
   api = await import("../../api/index.ts");
   mock = await import("../../../mockPeople.ts");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 test("Join: whoami for the accepted tenant, then its Members page (Rui, in globex, joins acme)", async () => {

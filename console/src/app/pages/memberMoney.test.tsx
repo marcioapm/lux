@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 
 // Member cost per principal and currency: summed per currency with
 // sumMoney, shown as a MoneyList, shares within a currency; never one
@@ -11,8 +11,7 @@ let Profile: typeof import("./Profile.tsx").Profile;
 let MemberCost: typeof import("./MemberCost.tsx").MemberCost;
 let money: typeof import("./memberMoney.ts");
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ Members } = await import("./Members.tsx"));
   ({ MemberPage } = await import("./MemberPage.tsx"));
   SA = await import("./ServiceAccounts.tsx");
@@ -20,10 +19,6 @@ beforeAll(async () => {
   ({ MemberCost } = await import("./MemberCost.tsx"));
   money = await import("./memberMoney.ts");
   t = await import("../peopleTesting.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 const row = (key: string, currency: string, amount: string, runs: number, owner?: object) => ({ key, group: { member: key }, currency, amount, runs, ...(owner ? { owner } : {}) });

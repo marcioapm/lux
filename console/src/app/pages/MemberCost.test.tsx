@@ -1,9 +1,8 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 let MemberCost: typeof import("./MemberCost.tsx").MemberCost;
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => { GlobalRegistrator.register(); ({ MemberCost } = await import("./MemberCost.tsx")); t = await import("../peopleTesting.tsx"); (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true; });
-afterAll(async () => { await GlobalRegistrator.unregister(); });
+withDom(async () => { ({ MemberCost } = await import("./MemberCost.tsx")); t = await import("../peopleTesting.tsx"); });
 test("cost by member: service accounts separately, then folded into their owner; no owner stays", async () => {
   const p = await t.mountAs("viewer", "/?tab=cost", <MemberCost />);
   try {

@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 
 // whoami readOnly: a read-only key (an admin's, an operator's) reads as its
 // role and gets no mutating control anywhere, its own keys and an account's
@@ -10,18 +10,13 @@ let MemberPage: typeof import("./MemberPage.tsx").MemberPage;
 let ServiceAccounts: typeof import("./ServiceAccounts.tsx");
 let RunPage: typeof import("./RunPage.tsx").RunPage;
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ Profile } = await import("./Profile.tsx"));
   ({ Members } = await import("./Members.tsx"));
   ({ MemberPage } = await import("./MemberPage.tsx"));
   ServiceAccounts = await import("./ServiceAccounts.tsx");
   ({ RunPage } = await import("./RunPage.tsx"));
   t = await import("../peopleTesting.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 const ACTION = /^(New key|New service account|Invite people|Change role|Remove|Edit|Disable|Stop|Terminate|Resume|Cancel|Extend|Rename)$/;

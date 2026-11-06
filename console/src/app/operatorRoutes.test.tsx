@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "./testDom.ts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -10,15 +10,10 @@ import { createRoot } from "react-dom/client";
 let App: typeof import("./App.tsx").App;
 let api: typeof import("../api/index.ts");
 let testing: typeof import("./testing.ts");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ App } = await import("./App.tsx"));
   api = await import("../api/index.ts");
   testing = await import("./testing.ts");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 const tenants = { tenants: [{ id: "ten_acme", name: "acme", retentionDays: 30, expireAfterDays: 0, activeRuns: 0, runs: 0, hosts: 0, storedBytes: 0, createdAt: "2026-01-01T00:00:00Z", ownersCount: 0, owners: [], membersCount: 0 }] };

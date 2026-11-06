@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { ApiKey } from "../../api/index.ts";
@@ -9,14 +9,9 @@ import type { ApiKey } from "../../api/index.ts";
 // >= 140px.
 let parts: typeof import("./peopleParts.tsx");
 let ds: typeof import("@lux/design-system");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   parts = await import("./peopleParts.tsx");
   ds = await import("@lux/design-system");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 const key: ApiKey = { id: "key_1", name: "laptop", prefix: "lux_u_7Hc2", readOnly: false, createdAt: "2026-11-01T00:00:00Z" };

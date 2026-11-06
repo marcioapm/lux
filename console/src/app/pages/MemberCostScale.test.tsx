@@ -1,17 +1,12 @@
-import { afterAll, beforeAll, expect, mock, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, mock, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 
 // The share column computes each currency's total once, not per row.
 // sumMoney is counted through a module
 // mock: the amounts it is handed stay O(rows).
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   t = await import("../peopleTesting.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 test("MemberCost at 3,000 rows: sumMoney sees O(rows) amounts, not O(rows²)", async () => {

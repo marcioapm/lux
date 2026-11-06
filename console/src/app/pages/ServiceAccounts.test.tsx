@@ -1,15 +1,12 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "../testDom.ts";
 let ServiceAccounts: typeof import("./ServiceAccounts.tsx").ServiceAccounts;
 let ServiceAccountPage: typeof import("./ServiceAccounts.tsx").ServiceAccountPage;
 let t: typeof import("../peopleTesting.tsx");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ ServiceAccounts, ServiceAccountPage } = await import("./ServiceAccounts.tsx"));
   t = await import("../peopleTesting.tsx");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
-afterAll(async () => { await GlobalRegistrator.unregister(); });
 
 test("service accounts: admins create, members read; names, roles and owners lead", async () => {
   const p = await t.mountAs("admin", "/service-accounts", <ServiceAccounts />);

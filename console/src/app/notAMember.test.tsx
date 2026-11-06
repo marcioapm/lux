@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "./testDom.ts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -9,15 +9,10 @@ import { createRoot } from "react-dom/client";
 let App: typeof import("./App.tsx").App;
 let api: typeof import("../api/index.ts");
 let testing: typeof import("./testing.ts");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ App } = await import("./App.tsx"));
   api = await import("../api/index.ts");
   testing = await import("./testing.ts");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 const notAMember = () => new Response(JSON.stringify({ error: { code: "not_a_member", message: "you are not a member of this tenant: ask one of its admins to invite this email" } }), { status: 403, headers: { "Content-Type": "application/json" } });

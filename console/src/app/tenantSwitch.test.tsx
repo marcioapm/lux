@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { expect, test } from "bun:test";
+import { withDom } from "./testDom.ts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -11,17 +11,12 @@ let api: typeof import("../api/index.ts");
 let testing: typeof import("./testing.ts");
 let mock: typeof import("../../mockPeople.ts");
 let people: typeof import("../../mockPeopleApi.ts");
-beforeAll(async () => {
-  GlobalRegistrator.register();
+withDom(async () => {
   ({ App } = await import("./App.tsx"));
   api = await import("../api/index.ts");
   testing = await import("./testing.ts");
   mock = await import("../../mockPeople.ts");
   people = await import("../../mockPeopleApi.ts");
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
-afterAll(async () => {
-  await GlobalRegistrator.unregister();
 });
 
 test("a two-tenant member switches tenant in the picker; whoami is asked again for it and the role follows", async () => {
