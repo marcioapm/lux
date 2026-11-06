@@ -1876,6 +1876,7 @@ function PeopleDemo() {
         </Card>
       </div>
       <h3 className="sg-h3">PersonPicker</h3>
+      <p className="muted">Suggestions stay in document flow: they never cover following fields. Try an exact email and Enter, arrows to scroll the active candidate, touch to pick, or Escape to close suggestions before the dialog.</p>
       <div className="grid-2">
         <Card title="Set initech's owner">
           <PersonPicker people={pickerPeople} value={ownerEmail} onChange={setOwnerEmail} label="Email" hint={isEmail(ownerEmail) ? (pickerPeople.some((p) => p.email === ownerEmail.trim().toLowerCase()) ? "A member: becomes Owner" : "Not a member yet: joins as Owner") : "Becomes Owner"} />

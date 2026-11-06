@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Person } from "./Person.tsx";
 
 /** One person to suggest: by email (the value), with their name, photo and a sub line ("Admin"). */
@@ -48,7 +48,11 @@ export function PersonPicker({ people, value, onChange, freeText = true, label, 
   const input = useRef<HTMLInputElement>(null);
   const q = value.trim().toLowerCase();
   const exact = people.find((p) => p.email.toLowerCase() === q);
-  const matches = useMemo(() => (exact ? people : people.filter((p) => !q || p.email.toLowerCase().includes(q) || (p.name ?? "").toLowerCase().includes(q))).slice(0, limit), [people, q, exact, limit]);
+  const matches = useMemo(() => people.filter((p) => !q || p.email.toLowerCase().includes(q) || (p.name ?? "").toLowerCase().includes(q)).slice(0, limit), [people, q, limit]);
+  const list = useRef<HTMLUListElement>(null);
+  useEffect(() => {
+    if (open) list.current?.children[active]?.scrollIntoView?.({ block: "nearest" });
+  }, [open, active, matches]);
   const pick = (p: PersonOption) => {
     if (p.disabled) return;
     onChange(p.email);
@@ -92,6 +96,8 @@ export function PersonPicker({ people, value, onChange, freeText = true, label, 
           aria-expanded={shown}
           aria-controls={`${id}-list`}
           aria-autocomplete="list"
+          aria-activedescendant={shown && matches[active] ? `${id}-option-${encodeURIComponent(matches[active]!.email)}` : undefined}
+          aria-describedby={invalid || hint ? `${id}-hint` : undefined}
           aria-invalid={invalid || undefined}
           autoComplete="off"
           spellCheck={false}
@@ -108,16 +114,21 @@ export function PersonPicker({ people, value, onChange, freeText = true, label, 
           onKeyDown={onKey}
         />
         {shown && (
-          <ul role="listbox" id={`${id}-list`} className="select-pop select-list person-picker-list">
+          <ul ref={list} role="listbox" id={`${id}-list`} className="select-pop select-list person-picker-list">
             {matches.map((p, i) => (
               <li
                 key={p.email}
                 role="option"
-                aria-selected={p.email.toLowerCase() === q}
+                id={`${id}-option-${encodeURIComponent(p.email)}`}
+                aria-selected={i === active}
                 aria-disabled={p.disabled ? true : undefined}
                 title={p.disabled}
                 className={["select-opt", i === active ? "is-active" : "", p.disabled ? "is-disabled" : ""].join(" ").trim()}
                 // mousedown, not click: the input's blur would close the list first.
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  pick(p);
+                }}
                 onMouseDown={(e) => {
                   e.preventDefault();
                   pick(p);
@@ -131,7 +142,7 @@ export function PersonPicker({ people, value, onChange, freeText = true, label, 
           </ul>
         )}
       </div>
-      {invalid ? <span className="field-hint field-error">{freeText ? "Not an email address" : "Pick one of the suggestions"}</span> : hint && <span className="field-hint">{hint}</span>}
+      {invalid ? <span id={`${id}-hint`} className="field-hint field-error">{freeText ? "Not an email address" : "Pick one of the suggestions"}</span> : hint && <span id={`${id}-hint`} className="field-hint">{hint}</span>}
     </div>
   );
 }

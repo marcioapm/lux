@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { Dialog } from "./Dialog.tsx";
 import { isEmail, PersonPicker, type PersonOption } from "./PersonPicker.tsx";
 
 const PEOPLE: PersonOption[] = [
@@ -90,6 +91,65 @@ describe("in a DOM", () => {
     await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
     await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(last).toBe(PEOPLE.filter((p) => p.email.includes("a") || p.name!.toLowerCase().includes("a"))[1]!.email);
+  });
+
+  test("exact email Enter retains the target; active descendant follows arrows and clears on close", async () => {
+    const el = await render(<Harness freeText={false} />);
+    const input = el.querySelector("input")!;
+    await type(input, "bruno@acme.dev");
+    expect(options(el)).toHaveLength(1);
+    expect(document.getElementById(input.getAttribute("aria-activedescendant")!)?.textContent).toContain("Bruno Costa");
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(last).toBe("bruno@acme.dev");
+    expect(input.hasAttribute("aria-activedescendant")).toBe(false);
+    await type(input, "");
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+    const active = document.getElementById(input.getAttribute("aria-activedescendant")!)!;
+    expect(active.textContent).toContain("Bruno");
+    expect(active.getAttribute("aria-selected")).toBe("true");
+    expect(options(el).filter((o) => o.getAttribute("aria-selected") === "true")).toHaveLength(1);
+    expect(document.getElementById(input.getAttribute("aria-describedby")!)?.textContent).toBe("Becomes Owner");
+    await type(input, "no-match");
+    expect(input.hasAttribute("aria-activedescendant")).toBe(false);
+    expect(document.getElementById(input.getAttribute("aria-describedby")!)?.textContent).toContain("Pick one");
+  });
+
+  test("touch picks and multiple pickers have unique option IDs", async () => {
+    const el = await render(<><Harness /><Harness /></>);
+    const inputs = el.querySelectorAll("input");
+    await type(inputs[0]!, "bru");
+    const first = options(el)[0]!.id;
+    await act(async () => options(el)[0]!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" })));
+    expect(last).toBe("bruno@acme.dev");
+    await type(inputs[1]!, "bru");
+    expect(options(el)[0]!.id).not.toBe(first);
+  });
+
+  test("Escape consumes only the first key inside Dialog", async () => {
+    function InDialog() {
+      const [open, setOpen] = useState(true);
+      return <Dialog open={open} title="Pick" onConfirm={() => {}} onCancel={() => setOpen(false)}><Harness /></Dialog>;
+    }
+    const el = await render(<InDialog />);
+    const input = el.querySelector("input")!;
+    const dialog = el.querySelector("dialog")!;
+    await type(input, "");
+    expect(options(el).length).toBe(3);
+    // happy-dom has no native Escape default: emulate cancellation only if
+    // the input did not prevent the key's default (real browser checks too).
+    async function escape() {
+      const key = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      await act(async () => {
+        input.dispatchEvent(key);
+        if (!key.defaultPrevented) dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
+      });
+    }
+    await escape();
+    expect(options(el)).toHaveLength(0);
+    expect(dialog.open).toBe(true);
+    expect(input.hasAttribute("aria-activedescendant")).toBe(false);
+    await escape();
+    expect(dialog.open).toBe(false);
   });
 
   test("freeText off: an address not among the people is invalid", async () => {

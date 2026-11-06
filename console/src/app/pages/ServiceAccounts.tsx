@@ -415,7 +415,12 @@ export function ServiceAccountPage({ id }: { id: string }) {
           <Table<Run> columns={runColumns({ tenant: false, owner: true, adapter: false })} rows={runs.data ?? []} rowKey={(r) => r.id} loading={runs.loading} onRowClick={(r) => go(runPath(r.id))} defaultSort={{ key: "created", dir: "desc" }} empty={`No Runs by ${s.name}.`} />
         </Card>
       </div>
-      <ServiceAccountDialog target={editing ? s : null} tenant={tenant} tenantName={tenantName} members={members.data ?? []} onCancel={() => setEditing(false)} onSaved={(x) => (setEditing(false), toast({ title: `Saved ${x.name}`, tone: "success" }), void q.refetch())} />
+      <ServiceAccountDialog target={editing ? s : null} tenant={tenant} tenantName={tenantName} members={members.data ?? []} onCancel={() => setEditing(false)} onSaved={(x) => {
+        setEditing(false);
+        toast({ title: `Saved ${x.name}`, tone: "success" });
+        if (id !== x.id) go(serviceAccountPath(x.id));
+        else void Promise.all([q.refetch(), keys.refetch()]);
+      }} />
       <NewKeyDialog
         open={newKey}
         who={`The key acts as ${s.name} (${ROLE_LABEL[s.role]} in ${tenantName}).`}

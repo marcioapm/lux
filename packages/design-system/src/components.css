@@ -925,8 +925,9 @@ a.idchip-text:hover {
   position: relative;
 }
 .person-picker-list {
+  position: static;
   list-style: none;
-  margin: 0;
+  margin: var(--sp-2) 0 0;
   width: 100%;
   max-width: none;
   max-height: 280px;
