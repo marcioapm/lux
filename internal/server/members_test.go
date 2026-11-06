@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"testing"
+
+	"github.com/marcioapm/lux/internal/ids"
 )
 
 func TestMembersOwnerRules(t *testing.T) {
@@ -38,12 +40,29 @@ func TestMembersOwnerRules(t *testing.T) {
 		t.Fatal(code)
 	}
 	// Removing someone revokes their keys and leaves their Run attributed.
+	// A second key of theirs in t1, and one in t2 (another tenant's: kept).
+	execSQL(t, f.s, context.Background(), `INSERT INTO memberships (tenant_id, user_id, role) VALUES ('t2', 'usr_member', 'member')`)
+	second := ids.Secret("lux_u")
+	execSQL(t, f.s, context.Background(), `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes, user_id, read_only) VALUES
+		('k_member_b', 't1', 'b', $1, '{}', 'usr_member', true), ('k_member_t2', 't2', 't2', $2, '{}', 'usr_member', false)`, ids.Hash(second), ids.Hash(ids.Secret("lux_u")))
 	code, out := f.do(t, f.keys["admin"], "DELETE", "/v1/members/usr_member", nil)
 	if code != 204 {
 		t.Fatalf("remove: %d %v", code, out)
 	}
 	if code, _ := f.do(t, f.keys["member"], "GET", "/v1/runs", nil); code != 401 {
 		t.Errorf("removed member's key: %d", code)
+	}
+	if got := queryAll(t, f.s, `SELECT id || ':' || (revoked_at IS NOT NULL) FROM api_keys WHERE user_id = 'usr_member' ORDER BY id`); stringify(got) != `["k_member:true","k_member_b:true","k_member_t2:false"]` {
+		t.Errorf("keys after removal (id:revoked): %v", got)
+	}
+	// Back in the tenant, the old secrets stay dead.
+	if code, out := f.do(t, f.keys["op"], "POST", "/v1/members?tenant=t1", map[string]any{"email": "mia@example.com", "role": "member"}); code >= 300 {
+		t.Fatalf("add back: %d %v", code, out)
+	}
+	for name, secret := range map[string]string{"first": f.keys["member"], "second": second} {
+		if code, _ := f.do(t, secret, "GET", "/v1/runs", nil); code != 401 {
+			t.Errorf("re-added member's old %s key: %d, want 401", name, code)
+		}
 	}
 	if owner := queryOne[*string](t, f.s, `SELECT owner_user_id FROM runs WHERE id='r_mia'`); owner == nil || *owner != "usr_member" {
 		t.Error("Run lost its owner")
