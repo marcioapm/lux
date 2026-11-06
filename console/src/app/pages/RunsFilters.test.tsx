@@ -1,0 +1,74 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+
+// The page's imports (the router) touch window at load: register the DOM first.
+let Runs: typeof import("./Runs.tsx").Runs;
+let RUN_SORT_KEYS: typeof import("./Runs.tsx").RUN_SORT_KEYS;
+let ScopeProvider: typeof import("../scope.tsx").ScopeProvider;
+let fakeApi: typeof import("../testing.ts").fakeApi;
+let router: typeof import("../router.tsx");
+beforeAll(async () => {
+  GlobalRegistrator.register();
+  ({ Runs, RUN_SORT_KEYS } = await import("./Runs.tsx"));
+  ({ ScopeProvider } = await import("../scope.tsx"));
+  ({ fakeApi } = await import("../testing.ts"));
+  router = await import("../router.tsx");
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+});
+afterAll(async () => {
+  await GlobalRegistrator.unregister();
+});
+
+const sleep = (ms: number) => act(() => new Promise<void>((r) => setTimeout(r, ms)));
+const setURL = (u: string) => (window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM.setURL(u);
+
+async function mount(url: string) {
+  localStorage.clear();
+  const fake = fakeApi((path) => (path.startsWith("/v1/runs") ? { runs: [{ id: "run_1", tenant: "acme", name: "one", state: "running", epoch: 1, labels: {}, owner: { kind: "user", id: "usr_car", name: "Carla" }, spec: { image: { ref: "alpine" }, workload: { adapter: "generic" }, resources: {} }, createdAt: "2026-11-01T00:00:00Z" }] } : path.startsWith("/v1/history") ? { samples: [] } : {}));
+  setURL(`http://localhost${url}`);
+  const el = document.createElement("div");
+  document.body.appendChild(el);
+  const root = createRoot(el);
+  await act(async () =>
+    root.render(
+      <ScopeProvider>
+        <Runs />
+      </ScopeProvider>,
+    ),
+  );
+  await sleep(50);
+  return {
+    el,
+    fake,
+    header: (text: string) => [...el.querySelectorAll("thead th")].find((th) => th.textContent?.replace(/[↑↓▲▼↕]/g, "").trim() === text) as HTMLElement | undefined,
+    headers: () => [...el.querySelectorAll("thead th")].map((th) => `${th.textContent?.trim()}${th.classList.contains("is-sortable") ? "*" : ""}`),
+    lists: () => fake.calls.filter((c) => c.startsWith("/v1/runs?") || c === "/v1/runs"),
+    done: async () => {
+      await act(async () => root.unmount());
+      el.remove();
+      fake.restore();
+    },
+  };
+}
+
+// api.go runSortKeys: sort=owner is a 400. The Owner column sorts nothing.
+test("Runs: the Owner header is not sortable and clicking it sends no sort=owner", async () => {
+  const p = await mount("/runs");
+  try {
+    const owner = p.header("Owner");
+    if (!owner) throw new Error(`headers: ${p.headers().join(" | ")}`);
+    expect(owner!.getAttribute("aria-sort")).toBeNull();
+    expect(owner!.classList.contains("is-sortable")).toBe(false);
+    await act(async () => owner!.click());
+    await sleep(50);
+    expect(p.lists().some((c) => c.includes("sort=owner"))).toBe(false);
+    // Every header that does sort is one of luxd's keys; Name still sorts.
+    for (const th of p.el.querySelectorAll("thead th.is-sortable")) expect(th.textContent).not.toContain("Owner");
+    expect(p.headers()).toContain("Run↕*");
+    expect(RUN_SORT_KEYS.has("owner")).toBe(false);
+  } finally {
+    await p.done();
+  }
+});

@@ -8,6 +8,9 @@ import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, hostPath, runColumns, runPath, useSeries } from "./common.tsx";
 
+/** GET /v1/runs' sort keys (internal/server/api.go runSortKeys): a column whose key is not one is not sortable here. */
+export const RUN_SORT_KEYS = new Set(["created", "id", "name", "tenant", "state", "host", "pool", "adapter", "runtime", "placements", "placement", "cost"]);
+
 
 /**
  * Runs list. Every filter lives in the URL (?state=a,b&resumable=true&host=&label=),
@@ -75,7 +78,9 @@ export function Runs() {
   const clear = () => setSearchParams({ state: null, resumable: null, host: null, label: null });
   const filtered = states.length > 0 || resumable || host !== "" || label !== "";
 
-  const cols = useMemo(() => runColumns({ tenant: scope.showTenant, cost: true, placement: true, owner: true, me: viewer.userId }).map((c) => ({ ...c, sortable: true })), [scope.showTenant]);
+  // Server-paged: a column sorts only when luxd has its sort key (api.go
+  // runSortKeys); Owner has none (sort=owner is a 400), so it does not.
+  const cols = useMemo(() => runColumns({ tenant: scope.showTenant, cost: true, placement: true, owner: true, me: viewer.userId }).map((c) => (RUN_SORT_KEYS.has(c.key) ? { ...c, sortable: true } : { ...c, sortable: false, sortValue: undefined })), [scope.showTenant]);
 
   return (
     <div className="page page-list">
@@ -83,7 +88,7 @@ export function Runs() {
         title="Runs"
         description={
           <>
-            <span>{scope.apiTenant ? `tenant ${scope.apiTenant}` : scope.showTenant ? "all tenants" : "your runs"} · every column sorts, across every matching run</span>
+            <span>{scope.apiTenant ? `tenant ${scope.apiTenant}` : scope.showTenant ? "all tenants" : "your runs"} · columns sort across every matching run</span>
             <ListPriceNote>costs are list prices</ListPriceNote>
           </>
         }
