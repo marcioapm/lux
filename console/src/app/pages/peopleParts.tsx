@@ -4,6 +4,7 @@ import { useState, type ReactNode } from "react";
 import { Badge, Button, Dialog, IconButton, Person, RelativeTime, ROLE_DESC, ROLE_LABEL, ROLES, roleAtLeast, Select, Table, useCopy, type Column, type SelectOption, type TenantRole } from "@lux/design-system";
 import { IconCheck, IconCopy, IconPencil, IconTrash } from "@lux/design-system/icons";
 import type { ApiKey, CreatedApiKey, NewKeyRequest, Owner, Person as PersonT } from "../../api/index.ts";
+import { ErrorStrip } from "./common.tsx";
 
 
 export const memberPath = (id: string) => `/members/${encodeURIComponent(id)}`;
@@ -165,11 +166,7 @@ export function NewKeyDialog({ open, who, readOnlyChoice, onCreate, onCancel }: 
         <span className="field-label">Expires</span>
         <Select value={exp} onChange={setExp} options={EXPIRY.map((e) => ({ value: e.value, label: e.label, text: e.label }))} />
       </div>
-      {error && (
-        <div className="error-strip" role="alert">
-          {error}
-        </div>
-      )}
+      <ErrorStrip error={error} />
     </Dialog>
   );
 }

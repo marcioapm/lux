@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { Badge, classifyEmails, CopyAllLinks, Dialog, emailCounts, EmailInput, InviteLinkList, inviteButtonText, isTaken, RoleBadge, ROLE_LABEL, useToast, type EmailEntry, type EmailVerdict, type TenantRole } from "@lux/design-system";
 import { IconCopy, IconUser } from "@lux/design-system/icons";
 import { api, errorText, type Invitation, type InviteResult, type Member } from "../../api/index.ts";
+import { ErrorStrip } from "./common.tsx";
 import { RoleField, roleOptions } from "./peopleParts.tsx";
 
 /** Copies an invitation's link from the left-out list. */
@@ -72,11 +73,7 @@ export function InviteDialog({ open, tenant, tenantName, members, invitations, c
       </div>
       <RoleField value={role} onChange={setRole} options={roleOptions({ owner: canInviteOwner })} />
       {!canInviteOwner && <span className="field-hint">Only owners invite Owners.</span>}
-      {error && (
-        <div className="error-strip" role="alert">
-          {error}
-        </div>
-      )}
+      <ErrorStrip error={error} />
     </Dialog>
   );
 }

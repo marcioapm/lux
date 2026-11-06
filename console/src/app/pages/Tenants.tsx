@@ -79,7 +79,7 @@ export function Tenants() {
       <Dialog open={creating} title="New tenant" description="Creates the tenant and, optionally, an Owner invitation for its first owner." confirmLabel={viewer.invitationsEnabled && email.trim() ? "Create and get link" : "Create tenant"} disabled={!name.trim()} loading={busy} onCancel={() => setCreating(false)} onConfirm={() => { setBusy(true); setError(null); void api.createTenant({ name: name.trim(), ...(viewer.invitationsEnabled && email.trim() ? { ownerEmail: email.trim() } : {}) }).then(async (r) => { setCreating(false); setLink(r.invitation ? { tenant: r.name, invitation: r.invitation } : null); setName(""); setEmail(""); await q.refetch(); }).catch((e) => setError(errorText(e))).finally(() => setBusy(false)); }}>
         <label className="field"><span className="field-label">Name</span><input className="input" value={name} onChange={(e) => setName(e.target.value)} autoFocus /></label>
         {viewer.invitationsEnabled && <label className="field"><span className="field-label">First owner's email</span><input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /><span className="field-hint">Optional. Empty: the tenant starts with no owner, and you invite one later.</span></label>}
-        {error && <div className="error-strip" role="alert">{error}</div>}
+        <ErrorStrip error={error} />
       </Dialog>
       <Dialog open={link != null} title={`Send ${link?.tenant ?? ""}'s Owner invitation`} confirmLabel="Done" onConfirm={() => setLink(null)} onCancel={() => setLink(null)}>{link && <InviteLinkList links={[{ email: link.invitation.email, url: link.invitation.url }]} />}</Dialog>
     </div>
