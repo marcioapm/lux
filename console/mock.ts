@@ -55,7 +55,7 @@ const asleep: Server = { id: "srv_mocksleepddddddd", name: "web-pr-398", port: 3
 const served = (s: Server, attached: boolean) => {
   const w = withUrl(s);
   const state = !attached ? (s.wake === "request" ? "asleep" : "stopped") : s.state === "ready" ? "ready" : s.state === "starting" ? "waking" : s.state === "exited" ? "exited" : s.state === "unreachable" ? "unreachable" : s.wake === "request" ? "asleep" : "stopped";
-  return { ...w, state, process: s.state, desired: "up", workdir: s.workdir ?? "", env: {}, afterSync: null, idleAfter: "10m0s", wakeTimeout: "5m0s", expireAfter: s.lifetime === "owner" ? "720h0m0s" : null, owner: "key_mock", runId: attached ? RUN_ID : null, runName: attached ? "agent-refactor-42" : undefined, runState: attached ? runState : undefined, fromSpec: false, lastRequestAt: s.state === "ready" ? ago(18) : null, idleAt: s.state === "ready" ? new Date(Date.now() + 462_000).toISOString() : undefined, wakes: 3, epoch: attached ? 3 : null, stopReason: null, readySince: s.readySince ?? null, createdAt: ago(2 * 86400), updatedAt: ago(3600) };
+  return { ...w, tenantId: TENANTS.find((t) => t.name === run().tenant)?.id ?? "ten_acme", state, process: s.state, desired: "up", workdir: s.workdir ?? "", env: {}, afterSync: null, idleAfter: "10m0s", wakeTimeout: "5m0s", expireAfter: s.lifetime === "owner" ? "720h0m0s" : null, owner: "key_mock", runId: attached ? RUN_ID : null, runName: attached ? "agent-refactor-42" : undefined, runState: attached ? runState : undefined, fromSpec: false, lastRequestAt: s.state === "ready" ? ago(18) : null, idleAt: s.state === "ready" ? new Date(Date.now() + 462_000).toISOString() : undefined, wakes: 3, epoch: attached ? 3 : null, stopReason: null, readySince: s.readySince ?? null, createdAt: ago(2 * 86400), updatedAt: ago(3600) };
 };
 const allServed = () => [...servers.map((s) => served(s, true)), served(asleep, false)];
 
@@ -172,7 +172,8 @@ function hostEvents(h: (typeof HOSTS)[number]) {
 
 const run = () => ({
   id: RUN_ID,
-  tenant: "acme",
+  // MOCK_RUN_TENANT=initech: the Run is another tenant's (a link from another tenant's console).
+  tenant: process.env.MOCK_RUN_TENANT ?? "acme",
   name: "agent-refactor-42",
   labels: { task: "418", owner: "ada" },
   state: runState,
