@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, RelativeTime, ROLE_DESC, ROLE_LABEL } from "@lux/design-system";
 import { api, errorText, isApiError, setWhoAmI, signOut, useQuery, useSession } from "../../api/index.ts";
 import { AuthScreen } from "../SignIn.tsx";
@@ -20,9 +20,25 @@ export async function joined(tenantId: string) {
   go(`/members?tenant=${encodeURIComponent(tenantId)}`);
 }
 
-/** /invite/:code: reachable before any tenant membership, bare and behind Access. */
+/**
+ * /invite/:code: reachable before any tenant membership, bare and behind
+ * Access. Keyed by code: another invitation opened on the same route starts
+ * over (its own accept, error and busy state).
+ */
 export function InviteAccept({ code }: { code: string }) {
+  return <InviteAcceptFor key={code} code={code} />;
+}
+
+function InviteAcceptFor({ code }: { code: string }) {
   const s = useSession();
+  // An accept that answers after this invitation was left must not land the person in its tenant.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   // luxd says a code is unusable with 410 invitation_unusable; anything else that fails (the network, a 5xx) is not the invitation's fault: retry.
   const q = useQuery(`invite:${code}`, (sig) =>
     api.invitationByCode(code, sig).catch((e) => {
@@ -49,6 +65,7 @@ export function InviteAccept({ code }: { code: string }) {
     void api
       .acceptInvitation(code)
       .then((r) => {
+        if (!alive.current) return;
         setAccepted({ tenantId: r.tenantId, tenant: r.tenant });
         return joined(r.tenantId);
       })
@@ -64,8 +81,9 @@ export function InviteAccept({ code }: { code: string }) {
       {accepted ? <>
         <h2 className="dialog-title">You joined {accepted.tenant}</h2>
         {error ? <>
-          <div className="error-strip" role="alert">You joined {accepted.tenant}. Couldn't load it yet: <Button variant="ghost" size="sm" loading={busy} onClick={() => land(accepted)}>Retry</Button></div>
-          <p className="secondary">{error}</p>
+          <p className="secondary">Your membership is ready. Couldn't open {accepted.tenant} yet.</p>
+          <div className="error-strip" role="alert">{error}</div>
+          <div className="dialog-actions"><Button variant="primary" loading={busy} onClick={() => land(accepted)}>Retry</Button></div>
         </> : <p className="secondary">Opening {accepted.tenant}…</p>}
       </> : unavailable ? <><h2 className="dialog-title">Invitations need Cloudflare Access</h2><p className="secondary">This console signs in with keys. Ask an operator to add your email directly.</p></> : failed ? <><h2 className="dialog-title">Couldn't check this invitation</h2><p className="secondary">{q.error} The link may still be fine.</p><div className="dialog-actions"><Button variant="primary" loading={q.loading} onClick={() => void q.refetch()}>Try again</Button></div></> : unusable ? <><h2 className="dialog-title">This invitation can't be used</h2><p className="secondary">It expired, was revoked or was already accepted. Ask whoever sent it for a new link; renewing keeps the same one.</p><Button onClick={() => go("/")}>Go to lux</Button></> : i && !i.emailMatches ? <><h2 className="dialog-title">This invitation is for someone else</h2><p className="secondary">You're signed in as <b>{s.user?.email ?? s.whoami?.email}</b>. The invitation was sent to a different email. Sign out and sign in with the invited one.</p><SignOutButton /></> : i ? <>
         <h2 className="dialog-title">Join {i.tenant}</h2>
