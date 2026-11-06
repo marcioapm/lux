@@ -371,6 +371,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	args := []any{from, to, family, want, absent, group[0], group[1], label[0], label[1], rank, top, nofamily, hostFamilies,
 		(group[0] != "key" && group[1] != "key") || p.atLeast("admin"), p.UserID, p.ServiceAccountID, p.Email}
 	rowCount := 0
+	singlePass := in.Interval != "" && len(in.Group) == 1 && group[0] == "family" && top == 0 && !in.Runs
 	read := func(tx pgx.Tx, interval string) ([]CostSummaryRow, error) {
 		bucket := "NULL::timestamptz"
 		switch interval {
@@ -381,7 +382,15 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		}
 		grouped := `SELECT ` + bucket + ` AS at, g1, g2, currency, other, trim_scale(sum(amount))::text AS amount FROM shaped GROUP BY 1, 2, 3, 4, 5`
 		var sql string
-		if (top > 0 || in.Runs) && interval == "" {
+		if singlePass {
+			// Both aggregate levels share the scoped joins. grouping, not a
+			// NULL timestamp, identifies totals independently of bucket values.
+			grouped = `SELECT ` + bucket + ` AS at, g1, g2, currency, other, trim_scale(sum(amount))::text AS amount,
+				grouping(` + bucket + `)::int AS total FROM shaped
+				GROUP BY GROUPING SETS ((1, 2, 3, 4, 5), (2, 3, 4, 5))`
+			sql = query + `SELECT at, g1, g2, currency, other, amount, NULL::int, NULL::int, total
+				FROM (` + grouped + `) b ORDER BY total DESC, 1 NULLS FIRST, 2, 3, 4, 5`
+		} else if (top > 0 || in.Runs) && interval == "" {
 			// vals is read once, as a map keyed like each row, through a scalar
 			// subquery: joined, both sides estimate at ~1 row and the planner
 			// nests the loop, comparing every row with every value (op 7d
@@ -405,7 +414,12 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			var row CostSummaryRow
 			var g1, g2 *string
 			var nvals *int
-			if err := rows.Scan(&row.At, &g1, &g2, &row.Currency, &row.Other, &row.Amount, &row.Runs, &nvals); err != nil {
+			var total int
+			dest := []any{&row.At, &g1, &g2, &row.Currency, &row.Other, &row.Amount, &row.Runs, &nvals}
+			if singlePass {
+				dest = append(dest, &total)
+			}
+			if err := rows.Scan(dest...); err != nil {
 				return nil, err
 			}
 			if row.Other && nvals != nil {
@@ -428,7 +442,11 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 				}
 				row.Group[in.Group[1]] = value
 			}
-			result = append(result, row)
+			if singlePass && total == 0 {
+				out.Body.Series = append(out.Body.Series, row)
+			} else {
+				result = append(result, row)
+			}
 			rowCount++
 			if err := costRowLimit(rowCount); err != nil {
 				return nil, err
@@ -438,11 +456,15 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	}
 	err = s.costTx(ctx, p, func(tx pgx.Tx) error {
 		var err error
-		out.Body.Totals, err = read(tx, "")
+		interval := ""
+		if singlePass {
+			interval = in.Interval
+		}
+		out.Body.Totals, err = read(tx, interval)
 		if err != nil {
 			return err
 		}
-		if in.Interval != "" {
+		if in.Interval != "" && !singlePass {
 			out.Body.Series, err = read(tx, in.Interval)
 			if err != nil {
 				return err
