@@ -100,6 +100,23 @@ func notRunOwner(o runOwner) error {
 	return errf(http.StatusForbidden, "not_run_owner", "this Run is owned by %s: only they, or an admin of the tenant, may act on it", o.name)
 }
 
+func errUnattachedServer() error {
+	return errf(http.StatusForbidden, "forbidden", "this server is attached to no Run: only an admin of the tenant may change it")
+}
+
+// checkRunActor is 403 not_run_owner unless the caller may act on the Run
+// as tx reads it.
+func checkRunActor(ctx context.Context, tx pgx.Tx, p Principal, runID string) error {
+	o, err := loadRunOwner(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	if !p.canActOnRun(o) {
+		return notRunOwner(o)
+	}
+	return nil
+}
+
 // requireRunActor is 403 not_run_owner unless the caller may act on the
 // Run; a Run the scope does not see passes (the handler answers 404).
 func (s *Server) requireRunActor(ctx context.Context, p Principal, runID string) error {
@@ -107,15 +124,8 @@ func (s *Server) requireRunActor(ctx context.Context, p Principal, runID string)
 		return nil
 	}
 	return s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		o, err := loadRunOwner(ctx, tx, runID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
+		if err := checkRunActor(ctx, tx, p, runID); !errors.Is(err, pgx.ErrNoRows) {
 			return err
-		}
-		if !p.canActOnRun(o) {
-			return notRunOwner(o)
 		}
 		return nil
 	})
@@ -138,7 +148,7 @@ func (s *Server) requireServerActor(ctx context.Context, p Principal, serverID s
 		return err
 	}
 	if run == nil {
-		return errf(http.StatusForbidden, "forbidden", "this server is attached to no Run: only an admin of the tenant may change it")
+		return errUnattachedServer()
 	}
 	return s.requireRunActor(ctx, p, *run)
 }
@@ -150,16 +160,9 @@ func lockedServerActor(ctx context.Context, tx pgx.Tx, p Principal, v serverRow)
 		return nil
 	}
 	if v.RunID == nil {
-		return errf(http.StatusForbidden, "forbidden", "this server is attached to no Run: only an admin of the tenant may change it")
+		return errUnattachedServer()
 	}
-	o, err := loadRunOwner(ctx, tx, *v.RunID)
-	if err != nil {
-		return err
-	}
-	if !p.canActOnRun(o) {
-		return notRunOwner(o)
-	}
-	return nil
+	return checkRunActor(ctx, tx, p, *v.RunID)
 }
 
 // requireServerRunActor: a server created for a Run, as the Run; one for
