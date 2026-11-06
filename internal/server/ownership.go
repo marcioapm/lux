@@ -143,6 +143,25 @@ func (s *Server) requireServerActor(ctx context.Context, p Principal, serverID s
 	return s.requireRunActor(ctx, p, *run)
 }
 
+// lockedServerActor is requireServerActor for a server locked in tx (with
+// its Run): the attachment checked is the one the change will act on.
+func lockedServerActor(ctx context.Context, tx pgx.Tx, p Principal, v serverRow) error {
+	if p.Operator || p.atLeast("admin") {
+		return nil
+	}
+	if v.RunID == nil {
+		return errf(http.StatusForbidden, "forbidden", "this server is attached to no Run: only an admin of the tenant may change it")
+	}
+	o, err := loadRunOwner(ctx, tx, *v.RunID)
+	if err != nil {
+		return err
+	}
+	if !p.canActOnRun(o) {
+		return notRunOwner(o)
+	}
+	return nil
+}
+
 // requireServerRunActor: a server created for a Run, as the Run; one for
 // no Run (the tenant's own), an admin.
 func (s *Server) requireServerRunActor(ctx context.Context, p Principal, runID string) error {

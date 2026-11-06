@@ -450,7 +450,12 @@ func (s *Server) attachServer(ctx context.Context, in *attachInput) (*tenantServ
 
 // changeServer runs fn on a tenant's server, locked, in a system scope,
 // and sends its Run's placement (before and after: a detach) the new set.
-func (s *Server) changeServer(ctx context.Context, tenantID, id string, fn func(pgx.Tx, serverRow) error) error {
+//
+// The caller's permission is checked here, against the server's Run as
+// locked (on every try): a server moved to another Run meanwhile is
+// judged by the Run it is attached to now, not the one checkAccess saw.
+func (s *Server) changeServer(ctx context.Context, p Principal, id string, fn func(pgx.Tx, serverRow) error) error {
+	tenantID := p.TenantID
 	var hosts []string
 	// Locks go Run first, then server, as a runner's report takes them; the
 	// Run is read before either is locked, so a server attached or detached
@@ -477,6 +482,9 @@ func (s *Server) changeServer(ctx context.Context, tenantID, id string, fn func(
 			}
 			if strOf(v.RunID) != strOf(before) {
 				return errServerMoved
+			}
+			if err := lockedServerActor(ctx, tx, p, v); err != nil {
+				return err
 			}
 			hosts, err = changeLockedServer(ctx, tx, v, fn)
 			return err
@@ -541,7 +549,7 @@ func serverRunAny(ctx context.Context, tx pgx.Tx, runID string) (state string, e
 
 func (s *Server) detachServer(ctx context.Context, in *ServerIDPath) (*tenantServerOutput, error) {
 	p := principal(ctx)
-	err := s.changeServer(ctx, p.TenantID, in.ID, func(tx pgx.Tx, v serverRow) error {
+	err := s.changeServer(ctx, p, in.ID, func(tx pgx.Tx, v serverRow) error {
 		if v.Lifetime == LifetimeRun {
 			return errf(http.StatusConflict, "lifetime_run", "server %s ends with its Run (lifetime run): delete it, or PATCH lifetime owner first", in.ID)
 		}
@@ -559,7 +567,7 @@ func (s *Server) detachServer(ctx context.Context, in *ServerIDPath) (*tenantSer
 func (s *Server) tenantServerAction(action string) func(context.Context, *ServerIDPath) (*tenantServerOutput, error) {
 	return func(ctx context.Context, in *ServerIDPath) (*tenantServerOutput, error) {
 		p := principal(ctx)
-		err := s.changeServer(ctx, p.TenantID, in.ID, func(tx pgx.Tx, v serverRow) error {
+		err := s.changeServer(ctx, p, in.ID, func(tx pgx.Tx, v serverRow) error {
 			if v.RunID == nil {
 				if action == "stop" {
 					return nil
@@ -714,7 +722,7 @@ type patchServerInput struct {
 func (s *Server) patchServer(ctx context.Context, in *patchServerInput) (*tenantServerOutput, error) {
 	p := principal(ctx)
 	b := in.Body
-	err := s.changeServer(ctx, p.TenantID, in.ID, func(tx pgx.Tx, v serverRow) error {
+	err := s.changeServer(ctx, p, in.ID, func(tx pgx.Tx, v serverRow) error {
 		sv := spec.Server{Name: v.Name, Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env, AfterSync: v.AfterSync, Inject: v.Inject}
 		labels, wake, lifetime := v.Labels, v.Wake, v.Lifetime
 		idle, timeout, expire := v.IdleAfterS, v.WakeTimeoutS, v.ExpireAfterS
@@ -813,7 +821,7 @@ func (s *Server) patchServer(ctx context.Context, in *patchServerInput) (*tenant
 
 func (s *Server) deleteServer(ctx context.Context, in *ServerIDPath) (*noContent, error) {
 	p := principal(ctx)
-	err := s.changeServer(ctx, p.TenantID, in.ID, func(tx pgx.Tx, v serverRow) error {
+	err := s.changeServer(ctx, p, in.ID, func(tx pgx.Tx, v serverRow) error {
 		return deleteServerTx(ctx, tx, p.TenantID, v, "deleted", p.Actor(), "server.deleted")
 	})
 	if err != nil {

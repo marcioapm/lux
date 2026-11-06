@@ -5,6 +5,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // ownedRuns adds t1 Runs owned by the member (r_mia), the owner (r_olive),
@@ -53,6 +57,67 @@ func TestRunOwnership(t *testing.T) {
 					t.Errorf("message names no owner: %s", msg)
 				}
 			}
+		}
+	}
+}
+
+// A server moved to another person's Run while a change to it waits on its
+// row is judged by the Run it is attached to now: the member who could act
+// on the Run it was on when the request came in gets 403, and the server
+// is untouched. Deterministic: the move holds the server's row (as an
+// admin's detach + attach would) until the request is blocked on it.
+func TestServerChangeRechecksMovedServer(t *testing.T) {
+	f := peopleFixture(t)
+	ownedRuns(t, f)
+	ctx := context.Background()
+	execSQL(t, f.s, ctx, `INSERT INTO run_servers (id, host, tenant_id, run_id, name, port, state, labels)
+		VALUES ('srv_mmmmmmmmmmmmmmmm', 'web-mmmmmmmm', 't1', 'r_mia', 'web', 3000, 'stopped', '{}')`)
+	for _, rt := range []struct{ method, path string }{
+		{http.MethodPatch, "/v1/servers/srv_mmmmmmmmmmmmmmmm"},
+		{http.MethodPost, "/v1/servers/srv_mmmmmmmmmmmmmmmm/detach"},
+		{http.MethodDelete, "/v1/servers/srv_mmmmmmmmmmmmmmmm"},
+	} {
+		execSQL(t, f.s, ctx, `UPDATE run_servers SET run_id = 'r_mia', labels = '{}' WHERE id = 'srv_mmmmmmmmmmmmmmmm'`)
+		locked, release := make(chan struct{}), make(chan struct{})
+		moved := make(chan error, 1)
+		go func() {
+			moved <- f.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				if _, err := tx.Exec(ctx, `UPDATE run_servers SET run_id = 'r_olive' WHERE id = 'srv_mmmmmmmmmmmmmmmm'`); err != nil {
+					return err
+				}
+				close(locked)
+				<-release
+				return nil
+			})
+		}()
+		<-locked
+		type res struct {
+			code int
+			out  map[string]any
+		}
+		done := make(chan res, 1)
+		go func() {
+			var body any
+			if rt.method == http.MethodPatch {
+				body = map[string]any{"labels": map[string]string{"hijacked": "yes"}}
+			}
+			code, out := f.do(t, f.keys["member"], rt.method, rt.path, body)
+			done <- res{code, out}
+		}()
+		if err := waitLocked(f.s, 1, nil); err != nil { // the request, on the server's row
+			close(release)
+			t.Fatal(err)
+		}
+		close(release)
+		if err := <-moved; err != nil {
+			t.Fatal(err)
+		}
+		r := <-done
+		if c, _ := errCode(r.out); r.code != http.StatusForbidden || c != "not_run_owner" {
+			t.Errorf("%s %s on a server moved to olive's Run: %d %v, want 403 not_run_owner", rt.method, rt.path, r.code, r.out)
+		}
+		if got := queryOne[string](t, f.s, `SELECT coalesce(run_id, '') || ' ' || labels::text FROM run_servers WHERE id = 'srv_mmmmmmmmmmmmmmmm'`); got != "r_olive {}" {
+			t.Errorf("%s %s: server changed: %q", rt.method, rt.path, got)
 		}
 	}
 }
