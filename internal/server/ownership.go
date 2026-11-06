@@ -20,7 +20,7 @@ type accessRule struct {
 	// run: the Run its path names ({id}) must be one the caller may act on.
 	run bool
 	// server: the tenant server its path names ({id}): one attached to a
-	// Run, as run; one attached to none, an admin.
+	// Run, as run; one attached to none, as its creator principal.
 	server bool
 }
 
@@ -41,7 +41,7 @@ const accessKey = "lux-access"
 
 func (r accessRule) doc() string {
 	if r.server {
-		return "A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden)."
+		return "A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop). Unattached servers belong to their creator: the person, service account, or that account's owning member. Admins may change every tenant server; unresolved creators are admin-only. Attaching requires permission on both the source server and destination Run. Detaching preserves the original creator. Otherwise 403 not_run_owner (or forbidden)."
 	}
 	return "A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner."
 }
@@ -101,7 +101,7 @@ func notRunOwner(o runOwner) error {
 }
 
 func errUnattachedServer() error {
-	return errf(http.StatusForbidden, "forbidden", "this server is attached to no Run: only an admin of the tenant may change it")
+	return errf(http.StatusForbidden, "forbidden", "this server is attached to no Run: only its creator principal, its service account's owning member, or an admin of the tenant may change it")
 }
 
 // checkRunActor is 403 not_run_owner unless the caller may act on the Run
@@ -131,48 +131,69 @@ func (s *Server) requireRunActor(ctx context.Context, p Principal, runID string)
 	})
 }
 
-// requireServerActor: a server attached to a Run, as the Run; attached to
-// none, an admin.
+// requireServerActor and lockedServerActor use the same attachment-sensitive
+// decision. The locked caller supplies the authoritative server row.
 func (s *Server) requireServerActor(ctx context.Context, p Principal, serverID string) error {
-	if p.Operator || p.atLeast("admin") {
-		return nil
-	}
-	var run *string
-	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT run_id FROM run_servers WHERE id = $1`, serverID).Scan(&run)
+	return s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		v, err := scanServerRow(tx.QueryRow(ctx, serverSelect+`WHERE sv.id = $1`, serverID))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // the handler answers 404
+		}
+		if err != nil {
+			return err
+		}
+		return lockedServerActor(ctx, tx, p, v)
 	})
+}
+
+// serverCreator resolves immutable creation attribution, including revoked
+// keys. Bind every tenant relation explicitly: locked mutations use System.
+// No key/SA display name, label, or hostname is an ownership credential.
+func serverCreator(ctx context.Context, tx pgx.Tx, v serverRow) (runOwner, error) {
+	var o runOwner
+	err := tx.QueryRow(ctx, `SELECT k.user_id, k.service_account_id, sa.owner_user_id
+		FROM api_keys k LEFT JOIN service_accounts sa
+			ON sa.id = k.service_account_id AND sa.tenant_id = k.tenant_id
+		WHERE k.id = $1 AND k.tenant_id = $2`, v.Owner, v.TenantID).Scan(&o.user, &o.sa, &o.saOwner)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return o, err
+	}
+	// Personal keys and Access both attribute creation to verified email.
+	err = tx.QueryRow(ctx, `SELECT u.id FROM users u JOIN memberships m ON m.user_id = u.id
+		WHERE lower(u.email) = lower($1) AND m.tenant_id = $2`, v.Owner, v.TenantID).Scan(&o.user)
 	if errors.Is(err, pgx.ErrNoRows) {
+		return runOwner{}, nil
+	}
+	return o, err
+}
+
+// lockedServerActor checks only the current Run while attached; creator
+// status must never grant access to somebody else's attached Run.
+func lockedServerActor(ctx context.Context, tx pgx.Tx, p Principal, v serverRow) error {
+	if p.atLeast("admin") {
 		return nil
 	}
+	if v.RunID != nil {
+		return checkRunActor(ctx, tx, p, *v.RunID)
+	}
+	o, err := serverCreator(ctx, tx, v)
 	if err != nil {
 		return err
 	}
-	if run == nil {
+	if !p.canActOnRun(o) {
 		return errUnattachedServer()
 	}
-	return s.requireRunActor(ctx, p, *run)
+	return nil
 }
 
-// lockedServerActor is requireServerActor for a server locked in tx (with
-// its Run): the attachment checked is the one the change will act on.
-func lockedServerActor(ctx context.Context, tx pgx.Tx, p Principal, v serverRow) error {
-	if p.Operator || p.atLeast("admin") {
-		return nil
-	}
-	if v.RunID == nil {
-		return errUnattachedServer()
-	}
-	return checkRunActor(ctx, tx, p, *v.RunID)
-}
-
-// requireServerRunActor: a server created for a Run, as the Run; one for
-// no Run (the tenant's own), an admin.
+// requireServerRunActor: creation requires member capability; with a Run,
+// it also requires permission on that Run.
 func (s *Server) requireServerRunActor(ctx context.Context, p Principal, runID string) error {
 	if runID != "" {
 		return s.requireRunActor(ctx, p, runID)
 	}
-	if !p.atLeast("admin") {
-		return errf(http.StatusForbidden, "forbidden", "a server attached to no Run is the tenant's: only an admin may create one")
+	if !p.atLeast("member") {
+		return errf(http.StatusForbidden, "forbidden", "only a member may create a server")
 	}
 	return nil
 }

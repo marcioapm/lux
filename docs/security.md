@@ -33,6 +33,19 @@ are in the linked pages.
   manage Owners. Only operators may remove or demote the last owner.
   Run mutations refuse another member with `403 not_run_owner`, naming
   the owner. Every role sees every Run; ownership is not a read boundary.
+- **Standalone servers** may be created by members, including member service
+  accounts; viewers and read-only keys cannot create or mutate them. While
+  unattached, a server belongs to its original creator principal: the person,
+  service account, or that account's owning member. Creation attribution is
+  the existing creator email or key ID, resolved through tenant-scoped users,
+  retained key records (including revoked keys), and service-account ownership.
+  Key rotation and account renaming do not change ownership; names, labels,
+  and hostnames cannot claim a server. Unresolvable legacy or platform-key
+  creators remain admin-only. Admins and operators may manage every tenant
+  server. While attached, only the current Run's authorization applies: creator
+  status grants no additional control. Attach checks both the authoritative
+  source server and the destination Run. Detach, sleep and re-attach preserve
+  original creation attribution, never transferring it to the detacher.
 - Removing a member immediately revokes their tenant keys, leaves their
   Runs running and attributed, and leaves their service accounts ownerless.
   Personal keys are visible only to self/admins; account keys to their

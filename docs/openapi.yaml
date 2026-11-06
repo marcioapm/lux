@@ -11347,7 +11347,7 @@ paths:
         - servers
     post:
       description: |-
-        A named URL that reaches a port in a Run, independent of Runs: attach it to one (runId, or POST .../attach), detach it, and it outlives them (lifetime owner). With wake request, a signed-in request while no running Run serves it emits server.wake_requested on GET /v1/events for its owner, once per wake; lux never starts a Run itself.
+        A named URL that reaches a port in a Run, independent of Runs: attach it to one (runId, or POST .../attach), detach it, and it outlives them (lifetime owner). With wake request, a signed-in request while no running Run serves it emits server.wake_requested on GET /v1/events for its owner, once per wake; lux never starts a Run itself. Members may create unattached servers, owned by their creator principal (including a service account and its owning member). With runId, permission on that Run is required; while attached, only Run-based authorization applies. Viewers and read-only keys cannot create servers.
 
         Needs the `run` scope.
       operationId: createServer
@@ -11416,7 +11416,7 @@ paths:
       description: |-
         Detaches it first (its command stops; its Run is untouched). Its hostname is gone from then on. 409 conflict when the server was attached or detached twice while this ran: retry.
 
-        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop). Unattached servers belong to their creator: the person, service account, or that account's owning member. Admins may change every tenant server; unresolved creators are admin-only. Attaching requires permission on both the source server and destination Run. Detaching preserves the original creator. Otherwise 403 not_run_owner (or forbidden).
 
         Needs the `run` scope.
       operationId: deleteServer
@@ -11529,7 +11529,7 @@ paths:
       description: |-
         What is given. Command, port, workdir, env and afterSync apply at its next start. 409 conflict when the server was attached or detached twice while this ran: retry.
 
-        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop). Unattached servers belong to their creator: the person, service account, or that account's owning member. Admins may change every tenant server; unresolved creators are admin-only. Attaching requires permission on both the source server and destination Run. Detaching preserves the original creator. Otherwise 403 not_run_owner (or forbidden).
 
         Needs the `run` scope.
       operationId: patchServer
@@ -11600,7 +11600,7 @@ paths:
       description: |-
         To a running Run: its command starts now. To a stopped one: at its next placement. 409 attached when another Run serves it. Its name must be free among the Run's servers (409 name_taken).
 
-        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop). Unattached servers belong to their creator: the person, service account, or that account's owning member. Admins may change every tenant server; unresolved creators are admin-only. Attaching requires permission on both the source server and destination Run. Detaching preserves the original creator. Otherwise 403 not_run_owner (or forbidden).
 
         Needs the `run` scope.
       operationId: attachServer
@@ -11671,7 +11671,7 @@ paths:
       description: |-
         Its command stops; the Run is untouched. 409 lifetime_run for a server that ends with its Run. 409 conflict when the server was attached or detached twice while this ran: retry.
 
-        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop). Unattached servers belong to their creator: the person, service account, or that account's owning member. Admins may change every tenant server; unresolved creators are admin-only. Attaching requires permission on both the source server and destination Run. Detaching preserves the original creator. Otherwise 403 not_run_owner (or forbidden).
 
         Needs the `run` scope.
       operationId: detachServer
@@ -11859,7 +11859,7 @@ paths:
       description: |-
         As it is defined now. Not running: as start. 409 conflict when the server was attached or detached twice while this ran: retry.
 
-        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop). Unattached servers belong to their creator: the person, service account, or that account's owning member. Admins may change every tenant server; unresolved creators are admin-only. Attaching requires permission on both the source server and destination Run. Detaching preserves the original creator. Otherwise 403 not_run_owner (or forbidden).
 
         Needs the `run` scope.
       operationId: restartTenantServer
@@ -11924,7 +11924,7 @@ paths:
       description: |-
         Up: started now if its Run runs, else at its next placement. 409 not_attached, no_command. 409 conflict when the server was attached or detached twice while this ran: retry.
 
-        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop). Unattached servers belong to their creator: the person, service account, or that account's owning member. Admins may change every tenant server; unresolved creators are admin-only. Attaching requires permission on both the source server and destination Run. Detaching preserves the original creator. Otherwise 403 not_run_owner (or forbidden).
 
         Needs the `run` scope.
       operationId: startTenantServer
@@ -11989,7 +11989,7 @@ paths:
       description: |-
         Down: its command stops, and new placements leave it stopped until it is started again. 409 conflict when the server was attached or detached twice while this ran: retry.
 
-        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop). Unattached servers belong to their creator: the person, service account, or that account's owning member. Admins may change every tenant server; unresolved creators are admin-only. Attaching requires permission on both the source server and destination Run. Detaching preserves the original creator. Otherwise 403 not_run_owner (or forbidden).
 
         Needs the `run` scope.
       operationId: stopTenantServer
