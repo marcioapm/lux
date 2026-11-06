@@ -26,6 +26,7 @@ export * from "./PageHeader.tsx";
 export * from "./Pagination.tsx";
 export * from "./PartBar.tsx";
 export * from "./Person.tsx";
+export * from "./PersonPicker.tsx";
 export * from "./RelativeTime.tsx";
 export * from "./SegmentedControl.tsx";
 export * from "./Select.tsx";

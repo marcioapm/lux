@@ -122,6 +122,9 @@ import {
   ToolUsage,
   Avatar,
   Person,
+  PersonPicker,
+  isEmail,
+  type PersonOption,
   RoleBadge,
   ROLES,
   EmailInput,
@@ -1801,6 +1804,13 @@ function PeopleDemo() {
   const classify = (e: { email: string }): EmailVerdict => known[e.email] ?? { status: "invite" };
   const [entries, setEntries] = useState(() => parseEmails("Jorge Faria <jorge@acme.dev>, marta@acme.dev, ana@acme.dev, filipa@acme.dev, rita@acme.dev, tomás@, marta@acme.dev"));
   const [empty, setEmpty] = useState<EmailEntry[]>([]);
+  const [ownerEmail, setOwnerEmail] = useState("rui@acme.dev");
+  const [convertEmail, setConvertEmail] = useState("");
+  const pickerPeople: PersonOption[] = [
+    { email: "ana@acme.dev", name: "Ana Ribeiro", sub: "ana@acme.dev · Admin" },
+    { email: "eva@acme.dev", name: "Eva Moreira", sub: "eva@acme.dev · Owner", disabled: "already an owner" },
+    { email: "rui@acme.dev", name: "Rui Alves", sub: "rui@acme.dev · Admin" },
+  ];
   const taken = emailCounts(classifyEmails(entries, classify)).taken;
   const links = [
     { email: "jorge@acme.dev", url: "https://lux.acme.dev/invite/inv_4Bn8Ty2Wq0" },
@@ -1818,7 +1828,7 @@ function PeopleDemo() {
     ),
   }));
   return (
-    <Section id="people" title="Avatar, Person, RoleBadge, EmailInput, InviteLinkList" note="Who: a person is a round avatar (photo or initials), a service account a square with the Bot glyph; sm (22px) beside a name in a cell, lg (48px) in a page header. Person is the cell: avatar, name, a sub line; inline for an Owner or Invited by column. RoleBadge: Owner accent, Admin info, Member neutral, Viewer outline, what the role may do in its title. EmailInput: chips carry the address only, state is tone (struck outline = left out, danger = not an email, info glyph = renewed); why is said once, under the box, with one action at most; the hint shows only while empty; the submit button carries the count. InviteLinkList: links to send by hand, each with Copy, and Copy all.">
+    <Section id="people" title="Avatar, Person, RoleBadge, EmailInput, PersonPicker, InviteLinkList" note="Who: a person is a round avatar (photo or initials), a service account a square with the Bot glyph; sm (22px) beside a name in a cell, lg (48px) in a page header. Person is the cell: avatar, name, a sub line; inline for an Owner or Invited by column. RoleBadge: Owner accent, Admin info, Member neutral, Viewer outline, what the role may do in its title. EmailInput: chips carry the address only, state is tone (struck outline = left out, danger = not an email, info glyph = renewed); why is said once, under the box, with one action at most; the hint shows only while empty; the submit button carries the count. PersonPicker: one email, Person suggestions as you type (focus it), any email unless freeText is off. InviteLinkList: links to send by hand, each with Copy, and Copy all.">
       <h3 className="sg-h3">Avatar</h3>
       <div className="sg-row">
         <Avatar name="Carla Santos" size="sm" />
@@ -1863,6 +1873,15 @@ function PeopleDemo() {
             </label>
             <EmailInput id="sg-ei2" entries={empty} onChange={setEmpty} classify={() => ({ status: "invite" })} hint="Type or paste. Enter, comma or space adds one; “Name <email>” and spreadsheet columns keep the name." />
           </div>
+        </Card>
+      </div>
+      <h3 className="sg-h3">PersonPicker</h3>
+      <div className="grid-2">
+        <Card title="Set initech's owner">
+          <PersonPicker people={pickerPeople} value={ownerEmail} onChange={setOwnerEmail} label="Email" hint={isEmail(ownerEmail) ? (pickerPeople.some((p) => p.email === ownerEmail.trim().toLowerCase()) ? "A member: becomes Owner" : "Not a member yet: joins as Owner") : "Becomes Owner"} />
+        </Card>
+        <Card title="Members only (freeText off)">
+          <PersonPicker people={pickerPeople} value={convertEmail} onChange={setConvertEmail} freeText={false} label="Member" hint="Their keys and Runs move to this member." />
         </Card>
       </div>
       <h3 className="sg-h3">InviteLinkList</h3>
