@@ -120,6 +120,10 @@ func TestServerChangeRechecksMovedServer(t *testing.T) {
 			t.Errorf("%s %s: server changed: %q", rt.method, rt.path, got)
 		}
 	}
+	// A server says its tenant: the console decides who may change it there.
+	if code, out := f.do(t, f.keys["viewer"], http.MethodGet, "/v1/servers/srv_mmmmmmmmmmmmmmmm", nil); code != 200 || out["tenantId"] != "t1" {
+		t.Errorf("server tenantId: %d %v", code, out["tenantId"])
+	}
 }
 
 // Every Run-changing route checks the owner, not just rename: a member of

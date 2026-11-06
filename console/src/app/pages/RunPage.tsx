@@ -1,6 +1,6 @@
 import { Badge, FactRow, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, ImageRef, KeyValue, LabelsFact, PageHeader, StatePill, Tabs } from "@lux/design-system";
 import { api, isRunActive, useNow, useQuery, type Run, type RunSubmitter } from "../../api/index.ts";
-import { canActOnRun, useViewer, whoCanAct } from "../identity.ts";
+import { canActOnRun, useObjectViewer, whoCanAct } from "../identity.ts";
 import { OwnerCell } from "./peopleParts.tsx";
 import { setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
@@ -19,15 +19,17 @@ const TABS = ["session", "output", "servers", "timeline", "resources", "events",
 type Tab = (typeof TABS)[number];
 
 export function RunPage({ id }: { id: string }) {
-  const { operator, apiTenant } = useScope();
-  const viewer = useViewer();
-  const sas = useQuery(`sas@${apiTenant ?? ""}`, (s) => api.serviceAccounts(apiTenant, s), { enabled: viewer.resolved && !viewer.legacy });
+  const { operator } = useScope();
   const now = useNow(5000);
   // The tab lives in the URL (?tab=), so links can open one; the first tab has none.
   const params = useSearchParams();
   const t = params.get("tab");
   const q = useRun(id, { active: 3000, settled: 15_000, liveActive: 15_000, liveSettled: 60_000 });
   const run = q.data;
+  // Who may act is decided in the Run's tenant (role, owned service
+  // accounts), not the tenant in scope: a link can open another's Run.
+  const viewer = useObjectViewer(run?.tenant);
+  const sas = useQuery(`sas@${run?.tenant ?? ""}`, (s) => api.serviceAccounts(run?.tenant, s), { enabled: run != null && viewer.resolved && !viewer.legacy });
   // An agent adapter's Session tab is first (the conversation); a generic Run's comes after Output.
   const session = hasSession(run?.spec.workload.adapter);
   const first: Tab = session ? "session" : "output";

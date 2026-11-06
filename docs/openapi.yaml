@@ -4859,6 +4859,9 @@ components:
           type:
             - string
             - "null"
+        tenantId:
+          description: "The tenant it is of: who may change it is decided there."
+          type: string
         updatedAt:
           format: date-time
           type: string

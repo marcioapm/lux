@@ -224,6 +224,8 @@ export type TenantServerState = ServedState;
 /** GET /v1/servers/{id}: a server of the tenant (TenantServer in internal/server/servers_api.go). */
 export interface TenantServer {
   id: string;
+  /** Its tenant's id: who may change it is decided there. Absent from an older luxd. */
+  tenantId?: string;
   name: string;
   hostname: string | null;
   url: string | null;

@@ -28,6 +28,7 @@ import (
 // TenantServer is a server as /v1/servers shows it.
 type TenantServer struct {
 	ID            string            `json:"id"`
+	TenantID      string            `json:"tenantId" doc:"The tenant it is of: who may change it is decided there."`
 	Name          string            `json:"name"`
 	Hostname      *string           `json:"hostname" nullable:"true" doc:"Its preview host name, stable for its life; null when previews are not configured."`
 	URL           *string           `json:"url" nullable:"true" doc:"Its preview URL; null when previews are not configured."`
@@ -67,7 +68,7 @@ type TenantServer struct {
 }
 
 func (s *Server) tenantServer(v serverRow, now time.Time) TenantServer {
-	t := TenantServer{ID: v.ID, Name: v.Name, Hostname: optString(s.previewHostname(v.Host)), URL: s.previewURL(v.Host),
+	t := TenantServer{ID: v.ID, TenantID: v.TenantID, Name: v.Name, Hostname: optString(s.previewHostname(v.Host)), URL: s.previewURL(v.Host),
 		State: v.derive(now), Process: v.State, Desired: "up", Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env,
 		AfterSync: v.AfterSync, Inject: v.Inject, Labels: v.Labels, Wake: v.Wake, IdleAfter: secs(v.IdleAfterS), WakeTimeout: secs(v.WakeTimeoutS),
 		Lifetime: v.Lifetime, Owner: v.Owner, RunID: v.RunID, RunName: v.RunName, RunState: v.RunState, FromSpec: v.FromSpec,
