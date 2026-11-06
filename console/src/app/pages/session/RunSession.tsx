@@ -240,7 +240,7 @@ function Rail({ ctx, run }: { ctx: Ctx; run: Run }) {
 }
 
 /** The Run page's Session tab: the Run's output read as a conversation, with its subagents, and the input to the Run. */
-export function RunSession({ run }: { run: Run }) {
+export function RunSession({ run, canAct = true }: { run: Run; canAct?: boolean }) {
   const adapter = run.spec.workload.adapter;
   const hosts = useMemo(() => Object.fromEntries((run.placements ?? []).map((p) => [p.host, p.hostName])), [run.placements]);
   const { session: s, status, error } = useRunSession(run.id, adapter, run.epoch, hosts);
@@ -307,7 +307,7 @@ export function RunSession({ run }: { run: Run }) {
         actions={<SegmentedControl<Filter> label="Show" value={filter} onChange={setFilter} options={[{ value: "all", label: "Everything" }, { value: "messages", label: "Messages" }]} />}
         itemCount={shown.length}
         contentKey={lastItem}
-        composer={<RunComposer key={run.id} run={run} />}
+        composer={<RunComposer key={run.id} run={run} canAct={canAct} />}
         status={
           <span className="num">
             {s.turns} {s.turns === 1 ? "turn" : "turns"} · {tools} tool {tools === 1 ? "call" : "calls"}
@@ -347,7 +347,7 @@ export function RunSession({ run }: { run: Run }) {
 }
 
 /** A generic workload's Session tab: no conversation to read, only input to its stdin. */
-export function RunStdinSession({ run }: { run: Run }) {
+export function RunStdinSession({ run, canAct = true }: { run: Run; canAct?: boolean }) {
   return (
     <SessionTranscript
       subtitle={run.spec.workload.adapter}
@@ -357,7 +357,7 @@ export function RunStdinSession({ run }: { run: Run }) {
           <EmptyState compact title="No agent conversation" description="This workload is not an agent: its output is on the Output tab and input goes to its stdin." />
         </div>
       }
-      composer={<RunComposer key={run.id} run={run} stdin />}
+      composer={<RunComposer key={run.id} run={run} canAct={canAct} stdin />}
     />
   );
 }

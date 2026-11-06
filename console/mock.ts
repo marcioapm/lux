@@ -10,11 +10,22 @@
 //   MOCK_COST_CURRENCIES=USD,EUR bun run mock   # cost in two currencies (mockCosts.ts)
 //   MOCK_ROLE=tenant bun run mock   # a tenant key (acme): no tenant picker, its own costs and key names;
 //                                   # the platform pool "default" hides its unallocated host time, its own pool "ci" shows it
+// Signed in as a role (mockPeople.ts): paste the key luxk_mock_<role>, role one of
+//   viewer (Diogo), member (Carla), admin (Ana), owner (Eva), operator (Márcio, also an owner of acme),
+//   notenant (Sam: no membership), invited (Filipa: no membership, a pending invitation), sa (ci-review-bot).
+//   With MOCK_AUTH=cloudflare-access: MOCK_AS=<role>, or the cookie lux_mock_as=<role>; invitations
+//   exist only there (key mode answers 409 invitations_unavailable, as luxd does).
+//   MOCK_INVITES=130: that many more pending invitations to acme (the list pages 100 at a time: Load more).
+//   multi (Rui) is a member of two tenants: globex (viewer) and initech (admin).
 import index from "./index.html";
 import { COST_TENANTS, costLabels, costSummary, submittedBy } from "./mockCosts.ts";
 import { history, hostHistory, poolMetrics, POOLS } from "./mockHistory.ts";
 import { costHost, hostCost, hostNetClasses, poolCost, runCost } from "./mockHostCost.ts";
 import { sessionOutput, sessionRun, sessionRunJson, SESSION_RUNS } from "./mockSessions.ts";
+import { callerOf, canAct, ownerFilter, runOwner, seedInvitations, TENANTS, whoamiFor } from "./mockPeople.ts";
+import { createTenant, peopleApi, tenantPeople } from "./mockPeopleApi.ts";
+
+if (process.env.MOCK_INVITES) seedInvitations(Number(process.env.MOCK_INVITES));
 
 const RUN_ID = "run_k3jq7x2mfa9vbn4z";
 const HOST_ID = "host_7f2cq9m1x0";
@@ -44,7 +55,7 @@ const asleep: Server = { id: "srv_mocksleepddddddd", name: "web-pr-398", port: 3
 const served = (s: Server, attached: boolean) => {
   const w = withUrl(s);
   const state = !attached ? (s.wake === "request" ? "asleep" : "stopped") : s.state === "ready" ? "ready" : s.state === "starting" ? "waking" : s.state === "exited" ? "exited" : s.state === "unreachable" ? "unreachable" : s.wake === "request" ? "asleep" : "stopped";
-  return { ...w, state, process: s.state, desired: "up", workdir: s.workdir ?? "", env: {}, afterSync: null, idleAfter: "10m0s", wakeTimeout: "5m0s", expireAfter: s.lifetime === "owner" ? "720h0m0s" : null, owner: "key_mock", runId: attached ? RUN_ID : null, runName: attached ? "agent-refactor-42" : undefined, runState: attached ? runState : undefined, fromSpec: false, lastRequestAt: s.state === "ready" ? ago(18) : null, idleAt: s.state === "ready" ? new Date(Date.now() + 462_000).toISOString() : undefined, wakes: 3, epoch: attached ? 3 : null, stopReason: null, readySince: s.readySince ?? null, createdAt: ago(2 * 86400), updatedAt: ago(3600) };
+  return { ...w, tenantId: TENANTS.find((t) => t.name === run().tenant)?.id ?? "ten_acme", state, process: s.state, desired: "up", workdir: s.workdir ?? "", env: {}, afterSync: null, idleAfter: "10m0s", wakeTimeout: "5m0s", expireAfter: s.lifetime === "owner" ? "720h0m0s" : null, owner: "key_mock", runId: attached ? RUN_ID : null, runName: attached ? "agent-refactor-42" : undefined, runState: attached ? runState : undefined, fromSpec: false, lastRequestAt: s.state === "ready" ? ago(18) : null, idleAt: s.state === "ready" ? new Date(Date.now() + 462_000).toISOString() : undefined, wakes: 3, epoch: attached ? 3 : null, stopReason: null, readySince: s.readySince ?? null, createdAt: ago(2 * 86400), updatedAt: ago(3600) };
 };
 const allServed = () => [...servers.map((s) => served(s, true)), served(asleep, false)];
 
@@ -161,7 +172,8 @@ function hostEvents(h: (typeof HOSTS)[number]) {
 
 const run = () => ({
   id: RUN_ID,
-  tenant: "acme",
+  // MOCK_RUN_TENANT=initech: the Run is another tenant's (a link from another tenant's console).
+  tenant: process.env.MOCK_RUN_TENANT ?? "acme",
   name: "agent-refactor-42",
   labels: { task: "418", owner: "ada" },
   state: runState,
@@ -181,7 +193,14 @@ const run = () => ({
   usage: { peakMemoryBytes: 1.9 * 1024 ** 3, peakDiskBytes: 0, peakPids: 120, cpuSeconds: 724, netRxBytes: 0, netTxBytes: 0, placements: 3, queueSeconds: 17 },
   servers: servers.map(withUrl),
   submittedBy: submittedBy("key_ci", callerTenant),
+  owner: runOwner("agent-refactor-42"),
 });
+
+/** A Run with its owner (mockPeople.ts). */
+const withOwner = <R extends { name?: string }>(r: R) => {
+  const owner = runOwner(r.name);
+  return owner ? { ...r, owner } : r;
+};
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const notFound = (what: string) => json({ error: { code: "not_found", message: `${what} not found` } }, 404);
@@ -252,8 +271,14 @@ type Srv = Bun.Server<ShellSock>;
 async function api(req: Request, srv: Srv): Promise<Response> {
     const u = new URL(req.url);
     const p = u.pathname;
+    const caller = callerOf(req, u, consoleAuth === "cloudflare-access");
     if (p === `/v1/runs/${RUN_ID}/exec`) {
       if (!u.searchParams.has("ticket") && !authed(req)) return json({ error: { code: "unauthorized", message: "no key" } }, 401);
+      // As luxd's execRun accessRule: a key's caller must be able to act on the Run (a ticket was checked when it was minted).
+      if (!u.searchParams.has("ticket") && caller && !canAct(caller, run().name)) {
+        const o = runOwner(run().name);
+        return json({ error: { code: "not_run_owner", message: `this Run is owned by ${o ? o.name : "no one"}: only they, or an admin of the tenant, may act on it` } }, 403);
+      }
       if (runState !== "running") return json({ error: { code: "not_running", message: `run is ${runState}: interactive access needs it running` } }, 409);
       if (req.headers.get("upgrade") !== "websocket") return json({ status: "ok" });
       // MOCK_OPEN_DELAY=ms holds the upgrade, to see the page connecting.
@@ -262,9 +287,33 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       return new Response("upgrade failed", { status: 500 });
     }
     if (!authed(req)) return json({ error: { code: "unauthorized", message: "no key" } }, 401);
+    // As luxd (TestAccessMembership): a person in no tenant, or not in the one asked for, gets 403 not_a_member, no identity.
+    if (p === "/v1/whoami" && caller && !caller.operator && !caller.sa && !caller.role) return json({ error: { code: "not_a_member", message: "you are not a member of this tenant: ask one of its admins to invite this email" } }, 403);
+    if (p === "/v1/whoami" && caller) return json(whoamiFor(caller, consoleAuth, previewDomain || null));
+    const people = await peopleApi(req, u, caller, consoleAuth);
+    if (people) return people.status === 204 ? new Response(null, { status: 204 }) : json(people.body, people.status);
+    // Signed in, in no tenant and not an operator: only whoami and the people routes above answer.
+    if (caller && !caller.operator && !caller.role && !caller.sa) return json({ error: { code: "not_a_member", message: "You're not part of any tenant yet. Contact your admin to invite this email." } }, 403);
+    // A Run's mutations are its owner's, its service account owner's, and admins'.
+    const runAct = p.match(/^\/v1\/runs\/(run_[a-z0-9]+)\/(stop|terminate|resume|migrate|input|cancel|extend|timeout|servers|tickets|push|sync|checkpoint|artifacts)/);
+    if (runAct && req.method !== "GET" && caller) {
+      const name = runAct[1] === RUN_ID ? run().name : sessionRun(runAct[1]!)?.name;
+      // Tickets: an output-only ticket is anyone's; exec (terminal) and input ones are the owner's.
+      const readOnlyTicket = runAct[2] === "tickets" && ((await req.clone().json().catch(() => ({}))) as { kind?: string }).kind === "output";
+      if (!readOnlyTicket && !canAct(caller, name)) {
+        const o = runOwner(name);
+        return json({ error: { code: "not_run_owner", message: `only ${o ? o.name : "admins"}${o ? " and admins" : ""} can act on this Run` } }, 403);
+      }
+    }
+    if (p === "/v1/tenants" && req.method === "POST" && caller) {
+      if (!caller.operator) return json({ error: { code: "forbidden", message: "operators only" } }, 403);
+      const b = (await req.json()) as { name: string; ownerEmail?: string };
+      const r = createTenant(b.name ?? "", b.ownerEmail || undefined, caller, u.origin);
+      return json(r.body, r.status);
+    }
     if (p === "/v1/whoami" && tenantRole) return json({ operator: false, tenant: "acme", tenantId: "ten_acme", keyId: "key_ci", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null });
     if (p === "/v1/whoami") return json(consoleAuth === "cloudflare-access" ? { operator: true, tenant: "", tenantId: "", email: "ada@example.com", name: "Ada Lovelace", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null } : { operator: true, tenant: "", tenantId: "", keyId: "key_op", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null });
-    if (p === "/v1/tenants") return json({ tenants: COST_TENANTS.map((t, i) => ({ ...t, retentionDays: 30, expireAfterDays: 90, activeRuns: 1 - i, runs: 12, hosts: 2, storedBytes: 0, createdAt: ago(86400) })) });
+    if (p === "/v1/tenants") return json({ tenants: [...COST_TENANTS, ...TENANTS.filter((t) => !COST_TENANTS.some((x) => x.id === t.id))].map((t, i) => ({ ...t, retentionDays: 30, expireAfterDays: 90, activeRuns: Math.max(1 - i, 0), runs: 12, hosts: 2, storedBytes: 0, createdAt: ago(86400 * (300 - i * 120)), ...tenantPeople(t.id) })) });
     if (p === "/v1/costs") {
       const r = costSummary(u, callerTenant);
       return json(r.body, r.status);
@@ -273,12 +322,15 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       const r = costLabels(u, callerTenant);
       return json(r.body, r.status);
     }
-    if (p === "/v1/runs") return json({ runs: [run(), ...SESSION_RUNS.map((r) => sessionRunJson(r, SESSION_HOST, runState))] });
+    if (p === "/v1/runs") {
+      const keep = ownerFilter(caller, u);
+      return json({ runs: [run(), ...SESSION_RUNS.map((r) => withOwner(sessionRunJson(r, SESSION_HOST, runState)))].filter((r) => keep(r.name)) });
+    }
     if (p === `/v1/runs/${RUN_ID}`) return json(run());
     const sr = p.match(/^\/v1\/runs\/(run_[a-z0-9]+)(\/.*)?$/);
     const sess = sr && sessionRun(sr[1]!);
     if (sess) {
-      const sj = sessionRunJson(sess, SESSION_HOST, runState);
+      const sj = withOwner(sessionRunJson(sess, SESSION_HOST, runState));
       if (!sr![2]) return json(sj);
       if (sr![2] === "/output") return sessionOutput(sess, SESSION_HOST, u.searchParams.get("since"), req.signal);
       if (sr![2] === "/cost") return json(runCost(sess.id, sj.placements.map((x) => ({ ...x, hostId: x.host }))));
@@ -304,6 +356,14 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       if (sm[2] === "events") return json({ events: [{ id: 1, serverId: x.id, type: "server.created", data: { name: x.name, by: "key_mock" }, time: ago(2 * 86400) }, { id: 2, serverId: x.id, type: "server.wake_requested", data: { name: x.name, by: "ada@example.com", path: "/goals" }, time: ago(60) }] });
       if (sm[2] === "log") return json({ lines: fakeLog(x as unknown as Server) });
       if (sm[2] === "tickets") return json({ ticket: "tkt_mock", kind: "preview", serverId: x.id, expiresAt: new Date(Date.now() + 60_000).toISOString() }, 201);
+      // As luxd's server accessRule: attached, as its Run; attached to none, admins.
+      if ((req.method === "DELETE" || req.method === "PATCH" || (req.method === "POST" && sm[2])) && caller) {
+        const rid = (x as { runId?: string | null }).runId;
+        const name = rid === RUN_ID ? run().name : rid ? sessionRun(rid)?.name : undefined;
+        if (rid ? !canAct(caller, name) : !(caller.operator || (caller.role != null && ["admin", "owner"].includes(caller.role)))) {
+          return json({ error: { code: rid ? "not_run_owner" : "forbidden", message: rid ? "only the Run's owner, or an admin of the tenant, may change this server" : "this server is attached to no Run: only an admin of the tenant may change it" } }, 403);
+        }
+      }
       if (req.method === "DELETE") return new Response(null, { status: 204 });
       return json(x);
     }

@@ -120,8 +120,21 @@ import {
   ThoughtTurn,
   ToolCall,
   ToolUsage,
+  Avatar,
+  Person,
+  RoleBadge,
+  ROLES,
+  EmailInput,
+  parseEmails,
+  classifyEmails,
+  emailCounts,
+  inviteButtonText,
+  InviteLinkList,
+  CopyAllLinks,
+  type EmailEntry,
+  type EmailVerdict,
 } from "../src/index.ts";
-import { IconDots, IconInfo, IconMinus, IconMoon, IconPencil, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconStar, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
+import { IconCopy, IconDots, IconInfo, IconMinus, IconMoon, IconPencil, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconStar, IconSun, IconTerminal, IconUser, IconWarning } from "../src/icons.tsx";
 import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeKeyBreakdown, fakeLabelValues, fakeRunLabels, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakePoolDaily, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeStoredSeries, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
 import { at, fakeDiff, fakeReply, fakeSubagents, fakeToolCounts } from "./fakeSession.ts";
 
@@ -137,7 +150,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "costpanel", "parts", "timeline", "events", "logs", "session", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "costpanel", "parts", "timeline", "events", "logs", "session", "terminal", "servers", "keyvalue", "people", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -204,6 +217,7 @@ function Sections() {
         <TerminalDemo />
         <Servers />
         <KeyValueDemo />
+        <PeopleDemo />
         <Dialogs />
         <Feedback />
         <Formatting />
@@ -1773,6 +1787,95 @@ function KeyValueDemo() {
         <IdChip value="run_4h2kq7m3xw5ybzta" truncate={10} prefix="run" />
         <IdChip value="sha256:8b1f2c9e4d7a6b5c3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a" truncate={22} />
         <Code>--userns=auto</Code>
+      </div>
+    </Section>
+  );
+}
+
+function PeopleDemo() {
+  const known: Record<string, EmailVerdict> = {
+    "ana@acme.dev": { status: "skip", reason: "already in acme", icon: <IconUser size={12} /> },
+    "filipa@acme.dev": { status: "skip", reason: "already invited today", icon: <IconCopy size={12} />, action: { label: "Copy their link", onClick: () => {} } },
+    "rita@acme.dev": { status: "renew", reason: "invitation expired: Invite renews it, same link" },
+  };
+  const classify = (e: { email: string }): EmailVerdict => known[e.email] ?? { status: "invite" };
+  const [entries, setEntries] = useState(() => parseEmails("Jorge Faria <jorge@acme.dev>, marta@acme.dev, ana@acme.dev, filipa@acme.dev, rita@acme.dev, tomás@, marta@acme.dev"));
+  const [empty, setEmpty] = useState<EmailEntry[]>([]);
+  const taken = emailCounts(classifyEmails(entries, classify)).taken;
+  const links = [
+    { email: "jorge@acme.dev", url: "https://lux.acme.dev/invite/inv_4Bn8Ty2Wq0" },
+    { email: "marta@acme.dev", url: "https://lux.acme.dev/invite/inv_9Lp3Cx7Ve5" },
+    { email: "filipa@acme.dev", url: "https://lux.acme.dev/invite/inv_7Rk2Qm9xPa", note: <Badge tone="info" title="Already invited: this is the same link">already invited</Badge> },
+  ];
+  const narrowLinks = ["engineering.alice@acme.dev", "engineering.bob@acme.dev"].map((email, i) => ({
+    email,
+    url: `https://lux.acme.dev/invite/inv_${i ? "2Hs8Kd4Lm1" : "6Wq1Zp3Nb7"}`,
+    note: (
+      <>
+        <RoleBadge role="admin" />
+        <Badge tone="info">renewed</Badge>
+      </>
+    ),
+  }));
+  return (
+    <Section id="people" title="Avatar, Person, RoleBadge, EmailInput, InviteLinkList" note="Who: a person is a round avatar (photo or initials), a service account a square with the Bot glyph; sm (22px) beside a name in a cell, lg (48px) in a page header. Person is the cell: avatar, name, a sub line; inline for an Owner or Invited by column. RoleBadge: Owner accent, Admin info, Member neutral, Viewer outline, what the role may do in its title. EmailInput: chips carry the address only, state is tone (struck outline = left out, danger = not an email, info glyph = renewed); why is said once, under the box, with one action at most; the hint shows only while empty; the submit button carries the count. InviteLinkList: links to send by hand, each with Copy, and Copy all.">
+      <h3 className="sg-h3">Avatar</h3>
+      <div className="sg-row">
+        <Avatar name="Carla Santos" size="sm" />
+        <Avatar name="Carla Santos" />
+        <Avatar name="Carla Santos" size="lg" />
+        <Avatar name="gha-runners" serviceAccount size="sm" />
+        <Avatar name="gha-runners" serviceAccount />
+        <Avatar name="gha-runners" serviceAccount size="lg" />
+      </div>
+      <h3 className="sg-h3">Person, RoleBadge</h3>
+      <div className="sg-row">
+        <Person name="Carla Santos" sub="carla@acme.dev" note="(you)" />
+        <Person name="ci-review-bot" sub="service account · owner Carla Santos" serviceAccount />
+        <Person name="Bruno Costa" inline />
+        <Person name="gha-runners" serviceAccount inline />
+      </div>
+      <div className="sg-row">
+        {ROLES.map((r) => (
+          <RoleBadge key={r} role={r} />
+        ))}
+        <Badge tone="warn">Operator</Badge>
+      </div>
+      <h3 className="sg-h3">EmailInput</h3>
+      <div className="grid-2">
+        <Card title="Invite people to acme">
+          <div className="field">
+            <label className="field-label" htmlFor="sg-ei">
+              Emails
+            </label>
+            <EmailInput id="sg-ei" entries={entries} onChange={setEntries} classify={classify} hint="Type or paste. Enter, comma or space adds one; “Name <email>” and spreadsheet columns keep the name." />
+          </div>
+          <div className="sg-row" style={{ marginTop: 12 }}>
+            <Button variant="primary" disabled={taken === 0}>
+              {inviteButtonText(taken)}
+            </Button>
+          </div>
+        </Card>
+        <Card title="Empty">
+          <div className="field">
+            <label className="field-label" htmlFor="sg-ei2">
+              Emails
+            </label>
+            <EmailInput id="sg-ei2" entries={empty} onChange={setEmpty} classify={() => ({ status: "invite" })} hint="Type or paste. Enter, comma or space adds one; “Name <email>” and spreadsheet columns keep the name." />
+          </div>
+        </Card>
+      </div>
+      <h3 className="sg-h3">InviteLinkList</h3>
+      <div style={{ maxWidth: 520 }}>
+        <InviteLinkList links={links} />
+        <div className="sg-row" style={{ marginTop: 12 }}>
+          <CopyAllLinks links={links} />
+        </div>
+      </div>
+      <h3 className="sg-h3">InviteLinkList, narrow (a phone's dialog, under 480px)</h3>
+      <p className="muted">The badges take their own line under the address; the address wraps at @ and . and is never cut, so two links with the same prefix still read apart.</p>
+      <div style={{ maxWidth: 300 }}>
+        <InviteLinkList links={narrowLinks} />
       </div>
     </Section>
   );

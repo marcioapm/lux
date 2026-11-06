@@ -110,6 +110,7 @@ func (a *app) root() *cobra.Command {
 	root.PersistentFlags().StringVar(&a.tenant, "tenant", "", "with an operator key: act on this tenant only, by id or name (env LUX_TENANT, config tenant); --tenant \"\" means all tenants")
 	root.PersistentFlags().StringVarP(&a.output, "output", "o", "text", "output format: text | json")
 	root.AddCommand(
+		a.whoamiCmd(), a.keysCmd(), a.membersCmd(), a.invitesCmd(), a.saCmd(),
 		a.runCmd(), a.lsCmd(), a.getCmd(), a.logsCmd(), a.eventsCmd(), a.steerCmd(), a.interruptCmd(),
 		a.stopCmd(), a.resumeCmd(), a.terminateCmd(), a.cancelCmd(), a.renameCmd(), a.extendCmd(), a.waitCmd(), a.pushCmd(), a.checkpointCmd(), a.diffCmd(), a.snapshotsCmd(),
 		a.artifactsCmd(), a.execCmd(), a.attachCmd(), a.portForwardCmd(), a.hostsCmd(), a.poolsCmd(),

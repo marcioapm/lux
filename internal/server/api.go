@@ -238,7 +238,7 @@ func (s *Server) routes(api huma.API) {
 			"Works in any state of the Run while the snapshot is available, terminated included; each URL handed out is a snapshot.downloaded event. " +
 			"404 for a snapshot not of this Run or a volume not in its manifest; 410 snapshot_unavailable once retention deleted it; " +
 			"409 not_uploaded (with Retry-After) while the volume is still on its host. " +
-			"It needs the run scope, not read: a volume holds whatever the workload wrote, credentials included.",
+			"Every role of the tenant may download one, viewers included (a viewer reads everything of the tenant's); a volume holds whatever the workload wrote, credentials included.",
 		Responses: map[string]*huma.Response{
 			"200": {Description: "With redirect=false: the URL.", Content: jsonContent(schemaRef[SnapshotVolumeURL](api))},
 			"302": {Description: "To the presigned URL.", Headers: map[string]*huma.Header{
@@ -246,7 +246,7 @@ func (s *Server) routes(api huma.API) {
 			}},
 		},
 		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusGone},
-	}, "run", streamed(s, s.downloadSnapshotVolume))
+	}, "read", streamed(s, s.downloadSnapshotVolume))
 	register(s, api, huma.Operation{
 		OperationID: "listArtifacts", Method: http.MethodGet, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
 		Summary: "List a Run's artifacts",
@@ -433,6 +433,14 @@ func (s *Server) routes(api huma.API) {
 		Errors: []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
 	}, "read", s.listPoolEvents)
 
+	// People.
+	s.peopleRoutes(api)
+	s.keyRoutes(api)
+	s.serviceAccountRoutes(api)
+	s.memberRoutes(api)
+	s.invitationRoutes(api)
+	s.operatorPeopleRoutes(api)
+
 	// Operators and the system.
 	register(s, api, huma.Operation{
 		OperationID: "whoami", Method: http.MethodGet, Path: "/v1/whoami", Tags: []string{"operators"},
@@ -550,7 +558,13 @@ type ImageResolution = proto.ImageResolution
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + runRaiseColumns + `, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + timeoutRemainingSQL + `, ` + resumableSQL + `, ` + stageColumns
+	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, ` + runRaiseColumns + `, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + timeoutRemainingSQL + `, ` + resumableSQL + `, ` + runOwnerSQL + `, ` + stageColumns
+
+// runOwnerSQL: the Run r's owner, as an Owner (JSON), or NULL.
+const runOwnerSQL = `coalesce(
+	(SELECT jsonb_build_object('kind', 'user', 'id', u.id, 'name', coalesce(nullif(u.name, ''), u.email), 'email', u.email) FROM users u WHERE u.id = r.owner_user_id),
+	CASE WHEN r.owner_user_id IS NOT NULL THEN jsonb_build_object('kind', 'user', 'id', r.owner_user_id, 'name', r.owner_user_id) END,
+	(SELECT jsonb_build_object('kind', 'serviceAccount', 'id', sa.id, 'name', sa.name) FROM service_accounts sa WHERE sa.id = r.owner_sa_id))`
 
 // timeoutRemainingSQL: the seconds Run r's timeout leaves it, by the reaper's
 // count (rr.timed, timedRuntimeSQL's); NULL without a timeout.
@@ -633,7 +647,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 	err := row.Scan(append([]any{&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
 		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing,
-		&requested, &size, &raisedFrom, &raisedFor, &shape, &r.TimeoutRemainingSeconds, &r.Resumable},
+		&requested, &size, &raisedFrom, &raisedFor, &shape, &r.TimeoutRemainingSeconds, &r.Resumable, &r.Owner},
 		stage.scanTargets()...)...)
 	// resolved_size is shown only while it names a size of the pool's
 	// current ladder with the Run's resources: a removed or changed shape
@@ -766,9 +780,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		var prompt []spec.Attachment
 		stored, prompt = splitPromptAttachments(stored)
 		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since, prompt_attachments,
-				submitted_by_key, submitted_by_email, requested_resources, resolved_size)
-			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''), $12, $13)`,
-			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email, requested, size)
+				submitted_by_key, submitted_by_email, requested_resources, resolved_size, owner_user_id, owner_sa_id)
+			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''), $12, $13, nullif($14, ''), nullif($15, ''))`,
+			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email, requested, size, p.UserID, p.ServiceAccountID)
 		if err != nil {
 			return err
 		}
@@ -915,6 +929,8 @@ type listRunsInput struct {
 	Label     []string `query:"label,explode" doc:"Only Runs with this label (key=value); repeat to require several."`
 	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."`
 	Limit     string   `query:"limit" doc:"Unpaged lists: at most this many Runs, newest first, 1 to 1000 (default 100; a value out of range is ignored). Paged lists (sort or a cursor): Runs per page, 1 to 200 (default 50; out of range is a 400). limit alone does not page." example:"100"`
+	Owner     string   `query:"owner" doc:"Only Runs these owners own (comma-separated, any of them): user:<id> or sa:<id> exactly, or a person's id or email, or a service account's id or name."`
+	Mine      bool     `query:"mine" doc:"Only the caller's Runs: a person's own and those of the service accounts they own; a service account's key, the account's."`
 }
 
 // Resolve reads every label as given: huma drops them all when the first
@@ -975,6 +991,21 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		k, v, _ := strings.Cut(l, "=")
 		where = append(where, "r.labels @> "+arg(map[string]string{k: v}))
 	}
+	if in.Owner != "" || in.Mine {
+		// Names resolve to ids first (one query, in the caller's scope),
+		// so the filter is the owner columns against ids, as runs_owner_*
+		// index them: a name subquery ORed in would scan every Run.
+		users, sas, err := s.resolveRunOwners(ctx, p, in.Owner, in.Mine)
+		if err != nil {
+			return nil, err
+		}
+		if in.Owner != "" {
+			where = append(where, ownerPredicate(users.owner, sas.owner, arg))
+		}
+		if in.Mine {
+			where = append(where, ownerPredicate(users.mine, sas.mine, arg))
+		}
+	}
 	pg, paged, err := resolvePaging(in.PageQuery, runSortKeys, "created", in.Limit, 50, 200)
 	if err != nil {
 		return nil, err
@@ -1024,6 +1055,72 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 	out := &listRunsOutput{}
 	out.Body.Runs = runs
 	return out, nil
+}
+
+// ownerIDs: the person and service account ids an owner= list, and mine,
+// resolve to.
+type ownerIDs struct{ owner, mine []string }
+
+// resolveRunOwners resolves owner= (several, comma-separated: any of them;
+// user:<id> and sa:<id> exactly, as cost rows key them; a bare value a
+// person's id or email, or a service account's id or name) and mine (a
+// person: them and the accounts they own; an account's key: the account)
+// to ids, in one query in the caller's scope. users is the system's; the
+// tenant's view shows its members and its Runs' owners.
+func (s *Server) resolveRunOwners(ctx context.Context, p Principal, owner string, mine bool) (users, sas ownerIDs, err error) {
+	bare := []string{}
+	for _, v := range strings.Split(owner, ",") {
+		v = strings.TrimSpace(v)
+		switch {
+		case v == "":
+		case strings.HasPrefix(v, "user:"):
+			users.owner = append(users.owner, strings.TrimPrefix(v, "user:"))
+		case strings.HasPrefix(v, "sa:"):
+			sas.owner = append(sas.owner, strings.TrimPrefix(v, "sa:"))
+		default:
+			bare = append(bare, v)
+		}
+	}
+	me := ""
+	if mine {
+		switch {
+		case p.UserID != "":
+			me = p.UserID
+			users.mine = []string{p.UserID}
+		case p.ServiceAccountID != "":
+			sas.mine = []string{p.ServiceAccountID}
+		}
+	}
+	if len(bare) == 0 && me == "" {
+		return users, sas, nil
+	}
+	var bu, bs, ms []string
+	err = s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT
+			ARRAY(SELECT u.id FROM users u WHERE cardinality($1::text[]) > 0 AND (u.id = ANY($1) OR lower(u.email) = ANY(SELECT lower(x) FROM unnest($1::text[]) x))),
+			ARRAY(SELECT sa.id FROM service_accounts sa WHERE cardinality($1::text[]) > 0 AND (sa.id = ANY($1) OR sa.name = ANY($1))),
+			ARRAY(SELECT sa.id FROM service_accounts sa WHERE $2 <> '' AND sa.owner_user_id = $2)`, bare, me).Scan(&bu, &bs, &ms)
+	})
+	users.owner = append(users.owner, bu...)
+	sas.owner = append(sas.owner, bs...)
+	sas.mine = append(sas.mine, ms...)
+	return users, sas, err
+}
+
+// ownerPredicate: Runs owned by one of these people or accounts; none of
+// either, no Run. Empty alternatives are left out.
+func ownerPredicate(users, sas []string, arg func(any) string) string {
+	var or []string
+	if len(users) > 0 {
+		or = append(or, "r.owner_user_id = ANY("+arg(users)+")")
+	}
+	if len(sas) > 0 {
+		or = append(or, "r.owner_sa_id = ANY("+arg(sas)+")")
+	}
+	if len(or) == 0 {
+		return "false"
+	}
+	return "(" + strings.Join(or, " OR ") + ")"
 }
 
 // listRunsPage is a page of GET /v1/runs in any sort key's order, keyed by

@@ -81,7 +81,10 @@ export function Select<V extends string>(props: SelectProps<V>) {
     }
     if (!open) return;
     if (e.key === "Escape") {
-      // Closes this menu only, not a dialog the select sits in.
+      // Closes this menu only, not a dialog the select sits in: a native
+      // <dialog> closes on Escape as the keydown's default action, which
+      // stopPropagation does not cancel; preventDefault does.
+      e.preventDefault();
       e.stopPropagation();
       setOpen(false);
     } else if (e.key === "ArrowDown") {
@@ -181,12 +184,14 @@ export interface TenantPickerProps {
   value: string;
   onChange: (tenantId: string) => void;
   size?: "sm" | "md";
+  /** Offer "All tenants" (an operator's). false: a person picking one of their memberships. Default true. */
+  all?: boolean;
 }
 
 /** Global tenant scope. "*" means all tenants. */
-export function TenantPicker({ tenants, value, onChange, size = "sm" }: TenantPickerProps) {
+export function TenantPicker({ tenants, value, onChange, size = "sm", all = true }: TenantPickerProps) {
   const options: SelectOption[] = [
-    { value: ALL_TENANTS, label: "All tenants", text: "All tenants" },
+    ...(all ? [{ value: ALL_TENANTS, label: "All tenants", text: "All tenants" }] : []),
     ...tenants.map((t) => ({
       value: t.id,
       text: t.name ?? t.id,

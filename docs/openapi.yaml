@@ -1,5 +1,13 @@
 components:
   schemas:
+    AddMemberRequest:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        role:
+          type: string
+      type: object
     AdmissionBlocker:
       additionalProperties: false
       properties:
@@ -25,6 +33,30 @@ components:
           description: "space_not_settled: the shortest wait after which the space would qualify if nothing changes."
           format: int64
           type: integer
+      type: object
+    ApiKey:
+      additionalProperties: false
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        createdBy:
+          $ref: "#/components/schemas/Person"
+        expiresAt:
+          format: date-time
+          type: string
+        id:
+          type: string
+        lastUsedAt:
+          format: date-time
+          type: string
+        name:
+          type: string
+        prefix:
+          description: The first characters of the key (lux_u_ for a person's, lux_s_ for a service account's), to tell keys apart.
+          type: string
+        readOnly:
+          type: boolean
       type: object
     Artifact:
       additionalProperties: false
@@ -411,9 +443,14 @@ components:
           additionalProperties:
             type: string
           type: object
+        key:
+          description: "For member/owner groups: user:<id>, sa:<id>, or (none)."
+          type: string
         other:
           description: "With top: the first-group value is the fold of every value past the top N, not a value of its own (a real value may also read (other))."
           type: boolean
+        owner:
+          $ref: "#/components/schemas/Owner"
         runs:
           description: "With top or runs, on totals: the Runs with cost (that rank counts, with top) under this row's first-group value, across the second group."
           format: int64
@@ -442,6 +479,22 @@ components:
         final:
           description: The part from final lines.
           type: string
+      type: object
+    CreateKeyInput:
+      additionalProperties: false
+      properties:
+        expiresAt:
+          description: "When the key stops working. None: it works until revoked."
+          format: date-time
+          type: string
+        name:
+          description: What the key is for (1 to 100 characters).
+          type: string
+        readOnly:
+          description: The key reads only, whatever the role. Otherwise it has the person's role, and follows it when it changes.
+          type: boolean
+      required:
+        - name
       type: object
     CreateServerInput:
       additionalProperties: false
@@ -517,6 +570,47 @@ components:
               type: string
             - type: number
         workdir:
+          type: string
+      type: object
+    CreateServiceAccountInput:
+      additionalProperties: false
+      properties:
+        description:
+          type: string
+        name:
+          description: Lowercase letters, digits and dashes, starting and ending with a letter or digit, up to 63; unique in the tenant.
+          type: string
+        ownerEmail:
+          description: "Its owner: a member of the tenant, by email."
+          type: string
+        role:
+          enum:
+            - viewer
+            - member
+            - admin
+          type: string
+      required:
+        - name
+        - role
+      type: object
+    CreateTenantInputBody:
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        ownerEmail:
+          type: string
+      type: object
+    CreateTenantOutputBody:
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        invitation:
+          $ref: "#/components/schemas/Invitation"
+        name:
+          type: string
+        tenantId:
           type: string
       type: object
     DiffFileStat:
@@ -651,6 +745,9 @@ components:
         serverId:
           description: "A server's event: its id (the server.* events)."
           type: string
+        subject:
+          description: "A tenant's event about its people (member.*, invitation.*, key.*, service_account.*): what it is about, e.g. usr_..., sa_..., inv_... or key_...; runId and serverId are then absent."
+          type: string
         time:
           format: date-time
           type: string
@@ -686,6 +783,9 @@ components:
             - "null"
         serverId:
           description: "A server's event: its id (the server.* events)."
+          type: string
+        subject:
+          description: "A tenant's event about its people (member.*, invitation.*, key.*, service_account.*): what it is about, e.g. usr_..., sa_..., inv_... or key_...; runId and serverId are then absent."
           type: string
         tenant:
           type: string
@@ -1212,6 +1312,156 @@ components:
           description: "A message: agents get it as a prompt, generic workloads on stdin. May be empty when attachments are given."
           type: string
       type: object
+    Invitation:
+      additionalProperties: false
+      properties:
+        acceptedAt:
+          format: date-time
+          type: string
+        code:
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        email:
+          type: string
+        expiresAt:
+          format: date-time
+          type: string
+        id:
+          type: string
+        invitedBy:
+          $ref: "#/components/schemas/Person"
+        name:
+          type: string
+        renewedAt:
+          format: date-time
+          type: string
+        revokedAt:
+          format: date-time
+          type: string
+        revokedBy:
+          $ref: "#/components/schemas/Person"
+        role:
+          type: string
+        status:
+          type: string
+        url:
+          type: string
+      type: object
+    InvitationCounts:
+      additionalProperties: false
+      properties:
+        accepted:
+          format: int64
+          type: integer
+        expired:
+          format: int64
+          type: integer
+        pending:
+          format: int64
+          type: integer
+        revoked:
+          format: int64
+          type: integer
+      type: object
+    InviteAcceptOutputBody:
+      additionalProperties: false
+      properties:
+        role:
+          type: string
+        tenant:
+          type: string
+        tenantId:
+          type: string
+      type: object
+    InviteBatch:
+      additionalProperties: false
+      properties:
+        invitations:
+          items:
+            $ref: "#/components/schemas/Item"
+          type:
+            - array
+            - "null"
+        role:
+          type: string
+      type: object
+    InviteBatchOutputBody:
+      additionalProperties: false
+      properties:
+        results:
+          items:
+            $ref: "#/components/schemas/InviteResult"
+          type:
+            - array
+            - "null"
+      type: object
+    InviteListOutputBody:
+      additionalProperties: false
+      properties:
+        cursor:
+          type: string
+        invitations:
+          items:
+            $ref: "#/components/schemas/Invitation"
+          type:
+            - array
+            - "null"
+      type: object
+    InviteLookupOutputBody:
+      additionalProperties: false
+      properties:
+        emailMatches:
+          type: boolean
+        expiresAt:
+          format: date-time
+          type: string
+        invitedBy:
+          $ref: "#/components/schemas/InviterName"
+        role:
+          type: string
+        status:
+          type: string
+        tenant:
+          type: string
+      type: object
+    InviteResult:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        invitation:
+          $ref: "#/components/schemas/Invitation"
+        message:
+          type: string
+        result:
+          type: string
+      type: object
+    InviterName:
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+      type: object
+    Item:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        name:
+          type: string
+      type: object
+    KeyList:
+      additionalProperties: false
+      properties:
+        keys:
+          items:
+            $ref: "#/components/schemas/ApiKey"
+          type:
+            - array
+            - "null"
+      type: object
     LifecycleEvent:
       additionalProperties: false
       properties:
@@ -1411,6 +1661,85 @@ components:
             - array
             - "null"
       type: object
+    Me:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        id:
+          type: string
+        lastSignInAt:
+          format: date-time
+          type: string
+        memberships:
+          items:
+            $ref: "#/components/schemas/MembershipRef"
+          type:
+            - array
+            - "null"
+        name:
+          type: string
+        operator:
+          type: boolean
+        picture:
+          type: string
+      type: object
+    Member:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        id:
+          type: string
+        joinedAt:
+          format: date-time
+          type: string
+        keyCount:
+          format: int64
+          type: integer
+        lastSeenAt:
+          format: date-time
+          type: string
+        name:
+          type: string
+        operator:
+          type: boolean
+        picture:
+          type: string
+        role:
+          type: string
+        runningRuns:
+          format: int64
+          type: integer
+      type: object
+    MembersOutputBody:
+      additionalProperties: false
+      properties:
+        members:
+          items:
+            $ref: "#/components/schemas/Member"
+          type:
+            - array
+            - "null"
+      type: object
+    MembershipRef:
+      additionalProperties: false
+      properties:
+        joinedAt:
+          format: date-time
+          type: string
+        role:
+          enum:
+            - viewer
+            - member
+            - admin
+            - owner
+          type: string
+        tenant:
+          type: string
+        tenantId:
+          type: string
+      type: object
     MigrateRequest:
       additionalProperties: false
       properties:
@@ -1468,6 +1797,59 @@ components:
         zone:
           type: string
       type: object
+    NewApiKey:
+      additionalProperties: false
+      properties:
+        apiKey:
+          description: "The key. Shown only now: luxd keeps its hash."
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        createdBy:
+          $ref: "#/components/schemas/Person"
+        expiresAt:
+          format: date-time
+          type: string
+        id:
+          type: string
+        lastUsedAt:
+          format: date-time
+          type: string
+        name:
+          type: string
+        prefix:
+          description: The first characters of the key (lux_u_ for a person's, lux_s_ for a service account's), to tell keys apart.
+          type: string
+        readOnly:
+          type: boolean
+      type: object
+    OperatorPerson:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        id:
+          type: string
+        keyCount:
+          format: int64
+          type: integer
+        lastSeenAt:
+          format: date-time
+          type: string
+        memberships:
+          items:
+            $ref: "#/components/schemas/MembershipRef"
+          type:
+            - array
+            - "null"
+        name:
+          type: string
+        operator:
+          type: boolean
+        picture:
+          type: string
+      type: object
     OutputEnd:
       additionalProperties: false
       properties:
@@ -1523,6 +1905,21 @@ components:
         t:
           format: int64
           type: integer
+      type: object
+    Owner:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        id:
+          type: string
+        kind:
+          enum:
+            - user
+            - serviceAccount
+          type: string
+        name:
+          type: string
       type: object
     PatchRunInput:
       additionalProperties: false
@@ -1595,6 +1992,62 @@ components:
         workdir:
           type: string
       type: object
+    PatchServiceAccountInput:
+      additionalProperties: false
+      properties:
+        description:
+          type: string
+        disabled:
+          description: true disables it (its keys stop working); false enables it again.
+          type: boolean
+        ownerEmail:
+          description: A member's email, or "" for no owner.
+          type: string
+        role:
+          enum:
+            - viewer
+            - member
+            - admin
+          type: string
+      type: object
+    PendingInvitation:
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        expiresAt:
+          format: date-time
+          type: string
+        invitedBy:
+          $ref: "#/components/schemas/InviterName"
+        role:
+          type: string
+        tenant:
+          type: string
+      type: object
+    PendingInvitationsOutputBody:
+      additionalProperties: false
+      properties:
+        invitations:
+          items:
+            $ref: "#/components/schemas/PendingInvitation"
+          type:
+            - array
+            - "null"
+      type: object
+    PeopleOutputBody:
+      additionalProperties: false
+      properties:
+        people:
+          items:
+            $ref: "#/components/schemas/OperatorPerson"
+          type:
+            - array
+            - "null"
+      type: object
     PerGB:
       additionalProperties: false
       properties:
@@ -1624,6 +2077,20 @@ components:
         p95:
           format: double
           type: number
+      type: object
+    Person:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        operator:
+          type: boolean
+        picture:
+          type: string
       type: object
     Placement:
       additionalProperties: false
@@ -2246,6 +2713,14 @@ components:
           description: The secret (in secrets) holding user:password, or a bare token (sent as the password, with the user lux).
           type: string
       type: object
+    RenameKeyInputBody:
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+      required:
+        - name
+      type: object
     RenamePoolInputBody:
       additionalProperties: false
       properties:
@@ -2499,6 +2974,9 @@ components:
           type: object
         name:
           type: string
+        owner:
+          $ref: "#/components/schemas/Owner"
+          description: "Who owns the Run: the person or service account that submitted it. Members act on their own Runs and their service accounts'; admins on all. Absent: no owner (submitted with a platform key, or before luxd recorded it)."
         placement:
           $ref: "#/components/schemas/ResumePlacement"
           description: "When it named a pool (placement.poolId): the pool the Run is bound to from now on, the one it left, and whether its platform went unchecked."
@@ -2748,6 +3226,12 @@ components:
           description: "Move the Run to this pool from this resume on, by id: the same field and rule as a submit's placement.poolId (the tenant's active pool with that id, else the platform's; any other is 422 unknown_pool). The Run's pool (pool and poolId in GET) and its spec's placement.pool and placement.poolId become that pool's, so later resumes, retries and migrations stay there. Checked before anything changes, with resources as this resume sets them: 422 platform_mismatch when the platforms the image offered at its last placement and the pool's hosts' are both known and share none; 422 pool_unfit when no host the pool has or launches can ever take the Run (nested containers, placement.requires labels, cpus, memory or disk beyond a whole host). On a Run already resuming: its own pool, 202; another, 409 not_resumable. With an operator's to, that host must be in this pool (else 422 invalid_spec)."
           type: string
       type: object
+    RoleInputBody:
+      additionalProperties: false
+      properties:
+        role:
+          type: string
+      type: object
     Run:
       additionalProperties: false
       properties:
@@ -2796,6 +3280,9 @@ components:
           type: object
         name:
           type: string
+        owner:
+          $ref: "#/components/schemas/Owner"
+          description: "Who owns the Run: the person or service account that submitted it. Members act on their own Runs and their service accounts'; admins on all. Absent: no owner (submitted with a platform key, or before luxd recorded it)."
         placementSeconds:
           description: "Time spent placing the Run, summed over its placements: for each, from when the Run needed a host (created, or its previous placement ending) until that placement's workload started. A Run still being placed counts up to the time of the response (placing). waitSeconds + startSeconds."
           format: double
@@ -3352,6 +3839,16 @@ components:
           format: double
           type: number
       type: object
+    SaList:
+      additionalProperties: false
+      properties:
+        serviceAccounts:
+          items:
+            $ref: "#/components/schemas/ServiceAccount"
+          type:
+            - array
+            - "null"
+      type: object
     Sample:
       additionalProperties: false
       properties:
@@ -3661,6 +4158,49 @@ components:
           description: "Where requests go: http or https, without credentials. A request's path is appended to this URL's."
           type: string
       type: object
+    ServiceAccount:
+      additionalProperties: false
+      properties:
+        activeKeys:
+          format: int64
+          type: integer
+        createdAt:
+          format: date-time
+          type: string
+        createdBy:
+          $ref: "#/components/schemas/Person"
+        description:
+          type: string
+        disabledAt:
+          description: "Disabled: its keys work no more."
+          format: date-time
+          type: string
+        id:
+          type: string
+        lastUsedAt:
+          description: The latest use of any of its keys (to the minute).
+          format: date-time
+          type: string
+        name:
+          type: string
+        owner:
+          $ref: "#/components/schemas/Person"
+          description: "The person who may rotate its keys and act on its Runs (as a member); absent: none."
+        role:
+          enum:
+            - viewer
+            - member
+            - admin
+          type: string
+      type: object
+    ServiceAccountRef:
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      type: object
     SizeRequest:
       additionalProperties: false
       properties:
@@ -3963,6 +4503,9 @@ components:
           type: object
         name:
           type: string
+        owner:
+          $ref: "#/components/schemas/Owner"
+          description: "Who owns the Run: the person or service account that submitted it. Members act on their own Runs and their service accounts'; admins on all. Absent: no owner (submitted with a platform key, or before luxd recorded it)."
         placementSeconds:
           description: "Time spent placing the Run, summed over its placements: for each, from when the Run needed a host (created, or its previous placement ending) until that placement's workload started. A Run still being placed counts up to the time of the response (placing). waitSeconds + startSeconds."
           format: double
@@ -4133,8 +4676,21 @@ components:
         maxStorageBytes:
           format: int64
           type: integer
+        membersCount:
+          format: int64
+          type: integer
         name:
           type: string
+        owners:
+          description: The tenant's owners, by email.
+          items:
+            $ref: "#/components/schemas/TenantOwner"
+          type:
+            - array
+            - "null"
+        ownersCount:
+          format: int64
+          type: integer
         retentionDays:
           description: Days a terminated Run keeps its snapshots and output after it was terminated. Artifacts are kept until deleted.
           format: int64
@@ -4155,6 +4711,16 @@ components:
           type:
             - array
             - "null"
+      type: object
+    TenantOwner:
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
       type: object
     TenantServer:
       additionalProperties: false
@@ -4293,6 +4859,9 @@ components:
           type:
             - string
             - "null"
+        tenantId:
+          description: "The tenant it is of: who may change it is decided there."
+          type: string
         updatedAt:
           format: date-time
           type: string
@@ -4483,8 +5052,17 @@ components:
           type: string
         email:
           type: string
+        invitationsEnabled:
+          type: boolean
         keyId:
           type: string
+        memberships:
+          description: The person's tenants and their role in each; empty for a service account or a platform key.
+          items:
+            $ref: "#/components/schemas/MembershipRef"
+          type:
+            - array
+            - "null"
         name:
           type: string
         operator:
@@ -4509,6 +5087,17 @@ components:
         previews:
           description: Whether preview.domain is set, regardless of preview auth mode. Always present; its presence indicates support for single-label relative server hostnames. previewDomain remains null when previews are off or use Cloudflare Access.
           type: boolean
+        readOnly:
+          description: "The key is read-only: it reads whatever the role is."
+          type: boolean
+        role:
+          description: "The caller's role in the tenant: the person's membership, or the service account's role. Absent for an operator."
+          enum:
+            - viewer
+            - member
+            - admin
+            - owner
+          type: string
         scopes:
           items:
             type: string
@@ -4518,10 +5107,16 @@ components:
         serverInject:
           description: "Whether servers support inject: HTML the preview listener adds to their HTML pages. Always true on releases supporting server-inject."
           type: boolean
+        serviceAccount:
+          $ref: "#/components/schemas/ServiceAccountRef"
+          description: "A service account's key: the account."
         tenant:
-          description: The key's tenant's name; empty for an operator key.
+          description: The caller's tenant's name; empty for an operator, or a person in no tenant.
           type: string
         tenantId:
+          type: string
+        userId:
+          description: The person's id.
           type: string
       type: object
     Workload:
@@ -4772,12 +5367,19 @@ paths:
             type:
               - array
               - "null"
-        - description: "Repeat up to twice: tenant (operators), pool, host, family, run, key, label:key."
+        - description: "Alias for one group: member (people and service accounts), owner (service accounts folded into their owner), key, run, pool, host or family."
+          explode: false
+          in: query
+          name: by
+          schema:
+            description: "Alias for one group: member (people and service accounts), owner (service accounts folded into their owner), key, run, pool, host or family."
+            type: string
+        - description: "Repeat up to twice: tenant (operators), pool, host, family, run, key, member, owner, label:key."
           explode: true
           in: query
           name: group
           schema:
-            description: "Repeat up to twice: tenant (operators), pool, host, family, run, key, label:key."
+            description: "Repeat up to twice: tenant (operators), pool, host, family, run, key, member, owner, label:key."
             items:
               type: string
             type:
@@ -6067,6 +6669,1006 @@ paths:
       summary: Set a static host's hourly price
       tags:
         - hosts
+  /v1/invitations:
+    get:
+      description: |-
+        status: pending, expired, accepted, revoked or all (default). q searches email. Up to 100, by id; cursor continues.
+
+        Needs the `admin` scope.
+      operationId: listInvitations
+      parameters:
+        - explode: false
+          in: query
+          name: status
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: q
+          schema:
+            type: string
+        - explode: false
+          in: query
+          name: cursor
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteListOutputBody"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List invitations
+      tags:
+        - people
+    post:
+      description: |-
+        One email per invitation, valid 14 days. Returns each email's created, existing, renewed, member or invalid result. No email is sent: send the links yourself. Only owners invite owners. Key console mode: 409 invitations_unavailable.
+
+        Needs the `admin` scope.
+      operationId: createInvitations
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InviteBatch"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteBatchOutputBody"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Invite people to the tenant
+      tags:
+        - people
+  /v1/invitations/by-code/{code}:
+    get:
+      description: |-
+        Verified Access users only. The intended email sees tenant, role, inviter name, expiry and status; anyone else only status and emailMatches:false.
+
+        Any caller: a key, or a person signed in, in a tenant or not.
+      operationId: lookupInvitation
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteLookupOutputBody"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Look up an invitation
+      tags:
+        - people
+  /v1/invitations/by-code/{code}/accept:
+    post:
+      description: |-
+        Verified Access users only; email must match (403 invitation_email_mismatch, with no invitation details). Expired, revoked or accepted: 410 invitation_unusable.
+
+        Any caller: a key, or a person signed in, in a tenant or not.
+      operationId: acceptInvitation
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteAcceptOutputBody"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Accept an invitation
+      tags:
+        - people
+  /v1/invitations/counts:
+    get:
+      description: Needs the `admin` scope.
+      operationId: invitationCounts
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationCounts"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Count invitations by status
+      tags:
+        - people
+  /v1/invitations/{invitation}/renew:
+    post:
+      description: |-
+        Pending or expired only: the same code, valid 14 more days.
+
+        Needs the `admin` scope.
+      operationId: renewInvitation
+      parameters:
+        - in: path
+          name: invitation
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invitation"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Renew an invitation
+      tags:
+        - people
+  /v1/invitations/{invitation}/revoke:
+    post:
+      description: Needs the `admin` scope.
+      operationId: revokeInvitation
+      parameters:
+        - in: path
+          name: invitation
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invitation"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Revoke an invitation
+      tags:
+        - people
+  /v1/me:
+    get:
+      description: |-
+        The person the request is from, signed in or by a personal key, with their tenants and their role in each. A person in no tenant gets it too (any other route answers them 403 not_a_member). 404 for a service account's key or a platform key: no person.
+
+        Any caller: a key, or a person signed in, in a tenant or not.
+      operationId: getMe
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Your profile
+      tags:
+        - people
+  /v1/me/invitations:
+    get:
+      description: |-
+        Verified Access users only, including people not yet a member of any tenant.
+
+        Any caller: a key, or a person signed in, in a tenant or not.
+      operationId: myInvitations
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PendingInvitationsOutputBody"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Your pending invitations
+      tags:
+        - people
+  /v1/me/keys:
+    get:
+      description: |-
+        Active ones (neither revoked nor expired), newest first. Never their secrets.
+
+        Needs the `read` scope.
+      operationId: listMyKeys
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Your API keys in this tenant
+      tags:
+        - people
+    post:
+      description: |-
+        A personal key in this tenant: it acts as you, with your role (it follows role changes) or, readOnly, as a viewer. The secret (lux_u_...) is in the answer only. At most 5 active keys per person per tenant: 409 key_limit.
+
+        Needs the `read` scope.
+      operationId: createMyKey
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateKeyInput"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewApiKey"
+          description: Created
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Make yourself an API key
+      tags:
+        - people
+  /v1/me/keys/{key}:
+    delete:
+      description: |-
+        It stops working at once.
+
+        Needs the `read` scope.
+      operationId: revokeMyKey
+      parameters:
+        - description: The key's id, or its prefix.
+          in: path
+          name: key
+          required: true
+          schema:
+            description: The key's id, or its prefix.
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Revoke one of your API keys
+      tags:
+        - people
+    patch:
+      description: Needs the `read` scope.
+      operationId: renameMyKey
+      parameters:
+        - description: The key's id, or its prefix.
+          in: path
+          name: key
+          required: true
+          schema:
+            description: The key's id, or its prefix.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RenameKeyInputBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKey"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Rename one of your API keys
+      tags:
+        - people
+  /v1/members:
+    get:
+      description: |-
+        Every role sees members; keyCount is shown only to self and admins.
+
+        Needs the `read` scope.
+      operationId: listMembers
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MembersOutputBody"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List the tenant's members
+      tags:
+        - people
+    post:
+      description: |-
+        Operators only. Normally invite the person instead.
+
+        Needs the `operator` scope.
+      operationId: addMember
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddMemberRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Add a member directly
+      tags:
+        - people
+  /v1/members/{user}:
+    delete:
+      description: |-
+        Revokes their keys in this tenant immediately; their Runs keep running and stay theirs. Their service accounts become ownerless. Only an operator may remove the last owner.
+
+        Needs the `admin` scope.
+      operationId: removeMember
+      parameters:
+        - description: The member's id or email.
+          in: path
+          name: user
+          required: true
+          schema:
+            description: The member's id or email.
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Remove a member
+      tags:
+        - people
+    get:
+      description: Needs the `read` scope.
+      operationId: getMember
+      parameters:
+        - description: The member's id or email.
+          in: path
+          name: user
+          required: true
+          schema:
+            description: The member's id or email.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Get a member
+      tags:
+        - people
+    patch:
+      description: |-
+        Admins manage roles up to admin; only owners and operators manage owners. Only an operator may demote the last owner (409 last_owner).
+
+        Needs the `admin` scope.
+      operationId: changeMemberRole
+      parameters:
+        - description: The member's id or email.
+          in: path
+          name: user
+          required: true
+          schema:
+            description: The member's id or email.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleInputBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Change a member's role
+      tags:
+        - people
+  /v1/members/{user}/keys:
+    get:
+      description: |-
+        Self and admins only; everyone else gets 404.
+
+        Needs the `read` scope.
+      operationId: listMemberKeys
+      parameters:
+        - description: The member's id or email.
+          in: path
+          name: user
+          required: true
+          schema:
+            description: The member's id or email.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List a member's active keys
+      tags:
+        - people
+  /v1/members/{user}/keys/{key}:
+    delete:
+      description: |-
+        Admins and owners revoke any member's key in this tenant (by id or prefix); an owner's keys only owners and operators. 404 for a key that is not that member's active key in this tenant. Records key.revoked, by the actor.
+
+        Needs the `admin` scope.
+      operationId: revokeMemberKey
+      parameters:
+        - description: The member's id or email.
+          in: path
+          name: user
+          required: true
+          schema:
+            description: The member's id or email.
+            type: string
+        - description: The key's id, or its prefix.
+          in: path
+          name: key
+          required: true
+          schema:
+            description: The key's id, or its prefix.
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Revoke a member's key
+      tags:
+        - people
+  /v1/people:
+    get:
+      description: |-
+        Operators only: memberships, operator flag, key count and last seen.
+
+        Needs the `operator` scope.
+      operationId: listPeople
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PeopleOutputBody"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List every person
+      tags:
+        - operators
   /v1/pools:
     get:
       description: |-
@@ -6917,6 +8519,20 @@ paths:
             examples:
               - "100"
             type: string
+        - description: "Only Runs these owners own (comma-separated, any of them): user:<id> or sa:<id> exactly, or a person's id or email, or a service account's id or name."
+          explode: false
+          in: query
+          name: owner
+          schema:
+            description: "Only Runs these owners own (comma-separated, any of them): user:<id> or sa:<id> exactly, or a person's id or email, or a service account's id or name."
+            type: string
+        - description: "Only the caller's Runs: a person's own and those of the service accounts they own; a service account's key, the account's."
+          explode: false
+          in: query
+          name: mine
+          schema:
+            description: "Only the caller's Runs: a person's own and those of the service accounts they own; a service account's key, the account's."
+            type: boolean
       responses:
         "200":
           content:
@@ -7094,6 +8710,8 @@ paths:
       description: |-
         Renames it, in any state, terminated included: `name` and `spec.name` both become the new name, and a `renamed` event (`from`, `to`, `by`) is recorded. Nothing else changes: not its workload, placement, epoch, snapshots or labels. The same name again changes nothing and records no event. 422 invalid_spec: no name, or one over 200 bytes, not UTF-8, or with a control character. Answers the Run as GET /v1/runs/{id} does.
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: patchRun
       parameters:
@@ -7156,6 +8774,8 @@ paths:
     delete:
       description: |-
         Every artifact of a terminated Run, from storage; retention never deletes artifacts. Their listing stays, available false, and a download answers 410 gone. Works however long ago the Run ended. Idempotent: deleted is 0 once none are left. 409 not_terminal on any other Run (a stopped, lost, failed or succeeded one can still be resumed).
+
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
 
         Needs the `run` scope.
       operationId: deleteArtifacts
@@ -7289,6 +8909,8 @@ paths:
 
         Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: attachRun
       parameters:
@@ -7398,6 +9020,8 @@ paths:
       description: |-
         The old name of POST /v1/runs/{id}/terminate, which it is in every way: the Run ends as terminated.
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: cancelRun
       parameters:
@@ -7452,7 +9076,10 @@ paths:
         - runs
   /v1/runs/{id}/checkpoint:
     post:
-      description: Needs the `run` scope.
+      description: |-
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
+        Needs the `run` scope.
       operationId: checkpointRun
       parameters:
         - description: The Run's id.
@@ -7802,6 +9429,8 @@ paths:
 
         Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: execRun
       parameters:
@@ -7979,6 +9608,8 @@ paths:
     post:
       description: |-
         Agents get text as a message, read at their next model step where the adapter can (the Run's steer says), else when the current turn ends; generic workloads get it on stdin. Its first answer is one lux.input record (phase accepted, or failed) and an input.delivered or input.failed event; after acceptance, lux.input.consumed (where the adapter has a receipt) or lux.input.failed records, and input.consumed or input.failed events. A stopped Run takes its input through resume instead. Images (attachments) are one message with the text, images first; records and events carry their name, contentType, size and sha256, never their bytes. 400 invalid_attachment: a bad image (by index); 400 attachments_unsupported: a generic Run.
+
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
 
         Needs the `run` scope.
       operationId: postInput
@@ -8304,6 +9935,8 @@ paths:
 
         Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: portForward
       parameters:
@@ -8396,6 +10029,8 @@ paths:
 
         credentials: per repository name, a git credential (e.g. a short-lived installation token) used in place of the repository's credential secret, for this push and every later fetch and push of that repository by the running placement (the runner keeps the latest in memory). luxd never stores it: it holds it in memory until the runner has the push, so the request must reach the luxd holding the runner's connection (a single luxd, or sticky routing, as interactive streams need): any other luxd answers 503 `host_unreachable` and queues nothing. A queued push whose credentials luxd no longer holds (it restarted, or the runner reconnected to another luxd first) ends failed. 422 `invalid_request` for a name that is not one of the Run's repositories, a repository without a credential, or an empty value. 409 `git_credentials_unsupported` when the Run's host runs a lux-runner that does not take them.
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: pushRun
       parameters:
@@ -8477,6 +10112,8 @@ paths:
         timeout sets the Run's timeout (its total running time) from this resume on, as POST /v1/runs/{id}/timeout does: a Run failed on its timeout needs a longer one to run again.
 
         placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit, and pool_preemptible for a Run with placement.preemptible false into a preemptible pool; nothing changes). validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.
+
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
 
         Needs the `run` scope.
       operationId: resumeRun
@@ -8616,6 +10253,8 @@ paths:
       description: |-
         A named port of the Run, with an optional command lux runs in its container. It starts now if start (default: when it has a command), which needs the Run running. Any state but finished may add one. One without a command is watched: ready whenever its port accepts connections while the Run runs.
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: addServer
       parameters:
@@ -8685,6 +10324,8 @@ paths:
       description: |-
         Stops it first. A server of lifetime owner is not the Run's to remove: 409 lifetime_owner (detach or delete it through /v1/servers/{id}).
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: removeServer
       parameters:
@@ -8749,6 +10390,8 @@ paths:
     put:
       description: |-
         Its port, command, workdir, env, afterSync and inject: what the body leaves out is cleared. A running one keeps what it was started with until it is started again.
+
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
 
         Needs the `run` scope.
       operationId: putServer
@@ -8898,6 +10541,8 @@ paths:
       description: |-
         Stops its command and runs it again, as it is defined now. 409 not_running unless the Run is running; 409 no_command without a command.
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: restartServer
       parameters:
@@ -8968,6 +10613,8 @@ paths:
       description: |-
         Runs its command. Idempotent while it runs. 409 not_running unless the Run is running; 409 no_command for a server without one (its port is watched whenever the Run runs).
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: startServer
       parameters:
@@ -9037,6 +10684,8 @@ paths:
     post:
       description: |-
         Stops its command; a server without one is no longer watched, until the Run's next placement. Idempotent.
+
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
 
         Needs the `run` scope.
       operationId: stopServer
@@ -9163,9 +10812,9 @@ paths:
   /v1/runs/{id}/snapshots/{snap}/volumes/{name}:
     get:
       description: |-
-        A 302 to a presigned S3 URL of the volume as stored: a zstd-compressed tar of the volume's files, valid 15 minutes and fetched without an Authorization header. With redirect=false, the URL as JSON instead, with the size and sha256 of those compressed bytes (`lux snapshots download` checks both). Works in any state of the Run while the snapshot is available, terminated included; each URL handed out is a snapshot.downloaded event. 404 for a snapshot not of this Run or a volume not in its manifest; 410 snapshot_unavailable once retention deleted it; 409 not_uploaded (with Retry-After) while the volume is still on its host. It needs the run scope, not read: a volume holds whatever the workload wrote, credentials included.
+        A 302 to a presigned S3 URL of the volume as stored: a zstd-compressed tar of the volume's files, valid 15 minutes and fetched without an Authorization header. With redirect=false, the URL as JSON instead, with the size and sha256 of those compressed bytes (`lux snapshots download` checks both). Works in any state of the Run while the snapshot is available, terminated included; each URL handed out is a snapshot.downloaded event. 404 for a snapshot not of this Run or a volume not in its manifest; 410 snapshot_unavailable once retention deleted it; 409 not_uploaded (with Retry-After) while the volume is still on its host. Every role of the tenant may download one, viewers included (a viewer reads everything of the tenant's); a volume holds whatever the workload wrote, credentials included.
 
-        Needs the `run` scope.
+        Needs the `read` scope.
       operationId: downloadSnapshotVolume
       parameters:
         - description: The Run's id.
@@ -9266,6 +10915,8 @@ paths:
       description: |-
         Gracefully: its state volumes are snapshotted and it can be resumed. Idempotent.
 
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
+
         Needs the `run` scope.
       operationId: stopRun
       parameters:
@@ -9326,6 +10977,8 @@ paths:
         409 `sync_modes_unsupported` when a mode other than move is asked for and the Run's host runs a lux-runner without sync modes.
 
         credentials: as on a push: per repository name, a git credential to fetch with in place of the repository's credential secret, kept by the runner for later fetches and pushes; never stored by luxd. luxd holds it in memory until the runner has the sync, so the request must reach the luxd holding the runner's connection (a single luxd, or sticky routing, as interactive streams need): any other luxd answers 503 `host_unreachable` and queues nothing. A queued sync whose credentials luxd no longer holds (it restarted, or the runner reconnected to another luxd first) ends failed (git.sync and sync.done). 422 `invalid_request` for a name that is not one of the Run's repositories, a repository without a credential, or an empty value; 409 `git_credentials_unsupported` when the Run's host runs a lux-runner that does not take them.
+
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
 
         Needs the `run` scope.
       operationId: syncRun
@@ -9401,6 +11054,8 @@ paths:
     post:
       description: |-
         It ends as terminated, for good: it cannot be resumed, and its snapshots and output go after its tenant's retention. Idempotent.
+
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
 
         Needs the `run` scope.
       operationId: terminateRun
@@ -9521,6 +11176,8 @@ paths:
     post:
       description: |-
         Gives a Run more (or less) running time while it runs, or before it is resumed: exactly one of `add` (added to its timeout), `set` (the new total) or `unlimited: true` (no timeout). The timeout is the Run's running time summed over its placements (spec.timeout); the new one counts at once, for the placement running now too. It must leave at least a minute past the time the Run has already run (runtimeSeconds): 422 timeout_too_short, whose message says both. add on a Run without a timeout: 422 invalid_spec (use set). Concurrent adds each count. Any state but terminated (409 run_terminated). Once the Run is being stopped for its timeout the stop cannot be called back: 409 timeout_stop_started; resume it with a timeout instead. A `timeout.changed` event (`from`, `to`, `by`; "" for none) is recorded; the same timeout again changes nothing and records no event. Answers the Run as GET /v1/runs/{id} does.
+
+        A member may do this to the Runs they own and those of a service account they own; an admin, to every Run of the tenant. Otherwise 403 not_run_owner, whose message names the owner.
 
         Needs the `run` scope.
       operationId: timeoutRun
@@ -9759,6 +11416,8 @@ paths:
       description: |-
         Detaches it first (its command stops; its Run is untouched). Its hostname is gone from then on. 409 conflict when the server was attached or detached twice while this ran: retry.
 
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+
         Needs the `run` scope.
       operationId: deleteServer
       parameters:
@@ -9870,6 +11529,8 @@ paths:
       description: |-
         What is given. Command, port, workdir, env and afterSync apply at its next start. 409 conflict when the server was attached or detached twice while this ran: retry.
 
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+
         Needs the `run` scope.
       operationId: patchServer
       parameters:
@@ -9939,6 +11600,8 @@ paths:
       description: |-
         To a running Run: its command starts now. To a stopped one: at its next placement. 409 attached when another Run serves it. Its name must be free among the Run's servers (409 name_taken).
 
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+
         Needs the `run` scope.
       operationId: attachServer
       parameters:
@@ -10007,6 +11670,8 @@ paths:
     post:
       description: |-
         Its command stops; the Run is untouched. 409 lifetime_run for a server that ends with its Run. 409 conflict when the server was attached or detached twice while this ran: retry.
+
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
 
         Needs the `run` scope.
       operationId: detachServer
@@ -10194,6 +11859,8 @@ paths:
       description: |-
         As it is defined now. Not running: as start. 409 conflict when the server was attached or detached twice while this ran: retry.
 
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+
         Needs the `run` scope.
       operationId: restartTenantServer
       parameters:
@@ -10257,6 +11924,8 @@ paths:
       description: |-
         Up: started now if its Run runs, else at its next placement. 409 not_attached, no_command. 409 conflict when the server was attached or detached twice while this ran: retry.
 
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
+
         Needs the `run` scope.
       operationId: startTenantServer
       parameters:
@@ -10319,6 +11988,8 @@ paths:
     post:
       description: |-
         Down: its command stops, and new placements leave it stopped until it is started again. 409 conflict when the server was attached or detached twice while this ran: retry.
+
+        A member may change a server attached to a Run they may act on (see POST /v1/runs/{id}/stop); one attached to no Run, admins only: otherwise 403 not_run_owner (or forbidden).
 
         Needs the `run` scope.
       operationId: stopTenantServer
@@ -10441,6 +12112,398 @@ paths:
       summary: Mint a preview ticket for a server
       tags:
         - servers
+  /v1/service-accounts:
+    get:
+      description: |-
+        By name, disabled ones included.
+
+        Needs the `read` scope.
+      operationId: listServiceAccounts
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List the tenant's service accounts
+      tags:
+        - people
+    post:
+      description: |-
+        A principal of the tenant that is no person (a bot, CI, an orchestrator): its keys act with its role, viewer, member or admin (never owner). Admins and owners only. An owner, if given, must be a member of the tenant: they may rotate its keys and act on its Runs, not change its role. 409 conflict for a name taken in the tenant.
+
+        Needs the `admin` scope.
+      operationId: createServiceAccount
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateServiceAccountInput"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceAccount"
+          description: Created
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Create a service account
+      tags:
+        - people
+  /v1/service-accounts/{sa}:
+    get:
+      description: Needs the `read` scope.
+      operationId: getServiceAccount
+      parameters:
+        - description: The service account's id or name.
+          in: path
+          name: sa
+          required: true
+          schema:
+            description: The service account's id or name.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceAccount"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A service account
+      tags:
+        - people
+    patch:
+      description: |-
+        Its description, role, owner, or disabled. Admins and owners only. Disabling stops its keys at once; its Runs keep running.
+
+        Needs the `admin` scope.
+      operationId: patchServiceAccount
+      parameters:
+        - description: The service account's id or name.
+          in: path
+          name: sa
+          required: true
+          schema:
+            description: The service account's id or name.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchServiceAccountInput"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceAccount"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Change a service account
+      tags:
+        - people
+  /v1/service-accounts/{sa}/keys:
+    get:
+      description: |-
+        Its active keys. Its owner and admins only (others: 404).
+
+        Needs the `read` scope.
+      operationId: listServiceAccountKeys
+      parameters:
+        - description: The service account's id or name.
+          in: path
+          name: sa
+          required: true
+          schema:
+            description: The service account's id or name.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A service account's API keys
+      tags:
+        - people
+    post:
+      description: |-
+        Its owner and admins only. The secret (lux_s_...) is in the answer only. At most 2 active keys: 409 key_limit (rotate: make the new key, move to it, revoke the old one).
+
+        Needs the `read` scope.
+      operationId: createServiceAccountKey
+      parameters:
+        - description: The service account's id or name.
+          in: path
+          name: sa
+          required: true
+          schema:
+            description: The service account's id or name.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateKeyInput"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewApiKey"
+          description: Created
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Make a service account a key
+      tags:
+        - people
+  /v1/service-accounts/{sa}/keys/{key}:
+    delete:
+      description: |-
+        Its owner and admins only.
+
+        Needs the `read` scope.
+      operationId: revokeServiceAccountKey
+      parameters:
+        - description: The service account's id or name.
+          in: path
+          name: sa
+          required: true
+          schema:
+            description: The service account's id or name.
+            type: string
+        - description: The key's id, or its prefix.
+          in: path
+          name: key
+          required: true
+          schema:
+            description: The key's id, or its prefix.
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Revoke a service account's key
+      tags:
+        - people
   /v1/status:
     get:
       description: |-
@@ -10543,6 +12606,54 @@ paths:
       summary: List tenants
       tags:
         - operators
+    post:
+      description: |-
+        Optionally invite its first owner (verified Access mode only).
+
+        Needs the `operator` scope.
+      operationId: createTenant
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenantInputBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateTenantOutputBody"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Create a tenant
+      tags:
+        - operators
   /v1/whoami:
     get:
       description: |-
@@ -10593,5 +12704,7 @@ tags:
     name: pools
   - description: The system, hosts and Runs now and over time.
     name: history
+  - description: Members, their roles and keys, service accounts and invitations.
+    name: people
   - description: "For operator keys: every tenant."
     name: operators

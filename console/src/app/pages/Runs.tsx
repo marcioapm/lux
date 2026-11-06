@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Button, Card, ListPriceNote, PageHeader, Pagination, rangeText, RUN_STATE_LIST, runStateStyle, sortInWords, Table, TimeSeriesChart } from "@lux/design-system";
+import { Button, Card, ListPriceNote, PageHeader, Pagination, rangeText, RUN_STATE_LIST, runStateStyle, SegmentedControl, sortInWords, Table, TimeSeriesChart } from "@lux/design-system";
 import { api, useQuery, type RunListParams } from "../../api/index.ts";
+import { useViewer } from "../identity.ts";
 import { historyRes, stepNote, stepOfRes } from "../every.ts";
 import { usePaged } from "../paged.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, hostPath, runColumns, runPath, useSeries } from "./common.tsx";
+
+/** GET /v1/runs' sort keys (internal/server/api.go runSortKeys): a column whose key is not one is not sortable here. */
+export const RUN_SORT_KEYS = new Set(["created", "id", "name", "tenant", "state", "host", "pool", "adapter", "runtime", "placements", "placement", "cost"]);
 
 
 /**
@@ -15,7 +19,15 @@ import { ErrorBlock, ErrorStrip, hostPath, runColumns, runPath, useSeries } from
  */
 export function Runs() {
   const scope = useScope();
+  const viewer = useViewer();
   const params = useSearchParams();
+  const owner = params.get("owner") ?? "";
+  const [ownerDraft, setOwnerDraft] = useState(owner);
+  // Mine follows the URL (back and forward included); the remembered
+  // choice applies only to a URL that says nothing (?mine= absent).
+  const mineParam = params.get("mine");
+  const mine = mineParam != null ? mineParam === "true" : localStorage.getItem("lux.runs.mine") === "true";
+  useEffect(() => setOwnerDraft(owner), [owner]);
   const states = useMemo(() => (params.get("state") ?? "").split(",").filter(Boolean), [params]);
   const resumable = params.get("resumable") === "true";
   const host = params.get("host") ?? "";
@@ -27,10 +39,10 @@ export function Runs() {
   useEffect(() => setLabelDraft(label), [label]);
 
   const filter = useMemo<RunListParams>(
-    () => ({ state: states.length ? states : undefined, resumable: resumable || undefined, host: host || undefined, label: label || undefined }),
-    [states, resumable, host, label],
+    () => ({ state: states.length ? states : undefined, resumable: resumable || undefined, host: host || undefined, label: label || undefined, owner: owner || undefined, mine: mine || undefined }),
+    [states, resumable, host, label, owner, mine],
   );
-  const filterKey = `${states.join(",")}|${resumable}|${host}|${label}`;
+  const filterKey = `${states.join(",")}|${resumable}|${host}|${label}|${owner}|${mine}`;
 
   // A page of the whole result, in the sort chosen, read by the server.
   // A filter, tenant, sort or size change starts at the first page; a
@@ -64,12 +76,14 @@ export function Runs() {
   };
   const submitText = (e: FormEvent) => {
     e.preventDefault();
-    setSearchParams({ host: hostDraft.trim() || null, label: labelDraft.trim() || null });
+    setSearchParams({ host: hostDraft.trim() || null, label: labelDraft.trim() || null, owner: ownerDraft.trim() || null });
   };
   const clear = () => setSearchParams({ state: null, resumable: null, host: null, label: null });
   const filtered = states.length > 0 || resumable || host !== "" || label !== "";
 
-  const cols = useMemo(() => runColumns({ tenant: scope.showTenant, cost: true, placement: true }).map((c) => ({ ...c, sortable: true })), [scope.showTenant]);
+  // Server-paged: a column sorts only when luxd has its sort key (api.go
+  // runSortKeys); Owner has none (sort=owner is a 400), so it does not.
+  const cols = useMemo(() => runColumns({ tenant: scope.showTenant, cost: true, placement: true, owner: true, me: viewer.userId }).map((c) => (RUN_SORT_KEYS.has(c.key) ? { ...c, sortable: true } : { ...c, sortable: false, sortValue: undefined })), [scope.showTenant]);
 
   return (
     <div className="page page-list">
@@ -77,7 +91,7 @@ export function Runs() {
         title="Runs"
         description={
           <>
-            <span>{scope.apiTenant ? `tenant ${scope.apiTenant}` : scope.showTenant ? "all tenants" : "your runs"} · every column sorts, across every matching run</span>
+            <span>{scope.apiTenant ? `tenant ${scope.apiTenant}` : scope.showTenant ? "all tenants" : "your runs"} · columns sort across every matching run</span>
             <ListPriceNote>costs are list prices</ListPriceNote>
           </>
         }
@@ -94,6 +108,7 @@ export function Runs() {
       <p className="page-note">Charts follow the tenant and the time range; table filters do not narrow them. History starts with luxd's samples: a range older than them is empty, not zero.</p>
       <div className="filters-bar">
         <div className="filters">
+          <SegmentedControl label="Run ownership" value={mine ? "mine" : "all"} options={[{ value: "all", label: "All runs" }, { value: "mine", label: "Mine" }]} onChange={(x) => { const on = x === "mine"; localStorage.setItem("lux.runs.mine", String(on)); setSearchParams({ mine: on ? "true" : "false" }); }} />
           <div className="chips" role="group" aria-label="States">
             {RUN_STATE_LIST.map((s) => {
               const st = runStateStyle(s);
@@ -111,6 +126,7 @@ export function Runs() {
           </label>
         </div>
         <form className="filters" onSubmit={submitText}>
+          <input className="input input-sm" placeholder="owner (email, id or service account; several: a,b)" aria-label="Owner filter" value={ownerDraft} onChange={(e) => setOwnerDraft(e.target.value)} />
           <input className="input input-sm mono" placeholder="host id or name" value={hostDraft} onChange={(e) => setHostDraft(e.target.value)} style={{ width: 200 }} />
           <input className="input input-sm mono" placeholder="label k=v" value={labelDraft} onChange={(e) => setLabelDraft(e.target.value)} style={{ width: 160 }} />
           <Button size="sm" type="submit">

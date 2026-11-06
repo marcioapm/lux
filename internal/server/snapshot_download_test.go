@@ -89,7 +89,8 @@ func TestDownloadSnapshotVolumeRefused(t *testing.T) {
 	check("another Run's snapshot", t1, "/v1/runs/rc/snapshots/snapA/volumes/work", http.StatusNotFound, "not_found")
 	check("another tenant's snapshot", t1, "/v1/runs/ra/snapshots/snapB/volumes/work", http.StatusNotFound, "not_found")
 	check("unknown volume", t1, "/v1/runs/ra/snapshots/snapA/volumes/home", http.StatusNotFound, "not_found")
-	check("read-only key", apiKey(t, s, new("t1"), "read"), "/v1/runs/ra/snapshots/snapA/volumes/work", http.StatusForbidden, "")
+	// Viewers may download snapshots (decision 2); successful downloads
+	// record an event, so this belongs outside the refusals below.
 
 	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host' WHERE id = 'bA-vol'`)
 	w := check("on its host", t1, "/v1/runs/ra/snapshots/snapA/volumes/work?redirect=false", http.StatusConflict, "not_uploaded")

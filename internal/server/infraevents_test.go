@@ -520,6 +520,7 @@ func apiKey(t *testing.T, s *Server, tenant *string, scopes ...string) string {
 	key := ids.Secret("lux")
 	execSQL(t, s, context.Background(), `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ($1, $2, 'k', $3, $4)`,
 		ids.New(ids.APIKey), tenant, ids.Hash(key), scopes)
+	claimRuns(t, s, key)
 	return key
 }
 

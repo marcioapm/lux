@@ -29,6 +29,14 @@ func testServer(t *testing.T) *Server {
 // DATABASE's clauses, e.g. a collation).
 func testServerWith(t *testing.T, opts string) *Server {
 	t.Helper()
+	return testServerFrom(t, opts, "", nil)
+}
+
+// testServerFrom is testServerWith on a database migrated up to upTo ("":
+// every migration), then seeded by seed as the database owner, then
+// migrated the rest of the way: what an upgrade finds.
+func testServerFrom(t *testing.T, opts, upTo string, seed func(*pgx.Conn)) *Server {
+	t.Helper()
 	admin := os.Getenv("LUX_TEST_PG")
 	if admin == "" {
 		t.Skip("LUX_TEST_PG not set")
@@ -44,6 +52,17 @@ func testServerWith(t *testing.T, opts string) *Server {
 	}
 	cfg := conn.Config()
 	owner := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, name)
+	if upTo != "" {
+		if _, err := store.MigrateUpTo(ctx, owner, "lux_app", upTo); err != nil {
+			t.Fatal(err)
+		}
+		oc, err := pgx.Connect(ctx, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seed(oc)
+		oc.Close(ctx)
+	}
 	if _, err := store.Migrate(ctx, owner, "lux_app"); err != nil {
 		t.Fatal(err)
 	}

@@ -352,6 +352,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.initCFTenant(ctx); err != nil {
 		return err
 	}
+	if err := s.syncPeople(ctx); err != nil {
+		return err
+	}
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	var psrv *http.Server
 	errc := make(chan error, 2)

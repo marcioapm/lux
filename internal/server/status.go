@@ -11,18 +11,29 @@ import (
 
 // Tenant is a tenant as operators see it: its limits and what it uses.
 type Tenant struct {
-	ID                string    `json:"id"`
-	Name              string    `json:"name"`
-	RetentionDays     int       `json:"retentionDays" doc:"Days a terminated Run keeps its snapshots and output after it was terminated. Artifacts are kept until deleted."`
-	ExpireAfterDays   int       `json:"expireAfterDays" doc:"Days a stopped, lost, failed or succeeded Run may rest before lux terminates it; 0: never."`
-	MaxConcurrentRuns *int      `json:"maxConcurrentRuns,omitempty"`
-	MaxHosts          *int      `json:"maxHosts,omitempty"`
-	MaxStorageBytes   *int64    `json:"maxStorageBytes,omitempty"`
-	ActiveRuns        int       `json:"activeRuns"`
-	Runs              int       `json:"runs"`
-	Hosts             int       `json:"hosts"`
-	StoredBytes       int64     `json:"storedBytes"`
-	CreatedAt         time.Time `json:"createdAt"`
+	ID                string        `json:"id"`
+	Name              string        `json:"name"`
+	RetentionDays     int           `json:"retentionDays" doc:"Days a terminated Run keeps its snapshots and output after it was terminated. Artifacts are kept until deleted."`
+	ExpireAfterDays   int           `json:"expireAfterDays" doc:"Days a stopped, lost, failed or succeeded Run may rest before lux terminates it; 0: never."`
+	MaxConcurrentRuns *int          `json:"maxConcurrentRuns,omitempty"`
+	MaxHosts          *int          `json:"maxHosts,omitempty"`
+	MaxStorageBytes   *int64        `json:"maxStorageBytes,omitempty"`
+	ActiveRuns        int           `json:"activeRuns"`
+	Runs              int           `json:"runs"`
+	Hosts             int           `json:"hosts"`
+	StoredBytes       int64         `json:"storedBytes"`
+	OwnersCount       int           `json:"ownersCount"`
+	Owners            []TenantOwner `json:"owners" doc:"The tenant's owners, by email."`
+	MembersCount      int           `json:"membersCount"`
+	CreatedAt         time.Time     `json:"createdAt"`
+}
+
+// TenantOwner is an owner of a tenant: a person, linkable by id. name is
+// empty when the person has none (show the email).
+type TenantOwner struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }
 
 // listTenants is for operators: every tenant, or the one ?tenant= names.
@@ -41,7 +52,10 @@ func (s *Server) listTenants(ctx context.Context, _ *TenantQuery) (*listTenantsO
 				(SELECT count(*) FROM runs WHERE tenant_id = t.id),
 				(SELECT count(*) FROM hosts WHERE tenant_id = t.id AND state <> 'terminated'),
 				(SELECT coalesce(sum(size), 0) FROM blobs WHERE tenant_id = t.id AND location <> 'deleted'),
-				t.created_at
+				t.created_at,
+				(SELECT count(*) FROM memberships m WHERE m.tenant_id=t.id AND m.role='owner')::int,
+				coalesce((SELECT json_agg(json_build_object('id', u.id, 'name', u.name, 'email', u.email) ORDER BY lower(u.email)) FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=t.id AND m.role='owner'), '[]'::json),
+				(SELECT count(*) FROM memberships m WHERE m.tenant_id=t.id)::int
 			FROM tenants t WHERE $1 = '' OR t.id = $1 ORDER BY t.name`, p.TenantID)
 		if err != nil {
 			return err
@@ -49,7 +63,7 @@ func (s *Server) listTenants(ctx context.Context, _ *TenantQuery) (*listTenantsO
 		tenants, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Tenant, error) {
 			var t Tenant
 			err := row.Scan(&t.ID, &t.Name, &t.RetentionDays, &t.ExpireAfterDays, &t.MaxConcurrentRuns, &t.MaxHosts, &t.MaxStorageBytes,
-				&t.ActiveRuns, &t.Runs, &t.Hosts, &t.StoredBytes, &t.CreatedAt)
+				&t.ActiveRuns, &t.Runs, &t.Hosts, &t.StoredBytes, &t.CreatedAt, &t.OwnersCount, &t.Owners, &t.MembersCount)
 			return t, err
 		})
 		return err

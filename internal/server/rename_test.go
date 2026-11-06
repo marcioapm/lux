@@ -29,6 +29,8 @@ func renameFixture(t *testing.T, state string) (s *Server, ctx context.Context, 
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, state, current_epoch) VALUES
 		($1, 't1', 'first', '{"team": "a"}', '{"name": "first", "labels": {"team": "a"}, "workload": {"workdir": "/work"}}', $3, 1),
 		($2, 't2', 'theirs', '{}', '{"name": "theirs"}', $3, 1)`, r1, r2, state)
+	claimRuns(t, s, keys["run"])
+	claimRuns(t, s, keys["t2"])
 	return s, ctx, keys
 }
 

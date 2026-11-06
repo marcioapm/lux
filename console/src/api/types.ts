@@ -153,6 +153,8 @@ export interface Run {
   cost?: RunCostBrief;
   /** In GET /v1/runs/{id} only: the API key (its name when the caller may see it) or the person that submitted it; absent before luxd recorded it. */
   submittedBy?: RunSubmitter;
+  /** The person or service account it is attributed to; absent: no owner (from before lux had accounts). */
+  owner?: Owner;
   /** On a shaped pool: what its submit asked for in resources, and the size it has. Absent for a Run submitted to and still in an unshaped pool. */
   sizing?: RunSizing;
 }
@@ -222,6 +224,8 @@ export type TenantServerState = ServedState;
 /** GET /v1/servers/{id}: a server of the tenant (TenantServer in internal/server/servers_api.go). */
 export interface TenantServer {
   id: string;
+  /** Its tenant's id: who may change it is decided there. Absent from an older luxd. */
+  tenantId?: string;
   name: string;
   hostname: string | null;
   url: string | null;
@@ -398,6 +402,10 @@ export interface Unpriced {
 }
 
 export interface CostSummaryRow {
+  /** For member/owner groups: user:<id>, sa:<id>, or (none). */
+  key?: string;
+  /** For member/owner groups: the person or service account; absent on (none). */
+  owner?: Owner;
   /** With interval: the bucket's start. */
   at?: string;
   /** With group: the group's value per group key ("(none)" when absent). */
@@ -734,6 +742,189 @@ export interface WhoAmI {
   previewScheme?: "https" | "http";
   /** With previewDomain: the port in preview URLs, if not the scheme's. */
   previewPort?: number;
+  /** A person's key or Access session: the person's id. Absent before luxd had accounts (then roles are unknown: the console falls back to scopes). */
+  userId?: string;
+  /** The caller's role in the tenant it is resolved to (tenant/tenantId). */
+  role?: TenantRole;
+  /** A service account's key: which. */
+  serviceAccount?: { id: string; name: string };
+  /** The key is read-only: it reads whatever the role is (absent: false). */
+  readOnly?: boolean;
+  /** The tenants the person belongs to, with their role in each. luxd with people always sends it ([] for a service account or platform key); absent: an older luxd. */
+  memberships?: Membership[];
+  /** Invitations exist (console.auth = "cloudflare-access"); luxd with people always sends it; false or absent hides every invitation control. */
+  invitationsEnabled?: boolean;
+}
+
+export type TenantRole = "viewer" | "member" | "admin" | "owner";
+
+/** A person with a lux account (identity: their Cloudflare Access email). */
+export interface Person {
+  id: string;
+  email: string;
+  name: string;
+  /** Always sent; "" when the identity provider has none. */
+  picture: string;
+  operator: boolean;
+}
+
+/** A person's membership of one tenant (MembershipRef). joinedAt: luxd always fills it; optional in its schema. */
+export interface Membership {
+  tenantId: string;
+  tenant: string;
+  role: TenantRole;
+  joinedAt?: string;
+}
+
+/** POST /v1/invitations/by-code/{code}/accept: the membership made (no joinedAt). */
+export interface AcceptedInvitation {
+  tenantId: string;
+  tenant: string;
+  role: TenantRole;
+}
+
+/** GET /v1/members: a person in the tenant. keyCount only for themselves and admins+. */
+export interface Member extends Person {
+  role: TenantRole;
+  joinedAt: string;
+  lastSeenAt?: string;
+  runningRuns: number;
+  keyCount?: number;
+}
+
+/** Who owns a Run, a key or a cost row: a person or a service account. */
+export interface Owner {
+  kind: "user" | "serviceAccount";
+  id: string;
+  name: string;
+  email?: string;
+}
+
+export interface ServiceAccount {
+  id: string;
+  name: string;
+  description: string;
+  role: Exclude<TenantRole, "owner">;
+  owner?: Person;
+  createdAt: string;
+  createdBy?: Person;
+  lastUsedAt?: string;
+  disabledAt?: string;
+  activeKeys: number;
+}
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  /** The plain value's first characters ("lux_u_7Hc2"). */
+  prefix: string;
+  readOnly: boolean;
+  createdAt: string;
+  lastUsedAt?: string;
+  expiresAt?: string;
+  createdBy?: Person;
+}
+
+/** POST …/keys: the key, and its secret, shown once. */
+export interface CreatedApiKey extends ApiKey {
+  apiKey: string;
+}
+
+export interface NewKeyRequest {
+  name: string;
+  readOnly?: boolean;
+  /** RFC 3339; absent: never. */
+  expiresAt?: string;
+}
+
+export type InvitationStatus = "pending" | "expired" | "accepted" | "revoked";
+
+export interface Invitation {
+  id: string;
+  email: string;
+  name?: string;
+  role: TenantRole;
+  status: InvitationStatus;
+  code: string;
+  /** The link to send: the console's origin + /invite/<code>. */
+  url: string;
+  invitedBy?: Person;
+  createdAt: string;
+  expiresAt: string;
+  renewedAt?: string;
+  acceptedAt?: string;
+  revokedAt?: string;
+  revokedBy?: Person;
+}
+
+export type InviteResultKind = "created" | "existing" | "renewed" | "member" | "invalid";
+
+export interface InviteResult {
+  email: string;
+  result: InviteResultKind;
+  invitation?: Invitation;
+  message?: string;
+}
+
+export type InvitationCounts = Record<InvitationStatus, number>;
+
+/** GET /v1/invitations/by-code/{code}: only what an invitee may see; a different email gets {status, emailMatches: false}. */
+export interface InvitationLookup {
+  tenant?: string;
+  role?: TenantRole;
+  invitedBy?: { name: string };
+  expiresAt?: string;
+  status: InvitationStatus;
+  emailMatches: boolean;
+}
+
+/** GET /v1/me/invitations: invitations waiting for my email. */
+export interface MyInvitation {
+  code: string;
+  tenant: string;
+  role: TenantRole;
+  invitedBy?: { name: string };
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** GET /v1/me. */
+export interface Me extends Person {
+  memberships: Membership[];
+  lastSignInAt?: string;
+}
+
+/** GET /v1/people (operators): every person, across tenants. */
+export interface PlatformPerson extends Person {
+  memberships: Membership[];
+  keyCount: number;
+  lastSeenAt?: string;
+}
+
+/** GET /v1/costs?by=member|owner&runs=true: a CostSummary whose totals rows carry key and (but on (none)) owner, one per owner and currency. */
+export interface CostByOwnerRow extends CostSummaryRow {
+  /** user:<id>, sa:<id>, or (none). */
+  key: string;
+  /** Filled because the console asks runs=true. */
+  runs?: number;
+}
+
+export interface CostByOwner extends Omit<CostSummary, "totals"> {
+  totals: CostByOwnerRow[];
+}
+
+/** POST /v1/tenants (operators): the new tenant's id (also as tenantId) and name, and its first owner's invitation when one was asked for. */
+export interface NewTenantResult {
+  id: string;
+  tenantId: string;
+  name: string;
+  invitation?: Invitation;
+}
+
+export interface TenantOwner {
+  id: string;
+  name: string;
+  email: string;
 }
 
 export interface Tenant {
@@ -750,6 +941,12 @@ export interface Tenant {
   hosts: number;
   storedBytes: number;
   createdAt: string;
+  /** The owners, by email: a person each (name empty when they have none: show the email). Absent from an older luxd. */
+  owners?: TenantOwner[] | null;
+  /** How many owners; 0: "No owner". Absent from an older luxd. */
+  ownersCount?: number;
+  /** How many people are members. */
+  membersCount?: number;
 }
 
 export interface Percentiles {
@@ -896,6 +1093,10 @@ export interface RunListParams extends PageParams {
   label?: string;
   before?: string;
   limit?: number;
+  /** A user id, email or service account name. */
+  owner?: string;
+  /** Runs I own, and those of service accounts I own. */
+  mine?: boolean;
 }
 
 /** GET /hosts/summary: the live hosts of the caller's unfiltered host list; capacity and allocation of the ready and draining ones. */

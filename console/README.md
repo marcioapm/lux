@@ -73,6 +73,41 @@ and screenshots only: nothing it answers is real. `tests/console_mock/`
 drives it in a headless browser (`cd tests && uv run pytest console_mock`;
 `LUX_TEST_CHROME` names a Chrome when Playwright's own is not installed).
 
+### Mock people and roles
+
+`mockPeople.ts` holds people, memberships, service accounts, keys, invitations
+and Run owners; `mockPeopleApi.ts` answers their API routes. Mutations last
+until the mock process restarts. Paste `luxk_mock_<role>` at key sign-in:
+
+| Role suffix | Signed in as | Tenant role |
+| --- | --- | --- |
+| `viewer` | Diogo Lopes | Viewer |
+| `member` | Carla Santos (owns ci-review-bot) | Member |
+| `admin` | Ana Ribeiro | Admin |
+| `owner` | Eva Moreira | Owner |
+| `operator` | Márcio Martins | Operator; Owner of acme, Admin of globex |
+| `bruno` | Bruno Costa | Member |
+| `notenant` | Sam Lee | No memberships |
+| `invited` | Filipa Rocha | No memberships, pending invitation to acme |
+| `sa` | ci-review-bot | Service-account key, Member |
+
+Invitations require Access mode, as on luxd:
+
+```bash
+MOCK_AUTH=cloudflare-access MOCK_AS=admin bun run --cwd console mock
+```
+
+In Access mode `MOCK_AS` chooses the role (default `operator`). For browser
+checks without restarting, set the mock-only cookie `lux_mock_as` to one of
+the suffixes above and reload. The cookie is read only by the mock. A pasted
+`luxk_mock_<role>` key also selects that identity; with key-mode mock auth,
+all invitation controls are hidden and its routes answer
+`409 invitations_unavailable`.
+
+Useful invite paths: `/invite/inv_7Rk2Qm9xPa` (Filipa's pending invite),
+`/invite/inv_Zt8Yq3Vb6n` (expired), and the first path as `notenant` (wrong
+email). The no-membership screen is `/` as `invited` or `notenant`.
+
 ## Auth
 
 Every API call sends `Authorization: Bearer <key>`. The key lives in
@@ -80,10 +115,21 @@ Every API call sends `Authorization: Bearer <key>`. The key lives in
 tab drops it, and "Sign out" at the foot of the sidebar clears it. A 401 from any call signs
 out and shows the sign-in screen again.
 
-Operator keys see every tenant; tenant keys their own. The role is learned from
-`GET /v1/tenants`: a 403 means a tenant key, and the tenant picker, the Tenants
-page and operator-only actions (Migrate, target-host choice on Resume) are
-hidden. Other 403s render as "Your key cannot do this: …".
+The principal is learned from `GET /v1/whoami`: operator, person or service
+account, tenant role and memberships. New fields are optional for older
+luxd installations. `src/app/identity.ts` centralizes the role ladder and
+Run ownership checks. Members see every Run, but act only on their own and
+those of service accounts they own; admins and operators act on all. Viewers
+have no Run actions, Terminal or Session input. luxd remains authoritative
+and rejects forbidden mutations.
+
+People pages: `/me` (sidebar footer, personal keys capped at 5 and a
+shown-once secret), `/members` and `?tab=invitations`, `/members/:id`,
+`/service-accounts` and `/service-accounts/:id` (two active keys for rotation),
+operator `/people`, and bare `/invite/:code`. The Overview Cost tab adds
+Cost by member with By member / By owner and per-currency share meters.
+Invitation controls exist only with Access auth. Signed-in people without
+memberships see a bare contact-admin screen with any pending invitation.
 
 A deep link (`/runs/{id}/terminal`, `/preview-auth?to=…`) opened without a
 session shows the sign-in on the page itself, saying where it continues

@@ -46,7 +46,7 @@ a new luxd with an older runner still delegates every nested Run.
 2. Run `luxd migrate` with the owner's DSN. It applies what is new and is
    safe to run again; running luxds keep working meanwhile, except while a
    migration builds an index, and except in a release whose note below
-   says otherwise (056; 062–064; 079). 045 and 046 index the pool and host events
+   says otherwise (056; 062–064; 079; 093). 045 and 046 index the pool and host events
    tables in their migration's transaction: until each commits, anything
    luxd does that records an event (heartbeats, registration, placements,
    drains) waits — about 3–4 s per million events for the two together.
@@ -121,8 +121,29 @@ a new luxd with an older runner still delegates every nested Run.
    079 then builds `runs_first_pool_started`, holding back writes to
    `runs` (not reads) for the build, about 0.3 s per 200,000 Runs.
    Otherwise older luxds keep working.
+   092–094 (people, roles, service accounts, invitations;
+   [operators](operators.md#people-invitations-and-upgrading)) add tables
+   and nullable columns. 093 then gives every Run an owner in one
+   transaction: an UPDATE of every Run submitted by an email or a key,
+   about 16.6–18.6 s and 1.2 GB of WAL per million such Runs on the test
+   machines, more under load. It holds those Runs' row locks until it
+   commits, live Runs included: reads and submits go on, but every write
+   to an existing Run waits (a stop, a rename, and each runner report,
+   behind which that host's heartbeats queue: the host is lost once the
+   wait exceeds the lease, `LUX_LEASE`, 30 s by default), and so does the
+   cost drainer of any luxd. Count them first:
+   `SELECT count(*) FROM runs WHERE submitted_by_email IS NOT NULL OR submitted_by_key IS NOT NULL`.
+   Above 500,000 (about 9 s at the slower measured rate: under a third of
+   the default lease, leaving room for load and slower disks; proportionally
+   fewer with a shorter `LUX_LEASE`), steps 2–3 change: stop every `luxd
+   serve` before step 2, run `luxd migrate`, and start every luxd on the
+   new binary once it has committed (time no luxd hears a host is not held
+   against it). Make room for the WAL first (about 1.2 GB per million Runs,
+   plus what replicas and archiving keep). Below it, older luxds keep
+   working through 092–094 (they leave new Runs without an owner: "(no
+   owner)" in cost views), so migrate and restart promptly.
 3. Restart (or roll) every `luxd serve` onto the new binary; for a release
-   with 056 and several luxds, or with 079 run with every luxd stopped
+   with 056 and several luxds, or with 079 or 093 run with every luxd stopped
    (above), start every one of them, all stopped in step 2: do not roll.
 
 Migrate first: a luxd newer than its schema does not check it, and fails

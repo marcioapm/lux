@@ -19,7 +19,7 @@ function landsHint(run: Run, stdin: boolean): string {
  * POST /v1/runs/{id}/input, whichever subagent is open. `stdin` labels it for
  * a generic workload, whose input is a line on its stdin.
  */
-export function RunComposer({ run, stdin = false }: { run: Run; stdin?: boolean }) {
+export function RunComposer({ run, stdin = false, canAct = true }: { run: Run; stdin?: boolean; canAct?: boolean }) {
   const toast = useToast();
   const open = INPUT_RUN_STATES.has(run.state);
   const closed = open ? undefined : closedReason(run);
@@ -31,6 +31,7 @@ export function RunComposer({ run, stdin = false }: { run: Run; stdin?: boolean 
       toast({ title: "Interrupt failed", description: errorText(err), tone: "danger" });
     }
   };
+  if (!canAct) return <div className="card-note muted">Only the owner and admins can send input.</div>;
   return (
     <SessionComposer
       label={stdin ? "Send to stdin" : "Message the agent"}

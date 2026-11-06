@@ -314,16 +314,18 @@ func (p *previews) authenticate(r *http.Request, v serverRow) (previewUser, bool
 		if tok == "" {
 			return previewUser{}, false
 		}
-		email, id, err := p.cf.user(r.Context(), tok)
+		email, _, err := p.cf.user(r.Context(), tok)
 		if err != nil {
 			return previewUser{}, false
 		}
-		pr, err := p.s.accessPrincipal(r.Context(), email, id, "read")
-		if err != nil {
+		// Not accessPrincipal: a preview needs no membership (decision 13
+		// of docs/security.md's model), so it never answers not_a_member.
+		ok, err := p.s.previewAllowed(r.Context(), email, v.TenantID)
+		if err != nil || !ok {
 			return previewUser{}, false
 		}
-		u := previewUser{ServerID: v.ID, TenantID: pr.TenantID, Operator: pr.Operator, User: email}
-		return u, u.Operator || u.TenantID == v.TenantID
+		u := previewUser{ServerID: v.ID, TenantID: v.TenantID, Operator: p.s.accessOperator(email), User: email}
+		return u, true
 	}
 	for _, c := range r.CookiesNamed(p.cookieName()) {
 		if u, ok := p.verify(c.Value, time.Now()); ok && u.ServerID == v.ID && (u.KeyID == "" || p.keyLive(r.Context(), u.KeyID)) {

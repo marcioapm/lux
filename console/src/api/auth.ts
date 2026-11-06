@@ -4,6 +4,7 @@
 // authenticates every call). Whether it is an operator's, and who, is
 // learned from GET /v1/whoami.
 import { useSyncExternalStore } from "react";
+import type { WhoAmI } from "./types.ts";
 
 const KEY = "lux.key";
 const listeners = new Set<() => void>();
@@ -24,9 +25,13 @@ interface Session {
   user: User | null;
   /** How luxd's console signs people in, once whoami has said (null until then). */
   consoleAuth: "key" | "cloudflare-access" | null;
+  /** The last whoami answer for this session (null until it has answered). */
+  whoami: WhoAmI | null;
+  /** whoami answered 403 not_a_member: signed in, in no tenant (or not in the one asked for), not an operator. */
+  notAMember: boolean;
 }
 
-let session: Session = { key: readKey(), role: "unknown", user: null, consoleAuth: null };
+let session: Session = { key: readKey(), role: "unknown", user: null, consoleAuth: null, whoami: null, notAMember: false };
 
 function readKey(): string | null {
   try {
@@ -50,7 +55,7 @@ export function getKey(): string | null {
 
 export function signIn(key: string) {
   storeKey(key);
-  session = { ...session, key, role: "unknown", user: null };
+  session = { ...session, key, role: "unknown", user: null, whoami: null, notAMember: false };
   emit();
 }
 
@@ -74,13 +79,26 @@ export function signOut() {
   try {
     sessionStorage.removeItem(KEY);
   } catch {}
-  session = { ...session, key: null, role: "unknown", user: null };
+  session = { ...session, key: null, role: "unknown", user: null, whoami: null, notAMember: false };
   emit();
 }
 
 export function setRole(role: Role, consoleAuth?: Session["consoleAuth"]) {
   if (session.role === role && (consoleAuth == null || session.consoleAuth === consoleAuth)) return;
   session = { ...session, role, consoleAuth: consoleAuth ?? session.consoleAuth };
+  emit();
+}
+
+/** What whoami said: the role, and who (a person, a service account) with their memberships. */
+export function setWhoAmI(me: WhoAmI) {
+  session = { ...session, role: me.operator ? "operator" : "tenant", consoleAuth: me.consoleAuth ?? session.consoleAuth, whoami: me, notAMember: false };
+  emit();
+}
+
+/** whoami said 403 not_a_member (no identity body): the "not part of any tenant" screen, never a generic error. */
+export function setNotAMember() {
+  if (session.notAMember) return;
+  session = { ...session, role: "tenant", whoami: null, notAMember: true };
   emit();
 }
 

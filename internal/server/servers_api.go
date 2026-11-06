@@ -28,6 +28,7 @@ import (
 // TenantServer is a server as /v1/servers shows it.
 type TenantServer struct {
 	ID            string            `json:"id"`
+	TenantID      string            `json:"tenantId" doc:"The tenant it is of: who may change it is decided there."`
 	Name          string            `json:"name"`
 	Hostname      *string           `json:"hostname" nullable:"true" doc:"Its preview host name, stable for its life; null when previews are not configured."`
 	URL           *string           `json:"url" nullable:"true" doc:"Its preview URL; null when previews are not configured."`
@@ -67,7 +68,7 @@ type TenantServer struct {
 }
 
 func (s *Server) tenantServer(v serverRow, now time.Time) TenantServer {
-	t := TenantServer{ID: v.ID, Name: v.Name, Hostname: optString(s.previewHostname(v.Host)), URL: s.previewURL(v.Host),
+	t := TenantServer{ID: v.ID, TenantID: v.TenantID, Name: v.Name, Hostname: optString(s.previewHostname(v.Host)), URL: s.previewURL(v.Host),
 		State: v.derive(now), Process: v.State, Desired: "up", Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env,
 		AfterSync: v.AfterSync, Inject: v.Inject, Labels: v.Labels, Wake: v.Wake, IdleAfter: secs(v.IdleAfterS), WakeTimeout: secs(v.WakeTimeoutS),
 		Lifetime: v.Lifetime, Owner: v.Owner, RunID: v.RunID, RunName: v.RunName, RunState: v.RunState, FromSpec: v.FromSpec,
@@ -198,6 +199,9 @@ type tenantServerOutput struct {
 func (s *Server) createServer(ctx context.Context, in *createServerInput) (*tenantServerOutput, error) {
 	p := principal(ctx)
 	b := in.Body
+	if err := s.requireServerRunActor(ctx, p, b.RunID); err != nil {
+		return nil, err
+	}
 	wake := cmp.Or(b.Wake, WakeNever)
 	if err := checkWake(wake); err != nil {
 		return nil, err
@@ -421,6 +425,9 @@ func (s *Server) attachServer(ctx context.Context, in *attachInput) (*tenantServ
 	if in.Body.RunID == "" {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_request", "runId is required")
 	}
+	if err := s.requireRunActor(ctx, p, in.Body.RunID); err != nil {
+		return nil, err
+	}
 	err := s.changeServers(ctx, p.TenantID, in.Body.RunID, func(tx pgx.Tx) error {
 		state, epoch, sp, err := serverRun(ctx, tx, in.Body.RunID)
 		if err != nil {
@@ -428,6 +435,12 @@ func (s *Server) attachServer(ctx context.Context, in *attachInput) (*tenantServ
 		}
 		v, err := lockServer(ctx, tx, p.TenantID, in.ID)
 		if err != nil {
+			return err
+		}
+		// The source as locked: checkAccess judged the server by the Run
+		// it was on before the lock, and a detach meanwhile makes it the
+		// tenant's (admins only).
+		if err := lockedServerActor(ctx, tx, p, v); err != nil {
 			return err
 		}
 		if err := checkServer(sp, spec.Server{Name: v.Name, Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env, AfterSync: v.AfterSync, Inject: v.Inject}); err != nil {
@@ -444,7 +457,12 @@ func (s *Server) attachServer(ctx context.Context, in *attachInput) (*tenantServ
 
 // changeServer runs fn on a tenant's server, locked, in a system scope,
 // and sends its Run's placement (before and after: a detach) the new set.
-func (s *Server) changeServer(ctx context.Context, tenantID, id string, fn func(pgx.Tx, serverRow) error) error {
+//
+// The caller's permission is checked here, against the server's Run as
+// locked (on every try): a server moved to another Run meanwhile is
+// judged by the Run it is attached to now, not the one checkAccess saw.
+func (s *Server) changeServer(ctx context.Context, p Principal, id string, fn func(pgx.Tx, serverRow) error) error {
+	tenantID := p.TenantID
 	var hosts []string
 	// Locks go Run first, then server, as a runner's report takes them; the
 	// Run is read before either is locked, so a server attached or detached
@@ -471,6 +489,9 @@ func (s *Server) changeServer(ctx context.Context, tenantID, id string, fn func(
 			}
 			if strOf(v.RunID) != strOf(before) {
 				return errServerMoved
+			}
+			if err := lockedServerActor(ctx, tx, p, v); err != nil {
+				return err
 			}
 			hosts, err = changeLockedServer(ctx, tx, v, fn)
 			return err
@@ -535,7 +556,7 @@ func serverRunAny(ctx context.Context, tx pgx.Tx, runID string) (state string, e
 
 func (s *Server) detachServer(ctx context.Context, in *ServerIDPath) (*tenantServerOutput, error) {
 	p := principal(ctx)
-	err := s.changeServer(ctx, p.TenantID, in.ID, func(tx pgx.Tx, v serverRow) error {
+	err := s.changeServer(ctx, p, in.ID, func(tx pgx.Tx, v serverRow) error {
 		if v.Lifetime == LifetimeRun {
 			return errf(http.StatusConflict, "lifetime_run", "server %s ends with its Run (lifetime run): delete it, or PATCH lifetime owner first", in.ID)
 		}
@@ -553,7 +574,7 @@ func (s *Server) detachServer(ctx context.Context, in *ServerIDPath) (*tenantSer
 func (s *Server) tenantServerAction(action string) func(context.Context, *ServerIDPath) (*tenantServerOutput, error) {
 	return func(ctx context.Context, in *ServerIDPath) (*tenantServerOutput, error) {
 		p := principal(ctx)
-		err := s.changeServer(ctx, p.TenantID, in.ID, func(tx pgx.Tx, v serverRow) error {
+		err := s.changeServer(ctx, p, in.ID, func(tx pgx.Tx, v serverRow) error {
 			if v.RunID == nil {
 				if action == "stop" {
 					return nil
@@ -708,7 +729,7 @@ type patchServerInput struct {
 func (s *Server) patchServer(ctx context.Context, in *patchServerInput) (*tenantServerOutput, error) {
 	p := principal(ctx)
 	b := in.Body
-	err := s.changeServer(ctx, p.TenantID, in.ID, func(tx pgx.Tx, v serverRow) error {
+	err := s.changeServer(ctx, p, in.ID, func(tx pgx.Tx, v serverRow) error {
 		sv := spec.Server{Name: v.Name, Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env, AfterSync: v.AfterSync, Inject: v.Inject}
 		labels, wake, lifetime := v.Labels, v.Wake, v.Lifetime
 		idle, timeout, expire := v.IdleAfterS, v.WakeTimeoutS, v.ExpireAfterS
@@ -807,7 +828,7 @@ func (s *Server) patchServer(ctx context.Context, in *patchServerInput) (*tenant
 
 func (s *Server) deleteServer(ctx context.Context, in *ServerIDPath) (*noContent, error) {
 	p := principal(ctx)
-	err := s.changeServer(ctx, p.TenantID, in.ID, func(tx pgx.Tx, v serverRow) error {
+	err := s.changeServer(ctx, p, in.ID, func(tx pgx.Tx, v serverRow) error {
 		return deleteServerTx(ctx, tx, p.TenantID, v, "deleted", p.Actor(), "server.deleted")
 	})
 	if err != nil {

@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, chart stacking, bars, day ticks and faded colours, family colours, storage kind colours, CostFigure, PartBar shares, Meter clamping and text, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme, agent colour slots, ToolUsage, Markdown escaping, ToolCall, SessionComposer (send, draft kept on failure, keys, IME, disabled, interrupt) and the transcript's composer slot and resize follow, ImageRef digest shortening, LabelsFact disclosure, KeyValue full-width rows and surface (src/*.test.ts*)
+bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, chart stacking, bars, day ticks and faded colours, family colours, storage kind colours, CostFigure, PartBar shares, Meter clamping and text, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme, agent colour slots, ToolUsage, Markdown escaping, ToolCall, SessionComposer (send, draft kept on failure, keys, IME, disabled, interrupt) and the transcript's composer slot and resize follow, ImageRef digest shortening, LabelsFact disclosure, KeyValue full-width rows and surface, Avatar, Person, RoleBadge, InviteLinkList, EmailInput (parsing, keys, paste, Backspace, remove, Remove left out, counts, screen-reader state, unsafe input as text) (src/*.test.ts*)
 ```
 
 ## Using it
@@ -333,7 +333,7 @@ Tabs), RelativeTime ("3h ago",
 the exact date, time and zone in a Tooltip; every table's times),
 DurationCell (a duration with how it was measured in a Tooltip, a live one
 in the foreground, a slow one in the warn tone),
-Tooltip, Select (an option's `disabled` is the reason it cannot be picked: shown greyed with the reason on its right; clicks and arrow keys pass it by; `hint` is a quiet note on the right of a pickable one; `footer` sits under the options), TenantPicker, TimeRangePicker, StepPicker (the page's step beside the range, "Every": Auto shows what it resolved to, `min/hour`; each choice its points or why it is off; a footer says what each kind of chart does with it), TimeSeriesChart (uPlot, with
+Tooltip, Select (an option's `disabled` is the reason it cannot be picked: shown greyed with the reason on its right; clicks and arrow keys pass it by; `hint` is a quiet note on the right of a pickable one; `footer` sits under the options; Escape on an open menu closes the menu only, never the dialog it sits in), TenantPicker (`all={false}`: no "All tenants", for a person picking one of their memberships), TimeRangePicker, StepPicker (the page's step beside the range, "Every": Auto shows what it resolved to, `min/hour`; each choice its points or why it is off; a footer says what each kind of chart does with it), TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline
 (placement waterfall: a stage is a bar from `start` to `end`, striped while
 it has no `end`; a `point: true` stage is an instant, a dot at `start` with
@@ -369,7 +369,9 @@ default (`defaultOpen` for the gallery), "Labels –" and no toggle when there a
 SectionHeader (a sentence-case `--text-lg` semibold title between groups
 of cards, its `note` beside it, `actions` such as a `Tabs size="sm"` on
 the right), ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
-EmptyState, Spinner, Skeleton, PartBar, Meter, Callout (below), and the
+EmptyState, Spinner, Skeleton, PartBar, Meter, Callout (below), the
+people components (Avatar, Person, RoleBadge, EmailInput, InviteLinkList;
+below), and the
 Session components (SessionTranscript, SessionComposer, InputTurn, MessageTurn, ThoughtTurn,
 PlanTurn, ToolCall, SessionMarker, Note, SubagentStub, SubagentTree,
 SubagentPanel, AgentMark, SessionRail, RailCard, RailFacts, ToolUsage;
@@ -465,6 +467,55 @@ token (600px), so a page with less above it can set its own.
 Icons for it (`@lux/design-system/icons`): `IconAgent`, `IconFile`,
 `IconThought`, `IconCompress`, `IconShield`, `IconListCheck`, `IconMove`,
 `IconLock`.
+
+People: who is in a tenant, with which role, and inviting more (gallery
+section "people"; the console's Profile, Members, Service accounts, Runs'
+Owner column and Cost by member).
+
+| Export | What |
+| --- | --- |
+| `Avatar({name, picture?, fallback?, size?, serviceAccount?, labelled?})` | a photo, else initials (`initials(name)`: "Ada Lovelace" → AL); a picture that fails to load falls back. `size` sm 22px (a cell, beside a name), md 30px (default: the sidebar foot), lg 48px (a page header). `serviceAccount`: a square in the muted fill with the Bot glyph, never a photo. Decoration (`aria-hidden`) unless `labelled`, where no name is beside it |
+| `Person({name, sub?, picture?, serviceAccount?, note?, inline?})` | a person or a service account in a cell: avatar, name (medium weight) with an optional muted `note` ("(you)"), and a `sub` line (email, role, "service account · owner …"), each ellipsized. `inline`: a small avatar and the name on one line (Owner, Invited by) |
+| `RoleBadge({role})`, `ROLES`, `ROLE_LABEL`, `ROLE_DESC`, `roleAtLeast(a, b)`, `isRole` | a tenant role (viewer < member < admin < owner) as a Badge: Owner accent, Admin info, Member neutral, Viewer an outline; its title says what the role may do (`ROLE_DESC`, also a role picker's hint). An unknown role shows its name, neutral. The word is "Member", never "user" |
+| `EmailInput({entries, onChange, classify, id?, label?, placeholder?, hint?, disabled?})` | addresses as chips (below) |
+| `parseEmails(text)`, `classifyEmails(entries, classify)`, `emailCounts(views)`, `inviteButtonText(n)` | EmailInput's parsing, verdicts and counts, for the caller's submit button and tests |
+| `InviteLinkList({links})`, `CopyAllLinks({links})`, `inviteLinksText(links)`, `breakableEmail(email)` | invitation links to send by hand: each address, its link (mono, ellipsized, whole in the title) and a Copy; an optional `note` (role and status Badges) before Copy. The address is never truncated: it wraps at `@` and `.` (`breakableEmail` puts `<wbr>`s there), so two addresses with the same prefix stay distinct. The list is its own container (`invlinks`): under 480px the note goes on its own line under the address, the link under that, Copy keeps its column. Copy all copies `email  link` lines, as `lux invites create` prints |
+
+Icons: `IconUser` (a person), `IconBot` (a service account).
+
+EmailInput rules (the control dude's invite dialog has, done right):
+
+- The box is an Input that grows: min-height the control height, chips
+  wrap, up to four control heights, then it scrolls. Focus ring as Input.
+  Clicking the box focuses the text field.
+- Chips carry the address only: 24px, `--radius-sm`, the muted fill, the
+  name semibold and the email muted (or the address alone), a small ✕
+  ("Remove <address>"). State is tone, never words inside a chip:
+  a struck-through outline is left out (the caller's skip: already a
+  member, already invited; or twice in the list), a danger fill with a
+  warning glyph is not an email, an info glyph is will be renewed. Each
+  chip has screen-reader text: ", will be invited", ", will be renewed" or
+  ", left out: <reason>".
+- Commit: Enter, comma, semicolon, Tab and blur commit what is typed; space
+  commits once the text has an @ (so "Tom Okafor <tom@…>" can be typed),
+  never inside `<…>` or quotes. Backspace in the empty field removes the
+  last chip. Paste splits by lines; a line with tabs is a spreadsheet row
+  (the cell with an @ is the address, another non-empty cell the name);
+  otherwise commas and semicolons outside quotes and `<>`, then whitespace
+  in a part without `<`. `Name <email>` and `"Last, First" <email>` keep
+  the name. Addresses are lower-cased; the first of a duplicate counts, the
+  rest are "twice in the list"; text that is not an email stays as a chip
+  in the danger tone. Everything is rendered as text: pasted markup is never
+  an element.
+- The caller classifies each valid, first-seen address
+  (`classify(entry) → {status: "invite"} | {status: "renew"} | {status: "skip", reason, icon?, action?}`):
+  the component knows nothing about members or invitations.
+- Under the box, once there are chips: "N to invite (k renewed) · M left
+  out" and, when any are left out, a "Remove left out" link; then the
+  left-out addresses, each with its glyph, the address, the reason and at
+  most one action (`action`: "Copy their link"). The hint line shows only
+  while the box is empty. The caller's submit button carries the count
+  (`inviteButtonText`: "Invite 3 people", disabled "Nothing to invite").
 
 A cost family is always named with its `ColorKey` square: rows
 (`FamilyKey`, `BreakdownTable`), KPIs and StatTiles (`swatch`), bar and

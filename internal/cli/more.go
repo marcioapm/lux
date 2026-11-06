@@ -617,7 +617,7 @@ func (a *app) tenantsCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.AddCommand(ls)
+	cmd.AddCommand(ls, a.tenantCreateCmd())
 	return cmd
 }
 

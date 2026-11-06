@@ -3,6 +3,7 @@ import { Button, Card, ConfirmDialog, EmptyState, EventTable, IdleCountdown, Ico
 import { IconCheck, IconCopy, IconExternal, IconRefresh, IconStop, IconTrash } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type TenantServer } from "../../api/index.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
+import { canActOnServer, mayChange, useObjectViewer } from "../identity.ts";
 import { DASH, ErrorBlock, ErrorStrip, JsonBlock, labelsText, PageSkeleton, RunLink } from "./common.tsx";
 import { eventSummary } from "./events.ts";
 import { durationWords, lifetimeText, wakeText } from "./serverText.ts";
@@ -23,6 +24,14 @@ export function ServerPage({ id }: { id: string }) {
   const tab: Tab = TABS.includes(t as Tab) ? (t as Tab) : "overview";
   const q = useQuery(`server:${id}`, (signal) => api.server(id, signal), { interval: 3000, live: 10_000, keep: true });
   const sv = q.data;
+  // Who may change it: attached, as its Run (owner, the owner's service
+  // accounts, admins); attached to none, admins. Decided in the server's
+  // tenant, not the one in scope (an older luxd sends no tenantId: the scope's).
+  const runId = sv?.runId ?? null;
+  const viewer = useObjectViewer(sv ? (sv.tenantId ?? null) : undefined);
+  const run = useQuery(`server:${id}:run:${runId ?? ""}`, (signal) => api.run(runId!, signal), { enabled: runId != null && viewer.resolved && !viewer.operator });
+  const sasTenant = sv?.tenantId;
+  const sas = useQuery(`sas@${sasTenant ?? ""}`, (s) => api.serviceAccounts(sasTenant, s), { enabled: runId != null && viewer.resolved && !viewer.legacy && !viewer.operator });
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const { copied, copy } = useCopy(sv?.url ?? "");
@@ -49,6 +58,7 @@ export function ServerPage({ id }: { id: string }) {
     }
   };
   const up = isServerUp(sv.process);
+  const mayAct = mayChange(viewer) && (viewer.operator || (sv.runId ? run.data != null && canActOnServer(viewer, run.data, sas.data) : canActOnServer(viewer, null)));
 
   return (
     <div className="page">
@@ -86,24 +96,26 @@ export function ServerPage({ id }: { id: string }) {
                 Open
               </Button>
             )}
-            {sv.runId && (
+            {mayAct && sv.runId && (
               <Button size="sm" variant="ghost" icon={<IconRefresh size={13} />} loading={busy} onClick={() => void act("Restarted", () => api.serverAction(sv.id, "restart"))}>
                 Restart
               </Button>
             )}
-            {sv.runId && up && (
+            {mayAct && sv.runId && up && (
               <Button size="sm" variant="ghost" icon={<IconStop size={12} />} loading={busy} onClick={() => void act("Stopped", () => api.serverAction(sv.id, "stop"))}>
                 Stop
               </Button>
             )}
-            {sv.runId && sv.lifetime === "owner" && (
+            {mayAct && sv.runId && sv.lifetime === "owner" && (
               <Button size="sm" variant="ghost" loading={busy} onClick={() => void act("Detached", () => api.detachServer(sv.id))}>
                 Detach
               </Button>
             )}
-            <Button size="sm" variant="danger" icon={<IconTrash size={13} />} onClick={() => setDeleting(true)}>
-              Delete
-            </Button>
+            {mayAct && (
+              <Button size="sm" variant="danger" icon={<IconTrash size={13} />} onClick={() => setDeleting(true)}>
+                Delete
+              </Button>
+            )}
           </>
         }
       />

@@ -4,6 +4,7 @@ import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type R
 import { historyRes, stepNote, stepOfRes } from "../every.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
+import { canManageInfra, useViewer } from "../identity.ts";
 import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, poolPath, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
 import { HostCost } from "./HostCost.tsx";
 import { volumeText } from "./hostCostView.ts";
@@ -16,6 +17,7 @@ type HostTab = (typeof HOST_TABS)[number];
 
 export function HostPage({ id }: { id: string }) {
   const scope = useScope();
+  const viewer = useViewer();
   const now = useNow();
   const toast = useToast();
   const tabParam = useSearchParams().get("tab");
@@ -121,9 +123,11 @@ export function HostPage({ id }: { id: string }) {
                 { key: "events", label: "Events", disabled: !showEvents },
               ]}
             />
-            <Button variant="danger" disabled={!canAct} onClick={() => setDrainOpen(true)}>
-              {forceOnly ? "Force evict" : "Drain"}
-            </Button>
+            {canManageInfra(viewer, h.platform) && (
+              <Button variant="danger" disabled={!canAct} onClick={() => setDrainOpen(true)}>
+                {forceOnly ? "Force evict" : "Drain"}
+              </Button>
+            )}
           </>
         }
       />

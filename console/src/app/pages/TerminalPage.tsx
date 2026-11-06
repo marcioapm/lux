@@ -2,6 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Badge, Button, Card, ConnectionBadge, CrumbSep, DEFAULT_FONT_SIZE, EmptyState, formatDuration, IconButton, IdChip, LinkButton, PageHeader, SegmentedControl, StatePill, Terminal, TerminalOverlay, useTerminalScheme, type ConnectionStatus, type TerminalHandle, type TerminalSchemePref, type TerminalSize } from "@lux/design-system";
 import { IconChevronLeft, IconExternal, IconMinus, IconPlus, IconRefresh, IconTerminal, IconWarning } from "@lux/design-system/icons";
 import { ENDED_RUN_STATES, errorText, EXEC_RUN_STATES, isApiError, openExec, SHELL_COMMAND, TERMINAL_RUN_STATES, useSession, type ExecSession, type Run } from "../../api/index.ts";
+import { api, useQuery } from "../../api/index.ts";
+import { canActOnRun, useObjectViewer } from "../identity.ts";
 import { href, Link, scoped, useSearch } from "../router.tsx";
 import { ButtonLink, ErrorBlock, HostLink, PageSkeleton, RunLink, runPath, useRun } from "./common.tsx";
 
@@ -45,6 +47,19 @@ const SCHEMES: { value: TerminalSchemePref; label: string; title: string }[] = [
  * reload, Reconnect or a new tab starts another; closing the tab ends it.
  */
 export function TerminalPage({ id }: { id: string }) {
+  const run = useQuery(`terminal-permission:${id}`, (s) => api.run(id, s));
+  // Decided in the Run's tenant (role, owned service accounts), not the tenant in scope.
+  const viewer = useObjectViewer(run.data?.tenant);
+  const sas = useQuery(`sas@${run.data?.tenant ?? ""}`, (s) => api.serviceAccounts(run.data?.tenant, s), { enabled: run.data != null && viewer.resolved && !viewer.legacy && !viewer.operator });
+  // Until the Run and whoami for its tenant answer, nobody gets a shell.
+  if (run.error && !run.data) return <div className="page"><ErrorBlock error={run.error} onRetry={run.refetch} /></div>;
+  if (!viewer.resolved) return <PageSkeleton />;
+  if (!run.data || (!viewer.legacy && !viewer.operator && !sas.data && sas.loading)) return <PageSkeleton />;
+  if (!canActOnRun(viewer, run.data, sas.data)) return <div className="page"><PageHeader title="Terminal" /><EmptyState title={viewer.readOnly ? "A read-only key cannot open a terminal" : "Only the owner and admins can open a terminal"} description="You can still read the Run's output and Session transcript." /></div>;
+  return <TerminalSession id={id} />;
+}
+
+function TerminalSession({ id }: { id: string }) {
   const session = useSession();
   // The terminal's own colours: changing them repaints this terminal in
   // place (same shell, same scrollback), never the console.

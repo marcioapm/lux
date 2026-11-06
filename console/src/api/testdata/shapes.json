@@ -1,0 +1,254 @@
+{
+  "ApiKey": {
+    "zero": [
+      "createdAt",
+      "id",
+      "name",
+      "prefix",
+      "readOnly"
+    ],
+    "filled": [
+      "createdAt",
+      "createdBy",
+      "expiresAt",
+      "id",
+      "lastUsedAt",
+      "name",
+      "prefix",
+      "readOnly"
+    ]
+  },
+  "CostSummaryRow": {
+    "zero": [
+      "amount",
+      "currency"
+    ],
+    "filled": [
+      "amount",
+      "at",
+      "currency",
+      "family",
+      "group",
+      "key",
+      "other",
+      "owner",
+      "runs"
+    ]
+  },
+  "Invitation": {
+    "zero": [
+      "code",
+      "createdAt",
+      "email",
+      "expiresAt",
+      "id",
+      "role",
+      "status",
+      "url"
+    ],
+    "filled": [
+      "acceptedAt",
+      "code",
+      "createdAt",
+      "email",
+      "expiresAt",
+      "id",
+      "invitedBy",
+      "name",
+      "renewedAt",
+      "revokedAt",
+      "revokedBy",
+      "role",
+      "status",
+      "url"
+    ]
+  },
+  "Me": {
+    "zero": [
+      "email",
+      "id",
+      "memberships",
+      "name",
+      "operator",
+      "picture"
+    ],
+    "filled": [
+      "email",
+      "id",
+      "lastSignInAt",
+      "memberships",
+      "name",
+      "operator",
+      "picture"
+    ]
+  },
+  "Member": {
+    "zero": [
+      "email",
+      "id",
+      "joinedAt",
+      "name",
+      "operator",
+      "picture",
+      "role",
+      "runningRuns"
+    ],
+    "filled": [
+      "email",
+      "id",
+      "joinedAt",
+      "keyCount",
+      "lastSeenAt",
+      "name",
+      "operator",
+      "picture",
+      "role",
+      "runningRuns"
+    ]
+  },
+  "MembershipRef": {
+    "zero": [
+      "role",
+      "tenant",
+      "tenantId"
+    ],
+    "filled": [
+      "joinedAt",
+      "role",
+      "tenant",
+      "tenantId"
+    ]
+  },
+  "Owner": {
+    "zero": [
+      "id",
+      "kind",
+      "name"
+    ],
+    "filled": [
+      "email",
+      "id",
+      "kind",
+      "name"
+    ]
+  },
+  "Person": {
+    "zero": [
+      "email",
+      "id",
+      "name",
+      "operator",
+      "picture"
+    ],
+    "filled": [
+      "email",
+      "id",
+      "name",
+      "operator",
+      "picture"
+    ]
+  },
+  "ServiceAccount": {
+    "zero": [
+      "activeKeys",
+      "createdAt",
+      "description",
+      "id",
+      "name",
+      "role"
+    ],
+    "filled": [
+      "activeKeys",
+      "createdAt",
+      "createdBy",
+      "description",
+      "disabledAt",
+      "id",
+      "lastUsedAt",
+      "name",
+      "owner",
+      "role"
+    ]
+  },
+  "Tenant": {
+    "zero": [
+      "activeRuns",
+      "createdAt",
+      "expireAfterDays",
+      "hosts",
+      "id",
+      "membersCount",
+      "name",
+      "owners",
+      "ownersCount",
+      "retentionDays",
+      "runs",
+      "storedBytes"
+    ],
+    "filled": [
+      "activeRuns",
+      "createdAt",
+      "expireAfterDays",
+      "hosts",
+      "id",
+      "maxConcurrentRuns",
+      "maxHosts",
+      "maxStorageBytes",
+      "membersCount",
+      "name",
+      "owners",
+      "ownersCount",
+      "retentionDays",
+      "runs",
+      "storedBytes"
+    ]
+  },
+  "TenantOwner": {
+    "zero": [
+      "email",
+      "id",
+      "name"
+    ],
+    "filled": [
+      "email",
+      "id",
+      "name"
+    ]
+  },
+  "Whoami": {
+    "zero": [
+      "consoleAuth",
+      "invitationsEnabled",
+      "memberships",
+      "operator",
+      "previewDomain",
+      "previews",
+      "scopes",
+      "serverInject",
+      "tenant",
+      "tenantId"
+    ],
+    "filled": [
+      "consoleAuth",
+      "email",
+      "invitationsEnabled",
+      "keyId",
+      "memberships",
+      "name",
+      "operator",
+      "picture",
+      "previewDomain",
+      "previewPort",
+      "previewScheme",
+      "previews",
+      "readOnly",
+      "role",
+      "scopes",
+      "serverInject",
+      "serviceAccount",
+      "tenant",
+      "tenantId",
+      "userId"
+    ]
+  }
+}

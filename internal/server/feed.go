@@ -252,7 +252,7 @@ func (s *Server) feedWindow(ctx context.Context, p Principal, after int64, f fee
 		}
 		evs, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (feedRow, error) {
 			var e feedRow
-			err := row.Scan(&e.ID, &e.ServerID, &e.Epoch, &e.Type, &e.Data, &e.Time, &e.RunID, &e.Tenant, &e.match)
+			err := row.Scan(&e.ID, &e.ServerID, &e.Subject, &e.Epoch, &e.Type, &e.Data, &e.Time, &e.RunID, &e.Tenant, &e.match)
 			if e.match {
 				s.eventDetail(&e.Event)
 			}
@@ -280,6 +280,6 @@ func feedWindowSQL(f feedFilter, tenant string, arg func(any) string) string {
 	if c := feedTenant(tenant, arg); c != "" {
 		where = "e." + c + " AND " + where
 	}
-	return `SELECT e.id, coalesce(e.server_id, ''), e.epoch, e.type, ` + data + `, e.created_at, e.run_id, t.name, ` + match + `
+	return `SELECT e.id, coalesce(e.server_id, ''), coalesce(e.subject, ''), e.epoch, e.type, ` + data + `, e.created_at, e.run_id, t.name, ` + match + `
 			FROM run_events e JOIN tenants t ON t.id = e.tenant_id` + join + ` WHERE ` + where + ` ORDER BY e.id LIMIT $2`
 }

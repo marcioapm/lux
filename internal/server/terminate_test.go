@@ -108,7 +108,9 @@ func TestTerminateRoutes(t *testing.T) {
 // postR1 posts POST /v1/runs/r1/<action> as t1 and expects 202.
 func postR1(t *testing.T, s *Server, action string) {
 	t.Helper()
-	key := apiKey(t, s, new("t1"), "run")
+	// Each call makes a fresh principal; use an admin for repeated
+	// operations on the Run owned by the first call's service account.
+	key := apiKey(t, s, new("t1"), "admin")
 	if code, body := call(t, s, key, http.MethodPost, "/v1/runs/r1/"+action, nil); code != http.StatusAccepted {
 		t.Fatalf("%s: %d %s", action, code, body)
 	}
