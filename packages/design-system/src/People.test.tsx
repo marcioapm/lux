@@ -139,8 +139,14 @@ describe("in a DOM", () => {
     expect(email).toContain("overflow-wrap: anywhere");
     expect(email).not.toMatch(/ellipsis|nowrap|overflow: hidden/);
     expect(block(".invlinks-url")).toContain("text-overflow: ellipsis");
-    const narrow = css.slice(css.indexOf("@container invlinks (max-width: 479px)"));
-    expect(narrow.length).toBeLessThan(css.length);
+    // The list is the container its narrow layout queries: a rename on either side would silently keep the wide layout.
+    const list = block(".invlinks");
+    expect(list).toContain("container-type: inline-size");
+    const name = /container-name:\s*([\w-]+)/.exec(list)?.[1];
+    expect(name).toBeDefined();
+    const at = css.indexOf(`@container ${name} (max-width: 479px)`);
+    expect(at).toBeGreaterThan(-1);
+    const narrow = css.slice(at);
     expect(block(".invlinks li", narrow).replace(/\s+/g, " ")).toContain(`"email copy" "note copy" "url copy"`);
   });
 
