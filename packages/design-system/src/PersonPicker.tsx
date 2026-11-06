@@ -157,7 +157,8 @@ export function PersonPicker({ people, value, onChange, freeText = true, label, 
                 }}
                 onPointerMove={(e) => {
                   const g = gesture.current;
-                  if (g && (e.clientX !== g.x || e.clientY !== g.y)) g.cancelled = true;
+                  // A completed click may jitter a few CSS pixels. Reject a drag, not normal hand movement.
+                  if (g && Math.hypot(e.clientX - g.x, e.clientY - g.y) > 8) g.cancelled = true;
                 }}
                 onPointerCancel={() => { if (gesture.current) gesture.current.cancelled = true; }}
                 onMouseDown={(e) => e.preventDefault()}

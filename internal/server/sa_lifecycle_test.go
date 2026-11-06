@@ -288,6 +288,48 @@ func (b *lifecycleBody) Read(p []byte) (int, error) {
 }
 func (b *lifecycleBody) Close() error { return nil }
 
+func TestServiceAccountKeyCallerExpiresWhileQueued(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			f := peopleFixture(t)
+			legacyAccount(t, f)
+			execSQL(t, f.s, context.Background(), `UPDATE api_keys SET revoked_at = now() WHERE id = 'k_ext2'`)
+			execSQL(t, f.s, context.Background(), `UPDATE service_accounts SET role = 'admin' WHERE id = 'sa_bot'`)
+			execSQL(t, f.s, context.Background(), `UPDATE api_keys SET expires_at = clock_timestamp() + interval '3 seconds' WHERE id = 'k_sa'`)
+			holder := lifecycleHolder(t, f, "lux_keys:t1:sa_bot", false)
+			path := "/v1/service-accounts/sa_ext/keys"
+			var payload any = map[string]any{"name": "expired-caller-replacement"}
+			if method == http.MethodDelete {
+				path += "/k_ext"
+				payload = nil
+			}
+			done := make(chan int, 1)
+			go func() { code, _ := f.do(t, f.keys["sa"], method, path, payload); done <- code }()
+			waitLifecycleLock(t, f, "lux_keys:t1:sa_bot", 1)
+			if _, err := holder.Exec(context.Background(), `SELECT pg_sleep(3.1)`); err != nil {
+				t.Fatal(err)
+			}
+			if !queryOne[bool](t, f.s, `SELECT expires_at < clock_timestamp() FROM api_keys WHERE id = 'k_sa'`) {
+				t.Fatal("caller has not expired")
+			}
+			if err := holder.Commit(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case code := <-done:
+				t.Logf("expired caller %s returned %d; replacements=%d; revoked=%v", method, code,
+					queryOne[int64](t, f.s, `SELECT count(*) FROM api_keys WHERE name = 'expired-caller-replacement'`),
+					queryOne[bool](t, f.s, `SELECT revoked_at IS NOT NULL FROM api_keys WHERE id = 'k_ext'`))
+				if code != http.StatusUnauthorized {
+					t.Errorf("expired caller authorized: %d, want 401", code)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("request blocked")
+			}
+		})
+	}
+}
+
 func TestServiceAccountKeyCallerPausedBody(t *testing.T) {
 	for _, action := range []string{"revoke", "convert", "delete", "disable", "demote", "readonly"} {
 		t.Run(action, func(t *testing.T) {

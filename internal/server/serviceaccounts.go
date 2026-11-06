@@ -574,7 +574,8 @@ func (s *Server) patchServiceAccount(ctx context.Context, in *struct {
 }
 
 // revalidateAccountCaller reuses authentication's SA identity at the write
-// boundary. The caller's lifecycle lock must already be held through commit.
+// boundary, using wall-clock expiry after any lock wait (transaction now()
+// predates that wait). The caller's lifecycle lock is held through commit.
 // Converted credentials retry authentication as their new person; personal
 // callers retain the existing membership/role semantics without another query.
 func revalidateAccountCaller(ctx context.Context, tx pgx.Tx, p Principal) (Principal, error) {
@@ -584,7 +585,7 @@ func revalidateAccountCaller(ctx context.Context, tx pgx.Tx, p Principal) (Princ
 	err := tx.QueryRow(ctx, `SELECT sa.role, sa.name, k.read_only FROM api_keys k
 		JOIN service_accounts sa ON sa.id = k.service_account_id AND sa.tenant_id = k.tenant_id
 		WHERE k.id = $1 AND k.tenant_id = $2 AND k.service_account_id = $3
-		AND `+activeKey+` AND sa.disabled_at IS NULL`, p.KeyID, p.TenantID, p.ServiceAccountID).Scan(&p.Role, &p.ServiceAccountName, &p.ReadOnly)
+		AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > clock_timestamp()) AND sa.disabled_at IS NULL`, p.KeyID, p.TenantID, p.ServiceAccountID).Scan(&p.Role, &p.ServiceAccountName, &p.ReadOnly)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return p, errf(http.StatusUnauthorized, "unauthorized", "API key principal changed or is no longer active; retry authentication")
 	}

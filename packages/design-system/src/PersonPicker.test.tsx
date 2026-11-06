@@ -157,6 +157,22 @@ describe("in a DOM", () => {
     expect(last).toBe("  ANN@EXAMPLE.COM  ");
   });
 
+  test("a completed non-first selection tolerates small mouse and touch movement", async () => {
+    for (const pointerType of ["mouse", "touch"]) {
+      const el = await render(<Harness />);
+      const field = el.querySelector("input")!;
+      await type(field, "");
+      const option = el.querySelectorAll('[role="option"]')[1]!;
+      await act(async () => {
+        option.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType, clientX: 20, clientY: 100 }));
+        option.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType, clientX: 21, clientY: 101 }));
+        option.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType, clientX: 21, clientY: 101 }));
+        (option as HTMLElement).click();
+      });
+      expect(field.value).toBe("bruno@acme.dev");
+    }
+  });
+
   test("swipes and cancelled gestures do not pick, while completed tap does", async () => {
     const el = await render(<Harness />);
     const input = el.querySelector("input")!;
