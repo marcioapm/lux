@@ -56,8 +56,8 @@ export interface KeysTableProps {
 export function KeysTable(props: KeysTableProps) {
   const { keys, loading, empty } = props;
   // No minWidth: the Table's floor (fixed widths plus 140px for Name, the
-  // one column without a width) keeps Name readable on a phone, where a
-  // forced 720 left it 22px; below the floor the table scrolls sideways.
+  // one column without a width) keeps Name readable on a phone; below the
+  // floor the table scrolls sideways.
   return <Table columns={keyColumns(props)} rows={keys} rowKey={(k) => k.id} loading={loading} defaultSort={{ key: "created", dir: "desc" }} empty={empty ?? "No API keys."} />;
 }
 

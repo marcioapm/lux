@@ -61,7 +61,7 @@ next:
 
 // by=member and by=owner name their owners in a constant number of
 // queries, however many buckets the series has: one for people, one for
-// service accounts (it was one a row: 7,450 for 31 days hourly).
+// service accounts.
 func TestCostByMemberOwnerQueries(t *testing.T) {
 	s, keys := costLabelFixture(t)
 	ctx := context.Background()

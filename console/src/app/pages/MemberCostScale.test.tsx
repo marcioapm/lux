@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
-// The share column computes each currency's total once, not per row (it
-// was O(n²): 2.1 s at 3,000 rows). sumMoney is counted through a module
+// The share column computes each currency's total once, not per row.
+// sumMoney is counted through a module
 // mock: the amounts it is handed stay O(rows).
 let t: typeof import("../peopleTesting.tsx");
 beforeAll(async () => {

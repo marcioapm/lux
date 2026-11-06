@@ -5,8 +5,8 @@ import { createRoot } from "react-dom/client";
 import type { ApiKey } from "../../api/index.ts";
 
 // KeysTable on a phone: Name is the one column without a width, so it gets
-// the table's width less the fixed ones. A forced minWidth 720 under the
-// fixed widths' sum left it 22px; the table's own floor keeps it >= 140px.
+// the table's width less the fixed ones; the table's own floor keeps it
+// >= 140px.
 let parts: typeof import("./peopleParts.tsx");
 let ds: typeof import("@lux/design-system");
 beforeAll(async () => {

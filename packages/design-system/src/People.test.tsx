@@ -115,7 +115,7 @@ describe("in a DOM", () => {
     expect(rows.map((r) => r.querySelector("button")!.getAttribute("aria-label"))).toEqual(["Copy link for jorge@acme.dev", "Copy link for filipa@acme.dev"]);
   });
 
-  // A5: two addresses with the same prefix must read apart on a phone. The
+  // Two addresses with the same prefix must read apart on a phone. The
   // address is whole in the DOM (wrapping at @ and .), the badges are out of
   // its line, and the stylesheet never ellipsizes it; narrow, the badges
   // take their own row under it.
