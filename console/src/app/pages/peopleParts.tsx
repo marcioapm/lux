@@ -52,7 +52,16 @@ export interface KeysTableProps {
   empty?: ReactNode;
 }
 
-export function KeysTable({ keys, loading, role = null, whose = "my", access = true, createdBy, onRename, onRevoke, empty }: KeysTableProps) {
+export function KeysTable(props: KeysTableProps) {
+  const { keys, loading, empty } = props;
+  // No minWidth: the Table's floor (fixed widths plus 140px for Name, the
+  // one column without a width) keeps Name readable on a phone, where a
+  // forced 720 left it 22px; below the floor the table scrolls sideways.
+  return <Table columns={keyColumns(props)} rows={keys} rowKey={(k) => k.id} loading={loading} defaultSort={{ key: "created", dir: "desc" }} empty={empty ?? "No API keys."} />;
+}
+
+/** KeysTable's columns: Name (no width: the rest of the table), then fixed ones. */
+export function keyColumns({ role = null, whose = "my", access = true, createdBy, onRename, onRevoke }: KeysTableProps): Column<ApiKey>[] {
   const cols: Column<ApiKey>[] = [
     { key: "name", header: "Name", cell: (k) => k.name, sortValue: (k) => k.name, lead: true },
     { key: "prefix", header: "Key", cell: (k) => <span className="mono muted">{k.prefix}…</span>, width: 130 },
@@ -83,7 +92,7 @@ export function KeysTable({ keys, loading, role = null, whose = "my", access = t
       align: "right",
       width: onRename && onRevoke ? 84 : 52,
     });
-  return <Table columns={cols} rows={keys} rowKey={(k) => k.id} loading={loading} defaultSort={{ key: "created", dir: "desc" }} empty={empty ?? "No API keys."} minWidth={720} />;
+  return cols;
 }
 
 const EXPIRY = [
