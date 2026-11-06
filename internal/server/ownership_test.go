@@ -48,15 +48,16 @@ func TestStandaloneServerLifecycle(t *testing.T) {
 				method, suffix string
 				body           any
 				status         int
+				runID          any
 			}{
-				{http.MethodPatch, "", map[string]any{"labels": map[string]string{"preview": "yes"}}, 200},
-				{http.MethodPost, "/stop", nil, 200},
-				{http.MethodPost, "/start", nil, 409},
-				{http.MethodPost, "/restart", nil, 409},
-				{http.MethodPost, "/attach", map[string]any{"runId": run}, 200},
-				{http.MethodPost, "/detach", nil, 200},
-				{http.MethodPost, "/attach", map[string]any{"runId": "r_second"}, 200},
-				{http.MethodDelete, "", nil, 204},
+				{http.MethodPatch, "", map[string]any{"labels": map[string]string{"preview": "yes"}}, 200, nil},
+				{http.MethodPost, "/stop", nil, 200, nil},
+				{http.MethodPost, "/start", nil, 409, nil},
+				{http.MethodPost, "/restart", nil, 409, nil},
+				{http.MethodPost, "/attach", map[string]any{"runId": run}, 200, run},
+				{http.MethodPost, "/detach", nil, 200, nil},
+				{http.MethodPost, "/attach", map[string]any{"runId": "r_second"}, 200, "r_second"},
+				{http.MethodDelete, "", nil, 204, nil},
 			} {
 				code, out = f.do(t, f.keys[actor], step.method, path+step.suffix, step.body)
 				if code != step.status {
@@ -68,6 +69,22 @@ func TestStandaloneServerLifecycle(t *testing.T) {
 					}
 				} else if step.method != http.MethodDelete && out["owner"] != owner {
 					t.Fatalf("creator changed: %v", out)
+				}
+				if step.method == http.MethodDelete {
+					if code, out := f.do(t, f.keys[actor], http.MethodGet, path, nil); code != http.StatusNotFound {
+						t.Fatalf("deleted server GET: %d %v", code, out)
+					}
+					if queryOne[bool](t, f.s, `SELECT EXISTS (SELECT 1 FROM run_servers WHERE id=$1)`, id) {
+						t.Fatal("deleted server still stored")
+					}
+				} else if step.status == http.StatusOK {
+					if out["runId"] != step.runID {
+						t.Fatalf("%s response runId: %v, want %v", step.suffix, out["runId"], step.runID)
+					}
+					stored := queryOne[*string](t, f.s, `SELECT run_id FROM run_servers WHERE id=$1`, id)
+					if (stored == nil) != (step.runID == nil) || stored != nil && *stored != step.runID {
+						t.Fatalf("%s stored runId: %v, want %v", step.suffix, stored, step.runID)
+					}
 				}
 			}
 		})
@@ -84,6 +101,11 @@ func TestStandaloneServerPrincipals(t *testing.T) {
 	execSQL(t, f.s, ctx, `UPDATE api_keys SET read_only = true WHERE id = 'k_readonly'`)
 	execSQL(t, f.s, ctx, `INSERT INTO service_accounts (id, tenant_id, name, role, owner_user_id) VALUES ('sa_other', 't1', 'other', 'member', 'usr_member2')`)
 	f.addKey(t, "other_sa", "service_account_id", "sa_other")
+	execSQL(t, f.s, ctx, `INSERT INTO service_accounts (id, tenant_id, name, role, owner_user_id) VALUES ('sa_sibling', 't1', 'sibling', 'member', 'usr_member')`)
+	f.addKey(t, "sibling_sa", "service_account_id", "sa_sibling")
+	execSQL(t, f.s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, owner_user_id, owner_sa_id) VALUES
+		('r_member2', 't1', '{}', 'stopped', 'usr_member2', NULL),
+		('r_sibling', 't1', '{}', 'stopped', NULL, 'sa_sibling')`)
 	f.addKey(t, "foreign", "user_id", "usr_member")
 	execSQL(t, f.s, ctx, `INSERT INTO memberships (tenant_id, user_id, role) VALUES ('t2','usr_member','member')`)
 	execSQL(t, f.s, ctx, `UPDATE api_keys SET tenant_id = 't2' WHERE id = 'k_foreign'`)
@@ -92,6 +114,34 @@ func TestStandaloneServerPrincipals(t *testing.T) {
 		execSQL(t, f.s, ctx, `INSERT INTO run_servers (id, tenant_id, name, port, owner, wake, lifetime) VALUES ($1,'t1','web',3000,$2,'request','owner')`, id, actor)
 	}
 	patch := map[string]any{"labels": map[string]string{"changed": "yes"}}
+	// Each attacker owns the destination Run, isolating source authorization.
+	for _, attack := range []struct{ key, server, run string }{
+		{"sibling_sa", "srv_key", "r_sibling"},
+		{"member2", "srv_email", "r_member2"},
+	} {
+		for _, route := range []struct {
+			method, suffix string
+			body           any
+		}{
+			{http.MethodPatch, "", patch}, {http.MethodDelete, "", nil},
+			{http.MethodPost, "/attach", map[string]any{"runId": attack.run}},
+		} {
+			before := queryOne[string](t, f.s, `SELECT row_to_json(s)::text FROM run_servers s WHERE id=$1`, attack.server)
+			if code, out := f.do(t, f.keys[attack.key], route.method, "/v1/servers/"+attack.server+route.suffix, route.body); code != http.StatusForbidden {
+				t.Fatalf("%s %s %s: %d %v", attack.key, route.method, attack.server+route.suffix, code, out)
+			}
+			if after := queryOne[string](t, f.s, `SELECT row_to_json(s)::text FROM run_servers s WHERE id=$1`, attack.server); after != before {
+				t.Fatalf("denied source request changed row: %s", attack.server)
+			}
+		}
+	}
+	execSQL(t, f.s, ctx, `INSERT INTO run_servers (id, tenant_id, name, port, owner, wake, lifetime) VALUES ('srv_sibling','t1','web',3000,'k_sibling_sa','request','owner')`)
+	if code, out := f.do(t, f.keys["sa"], http.MethodPatch, "/v1/servers/srv_sibling", patch); code != http.StatusForbidden {
+		t.Fatalf("exact SA manages sibling: %d %v", code, out)
+	}
+	if code, out := f.do(t, f.keys["member"], http.MethodPatch, "/v1/servers/srv_sibling", patch); code != http.StatusOK {
+		t.Fatalf("owning person manages sibling: %d %v", code, out)
+	}
 	for _, id := range []string{"srv_email", "srv_key", "srv_personal"} {
 		path := "/v1/servers/" + id
 		for _, key := range []string{"member2", "other_sa", "viewer", "readonly", "foreign"} {
@@ -147,7 +197,8 @@ func TestStandaloneServerPrincipals(t *testing.T) {
 	if got := queryOne[string](t, f.s, `SELECT coalesce(run_id,'') FROM run_servers WHERE id='srv_email'`); got != "" {
 		t.Fatal("unauthorized attach changed server")
 	}
-	if code, out := f.do(t, f.keys["admin"], http.MethodPost, "/v1/servers/srv_email/attach", map[string]any{"runId": "r_olive"}); code != 200 {
+	creator := queryOne[string](t, f.s, `SELECT owner FROM run_servers WHERE id='srv_email'`)
+	if code, out := f.do(t, f.keys["admin"], http.MethodPost, "/v1/servers/srv_email/attach", map[string]any{"runId": "r_member2"}); code != 200 {
 		t.Fatal(code, out)
 	}
 	for _, route := range []struct {
@@ -167,8 +218,18 @@ func TestStandaloneServerPrincipals(t *testing.T) {
 		}
 	}
 	// Detach by the current Run owner does not transfer creation attribution.
-	if code, out := f.do(t, f.keys["owner"], http.MethodPost, "/v1/servers/srv_email/detach", nil); code != 200 {
+	if code, out := f.do(t, f.keys["member2"], http.MethodPost, "/v1/servers/srv_email/detach", nil); code != 200 || out["owner"] != creator || out["runId"] != nil {
 		t.Fatal(code, out)
+	}
+	before := queryOne[string](t, f.s, `SELECT row_to_json(s)::text FROM run_servers s WHERE id='srv_email'`)
+	if code, out := f.do(t, f.keys["member2"], http.MethodPatch, "/v1/servers/srv_email", patch); code != http.StatusForbidden {
+		t.Fatalf("detacher owns unattached server: %d %v", code, out)
+	}
+	if after := queryOne[string](t, f.s, `SELECT row_to_json(s)::text FROM run_servers s WHERE id='srv_email'`); after != before {
+		t.Fatal("denied detacher changed row")
+	}
+	if got := queryOne[string](t, f.s, `SELECT owner FROM run_servers WHERE id='srv_email'`); got != creator {
+		t.Fatalf("detach rewrote creator: %s", got)
 	}
 	if code, out := f.do(t, f.keys["member"], http.MethodPatch, "/v1/servers/srv_email", patch); code != 200 {
 		t.Fatal(code, out)
