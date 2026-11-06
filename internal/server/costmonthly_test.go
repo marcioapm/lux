@@ -225,6 +225,9 @@ func TestCostMonthlyExperiment(t *testing.T) {
 							if i < 2 {
 								baseline = append(baseline, rows...)
 							} else {
+								if len(rows) != len(baseline) {
+									t.Fatalf("candidate row count=%d, baseline=%d", len(rows), len(baseline))
+								}
 								for j, row := range rows {
 									wantTotal := int32(0)
 									if baseline[j][0] == nil {
@@ -262,12 +265,14 @@ func TestCostMonthlyWork(t *testing.T) {
 	}
 	_, before := monthlyExplain(t, s, baseline[0], "force_custom_plan", "4MB")
 	_, after := monthlyExplain(t, s, qs[0], "force_custom_plan", "4MB")
-	blocks := func(p map[string]any) float64 {
+	work := func(p map[string]any) (float64, float64) {
 		r := p["Plan"].(map[string]any)
-		return r["Shared Hit Blocks"].(float64) + r["Shared Read Blocks"].(float64)
+		return r["Shared Hit Blocks"].(float64) + r["Shared Read Blocks"].(float64), r["Temp Read Blocks"].(float64) + r["Temp Written Blocks"].(float64)
 	}
-	t.Logf("monthly buffers totals=%v combined=%v heavy=%d", blocks(before), blocks(after), len(qs))
-	if blocks(after) > blocks(before)*1.25 {
+	beforeShared, beforeTemp := work(before)
+	afterShared, afterTemp := work(after)
+	t.Logf("monthly work totals=%v/%v combined=%v/%v heavy=%d", beforeShared, beforeTemp, afterShared, afterTemp, len(qs))
+	if afterShared > beforeShared*1.25 || afterTemp > beforeTemp*1.25 {
 		t.Fatal("combined aggregation repeats scoped buffer work")
 	}
 }
@@ -382,7 +387,7 @@ func TestCostMonthlyFamilyRowLimit(t *testing.T) {
 		}
 	}
 	ownerExec(t, s, `INSERT INTO cost_hourly(hour,tenant_id,run_id,source,family,currency,amount,allocated,unallocated)
-		VALUES($1,'t1','r1','limit','family-1','USD',1,0,0)`, t0.Add(79*time.Hour))
+		VALUES($1,'t1','r1','limit','family-126','USD',1,0,0)`, t0.Add(79*time.Hour))
 	for _, suffix := range []string{"", "&runs=true"} {
 		if code := getJSON(t, s, keys["t1"], path+suffix, &got); code != 413 {
 			t.Fatalf("over limit: HTTP=%d", code)
