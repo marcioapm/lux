@@ -122,7 +122,7 @@ test("an admin has no actions on their own row or page; viewers and read-only ke
 
 test("memberActions: the rule per caller", async () => {
   const { viewerOf } = await import("../identity.ts");
-  const base = { tenant: "acme", tenantId: "ten_acme", scopes: ["read", "run", "admin"], consoleAuth: "cloudflare-access", memberships: [] };
+  const base = { tenant: "acme", tenantId: "ten_acme", scopes: ["read", "run", "admin"], consoleAuth: "cloudflare-access" as const, memberships: [] };
   const owner = viewerOf({ ...base, operator: false, userId: "usr_eva", role: "owner" });
   const admin = viewerOf({ ...base, operator: false, userId: "usr_ana", role: "admin" });
   const op = viewerOf({ ...base, operator: true, userId: "usr_mar" });
