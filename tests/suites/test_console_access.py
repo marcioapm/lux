@@ -21,7 +21,7 @@ def access(env):
                    LUX_CF_ACCESS_DEFAULT_TENANT=tenant["tenantId"])
     # Memberships are explicit now; admission through Access alone grants
     # no tenant privileges. Keep the infrastructure tests' admin fixture.
-    operator_headers = {"Cf-Access-Jwt-Assertion": fake.token("ada@example.com")}
+    operator_headers = {"Cf-Access-Jwt-Assertion": fake.token("ada@example.com", "Ada Lovelace")}
     for email in ("ordinary@example.com", "pictured@example.com", "plain-http@example.com"):
         r = requests.post(env.luxd_url + "/v1/members", params={"tenant": tenant["tenantId"]},
                           headers=operator_headers, json={"email": email, "role": "admin"}, timeout=10)
