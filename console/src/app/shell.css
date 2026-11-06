@@ -1005,7 +1005,6 @@
 }
 .secret-box .input {
   flex: 1;
-  min-width: 0;
 }
 .snippet {
   margin: 0;
@@ -1034,9 +1033,6 @@
   padding: var(--sp-4) var(--sp-5);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
-}
-.inv-offer .person-text {
-  min-width: 0;
 }
 .filter-row {
   display: flex;
