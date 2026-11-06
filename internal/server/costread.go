@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
@@ -525,28 +526,60 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		}
 	}
 	if group[0] == "member" || group[0] == "owner" {
+		// The owners are read once each, people in one query and accounts
+		// in another, whatever the number of rows (a series has one per
+		// owner and bucket).
 		err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			var userIDs []*string
+			var saIDs []string
 			for _, rows := range [][]CostSummaryRow{out.Body.Totals, out.Body.Series} {
 				for i := range rows {
 					r := &rows[i]
 					r.Key = r.Group[group[0]]
-					if strings.HasPrefix(r.Key, "user:") {
-						id := strings.TrimPrefix(r.Key, "user:")
-						person, e := personByID(ctx, tx, &id)
-						if e != nil {
-							return e
-						}
-						if person != nil {
-							r.Owner = &Owner{Kind: "user", ID: person.ID, Name: person.Name, Email: person.Email}
+					if id, ok := strings.CutPrefix(r.Key, "user:"); ok {
+						userIDs = append(userIDs, &id)
+					} else if id, ok := strings.CutPrefix(r.Key, "sa:"); ok && !slices.Contains(saIDs, id) {
+						saIDs = append(saIDs, id)
+					}
+				}
+			}
+			people, err := peopleByIDs(ctx, tx, userIDs...)
+			if err != nil {
+				return err
+			}
+			accounts := map[string]string{}
+			if len(saIDs) > 0 {
+				rows, err := tx.Query(ctx, `SELECT id, name FROM service_accounts WHERE id = ANY($1)`, saIDs)
+				if err != nil {
+					return err
+				}
+				for rows.Next() {
+					var id, name string
+					if err := rows.Scan(&id, &name); err != nil {
+						rows.Close()
+						return err
+					}
+					accounts[id] = name
+				}
+				rows.Close()
+				if err := rows.Err(); err != nil {
+					return err
+				}
+			}
+			for _, rows := range [][]CostSummaryRow{out.Body.Totals, out.Body.Series} {
+				for i := range rows {
+					r := &rows[i]
+					if id, ok := strings.CutPrefix(r.Key, "user:"); ok {
+						if u := people[id]; u != nil {
+							r.Owner = &Owner{Kind: "user", ID: u.ID, Name: u.Name, Email: u.Email}
 							if r.Owner.Name == "" {
-								r.Owner.Name = person.Email
+								r.Owner.Name = u.Email
 							}
 						}
-					} else if strings.HasPrefix(r.Key, "sa:") {
-						id := strings.TrimPrefix(r.Key, "sa:")
-						var name string
-						if e := tx.QueryRow(ctx, `SELECT name FROM service_accounts WHERE id=$1`, id).Scan(&name); e != nil {
-							return e
+					} else if id, ok := strings.CutPrefix(r.Key, "sa:"); ok {
+						name, found := accounts[id]
+						if !found {
+							return fmt.Errorf("cost row of service account %s: %w", id, pgx.ErrNoRows)
 						}
 						r.Owner = &Owner{Kind: "serviceAccount", ID: id, Name: name}
 					}

@@ -80,3 +80,41 @@ func personByID(ctx context.Context, tx pgx.Tx, id *string) (*Person, error) {
 	}
 	return &p, err
 }
+
+// peopleByIDs reads the people of ids (nil and empty skipped, duplicates
+// read once) in one query: lists hydrate from its map, not a query a row.
+func peopleByIDs(ctx context.Context, tx pgx.Tx, ids ...*string) (map[string]*Person, error) {
+	set := map[string]bool{}
+	var list []string
+	for _, id := range ids {
+		if id != nil && *id != "" && !set[*id] {
+			set[*id] = true
+			list = append(list, *id)
+		}
+	}
+	out := make(map[string]*Person, len(list))
+	if len(list) == 0 {
+		return out, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT id, email, name, picture, operator FROM users WHERE id = ANY($1)`, list)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p Person
+		if err := rows.Scan(&p.ID, &p.Email, &p.Name, &p.Picture, &p.Operator); err != nil {
+			return nil, err
+		}
+		out[p.ID] = &p
+	}
+	return out, rows.Err()
+}
+
+// person is m's person of id, or nil.
+func person(m map[string]*Person, id *string) *Person {
+	if id == nil {
+		return nil
+	}
+	return m[*id]
+}

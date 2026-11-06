@@ -4,8 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/store"
 )
@@ -54,6 +56,45 @@ next:
 		n++
 	}
 	return n
+}
+
+// by=member and by=owner name their owners in a constant number of
+// queries, however many buckets the series has: one for people, one for
+// service accounts (it was one a row: 7,450 for 31 days hourly).
+func TestCostByMemberOwnerQueries(t *testing.T) {
+	s, keys := costLabelFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO users(id,email,name) VALUES('usr_cost','cost@example.com','Cost Member'),('usr_two','two@example.com','')`)
+	execSQL(t, s, ctx, `INSERT INTO memberships(tenant_id,user_id,role) VALUES('t1','usr_cost','member'),('t1','usr_two','member')`)
+	execSQL(t, s, ctx, `UPDATE runs SET owner_user_id='usr_cost' WHERE id='r1'`)
+	execSQL(t, s, ctx, `UPDATE runs SET owner_user_id='usr_two' WHERE id='r4'`)
+	execSQL(t, s, ctx, `UPDATE runs SET owner_sa_id=(SELECT service_account_id FROM api_keys WHERE id='k1') WHERE id='r3'`)
+	count := func(hours int) (people, accounts, series int) {
+		// One more bucket an hour, each with every owner.
+		execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount, allocated, unallocated)
+			SELECT $1::timestamptz + make_interval(hours => h), 't1', r, 'compute', 'compute', 'USD', 'h1', 'blue', 1, 0, 0
+			FROM generate_series(1, $2::int) h, unnest(ARRAY['r1','r3','r4']) r ON CONFLICT DO NOTHING`, t0, hours)
+		path := "/v1/costs?from=" + url.QueryEscape(t0.Format(time.RFC3339)) + "&to=" + url.QueryEscape(t0.Add(time.Duration(hours+1)*time.Hour).Format(time.RFC3339)) + "&by=member&interval=hour"
+		_, got := tracedRequest(t, s, keys["t1"], http.MethodGet, path)
+		var body CostSummaryBody
+		if code := getJSON(t, s, keys["t1"], path, &body); code != 200 {
+			t.Fatal(code)
+		}
+		for _, r := range body.Series {
+			if r.Key != "(none)" && r.Owner == nil {
+				t.Errorf("series row %s has no owner", r.Key)
+			}
+		}
+		return countStatements(got, "FROM users"), countStatements(got, "FROM service_accounts"), len(body.Series)
+	}
+	p1, a1, n1 := count(2)
+	p2, a2, n2 := count(24)
+	if n2 <= n1 {
+		t.Fatalf("series did not grow: %d then %d rows", n1, n2)
+	}
+	if p1 != p2 || a1 != a2 || p2 > 1 || a2 > 1 {
+		t.Errorf("owner queries grow with buckets: people %d→%d, accounts %d→%d (series %d→%d rows)", p1, p2, a1, a2, n1, n2)
+	}
 }
 
 // owner= and mine=true filter Runs on the owner columns against ids
