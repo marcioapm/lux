@@ -87,3 +87,55 @@ func TestMembersOwnerRules(t *testing.T) {
 	}
 	_ = context.Background
 }
+
+// POST /v1/members {upsert:true}: operators only; a non-member is added with
+// the role, a member gets it (member.role_changed); without upsert, 409.
+func TestAddMemberUpsert(t *testing.T) {
+	f := peopleFixture(t)
+	for _, key := range []string{"owner", "admin"} {
+		if code, out := f.do(t, f.keys[key], "POST", "/v1/members", map[string]any{"email": "new@example.com", "role": "owner", "upsert": true}); code != 403 {
+			t.Errorf("%s upserts: %d %v", key, code, out)
+		}
+	}
+	code, out := f.do(t, f.keys["op"], "POST", "/v1/members?tenant=t2", map[string]any{"email": "New@Example.com", "role": "owner", "upsert": true})
+	if code != 200 || out["role"] != "owner" || out["email"] != "New@Example.com" {
+		t.Fatalf("add as owner: %d %v", code, out)
+	}
+	if code, out := f.do(t, f.keys["op"], "POST", "/v1/members?tenant=t1", map[string]any{"email": "mia@example.com", "role": "owner"}); code != 409 {
+		t.Errorf("no upsert, a member: %d %v", code, out)
+	}
+	code, out = f.do(t, f.keys["op"], "POST", "/v1/members?tenant=t1", map[string]any{"email": "MIA@example.com", "role": "owner", "upsert": true})
+	if code != 200 || out["role"] != "owner" || out["id"] != "usr_member" {
+		t.Fatalf("promote: %d %v", code, out)
+	}
+	if got := queryAll(t, f.s, `SELECT type || ':' || (data->>'user') || ':' || coalesce(data->>'from', '') || ':' || coalesce(data->>'to', data->>'role') || ':' || (data->>'by') FROM run_events WHERE type LIKE 'member.%' ORDER BY id`); stringify(got) != `["member.joined:`+queryOne[string](t, f.s, `SELECT id FROM users WHERE email='New@Example.com'`)+`::owner:k_op","member.role_changed:usr_member:member:owner:k_op"]` {
+		t.Errorf("events: %v", got)
+	}
+	// Upsert to the same role: no change, no event.
+	if code, _ := f.do(t, f.keys["op"], "POST", "/v1/members?tenant=t1", map[string]any{"email": "mia@example.com", "role": "owner", "upsert": true}); code != 200 {
+		t.Error(code)
+	}
+	if n := queryOne[int64](t, f.s, `SELECT count(*) FROM run_events WHERE type LIKE 'member.%'`); n != 2 {
+		t.Errorf("events after a no-op upsert: %d", n)
+	}
+}
+
+// An owner changes their own role while another owner exists; the last owner
+// who is not an operator cannot (409 last_owner); an operator always can.
+func TestOwnerChangesOwnRole(t *testing.T) {
+	f := peopleFixture(t)
+	code, out := f.do(t, f.keys["owner"], "PATCH", "/v1/members/olive@example.com", map[string]any{"role": "admin"})
+	if c, _ := errCode(out); code != 409 || c != "last_owner" {
+		t.Fatalf("last owner demotes self: %d %v", code, out)
+	}
+	if code, out := f.do(t, f.keys["owner"], "PATCH", "/v1/members/usr_admin", map[string]any{"role": "owner"}); code != 200 {
+		t.Fatalf("second owner: %d %v", code, out)
+	}
+	if code, out := f.do(t, f.keys["owner"], "PATCH", "/v1/members/olive@example.com", map[string]any{"role": "admin"}); code != 200 || out["role"] != "admin" {
+		t.Fatalf("owner demotes self with another owner: %d %v", code, out)
+	}
+	// Now the only owner, adam, as an operator would be allowed: the operator demotes them.
+	if code, out := f.do(t, f.keys["op"], "PATCH", "/v1/members/usr_admin?tenant=t1", map[string]any{"role": "member"}); code != 200 {
+		t.Fatalf("operator demotes the last owner: %d %v", code, out)
+	}
+}

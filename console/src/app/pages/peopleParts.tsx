@@ -1,14 +1,27 @@
 // Pieces the people pages share: who cells, key tables, the New key and
 // shown-once dialogs, role pickers.
 import { useState, type ReactNode } from "react";
-import { Badge, Button, Dialog, IconButton, Person, RelativeTime, ROLE_DESC, ROLE_LABEL, ROLES, roleAtLeast, Select, Table, useCopy, type Column, type SelectOption, type TenantRole } from "@lux/design-system";
+import { Badge, Button, Dialog, IconButton, Person, RelativeTime, ROLE_DESC, ROLE_LABEL, ROLES, roleAtLeast, Select, Table, useCopy, type Column, type PersonOption, type SelectOption, type TenantRole } from "@lux/design-system";
 import { IconCheck, IconCopy, IconPencil, IconTrash } from "@lux/design-system/icons";
-import type { ApiKey, CreatedApiKey, NewKeyRequest, Owner, Person as PersonT } from "../../api/index.ts";
+import type { ApiKey, CreatedApiKey, Member, NewKeyRequest, Owner, Person as PersonT } from "../../api/index.ts";
 import { ErrorStrip } from "./common.tsx";
 
 
 export const memberPath = (id: string) => `/members/${encodeURIComponent(id)}`;
 export const serviceAccountPath = (id: string) => `/service-accounts/${encodeURIComponent(id)}`;
+
+/** A tenant's members as PersonPicker suggestions: name, photo, their role under it; disabled(m) greys one with the reason. */
+export function memberOptions(members: readonly Member[], disabled?: (m: Member) => string | undefined): PersonOption[] {
+  return [...members]
+    .sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email))
+    .map((m) => ({ email: m.email, name: m.name || undefined, picture: m.picture, sub: `${m.email} · ${ROLE_LABEL[m.role]}`, disabled: disabled?.(m) }));
+}
+
+/** The member of members with this email (any case), if any. */
+export function memberByEmail(members: readonly Member[], email: string): Member | undefined {
+  const e = email.trim().toLowerCase();
+  return members.find((m) => m.email.toLowerCase() === e);
+}
 
 /** A Run's, key's or cost row's owner on one line; "–" with no owner. */
 export function OwnerCell({ owner, me }: { owner?: Owner; me?: string }) {

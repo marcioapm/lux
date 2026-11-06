@@ -1,16 +1,120 @@
 import { useState } from "react";
-import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, Dialog, IconButton, IdChip, KeyValue, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_DESC, ROLE_LABEL, ROLES, Select, StatTile, Table, useToast, type Column, type TenantRole } from "@lux/design-system";
-import { IconPencil, IconPlus, IconStop } from "@lux/design-system/icons";
+import { Avatar, Badge, Button, Callout, Card, CENTS, ConfirmDialog, Dialog, IconButton, IdChip, KeyValue, MoneyList, PageHeader, Person, PersonPicker, RelativeTime, RoleBadge, ROLE_DESC, ROLE_LABEL, ROLES, Select, StatTile, Table, useToast, type Column, type TenantRole } from "@lux/design-system";
+import { IconPencil, IconPlus, IconStop, IconTrash, IconWarning } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type ApiKey, type CreatedApiKey, type Member, type Run, type ServiceAccount } from "../../api/index.ts";
-import { atLeast, canManageAccountKeys, useViewer } from "../identity.ts";
+import { atLeast, canManageAccountKeys, useViewer, type Viewer } from "../identity.ts";
 import { go } from "../router.tsx";
 import { ErrorBlock, ErrorStrip, PageSkeleton, QueryBody, runColumns, runPath, useAct } from "./common.tsx";
 import { useCostByOwner, usePeopleTenant } from "./Members.tsx";
-import { KeyRevealDialog, KeysTable, NewKeyDialog, PersonInline, RoleField, roleOptions, serviceAccountPath } from "./peopleParts.tsx";
+import { KeyRevealDialog, KeysTable, memberByEmail, memberOptions, memberPath, NewKeyDialog, PersonInline, RoleField, roleOptions, serviceAccountPath } from "./peopleParts.tsx";
 import { sortAmount, totalsByCurrency } from "./memberMoney.ts";
 
 /** At most this many active keys per service account (luxd: 409 key_limit), so one can rotate without downtime. */
 export const SA_KEY_CAP = 2;
+
+/** Why the account cannot be deleted (it owns Runs: luxd answers 409 has_runs), or null. An older luxd sends no count: luxd decides. */
+export function deleteBlocked(s: Pick<ServiceAccount, "runs" | "disabledAt">): string | null {
+  if (!s.runs) return null;
+  const n = `${s.runs.toLocaleString("en-US")} Run${s.runs === 1 ? "" : "s"}`;
+  return `It owns ${n}: ${s.disabledAt ? "it is disabled already, which keeps them attributed" : "disable it instead (its keys stop, its Runs stay attributed)"}, or convert it to a member's personal keys`;
+}
+
+/**
+ * The sentence the Convert dialog leads with: whose keys act as whom, with
+ * which role, before and after; more: the member's role outranks the
+ * account's (the keys gain access).
+ */
+export function convertSentence(sa: Pick<ServiceAccount, "name" | "role">, m: Pick<Member, "name" | "email" | "role">, keys: number): { text: string; change: "same" | "more" | "less" } {
+  const who = m.name || m.email;
+  const whose = keys === 1 ? `${sa.name}'s key will act` : `${sa.name}'s ${keys} keys will act`;
+  const change = ROLES.indexOf(m.role) > ROLES.indexOf(sa.role) ? "more" : ROLES.indexOf(m.role) < ROLES.indexOf(sa.role) ? "less" : "same";
+  const tail = change === "more" ? ": more access" : change === "less" ? ": less access" : "";
+  return { text: `${whose} as ${who} (${ROLE_LABEL[m.role]}) instead of the service account (${ROLE_LABEL[sa.role]})${tail}`, change };
+}
+
+/** "1 key, 145 Runs move to Jonas; the service account is deleted". */
+export function convertCounts(sa: Pick<ServiceAccount, "activeKeys" | "runs">, m: Pick<Member, "name" | "email">): string {
+  const n = (x: number, one: string) => `${x.toLocaleString("en-US")} ${one}${x === 1 ? "" : "s"}`;
+  return `${n(sa.activeKeys, "key")}, ${n(sa.runs ?? 0, "Run")} move to ${(m.name || m.email).split(" ")[0]}; the service account is deleted`;
+}
+
+/** The member's role caps whom a caller converts to (luxd's escalation guard): the reason a member is off, or undefined. */
+function convertOff(v: Viewer, m: Member, sa: ServiceAccount): string | undefined {
+  if (!atLeast(v, m.role)) return `${ROLE_LABEL[m.role]}: above your role`;
+  const have = m.keyCount ?? 0;
+  if (have + sa.activeKeys > PERSONAL_KEY_CAP) return `has ${have} keys: ${PERSONAL_KEY_CAP} at most`;
+  return undefined;
+}
+
+/** At most this many active personal keys per person per tenant (luxd maxPersonalKeys). */
+export const PERSONAL_KEY_CAP = 5;
+
+/** Convert to personal keys: pick a member; the role sentence (a Callout when the keys gain access) and the counts; then their page. */
+export function ConvertDialog({ sa, open, tenant, members, onCancel, onDone }: { sa: ServiceAccount; open: boolean; tenant: string | undefined; members: Member[]; onCancel: () => void; onDone: (m: Member) => void }) {
+  const v = useViewer();
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const m = memberByEmail(members, email);
+  const off = m ? convertOff(v, m, sa) : undefined;
+  const sentence = m ? convertSentence(sa, m, sa.activeKeys) : null;
+  const close = () => (setEmail(""), setError(null));
+  const submit = async () => {
+    if (!m) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.convertServiceAccount(tenant, sa.id, m.email);
+      close();
+      onDone(r.user);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog
+      open={open}
+      title={`Convert ${sa.name} to personal keys`}
+      description="For a key that was always a person's: it becomes that member's personal key, with the same secret, so nothing that uses it changes but who it acts as."
+      confirmLabel="Convert"
+      tone="danger"
+      disabled={!m || off != null}
+      loading={busy}
+      width={540}
+      onConfirm={() => void submit()}
+      onCancel={() => (close(), onCancel())}
+    >
+      <PersonPicker people={memberOptions(members, (x) => convertOff(v, x, sa))} value={email} onChange={setEmail} freeText={false} label="Member" hint="Their keys and Runs, from now on." autoFocus />
+      {m && sentence && !off && (
+        <>
+          {sentence.change === "more" ? <Callout icon={<IconWarning size={14} />}>{sentence.text}.</Callout> : <p className="convert-sentence">{sentence.text}.</p>}
+          <p className="muted">{convertCounts(sa, m)}.</p>
+        </>
+      )}
+      {m && off && <p className="field-hint">{m.name || m.email} can't take them: {off}.</p>}
+      <ErrorStrip error={error} />
+    </Dialog>
+  );
+}
+
+/** Delete: confirm naming the account and what goes with it. */
+export function DeleteServiceAccountDialog({ sa, busy, onConfirm, onCancel }: { sa: ServiceAccount | null; busy: boolean; onConfirm: (s: ServiceAccount) => void; onCancel: () => void }) {
+  const keys = sa?.activeKeys ?? 0;
+  return (
+    <ConfirmDialog
+      open={sa != null}
+      title={`Delete ${sa?.name ?? ""}?`}
+      description={`${keys ? `Its ${keys === 1 ? "key stops" : `${keys} keys stop`} working at once and ${keys === 1 ? "is" : "are"} kept, revoked, for the record. ` : ""}The service account ${sa?.name ?? ""} is gone for good; its name is free again. It owns no Runs.`}
+      confirmLabel="Delete service account"
+      tone="danger"
+      loading={busy}
+      onConfirm={() => sa && onConfirm(sa)}
+      onCancel={onCancel}
+    />
+  );
+}
 
 const ROLE_WHAT: Record<string, string> = { viewer: "reads only", member: "starts Runs, manages its own", admin: "manages the tenant's Runs and settings" };
 
@@ -24,6 +128,7 @@ export function ServiceAccounts() {
   const cost = useCostByOwner("member");
   const [editing, setEditing] = useState<ServiceAccount | "new" | null>(null);
   const [disabling, setDisabling] = useState<ServiceAccount | null>(null);
+  const [deleting, setDeleting] = useState<ServiceAccount | null>(null);
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const { busy, act } = useAct();
   const admin = atLeast(v, "admin");
@@ -60,10 +165,13 @@ export function ServiceAccounts() {
               <IconStop size={14} />
             </IconButton>
           )}
+          <IconButton size="sm" label={`Delete ${s.name}`} disabled={deleteBlocked(s) != null} title={deleteBlocked(s) ?? `Delete ${s.name}`} onClick={(e) => (e.stopPropagation(), setDeleting(s))} onKeyDown={(e) => e.stopPropagation()}>
+            <IconTrash size={14} />
+          </IconButton>
         </span>
       ),
       align: "right",
-      width: 84,
+      width: 110,
     });
 
   const disable = (s: ServiceAccount) =>
@@ -112,6 +220,7 @@ export function ServiceAccounts() {
         onConfirm={() => disabling && void disable(disabling)}
         onCancel={() => setDisabling(null)}
       />
+      <DeleteServiceAccountDialog sa={deleting} busy={busy} onCancel={() => setDeleting(null)} onConfirm={(s) => void act(`Deleted ${s.name}`, () => api.deleteServiceAccount(tenant, s.id), () => (setDeleting(null), q.refetch()))} />
     </div>
   );
 }
@@ -123,11 +232,15 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
   // The owner by email: the server takes ownerEmail ("" on a patch: no owner).
   const [form, setForm] = useState<{ for: string; name: string; description: string; ownerEmail: string; role: Exclude<TenantRole, "owner"> } | null>(null);
   const key = isNew ? "new" : (sa?.id ?? "");
-  const f = form?.for === key ? form : { for: key, name: "", description: sa?.description ?? "", ownerEmail: sa?.owner?.email ?? "", role: sa?.role ?? "member" };
+  const f = form?.for === key ? form : { for: key, name: sa?.name ?? "", description: sa?.description ?? "", ownerEmail: sa?.owner?.email ?? "", role: sa?.role ?? "member" };
   const set = (p: Partial<typeof f>) => setForm({ ...f, ...p });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const valid = !isNew || /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(f.name);
+  const valid = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(f.name);
+  const renamed = sa != null && f.name !== sa.name;
+  // serviceaccounts.go renameAccount: its active keys named as the account (the upgrade named legacy keys so) follow it.
+  const keys = useQuery(`sa:${sa?.id ?? ""}:keys@${tenant ?? ""}`, (s) => api.serviceAccountKeys(tenant, sa!.id, s), { enabled: sa != null && renamed });
+  const following = renamed ? (keys.data ?? []).filter((k) => k.name === sa.name) : [];
   const submit = async () => {
     setBusy(true);
     setError(null);
@@ -138,7 +251,7 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
         setForm(null);
         await onSaved(s, k);
       } else if (sa) {
-        const s = await api.updateServiceAccount(tenant, sa.id, { description: f.description, role: f.role, ownerEmail: f.ownerEmail });
+        const s = await api.updateServiceAccount(tenant, sa.id, { ...(renamed ? { name: f.name } : {}), description: f.description, role: f.role, ownerEmail: f.ownerEmail });
         setForm(null);
         await onSaved(s);
       }
@@ -165,13 +278,15 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
         onCancel();
       }}
     >
-      {isNew && (
-        <label className="field">
-          <span className="field-label">Name</span>
-          <input className="input mono" value={f.name} onChange={(e) => set({ name: e.target.value })} placeholder="release-bot" autoComplete="off" spellCheck={false} aria-invalid={f.name !== "" && !valid} autoFocus />
-          <span className="field-hint">Lowercase letters, digits and dashes; unique in {tenantName}.</span>
-        </label>
-      )}
+      <label className="field">
+        <span className="field-label">Name</span>
+        <input className="input mono" value={f.name} onChange={(e) => set({ name: e.target.value })} placeholder="release-bot" autoComplete="off" spellCheck={false} aria-invalid={f.name !== "" && !valid} autoFocus={isNew} />
+        <span className="field-hint">
+          Lowercase letters, digits and dashes; unique in {tenantName}.
+          {following.length > 0 && ` Its key named ${following.map((k) => k.name).join(", ")} is renamed too.`}
+          {renamed && " Clients that name it (lux sa get, ?owner=) need the new name."}
+        </span>
+      </label>
       <label className="field">
         <span className="field-label">Description</span>
         <input className="input" value={f.description} onChange={(e) => set({ description: e.target.value })} placeholder="Tags and publishes releases" autoComplete="off" />
@@ -201,6 +316,8 @@ export function ServiceAccountPage({ id }: { id: string }) {
   const runs = useQuery(`sa:${id}:runs@${tenant ?? ""}`, (s) => api.runsPage(tenant, { owner: q.data?.name ?? id, limit: 50 }, s).then((p) => p.rows), { enabled: q.data != null });
   const [editing, setEditing] = useState(false);
   const [disabling, setDisabling] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [converting, setConverting] = useState(false);
   const [newKey, setNewKey] = useState(false);
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const [revoking, setRevoking] = useState<ApiKey | null>(null);
@@ -242,15 +359,22 @@ export function ServiceAccountPage({ id }: { id: string }) {
           admin ? (
             <>
               <Button onClick={() => setEditing(true)}>Edit</Button>
+              <Button onClick={() => setConverting(true)} title="Make its keys a member's personal keys, its Runs theirs">
+                Convert to personal keys
+              </Button>
               {!s.disabledAt && (
                 <Button variant="danger" onClick={() => setDisabling(true)}>
                   Disable
                 </Button>
               )}
+              <Button variant="danger" disabled={deleteBlocked(s) != null} title={deleteBlocked(s) ?? undefined} onClick={() => setDeleting(true)}>
+                Delete
+              </Button>
             </>
           ) : undefined
         }
       />
+      {admin && deleteBlocked(s) && <p className="page-note">Delete is off: {deleteBlocked(s)}.</p>}
       <div className="stack">
         <KeyValue
           columns={3}
@@ -291,7 +415,12 @@ export function ServiceAccountPage({ id }: { id: string }) {
           <Table<Run> columns={runColumns({ tenant: false, owner: true, adapter: false })} rows={runs.data ?? []} rowKey={(r) => r.id} loading={runs.loading} onRowClick={(r) => go(runPath(r.id))} defaultSort={{ key: "created", dir: "desc" }} empty={`No Runs by ${s.name}.`} />
         </Card>
       </div>
-      <ServiceAccountDialog target={editing ? s : null} tenant={tenant} tenantName={tenantName} members={members.data ?? []} onCancel={() => setEditing(false)} onSaved={(x) => (setEditing(false), toast({ title: `Saved ${x.name}`, tone: "success" }), void q.refetch())} />
+      <ServiceAccountDialog target={editing ? s : null} tenant={tenant} tenantName={tenantName} members={members.data ?? []} onCancel={() => setEditing(false)} onSaved={(x) => {
+        setEditing(false);
+        toast({ title: `Saved ${x.name}`, tone: "success" });
+        if (id !== x.id) go(serviceAccountPath(x.id));
+        else void Promise.all([q.refetch(), keys.refetch()]);
+      }} />
       <NewKeyDialog
         open={newKey}
         who={`The key acts as ${s.name} (${ROLE_LABEL[s.role]} in ${tenantName}).`}
@@ -310,6 +439,8 @@ export function ServiceAccountPage({ id }: { id: string }) {
       <KeyRevealDialog created={created} onDone={() => setCreated(null)} />
       <ConfirmDialog open={revoking != null} title={`Revoke ${revoking?.name ?? ""}?`} description={`Clients still using it stop working at once. Switch them to the other key first.`} confirmLabel="Revoke key" tone="danger" loading={busy} onConfirm={() => revoking && void act(`Revoked ${revoking.name}`, () => api.revokeServiceAccountKey(tenant, s.id, revoking.id), done(() => setRevoking(null)))} onCancel={() => setRevoking(null)} />
       <ConfirmDialog open={disabling} title={`Disable ${s.name}?`} description="Its keys stop working at once; its running Runs keep running." confirmLabel="Disable" tone="danger" loading={busy} onConfirm={() => void act(`Disabled ${s.name}`, () => api.updateServiceAccount(tenant, s.id, { disabled: true }), done(() => setDisabling(false)))} onCancel={() => setDisabling(false)} />
+      <DeleteServiceAccountDialog sa={deleting ? s : null} busy={busy} onCancel={() => setDeleting(false)} onConfirm={(x) => void act(`Deleted ${x.name}`, () => api.deleteServiceAccount(tenant, x.id), () => (setDeleting(false), go("/service-accounts")))} />
+      {admin && <ConvertDialog sa={s} open={converting} tenant={tenant} members={members.data ?? []} onCancel={() => setConverting(false)} onDone={(m) => (setConverting(false), toast({ title: `${s.name}'s keys are ${m.name || m.email}'s now`, tone: "success" }), go(memberPath(m.id)))} />}
     </div>
   );
 }

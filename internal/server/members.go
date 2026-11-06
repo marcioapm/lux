@@ -38,7 +38,7 @@ type roleInput struct {
 func (s *Server) memberRoutes(api huma.API) {
 	register(s, api, huma.Operation{OperationID: "listMembers", Method: http.MethodGet, Path: "/v1/members", Tags: []string{"people"}, Summary: "List the tenant's members", Description: "Every role sees members; keyCount is shown only to self and admins."}, "read", forTenant(s.listMembers))
 	register(s, api, huma.Operation{OperationID: "getMember", Method: http.MethodGet, Path: "/v1/members/{user}", Tags: []string{"people"}, Summary: "Get a member"}, "read", forTenant(s.getMember))
-	register(s, api, huma.Operation{OperationID: "addMember", Method: http.MethodPost, Path: "/v1/members", Tags: []string{"people"}, Summary: "Add a member directly", Description: "Operators only. Normally invite the person instead."}, "operator", forTenant(s.addMember))
+	register(s, api, huma.Operation{OperationID: "addMember", Method: http.MethodPost, Path: "/v1/members", Tags: []string{"people"}, Summary: "Add a member directly", Description: "Operators only (403 otherwise). Normally invite the person instead. Already a member: 409 conflict, unless upsert is true, which sets their role instead (member.role_changed): how an operator assigns a tenant's owner, by email, in one call."}, "operator", forTenant(s.addMember))
 	register(s, api, huma.Operation{OperationID: "changeMemberRole", Method: http.MethodPatch, Path: "/v1/members/{user}", Tags: []string{"people"}, Summary: "Change a member's role", Description: "Admins manage roles up to admin; only owners and operators manage owners. Only an operator may demote the last owner (409 last_owner)."}, "admin", forTenant(s.changeMemberRole))
 	register(s, api, huma.Operation{OperationID: "removeMember", Method: http.MethodDelete, Path: "/v1/members/{user}", Tags: []string{"people"}, Summary: "Remove a member", Description: "Revokes their keys in this tenant immediately; their Runs keep running and stay theirs. Their service accounts become ownerless. Only an operator may remove the last owner.", DefaultStatus: 204}, "admin", forTenant(s.removeMember))
 	register(s, api, huma.Operation{OperationID: "listMemberKeys", Method: http.MethodGet, Path: "/v1/members/{user}/keys", Tags: []string{"people"}, Summary: "List a member's active keys", Description: "Self and admins only; everyone else gets 404."}, "read", forTenant(s.listMemberKeys))
@@ -216,11 +216,15 @@ func (s *Server) removeMember(ctx context.Context, in *MemberPath) (*struct{}, e
 }
 func (s *Server) addMember(ctx context.Context, in *struct {
 	Body struct {
-		Email string `json:"email"`
-		Role  string `json:"role"`
+		Email  string `json:"email"`
+		Role   string `json:"role"`
+		Upsert bool   `json:"upsert,omitempty" doc:"Already a member: set their role (member.role_changed) instead of 409 conflict."`
 	}
 }) (*memberOutput, error) {
 	p := principal(ctx)
+	if !p.Operator {
+		return nil, errf(http.StatusForbidden, "forbidden", "only operators add members directly; admins invite")
+	}
 	if !ValidAccessOperatorEmail(in.Body.Email) || !validRole(in.Body.Role) {
 		return nil, errf(422, "invalid_request", "a valid email and role are required")
 	}
@@ -238,9 +242,22 @@ func (s *Server) addMember(ctx context.Context, in *struct {
 			return err
 		}
 		if tag.RowsAffected() == 0 {
-			return errf(409, "conflict", "already a member")
-		}
-		if err := addTenantEvent(ctx, tx, p.TenantID, "member.joined", p, map[string]any{"user": id, "role": in.Body.Role}); err != nil {
+			if !in.Body.Upsert {
+				return errf(409, "conflict", "already a member")
+			}
+			var old string
+			if err := tx.QueryRow(ctx, `SELECT role FROM memberships WHERE tenant_id=$1 AND user_id=$2`, p.TenantID, id).Scan(&old); err != nil {
+				return err
+			}
+			if old != in.Body.Role {
+				if _, err := tx.Exec(ctx, `UPDATE memberships SET role=$3 WHERE tenant_id=$1 AND user_id=$2`, p.TenantID, id, in.Body.Role); err != nil {
+					return err
+				}
+				if err := addTenantEvent(ctx, tx, p.TenantID, "member.role_changed", p, map[string]any{"user": id, "from": old, "to": in.Body.Role}); err != nil {
+					return err
+				}
+			}
+		} else if err := addTenantEvent(ctx, tx, p.TenantID, "member.joined", p, map[string]any{"user": id, "role": in.Body.Role}); err != nil {
 			return err
 		}
 		out, err = findMember(ctx, tx, p, id)

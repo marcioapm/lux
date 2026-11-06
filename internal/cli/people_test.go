@@ -22,6 +22,9 @@ func TestPeopleCommands(t *testing.T) {
 		{[]string{"invites", "create", "a@example.com", "--role", "member"}, "POST", "/v1/invitations", "role", "member", `{"results":[]}`},
 		{[]string{"sa", "create", "ci", "--role", "member", "--owner", "a@example.com"}, "POST", "/v1/service-accounts", "ownerEmail", "a@example.com", `{"name":"ci"}`},
 		{[]string{"sa", "keys", "create", "ci", "--name", "rotation"}, "POST", "/v1/service-accounts/ci/keys", "name", "rotation", `{"apiKey":"lux_s_secret"}`},
+		{[]string{"sa", "set", "external-app", "--name", "jervasion"}, "PATCH", "/v1/service-accounts/external-app", "name", "jervasion", `{"name":"jervasion"}`},
+		{[]string{"sa", "rm", "old-bot"}, "DELETE", "/v1/service-accounts/old-bot", "", "", ``},
+		{[]string{"sa", "convert", "jonas", "jonas@example.com"}, "POST", "/v1/service-accounts/jonas/convert", "email", "jonas@example.com", `{"user":{"id":"usr_j","email":"jonas@example.com","role":"member"},"keys":1,"runs":145}`},
 		{[]string{"tenants", "create", "team", "--owner", "a@example.com"}, "POST", "/v1/tenants", "ownerEmail", "a@example.com", `{"id":"ten_1"}`},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
@@ -52,6 +55,46 @@ func TestPeopleCommands(t *testing.T) {
 				t.Fatal(stdout.String())
 			}
 		})
+	}
+}
+
+// members set-role me asks whoami for the caller's person; tenants set-owner
+// upserts an owner in the named tenant (?tenant=).
+func TestSetRoleMeAndSetOwner(t *testing.T) {
+	type hit struct {
+		method, path, tenant string
+		body                 map[string]any
+	}
+	run := func(t *testing.T, whoami string, args ...string) ([]hit, int, string) {
+		var hits []hit
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var b map[string]any
+			json.NewDecoder(r.Body).Decode(&b)
+			hits = append(hits, hit{r.Method, r.URL.Path, r.URL.Query().Get("tenant"), b})
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/v1/whoami" {
+				w.Write([]byte(whoami))
+				return
+			}
+			w.Write([]byte(`{"id":"usr_1","role":"owner"}`))
+		}))
+		defer srv.Close()
+		var stdout, stderr bytes.Buffer
+		a := &app{stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr}
+		code := a.main(append([]string{"--url", srv.URL, "--api-key", "key", "-o", "json"}, args...))
+		return hits, code, stderr.String()
+	}
+	hits, code, errs := run(t, `{"userId":"usr_me","role":"owner"}`, "members", "set-role", "me", "admin")
+	if code != 0 || len(hits) != 2 || hits[0].path != "/v1/whoami" || hits[1].method != "PATCH" || hits[1].path != "/v1/members/usr_me" || hits[1].body["role"] != "admin" {
+		t.Fatalf("set-role me: %d %s %+v", code, errs, hits)
+	}
+	if _, code, errs := run(t, `{"serviceAccount":{"id":"sa_1"}}`, "members", "set-role", "me", "admin"); code == 0 || !strings.Contains(errs, "no person") {
+		t.Errorf("set-role me with a service account key: %d %s", code, errs)
+	}
+	hits, code, errs = run(t, `{}`, "tenants", "set-owner", "acme", "jonas@example.com")
+	if code != 0 || len(hits) != 1 || hits[0].method != "POST" || hits[0].path != "/v1/members" || hits[0].tenant != "acme" ||
+		hits[0].body["email"] != "jonas@example.com" || hits[0].body["role"] != "owner" || hits[0].body["upsert"] != true {
+		t.Fatalf("set-owner: %d %s %+v", code, errs, hits)
 	}
 }
 

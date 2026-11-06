@@ -18,6 +18,18 @@
       "readOnly"
     ]
   },
+  "ConvertedServiceAccount": {
+    "zero": [
+      "keys",
+      "runs",
+      "user"
+    ],
+    "filled": [
+      "keys",
+      "runs",
+      "user"
+    ]
+  },
   "CostSummaryRow": {
     "zero": [
       "amount",
@@ -155,7 +167,8 @@
       "description",
       "id",
       "name",
-      "role"
+      "role",
+      "runs"
     ],
     "filled": [
       "activeKeys",
@@ -167,7 +180,8 @@
       "lastUsedAt",
       "name",
       "owner",
-      "role"
+      "role",
+      "runs"
     ]
   },
   "Tenant": {

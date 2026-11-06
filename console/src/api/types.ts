@@ -811,6 +811,8 @@ export interface ServiceAccount {
   lastUsedAt?: string;
   disabledAt?: string;
   activeKeys: number;
+  /** Runs it owns, any state and age (luxd ≥ 0.1.48; absent from an older one). An account with Runs cannot be deleted. */
+  runs?: number;
 }
 
 export interface ApiKey {

@@ -1,3 +1,4 @@
+import { act } from "react";
 import { expect, test } from "bun:test";
 import { withDom } from "../testDom.ts";
 let ServiceAccounts: typeof import("./ServiceAccounts.tsx").ServiceAccounts;
@@ -53,6 +54,41 @@ test("service account detail as a member who does not own it: no Keys card, no k
     expect(p.button("New key")).toBeUndefined();
     expect(p.fake.calls.some((c) => c.includes("/keys"))).toBe(false);
     expect(p.text()).not.toContain("Not found");
+  } finally { await p.done(); }
+});
+
+test("old-name detail rename navigates to immutable ID, retains tenant, and reloads keys", async () => {
+  const { usePath } = await import("../router.tsx");
+  function Routed() { const path = usePath(); return <ServiceAccountPage id={path.split("/").pop()!} />; }
+  const p = await t.mountAs("admin", "/service-accounts/grafana-reader?tenant=ten_acme", <Routed />, { extra: (path) => path.startsWith("/v1/runs") ? { runs: [] } : undefined });
+  try {
+    await p.until(() => p.text().includes("grafana-reader") && p.button("Edit") != null, "old name detail");
+    await t.click(p.button("Edit"));
+    await t.fill(p.dialog()!.querySelector("input"), "grafana-renamed");
+    await t.click(t.dialogButton(p.dialog(), "Save"));
+    await p.until(() => window.location.pathname !== "/service-accounts/grafana-reader" && !p.dialog() && p.text().includes("grafana-renamed"), "immutable route");
+    const id = window.location.pathname.split("/").pop()!;
+    expect(id.startsWith("sa_")).toBe(true);
+    expect(window.location.search).toContain("tenant=ten_acme");
+    await p.until(() => p.fake.calls.some((c) => c.includes(`/service-accounts/${id}/keys`)), "ID key query");
+    expect(p.text()).not.toContain("Not found");
+    const { api } = await import("../../api/index.ts");
+    expect((await api.serviceAccount("ten_acme", id)).name).toBe("grafana-renamed");
+  } finally { await p.done(); }
+});
+
+test("Convert exact email Enter retains Bruno, never the first member", async () => {
+  const p = await t.mountAs("admin", "/service-accounts/sa_7cr3b2x9", <ServiceAccountPage id="sa_7cr3b2x9" />, { extra: (path) => path.startsWith("/v1/runs") ? { runs: [] } : undefined });
+  try {
+    await p.until(() => p.button("Convert to personal keys") != null, "detail");
+    await t.click(p.button("Convert to personal keys"));
+    const input = p.dialog()!.querySelector("input")!;
+    await t.fill(input, "bruno@acme.dev");
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    expect(input.value).toBe("bruno@acme.dev");
+    await t.click(t.dialogButton(p.dialog(), "Convert"));
+    await p.until(() => p.fake.posts.some((x) => x.path.includes("/convert")), "convert request");
+    expect(p.fake.posts.find((x) => x.path.includes("/convert"))!.body).toEqual({ email: "bruno@acme.dev" });
   } finally { await p.done(); }
 });
 

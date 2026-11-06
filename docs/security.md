@@ -52,6 +52,29 @@ are in the linked pages.
   owner/admins. Admins revoke a member's key
   (`DELETE /v1/members/{user}/keys/{key}`, event `key.revoked` by them);
   an owner's keys only owners and operators. Service accounts cannot sign in or have the Owner role.
+- **Changing your own membership.** The server applies the same rules to
+  you as to anyone (`checkOwnerChange`): an owner may demote themselves
+  while another owner exists (the last owner gets 409 `last_owner`);
+  operators may change or remove any membership, their own included, and
+  keep operator access after. Only operators add members directly
+  (`POST /v1/members`), and only operators use its `upsert` (set the role
+  of someone already a member, `member.role_changed`), which is how a
+  tenant's owner is assigned without an invitation.
+- **Renaming, deleting and converting service accounts** is for admins
+  and owners (403 for anyone else, read-only keys included). A rename is
+  validated as a create and renames the account's active keys named
+  exactly as the old name. Delete is refused (409 `has_runs`) while the
+  account owns Runs, so attribution is never lost; its keys are revoked at
+  once and their rows kept, revoked, as removing a member keeps a member's.
+  **Convert** (`POST /v1/service-accounts/{sa}/convert {email}`) makes the
+  account's active keys a member's personal keys, the same secrets, and
+  moves its Runs to them, in one transaction under the tenant's members
+  lock (a concurrent second convert finds no account). **Escalation
+  guard:** a converted key acts with the member's role, not the
+  account's, so a caller may convert only to a member whose role is at
+  most their own: an admin to viewers, members and admins; to an owner,
+  only owners and operators. Read-only keys stay read-only and expiries
+  are kept; the member's 5-key cap holds (409 `key_limit`, nothing moved).
 - The console signs in with a key, kept in browser-tab session storage, or
   through Cloudflare Access. luxd verifies signatures, audience and expiry.
   Only configured operator emails are operators; everyone else needs a

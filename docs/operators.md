@@ -60,6 +60,54 @@ Runs (live ones' runner reports included) until it commits: count them
 and, above 500,000, stop every luxd for the migration
 ([Operations, upgrading](operations.md#upgrading), step 2).
 
+### Claiming and assigning owners
+
+A tenant with no owner shows **No owner** on the console's Tenants page.
+As an operator, click it (or a row's **Set owner**), type or pick an email
+and confirm: a member of that tenant becomes Owner, anyone else joins it as
+Owner, without an invitation, so this works in key console mode too.
+Existing owners stay owners. The same, from the CLI or the API:
+
+```bash
+lux tenants set-owner team you@example.com           # POST /v1/members?tenant=team {email, role: "owner", upsert: true}
+lux members set-role me owner --tenant team          # claim it yourself (you are already a member)
+```
+
+`upsert` is operators only (403 otherwise); a member's role change is
+recorded as `member.role_changed`, a new member as `member.joined`. On the
+Members page your own row now offers **Change your role** when luxd would
+allow it (operators always; an owner while another owner exists) and, to
+operators only, **Leave**: an operator keeps their access through the
+operator flag, anyone else would lose it.
+
+### After an upgrade: legacy keys that were a person's
+
+Migration 093 made every legacy tenant key a service account's, the
+operator's own and colleagues' included. For each such key that belongs to
+a person, convert its account instead of editing the database:
+
+1. Make sure the person is a member of the tenant (Set owner above, `lux
+   members add`, or an invitation).
+2. On the service account's page, **Convert to personal keys**, pick the
+   member, read the sentence (the key will act with the member's role, not
+   the account's; "more access" is called out) and confirm. Or:
+   `lux sa convert <account> <email> --tenant <tenant>`.
+3. Each active key of the account becomes the member's personal key, same
+   secret, read-only and expiry kept: nothing that uses it needs a change.
+   Every Run the account owned becomes the member's; the account is deleted
+   (`service_account.converted`, with the counts). At most 5 active personal
+   keys per member: 409 `key_limit` moves nothing, revoke one first.
+
+This replaces the hand SQL used after 0.1.47 (setting `api_keys.user_id`,
+clearing `service_account_id`, moving `runs.owner_sa_id` to
+`owner_user_id`, deleting the empty account), in one transaction.
+
+A legacy account that really is a machine stays one: rename it (`lux sa set
+external-app --name jervasion`; its key named `external-app`, as the
+upgrade named it, is renamed too) and give it an owner. One that was never
+used and owns no Runs can be deleted (`lux sa rm`, or **Delete** on its
+page); with Runs, disable it instead (409 `has_runs`).
+
 Previews deliberately keep their older gate: verified Access users need no
 membership for default-tenant previews; other tenants require membership
 or operator status. See [Security](security.md#previews).
