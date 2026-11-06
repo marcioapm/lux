@@ -119,3 +119,35 @@ test("principalCost and totals: exact per-currency sums", () => {
   expect(c.amounts).toEqual([{ currency: "EUR", amount: "1.005" }, { currency: "USD", amount: "0.3" }]);
   expect(money.totalsByCurrency(TOTALS as never)).toEqual(new Map([["USD", 520.25], ["EUR", 72.15]]));
 });
+
+test("Runs: within one principal the largest currency's count, across principals added", () => {
+  // Two accounts, different currencies: distinct Runs, 3 + 5.
+  const two = new Map([
+    ["sa:a", [row("sa:a", "USD", "1.00", 3)]],
+    ["sa:b", [row("sa:b", "EUR", "2.00", 5)]],
+  ]) as never;
+  expect(money.keysCost(two, ["sa:a", "sa:b"]).runs).toBe(8);
+  // One account whose 4 Runs are billed in USD and EUR: 4, not 8.
+  const one = new Map([["sa:a", [row("sa:a", "USD", "1.00", 4), row("sa:a", "EUR", "2.00", 4)]]]) as never;
+  expect(money.keysCost(one, ["sa:a"]).runs).toBe(4);
+  expect(money.keysCost(one, ["sa:a"]).amounts).toEqual([{ currency: "EUR", amount: "2" }, { currency: "USD", amount: "1" }]);
+});
+
+test("A member's page: Runs via two accounts in different currencies are added (+ 8, not + 5)", async () => {
+  // Ana owns nightly-evals (3 USD Runs) and grafana-reader (5 EUR Runs).
+  const rows = [
+    row("user:usr_ana", "USD", "10.00", 2, { kind: "user", id: "usr_ana", name: "Ana Ribeiro", email: "ana@acme.dev" }),
+    row("sa:sa_2ne9v1q5", "USD", "30.00", 3, { kind: "serviceAccount", id: "sa_2ne9v1q5", name: "nightly-evals" }),
+    row("sa:sa_9gr1d7k3", "EUR", "50.00", 5, { kind: "serviceAccount", id: "sa_9gr1d7k3", name: "grafana-reader" }),
+  ];
+  const extra = (path: string) => (path.startsWith("/v1/costs") ? { from: "2026-10-06T00:00:00Z", to: "2026-11-05T00:00:00Z", basis: "list", totals: rows } : undefined);
+  const p = await t.mountAs("admin", "/members/usr_ana?tenant=ten_acme", <MemberPage id="usr_ana" />, { extra });
+  try {
+    await p.until(() => p.text().includes("€50.00"), "the accounts' cost");
+    const tile = [...p.el.querySelectorAll(".stat-tile, .stat")].map((x) => t.visibleText(x)).find((x) => x.startsWith("Runs · 30d"))!;
+    expect(tile).toContain("2");
+    expect(tile).toMatch(/\+ 8 by /);
+  } finally {
+    await p.done();
+  }
+});

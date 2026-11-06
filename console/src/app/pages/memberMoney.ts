@@ -22,21 +22,29 @@ export function costsByKey(rows: readonly CostByOwnerRow[]): Map<string, CostByO
 
 /**
  * The cost of these rows, summed per currency with sumMoney (exact
- * decimals), currencies in name order. runs: a Run is counted in each of
- * its currencies' rows, so the largest per-currency count, not the sum.
+ * decimals), currencies in name order. runs: per principal (row key), a
+ * Run is counted in each of its currencies' rows, so that principal's
+ * largest per-currency count; principals' Runs are distinct, so added.
  */
 export function principalCost(rows: readonly CostByOwnerRow[] | undefined): PrincipalCost {
   if (!rows || rows.length === 0) return { amounts: [], runs: null };
   const byCurrency = new Map<string, string[]>();
-  const runs = new Map<string, number>();
+  // key -> currency -> Runs
+  const runs = new Map<string, Map<string, number>>();
   for (const r of rows) {
     const a = byCurrency.get(r.currency);
     if (a) a.push(r.amount);
     else byCurrency.set(r.currency, [r.amount]);
-    if (r.runs != null) runs.set(r.currency, (runs.get(r.currency) ?? 0) + r.runs);
+    if (r.runs != null) {
+      let m = runs.get(r.key);
+      if (!m) runs.set(r.key, (m = new Map()));
+      m.set(r.currency, (m.get(r.currency) ?? 0) + r.runs);
+    }
   }
   const amounts = [...byCurrency.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([currency, list]) => ({ currency, amount: sumMoney(list) ?? "0" }));
-  return { amounts, runs: runs.size ? Math.max(...runs.values()) : null };
+  let total = 0;
+  for (const m of runs.values()) total += Math.max(...m.values());
+  return { amounts, runs: runs.size ? total : null };
 }
 
 /** The cost of several keys together (a person and the accounts they own), per currency. */
