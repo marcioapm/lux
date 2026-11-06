@@ -293,7 +293,7 @@ export function ServiceAccountPage({ id }: { id: string }) {
         <div className="grid grid-stats">
           <StatTile label="Runs · 30d" value={mine.runs != null ? mine.runs.toLocaleString("en-US") : "–"} loading={cost.loading} />
           <StatTile label="Cost · 30d" value={mine.amounts.length ? <MoneyList amounts={mine.amounts} decimals={CENTS} /> : "–"} unit={only && total > 0 ? `${Math.round((Number(only.amount) / total) * 100)}% of ${tenantName}'s ${only.currency}` : "list prices"} loading={cost.loading} />
-          <StatTile label="Keys" value={`${manageKeys ? active.length : s.activeKeys} / ${SA_KEY_CAP}`} unit="active" loading={manageKeys && keys.loading} />
+          <StatTile label="Keys" value={manageKeys ? (keys.data ? `${active.length} / ${SA_KEY_CAP}` : "–") : `${s.activeKeys} / ${SA_KEY_CAP}`} unit="active" loading={manageKeys && keys.loading} />
         </div>
         {manageKeys ? (
           <Card
@@ -301,13 +301,19 @@ export function ServiceAccountPage({ id }: { id: string }) {
             title="Keys"
             subtitle={`At most ${SA_KEY_CAP} active, so a key can be rotated without downtime: create the new one, switch the client, revoke the old.`}
             actions={
-              <Button variant="primary" size="sm" icon={<IconPlus size={14} />} disabled={full || keys.loading || s.disabledAt != null} title={full ? `${SA_KEY_CAP} active keys is the limit: revoke the old one first` : undefined} onClick={() => setNewKey(true)}>
+              <Button variant="primary" size="sm" icon={<IconPlus size={14} />} disabled={full || !keys.data || s.disabledAt != null} title={full ? `${SA_KEY_CAP} active keys is the limit: revoke the old one first` : !keys.data ? "Its keys have not loaded" : undefined} onClick={() => setNewKey(true)}>
                 New key
               </Button>
             }
           >
             {full && <div className="card-note muted">{SA_KEY_CAP} active keys is the limit: revoke the old one first.</div>}
-            <KeysTable keys={active} loading={keys.loading} access={false} createdBy onRevoke={setRevoking} empty="No keys: nothing can use this account." />
+            {/* A failed first load is an error, never "no keys"; a failed refresh keeps the list with a strip. */}
+            <ErrorStrip error={keys.data ? keys.error : null} />
+            {keys.error && !keys.data && !keys.loading ? (
+              <ErrorBlock error={keys.error} onRetry={keys.refetch} compact />
+            ) : (
+              <KeysTable keys={active} loading={keys.loading} access={false} createdBy onRevoke={setRevoking} empty="No keys: nothing can use this account." />
+            )}
           </Card>
         ) : (
           <p className="page-note">Its keys are visible to its owner and to admins.</p>
