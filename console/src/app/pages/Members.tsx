@@ -1,13 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
-import { Badge, Button, Card, CENTS, ConfirmDialog, Dialog, EmptyState, IconButton, Money, PageHeader, Person, RelativeTime, RoleBadge, ROLE_LABEL, SegmentedControl, Table, Tabs, useToast, type Column, type TenantRole } from "@lux/design-system";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Badge, Button, Card, CENTS, ConfirmDialog, Dialog, EmptyState, IconButton, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_LABEL, SegmentedControl, Table, Tabs, useToast, type Column, type TenantRole } from "@lux/design-system";
 import { IconClose, IconCopy, IconPencil, IconPlus, IconRefresh, IconTrash } from "@lux/design-system/icons";
-import { api, errorText, useQuery, useSession, type CostByOwnerRow, type Invitation, type InvitationStatus, type InviteResult, type Member } from "../../api/index.ts";
+import { api, errorText, useQuery, useSession, type Invitation, type InvitationStatus, type InviteResult, type Member } from "../../api/index.ts";
 import { atLeast, useViewer, type Viewer } from "../identity.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip } from "./common.tsx";
 import { InviteDialog, InviteLinksDialog } from "./InviteDialog.tsx";
 import { memberPath, PersonInline, RoleField, roleOptions } from "./peopleParts.tsx";
+import { costsByKey, keysCost, sortAmount } from "./memberMoney.ts";
 
 /** The tenant a people page is about: the scope's, else the viewer's own. */
 export function usePeopleTenant(): { tenant: string | undefined; name: string } {
@@ -25,16 +26,17 @@ export function canManage(v: Viewer, m: Pick<Member, "id" | "role">): boolean {
   return m.role !== "owner" || atLeast(v, "owner");
 }
 
-/** Cost · 30d and Runs · 30d per member key ("user:<id>"). */
+/**
+ * Cost · 30d and Runs · 30d per member key ("user:<id>", "sa:<id>"): each
+ * key's rows, one per currency (never only the first: a person with USD and
+ * EUR cost has both). cost(key) is that per currency.
+ */
 export function useCostByOwner(by: "member" | "owner") {
   const { tenant } = usePeopleTenant();
   const q = useQuery(`costs:${by}@${tenant ?? ""}`, (s) => api.costsByOwner(tenant, by, "30d", s), { interval: 60_000 });
-  const byKey = useMemo(() => {
-    const m = new Map<string, CostByOwnerRow>();
-    for (const r of q.data?.totals ?? []) if (!m.has(r.key)) m.set(r.key, r);
-    return m;
-  }, [q.data]);
-  return { ...q, byKey };
+  const byKey = useMemo(() => costsByKey(q.data?.totals ?? []), [q.data]);
+  const cost = useCallback((...keys: string[]) => keysCost(byKey, keys), [byKey]);
+  return { ...q, byKey, cost };
 }
 
 type Tab = "members" | "invitations";
@@ -165,15 +167,12 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
         width: 170,
       },
       { key: "running", header: "Running", cell: (m) => m.runningRuns, sortValue: (m) => m.runningRuns, align: "right", mono: true, width: 90 },
-      { key: "runs", header: "Runs · 30d", cell: (m) => cost.byKey.get(`user:${m.id}`)?.runs ?? "–", sortValue: (m) => cost.byKey.get(`user:${m.id}`)?.runs ?? null, align: "right", mono: true, width: 104 },
+      { key: "runs", header: "Runs · 30d", cell: (m) => cost.cost(`user:${m.id}`).runs ?? "–", sortValue: (m) => cost.cost(`user:${m.id}`).runs, align: "right", mono: true, width: 104 },
       {
         key: "cost",
         header: "Cost · 30d",
-        cell: (m) => {
-          const r = cost.byKey.get(`user:${m.id}`);
-          return r ? <Money amount={r.amount} currency={r.currency} decimals={CENTS} /> : "–";
-        },
-        sortValue: (m) => (cost.byKey.has(`user:${m.id}`) ? Number(cost.byKey.get(`user:${m.id}`)!.amount) : null),
+        cell: (m) => <MoneyList amounts={cost.cost(`user:${m.id}`).amounts} decimals={CENTS} />,
+        sortValue: (m) => sortAmount(cost.cost(`user:${m.id}`)),
         align: "right",
         mono: true,
         width: 110,
@@ -201,7 +200,7 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
         width: 84,
       });
     return c;
-  }, [v, cost.byKey, keysShown, admin, tenantName, owners]);
+  }, [v, cost.cost, keysShown, admin, tenantName, owners]);
 
   const act = async (title: string, fn: () => Promise<unknown>, close: () => void) => {
     setBusy(true);

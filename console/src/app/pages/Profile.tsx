@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Avatar, Badge, Button, Callout, Card, ConfirmDialog, formatCount, Money, PageHeader, RelativeTime, RoleBadge, ROLE_LABEL, StatTile, Table, useToast, CENTS, type Column } from "@lux/design-system";
+import { Avatar, Badge, Button, Callout, Card, ConfirmDialog, formatCount, MoneyList, PageHeader, RelativeTime, RoleBadge, ROLE_LABEL, StatTile, Table, useToast, CENTS, type Column } from "@lux/design-system";
 import { IconPlus } from "@lux/design-system/icons";
 import { api, errorText, useQuery, useSession, type ApiKey, type CreatedApiKey, type Membership } from "../../api/index.ts";
 import { atLeast, canManageOwnKeys, useViewer } from "../identity.ts";
 import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, PageSkeleton } from "./common.tsx";
 import { KeyRevealDialog, KeysTable, NewKeyDialog } from "./peopleParts.tsx";
+import { principalCost } from "./memberMoney.ts";
 
 /** At most this many active personal keys per person per tenant (luxd enforces it: 409 key_limit). */
 export const PERSONAL_KEY_CAP = 5;
@@ -36,7 +37,8 @@ export function Profile() {
   // A read-only key changes nothing, its own keys included (luxd refuses it).
   const manage = canManageOwnKeys(viewer);
   const self = members.data?.find((m) => m.id === p.id);
-  const mine = cost.data?.totals.filter((r) => r.key === `user:${p.id}`) ?? [];
+  // Every currency of mine, summed per currency (never the first row only).
+  const mine = principalCost(cost.data?.totals.filter((r) => r.key === `user:${p.id}`));
 
   const act = async (what: string, fn: () => Promise<unknown>, done: () => void) => {
     setBusy(true);
@@ -92,8 +94,8 @@ export function Profile() {
       <div className="stack">
         <div className="grid grid-stats">
           <StatTile label="Running now" value={self ? String(self.runningRuns) : "–"} unit={tenantName ? `in ${tenantName}` : undefined} loading={members.loading} />
-          <StatTile label="Runs · 30d" value={mine[0]?.runs != null ? formatCount(mine[0].runs) : "–"} unit="mine, not my service accounts'" loading={cost.loading} />
-          <StatTile label="Cost · 30d" value={mine.length ? <Money amount={mine[0]!.amount} currency={mine[0]!.currency} decimals={CENTS} /> : "–"} unit="list prices" loading={cost.loading} />
+          <StatTile label="Runs · 30d" value={mine.runs != null ? formatCount(mine.runs) : "–"} unit="mine, not my service accounts'" loading={cost.loading} />
+          <StatTile label="Cost · 30d" value={mine.amounts.length ? <MoneyList amounts={mine.amounts} decimals={CENTS} /> : "–"} unit="list prices" loading={cost.loading} />
           <StatTile label="API keys" value={keys.data ? `${active.length} / ${PERSONAL_KEY_CAP}` : "–"} unit="active" loading={keys.loading} />
         </div>
         <Card

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, Money, PageHeader, Person, RelativeTime, RoleBadge, ROLE_LABEL, StatTile, Table, useToast, type Column } from "@lux/design-system";
+import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_LABEL, StatTile, Table, useToast, type Column } from "@lux/design-system";
 import { api, errorText, useQuery, type ApiKey, type Run, type ServiceAccount } from "../../api/index.ts";
 import { atLeast, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
@@ -34,10 +34,10 @@ export function MemberPage({ id }: { id: string }) {
   const who = p.name || p.email;
   const first = who.split(" ")[0];
   const owned = (sas.data ?? []).filter((s) => s.owner?.id === p.id);
-  const own = cost.byKey.get(`user:${p.id}`);
-  const viaSa = owned.map((s) => cost.byKey.get(`sa:${s.id}`)).filter((r) => r != null);
-  const viaSaRuns = viaSa.reduce((n, r) => n + (r.runs ?? 0), 0);
-  const viaSaCost = viaSa.reduce((n, r) => n + Number(r.amount), 0);
+  // Per currency, never added across them: theirs, and their accounts' together.
+  const own = cost.cost(`user:${p.id}`);
+  const viaSa = cost.cost(...owned.map((s) => `sa:${s.id}`));
+  const viaSaRuns = viaSa.runs ?? 0;
   const manage = canManage(v, p);
   // The last-owner rule: only an operator demotes or removes the only owner.
   const lastOwner = lastOwnerReason(v, p, (all.data ?? []).filter((x) => x.role === "owner").length || 1);
@@ -61,10 +61,7 @@ export function MemberPage({ id }: { id: string }) {
     {
       key: "cost",
       header: "Cost · 30d",
-      cell: (s) => {
-        const r = cost.byKey.get(`sa:${s.id}`);
-        return r ? <Money amount={r.amount} currency={r.currency} decimals={CENTS} /> : "–";
-      },
+      cell: (s) => <MoneyList amounts={cost.cost(`sa:${s.id}`).amounts} decimals={CENTS} />,
       align: "right",
       mono: true,
       width: 120,
@@ -111,8 +108,8 @@ export function MemberPage({ id }: { id: string }) {
       <div className="stack">
         <div className="grid grid-stats">
           <StatTile label="Running now" value={String(p.runningRuns)} />
-          <StatTile label="Runs · 30d" value={own?.runs != null ? String(own.runs) : "–"} unit={viaSaRuns ? `+ ${viaSaRuns} by ${owned.map((s) => s.name).join(", ")}` : undefined} loading={cost.loading} />
-          <StatTile label="Cost · 30d" value={own ? <Money amount={own.amount} currency={own.currency} decimals={CENTS} /> : "–"} unit={viaSaCost ? <><Money amount={viaSaCost.toFixed(2)} currency={viaSa[0]!.currency} decimals={CENTS} /> more via service accounts</> : "list prices"} loading={cost.loading} />
+          <StatTile label="Runs · 30d" value={own.runs != null ? String(own.runs) : "–"} unit={viaSaRuns ? `+ ${viaSaRuns} by ${owned.map((s) => s.name).join(", ")}` : undefined} loading={cost.loading} />
+          <StatTile label="Cost · 30d" value={own.amounts.length ? <MoneyList amounts={own.amounts} decimals={CENTS} /> : "–"} unit={viaSa.amounts.length ? <><MoneyList amounts={viaSa.amounts} decimals={CENTS} /> more via service accounts</> : "list prices"} loading={cost.loading} />
           <StatTile label="Service accounts" value={String(owned.length)} unit="owned" loading={sas.loading} />
         </div>
         {owned.length > 0 && (

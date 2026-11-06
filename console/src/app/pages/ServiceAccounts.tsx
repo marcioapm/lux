@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, Dialog, IconButton, IdChip, KeyValue, Money, PageHeader, Person, RelativeTime, RoleBadge, ROLE_DESC, ROLE_LABEL, Select, StatTile, Table, useToast, type Column, type TenantRole } from "@lux/design-system";
+import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, Dialog, IconButton, IdChip, KeyValue, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_DESC, ROLE_LABEL, Select, StatTile, Table, useToast, type Column, type TenantRole } from "@lux/design-system";
 import { IconPencil, IconPlus, IconStop } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type ApiKey, type CreatedApiKey, type Member, type Run, type ServiceAccount } from "../../api/index.ts";
 import { atLeast, canManageAccountKeys, useViewer } from "../identity.ts";
@@ -7,6 +7,7 @@ import { go } from "../router.tsx";
 import { ErrorBlock, ErrorStrip, PageSkeleton, runColumns, runPath } from "./common.tsx";
 import { useCostByOwner, usePeopleTenant } from "./Members.tsx";
 import { KeyRevealDialog, KeysTable, NewKeyDialog, PersonInline, RoleField, serviceAccountPath } from "./peopleParts.tsx";
+import { sortAmount, totalsByCurrency } from "./memberMoney.ts";
 
 /** At most this many active keys per service account (luxd: 409 key_limit), so one can rotate without downtime. */
 export const SA_KEY_CAP = 2;
@@ -32,15 +33,12 @@ export function ServiceAccounts() {
     { key: "owner", header: "Owner", cell: (s) => (s.owner ? <PersonInline person={s.owner} /> : <span className="muted">no owner</span>), sortValue: (s) => s.owner?.name, width: 170 },
     { key: "role", header: "Role", cell: (s) => <RoleBadge role={s.role} />, sortValue: (s) => ["viewer", "member", "admin"].indexOf(s.role), width: 100 },
     { key: "keys", header: "Keys", cell: (s) => `${s.activeKeys} / ${SA_KEY_CAP}`, sortValue: (s) => s.activeKeys, align: "right", mono: true, width: 70 },
-    { key: "runs", header: "Runs · 30d", cell: (s) => cost.byKey.get(`sa:${s.id}`)?.runs?.toLocaleString("en-US") ?? "–", sortValue: (s) => cost.byKey.get(`sa:${s.id}`)?.runs ?? null, align: "right", mono: true, width: 104 },
+    { key: "runs", header: "Runs · 30d", cell: (s) => cost.cost(`sa:${s.id}`).runs?.toLocaleString("en-US") ?? "–", sortValue: (s) => cost.cost(`sa:${s.id}`).runs, align: "right", mono: true, width: 104 },
     {
       key: "cost",
       header: "Cost · 30d",
-      cell: (s) => {
-        const r = cost.byKey.get(`sa:${s.id}`);
-        return r ? <Money amount={r.amount} currency={r.currency} decimals={CENTS} /> : "–";
-      },
-      sortValue: (s) => (cost.byKey.has(`sa:${s.id}`) ? Number(cost.byKey.get(`sa:${s.id}`)!.amount) : null),
+      cell: (s) => <MoneyList amounts={cost.cost(`sa:${s.id}`).amounts} decimals={CENTS} />,
+      sortValue: (s) => sortAmount(cost.cost(`sa:${s.id}`)),
       align: "right",
       mono: true,
       width: 110,
@@ -230,8 +228,11 @@ export function ServiceAccountPage({ id }: { id: string }) {
   const manageKeys = canManageAccountKeys(v, s);
   const active = keys.data ?? [];
   const full = active.length >= SA_KEY_CAP;
-  const mine = cost.byKey.get(`sa:${s.id}`);
-  const total = [...cost.byKey.values()].reduce((n, r) => n + Number(r.amount), 0);
+  const mine = cost.cost(`sa:${s.id}`);
+  // Its share of the tenant, per currency: only with one currency is it one number.
+  const totals = totalsByCurrency(cost.data?.totals ?? []);
+  const only = mine.amounts.length === 1 ? mine.amounts[0]! : null;
+  const total = only ? (totals.get(only.currency) ?? 0) : 0;
 
   const act = async (title: string, fn: () => Promise<unknown>, after: () => void) => {
     setBusy(true);
@@ -290,8 +291,8 @@ export function ServiceAccountPage({ id }: { id: string }) {
           ]}
         />
         <div className="grid grid-stats">
-          <StatTile label="Runs · 30d" value={mine?.runs != null ? mine.runs.toLocaleString("en-US") : "–"} loading={cost.loading} />
-          <StatTile label="Cost · 30d" value={mine ? <Money amount={mine.amount} currency={mine.currency} decimals={CENTS} /> : "–"} unit={mine && total > 0 ? `${Math.round((Number(mine.amount) / total) * 100)}% of ${tenantName}` : "list prices"} loading={cost.loading} />
+          <StatTile label="Runs · 30d" value={mine.runs != null ? mine.runs.toLocaleString("en-US") : "–"} loading={cost.loading} />
+          <StatTile label="Cost · 30d" value={mine.amounts.length ? <MoneyList amounts={mine.amounts} decimals={CENTS} /> : "–"} unit={only && total > 0 ? `${Math.round((Number(only.amount) / total) * 100)}% of ${tenantName}'s ${only.currency}` : "list prices"} loading={cost.loading} />
           <StatTile label="Keys" value={`${manageKeys ? active.length : s.activeKeys} / ${SA_KEY_CAP}`} unit="active" loading={manageKeys && keys.loading} />
         </div>
         {manageKeys ? (
