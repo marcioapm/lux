@@ -68,9 +68,33 @@ async function pickMember(p: Awaited<ReturnType<typeof t.mountAs>>, text: string
   await t.fill(input, text);
   await p.until(() => [...p.dialog()!.querySelectorAll('[role="option"]')].some((o) => o.textContent?.includes(email)), `${email} suggested`);
   const opt = [...p.dialog()!.querySelectorAll('[role="option"]')].find((o) => o.textContent?.includes(email))!;
-  await act(async () => opt.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+  await act(async () => opt.dispatchEvent(new MouseEvent("click", { bubbles: true })));
   return opt;
 }
+
+test("Convert exact typed email confirms once without choosing the suggestion", async () => {
+  const p = await t.mountAs("admin", "/service-accounts/sa_3jo1n4s2", <ServiceAccountPage id="sa_3jo1n4s2" />, { extra: noRuns });
+  try {
+    await p.until(() => p.button("Convert to personal keys") != null, "page");
+    await p.until(() => p.fake.calls.some((c) => c.startsWith("/v1/members")), "members");
+    await t.click(p.button("Convert to personal keys"));
+    const input = p.dialog()!.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    await t.fill(input, "bruno@acme.dev");
+    const { act } = await import("react");
+    await act(async () => input.focus());
+    const confirm = t.dialogButton(p.dialog(), "Convert")!;
+    await act(async () => {
+      confirm.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      confirm.focus();
+    });
+    expect(p.dialog()!.querySelectorAll('[role="option"]')).toHaveLength(1);
+    await t.click(confirm);
+    await p.until(() => p.fake.posts.some((x) => x.path.includes("/convert")), "POST");
+    expect(p.fake.posts.filter((x) => x.path.includes("/convert"))).toEqual([
+      expect.objectContaining({ path: "/v1/service-accounts/sa_3jo1n4s2/convert", method: "POST", body: { email: "bruno@acme.dev" } }),
+    ]);
+  } finally { await p.done(); }
+});
 
 test("Convert, same role: the sentence, the counts, then the member's page; the keys and Runs are theirs", async () => {
   const p = await t.mountAs("admin", "/service-accounts/sa_3jo1n4s2", <ServiceAccountPage id="sa_3jo1n4s2" />, { extra: noRuns });

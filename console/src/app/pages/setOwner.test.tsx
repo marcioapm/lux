@@ -27,7 +27,7 @@ async function setOwner(p: Awaited<ReturnType<typeof t.mountAs>>, email: string,
     await p.until(() => p.dialog()!.querySelectorAll('[role="option"]').length > 0, "suggestions");
     const opt = [...p.dialog()!.querySelectorAll('[role="option"]')].find((o) => o.textContent?.includes(email))!;
     const { act } = await import("react");
-    await act(async () => opt.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+    await act(async () => opt.dispatchEvent(new MouseEvent("click", { bubbles: true })));
   } else await t.fill(input, email);
 }
 
@@ -49,6 +49,30 @@ test("Set owner, a member: suggested from the tenant's members, promoted with on
   } finally {
     await p.done();
   }
+});
+
+test("Set owner exact typed email confirms with one completed click without choosing a suggestion", async () => {
+  const p = await t.mountAs("operator", "/tenants", <Tenants />, { extra: tenants });
+  try {
+    await p.until(() => rowOf(p.el, "initech") != null, "initech");
+    await t.click(p.button("No owner: set initech's owner"));
+    await p.until(() => p.fake.calls.includes("/v1/members?tenant=ten_initech"), "members");
+    const input = p.dialog()!.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    await t.fill(input, "rui@acme.dev");
+    const { act } = await import("react");
+    await act(async () => input.focus());
+    const confirm = t.dialogButton(p.dialog(), "Make owner")!;
+    await act(async () => {
+      confirm.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      confirm.focus();
+    });
+    expect(p.dialog()!.querySelectorAll('[role="option"]')).toHaveLength(1);
+    await t.click(confirm);
+    await p.until(() => p.fake.posts.some((x) => x.method === "POST"), "one POST");
+    expect(p.fake.posts.filter((x) => x.method === "POST")).toEqual([
+      expect.objectContaining({ path: "/v1/members?tenant=ten_initech", body: { email: "rui@acme.dev", role: "owner", upsert: true } }),
+    ]);
+  } finally { await p.done(); }
 });
 
 test("Set owner, not a member: joins as Owner; an existing owner is not offered", async () => {
