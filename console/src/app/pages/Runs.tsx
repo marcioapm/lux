@@ -23,7 +23,10 @@ export function Runs() {
   const params = useSearchParams();
   const owner = params.get("owner") ?? "";
   const [ownerDraft, setOwnerDraft] = useState(owner);
-  const [mine, setMine] = useState(() => params.get("mine") === "true" || localStorage.getItem("lux.runs.mine") === "true");
+  // Mine follows the URL (back and forward included); the remembered
+  // choice applies only to a URL that says nothing (?mine= absent).
+  const mineParam = params.get("mine");
+  const mine = mineParam != null ? mineParam === "true" : localStorage.getItem("lux.runs.mine") === "true";
   useEffect(() => setOwnerDraft(owner), [owner]);
   const states = useMemo(() => (params.get("state") ?? "").split(",").filter(Boolean), [params]);
   const resumable = params.get("resumable") === "true";
@@ -105,7 +108,7 @@ export function Runs() {
       <p className="page-note">Charts follow the tenant and the time range; table filters do not narrow them. History starts with luxd's samples: a range older than them is empty, not zero.</p>
       <div className="filters-bar">
         <div className="filters">
-          <SegmentedControl label="Run ownership" value={mine ? "mine" : "all"} options={[{ value: "all", label: "All runs" }, { value: "mine", label: "Mine" }]} onChange={(x) => { const on = x === "mine"; setMine(on); localStorage.setItem("lux.runs.mine", String(on)); setSearchParams({ mine: on ? "true" : null }); }} />
+          <SegmentedControl label="Run ownership" value={mine ? "mine" : "all"} options={[{ value: "all", label: "All runs" }, { value: "mine", label: "Mine" }]} onChange={(x) => { const on = x === "mine"; localStorage.setItem("lux.runs.mine", String(on)); setSearchParams({ mine: on ? "true" : "false" }); }} />
           <div className="chips" role="group" aria-label="States">
             {RUN_STATE_LIST.map((s) => {
               const st = runStateStyle(s);

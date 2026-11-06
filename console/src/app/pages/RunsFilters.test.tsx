@@ -72,3 +72,44 @@ test("Runs: the Owner header is not sortable and clicking it sends no sort=owner
     await p.done();
   }
 });
+
+/** Go to url as back/forward does: the URL changes, then popstate. */
+async function historyGo(url: string) {
+  await act(async () => {
+    history.replaceState(null, "", url);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await sleep(50);
+}
+const segment = (el: HTMLElement) => el.querySelector('[role="radiogroup"][aria-label="Run ownership"] [aria-checked="true"]')?.textContent;
+
+// Mine is the URL's (back/forward too); the remembered choice only when the URL has no mine.
+test("Runs: Mine follows the URL on back and forward; the remembered choice only fills a URL without mine", async () => {
+  const p = await mount("/runs?mine=true");
+  try {
+    expect(segment(p.el)).toBe("Mine");
+    expect(p.lists().at(-1)).toContain("mine=true");
+    await historyGo("/runs?mine=false");
+    expect(segment(p.el)).toBe("All runs");
+    expect(p.lists().at(-1)).not.toContain("mine=true");
+    await historyGo("/runs?mine=true");
+    expect(segment(p.el)).toBe("Mine");
+    expect(p.lists().at(-1)).toContain("mine=true");
+    // No mine in the URL: the remembered choice (here, from clicking Mine).
+    localStorage.setItem("lux.runs.mine", "true");
+    await historyGo("/runs");
+    expect(segment(p.el)).toBe("Mine");
+    localStorage.setItem("lux.runs.mine", "false");
+    await historyGo("/runs?state=running");
+    expect(segment(p.el)).toBe("All runs");
+    // A click writes the URL and the memory.
+    const all = [...p.el.querySelectorAll('[role="radio"]')].find((b) => b.textContent === "Mine") as HTMLElement;
+    await act(async () => all.click());
+    await sleep(50);
+    expect(new URLSearchParams(window.location.search).get("mine")).toBe("true");
+    expect(localStorage.getItem("lux.runs.mine")).toBe("true");
+    expect(router.matchPath("/runs", window.location.pathname)).not.toBeNull();
+  } finally {
+    await p.done();
+  }
+});
