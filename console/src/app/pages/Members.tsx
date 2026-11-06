@@ -5,7 +5,7 @@ import { api, errorText, useQuery, useSession, type Invitation, type InvitationS
 import { atLeast, useViewer, type Viewer } from "../identity.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
-import { ErrorBlock, ErrorStrip } from "./common.tsx";
+import { ErrorBlock, ErrorStrip, QueryBody } from "./common.tsx";
 import { InviteDialog, InviteLinksDialog } from "./InviteDialog.tsx";
 import { memberPath, PersonInline, RoleField, roleOptions } from "./peopleParts.tsx";
 import { costsByKey, keysCost, sortAmount } from "./memberMoney.ts";
@@ -432,12 +432,9 @@ function InvitationsTab({ tenant, onChanged }: { tenant: string | undefined; onC
         <input className="input input-sm" type="search" placeholder="Search email" aria-label="Search email" value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
       <Card flush>
-        <ErrorStrip error={list.data ? list.error : null} />
-        {list.error && !list.data && !list.loading ? (
-          <ErrorBlock error={list.error} onRetry={list.refetch} />
-        ) : (
+        <QueryBody q={list}>
           <Table columns={cols} rows={rows} rowKey={(i) => i.id} loading={list.loading} defaultSort={{ key: "sent", dir: "desc" }} empty={urlQ ? `No invitations match “${urlQ}”.` : "No invitations here."} minWidth={860} />
-        )}
+        </QueryBody>
         {cursor !== "" && list.data && (
           <div className="card-foot">
             <span className="muted">{rows.length} shown</span>

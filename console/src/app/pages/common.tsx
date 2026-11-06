@@ -61,6 +61,20 @@ export function ErrorStrip({ error }: { error: string | null }) {
   );
 }
 
+/**
+ * A query's content: a failed first load is the error with Retry (never an
+ * empty table); a failed refresh keeps children under an ErrorStrip.
+ */
+export function QueryBody({ q, compact, children }: { q: Pick<QueryState<unknown>, "data" | "error" | "loading" | "refetch">; compact?: boolean; children: ReactNode }) {
+  if (q.error && !q.data && !q.loading) return <ErrorBlock error={q.error} onRetry={q.refetch} compact={compact} />;
+  return (
+    <>
+      <ErrorStrip error={q.data ? q.error : null} />
+      {children}
+    </>
+  );
+}
+
 /** Placeholder for a page whose main object is still loading. */
 export function PageSkeleton() {
   return (

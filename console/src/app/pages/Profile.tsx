@@ -4,7 +4,7 @@ import { IconPlus } from "@lux/design-system/icons";
 import { api, errorText, useQuery, useSession, type ApiKey, type CreatedApiKey, type Membership } from "../../api/index.ts";
 import { atLeast, canManageOwnKeys, useViewer } from "../identity.ts";
 import { useScope } from "../scope.tsx";
-import { ErrorBlock, ErrorStrip, PageSkeleton } from "./common.tsx";
+import { ErrorBlock, PageSkeleton, QueryBody } from "./common.tsx";
 import { KeyRevealDialog, KeysTable, NewKeyDialog } from "./peopleParts.tsx";
 import { principalCost } from "./memberMoney.ts";
 
@@ -112,12 +112,9 @@ export function Profile() {
         >
           {!manage && viewer.readOnly && <div className="card-note muted">Signed in with a read-only key: it cannot create, rename or revoke keys.</div>}
           {manage && full && <div className="card-note muted">{PERSONAL_KEY_CAP} active keys is the limit: revoke one first.</div>}
-          <ErrorStrip error={keys.data ? keys.error : null} />
-          {keys.error && !keys.data && !keys.loading ? (
-            <ErrorBlock error={keys.error} onRetry={keys.refetch} compact />
-          ) : (
+          <QueryBody q={keys} compact>
             <KeysTable keys={active} loading={keys.loading} role={role} onRename={manage ? setRenaming : undefined} onRevoke={manage ? setRevoking : undefined} empty="No API keys yet. The console works without one; the CLI and scripts need one." />
-          )}
+          </QueryBody>
         </Card>
         <Card flush title="Tenants" subtitle={p.memberships.length > 1 ? "Your role in each. Switch with the Tenant picker in the top bar." : "Your role in each."}>
           <Table columns={tenantCols} rows={p.memberships} rowKey={(m) => m.tenantId} defaultSort={{ key: "tenant", dir: "asc" }} empty="You are not a member of any tenant." />

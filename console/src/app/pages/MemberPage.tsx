@@ -3,7 +3,7 @@ import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, MoneyList, PageHeade
 import { api, errorText, useQuery, type ApiKey, type Run, type ServiceAccount } from "../../api/index.ts";
 import { atLeast, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
-import { ErrorBlock, ErrorStrip, PageSkeleton, runColumns, runPath } from "./common.tsx";
+import { ErrorBlock, PageSkeleton, QueryBody, runColumns, runPath } from "./common.tsx";
 import { canManage, ChangeRoleDialog, lastOwnerReason, RemoveMemberDialog, useCostByOwner, usePeopleTenant } from "./Members.tsx";
 import { KeysTable, serviceAccountPath } from "./peopleParts.tsx";
 
@@ -126,13 +126,9 @@ export function MemberPage({ id }: { id: string }) {
         </Card>
         {seesKeys && (
           <Card flush title="API keys" subtitle={self ? "yours: manage them on your profile" : `visible to ${first} and admins`}>
-            {/* A failed first load is an error, never "no keys"; a failed refresh keeps the list with a strip. */}
-            <ErrorStrip error={keys.data ? keys.error : null} />
-            {keys.error && !keys.data && !keys.loading ? (
-              <ErrorBlock error={keys.error} onRetry={keys.refetch} compact />
-            ) : (
+            <QueryBody q={keys} compact>
               <KeysTable keys={keys.data ?? []} loading={keys.loading} role={p.role} whose={self ? "my" : "their"} onRevoke={canRevokeKeys(v, p, self) ? setRevoking : undefined} empty={`${first} has no API keys.`} />
-            )}
+            </QueryBody>
           </Card>
         )}
       </div>

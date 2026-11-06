@@ -4,7 +4,7 @@ import { IconPencil, IconPlus, IconStop } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type ApiKey, type CreatedApiKey, type Member, type Run, type ServiceAccount } from "../../api/index.ts";
 import { atLeast, canManageAccountKeys, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
-import { ErrorBlock, ErrorStrip, PageSkeleton, runColumns, runPath } from "./common.tsx";
+import { ErrorBlock, ErrorStrip, PageSkeleton, QueryBody, runColumns, runPath } from "./common.tsx";
 import { useCostByOwner, usePeopleTenant } from "./Members.tsx";
 import { KeyRevealDialog, KeysTable, NewKeyDialog, PersonInline, RoleField, roleOptions, serviceAccountPath } from "./peopleParts.tsx";
 import { sortAmount, totalsByCurrency } from "./memberMoney.ts";
@@ -94,8 +94,9 @@ export function ServiceAccounts() {
         }
       />
       <Card flush>
-        <ErrorStrip error={q.data ? q.error : null} />
-        {q.error && !q.data && !q.loading ? <ErrorBlock error={q.error} onRetry={q.refetch} /> : <Table columns={cols} rows={q.data ?? []} rowKey={(s) => s.id} loading={q.loading} onRowClick={(s) => go(serviceAccountPath(s.id))} defaultSort={{ key: "name", dir: "asc" }} empty="No service accounts." minWidth={880} />}
+        <QueryBody q={q}>
+          <Table columns={cols} rows={q.data ?? []} rowKey={(s) => s.id} loading={q.loading} onRowClick={(s) => go(serviceAccountPath(s.id))} defaultSort={{ key: "name", dir: "asc" }} empty="No service accounts." minWidth={880} />
+        </QueryBody>
       </Card>
       {!admin && <p className="page-note">Only admins and owners create, edit or disable service accounts. An account's owner rotates its keys.</p>}
       <ServiceAccountDialog
@@ -192,11 +193,7 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
         <span className="field-hint">Answers for it: rotates its keys and acts on its Runs. Its cost also rolls up to them under “By owner”.</span>
       </div>
       <RoleField value={f.role} onChange={(r) => set({ role: r === "owner" ? "admin" : r })} options={roleOptions({ owner: false }, { includeOwner: false })} />
-      {error && (
-        <div className="error-strip" role="alert">
-          {error}
-        </div>
-      )}
+      <ErrorStrip error={error} />
     </Dialog>
   );
 }
@@ -307,13 +304,9 @@ export function ServiceAccountPage({ id }: { id: string }) {
             }
           >
             {full && <div className="card-note muted">{SA_KEY_CAP} active keys is the limit: revoke the old one first.</div>}
-            {/* A failed first load is an error, never "no keys"; a failed refresh keeps the list with a strip. */}
-            <ErrorStrip error={keys.data ? keys.error : null} />
-            {keys.error && !keys.data && !keys.loading ? (
-              <ErrorBlock error={keys.error} onRetry={keys.refetch} compact />
-            ) : (
+            <QueryBody q={keys} compact>
               <KeysTable keys={active} loading={keys.loading} access={false} createdBy onRevoke={setRevoking} empty="No keys: nothing can use this account." />
-            )}
+            </QueryBody>
           </Card>
         ) : (
           <p className="page-note">Its keys are visible to its owner and to admins.</p>
