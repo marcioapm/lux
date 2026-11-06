@@ -161,3 +161,12 @@ describe("in a DOM", () => {
     expect(input.getAttribute("aria-invalid")).toBeNull();
   });
 });
+
+
+test("PersonPicker list overrides the shared popup positioning even when Select styles follow it", async () => {
+  const css = await Bun.file(new URL("./components.css", import.meta.url)).text();
+  // It also carries select-pop; the combined selector outranks that later rule.
+  const block = /\.select-pop\.person-picker-list\s*\{([^}]+)\}/.exec(css)?.[1];
+  expect(block).toBeDefined();
+  expect(block).toContain("position: static");
+});

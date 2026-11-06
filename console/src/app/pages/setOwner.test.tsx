@@ -89,3 +89,16 @@ test("Set owner works in key console mode; it is not there for a read-only opera
     await ro.done();
   }
 });
+
+
+test("No owner action has a minimum 24px target, using the resolved spacing token", async () => {
+  const css = await Bun.file(new URL("../shell.css", import.meta.url)).text();
+  const tokens = await Bun.file(new URL("../../../../packages/design-system/src/tokens.css", import.meta.url)).text();
+  const block = /\.badge-button\s*\{([^}]+)\}/.exec(css)![1]!;
+  for (const dimension of ["width", "height"]) {
+    const token = new RegExp(`min-${dimension}:\\s*var\\((--[\\w-]+)\\)`).exec(block)?.[1];
+    expect(token).toBeDefined();
+    const value = new RegExp(`${token}:\\s*(\\d+)px`).exec(tokens)?.[1];
+    expect(Number(value)).toBeGreaterThanOrEqual(24);
+  }
+});

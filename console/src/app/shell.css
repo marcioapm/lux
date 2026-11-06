@@ -1059,8 +1059,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: var(--sp-6);
-  min-height: var(--sp-6);
+  min-width: var(--sp-7);
+  min-height: var(--sp-7);
   padding: 0;
   border: 0;
   background: none;

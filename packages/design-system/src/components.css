@@ -924,7 +924,7 @@ a.idchip-text:hover {
 .person-picker-box {
   position: relative;
 }
-.person-picker-list {
+.select-pop.person-picker-list {
   position: static;
   list-style: none;
   margin: var(--sp-2) 0 0;
