@@ -9,15 +9,24 @@ export interface PrincipalCost {
   runs: number | null;
 }
 
-/** Each key's rows (its currencies), in one pass over rows. */
-export function costsByKey(rows: readonly CostByOwnerRow[]): Map<string, CostByOwnerRow[]> {
-  const m = new Map<string, CostByOwnerRow[]>();
+function groupBy<T, V>(rows: readonly T[], key: (r: T) => string, value: (r: T) => V): Map<string, V[]> {
+  const m = new Map<string, V[]>();
   for (const r of rows) {
-    const list = m.get(r.key);
-    if (list) list.push(r);
-    else m.set(r.key, [r]);
+    const list = m.get(key(r));
+    if (list) list.push(value(r));
+    else m.set(key(r), [value(r)]);
   }
   return m;
+}
+
+/** Each key's rows (its currencies), in one pass over rows. */
+export function costsByKey(rows: readonly CostByOwnerRow[]): Map<string, CostByOwnerRow[]> {
+  return groupBy(rows, (r) => r.key, (r) => r);
+}
+
+/** Each currency's amounts over rows, summed exactly (sumMoney). */
+function sumByCurrency(rows: readonly CostByOwnerRow[]): Map<string, string> {
+  return new Map([...groupBy(rows, (r) => r.currency, (r) => r.amount)].map(([c, list]) => [c, sumMoney(list) ?? "0"]));
 }
 
 /**
@@ -28,20 +37,16 @@ export function costsByKey(rows: readonly CostByOwnerRow[]): Map<string, CostByO
  */
 export function principalCost(rows: readonly CostByOwnerRow[] | undefined): PrincipalCost {
   if (!rows || rows.length === 0) return { amounts: [], runs: null };
-  const byCurrency = new Map<string, string[]>();
   // key -> currency -> Runs
   const runs = new Map<string, Map<string, number>>();
   for (const r of rows) {
-    const a = byCurrency.get(r.currency);
-    if (a) a.push(r.amount);
-    else byCurrency.set(r.currency, [r.amount]);
     if (r.runs != null) {
       let m = runs.get(r.key);
       if (!m) runs.set(r.key, (m = new Map()));
       m.set(r.currency, (m.get(r.currency) ?? 0) + r.runs);
     }
   }
-  const amounts = [...byCurrency.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([currency, list]) => ({ currency, amount: sumMoney(list) ?? "0" }));
+  const amounts = [...sumByCurrency(rows)].sort(([a], [b]) => a.localeCompare(b)).map(([currency, amount]) => ({ currency, amount }));
   let total = 0;
   for (const m of runs.values()) total += Math.max(...m.values());
   return { amounts, runs: runs.size ? total : null };
@@ -54,15 +59,7 @@ export function keysCost(byKey: ReadonlyMap<string, readonly CostByOwnerRow[]>, 
 
 /** Each currency's total over every row, computed once (a share is a row's amount over its currency's total). */
 export function totalsByCurrency(rows: readonly CostByOwnerRow[]): Map<string, number> {
-  const byCurrency = new Map<string, string[]>();
-  for (const r of rows) {
-    const a = byCurrency.get(r.currency);
-    if (a) a.push(r.amount);
-    else byCurrency.set(r.currency, [r.amount]);
-  }
-  const out = new Map<string, number>();
-  for (const [c, list] of byCurrency) out.set(c, Number(sumMoney(list) ?? "0"));
-  return out;
+  return new Map([...sumByCurrency(rows)].map(([c, amount]) => [c, Number(amount)]));
 }
 
 /** The first currency's amount, for sorting a column of per-currency lists. */
