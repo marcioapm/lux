@@ -67,22 +67,10 @@ func (s *Server) getMe(ctx context.Context, _ *struct{}) (*meOutput, error) {
 	return &meOutput{me}, nil
 }
 
-// personByID reads people by id as the system: a key's creator, an
-// inviter, a service account's owner, who may be of no tenant now.
-func personByID(ctx context.Context, tx pgx.Tx, id *string) (*Person, error) {
-	if id == nil || *id == "" {
-		return nil, nil
-	}
-	var p Person
-	err := tx.QueryRow(ctx, `SELECT id, email, name, picture, operator FROM users WHERE id = $1`, *id).Scan(&p.ID, &p.Email, &p.Name, &p.Picture, &p.Operator)
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	return &p, err
-}
-
 // peopleByIDs reads the people of ids (nil and empty skipped, duplicates
-// read once) in one query: lists hydrate from its map, not a query a row.
+// read once) in one query, as the system: a key's creator, an inviter, a
+// service account's owner, who may be of no tenant now. Lists hydrate from
+// its map, not a query a row.
 func peopleByIDs(ctx context.Context, tx pgx.Tx, ids ...*string) (map[string]*Person, error) {
 	set := map[string]bool{}
 	var list []string

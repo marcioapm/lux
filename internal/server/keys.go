@@ -136,11 +136,17 @@ func scanKeys(ctx context.Context, tx pgx.Tx, where string, args ...any) ([]ApiK
 	if err != nil {
 		return nil, err
 	}
+	bys := make([]*string, 0, len(list))
+	for _, x := range list {
+		bys = append(bys, x.by)
+	}
+	people, err := peopleByIDs(ctx, tx, bys...)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]ApiKey, 0, len(list))
 	for _, x := range list {
-		if x.k.CreatedBy, err = personByID(ctx, tx, x.by); err != nil {
-			return nil, err
-		}
+		x.k.CreatedBy = person(people, x.by)
 		out = append(out, x.k)
 	}
 	return out, nil
@@ -208,7 +214,8 @@ func insertKey(ctx context.Context, tx pgx.Tx, p Principal, k keySpec) (NewApiKe
 	if err != nil {
 		return out, err
 	}
-	out.CreatedBy, err = personByID(ctx, tx, by)
+	people, err := peopleByIDs(ctx, tx, by)
+	out.CreatedBy = person(people, by)
 	return out, err
 }
 
