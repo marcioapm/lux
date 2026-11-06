@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { Avatar, Badge, Button, Callout, Card, ConfirmDialog, formatCount, MoneyList, PageHeader, RelativeTime, RoleBadge, ROLE_LABEL, StatTile, Table, useToast, CENTS, type Column } from "@lux/design-system";
+import { Avatar, Badge, Button, Callout, Card, ConfirmDialog, formatCount, MoneyList, PageHeader, RelativeTime, RoleBadge, ROLE_LABEL, StatTile, Table, CENTS, type Column } from "@lux/design-system";
 import { IconPlus } from "@lux/design-system/icons";
 import { api, errorText, useQuery, useSession, type ApiKey, type CreatedApiKey, type Membership } from "../../api/index.ts";
 import { atLeast, canManageOwnKeys, useViewer } from "../identity.ts";
 import { useScope } from "../scope.tsx";
-import { ErrorBlock, PageSkeleton, QueryBody } from "./common.tsx";
+import { ErrorBlock, PageSkeleton, QueryBody, useAct } from "./common.tsx";
 import { KeyRevealDialog, KeysTable, NewKeyDialog } from "./peopleParts.tsx";
 import { principalCost } from "./memberMoney.ts";
 
@@ -16,7 +16,6 @@ export function Profile() {
   const viewer = useViewer();
   const session = useSession();
   const { apiTenant } = useScope();
-  const toast = useToast();
   const me = useQuery("me", (s) => api.me(s));
   const keys = useQuery(`me:keys@${apiTenant ?? ""}`, (s) => api.myKeys(apiTenant, s));
   const members = useQuery(`members@${apiTenant ?? ""}`, (s) => api.members(apiTenant, s));
@@ -25,7 +24,7 @@ export function Profile() {
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const [renaming, setRenaming] = useState<ApiKey | null>(null);
   const [revoking, setRevoking] = useState<ApiKey | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { busy, act } = useAct((what) => `${what.split(" ")[0]} failed`);
 
   if (me.error && !me.data && !me.loading) return <div className="page"><ErrorBlock error={me.error} onRetry={me.refetch} /></div>;
   if (!me.data) return <PageSkeleton />;
@@ -39,20 +38,7 @@ export function Profile() {
   const self = members.data?.find((m) => m.id === p.id);
   // Every currency of mine, summed per currency (never the first row only).
   const mine = principalCost(cost.data?.totals.filter((r) => r.key === `user:${p.id}`));
-
-  const act = async (what: string, fn: () => Promise<unknown>, done: () => void) => {
-    setBusy(true);
-    try {
-      await fn();
-      toast({ title: what, tone: "success" });
-      done();
-      await keys.refetch();
-    } catch (e) {
-      toast({ title: `${what.split(" ")[0]} failed`, description: errorText(e), tone: "danger" });
-    } finally {
-      setBusy(false);
-    }
-  };
+  const done = (close: () => void) => () => (close(), keys.refetch());
 
   const tenantCols: Column<Membership>[] = [
     { key: "tenant", header: "Tenant", cell: (m) => m.tenant, sortValue: (m) => m.tenant, lead: true },
@@ -148,7 +134,7 @@ export function Profile() {
         confirmLabel="Rename key"
         input={{ label: "New name", placeholder: renaming?.name, required: true }}
         loading={busy}
-        onConfirm={(name) => renaming && void act(`Renamed ${renaming.name} to ${name?.trim()}`, () => api.renameMyKey(apiTenant, renaming.id, (name ?? "").trim()), () => setRenaming(null))}
+        onConfirm={(name) => renaming && void act(`Renamed ${renaming.name} to ${name?.trim()}`, () => api.renameMyKey(apiTenant, renaming.id, (name ?? "").trim()), done(() => setRenaming(null)))}
         onCancel={() => setRenaming(null)}
       />
       <ConfirmDialog
@@ -158,7 +144,7 @@ export function Profile() {
         confirmLabel="Revoke key"
         tone="danger"
         loading={busy}
-        onConfirm={() => revoking && void act(`Revoked ${revoking.name}`, () => api.revokeMyKey(apiTenant, revoking.id), () => setRevoking(null))}
+        onConfirm={() => revoking && void act(`Revoked ${revoking.name}`, () => api.revokeMyKey(apiTenant, revoking.id), done(() => setRevoking(null)))}
         onCancel={() => setRevoking(null)}
       />
     </div>

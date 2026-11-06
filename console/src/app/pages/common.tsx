@@ -1,8 +1,8 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
-import { useMemo, useRef, type ReactNode } from "react";
-import { Button, CostFigure, DurationCell, EmptyState, formatDuration, formatPercent, formatUnit, IdChip, KeyValue, LinkButton, RelativeTime, RUN_STATE_LIST, Skeleton, SkeletonLines, StatePill, type ChartMark, type Column, type LinkButtonProps, type RunState, type Unit } from "@lux/design-system";
-import { api, isRunActive, useNow, useQuery, type QueryState, type Run, type Sample } from "../../api/index.ts";
+import { useMemo, useRef, useState, type ReactNode } from "react";
+import { Button, CostFigure, DurationCell, EmptyState, formatDuration, formatPercent, formatUnit, IdChip, KeyValue, LinkButton, RelativeTime, RUN_STATE_LIST, Skeleton, SkeletonLines, StatePill, useToast, type ChartMark, type Column, type LinkButtonProps, type RunState, type Unit } from "@lux/design-system";
+import { api, errorText, isRunActive, useNow, useQuery, type QueryState, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
 import { OwnerCell } from "./peopleParts.tsx";
 
@@ -73,6 +73,29 @@ export function QueryBody({ q, compact, children }: { q: Pick<QueryState<unknown
       {children}
     </>
   );
+}
+
+/**
+ * An action behind a confirm: busy while it runs, a success toast titled
+ * title, then after (close, refetch); any failure, after included, a
+ * danger toast titled failTitle(title).
+ */
+export function useAct(failTitle: (title: string) => string = () => "Not done") {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const act = async (title: string, fn: () => Promise<unknown>, after: () => unknown) => {
+    setBusy(true);
+    try {
+      await fn();
+      toast({ title, tone: "success" });
+      await after();
+    } catch (e) {
+      toast({ title: failTitle(title), description: errorText(e), tone: "danger" });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, act };
 }
 
 /** Placeholder for a page whose main object is still loading. */

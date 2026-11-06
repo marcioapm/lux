@@ -1,16 +1,15 @@
 import { useState } from "react";
-import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_LABEL, StatTile, Table, useToast, type Column } from "@lux/design-system";
-import { api, errorText, useQuery, type ApiKey, type Run, type ServiceAccount } from "../../api/index.ts";
+import { Avatar, Badge, Button, Card, CENTS, ConfirmDialog, MoneyList, PageHeader, Person, RelativeTime, RoleBadge, ROLE_LABEL, StatTile, Table, type Column } from "@lux/design-system";
+import { api, useQuery, type ApiKey, type Run, type ServiceAccount } from "../../api/index.ts";
 import { atLeast, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
-import { ErrorBlock, PageSkeleton, QueryBody, runColumns, runPath } from "./common.tsx";
+import { ErrorBlock, PageSkeleton, QueryBody, runColumns, runPath, useAct } from "./common.tsx";
 import { canManage, ChangeRoleDialog, lastOwnerReason, RemoveMemberDialog, useCostByOwner, usePeopleTenant } from "./Members.tsx";
 import { KeysTable, serviceAccountPath } from "./peopleParts.tsx";
 
 /** /members/:id: one person's role, spend, service accounts, Runs and (to them and admins) keys. */
 export function MemberPage({ id }: { id: string }) {
   const v = useViewer();
-  const toast = useToast();
   const { tenant, name: tenantName } = usePeopleTenant();
   const m = useQuery(`member:${id}@${tenant ?? ""}`, (s) => api.member(tenant, id, s));
   const all = useQuery(`members@${tenant ?? ""}`, (s) => api.members(tenant, s), { enabled: atLeast(v, "admin") });
@@ -26,7 +25,7 @@ export function MemberPage({ id }: { id: string }) {
   const [changing, setChanging] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [revoking, setRevoking] = useState<ApiKey | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { busy, act } = useAct();
 
   if (m.error && !m.data && !m.loading) return <div className="page"><ErrorBlock error={m.error} onRetry={m.refetch} /></div>;
   if (!m.data) return <PageSkeleton />;
@@ -41,19 +40,6 @@ export function MemberPage({ id }: { id: string }) {
   const manage = canManage(v, p);
   // The last-owner rule: only an operator demotes or removes the only owner.
   const lastOwner = lastOwnerReason(v, p, (all.data ?? []).filter((x) => x.role === "owner").length || 1);
-
-  const act = async (title: string, fn: () => Promise<unknown>, after: () => void) => {
-    setBusy(true);
-    try {
-      await fn();
-      toast({ title, tone: "success" });
-      after();
-    } catch (e) {
-      toast({ title: "Not done", description: errorText(e), tone: "danger" });
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const saCols: Column<ServiceAccount>[] = [
     { key: "name", header: "Service account", cell: (s) => <Person name={s.name} sub={s.description} serviceAccount />, sortValue: (s) => s.name, label: "Service account" },

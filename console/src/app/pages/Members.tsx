@@ -5,7 +5,7 @@ import { api, errorText, useQuery, useSession, type Invitation, type InvitationS
 import { atLeast, useViewer, type Viewer } from "../identity.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
-import { ErrorBlock, ErrorStrip, QueryBody } from "./common.tsx";
+import { ErrorBlock, ErrorStrip, QueryBody, useAct } from "./common.tsx";
 import { InviteDialog, InviteLinksDialog } from "./InviteDialog.tsx";
 import { memberPath, PersonInline, RoleField, roleOptions } from "./peopleParts.tsx";
 import { costsByKey, keysCost, sortAmount } from "./memberMoney.ts";
@@ -135,12 +135,11 @@ export function Members() {
 
 function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQuery<Member[]>>; tenantName: string }) {
   const v = useViewer();
-  const toast = useToast();
   const { tenant } = usePeopleTenant();
   const cost = useCostByOwner("member");
   const [changing, setChanging] = useState<Member | null>(null);
   const [removing, setRemoving] = useState<Member | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { busy, act } = useAct();
   const admin = atLeast(v, "admin");
   const rows = members.data ?? [];
   const keysShown = rows.some((m) => m.keyCount != null);
@@ -202,20 +201,6 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
     return c;
   }, [v, cost.cost, keysShown, admin, tenantName, owners]);
 
-  const act = async (title: string, fn: () => Promise<unknown>, close: () => void) => {
-    setBusy(true);
-    try {
-      await fn();
-      toast({ title, tone: "success" });
-      close();
-      await members.refetch();
-    } catch (e) {
-      toast({ title: "Not done", description: errorText(e), tone: "danger" });
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <>
       <Card flush>
@@ -226,8 +211,8 @@ function MembersTable({ members, tenantName }: { members: ReturnType<typeof useQ
           <Table columns={cols} rows={rows} rowKey={(m) => m.id} loading={members.loading} onRowClick={(m) => go(memberPath(m.id))} defaultSort={{ key: "role", dir: "desc" }} empty="No members yet." minWidth={860} />
         )}
       </Card>
-      <ChangeRoleDialog member={changing} tenantName={tenantName} busy={busy} owner={atLeast(v, "owner")} lastOwner={changing ? lastOwnerReason(v, changing, owners) : null} onCancel={() => setChanging(null)} onConfirm={(m, role) => void act(`${m.name || m.email} is now ${ROLE_LABEL[role]}`, () => api.setMemberRole(tenant, m.id, role), () => setChanging(null))} />
-      <RemoveMemberDialog member={removing} tenantName={tenantName} busy={busy} onCancel={() => setRemoving(null)} onConfirm={(m) => void act(`Removed ${m.name || m.email}`, () => api.removeMember(tenant, m.id), () => setRemoving(null))} />
+      <ChangeRoleDialog member={changing} tenantName={tenantName} busy={busy} owner={atLeast(v, "owner")} lastOwner={changing ? lastOwnerReason(v, changing, owners) : null} onCancel={() => setChanging(null)} onConfirm={(m, role) => void act(`${m.name || m.email} is now ${ROLE_LABEL[role]}`, () => api.setMemberRole(tenant, m.id, role), () => (setChanging(null), members.refetch()))} />
+      <RemoveMemberDialog member={removing} tenantName={tenantName} busy={busy} onCancel={() => setRemoving(null)} onConfirm={(m) => void act(`Removed ${m.name || m.email}`, () => api.removeMember(tenant, m.id), () => (setRemoving(null), members.refetch()))} />
     </>
   );
 }
@@ -343,24 +328,16 @@ function InvitationsTab({ tenant, onChanged }: { tenant: string | undefined; onC
     }
   };
   const [revoking, setRevoking] = useState<Invitation | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { busy, act } = useAct();
   const owner = atLeast(v, "owner");
 
-  const run = async (title: string, fn: () => Promise<unknown>) => {
-    setBusy(true);
-    try {
-      await fn();
-      toast({ title, tone: "success" });
+  const run = (title: string, fn: () => Promise<unknown>) =>
+    act(title, fn, async () => {
       setRevoking(null);
       setMore(null);
       await Promise.all([list.refetch(), counts.refetch()]);
       onChanged();
-    } catch (e) {
-      toast({ title: "Not done", description: errorText(e), tone: "danger" });
-    } finally {
-      setBusy(false);
-    }
-  };
+    });
   const copy = (i: Invitation) => void navigator.clipboard?.writeText(i.url).then(() => toast({ title: `Link for ${i.email} copied`, tone: "success" }));
 
   const cols: Column<Invitation>[] = [

@@ -4,7 +4,7 @@ import { IconPencil, IconPlus, IconStop } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type ApiKey, type CreatedApiKey, type Member, type Run, type ServiceAccount } from "../../api/index.ts";
 import { atLeast, canManageAccountKeys, useViewer } from "../identity.ts";
 import { go } from "../router.tsx";
-import { ErrorBlock, ErrorStrip, PageSkeleton, QueryBody, runColumns, runPath } from "./common.tsx";
+import { ErrorBlock, ErrorStrip, PageSkeleton, QueryBody, runColumns, runPath, useAct } from "./common.tsx";
 import { useCostByOwner, usePeopleTenant } from "./Members.tsx";
 import { KeyRevealDialog, KeysTable, NewKeyDialog, PersonInline, RoleField, roleOptions, serviceAccountPath } from "./peopleParts.tsx";
 import { sortAmount, totalsByCurrency } from "./memberMoney.ts";
@@ -25,7 +25,7 @@ export function ServiceAccounts() {
   const [editing, setEditing] = useState<ServiceAccount | "new" | null>(null);
   const [disabling, setDisabling] = useState<ServiceAccount | null>(null);
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { busy, act } = useAct();
   const admin = atLeast(v, "admin");
 
   const cols: Column<ServiceAccount>[] = [
@@ -66,19 +66,8 @@ export function ServiceAccounts() {
       width: 84,
     });
 
-  const disable = async (s: ServiceAccount) => {
-    setBusy(true);
-    try {
-      await api.updateServiceAccount(tenant, s.id, { disabled: true });
-      toast({ title: `Disabled ${s.name}`, tone: "success" });
-      setDisabling(null);
-      await q.refetch();
-    } catch (e) {
-      toast({ title: "Not done", description: errorText(e), tone: "danger" });
-    } finally {
-      setBusy(false);
-    }
-  };
+  const disable = (s: ServiceAccount) =>
+    act(`Disabled ${s.name}`, () => api.updateServiceAccount(tenant, s.id, { disabled: true }), () => (setDisabling(null), q.refetch()));
 
   return (
     <div className="page page-list">
@@ -215,7 +204,7 @@ export function ServiceAccountPage({ id }: { id: string }) {
   const [newKey, setNewKey] = useState(false);
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const [revoking, setRevoking] = useState<ApiKey | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { busy, act } = useAct();
 
   if (q.error && !q.data && !q.loading) return <div className="page"><ErrorBlock error={q.error} onRetry={q.refetch} /></div>;
   if (!q.data) return <PageSkeleton />;
@@ -230,20 +219,7 @@ export function ServiceAccountPage({ id }: { id: string }) {
   const totals = totalsByCurrency(cost.data?.totals ?? []);
   const only = mine.amounts.length === 1 ? mine.amounts[0]! : null;
   const total = only ? (totals.get(only.currency) ?? 0) : 0;
-
-  const act = async (title: string, fn: () => Promise<unknown>, after: () => void) => {
-    setBusy(true);
-    try {
-      await fn();
-      toast({ title, tone: "success" });
-      after();
-      await Promise.all([q.refetch(), keys.refetch()]);
-    } catch (e) {
-      toast({ title: "Not done", description: errorText(e), tone: "danger" });
-    } finally {
-      setBusy(false);
-    }
-  };
+  const done = (close: () => void) => () => (close(), Promise.all([q.refetch(), keys.refetch()]));
 
   return (
     <div className="page">
@@ -332,8 +308,8 @@ export function ServiceAccountPage({ id }: { id: string }) {
         onCancel={() => setNewKey(false)}
       />
       <KeyRevealDialog created={created} onDone={() => setCreated(null)} />
-      <ConfirmDialog open={revoking != null} title={`Revoke ${revoking?.name ?? ""}?`} description={`Clients still using it stop working at once. Switch them to the other key first.`} confirmLabel="Revoke key" tone="danger" loading={busy} onConfirm={() => revoking && void act(`Revoked ${revoking.name}`, () => api.revokeServiceAccountKey(tenant, s.id, revoking.id), () => setRevoking(null))} onCancel={() => setRevoking(null)} />
-      <ConfirmDialog open={disabling} title={`Disable ${s.name}?`} description="Its keys stop working at once; its running Runs keep running." confirmLabel="Disable" tone="danger" loading={busy} onConfirm={() => void act(`Disabled ${s.name}`, () => api.updateServiceAccount(tenant, s.id, { disabled: true }), () => setDisabling(false))} onCancel={() => setDisabling(false)} />
+      <ConfirmDialog open={revoking != null} title={`Revoke ${revoking?.name ?? ""}?`} description={`Clients still using it stop working at once. Switch them to the other key first.`} confirmLabel="Revoke key" tone="danger" loading={busy} onConfirm={() => revoking && void act(`Revoked ${revoking.name}`, () => api.revokeServiceAccountKey(tenant, s.id, revoking.id), done(() => setRevoking(null)))} onCancel={() => setRevoking(null)} />
+      <ConfirmDialog open={disabling} title={`Disable ${s.name}?`} description="Its keys stop working at once; its running Runs keep running." confirmLabel="Disable" tone="danger" loading={busy} onConfirm={() => void act(`Disabled ${s.name}`, () => api.updateServiceAccount(tenant, s.id, { disabled: true }), done(() => setDisabling(false)))} onCancel={() => setDisabling(false)} />
     </div>
   );
 }
