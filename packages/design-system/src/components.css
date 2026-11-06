@@ -1484,6 +1484,7 @@ a.idchip-text:hover {
   color: var(--fg-muted);
 }
 .emailchip-remove {
+  position: relative;
   display: inline-grid;
   place-items: center;
   width: 20px;
@@ -1494,6 +1495,13 @@ a.idchip-text:hover {
   color: var(--fg-muted);
   cursor: pointer;
   flex: none;
+}
+/* Touch target: a 24×24 hit area around the 20px glyph, inside the chip's
+   24px height (the chip does not grow) and its 2px end padding. */
+.emailchip-remove::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
 }
 .emailchip-remove:hover {
   background: var(--bg-inset);
@@ -1613,6 +1621,21 @@ a.idchip-text:hover {
 }
 .linkbtn:hover {
   text-decoration: underline;
+}
+/* EmailInput's link actions (Remove left out, Copy their link): text-high,
+   so a hit box at least 24px tall (and 24px wide) centred on the text,
+   without moving the line. */
+.emailinput-out .linkbtn {
+  position: relative;
+}
+.emailinput-out .linkbtn::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: max(100%, 24px);
+  height: max(100%, 24px);
+  transform: translate(-50%, -50%);
 }
 .linkbtn:focus-visible {
   outline: none;
