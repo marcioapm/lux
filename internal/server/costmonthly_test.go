@@ -374,7 +374,7 @@ func TestCostMonthlyFamilyEquivalence(t *testing.T) {
 
 func TestCostMonthlyFamilyRowLimit(t *testing.T) {
 	s, keys := costFixture(t)
-	// One total per family plus one per hour: 125 * (1 + 79) = 10000.
+	// One total per family plus one per hour: 125 + 125 * 79 = 10000.
 	ownerExec(t, s, `INSERT INTO cost_hourly(hour,tenant_id,run_id,source,family,currency,amount,allocated,unallocated)
 		SELECT $1::timestamptz + h * interval '1 hour','t1','r1','limit','family-' || f,'USD',1,0,0
 		FROM generate_series(0,78) h, generate_series(1,125) f`, t0)
