@@ -113,3 +113,32 @@ func TestInvitations(t *testing.T) {
 	}
 	_ = fmt.Sprint
 }
+
+// Renew and revoke by email act on the live invitation, never a spent one
+// of the same email (revoked or accepted, whatever their ids sort as); by
+// id, a spent invitation is still 410.
+func TestInvitationByEmailIsTheLiveOne(t *testing.T) {
+	f, _ := accessFixture(t)
+	ctx := context.Background()
+	execSQL(t, f.s, ctx, `INSERT INTO invitations (id, tenant_id, code, email, role, expires_at, revoked_at, accepted_at) VALUES
+		('inv_0000_revoked', 't1', 'code-revoked', 'a@example.com', 'member', now() + interval '1 day', now(), NULL),
+		('inv_0001_accepted', 't1', 'code-accepted', 'a@example.com', 'member', now() + interval '1 day', NULL, now()),
+		('inv_zzzz_live', 't1', 'code-live', 'a@example.com', 'member', now() + interval '1 day', NULL, NULL)`)
+	for _, action := range []string{"renew", "revoke"} {
+		code, out := f.do(t, f.keys["admin"], "POST", "/v1/invitations/A@example.com/"+action, nil)
+		if code != 200 || out["id"] != "inv_zzzz_live" {
+			t.Fatalf("%s by email: %d %v, want 200 on inv_zzzz_live", action, code, out)
+		}
+	}
+	if got := queryOne[bool](t, f.s, `SELECT revoked_at IS NOT NULL AND renewed_at IS NOT NULL FROM invitations WHERE id = 'inv_zzzz_live'`); !got {
+		t.Error("the live invitation was not renewed and revoked")
+	}
+	code, out := f.do(t, f.keys["admin"], "POST", "/v1/invitations/inv_0000_revoked/renew", nil)
+	if c, _ := errCode(out); code != 410 || c != "invitation_unusable" {
+		t.Errorf("renew a revoked one by id: %d %v", code, out)
+	}
+	// None live now: by email, nothing to act on.
+	if code, out := f.do(t, f.keys["admin"], "POST", "/v1/invitations/a@example.com/revoke", nil); code != 404 {
+		t.Errorf("revoke by email with none live: %d %v", code, out)
+	}
+}

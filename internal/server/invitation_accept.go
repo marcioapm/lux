@@ -20,7 +20,9 @@ func (s *Server) changeInvitation(ctx context.Context, id string, revoke bool) (
 		if err := lockMembers(ctx, tx, p.TenantID); err != nil {
 			return err
 		}
-		list, err := s.readInvitations(ctx, tx, `i.tenant_id=$1 AND (i.id=$2 OR lower(i.email)=lower($2))`, p.TenantID, id)
+		// By id: exactly that invitation (410 if it is spent). By email:
+		// the live one (one per tenant and email); spent ones are history.
+		list, err := s.readInvitations(ctx, tx, `i.tenant_id=$1 AND (i.id=$2 OR (lower(i.email)=lower($2) AND i.accepted_at IS NULL AND i.revoked_at IS NULL))`, p.TenantID, id)
 		if err != nil {
 			return err
 		}
