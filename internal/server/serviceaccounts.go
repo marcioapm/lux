@@ -188,6 +188,26 @@ func memberByEmail(ctx context.Context, tx pgx.Tx, tenant, email string) (string
 	return id, err
 }
 
+// accountOwner is memberByEmail for an account's owner: "" is no owner.
+func accountOwner(ctx context.Context, tx pgx.Tx, tenant, email string) (*string, error) {
+	if email == "" {
+		return nil, nil
+	}
+	id, err := memberByEmail(ctx, tx, tenant, email)
+	if err != nil {
+		return nil, err
+	}
+	return &id, nil
+}
+
+// checkAccountRole: a service account is never an owner.
+func checkAccountRole(role string) error {
+	if role == "viewer" || role == "member" || role == "admin" {
+		return nil
+	}
+	return errf(http.StatusUnprocessableEntity, "invalid_request", "role: viewer, member or admin")
+}
+
 func (s *Server) listServiceAccounts(ctx context.Context, _ *struct{}) (*saListOutput, error) {
 	p := principal(ctx)
 	var out []ServiceAccount
@@ -219,26 +239,18 @@ func (s *Server) createServiceAccount(ctx context.Context, in *struct{ Body Crea
 	if !dnsLabel.MatchString(b.Name) {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_request", "name %q: lowercase letters, digits and dashes, starting and ending with a letter or digit, at most 63", b.Name)
 	}
-	if b.Role != "viewer" && b.Role != "member" && b.Role != "admin" {
-		return nil, errf(http.StatusUnprocessableEntity, "invalid_request", "role: viewer, member or admin")
+	if err := checkAccountRole(b.Role); err != nil {
+		return nil, err
 	}
 	var out ServiceAccount
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		var owner *string
-		if b.OwnerEmail != "" {
-			id, err := memberByEmail(ctx, tx, p.TenantID, b.OwnerEmail)
-			if err != nil {
-				return err
-			}
-			owner = &id
-		}
-		var by *string
-		if p.UserID != "" {
-			by = &p.UserID
+		owner, err := accountOwner(ctx, tx, p.TenantID, b.OwnerEmail)
+		if err != nil {
+			return err
 		}
 		id := ids.New(ids.ServiceAccount)
 		tag, err := tx.Exec(ctx, `INSERT INTO service_accounts (id, tenant_id, name, description, role, owner_user_id, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (tenant_id, name) DO NOTHING`, id, p.TenantID, b.Name, b.Description, b.Role, owner, by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (tenant_id, name) DO NOTHING`, id, p.TenantID, b.Name, b.Description, b.Role, owner, p.userRef())
 		if err != nil {
 			return err
 		}
@@ -262,8 +274,10 @@ func (s *Server) patchServiceAccount(ctx context.Context, in *struct {
 }) (*saOutput, error) {
 	p := principal(ctx)
 	b := in.Body
-	if b.Role != nil && *b.Role != "viewer" && *b.Role != "member" && *b.Role != "admin" {
-		return nil, errf(http.StatusUnprocessableEntity, "invalid_request", "role: viewer, member or admin")
+	if b.Role != nil {
+		if err := checkAccountRole(*b.Role); err != nil {
+			return nil, err
+		}
 	}
 	var out ServiceAccount
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -285,13 +299,9 @@ func (s *Server) patchServiceAccount(ctx context.Context, in *struct {
 			changed["role"] = *b.Role
 		}
 		if b.OwnerEmail != nil {
-			var owner *string
-			if *b.OwnerEmail != "" {
-				id, err := memberByEmail(ctx, tx, p.TenantID, *b.OwnerEmail)
-				if err != nil {
-					return err
-				}
-				owner = &id
+			owner, err := accountOwner(ctx, tx, p.TenantID, *b.OwnerEmail)
+			if err != nil {
+				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE service_accounts SET owner_user_id = $2 WHERE id = $1`, sa.ID, owner); err != nil {
 				return err
