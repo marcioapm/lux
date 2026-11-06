@@ -67,9 +67,61 @@ test("Server page: an unattached server is its tenant's admins' (Delete), decide
   }
 });
 
-test("useObjectViewer: a tenant whoami does not know is asked of whoami?tenant=, nothing changes until it answers", async () => {
-  const { viewerOf, knowsTenant } = await import("../identity.ts");
-  const me = { operator: false, tenant: "globex", tenantId: "ten_globex", scopes: ["read"], consoleAuth: "cloudflare-access" as const, userId: "usr_rui", role: "viewer" as const, memberships: [{ tenantId: "ten_globex", tenant: "globex", role: "viewer" as const }] };
-  expect(knowsTenant(me, "initech")).toBe(false);
-  expect(viewerOf(null, "initech").resolved).toBe(false);
+// A Run of acme, a tenant Rui's session whoami does not know: the page asks
+// whoami?tenant=acme and shows no mutating control until it answers.
+function deferredWhoami() {
+  let settle!: (r: unknown) => void;
+  const answer = new Promise<unknown>((r) => (settle = r));
+  return { answer, settle };
+}
+const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+const ACTIONS = ["Stop", "Terminate", "Cancel", "Rename", "Extend", "Push", "Sync", "Checkpoint"];
+
+test("Run page in a tenant whoami does not know: whoami?tenant=<it>, nothing mutating while pending; admin there → actions", async () => {
+  const run = runIn("acme");
+  const who = deferredWhoami();
+  const p = await t.mountAs("multi", `/runs/${run.id}?tenant=ten_globex`, <RunPage id={run.id} />, {
+    extra: (path) => {
+      if (path.startsWith(`/v1/runs/${run.id}`)) return run;
+      if (path.startsWith("/v1/whoami") && new URLSearchParams(path.split("?")[1] ?? "").get("tenant") === "acme") return who.answer;
+      return undefined;
+    },
+  });
+  try {
+    await p.until(() => p.text().includes(run.name), "the run");
+    await p.until(() => p.fake.calls.some((c) => c.startsWith("/v1/whoami") && c.includes("tenant=acme")), "whoami asked of the Run's tenant");
+    await new Promise((r) => setTimeout(r, 100));
+    expect(p.el.querySelector(".page-head-actions")).toBeNull();
+    for (const a of ACTIONS) expect(p.button(a)).toBeUndefined();
+    expect(p.el.querySelector("textarea")).toBeNull();
+    who.settle(json(200, { operator: false, tenant: "acme", tenantId: "ten_acme", scopes: ["admin"], consoleAuth: "cloudflare-access", userId: "usr_rui", email: "rui@globex.dev", role: "admin", memberships: [{ tenantId: "ten_acme", tenant: "acme", role: "admin" }], invitationsEnabled: true }));
+    await p.until(() => p.el.querySelector(".page-head-actions") != null, "the admin's actions");
+    expect(p.text()).not.toContain("can act on it");
+  } finally {
+    who.settle(json(200, {}));
+    await p.done();
+  }
+});
+
+test("Run page in a tenant whoami does not know: 403 not_a_member there → read-only", async () => {
+  const run = runIn("acme");
+  const who = deferredWhoami();
+  const p = await t.mountAs("multi", `/runs/${run.id}?tenant=ten_initech`, <RunPage id={run.id} />, {
+    extra: (path) => {
+      if (path.startsWith(`/v1/runs/${run.id}`)) return run;
+      if (path.startsWith("/v1/whoami") && new URLSearchParams(path.split("?")[1] ?? "").get("tenant") === "acme") return who.answer;
+      return undefined;
+    },
+  });
+  try {
+    await p.until(() => p.fake.calls.some((c) => c.startsWith("/v1/whoami") && c.includes("tenant=acme")), "whoami asked of the Run's tenant");
+    expect(p.el.querySelector(".page-head-actions")).toBeNull();
+    who.settle(json(403, { status: 403, code: "not_a_member", message: "you are not a member of acme" }));
+    await new Promise((r) => setTimeout(r, 150));
+    // Rui is admin in initech (the scope): that must not leak onto acme's Run.
+    expect(p.el.querySelector(".page-head-actions")).toBeNull();
+    for (const a of ACTIONS) expect(p.button(a)).toBeUndefined();
+  } finally {
+    await p.done();
+  }
 });
