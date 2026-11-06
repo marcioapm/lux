@@ -53,3 +53,35 @@ func TestPeopleCommands(t *testing.T) {
 		})
 	}
 }
+
+// tenants create --owner: text shows the first owner's invitation (email,
+// link, expiry), the thing the operator must send; JSON keeps it nested.
+func TestTenantCreateOwnerInvitation(t *testing.T) {
+	answer := `{"id":"ten_1","name":"team","tenantId":"ten_1","invitation":{"id":"inv_1","email":"a@example.com","role":"owner","status":"pending","code":"c0de","url":"https://lux.example.com/invite/c0de","createdAt":"2026-11-06T00:00:00Z","expiresAt":"2026-11-20T00:00:00Z"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	run := func(extra ...string) string {
+		var stdout, stderr bytes.Buffer
+		a := &app{stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr}
+		args := append([]string{"--url", srv.URL, "--api-key", "key"}, extra...)
+		if code := a.main(append(args, "tenants", "create", "team", "--owner", "a@example.com")); code != 0 {
+			t.Fatalf("%d %s", code, stderr.String())
+		}
+		return stdout.String()
+	}
+	text := run()
+	if !strings.Contains(text, "invitation: a@example.com  https://lux.example.com/invite/c0de  2026-11-20T00:00:00Z\n") {
+		t.Errorf("text drops the invitation:\n%s", text)
+	}
+	var got, want map[string]any
+	if err := json.Unmarshal([]byte(run("-o", "json")), &got); err != nil {
+		t.Fatal(err)
+	}
+	json.Unmarshal([]byte(answer), &want)
+	if g, _ := json.Marshal(got); string(g) != func() string { w, _ := json.Marshal(want); return string(w) }() {
+		t.Errorf("json changed: %s", g)
+	}
+}

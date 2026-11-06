@@ -53,6 +53,11 @@ func (a *app) peopleRequest(cmd *cobra.Command, method, path string, body any, l
 			fmt.Fprintf(a.stdout, "%s: %v\n", k, v)
 		}
 	}
+	// A tenant created with its first owner carries that Owner invitation:
+	// its link is what the operator sends, so text shows it as create does.
+	if v, ok := out["invitation"].(map[string]any); ok {
+		fmt.Fprintf(a.stdout, "invitation: %v  %v  %v\n", v["email"], v["url"], v["expiresAt"])
+	}
 	return nil
 }
 func compactPerson(m map[string]any) string {
