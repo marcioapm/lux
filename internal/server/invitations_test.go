@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestInvitations(t *testing.T) {
@@ -112,6 +113,33 @@ func TestInvitations(t *testing.T) {
 		}
 	}
 	_ = fmt.Sprint
+}
+
+// Renew by id (the console's Renew): an expired invitation keeps its code
+// and link, is valid 14 days from now, and is accepted with the original
+// code.
+func TestInvitationRenewKeepsCode(t *testing.T) {
+	f, access := accessFixture(t)
+	code, out := f.do(t, f.keys["admin"], "POST", "/v1/invitations", map[string]any{"role": "member", "invitations": []any{map[string]any{"email": "late@example.com"}}})
+	if code != 200 {
+		t.Fatalf("create: %d %v", code, out)
+	}
+	v := out["results"].([]any)[0].(map[string]any)["invitation"].(map[string]any)
+	id, invcode, url := v["id"].(string), v["code"].(string), v["url"].(string)
+	execSQL(t, f.s, context.Background(), `UPDATE invitations SET expires_at = now() - interval '1 hour', created_at = now() - interval '15 days' WHERE id = $1`, id)
+	before := time.Now()
+	code, out = f.do(t, f.keys["admin"], "POST", "/v1/invitations/"+id+"/renew", nil)
+	if code != 200 || out["code"] != invcode || out["url"] != url || out["status"] != "pending" || out["renewedAt"] == nil {
+		t.Fatalf("renew: %d %v, want code %s url %s pending", code, out, invcode, url)
+	}
+	exp, err := time.Parse(time.RFC3339, out["expiresAt"].(string))
+	if d := exp.Sub(before.Add(14 * 24 * time.Hour)); err != nil || d < -time.Minute || d > time.Minute {
+		t.Errorf("expiresAt %v (%v): want now+14d", out["expiresAt"], err)
+	}
+	code, out = accessDo(t, f.s, access.sign("late@example.com"), "POST", "/v1/invitations/by-code/"+invcode+"/accept", nil)
+	if code != 200 || out["role"] != "member" {
+		t.Fatalf("accept with the original code: %d %v", code, out)
+	}
 }
 
 // Renew and revoke by email act on the live invitation, never a spent one
