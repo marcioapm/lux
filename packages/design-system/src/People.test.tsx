@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Avatar, initials } from "./Avatar.tsx";
-import { inviteLinksText, InviteLinkList } from "./InviteLinkList.tsx";
+import { CopyAllLinks, inviteLinksText, InviteLinkList } from "./InviteLinkList.tsx";
 import { Person, RoleBadge, roleAtLeast } from "./Person.tsx";
 
 test("initials", () => {
@@ -113,5 +113,23 @@ describe("in a DOM", () => {
     expect(rows.map((r) => r.querySelector(".invlinks-url")!.textContent)).toEqual(["https://lux/invite/a", "https://lux/invite/b"]);
     expect(rows[1]!.textContent).toContain("already invited");
     expect(rows.map((r) => r.querySelector("button")!.getAttribute("aria-label"))).toEqual(["Copy link for jorge@acme.dev", "Copy link for filipa@acme.dev"]);
+  });
+
+  // The rendered control, not just inviteLinksText: a CopyAllLinks that put
+  // the URLs alone (or anything else) on the clipboard fails here.
+  test("CopyAllLinks: Copy all writes every link as `email  url` lines, exactly", async () => {
+    const written: string[] = [];
+    const before = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: async (s: string) => void written.push(s) }, configurable: true });
+    try {
+      const el = await render(<CopyAllLinks links={[{ email: "a@acme.dev", url: "https://lux.example.com/invite/aaa" }, { email: "b@acme.dev", name: "Bea", url: "https://lux.example.com/invite/bbb" }]} />);
+      const b = [...el.querySelectorAll("button")].find((x) => x.textContent?.includes("Copy all"))!;
+      await act(async () => b.click());
+      await act(async () => new Promise((r) => setTimeout(r, 10)));
+      expect(written).toEqual(["a@acme.dev  https://lux.example.com/invite/aaa\nb@acme.dev  https://lux.example.com/invite/bbb"]);
+      expect(b.textContent).toContain("Copied");
+    } finally {
+      if (before) Object.defineProperty(navigator, "clipboard", before);
+    }
   });
 });
