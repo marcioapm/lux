@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"time"
 
@@ -265,5 +264,3 @@ func (s *Server) listMemberKeys(ctx context.Context, in *MemberPath) (*keysOutpu
 	})
 	return &keysOutput{keyList{keys}}, err
 }
-
-var _ = errors.Is
