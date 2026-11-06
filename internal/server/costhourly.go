@@ -151,8 +151,11 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 				firstLimit = 0
 			}
 		}
+		// Keep cursor lookups keyed by host under RLS despite its low row estimates.
 		rows, err := tx.Query(ctx, `SELECT h.id, greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1)
-			FROM hosts h LEFT JOIN cost_host_refresh c ON c.host_id = h.id
+			FROM hosts h LEFT JOIN LATERAL (
+                    SELECT next_hour, retry_at FROM cost_host_refresh WHERE host_id = h.id OFFSET 0
+                ) c ON true
 			WHERE (c.retry_at IS NULL OR c.retry_at <= $2)
 				AND greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1) <= date_trunc('hour', $2::timestamptz)
 				AND (h.terminated_at IS NULL OR h.terminated_at > greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1))
@@ -214,7 +217,9 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 				pending bool
 			}
 			err = tx.QueryRow(ctx, `SELECT h.id, greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1)
-				FROM hosts h LEFT JOIN cost_host_refresh c ON c.host_id = h.id
+				FROM hosts h LEFT JOIN LATERAL (
+                    SELECT next_hour, retry_at FROM cost_host_refresh WHERE host_id = h.id OFFSET 0
+                ) c ON true
 				WHERE (c.retry_at IS NULL OR c.retry_at <= $2)
 					AND greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1) <= date_trunc('hour', $2::timestamptz)
 					AND (h.terminated_at IS NULL OR h.terminated_at > greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1))
