@@ -371,7 +371,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	args := []any{from, to, family, want, absent, group[0], group[1], label[0], label[1], rank, top, nofamily, hostFamilies,
 		(group[0] != "key" && group[1] != "key") || p.atLeast("admin"), p.UserID, p.ServiceAccountID, p.Email}
 	rowCount := 0
-	singlePass := in.Interval != "" && len(in.Group) == 1 && group[0] == "family" && top == 0 && !in.Runs
+	singlePass := in.Interval != "" && len(in.Group) == 1 && group[0] == "family" && top == 0
 	read := func(tx pgx.Tx, interval string) ([]CostSummaryRow, error) {
 		bucket := "NULL::timestamptz"
 		switch interval {
@@ -381,6 +381,10 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			bucket = "date_trunc('day', hour AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
 		}
 		grouped := `SELECT ` + bucket + ` AS at, g1, g2, currency, other, trim_scale(sum(amount))::text AS amount FROM shaped GROUP BY 1, 2, 3, 4, 5`
+		// Read vals once through a scalar map lookup, not a join whose low
+		// row estimate can cause a nested loop over every cost row.
+		const valKey = `(currency || E'\x1f' || other::text || coalesce(E'\x1f' || g1, ''))`
+		const valmap = `, valmap AS MATERIALIZED (SELECT jsonb_object_agg(` + valKey + `, jsonb_build_array(runs, nvals)) AS m FROM vals) `
 		var sql string
 		if singlePass {
 			// Both aggregate levels share the scoped joins. grouping, not a
@@ -388,7 +392,15 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			grouped = `SELECT ` + bucket + ` AS at, g1, g2, currency, other, trim_scale(sum(amount))::text AS amount,
 				grouping(` + bucket + `)::int AS total FROM shaped
 				GROUP BY GROUPING SETS ((1, 2, 3, 4, 5), (2, 3, 4, 5))`
-			sql = query + `SELECT at, g1, g2, currency, other, amount, NULL::int, NULL::int, total
+			metadata := `NULL::int, NULL::int`
+			if in.Runs {
+				query += valmap
+				// Counts cover the entire window, not the sum of bucket counts:
+				// the same Run can contribute to more than one bucket.
+				metadata = `CASE WHEN total = 1 THEN ((SELECT m FROM valmap) -> ` + valKey + ` ->> 0)::int END,
+					CASE WHEN total = 1 THEN ((SELECT m FROM valmap) -> ` + valKey + ` ->> 1)::int END`
+			}
+			sql = query + `SELECT at, g1, g2, currency, other, amount, ` + metadata + `, total
 				FROM (` + grouped + `) b ORDER BY total DESC, 1 NULLS FIRST, 2, 3, 4, 5`
 		} else if (top > 0 || in.Runs) && interval == "" {
 			// vals is read once, as a map keyed like each row, through a scalar
@@ -396,8 +408,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			// nests the loop, comparing every row with every value (op 7d
 			// group=run&runs=true: 10.3M comparisons). currency holds no \x1f,
 			// and a NULL g1 (no group, no pool, no host) keys apart from any value.
-			const valKey = `(currency || E'\x1f' || other::text || coalesce(E'\x1f' || g1, ''))`
-			sql = query + `, valmap AS MATERIALIZED (SELECT jsonb_object_agg(` + valKey + `, jsonb_build_array(runs, nvals)) AS m FROM vals)
+			sql = query + valmap + `
 				SELECT at, g1, g2, currency, other, amount,
 					((SELECT m FROM valmap) -> ` + valKey + ` ->> 0)::int, ((SELECT m FROM valmap) -> ` + valKey + ` ->> 1)::int
 				FROM (` + grouped + `) b ORDER BY 1 NULLS FIRST, 2, 3, 4, 5`

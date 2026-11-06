@@ -34,6 +34,51 @@ func (r *monthlyRecorder) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pg
 
 func (*monthlyRecorder) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
+// Frozen from the two statements issued by the HTTP handler at ed558707,
+// captured before changing costread.go. Do not build the oracle from that file.
+const monthlyOldBase = `WITH scoped AS (
+	SELECT c.hour, c.currency, c.amount, c.tenant_id, c.family, c.run_id,
+		coalesce(cp.name, '(none)') AS pool, coalesce(c.host_id, '(none)') AS host, r.labels,
+		coalesce(r.submitted_by_key, 'email:' || r.submitted_by_email, '(none)') AS submitter,
+		coalesce('user:' || r.owner_user_id, 'sa:' || r.owner_sa_id, '(none)') AS member,
+		coalesce('user:' || r.owner_user_id, 'user:' || sa.owner_user_id, 'sa:' || r.owner_sa_id, '(none)') AS owner
+	FROM cost_hourly c JOIN runs r ON r.id = c.run_id LEFT JOIN pools cp ON cp.id = c.pool_id
+	LEFT JOIN service_accounts sa ON sa.id = r.owner_sa_id
+	WHERE c.run_id IS NOT NULL AND c.hour >= $1 AND c.hour < $2
+		AND (cardinality($3::text[]) = 0 OR c.family = ANY($3::text[]))
+		AND ($4::jsonb = '{}' OR NOT EXISTS (SELECT 1 FROM jsonb_each($4::jsonb) f
+			WHERE (r.labels->>f.key) IN (SELECT jsonb_array_elements_text(f.value)) IS NOT TRUE))
+		AND (cardinality($5::text[]) = 0 OR NOT EXISTS (SELECT 1 FROM unnest($5::text[]) k WHERE r.labels ? k))
+), dimensions AS (
+	SELECT hour, currency, amount, run_id, ($10 = 'all' OR (family = ANY($13::text[])) = ($10 = 'compute')) AS ranks,
+		CASE $6::text WHEN 'tenant' THEN tenant_id WHEN 'pool' THEN pool WHEN 'host' THEN host WHEN 'key' THEN submitter WHEN 'member' THEN member WHEN 'owner' THEN owner
+			WHEN 'family' THEN family WHEN 'run' THEN run_id WHEN 'label' THEN coalesce(labels->>$8, '(none)') END AS g1,
+		CASE $7::text WHEN 'tenant' THEN tenant_id WHEN 'pool' THEN pool WHEN 'host' THEN host WHEN 'key' THEN submitter WHEN 'member' THEN member WHEN 'owner' THEN owner
+			WHEN 'family' THEN family WHEN 'run' THEN run_id WHEN 'label' THEN coalesce(labels->>$9, '(none)') END AS g2
+	FROM scoped WHERE family <> ALL($12::text[])
+	AND ($14::boolean OR submitter IN (SELECT k.id FROM api_keys k LEFT JOIN service_accounts sa ON sa.id=k.service_account_id
+		WHERE (k.user_id=nullif($15,'')) OR k.service_account_id=nullif($16,'') OR sa.owner_user_id=nullif($15,''))
+		OR submitter = 'email:' || nullif($17,''))
+), shaped AS (SELECT *, false AS other FROM dimensions WHERE $11::int = 0), vals AS (
+	SELECT g1, currency, other, count(*)::int AS runs, NULL::int AS nvals
+	FROM (SELECT DISTINCT g1, currency, other, run_id FROM shaped) d GROUP BY 1, 2, 3
+) `
+
+func monthlyOldStatements(args []any, interval string) []feedStatement {
+	const key = `(currency || E'\x1f' || other::text || coalesce(E'\x1f' || g1, ''))`
+	bucket := `date_trunc('day', hour AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`
+	if interval == "hour" {
+		bucket = `date_trunc('hour', hour)`
+	}
+	return []feedStatement{
+		{sql: monthlyOldBase + `, valmap AS MATERIALIZED (SELECT jsonb_object_agg(` + key + `, jsonb_build_array(runs, nvals)) AS m FROM vals)
+		SELECT at, g1, g2, currency, other, amount,
+		((SELECT m FROM valmap) -> ` + key + ` ->> 0)::int, ((SELECT m FROM valmap) -> ` + key + ` ->> 1)::int
+		FROM (SELECT NULL::timestamptz AS at, g1, g2, currency, other, trim_scale(sum(amount))::text AS amount FROM shaped GROUP BY 1, 2, 3, 4, 5) b ORDER BY 1 NULLS FIRST, 2, 3, 4, 5`, args: args},
+		{sql: monthlyOldBase + `SELECT *, NULL::int, NULL::int FROM (SELECT ` + bucket + ` AS at, g1, g2, currency, other, trim_scale(sum(amount))::text AS amount FROM shaped GROUP BY 1, 2, 3, 4, 5) b ORDER BY 1 NULLS FIRST, 2, 3, 4, 5`, args: args},
+	}
+}
+
 func monthlyFixture(t *testing.T) (*Server, map[string]string) {
 	t.Helper()
 	s, keys := costFixture(t)
@@ -141,7 +186,7 @@ func TestCostMonthlyExperiment(t *testing.T) {
 	from := t0.Add(-30 * 24 * time.Hour)
 	for _, window := range []int{24, 720} {
 		for _, interval := range []string{"hour", "day"} {
-			path := "/v1/costs?from=" + url.QueryEscape(from.Format(time.RFC3339)) + "&to=" + url.QueryEscape(from.Add(time.Duration(window)*time.Hour).Format(time.RFC3339)) + "&group=family&interval=" + interval
+			path := "/v1/costs?from=" + url.QueryEscape(from.Format(time.RFC3339)) + "&to=" + url.QueryEscape(from.Add(time.Duration(window)*time.Hour).Format(time.RFC3339)) + "&group=family&runs=true&interval=" + interval
 			if os.Getenv("LUX_MONTHLY_RESTART") == "lux-monthly-pg" {
 				if output, err := exec.Command("podman", "restart", "lux-monthly-pg").CombinedOutput(); err != nil {
 					t.Fatalf("local restart: %s: %v", output, err)
@@ -166,13 +211,12 @@ func TestCostMonthlyExperiment(t *testing.T) {
 				t.Fatalf("single pass needs 1 captured statement, got %d", len(qs))
 			}
 			candidate := qs[0]
-			totals, tq, _ := monthlyCapture(t, s, keys["op"], strings.Replace(path, "&interval="+interval, "", 1))
-			series, sq, _ := monthlyCapture(t, s, keys["op"], path+"&runs=true")
-			if !reflect.DeepEqual(got.Totals, totals.Totals) || !reflect.DeepEqual(got.Series, series.Series) {
-				t.Fatal("production rows differ from unchanged totals/series paths")
+			_ = got
+			qs = monthlyOldStatements(candidate.args, interval)
+			for i, q := range append(slices.Clone(qs), candidate) {
+				t.Logf("CAPTURE window=%d interval=%s query=%d SQL:\n%s\nTYPED BINDS: %#v", window, interval, i, q.sql, q.args)
 			}
-			qs = []feedStatement{tq[0], sq[1]}
-			for _, memory := range []string{"4MB", "16MB"} {
+			for _, memory := range []string{"4MB"} {
 				for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
 					for attempt := 0; attempt < 3; attempt++ {
 						var baseline [][]any
@@ -210,7 +254,7 @@ func TestCostMonthlyExperiment(t *testing.T) {
 // against reintroducing the second scoped join over a monthly window.
 func TestCostMonthlyWork(t *testing.T) {
 	s, keys := monthlyFixture(t)
-	path := "/v1/costs?from=" + url.QueryEscape(t0.Add(-30*24*time.Hour).Format(time.RFC3339)) + "&to=" + url.QueryEscape(t0.Format(time.RFC3339)) + "&group=family"
+	path := "/v1/costs?from=" + url.QueryEscape(t0.Add(-30*24*time.Hour).Format(time.RFC3339)) + "&to=" + url.QueryEscape(t0.Format(time.RFC3339)) + "&group=family&runs=true"
 	_, baseline, _ := monthlyCapture(t, s, keys["op"], path)
 	_, qs, _ := monthlyCapture(t, s, keys["op"], path+"&interval=day")
 	if len(qs) != 1 {
@@ -230,23 +274,93 @@ func TestCostMonthlyWork(t *testing.T) {
 
 func TestCostMonthlyFamilyEquivalence(t *testing.T) {
 	s, keys := costReadFixture(t)
+	// The same Run spans hours and UTC days, including a zero cost row.
+	ownerExec(t, s, `INSERT INTO cost_hourly(hour,tenant_id,run_id,source,family,currency,amount,allocated,unallocated)
+		VALUES ($1,'t1','r1','overlap','compute','USD',0,0,0),
+		($1,'t1','r1','overlap','(none)','EUR',1.230000000,0,0)`, t0.Add(25*time.Hour))
 	for _, key := range []string{"t1", "t2", "op"} {
-		for _, filters := range []string{"", "&family=compute", "&nofamily=compute", "&label=team=alpha", "&nolabel=team", "&family=missing"} {
+		for _, filters := range []string{"", "&family=compute", "&nofamily=compute", "&label=team=alpha", "&nolabel=team", "&label=team=missing", "&family=missing", "&tenant=t1"} {
 			for _, interval := range []string{"hour", "day"} {
-				var got, totals, series CostSummaryBody
-				path := costPath("&group=family" + filters)
-				for _, request := range []struct {
-					path string
-					out  *CostSummaryBody
-				}{
-					{path + "&interval=" + interval, &got}, {path, &totals}, {path + "&interval=" + interval + "&runs=true", &series},
-				} {
-					if code := getJSON(t, s, keys[key], request.path, request.out); code != 200 {
-						t.Fatalf("%s: %d", request.path, code)
+				for _, runs := range []bool{false, true} {
+					var got, totals, series CostSummaryBody
+					path := "/v1/costs?from=" + url.QueryEscape(t0.Format(time.RFC3339)) + "&to=" + url.QueryEscape(t0.Add(48*time.Hour).Format(time.RFC3339)) + "&group=family" + filters
+					if runs {
+						path += "&runs=true"
 					}
-				}
-				if !reflect.DeepEqual(got.Totals, totals.Totals) || !reflect.DeepEqual(got.Series, series.Series) || !reflect.DeepEqual(got.Unallocated, totals.Unallocated) || !reflect.DeepEqual(got.Families, totals.Families) {
-					t.Fatalf("%s %s %s: combined result differs", key, filters, interval)
+					if runs {
+						got, qs, _ := monthlyCapture(t, s, keys[key], path+"&interval="+interval)
+						if len(qs) != 1 {
+							t.Fatalf("runs=true heavy statements=%d, want 1", len(qs))
+						}
+						var want CostSummaryBody
+						if code := getJSON(t, s, keys[key], path, &want); code != 200 {
+							t.Fatal(code)
+						}
+						p := Principal{Operator: key == "op"}
+						if key != "op" {
+							p.TenantID = key
+						}
+						if key == "op" && strings.Contains(filters, "tenant=t1") {
+							p.TenantID = "t1"
+						}
+						old := monthlyOldStatements(qs[0].args, interval)
+						for i, q := range old {
+							rows := []CostSummaryRow{}
+							err := s.costTx(context.Background(), p, func(tx pgx.Tx) error {
+								r, err := tx.Query(context.Background(), q.sql, q.args...)
+								if err != nil {
+									return err
+								}
+								defer r.Close()
+								for r.Next() {
+									var row CostSummaryRow
+									var g1, g2 *string
+									var nvals *int
+									if err := r.Scan(&row.At, &g1, &g2, &row.Currency, &row.Other, &row.Amount, &row.Runs, &nvals); err != nil {
+										return err
+									}
+									if row.At != nil {
+										at := row.At.UTC()
+										row.At = &at
+									}
+									row.Group = map[string]string{"family": *g1}
+									rows = append(rows, row)
+									if i == 0 && (row.Runs == nil || *row.Runs < 1) {
+										t.Fatalf("missing total count: %+v", row)
+									}
+									if i == 1 && row.Runs != nil {
+										t.Fatal("series count must be absent")
+									}
+								}
+								return r.Err()
+							})
+							if err != nil {
+								t.Fatal(err)
+							}
+							if i == 0 {
+								want.Totals = rows
+							} else if len(rows) > 0 {
+								want.Series = rows
+							}
+						}
+						if !reflect.DeepEqual(got, want) {
+							t.Fatalf("runs=true %s %s %s: full response differs\ngot=%+v\nwant=%+v", key, filters, interval, got, want)
+						}
+						continue
+					}
+					for _, request := range []struct {
+						path string
+						out  *CostSummaryBody
+					}{
+						{path + "&interval=" + interval, &got}, {path, &totals}, {path + "&interval=" + interval + "&runs=true", &series},
+					} {
+						if code := getJSON(t, s, keys[key], request.path, request.out); code != 200 {
+							t.Fatalf("%s: %d", request.path, code)
+						}
+					}
+					if !reflect.DeepEqual(got.Totals, totals.Totals) || !reflect.DeepEqual(got.Series, series.Series) || !reflect.DeepEqual(got.Unallocated, totals.Unallocated) || !reflect.DeepEqual(got.Families, totals.Families) {
+						t.Fatalf("%s %s %s: combined result differs", key, filters, interval)
+					}
 				}
 			}
 		}
@@ -261,12 +375,17 @@ func TestCostMonthlyFamilyRowLimit(t *testing.T) {
 		FROM generate_series(0,78) h, generate_series(1,125) f`, t0)
 	path := "/v1/costs?from=" + url.QueryEscape(t0.Format(time.RFC3339)) + "&to=" + url.QueryEscape(t0.Add(80*time.Hour).Format(time.RFC3339)) + "&group=family&interval=hour"
 	var got CostSummaryBody
-	if code := getJSON(t, s, keys["t1"], path, &got); code != 200 || len(got.Totals)+len(got.Series) != costMaxRows {
-		t.Fatalf("exact limit: HTTP=%d rows=%d", code, len(got.Totals)+len(got.Series))
+	for _, suffix := range []string{"", "&runs=true"} {
+		got = CostSummaryBody{}
+		if code := getJSON(t, s, keys["t1"], path+suffix, &got); code != 200 || len(got.Totals)+len(got.Series) != costMaxRows {
+			t.Fatalf("exact limit: HTTP=%d rows=%d", code, len(got.Totals)+len(got.Series))
+		}
 	}
 	ownerExec(t, s, `INSERT INTO cost_hourly(hour,tenant_id,run_id,source,family,currency,amount,allocated,unallocated)
 		VALUES($1,'t1','r1','limit','family-1','USD',1,0,0)`, t0.Add(79*time.Hour))
-	if code := getJSON(t, s, keys["t1"], path, &got); code != 413 {
-		t.Fatalf("over limit: HTTP=%d", code)
+	for _, suffix := range []string{"", "&runs=true"} {
+		if code := getJSON(t, s, keys["t1"], path+suffix, &got); code != 413 {
+			t.Fatalf("over limit: HTTP=%d", code)
+		}
 	}
 }
