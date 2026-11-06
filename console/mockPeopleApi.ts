@@ -1,7 +1,7 @@
 // The people routes of the mock luxd (mockPeople.ts holds the data):
 // /v1/me, /me/keys, /me/invitations, /members, /invitations (and by-code),
 // /service-accounts, /people, /costs?by=member|owner, POST /tenants.
-import { activeKeys, ago, atLeast, DAY, err, INVITES, invJson, invStatus, KEYS, keyJson, memberJson, MEMBERSHIPS, membershipsOf, ok, OWNER_COST, person, SAS, saJson, seq, TENANTS, tenantName, USERS, type Caller, type Inv, type Key, type MembershipRow, type Role, type SA } from "./mockPeople.ts";
+import { activeKeys, ago, atLeast, DAY, err, INVITES, invJson, invStatus, KEYS, keyJson, memberJson, MEMBERSHIPS, membershipsOf, ok, OWNER_COST, person, RANK, SAS, saJson, seq, TENANTS, tenantName, USERS, type Caller, type Inv, type Key, type MembershipRow, type Role, type SA } from "./mockPeople.ts";
 
 let codeSeq = 0;
 const newCode = () => `inv_${(Date.now() + ++codeSeq).toString(36).slice(-6)}${Math.random().toString(36).slice(2, 6)}`;
@@ -101,13 +101,21 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
   const inTenant = () => MEMBERSHIPS.filter((m) => m.tenantId === tenantId);
   if (p === "/v1/members") {
     if (method === "GET") return ok({ members: inTenant().map((m) => memberJson(m, c)) });
-    if (!c.operator) return err(403, "forbidden", "only operators add members directly; admins invite");
-    const b = await body<{ email: string; role: Role }>();
+    if (!c.operator || c.readOnly) return err(403, "forbidden", "only operators add members directly; admins invite");
+    const b = await body<{ email: string; role: Role; upsert?: boolean }>();
+    if (!EMAIL_RE.test(b.email ?? "") || !(b.role in RANK)) return err(422, "invalid_request", "a valid email and role are required");
     let user = USERS.find((x) => x.email === b.email.toLowerCase());
     if (!user) USERS.push((user = { id: `usr_${++seq.key}`, email: b.email.toLowerCase(), name: "", operator: false, lastSeen: 0 }));
+    // members.go addMember: already a member is 409, unless upsert (operators: set the role).
+    const had = inTenant().find((m) => m.userId === user!.id);
+    if (had) {
+      if (!b.upsert) return err(409, "conflict", "already a member");
+      had.role = b.role;
+      return ok(memberJson(had, c));
+    }
     const m: MembershipRow = { tenantId, userId: user.id, role: b.role, joined: 0 };
     MEMBERSHIPS.push(m);
-    return ok(memberJson(m, c), 201);
+    return ok(memberJson(m, c));
   }
   const mm = p.match(/^\/v1\/members\/([^/]+)(?:\/keys(?:\/([^/]+))?)?$/);
   if (mm) {

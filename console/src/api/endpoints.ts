@@ -112,7 +112,7 @@ export const api = {
   setMemberRole: (tenant: Scope, user: string, role: TenantRole) => request<Member>(`/members/${enc(user)}`, { method: "PATCH", tenant, body: { role } }),
   removeMember: (tenant: Scope, user: string) => request<void>(`/members/${enc(user)}`, { method: "DELETE", tenant }),
   /** Operators: add a person directly by email (key-mode installs). */
-  addMember: (tenant: Scope, body: { email: string; role: TenantRole }) => request<Member>("/members", { method: "POST", tenant, body }),
+  addMember: (tenant: Scope, body: { email: string; role: TenantRole; upsert?: boolean }) => request<Member>("/members", { method: "POST", tenant, body }),
 
   /** cursor: luxd always sends it; "" when there are no more. */
   invitations: (tenant: Scope, p: { status?: string; q?: string; cursor?: string } = {}, signal?: Sig) => request<{ invitations: Invitation[]; cursor: string }>("/invitations", { tenant, query: p, signal }),

@@ -7,6 +7,9 @@ components:
           type: string
         role:
           type: string
+        upsert:
+          description: "Already a member: set their role (member.role_changed) instead of 409 conflict."
+          type: boolean
       type: object
     AdmissionBlocker:
       additionalProperties: false
@@ -7325,7 +7328,7 @@ paths:
         - people
     post:
       description: |-
-        Operators only. Normally invite the person instead.
+        Operators only (403 otherwise). Normally invite the person instead. Already a member: 409 conflict, unless upsert is true, which sets their role instead (member.role_changed): how an operator assigns a tenant's owner, by email, in one call.
 
         Needs the `operator` scope.
       operationId: addMember
