@@ -915,6 +915,30 @@ a.idchip-text:hover {
 .field .input {
   width: 100%;
 }
+.field-hint.field-error {
+  color: var(--danger-fg, var(--fg-muted));
+}
+
+/* ---------- PersonPicker ----------
+   An email field with Person suggestions under it (Set owner, Convert). */
+.person-picker-box {
+  position: relative;
+}
+.select-pop.person-picker-list {
+  position: static;
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  width: 100%;
+  max-width: none;
+  max-height: 280px;
+  overflow: auto;
+}
+.person-picker-list .select-opt {
+  justify-content: space-between;
+}
+.person-picker-list .person {
+  min-width: 0;
+}
 
 /* ---------- Select ---------- */
 .select {

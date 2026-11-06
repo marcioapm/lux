@@ -122,12 +122,35 @@ func (a *app) membersCmd() *cobra.Command {
 	add.Flags().StringVar(&role, "role", "member", "viewer, member, admin or owner")
 	cmd.AddCommand(add, &cobra.Command{Use: "ls", Short: "List members", Args: cobra.NoArgs, RunE: func(c *cobra.Command, _ []string) error {
 		return a.peopleRequest(c, "GET", "/v1/members", nil, "members")
-	}}, &cobra.Command{Use: "set-role <email> <role>", Short: "Change a member's role", Args: cobra.ExactArgs(2), RunE: func(c *cobra.Command, args []string) error {
-		return a.peopleRequest(c, "PATCH", "/v1/members/"+url.PathEscape(args[0]), map[string]any{"role": args[1]}, "")
+	}}, &cobra.Command{Use: "set-role <email|me> <role>", Short: "Change a member's role (me: your own, from whoami)", Args: cobra.ExactArgs(2), RunE: func(c *cobra.Command, args []string) error {
+		who := args[0]
+		if who == "me" {
+			id, err := a.myUserID(c)
+			if err != nil {
+				return err
+			}
+			who = id
+		}
+		return a.peopleRequest(c, "PATCH", "/v1/members/"+url.PathEscape(who), map[string]any{"role": args[1]}, "")
 	}}, &cobra.Command{Use: "rm <email>", Short: "Remove a member and revoke their keys", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
 		return a.peopleRequest(c, "DELETE", "/v1/members/"+url.PathEscape(args[0]), nil, "")
 	}})
 	return cmd
+}
+
+// myUserID is the caller's person, from whoami: a key of no person (a
+// service account's, a platform operator key) has none.
+func (a *app) myUserID(c *cobra.Command) (string, error) {
+	var me struct {
+		UserID string `json:"userId"`
+	}
+	if err := a.c.Do(ctxOf(c), "GET", "/v1/whoami", nil, &me); err != nil {
+		return "", err
+	}
+	if me.UserID == "" {
+		return "", fmt.Errorf("me: this key is no person's (a service account's or a platform key): name the member by email")
+	}
+	return me.UserID, nil
 }
 func (a *app) invitesCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "invites", Short: "Email-bound invitations (Cloudflare Access mode)"}

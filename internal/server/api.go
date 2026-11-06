@@ -745,6 +745,19 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	created := false
 	id := ids.New(ids.Run)
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		if p.ServiceAccountID != "" {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext('lux_keys:' || $1 || ':' || $2))`, p.TenantID, p.ServiceAccountID); err != nil {
+				return err
+			}
+			var err error
+			p, err = revalidateAccountCaller(ctx, tx, p)
+			if err != nil {
+				return err
+			}
+			if !p.atLeast("member") {
+				return errf(http.StatusForbidden, "forbidden", "this key lacks the run scope")
+			}
+		}
 		if idem != "" {
 			existing, err := runByIdempotencyKey(ctx, tx, idem)
 			if err == nil {

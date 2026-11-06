@@ -1,8 +1,10 @@
 package cli
 
 import (
-	"github.com/spf13/cobra"
+	"fmt"
 	"net/url"
+
+	"github.com/spf13/cobra"
 )
 
 func (a *app) saCmd() *cobra.Command {
@@ -20,12 +22,32 @@ func (a *app) saCmd() *cobra.Command {
 		return a.peopleRequest(c, "GET", "/v1/service-accounts/"+url.PathEscape(args[0]), nil, "")
 	}}, &cobra.Command{Use: "disable <sa>", Short: "Disable a service account", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
 		return a.peopleRequest(c, "PATCH", "/v1/service-accounts/"+url.PathEscape(args[0]), map[string]any{"disabled": true}, "")
+	}}, &cobra.Command{Use: "rm <sa>", Short: "Delete a service account that owns no Runs (admins only); its keys are revoked", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
+		return a.peopleRequest(c, "DELETE", "/v1/service-accounts/"+url.PathEscape(args[0]), nil, "")
+	}}, &cobra.Command{Use: "convert <sa> <email>", Short: "Make a service account's keys a member's personal keys and its Runs theirs; the account is deleted (admins only)", Args: cobra.ExactArgs(2), RunE: func(c *cobra.Command, args []string) error {
+		var out struct {
+			User struct {
+				ID    string `json:"id"`
+				Email string `json:"email"`
+				Role  string `json:"role"`
+			} `json:"user"`
+			Keys int `json:"keys"`
+			Runs int `json:"runs"`
+		}
+		if err := a.c.Do(ctxOf(c), "POST", "/v1/service-accounts/"+url.PathEscape(args[0])+"/convert", map[string]any{"email": args[1]}, &out); err != nil {
+			return err
+		}
+		if a.output == "json" {
+			return a.json(out)
+		}
+		fmt.Fprintf(a.stdout, "%d keys and %d Runs are %s's (%s) now; %s is deleted\n", out.Keys, out.Runs, out.User.Email, out.User.Role, args[0])
+		return nil
 	}})
-	var setRole, setOwner, setDesc string
+	var setRole, setOwner, setDesc, setName string
 	var disabled bool
-	set := &cobra.Command{Use: "set <sa>", Short: "Change role, owner, description or disabled", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
+	set := &cobra.Command{Use: "set <sa>", Short: "Change name, role, owner, description or disabled", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
 		b := map[string]any{}
-		for flag, v := range map[string]any{"role": setRole, "owner": setOwner, "description": setDesc, "disabled": disabled} {
+		for flag, v := range map[string]any{"name": setName, "role": setRole, "owner": setOwner, "description": setDesc, "disabled": disabled} {
 			if c.Flags().Changed(flag) {
 				k := flag
 				if k == "owner" {
@@ -36,6 +58,7 @@ func (a *app) saCmd() *cobra.Command {
 		}
 		return a.peopleRequest(c, "PATCH", "/v1/service-accounts/"+url.PathEscape(args[0]), b, "")
 	}}
+	set.Flags().StringVar(&setName, "name", "", "a new name (its key named as the account follows)")
 	set.Flags().StringVar(&setRole, "role", "", "viewer, member or admin")
 	set.Flags().StringVar(&setOwner, "owner", "", "owner email (empty clears)")
 	set.Flags().StringVar(&setDesc, "description", "", "description")
@@ -63,4 +86,14 @@ func (a *app) tenantCreateCmd() *cobra.Command {
 	}}
 	cmd.Flags().StringVar(&owner, "owner", "", "first owner's email")
 	return cmd
+}
+
+// tenantSetOwnerCmd: POST /v1/members?tenant=<tenant> {email, role: owner,
+// upsert: true}. Operators only: a member becomes owner, anyone else joins
+// as one; no invitation.
+func (a *app) tenantSetOwnerCmd() *cobra.Command {
+	return &cobra.Command{Use: "set-owner <tenant> <email>", Short: "Make someone an owner of a tenant (operators only): a member is promoted, anyone else added", Args: cobra.ExactArgs(2), RunE: func(c *cobra.Command, args []string) error {
+		a.c.Tenant = args[0]
+		return a.peopleRequest(c, "POST", "/v1/members", map[string]any{"email": args[1], "role": "owner", "upsert": true}, "")
+	}}
 }

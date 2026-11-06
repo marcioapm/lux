@@ -1049,3 +1049,29 @@
     width: 100%;
   }
 }
+/* Convert to personal keys: who the keys act as, before and after. */
+.convert-sentence {
+  margin: 0;
+  color: var(--fg);
+}
+/* A badge that is also an action (Tenants: "No owner" opens Set owner). */
+.badge-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--sp-7);
+  min-height: var(--sp-7);
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.badge-button:hover .badge {
+  filter: brightness(0.95);
+  text-decoration: underline;
+}
+.badge-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

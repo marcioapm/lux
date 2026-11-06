@@ -1,7 +1,7 @@
 // The people routes of the mock luxd (mockPeople.ts holds the data):
 // /v1/me, /me/keys, /me/invitations, /members, /invitations (and by-code),
 // /service-accounts, /people, /costs?by=member|owner, POST /tenants.
-import { activeKeys, ago, atLeast, DAY, err, INVITES, invJson, invStatus, KEYS, keyJson, memberJson, MEMBERSHIPS, membershipsOf, ok, OWNER_COST, person, SAS, saJson, seq, TENANTS, tenantName, USERS, type Caller, type Inv, type Key, type MembershipRow, type Role, type SA } from "./mockPeople.ts";
+import { activeKeys, ago, atLeast, DAY, err, INVITES, invJson, invStatus, KEYS, keyJson, memberJson, MEMBERSHIPS, membershipsOf, moveRunOwners, ok, OWNER_COST, person, RANK, SAS, saJson, seq, TENANTS, tenantName, USERS, type Caller, type Inv, type Key, type MembershipRow, type Role, type SA } from "./mockPeople.ts";
 
 let codeSeq = 0;
 const newCode = () => `inv_${(Date.now() + ++codeSeq).toString(36).slice(-6)}${Math.random().toString(36).slice(2, 6)}`;
@@ -22,6 +22,28 @@ type Res = { status: number; body: unknown } | null;
 export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleAuth: string): Promise<Res> {
   const p = u.pathname;
   const method = req.method;
+  // Dispatch only documented method + complete path combinations. Unknown
+  // subpaths/verbs must never fall through to another route's mutation.
+  const routes: [RegExp, string[]][] = [
+    [/^\/v1\/(me|me\/invitations|people|costs)$/, ["GET"]],
+    [/^\/v1\/me\/keys$/, ["GET", "POST"]],
+    [/^\/v1\/me\/keys\/[^/]+$/, ["PATCH", "DELETE"]],
+    [/^\/v1\/members$/, ["GET", "POST"]],
+    [/^\/v1\/members\/[^/]+$/, ["GET", "PATCH", "DELETE"]],
+    [/^\/v1\/members\/[^/]+\/keys$/, ["GET"]],
+    [/^\/v1\/members\/[^/]+\/keys\/[^/]+$/, ["DELETE"]],
+    [/^\/v1\/service-accounts$/, ["GET", "POST"]],
+    [/^\/v1\/service-accounts\/[^/]+$/, ["GET", "PATCH", "DELETE"]],
+    [/^\/v1\/service-accounts\/[^/]+\/convert$/, ["POST"]],
+    [/^\/v1\/service-accounts\/[^/]+\/keys$/, ["GET", "POST"]],
+    [/^\/v1\/service-accounts\/[^/]+\/keys\/[^/]+$/, ["DELETE"]],
+    [/^\/v1\/invitations$/, ["GET", "POST"]],
+    [/^\/v1\/invitations\/counts$/, ["GET"]],
+    [/^\/v1\/invitations\/by-code\/[^/]+$/, ["GET"]],
+    [/^\/v1\/invitations\/by-code\/[^/]+\/accept$/, ["POST"]],
+    [/^\/v1\/invitations\/[^/]+\/(renew|revoke)$/, ["POST"]],
+  ];
+  if (!routes.some(([pattern, methods]) => pattern.test(p) && methods.includes(method))) return null;
   const body = async <T>() => (method === "GET" || method === "DELETE" ? ({} as T) : ((await req.json().catch(() => ({}))) as T));
   const origin = u.origin;
   if (!c) return null;
@@ -101,13 +123,21 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
   const inTenant = () => MEMBERSHIPS.filter((m) => m.tenantId === tenantId);
   if (p === "/v1/members") {
     if (method === "GET") return ok({ members: inTenant().map((m) => memberJson(m, c)) });
-    if (!c.operator) return err(403, "forbidden", "only operators add members directly; admins invite");
-    const b = await body<{ email: string; role: Role }>();
+    if (!c.operator || c.readOnly) return err(403, "forbidden", "only operators add members directly; admins invite");
+    const b = await body<{ email: string; role: Role; upsert?: boolean }>();
+    if (!EMAIL_RE.test(b.email ?? "") || !(b.role in RANK)) return err(422, "invalid_request", "a valid email and role are required");
     let user = USERS.find((x) => x.email === b.email.toLowerCase());
     if (!user) USERS.push((user = { id: `usr_${++seq.key}`, email: b.email.toLowerCase(), name: "", operator: false, lastSeen: 0 }));
+    // members.go addMember: already a member is 409, unless upsert (operators: set the role).
+    const had = inTenant().find((m) => m.userId === user!.id);
+    if (had) {
+      if (!b.upsert) return err(409, "conflict", "already a member");
+      had.role = b.role;
+      return ok(memberJson(had, c));
+    }
     const m: MembershipRow = { tenantId, userId: user.id, role: b.role, joined: 0 };
     MEMBERSHIPS.push(m);
-    return ok(memberJson(m, c), 201);
+    return ok(memberJson(m, c));
   }
   const mm = p.match(/^\/v1\/members\/([^/]+)(?:\/keys(?:\/([^/]+))?)?$/);
   if (mm) {
@@ -226,10 +256,35 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
     SAS.push(s);
     return ok(saJson(s), 201);
   }
-  const sm = p.match(/^\/v1\/service-accounts\/([^/]+)(?:\/keys(?:\/([^/]+))?)?$/);
+  const sm = p.match(/^\/v1\/service-accounts\/([^/]+)(?:\/keys(?:\/([^/]+))?|\/(convert))?$/);
   if (sm) {
     const s = SAS.find((x) => x.tenantId === tenantId && (x.id === sm[1] || x.name === sm[1]));
     if (!s) return err(404, "not_found", `no service account ${sm[1]}`);
+    if (sm[3] === "convert") {
+      // serviceaccounts.go convertServiceAccount: admins+; a member; at most the caller's role; the 5-key cap; keys, Runs move; the account goes.
+      if (method !== "POST") return err(405, "method_not_allowed", "POST");
+      if (!atLeast(c, "admin")) return err(403, "forbidden", "only admins and owners convert service accounts");
+      const b = await body<{ email?: string }>();
+      const target = inTenant().find((m) => m.userId === b.email || USERS.find((x) => x.id === m.userId)?.email.toLowerCase() === (b.email ?? "").toLowerCase());
+      if (!target) return err(404, "not_a_member", `${b.email ?? ""} is not a member of this tenant`);
+      if (!atLeast(c, target.role)) return err(403, "forbidden", `${b.email} is ${target.role}: only someone at least ${target.role} converts keys to theirs (the keys would act with that role)`);
+      const moving = KEYS.filter((k) => k.saId === s.id && activeKeys(k));
+      const have = KEYS.filter((k) => k.userId === target.userId && k.tenantId === tenantId && activeKeys(k)).length;
+      if (have + moving.length > 5) return err(409, "key_limit", `${b.email} has ${have} active keys and ${s.name} ${moving.length}: at most 5 personal keys; revoke ${have + moving.length - 5} first`);
+      for (const k of moving) (k.userId = target.userId), (k.saId = undefined);
+      for (const k of KEYS) if (k.saId === s.id) (k.revoked = true), (k.saId = undefined);
+      const runs = s.runs ?? 0;
+      const sk = `sa:${s.id}`;
+      if (OWNER_COST[sk]) {
+        const uk = `user:${target.userId}`;
+        const u = OWNER_COST[uk] ?? { amount: "0.00", runs: 0, cpuh: 0 };
+        OWNER_COST[uk] = { amount: (Number(u.amount) + Number(OWNER_COST[sk]!.amount)).toFixed(2), runs: u.runs + OWNER_COST[sk]!.runs, cpuh: u.cpuh + OWNER_COST[sk]!.cpuh };
+        delete OWNER_COST[sk];
+      }
+      moveRunOwners(s.id, target.userId);
+      SAS.splice(SAS.indexOf(s), 1);
+      return ok({ user: memberJson(target, c), keys: moving.length, runs });
+    }
     if (p.includes("/keys")) {
       // Its owner and admins only; anyone else is told it is not there (accountKeyHolder).
       if (!atLeast(c, "admin") && !ownsSA(s)) return err(404, "not_found", `no service account ${sm[1]}`);
@@ -249,15 +304,30 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
       KEYS.push(k);
       return ok({ ...keyJson(k), apiKey: value }, 201);
     }
+    if (sm[3] || (method !== "GET" && method !== "PATCH" && method !== "DELETE")) return null;
     if (method === "GET") return ok(saJson(s));
     if (!atLeast(c, "admin")) return err(403, "forbidden", "this needs the admin scope");
-    const b = await body<{ description?: string; role?: SA["role"]; ownerEmail?: string; disabled?: boolean }>();
+    if (method === "DELETE") {
+      // serviceaccounts.go deleteServiceAccount: only with no Runs; its keys revoked, kept.
+      if ((s.runs ?? 0) > 0) return { status: 409, body: { error: { code: "has_runs", message: `${s.name} owns ${s.runs} Runs: a service account with Runs cannot be deleted; disable it instead (its keys stop, its Runs stay attributed), or convert it to a member's personal keys`, details: [`runs: ${s.runs}`] } } };
+      for (const k of KEYS) if (k.saId === s.id) (k.revoked = true), (k.saId = undefined);
+      SAS.splice(SAS.indexOf(s), 1);
+      return ok(null, 204);
+    }
+    const b = await body<{ name?: string; description?: string; role?: SA["role"]; ownerEmail?: string; disabled?: boolean }>();
     if (b.role != null && !SA_ROLES.includes(b.role)) return err(422, "invalid_request", "role: viewer, member or admin");
+    if (b.name != null && !SA_NAME_RE.test(b.name)) return err(422, "invalid_request", `name ${JSON.stringify(b.name)}: lowercase letters, digits and dashes, starting and ending with a letter or digit, at most 63`);
+    if (b.name != null && SAS.some((x) => x.tenantId === tenantId && x.name === b.name && x.id !== s.id)) return err(409, "conflict", `a service account ${b.name} exists in this tenant`);
     let ownerId = s.ownerId;
     if (b.ownerEmail != null) {
       const o = ownerByEmail(b.ownerEmail);
       if ("error" in o) return o.error;
       ownerId = o.id;
+    }
+    if (b.name != null && b.name !== s.name) {
+      // serviceaccounts.go renameAccount: its active keys named as the account follow it.
+      for (const k of KEYS) if (k.saId === s.id && k.name === s.name && activeKeys(k)) k.name = b.name;
+      s.name = b.name;
     }
     if (b.description != null) s.description = b.description;
     if (b.role) s.role = b.role;

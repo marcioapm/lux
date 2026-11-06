@@ -92,13 +92,16 @@ export interface SA {
   createdBy?: string;
   lastUsed?: number;
   disabled?: number;
+  /** Runs it owns, any state and age (ServiceAccount.runs): none can be deleted while it has some. */
+  runs?: number;
 }
 export const SAS: SA[] = [
-  { id: "sa_4kq2v8m1", tenantId: "ten_acme", name: "gha-runners", description: "lux-gha JIT runners for acme/* workflows", role: "member", ownerId: "usr_eva", created: 178 * DAY, createdBy: "usr_eva", lastUsed: 20 },
-  { id: "sa_7cr3b2x9", tenantId: "ten_acme", name: "ci-review-bot", description: "PR review agents", role: "member", ownerId: "usr_car", created: 98 * DAY, createdBy: "usr_ana", lastUsed: 4 * 60 },
-  { id: "sa_2ne9v1q5", tenantId: "ten_acme", name: "nightly-evals", description: "Model eval sweep, 02:00 UTC", role: "member", ownerId: "usr_ana", created: 83 * DAY, createdBy: "usr_ana", lastUsed: 13 * 3600 },
+  { id: "sa_4kq2v8m1", tenantId: "ten_acme", name: "gha-runners", description: "lux-gha JIT runners for acme/* workflows", role: "member", ownerId: "usr_eva", created: 178 * DAY, createdBy: "usr_eva", lastUsed: 20, runs: 4210 },
+  { id: "sa_7cr3b2x9", tenantId: "ten_acme", name: "ci-review-bot", description: "PR review agents", role: "member", ownerId: "usr_car", created: 98 * DAY, createdBy: "usr_ana", lastUsed: 4 * 60, runs: 612 },
+  { id: "sa_2ne9v1q5", tenantId: "ten_acme", name: "nightly-evals", description: "Model eval sweep, 02:00 UTC", role: "member", ownerId: "usr_ana", created: 83 * DAY, createdBy: "usr_ana", lastUsed: 13 * 3600, runs: 90 },
   { id: "sa_9gr1d7k3", tenantId: "ten_acme", name: "grafana-reader", description: "Read-only, for the Grafana datasource", role: "viewer", ownerId: "usr_ana", created: 34 * DAY, createdBy: "usr_ana", lastUsed: 60 },
-  { id: "sa_5dd0p2x8", tenantId: "ten_acme", name: "dude-prod", description: "Migrated from the API key dude-prod", role: "admin", created: 300 * DAY },
+  { id: "sa_5dd0p2x8", tenantId: "ten_acme", name: "dude-prod", description: "Migrated from the API key dude-prod", role: "admin", created: 300 * DAY, runs: 41 },
+  { id: "sa_3jo1n4s2", tenantId: "ten_acme", name: "jonas", description: "From API key jonas", role: "member", created: 300 * DAY, lastUsed: 2 * DAY, runs: 145 },
 ];
 
 export interface Key {
@@ -133,6 +136,7 @@ export const KEYS: Key[] = [
   { id: "key_s_ne1", tenantId: "ten_acme", saId: "sa_2ne9v1q5", name: "evals", prefix: "lux_s_Ne2v", readOnly: false, created: 83 * DAY, lastUsed: 13 * 3600, createdBy: "usr_ana" },
   { id: "key_s_gr1", tenantId: "ten_acme", saId: "sa_9gr1d7k3", name: "grafana", prefix: "lux_s_Gr9d", readOnly: false, created: 34 * DAY, lastUsed: 60, createdBy: "usr_ana" },
   { id: "key_dude", tenantId: "ten_acme", saId: "sa_5dd0p2x8", name: "dude-prod", prefix: "lux_Dd0p", readOnly: false, created: 300 * DAY, lastUsed: 300 },
+  { id: "key_jonas", tenantId: "ten_acme", saId: "sa_3jo1n4s2", name: "jonas", prefix: "lux_J0n4", readOnly: false, created: 300 * DAY, lastUsed: 2 * DAY },
 ];
 
 export interface Inv {
@@ -181,10 +185,15 @@ export function resetPeople() {
     [INVITES, fresh.INVITES],
   ] as [unknown[], unknown[]][])
     arr.splice(0, arr.length, ...init);
+  // A convert moved Runs and their cost: back too (declared below; called after module load).
+  for (const k of Object.keys(RUN_OWNERS)) delete RUN_OWNERS[k];
+  Object.assign(RUN_OWNERS, structuredClone(INITIAL_RUN_OWNERS));
+  for (const k of Object.keys(OWNER_COST)) delete OWNER_COST[k];
+  Object.assign(OWNER_COST, structuredClone(INITIAL_OWNER_COST));
 }
 
 /** Run owners, by Run id or name (mock.ts's and mockSessions.ts's Runs). */
-const RUN_OWNERS: Record<string, { user?: string; sa?: string }> = {
+const INITIAL_RUN_OWNERS: Record<string, { user?: string; sa?: string }> = {
   "agent-refactor-42": { sa: "sa_7cr3b2x9" },
   "billing-backoff-418": { user: "usr_bru" },
   "hosts-probe-claude": { user: "usr_car" },
@@ -192,9 +201,15 @@ const RUN_OWNERS: Record<string, { user?: string; sa?: string }> = {
   "notes-count-acp": { user: "usr_ana" },
   "jervasion-pr-45": { sa: "sa_4kq2v8m1" },
 };
+const RUN_OWNERS: Record<string, { user?: string; sa?: string }> = structuredClone(INITIAL_RUN_OWNERS);
+
+/** A convert: the account's Runs become the person's (serviceaccounts.go convertServiceAccount). */
+export function moveRunOwners(sa: string, user: string) {
+  for (const o of Object.values(RUN_OWNERS)) if (o.sa === sa) (o.sa = undefined), (o.user = user);
+}
 
 /** Cost · 30d per owner (USD, list prices), Runs · 30d and CPU-hours. */
-export const OWNER_COST: Record<string, { amount: string; runs: number; cpuh: number }> = {
+const INITIAL_OWNER_COST: Record<string, { amount: string; runs: number; cpuh: number }> = {
   "user:usr_eva": { amount: "3.10", runs: 2, cpuh: 1.4 },
   "user:usr_mar": { amount: "18.22", runs: 9, cpuh: 22 },
   "user:usr_ana": { amount: "41.80", runs: 31, cpuh: 64.2 },
@@ -204,8 +219,10 @@ export const OWNER_COST: Record<string, { amount: string; runs: number; cpuh: nu
   "sa:sa_7cr3b2x9": { amount: "388.77", runs: 612, cpuh: 1310 },
   "sa:sa_2ne9v1q5": { amount: "142.05", runs: 90, cpuh: 455.2 },
   "sa:sa_5dd0p2x8": { amount: "77.40", runs: 41, cpuh: 98.1 },
+  "sa:sa_3jo1n4s2": { amount: "52.70", runs: 145, cpuh: 61.2 },
   "(none)": { amount: "61.33", runs: 211, cpuh: 140.8 },
 };
+export const OWNER_COST: Record<string, { amount: string; runs: number; cpuh: number }> = structuredClone(INITIAL_OWNER_COST);
 
 /** Who is calling, from the key (luxk_mock_<role>) or, in Access mode, MOCK_AS. */
 export interface Caller {
@@ -296,6 +313,7 @@ export function saJson(s: SA) {
     ...(s.lastUsed != null ? { lastUsedAt: ago(s.lastUsed) } : {}),
     ...(s.disabled != null ? { disabledAt: ago(s.disabled) } : {}),
     activeKeys: KEYS.filter((k) => k.saId === s.id && activeKeys(k)).length,
+    runs: s.runs ?? 0,
   };
 }
 const RUNNING: Record<string, number> = { usr_car: 1, usr_bru: 1 };

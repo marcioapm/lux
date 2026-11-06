@@ -7,6 +7,9 @@ components:
           type: string
         role:
           type: string
+        upsert:
+          description: "Already a member: set their role (member.role_changed) instead of 409 conflict."
+          type: boolean
       type: object
     AdmissionBlocker:
       additionalProperties: false
@@ -234,6 +237,30 @@ components:
           type:
             - array
             - "null"
+      type: object
+    ConvertServiceAccountInput:
+      additionalProperties: false
+      properties:
+        email:
+          description: The member whose personal keys they become, by email (or user id).
+          type: string
+      required:
+        - email
+      type: object
+    ConvertedServiceAccount:
+      additionalProperties: false
+      properties:
+        keys:
+          description: Keys that became the member's.
+          format: int64
+          type: integer
+        runs:
+          description: Runs that became the member's.
+          format: int64
+          type: integer
+        user:
+          $ref: "#/components/schemas/Member"
+          description: The member, as now.
       type: object
     CostFamilyInfo:
       additionalProperties: false
@@ -2000,6 +2027,9 @@ components:
         disabled:
           description: true disables it (its keys stop working); false enables it again.
           type: boolean
+        name:
+          description: "A new name: as create's (a DNS label, unique in the tenant: 409 conflict). Its active keys named exactly as the old name (the upgrade named each legacy key's account after the key) are renamed too."
+          type: string
         ownerEmail:
           description: A member's email, or "" for no owner.
           type: string
@@ -4192,6 +4222,10 @@ components:
             - member
             - admin
           type: string
+        runs:
+          description: The Runs it owns, of any state and age. An account that owns Runs cannot be deleted (disable it instead); converting it moves them.
+          format: int64
+          type: integer
       type: object
     ServiceAccountRef:
       additionalProperties: false
@@ -7325,7 +7359,7 @@ paths:
         - people
     post:
       description: |-
-        Operators only. Normally invite the person instead.
+        Operators only (403 otherwise). Normally invite the person instead. Already a member: 409 conflict, unless upsert is true, which sets their role instead (member.role_changed): how an operator assigns a tenant's owner, by email, in one call.
 
         Needs the `operator` scope.
       operationId: addMember
@@ -12204,6 +12238,64 @@ paths:
       tags:
         - people
   /v1/service-accounts/{sa}:
+    delete:
+      description: |-
+        Admins and owners only. Only an account that owns no Runs: otherwise 409 has_runs (with the count), and the answer is to disable it, which stops its keys and keeps its Runs attributed. Its keys stop working at once: active ones are revoked (key.revoked each) and every key row is kept, revoked, for the record, no longer tied to the account. Records service_account.deleted.
+
+        Needs the `admin` scope.
+      operationId: deleteServiceAccount
+      parameters:
+        - description: The service account's id or name.
+          in: path
+          name: sa
+          required: true
+          schema:
+            description: The service account's id or name.
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Delete a service account
+      tags:
+        - people
     get:
       description: Needs the `read` scope.
       operationId: getServiceAccount
@@ -12259,7 +12351,7 @@ paths:
         - people
     patch:
       description: |-
-        Its description, role, owner, or disabled. Admins and owners only. Disabling stops its keys at once; its Runs keep running.
+        Its name, description, role, owner, or disabled. Admins and owners only. Disabling stops its keys at once; its Runs keep running. A new name is validated as create's (422 invalid_request) and must be free in the tenant (409 conflict); its active keys named exactly as the old name follow it. Records service_account.updated (with from and to on a rename) or service_account.disabled.
 
         Needs the `admin` scope.
       operationId: patchServiceAccount
@@ -12302,6 +12394,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
           description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
         "422":
           content:
             application/json:
@@ -12317,6 +12415,75 @@ paths:
       security:
         - apiKey: []
       summary: Change a service account
+      tags:
+        - people
+  /v1/service-accounts/{sa}/convert:
+    post:
+      description: |-
+        For a key that was always a person's (the upgrade made every legacy key a service account's). Admins and owners only, in one step: each active key of the account becomes the member's personal key (its secret, read-only and expiry unchanged), so it acts as that member, with their role, from the next request; every Run the account owns becomes the member's; the account is deleted (its revoked keys kept, revoked, as on delete). The member must be one of the tenant (404 not_a_member). 409 key_limit if the member would have more than 5 active keys (nothing moves). The key gains the member's role, not the account's: a caller converts only to a member whose role is at most their own (an owner: owners and operators only; 403 otherwise). Records service_account.converted {serviceAccount, name, user, keys, runs}.
+
+        Needs the `admin` scope.
+      operationId: convertServiceAccount
+      parameters:
+        - description: The service account's id or name.
+          in: path
+          name: sa
+          required: true
+          schema:
+            description: The service account's id or name.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConvertServiceAccountInput"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConvertedServiceAccount"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Make a service account's keys a member's personal keys
       tags:
         - people
   /v1/service-accounts/{sa}/keys:

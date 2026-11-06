@@ -65,6 +65,11 @@ export async function mountAs(role: string, url: string, node: ReactNode, opts: 
     const headers = new Map([["authorization", `Bearer ${key}`]]);
     const req = { method, headers: { get: (k: string) => headers.get(k.toLowerCase()) ?? null }, json: async () => body ?? {} } as unknown as Request;
     const u = new URL(`http://localhost${path}`);
+    // As mock.ts: whoami from the same caller (a page asks again after changing its own membership).
+    if (u.pathname === "/v1/whoami") {
+      const c = callerOf(req, u, false);
+      return c ? whoamiFor(c, auth, null) : {};
+    }
     const r = await peopleApi(req, u, callerOf(req, u, false), auth);
     if (!r) return {};
     if (r.status === 204) return new Response(null, { status: 204 });
