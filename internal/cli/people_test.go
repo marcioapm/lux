@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPeopleCommands(t *testing.T) {
@@ -49,6 +50,53 @@ func TestPeopleCommands(t *testing.T) {
 			}
 			if !json.Valid(stdout.Bytes()) {
 				t.Fatal(stdout.String())
+			}
+		})
+	}
+}
+
+// keys create sends its flags: --read-only and --expires 90d as readOnly
+// true and expiresAt about 90 days from now; without them, neither.
+func TestKeysCreateFlags(t *testing.T) {
+	for _, tc := range []struct {
+		args     []string
+		readOnly bool
+		expires  time.Duration // 0: none
+	}{
+		{[]string{"keys", "create", "--name", "desk", "--read-only", "--expires", "90d"}, true, 90 * 24 * time.Hour},
+		{[]string{"keys", "create", "--name", "desk"}, false, 0},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			var body map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewDecoder(r.Body).Decode(&body)
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"apiKey":"lux_u_secret"}`))
+			}))
+			defer srv.Close()
+			var stdout, stderr bytes.Buffer
+			a := &app{stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr}
+			now := time.Now()
+			if code := a.main(append([]string{"--url", srv.URL, "--api-key", "key", "-o", "json"}, tc.args...)); code != 0 {
+				t.Fatalf("%d %s", code, stderr.String())
+			}
+			if body["name"] != "desk" {
+				t.Errorf("name: %v", body)
+			}
+			if ro, _ := body["readOnly"].(bool); ro != tc.readOnly {
+				t.Errorf("readOnly: %v, want %v", body["readOnly"], tc.readOnly)
+			}
+			exp, set := body["expiresAt"].(string)
+			switch {
+			case tc.expires == 0 && body["expiresAt"] != nil:
+				t.Errorf("expiresAt: %v, want none", body["expiresAt"])
+			case tc.expires != 0 && !set:
+				t.Errorf("expiresAt: %v, want a time", body["expiresAt"])
+			case tc.expires != 0:
+				at, err := time.Parse(time.RFC3339, exp)
+				if d := at.Sub(now.Add(tc.expires)); err != nil || d < -time.Minute || d > time.Minute {
+					t.Errorf("expiresAt %s (%v): want now+%v", exp, err, tc.expires)
+				}
 			}
 		})
 	}
