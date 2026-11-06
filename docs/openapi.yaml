@@ -2003,6 +2003,9 @@ components:
         disabled:
           description: true disables it (its keys stop working); false enables it again.
           type: boolean
+        name:
+          description: "A new name: as create's (a DNS label, unique in the tenant: 409 conflict). Its active keys named exactly as the old name (the upgrade named each legacy key's account after the key) are renamed too."
+          type: string
         ownerEmail:
           description: A member's email, or "" for no owner.
           type: string
@@ -12262,7 +12265,7 @@ paths:
         - people
     patch:
       description: |-
-        Its description, role, owner, or disabled. Admins and owners only. Disabling stops its keys at once; its Runs keep running.
+        Its name, description, role, owner, or disabled. Admins and owners only. Disabling stops its keys at once; its Runs keep running. A new name is validated as create's (422 invalid_request) and must be free in the tenant (409 conflict); its active keys named exactly as the old name follow it. Records service_account.updated (with from and to on a rename) or service_account.disabled.
 
         Needs the `admin` scope.
       operationId: patchServiceAccount
@@ -12305,6 +12308,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
           description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
         "422":
           content:
             application/json:

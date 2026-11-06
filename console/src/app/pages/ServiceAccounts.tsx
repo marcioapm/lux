@@ -123,11 +123,15 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
   // The owner by email: the server takes ownerEmail ("" on a patch: no owner).
   const [form, setForm] = useState<{ for: string; name: string; description: string; ownerEmail: string; role: Exclude<TenantRole, "owner"> } | null>(null);
   const key = isNew ? "new" : (sa?.id ?? "");
-  const f = form?.for === key ? form : { for: key, name: "", description: sa?.description ?? "", ownerEmail: sa?.owner?.email ?? "", role: sa?.role ?? "member" };
+  const f = form?.for === key ? form : { for: key, name: sa?.name ?? "", description: sa?.description ?? "", ownerEmail: sa?.owner?.email ?? "", role: sa?.role ?? "member" };
   const set = (p: Partial<typeof f>) => setForm({ ...f, ...p });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const valid = !isNew || /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(f.name);
+  const valid = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(f.name);
+  const renamed = sa != null && f.name !== sa.name;
+  // serviceaccounts.go renameAccount: its active keys named as the account (the upgrade named legacy keys so) follow it.
+  const keys = useQuery(`sa:${sa?.id ?? ""}:keys@${tenant ?? ""}`, (s) => api.serviceAccountKeys(tenant, sa!.id, s), { enabled: sa != null && renamed });
+  const following = renamed ? (keys.data ?? []).filter((k) => k.name === sa.name) : [];
   const submit = async () => {
     setBusy(true);
     setError(null);
@@ -138,7 +142,7 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
         setForm(null);
         await onSaved(s, k);
       } else if (sa) {
-        const s = await api.updateServiceAccount(tenant, sa.id, { description: f.description, role: f.role, ownerEmail: f.ownerEmail });
+        const s = await api.updateServiceAccount(tenant, sa.id, { ...(renamed ? { name: f.name } : {}), description: f.description, role: f.role, ownerEmail: f.ownerEmail });
         setForm(null);
         await onSaved(s);
       }
@@ -165,13 +169,15 @@ export function ServiceAccountDialog({ target, tenant, tenantName, members, onSa
         onCancel();
       }}
     >
-      {isNew && (
-        <label className="field">
-          <span className="field-label">Name</span>
-          <input className="input mono" value={f.name} onChange={(e) => set({ name: e.target.value })} placeholder="release-bot" autoComplete="off" spellCheck={false} aria-invalid={f.name !== "" && !valid} autoFocus />
-          <span className="field-hint">Lowercase letters, digits and dashes; unique in {tenantName}.</span>
-        </label>
-      )}
+      <label className="field">
+        <span className="field-label">Name</span>
+        <input className="input mono" value={f.name} onChange={(e) => set({ name: e.target.value })} placeholder="release-bot" autoComplete="off" spellCheck={false} aria-invalid={f.name !== "" && !valid} autoFocus={isNew} />
+        <span className="field-hint">
+          Lowercase letters, digits and dashes; unique in {tenantName}.
+          {following.length > 0 && ` Its key named ${following.map((k) => k.name).join(", ")} is renamed too.`}
+          {renamed && " Clients that name it (lux sa get, ?owner=) need the new name."}
+        </span>
+      </label>
       <label className="field">
         <span className="field-label">Description</span>
         <input className="input" value={f.description} onChange={(e) => set({ description: e.target.value })} placeholder="Tags and publishes releases" autoComplete="off" />

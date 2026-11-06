@@ -27,6 +27,7 @@ lux sa create ci --role member --owner person@example.com --description CI
 lux sa ls
 lux sa get ci
 lux sa set ci --role admin --owner person@example.com
+lux sa set external-app --name jervasion          # rename; its key named external-app becomes jervasion too
 lux sa disable ci
 lux sa keys create ci --name rotation
 lux sa keys ls ci

@@ -21,11 +21,11 @@ func (a *app) saCmd() *cobra.Command {
 	}}, &cobra.Command{Use: "disable <sa>", Short: "Disable a service account", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
 		return a.peopleRequest(c, "PATCH", "/v1/service-accounts/"+url.PathEscape(args[0]), map[string]any{"disabled": true}, "")
 	}})
-	var setRole, setOwner, setDesc string
+	var setRole, setOwner, setDesc, setName string
 	var disabled bool
-	set := &cobra.Command{Use: "set <sa>", Short: "Change role, owner, description or disabled", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
+	set := &cobra.Command{Use: "set <sa>", Short: "Change name, role, owner, description or disabled", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
 		b := map[string]any{}
-		for flag, v := range map[string]any{"role": setRole, "owner": setOwner, "description": setDesc, "disabled": disabled} {
+		for flag, v := range map[string]any{"name": setName, "role": setRole, "owner": setOwner, "description": setDesc, "disabled": disabled} {
 			if c.Flags().Changed(flag) {
 				k := flag
 				if k == "owner" {
@@ -36,6 +36,7 @@ func (a *app) saCmd() *cobra.Command {
 		}
 		return a.peopleRequest(c, "PATCH", "/v1/service-accounts/"+url.PathEscape(args[0]), b, "")
 	}}
+	set.Flags().StringVar(&setName, "name", "", "a new name (its key named as the account follows)")
 	set.Flags().StringVar(&setRole, "role", "", "viewer, member or admin")
 	set.Flags().StringVar(&setOwner, "owner", "", "owner email (empty clears)")
 	set.Flags().StringVar(&setDesc, "description", "", "description")

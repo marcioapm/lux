@@ -259,13 +259,20 @@ export async function peopleApi(req: Request, u: URL, c: Caller | null, consoleA
     }
     if (method === "GET") return ok(saJson(s));
     if (!atLeast(c, "admin")) return err(403, "forbidden", "this needs the admin scope");
-    const b = await body<{ description?: string; role?: SA["role"]; ownerEmail?: string; disabled?: boolean }>();
+    const b = await body<{ name?: string; description?: string; role?: SA["role"]; ownerEmail?: string; disabled?: boolean }>();
     if (b.role != null && !SA_ROLES.includes(b.role)) return err(422, "invalid_request", "role: viewer, member or admin");
+    if (b.name != null && !SA_NAME_RE.test(b.name)) return err(422, "invalid_request", `name ${JSON.stringify(b.name)}: lowercase letters, digits and dashes, starting and ending with a letter or digit, at most 63`);
+    if (b.name != null && SAS.some((x) => x.tenantId === tenantId && x.name === b.name && x.id !== s.id)) return err(409, "conflict", `a service account ${b.name} exists in this tenant`);
     let ownerId = s.ownerId;
     if (b.ownerEmail != null) {
       const o = ownerByEmail(b.ownerEmail);
       if ("error" in o) return o.error;
       ownerId = o.id;
+    }
+    if (b.name != null && b.name !== s.name) {
+      // serviceaccounts.go renameAccount: its active keys named as the account follow it.
+      for (const k of KEYS) if (k.saId === s.id && k.name === s.name && activeKeys(k)) k.name = b.name;
+      s.name = b.name;
     }
     if (b.description != null) s.description = b.description;
     if (b.role) s.role = b.role;

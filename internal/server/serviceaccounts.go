@@ -9,6 +9,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/store"
@@ -65,6 +66,7 @@ type CreateServiceAccountInput struct {
 }
 
 type PatchServiceAccountInput struct {
+	Name        *string `json:"name,omitempty" doc:"A new name: as create's (a DNS label, unique in the tenant: 409 conflict). Its active keys named exactly as the old name (the upgrade named each legacy key's account after the key) are renamed too."`
 	Description *string `json:"description,omitempty"`
 	Role        *string `json:"role,omitempty" enum:"viewer,member,admin"`
 	OwnerEmail  *string `json:"ownerEmail,omitempty" doc:"A member's email, or \"\" for no owner."`
@@ -103,8 +105,10 @@ func (s *Server) serviceAccountRoutes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "patchServiceAccount", Method: http.MethodPatch, Path: "/v1/service-accounts/{sa}", Tags: []string{"people"},
 		Summary:     "Change a service account",
-		Description: "Its description, role, owner, or disabled. Admins and owners only. Disabling stops its keys at once; its Runs keep running.",
-		Errors:      []int{http.StatusNotFound, http.StatusUnprocessableEntity},
+		Description: "Its name, description, role, owner, or disabled. Admins and owners only. Disabling stops its keys at once; its Runs keep running. " +
+			"A new name is validated as create's (422 invalid_request) and must be free in the tenant (409 conflict); its active keys named exactly as the old name follow it. " +
+			"Records service_account.updated (with from and to on a rename) or service_account.disabled.",
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "admin", forTenant(s.patchServiceAccount))
 	register(s, api, huma.Operation{
 		OperationID: "listServiceAccountKeys", Method: http.MethodGet, Path: "/v1/service-accounts/{sa}/keys", Tags: []string{"people"},
@@ -208,6 +212,41 @@ func checkAccountRole(role string) error {
 	return errf(http.StatusUnprocessableEntity, "invalid_request", "role: viewer, member or admin")
 }
 
+// checkAccountName: a DNS label, as create takes it.
+func checkAccountName(name string) error {
+	if !dnsLabel.MatchString(name) {
+		return errf(http.StatusUnprocessableEntity, "invalid_request", "name %q: lowercase letters, digits and dashes, starting and ending with a letter or digit, at most 63", name)
+	}
+	return nil
+}
+
+// renameAccount renames sa to name (409 conflict when another account of
+// the tenant has it) and, with it, its active keys named exactly as the old
+// name: the upgrade (093_people_backfill.sql) named each legacy key's
+// account after the key, so such a key reads as the account's. Revoked
+// keys keep their names, as the record. The keys renamed, by id.
+func renameAccount(ctx context.Context, tx pgx.Tx, tenant string, sa ServiceAccount, name string) ([]string, error) {
+	var taken bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM service_accounts WHERE tenant_id = $1 AND name = $2 AND id <> $3)`, tenant, name, sa.ID).Scan(&taken); err != nil {
+		return nil, err
+	}
+	if taken {
+		return nil, errf(http.StatusConflict, "conflict", "a service account %s exists in this tenant", name)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE service_accounts SET name = $2 WHERE id = $1`, sa.ID, name); err != nil {
+		var pg *pgconn.PgError
+		if errors.As(err, &pg) && pg.Code == "23505" {
+			return nil, errf(http.StatusConflict, "conflict", "a service account %s exists in this tenant", name)
+		}
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `UPDATE api_keys k SET name = $3 WHERE k.service_account_id = $1 AND k.name = $2 AND `+activeKey+` RETURNING k.id`, sa.ID, sa.Name, name)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
 func (s *Server) listServiceAccounts(ctx context.Context, _ *struct{}) (*saListOutput, error) {
 	p := principal(ctx)
 	var out []ServiceAccount
@@ -236,8 +275,8 @@ func (s *Server) getServiceAccount(ctx context.Context, in *SAPath) (*saOutput, 
 func (s *Server) createServiceAccount(ctx context.Context, in *struct{ Body CreateServiceAccountInput }) (*saOutput, error) {
 	p := principal(ctx)
 	b := in.Body
-	if !dnsLabel.MatchString(b.Name) {
-		return nil, errf(http.StatusUnprocessableEntity, "invalid_request", "name %q: lowercase letters, digits and dashes, starting and ending with a letter or digit, at most 63", b.Name)
+	if err := checkAccountName(b.Name); err != nil {
+		return nil, err
 	}
 	if err := checkAccountRole(b.Role); err != nil {
 		return nil, err
@@ -279,6 +318,11 @@ func (s *Server) patchServiceAccount(ctx context.Context, in *struct {
 			return nil, err
 		}
 	}
+	if b.Name != nil {
+		if err := checkAccountName(*b.Name); err != nil {
+			return nil, err
+		}
+	}
 	var out ServiceAccount
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		sa, _, err := loadAccount(ctx, tx, p.TenantID, in.SA)
@@ -286,6 +330,16 @@ func (s *Server) patchServiceAccount(ctx context.Context, in *struct {
 			return err
 		}
 		changed := map[string]any{"serviceAccount": sa.ID, "name": sa.Name}
+		if b.Name != nil && *b.Name != sa.Name {
+			keys, err := renameAccount(ctx, tx, p.TenantID, sa, *b.Name)
+			if err != nil {
+				return err
+			}
+			changed["name"], changed["from"], changed["to"] = *b.Name, sa.Name, *b.Name
+			if len(keys) > 0 {
+				changed["keysRenamed"] = keys
+			}
+		}
 		if b.Description != nil {
 			if _, err := tx.Exec(ctx, `UPDATE service_accounts SET description = $2 WHERE id = $1`, sa.ID, *b.Description); err != nil {
 				return err
