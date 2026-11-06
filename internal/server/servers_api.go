@@ -437,6 +437,12 @@ func (s *Server) attachServer(ctx context.Context, in *attachInput) (*tenantServ
 		if err != nil {
 			return err
 		}
+		// The source as locked: checkAccess judged the server by the Run
+		// it was on before the lock, and a detach meanwhile makes it the
+		// tenant's (admins only).
+		if err := lockedServerActor(ctx, tx, p, v); err != nil {
+			return err
+		}
 		if err := checkServer(sp, spec.Server{Name: v.Name, Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env, AfterSync: v.AfterSync, Inject: v.Inject}); err != nil {
 			return err
 		}

@@ -126,6 +126,68 @@ func TestServerChangeRechecksMovedServer(t *testing.T) {
 	}
 }
 
+// Attaching judges the source server as locked: a server an admin detaches
+// (making it the tenant's, admins only) while a member's attach waits on
+// its row is not attached by the member to their other Run. Deterministic:
+// the admin's real detachTx holds the row until the request blocks on it.
+func TestAttachRechecksDetachedServer(t *testing.T) {
+	f := peopleFixture(t)
+	ownedRuns(t, f)
+	ctx := context.Background()
+	execSQL(t, f.s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, owner_user_id) VALUES ('r_mia_b', 't1', '{}', 'stopped', 'usr_member')`)
+	execSQL(t, f.s, ctx, `INSERT INTO run_servers (id, host, tenant_id, run_id, name, port, state, labels, lifetime)
+		VALUES ('srv_aaaaaaaaaaaaaaaa', 'web-aaaaaaaa', 't1', 'r_mia', 'web', 3000, 'stopped', '{}', 'owner')`)
+	locked, release := make(chan struct{}), make(chan struct{})
+	detached := make(chan error, 1)
+	go func() {
+		detached <- f.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			v, err := lockServer(ctx, tx, "t1", "srv_aaaaaaaaaaaaaaaa")
+			if err != nil {
+				return err
+			}
+			if err := detachTx(ctx, tx, "t1", v, "test", "admin"); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case err := <-detached:
+		t.Fatal(err)
+	}
+	type res struct {
+		code int
+		out  map[string]any
+	}
+	done := make(chan res, 1)
+	go func() {
+		code, out := f.do(t, f.keys["member"], http.MethodPost, "/v1/servers/srv_aaaaaaaaaaaaaaaa/attach", map[string]any{"runId": "r_mia_b"})
+		done <- res{code, out}
+	}()
+	if err := waitLocked(f.s, 1, nil); err != nil { // the request, on the server's row
+		close(release)
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-detached; err != nil {
+		t.Fatal(err)
+	}
+	r := <-done
+	if r.code != http.StatusForbidden {
+		t.Errorf("attach of a server detached meanwhile: %d %v, want 403", r.code, r.out)
+	}
+	if got := queryOne[string](t, f.s, `SELECT coalesce(run_id, 'NULL') FROM run_servers WHERE id = 'srv_aaaaaaaaaaaaaaaa'`); got != "NULL" {
+		t.Errorf("server attached to %s, want NULL", got)
+	}
+	// An admin may attach it (the tenant's server), to the member's Run.
+	if code, out := f.do(t, f.keys["admin"], http.MethodPost, "/v1/servers/srv_aaaaaaaaaaaaaaaa/attach", map[string]any{"runId": "r_mia_b"}); code != http.StatusOK || out["runId"] != "r_mia_b" {
+		t.Errorf("admin attach: %d %v", code, out)
+	}
+}
+
 // Every Run-changing route checks the owner, not just rename: a member of
 // the tenant gets not_run_owner on another's Run for each.
 func TestRunOwnershipEveryRoute(t *testing.T) {
