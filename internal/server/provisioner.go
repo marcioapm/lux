@@ -323,7 +323,8 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 			}
 		}
 		var err error
-		st.plan, err = s.planCapacity(ctx, tx, pl, st.idleHosts)
+		needIdleExpectation := pl.Min > st.total || s.warm(pl, &st) > st.idle+st.provisioning
+		st.plan, err = s.planCapacity(ctx, tx, pl, st.idleHosts, needIdleExpectation)
 		return err
 	}); err != nil {
 		return err

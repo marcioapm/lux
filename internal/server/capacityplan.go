@@ -323,7 +323,8 @@ type poolHostSize struct {
 
 // planCapacity plans the pool's waiting Runs; idle is the pool's idle ready
 // hosts, of which those it reserves are not surplus (reservedIdle).
-func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle map[string]bool) (capacityPlan, error) {
+// needIdleExpectation keeps launch evidence when warm or minimum hosts are needed.
+func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle map[string]bool, needIdleExpectation bool) (capacityPlan, error) {
 	plan := capacityPlan{reserved: map[string]bool{}, hostDecisions: map[string]hostDecision{}}
 	// Per actual host: the stage it was reserved at, and its first blocker;
 	// its decision is settled after every Run was tried.
@@ -355,7 +356,15 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 		blockedHosts[host] = hostBlock{stage, blockers}
 		sample(&plan.Exhausted, planDeficit{Run: r.ID, Host: host, Stage: stage, Blockers: blockers})
 	}
-	var err error
+	runs, waitingSince, err := waitingRuns(ctx, tx, pl)
+	if err != nil {
+		return plan, err
+	}
+	// Check actual Runs here: the caller's demand count can precede an arrival.
+	if len(runs) == 0 && !needIdleExpectation {
+		err := s.idleDecisions(ctx, tx, pl, &plan)
+		return plan, err
+	}
 	var lastRegistered time.Time
 	plan.Expected, lastRegistered, err = s.hostExpectation(ctx, tx, pl)
 	if err != nil {
@@ -363,10 +372,6 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	}
 	if plan.Expected == nil {
 		plan.Unknown = "no registered host observations for current template"
-	}
-	runs, waitingSince, err := waitingRuns(ctx, tx, pl)
-	if err != nil {
-		return plan, err
 	}
 	ready, err := s.readyHosts(ctx, tx, runs)
 	if err != nil {
