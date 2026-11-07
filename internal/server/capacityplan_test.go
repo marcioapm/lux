@@ -1398,7 +1398,7 @@ func planOnce(t *testing.T, s *Server, pl poolRow) capacityPlan {
 	var plan capacityPlan
 	if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
 		var err error
-		plan, err = s.planCapacity(context.Background(), tx, pl, map[string]bool{})
+		plan, err = s.planCapacity(context.Background(), tx, pl, map[string]bool{}, true)
 		return err
 	}); err != nil {
 		t.Fatal(err)
