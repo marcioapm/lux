@@ -137,9 +137,10 @@ func (s *Server) refreshTransferPrices(ctx context.Context) {
 	var regions []region
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT DISTINCT p.provider, h.launch_template->>'region'
-			FROM hosts h JOIN pools p ON p.id = h.pool_id
+			FROM (SELECT id FROM hosts WHERE terminated_at IS NULL
+				UNION SELECT host_id FROM cost_transfer_snapshots WHERE NOT finalized) wanted
+			JOIN hosts h ON h.id = wanted.id JOIN pools p ON p.id = h.pool_id
 			WHERE h.provision_requested_at IS NOT NULL AND p.provider <> 'static' AND coalesce(h.launch_template->>'region', '') <> ''
-				AND (h.terminated_at IS NULL OR EXISTS (SELECT 1 FROM cost_transfer_snapshots t WHERE t.host_id = h.id AND NOT t.finalized))
 			ORDER BY 1, 2`)
 		if err != nil {
 			return err

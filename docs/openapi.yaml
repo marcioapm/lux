@@ -1636,7 +1636,7 @@ components:
           format: date-time
           type: string
         cpuCores:
-          description: "CPU in use, in cores: a rate over the machine's previous point."
+          description: "Execution plus hypervisor-stolen CPU, in cores: a rate over the machine's previous point. Excludes idle and IOwait."
           format: double
           type: number
         cpus:
