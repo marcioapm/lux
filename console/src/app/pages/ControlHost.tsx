@@ -46,8 +46,8 @@ export function ControlHost({ control }: { control: Control | undefined }) {
     <>
       <SectionHeader title="Control host" note={hosts ? `${hosts}: the machine${one ? "" : "s"} luxd runs on, its Postgres, and luxd itself` : "the machine luxd runs on, its Postgres, and luxd itself"} />
       <div className="grid grid-charts">
-        <Card title="CPU" subtitle={one && last?.cpus ? `used vs capacity · ${formatCores(last.cpus)}` : "used vs capacity"}>
-          <TimeSeriesChart x={data.cpu.x} ys={data.cpu.ys} series={lines("Used", "Capacity")} unit="cores" />
+        <Card title="CPU" subtitle={`includes hypervisor-stolen CPU; excludes idle and IOwait${one && last?.cpus ? ` · ${formatCores(last.cpus)} capacity` : ""}`}>
+          <TimeSeriesChart x={data.cpu.x} ys={data.cpu.ys} series={lines("Execution + steal", "Capacity")} unit="cores" />
         </Card>
         <Card title="Memory" subtitle={one && last?.memoryTotal ? `used vs total · ${formatBytes(last.memoryTotal)}` : "used vs total"}>
           <TimeSeriesChart x={data.mem.x} ys={data.mem.ys} series={lines("Used", "Total")} unit="bytes" />

@@ -113,6 +113,24 @@ const historyCall = (calls: string[]) => new URL(calls.find((u) => u.startsWith(
 
 const titles = (el: Element) => [...el.querySelectorAll(".card-title")].map((t) => t.textContent);
 
+test("control machine CPU includes steal, not just execution, without relabeling memory", async () => {
+  const p = await render("operator", "http://localhost/", (path) => path.startsWith("/v1/history") ? {
+    from: iso(0), to: iso(60), resolution: 60, samples: [],
+    control: { machines: [{ hostname: "control", samples: [{ at: iso(0), cpuCores: 1.5, cpus: 2 }] }], postgres: [], luxd: [] },
+  } : undefined);
+  try {
+    const cards = [...p.el.querySelectorAll(".card")];
+    const cpu = cards.filter((c) => c.querySelector(".card-title")?.textContent === "CPU").at(-1)!;
+    expect([...cpu.querySelectorAll(".tschart-legend-item")].map((b) => b.textContent)).toEqual(["Execution + steal", "Capacity"]);
+    expect(cpu.textContent).toContain("includes hypervisor-stolen CPU; excludes idle and IOwait");
+    expect(cpu.textContent).not.toContain("Used");
+    const mem = cards.filter((c) => c.querySelector(".card-title")?.textContent === "Memory").at(-1)!;
+    expect([...mem.querySelectorAll(".tschart-legend-item")].map((b) => b.textContent)).toEqual(["Used", "Total"]);
+  } finally {
+    await p.done();
+  }
+});
+
 test("the Overview's tabs: Activity by default (tiles, trends, feed); Cost and Storage each alone; ?tab= follows a click", async () => {
   const p = await render("tenant", "http://localhost/");
   try {

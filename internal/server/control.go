@@ -140,7 +140,7 @@ type MachineSeries struct {
 
 type MachinePoint struct {
 	At          time.Time    `json:"at"`
-	CPUCores    *float64     `json:"cpuCores,omitempty" doc:"CPU in use, in cores: a rate over the machine's previous point."`
+	CPUCores    *float64     `json:"cpuCores,omitempty" doc:"Execution plus hypervisor-stolen CPU, in cores: a rate over the machine's previous point. Excludes idle and IOwait."`
 	CPUs        *int         `json:"cpus,omitempty" doc:"Cores on the machine."`
 	MemoryBytes *int64       `json:"memoryBytes,omitempty"`
 	MemoryTotal *int64       `json:"memoryTotal,omitempty"`
