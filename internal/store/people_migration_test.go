@@ -47,7 +47,7 @@ func TestPeopleUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(done, []string{"092_people", "093_people_backfill", "094_tenant_events"}) {
+	if !slices.Equal(done, []string{"092_people", "093_people_backfill", "094_tenant_events", "095_placements_recent"}) {
 		t.Fatalf("applied %v", done)
 	}
 	type sa struct{ tenant, name, role string }
