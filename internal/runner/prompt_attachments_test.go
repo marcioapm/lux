@@ -43,7 +43,7 @@ func TestSnapshotOnlySecondPlacementStartsAgentPrompt(t *testing.T) {
 				if b, err := os.ReadFile(f.bin + ".vol." + volumeName("run1", "data")); err != nil || string(b) != "state" {
 					t.Fatalf("restored data %q: %v", b, err)
 				}
-				if err := f.p.writeShimConfig(t.Context(), f.sp, f.a.PromptAttachments); err != nil {
+				if err := f.p.writeShimConfig(t.Context(), f.sp, f.a.PromptAttachments, nil); err != nil {
 					t.Fatal(err)
 				}
 				rt, _ := f.r.mountpoint(t.Context(), runtimeVolume("run1"))
@@ -149,7 +149,7 @@ func TestShimConfigPromptAttachments(t *testing.T) {
 			r := &Runner{}
 			r.mounts.Store(runtimeVolume("run_x"), rt)
 			p := &placement{r: r, runID: "run_x", epoch: 1, assign: &proto.Assign{Resume: c.resume}, state: &runState{}}
-			if err := p.writeShimConfig(context.Background(), sp, prompt); err != nil {
+			if err := p.writeShimConfig(context.Background(), sp, prompt, nil); err != nil {
 				t.Fatal(err)
 			}
 			b, err := os.ReadFile(filepath.Join(rt, "config.json"))

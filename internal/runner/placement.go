@@ -490,10 +490,12 @@ func (p *placement) run(ctx context.Context) {
 	defer close(p.done)
 	a := p.assign
 	sp := a.Spec
-	// The prompt's images go to this placement's shim config and nowhere
-	// else: not runner memory past it, not state.json.
+	// The prompt's images and the files go to this placement's shim
+	// config and nowhere else: not runner memory past it, not state.json.
 	prompt := a.PromptAttachments
 	a.PromptAttachments = nil
+	files := a.Files
+	a.Files = nil
 	if err := p.waitPrevious(); err != nil {
 		p.failBeforeStart(ctx, err)
 		return
@@ -611,7 +613,7 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 
-	err = p.createContainer(ctx, sp, image, network, prompt)
+	err = p.createContainer(ctx, sp, image, network, prompt, files)
 	unpin()
 	if err != nil {
 		fail("container", err)
@@ -1138,12 +1140,12 @@ func hardening(sp spec.RunSpec) []string {
 }
 
 // Every placement gets a fresh writable layer, even on a same-host resume.
-func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image string, network podman.Network, prompt []spec.Attachment) error {
+func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image string, network podman.Network, prompt []spec.Attachment, files []spec.File) error {
 	if err := p.r.pm.Remove(ctx, containerName(p.runID)); err != nil {
 		return err
 	}
 	p.r.allocateCpuset(p, sp.Resources.CPUs)
-	if err := p.writeShimConfig(ctx, sp, prompt); err != nil {
+	if err := p.writeShimConfig(ctx, sp, prompt, files); err != nil {
 		return err
 	}
 	id, err := p.r.pm.Create(ctx, p.createArgs(sp, image, network))
@@ -1215,8 +1217,9 @@ func (p *placement) mounts() []volumeRef {
 }
 
 // writeShimConfig writes config.json for the shim; prompt is the first
-// placement's prompt images (nil on a resume).
-func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt []spec.Attachment) error {
+// placement's prompt images (nil on a resume), files the spec's files with
+// their bytes (on every placement).
+func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt []spec.Attachment, files []spec.File) error {
 	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
 	if err != nil {
 		return err
@@ -1284,6 +1287,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 	if !cfg.AgentResume() {
 		cfg.PromptAttachments = prompt
 	}
+	cfg.Files = files
 	for _, v := range p.mounts() {
 		cfg.VolumePaths = append(cfg.VolumePaths, v.Path)
 	}

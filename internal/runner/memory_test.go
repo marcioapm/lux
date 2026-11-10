@@ -122,7 +122,7 @@ func TestShimConfigFreshPlacementMemoryLimit(t *testing.T) {
 	r.mounts.Store(runtimeVolume("run_1"), rt)
 	p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
 	sp := spec.RunSpec{Resources: spec.Resources{Memory: spec.Bytes(16*gib + 7)}}
-	if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
+	if err := p.writeShimConfig(context.Background(), sp, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(rt, "config.json"))
@@ -159,7 +159,7 @@ func TestShimConfigDelegatesOnlyWhenAsked(t *testing.T) {
 			Sandbox:   spec.Sandbox{NestedContainers: c.nested, CgroupDelegation: c.delegation},
 			Resources: spec.Resources{CPUs: 2, Memory: spec.Bytes(gib)},
 		}
-		if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
+		if err := p.writeShimConfig(context.Background(), sp, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		b, err := os.ReadFile(filepath.Join(rt, "config.json"))

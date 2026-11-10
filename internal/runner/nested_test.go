@@ -263,7 +263,7 @@ func TestNestedRunsGetInnerDefaults(t *testing.T) {
 			p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
 			sp := spec.RunSpec{Env: c.specEnv, Resources: spec.Resources{CPUs: c.cpus, Memory: spec.Bytes(gib)},
 				Sandbox: spec.Sandbox{NestedContainers: c.nested, CgroupDelegation: c.delegation}}
-			if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
+			if err := p.writeShimConfig(context.Background(), sp, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			if got := shimConfigEnv(t, rt)["CONTAINERS_CONF_OVERRIDE"]; got != c.wantEnv {
@@ -340,7 +340,7 @@ func TestNestedRunsWithoutTheShimsOCIDefaults(t *testing.T) {
 		rt := t.TempDir()
 		r.mounts.Store(runtimeVolume("run_1"), rt)
 		p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
-		if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
+		if err := p.writeShimConfig(context.Background(), sp, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		return rt

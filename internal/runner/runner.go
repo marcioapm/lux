@@ -157,6 +157,8 @@ type Runner struct {
 	// noOCIDefaults warns of that once.
 	shimOCIDefaults bool
 	noOCIDefaults   sync.Once
+	// shimFiles: its --shim writes a Run's files (shimKnowsFiles).
+	shimFiles bool
 	// mem scales a Run's resources.memory to its container's limit.
 	mem memoryScale
 	// disk scales a Run's resources.disk to the limit it is held to.
@@ -299,6 +301,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	r.shimSyncModes = shimKnowsSyncModes(cfg.Shim)
 	r.shimReclaim = shimKnowsReclaim(cfg.Shim)
 	r.shimOCIDefaults = shimKnowsOCIDefaults(cfg.Shim)
+	r.shimFiles = shimKnowsFiles(cfg.Shim)
 	return r, nil
 }
 
@@ -368,6 +371,9 @@ func (r *Runner) capabilities() []string {
 	}
 	if r.disk.on {
 		caps = append(caps, proto.CapDiskScale)
+	}
+	if r.shimFiles {
+		caps = append(caps, proto.CapFiles)
 	}
 	return caps
 }

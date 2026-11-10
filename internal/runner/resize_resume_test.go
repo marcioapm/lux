@@ -141,7 +141,7 @@ func (f *resizeFixture) start(t *testing.T) {
 		err = f.p.prepareVolumes(ctx, f.a.Spec, f.a.Resume)
 	}
 	if err == nil {
-		err = f.p.createContainer(ctx, f.a.Spec, "img", podman.Network{}, nil)
+		err = f.p.createContainer(ctx, f.a.Spec, "img", podman.Network{}, nil, nil)
 	}
 	if err == nil {
 		err = f.r.pm.Start(ctx, containerName("run1"))

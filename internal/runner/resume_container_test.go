@@ -154,7 +154,7 @@ func (f *resumeFixture) start(ctx context.Context) error {
 	if err := f.p.prepareVolumes(ctx, f.sp, f.a.Resume); err != nil {
 		return err
 	}
-	if err := f.p.createContainer(ctx, f.sp, "img", podman.Network{}, nil); err != nil {
+	if err := f.p.createContainer(ctx, f.sp, "img", podman.Network{}, nil, nil); err != nil {
 		return err
 	}
 	return f.r.pm.Start(ctx, containerName("run1"))

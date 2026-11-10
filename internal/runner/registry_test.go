@@ -350,7 +350,7 @@ func TestMintedCredentialsStayInTheAuthFile(t *testing.T) {
 	// The container: neither its shim config nor its command line.
 	rt := t.TempDir()
 	f.r.mounts.Store(runtimeVolume("run1"), rt)
-	if err := f.p.writeShimConfig(context.Background(), sp, nil); err != nil {
+	if err := f.p.writeShimConfig(context.Background(), sp, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := os.ReadFile(filepath.Join(rt, "config.json"))

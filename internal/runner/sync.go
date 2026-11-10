@@ -68,6 +68,12 @@ func shimKnowsOCIDefaults(path string) bool {
 	return slices.Contains(shimCapabilities(path), proto.ShimCapOCIDefaults)
 }
 
+// shimKnowsFiles: the lux-shim at path lists proto.ShimCapFiles, so it
+// writes a Run's files before init.
+func shimKnowsFiles(path string) bool {
+	return slices.Contains(shimCapabilities(path), proto.ShimCapFiles)
+}
+
 // probeShim runs the lux-shim at path with args and returns its stdout,
 // ok when it exited 0. One that does not answer within the deadline is
 // killed with its process group; its output is waited for no longer than
