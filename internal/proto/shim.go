@@ -47,6 +47,8 @@ const (
 	// ShimCapOCIDefaults: the shim has ShimOCIDefaultsCmd, so the runner
 	// may register it as delegated nested Runs' precreate hook.
 	ShimCapOCIDefaults = "oci-defaults-v1"
+	// ShimCapFiles: the shim writes ShimConfig.Files before init.
+	ShimCapFiles = "files-v1"
 )
 
 // ShimOCIDefaultsCmd is `lux-shim oci-defaults MEMORY CPU_QUOTA CPU_PERIOD`,
@@ -68,6 +70,9 @@ type ShimConfig struct {
 	Prompt  string   `json:"prompt,omitempty"`
 	// PromptAttachments go with Prompt (spec workload.attachments).
 	PromptAttachments []spec.Attachment `json:"promptAttachments,omitempty"`
+	// Files: the spec's files with their bytes, written before init on
+	// every start (spec files).
+	Files []spec.File `json:"files,omitempty"`
 	// InputsDir is $LUX_INPUTS, where the shim writes each input's images;
 	// InputsRoot is the mount it is on, which the shim does not leave
 	// writing there.
@@ -223,8 +228,9 @@ const (
 	// stopped first, or the agent dropped it). {"requestId", "error"}; at
 	// most once per request id, never after EvInputConsumed.
 	EvInputFailed = "lux.input.failed"
-	EvInit        = "lux.init" // {"phase": "start" | "done", "exitCode"?}
-	EvSync        = "lux.sync" // {"results": [SyncResult]}: the checkouts moved before init
+	EvInit        = "lux.init"  // {"phase": "start" | "done", "exitCode"?}
+	EvFiles       = "lux.files" // {"count", "bytes"}: the spec's files, written before init
+	EvSync        = "lux.sync"  // {"results": [SyncResult]}: the checkouts moved before init
 	// EvSyncFallback: before init, these checkouts lack their bundle's base
 	// ({"repos": [name]}); the shim waits for a ShimSync with whole-history
 	// bundles for them.

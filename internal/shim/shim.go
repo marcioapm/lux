@@ -206,6 +206,10 @@ func (s *Shim) run() int {
 	if s.cfg.Sync != nil {
 		s.syncBeforeInit(env)
 	}
+	// After a sync, so a file in a checkout is the spec's, not the ref's.
+	if err := s.writeFiles(); err != nil {
+		return s.fail("start-failed", "files: "+err.Error())
+	}
 	if strings.TrimSpace(s.cfg.Init) != "" {
 		code, err := s.runInit(env)
 		if err != nil || code != 0 {
@@ -604,7 +608,7 @@ func (s *Shim) stop(reason string, shorter time.Duration) {
 // Capabilities prints the shim features the runner probes for
 // (proto.ShimCapabilitiesCmd).
 func Capabilities(w io.Writer) int {
-	if err := json.NewEncoder(w).Encode([]string{proto.ShimCapReclaim, proto.ShimCapOCIDefaults}); err != nil {
+	if err := json.NewEncoder(w).Encode([]string{proto.ShimCapReclaim, proto.ShimCapOCIDefaults, proto.ShimCapFiles}); err != nil {
 		return 1
 	}
 	return 0

@@ -424,6 +424,9 @@ type Assign struct {
 	// PromptAttachments: workload.attachments with their bytes, which
 	// Spec leaves out; only on a first placement (Resume nil).
 	PromptAttachments []spec.Attachment `json:"promptAttachments,omitempty"`
+	// Files: the spec's files with their bytes, which Spec leaves out; on
+	// every placement. Only a runner with CapFiles is sent any.
+	Files []spec.File `json:"files,omitempty"`
 	// Image build resolution from an earlier placement, so rebuilds use the
 	// same pinned FROMs.
 	ImageResolved *ImageResolution `json:"imageResolved,omitempty"`
@@ -535,6 +538,11 @@ const CapDiskScale = "disk-scale"
 // guard never stops a placement whose spec has placement.preemptible false.
 // Non-preemptible Runs are placed only on such runners.
 const CapNonPreemptible = "non-preemptible"
+
+// CapFiles is the Hello capability of a runner, and its lux-shim, that
+// write a Run's files (Assign.Files) before init. Runs with files are
+// placed only on such runners: an older one would start them without.
+const CapFiles = "files"
 
 // ImageResolution is a built image as its Run's first build made it: the
 // Containerfile with every FROM pinned to a digest, and the image id.
