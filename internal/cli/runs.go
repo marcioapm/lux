@@ -30,7 +30,7 @@ type Run = server.Run
 func (a *app) runCmd() *cobra.Command {
 	var file, idem, secretsFrom, pool, size string
 	var follow, wait, spot, dryRun, preemptible bool
-	var labels []string
+	var labels, copies []string
 	var idleTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "run -f spec.yaml [-- command...]",
@@ -55,7 +55,18 @@ the Run away on its own initiative (docs/runspec.md, Non-preemptible Runs).
 It needs a pool named by --pool or the spec, one with preemptible false.
 
 Secret values in the spec can be read from the environment with
-value: ${NAME}, or from a .env file with --secrets-from.`,
+value: ${NAME}, or from a .env file with --secrets-from.
+
+Files (docs/runspec.md, Files) are written into the container before
+init, on every start, as the workload user. In the spec, each takes
+content (text) or source (a local file or directory, relative to the spec
+file); --copy LOCAL:REMOTE adds one (LOCAL relative to here), e.g.
+
+  lux run -f spec.yaml --copy ./skills:~/.claude/skills
+
+A directory is copied file by file, each keeping its mode. Links,
+devices and fifos are refused, never followed. At most 1000 files and
+4 MiB in total. --dry-run reads and checks them too.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var sp spec.RunSpec
 			if file != "" {
@@ -102,6 +113,12 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 				}
 				sp.Labels[k] = v
 			}
+			// Before a dry run too: it checks what would be sent.
+			files, err := packFiles(sp.Files, specDir(file), copies)
+			if err != nil {
+				return err
+			}
+			sp.Files = files
 			if dryRun {
 				if follow || wait {
 					return fmt.Errorf("--dry-run cannot be combined with --follow or --wait")
@@ -144,6 +161,7 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "label key=value (repeatable)")
 	cmd.Flags().StringVar(&idem, "idempotency-key", "", "make the submission safe to retry")
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
+	cmd.Flags().StringArrayVar(&copies, "copy", nil, "LOCAL:REMOTE: copy a local file or directory into the container before init (repeatable; adds to the spec's files)")
 	cmd.Flags().BoolVar(&spot, "spot", false, "opt into opportunistic scheduling (requires resumePolicy never)")
 	cmd.Flags().BoolVar(&preemptible, "preemptible", true, "--preemptible=false: lux never preempts the Run; needs a named pool with preemptible false (sets placement.preemptible)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate and check advisory live admission without creating a Run; not a reservation or workload-success guarantee")
@@ -1113,9 +1131,10 @@ func parseAddRepo(v string) (spec.Repository, error) {
 }
 
 func (a *app) resumeCmd() *cobra.Command {
-	var input, secretsFrom, fromSnapshot, to, disk, diskGrace, memory, reqID, syncMode, pool, size, timeout string
+	var input, secretsFrom, fromSnapshot, to, disk, diskGrace, memory, reqID, syncMode, pool, size, timeout, filesFrom string
 	var cpus float64
-	var secretArgs, removeSecrets, addRepos, syncs []string
+	var secretArgs, removeSecrets, addRepos, syncs, copies []string
+	var noFiles bool
 	var follow, wait, dryRun bool
 	cmd := &cobra.Command{
 		Use:   "resume <run>",
@@ -1177,12 +1196,21 @@ time over all its placements, the time already run included, so it must
 be at least a minute more than that (0s: no timeout). A Run that failed on
 its timeout has used its time up and needs it to run again.
 
+--files-from SPEC replaces the Run's files with those of a spec file (its
+files, read as lux run reads them), and --copy LOCAL:REMOTE adds to them;
+either replaces them all from this resume on, so edited files reach the
+Run. --no-files removes them. Without these the Run keeps its files,
+written again on every start.
+
 --dry-run runs every check the resume would and changes nothing: "valid", or
 the error the resume would meet. Secret values may be left out. A running
 Run is checked as if it were stopped ("state unchecked" on stderr).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
+			if noFiles && (filesFrom != "" || len(copies) > 0) {
+				return fmt.Errorf("--no-files cannot be combined with --files-from or --copy")
+			}
 			for _, kv := range secretArgs {
 				if k, _, _ := strings.Cut(kv, "="); slices.Contains(removeSecrets, k) {
 					return fmt.Errorf("secret %q is both supplied and removed", k)
@@ -1285,6 +1313,25 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 				}
 				req["placement"] = map[string]string{"poolId": id}
 			}
+			if filesFrom != "" || len(copies) > 0 {
+				var from spec.RunSpec
+				if filesFrom != "" {
+					b, err := readFileOrStdin(filesFrom)
+					if err != nil {
+						return err
+					}
+					if err := yaml.Unmarshal(b, &from); err != nil {
+						return fmt.Errorf("%s: %w", filesFrom, err)
+					}
+				}
+				files, err := packFiles(from.Files, specDir(filesFrom), copies)
+				if err != nil {
+					return err
+				}
+				req["files"] = files
+			} else if noFiles {
+				req["files"] = []spec.File{}
+			}
 			if dryRun {
 				req["validateOnly"] = true
 			}
@@ -1360,6 +1407,9 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 	cmd.Flags().StringVar(&syncMode, "sync-mode", "", "with --sync: "+syncModeHelp)
 	cmd.Flags().StringVar(&pool, "pool", "", "move the Run to this pool (name or id) from this resume on")
 	cmd.Flags().StringVar(&timeout, "timeout", "", "the Run's timeout from now on, a total over all placements including time already run (e.g. 4h; 0s: none)")
+	cmd.Flags().StringVar(&filesFrom, "files-from", "", "replace the Run's files with a spec file's files (relative sources against it)")
+	cmd.Flags().StringArrayVar(&copies, "copy", nil, "LOCAL:REMOTE: a file or directory for the Run's files, which it replaces (repeatable)")
+	cmd.Flags().BoolVar(&noFiles, "no-files", false, "remove the Run's files from this resume on")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "check the resume and change nothing; a running Run is checked as if it were stopped")
 	return cmd
 }
