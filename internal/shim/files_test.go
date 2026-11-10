@@ -229,3 +229,22 @@ func TestWriteFilesAsTheWorkload(t *testing.T) {
 		t.Fatal("the shim lost root")
 	}
 }
+
+// Once ~/ is expanded, a file is held to the reserved roots and to the
+// file secrets' paths too: a home of / or a secret's path under ~ cannot
+// slip past the spec's checks.
+func TestWriteFilesChecksTheExpandedPath(t *testing.T) {
+	s, _, _ := filesShim(t, dataFile("~/.lux/run/config.json", "x", 0o644))
+	s.user.home = "/"
+	if err := s.writeFiles(); err == nil || !strings.Contains(err.Error(), "/.lux/run/config.json is under /.lux, which is reserved") {
+		t.Fatalf("home /: %v", err)
+	}
+	s, _, _ = filesShim(t, dataFile("~/.netrc", "x", 0o644))
+	s.cfg.Secrets = []spec.Secret{{Name: "netrc", As: "file", Path: filepath.Join(s.user.home, ".netrc")}}
+	if err := s.writeFiles(); err == nil || !strings.Contains(err.Error(), `meets secret "netrc"'s path`) {
+		t.Fatalf("a secret's path: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(s.user.home, ".netrc")); err == nil {
+		t.Fatal("written over the secret's path")
+	}
+}

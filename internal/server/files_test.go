@@ -275,3 +275,31 @@ func TestSubmitFilesOverHTTP(t *testing.T) {
 		t.Fatalf("a symbolic mode: %d %v", code, out)
 	}
 }
+
+// A chosen host (resume --to) whose runner lacks files is refused at
+// once, as hostFit would never place the Run there: with the Run's files,
+// or with those the resume brings.
+func TestChosenHostNeedsFiles(t *testing.T) {
+	s := promptServer(t)
+	filesHost(t, s, "h1", true)
+	filesHost(t, s, "old", false)
+	op := operatorCtx()
+	out, err := submitWithFiles(s, skillFiles("v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := out.Body.ID
+	schedule(t, s)
+	code := 1
+	applyRunStatus(t, s, id, 1, proto.Status{State: "exited", ExitCode: &code})
+	if _, err := s.resumeRun(op, &resumeRunInput{RunPath: RunPath{ID: id}, Body: &resumeRequest{To: "old"}}); err == nil {
+		t.Fatal("resumed onto a host without files")
+	} else if msg := invalidSpecProblems(t, err); !strings.Contains(msg, "predates files") {
+		t.Fatal(msg)
+	}
+	// Without files from this resume on, that host will do.
+	none := []spec.File{}
+	if _, err := s.resumeRun(op, &resumeRunInput{RunPath: RunPath{ID: id}, Body: &resumeRequest{To: "old", Files: &none}}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -38,7 +38,13 @@ func (s *Shim) writeFiles() error {
 			return
 		}
 		for _, f := range files {
-			n, err := placeFile(spec.ExpandFilePath(f.Path, s.user.home), f)
+			p := spec.ExpandFilePath(f.Path, s.user.home)
+			// ~/ is only known here: a home of / would put it anywhere.
+			if msg := spec.CheckFileTarget(p, s.cfg.Secrets); msg != "" {
+				done <- fmt.Errorf("%s: %s", f.Path, msg)
+				return
+			}
+			n, err := placeFile(p, f)
 			if err != nil {
 				done <- fmt.Errorf("%s: %w", f.Path, err)
 				return

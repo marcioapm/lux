@@ -132,12 +132,13 @@ func SavePoolPreemptible(ctx context.Context, tx pgx.Tx, tenantID, name, provide
 	return next, checkPreemptibleFlip(ctx, tx, id, *current, next)
 }
 
-// checkChosenHost refuses (422) an operator's chosen host for a
-// non-preemptible Run when the host is spot or its runner lacks
-// CapNonPreemptible: hostFit would never place the Run there, and place_on
-// would hold it waiting for that host indefinitely.
+// checkChosenHost refuses (422) an operator's chosen host that hostFit
+// would never place the Run on, so place_on would hold it waiting for that
+// host indefinitely: for a non-preemptible Run, a spot host or a runner
+// lacking CapNonPreemptible; for a Run with files, a runner lacking
+// CapFiles.
 func checkChosenHost(ctx context.Context, tx pgx.Tx, sp *spec.RunSpec, hostID *string) error {
-	if hostID == nil || !sp.NonPreemptible() {
+	if hostID == nil || (!sp.NonPreemptible() && len(sp.Files) == 0) {
 		return nil
 	}
 	var market string
@@ -146,12 +147,15 @@ func checkChosenHost(ctx context.Context, tx pgx.Tx, sp *spec.RunSpec, hostID *s
 		return err
 	}
 	switch {
-	case market == MarketSpot:
+	case sp.NonPreemptible() && market == MarketSpot:
 		return errf(http.StatusUnprocessableEntity, "invalid_spec",
 			"the chosen host is a spot instance: a Run with placement.preemptible false runs only on a host that is not spot")
-	case !slices.Contains(caps, proto.CapNonPreemptible):
+	case sp.NonPreemptible() && !slices.Contains(caps, proto.CapNonPreemptible):
 		return errf(http.StatusUnprocessableEntity, "invalid_spec",
 			"the chosen host's lux-runner lacks non-preemptible support: a Run with placement.preemptible false cannot run there")
+	case len(sp.Files) > 0 && !slices.Contains(caps, proto.CapFiles):
+		return errf(http.StatusUnprocessableEntity, "invalid_spec",
+			"the chosen host's lux-runner predates files: a Run with files cannot run there")
 	}
 	return nil
 }

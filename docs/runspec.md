@@ -939,7 +939,9 @@ goes fails it too. Each file is written beside its path and renamed over
 it, so whatever was there, a link included, is replaced and never written
 through. A `lux.files` record (`{count, bytes}`) marks it done, before
 `lux.init`. A resume's [sync](#syncing-checkouts) comes first, so a file
-inside a checkout is the spec's, not the ref's.
+inside a checkout is the spec's, not the ref's. A `~/` path is checked
+again once expanded: one that lands under a reserved root (a home of
+`/`) or on a file secret's path fails the start.
 
 **Every start writes them again**, overwriting what the workload made of
 them. Nothing else is touched: a file the workload added next to them
@@ -967,7 +969,8 @@ file`) for credentials.
 A Run with files is placed only on hosts whose `lux-runner` and
 `lux-shim` write them (the `files` capability, since the `files`
 release); an older host is skipped, the Run waiting with `files` among
-its reasons.
+its reasons. An operator's chosen host (`resume --to`, `migrate --to`)
+without it is refused (422).
 
 ## Before stop
 

@@ -1929,7 +1929,12 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			}
 			to = &rp
 		}
-		if err := checkChosenHost(ctx, tx, &sp, placeOn); err != nil {
+		// The files the Run has from this resume on.
+		chosen := sp
+		if replacing != nil {
+			chosen.Files = replacing.Files
+		}
+		if err := checkChosenHost(ctx, tx, &chosen, placeOn); err != nil {
 			return err
 		}
 		switch {

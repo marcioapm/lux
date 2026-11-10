@@ -94,6 +94,24 @@ func ExpandFilePath(p, home string) string {
 	return ""
 }
 
+// CheckFileTarget is what is wrong with a file's path once ~/ is
+// expanded (p, absolute and clean), "" if nothing: the shim's check,
+// since only it knows the home: not under a reserved root, nor at, in or
+// around a file secret's path.
+func CheckFileTarget(p string, secrets []Secret) string {
+	for _, root := range reservedFileRoots {
+		if Under(p, root) {
+			return fmt.Sprintf("%s is under %s, which is reserved", p, root)
+		}
+	}
+	for _, sec := range secrets {
+		if sec.As == "file" && !sec.RunnerOnly && (Under(path.Clean(sec.Path), p) || Under(p, path.Clean(sec.Path))) {
+			return fmt.Sprintf("%s meets secret %q's path %s", p, sec.Name, sec.Path)
+		}
+	}
+	return ""
+}
+
 // checkFilePath is what is wrong with a file's path, "" if nothing: it
 // must be absolute or ~/, name a file (not / or a directory), and keep
 // out of the reserved roots.
