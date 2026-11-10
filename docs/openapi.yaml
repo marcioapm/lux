@@ -822,6 +822,29 @@ components:
         type:
           type: string
       type: object
+    File:
+      additionalProperties: false
+      properties:
+        data:
+          description: "Its bytes, standard base64; absent or empty: an empty file. Run views leave it out."
+          type: string
+        mode:
+          description: "Its permission bits, octal: \"0644\" (the default) or \"0755\". No setuid, setgid or sticky bit."
+          examples:
+            - "0644"
+          pattern: ^(0o)?[0-7]{1,4}$
+          type: string
+        path:
+          description: "Where it goes in the container: absolute, or ~/ for the workload user's home. No .. and no NUL; not under /.lux, /proc, /sys or /dev. Missing directories are made, as the workload user."
+          type: string
+        sha256:
+          description: "Set by luxd: the sha256 of its bytes, hex."
+          type: string
+        size:
+          description: "Set by luxd: its size in bytes."
+          format: int64
+          type: integer
+      type: object
     Git:
       additionalProperties: false
       properties:
@@ -3162,6 +3185,11 @@ components:
     ResumeRequest:
       additionalProperties: false
       properties:
+        files:
+          description: "Replace the Run's files from this resume on (spec files: the same rules, at most 1000 and 4 MiB in total), written on this start and every later one. [] removes them all; a file left out is no longer written, but what an earlier start wrote stays in the container's state volumes. Absent: unchanged. Refused on a Run already resuming (409 not_resumable), unless the same as its files."
+          items:
+            $ref: "#/components/schemas/File"
+          type: array
         fromSnapshot:
           description: "Resume from this snapshot instead of the latest (e.g. after lost). Older snapshots are deleted once the latest is uploaded: one deleted is 409 snapshot_unavailable."
           type: string
@@ -3755,6 +3783,13 @@ components:
           additionalProperties:
             type: string
           type: object
+        files:
+          description: "Files lux writes into the container on every start (a resume, a move), before init, as the workload user: each replaces what is at its path. At most 1000, 4 MiB in total. Their bytes are kept apart from the spec, which keeps each one's path, mode, size and sha256; a resume can replace them (files in the resume request). Not secret: use secrets for credentials."
+          items:
+            $ref: "#/components/schemas/File"
+          type:
+            - array
+            - "null"
         git:
           $ref: "#/components/schemas/Git"
         image:

@@ -186,6 +186,15 @@ func (s *RunSpec) normalizeFiles(fail func(string, ...any)) {
 	}
 }
 
+// FilesProblems normalizes the spec's files alone (as Normalize does) and
+// returns what is wrong with them: a resume's, before they replace the
+// Run's.
+func (s *RunSpec) FilesProblems() []string {
+	var errs []string
+	s.normalizeFiles(func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) })
+	return errs
+}
+
 // emptySHA256 is the sha256 of no bytes: an empty file's.
 var emptySHA256 = func() string { s := sha256.Sum256(nil); return hex.EncodeToString(s[:]) }()
 

@@ -704,6 +704,10 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			}
 		}
 	}
+	// Checked here, not in Normalize, which also runs on stored specs.
+	if problems := spec.ClientSetFileFields("files", sp.Files); len(problems) > 0 {
+		return nil, invalidSpec(&spec.ValidationError{Problems: problems})
+	}
 	if sp.Placement.Pool != "" && sp.Placement.PoolID != "" {
 		// Checked here, not in Normalize: the stored spec carries both.
 		return nil, invalidSpec(&spec.ValidationError{Problems: []string{
@@ -731,6 +735,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		return nil, err
 	}
 	stored, refs, values := sp.SplitSecrets()
+	stored, files := stored.SplitFiles()
 	if in.ValidateOnly {
 		// Values are never required for a validation: only names and
 		// references (Normalize checked them), as for resume validateOnly.
@@ -793,9 +798,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		var prompt []spec.Attachment
 		stored, prompt = splitPromptAttachments(stored)
 		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since, prompt_attachments,
-				submitted_by_key, submitted_by_email, requested_resources, resolved_size, owner_user_id, owner_sa_id)
-			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''), $12, $13, nullif($14, ''), nullif($15, ''))`,
-			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email, requested, size, p.UserID, p.ServiceAccountID)
+				submitted_by_key, submitted_by_email, requested_resources, resolved_size, owner_user_id, owner_sa_id, files)
+			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''), $12, $13, nullif($14, ''), nullif($15, ''), $16)`,
+			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email, requested, size, p.UserID, p.ServiceAccountID, files)
 		if err != nil {
 			return err
 		}
@@ -1699,6 +1704,7 @@ type resumeRequest struct {
 	Placement    *resumeTarget    `json:"placement,omitempty" doc:"Move the Run to another pool (poolId) from this resume on, with its saved state, as on any host change."`
 	ValidateOnly bool             `json:"validateOnly,omitempty" doc:"Run every check this resume would run and change nothing: 200 with valid: true (and the resize and placement it would apply), or the error it would meet. Secret values may be left out: only the names sent are checked. A live Run (scheduled, starting, running, stopping) is judged as if it were stopped, its state given in stateUnchecked."`
 	Timeout      *spec.Duration   `json:"timeout,omitempty" doc:"The Run's timeout from this resume on: its total running time over all its placements, the time already run included (\"4h\"); \"0s\": no timeout. Absent: unchanged. It must leave at least a minute past the time already run (422 timeout_too_short); negative: 422 invalid_spec. Written into spec.timeout with a timeout.changed event. A Run failed on its timeout has used its time up: without a longer timeout it is stopped again as soon as it runs. On a Run already resuming: its timeout now, 202; other values, 409 not_resumable (POST /v1/runs/{id}/timeout changes it)."`
+	Files        *[]spec.File     `json:"files,omitempty" doc:"Replace the Run's files from this resume on (spec files: the same rules, at most 1000 and 4 MiB in total), written on this start and every later one. [] removes them all; a file left out is no longer written, but what an earlier start wrote stays in the container's state volumes. Absent: unchanged. Refused on a Run already resuming (409 not_resumable), unless the same as its files."`
 	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha; mode: move, fast-forward or fetch) before init, through the host's mirror. Mode move (default): tracked files become the ref's, untracked and ignored ones are kept. fast-forward: only a checkout that loses nothing moves; fetch: none does. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
 }
 
@@ -1830,6 +1836,18 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 	if req.Git != nil {
 		adding = req.Git.Repositories
 	}
+	// The resume's files, checked alone as a spec's would be (each one's
+	// size and sha256 set) before the Run's own are replaced by them.
+	var replacing *spec.RunSpec
+	if req.Files != nil {
+		if problems := spec.ClientSetFileFields("files", *req.Files); len(problems) > 0 {
+			return nil, invalidSpec(&spec.ValidationError{Problems: problems})
+		}
+		replacing = &spec.RunSpec{Files: slices.Clone(*req.Files)}
+		if problems := replacing.FilesProblems(); len(problems) > 0 {
+			return nil, invalidSpec(&spec.ValidationError{Problems: problems})
+		}
+	}
 	values := map[string]string{}
 	for _, sec := range req.Secrets {
 		values[sec.Name] = sec.Value
@@ -1957,6 +1975,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			if req.Timeout != nil && req.Timeout.Duration != sp.Timeout.Duration {
 				return errf(http.StatusConflict, "not_resumable", "run is resuming already with timeout %s: change it with POST /v1/runs/{id}/timeout", cmp.Or(durationText(sp.Timeout.Duration), "none"))
 			}
+			if replacing != nil && !sameFiles(replacing.Files, sp.Files) {
+				return errf(http.StatusConflict, "not_resumable", "run is resuming already: its files can only change before it is resumed")
+			}
 			return nil // idempotent: the first resume's secrets stand
 		case terminal(state):
 			return errf(http.StatusConflict, "not_resumable", "run is %s", state)
@@ -1990,6 +2011,18 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		declared, err := sp.ResumeSecrets(req.Secrets, req.RemoveSecrets, adding, s.cfg.Defaults)
 		if err != nil {
 			return invalidSpec(err)
+		}
+		var files []spec.File
+		if replacing != nil {
+			sp.Files = replacing.Files
+			if err := sp.Normalize(s.cfg.Defaults); err != nil {
+				return invalidSpec(err)
+			}
+			sp, files = sp.SplitFiles()
+			if _, err := tx.Exec(ctx, `UPDATE runs SET files = $2 WHERE id = $1`, id, files); err != nil {
+				return err
+			}
+			specChanged = true
 		}
 		for _, n := range declared {
 			refs = append(refs, spec.SecretRef{Name: n})
@@ -2120,6 +2153,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		}
 		if len(req.RemoveSecrets) > 0 {
 			ev["removedSecrets"] = req.RemoveSecrets
+		}
+		if replacing != nil {
+			ev["files"] = map[string]any{"count": len(files), "bytes": spec.FilesBytes(files)}
 		}
 		if resize != nil {
 			ev["resources"] = resize

@@ -273,9 +273,10 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 			return err
 		}
 	}
-	// prompt_attachments: only a terminated Run is never placed again. A
-	// succeeded or failed one can be resumed without an agent session: a
-	// fresh agent start, with or without restored files, needs them.
+	// prompt_attachments and files: only a terminated Run is never placed
+	// again. A succeeded or failed one can be resumed without an agent
+	// session: a fresh agent start, with or without restored files, needs
+	// them, and every start writes the files.
 	// finished_at: when its last placement ended. A Run terminated once it
 	// had ended (succeeded, failed: nothing ran since) keeps it.
 	// terminated_at: retention's clock (reapRetention).
@@ -288,6 +289,7 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 				WHEN $2 = 'terminated' THEN now() ELSE finished_at END,
 			terminated_at = CASE WHEN $2 = 'terminated' THEN coalesce(terminated_at, now()) ELSE terminated_at END,
 			prompt_attachments = CASE WHEN $2 = 'terminated' THEN NULL ELSE prompt_attachments END,
+			files = CASE WHEN $2 = 'terminated' THEN NULL ELSE files END,
 			activity = CASE WHEN $2 IN ('running') THEN activity ELSE '' END
 		WHERE id = $1`, runID, state, reason)
 	if err != nil {

@@ -47,6 +47,9 @@ const (
 	// kindNonPreemptible: a non-preemptible Run, a spot host or a runner
 	// without CapNonPreemptible (its disk guard could stop the Run).
 	kindNonPreemptible
+	// kindFiles: a Run with files, a runner without CapFiles (it would
+	// start the Run without them).
+	kindFiles
 )
 
 func shapeText(cpus float64, memory, disk int64) string {
@@ -101,6 +104,9 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	// An older runner would run a fast-forward or fetch resume as move.
 	if proto.SafeSyncModes(r.PendingSync) && !slices.Contains(h.Caps, proto.CapSyncModes) {
 		constraint(kindSyncModes, "host's lux-runner predates sync modes")
+	}
+	if len(r.Spec.Files) > 0 && !slices.Contains(h.Caps, proto.CapFiles) {
+		constraint(kindFiles, "host's lux-runner predates files")
 	}
 	if r.Spec.Spot && !slices.Contains(h.Caps, proto.CapSpotReclaim) {
 		constraint(kindSpotReclaim, "host's lux-runner lacks spot reclamation support")
@@ -163,7 +169,7 @@ type waitCapacity struct {
 }
 
 // waitKinds is the reason's fixed order: the resource kinds, then constraints.
-var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes", "nonPreemptible", "shape", "diskPressure"}
+var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes", "files", "nonPreemptible", "shape", "diskPressure"}
 
 // add counts h's blockers, unless one of them rules h out for this Run on
 // pool, tenancy or chosen-host grounds, or h is not connected to this luxd
@@ -182,6 +188,8 @@ func (w *waitCapacity) add(blockers []fitBlocker) {
 			kind = "nested"
 		case kindSyncModes:
 			kind = "syncModes"
+		case kindFiles:
+			kind = "files"
 		case kindNonPreemptible:
 			kind = "nonPreemptible"
 		case kindShape:
@@ -234,6 +242,8 @@ func (w *waitCapacity) reason(r pendingRun) string {
 			what = plural(n, "does", "do") + " not support nested containers"
 		case "syncModes":
 			what = plural(n, "runs a lux-runner", "run lux-runners") + " without sync modes (its sync asks for fast-forward or fetch)"
+		case "files":
+			what = plural(n, "runs a lux-runner", "run lux-runners") + " without files"
 		case "nonPreemptible":
 			what = "cannot take a non-preemptible Run (a spot instance, or a lux-runner without its support)"
 		case "shape":

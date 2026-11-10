@@ -691,6 +691,12 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 			return err
 		}
 	}
+	// Written on every start, so read for every placement.
+	if len(r.Spec.Files) > 0 {
+		if err := tx.QueryRow(ctx, `SELECT files FROM runs WHERE id = $1`, r.ID).Scan(&a.Files); err != nil {
+			return err
+		}
+	}
 	if len(r.PendingInput) > 0 {
 		var in proto.Input
 		if err := json.Unmarshal(r.PendingInput, &in); err == nil {

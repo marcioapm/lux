@@ -165,6 +165,7 @@ var schemaNames = map[reflect.Type]string{
 type (
 	durationSchema struct{}
 	bytesSchema    struct{}
+	fileModeSchema struct{}
 )
 
 func (durationSchema) Schema(huma.Registry) *huma.Schema {
@@ -187,6 +188,11 @@ func (bytesSchema) Schema(huma.Registry) *huma.Schema {
 	}
 }
 
+func (fileModeSchema) Schema(huma.Registry) *huma.Schema {
+	return &huma.Schema{Type: huma.TypeString, Pattern: `^(0o)?[0-7]{1,4}$`, Examples: []any{"0644"},
+		Description: `Permission bits, octal ("0644", "0755"). Responses carry four digits.`}
+}
+
 func schemaNamer(t reflect.Type, hint string) string {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -203,6 +209,7 @@ func (s *Server) newAPI(mux *http.ServeMux) huma.API {
 	registry.RegisterTypeAlias(reflect.TypeFor[spec.Duration](), reflect.TypeFor[durationSchema]())
 	registry.RegisterTypeAlias(reflect.TypeFor[spec.OptionalDuration](), reflect.TypeFor[durationSchema]())
 	registry.RegisterTypeAlias(reflect.TypeFor[spec.Bytes](), reflect.TypeFor[bytesSchema]())
+	registry.RegisterTypeAlias(reflect.TypeFor[spec.FileMode](), reflect.TypeFor[fileModeSchema]())
 	registry.RegisterTypeAlias(reflect.TypeFor[poolInput](), reflect.TypeFor[Pool]())
 	cfg := huma.Config{
 		OpenAPI: &huma.OpenAPI{

@@ -544,7 +544,7 @@ func (s *Server) refuseSync(ctx context.Context, tx pgx.Tx, hostID string, id in
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE host_messages SET acked_at = now(),
-			payload = CASE type WHEN $2 THEN payload - 'promptAttachments' ELSE payload END
+			payload = CASE type WHEN $2 THEN payload - 'promptAttachments' - 'files' ELSE payload END
 		WHERE id = $1`, id, proto.MsgAssign); err != nil {
 		return err
 	}
@@ -692,10 +692,10 @@ func (s *Server) ackMessage(ctx context.Context, hostID string, id int64) error 
 			return err
 		}
 		// An acked message is never read again (redelivery reads acked_at
-		// IS NULL only): its image bytes go with the ack.
+		// IS NULL only): its image and file bytes go with the ack.
 		err := tx.QueryRow(ctx, `UPDATE host_messages SET acked_at = now(),
 				payload = CASE type WHEN $3 THEN payload - 'attachments'
-					WHEN $4 THEN payload - 'promptAttachments'
+					WHEN $4 THEN payload - 'promptAttachments' - 'files'
 					ELSE payload END
 			WHERE id = $1 AND host_id = $2 AND acked_at IS NULL
 			RETURNING type, coalesce(run_id, ''), coalesce(epoch, 0)`, id, hostID, proto.MsgInput, proto.MsgAssign).Scan(&typ, &runID, &epoch)

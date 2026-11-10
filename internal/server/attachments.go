@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/marcioapm/lux/internal/spec"
@@ -43,4 +44,12 @@ func splitPromptAttachments(sp spec.RunSpec) (spec.RunSpec, []spec.Attachment) {
 	}
 	sp.Workload.Attachments = list
 	return sp, full
+}
+
+// sameFiles: a resume's files (normalized) are the ones a Run already has
+// (as stored): the same paths, modes and contents, in the same order.
+func sameFiles(asked, stored []spec.File) bool {
+	return slices.EqualFunc(asked, stored, func(a, b spec.File) bool {
+		return a.Path == b.Path && a.Mode == b.Mode && a.SHA256 == b.SHA256
+	})
 }
