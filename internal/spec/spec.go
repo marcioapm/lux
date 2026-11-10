@@ -29,6 +29,7 @@ type RunSpec struct {
 	Image     Image             `json:"image" yaml:"image"`
 	Workload  Workload          `json:"workload" yaml:"workload"`
 	Init      *Init             `json:"init,omitempty" yaml:"init,omitempty"`
+	Files     []File            `json:"files,omitempty" yaml:"files,omitempty" doc:"Files lux writes into the container on every start (a resume, a move), before init, as the workload user: each replaces what is at its path. At most 1000, 4 MiB in total. Their bytes are kept apart from the spec, which keeps each one's path, mode, size and sha256; a resume can replace them (files in the resume request). Not secret: use secrets for credentials."`
 	Env       map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 	Secrets   []Secret          `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 	Git       *Git              `json:"git,omitempty" yaml:"git,omitempty"`
@@ -887,6 +888,7 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		}
 		servers[sv.Name] = true
 	}
+	s.normalizeFiles(fail)
 	for i, p := range s.Artifacts.Paths {
 		if !path.IsAbs(p) {
 			fail("artifacts.paths[%d]: must be absolute", i)
