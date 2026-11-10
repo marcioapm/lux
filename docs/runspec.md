@@ -50,7 +50,7 @@ init:
 
 files:                          # written before init, on every start, as the workload user
   - { path: ~/.claude/skills, source: ./skills }      # a local directory (lux run reads it)
-  - { path: /etc/tool.conf, content: "verbose = true\n", mode: "0600" }
+  - { path: ~/.config/tool.conf, content: "verbose = true\n", mode: "0600" }
 
 env: { NODE_ENV: test }
 
@@ -892,7 +892,7 @@ init:
 files:
   - path: ~/.claude/skills      # a directory: every file under it, by its relative path
     source: ./skills            # relative to the spec file
-  - path: /etc/tool.conf
+  - path: ~/.config/tool.conf
     content: |                  # inline text
       verbose = true
     mode: "0600"
