@@ -202,6 +202,9 @@ on every start, so it must be idempotent.
 - A resume must supply the Run's **secrets** again, because lux never stores
   secret values. This also means a resume can rotate credentials, add
   secrets and remove them ([Secrets](#secrets)).
+- The Run's **files** ([the RunSpec](runspec.md#files)) are written
+  again before init, on every start; a resume can replace them (`files`,
+  `lux resume --files-from`).
 - A resume can **sync** repositories (`sync: [{repo, ref}]`, `lux resume
   --sync app=main`): their restored checkouts move to the ref's commit
   before init ([the RunSpec](runspec.md#syncing-checkouts)). A running Run

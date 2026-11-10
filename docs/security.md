@@ -117,6 +117,17 @@ are in the linked pages.
   WebSocket, and output is redacted before it is written anywhere
   ([Concepts](concepts.md)). A workload can still write a secret into its
   state volumes; that is its choice, and is snapshotted like anything else.
+- **Files** (`files`, [The RunSpec](runspec.md#files)) are written by
+  lux-shim as the workload user: on a thread with the user's fsuid, fsgid
+  and groups, which drops root's file capabilities, so a file goes only
+  where the workload could put it. Paths are walked from `/` with
+  `O_NOFOLLOW`, and each file is renamed into place: a link the workload
+  plants on a state volume fails the start or is replaced, never written
+  through. Paths under `/.lux`, `/proc`, `/sys` and `/dev`, and `..`, are
+  refused at submit. The CLI follows no link when it reads a source.
+  Files are not secret: their bytes are kept beside the spec (never in it,
+  in events or in the environment) and dropped on terminate; their path,
+  mode, size and sha256 are in the spec.
 - **Credentials a workload uses but must not hold** go through a service
   (`workload.services`): lux-shim adds them to each request it forwards
   from a socket in the container. The values are only in the shim's

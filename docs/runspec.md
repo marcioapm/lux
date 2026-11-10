@@ -48,6 +48,10 @@ workload:
 init:
   script: npm ci                # runs before the workload, on every start
 
+files:                          # written before init, on every start, as the workload user
+  - { path: ~/.claude/skills, source: ./skills }      # a local directory (lux run reads it)
+  - { path: /etc/tool.conf, content: "verbose = true\n", mode: "0600" }
+
 env: { NODE_ENV: test }
 
 secrets:                        # values supplied by the caller; never stored
@@ -871,6 +875,99 @@ spec, and so a Run's views (`GET /v1/runs/{id}`), keep their names and
 types. Steers take
 images the same way (`attachments` on `POST /v1/runs/{id}/input`,
 `lux steer --image`).
+
+## Files
+
+`files` puts local files into the container before anything runs: before
+`init.script` and the workload, on every start of the Run (its first, a
+resume, a move). For what has to be in place when the agent starts, such
+as its skills folder, which agents read once at startup:
+
+```yaml
+workload:
+  adapter: claude-code
+  user: agent
+init:
+  script: ls ~/.claude/skills   # the files are already there
+files:
+  - path: ~/.claude/skills      # a directory: every file under it, by its relative path
+    source: ./skills            # relative to the spec file
+  - path: /etc/tool.conf
+    content: |                  # inline text
+      verbose = true
+    mode: "0600"
+```
+
+```bash
+lux run -f spec.yaml
+lux run -f spec.yaml --copy ./skills:~/.claude/skills     # the same, as a flag
+lux run --image alpine --copy ./notes.md:/tmp/notes.md -- cat /tmp/notes.md
+```
+
+Each file is `{path, mode, data}` to luxd. The CLI fills `data` from
+`content` (text) or `source` (a local file or directory), so a spec file
+can name local paths. `--copy LOCAL:REMOTE` (repeatable) adds files the
+same way, `LOCAL` relative to the working directory. A `source`
+directory becomes one file per regular file under it, dotfiles included,
+each keeping its own permission bits unless the spec gives `mode`. The CLI
+follows no link and reads no device, socket or fifo, whether named or
+found in a directory: it refuses them, saying which. An empty
+directory is refused, since lux copies files, not directories.
+
+- `path`: absolute, or `~/…` for the workload user's home (the
+  `workload.user` as the image's `/etc/passwd` has it, else the image's
+  `USER`). No `..` and no NUL; not `/` or a directory (no trailing `/`);
+  not under `/.lux`, `/proc`, `/sys` or `/dev`; not a file secret's path,
+  nor inside or around one. Two files cannot share a path, and one cannot
+  be a directory of another.
+- `mode`: octal, as a string in JSON (`"0644"`, the default, or
+  `"0755"`); YAML also takes a bare `0755` (always read as octal).
+  Permission bits only: no setuid, setgid or sticky bit.
+- `data`: standard base64. Empty or absent is an empty file.
+- At most 1000 files and 4 MiB in total (decoded): enough for a folder of
+  skills or configuration; anything bigger belongs in the image, a
+  repository or a state volume. `lux run` checks both before sending.
+
+**How they are written.** The shim writes them as the workload user, not as
+root: a file goes only where that user could write it (a path in a
+root-owned directory fails the start), and the file and every directory
+made for it (`0755`) are that user's. The path is walked from `/` one
+directory at a time, following no symbolic link: a link on the way
+(a workload may have made `~/.claude` one) fails the start with
+`files: <path>: <dir> is a symbolic link`, and a directory where the file
+goes fails it too. Each file is written beside its path and renamed over
+it, so whatever was there, a link included, is replaced and never written
+through. A `lux.files` record (`{count, bytes}`) marks it done, before
+`lux.init`. A resume's [sync](#syncing-checkouts) comes first, so a file
+inside a checkout is the spec's, not the ref's.
+
+**Every start writes them again**, overwriting what the workload made of
+them. Nothing else is touched: a file the workload added next to them
+stays, and a file left out of a later list is no longer written, but
+what an earlier start wrote stays on a state volume (on the writable
+layer it goes with the container, as on every placement). To change them,
+resume with new ones: `lux resume <run> --files-from spec.yaml` (that
+spec's `files`, read as `lux run` reads them) or `--copy LOCAL:REMOTE`
+replaces the Run's files from that resume on; `--no-files` removes them.
+The API takes them as `files` on `POST /v1/runs/{id}/resume`. A Run
+already resuming refuses different ones (409 `not_resumable`).
+
+**Where they are kept.** luxd keeps their bytes apart from the stored
+spec, as it keeps a prompt's images, and drops them when the Run is
+terminated. The spec, and so a Run's views (`GET /v1/runs/{id}`), keeps
+each file's `path`, `mode`, `size` and `sha256` (set by luxd: a client
+sending them is refused). Their bytes go to the runner with every
+placement, then into the shim's configuration file on the Run's runtime
+volume (as root's), and leave the shim's memory once written. They are
+never in the environment, events, output or snapshots (unless the files
+themselves are on a state volume). They are not secrets: anyone who can
+read the Run's container can read them. Use [secrets](concepts.md#secrets) (`as:
+file`) for credentials.
+
+A Run with files is placed only on hosts whose `lux-runner` and
+`lux-shim` write them (the `files` capability, since the `files`
+release); an older host is skipped, the Run waiting with `files` among
+its reasons.
 
 ## Before stop
 

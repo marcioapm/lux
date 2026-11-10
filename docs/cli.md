@@ -84,8 +84,9 @@ was reached; `1` anything else.
 ## Runs
 
 ```bash
-lux run -f spec.yaml [--spot] [--preemptible=false] [--dry-run | --follow | --wait] [--name N] [--idle-timeout D] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env]
+lux run -f spec.yaml [--spot] [--preemptible=false] [--dry-run | --follow | --wait] [--name N] [--idle-timeout D] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env] [--copy LOCAL:REMOTE]
 lux run --image alpine -- echo hello           # a quick generic Run
+lux run -f agent.yaml --copy ./skills:~/.claude/skills   # local files, in place before init
 lux run --image alpine --pool arm64 -- uname -m
 lux run --image alpine --pool m --size m-2-arm64 -- make test   # a size of a shaped pool
 lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with RUNTIME and COST columns; --resumable omits Runs whose only snapshot report was refused, and resumePolicy never
@@ -106,6 +107,16 @@ Flags win over the spec file: `--pool` replaces `placement.pool`, as
 `--image` and `--name` replace theirs, and `--size` sets
 `resources.size`. Without `--pool` or `placement.pool`, the server picks
 the pool.
+
+Files ([the RunSpec](runspec.md#files)): a spec's `files` take `content`
+(text) or `source` (a local file or directory, relative to the spec
+file), which `lux run` reads into the request; `--copy LOCAL:REMOTE`
+(repeatable, `LOCAL` relative to the working directory) adds one. They
+are written into the container before init, on every start, as the
+workload user. A directory is copied file by file, each with its own
+mode. Links, devices, sockets and fifos are refused, never followed. At
+most 1000 files and 4 MiB in total, checked before anything is sent.
+`--dry-run` reads and sends them, so luxd checks them too.
 
 `--idle-timeout D` overrides `workload.idleTimeout`, including `0` to
 disable it. Agent adapters only; otherwise `1m` to `24h`. An idle stop
@@ -194,7 +205,7 @@ JPEG, WebP or GIF). See [images](adapters.md#images).
 
 ```bash
 lux stop <run> [--wait]         # graceful; snapshot; resumable
-lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--disk-grace DURATION] [--size NAME] [--pool NAME|ID] [--timeout DURATION] [--dry-run] [--to HOST]
+lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--disk-grace DURATION] [--size NAME] [--pool NAME|ID] [--timeout DURATION] [--files-from SPEC] [--copy LOCAL:REMOTE] [--no-files] [--dry-run] [--to HOST]
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]... [--sync-mode move|fast-forward|fetch]  # move restored checkouts to ref before init
 lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID] [--credential repo=VALUE]   # a running Run's checkouts
@@ -234,6 +245,16 @@ secret valuing a header, cannot be removed (422).
 ```bash
 lux resume run_x --secret GIT_TOKEN=… --secret LLM_PROXY_KEY=…   # adds LLM_PROXY_KEY
 lux resume run_x --secret GIT_TOKEN=… --remove-secret LLM_PROXY_KEY
+```
+
+A resume writes the Run's files again. `--files-from SPEC` (that spec's
+`files`, read as `lux run` reads them) and `--copy LOCAL:REMOTE` replace
+them from this resume on, so edited files reach the Run; `--no-files`
+removes them ([the RunSpec](runspec.md#files)).
+
+```bash
+lux resume run_x --files-from agent.yaml        # the skills as they are now
+lux resume run_x --copy ./skills:~/.claude/skills
 ```
 
 `--cpus`, `--memory` and `--disk` change what the Run gets from now on
