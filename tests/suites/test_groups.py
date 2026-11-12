@@ -1,6 +1,8 @@
-"""The workload runs with its user's supplementary groups, from the image's
-/etc/group, as `podman run` gives them: the workload itself and an exec
-into it, for the image's USER and for a user the spec names."""
+"""The workload runs as its user, with that user's supplementary groups
+from the image's /etc/group, as `podman run` gives them: the workload
+itself, an exec into it (with and without a terminal) and its beforeStop
+hook, for the image's USER and for a user the spec names. uid, primary gid
+and groups are compared separately."""
 
 from __future__ import annotations
 
@@ -14,6 +16,10 @@ RUN addgroup -g 4001 extra1 && addgroup -g 4002 extra2 && adduser -D -u 1000 run
 USER runner
 """
 
+# One line: "ids=<uid>|<gid>|<groups>".
+IDS = 'echo "ids=$(id -u)|$(id -g)|$(id -G)"'
+PUBLISH = "/.lux/bin/lux-shim publish"
+
 
 def spec(*cmd: str, **workload) -> dict:
     s = generic(ALPINE_IMAGE, *cmd)
@@ -22,25 +28,41 @@ def spec(*cmd: str, **workload) -> dict:
     return s
 
 
-def test_workload_gets_the_images_groups(lux, runners, hosts):
-    runners.start(hosts[0])
-    run_id = lux.submit(spec("sh", "-c", "echo groups=$(id -G); sleep 300"))
-    lux.wait_output(run_id, "groups=")
-    image = lux.get(run_id)["image"]["imageId"]
-    want = hosts[0].podman("run", "--rm", image, "id", "-G").strip()
-    assert want.split() == ["1000", "4001", "4002"], want
-    got = next(l for l in lux.logs(run_id).splitlines() if l.startswith("groups="))
-    assert got == f"groups={want}", (got, want)
-    # An exec into the Run runs as the same user, with the same groups.
-    out = lux.run("exec", run_id, "-T", "--", "id", "-G", input="").stdout.strip()
-    assert out == want, (out, want)
-    lux.run("terminate", run_id)
+def ids_line(text: str) -> tuple[str, str, str]:
+    line = next(l for l in reversed(text.replace("\r", "").splitlines()) if l.startswith("ids="))
+    uid, gid, groups = line.removeprefix("ids=").split("|")
+    return uid, gid, groups
 
-    # A user the spec names, by name and by uid, and one in no extra group;
-    # uid:gid gets that group only, as podman gives it.
-    for user, podman_user in [("runner", "runner"), ("1000", "1000"), ("run", "run"), ("runner:4002", "runner:4002")]:
-        run_id = lux.submit(spec("id", "-G", user=user))
+
+def podman_ids(host, image: str, *user: str) -> tuple[str, str, str]:
+    args = ["--user", user[0]] if user else []
+    return ids_line(host.podman("run", "--rm", *args, image, "sh", "-c", IDS))
+
+
+def test_workload_gets_the_images_groups(lux, runners, hosts, tmp_path):
+    runners.start(hosts[0])
+    run_id = lux.submit(spec("sh", "-c", f"{IDS}; sleep 300",
+                             beforeStop={"command": ["sh", "-c", f"{IDS} > /tmp/hook-ids; {PUBLISH} /tmp/hook-ids"], "timeout": "10s"}))
+    lux.wait_output(run_id, "ids=")
+    image = lux.get(run_id)["image"]["imageId"]
+    want = podman_ids(hosts[0], image)
+    assert want == ("1000", "1000", "1000 4001 4002"), want
+    assert ids_line(lux.logs(run_id)) == want
+    # An exec into the Run runs as the same user, with the same groups,
+    # without a terminal and with one.
+    assert ids_line(lux.run("exec", run_id, "-T", "--", "sh", "-c", IDS, input="").stdout) == want
+    assert ids_line(lux.run("exec", run_id, "-t", "--", "sh", "-c", IDS, input="").stdout) == want
+    # So does the beforeStop hook.
+    lux.run("stop", run_id, "--wait")
+    lux.run("artifacts", run_id, "--download", str(tmp_path))
+    assert ids_line((tmp_path / "1/.lux/artifacts/hook-ids").read_text()) == want
+
+    # A user the spec names: by name, by uid in its forms, one in no extra
+    # group; uid:gid gets that group only. "runner:" gets runner's groups,
+    # as runc gives them (podman with crun gives its primary group only).
+    for user, podman_user in [("runner", "runner"), ("1000", "1000"), ("01000", "01000"), ("runner:", "runner"),
+                              ("run", "run"), ("runner:4002", "runner:4002"), ("1000:1000", "1000:1000")]:
+        run_id = lux.submit(spec("sh", "-c", IDS, user=user))
         lux.wait_state(run_id, "succeeded")
-        want = hosts[0].podman("run", "--rm", "--user", podman_user, image, "id", "-G").strip()
-        got = lux.logs(run_id).strip().splitlines()[-1]
-        assert got == want, (user, got, want)
+        want = podman_ids(hosts[0], image, podman_user)
+        assert ids_line(lux.logs(run_id)) == want, (user, want)

@@ -1,7 +1,8 @@
 // Package passwd resolves a container user ("name", "uid" or "uid:gid")
 // against an image's /etc/passwd, and its supplementary groups against the
-// image's /etc/group. Shared by the shim, which switches to the user, and
-// the runner, which prepares files for it.
+// image's /etc/group. Lookup is shared by the shim, which switches to the
+// user, and the runner, which prepares files for it; the runner alone
+// reads /etc/group (Resolve, Groups).
 package passwd
 
 import (
@@ -20,67 +21,85 @@ type User struct {
 // Lookup resolves spec against the contents of /etc/passwd. Empty, "root"
 // or "0" is root.
 func Lookup(spec string, passwd []byte) (User, error) {
+	u, _, err := Resolve(spec, passwd)
+	return u, err
+}
+
+// Resolve is Lookup, from the same scan of passwd, plus member: the name
+// whose /etc/group memberships the user gets, as runc's GetExecUser gives
+// them. member is the name of the first entry whose name is spec's user
+// or, for a numeric user, whose uid equals it as a number ("1000",
+// "01000", "+1000"), as runc matches it; it is
+// empty for root, for a user with no entry, for one whose entry has uid 0,
+// and when spec has a non-empty group ("runner:4002" gets that group only;
+// "runner:" gets memberships).
+//
+// The user's uid and primary gid are Lookup's, which matches an entry's
+// uid as text: "01000" finds no entry there, so it runs as 1000:1000 even
+// if uid 1000's entry has another primary gid, while its memberships are
+// that entry's.
+func Resolve(spec string, passwd []byte) (u User, member string, err error) {
 	if spec == "" || spec == "root" || spec == "0" {
-		return User{Name: "root", Home: "/root"}, nil
+		return User{Name: "root", Home: "/root"}, "", nil
 	}
 	name, group, _ := strings.Cut(spec, ":")
-	u := User{Name: name, Home: "/"}
-	found := false
+	u = User{Name: name, Home: "/"}
+	num, numErr := strconv.Atoi(name)
+	found, wantMember := false, group == ""
 	for _, l := range strings.Split(string(passwd), "\n") {
+		if found && !wantMember {
+			break
+		}
 		f := strings.Split(l, ":")
-		if len(f) < 7 || (f[0] != name && f[2] != name) {
+		if len(f) < 7 {
 			continue
 		}
-		u.Name, u.Home = f[0], f[5]
-		u.UID, _ = strconv.Atoi(f[2])
-		u.GID, _ = strconv.Atoi(f[3])
-		found = true
-		break
+		if !found && (f[0] == name || f[2] == name) {
+			u.Name, u.Home = f[0], f[5]
+			u.UID, _ = strconv.Atoi(f[2])
+			u.GID, _ = strconv.Atoi(f[3])
+			found = true
+		}
+		if wantMember && f[0] != "" {
+			uid, err := strconv.Atoi(f[2])
+			if f[0] == name || (numErr == nil && err == nil && uid == num) {
+				if err == nil && uid != 0 {
+					member = f[0]
+				}
+				wantMember = false
+			}
+		}
 	}
 	if !found {
 		n, err := strconv.Atoi(name)
 		if err != nil {
-			return User{}, fmt.Errorf("user %q is not in the image's /etc/passwd", name)
+			return User{}, "", fmt.Errorf("user %q is not in the image's /etc/passwd", name)
 		}
 		u.UID, u.GID = n, n
 	}
 	if group != "" {
 		g, err := strconv.Atoi(group)
 		if err != nil {
-			return User{}, errors.New("group must be numeric")
+			return User{}, "", errors.New("group must be numeric")
 		}
 		u.GID = g
 	}
-	return u, nil
+	if u.UID == 0 {
+		member = "" // root keeps its primary group only
+	}
+	return u, member, nil
 }
 
-// MemberName is the user name whose /etc/group memberships a process
-// started as spec gets, as runc and podman give them: a name or a uid with
-// an /etc/passwd entry, and no group in spec. ok is false for root, for a
-// uid with no entry and for "user:group" (which gets that group only).
-func MemberName(spec string, passwd []byte) (name string, ok bool) {
-	if spec == "" || spec == "root" || spec == "0" || strings.Contains(spec, ":") {
-		return "", false
-	}
-	for _, l := range strings.Split(string(passwd), "\n") {
-		f := strings.Split(l, ":")
-		if len(f) >= 7 && f[0] != "" && (f[0] == spec || f[2] == spec) {
-			return f[0], true
-		}
-	}
-	return "", false
-}
-
-// Groups is the process's group list for user name with primary gid: the
-// primary first, then, in file order, every group of /etc/group (its
-// contents) whose member list names the user, each gid once. As runc's
-// GetAdditionalGroups, a member must equal name exactly; lines that are
-// empty, comments, or without four fields and a numeric gid are skipped.
-// An empty or missing file gives the primary only.
+// Groups are the supplementary gids of user name with primary gid: in file
+// order, each gid of /etc/group (its contents) whose member list names the
+// user, each once and never the primary. As runc's GetAdditionalGroups, a
+// member must equal name exactly; lines that are empty, comments, or
+// without four fields and a numeric gid are skipped. No name, or an empty
+// or missing file, gives none.
 func Groups(name string, primary int, group []byte) []int {
-	gids := []int{primary}
+	var gids []int
 	if name == "" {
-		return gids
+		return nil
 	}
 	seen := map[int]bool{primary: true}
 	for _, l := range strings.Split(string(group), "\n") {

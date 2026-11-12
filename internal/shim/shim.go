@@ -18,6 +18,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -1266,31 +1267,25 @@ func lookupUser(spec string) (*userInfo, error) {
 // ngroupsMax is the kernel's NGROUPS_MAX: setgroups takes no more.
 const ngroupsMax = 65536
 
-// The files resolveGroups reads (variables for tests).
+// The files lookupUser and resolveGroups read (variables for tests).
 var (
 	etcPasswd     = "/etc/passwd"
-	etcGroup      = "/etc/group"
 	procGidMap    = "/proc/self/gid_map"
 	procSetgroups = "/proc/self/setgroups"
 )
 
-// resolveGroups gives u the supplementary groups the image's /etc/group
-// lists its user in, as podman and docker do, keeping only what setgroups
-// can take here; anything dropped is warned of once. Root keeps its
-// primary group only (it runs with no credential change).
+// resolveGroups adds to u's primary group the supplementary groups the
+// runner read from the image (cfg.Groups), keeping only what setgroups can
+// take here; anything left out is warned of once. The shim reads no
+// /etc/group. With no groups supplied, or for root (which runs with no
+// credential change), u keeps its primary group only and nothing is read.
 func (s *Shim) resolveGroups(u *userInfo) {
-	if u.uid == 0 && u.gid == 0 {
+	if (u.uid == 0 && u.gid == 0) || len(s.cfg.Groups) == 0 {
 		return
 	}
-	spec := s.cfg.MemberUser
-	if spec == "" {
-		spec = s.cfg.User
-	}
-	pw, _ := os.ReadFile(etcPasswd)
-	gr, _ := os.ReadFile(etcGroup)
 	gidMap, _ := os.ReadFile(procGidMap)
 	setgroups, _ := os.ReadFile(procSetgroups)
-	groups, warn := workloadGroups(spec, u.gid, pw, gr, gidMap, setgroups)
+	groups, warn := workloadGroups(u.name, u.gid, s.cfg.Groups, gidMap, setgroups)
 	u.groups = groups
 	if warn != "" {
 		fmt.Fprintln(os.Stderr, "lux-shim:", warn)
@@ -1298,32 +1293,35 @@ func (s *Shim) resolveGroups(u *userInfo) {
 	}
 }
 
-// workloadGroups is the group list for spec (passwd.MemberName) with
-// primary gid: its /etc/group memberships (passwd.Groups), less those the
-// container's user namespace cannot set (gidMap is /proc/self/gid_map,
-// setgroups /proc/self/setgroups), at most ngroupsMax. The primary is
-// always kept, as before. warn says what was dropped, if anything.
-func workloadGroups(spec string, primary int, pw, gr, gidMap, setgroups []byte) ([]uint32, string) {
+// workloadGroups is the group list of user name: primary, then each of
+// extra (the primary and repeats skipped) that the container's user
+// namespace can set (gidMap is /proc/self/gid_map, setgroups
+// /proc/self/setgroups), at most ngroupsMax in all. The primary is always
+// kept, as before. warn says what was left out, if anything.
+func workloadGroups(name string, primary int, extra []int, gidMap, setgroups []byte) ([]uint32, string) {
 	only := []uint32{uint32(primary)}
-	name, ok := passwd.MemberName(spec, pw)
-	if !ok {
-		return only, ""
+	seen := map[int]bool{primary: true}
+	var gids []int
+	for _, g := range extra {
+		if g >= 0 && g <= math.MaxUint32 && !seen[g] {
+			seen[g] = true
+			gids = append(gids, g)
+		}
 	}
-	gids := passwd.Groups(name, primary, gr)
-	if len(gids) == 1 {
+	if len(gids) == 0 {
 		return only, ""
 	}
 	if strings.TrimSpace(string(setgroups)) == "deny" {
-		return only, fmt.Sprintf("workload user %s: supplementary groups %v not set: setgroups is denied in this user namespace", name, gids[1:])
+		return only, fmt.Sprintf("workload user %s: supplementary groups %v not set: setgroups is denied in this user namespace", name, gids)
 	}
 	ranges := parseIDMap(gidMap)
 	if len(ranges) == 0 {
-		return only, fmt.Sprintf("workload user %s: supplementary groups %v not set: the user namespace's gid map is unreadable", name, gids[1:])
+		return only, fmt.Sprintf("workload user %s: supplementary groups %v not set: the user namespace's gid map is unreadable", name, gids)
 	}
-	var out []uint32
+	out := only
 	var dropped []int
-	for i, g := range gids {
-		if i == 0 || ranges.contains(g) {
+	for _, g := range gids {
+		if ranges.contains(g) {
 			out = append(out, uint32(g))
 		} else {
 			dropped = append(dropped, g)

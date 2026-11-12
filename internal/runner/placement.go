@@ -79,9 +79,9 @@ type placement struct {
 	done         chan struct{}
 	session      string      // latest session id the adapter reported
 	user         passwd.User // who the workload runs as
-	// imageUser is the image's USER as written (a name, uid or uid:gid),
-	// for the shim to give the workload its /etc/group memberships.
-	imageUser string
+	// groups are the workload's supplementary gids from the image's
+	// /etc/group (imageGroups), recomputed on every placement.
+	groups []int
 	// env is what the runner places things by in the workload's
 	// environment (workloadEnv: HOME, XDG_DATA_HOME); made are the
 	// directories the engine stores' mounts make, for the shim to hand over.
@@ -570,11 +570,14 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	defer closeImage() // on any early return
-	if p.user, err = workloadUser(sp, info, imageRoot); err != nil {
+	var warn string
+	if p.user, p.groups, warn, err = workloadUser(sp, info, imageRoot); err != nil {
 		fail("user", err)
 		return
 	}
-	p.imageUser = strings.TrimSpace(info.User)
+	if warn != "" {
+		p.event(ctx, proto.EvWarning, map[string]any{"message": warn})
+	}
 	p.mu.Lock()
 	p.state.User = fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
 	p.mu.Unlock()
@@ -1225,9 +1228,9 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 	if err != nil {
 		return err
 	}
-	user, memberUser := sp.Workload.User, ""
+	user := sp.Workload.User
 	if user == "" {
-		user, memberUser = fmt.Sprintf("%d:%d", p.user.UID, p.user.GID), p.imageUser
+		user = fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
 	}
 	a := p.assign
 	cfg := proto.ShimConfig{
@@ -1238,7 +1241,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 		Prompt:       sp.Workload.Prompt,
 		Workdir:      sp.Workload.Workdir,
 		User:         user,
-		MemberUser:   memberUser,
+		Groups:       p.groups,
 		TTY:          sp.Workload.TTY,
 		Env:          withCpusetEnv(withSizeEnv(sp.Env, sp.Resources.CPUs, p.r.mem.limit(int64(sp.Resources.Memory))), p.cpuset()),
 		GraceSec:     sp.Workload.Grace.Seconds(),

@@ -1,7 +1,11 @@
 package passwd
 
 import (
+	"errors"
+	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -27,17 +31,17 @@ func TestGroups(t *testing.T) {
 		group   string
 		want    []int
 	}{
-		{"no memberships", "solo", 1002, testGroup, []int{1002}},
-		{"one membership", "x", 7, "a:x:5:x\n", []int{7, 5}},
-		{"many, in file order; the primary listed again is kept once", "runner", 1000, testGroup, []int{1000, 4, 999, 3000}},
-		{"a name that prefixes a member is not that member", "run", 1001, testGroup, []int{1001}},
-		{"a member that prefixes the name is not it", "runnerx", 5, testGroup, []int{5}},
-		{"no name: the primary only", "", 1000, testGroup, []int{1000}},
-		{"empty file", "runner", 1000, "", []int{1000}},
-		{"missing file (nil)", "runner", 1000, "", []int{1000}},
-		{"a gid listed twice is kept once", "u", 1, "a:x:5:u\nb:x:5:u\n", []int{1, 5}},
-		{"malformed lines are skipped", "u", 1, "# a:x:6:u\nshort:x:7\nbadgid:x:notanumber:u\nneg:x:-1:u\n\n   \nok:x:8:u\n", []int{1, 8}},
-		{"crlf and padding around a line", "u", 1, "  a:x:5:u  \r\nb:x:6:v,u\r\n", []int{1, 5, 6}},
+		{"no memberships", "solo", 1002, testGroup, nil},
+		{"one membership", "x", 7, "a:x:5:x\n", []int{5}},
+		{"many, in file order; never the primary", "runner", 1000, testGroup, []int{4, 999, 3000}},
+		{"a name that prefixes a member is not that member", "run", 1001, testGroup, nil},
+		{"a member that prefixes the name is not it", "runnerx", 5, testGroup, nil},
+		{"no name: none", "", 1000, testGroup, nil},
+		{"empty file", "runner", 1000, "", nil},
+		{"missing file (nil)", "runner", 1000, "", nil},
+		{"a gid listed twice is kept once", "u", 1, "a:x:5:u\nb:x:5:u\n", []int{5}},
+		{"malformed lines are skipped", "u", 1, "# a:x:6:u\nshort:x:7\nbadgid:x:notanumber:u\nneg:x:-1:u\n\n   \nok:x:8:u\n", []int{8}},
+		{"crlf and padding around a line", "u", 1, "  a:x:5:u  \r\nb:x:6:v,u\r\n", []int{5, 6}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var g []byte
@@ -51,48 +55,103 @@ func TestGroups(t *testing.T) {
 	}
 }
 
-func TestMemberName(t *testing.T) {
+func TestResolveMember(t *testing.T) {
+	pw := testPasswd + "zero:x:0:0::/:/bin/sh\n"
 	for _, c := range []struct {
-		spec string
-		name string
-		ok   bool
+		spec   string
+		member string
 	}{
-		{"runner", "runner", true},
-		{"1000", "runner", true}, // a uid with an entry: its name
-		{"1001", "run", true},
-		{"4242", "", false},       // a uid with no entry: the primary only
-		{"nobody", "", false},     // not in passwd
-		{"runner:999", "", false}, // an explicit group: that group only, as podman
-		{"1000:1000", "", false},  // likewise
-		{"", "", false},           // root
-		{"root", "", false},       // root
-		{"0", "", false},          // root
+		{"runner", "runner"},
+		{"1000", "runner"},  // a uid with an entry: its name
+		{"01000", "runner"}, // matched as a number, as runc
+		{"+1000", "runner"}, // likewise
+		{"runner:", "runner"},
+		{"1000:", "runner"},
+		{"1001", "run"},
+		{"4242", ""},       // a uid with no entry: the primary only
+		{"runner:999", ""}, // an explicit group: that group only, as podman
+		{"1000:1000", ""},  // likewise
+		{"01000:1000", ""}, // likewise
+		{"", ""},           // root
+		{"root", ""},       // root
+		{"0", ""},          // root
+		{"00", ""},         // root, numerically
+		{"zero", ""},       // an entry with uid 0
+		{"-1000", ""},      // no such uid
 	} {
-		name, ok := MemberName(c.spec, []byte(testPasswd))
-		if name != c.name || ok != c.ok {
-			t.Errorf("MemberName(%q) = %q, %v; want %q, %v", c.spec, name, ok, c.name, c.ok)
+		_, member, err := Resolve(c.spec, []byte(pw))
+		if err != nil || member != c.member {
+			t.Errorf("Resolve(%q) member = %q, %v; want %q", c.spec, member, err, c.member)
 		}
+	}
+	if _, _, err := Resolve("nobody", []byte(pw)); err == nil {
+		t.Error("Resolve(nobody) did not fail")
 	}
 }
 
 // The name a numeric uid resolves to is what is matched in /etc/group.
 func TestGroupsByUID(t *testing.T) {
-	name, ok := MemberName("1000", []byte(testPasswd))
-	if !ok {
-		t.Fatal("uid 1000 not found")
-	}
-	if got := Groups(name, 1000, []byte(testGroup)); !slices.Equal(got, []int{1000, 4, 999, 3000}) {
-		t.Fatalf("got %v", got)
+	for _, spec := range []string{"1000", "01000", "+1000", "runner:"} {
+		_, member, _ := Resolve(spec, []byte(testPasswd))
+		if got := Groups(member, 1000, []byte(testGroup)); !slices.Equal(got, []int{4, 999, 3000}) {
+			t.Fatalf("%q: got %v", spec, got)
+		}
 	}
 }
 
-func TestLookupUnchanged(t *testing.T) {
-	u, err := Lookup("runner", []byte(testPasswd))
-	if err != nil || u != (User{Name: "runner", UID: 1000, GID: 1000, Home: "/home/runner"}) {
-		t.Fatalf("Lookup = %+v, %v", u, err)
+// lookupBefore is Lookup as it was before Resolve: who a workload runs as
+// must not change.
+func lookupBefore(spec string, passwd []byte) (User, error) {
+	if spec == "" || spec == "root" || spec == "0" {
+		return User{Name: "root", Home: "/root"}, nil
 	}
-	u, err = Lookup("1000:999", []byte(testPasswd))
-	if err != nil || u.UID != 1000 || u.GID != 999 {
-		t.Fatalf("Lookup uid:gid = %+v, %v", u, err)
+	name, group, _ := strings.Cut(spec, ":")
+	u := User{Name: name, Home: "/"}
+	found := false
+	for _, l := range strings.Split(string(passwd), "\n") {
+		f := strings.Split(l, ":")
+		if len(f) < 7 || (f[0] != name && f[2] != name) {
+			continue
+		}
+		u.Name, u.Home = f[0], f[5]
+		u.UID, _ = strconv.Atoi(f[2])
+		u.GID, _ = strconv.Atoi(f[3])
+		found = true
+		break
+	}
+	if !found {
+		n, err := strconv.Atoi(name)
+		if err != nil {
+			return User{}, fmt.Errorf("user %q is not in the image's /etc/passwd", name)
+		}
+		u.UID, u.GID = n, n
+	}
+	if group != "" {
+		g, err := strconv.Atoi(group)
+		if err != nil {
+			return User{}, errors.New("group must be numeric")
+		}
+		u.GID = g
+	}
+	return u, nil
+}
+
+func TestLookupUnchanged(t *testing.T) {
+	files := []string{"", testPasswd,
+		// uid 1000 under two names, the second with another gid; a name
+		// that is a uid; malformed and short lines.
+		"a:x:1000:5::/a:/bin/sh\nb:x:1000:6::/b:/bin/sh\n1000:x:7:7::/n:/bin/sh\nshort:x:1\nbad:x:x:y::/:/bin/sh\n",
+		"x:x:01000:9::/x:/bin/sh\nroot:x:0:0::/root:/bin/sh\n"}
+	specs := []string{"", "root", "0", "00", "0:0", "0:5", "runner", "1000", "01000", "+1000", "-1",
+		"runner:", "runner:999", "1000:1000", "1000:x", "a", "b", "7", "x", "bad", "short", "nobody", "4242", "4242:1", ":", ":5"}
+	for _, f := range files {
+		for _, spec := range specs {
+			want, wantErr := lookupBefore(spec, []byte(f))
+			got, err := Lookup(spec, []byte(f))
+			u, _, rerr := Resolve(spec, []byte(f))
+			if got != want || u != want || fmt.Sprint(err) != fmt.Sprint(wantErr) || fmt.Sprint(rerr) != fmt.Sprint(wantErr) {
+				t.Errorf("%q in %q: Lookup %+v %v, Resolve %+v %v; before %+v %v", spec, f, got, err, u, rerr, want, wantErr)
+			}
+		}
 	}
 }

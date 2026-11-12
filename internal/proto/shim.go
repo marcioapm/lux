@@ -75,15 +75,16 @@ type ShimConfig struct {
 	InputsRoot string `json:"inputsRoot,omitempty"`
 	Workdir    string `json:"workdir,omitempty"`
 	User       string `json:"user,omitempty"` // name or uid[:gid]; empty: root
-	// MemberUser is the image's USER as written (name, uid or uid:gid)
-	// when User is that user resolved to uid:gid by the runner: the shim
-	// gives the workload the /etc/group memberships podman gives that
-	// USER. Empty: the shim reads them from User.
-	MemberUser string            `json:"memberUser,omitempty"`
-	TTY        bool              `json:"tty,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	Init       string            `json:"init,omitempty"`
-	GraceSec   float64           `json:"graceSec"`
+	// Groups are the workload user's supplementary gids, the primary not
+	// among them, which the runner reads from the image's /etc/group on
+	// every placement. The shim sets those the container's user namespace
+	// can take, after the primary; empty (or a runner that predates it):
+	// the primary only. Unused for root.
+	Groups   []int             `json:"groups,omitempty"`
+	TTY      bool              `json:"tty,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	Init     string            `json:"init,omitempty"`
+	GraceSec float64           `json:"graceSec"`
 	// BeforeStop, when set, runs in the container on every stop before the
 	// workload is signalled (spec.Workload.BeforeStop).
 	BeforeStop           []string `json:"beforeStop,omitempty"`

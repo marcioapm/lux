@@ -19,7 +19,7 @@ workload:
   attachments:                  # images with the first prompt (agent adapters)
     - { name: failing.png, contentType: image/png, data: iVBORw0KGgo… }   # base64
   workdir: /workspace/repos/api
-  user: agent                   # default: the image's USER; gets its groups from the image's /etc/group
+  user: agent                   # default: the image's USER; non-root gets its groups from the image's /etc/group
   grace: 30s                    # graceful stop before SIGKILL
   idleTimeout: 5m               # agent only; stop when idle; unset or 0: never
   beforeStop:                   # run in the container on every stop, first
