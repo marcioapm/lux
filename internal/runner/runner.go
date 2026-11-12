@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,7 +89,8 @@ type Config struct {
 	// AssignHold is test-only (LUX_TEST_ASSIGN_HOLD): while the file it
 	// names exists, each assignment is held before it is taken up and
 	// acked. See holdAssignment and noteUnknownEpoch.
-	AssignHold string
+	AssignHold          string
+	WithoutCapabilities []string
 }
 
 type Runner struct {
@@ -359,7 +361,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // disk scaling only when it is on. Its disk guard always exempts
 // non-preemptible placements.
 func (r *Runner) capabilities() []string {
-	caps := []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapNonPreemptible, proto.CapRegistryMinted}
+	caps := []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapNonPreemptible, proto.CapRegistryMinted, proto.CapManagedImages}
 	if r.shimSyncModes {
 		caps = append(caps, proto.CapSyncModes)
 	}
@@ -369,7 +371,7 @@ func (r *Runner) capabilities() []string {
 	if r.disk.on {
 		caps = append(caps, proto.CapDiskScale)
 	}
-	return caps
+	return slices.DeleteFunc(caps, func(capability string) bool { return slices.Contains(r.cfg.WithoutCapabilities, capability) })
 }
 
 // capacity is Hello's: with disk scaling on, Disk is nominal and the

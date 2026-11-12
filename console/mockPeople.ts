@@ -404,6 +404,7 @@ export function whoamiFor(c: Caller, consoleAuth: string, previewDomain: string 
     invitationsEnabled: consoleAuth === "cloudflare-access",
     previews: previewDomain != null,
     serverInject: true,
+    managedImages: false,
     previewDomain,
   };
 }
