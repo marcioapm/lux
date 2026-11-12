@@ -109,6 +109,7 @@ type Config struct {
 	// Registry: pull credentials minted for the operator's registry
 	// (registry.go); Host "" is off.
 	Registry RegistryConfig
+	Images   ImagesConfig
 }
 
 // PreviewConfig is the preview listener's ([preview]).

@@ -233,6 +233,7 @@
     "zero": [
       "consoleAuth",
       "invitationsEnabled",
+      "managedImages",
       "memberships",
       "operator",
       "previewDomain",
@@ -247,6 +248,7 @@
       "email",
       "invitationsEnabled",
       "keyId",
+      "managedImages",
       "memberships",
       "name",
       "operator",
