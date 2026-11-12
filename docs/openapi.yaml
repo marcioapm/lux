@@ -5216,6 +5216,7 @@ components:
         tty:
           type: boolean
         user:
+          description: "Who the workload runs as: a name or uid, or uid:gid. Default: the image's USER. Resolved against the image's /etc/passwd; a name or uid also gets the supplementary groups the image's /etc/group lists it in, as podman and docker give them (uid:gid gets that group only)."
           type: string
         workdir:
           type: string

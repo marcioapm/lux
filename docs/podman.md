@@ -37,6 +37,14 @@ Every Run's container gets (`hardening()` and `containment()`):
   log would be a second, unredacted copy.
 - `--restart=no`: the runner decides what happens after an exit.
 
+The shim, not Podman, switches to the workload user (`workload.user`, or
+the image's `USER`). As `podman run` and `docker run` do, a user given by
+name or uid gets the supplementary groups the image's `/etc/group` lists
+it in, and `uid:gid` gets that group only. A group the container's user
+namespace does not map, or any group when `setgroups` is denied there, is
+left out with a `lux.warning`, never failing the start. A Run started
+before a host's lux had this gets its groups on its next start.
+
 ### Volumes and idmapped mounts
 
 - State volumes and the runtime volume (`lux-<run>--rt`) are mounted with

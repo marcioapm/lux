@@ -79,6 +79,9 @@ type placement struct {
 	done         chan struct{}
 	session      string      // latest session id the adapter reported
 	user         passwd.User // who the workload runs as
+	// imageUser is the image's USER as written (a name, uid or uid:gid),
+	// for the shim to give the workload its /etc/group memberships.
+	imageUser string
 	// env is what the runner places things by in the workload's
 	// environment (workloadEnv: HOME, XDG_DATA_HOME); made are the
 	// directories the engine stores' mounts make, for the shim to hand over.
@@ -571,6 +574,7 @@ func (p *placement) run(ctx context.Context) {
 		fail("user", err)
 		return
 	}
+	p.imageUser = strings.TrimSpace(info.User)
 	p.mu.Lock()
 	p.state.User = fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
 	p.mu.Unlock()
@@ -1221,9 +1225,9 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 	if err != nil {
 		return err
 	}
-	user := sp.Workload.User
+	user, memberUser := sp.Workload.User, ""
 	if user == "" {
-		user = fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
+		user, memberUser = fmt.Sprintf("%d:%d", p.user.UID, p.user.GID), p.imageUser
 	}
 	a := p.assign
 	cfg := proto.ShimConfig{
@@ -1234,6 +1238,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 		Prompt:       sp.Workload.Prompt,
 		Workdir:      sp.Workload.Workdir,
 		User:         user,
+		MemberUser:   memberUser,
 		TTY:          sp.Workload.TTY,
 		Env:          withCpusetEnv(withSizeEnv(sp.Env, sp.Resources.CPUs, p.r.mem.limit(int64(sp.Resources.Memory))), p.cpuset()),
 		GraceSec:     sp.Workload.Grace.Seconds(),

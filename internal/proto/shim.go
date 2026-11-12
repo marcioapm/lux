@@ -71,10 +71,15 @@ type ShimConfig struct {
 	// InputsDir is $LUX_INPUTS, where the shim writes each input's images;
 	// InputsRoot is the mount it is on, which the shim does not leave
 	// writing there.
-	InputsDir  string            `json:"inputsDir,omitempty"`
-	InputsRoot string            `json:"inputsRoot,omitempty"`
-	Workdir    string            `json:"workdir,omitempty"`
-	User       string            `json:"user,omitempty"` // name or uid[:gid]; empty: root
+	InputsDir  string `json:"inputsDir,omitempty"`
+	InputsRoot string `json:"inputsRoot,omitempty"`
+	Workdir    string `json:"workdir,omitempty"`
+	User       string `json:"user,omitempty"` // name or uid[:gid]; empty: root
+	// MemberUser is the image's USER as written (name, uid or uid:gid)
+	// when User is that user resolved to uid:gid by the runner: the shim
+	// gives the workload the /etc/group memberships podman gives that
+	// USER. Empty: the shim reads them from User.
+	MemberUser string            `json:"memberUser,omitempty"`
 	TTY        bool              `json:"tty,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	Init       string            `json:"init,omitempty"`

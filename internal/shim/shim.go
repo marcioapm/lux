@@ -178,6 +178,7 @@ func (s *Shim) run() int {
 	if err != nil {
 		return s.fail("start-failed", err.Error())
 	}
+	s.resolveGroups(user)
 	s.user = user // only this goroutine reads it before env is published
 	env := s.environment(start.Secrets)
 	// Exec reads s.env, under the lock, as its sign that the workload's
@@ -1246,15 +1247,129 @@ type userInfo struct {
 	name     string
 	uid, gid int
 	home     string
-	groups   []uint32
+	// groups: the process's groups (primary first), set by setgroups
+	// when the workload does not run as root (command).
+	groups []uint32
 }
 
-// lookupUser resolves the workload user against the image's /etc/passwd.
+// lookupUser resolves the workload user against the image's /etc/passwd,
+// with its primary group only (resolveGroups adds the others).
 func lookupUser(spec string) (*userInfo, error) {
-	b, _ := os.ReadFile("/etc/passwd")
+	b, _ := os.ReadFile(etcPasswd)
 	u, err := passwd.Lookup(spec, b)
 	if err != nil {
 		return nil, err
 	}
 	return &userInfo{name: u.Name, uid: u.UID, gid: u.GID, home: u.Home, groups: []uint32{uint32(u.GID)}}, nil
+}
+
+// ngroupsMax is the kernel's NGROUPS_MAX: setgroups takes no more.
+const ngroupsMax = 65536
+
+// The files resolveGroups reads (variables for tests).
+var (
+	etcPasswd     = "/etc/passwd"
+	etcGroup      = "/etc/group"
+	procGidMap    = "/proc/self/gid_map"
+	procSetgroups = "/proc/self/setgroups"
+)
+
+// resolveGroups gives u the supplementary groups the image's /etc/group
+// lists its user in, as podman and docker do, keeping only what setgroups
+// can take here; anything dropped is warned of once. Root keeps its
+// primary group only (it runs with no credential change).
+func (s *Shim) resolveGroups(u *userInfo) {
+	if u.uid == 0 && u.gid == 0 {
+		return
+	}
+	spec := s.cfg.MemberUser
+	if spec == "" {
+		spec = s.cfg.User
+	}
+	pw, _ := os.ReadFile(etcPasswd)
+	gr, _ := os.ReadFile(etcGroup)
+	gidMap, _ := os.ReadFile(procGidMap)
+	setgroups, _ := os.ReadFile(procSetgroups)
+	groups, warn := workloadGroups(spec, u.gid, pw, gr, gidMap, setgroups)
+	u.groups = groups
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, "lux-shim:", warn)
+		s.out.Event(proto.EvWarning, map[string]any{"message": warn})
+	}
+}
+
+// workloadGroups is the group list for spec (passwd.MemberName) with
+// primary gid: its /etc/group memberships (passwd.Groups), less those the
+// container's user namespace cannot set (gidMap is /proc/self/gid_map,
+// setgroups /proc/self/setgroups), at most ngroupsMax. The primary is
+// always kept, as before. warn says what was dropped, if anything.
+func workloadGroups(spec string, primary int, pw, gr, gidMap, setgroups []byte) ([]uint32, string) {
+	only := []uint32{uint32(primary)}
+	name, ok := passwd.MemberName(spec, pw)
+	if !ok {
+		return only, ""
+	}
+	gids := passwd.Groups(name, primary, gr)
+	if len(gids) == 1 {
+		return only, ""
+	}
+	if strings.TrimSpace(string(setgroups)) == "deny" {
+		return only, fmt.Sprintf("workload user %s: supplementary groups %v not set: setgroups is denied in this user namespace", name, gids[1:])
+	}
+	ranges := parseIDMap(gidMap)
+	if len(ranges) == 0 {
+		return only, fmt.Sprintf("workload user %s: supplementary groups %v not set: the user namespace's gid map is unreadable", name, gids[1:])
+	}
+	var out []uint32
+	var dropped []int
+	for i, g := range gids {
+		if i == 0 || ranges.contains(g) {
+			out = append(out, uint32(g))
+		} else {
+			dropped = append(dropped, g)
+		}
+	}
+	var warns []string
+	if len(dropped) > 0 {
+		warns = append(warns, fmt.Sprintf("supplementary groups %v not set: not mapped in the container's user namespace", dropped))
+	}
+	if len(out) > ngroupsMax {
+		warns = append(warns, fmt.Sprintf("%d supplementary groups not set: more than NGROUPS_MAX (%d)", len(out)-ngroupsMax, ngroupsMax))
+		out = out[:ngroupsMax]
+	}
+	if len(warns) == 0 {
+		return out, ""
+	}
+	return out, "workload user " + name + ": " + strings.Join(warns, "; ")
+}
+
+type idRange struct{ inside, count uint64 }
+
+type idMap []idRange
+
+// parseIDMap reads /proc/<pid>/{uid,gid}_map: "inside outside count" lines.
+func parseIDMap(b []byte) idMap {
+	var m idMap
+	for _, l := range strings.Split(string(b), "\n") {
+		f := strings.Fields(l)
+		if len(f) != 3 {
+			continue
+		}
+		in, err1 := strconv.ParseUint(f[0], 10, 32)
+		n, err2 := strconv.ParseUint(f[2], 10, 32)
+		if err1 != nil || err2 != nil || n == 0 {
+			continue
+		}
+		m = append(m, idRange{in, n})
+	}
+	return m
+}
+
+func (m idMap) contains(id int) bool {
+	for _, r := range m {
+		if id >= 0 && uint64(id) >= r.inside && uint64(id) < r.inside+r.count {
+			return true
+		}
+	}
+	return false
 }
