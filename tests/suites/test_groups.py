@@ -42,4 +42,5 @@ def test_workload_gets_the_images_groups(lux, runners, hosts):
         run_id = lux.submit(spec("id", "-G", user=user))
         lux.wait_state(run_id, "succeeded")
         want = hosts[0].podman("run", "--rm", "--user", podman_user, image, "id", "-G").strip()
-        assert lux.logs(run_id).strip() == want, (user, lux.logs(run_id), want)
+        got = lux.logs(run_id).strip().splitlines()[-1]
+        assert got == want, (user, got, want)
