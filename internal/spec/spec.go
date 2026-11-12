@@ -92,7 +92,7 @@ type Workload struct {
 	Attachments []Attachment `json:"attachments,omitempty" yaml:"attachments,omitempty" doc:"Images given to the agent with its first prompt (request id prompt), each also written to $LUX_INPUTS/prompt/. At most 10, each at most 5 MiB decoded. Agent adapters only: a generic workload is refused (400 attachments_unsupported); a bad one is refused with 400 invalid_attachment."`
 	Workdir     string       `json:"workdir,omitempty" yaml:"workdir,omitempty"`
 	// User the workload runs as; defaults to the image's user.
-	User        string   `json:"user,omitempty" yaml:"user,omitempty"`
+	User        string   `json:"user,omitempty" yaml:"user,omitempty" doc:"Who the workload runs as: a name or uid, optionally with :gid (numeric); default: the image's USER. Its supplementary groups: docs/podman.md."`
 	TTY         bool     `json:"tty,omitempty" yaml:"tty,omitempty"`
 	Resume      *Resume  `json:"resume,omitempty" yaml:"resume,omitempty"`
 	IdleTimeout Duration `json:"idleTimeout,omitempty" yaml:"idleTimeout,omitempty" doc:"Stop and snapshot an idle agent after this duration with no pending input. Agent adapters only. Zero or unset: never; otherwise 1m to 24h. Each placement starts a fresh clock. The stop reason is idle, not a failure."`

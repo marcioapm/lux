@@ -37,6 +37,31 @@ Every Run's container gets (`hardening()` and `containment()`):
   log would be a second, unredacted copy.
 - `--restart=no`: the runner decides what happens after an exit.
 
+The shim, not Podman, switches to the workload user (`workload.user`, or
+the image's `USER`); its uid and primary gid are resolved against the
+image's `/etc/passwd`. Supplementary groups follow runc's `GetExecUser`
+for a user other than root: one given by name or uid (`runner`, `1000`,
+`01000`, `+1000`, and `runner:` with an empty group) with an entry in
+`/etc/passwd` gets the groups the image's `/etc/group` lists it in, and
+`uid:gid` gets that group only. That is what `podman run --user` gives,
+except that podman 5.7 with crun gives `runner:` its primary group only.
+Unlike podman, root keeps its primary group only, and a group given by
+name (`runner:docker`) is refused as before.
+
+The runner reads `/etc/group` from the image itself, through an
+`os.Root` on the mounted image, before any volume is mounted: a volume
+over `/etc` (or a snapshot restored onto one) never adds groups. It is
+read only when the user is eligible for memberships, and only if it is a
+regular file inside the image of at most 1 MiB; otherwise the workload
+gets its primary group only, with a `lux.warning`. The shim is given the
+gids (`groups` in its config) and reads no `/etc/group`. Of those added
+groups, any the container's user namespace does not map, or all of them
+when `setgroups` is denied there, are left out with a `lux.warning`.
+That filter covers only the added groups: a non-root start in a user
+namespace with `setgroups` denied fails as it did before. The groups are
+recomputed on every placement, so a Run started before a host's lux had
+this gets them on its next start.
+
 ### Volumes and idmapped mounts
 
 - State volumes and the runtime volume (`lux-<run>--rt`) are mounted with

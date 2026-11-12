@@ -71,14 +71,18 @@ type ShimConfig struct {
 	// InputsDir is $LUX_INPUTS, where the shim writes each input's images;
 	// InputsRoot is the mount it is on, which the shim does not leave
 	// writing there.
-	InputsDir  string            `json:"inputsDir,omitempty"`
-	InputsRoot string            `json:"inputsRoot,omitempty"`
-	Workdir    string            `json:"workdir,omitempty"`
-	User       string            `json:"user,omitempty"` // name or uid[:gid]; empty: root
-	TTY        bool              `json:"tty,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	Init       string            `json:"init,omitempty"`
-	GraceSec   float64           `json:"graceSec"`
+	InputsDir  string `json:"inputsDir,omitempty"`
+	InputsRoot string `json:"inputsRoot,omitempty"`
+	Workdir    string `json:"workdir,omitempty"`
+	User       string `json:"user,omitempty"` // name or uid[:gid]; empty: root
+	// Groups are the workload user's supplementary gids, the primary not
+	// among them (docs/podman.md). Empty, or absent from an older runner:
+	// the primary group only. Unused for root.
+	Groups   []int             `json:"groups,omitempty"`
+	TTY      bool              `json:"tty,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	Init     string            `json:"init,omitempty"`
+	GraceSec float64           `json:"graceSec"`
 	// BeforeStop, when set, runs in the container on every stop before the
 	// workload is signalled (spec.Workload.BeforeStop).
 	BeforeStop           []string `json:"beforeStop,omitempty"`

@@ -5216,6 +5216,7 @@ components:
         tty:
           type: boolean
         user:
+          description: "Who the workload runs as: a name or uid, optionally with :gid (numeric); default: the image's USER. Its supplementary groups: docs/podman.md."
           type: string
         workdir:
           type: string

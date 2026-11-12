@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -291,17 +292,76 @@ func (p *placement) openImage(ctx context.Context, image string) (root *os.Root,
 }
 
 // workloadUser resolves who the workload runs as: the spec's user or the
-// image's, against the image's /etc/passwd.
-func workloadUser(sp spec.RunSpec, info podman.ImageInfo, image *os.Root) (passwd.User, error) {
+// image's, against the image's /etc/passwd, and its supplementary groups
+// from the image's /etc/group (imageGroups), the primary not among them.
+// Only a user eligible for memberships (passwd.Resolve: not root, with an
+// entry, and no non-empty group) has /etc/group read. Groups are best
+// effort: warn says why there are none, never an error.
+func workloadUser(sp spec.RunSpec, info podman.ImageInfo, image *os.Root) (u passwd.User, groups []int, warn string, err error) {
 	name := sp.Workload.User
 	if name == "" {
 		name = strings.TrimSpace(info.User)
 	}
-	if name == "" || name == "root" || name == "0" {
-		return passwd.Lookup(name, nil)
+	var b []byte // root reads no /etc/passwd
+	if name != "" && name != "root" && name != "0" {
+		b, _ = image.ReadFile("etc/passwd")
 	}
-	b, _ := image.ReadFile("etc/passwd")
-	return passwd.Lookup(name, b)
+	u, member, err := passwd.Resolve(name, b)
+	if err != nil {
+		return passwd.User{}, nil, "", err
+	}
+	groups, warn = imageGroups(image, member, u.GID)
+	return u, groups, warn, nil
+}
+
+// maxGroupFile is the most of an image's /etc/group imageGroups reads.
+const maxGroupFile = 1 << 20
+
+// imageGroups are the supplementary gids (the primary not among them) the
+// image's /etc/group lists member in, read from the image itself, never
+// from a volume over /etc. Nothing is read when member is empty. The file
+// is opened without blocking (a FIFO does not hang the start) and read
+// only if it is a regular file of at most maxGroupFile bytes; otherwise,
+// or on any error, the workload gets its primary group only, and warn says
+// why. A missing file is no memberships, with no warning.
+func imageGroups(image *os.Root, member string, primary int) (gids []int, warn string) {
+	if member == "" {
+		return nil, ""
+	}
+	b, err := readImageGroupFile(image)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, ""
+	}
+	if err != nil {
+		return nil, fmt.Sprintf("workload user %s: supplementary groups not set: %v", member, err)
+	}
+	return passwd.Groups(member, primary, b), ""
+}
+
+// readImageGroupFile reads the image's /etc/group if it is a regular file
+// of at most maxGroupFile bytes; a FIFO, device or directory is refused
+// without reading.
+func readImageGroupFile(image *os.Root) ([]byte, error) {
+	f, err := image.OpenFile("etc/group", os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("/etc/group is not a regular file (%s)", st.Mode().Type())
+	}
+	if st.Size() > maxGroupFile {
+		return nil, fmt.Errorf("/etc/group is larger than %d bytes", maxGroupFile)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxGroupFile+1))
+	if err == nil && len(b) > maxGroupFile {
+		err = fmt.Errorf("/etc/group is larger than %d bytes", maxGroupFile)
+	}
+	return b, err
 }
 
 // workloadEnv is what the runner places things by in the workload's
