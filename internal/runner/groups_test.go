@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/podman"
@@ -58,24 +60,47 @@ func openRoot(t *testing.T, dir string) *os.Root {
 	return root
 }
 
-// countGroupReads counts imageGroups' reads of /etc/group.
-func countGroupReads(t *testing.T) *int {
+// countGroupOpens calls f and counts the opens of dir's etc/group while it
+// runs, through inotify on dir/etc: workloadUser has no hook for it.
+func countGroupOpens(t *testing.T, dir string, f func()) int {
 	t.Helper()
-	n := new(int)
-	old := readGroupFile
-	readGroupFile = func(r *os.Root, name string, limit int64) ([]byte, error) {
-		*n++
-		return old(r, name, limit)
+	fd, err := syscall.InotifyInit1(syscall.IN_NONBLOCK | syscall.IN_CLOEXEC)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { readGroupFile = old })
-	return n
+	defer syscall.Close(fd)
+	if _, err := syscall.InotifyAddWatch(fd, filepath.Join(dir, "etc"), syscall.IN_OPEN); err != nil {
+		t.Fatal(err)
+	}
+	f()
+	// The kernel queues IN_OPEN before open returns: all are there now.
+	n := 0
+	buf := make([]byte, 64<<10)
+	for {
+		r, err := syscall.Read(fd, buf)
+		if err == syscall.EAGAIN {
+			return n
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for off := 0; off+syscall.SizeofInotifyEvent <= r; {
+			ev := (*syscall.InotifyEvent)(unsafe.Pointer(&buf[off]))
+			name := buf[off+syscall.SizeofInotifyEvent : off+syscall.SizeofInotifyEvent+int(ev.Len)]
+			if string(bytes.TrimRight(name, "\x00")) == "group" {
+				n++
+			}
+			off += syscall.SizeofInotifyEvent + int(ev.Len)
+		}
+	}
 }
 
 // Who the workload runs as and its groups, for the spec's user or the
 // image's USER, as podman and runc give them (but root, which keeps its
 // primary group only). Only an eligible user has /etc/group read.
 func TestWorkloadUserGroups(t *testing.T) {
-	root := openRoot(t, imageDir(t, imageGroup))
+	dir := imageDir(t, imageGroup)
+	root := openRoot(t, dir)
 	for _, c := range []struct {
 		specUser, imageUser string
 		uid, gid            int
@@ -101,16 +126,23 @@ func TestWorkloadUserGroups(t *testing.T) {
 		{"00", "", 0, 0, nil, 0}, // root, numerically: no groups either
 		{"0:0", "", 0, 0, nil, 0},
 	} {
-		reads := countGroupReads(t)
 		sp := spec.RunSpec{Workload: spec.Workload{User: c.specUser}}
-		u, groups, warn, err := workloadUser(sp, podman.ImageInfo{User: c.imageUser}, root)
+		var (
+			u      passwd.User
+			groups []int
+			warn   string
+			err    error
+		)
+		reads := countGroupOpens(t, dir, func() {
+			u, groups, warn, err = workloadUser(sp, podman.ImageInfo{User: c.imageUser}, root)
+		})
 		if err != nil || warn != "" {
 			t.Fatalf("%q/%q: %v %q", c.specUser, c.imageUser, err, warn)
 		}
 		want, _ := passwd.Lookup(map[bool]string{true: c.specUser, false: c.imageUser}[c.specUser != ""], []byte(imagePasswd))
-		if u != want || u.UID != c.uid || u.GID != c.gid || !slices.Equal(groups, c.groups) || *reads != c.reads {
+		if u != want || u.UID != c.uid || u.GID != c.gid || !slices.Equal(groups, c.groups) || reads != c.reads {
 			t.Errorf("%q/%q: %+v groups %v (%d reads); want %d:%d groups %v (%d reads), Lookup %+v",
-				c.specUser, c.imageUser, u, groups, *reads, c.uid, c.gid, c.groups, c.reads, want)
+				c.specUser, c.imageUser, u, groups, reads, c.uid, c.gid, c.groups, c.reads, want)
 		}
 	}
 }

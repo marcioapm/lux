@@ -87,6 +87,16 @@ func TestResolveMember(t *testing.T) {
 	if _, _, err := Resolve("nobody", []byte(pw)); err == nil {
 		t.Error("Resolve(nobody) did not fail")
 	}
+	// Each uid-0 guard on its own: the member's entry has uid 0 but the
+	// user's does not, and the user's uid is 0 but the member's is not.
+	for spec, pw := range map[string]string{
+		"00":  "a:x:0:0::/:/bin/sh\n00:x:5:5::/:/bin/sh\n",
+		"abc": "q:x:abc:0::/:/bin/sh\nabc:x:5:5::/:/bin/sh\n",
+	} {
+		if _, member, err := Resolve(spec, []byte(pw)); err != nil || member != "" {
+			t.Errorf("Resolve(%q) member = %q, %v; want none", spec, member, err)
+		}
+	}
 }
 
 // The name a numeric uid resolves to is what is matched in /etc/group.

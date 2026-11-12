@@ -298,26 +298,20 @@ func (p *placement) openImage(ctx context.Context, image string) (root *os.Root,
 // entry, and no non-empty group) has /etc/group read. Groups are best
 // effort: warn says why there are none, never an error.
 func workloadUser(sp spec.RunSpec, info podman.ImageInfo, image *os.Root) (u passwd.User, groups []int, warn string, err error) {
-	u, member, err := imageUser(sp, info, image)
+	name := sp.Workload.User
+	if name == "" {
+		name = strings.TrimSpace(info.User)
+	}
+	var b []byte // root reads no /etc/passwd
+	if name != "" && name != "root" && name != "0" {
+		b, _ = image.ReadFile("etc/passwd")
+	}
+	u, member, err := passwd.Resolve(name, b)
 	if err != nil {
 		return passwd.User{}, nil, "", err
 	}
 	groups, warn = imageGroups(image, member, u.GID)
 	return u, groups, warn, nil
-}
-
-// imageUser is workloadUser's user, and member, the name whose /etc/group
-// memberships it gets (passwd.Resolve), from one read of /etc/passwd.
-func imageUser(sp spec.RunSpec, info podman.ImageInfo, image *os.Root) (u passwd.User, member string, err error) {
-	name := sp.Workload.User
-	if name == "" {
-		name = strings.TrimSpace(info.User)
-	}
-	if name == "" || name == "root" || name == "0" {
-		return passwd.Resolve(name, nil)
-	}
-	b, _ := image.ReadFile("etc/passwd")
-	return passwd.Resolve(name, b)
 }
 
 // maxGroupFile is the most of an image's /etc/group imageGroups reads.
@@ -334,7 +328,7 @@ func imageGroups(image *os.Root, member string, primary int) (gids []int, warn s
 	if member == "" {
 		return nil, ""
 	}
-	b, err := readGroupFile(image, "etc/group", maxGroupFile)
+	b, err := readImageGroupFile(image)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, ""
 	}
@@ -344,13 +338,11 @@ func imageGroups(image *os.Root, member string, primary int) (gids []int, warn s
 	return passwd.Groups(member, primary, b), ""
 }
 
-// readGroupFile is how imageGroups reads /etc/group (a variable for tests).
-var readGroupFile = readImageFile
-
-// readImageFile reads name from image if it is a regular file of at most
-// limit bytes; a FIFO, device or directory is refused without reading.
-func readImageFile(image *os.Root, name string, limit int64) ([]byte, error) {
-	f, err := image.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
+// readImageGroupFile reads the image's /etc/group if it is a regular file
+// of at most maxGroupFile bytes; a FIFO, device or directory is refused
+// without reading.
+func readImageGroupFile(image *os.Root) ([]byte, error) {
+	f, err := image.OpenFile("etc/group", os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -360,14 +352,14 @@ func readImageFile(image *os.Root, name string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("/%s is not a regular file (%s)", name, st.Mode().Type())
+		return nil, fmt.Errorf("/etc/group is not a regular file (%s)", st.Mode().Type())
 	}
-	if st.Size() > limit {
-		return nil, fmt.Errorf("/%s is larger than %d bytes", name, limit)
+	if st.Size() > maxGroupFile {
+		return nil, fmt.Errorf("/etc/group is larger than %d bytes", maxGroupFile)
 	}
-	b, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err == nil && int64(len(b)) > limit {
-		err = fmt.Errorf("/%s is larger than %d bytes", name, limit)
+	b, err := io.ReadAll(io.LimitReader(f, maxGroupFile+1))
+	if err == nil && len(b) > maxGroupFile {
+		err = fmt.Errorf("/etc/group is larger than %d bytes", maxGroupFile)
 	}
 	return b, err
 }

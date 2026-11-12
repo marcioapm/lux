@@ -76,10 +76,8 @@ type ShimConfig struct {
 	Workdir    string `json:"workdir,omitempty"`
 	User       string `json:"user,omitempty"` // name or uid[:gid]; empty: root
 	// Groups are the workload user's supplementary gids, the primary not
-	// among them, which the runner reads from the image's /etc/group on
-	// every placement. The shim sets those the container's user namespace
-	// can take, after the primary; empty (or a runner that predates it):
-	// the primary only. Unused for root.
+	// among them (docs/podman.md). Empty, or absent from an older runner:
+	// the primary group only. Unused for root.
 	Groups   []int             `json:"groups,omitempty"`
 	TTY      bool              `json:"tty,omitempty"`
 	Env      map[string]string `json:"env,omitempty"`

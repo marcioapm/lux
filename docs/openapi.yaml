@@ -5216,7 +5216,7 @@ components:
         tty:
           type: boolean
         user:
-          description: "Who the workload runs as: a name or uid, optionally with :gid (numeric). Default: the image's USER. Resolved against the image's /etc/passwd. A user other than root with an entry there and no gid also gets the supplementary groups the image's own /etc/group lists it in, as runc gives them; a gid given gets that group only, and root keeps its primary group only. Groups the container cannot set are left out with a warning."
+          description: "Who the workload runs as: a name or uid, optionally with :gid (numeric); default: the image's USER. Its supplementary groups: docs/podman.md."
           type: string
         workdir:
           type: string
