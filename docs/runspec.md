@@ -46,7 +46,7 @@ workload:
       inject: '<script src="/banner.js"></script>'   # optional: added after <head> on its preview's pages
 
 init:
-  script: npm ci                # runs before the workload, on every start
+  script: npm ci                # runs before the workload, on every start; any size (run from a file)
 
 env: { NODE_ENV: test }
 

@@ -1009,9 +1009,27 @@ func (s *Shim) command(argv []string, env []string) *exec.Cmd {
 	return cmd
 }
 
+// initScriptDir holds the init script's file: the secrets tmpfs, which
+// the workload user owns and which is never in a snapshot. A variable so
+// tests can point it elsewhere.
+var initScriptDir = proto.ShimSecretsDir
+
+// initScriptFile is the init script's file name, with the reserved prefix
+// so no user secret's file can take it.
+const initScriptFile = spec.ReservedSecretPrefix + "init.sh"
+
+// runInit runs the init script from a file, not as `sh -c SCRIPT`: Linux
+// caps a single argument at 128 KiB (MAX_ARG_STRLEN), so a larger script
+// would fail with E2BIG ("Argument list too long") before it ran.
 func (s *Shim) runInit(env []string) (int, error) {
 	s.out.Event(proto.EvInit, map[string]any{"phase": "start"})
-	cmd := s.command([]string{"/bin/sh", "-c", s.cfg.Init}, env)
+	path := filepath.Join(initScriptDir, initScriptFile)
+	_ = os.Remove(path) // 0o400 from an earlier start: WriteFile can't reopen it
+	if err := os.WriteFile(path, []byte(s.cfg.Init), 0o400); err != nil {
+		return -1, err
+	}
+	_ = os.Chown(path, s.user.uid, s.user.gid)
+	cmd := s.command([]string{"/bin/sh", path}, env)
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 	s.mu.Lock()
