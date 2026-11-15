@@ -13,7 +13,8 @@ and an /etc/passwd home and shell. One probe prints the process's view
 no_new_privs, seccomp, cgroup, open fds, signal mask and ignored signals).
 
 The reference is `podman run` with podman's stock namespace and cgroup
-defaults given explicitly (PODMAN_DEFAULTS).
+defaults given explicitly (PODMAN_DEFAULTS). Its rlimits for every context
+are its container process's (reference()): podman exec gives its caller's.
 
 Every field either matches podman, or is in INTENDED (a difference lux
 means, with lux's value pinned, the reason and the doc that says so), or
@@ -296,6 +297,23 @@ def fields(text: str, name: str) -> dict[str, str]:
     return {k: "\n".join(sorted(v) if k == "hosts" else v) for k, v in out.items()}
 
 
+def reference(context: str, podman: dict[str, str], workload: dict[str, str]) -> dict[str, str]:
+    """podman's probe for context, with the rlimits of the container's own
+    process (the workload's probe, `podman run`) in place of podman exec's.
+    podman exec sets no rlimits: its process.json copies the container's
+    configured Process (libpod/oci_conmon_exec_common.go), not the limits
+    podman adds to the running spec (RLIMIT_NOFILE and RLIMIT_NPROC at
+    1048576, libpod/container_internal_common.go), so an exec'd process has
+    its caller's limits, here the harness host's `docker exec` session's
+    (65536 and unlimited on CI). That is the caller, not the container. lux
+    exec and servers are lux-shim's children and get the container's; they
+    must equal podman run's process's, as the workload's do."""
+    if context == "workload":
+        return podman
+    return {**{k: v for k, v in podman.items() if not k.startswith("limits.")},
+            **{k: v for k, v in workload.items() if k.startswith("limits.")}}
+
+
 def diff(podman: dict[str, str], lux: dict[str, str]) -> dict[str, tuple[str | None, str | None]]:
     return {k: (podman.get(k), lux.get(k)) for k in sorted(podman.keys() | lux.keys()) if podman.get(k) != lux.get(k)}
 
@@ -414,7 +432,8 @@ def probes(site):
                 "exec-tty": host.exec("podman", "exec", "-it", pname, "probe", input=b""),
                 "server": host.podman("exec", pname, *SERVER_PODMAN)}
 
-        out = {ctx: (fields(want[ctx], pname), fields(raw[ctx], lux_name)) for ctx in CONTEXTS}
+        podman = {ctx: fields(want[ctx], pname) for ctx in CONTEXTS}
+        out = {ctx: (reference(ctx, podman[ctx], podman["workload"]), fields(raw[ctx], lux_name)) for ctx in CONTEXTS}
 
         lux.run("stop", run_id, "--wait")
         host.podman("stop", pname)
@@ -539,7 +558,7 @@ def test_classify_lists_are_disjoint():
 _PODMAN = {
     "argv": "/usr/local/bin/probe from-spec", "entrypoint": "ran", "pid": "pid1=parent",
     "uid": "1000", "gid": "1000", "groups": "1000 4001 4002", "umask": "0022",
-    "limits.Max open files": "1048576 1048576", "limits.Max processes": "unlimited unlimited",
+    "limits.Max open files": "1048576 1048576", "limits.Max processes": "1048576 1048576",
     "pwd": "/srv/app", "env.HOME": "/srv/home-from-env", "env.PATH": "/opt/probe/bin:/usr/bin:/bin",
     "env.HOSTNAME": "0123456789ab", "env.LANG": "C.UTF-8",
     "hostname": "0123456789ab", "hostname_resolves": "yes",
@@ -613,11 +632,21 @@ def test_classify_flags_regressions(name):
 # unknown fields). An exec's probe is lux-shim's child, so the workload's
 # pid1=other is unknown there although podman exec's is pid1=other too; an
 # exec with a terminal that has podman's TERM is the pty-term gap closed,
-# nothing unknown. Each fails if classify ignores the context.
+# nothing unknown. podman exec's own rlimits are its caller's (CALLER_LIMITS
+# below), never the reference: lux's exec and server rlimits are the
+# container's, and one that is podman exec's caller's or any other is
+# unknown. Each fails if classify ignores the context.
 CONTEXT_CASES = {
     "exec-pid1-workloads": ("exec", {"entrypoint": "not-run", "pid": "pid1=other"}, {"pid"}),
     "exec-tty-term-closed": ("exec-tty", {"entrypoint": "not-run", "pid": "pid1=parent", "env.TERM": "xterm"},
                              set()),
+    "exec-container-rlimits": ("exec", {"entrypoint": "not-run", "pid": "pid1=parent"}, set()),
+    "exec-callers-nofile": ("exec", {"entrypoint": "not-run", "pid": "pid1=parent",
+                                     "limits.Max open files": "65536 65536"}, {"limits.Max open files"}),
+    "exec-tty-callers-nproc": ("exec-tty", {"entrypoint": "not-run", "pid": "pid1=parent", "env.TERM": "xterm",
+                                            "limits.Max processes": "unlimited unlimited"}, {"limits.Max processes"}),
+    "server-other-nofile": ("server", {"limits.Max open files": "4096 1048576"}, {"limits.Max open files"}),
+    "workload-other-nproc": ("workload", {"limits.Max processes": "unlimited unlimited"}, {"limits.Max processes"}),
 }
 
 
@@ -629,12 +658,30 @@ def test_classify_uses_the_context(name):
     assert set(unknown) == want, (name, unknown)
 
 
+# podman exec's rlimits on CI: the harness host's `docker exec` session's,
+# not the container's.
+CALLER_LIMITS = {"limits.Max open files": "65536 65536", "limits.Max processes": "unlimited unlimited"}
+
+
+def test_classify_reference_takes_the_containers_rlimits():
+    """reference() keeps the workload's probe as it is, and gives the
+    others podman run's rlimits and podman exec's every other field."""
+    execd = {**_PODMAN, **CALLER_LIMITS, "pid": "pid1=other", "env.TERM": "xterm"}
+    assert reference("workload", {**_PODMAN, **CALLER_LIMITS}, _PODMAN) == {**_PODMAN, **CALLER_LIMITS}
+    for ctx in ("exec", "exec-tty", "server"):
+        got = reference(ctx, execd, _PODMAN)
+        assert got == {**execd, **{k: _PODMAN[k] for k in CALLER_LIMITS}}, (ctx, got)
+    # A limit only podman exec's probe has is not the container's: dropped.
+    assert "limits.Max locked memory" not in reference("exec", {**execd, "limits.Max locked memory": "8 8"}, _PODMAN)
+
+
 def _synthetic_probes(lux: dict) -> dict:
-    """{context: (podman, lux)}: podman exec's probe has no ENTRYPOINT run
-    and its parent outside the container, and -t adds TERM."""
-    execd = {**_PODMAN, "entrypoint": "not-run", "pid": "pid1=other"}
+    """{context: (podman, lux)}: podman exec's probe has no ENTRYPOINT run,
+    its parent outside the container and its caller's rlimits, and -t adds
+    TERM; each goes through reference() as the real ones do."""
+    execd = {**_PODMAN, **CALLER_LIMITS, "entrypoint": "not-run", "pid": "pid1=other"}
     podman = {"workload": _PODMAN, "exec": execd, "exec-tty": {**execd, "env.TERM": "xterm"}, "server": execd}
-    return {ctx: (podman[ctx], lux) for ctx in CONTEXTS}
+    return {ctx: (reference(ctx, podman[ctx], _PODMAN), lux) for ctx in CONTEXTS}
 
 
 @pytest.mark.parametrize("name", list(GAPS))

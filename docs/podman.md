@@ -439,6 +439,10 @@ killed before it wrote its exit file, or predates the count.
 
 These go through the shim, not `podman exec`, so they run as the
 workload user with the workload's environment, and a TTY is the shim's.
+They and servers also have the container's rlimits, the shim's own:
+`podman exec` sets none (its process copies the container's configured
+process, without the `RLIMIT_NOFILE` and `RLIMIT_NPROC` defaults Podman
+adds at start), so a command it runs has its caller's limits instead.
 Port forwarding dials the container's address on its network from the
 host (`podman container inspect` for the address, looked up once).
 
