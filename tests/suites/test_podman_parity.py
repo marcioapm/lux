@@ -12,11 +12,20 @@ and an /etc/passwd home and shell. One probe prints the process's view
 /tmp and /dev/shm, the workdir's and home's modes, capabilities,
 no_new_privs, seccomp, cgroup, open fds, signal mask and ignored signals).
 
+The reference is `podman run` with podman's stock namespace and cgroup
+defaults given explicitly (PODMAN_DEFAULTS): a host's containers.conf may
+change them, and the harness's hosts' does, so without them the reference
+would share the host's network, IPC, UTS and cgroup namespaces while lux
+sets its own (hardening() in internal/runner/placement.go).
+
 Every field either matches podman, or is in INTENDED (a difference lux
-means, with the reason and the doc that says so), or is in GAPS (a
-difference nobody has decided on yet). A difference in neither fails
-test_matches_podman. Each gap is its own strict xfail: changing lux so
-that a gap closes fails its test, and the gap then moves out of GAPS.
+means, with lux's value pinned, the reason and the doc that says so), or
+is in GAPS (a difference nobody has decided on yet, with lux's current
+value pinned). Anything else, including an INTENDED or GAPS field whose lux
+value is not the pinned one, is unknown and fails test_matches_podman.
+Each gap is its own strict xfail: changing lux so that a gap closes fails
+its test, and the gap then moves out of GAPS. test_classify_flags_regressions
+checks the classification itself on synthetic probes, with no environment.
 """
 
 from __future__ import annotations
@@ -28,7 +37,7 @@ import re
 
 import pytest
 
-from conftest import Runners, cleanup_host
+from conftest import Runners, cleanup_host, generic
 from env import ALPINE_IMAGE, wait_until
 
 # The probe: one "<field>\t<line>" per line of output, between markers, so
@@ -51,7 +60,7 @@ p hostname_resolves sh -c 'getent hosts "$(hostname)" >/dev/null && echo yes || 
 p hosts cat /etc/hosts
 p resolv cat /etc/resolv.conf
 p tmpdirs stat -c '%n %a %U:%G' /tmp /dev/shm
-p shmsize sh -c 'df -k /dev/shm | tail -1'
+p shmsize sh -c "df -k /dev/shm | awk 'NR==2{print \$2}'"
 p workdir_mode stat -c '%n %a %U:%G' /srv/app
 p home_mode stat -c '%n %a %U:%G' /home/runner
 p caps grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):' /proc/self/status
@@ -109,60 +118,90 @@ COMMAND = ["sh", "-c", "probe from-spec; exec probe-wait"]
 SERVER = ["sh", "-c", "probe; exec sleep 300"]
 SERVER_PODMAN = ["sh", "-c", "probe; exit 0"]
 
+# podman's stock defaults, given explicitly to the reference container. A
+# host's containers.conf may change any of them (the harness's hosts' sets
+# netns, ipcns, utsns and cgroupns to "host" and cgroups to "disabled"),
+# which is why hardening() sets lux's explicitly too. userns is left to
+# the host: podman's stock default for rootful podman is the host's user
+# namespace, which is also what the hosts' containers.conf says, and no
+# field the probe prints depends on the mapping (ids, modes and
+# capabilities are the container's view either way); --userns=auto would
+# mirror lux but not what `podman run` gives a user.
+PODMAN_DEFAULTS = ["--network=bridge", "--uts=private", "--ipc=private", "--pid=private",
+                   "--cgroupns=private", "--cgroups=enabled"]
+
 CONTEXTS = ["workload", "exec", "exec-tty", "server"]
 
 DOCS = "https://github.com/marcioapm/lux/blob/main/docs/"
 
-# Differences lux intends: (contexts, field patterns, why, the doc that
-# says so). fnmatch patterns over the field names fields() makes.
+# A pinned value that means "lux has no such field".
+ABSENT = object()
+
+IPV4 = r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+
+# Differences lux intends: (contexts, {field pattern: lux's value}, why,
+# the doc that says so). Patterns are fnmatch patterns over the field names
+# fields() makes; a value is a regex lux's whole value must match, or
+# ABSENT. A pattern without wildcards is checked in every listed context
+# whether or not podman differs (lux matching podman there is a
+# regression too); a wildcard pattern is checked for every lux field it
+# names, and the first pattern that names a field is the one used.
 INTENDED = [
-    (CONTEXTS, ["pid"],
-     "lux-shim is PID 1 (--init=false) and starts the workload, every exec and every server as its "
-     "children; podman's PID 1 is the image's process, and podman exec's parent is outside the container",
+    # The workload's and a server's probe run under their `sh -c`, a child
+    # of lux-shim: neither the probe nor its parent is PID 1. An exec's
+    # probe is lux-shim's own child.
+    (["workload", "server"], {"pid": r"pid1=other"},
+     "lux-shim is PID 1 (--init=false) and starts the workload and every server as its children "
+     "(here under their `sh -c`); podman's PID 1 is the image's process",
      DOCS + "podman.md#containers"),
-    (CONTEXTS, ["caps.CapBnd", "caps.NoNewPrivs"],
+    (["exec", "exec-tty"], {"pid": r"pid1=parent"},
+     "lux exec runs its command as a child of lux-shim, PID 1; podman exec's parent is outside the "
+     "container",
+     DOCS + "podman.md#exec-attach-ports"),
+    (CONTEXTS, {"caps.CapBnd": r"00000000000000eb", "caps.NoNewPrivs": r"1"},
      "every Run drops all capabilities but CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID and KILL, and "
      "sets no-new-privileges (a nested Run keeps SYS_CHROOT and loses no-new-privileges)",
      DOCS + "podman.md#containers"),
-    (CONTEXTS, ["resolv.nameserver"],
-     "a Run's resolver is lux's DNS stub on its network's gateway (podman's DNS is off), so egress "
-     "rules apply to names",
+    (CONTEXTS, {"resolv.nameserver": rf"nameserver {IPV4}"},
+     "a Run's resolver is lux's DNS stub on its network's gateway, its only nameserver (podman's DNS is "
+     "off), so egress rules apply to names",
      DOCS + "podman.md#networks"),
-    (CONTEXTS, ["env.LUX_*"],
+    (CONTEXTS, {"env.LUX_RUN_ID": r"run_[a-z0-9]+", "env.LUX_EPOCH": r"[0-9]+", "env.LUX_*": r".+"},
      "lux's own variables (LUX_RUN_ID, LUX_EPOCH, LUX_CPUS, LUX_MEMORY_LIMIT, LUX_CPUSET, LUX_INPUTS, "
      "LUX_SERVICE_*); LUX_ is reserved, a spec's env cannot use it",
      DOCS + "runspec.md#rules"),
-    (CONTEXTS, ["hostname", "env.HOSTNAME"],
+    (CONTEXTS, {"hostname": r"lux", "env.HOSTNAME": r"lux"},
      "every Run's hostname is `lux` (--hostname=lux), the same on every placement, rather than a "
      "container id that changes on each; lux exec and servers have the workload's environment, "
-     "HOSTNAME included, where podman exec has none",
+     "HOSTNAME included",
      DOCS + "podman.md#containers"),
-    (CONTEXTS, ["cgroup"],
-     "every Run has a private cgroup namespace (--cgroupns=private, whatever the host's "
-     "containers.conf); with sandbox.cgroupDelegation the workload runs in /workload/main",
-     DOCS + "podman.md#limits-of-nested-containers"),
-    (["workload"], ["fds.0"],
+    (["workload"], {"fds.0": r"\S+ pipe"},
      "a generic workload's stdin is a pipe from lux-shim: input to the Run is written to it",
      DOCS + "adapters.md#writing-a-workload-for-generic"),
 ]
 
-# Differences nobody has decided on yet: name -> (contexts, field
-# patterns, what differs). Each is a strict xfail in test_known_gap; the
-# report on the branch that added this suite analyses each one.
+# Differences nobody has decided on yet: name -> (contexts, {field
+# pattern: lux's current value}, what differs), values as in INTENDED.
+# A gap field with another lux value is unknown. Each is a strict xfail in
+# test_known_gap.
 GAPS = {
-    "image-workdir": (CONTEXTS, ["pwd"],
+    "image-workdir": (CONTEXTS, {"pwd": r"/home/runner"},
                       "the image's WORKDIR is not the default working directory: lux starts in the "
                       "user's home when workload.workdir is unset"),
-    "image-env-home": (CONTEXTS, ["env.HOME"],
+    "image-env-home": (CONTEXTS, {"env.HOME": r"/home/runner"},
                        "an image's ENV HOME is replaced by the passwd home"),
-    "env-user": (CONTEXTS, ["env.USER"],
+    "env-user": (CONTEXTS, {"env.USER": r"runner"},
                  "lux sets USER to the workload user's name; podman sets no USER"),
-    "image-entrypoint": (["workload"], ["entrypoint"],
+    "image-entrypoint": (["workload"], {"entrypoint": r"not-run"},
                          "the image's ENTRYPOINT never runs: workload.command replaces both "
                          "ENTRYPOINT and CMD"),
-    "pty-term": (["exec-tty"], ["env.TERM"],
+    "pty-term": (["exec-tty"], {"env.TERM": ABSENT},
                  "lux exec -t sets no TERM; podman exec -t sets TERM=xterm"),
 }
+
+# How lux stops a generic workload today, whatever the image's STOPSIGNAL
+# (the image-stopsignal gap).
+GAP_STOP_SIGNAL = "TERM"
 
 # Fields podman's and lux's probes do not have in common by construction:
 # PWD follows pwd, SHLVL counts the shells the ENTRYPOINT adds, and
@@ -170,17 +209,29 @@ GAPS = {
 SKIP_ENV = {"PWD", "SHLVL", "PROBE_ENTRYPOINT"}
 
 
+class HarnessError(Exception):
+    """The harness could not get a probe: not a gap, so never an xfail."""
+
+
 def spec(*cmd: str, **workload) -> dict:
-    w = {"adapter": "generic", **workload}
-    if cmd:
-        w["command"] = list(cmd)
-    return {"image": {"build": {"containerfile": CONTAINERFILE}}, "workload": w}
+    s = generic(ALPINE_IMAGE, *cmd)
+    s["image"] = {"build": {"containerfile": CONTAINERFILE}}
+    if not cmd:
+        del s["workload"]["command"]
+    s["workload"].update(workload)
+    return s
+
+
+def wait_text(fn, text: str, timeout: float, message: str) -> str:
+    """fn() once it has text in it."""
+    return wait_until(lambda: (lambda o: o if text in o else None)(fn()), timeout, 0.5, message)
 
 
 def probe_lines(text: str) -> list[tuple[str, str]]:
     """The probe's (field, line) pairs in text: the last complete probe. A
     terminal may echo input (a ^@) ahead of the first marker."""
     lines = text.replace("\r", "").splitlines()
+    assert any(l.strip() == "probe-end" for l in lines), f"no complete probe in:\n{text}"
     end = max(i for i, l in enumerate(lines) if l.strip() == "probe-end")
     begin = max(i for i, l in enumerate(lines[:end]) if l.strip().endswith("probe-begin"))
     return [tuple(l.split("\t", 1)) for l in lines[begin + 1:end] if "\t" in l]
@@ -197,8 +248,10 @@ def fields(text: str, hostname: str, name: str) -> dict[str, str]:
 
     for f, line in probe_lines(text):
         if f == "limits":
-            # "Max open files   1048576   1048576   files": name, soft, hard.
-            add("limits." + line[:26].strip(), " ".join(line[26:].split()[:2]))
+            # "Max open files            1048576              1048576              files":
+            # columns are two or more spaces apart; name, soft, hard.
+            name_, soft, hard = (re.split(r"\s{2,}", line.strip()) + ["", ""])[:3]
+            add("limits." + name_, f"{soft} {hard}")
         elif f == "env":
             k, _, v = line.partition("=")
             if k not in SKIP_ENV:
@@ -219,7 +272,8 @@ def fields(text: str, hostname: str, name: str) -> dict[str, str]:
             add("hosts", " ".join(words))
         elif f == "resolv":
             # Shape only: nameservers are their own field, and dns.podman
-            # (podman's own DNS, which lux turns off) is not a search domain.
+            # (podman's own DNS, which lux turns off) is not a search
+            # domain.
             if line.startswith("nameserver"):
                 add("resolv.nameserver", line)
             elif line.startswith("search"):
@@ -248,17 +302,66 @@ def diff(podman: dict[str, str], lux: dict[str, str]) -> dict[str, tuple[str | N
     return {k: (podman.get(k), lux.get(k)) for k in sorted(podman.keys() | lux.keys()) if podman.get(k) != lux.get(k)}
 
 
-def _matches(context: str, key: str, entries) -> bool:
-    return any(context in ctxs and any(fnmatch.fnmatchcase(key, p) for p in pats) for ctxs, pats, *_ in entries)
+def _pinned(pins: dict, key: str):
+    """The value pins give key, or None when no pattern names it."""
+    return next((v for p, v in pins.items() if fnmatch.fnmatchcase(key, p)), None)
 
 
-def intended(context: str, key: str) -> bool:
+def _holds(want, value: str | None) -> bool:
+    if want is ABSENT:
+        return value is None
+    return value is not None and re.fullmatch(want, value) is not None
+
+
+def _matches(context: str, key: str, entries) -> object | None:
+    """The pinned value of the first entry for context naming key."""
+    for ctxs, pins, *_ in entries:
+        if context in ctxs and (want := _pinned(pins, key)) is not None:
+            return want
+    return None
+
+
+def intended(context: str, key: str):
     return _matches(context, key, INTENDED)
 
 
 def gap(context: str, key: str) -> str | None:
-    return next((n for n, (ctxs, pats, _) in GAPS.items()
-                 if context in ctxs and any(fnmatch.fnmatchcase(key, p) for p in pats)), None)
+    """The name of the gap naming key in context."""
+    return next((n for n, e in GAPS.items() if _matches(context, key, [e]) is not None), None)
+
+
+def classify(context: str, podman: dict[str, str], lux: dict[str, str]) -> dict[str, tuple]:
+    """Every unknown difference: field -> (podman, lux). A field is unknown
+    when it differs from podman and is neither INTENDED nor a gap, or when
+    it is INTENDED or a gap and lux's value is not the pinned one. Exact
+    INTENDED fields are checked even where lux matches podman."""
+    keys = set(diff(podman, lux)) | set(lux)
+    keys |= {p for ctxs, pins, *_ in INTENDED if context in ctxs for p in pins if not _wild(p)}
+    unknown = {}
+    for k in sorted(keys):
+        want = intended(context, k)
+        if want is None:
+            if podman.get(k) == lux.get(k):
+                continue
+            name = gap(context, k)
+            want = _matches(context, k, [GAPS[name]]) if name else None
+        if want is None or not _holds(want, lux.get(k)):
+            unknown[k] = (podman.get(k), lux.get(k))
+    return unknown
+
+
+def _wild(p: str) -> bool:
+    return any(c in p for c in "*?[")
+
+
+def overlaps(keys) -> list[tuple[str, str]]:
+    """(context, field) pairs both INTENDED and a gap, among keys and every
+    exact field either list names."""
+    names = set(keys)
+    for ctxs, pins, *_ in [*INTENDED, *GAPS.values()]:
+        names |= {p for p in pins if not _wild(p)}
+    return [(ctx, k) for ctx in CONTEXTS for k in sorted(names)
+            if intended(ctx, k) is not None and gap(ctx, k) is not None]
 
 
 def stop_signal(text: str) -> str | None:
@@ -267,17 +370,32 @@ def stop_signal(text: str) -> str | None:
 
 
 @pytest.fixture(scope="module")
-def probes(env, tenant_factory, require):
-    """Every probe, once: {context: (podman fields, lux fields)}, and how
-    each side was stopped. One Run and one podman container of its image,
-    on the same host."""
+def site(env, tenant_factory, require):
+    """The module's tenant and one runner on hosts[0], shared by every test
+    here: (lux, host)."""
     require("luxd", "lux-runner", "lux-shim", "lux")
     lux = tenant_factory()
     runners = Runners(env, lux)
     host = env.hosts[0]
+    try:
+        try:
+            runners.start(host)
+        except AssertionError as e:
+            raise HarnessError(f"runner on {host.name}: {e}") from e
+        yield lux, host
+    finally:
+        runners.stop_all()
+        cleanup_host(host)
+
+
+@pytest.fixture(scope="module")
+def probes(site):
+    """Every probe, once: {context: (podman fields, lux fields)}, and how
+    each side was stopped. One Run and one podman container of its image,
+    on the same host."""
+    lux, host = site
     pname = ""
     try:
-        runners.start(host)
         run_id = lux.submit(spec(*COMMAND))
         lux.wait_output(run_id, "waiting", timeout=300)
         image = lux.get(run_id)["image"]["imageId"]
@@ -287,13 +405,11 @@ def probes(env, tenant_factory, require):
                "exec": lux.run("exec", run_id, "-T", "--", "probe", input="").stdout,
                "exec-tty": lux.run("exec", run_id, "-t", "--", "probe", input="").stdout}
         lux.run("server", "add", run_id, "probe", "8080", "--", *SERVER)
-        raw["server"] = wait_until(lambda: (lambda o: o if "probe-end" in o else None)(
-            lux.logs(run_id, "--server", "probe")), 60, 0.5, "no server output")
+        raw["server"] = wait_text(lambda: lux.logs(run_id, "--server", "probe"), "probe-end", 60, "no server output")
 
         pname = "parity-" + run_id
-        host.podman("run", "-d", "--name", pname, image, *COMMAND)
-        logs = wait_until(lambda: (lambda o: o if "waiting" in o else None)(host.podman("logs", pname)),
-                          60, 0.5, "podman container never waited")
+        host.podman("run", "-d", "--name", pname, *PODMAN_DEFAULTS, image, *COMMAND)
+        logs = wait_text(lambda: host.podman("logs", pname), "waiting", 60, "podman container never waited")
         # podman exec -i: a stdin pipe, as lux exec -T gives; without -i,
         # /dev/null, as a server's.
         want = {"workload": logs,
@@ -309,20 +425,23 @@ def probes(env, tenant_factory, require):
         lux.run("stop", run_id, "--wait")
         host.podman("stop", pname)
         out["stop"] = (stop_signal(host.podman("logs", pname)), stop_signal(lux.logs(run_id)))
-        yield out
+    except AssertionError as e:
+        # A wait that timed out, or a probe that never completed.
+        raise HarnessError(str(e)) from e
     finally:
         if pname:
             host.podman("rm", "-f", pname, check=False)
-        runners.stop_all()
-        cleanup_host(host)
+    yield out
 
 
 def test_probe_sees_the_image(probes):
     """The image is what the comparison assumes: podman runs it as runner
     with both extra groups, in its WORKDIR, with its ENV and ENTRYPOINT,
-    and stops it with its STOPSIGNAL."""
+    and stops it with its STOPSIGNAL; lux stops it with a signal the probe
+    saw."""
     podman, lux = probes["workload"]
     assert probes["stop"][0] == "QUIT", probes["stop"]
+    assert probes["stop"][1] in (GAP_STOP_SIGNAL, probes["stop"][0]), probes["stop"]
     assert podman["groups"] == "1000 4001 4002", podman
     assert podman["pwd"] == "/srv/app", podman
     assert podman["env.PROBE_IMAGE_ENV"] == "from-image", podman
@@ -335,53 +454,185 @@ def test_probe_sees_the_image(probes):
 
 @pytest.mark.parametrize("context", CONTEXTS)
 def test_matches_podman(probes, context):
-    """Every field is podman's, an intended difference, or a known gap."""
+    """Every field is podman's, an intended difference, or a known gap,
+    with lux's pinned value."""
     podman, lux = probes[context]
-    unknown = {k: v for k, v in diff(podman, lux).items() if not intended(context, k) and not gap(context, k)}
-    assert not unknown, "differences from podman that are neither INTENDED nor in GAPS " \
-                        "(field: (podman, lux)):\n" + "\n".join(f"  {k}: {v!r}" for k, v in unknown.items())
+    assert not overlaps(podman.keys() | lux.keys())
+    unknown = classify(context, podman, lux)
+    assert not unknown, "differences from podman that are neither INTENDED nor in GAPS with lux's " \
+                        "pinned value (field: (podman, lux)):\n" + "\n".join(f"  {k}: {v!r}" for k, v in unknown.items())
 
 
 def _gap_params():
-    return [pytest.param(name, marks=pytest.mark.xfail(strict=True, reason=GAPS[name][2]), id=name)
+    return [pytest.param(name, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=GAPS[name][2]),
+                         id=name)
             for name in GAPS]
 
 
 @pytest.mark.parametrize("name", _gap_params())
 def test_known_gap(probes, name):
     """Passes once lux matches podman in this gap's fields (then move the
-    gap out of GAPS). Each gap must still show somewhere, or it is stale."""
-    contexts, pats, _ = GAPS[name]
-    found = {ctx: {k: v for k, v in diff(*probes[ctx]).items() if any(fnmatch.fnmatchcase(k, p) for p in pats)}
-             for ctx in contexts}
-    found = {ctx: d for ctx, d in found.items() if d}
+    gap out of GAPS). Each gap must still show somewhere, or it is stale.
+    Only the gap itself is an AssertionError: a field that is neither
+    podman's nor the pinned value fails outright."""
+    found = gap_shows(name, probes)
     assert not found, f"{name}: (podman, lux) per context: {found}"
 
 
-@pytest.mark.xfail(strict=True, reason="gap image-stopsignal: lux stops a generic workload with SIGTERM "
-                                       "whatever the image's STOPSIGNAL")
+def gap_shows(name: str, probes) -> dict:
+    """Where gap name still shows: {context: {field: (podman, lux)}}. A
+    gap field that is neither podman's nor the pinned value fails here, as
+    pytest's Failed, not an AssertionError."""
+    contexts, pins, _ = GAPS[name]
+    found = {}
+    for ctx in contexts:
+        podman, lux = probes[ctx]
+        for k, v in diff(podman, lux).items():
+            want = _pinned(pins, k)
+            if want is None:
+                continue
+            if not _holds(want, v[1]):
+                pytest.fail(f"{name}: {ctx} {k} is neither podman's nor the gap's: (podman, lux) {v!r}")
+            found.setdefault(ctx, {})[k] = v
+    return found
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="gap image-stopsignal: lux stops a generic workload with SIGTERM whatever the "
+                          "image's STOPSIGNAL")
 def test_gap_image_stopsignal(probes):
     podman, lux = probes["stop"]
+    if lux not in (GAP_STOP_SIGNAL, podman):
+        pytest.fail(f"lux stopped the workload with {lux!r}, neither podman's {podman!r} nor {GAP_STOP_SIGNAL}")
     assert lux == podman
 
 
-@pytest.mark.xfail(strict=True, reason="gap image-cmd: a generic spec must give workload.command; podman "
-                                       "runs the image's ENTRYPOINT and CMD when no command is given")
-def test_gap_image_cmd(env, lux, runners, hosts):
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="gap image-cmd: a generic spec must give workload.command; podman runs the image's "
+                          "ENTRYPOINT and CMD when no command is given")
+def test_gap_image_cmd(site):
+    lux, _host = site
     p = lux.run("run", "-f", "-", check=False, input=json.dumps(spec()))
+    if p.returncode != 0 and "command" not in p.stderr:
+        pytest.fail(f"refused for another reason than the missing command: {p.stderr}")
     assert p.returncode == 0, p.stderr
     # Accepted: it must run what `podman run IMAGE` runs, the ENTRYPOINT
     # with the CMD.
     run_id = p.stdout.strip()
-    runners.start(hosts[0])
-    got = fields(lux.wait_output(run_id, "probe-end", timeout=300), "lux", "lux-" + run_id)
+    try:
+        out = lux.wait_output(run_id, "probe-end", timeout=300)
+    except AssertionError as e:
+        raise HarnessError(str(e)) from e
+    got = fields(out, "lux", "lux-" + run_id)
     assert (got["argv"], got["entrypoint"]) == ("/usr/local/bin/probe from-cmd", "ran"), got
 
 
-def test_intended_and_gaps_are_disjoint():
-    """A field is either intended or a gap in a context, never both."""
-    for ctxs, pats, why, doc in INTENDED:
-        assert why and doc.startswith(DOCS), (pats, doc)
-        for ctx in ctxs:
-            for p in pats:
-                assert gap(ctx, p) is None, (ctx, p)
+def test_classify_lists_are_disjoint():
+    """A field is either intended or a gap in a context, never both, among
+    the fields a probe has; each entry says why, and each INTENDED entry
+    names its doc."""
+    for ctxs, pins, why, doc in INTENDED:
+        assert why and pins and doc.startswith(DOCS), (pins, doc)
+    for name, (ctxs, pins, why) in GAPS.items():
+        assert why and pins, name
+    assert not overlaps([*_PODMAN, *_LUX["workload"]])
+
+
+# ---- the classification itself, on synthetic probes --------------------------
+
+# A podman probe and lux's of the same image, as fields() makes them: every
+# field the regressions below touch, and a few that match.
+_PODMAN = {
+    "argv": "/usr/local/bin/probe from-spec", "entrypoint": "ran", "pid": "pid1=parent",
+    "uid": "1000", "gid": "1000", "groups": "1000 4001 4002", "umask": "0022",
+    "limits.Max open files": "1048576 1048576", "limits.Max processes": "unlimited unlimited",
+    "pwd": "/srv/app", "env.HOME": "/srv/home-from-env", "env.PATH": "/opt/probe/bin:/usr/bin:/bin",
+    "env.HOSTNAME": "0123456789ab", "env.LANG": "C.UTF-8",
+    "hostname": "0123456789ab", "hostname_resolves": "yes",
+    "resolv.nameserver": "nameserver 10.88.0.1", "resolv.search": "search example.test",
+    "shmsize": "64000", "caps.CapInh": "0000000000000000", "caps.CapPrm": "0000000000000000",
+    "caps.CapEff": "0000000000000000", "caps.CapBnd": "00000000800405fb", "caps.CapAmb": "0000000000000000",
+    "caps.NoNewPrivs": "0", "caps.Seccomp": "2", "cgroup": "0::/",
+    "fds.0": "lr-x------ pipe", "fds.1": "l-wx------ pipe", "fds.2": "l-wx------ pipe",
+    "signals.SigBlk": "0000000000000000", "signals.SigIgn": "0000000000000000", "tty": "not a tty",
+}
+_LUX = {"workload": {
+    **_PODMAN, "entrypoint": "not-run", "pid": "pid1=other", "pwd": "/home/runner",
+    "env.HOME": "/home/runner", "env.USER": "runner", "env.HOSTNAME": "lux", "hostname": "lux",
+    "env.LUX_RUN_ID": "run_0123456789abcdef", "env.LUX_EPOCH": "1", "env.LUX_CPUS": "1",
+    "resolv.nameserver": "nameserver 10.89.0.1", "caps.CapBnd": "00000000000000eb", "caps.NoNewPrivs": "1",
+}}
+
+# Each is one way lux could regress, applied to lux's workload probe; each
+# must be unknown. A value of None removes the field.
+REGRESSIONS = {
+    "umask": {"umask": "0077"},
+    "dropped-group": {"groups": "1000 4001"},
+    "rlimit": {"limits.Max open files": "1024 1048576"},
+    "leaked-fd": {"fds.3": "lr-x------ /.lux/run/config.json"},
+    "signal-mask": {"signals.SigBlk": "0000000000010000"},
+    "ignored-signal": {"signals.SigIgn": "0000000000000004"},
+    "capbnd-added": {"caps.CapBnd": "00000000000000ef"},
+    "capbnd-podmans": {"caps.CapBnd": "00000000800405fb"},
+    "capeff-raised": {"caps.CapEff": "00000000000000eb"},
+    "no-new-privs-off": {"caps.NoNewPrivs": "0"},
+    "cwd": {"pwd": "/tmp"},
+    "cwd-podmans": {"pwd": "/"},
+    "home": {"env.HOME": "/root"},
+    "user": {"env.USER": "root"},
+    "hostname": {"hostname": "lux-run_0123456789abcdef"},
+    "hostname-podmans": {"hostname": "0123456789ab"},
+    "env-hostname": {"env.HOSTNAME": "other"},
+    "cgroup-path": {"cgroup": "0::/workload/main"},
+    "second-nameserver": {"resolv.nameserver": "nameserver 10.89.0.1\nnameserver 8.8.8.8"},
+    "nameserver-not-ipv4": {"resolv.nameserver": "nameserver fd00::1"},
+    "run-id": {"env.LUX_RUN_ID": "oops"},
+    "run-id-missing": {"env.LUX_RUN_ID": None},
+    "lux-var-empty": {"env.LUX_CPUS": ""},
+    "pid1": {"pid": "pid1=self"},
+    "stdin-not-pipe": {"fds.0": "lrwx------ /dev/null"},
+    "entrypoint": {"entrypoint": "maybe"},
+    "uid": {"uid": "0"},
+    "new-env": {"env.SECRET": "x"},
+}
+
+
+def _regressed(changes: dict) -> dict:
+    lux = dict(_LUX["workload"])
+    for k, v in changes.items():
+        if v is None:
+            lux.pop(k, None)
+        else:
+            lux[k] = v
+    return lux
+
+
+def test_classify_accepts_the_baseline():
+    assert classify("workload", _PODMAN, _LUX["workload"]) == {}
+
+
+@pytest.mark.parametrize("name", list(REGRESSIONS))
+def test_classify_flags_regressions(name):
+    """Each regression is an unknown difference, in the field it touches."""
+    changes = REGRESSIONS[name]
+    unknown = classify("workload", _PODMAN, _regressed(changes))
+    assert set(changes) <= set(unknown), (name, unknown)
+
+
+def _synthetic_probes(lux: dict) -> dict:
+    tty_podman = {**_PODMAN, "env.TERM": "xterm"}
+    return {ctx: (tty_podman if ctx == "exec-tty" else _PODMAN, lux) for ctx in CONTEXTS}
+
+
+@pytest.mark.parametrize("name", list(GAPS))
+def test_classify_gap_shows_until_closed(name):
+    """Each gap shows on today's lux, and no longer once lux matches
+    podman (test_known_gap then XPASSes); a third value fails outright."""
+    assert gap_shows(name, _synthetic_probes(_LUX["workload"]))
+    closed = {ctx: (p, {**p, **{k: v for k, v in _LUX["workload"].items() if gap(ctx, k) != name}})
+              for ctx, (p, _) in _synthetic_probes({}).items()}
+    assert not gap_shows(name, closed)
+    _ctxs, pins, _ = GAPS[name]
+    other = {**_LUX["workload"], **{k: "something-else" for k in pins}}
+    with pytest.raises(pytest.fail.Exception):
+        gap_shows(name, _synthetic_probes(other))

@@ -185,8 +185,14 @@ def main() -> None:
 
 
 # Suites that take longest go first, so the split is even and the slowest
-# ones are not left for last. Seconds from a full run; unknown ones count 10.
+# ones are not left for last. Seconds from a full run; then
+# SUITE_SECONDS_ESTIMATED (CI checks out without a recorded run); unknown
+# ones count 10.
 SUITE_SECONDS_FILE = TESTS_DIR / ".suite-seconds.json"
+
+# Estimates for suites known to take well over 10s: an image build, a
+# runner, and a podman container of the same image.
+SUITE_SECONDS_ESTIMATED = {"test_podman_parity.py": 45.0}
 
 
 def _suite_seconds() -> dict[str, float]:
@@ -199,7 +205,8 @@ def _suite_seconds() -> dict[str, float]:
 def _split(suites: list[str], jobs: int, seconds: dict[str, float]) -> list[list[str]]:
     """Greedy longest-first: each suite to the least loaded job."""
     def weight(s):
-        return seconds.get(Path(s).name, 10.0)
+        name = Path(s).name
+        return seconds.get(name, SUITE_SECONDS_ESTIMATED.get(name, 10.0))
     loads = [[0.0, []] for _ in range(jobs)]
     for s in sorted(suites, key=weight, reverse=True):
         least = min(loads, key=lambda l: l[0])
