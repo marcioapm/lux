@@ -13,10 +13,7 @@ and an /etc/passwd home and shell. One probe prints the process's view
 no_new_privs, seccomp, cgroup, open fds, signal mask and ignored signals).
 
 The reference is `podman run` with podman's stock namespace and cgroup
-defaults given explicitly (PODMAN_DEFAULTS): a host's containers.conf may
-change them, and the harness's hosts' does, so without them the reference
-would share the host's network, IPC, UTS and cgroup namespaces while lux
-sets its own (hardening() in internal/runner/placement.go).
+defaults given explicitly (PODMAN_DEFAULTS).
 
 Every field either matches podman, or is in INTENDED (a difference lux
 means, with lux's value pinned, the reason and the doc that says so), or
@@ -121,12 +118,13 @@ SERVER_PODMAN = ["sh", "-c", "probe; exit 0"]
 # podman's stock defaults, given explicitly to the reference container. A
 # host's containers.conf may change any of them (the harness's hosts' sets
 # netns, ipcns, utsns and cgroupns to "host" and cgroups to "disabled"),
-# which is why hardening() sets lux's explicitly too. userns is left to
-# the host: podman's stock default for rootful podman is the host's user
-# namespace, which is also what the hosts' containers.conf says, and no
-# field the probe prints depends on the mapping (ids, modes and
-# capabilities are the container's view either way); --userns=auto would
-# mirror lux but not what `podman run` gives a user.
+# which is why hardening() in internal/runner/placement.go sets lux's
+# explicitly too. userns is left to the host: podman's stock default for
+# rootful podman is the host's user namespace, which is also what the
+# hosts' containers.conf says, and no field the probe prints depends on
+# the mapping (ids, modes and capabilities are the container's view
+# either way); --userns=auto would mirror lux but not what `podman run`
+# gives a user.
 PODMAN_DEFAULTS = ["--network=bridge", "--uts=private", "--ipc=private", "--pid=private",
                    "--cgroupns=private", "--cgroups=enabled"]
 
@@ -137,8 +135,6 @@ DOCS = "https://github.com/marcioapm/lux/blob/main/docs/"
 # A pinned value that means "lux has no such field".
 ABSENT = object()
 
-IPV4 = r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
-
 # Differences lux intends: (contexts, {field pattern: lux's value}, why,
 # the doc that says so). Patterns are fnmatch patterns over the field names
 # fields() makes; a value is a regex lux's whole value must match, or
@@ -147,9 +143,6 @@ IPV4 = r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
 # regression too); a wildcard pattern is checked for every lux field it
 # names, and the first pattern that names a field is the one used.
 INTENDED = [
-    # The workload's and a server's probe run under their `sh -c`, a child
-    # of lux-shim: neither the probe nor its parent is PID 1. An exec's
-    # probe is lux-shim's own child.
     (["workload", "server"], {"pid": r"pid1=other"},
      "lux-shim is PID 1 (--init=false) and starts the workload and every server as its children "
      "(here under their `sh -c`); podman's PID 1 is the image's process",
@@ -162,11 +155,12 @@ INTENDED = [
      "every Run drops all capabilities but CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID and KILL, and "
      "sets no-new-privileges (a nested Run keeps SYS_CHROOT and loses no-new-privileges)",
      DOCS + "podman.md#containers"),
-    (CONTEXTS, {"resolv.nameserver": rf"nameserver {IPV4}"},
+    (CONTEXTS, {"resolv.nameserver": r"nameserver \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"},
      "a Run's resolver is lux's DNS stub on its network's gateway, its only nameserver (podman's DNS is "
      "off), so egress rules apply to names",
      DOCS + "podman.md#networks"),
-    (CONTEXTS, {"env.LUX_RUN_ID": r"run_[a-z0-9]+", "env.LUX_EPOCH": r"[0-9]+", "env.LUX_*": r".+"},
+    (CONTEXTS, {"env.LUX_RUN_ID": r"run_[a-z0-9]+", "env.LUX_EPOCH": r"[0-9]+",
+                "env.LUX_CPUS": r"[0-9]+(\.[0-9]+)?", "env.LUX_MEMORY_LIMIT": r"[0-9]+", "env.LUX_*": r".+"},
      "lux's own variables (LUX_RUN_ID, LUX_EPOCH, LUX_CPUS, LUX_MEMORY_LIMIT, LUX_CPUSET, LUX_INPUTS, "
      "LUX_SERVICE_*); LUX_ is reserved, a spec's env cannot use it",
      DOCS + "runspec.md#rules"),
@@ -213,18 +207,20 @@ class HarnessError(Exception):
     """The harness could not get a probe: not a gap, so never an xfail."""
 
 
-def spec(*cmd: str, **workload) -> dict:
+def spec(*cmd: str) -> dict:
     s = generic(ALPINE_IMAGE, *cmd)
     s["image"] = {"build": {"containerfile": CONTAINERFILE}}
     if not cmd:
         del s["workload"]["command"]
-    s["workload"].update(workload)
     return s
 
 
 def wait_text(fn, text: str, timeout: float, message: str) -> str:
     """fn() once it has text in it."""
-    return wait_until(lambda: (lambda o: o if text in o else None)(fn()), timeout, 0.5, message)
+    def ready():
+        out = fn()
+        return out if text in out else None
+    return wait_until(ready, timeout, 0.5, message)
 
 
 def probe_lines(text: str) -> list[tuple[str, str]]:
@@ -237,16 +233,18 @@ def probe_lines(text: str) -> list[tuple[str, str]]:
     return [tuple(l.split("\t", 1)) for l in lines[begin + 1:end] if "\t" in l]
 
 
-def fields(text: str, hostname: str, name: str) -> dict[str, str]:
+def fields(text: str, name: str) -> dict[str, str]:
     """A probe's output as comparable fields. What names this one container
-    (its name and address in /etc/hosts, pipe inodes, pty numbers, fd
-    timestamps) is replaced by placeholders."""
+    (its name, hostname and address in /etc/hosts, pipe inodes, pty
+    numbers, fd timestamps) is replaced by placeholders or left out."""
+    lines = probe_lines(text)
+    hostname = dict(lines).get("hostname")
     out: dict[str, list[str]] = {}
 
     def add(k: str, v: str) -> None:
         out.setdefault(k, []).append(v)
 
-    for f, line in probe_lines(text):
+    for f, line in lines:
         if f == "limits":
             # "Max open files            1048576              1048576              files":
             # columns are two or more spaces apart; name, soft, hard.
@@ -258,12 +256,12 @@ def fields(text: str, hostname: str, name: str) -> dict[str, str]:
                 add("env." + k, v)
         elif f == "hosts":
             # The container's own entry, by its name: the name is a
-            # placeholder, and its hostname is left out (podman
-            # leaves it out too when the host's own /etc/hosts, which is
-            # copied in, already has it; hostname_resolves says whether it
-            # resolves). Every other line is the host's, the same for both.
-            # Addresses other than loopback are placeholders too: the Run's
-            # network is not podman's default one.
+            # placeholder, and its hostname is left out (podman leaves it out
+            # too when the host's /etc/hosts, which is copied in, already has
+            # it; hostname_resolves says whether it resolves). Every other
+            # line is the host's, the same for both. Addresses other than
+            # loopback are placeholders too: the Run's network is not
+            # podman's default one.
             words = line.split()
             if name in words:
                 words = [words[0], *sorted("<name>" if w == name else w for w in words[1:] if w != hostname)]
@@ -343,8 +341,7 @@ def classify(context: str, podman: dict[str, str], lux: dict[str, str]) -> dict[
         if want is None:
             if podman.get(k) == lux.get(k):
                 continue
-            name = gap(context, k)
-            want = _matches(context, k, [GAPS[name]]) if name else None
+            want = _matches(context, k, GAPS.values())
         if want is None or not _holds(want, lux.get(k)):
             unknown[k] = (podman.get(k), lux.get(k))
     return unknown
@@ -358,7 +355,7 @@ def overlaps(keys) -> list[tuple[str, str]]:
     """(context, field) pairs both INTENDED and a gap, among keys and every
     exact field either list names."""
     names = set(keys)
-    for ctxs, pins, *_ in [*INTENDED, *GAPS.values()]:
+    for _ctxs, pins, *_ in [*INTENDED, *GAPS.values()]:
         names |= {p for p in pins if not _wild(p)}
     return [(ctx, k) for ctx in CONTEXTS for k in sorted(names)
             if intended(ctx, k) is not None and gap(ctx, k) is not None]
@@ -417,10 +414,7 @@ def probes(site):
                 "exec-tty": host.exec("podman", "exec", "-it", pname, "probe", input=b""),
                 "server": host.podman("exec", pname, *SERVER_PODMAN)}
 
-        out = {}
-        for ctx in CONTEXTS:
-            pm_host = dict(probe_lines(want[ctx])).get("hostname", "")
-            out[ctx] = (fields(want[ctx], pm_host, pname), fields(raw[ctx], "lux", lux_name))
+        out = {ctx: (fields(want[ctx], pname), fields(raw[ctx], lux_name)) for ctx in CONTEXTS}
 
         lux.run("stop", run_id, "--wait")
         host.podman("stop", pname)
@@ -523,7 +517,7 @@ def test_gap_image_cmd(site):
         out = lux.wait_output(run_id, "probe-end", timeout=300)
     except AssertionError as e:
         raise HarnessError(str(e)) from e
-    got = fields(out, "lux", "lux-" + run_id)
+    got = fields(out, "lux-" + run_id)
     assert (got["argv"], got["entrypoint"]) == ("/usr/local/bin/probe from-cmd", "ran"), got
 
 
@@ -531,11 +525,11 @@ def test_classify_lists_are_disjoint():
     """A field is either intended or a gap in a context, never both, among
     the fields a probe has; each entry says why, and each INTENDED entry
     names its doc."""
-    for ctxs, pins, why, doc in INTENDED:
+    for _ctxs, pins, why, doc in INTENDED:
         assert why and pins and doc.startswith(DOCS), (pins, doc)
-    for name, (ctxs, pins, why) in GAPS.items():
+    for name, (_ctxs, pins, why) in GAPS.items():
         assert why and pins, name
-    assert not overlaps([*_PODMAN, *_LUX["workload"]])
+    assert not overlaps([*_PODMAN, *_LUX])
 
 
 # ---- the classification itself, on synthetic probes --------------------------
@@ -556,12 +550,13 @@ _PODMAN = {
     "fds.0": "lr-x------ pipe", "fds.1": "l-wx------ pipe", "fds.2": "l-wx------ pipe",
     "signals.SigBlk": "0000000000000000", "signals.SigIgn": "0000000000000000", "tty": "not a tty",
 }
-_LUX = {"workload": {
+_LUX = {
     **_PODMAN, "entrypoint": "not-run", "pid": "pid1=other", "pwd": "/home/runner",
     "env.HOME": "/home/runner", "env.USER": "runner", "env.HOSTNAME": "lux", "hostname": "lux",
-    "env.LUX_RUN_ID": "run_0123456789abcdef", "env.LUX_EPOCH": "1", "env.LUX_CPUS": "1",
+    "env.LUX_RUN_ID": "run_0123456789abcdef", "env.LUX_EPOCH": "1", "env.LUX_CPUS": "0.5",
+    "env.LUX_MEMORY_LIMIT": "8589934592",
     "resolv.nameserver": "nameserver 10.89.0.1", "caps.CapBnd": "00000000000000eb", "caps.NoNewPrivs": "1",
-}}
+}
 
 # Each is one way lux could regress, applied to lux's workload probe; each
 # must be unknown. A value of None removes the field.
@@ -598,17 +593,12 @@ REGRESSIONS = {
 
 
 def _regressed(changes: dict) -> dict:
-    lux = dict(_LUX["workload"])
-    for k, v in changes.items():
-        if v is None:
-            lux.pop(k, None)
-        else:
-            lux[k] = v
-    return lux
+    lux = {**_LUX, **changes}
+    return {k: v for k, v in lux.items() if v is not None}
 
 
 def test_classify_accepts_the_baseline():
-    assert classify("workload", _PODMAN, _LUX["workload"]) == {}
+    assert classify("workload", _PODMAN, _LUX) == {}
 
 
 @pytest.mark.parametrize("name", list(REGRESSIONS))
@@ -619,20 +609,43 @@ def test_classify_flags_regressions(name):
     assert set(changes) <= set(unknown), (name, unknown)
 
 
+# Another context's probe: (context, changes to lux's workload probe, the
+# unknown fields). An exec's probe is lux-shim's child, so the workload's
+# pid1=other is unknown there although podman exec's is pid1=other too; an
+# exec with a terminal that has podman's TERM is the pty-term gap closed,
+# nothing unknown. Each fails if classify ignores the context.
+CONTEXT_CASES = {
+    "exec-pid1-workloads": ("exec", {"entrypoint": "not-run", "pid": "pid1=other"}, {"pid"}),
+    "exec-tty-term-closed": ("exec-tty", {"entrypoint": "not-run", "pid": "pid1=parent", "env.TERM": "xterm"},
+                             set()),
+}
+
+
+@pytest.mark.parametrize("name", list(CONTEXT_CASES))
+def test_classify_uses_the_context(name):
+    context, changes, want = CONTEXT_CASES[name]
+    podman, _ = _synthetic_probes({})[context]
+    unknown = classify(context, podman, _regressed(changes))
+    assert set(unknown) == want, (name, unknown)
+
+
 def _synthetic_probes(lux: dict) -> dict:
-    tty_podman = {**_PODMAN, "env.TERM": "xterm"}
-    return {ctx: (tty_podman if ctx == "exec-tty" else _PODMAN, lux) for ctx in CONTEXTS}
+    """{context: (podman, lux)}: podman exec's probe has no ENTRYPOINT run
+    and its parent outside the container, and -t adds TERM."""
+    execd = {**_PODMAN, "entrypoint": "not-run", "pid": "pid1=other"}
+    podman = {"workload": _PODMAN, "exec": execd, "exec-tty": {**execd, "env.TERM": "xterm"}, "server": execd}
+    return {ctx: (podman[ctx], lux) for ctx in CONTEXTS}
 
 
 @pytest.mark.parametrize("name", list(GAPS))
 def test_classify_gap_shows_until_closed(name):
     """Each gap shows on today's lux, and no longer once lux matches
     podman (test_known_gap then XPASSes); a third value fails outright."""
-    assert gap_shows(name, _synthetic_probes(_LUX["workload"]))
-    closed = {ctx: (p, {**p, **{k: v for k, v in _LUX["workload"].items() if gap(ctx, k) != name}})
+    assert gap_shows(name, _synthetic_probes(_LUX))
+    closed = {ctx: (p, {**p, **{k: v for k, v in _LUX.items() if gap(ctx, k) != name}})
               for ctx, (p, _) in _synthetic_probes({}).items()}
     assert not gap_shows(name, closed)
     _ctxs, pins, _ = GAPS[name]
-    other = {**_LUX["workload"], **{k: "something-else" for k in pins}}
+    other = {**_LUX, **{k: "something-else" for k in pins}}
     with pytest.raises(pytest.fail.Exception):
         gap_shows(name, _synthetic_probes(other))
