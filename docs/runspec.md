@@ -237,6 +237,9 @@ covered.
   Code's `~/.claude`). A spec that leaves them off is rejected, because it
   would lose its conversation on the first resume.
 - `env` names must be valid variable names and must not start with `LUX_`.
+- **The Run's identity is in the workload's environment**: `LUX_RUN_ID` is
+  the Run's id and `LUX_EPOCH` its placement's number, for the workload,
+  init, `beforeStop`, servers and `lux exec`.
 - **The Run's size is in the workload's environment**, for tools that
   size their parallelism or heap: `LUX_CPUS` is `resources.cpus` as
   given (`0.5`, `2`), and `LUX_MEMORY_LIMIT` is the container's memory

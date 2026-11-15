@@ -32,6 +32,8 @@ Every Run's container gets (`hardening()` and `containment()`):
 - Private cgroup, IPC, UTS and PID namespaces, set explicitly
   (`--cgroupns=private --ipc=private --uts=private --pid=private`). A
   host's `containers.conf` may default any of them to the host's.
+- `--hostname=lux`: every Run's hostname is `lux`, the same on every
+  placement, where Podman would use the container's id.
 - `--init=false`: the shim is PID 1 and reaps.
 - `--log-driver=none`: the shim writes the output file itself; Podman's
   log would be a second, unredacted copy.
