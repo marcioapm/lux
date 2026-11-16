@@ -446,7 +446,8 @@ request is recorded as an event.
 
 ## Writing a workload for `generic`
 
-Anything that reads stdin and writes stdout works. To be steerable, read
+Anything that reads stdin and writes stdout works; stdin is a pipe from
+lux's shim, which writes the Run's input to it. To be steerable, read
 lines from stdin. To stop gracefully, handle SIGTERM within the grace
 period (`workload.grace`, default 30s). To resume, keep your state under a
 state volume and read it back on start, or set `workload.resume.command`.

@@ -34,10 +34,13 @@ e2e:
 infra:
 	cd tests && uv run python run_tests.py --infra-only
 
-# The e2e harness's own configuration (tests/test_harness_config.py) and
-# the fake EC2's answers (tests/test_fake_ec2.py); no Docker, no environment.
+# The e2e harness's own configuration (tests/test_harness_config.py), the
+# fake EC2's answers (tests/test_fake_ec2.py), and how the podman parity
+# suite classifies differences (its test_classify_* tests, on synthetic
+# probes); no Docker, no environment.
 harness-unit:
 	cd tests && uv run pytest -q -p no:cacheprovider test_harness_config.py test_fake_ec2.py
+	cd tests && uv run pytest -q -p no:cacheprovider suites/test_podman_parity.py -k test_classify_
 
 test: unit e2e
 
