@@ -183,7 +183,7 @@ func TestTransientInterruptedMoveResumes(t *testing.T) {
 // Every requested resume of a transient Run is refused 409 not_resumable,
 // and resumability lists never's blocker; nor is it listed resumable.
 func TestTransientRefusesResume(t *testing.T) {
-	for _, how := range []string{"succeeded", "stopped by request", "running"} {
+	for _, how := range []string{"succeeded", "stopped by request", "running", "stopped", "lost", "legacy succeeded", "failed"} {
 		t.Run(how, func(t *testing.T) {
 			s, ctx := policyFixture(t, "transient")
 			switch how {
@@ -196,6 +196,21 @@ func TestTransientRefusesResume(t *testing.T) {
 				exitR1(t, s)
 			}
 			execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+			if slices.Contains([]string{"stopped", "lost", "legacy succeeded", "failed"}, how) {
+				// Defensive policy filtering must not rely on the state filter.
+				state := how
+				if how == "legacy succeeded" {
+					state = "succeeded"
+				}
+				snapshotR1(t, s)
+				execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+				execSQL(t, s, ctx, `UPDATE runs SET state = $1 WHERE id = 'r1'`, state)
+			}
+			var resumable bool
+			systemScan(t, s, `SELECT `+resumableSQL+` FROM runs r WHERE id = 'r1'`, nil, &resumable)
+			if resumable {
+				t.Error("SQL classified transient Run as resumable")
+			}
 			for _, pctx := range []context.Context{tenantCtx("t1"), operatorCtx()} {
 				_, err := s.resumeRun(pctx, &resumeRunInput{RunPath: RunPath{ID: "r1"}})
 				var he *HTTPError
@@ -274,6 +289,49 @@ func transientMovedThenEnded(t *testing.T, policy string) (*Server, context.Cont
 // blobs deleted (S3 too), those snapshots unavailable. Its output and
 // artifacts stay, and its 0-volume exit snapshot stays available. A volume
 // still on its host is not deleted until it has arrived.
+func TestReapTransientMixedUpload(t *testing.T) {
+	s, ctx, f := transientMovedThenEnded(t, "transient")
+	// A fully uploaded snapshot makes this Run enter the UPDATE, while a
+	// second snapshot of the SAME Run still has one volume on its host.
+	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "mixed", RunID: "r1", Epoch: 2,
+		Volumes: []proto.VolumeSnapshot{
+			{Name: "one", Path: "/one", BlobID: "mixed-s3", Size: 1, SHA256: "one"},
+			{Name: "two", Path: "/two", BlobID: "mixed-host", Size: 2, SHA256: "two"},
+		}}}
+	var host string
+	systemScan(t, s, `SELECT host_id FROM placements WHERE run_id = 'r1' AND epoch = 2`, nil, &host)
+	if got := reportSnapshot(t, s, host, "r1", 2, sd); got.Type != proto.MsgAck || ackRefused(t, got) {
+		t.Fatalf("mixed snapshot: %s %s", got.Type, got.Data)
+	}
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 's3', s3_key = run_id || '/' || id WHERE id = 'mixed-s3'`)
+	if err := s.reapTransient(ctx); err != nil {
+		t.Fatal(err)
+	}
+	locs := blobLocations(t, s, "r1")
+	if snapshotAvailable(t, s, "snapR1") || locs["b-r1-vol"] != "deleted" {
+		t.Error("fully uploaded snapshot not reaped")
+	}
+	if !snapshotAvailable(t, s, "mixed") || locs["mixed-s3"] != "s3" || locs["mixed-host"] != "host" {
+		t.Errorf("mixed snapshot claimed mid-upload: available %v locations %v", snapshotAvailable(t, s, "mixed"), locs)
+	}
+	if !slices.Equal(f.Deleted(), []string{"r1/b-r1-vol"}) {
+		t.Errorf("unexpected deletes %v", f.Deleted())
+	}
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 's3', s3_key = run_id || '/' || id WHERE id = 'mixed-host'`)
+	if err := s.reapTransient(ctx); err != nil {
+		t.Fatal(err)
+	}
+	locs = blobLocations(t, s, "r1")
+	if snapshotAvailable(t, s, "mixed") || locs["mixed-s3"] != "deleted" || locs["mixed-host"] != "deleted" {
+		t.Errorf("completed mixed upload not reaped: %v", locs)
+	}
+	for _, id := range []string{"b-out-snapE", "b-art-snapE"} {
+		if locs[id] != "s3" {
+			t.Errorf("non-volume %s touched: %s", id, locs[id])
+		}
+	}
+}
+
 func TestReapTransientVolumes(t *testing.T) {
 	s, ctx, f := transientMovedThenEnded(t, "transient")
 	var state string
