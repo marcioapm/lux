@@ -262,14 +262,14 @@ func TestSpotResumePolicy(t *testing.T) {
 }
 
 func TestResumePolicy(t *testing.T) {
-	for policy, ok := range map[string]bool{"": true, "auto": true, "restart": true, "manual": true, "never": true, "Never": false, "always": false} {
+	for policy, ok := range map[string]bool{"": true, "auto": true, "restart": true, "manual": true, "never": true, "transient": true, "Never": false, "always": false} {
 		s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}}, ResumePolicy: policy}
 		err := s.Normalize(BuiltinDefaults)
 		if (err == nil) != ok {
 			t.Errorf("%q: %v", policy, err)
 		}
 		if !ok {
-			want := fmt.Sprintf("resumePolicy: must be auto, restart, manual or never, got %q", policy)
+			want := fmt.Sprintf("resumePolicy: must be auto, restart, manual, never or transient, got %q", policy)
 			var ve *ValidationError
 			if !errors.As(err, &ve) || !slices.Equal(ve.Problems, []string{want}) {
 				t.Errorf("%q: error %v, want only %q", policy, err, want)
@@ -300,6 +300,7 @@ func TestResumePolicySets(t *testing.T) {
 		{ResumeRestart, false, false},
 		{ResumeManual, true, false},
 		{ResumeNever, true, true},
+		{ResumeTransient, false, true},
 	} {
 		if got := FailsOnMove(c.policy); got != c.failsOnMove {
 			t.Errorf("FailsOnMove(%q) = %v", c.policy, got)
@@ -307,6 +308,35 @@ func TestResumePolicySets(t *testing.T) {
 		if got := RefusesResume(c.policy); got != c.refusesResume {
 			t.Errorf("RefusesResume(%q) = %v", c.policy, got)
 		}
+	}
+}
+
+// ExportsOnStop: never exports on no stop, transient only on a move, every
+// other policy on every stop.
+func TestExportsOnStop(t *testing.T) {
+	if !slices.Equal(MoveStops, []string{"drain", "preempt", "migrate"}) {
+		t.Fatalf("MoveStops = %v", MoveStops)
+	}
+	for _, policy := range []string{"", ResumeAuto, ResumeRestart, ResumeManual, ResumeNever, ResumeTransient} {
+		for _, stop := range []string{"", "stop", "idle", "timeout", "disk", "drain", "preempt", "migrate"} {
+			want := policy != ResumeNever && (policy != ResumeTransient || IsMoveStop(stop))
+			if got := ExportsOnStop(policy, stop); got != want {
+				t.Errorf("ExportsOnStop(%q, %q) = %v, want %v", policy, stop, got, want)
+			}
+		}
+	}
+	if !ExportsOnStop(ResumeTransient, "preempt") || ExportsOnStop(ResumeTransient, "stop") {
+		t.Fatal("transient: exports on a move only")
+	}
+}
+
+// transient is for normal Runs: spot refuses it with the never message.
+func TestSpotRefusesTransient(t *testing.T) {
+	s := RunSpec{Spot: true, Image: Image{Ref: "alpine"}, Workload: Workload{Command: []string{"true"}}, ResumePolicy: ResumeTransient}
+	want := `resumePolicy: spot Runs require never (or omit resumePolicy), got "transient"`
+	var ve *ValidationError
+	if err := s.Normalize(BuiltinDefaults); !errors.As(err, &ve) || !slices.Equal(ve.Problems, []string{want}) {
+		t.Fatalf("error = %v, want %q", err, want)
 	}
 }
 
