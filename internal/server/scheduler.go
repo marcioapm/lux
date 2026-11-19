@@ -223,7 +223,8 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			// them past the grace period (it restarted, or they went to an
 			// instance that is gone), the Run cannot start until someone
 			// supplies them again: it stops, resumable with its secrets. A
-			// never Run cannot be resumed, so it ends terminated.
+			// never or transient Run cannot be resumed by request (even one
+			// queued after a move), so it ends terminated.
 			if _, ok := s.secrets.get(r.ID); r.HasSecrets && !ok {
 				if it.graceful {
 					why := secretsLostReason
@@ -717,8 +718,8 @@ const foreignSnapshotReason = "its snapshot does not match this Run's blob recor
 // holds any more is lost.
 const snapshotUnavailableReason = "its snapshot is no longer available"
 
-// secretsLostReason (secretsLostNeverReason for a never Run, which cannot
-// be resumed) is the state_reason of a queued Run whose secret values no
+// secretsLostReason (secretsLostNeverReason for a never or transient Run,
+// which cannot be resumed by request) is the state_reason of a queued Run whose secret values no
 // luxd holds any more.
 const (
 	secretsLostReason      = "secrets must be supplied again: resume with them"

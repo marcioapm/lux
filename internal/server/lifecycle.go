@@ -72,7 +72,9 @@ const resumableSQL = `(r.state IN ` + resumableRunStates + ` AND NOT ` + refuses
 // placed again as soon as it has stopped (resumed, or restarted from
 // scratch), unless its spec's resumePolicy is manual or never
 // (spec.FailsOnMove), when it ends instead: failed, or terminated (never).
-var movedStops = []string{"drain", "preempt", "migrate"}
+// The list is spec.MoveStops, which the runner's export decision
+// (spec.ExportsOnStop) shares.
+var movedStops = spec.MoveStops
 
 // stopTerminate is the stop reason of a terminate request.
 const stopTerminate = "terminate"
@@ -120,18 +122,21 @@ func notResumedReason(stop, policy string) string {
 	return stop + ": not resumed (resumePolicy " + policy + ")"
 }
 
-// neverResumedEnd is how a Run whose resumePolicy is never ends: an end
-// that would leave it resumable (stopped, lost, succeeded, failed)
-// terminates it instead, as nothing can resume it, its outcome kept in the
-// reason ("succeeded; resumePolicy never", "host lost: missed heartbeats;
-// resumePolicy never"). Any other state, or any other policy, is returned
-// unchanged. endRun applies it before setRunState, so that a Run's side
-// effects (secrets, servers, events) follow the state written.
+// neverResumedEnd is how a Run whose resumePolicy refuses every requested
+// resume (spec.RefusesResume: never, transient) ends: an end that would
+// leave it resumable (stopped, lost, succeeded, failed) terminates it
+// instead, as nothing can resume it, its outcome kept in the reason
+// ("succeeded; resumePolicy never", "host lost: missed heartbeats;
+// resumePolicy transient"). Any other state, or any other policy, is
+// returned unchanged. A transient Run's move is not an end: its caller
+// places it again and does not map it (runEnd.requeued). endRun applies it
+// before setRunState, so that a Run's side effects (secrets, servers,
+// events) follow the state written.
 func neverResumedEnd(policy, state, reason string) (string, string) {
 	if !spec.RefusesResume(policy) || !resumable(state) {
 		return state, reason
 	}
-	return StateTerminated, cmp.Or(reason, state) + "; resumePolicy " + spec.ResumeNever
+	return StateTerminated, cmp.Or(reason, state) + "; resumePolicy " + policy
 }
 
 // runResumePolicy is a Run's spec's resumePolicy, "" when unset.
@@ -149,18 +154,19 @@ const runResumePolicySQL = `coalesce(r.spec->>'resumePolicy', '')`
 const failsOnMoveSQL = runResumePolicySQL + ` IN ('` + spec.ResumeManual + `', '` + spec.ResumeNever + `')`
 
 // refusesResumeSQL, for SQL over runs (as r): spec.RefusesResume of its policy.
-const refusesResumeSQL = runResumePolicySQL + ` = '` + spec.ResumeNever + `'`
+const refusesResumeSQL = runResumePolicySQL + ` IN ('` + spec.ResumeNever + `', '` + spec.ResumeTransient + `')`
 
 // restartsFromScratchSQL, for SQL over runs (as r): resumePolicy restart and
 // no session, so a resume restores nothing (assign sends no ResumeInfo).
 const restartsFromScratchSQL = `(` + runResumePolicySQL + ` = '` + spec.ResumeRestart + `' AND r.session_id = '')`
 
-// neverResumableReason is why a Run whose resumePolicy is never is not
-// resumed: the 409's message and its resumability blocker.
+// neverResumableReason is why a Run whose resumePolicy is never (or
+// transient: the same refusal) is not resumed: the 409's message and its
+// resumability blocker.
 const neverResumableReason = "resumePolicy never: this Run cannot be resumed"
 
 // errNeverResumable refuses any requested resume of a Run whose
-// resumePolicy is never.
+// resumePolicy is never or transient (spec.RefusesResume).
 func errNeverResumable() error {
 	return errf(http.StatusConflict, "not_resumable", "%s", neverResumableReason)
 }
@@ -533,16 +539,18 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 			note = refusedNoSnapshotReason
 		}
 	}
-	next, err = s.endRun(ctx, tx, runEnd{tenantID: tenantID, runID: runID, epoch: epoch, policy: policy, state: next, reason: reason, note: note})
+	// A refused move cannot resume from its rejected snapshot; leave the
+	// Run stopped for a person to decide what to restore (a transient one,
+	// which no person can resume, ends terminated). restart is exempt: it
+	// restores nothing, and forgetRestoredState clears the snapshot_id the
+	// refusal left. A terminate that raced the move wins: a terminated Run
+	// is never placed again. A Run placed again has not ended, so its
+	// stopped is written unmapped (a transient Run's would terminate it).
+	moved := moveStop && !failsOnMove && next == StateStopped && (!snapshotRefused || restarts)
+	next, err = s.endRun(ctx, tx, runEnd{tenantID: tenantID, runID: runID, epoch: epoch, policy: policy, state: next, reason: reason, note: note, requeued: moved})
 	if err != nil {
 		return err
 	}
-	// A refused move cannot resume from its rejected snapshot; leave the
-	// Run stopped for a person to decide what to restore. restart is
-	// exempt: it restores nothing, and forgetRestoredState clears the
-	// snapshot_id the refusal left. A terminate that raced the move wins:
-	// a terminated Run is never placed again.
-	moved := moveStop && !failsOnMove && next != StateTerminated && (!snapshotRefused || restarts)
 	// Servers count as migrated only when the Run is resumed elsewhere.
 	serverStop := endReason("stop")
 	if moved {
@@ -582,7 +590,8 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 // snapshot taken before it. Its host.placement_ended goes to later, for
 // the caller to write once it has locked every row it will (callers lose
 // several placements in one transaction; event streams come last). A Run
-// whose resumePolicy is never ends terminated instead (neverResumedEnd).
+// whose resumePolicy is never or transient ends terminated instead
+// (neverResumedEnd); a transient one lost mid-move is placed again, as auto.
 func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epoch int, why string, later *laterEvents) error {
 	_, err := s.losePlacement(ctx, tx, runID, epoch, why, later, false)
 	return err
