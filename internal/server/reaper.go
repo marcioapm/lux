@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -27,7 +28,8 @@ func (s *Server) reaperLoop(ctx context.Context) {
 	}
 }
 
-// storageReapEvery is how often reapSuperseded and reapRetention run:
+// storageReapEvery is how often reapSuperseded, reapRetention and
+// reapTransient run:
 // their deadlines are uploads and days, and each scans every Run with
 // retainable blobs, so they need not run every tick as leases and hosts do.
 const storageReapEvery = time.Minute
@@ -38,7 +40,7 @@ func (s *Server) reapOnce(ctx context.Context, lastStorage *time.Time) {
 	reapers := []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapIdle, s.reapExpiry}
 	if time.Since(*lastStorage) >= storageReapEvery {
 		*lastStorage = time.Now()
-		reapers = append(reapers, s.reapSuperseded, s.reapRetention)
+		reapers = append(reapers, s.reapSuperseded, s.reapRetention, s.reapTransient)
 	}
 	reapers = append(reapers, s.reapOutdatedStaticHosts)
 	for _, f := range reapers {
@@ -802,5 +804,75 @@ func (s *Server) reapRetention(ctx context.Context) error {
 		return err
 	}
 	s.deleteObjects(ctx, "retention", keys)
+	return nil
+}
+
+// transientHostVolume, for SQL over snapshots (as o): one of the snapshot's
+// volumes is still on its host, mid-upload.
+const transientHostVolume = `EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(nullif(o.manifest->'volumes', 'null'), '[]')) v
+	JOIN blobs h ON h.id = v->>'blobId' AND h.run_id = o.run_id WHERE h.location = 'host')`
+
+// transientDeletable, for SQL over blobs (as b): a volume blob in S3 that
+// no snapshot with a volume still on its host names, so deleting it never
+// races that snapshot's upload.
+const transientDeletable = `b.kind = 'volume' AND b.location = 's3' AND NOT EXISTS (SELECT 1 FROM snapshots o
+	WHERE o.run_id = b.run_id AND o.manifest->'volumes' @> jsonb_build_array(jsonb_build_object('blobId', b.id)) AND ` + transientHostVolume + `)`
+
+// reapTransient deletes, at once, the snapshot volumes of Runs whose
+// resumePolicy is transient once they are terminated: such a Run is never
+// resumed, so the snapshots its moves took have no use left, and retention
+// (reapRetention) is not waited for. Its output and artifacts keep normal
+// retention; a snapshot with no volume (its exit's) stays available.
+//
+// The claim is reapRetention's: the Run is locked first (FOR UPDATE SKIP
+// LOCKED), in a statement of its own that rechecks it is terminated, and a
+// second statement marks its volume-bearing snapshots unavailable and their
+// volume blobs deleted. A snapshot with a volume still on its host waits,
+// available, for a later pass: never deleted from under an upload. kind =
+// 'volume' leaves out git checkpoints, outputs and artifacts. S3 objects
+// are deleted after the claim commits.
+//
+// Candidates come from blobs_retainable (location = 's3' AND kind <>
+// 'artifact'), as reapRetention's do: a reaped Run has no volume blob left
+// in S3, so a pass never walks reaped history, and no runs index is needed.
+func (s *Server) reapTransient(ctx context.Context) error {
+	var keys []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT r.id FROM runs r
+			WHERE r.id = ANY (ARRAY(SELECT DISTINCT b.run_id FROM blobs b WHERE b.location = 's3' AND b.kind = 'volume'))
+			  AND r.state = 'terminated' AND `+runResumePolicySQL+` = '`+spec.ResumeTransient+`'
+			  AND EXISTS (SELECT 1 FROM blobs b WHERE b.run_id = r.id AND `+transientDeletable+`)
+			ORDER BY r.terminated_at, r.id LIMIT 20
+			FOR UPDATE OF r SKIP LOCKED`)
+		if err != nil {
+			return err
+		}
+		runs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil || len(runs) == 0 {
+			return err
+		}
+		// A new statement: it sees whatever committed before the locks.
+		rows, err = tx.Query(ctx, `
+			WITH due AS (
+				SELECT r.id FROM runs r WHERE r.id = ANY($1) AND r.state = 'terminated'
+			), gone AS (
+				UPDATE snapshots o SET available = false
+				WHERE o.run_id IN (SELECT id FROM due) AND o.available
+				  AND jsonb_array_length(coalesce(nullif(o.manifest->'volumes', 'null'), '[]')) > 0
+				  AND NOT `+transientHostVolume+`
+			)
+			UPDATE blobs b SET location = 'deleted', deleted_at = now()
+			WHERE b.run_id IN (SELECT id FROM due) AND `+transientDeletable+`
+			RETURNING b.s3_key`, runs)
+		if err != nil {
+			return err
+		}
+		keys, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	s.deleteObjects(ctx, "transient snapshot", keys)
 	return nil
 }

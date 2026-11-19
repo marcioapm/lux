@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -235,5 +236,151 @@ func TestSchedulerEndsTransientRunTerminated(t *testing.T) {
 	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
 	if state != StateTerminated || reason != "its secrets are no longer held; resumePolicy transient" {
 		t.Fatalf("state %q reason %q", state, reason)
+	}
+}
+
+// transientMovedThenEnded: r1 (resumePolicy policy) preempted on h1 with
+// snapshot snapR1 (volume b-r1-vol), placed again, then exited 0 on its
+// second host with a 0-volume snapshot snapE (output, an artifact). Every
+// blob is in fake S3 under <run>/<blob id>.
+func transientMovedThenEnded(t *testing.T, policy string) (*Server, context.Context, *fakeS3) {
+	t.Helper()
+	s, ctx := policyFixture(t, policy)
+	f := useFakeS3(t, s)
+	if err := moveStops["preempt"](t, s); err != nil {
+		t.Fatal(err)
+	}
+	exitR1(t, s)
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 's3', s3_key = run_id || '/' || id`)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
+	if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+		t.Fatal(err)
+	}
+	var host string
+	systemScan(t, s, `SELECT host_id FROM placements WHERE run_id = 'r1' AND epoch = 2`, nil, &host)
+	snapshotR1Empty(t, s, host, 2, "snapE")
+	code := 0
+	if got := s.handleReport(ctx, host, proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: "r1", Epoch: 2,
+		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "exited"})}); got.Type != proto.MsgAck {
+		t.Fatalf("exit report: %s %s", got.Type, got.Data)
+	}
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 's3', s3_key = run_id || '/' || id WHERE location = 'host'`)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+	return s, ctx, f
+}
+
+// Once a transient Run that moved is terminated, the next pass deletes the
+// volumes of every snapshot it holds, without waiting for retention: the
+// blobs deleted (S3 too), those snapshots unavailable. Its output and
+// artifacts stay, and its 0-volume exit snapshot stays available. A volume
+// still on its host is not deleted until it has arrived.
+func TestReapTransientVolumes(t *testing.T) {
+	s, ctx, f := transientMovedThenEnded(t, "transient")
+	var state string
+	systemScan(t, s, `SELECT state FROM runs WHERE id = 'r1'`, nil, &state)
+	if state != StateTerminated {
+		t.Fatalf("r1 %s, want terminated", state)
+	}
+	// Mid-upload: nothing goes.
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host' WHERE id = 'b-r1-vol'`)
+	if err := s.reapTransient(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Deleted(); len(got) != 0 {
+		t.Fatalf("deleted mid-upload: %v", got)
+	}
+	if !snapshotAvailable(t, s, "snapR1") || blobLocations(t, s, "r1")["b-r1-vol"] != "host" {
+		t.Fatal("a snapshot whose volume is still on its host was claimed")
+	}
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 's3' WHERE id = 'b-r1-vol'`)
+	if err := s.reapTransient(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := f.Deleted(), []string{"r1/b-r1-vol"}; !slices.Equal(got, want) {
+		t.Fatalf("S3 deletes %v, want %v", got, want)
+	}
+	if snapshotAvailable(t, s, "snapR1") {
+		t.Error("snapR1 still available")
+	}
+	if !snapshotAvailable(t, s, "snapE") {
+		t.Error("the 0-volume exit snapshot made unavailable")
+	}
+	locs := blobLocations(t, s, "r1")
+	if locs["b-r1-vol"] != "deleted" {
+		t.Errorf("b-r1-vol %s, want deleted", locs["b-r1-vol"])
+	}
+	for _, id := range []string{"b-out-snapE", "b-art-snapE"} {
+		if locs[id] != "s3" {
+			t.Errorf("%s %s, want s3", id, locs[id])
+		}
+	}
+	var deletedAt bool
+	systemScan(t, s, `SELECT deleted_at IS NOT NULL FROM blobs WHERE id = 'b-r1-vol'`, nil, &deletedAt)
+	if !deletedAt {
+		t.Error("deleted_at not set")
+	}
+	// Nothing left: a further pass deletes nothing.
+	if err := s.reapTransient(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Deleted(); len(got) != 1 {
+		t.Fatalf("a second pass deleted %v", got)
+	}
+}
+
+// The pass touches no other Run: an auto Run terminated after a move keeps
+// its snapshot for retention, a transient Run not terminated (resumed after
+// its move) keeps it to resume from, and a transient Run whose only
+// snapshot has no volume has nothing to delete.
+func TestReapTransientSparesOthers(t *testing.T) {
+	t.Run("auto terminated", func(t *testing.T) {
+		s, ctx, f := transientMovedThenEnded(t, "auto")
+		if _, err := s.terminateRun(tenantCtx("t1"), &RunPath{ID: "r1"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.reapTransient(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.Deleted(); len(got) != 0 || !snapshotAvailable(t, s, "snapR1") {
+			t.Fatalf("deleted %v, snapR1 available %v", got, snapshotAvailable(t, s, "snapR1"))
+		}
+	})
+	t.Run("transient resuming", func(t *testing.T) {
+		s, ctx := policyFixture(t, "transient")
+		f := useFakeS3(t, s)
+		if err := moveStops["preempt"](t, s); err != nil {
+			t.Fatal(err)
+		}
+		exitR1(t, s)
+		execSQL(t, s, ctx, `UPDATE blobs SET location = 's3', s3_key = run_id || '/' || id`)
+		if err := s.reapTransient(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.Deleted(); len(got) != 0 || !snapshotAvailable(t, s, "snapR1") {
+			t.Fatalf("deleted %v, snapR1 available %v", got, snapshotAvailable(t, s, "snapR1"))
+		}
+	})
+	t.Run("transient, 0-volume snapshot only", func(t *testing.T) {
+		s, ctx := policyFixture(t, "transient")
+		f := useFakeS3(t, s)
+		snapshotR1Empty(t, s, "h1", 1, "snapE")
+		reportR1Exit(t, s, 0, "exited")
+		execSQL(t, s, ctx, `UPDATE blobs SET location = 's3', s3_key = run_id || '/' || id`)
+		if err := s.reapTransient(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.Deleted(); len(got) != 0 || !snapshotAvailable(t, s, "snapE") {
+			t.Fatalf("deleted %v, snapE available %v", got, snapshotAvailable(t, s, "snapE"))
+		}
+	})
+}
+
+// The reaper's storage tick runs the transient pass.
+func TestReapOnceReapsTransient(t *testing.T) {
+	s, ctx, f := transientMovedThenEnded(t, "transient")
+	var last time.Time
+	s.reapOnce(ctx, &last)
+	if got := f.Deleted(); !slices.Equal(got, []string{"r1/b-r1-vol"}) {
+		t.Fatalf("S3 deletes %v", got)
 	}
 }
