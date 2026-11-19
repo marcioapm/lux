@@ -36,7 +36,7 @@ export interface RunSpec {
   resources: SpecResources;
   /** preemptible false: lux never takes the Run away on its own initiative; absent is true. */
   placement: { pool?: string; requires?: Record<string, string>; prefers?: Record<string, string>; preemptible?: boolean };
-  resumePolicy?: "auto" | "restart" | "manual" | "never";
+  resumePolicy?: "auto" | "restart" | "manual" | "never" | "transient";
   [key: string]: unknown;
 }
 

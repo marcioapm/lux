@@ -77,7 +77,7 @@ volumes:
 resources: { cpus: 4, memory: 8Gi, disk: 50Gi, pids: 2048, diskGrace: 5m }   # diskGrace: time allowed over disk
 # resources: { size: m-2-arm64 }  # on a shaped pool: one of its sizes instead (lux pools sizes <pool>)
 timeout: 4h                     # running time, over all placements; unset: no limit; `lux extend` changes it
-resumePolicy: auto              # auto | restart | manual | never: after a drain, preemption or migration (see below)
+resumePolicy: auto              # auto | restart | manual | never | transient: after a drain, preemption or migration (see below)
 
 placement:
   pool: default                 # omitted: the tenant's default pool (see Rules)
@@ -520,19 +520,31 @@ lux moves a Run when a force-evicting drain (`lux hosts drain --force-evict`,
   resumed". `lux ls --resumable` leaves it out. An assignment no runner
   started (refused by an outdated runner) may still be placed again: none
   of the work ran.
+- `transient`: for read-only one-shot work such as a code review or an
+  audit. A move resumes it elsewhere from its snapshot with its session, as
+  `auto` (and `lux migrate` moves it). Every other end ends it `terminated`,
+  as `never`: `succeeded; resumePolicy transient`, `stop; resumePolicy
+  transient`, `idle; resumePolicy transient`, and so on; its state volumes
+  are not snapshotted on that exit. Once it is terminated, the next reaper
+  pass deletes the volumes of every snapshot it took for a move, without
+  waiting for the tenant's retention, and marks those snapshots
+  unavailable; its output and artifacts keep normal retention, so `lux
+  collect` and `lux logs` still work. A requested resume is refused, 409
+  `not_resumable`, and `lux ls --resumable` leaves it out. Spot Runs still
+  require `never`.
 
-Except for `never`, the policy covers only what lux does by itself: a resume
+Except for `never` and `transient`, the policy covers only what lux does by itself: a resume
 you ask for restores the snapshot as usual. A cordon-only drain does not stop
 the Run. If a host disappears during an already requested drain, preemption or
 migration, `auto` continues the move using the persisted recovery state supported
 by ordinary resume; `restart` starts from scratch. Work not saved may be lost.
 A refused snapshot still blocks automatic restoration, even with an older snapshot.
 An unannounced host loss ends `lost` and is never resumed automatically (a `never`
-Run ends `terminated` instead, as above). Any other value is refused with
+or `transient` Run ends `terminated` instead, as above). Any other value is refused with
 422 `invalid_spec`.
 
 An older luxd ignores `resumePolicy` and treats the Run as `auto`. A client
-that relies on `restart`, `manual` or `never` should check that the release
+that relies on `restart`, `manual`, `never` or `transient` should check that the release
 lists `resume-policy` in `FEATURES`, or that `GET /v1/runs/{id}` echoes
 `spec.resumePolicy`. Where several luxd share a database, an older one that
 rewrites the Run's spec (a resume adding secrets or repositories, a failed
