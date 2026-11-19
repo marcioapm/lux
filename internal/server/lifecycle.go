@@ -461,14 +461,14 @@ func lockReportedHost(ctx context.Context, tx pgx.Tx, runID string, epoch int, s
 // lock and the host's row (lockReportedHost).
 func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch int, st proto.Status, runState string, terminate bool) error {
 	var stopReason string
-	var snapshotRefused, hasSnapshot, claimed bool
+	var snapshotRefused, hasSnapshot, claimed, started bool
 	err := tx.QueryRow(ctx, `UPDATE placements p SET state = 'exited', ended_at = now(),
 			exited_at = coalesce(exited_at, now()), exit_code = $3, exit_reason = $4, output_seq = nullif($5::bigint, 0),
 			lease_expires_at = NULL
 		WHERE run_id = $1 AND epoch = $2 AND state <> 'exited'
 		RETURNING stop_reason, host_id, snapshot_refused,
-			(SELECT snapshot_id IS NOT NULL FROM runs WHERE id = p.run_id), reclaim_for IS NOT NULL`,
-		runID, epoch, st.ExitCode, st.Reason, st.OutputSeq).Scan(&stopReason, &hostID, &snapshotRefused, &hasSnapshot, &claimed)
+			(SELECT snapshot_id IS NOT NULL FROM runs WHERE id = p.run_id), reclaim_for IS NOT NULL, `+containerStartedSQL,
+		runID, epoch, st.ExitCode, st.Reason, st.OutputSeq).Scan(&stopReason, &hostID, &snapshotRefused, &hasSnapshot, &claimed, &started)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // already recorded: a redelivered report
 	}
@@ -491,9 +491,11 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 		return err
 	}
 	recordedStop := stopReason
-	if policy == spec.ResumeTransient && slices.Contains(movedStops, stopReason) {
+	if policy == spec.ResumeTransient && started && slices.Contains(movedStops, stopReason) {
 		// A move recorded after the runner's export decision is not a move
 		// of this exit: decide from the actual exit, never an empty restore.
+		// A placement whose container never started ran nothing and left
+		// no new state: its move stands, resumed from the Run's snapshot.
 		if stopReason, err = transientMoveStop(ctx, tx, runID, epoch); err != nil {
 			return err
 		}
@@ -593,9 +595,16 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 	return hostEvent(ctx, tx, hostID, evPlacementEnded, placementEnded)
 }
 
+// containerStartedSQL is whether a placement's container started, as far as
+// luxd has heard: the runner's containerStarted mark (on every report after
+// it, the end report too), or luxd saw it running (a runner without the
+// mark). A start a move cancels (finishWithoutContainer) has neither.
+const containerStartedSQL = `(container_started_at IS NOT NULL OR started_at IS NOT NULL)`
+
 // transientMoveStop is the move reason the runner captured in the Run's
 // current snapshot when it decided to export it, for this same placement
 // epoch. A missing snapshot or marker is "": a transient Run is not moved.
+// Asked only of a placement whose container started.
 func transientMoveStop(ctx context.Context, tx pgx.Tx, runID string, epoch int) (string, error) {
 	var stop string
 	err := tx.QueryRow(ctx, `SELECT coalesce(s.manifest->>'moveStop', '') FROM runs r
@@ -656,9 +665,9 @@ func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epo
 		return "", err
 	}
 	var hostID, stopReason string
-	var stopRequested, snapshotRefused bool
-	if err := tx.QueryRow(ctx, `SELECT host_id, stop_reason, stop_requested_at IS NOT NULL, snapshot_refused
-		FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID, &stopReason, &stopRequested, &snapshotRefused); err != nil {
+	var stopRequested, snapshotRefused, started bool
+	if err := tx.QueryRow(ctx, `SELECT host_id, stop_reason, stop_requested_at IS NOT NULL, snapshot_refused, `+containerStartedSQL+`
+		FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID, &stopReason, &stopRequested, &snapshotRefused, &started); err != nil {
 		return "", err
 	}
 	if err := lockCostHost(ctx, tx, hostID); err != nil {
@@ -681,7 +690,7 @@ func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epo
 	if err != nil {
 		return "", err
 	}
-	if policy == spec.ResumeTransient && slices.Contains(movedStops, stopReason) {
+	if policy == spec.ResumeTransient && started && slices.Contains(movedStops, stopReason) {
 		if stopReason, err = transientMoveStop(ctx, tx, runID, epoch); err != nil {
 			return "", err
 		}

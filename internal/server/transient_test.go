@@ -132,7 +132,7 @@ func TestTransientOlderMoveSnapshotIsNotProof(t *testing.T) {
 	}
 	var host string
 	systemScan(t, s, `SELECT host_id FROM placements WHERE run_id = 'r1' AND epoch = 2`, nil, &host)
-	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE run_id = 'r1' AND epoch = 2`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'running', started_at = now() WHERE run_id = 'r1' AND epoch = 2`)
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'r1'`)
 	execSQL(t, s, ctx, `UPDATE placements SET stop_reason = 'drain', stop_requested_at = now() WHERE run_id = 'r1' AND epoch = 2`)
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopping' WHERE id = 'r1'`)
@@ -145,6 +145,150 @@ func TestTransientOlderMoveSnapshotIsNotProof(t *testing.T) {
 	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
 	if state != StateTerminated || reason != "succeeded; resumePolicy transient" {
 		t.Fatalf("older move snapshot reused: %s (%s)", state, reason)
+	}
+}
+
+// moveHost stops r1's placement on host the way each move does. A migrate
+// is refused by the API until the Run runs, so it is recorded as
+// migrateRun records it.
+func moveHost(t *testing.T, s *Server, stop, host string) {
+	t.Helper()
+	ctx := context.Background()
+	var err error
+	switch stop {
+	case "preempt":
+		err = s.hostEvicting(ctx, host, proto.Evicting{Reason: "spot"})
+	case "drain":
+		_, err = s.drainHost(operatorCtx(), &drainHostInput{HostPath: HostPath{ID: host}, Body: &drainHostRequest{ForceEvict: true}})
+	case "migrate":
+		err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			_, err := s.requestStop(ctx, tx, "t1", "r1", "migrate")
+			return err
+		})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reason string
+	systemScan(t, s, `SELECT coalesce(p.stop_reason, '') FROM placements p JOIN runs r ON r.id = p.run_id AND p.epoch = r.current_epoch
+		WHERE r.id = 'r1'`, nil, &reason)
+	if reason != stop {
+		t.Fatalf("placement stop reason %q, want %q", reason, stop)
+	}
+}
+
+// startingR1 reports r1's placement epoch on host as starting, its image
+// pulled: not yet its volumes or its container.
+func startingR1(t *testing.T, s *Server, host string, epoch int) {
+	t.Helper()
+	ms := time.Now().UnixMilli()
+	if got := s.handleReport(context.Background(), host, proto.Frame{Type: proto.MsgStatus, ID: 3, RunID: "r1", Epoch: epoch,
+		Data: proto.Marshal(proto.Status{State: "starting", Times: map[string]int64{"imageReady": ms}})}); got.Type != proto.MsgAck {
+		t.Fatalf("starting report: %s %s", got.Type, got.Data)
+	}
+}
+
+// endBeforeStart ends r1's starting placement epoch on host: its runner's
+// "stopped before start" report (finishWithoutContainer: no snapshot), its
+// lease lost, or its host lost (other, a host that keeps heartbeating).
+func endBeforeStart(t *testing.T, s *Server, ctx context.Context, how, host, other string, epoch int) {
+	t.Helper()
+	var err error
+	switch how {
+	case "exit":
+		code, ms := 0, time.Now().UnixMilli()
+		if got := s.handleReport(ctx, host, proto.Frame{Type: proto.MsgStatus, ID: 4, RunID: "r1", Epoch: epoch,
+			Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "stopped", Message: "stopped before start",
+				Times: map[string]int64{"imageReady": ms}})}); got.Type != proto.MsgAck {
+			t.Fatalf("exit report: %s %s", got.Type, got.Data)
+		}
+	case "lease":
+		execSQL(t, s, ctx, `UPDATE placements SET lease_expires_at = now() - interval '1 minute' WHERE run_id = 'r1' AND epoch = $1`, epoch)
+		err = s.reapLeases(ctx)
+	case "host":
+		execSQL(t, s, ctx, `UPDATE hosts SET last_heartbeat = now() - interval '1 hour' WHERE id = $1`, host)
+		execSQL(t, s, ctx, `UPDATE hosts SET last_heartbeat = now() WHERE id = $1`, other)
+		err = s.reapHosts(ctx)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	systemScan(t, s, `SELECT state FROM placements WHERE run_id = 'r1' AND epoch = $1`, []any{epoch}, &state)
+	if want := map[string]string{"exit": "exited", "lease": "lost", "host": "lost"}[how]; state != want {
+		t.Fatalf("placement %s, want %s", state, want)
+	}
+}
+
+// A move that cancels a transient placement's start (image pull, volume
+// restore, clone) leaves no snapshot of that epoch: nothing ran in it, so
+// it is not a natural end. The Run is placed again from the snapshot it
+// already had (none on its first placement), as auto, and that snapshot is
+// kept, never reaped as a terminated Run's.
+func TestTransientMoveBeforeStartResumes(t *testing.T) {
+	for _, stop := range []string{"drain", "preempt", "migrate"} {
+		for _, how := range []string{"exit", "lease", "host"} {
+			t.Run(stop+"/"+how+"/first placement", func(t *testing.T) {
+				s, ctx := policyFixture(t, "transient")
+				execSQL(t, s, ctx, `UPDATE placements SET state = 'assigned', container_started_at = NULL, started_at = NULL WHERE id = 'p1'`)
+				execSQL(t, s, ctx, `UPDATE runs SET state = 'scheduled' WHERE id = 'r1'`)
+				startingR1(t, s, "h1", 1)
+				moveHost(t, s, stop, "h1")
+				endBeforeStart(t, s, ctx, how, "h1", "h2", 1)
+				var state, reason string
+				systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
+				if state != StateResuming || reason != "auto-resume after "+stop {
+					t.Fatalf("Run %s (%s), want resuming after %s", state, reason, stop)
+				}
+				readyHost(t, s, "h3", "default", "", false)
+				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+					t.Fatal(err)
+				}
+				if a := assignOf(t, s, 2); a.RunID != "r1" || a.Resume != nil && a.Resume.Snapshot != nil {
+					t.Fatalf("placed again with %+v, want no snapshot", a)
+				}
+			})
+			t.Run(stop+"/"+how+"/resumed placement", func(t *testing.T) {
+				s, ctx := policyFixture(t, "transient")
+				f := useFakeS3(t, s)
+				if err := moveStops["preempt"](t, s); err != nil {
+					t.Fatal(err)
+				}
+				exitR1(t, s)
+				execSQL(t, s, ctx, `UPDATE blobs SET location = 's3', s3_key = run_id || '/' || id`)
+				execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
+				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+					t.Fatal(err)
+				}
+				if a := assignOf(t, s, 2); a.Resume == nil || a.Resume.Snapshot == nil || a.Resume.Snapshot.SnapshotID != "snapR1" {
+					t.Fatalf("epoch 2 assigned %+v, want snapR1", a.Resume)
+				}
+				var host string
+				systemScan(t, s, `SELECT host_id FROM placements WHERE run_id = 'r1' AND epoch = 2`, nil, &host)
+				startingR1(t, s, host, 2)
+				moveHost(t, s, stop, host)
+				readyHost(t, s, "h3", "default", "", false)
+				endBeforeStart(t, s, ctx, how, host, "h3", 2)
+				var state, reason, snap string
+				systemScan(t, s, `SELECT state, state_reason, coalesce(snapshot_id, '') FROM runs WHERE id = 'r1'`, nil, &state, &reason, &snap)
+				if state != StateResuming || reason != "auto-resume after "+stop || snap != "snapR1" {
+					t.Fatalf("Run %s (%s) snapshot %q, want resuming after %s from snapR1", state, reason, snap, stop)
+				}
+				if err := s.reapTransient(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if !snapshotAvailable(t, s, "snapR1") || blobLocations(t, s, "r1")["b-r1-vol"] != "s3" || len(f.Deleted()) != 0 {
+					t.Fatalf("snapR1 reaped: available %v, locations %v, deleted %v",
+						snapshotAvailable(t, s, "snapR1"), blobLocations(t, s, "r1"), f.Deleted())
+				}
+				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+					t.Fatal(err)
+				}
+				if a := assignOf(t, s, 3); a.Resume == nil || a.Resume.Snapshot == nil || a.Resume.Snapshot.SnapshotID != "snapR1" || a.Resume.SessionID != "sess-1" {
+					t.Fatalf("epoch 3 assigned %+v, want snapR1 and sess-1", a.Resume)
+				}
+			})
+		}
 	}
 }
 

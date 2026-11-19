@@ -30,7 +30,9 @@ func policyFixture(t *testing.T, policy string) (*Server, context.Context) {
 	readyHost(t, s, "h1", "default", "", false)
 	readyHost(t, s, "h2", "default", "", false)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', $1, 'running', 1)`, sp)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
+	// Running, as luxd records it: its container started, luxd saw it run.
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, container_started_at, started_at)
+		VALUES ('p1', 't1', 'r1', 'h1', 1, 'running', now(), now())`)
 	execSQL(t, s, ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, port, command, state, epoch)
 		VALUES ('srv_webwebwebwebwebw', 't1', 'r1', 'web', 3000, '["serve"]', 'ready', 1)`)
 	s.secrets.put("r1", map[string]string{"TOKEN": "jit"})
