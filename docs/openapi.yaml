@@ -1675,6 +1675,8 @@ components:
         epoch:
           format: int64
           type: integer
+        moveStop:
+          type: string
         runId:
           type: string
         sessionId:

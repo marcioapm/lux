@@ -19,7 +19,8 @@ import (
 // output and an artifact only.
 func snapshotR1Empty(t *testing.T, s *Server, host string, epoch int, snapID string) {
 	t.Helper()
-	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: snapID, RunID: "r1", Epoch: epoch, SessionID: "sess-1", Volumes: []proto.VolumeSnapshot{}},
+	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: snapID, RunID: "r1", Epoch: epoch, SessionID: "sess-1",
+		MoveStop: requestedMove(t, s, epoch), Volumes: []proto.VolumeSnapshot{}},
 		Output: &proto.BlobInfo{BlobID: "b-out-" + snapID, Size: 5, SHA256: "out-" + snapID},
 		Artifacts: []proto.Artifact{{BlobInfo: proto.BlobInfo{BlobID: "b-art-" + snapID, Size: 6, SHA256: "art-" + snapID},
 			Path: "/out/report.md", ContentType: "text/markdown", FileSize: 7, FileSHA256: "file-" + snapID}}}
@@ -45,6 +46,108 @@ func requestStopR1(t *testing.T, s *Server, reason string) {
 // terminated, its outcome and the policy in its reason, not resumable, its
 // secrets and lifetime-run servers gone. Its exit snapshot (0 volumes, as
 // its runner reports) is recorded with no volume.
+func TestTransientSnapshotBeforeMove(t *testing.T) {
+	for _, stop := range []string{"drain", "preempt", "migrate"} {
+		for _, outcome := range []string{"success", "failure", "lease", "host"} {
+			t.Run(stop+"/"+outcome, func(t *testing.T) {
+				s, ctx := policyFixture(t, "transient")
+				snapshotR1Empty(t, s, "h1", 1, "natural")
+				if err := moveStops[stop](t, s); err != nil {
+					t.Fatal(err)
+				}
+				want := "succeeded; resumePolicy transient"
+				switch outcome {
+				case "success":
+					reportR1Exit(t, s, 0, "exited")
+				case "failure":
+					reportR1Exit(t, s, 1, "exited")
+					want = "exit code 1; resumePolicy transient"
+				default:
+					reapInterruptedMove(t, s, ctx, outcome)
+					want = ""
+				}
+				var state, reason string
+				systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
+				if state != StateTerminated || want != "" && reason != want {
+					t.Fatalf("natural snapshot followed by %s: %s (%s), want terminated (%s)", stop, state, reason, want)
+				}
+			})
+		}
+	}
+}
+
+func TestTransientMoveSnapshotProvenance(t *testing.T) {
+	for _, stop := range []string{"drain", "preempt", "migrate"} {
+		for _, c := range []struct {
+			name string
+			vols bool
+			host bool
+		}{{"full volumes", true, false}, {"no declared state volumes", false, false},
+			{"full volumes host lost", true, true}, {"no declared state volumes host lost", false, true}} {
+			t.Run(stop+"/"+c.name, func(t *testing.T) {
+				s, ctx := policyFixture(t, "transient")
+				if err := moveStops[stop](t, s); err != nil {
+					t.Fatal(err)
+				}
+				snap := "snapR1"
+				if c.vols {
+					snapshotR1(t, s)
+				} else {
+					snap = "move-empty"
+					snapshotR1Empty(t, s, "h1", 1, snap)
+				}
+				execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+				if c.host {
+					reapInterruptedMove(t, s, ctx, "lease")
+				} else {
+					reportR1Exit(t, s, 143, "stopped")
+				}
+				var state, reason string
+				systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
+				if state != StateResuming || reason != "auto-resume after "+stop {
+					t.Fatalf("genuine move: %s (%s), want resuming", state, reason)
+				}
+				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+					t.Fatal(err)
+				}
+				if a := assignOf(t, s, 2); a.Resume == nil || a.Resume.Snapshot == nil || a.Resume.Snapshot.SnapshotID != snap || a.Resume.SessionID != "sess-1" {
+					t.Fatalf("resume assigned %+v, want %s and sess-1", a.Resume, snap)
+				}
+			})
+		}
+	}
+}
+
+// A moved epoch's snapshot proves only that epoch's move. If the next
+// epoch completes and a move races its exit snapshot, it ends terminated.
+func TestTransientOlderMoveSnapshotIsNotProof(t *testing.T) {
+	s, ctx := policyFixture(t, "transient")
+	if err := moveStops["preempt"](t, s); err != nil {
+		t.Fatal(err)
+	}
+	exitR1(t, s)
+	execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true`)
+	if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+		t.Fatal(err)
+	}
+	var host string
+	systemScan(t, s, `SELECT host_id FROM placements WHERE run_id = 'r1' AND epoch = 2`, nil, &host)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE run_id = 'r1' AND epoch = 2`)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'r1'`)
+	execSQL(t, s, ctx, `UPDATE placements SET stop_reason = 'drain', stop_requested_at = now() WHERE run_id = 'r1' AND epoch = 2`)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopping' WHERE id = 'r1'`)
+	code := 0
+	if got := s.handleReport(ctx, host, proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: "r1", Epoch: 2,
+		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "exited"})}); got.Type != proto.MsgAck {
+		t.Fatalf("exit report: %s %s", got.Type, got.Data)
+	}
+	var state, reason string
+	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
+	if state != StateTerminated || reason != "succeeded; resumePolicy transient" {
+		t.Fatalf("older move snapshot reused: %s (%s)", state, reason)
+	}
+}
+
 func TestTransientRunEndsTerminated(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -160,16 +263,17 @@ func TestTransientRunResumesAfterAMove(t *testing.T) {
 	}
 }
 
-// A transient Run whose host is lost mid-move is placed again, as auto.
+// A transient Run whose host is lost after its move export is placed again.
+// Lost before that export reaches luxd, there is no proof it can resume.
 func TestTransientInterruptedMoveResumes(t *testing.T) {
 	for _, trigger := range []string{"lease", "host"} {
 		t.Run(trigger, func(t *testing.T) {
 			s, ctx := policyFixture(t, "transient")
-			snapshotR1(t, s)
-			execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
 			if err := moveStops["preempt"](t, s); err != nil {
 				t.Fatal(err)
 			}
+			snapshotR1(t, s)
+			execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
 			reapInterruptedMove(t, s, ctx, trigger)
 			var state, reason string
 			systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
@@ -178,6 +282,18 @@ func TestTransientInterruptedMoveResumes(t *testing.T) {
 			}
 		})
 	}
+	t.Run("before export", func(t *testing.T) {
+		s, ctx := policyFixture(t, "transient")
+		if err := moveStops["preempt"](t, s); err != nil {
+			t.Fatal(err)
+		}
+		reapInterruptedMove(t, s, ctx, "lease")
+		var state string
+		systemScan(t, s, `SELECT state FROM runs WHERE id = 'r1'`, nil, &state)
+		if state != StateTerminated {
+			t.Fatalf("Run %s, want terminated", state)
+		}
+	})
 }
 
 // Every requested resume of a transient Run is refused 409 not_resumable,

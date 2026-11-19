@@ -1894,6 +1894,10 @@ func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDon
 	// volumes exported and uploaded.
 	stop := p.pendingStop()
 	exportVolumes := (p.assign == nil || spec.ExportsOnStop(p.assign.Spec.ResumePolicy, stop)) && !terminateStop(stop)
+	if exportVolumes && slices.Contains(spec.MoveStops, stop) {
+		sd.Manifest.MoveStop = stop
+		rec.MoveStop = stop
+	}
 	vols := p.state.Volumes
 	if !exportVolumes {
 		vols = nil

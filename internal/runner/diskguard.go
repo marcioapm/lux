@@ -533,6 +533,24 @@ func heldInS3(st *runState, records map[string]*snapshotRecord) bool {
 		}
 	}
 	if st.VolumesSnapshot == "" {
+		if st.Spec != nil && st.Spec.ResumePolicy == spec.ResumeTransient {
+			// This epoch's saved exit snapshot records the export decision
+			// actually used; a later move request cannot make it a move. Any
+			// marked move keeps the copy. With no snapshot record, fall back
+			// to the stop reason below (a failed move export stays held).
+			found := false
+			for _, rec := range records {
+				if rec.RunID == st.RunID && rec.Epoch == st.Epoch && rec.Published == nil && rec.Checkpoint == nil {
+					if rec.MoveStop != "" {
+						return false
+					}
+					found = true
+				}
+			}
+			if found {
+				return true
+			}
+		}
 		return terminateStop(st.StopReason) || st.Spec != nil && !spec.ExportsOnStop(st.Spec.ResumePolicy, st.StopReason)
 	}
 	rec := records[st.VolumesSnapshot]

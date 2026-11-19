@@ -82,13 +82,28 @@ func exitR1(t *testing.T, s *Server) {
 }
 
 // snapshotR1 reports r1's placement 1 took snapshot snapR1 (session sess-1).
+// As the runner does, it records a move already requested of the placement
+// when it decides to export.
 func snapshotR1(t *testing.T, s *Server) {
 	t.Helper()
 	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "snapR1", RunID: "r1", Epoch: 1, SessionID: "sess-1",
-		Volumes: []proto.VolumeSnapshot{{Name: "work", Path: "/work", BlobID: "b-r1-vol", Size: 10, SHA256: "r1-vol"}}}}
+		MoveStop: requestedMove(t, s, 1),
+		Volumes:  []proto.VolumeSnapshot{{Name: "work", Path: "/work", BlobID: "b-r1-vol", Size: 10, SHA256: "r1-vol"}}}}
 	if got := reportSnapshot(t, s, "h1", "r1", 1, sd); got.Type != proto.MsgAck || ackRefused(t, got) {
 		t.Fatalf("snapshot report: %s %s", got.Type, got.Data)
 	}
+}
+
+// requestedMove is the move reason luxd has sent r1's placement epoch, as
+// the runner sees it at its export decision; "" for none.
+func requestedMove(t *testing.T, s *Server, epoch int) string {
+	t.Helper()
+	var stop string
+	systemScan(t, s, `SELECT coalesce(stop_reason, '') FROM placements WHERE run_id = 'r1' AND epoch = $1`, []any{epoch}, &stop)
+	if !slices.Contains(movedStops, stop) {
+		return ""
+	}
+	return stop
 }
 
 // reportR1Exit reports r1's placement 1 exited with code and reason.

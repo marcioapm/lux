@@ -486,11 +486,19 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 	}
 	addEvent(ctx, tx, tenantID, runID, epoch, "exited", map[string]any{"exitCode": st.ExitCode, "reason": st.Reason, "message": st.Message})
 
-	moveStop := slices.Contains(movedStops, stopReason)
 	policy, err := runResumePolicy(ctx, tx, runID)
 	if err != nil {
 		return err
 	}
+	recordedStop := stopReason
+	if policy == spec.ResumeTransient && slices.Contains(movedStops, stopReason) {
+		// A move recorded after the runner's export decision is not a move
+		// of this exit: decide from the actual exit, never an empty restore.
+		if stopReason, err = transientMoveStop(ctx, tx, runID, epoch); err != nil {
+			return err
+		}
+	}
+	moveStop := slices.Contains(movedStops, stopReason)
 	failsOnMove := moveStop && spec.FailsOnMove(policy)
 	restarts := policy == spec.ResumeRestart
 	var next, reason string
@@ -563,8 +571,8 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 	if st.ExitCode != nil {
 		placementEnded["exitCode"] = *st.ExitCode
 	}
-	if stopReason != "" {
-		placementEnded["stopReason"] = stopReason
+	if recordedStop != "" {
+		placementEnded["stopReason"] = recordedStop
 	}
 	if moved {
 		// Moved, not stopped by a person: placed again automatically
@@ -583,6 +591,23 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 	}
 	// Last: event streams come after every row lock (infraevents.go).
 	return hostEvent(ctx, tx, hostID, evPlacementEnded, placementEnded)
+}
+
+// transientMoveStop is the move reason the runner captured in the Run's
+// current snapshot when it decided to export it, for this same placement
+// epoch. A missing snapshot or marker is "": a transient Run is not moved.
+func transientMoveStop(ctx context.Context, tx pgx.Tx, runID string, epoch int) (string, error) {
+	var stop string
+	err := tx.QueryRow(ctx, `SELECT coalesce(s.manifest->>'moveStop', '') FROM runs r
+		JOIN snapshots s ON s.id = r.snapshot_id AND s.run_id = r.id
+		WHERE r.id = $1 AND s.epoch = $2`, runID, epoch).Scan(&stop)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil || !slices.Contains(movedStops, stop) {
+		return "", err
+	}
+	return stop, nil
 }
 
 // placementLost gives up on a placement: its host stopped answering (or came
@@ -655,6 +680,11 @@ func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epo
 	policy, err := runResumePolicy(ctx, tx, runID)
 	if err != nil {
 		return "", err
+	}
+	if policy == spec.ResumeTransient && slices.Contains(movedStops, stopReason) {
+		if stopReason, err = transientMoveStop(ctx, tx, runID, epoch); err != nil {
+			return "", err
+		}
 	}
 	// Continue only a move already requested before the host disappeared.
 	// A refused snapshot blocks automatic restoration even with an older copy.
