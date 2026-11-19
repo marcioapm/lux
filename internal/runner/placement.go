@@ -1881,9 +1881,10 @@ func dirSize(ctx context.Context, root string) (int64, error) {
 // snapshot exports every state volume (zstd), compresses the output file,
 // and records them for upload. The local volumes now hold exactly this
 // snapshot, so a resume here moves nothing. A Run whose resumePolicy is
-// never, or whose placement ends in a terminate, is not resumed, so its
-// state volumes are not exported: its manifest lists none, and no local
-// copy is claimed. exportCtx covers the volume exports only.
+// never, one whose resumePolicy is transient stopped for anything but a
+// move (spec.ExportsOnStop), or whose placement ends in a terminate, is not
+// resumed, so its state volumes are not exported: its manifest lists none,
+// and no local copy is claimed. exportCtx covers the volume exports only.
 func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDone, error) {
 	snapID := ids.New(ids.Snapshot)
 	rec := &snapshotRecord{RunID: p.runID, Epoch: p.epoch, Created: time.Now().UnixMilli()}
@@ -1891,7 +1892,8 @@ func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDon
 	sd.Manifest.SessionID = p.sessionID()
 	// Decided once, here: a terminate arriving after this still gets the
 	// volumes exported and uploaded.
-	exportVolumes := (p.assign == nil || !spec.RefusesResume(p.assign.Spec.ResumePolicy)) && !terminateStop(p.pendingStop())
+	stop := p.pendingStop()
+	exportVolumes := (p.assign == nil || spec.ExportsOnStop(p.assign.Spec.ResumePolicy, stop)) && !terminateStop(stop)
 	vols := p.state.Volumes
 	if !exportVolumes {
 		vols = nil

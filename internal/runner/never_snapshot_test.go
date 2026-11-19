@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -91,6 +92,53 @@ func TestExitSnapshotExportsStateVolumesUnlessNever(t *testing.T) {
 			held := slices.ContainsFunc(f.r.localSnapshots(), func(l proto.LocalSnapshot) bool { return l.RunID == "run1" })
 			if held != c.volumes {
 				t.Errorf("heartbeat lists a local copy: %v, want %v", held, c.volumes)
+			}
+		})
+	}
+}
+
+// A transient placement exports its state volume only when stopped for a
+// move (drain, preempt, migrate), to be resumed elsewhere; any other end
+// (success, failure, idle, a requested stop, a timeout) exports none, as
+// for never, and still reports its output and artifacts. A terminate that
+// overrides a move's stop exports nothing either.
+func TestTransientExitSnapshotExportsOnlyOnAMove(t *testing.T) {
+	for _, c := range []struct {
+		stops   []string
+		code    int
+		volumes bool
+	}{
+		{nil, 0, false}, {nil, 1, false}, {[]string{"stop"}, 0, false}, {[]string{"idle"}, 0, false},
+		{[]string{"timeout"}, 137, false}, {[]string{"preempt", "terminate"}, 0, false},
+		{[]string{"drain"}, 0, true}, {[]string{"preempt"}, 0, true}, {[]string{"migrate"}, 0, true},
+	} {
+		t.Run(fmt.Sprintf("%v exit %d", c.stops, c.code), func(t *testing.T) {
+			f := newFinishFixture(t)
+			f.serveUploads(t)
+			f.p.assign.Spec.ResumePolicy = spec.ResumeTransient
+			f.p.assign.Spec.Artifacts.Paths = []string{"/data/state"}
+			writeFile(t, filepath.Join(f.r.cfg.DataDir, "rt", proto.OutputFile(1)), `{"seq":1}`+"\n")
+			for _, why := range c.stops {
+				f.p.mu.Lock()
+				if f.p.stopWhy == "" || terminateStop(why) {
+					f.p.stopWhy = why
+				}
+				f.p.mu.Unlock()
+			}
+			f.release()
+			f.p.setPhase("exited")
+			go func() {
+				defer close(f.p.done)
+				f.p.finish(context.Background(), &exitRecord{Code: c.code, Reason: "stopped", OutputSeq: 3})
+			}()
+			mustEnd(t, f.p, "the placement never ended")
+			sd := f.snapshotDone(t)
+			if sd.Error != "" || sd.Manifest.SnapshotID == "" || sd.Output == nil || len(sd.Artifacts) != 1 {
+				t.Fatalf("snapshot.done %+v: want a snapshot id, the output and the artifact", sd)
+			}
+			exported := strings.Contains(f.podmanLog(), "volume export")
+			if exported != c.volumes || (len(sd.Manifest.Volumes) == 1) != c.volumes || (!c.volumes && len(sd.Manifest.Volumes) != 0) {
+				t.Fatalf("volume export run %v, manifest volumes %+v: want exported %v", exported, sd.Manifest.Volumes, c.volumes)
 			}
 		})
 	}
