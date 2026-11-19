@@ -598,8 +598,12 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 // containerStartedSQL is whether a placement's container started, as far as
 // luxd has heard: the runner's containerStarted mark (on every report after
 // it, the end report too), or luxd saw it running (a runner without the
-// mark). A start a move cancels (finishWithoutContainer) has neither.
-const containerStartedSQL = `(container_started_at IS NOT NULL OR started_at IS NOT NULL)`
+// mark), or the Run's current snapshot is of this epoch (only a started
+// container exports one, its start mark unheard or not). A start a move
+// cancels (finishWithoutContainer) has none of these. p is the placement.
+const containerStartedSQL = `(p.container_started_at IS NOT NULL OR p.started_at IS NOT NULL
+	OR EXISTS (SELECT 1 FROM runs r JOIN snapshots s ON s.id = r.snapshot_id AND s.run_id = r.id
+		WHERE r.id = p.run_id AND s.epoch = p.epoch))`
 
 // transientMoveStop is the move reason the runner captured in the Run's
 // current snapshot when it decided to export it, for this same placement
@@ -667,7 +671,7 @@ func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epo
 	var hostID, stopReason string
 	var stopRequested, snapshotRefused, started bool
 	if err := tx.QueryRow(ctx, `SELECT host_id, stop_reason, stop_requested_at IS NOT NULL, snapshot_refused, `+containerStartedSQL+`
-		FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID, &stopReason, &stopRequested, &snapshotRefused, &started); err != nil {
+		FROM placements p WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID, &stopReason, &stopRequested, &snapshotRefused, &started); err != nil {
 		return "", err
 	}
 	if err := lockCostHost(ctx, tx, hostID); err != nil {

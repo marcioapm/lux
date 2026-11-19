@@ -292,6 +292,48 @@ func TestTransientMoveBeforeStartResumes(t *testing.T) {
 	}
 }
 
+// A container that started unheard by luxd (a shim start failed with no
+// running report, or its in-flight containerStarted dropped), then exited
+// naturally, proves its start with its same-epoch exit snapshot (no
+// moveStop). A move recorded after it, then the lease or host lost before
+// the end report, ends the Run terminated, never resumed from that snapshot.
+func TestTransientSnapshotProvesStartedWhenStartUnheard(t *testing.T) {
+	for _, stop := range []string{"drain", "preempt", "migrate"} {
+		for _, how := range []string{"lease", "host"} {
+			t.Run(stop+"/"+how, func(t *testing.T) {
+				s, ctx := policyFixture(t, "transient")
+				execSQL(t, s, ctx, `UPDATE placements SET state = 'assigned', container_started_at = NULL, started_at = NULL WHERE id = 'p1'`)
+				execSQL(t, s, ctx, `UPDATE runs SET state = 'scheduled' WHERE id = 'r1'`)
+				startingR1(t, s, "h1", 1)
+				snapshotR1Empty(t, s, "h1", 1, "natural")
+				var marked bool
+				systemScan(t, s, `SELECT container_started_at IS NOT NULL OR started_at IS NOT NULL FROM placements WHERE id = 'p1'`, nil, &marked)
+				if marked {
+					t.Fatal("placement marked started: the start must be unheard")
+				}
+				moveHost(t, s, stop, "h1")
+				reapInterruptedMove(t, s, ctx, how)
+				want := map[string]string{"lease": "lease expired: host stopped heartbeating", "host": "host lost: missed heartbeats"}[how] +
+					"; resumePolicy transient"
+				var state, reason string
+				var placements int
+				systemScan(t, s, `SELECT state, state_reason, (SELECT count(*) FROM placements WHERE run_id = 'r1') FROM runs WHERE id = 'r1'`,
+					nil, &state, &reason, &placements)
+				if state != StateTerminated || reason != want {
+					t.Fatalf("Run %s (%s), want terminated (%s)", state, reason, want)
+				}
+				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+					t.Fatal(err)
+				}
+				systemScan(t, s, `SELECT count(*) FROM placements WHERE run_id = 'r1'`, nil, &placements)
+				if placements != 1 {
+					t.Fatalf("%d placements, want 1: resumed", placements)
+				}
+			})
+		}
+	}
+}
+
 func TestTransientRunEndsTerminated(t *testing.T) {
 	for _, c := range []struct {
 		name   string
