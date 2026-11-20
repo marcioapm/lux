@@ -359,6 +359,37 @@ func (s *Server) relayOutput(ctx context.Context, pl placementOutput, since int6
 		default:
 		}
 	}()
+	// handle relays one frame; end is whether the relay returns with done, err.
+	handle := func(fr proto.Frame, ok bool) (end, done bool, err error) {
+		if !ok {
+			return true, false, fmt.Errorf("output stream dropped: client too slow")
+		}
+		switch fr.Type {
+		case proto.MsgOutputRecords:
+			var or proto.OutputRecords
+			if err := json.Unmarshal(fr.Data, &or); err != nil {
+				return true, false, err
+			}
+			for _, rec := range or.Records {
+				if err := emit(rec); err != nil {
+					return true, false, err
+				}
+			}
+		case proto.MsgOutputEnd:
+			var oe proto.OutputEnd
+			_ = json.Unmarshal(fr.Data, &oe)
+			if oe.Error != "" {
+				return true, true, fmt.Errorf("%s", oe.Error)
+			}
+			// Without follow the host sends what it has and ends; the
+			// placement is only done if it has exited.
+			if !follow {
+				return true, pl.state == "exited" || pl.state == "lost", nil
+			}
+			return true, true, nil
+		}
+		return false, false, nil
+	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	idle := 0
@@ -367,7 +398,18 @@ func (s *Server) relayOutput(ctx context.Context, pl placementOutput, since int6
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-c.done:
-			return false, fmt.Errorf("host disconnected")
+			// The read loop routes every frame it received before done is
+			// closed: relay those, but never wait for more.
+			for {
+				select {
+				case fr, ok := <-ch:
+					if end, done, err := handle(fr, ok); end {
+						return done, err
+					}
+				default:
+					return false, fmt.Errorf("host disconnected")
+				}
+			}
 		case <-ticker.C:
 			if err := tick(); err != nil {
 				return false, err
@@ -377,33 +419,9 @@ func (s *Server) relayOutput(ctx context.Context, pl placementOutput, since int6
 				return false, fmt.Errorf("host did not answer")
 			}
 		case fr, ok := <-ch:
-			if !ok {
-				return false, fmt.Errorf("output stream dropped: client too slow")
-			}
 			idle = 0
-			switch fr.Type {
-			case proto.MsgOutputRecords:
-				var or proto.OutputRecords
-				if err := json.Unmarshal(fr.Data, &or); err != nil {
-					return false, err
-				}
-				for _, rec := range or.Records {
-					if err := emit(rec); err != nil {
-						return false, err
-					}
-				}
-			case proto.MsgOutputEnd:
-				var oe proto.OutputEnd
-				_ = json.Unmarshal(fr.Data, &oe)
-				if oe.Error != "" {
-					return true, fmt.Errorf("%s", oe.Error)
-				}
-				// Without follow the host sends what it has and ends; the
-				// placement is only done if it has exited.
-				if !follow {
-					return pl.state == "exited" || pl.state == "lost", nil
-				}
-				return true, nil
+			if end, done, err := handle(fr, ok); end {
+				return done, err
 			}
 		}
 	}

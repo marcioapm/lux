@@ -151,6 +151,120 @@ func TestRelayOutputReplacementDuringSubscribe(t *testing.T) {
 	})
 }
 
+// gatedRelay starts relayOutput for epoch 1 on host's current connection, with
+// emit blocking on the first record until release is closed. It returns the
+// subscription id, the emitted seqs and the relay's result.
+func gatedRelay(t *testing.T, s *Server, c *runnerConn, state string, since int64, follow bool, release <-chan struct{}) (string, *[]int64, <-chan [2]any) {
+	t.Helper()
+	var seqs []int64
+	results := make(chan [2]any, 1)
+	first := true
+	go func() {
+		done, err := s.relayOutput(context.Background(), placementOutput{runID: "run", epoch: 1, hostID: "host", state: state}, since, follow,
+			func(r proto.Record) error {
+				if first {
+					first = false
+					<-release
+				}
+				seqs = append(seqs, r.Seq)
+				return nil
+			}, func() error { return nil })
+		results <- [2]any{done, err}
+	}()
+	f := <-c.send
+	var sub proto.OutputSubscribe
+	if f.Type != proto.MsgOutputSubscribe || json.Unmarshal(f.Data, &sub) != nil || sub.Since != since {
+		t.Fatalf("subscribe: %+v", f)
+	}
+	return sub.SubID, &seqs, results
+}
+
+func routeRecords(s *Server, subID string, seqs ...int64) {
+	var recs []proto.Record
+	for _, q := range seqs {
+		recs = append(recs, proto.Record{Seq: q})
+	}
+	s.hub.route(subID, proto.Frame{Type: proto.MsgOutputRecords, Data: proto.Marshal(proto.OutputRecords{SubID: subID, Records: recs})})
+}
+
+// The runner's read loop routes every frame before its connection's done is
+// closed: frames already received must be relayed even when the relay sees
+// done and its subscription channel ready together. For an exited placement
+// without follow, dropping them would be a gap and real record loss.
+// Repeated, because select picks among ready cases at random.
+func TestRelayOutputDrainsBufferedFramesOnDisconnect(t *testing.T) {
+	for i := range 64 {
+		synctest.Test(t, func(t *testing.T) {
+			s := &Server{}
+			s.hub = newHub(s)
+			old := &runnerConn{send: make(chan proto.Frame, 8), done: make(chan struct{})}
+			s.hub.conns["host"] = old
+			release := make(chan struct{})
+			subID, seqs, results := gatedRelay(t, s, old, "exited", 0, false, release)
+			routeRecords(s, subID, 1)
+			synctest.Wait() // relay is blocked emitting record 1
+			routeRecords(s, subID, 2)
+			routeRecords(s, subID, 3)
+			s.hub.route(subID, proto.Frame{Type: proto.MsgOutputEnd, Data: proto.Marshal(proto.OutputEnd{SubID: subID})})
+			s.hub.mu.Lock()
+			delete(s.hub.conns, "host")
+			s.hub.mu.Unlock()
+			close(old.done)
+			close(release) // both select arms are ready now
+			got := <-results
+			if got[0] != true || got[1] != nil || fmt.Sprint(*seqs) != "[1 2 3]" {
+				t.Fatalf("trial %d: done=%v err=%v records=%v, want done, nil, [1 2 3]", i, got[0], got[1], *seqs)
+			}
+		})
+	}
+}
+
+// Following a running placement, what was buffered is relayed before the
+// relay returns for a retry, and the retry, from the cursor emit left, adds
+// no duplicates and keeps order.
+func TestRelayOutputDrainsBufferedFramesBeforeRetry(t *testing.T) {
+	for i := range 64 {
+		synctest.Test(t, func(t *testing.T) {
+			s := &Server{}
+			s.hub = newHub(s)
+			old := &runnerConn{send: make(chan proto.Frame, 8), done: make(chan struct{})}
+			s.hub.conns["host"] = old
+			release := make(chan struct{})
+			subID, seqs, results := gatedRelay(t, s, old, "running", 0, true, release)
+			routeRecords(s, subID, 1)
+			synctest.Wait()
+			routeRecords(s, subID, 2, 3)
+			s.hub.mu.Lock()
+			fresh := &runnerConn{send: make(chan proto.Frame, 8), done: make(chan struct{})}
+			s.hub.conns["host"] = fresh
+			s.hub.mu.Unlock()
+			close(old.done)
+			close(release)
+			got := <-results
+			if got[0] != false || got[1] == nil || fmt.Sprint(*seqs) != "[1 2 3]" {
+				t.Fatalf("trial %d: done=%v err=%v records=%v, want interrupted after [1 2 3]", i, got[0], got[1], *seqs)
+			}
+			if len(fresh.send) != 0 {
+				t.Fatalf("trial %d: cancel sent to replacement", i)
+			}
+			// Retry as streamOutput does, from the last emitted seq.
+			since := (*seqs)[len(*seqs)-1]
+			retry := make(chan struct{})
+			close(retry)
+			subID, more, results := gatedRelay(t, s, fresh, "running", since, true, retry)
+			for q := since + 1; q <= 5; q++ {
+				routeRecords(s, subID, q)
+			}
+			s.hub.route(subID, proto.Frame{Type: proto.MsgOutputEnd, Data: proto.Marshal(proto.OutputEnd{SubID: subID})})
+			got = <-results
+			all := append(append([]int64(nil), *seqs...), *more...)
+			if got[0] != true || got[1] != nil || fmt.Sprint(all) != "[1 2 3 4 5]" {
+				t.Fatalf("trial %d: retry done=%v err=%v records=%v, want [1 2 3 4 5]", i, got[0], got[1], all)
+			}
+		})
+	}
+}
+
 func TestOutputSubscriptionSendFailures(t *testing.T) {
 	for _, mode := range []string{"missing", "disconnect", "congestion", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
