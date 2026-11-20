@@ -395,12 +395,12 @@ func TestMintedCredentialsInABuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pinned, err := f.p.pinFroms(context.Background(), sp.Image.Build.Containerfile, auth)
+	pinned, err := f.p.pinFroms(context.Background(), sp.Image.Build.Containerfile, nil, &imageAuth{user: auth})
 	if err != nil || !strings.HasPrefix(pinned, "FROM "+base+"@sha256:0123") {
 		t.Fatalf("pinned %q: %v", pinned, err)
 	}
 	ref := cacheRef(cache, "k1")
-	if _, ok := f.p.pullCached(context.Background(), ref, "localhost/lux-build:k1", auth); !ok {
+	if _, ok := f.p.pullCached(context.Background(), ref, "localhost/lux-build:k1", auth, false); !ok {
 		t.Fatal("the cache pull did not hit")
 	}
 	auth.close()
