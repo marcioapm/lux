@@ -314,8 +314,8 @@ func TestResumePolicySets(t *testing.T) {
 // ExportsOnStop: never exports on no stop, transient only on a move, every
 // other policy on every stop.
 func TestExportsOnStop(t *testing.T) {
-	if !slices.Equal(MoveStops, []string{"drain", "preempt", "migrate"}) {
-		t.Fatalf("MoveStops = %v", MoveStops)
+	if !slices.Equal(moveStops, []string{"drain", "preempt", "migrate"}) {
+		t.Fatalf("moveStops = %v", moveStops)
 	}
 	for _, policy := range []string{"", ResumeAuto, ResumeRestart, ResumeManual, ResumeNever, ResumeTransient} {
 		for _, stop := range []string{"", "stop", "idle", "timeout", "disk", "drain", "preempt", "migrate"} {

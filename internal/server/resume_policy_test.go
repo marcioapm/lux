@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -102,7 +103,7 @@ func requestedMove(t *testing.T, s *Server, epoch int) string {
 	t.Helper()
 	var stop string
 	systemScan(t, s, `SELECT coalesce(stop_reason, '') FROM placements WHERE run_id = 'r1' AND epoch = $1`, []any{epoch}, &stop)
-	if !slices.Contains(movedStops, stop) {
+	if !spec.IsMoveStop(stop) {
 		return ""
 	}
 	return stop

@@ -55,13 +55,15 @@ const (
 	ResumeTransient = "transient"
 )
 
-// MoveStops: the stop reasons that move a Run (a drain, a spot preemption,
-// a migration) rather than stop it. The one list behind the server's
-// movedStops and the runner's export decision (ExportsOnStop).
-var MoveStops = []string{"drain", "preempt", "migrate"}
+// moveStops: the stop reasons that move a Run (a drain, a spot preemption,
+// a migration) rather than stop it.
+var moveStops = []string{"drain", "preempt", "migrate"}
 
-// IsMoveStop reports whether a stop reason moves the Run (MoveStops).
-func IsMoveStop(stop string) bool { return slices.Contains(MoveStops, stop) }
+// IsMoveStop reports whether a stop reason moves a Run rather than stops
+// it: luxd places a moved Run again as soon as it has stopped (resumed, or
+// restarted from scratch) unless its resumePolicy ends it (FailsOnMove),
+// and the runner's export decision (ExportsOnStop) reads it too.
+func IsMoveStop(stop string) bool { return slices.Contains(moveStops, stop) }
 
 // FailsOnMove reports whether a resumePolicy ends the Run, rather than
 // placing it again, when lux moves it: manual (failed) and never

@@ -137,7 +137,7 @@ func scanServerRow(row pgx.Row) (serverRow, error) {
 	// Moving: its placement is stopping to move (and the Run will be
 	// placed again: resumePolicy is not manual or never), or its Run is
 	// on its way to the next one after a move.
-	v.Moving = (v.RunState == StateStopping && resumes && slices.Contains(movedStops, v.PlacementStop)) ||
+	v.Moving = (v.RunState == StateStopping && resumes && spec.IsMoveStop(v.PlacementStop)) ||
 		(v.StopReason != nil && *v.StopReason == "migrated" && slices.Contains(startingRunStates, v.RunState))
 	return v, err
 }
@@ -433,7 +433,7 @@ func stopServersAtEnd(ctx context.Context, tx pgx.Tx, tenantID, runID string, ep
 // a placement stop reason (placements.stop_reason) and the Run is resumed
 // after it if that was a move.
 func endReason(placementStop string) string {
-	if slices.Contains(movedStops, placementStop) {
+	if spec.IsMoveStop(placementStop) {
 		return "migrated"
 	}
 	return "run stopped"

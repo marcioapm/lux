@@ -68,14 +68,6 @@ const noSnapshotReason = "its only snapshot report was refused, so there is no s
 // both Run.resumable (runColumns) and GET /v1/runs?resumable=true.
 const resumableSQL = `(r.state IN ` + resumableRunStates + ` AND NOT ` + refusesResumeSQL + ` AND NOT ` + refusedWithoutSnapshot + `)`
 
-// movedStops: stop reasons that move a Run rather than stop it; it is
-// placed again as soon as it has stopped (resumed, or restarted from
-// scratch), unless its spec's resumePolicy is manual or never
-// (spec.FailsOnMove), when it ends instead: failed, or terminated (never).
-// The list is spec.MoveStops, which the runner's export decision
-// (spec.ExportsOnStop) shares.
-var movedStops = spec.MoveStops
-
 // stopTerminate is the stop reason of a terminate request.
 const stopTerminate = "terminate"
 
@@ -491,7 +483,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 		return err
 	}
 	recordedStop := stopReason
-	if policy == spec.ResumeTransient && started && slices.Contains(movedStops, stopReason) {
+	if policy == spec.ResumeTransient && started && spec.IsMoveStop(stopReason) {
 		// A move recorded after the runner's export decision is not a move
 		// of this exit: decide from the actual exit, never an empty restore.
 		// A placement whose container never started ran nothing and left
@@ -500,7 +492,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 			return err
 		}
 	}
-	moveStop := slices.Contains(movedStops, stopReason)
+	moveStop := spec.IsMoveStop(stopReason)
 	failsOnMove := moveStop && spec.FailsOnMove(policy)
 	restarts := policy == spec.ResumeRestart
 	var next, reason string
@@ -617,7 +609,7 @@ func transientMoveStop(ctx context.Context, tx pgx.Tx, runID string, epoch int) 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
-	if err != nil || !slices.Contains(movedStops, stop) {
+	if err != nil || !spec.IsMoveStop(stop) {
 		return "", err
 	}
 	return stop, nil
@@ -694,7 +686,7 @@ func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epo
 	if err != nil {
 		return "", err
 	}
-	if policy == spec.ResumeTransient && started && slices.Contains(movedStops, stopReason) {
+	if policy == spec.ResumeTransient && started && spec.IsMoveStop(stopReason) {
 		if stopReason, err = transientMoveStop(ctx, tx, runID, epoch); err != nil {
 			return "", err
 		}
@@ -702,7 +694,7 @@ func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epo
 	// Continue only a move already requested before the host disappeared.
 	// A refused snapshot blocks automatic restoration even with an older copy.
 	moved := !requeued && !terminate && runState == StateStopping && stopRequested &&
-		slices.Contains(movedStops, stopReason) && !spec.FailsOnMove(policy) &&
+		spec.IsMoveStop(stopReason) && !spec.FailsOnMove(policy) &&
 		(!snapshotRefused || policy == spec.ResumeRestart)
 	serverStop := "host lost"
 	if moved {
