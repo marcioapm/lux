@@ -68,6 +68,171 @@ func TestRelayOutputConnectionReplacement(t *testing.T) {
 	})
 }
 
+// Sending on a full queue lets us replace the connection after capture but
+// before enqueue, without sleeps or a production synchronization hook.
+func TestOutputSubscriptionBoundDuringSend(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHub(nil)
+		old := &runnerConn{send: make(chan proto.Frame), done: make(chan struct{})}
+		fresh := &runnerConn{send: make(chan proto.Frame, 1), done: make(chan struct{})}
+		h.conns["host"] = old
+		type result struct {
+			conn *runnerConn
+			err  error
+		}
+		results := make(chan result, 1)
+		go func() {
+			c, err := h.sendLiveBound(context.Background(), "host", proto.Frame{Type: proto.MsgOutputSubscribe})
+			results <- result{c, err}
+		}()
+		synctest.Wait() // sender has captured old and is blocked on its queue
+		h.mu.Lock()
+		h.conns["host"] = fresh
+		h.mu.Unlock()
+		if f := <-old.send; f.Type != proto.MsgOutputSubscribe {
+			t.Fatalf("sent %+v", f)
+		}
+		got := <-results
+		if got.err != nil || got.conn != old {
+			t.Fatalf("bound connection = %+v, want old", got)
+		}
+		close(old.done)
+		select {
+		case <-got.conn.done:
+		default:
+			t.Fatal("subscription is waiting on the replacement's lifetime")
+		}
+		if len(fresh.send) != 0 {
+			t.Fatal("subscription sent to replacement")
+		}
+	})
+}
+
+func TestRelayOutputReplacementDuringSubscribe(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &Server{}
+		s.hub = newHub(s)
+		old := &runnerConn{send: make(chan proto.Frame), done: make(chan struct{})}
+		fresh := &runnerConn{send: make(chan proto.Frame, 1), done: make(chan struct{})}
+		s.hub.conns["host"] = old
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		results := make(chan error, 1)
+		go func() {
+			done, err := s.relayOutput(ctx, placementOutput{runID: "run", epoch: 43, hostID: "host", state: "running"}, 112, true,
+				func(proto.Record) error { return nil }, func() error { return nil })
+			if done {
+				results <- fmt.Errorf("interruption reported done")
+				return
+			}
+			results <- err
+		}()
+		synctest.Wait() // subscribe captured old; enqueue is blocked
+		s.hub.mu.Lock()
+		s.hub.conns["host"] = fresh
+		s.hub.mu.Unlock()
+		if f := <-old.send; f.Type != proto.MsgOutputSubscribe {
+			t.Fatalf("subscribe = %+v", f)
+		}
+		synctest.Wait() // relay has selected the subscription's lifetime
+		close(old.done)
+		synctest.Wait()
+		select {
+		case err := <-results:
+			if err == nil || err.Error() == "interruption reported done" {
+				t.Fatalf("interruption = %v", err)
+			}
+		default:
+			t.Fatal("relay bound subscription lifetime to replacement")
+		}
+		if len(fresh.send) != 0 {
+			t.Fatal("cancel sent to replacement producer")
+		}
+	})
+}
+
+func TestOutputSubscriptionSendFailures(t *testing.T) {
+	for _, mode := range []string{"missing", "disconnect", "congestion", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h := newHub(nil)
+				c := &runnerConn{send: make(chan proto.Frame), done: make(chan struct{})}
+				if mode != "missing" {
+					h.conns["host"] = c
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				results := make(chan error, 1)
+				go func() {
+					_, err := h.sendLiveBound(ctx, "host", proto.Frame{})
+					results <- err
+				}()
+				synctest.Wait()
+				switch mode {
+				case "disconnect":
+					close(c.done)
+				case "congestion":
+					time.Sleep(10 * time.Second)
+				case "cancel":
+					cancel()
+				}
+				if err := <-results; err == nil {
+					t.Fatal("send succeeded without a receiver")
+				}
+			})
+		})
+	}
+}
+
+func TestRelayOutputEndAndCancellation(t *testing.T) {
+	for _, mode := range []string{"follow", "snapshot-running", "snapshot-exited", "disconnect", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s := &Server{}
+				s.hub = newHub(s)
+				c := &runnerConn{send: make(chan proto.Frame, 1), done: make(chan struct{})}
+				s.hub.conns["host"] = c
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				state := "running"
+				if mode == "snapshot-exited" {
+					state = "exited"
+				}
+				type result struct {
+					done bool
+					err  error
+				}
+				results := make(chan result, 1)
+				go func() {
+					done, err := s.relayOutput(ctx, placementOutput{runID: "run", epoch: 1, hostID: "host", state: state}, 0,
+						!strings.HasPrefix(mode, "snapshot"), func(proto.Record) error { return nil }, func() error { return nil })
+					results <- result{done, err}
+				}()
+				f := <-c.send
+				var sub proto.OutputSubscribe
+				_ = json.Unmarshal(f.Data, &sub)
+				switch mode {
+				case "disconnect":
+					delete(s.hub.conns, "host")
+					close(c.done)
+				case "cancel":
+					// A full queue must not block deferred cancellation.
+					c.send <- proto.Frame{}
+					cancel()
+				default:
+					s.hub.route(sub.SubID, proto.Frame{Type: proto.MsgOutputEnd, Data: proto.Marshal(proto.OutputEnd{SubID: sub.SubID})})
+				}
+				got := <-results
+				interrupted := mode == "disconnect" || mode == "cancel"
+				wantDone := mode == "follow" || mode == "snapshot-exited"
+				if got.done != wantDone || (got.err != nil) != interrupted {
+					t.Fatalf("result = %+v, want done=%v interrupted=%v", got, wantDone, interrupted)
+				}
+			})
+		})
+	}
+}
+
 // fakeOutputHost stands in for a host's runner connection, answering output
 // subscriptions as a real runner does: for a placement it does not hold, an
 // output.end at once with no error; for one it holds, its records after
@@ -76,6 +241,8 @@ type fakeOutputHost struct {
 	mu   sync.Mutex
 	held map[int]fakePlacement
 	subs map[int][]time.Time // when each subscription arrived, by epoch
+	last map[int]proto.OutputSubscribe
+	stop func()
 }
 
 type fakePlacement struct {
@@ -88,12 +255,14 @@ type fakePlacement struct {
 
 func newFakeOutputHost(t *testing.T, s *Server, hostID string) *fakeOutputHost {
 	t.Helper()
-	h := &fakeOutputHost{held: map[int]fakePlacement{}, subs: map[int][]time.Time{}}
+	h := &fakeOutputHost{held: map[int]fakePlacement{}, subs: map[int][]time.Time{}, last: map[int]proto.OutputSubscribe{}}
 	c := &runnerConn{hostID: hostID, send: make(chan proto.Frame, 256), notify: make(chan struct{}, 1), done: make(chan struct{})}
 	s.hub.mu.Lock()
 	s.hub.conns[hostID] = c
 	s.hub.mu.Unlock()
-	t.Cleanup(func() { close(c.done) })
+	var once sync.Once
+	h.stop = func() { once.Do(func() { close(c.done) }) }
+	t.Cleanup(h.stop)
 	go func() {
 		for {
 			select {
@@ -137,6 +306,7 @@ func (h *fakeOutputHost) answer(s *Server, f proto.Frame) {
 	_ = json.Unmarshal(f.Data, &sub)
 	h.mu.Lock()
 	h.subs[f.Epoch] = append(h.subs[f.Epoch], time.Now())
+	h.last[f.Epoch] = sub
 	p, ok := h.held[f.Epoch]
 	h.mu.Unlock()
 	if ok && p.ready != nil && !p.ready() {
@@ -167,13 +337,18 @@ type outputSSE struct {
 // send yet, its response headers are not flushed.
 func followOutput(t *testing.T, s *Server, key string) <-chan outputSSE {
 	t.Helper()
+	return followOutputQuery(t, s, key, "follow=true")
+}
+
+func followOutputQuery(t *testing.T, s *Server, key, query string) <-chan outputSSE {
+	t.Helper()
 	srv := httptest.NewServer(s.Handler())
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(func() { cancel(); srv.Close() })
 	events := make(chan outputSSE, 64)
 	go func() {
 		defer close(events)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/v1/runs/r1/output?follow=true", nil)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/v1/runs/r1/output?"+query, nil)
 		req.Header.Set("Authorization", "Bearer "+key)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -405,6 +580,79 @@ func TestFollowAFirstPlacementFromSubmit(t *testing.T) {
 	h1.hold(1, false, "one\n")
 	startRunning(t, s, "p1")
 	expectRecord(t, events, "1.1", "one\n", "the first placement's record")
+}
+
+// One HTTP reader survives a short reconnect, retaining its record cursor,
+// then follows a new epoch and receives both records and lifecycle events.
+func TestFollowOutputAcrossConnectionReplacement(t *testing.T) {
+	s, key, hosts := followFixture(t, []string{"h1"}, []string{"running"})
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE placements SET epoch = 43 WHERE id = 'p1'`)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running', current_epoch = 43 WHERE id = 'r1'`)
+	data := make([]string, 113)
+	data[112] = "old\n"
+	hosts["h1"].hold(43, false, data...)
+	events := followOutputQuery(t, s, key, "follow=true&events=true&since=43.112")
+	expectRecord(t, events, "43.113", "old\n", "before reconnect")
+
+	// Install a replacement before retiring old, so Streaming never sees a gap.
+	fresh := newFakeOutputHost(t, s, "h1")
+	fresh.hold(43, true, data...)
+	fresh.hold(44, true, "new epoch\n")
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE id = 'p1'`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p44', 't1', 'r1', 'h1', 44, 'exited')`)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'succeeded', current_epoch = 44 WHERE id = 'r1'`)
+	if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		return addEvent(ctx, tx, "t1", "r1", 44, "run.exited", map[string]any{})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Append seq114 only after installing the fake: no subscription has yet
+	// been retried because old's lifetime is still open.
+	data = append(data, "after reconnect\n")
+	fresh.hold(43, true, data...)
+	hosts["h1"].stop()
+
+	var cursors []string
+	var lifecycle, ended bool
+	for {
+		ev, ok := nextEvent(events, 5*time.Second)
+		if !ok {
+			if !ended {
+				t.Fatal("HTTP reader did not finish after reconnect")
+			}
+			break
+		}
+		switch ev.name {
+		case "record":
+			var rec OutputRecord
+			if err := json.Unmarshal([]byte(ev.data), &rec); err != nil {
+				t.Fatal(err)
+			}
+			cursors = append(cursors, rec.Cursor)
+		case "lux":
+			var e struct {
+				Epoch int `json:"epoch"`
+			}
+			if err := json.Unmarshal([]byte(ev.data), &e); err != nil {
+				t.Fatal(err)
+			}
+			lifecycle = lifecycle || e.Epoch == 44
+		case "end":
+			ended = true
+		default:
+			t.Fatalf("unexpected SSE: %+v", ev)
+		}
+	}
+	if strings.Join(cursors, ",") != "43.114,44.1" || !lifecycle {
+		t.Fatalf("records=%v lifecycle44=%v, want 43.114,44.1 and lifecycle advance", cursors, lifecycle)
+	}
+	fresh.mu.Lock()
+	sub := fresh.last[43]
+	fresh.mu.Unlock()
+	if sub.Since != 113 || fresh.subscribed(43) != 1 {
+		t.Fatalf("reconnect subscription = %+v count=%d, want since113 once", sub, fresh.subscribed(43))
+	}
 }
 
 // Resumed on another host: h1 has the exited placement 1, h2 is assigned
