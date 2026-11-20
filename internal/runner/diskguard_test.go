@@ -721,6 +721,36 @@ func TestLocalCopiesHeldInS3(t *testing.T) {
 			}
 		})
 	}
+	// transient: stopped for a move, its volumes are exported and resumed
+	// elsewhere, so until that snapshot is reported and uploaded the local
+	// copy is the only one. Stopped any other way, it exports nothing and
+	// is never resumed, like never.
+	uploading := []pendingUpload{{BlobID: "b1", Size: 3 * mib}}
+	for _, c := range []struct {
+		stop        string
+		records     map[string]*snapshotRecord
+		reclaimable bool
+	}{
+		{"preempt", nil, false}, {"drain", nil, false}, {"migrate", nil, false},
+		{"preempt", map[string]*snapshotRecord{"s1": {RunID: "run1", Reported: true, Uploads: uploading}}, false},
+		{"migrate", map[string]*snapshotRecord{"s1": {RunID: "run1", Uploads: done}}, false},
+		{"", nil, true}, {"stop", nil, true}, {"idle", nil, true}, {"timeout", nil, true}, {"terminate", nil, true},
+	} {
+		t.Run(fmt.Sprintf("transient, no volumes snapshot, stop %q, %d records", c.stop, len(c.records)), func(t *testing.T) {
+			f := newDiskFixture(t)
+			st := &runState{RunID: "run1", Epoch: 1, Phase: "reported", LastExitAt: 1, StopReason: c.stop,
+				Spec: &spec.RunSpec{ResumePolicy: spec.ResumeTransient}}
+			if err := writeRunState(f.r.runDir("run1"), st); err != nil {
+				t.Fatal(err)
+			}
+			for id, rec := range c.records {
+				saveRecord(t, f.r, id, rec)
+			}
+			if got := f.r.localCopies(); len(got) != 1 || got[0].reclaimable != c.reclaimable {
+				t.Fatalf("copies %+v, want run1 reclaimable %v", got, c.reclaimable)
+			}
+		})
+	}
 	t.Run("oldest exit first", func(t *testing.T) {
 		f := newDiskFixture(t)
 		copyRun(t, f.r, "run-a", 2, "", spec.ResumeNever)

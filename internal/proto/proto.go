@@ -554,11 +554,14 @@ type ResumeInfo struct {
 
 // Manifest describes one snapshot: the Run's state volumes as of one exit.
 type Manifest struct {
-	SnapshotID string           `json:"snapshotId"`
-	RunID      string           `json:"runId"`
-	Epoch      int              `json:"epoch"`
-	SessionID  string           `json:"sessionId"`
-	Volumes    []VolumeSnapshot `json:"volumes"` // never null: see nonNil in snapshot
+	SnapshotID string `json:"snapshotId"`
+	RunID      string `json:"runId"`
+	Epoch      int    `json:"epoch"`
+	SessionID  string `json:"sessionId"`
+	// MoveStop is the move reason captured with the runner's export decision.
+	// Empty means this snapshot is not proof of a move, even with volumes.
+	MoveStop string           `json:"moveStop,omitempty"`
+	Volumes  []VolumeSnapshot `json:"volumes"` // never null: see nonNil in snapshot
 }
 
 type VolumeSnapshot struct {

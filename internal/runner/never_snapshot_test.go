@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -91,6 +92,114 @@ func TestExitSnapshotExportsStateVolumesUnlessNever(t *testing.T) {
 			held := slices.ContainsFunc(f.r.localSnapshots(), func(l proto.LocalSnapshot) bool { return l.RunID == "run1" })
 			if held != c.volumes {
 				t.Errorf("heartbeat lists a local copy: %v, want %v", held, c.volumes)
+			}
+		})
+	}
+}
+
+// A transient placement exports its state volume only when stopped for a
+// move (drain, preempt, migrate), to be resumed elsewhere; any other end
+// (success, failure, idle, a requested stop, a timeout) exports none, as
+// for never, and still reports its output and artifacts. A terminate that
+// overrides a move's stop exports nothing either.
+func TestTransientExitSnapshotExportsOnlyOnAMove(t *testing.T) {
+	for _, c := range []struct {
+		stops   []string
+		code    int
+		volumes bool
+	}{
+		{nil, 0, false}, {nil, 1, false}, {[]string{"stop"}, 0, false}, {[]string{"idle"}, 0, false},
+		{[]string{"timeout"}, 137, false}, {[]string{"preempt", "terminate"}, 0, false},
+		{[]string{"drain"}, 0, true}, {[]string{"preempt"}, 0, true}, {[]string{"migrate"}, 0, true},
+	} {
+		t.Run(fmt.Sprintf("%v exit %d", c.stops, c.code), func(t *testing.T) {
+			f := newFinishFixture(t)
+			f.serveUploads(t)
+			f.p.assign.Spec.ResumePolicy = spec.ResumeTransient
+			f.p.assign.Spec.Artifacts.Paths = []string{"/data/state"}
+			writeFile(t, filepath.Join(f.r.cfg.DataDir, "rt", proto.OutputFile(1)), `{"seq":1}`+"\n")
+			for _, why := range c.stops {
+				f.p.mu.Lock()
+				if f.p.stopWhy == "" || terminateStop(why) {
+					f.p.stopWhy = why
+				}
+				f.p.mu.Unlock()
+			}
+			f.release()
+			f.p.setPhase("exited")
+			go func() {
+				defer close(f.p.done)
+				f.p.finish(context.Background(), &exitRecord{Code: c.code, Reason: "stopped", OutputSeq: 3})
+			}()
+			mustEnd(t, f.p, "the placement never ended")
+			sd := f.snapshotDone(t)
+			if sd.Error != "" || sd.Manifest.SnapshotID == "" || sd.Output == nil || len(sd.Artifacts) != 1 {
+				t.Fatalf("snapshot.done %+v: want a snapshot id, the output and the artifact", sd)
+			}
+			exported := strings.Contains(f.podmanLog(), "volume export")
+			if exported != c.volumes || (len(sd.Manifest.Volumes) == 1) != c.volumes || (!c.volumes && len(sd.Manifest.Volumes) != 0) {
+				t.Fatalf("volume export run %v, manifest volumes %+v: want exported %v", exported, sd.Manifest.Volumes, c.volumes)
+			}
+			wantMove := ""
+			if c.volumes {
+				wantMove = c.stops[0]
+			}
+			if sd.Manifest.MoveStop != wantMove {
+				t.Fatalf("manifest moveStop %q, want %q", sd.Manifest.MoveStop, wantMove)
+			}
+			if rec := f.r.snapshotRecords()[sd.Manifest.SnapshotID]; rec == nil || rec.MoveStop != wantMove {
+				t.Fatalf("saved record %+v, want moveStop %q", rec, wantMove)
+			}
+		})
+	}
+}
+
+// The runner records a move in the manifest even when the spec declares no
+// state volume: provenance is not inferred from the volume count.
+func TestTransientMoveWithoutStateVolumesRecordsMove(t *testing.T) {
+	f := newFinishFixture(t)
+	f.serveUploads(t)
+	f.p.assign.Spec.ResumePolicy = spec.ResumeTransient
+	f.p.state.Volumes = nil
+	f.p.stopWhy = "migrate"
+	f.release()
+	f.p.setPhase("exited")
+	go func() {
+		defer close(f.p.done)
+		f.p.finish(context.Background(), &exitRecord{Code: 143, Reason: "stopped"})
+	}()
+	mustEnd(t, f.p, "the placement never ended")
+	sd := f.snapshotDone(t)
+	if len(sd.Manifest.Volumes) != 0 || sd.Manifest.MoveStop != "migrate" {
+		t.Fatalf("manifest %+v, want zero volumes and moveStop migrate", sd.Manifest)
+	}
+}
+
+// A transient natural-exit snapshot remains a natural exit even if luxd's
+// move request reaches the runner afterwards: once uploaded, its copy can be
+// reclaimed. An upload still pending keeps it.
+func TestTransientDiskGuardUsesSnapshotDecision(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		move     string
+		uploaded bool
+		want     bool
+	}{
+		{"natural uploaded", "", true, true},
+		{"natural uploading", "", false, false},
+		{"move uploaded", "drain", true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newDiskFixture(t)
+			st := &runState{RunID: "run1", Epoch: 1, Phase: "reported", LastExitAt: 1, StopReason: "drain",
+				Spec: &spec.RunSpec{ResumePolicy: spec.ResumeTransient}}
+			if err := writeRunState(f.r.runDir("run1"), st); err != nil {
+				t.Fatal(err)
+			}
+			saveRecord(t, f.r, "s1", &snapshotRecord{RunID: "run1", Epoch: 1, Reported: true, MoveStop: c.move,
+				Uploads: []pendingUpload{{BlobID: "out", Size: 1, Done: c.uploaded}}})
+			if got := f.r.localCopies(); len(got) != 1 || got[0].reclaimable != c.want {
+				t.Fatalf("copies %+v, want reclaimable %v", got, c.want)
 			}
 		})
 	}

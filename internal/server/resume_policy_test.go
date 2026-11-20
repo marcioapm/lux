@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -30,12 +31,18 @@ func policyFixture(t *testing.T, policy string) (*Server, context.Context) {
 	readyHost(t, s, "h1", "default", "", false)
 	readyHost(t, s, "h2", "default", "", false)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', $1, 'running', 1)`, sp)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
+	// Running, as luxd records it: its container started, luxd saw it run.
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, container_started_at, started_at)
+		VALUES ('p1', 't1', 'r1', 'h1', 1, 'running', now(), now())`)
 	execSQL(t, s, ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, port, command, state, epoch)
 		VALUES ('srv_webwebwebwebwebw', 't1', 'r1', 'web', 3000, '["serve"]', 'ready', 1)`)
 	s.secrets.put("r1", map[string]string{"TOKEN": "jit"})
 	return s, ctx
 }
+
+// neverRefusal is the 409 message and resumability blocker of a never (or
+// spot) Run.
+const neverRefusal = "resumePolicy never: this Run cannot be resumed"
 
 func operatorCtx() context.Context {
 	return context.WithValue(context.Background(), principalKey, Principal{Operator: true, TenantID: "t1", Scopes: []string{"admin", "operator"}})
@@ -82,13 +89,28 @@ func exitR1(t *testing.T, s *Server) {
 }
 
 // snapshotR1 reports r1's placement 1 took snapshot snapR1 (session sess-1).
+// As the runner does, it records a move already requested of the placement
+// when it decides to export.
 func snapshotR1(t *testing.T, s *Server) {
 	t.Helper()
 	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "snapR1", RunID: "r1", Epoch: 1, SessionID: "sess-1",
-		Volumes: []proto.VolumeSnapshot{{Name: "work", Path: "/work", BlobID: "b-r1-vol", Size: 10, SHA256: "r1-vol"}}}}
+		MoveStop: requestedMove(t, s, 1),
+		Volumes:  []proto.VolumeSnapshot{{Name: "work", Path: "/work", BlobID: "b-r1-vol", Size: 10, SHA256: "r1-vol"}}}}
 	if got := reportSnapshot(t, s, "h1", "r1", 1, sd); got.Type != proto.MsgAck || ackRefused(t, got) {
 		t.Fatalf("snapshot report: %s %s", got.Type, got.Data)
 	}
+}
+
+// requestedMove is the move reason luxd has sent r1's placement epoch, as
+// the runner sees it at its export decision; "" for none.
+func requestedMove(t *testing.T, s *Server, epoch int) string {
+	t.Helper()
+	var stop string
+	systemScan(t, s, `SELECT coalesce(stop_reason, '') FROM placements WHERE run_id = 'r1' AND epoch = $1`, []any{epoch}, &stop)
+	if !spec.IsMoveStop(stop) {
+		return ""
+	}
+	return stop
 }
 
 // reportR1Exit reports r1's placement 1 exited with code and reason.
@@ -567,7 +589,7 @@ func TestResumePolicyNeverRefusesResume(t *testing.T) {
 					Input: &resumeInput{Text: "go on"}}})
 				var he *HTTPError
 				if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "not_resumable" ||
-					he.Message != neverResumableReason {
+					he.Message != neverRefusal {
 					t.Fatalf("resume: %v, want 409 not_resumable", err)
 				}
 				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
@@ -587,7 +609,7 @@ func TestResumePolicyNeverRefusesResume(t *testing.T) {
 					t.Fatal(err)
 				}
 				rs, err := s.resumability(context.Background(), "t1", run)
-				if err != nil || !slices.Contains(rs.Blockers, neverResumableReason) {
+				if err != nil || !slices.Contains(rs.Blockers, neverRefusal) {
 					t.Fatalf("resumability %+v %v", rs, err)
 				}
 			})

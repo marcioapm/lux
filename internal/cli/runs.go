@@ -54,6 +54,15 @@ smallest size covering them; on an unshaped pool, --size is refused.
 the Run away on its own initiative (docs/runspec.md, Non-preemptible Runs).
 It needs a pool named by --pool or the spec, one with preemptible false.
 
+The spec's resumePolicy says what a move (drain, preemption, migrate) and
+the Run's end do (docs/runspec.md, Resume policy):
+  auto       move: resumed from its snapshot; end: resumable
+  restart    move: started again from scratch; end: resumable
+  manual     move: ends failed; end: resumable
+  never      move: ends terminated; end: terminated, no volume snapshot
+  transient  move: resumed from its snapshot; end: terminated, no volume
+             snapshot, its snapshots' volumes deleted at once
+
 Secret values in the spec can be read from the environment with
 value: ${NAME}, or from a .env file with --secrets-from.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -316,7 +325,7 @@ an estimate, or a cost source has not answered yet.`,
 	cmd.Flags().StringVar(&owner, "owner", "", "owner's id, email or service account name")
 	cmd.Flags().BoolVar(&mine, "mine", false, "your Runs and those of service accounts you own")
 	cmd.Flags().StringVar(&state, "state", "", "filter by state (comma-separated)")
-	cmd.Flags().BoolVar(&resumable, "resumable", false, "only Runs resume accepts (stopped, lost, failed, succeeded; not resumePolicy never, nor those whose only snapshot report was refused)")
+	cmd.Flags().BoolVar(&resumable, "resumable", false, "only Runs resume accepts (stopped, lost, failed, succeeded; not resumePolicy never or transient, nor those whose only snapshot report was refused)")
 	cmd.Flags().StringVar(&host, "host", "", "only Runs placed on this host (id or name), ever")
 	cmd.Flags().IntVar(&limit, "limit", 0, "at most this many (default 100, max 1000)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "filter by label key=value")

@@ -37,7 +37,7 @@ wanted() { [[ " $ARCHES " == *" $1 "* ]]; }
 # validate: `luxd validate` checks a configuration as serve would, connecting to nothing.
 # resume-secrets: a resume declares secrets the Run lacks (secrets) and removes them (removeSecrets).
 # sync-modes: a sync entry's mode (move, fast-forward, fetch) on POST /v1/runs/{id}/sync and a resume's sync.
-# resume-policy: a RunSpec's resumePolicy (auto, restart, manual, never); an older luxd ignores it and treats the Run as auto.
+# resume-policy: a RunSpec's resumePolicy (auto, restart, manual, never, transient); an older luxd ignores it and treats the Run as auto.
 # egress-wildcards: a network.egress host rule *.<domain>; an older luxd refuses it, an older runner admits no name under it.
 # git-credentials: credentials (per repository name, a git credential) on POST /v1/runs/{id}/push and /sync; an older luxd refuses the field (422).
 # pool-sizes: a pool's shape and sizes, resources.size on submit and resume, and a Run's sizing; an older luxd refuses shape and resources.size as unknown fields.

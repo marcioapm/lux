@@ -40,7 +40,7 @@ type RunSpec struct {
 	Sandbox   Sandbox           `json:"sandbox" yaml:"sandbox"`
 	Artifacts Artifacts         `json:"artifacts" yaml:"artifacts"`
 	// Empty means ResumeAuto for normal Runs; spot normalizes it to never.
-	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: it can never be resumed, so every end that would leave it resumable (a move, a requested stop, success, failure) ends it terminated, its outcome in stateReason (e.g. succeeded; resumePolicy never), its state volumes are not snapshotted on exit, and an operator's migrate is refused; a requested resume of one still resting from an older luxd is refused (409 not_resumable); an assignment no runner started may still be placed again. For one-shot work such as a CI job holding a single-use token."`
+	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: it can never be resumed, so every end that would leave it resumable (a move, a requested stop, success, failure) ends it terminated, its outcome in stateReason (e.g. succeeded; resumePolicy never), its state volumes are not snapshotted on exit, and an operator's migrate is refused; a requested resume of one still resting from an older luxd is refused (409 not_resumable); an assignment no runner started may still be placed again. For one-shot work such as a CI job holding a single-use token. transient: a move resumes it elsewhere, as auto, but only from the snapshot its runner exported for that move (a move during its start, from its current snapshot); every other end (a requested stop, an idle stop, success, failure, a lost host, a move after the workload exited or whose export failed or never arrived) ends it terminated as never does (e.g. succeeded; resumePolicy transient), its state volumes not snapshotted on that exit; once terminated, the volumes of every snapshot it took are deleted at the next reaper pass rather than after the tenant's retentionDays (its output and artifacts keep normal retention); a requested resume is refused (409 not_resumable). For read-only one-shot work such as a review. Spot Runs require never."`
 }
 
 // RunSpec.ResumePolicy values.
@@ -49,7 +49,21 @@ const (
 	ResumeRestart = "restart"
 	ResumeManual  = "manual"
 	ResumeNever   = "never"
+	// ResumeTransient moves like auto and ends like never: resumed after a
+	// move, terminated on any other end, its snapshots' volumes deleted
+	// once it is terminated.
+	ResumeTransient = "transient"
 )
+
+// moveStops: the stop reasons that move a Run (a drain, a spot preemption,
+// a migration) rather than stop it.
+var moveStops = []string{"drain", "preempt", "migrate"}
+
+// IsMoveStop reports whether a stop reason moves a Run rather than stops
+// it: luxd places a moved Run again as soon as it has stopped (resumed, or
+// restarted from scratch) unless its resumePolicy ends it (FailsOnMove),
+// and the runner's export decision (ExportsOnStop) reads it too.
+func IsMoveStop(stop string) bool { return slices.Contains(moveStops, stop) }
 
 // FailsOnMove reports whether a resumePolicy ends the Run, rather than
 // placing it again, when lux moves it: manual (failed) and never
@@ -57,8 +71,23 @@ const (
 func FailsOnMove(policy string) bool { return policy == ResumeManual || policy == ResumeNever }
 
 // RefusesResume reports whether a resumePolicy refuses every requested
-// resume: never.
-func RefusesResume(policy string) bool { return policy == ResumeNever }
+// resume: never and transient. Whether a stop exports the Run's state
+// volumes is ExportsOnStop.
+func RefusesResume(policy string) bool { return policy == ResumeNever || policy == ResumeTransient }
+
+// ExportsOnStop reports whether a placement stopped for stop exports its
+// state volumes under a resumePolicy: never does not, transient only for a
+// move (IsMoveStop), every other policy does. A terminate or cancel exports
+// nothing under any policy; that is the runner's own check.
+func ExportsOnStop(policy, stop string) bool {
+	switch policy {
+	case ResumeNever:
+		return false
+	case ResumeTransient:
+		return IsMoveStop(stop)
+	}
+	return true
+}
 
 // Image is exactly one of a pinned reference or a build.
 type Image struct {
@@ -850,9 +879,9 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		}
 	} else {
 		switch s.ResumePolicy {
-		case "", ResumeAuto, ResumeRestart, ResumeManual, ResumeNever:
+		case "", ResumeAuto, ResumeRestart, ResumeManual, ResumeNever, ResumeTransient:
 		default:
-			fail("resumePolicy: must be auto, restart, manual or never, got %q", s.ResumePolicy)
+			fail("resumePolicy: must be auto, restart, manual, never or transient, got %q", s.ResumePolicy)
 		}
 	}
 	for i, e := range s.Network.Egress {

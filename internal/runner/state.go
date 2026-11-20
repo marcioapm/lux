@@ -136,9 +136,11 @@ type pendingUpload struct {
 // snapshotRecord is a placement's snapshot's blobs (named by the snapshot
 // id), or one published artifact's (named by the artifact id).
 type snapshotRecord struct {
-	RunID   string          `json:"runId"`
-	Epoch   int             `json:"epoch"`
-	Uploads []pendingUpload `json:"uploads"`
+	// MoveStop is the snapshot manifest's runner decision; the disk guard reads it.
+	MoveStop string          `json:"moveStop,omitempty"`
+	RunID    string          `json:"runId"`
+	Epoch    int             `json:"epoch"`
+	Uploads  []pendingUpload `json:"uploads"`
 	// Discard: its Run's local copy was removed; delete the files once the
 	// last uploads finish.
 	Discard bool  `json:"discard,omitempty"`
