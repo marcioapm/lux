@@ -521,8 +521,10 @@ func TestTransientInterruptedMoveResumes(t *testing.T) {
 }
 
 // Every requested resume of a transient Run is refused 409 not_resumable,
-// and resumability lists never's blocker; nor is it listed resumable.
+// and resumability lists the same blocker, naming its policy; nor is it
+// listed resumable.
 func TestTransientRefusesResume(t *testing.T) {
+	const transientRefusal = "resumePolicy transient: this Run cannot be resumed"
 	for _, how := range []string{"succeeded", "stopped by request", "running", "stopped", "lost", "legacy succeeded", "failed"} {
 		t.Run(how, func(t *testing.T) {
 			s, ctx := policyFixture(t, "transient")
@@ -554,7 +556,7 @@ func TestTransientRefusesResume(t *testing.T) {
 			for _, pctx := range []context.Context{tenantCtx("t1"), operatorCtx()} {
 				_, err := s.resumeRun(pctx, &resumeRunInput{RunPath: RunPath{ID: "r1"}})
 				var he *HTTPError
-				if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "not_resumable" || he.Message != neverResumableReason {
+				if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "not_resumable" || he.Message != transientRefusal {
 					t.Fatalf("resume: %v, want 409 not_resumable", err)
 				}
 			}
@@ -562,7 +564,7 @@ func TestTransientRefusesResume(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if rs, err := s.resumability(context.Background(), "t1", run); err != nil || !slices.Contains(rs.Blockers, neverResumableReason) {
+			if rs, err := s.resumability(context.Background(), "t1", run); err != nil || !slices.Contains(rs.Blockers, transientRefusal) {
 				t.Fatalf("resumability %+v %v", rs, err)
 			}
 			out, err := s.listRuns(tenantCtx("t1"), &listRunsInput{Resumable: true})

@@ -1414,7 +1414,7 @@ func (s *Server) getRun(ctx context.Context, in *RunPath) (*runOutput, error) {
 func (s *Server) resumability(ctx context.Context, tenantID string, run *Run) (*Resumability, error) {
 	rs := &Resumability{Snapshot: run.SnapshotID}
 	if spec.RefusesResume(run.Spec.ResumePolicy) {
-		rs.Blockers = append(rs.Blockers, neverResumableReason)
+		rs.Blockers = append(rs.Blockers, neverResumableReason(run.Spec.ResumePolicy))
 	}
 	for _, ref := range run.Secrets {
 		rs.Secrets = append(rs.Secrets, ref.Name)
@@ -1891,7 +1891,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		// Before anything else: whatever its state, such a Run is never
 		// placed again on request.
 		if sp.Spot || spec.RefusesResume(sp.ResumePolicy) {
-			return errNeverResumable()
+			return errNeverResumable(sp.ResumePolicy)
 		}
 		var to *resolvedPool
 		if req.Placement != nil {

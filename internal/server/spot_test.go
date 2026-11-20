@@ -62,7 +62,7 @@ func TestSpotResumeRefusesUnnormalizedStoredPolicy(t *testing.T) {
 	for _, validate := range []bool{false, true} {
 		_, err := s.resumeRun(tenantCtx("t1"), &resumeRunInput{RunPath: RunPath{ID: "legacy"}, Body: &resumeRequest{ValidateOnly: validate}})
 		var he *HTTPError
-		if !errors.As(err, &he) || he.Code != "not_resumable" || he.Message != neverResumableReason {
+		if !errors.As(err, &he) || he.Code != "not_resumable" || he.Message != neverRefusal {
 			t.Fatalf("resume validateOnly=%v: %v", validate, err)
 		}
 	}

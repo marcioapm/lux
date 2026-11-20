@@ -152,15 +152,21 @@ const refusesResumeSQL = runResumePolicySQL + ` IN ('` + spec.ResumeNever + `', 
 // no session, so a resume restores nothing (assign sends no ResumeInfo).
 const restartsFromScratchSQL = `(` + runResumePolicySQL + ` = '` + spec.ResumeRestart + `' AND r.session_id = '')`
 
-// neverResumableReason is why a Run whose resumePolicy is never (or
-// transient: the same refusal) is not resumed: the 409's message and its
-// resumability blocker.
-const neverResumableReason = "resumePolicy never: this Run cannot be resumed"
+// neverResumableReason is why a Run whose resumePolicy refuses every
+// requested resume (spec.RefusesResume) is not resumed, naming the policy:
+// the 409's message and its resumability blocker. Any other policy is a
+// spot Run's, which is never whatever its spec stored.
+func neverResumableReason(policy string) string {
+	if !spec.RefusesResume(policy) {
+		policy = spec.ResumeNever
+	}
+	return "resumePolicy " + policy + ": this Run cannot be resumed"
+}
 
 // errNeverResumable refuses any requested resume of a Run whose
-// resumePolicy is never or transient (spec.RefusesResume).
-func errNeverResumable() error {
-	return errf(http.StatusConflict, "not_resumable", "%s", neverResumableReason)
+// resumePolicy is policy (neverResumableReason).
+func errNeverResumable(policy string) error {
+	return errf(http.StatusConflict, "not_resumable", "%s", neverResumableReason(policy))
 }
 
 // forgetRestoredState makes a Run's next placement a first one: with no

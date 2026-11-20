@@ -40,6 +40,10 @@ func policyFixture(t *testing.T, policy string) (*Server, context.Context) {
 	return s, ctx
 }
 
+// neverRefusal is the 409 message and resumability blocker of a never (or
+// spot) Run.
+const neverRefusal = "resumePolicy never: this Run cannot be resumed"
+
 func operatorCtx() context.Context {
 	return context.WithValue(context.Background(), principalKey, Principal{Operator: true, TenantID: "t1", Scopes: []string{"admin", "operator"}})
 }
@@ -585,7 +589,7 @@ func TestResumePolicyNeverRefusesResume(t *testing.T) {
 					Input: &resumeInput{Text: "go on"}}})
 				var he *HTTPError
 				if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "not_resumable" ||
-					he.Message != neverResumableReason {
+					he.Message != neverRefusal {
 					t.Fatalf("resume: %v, want 409 not_resumable", err)
 				}
 				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
@@ -605,7 +609,7 @@ func TestResumePolicyNeverRefusesResume(t *testing.T) {
 					t.Fatal(err)
 				}
 				rs, err := s.resumability(context.Background(), "t1", run)
-				if err != nil || !slices.Contains(rs.Blockers, neverResumableReason) {
+				if err != nil || !slices.Contains(rs.Blockers, neverRefusal) {
 					t.Fatalf("resumability %+v %v", rs, err)
 				}
 			})
