@@ -489,14 +489,8 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 		return err
 	}
 	recordedStop := stopReason
-	if policy == spec.ResumeTransient && started && spec.IsMoveStop(stopReason) {
-		// A move recorded after the runner's export decision is not a move
-		// of this exit: decide from the actual exit, never an empty restore.
-		// A placement whose container never started ran nothing and left
-		// no new state: its move stands, resumed from the Run's snapshot.
-		if stopReason, err = transientMoveStop(ctx, tx, runID, epoch); err != nil {
-			return err
-		}
+	if stopReason, err = effectiveStop(ctx, tx, runID, epoch, policy, stopReason, started); err != nil {
+		return err
 	}
 	moveStop := spec.IsMoveStop(stopReason)
 	failsOnMove := moveStop && spec.FailsOnMove(policy)
@@ -603,12 +597,18 @@ const containerStartedSQL = `(p.container_started_at IS NOT NULL OR p.started_at
 	OR EXISTS (SELECT 1 FROM runs r JOIN snapshots s ON s.id = r.snapshot_id AND s.run_id = r.id
 		WHERE r.id = p.run_id AND s.epoch = p.epoch))`
 
-// transientMoveStop is the move reason the runner captured in the Run's
-// current snapshot when it decided to export it, for this same placement
-// epoch. A missing snapshot or marker is "": a transient Run is not moved.
-// Asked only of a placement whose container started.
-func transientMoveStop(ctx context.Context, tx pgx.Tx, runID string, epoch int) (string, error) {
-	var stop string
+// effectiveStop is the stop reason a placement's end is decided by: its
+// recorded stop, except a transient Run's move whose container started.
+// That move counts only as the runner's export decision recorded it in the
+// Run's current snapshot of this same epoch (its moveStop); a move recorded
+// after that decision is not a move of this exit, and a missing snapshot
+// or marker is "": not moved, never an empty restore. A placement whose
+// container never started ran nothing and left no new state: its move
+// stands, resumed from the Run's snapshot.
+func effectiveStop(ctx context.Context, tx pgx.Tx, runID string, epoch int, policy, stop string, started bool) (string, error) {
+	if policy != spec.ResumeTransient || !started || !spec.IsMoveStop(stop) {
+		return stop, nil
+	}
 	err := tx.QueryRow(ctx, `SELECT coalesce(s.manifest->>'moveStop', '') FROM runs r
 		JOIN snapshots s ON s.id = r.snapshot_id AND s.run_id = r.id
 		WHERE r.id = $1 AND s.epoch = $2`, runID, epoch).Scan(&stop)
@@ -692,10 +692,8 @@ func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epo
 	if err != nil {
 		return "", err
 	}
-	if policy == spec.ResumeTransient && started && spec.IsMoveStop(stopReason) {
-		if stopReason, err = transientMoveStop(ctx, tx, runID, epoch); err != nil {
-			return "", err
-		}
+	if stopReason, err = effectiveStop(ctx, tx, runID, epoch, policy, stopReason, started); err != nil {
+		return "", err
 	}
 	// Continue only a move already requested before the host disappeared.
 	// A refused snapshot blocks automatic restoration even with an older copy.
