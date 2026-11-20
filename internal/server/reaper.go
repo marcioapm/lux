@@ -29,9 +29,9 @@ func (s *Server) reaperLoop(ctx context.Context) {
 }
 
 // storageReapEvery is how often reapSuperseded, reapRetention and
-// reapTransient run:
-// their deadlines are uploads and days, and each scans every Run with
-// retainable blobs, so they need not run every tick as leases and hosts do.
+// reapTransient run: their deadlines are uploads and days, and each scans
+// every Run with retainable blobs, so they need not run every tick as
+// leases and hosts do.
 const storageReapEvery = time.Minute
 
 // reapOnce is one reaper tick. lastStorage is when the storage reapers

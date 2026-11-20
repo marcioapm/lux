@@ -719,8 +719,8 @@ const foreignSnapshotReason = "its snapshot does not match this Run's blob recor
 const snapshotUnavailableReason = "its snapshot is no longer available"
 
 // secretsLostReason (secretsLostNeverReason for a never or transient Run,
-// which cannot be resumed by request) is the state_reason of a queued Run whose secret values no
-// luxd holds any more.
+// which cannot be resumed by request) is the state_reason of a queued Run
+// whose secret values no luxd holds any more.
 const (
 	secretsLostReason      = "secrets must be supplied again: resume with them"
 	secretsLostNeverReason = "its secrets are no longer held"
