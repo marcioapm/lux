@@ -334,6 +334,41 @@ func TestTransientSnapshotProvesStartedWhenStartUnheard(t *testing.T) {
 	}
 }
 
+// A container whose start luxd hears only from the end report's
+// containerStarted time (no running report arrived, so started_at is NULL)
+// and no snapshot of its epoch, exited naturally; a move luxd recorded
+// before that end report arrived is not a move of this exit: the Run ends
+// terminated, not placed again as a start the move cancelled.
+func TestTransientContainerStartedMarkProvesStart(t *testing.T) {
+	for _, stop := range []string{"drain", "preempt", "migrate"} {
+		t.Run(stop, func(t *testing.T) {
+			s, ctx := policyFixture(t, "transient")
+			execSQL(t, s, ctx, `UPDATE placements SET state = 'assigned', container_started_at = NULL, started_at = NULL WHERE id = 'p1'`)
+			execSQL(t, s, ctx, `UPDATE runs SET state = 'scheduled' WHERE id = 'r1'`)
+			startingR1(t, s, "h1", 1)
+			moveHost(t, s, stop, "h1")
+			code, ms := 0, time.Now().UnixMilli()
+			if got := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgStatus, ID: 4, RunID: "r1", Epoch: 1,
+				Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "exited",
+					Times: map[string]int64{"imageReady": ms, "containerStarted": ms}})}); got.Type != proto.MsgAck {
+				t.Fatalf("exit report: %s %s", got.Type, got.Data)
+			}
+			var marked, startedAt, snapshot bool
+			systemScan(t, s, `SELECT container_started_at IS NOT NULL, started_at IS NOT NULL,
+					EXISTS (SELECT 1 FROM snapshots WHERE run_id = 'r1') FROM placements WHERE id = 'p1'`,
+				nil, &marked, &startedAt, &snapshot)
+			if !marked || startedAt || snapshot {
+				t.Fatalf("container_started_at set %v, started_at set %v, snapshot %v: want only the start mark", marked, startedAt, snapshot)
+			}
+			var state, reason string
+			systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
+			if state != StateTerminated || reason != "succeeded; resumePolicy transient" {
+				t.Fatalf("Run %s (%s), want terminated (succeeded; resumePolicy transient)", state, reason)
+			}
+		})
+	}
+}
+
 func TestTransientRunEndsTerminated(t *testing.T) {
 	for _, c := range []struct {
 		name   string
