@@ -346,11 +346,19 @@ func (s *Server) relayOutput(ctx context.Context, pl placementOutput, since int6
 	runID := pl.runID
 	f := proto.Frame{Type: proto.MsgOutputSubscribe, RunID: runID, Epoch: pl.epoch,
 		Data: proto.Marshal(proto.OutputSubscribe{SubID: subID, Since: since, Follow: follow})}
-	if err := s.hub.SendLive(pl.hostID, f); err != nil {
+	c, err := s.hub.sendLiveBound(ctx, pl.hostID, f)
+	if err != nil {
 		return false, err
 	}
-	defer s.hub.SendLive(pl.hostID, proto.Frame{Type: proto.MsgOutputCancel, RunID: runID, Epoch: pl.epoch,
-		Data: proto.Marshal(proto.OutputSubscribe{SubID: subID})})
+	defer func() {
+		// Cancellation is best effort, and belongs only to this producer.
+		// A closed or congested connection must not delay a retry.
+		select {
+		case c.send <- proto.Frame{Type: proto.MsgOutputCancel, RunID: runID, Epoch: pl.epoch,
+			Data: proto.Marshal(proto.OutputSubscribe{SubID: subID})}:
+		default:
+		}
+	}()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	idle := 0
@@ -358,14 +366,13 @@ func (s *Server) relayOutput(ctx context.Context, pl placementOutput, since int6
 		select {
 		case <-ctx.Done():
 			return false, ctx.Err()
+		case <-c.done:
+			return false, fmt.Errorf("host disconnected")
 		case <-ticker.C:
 			if err := tick(); err != nil {
 				return false, err
 			}
 			idle++
-			if !s.hub.Streaming(pl.hostID) {
-				return false, fmt.Errorf("host disconnected")
-			}
 			if !follow && idle > 30 {
 				return false, fmt.Errorf("host did not answer")
 			}

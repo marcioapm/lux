@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,6 +18,55 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/store"
 )
+
+// A replacement can arrive between ticks: host reachability is not the
+// lifetime of the connection that owns this subscription.
+func TestRelayOutputConnectionReplacement(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &Server{}
+		s.hub = newHub(s)
+		old := &runnerConn{send: make(chan proto.Frame, 8), done: make(chan struct{})}
+		s.hub.conns["host"] = old
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		type result struct {
+			done bool
+			err  error
+		}
+		results := make(chan result, 1)
+		records := make(chan int64, 1)
+		go func() {
+			done, err := s.relayOutput(ctx, placementOutput{runID: "run", epoch: 43, hostID: "host", state: "running"}, 112, true,
+				func(r proto.Record) error { records <- r.Seq; return nil }, func() error { return nil })
+			results <- result{done, err}
+		}()
+		f := <-old.send
+		var sub proto.OutputSubscribe
+		if f.Type != proto.MsgOutputSubscribe || json.Unmarshal(f.Data, &sub) != nil || sub.Since != 112 {
+			t.Fatalf("subscribe: %+v", f)
+		}
+		s.hub.route(sub.SubID, proto.Frame{Type: proto.MsgOutputRecords,
+			Data: proto.Marshal(proto.OutputRecords{SubID: sub.SubID, Records: []proto.Record{{Seq: 113}}})})
+		if seq := <-records; seq != 113 {
+			t.Fatalf("record = %d, want 113", seq)
+		}
+		s.hub.mu.Lock()
+		s.hub.conns["host"] = &runnerConn{send: make(chan proto.Frame, 8), done: make(chan struct{})}
+		s.hub.mu.Unlock()
+		close(old.done)
+		synctest.Wait()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		select {
+		case got := <-results:
+			if got.done || got.err == nil {
+				t.Fatalf("interruption = %+v, want false and error", got)
+			}
+		default:
+			t.Fatal("old relay stayed alive across connection replacement: new lifecycle advances but no new records can be subscribed")
+		}
+	})
+}
 
 // fakeOutputHost stands in for a host's runner connection, answering output
 // subscriptions as a real runner does: for a placement it does not hold, an

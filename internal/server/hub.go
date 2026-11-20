@@ -107,17 +107,27 @@ func (h *Hub) Notify(hostID string) {
 
 // SendLive sends a non-durable frame (stream control) to a connected runner.
 func (h *Hub) SendLive(hostID string, f proto.Frame) error {
+	_, err := h.sendLiveBound(context.Background(), hostID, f)
+	return err
+}
+
+// sendLiveBound captures the connection once, so the frame and its lifetime
+// cannot belong to different connections when a runner reconnects. Never hold
+// the hub lock while waiting for space in the connection's send queue.
+func (h *Hub) sendLiveBound(ctx context.Context, hostID string, f proto.Frame) (*runnerConn, error) {
 	c := h.conn(hostID)
 	if c == nil {
-		return errors.New("host is not connected")
+		return nil, errors.New("host is not connected")
 	}
 	select {
 	case c.send <- f:
-		return nil
+		return c, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case <-c.done:
-		return errors.New("host disconnected")
+		return nil, errors.New("host disconnected")
 	case <-time.After(10 * time.Second):
-		return errors.New("host connection is congested")
+		return nil, errors.New("host connection is congested")
 	}
 }
 
