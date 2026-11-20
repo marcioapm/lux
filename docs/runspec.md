@@ -521,17 +521,22 @@ lux moves a Run when a force-evicting drain (`lux hosts drain --force-evict`,
   started (refused by an outdated runner) may still be placed again: none
   of the work ran.
 - `transient`: for read-only one-shot work such as a code review or an
-  audit. A move resumes it elsewhere from its snapshot with its session, as
-  `auto` (and `lux migrate` moves it). Every other end ends it `terminated`,
-  as `never`: `succeeded; resumePolicy transient`, `stop; resumePolicy
-  transient`, `idle; resumePolicy transient`, and so on; its state volumes
-  are not snapshotted on that exit. Once it is terminated, the next reaper
-  pass deletes the volumes of every snapshot it took for a move, without
+  audit. A move resumes it elsewhere with its session, as `auto` (and `lux
+  migrate` moves it), but only from a snapshot its runner exported for that
+  move. A move during its start, before its container ran, resumes it from
+  the Run's current snapshot (none on a first placement). Every other end
+  ends it `terminated`, as `never`: `succeeded; resumePolicy transient`,
+  `stop; resumePolicy transient`, `idle; resumePolicy transient`, and so
+  on; its state volumes are not snapshotted on that exit. A move ends it
+  `terminated` too when the workload had already exited on its own, when
+  the move's export failed or was interrupted, or when its host was lost
+  before that export. Once it is terminated, the next reaper pass deletes
+  the volumes of every snapshot it took (its earlier moves'), without
   waiting for the tenant's retention, and marks those snapshots
   unavailable; its output and artifacts keep normal retention, so `lux
   collect` and `lux logs` still work. A requested resume is refused, 409
-  `not_resumable`, and `lux ls --resumable` leaves it out. Spot Runs still
-  require `never`.
+  `not_resumable`, "resumePolicy transient: this Run cannot be resumed",
+  and `lux ls --resumable` leaves it out. Spot Runs still require `never`.
 
 Except for `never` and `transient`, the policy covers only what lux does by itself: a resume
 you ask for restores the snapshot as usual. A cordon-only drain does not stop
