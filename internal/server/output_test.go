@@ -20,40 +20,81 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
+// testConn is a runner connection with a send queue of size buffer.
+func testConn(buffer int) *runnerConn {
+	return &runnerConn{send: make(chan proto.Frame, buffer), done: make(chan struct{})}
+}
+
+// relayServer is a server whose hub has c as "host"'s connection.
+func relayServer(c *runnerConn) *Server {
+	s := &Server{}
+	s.hub = newHub(s)
+	s.hub.conns["host"] = c
+	return s
+}
+
+// replaceConn installs c as "host"'s connection, as a reconnecting runner does.
+func replaceConn(h *Hub, c *runnerConn) {
+	h.mu.Lock()
+	h.conns["host"] = c
+	h.mu.Unlock()
+}
+
+type relayResult struct {
+	done bool
+	err  error
+}
+
+// startRelay runs relayOutput for run on "host" in the background.
+func startRelay(ctx context.Context, s *Server, epoch int, state string, since int64, follow bool, emit func(proto.Record) error) <-chan relayResult {
+	results := make(chan relayResult, 1)
+	go func() {
+		done, err := s.relayOutput(ctx, placementOutput{runID: "run", epoch: epoch, hostID: "host", state: state}, since, follow,
+			emit, func() error { return nil })
+		results <- relayResult{done, err}
+	}()
+	return results
+}
+
+// expectSubscribe takes a subscription from since off c's queue and returns
+// its id.
+func expectSubscribe(t *testing.T, c *runnerConn, since int64) string {
+	t.Helper()
+	f := <-c.send
+	var sub proto.OutputSubscribe
+	if f.Type != proto.MsgOutputSubscribe || json.Unmarshal(f.Data, &sub) != nil || sub.Since != since {
+		t.Fatalf("subscribe: %+v", f)
+	}
+	return sub.SubID
+}
+
+func routeRecords(s *Server, subID string, seqs ...int64) {
+	var recs []proto.Record
+	for _, q := range seqs {
+		recs = append(recs, proto.Record{Seq: q})
+	}
+	s.hub.route(subID, proto.Frame{Type: proto.MsgOutputRecords, Data: proto.Marshal(proto.OutputRecords{SubID: subID, Records: recs})})
+}
+
+func routeEnd(s *Server, subID string) {
+	s.hub.route(subID, proto.Frame{Type: proto.MsgOutputEnd, Data: proto.Marshal(proto.OutputEnd{SubID: subID})})
+}
+
 // A replacement can arrive between ticks: host reachability is not the
 // lifetime of the connection that owns this subscription.
 func TestRelayOutputConnectionReplacement(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		s := &Server{}
-		s.hub = newHub(s)
-		old := &runnerConn{send: make(chan proto.Frame, 8), done: make(chan struct{})}
-		s.hub.conns["host"] = old
+		old := testConn(8)
+		s := relayServer(old)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		type result struct {
-			done bool
-			err  error
-		}
-		results := make(chan result, 1)
 		records := make(chan int64, 1)
-		go func() {
-			done, err := s.relayOutput(ctx, placementOutput{runID: "run", epoch: 43, hostID: "host", state: "running"}, 112, true,
-				func(r proto.Record) error { records <- r.Seq; return nil }, func() error { return nil })
-			results <- result{done, err}
-		}()
-		f := <-old.send
-		var sub proto.OutputSubscribe
-		if f.Type != proto.MsgOutputSubscribe || json.Unmarshal(f.Data, &sub) != nil || sub.Since != 112 {
-			t.Fatalf("subscribe: %+v", f)
-		}
-		s.hub.route(sub.SubID, proto.Frame{Type: proto.MsgOutputRecords,
-			Data: proto.Marshal(proto.OutputRecords{SubID: sub.SubID, Records: []proto.Record{{Seq: 113}}})})
+		results := startRelay(ctx, s, 43, "running", 112, true, func(r proto.Record) error { records <- r.Seq; return nil })
+		routeRecords(s, expectSubscribe(t, old, 112), 113)
 		if seq := <-records; seq != 113 {
 			t.Fatalf("record = %d, want 113", seq)
 		}
-		s.hub.mu.Lock()
-		s.hub.conns["host"] = &runnerConn{send: make(chan proto.Frame, 8), done: make(chan struct{})}
-		s.hub.mu.Unlock()
+		replaceConn(s.hub, testConn(8))
 		close(old.done)
 		synctest.Wait()
 		time.Sleep(time.Second)
@@ -74,8 +115,7 @@ func TestRelayOutputConnectionReplacement(t *testing.T) {
 func TestOutputSubscriptionBoundDuringSend(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newHub(nil)
-		old := &runnerConn{send: make(chan proto.Frame), done: make(chan struct{})}
-		fresh := &runnerConn{send: make(chan proto.Frame, 1), done: make(chan struct{})}
+		old, fresh := testConn(0), testConn(1)
 		h.conns["host"] = old
 		type result struct {
 			conn *runnerConn
@@ -87,9 +127,7 @@ func TestOutputSubscriptionBoundDuringSend(t *testing.T) {
 			results <- result{c, err}
 		}()
 		synctest.Wait() // sender has captured old and is blocked on its queue
-		h.mu.Lock()
-		h.conns["host"] = fresh
-		h.mu.Unlock()
+		replaceConn(h, fresh)
 		if f := <-old.send; f.Type != proto.MsgOutputSubscribe {
 			t.Fatalf("sent %+v", f)
 		}
@@ -111,37 +149,21 @@ func TestOutputSubscriptionBoundDuringSend(t *testing.T) {
 
 func TestRelayOutputReplacementDuringSubscribe(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		s := &Server{}
-		s.hub = newHub(s)
-		old := &runnerConn{send: make(chan proto.Frame), done: make(chan struct{})}
-		fresh := &runnerConn{send: make(chan proto.Frame, 1), done: make(chan struct{})}
-		s.hub.conns["host"] = old
+		old, fresh := testConn(0), testConn(1)
+		s := relayServer(old)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		results := make(chan error, 1)
-		go func() {
-			done, err := s.relayOutput(ctx, placementOutput{runID: "run", epoch: 43, hostID: "host", state: "running"}, 112, true,
-				func(proto.Record) error { return nil }, func() error { return nil })
-			if done {
-				results <- fmt.Errorf("interruption reported done")
-				return
-			}
-			results <- err
-		}()
+		results := startRelay(ctx, s, 43, "running", 112, true, func(proto.Record) error { return nil })
 		synctest.Wait() // subscribe captured old; enqueue is blocked
-		s.hub.mu.Lock()
-		s.hub.conns["host"] = fresh
-		s.hub.mu.Unlock()
-		if f := <-old.send; f.Type != proto.MsgOutputSubscribe {
-			t.Fatalf("subscribe = %+v", f)
-		}
+		replaceConn(s.hub, fresh)
+		expectSubscribe(t, old, 112)
 		synctest.Wait() // relay has selected the subscription's lifetime
 		close(old.done)
 		synctest.Wait()
 		select {
-		case err := <-results:
-			if err == nil || err.Error() == "interruption reported done" {
-				t.Fatalf("interruption = %v", err)
+		case got := <-results:
+			if got.done || got.err == nil {
+				t.Fatalf("interruption = %+v, want false and error", got)
 			}
 		default:
 			t.Fatal("relay bound subscription lifetime to replacement")
@@ -152,40 +174,22 @@ func TestRelayOutputReplacementDuringSubscribe(t *testing.T) {
 	})
 }
 
-// gatedRelay starts relayOutput for epoch 1 on host's current connection, with
-// emit blocking on the first record until release is closed. It returns the
-// subscription id, the emitted seqs and the relay's result.
-func gatedRelay(t *testing.T, s *Server, c *runnerConn, state string, since int64, follow bool, release <-chan struct{}) (string, *[]int64, <-chan [2]any) {
+// gatedRelay starts relayOutput for epoch 1 on c, with emit blocking on the
+// first record until release is closed. It returns the subscription id, the
+// emitted seqs and the relay's result.
+func gatedRelay(t *testing.T, s *Server, c *runnerConn, state string, since int64, follow bool, release <-chan struct{}) (string, *[]int64, <-chan relayResult) {
 	t.Helper()
 	var seqs []int64
-	results := make(chan [2]any, 1)
 	first := true
-	go func() {
-		done, err := s.relayOutput(context.Background(), placementOutput{runID: "run", epoch: 1, hostID: "host", state: state}, since, follow,
-			func(r proto.Record) error {
-				if first {
-					first = false
-					<-release
-				}
-				seqs = append(seqs, r.Seq)
-				return nil
-			}, func() error { return nil })
-		results <- [2]any{done, err}
-	}()
-	f := <-c.send
-	var sub proto.OutputSubscribe
-	if f.Type != proto.MsgOutputSubscribe || json.Unmarshal(f.Data, &sub) != nil || sub.Since != since {
-		t.Fatalf("subscribe: %+v", f)
-	}
-	return sub.SubID, &seqs, results
-}
-
-func routeRecords(s *Server, subID string, seqs ...int64) {
-	var recs []proto.Record
-	for _, q := range seqs {
-		recs = append(recs, proto.Record{Seq: q})
-	}
-	s.hub.route(subID, proto.Frame{Type: proto.MsgOutputRecords, Data: proto.Marshal(proto.OutputRecords{SubID: subID, Records: recs})})
+	results := startRelay(context.Background(), s, 1, state, since, follow, func(r proto.Record) error {
+		if first {
+			first = false
+			<-release
+		}
+		seqs = append(seqs, r.Seq)
+		return nil
+	})
+	return expectSubscribe(t, c, since), &seqs, results
 }
 
 // The runner's read loop routes every frame before its connection's done is
@@ -196,25 +200,23 @@ func routeRecords(s *Server, subID string, seqs ...int64) {
 func TestRelayOutputDrainsBufferedFramesOnDisconnect(t *testing.T) {
 	for i := range 64 {
 		synctest.Test(t, func(t *testing.T) {
-			s := &Server{}
-			s.hub = newHub(s)
-			old := &runnerConn{send: make(chan proto.Frame, 8), done: make(chan struct{})}
-			s.hub.conns["host"] = old
+			old := testConn(8)
+			s := relayServer(old)
 			release := make(chan struct{})
 			subID, seqs, results := gatedRelay(t, s, old, "exited", 0, false, release)
 			routeRecords(s, subID, 1)
 			synctest.Wait() // relay is blocked emitting record 1
 			routeRecords(s, subID, 2)
 			routeRecords(s, subID, 3)
-			s.hub.route(subID, proto.Frame{Type: proto.MsgOutputEnd, Data: proto.Marshal(proto.OutputEnd{SubID: subID})})
+			routeEnd(s, subID)
 			s.hub.mu.Lock()
 			delete(s.hub.conns, "host")
 			s.hub.mu.Unlock()
 			close(old.done)
 			close(release) // both select arms are ready now
 			got := <-results
-			if got[0] != true || got[1] != nil || fmt.Sprint(*seqs) != "[1 2 3]" {
-				t.Fatalf("trial %d: done=%v err=%v records=%v, want done, nil, [1 2 3]", i, got[0], got[1], *seqs)
+			if !got.done || got.err != nil || fmt.Sprint(*seqs) != "[1 2 3]" {
+				t.Fatalf("trial %d: done=%v err=%v records=%v, want done, nil, [1 2 3]", i, got.done, got.err, *seqs)
 			}
 		})
 	}
@@ -226,24 +228,19 @@ func TestRelayOutputDrainsBufferedFramesOnDisconnect(t *testing.T) {
 func TestRelayOutputDrainsBufferedFramesBeforeRetry(t *testing.T) {
 	for i := range 64 {
 		synctest.Test(t, func(t *testing.T) {
-			s := &Server{}
-			s.hub = newHub(s)
-			old := &runnerConn{send: make(chan proto.Frame, 8), done: make(chan struct{})}
-			s.hub.conns["host"] = old
+			old, fresh := testConn(8), testConn(8)
+			s := relayServer(old)
 			release := make(chan struct{})
 			subID, seqs, results := gatedRelay(t, s, old, "running", 0, true, release)
 			routeRecords(s, subID, 1)
-			synctest.Wait()
+			synctest.Wait() // relay is blocked emitting record 1
 			routeRecords(s, subID, 2, 3)
-			s.hub.mu.Lock()
-			fresh := &runnerConn{send: make(chan proto.Frame, 8), done: make(chan struct{})}
-			s.hub.conns["host"] = fresh
-			s.hub.mu.Unlock()
+			replaceConn(s.hub, fresh)
 			close(old.done)
-			close(release)
+			close(release) // both select arms are ready now
 			got := <-results
-			if got[0] != false || got[1] == nil || fmt.Sprint(*seqs) != "[1 2 3]" {
-				t.Fatalf("trial %d: done=%v err=%v records=%v, want interrupted after [1 2 3]", i, got[0], got[1], *seqs)
+			if got.done || got.err == nil || fmt.Sprint(*seqs) != "[1 2 3]" {
+				t.Fatalf("trial %d: done=%v err=%v records=%v, want interrupted after [1 2 3]", i, got.done, got.err, *seqs)
 			}
 			if len(fresh.send) != 0 {
 				t.Fatalf("trial %d: cancel sent to replacement", i)
@@ -256,11 +253,11 @@ func TestRelayOutputDrainsBufferedFramesBeforeRetry(t *testing.T) {
 			for q := since + 1; q <= 5; q++ {
 				routeRecords(s, subID, q)
 			}
-			s.hub.route(subID, proto.Frame{Type: proto.MsgOutputEnd, Data: proto.Marshal(proto.OutputEnd{SubID: subID})})
+			routeEnd(s, subID)
 			got = <-results
 			all := append(append([]int64(nil), *seqs...), *more...)
-			if got[0] != true || got[1] != nil || fmt.Sprint(all) != "[1 2 3 4 5]" {
-				t.Fatalf("trial %d: retry done=%v err=%v records=%v, want [1 2 3 4 5]", i, got[0], got[1], all)
+			if !got.done || got.err != nil || fmt.Sprint(all) != "[1 2 3 4 5]" {
+				t.Fatalf("trial %d: retry done=%v err=%v records=%v, want [1 2 3 4 5]", i, got.done, got.err, all)
 			}
 		})
 	}
@@ -271,7 +268,7 @@ func TestOutputSubscriptionSendFailures(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				h := newHub(nil)
-				c := &runnerConn{send: make(chan proto.Frame), done: make(chan struct{})}
+				c := testConn(0)
 				if mode != "missing" {
 					h.conns["host"] = c
 				}
@@ -307,29 +304,16 @@ func TestRelayOutputEndAndCancellation(t *testing.T) {
 	for _, mode := range []string{"follow", "snapshot-running", "snapshot-exited", "disconnect", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				s := &Server{}
-				s.hub = newHub(s)
-				c := &runnerConn{send: make(chan proto.Frame, 1), done: make(chan struct{})}
-				s.hub.conns["host"] = c
+				c := testConn(1)
+				s := relayServer(c)
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 				state := "running"
 				if mode == "snapshot-exited" {
 					state = "exited"
 				}
-				type result struct {
-					done bool
-					err  error
-				}
-				results := make(chan result, 1)
-				go func() {
-					done, err := s.relayOutput(ctx, placementOutput{runID: "run", epoch: 1, hostID: "host", state: state}, 0,
-						!strings.HasPrefix(mode, "snapshot"), func(proto.Record) error { return nil }, func() error { return nil })
-					results <- result{done, err}
-				}()
-				f := <-c.send
-				var sub proto.OutputSubscribe
-				_ = json.Unmarshal(f.Data, &sub)
+				results := startRelay(ctx, s, 1, state, 0, !strings.HasPrefix(mode, "snapshot"), func(proto.Record) error { return nil })
+				subID := expectSubscribe(t, c, 0)
 				switch mode {
 				case "disconnect":
 					delete(s.hub.conns, "host")
@@ -339,7 +323,7 @@ func TestRelayOutputEndAndCancellation(t *testing.T) {
 					c.send <- proto.Frame{}
 					cancel()
 				default:
-					s.hub.route(sub.SubID, proto.Frame{Type: proto.MsgOutputEnd, Data: proto.Marshal(proto.OutputEnd{SubID: sub.SubID})})
+					routeEnd(s, subID)
 				}
 				got := <-results
 				interrupted := mode == "disconnect" || mode == "cancel"
