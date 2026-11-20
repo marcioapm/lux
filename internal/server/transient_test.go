@@ -62,13 +62,16 @@ func TestTransientSnapshotBeforeMove(t *testing.T) {
 				case "failure":
 					reportR1Exit(t, s, 1, "exited")
 					want = "exit code 1; resumePolicy transient"
-				default:
+				case "lease":
 					reapInterruptedMove(t, s, ctx, outcome)
-					want = ""
+					want = "lease expired: host stopped heartbeating; resumePolicy transient"
+				case "host":
+					reapInterruptedMove(t, s, ctx, outcome)
+					want = "host lost: missed heartbeats; resumePolicy transient"
 				}
 				var state, reason string
 				systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r1'`, nil, &state, &reason)
-				if state != StateTerminated || want != "" && reason != want {
+				if state != StateTerminated || reason != want {
 					t.Fatalf("natural snapshot followed by %s: %s (%s), want terminated (%s)", stop, state, reason, want)
 				}
 			})
