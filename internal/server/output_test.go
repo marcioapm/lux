@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -290,8 +291,12 @@ func TestOutputSubscriptionSendFailures(t *testing.T) {
 				case "cancel":
 					cancel()
 				}
-				if err := <-results; err == nil {
+				err := <-results
+				if err == nil {
 					t.Fatal("send succeeded without a receiver")
+				}
+				if mode == "cancel" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancelled send: %v, want context.Canceled", err)
 				}
 			})
 		})
