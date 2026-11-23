@@ -47,8 +47,9 @@ type finishFixture struct {
 	// volAtStatus: whether the data volume did.
 	ctrAtStatus []bool
 	volAtStatus []bool
-	// holdEpoch: reports about this epoch are kept in held, unanswered,
-	// until ackHeld or nackHeld answers them.
+	// holdEpoch: lifecycle reports and test.ping about this epoch are kept
+	// in held, unanswered, until ackHeld or nackHeld answers them.
+	// Snapshot timing telemetry is still ACKed normally.
 	holdEpoch int
 	held      []proto.Frame
 	// uploaded: the blob ids PUT to the fake luxd (serveUploads).
@@ -134,7 +135,7 @@ esac
 			r.conn.mu.Unlock()
 			for _, fr := range reports {
 				f.mu.Lock()
-				if f.holdEpoch != 0 && fr.Epoch == f.holdEpoch && fr.Type != proto.MsgHeartbeat {
+				if f.holdEpoch != 0 && fr.Epoch == f.holdEpoch && fr.Type != proto.MsgHeartbeat && !isSnapshotTimingTelemetry(fr) {
 					f.held = append(f.held, fr)
 					f.mu.Unlock()
 					continue
@@ -230,15 +231,33 @@ func (f *finishFixture) count() int {
 	return len(f.reports)
 }
 
-// types are the report types sent so far, but heartbeats.
+func isSnapshotTimingTelemetry(fr proto.Frame) bool {
+	if fr.Type != proto.MsgRunEvent {
+		return false
+	}
+	var ev proto.RunEvent
+	if json.Unmarshal(fr.Data, &ev) != nil {
+		return false
+	}
+	switch ev.Type {
+	case "snapshot.local.started", "snapshot.local.completed", "snapshot.local.failed",
+		"snapshot.volume.started", "snapshot.volume.completed", "snapshot.volume.failed":
+		return true
+	}
+	return false
+}
+
+// types are the report types sent so far, excluding heartbeats and snapshot timing telemetry.
+// Keep snapshot.done and every other run event in lifecycle order assertions.
 func (f *finishFixture) types() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []string
 	for _, fr := range f.reports {
-		if fr.Type != proto.MsgHeartbeat {
-			out = append(out, fr.Type)
+		if fr.Type == proto.MsgHeartbeat || isSnapshotTimingTelemetry(fr) {
+			continue
 		}
+		out = append(out, fr.Type)
 	}
 	return out
 }
