@@ -10,6 +10,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -265,6 +266,102 @@ func TestStaleEpochDoesNotKillTheNextEpochsContainer(t *testing.T) {
 	f.waitFile(t, f.bin+".killed")
 	if b, _ := os.ReadFile(f.bin + ".killed"); string(b) != "ctr-1\n" {
 		t.Errorf("killed %q, want epoch 1's own ctr-1 only; podman:\n%s", b, f.podmanLog())
+	}
+}
+
+// observationContext tracks completion of the bounded asynchronous observation:
+// cancelling its child timeout unregisters the parent's cancellation callback.
+type observationContext struct {
+	context.Context
+	mu     sync.Mutex
+	active int
+}
+
+// Hide the parent's internal cancelCtx so WithTimeout uses AfterFunc.
+func (c *observationContext) Value(any) any { return nil }
+
+func (c *observationContext) AfterFunc(fn func()) func() bool {
+	c.mu.Lock()
+	c.active++
+	c.mu.Unlock()
+	stop := context.AfterFunc(c.Context, fn)
+	return func() bool {
+		stopped := stop()
+		c.mu.Lock()
+		c.active--
+		c.mu.Unlock()
+		return stopped
+	}
+}
+
+// A timing event can outlive finish and receive a legitimate stale NACK
+// after the next epoch owns state.json. It must not fence the old placement.
+func TestSnapshotObservationNackLeavesSuccessorStateAlone(t *testing.T) {
+	f := newFinishFixture(t)
+	f.serveUploads(t)
+	f.mu.Lock()
+	f.holdObservation = "snapshot.local.completed"
+	f.mu.Unlock()
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &observationContext{Context: parent}
+	// Use the production snapshot call site and track completion of its
+	// asynchronous observations without adding a production join.
+	f.release()
+	f.exitedAsSupervised(ctx)
+	f.waitHeld(t)
+	mustEnd(t, f.p, "epoch 1 never ended")
+	if got := f.types(); len(got) != 2 || got[0] != proto.MsgSnapshotDone || got[1] != proto.MsgStatus {
+		t.Fatalf("reports %v, want snapshot.done then final status ACKed", got)
+	}
+	p2 := f.assignEpoch(t, 2)
+	mustEnd(t, p2, "epoch 2 never ended")
+	f.wantRunState(t, 2, false)
+	// The fixture's network command fails. Model the successor's durable
+	// started container after the real assign/handover has taken ownership.
+	p2.mu.Lock()
+	p2.state.Phase, p2.state.Container = "started", "ctr-2"
+	p2.mu.Unlock()
+	if err := p2.saveState(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(f.p.dir + "/state.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Track the held report's own reply consumption, not a scheduler delay.
+	f.mu.Lock()
+	held := slices.Clone(f.held)
+	f.mu.Unlock()
+	if len(held) != 1 || held[0].RunID != "run1" || held[0].Epoch != 1 {
+		t.Fatalf("held telemetry envelope: %+v", held)
+	}
+	f.nackHeld()
+	waitFor(t, "telemetry report did not finish", func() bool {
+		ctx.mu.Lock()
+		defer ctx.mu.Unlock()
+		return ctx.active == 0
+	})
+	after, err := os.ReadFile(f.p.dir + "/state.json")
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("delayed telemetry NACK changed successor state: before %s; after %s; err %v", before, after, err)
+	}
+	if f.p.isStale() || f.r.staleEpoch("run1") == 1 {
+		t.Error("telemetry NACK fenced epoch 1 or blocked its pending blobs")
+	}
+	if killed, _ := os.ReadFile(f.bin + ".killed"); len(killed) != 0 {
+		t.Errorf("telemetry NACK killed a container: %s", killed)
+	}
+	f.wantUploaded(t)
+	// A restart must not skip the durable successor as stale. With no
+	// inspect result the fixture readopts it as done, but retains its epoch.
+	f.r.mu.Lock()
+	f.r.placements = map[string]*placement{}
+	f.r.readopt(context.Background())
+	recovered := f.r.placements["run1"]
+	f.r.mu.Unlock()
+	if recovered == nil || recovered.epoch != 2 || recovered.isStale() {
+		t.Fatalf("successor not recoverable by readopt: %+v", recovered)
 	}
 }
 

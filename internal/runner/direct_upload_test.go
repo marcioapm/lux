@@ -498,6 +498,81 @@ func TestUploaderCompletePlain404IsRetried(t *testing.T) {
 	}
 }
 
+// Each pass logs one structured attempt; a failed attempt stays pending and
+// a later successful pass durably completes it without uploading it again.
+func TestUploaderPassLogsUploadAttempt(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		outcomes []string
+	}{
+		{name: "success", outcomes: []string{"success"}},
+		{name: "failed then success", outcomes: []string{"failed", "success"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fk := newDirectFake(t)
+			if c.outcomes[0] == "failed" {
+				fk.upload = func(w http.ResponseWriter) bool {
+					fk.mu.Lock()
+					defer fk.mu.Unlock()
+					if len(fk.requests) != 1 {
+						return false
+					}
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return true
+				}
+			}
+			r, id := uploadRunner(t, fk, false)
+			var logs bytes.Buffer
+			r.log = slog.New(slog.NewJSONHandler(&logs, nil))
+			for pass, outcome := range c.outcomes {
+				logs.Reset()
+				r.uploads.pass(context.Background())
+				if got, want := uploadDone(t, r, id), outcome == "success"; got != want {
+					t.Fatalf("pass %d: done %v, want %v", pass+1, got, want)
+				}
+				attempts := 0
+				dec := json.NewDecoder(&logs)
+				for {
+					var entry map[string]any
+					if err := dec.Decode(&entry); err == io.EOF {
+						break
+					} else if err != nil {
+						t.Fatalf("decode log: %v", err)
+					}
+					if entry["msg"] != "blob upload attempt" {
+						continue
+					}
+					attempts++
+					for key, want := range map[string]any{
+						"run": "run1", "epoch": float64(1), "snapshot_id": id,
+						"blob": "blob1", "bytes": float64(10), "outcome": outcome,
+					} {
+						if got := entry[key]; got != want {
+							t.Errorf("pass %d: %s = %v, want %v", pass+1, key, got, want)
+						}
+					}
+					if elapsed, ok := entry["elapsed_ms"].(float64); !ok || elapsed < 0 {
+						t.Errorf("pass %d: elapsed_ms = %v, want a nonnegative number", pass+1, entry["elapsed_ms"])
+					}
+				}
+				if attempts != 1 {
+					t.Fatalf("pass %d: %d attempt logs, want 1", pass+1, attempts)
+				}
+			}
+			logs.Reset()
+			r.uploads.pass(context.Background())
+			if logs.Len() != 0 {
+				t.Errorf("completed upload logged again: %s", logs.String())
+			}
+			fk.mu.Lock()
+			defer fk.mu.Unlock()
+			if len(fk.requests) != len(c.outcomes) || len(fk.puts) != 1 || len(fk.completes) != 1 {
+				t.Fatalf("/upload %d, S3 puts %q, /complete %+v", len(fk.requests), fk.puts, fk.completes)
+			}
+		})
+	}
+}
+
 // The fallback to the streaming PUT is logged once per process, not once
 // per blob.
 func TestUploaderFallbackWarnsOnce(t *testing.T) {

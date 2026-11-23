@@ -39,40 +39,61 @@ func (r *Runner) writeBlob(blobID string, produce func(io.Writer) error) (int64,
 	return r.writeBlobLevel(blobID, zstd.SpeedDefault, produce)
 }
 
+type blobStats struct {
+	rawBytes, compressedBytes int64
+	stream, finalize, sync    time.Duration
+}
+
 func (r *Runner) writeBlobLevel(blobID string, level zstd.EncoderLevel, produce func(io.Writer) error) (int64, string, error) {
+	size, sum, _, err := r.writeBlobStats(blobID, level, produce)
+	return size, sum, err
+}
+
+// stream measures the overlapping producer/read/compress/hash/write pipeline,
+// not compressor CPU time. Finalization and file sync are measured separately.
+func (r *Runner) writeBlobStats(blobID string, level zstd.EncoderLevel, produce func(io.Writer) error) (size int64, sum string, stats blobStats, err error) {
 	path := r.blobPath(blobID)
 	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
-		return 0, "", err
+		return 0, "", stats, err
 	}
 	h := sha256.New()
 	cw := &countWriter{w: io.MultiWriter(f, h)}
+	defer func() { stats.compressedBytes = cw.n }()
 	zw, err := zstd.NewWriter(cw, zstd.WithEncoderLevel(level), zstd.WithEncoderConcurrency(1))
 	if err != nil {
 		f.Close()
-		return 0, "", err
+		return 0, "", stats, err
 	}
-	if err := produce(zw); err != nil {
-		zw.Close()
+	raw := &countWriter{w: zw}
+	start := time.Now()
+	produceErr := produce(raw)
+	stats.stream = time.Since(start)
+	stats.rawBytes = raw.n
+	start = time.Now()
+	closeErr := zw.Close()
+	stats.finalize = time.Since(start)
+	if err := produceErr; err != nil || closeErr != nil {
+		if err == nil {
+			err = closeErr
+		}
 		f.Close()
 		os.Remove(tmp)
-		return 0, "", err
+		return 0, "", stats, err
 	}
-	if err := zw.Close(); err != nil {
+	start = time.Now()
+	err = f.Sync()
+	stats.sync = time.Since(start)
+	if err != nil {
 		f.Close()
-		os.Remove(tmp)
-		return 0, "", err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return 0, "", err
+		return 0, "", stats, err
 	}
 	f.Close()
 	if err := os.Rename(tmp, path); err != nil {
-		return 0, "", err
+		return 0, "", stats, err
 	}
-	return cw.n, hex.EncodeToString(h.Sum(nil)), nil
+	return cw.n, hex.EncodeToString(h.Sum(nil)), stats, nil
 }
 
 type countWriter struct {
@@ -194,7 +215,15 @@ func (u *uploader) pass(ctx context.Context) {
 			if up.Done {
 				continue
 			}
+			started := time.Now()
 			err := u.upload(ctx, up)
+			outcome := "success"
+			if err != nil {
+				outcome = "failed"
+			}
+			u.r.log.Info("blob upload attempt", "run", rec.RunID, "epoch", rec.Epoch,
+				"snapshot_id", snapID, "blob", up.BlobID, "bytes", up.Size,
+				"elapsed_ms", time.Since(started).Milliseconds(), "outcome", outcome)
 			var he *httpError
 			if err != nil && errors.As(err, &he) && (he.Status == http.StatusNotFound || he.Status == http.StatusGone) {
 				err = nil // luxd deleted it (retention): nothing to do

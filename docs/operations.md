@@ -1,5 +1,50 @@
 # Operations
 
+## Local snapshot progress
+
+`lux events <run>` includes best-effort runner snapshot progress, also written
+as structured runner logs. These generic RunEvents carry run and epoch in their
+envelope; `snapshot_id` correlates the local attempt, including failed attempts
+that never produce a manifest. Delivery is asynchronous: events can arrive out
+of order or be missing, and the runner never waits for their delivery to stop.
+
+- `snapshot.local.started`, then `snapshot.local.completed` or
+  `snapshot.local.failed`: local snapshot creation, excluding report ACK retries
+  and background uploads. Terminal events have `elapsed_ms` and `outcome`
+  (`success`, `failed`, or `cancelled`). Completion follows the existing snapshot
+  semantics: optional output/artifact collection failures need not fail the
+  snapshot. A failed or cancelled state-volume export never completes it.
+- `snapshot.volume.started`, then `snapshot.volume.completed` or
+  `snapshot.volume.failed`: one pair per exported state volume, identified by
+  logical `volume` name, never user filenames or directory contents. All carry
+  `codec: zstd`, `level: default`, `concurrency: 1`. Terminal events include
+  `outcome`, `elapsed_ms`, `raw_bytes`, `compressed_bytes`, `stream_ms`,
+  `finalize_ms`, and `sync_ms`.
+
+`raw_bytes` counts bytes accepted by the encoder from the exporter;
+`compressed_bytes` counts bytes written through the local compressed-file/hash
+writer, including finalization. On failure these are partial counts, even though
+the temporary blob is removed. An empty input can have zero compressed bytes.
+`stream_ms` measures the **combined export/compression stream**: producer,
+reads, compression, hashing and local writes overlap. It is not independent
+compressor CPU time. `finalize_ms` measures encoder Close (including cleanup
+following producer failure); `sync_ms` measures file Sync, or zero if it was
+not reached. Milliseconds are truncated, so short phases can be zero.
+Volume `elapsed_ms` also includes setup, file close/rename and cleanup; phase
+values are not an exhaustive decomposition of total elapsed time. No clocks,
+logs or events are taken per file, chunk or Write.
+
+Each background blob upload attempt writes a `blob upload attempt` structured
+log with `run`, `epoch`, `snapshot_id` (the existing upload-record ID), `blob`,
+`bytes`, `elapsed_ms`, and `outcome` (`success` or `failed`). Duration covers
+the uploader call, including API/network work and direct-upload fallback, not
+snapshot creation. Outcome is recorded before existing retention handling:
+a 404/410 is logged as failed even when subsequently treated as no longer
+needed. Existing missing-file no-op behavior is logged as success. `bytes` is
+the recorded blob size, not a network-transfer counter; retries/fallback can
+transfer more. Upload retry and retention behavior are unchanged. New telemetry
+contains no raw exporter errors, tar contents, environment or user filenames.
+
 ## luxd
 
 `luxd` is stateless. Postgres holds state and S3 holds bytes, so you can

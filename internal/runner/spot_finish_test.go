@@ -137,7 +137,10 @@ func TestSpotFinishKeepsDiskReservedUntilCleanup(t *testing.T) {
 	if n := strings.Count(f.podmanLog(), "volume rm"); n < 3 {
 		t.Fatalf("%d volume removals in 300ms: want retries", n)
 	}
-	if evs := f.runEvents(); len(evs) != 1 || evs[0].Type != proto.EvDiskReleaseFailed || evs[0].Data["error"] == "" || evs[0].Data["error"] == nil {
+	releaseFailures := slices.DeleteFunc(f.runEvents(), func(ev proto.RunEvent) bool {
+		return ev.Type != proto.EvDiskReleaseFailed
+	})
+	if evs := releaseFailures; len(evs) != 1 || evs[0].Data["error"] == "" || evs[0].Data["error"] == nil {
 		t.Fatalf("run events %+v: want one %s with its error across the failed removals", evs, proto.EvDiskReleaseFailed)
 	}
 	leases, _ := f.heartbeatAfter(t, f.count())

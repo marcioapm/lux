@@ -1885,8 +1885,16 @@ func dirSize(ctx context.Context, root string) (int64, error) {
 // move (spec.ExportsOnStop), or whose placement ends in a terminate, is not
 // resumed, so its state volumes are not exported: its manifest lists none,
 // and no local copy is claimed. exportCtx covers the volume exports only.
-func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDone, error) {
+func (p *placement) snapshot(ctx, exportCtx context.Context) (result *proto.SnapshotDone, resultErr error) {
 	snapID := ids.New(ids.Snapshot)
+	started := time.Now()
+	p.snapshotObservation(ctx, "snapshot.local.started", map[string]any{"snapshot_id": snapID})
+	defer func() {
+		outcome, terminal := snapshotOutcome(resultErr, exportCtx)
+		p.snapshotObservation(ctx, "snapshot.local."+terminal, map[string]any{
+			"snapshot_id": snapID, "elapsed_ms": time.Since(started).Milliseconds(), "outcome": outcome,
+		})
+	}()
 	rec := &snapshotRecord{RunID: p.runID, Epoch: p.epoch, Created: time.Now().UnixMilli()}
 	sd := &proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: snapID, RunID: p.runID, Epoch: p.epoch, Volumes: []proto.VolumeSnapshot{}}}
 	sd.Manifest.SessionID = p.sessionID()
@@ -1907,7 +1915,18 @@ func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDon
 			continue
 		}
 		blobID := ids.New(ids.Blob)
-		size, sum, err := p.r.writeBlob(blobID, func(w io.Writer) error { return p.r.pm.VolumeExport(exportCtx, v.Volume, w) })
+		volumeStarted := time.Now()
+		p.snapshotObservation(ctx, "snapshot.volume.started", map[string]any{
+			"snapshot_id": snapID, "volume": v.Name, "codec": "zstd", "level": "default", "concurrency": 1,
+		})
+		size, sum, stats, err := p.r.writeBlobStats(blobID, zstd.SpeedDefault, func(w io.Writer) error { return p.r.pm.VolumeExport(exportCtx, v.Volume, w) })
+		outcome, terminal := snapshotOutcome(err, exportCtx)
+		p.snapshotObservation(ctx, "snapshot.volume."+terminal, map[string]any{
+			"snapshot_id": snapID, "volume": v.Name, "codec": "zstd", "level": "default", "concurrency": 1,
+			"outcome": outcome, "elapsed_ms": time.Since(volumeStarted).Milliseconds(),
+			"raw_bytes": stats.rawBytes, "compressed_bytes": stats.compressedBytes,
+			"stream_ms": stats.stream.Milliseconds(), "finalize_ms": stats.finalize.Milliseconds(), "sync_ms": stats.sync.Milliseconds(),
+		})
 		if err != nil {
 			// No record lists the blobs already written: nothing else removes them.
 			for _, up := range rec.Uploads {
@@ -1955,6 +1974,34 @@ func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDon
 	p.mu.Unlock()
 	_ = p.saveState()
 	return sd, nil
+}
+
+// snapshotObservation sends bounded, best-effort telemetry, not lifecycle reports.
+// Only bounded identifiers and measurements belong here, never exporter errors.
+func (p *placement) snapshotObservation(ctx context.Context, typ string, data map[string]any) {
+	args := []any{"run", p.runID, "epoch", p.epoch}
+	for key, value := range data {
+		args = append(args, key, value)
+	}
+	p.r.log.Info(typ, args...)
+	go func() {
+		c, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		// A delayed telemetry reply must not fence a finished placement or
+		// overwrite the next epoch's run state.
+		_ = p.r.conn.Report(c, proto.Frame{Type: proto.MsgRunEvent, RunID: p.runID, Epoch: p.epoch,
+			Data: proto.Marshal(proto.RunEvent{Type: typ, Data: data})})
+	}()
+}
+
+func snapshotOutcome(err error, exportCtx context.Context) (outcome, terminal string) {
+	if err == nil {
+		return "success", "completed"
+	}
+	if exportCtx.Err() != nil {
+		return "cancelled", "failed"
+	}
+	return "failed", "failed"
 }
 
 // sessionID is the latest session id the adapter reported (seen by
