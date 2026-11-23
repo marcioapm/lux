@@ -1976,7 +1976,7 @@ func (p *placement) snapshot(ctx, exportCtx context.Context) (result *proto.Snap
 	return sd, nil
 }
 
-// snapshotObservation uses the existing best-effort asynchronous event path.
+// snapshotObservation sends bounded, best-effort telemetry, not lifecycle reports.
 // Only bounded identifiers and measurements belong here, never exporter errors.
 func (p *placement) snapshotObservation(ctx context.Context, typ string, data map[string]any) {
 	args := []any{"run", p.runID, "epoch", p.epoch}
@@ -1984,7 +1984,14 @@ func (p *placement) snapshotObservation(ctx context.Context, typ string, data ma
 		args = append(args, key, value)
 	}
 	p.r.log.Info(typ, args...)
-	p.event(ctx, typ, data)
+	go func() {
+		c, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		// A delayed telemetry reply must not fence a finished placement or
+		// overwrite the next epoch's run state.
+		_ = p.r.conn.Report(c, proto.Frame{Type: proto.MsgRunEvent, RunID: p.runID, Epoch: p.epoch,
+			Data: proto.Marshal(proto.RunEvent{Type: typ, Data: data})})
+	}()
 }
 
 func snapshotOutcome(err error, exportCtx context.Context) (outcome, terminal string) {

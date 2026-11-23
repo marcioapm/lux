@@ -52,6 +52,8 @@ type finishFixture struct {
 	// Snapshot timing telemetry is still ACKed normally.
 	holdEpoch int
 	held      []proto.Frame
+	// holdObservation holds just this snapshot event, leaving lifecycle ACKs alone.
+	holdObservation string
 	// uploaded: the blob ids PUT to the fake luxd (serveUploads).
 	uploaded []string
 }
@@ -135,6 +137,12 @@ esac
 			r.conn.mu.Unlock()
 			for _, fr := range reports {
 				f.mu.Lock()
+				var ev proto.RunEvent
+				if f.holdObservation != "" && fr.Type == proto.MsgRunEvent && json.Unmarshal(fr.Data, &ev) == nil && ev.Type == f.holdObservation {
+					f.held = append(f.held, fr)
+					f.mu.Unlock()
+					continue
+				}
 				if f.holdEpoch != 0 && fr.Epoch == f.holdEpoch && fr.Type != proto.MsgHeartbeat && !isSnapshotTimingTelemetry(fr) {
 					f.held = append(f.held, fr)
 					f.mu.Unlock()
